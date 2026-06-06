@@ -28,6 +28,17 @@ pub enum ResidentOwnership {
     RegistryOwned,
 }
 
+/// Default ownership model for activation resources reported by a backend.
+pub fn resident_ownership_for_backend(backend_name: &str) -> ResidentOwnership {
+    match backend_name {
+        "cuda" | "cuda-portable" | "metal" | "metal-portable" | "rocm" => {
+            ResidentOwnership::StorageOwned
+        }
+        "vulkan" | "vulkan-portable" | "cpu" | "portable" => ResidentOwnership::RegistryOwned,
+        _ => ResidentOwnership::RegistryOwned,
+    }
+}
+
 /// Backend-neutral resident lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResidentResourceState {
@@ -134,5 +145,33 @@ mod tests {
         assert_eq!(resource.state, ResidentResourceState::DirtyDevice);
         assert_eq!(resource.replay_stability, ReplayStability::StableAcrossReplay);
         Ok(())
+    }
+
+    #[test]
+    fn resident_ownership_for_backend_maps_current_backends() {
+        assert_eq!(
+            resident_ownership_for_backend("cuda"),
+            ResidentOwnership::StorageOwned
+        );
+        assert_eq!(
+            resident_ownership_for_backend("metal"),
+            ResidentOwnership::StorageOwned
+        );
+        assert_eq!(
+            resident_ownership_for_backend("rocm"),
+            ResidentOwnership::StorageOwned
+        );
+        assert_eq!(
+            resident_ownership_for_backend("vulkan"),
+            ResidentOwnership::RegistryOwned
+        );
+        assert_eq!(
+            resident_ownership_for_backend("cpu"),
+            ResidentOwnership::RegistryOwned
+        );
+        assert_eq!(
+            resident_ownership_for_backend("future-backend"),
+            ResidentOwnership::RegistryOwned
+        );
     }
 }

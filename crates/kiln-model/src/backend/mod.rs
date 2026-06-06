@@ -448,6 +448,25 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         false
     }
 
+    /// Metadata-only descriptor for an activation that the backend already
+    /// reports as resident. This does not allocate or register anything; it
+    /// lets Phase 3 callers reason about residency state through one shared
+    /// contract while concrete registries continue to own the actual bytes.
+    fn resident_activation_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+    ) -> Option<residency::ResidentResource> {
+        if self.has_resident_activation(tensor) {
+            Some(residency::ResidentResource::from_tensor(
+                tensor,
+                residency::ResidentResourceFamily::Activation,
+                residency::resident_ownership_for_backend(self.name()),
+            ))
+        } else {
+            None
+        }
+    }
+
     /// Read a previously-registered activation back from device into
     /// a fresh CPU `kiln_tensor::Tensor` with the given shape and dtype. Returns
     /// `Ok(None)` when the activation isn't resident — caller should
@@ -1855,6 +1874,11 @@ pub trait ResidencyBackend: Send + Sync + std::fmt::Debug {
 
     fn runtime_has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool;
 
+    fn runtime_resident_activation_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+    ) -> Option<residency::ResidentResource>;
+
     fn runtime_resolve_resident_activation(
         &self,
         tensor: &kiln_tensor::Tensor,
@@ -2733,6 +2757,13 @@ impl<T: BackendRuntime + ?Sized> ResidencyBackend for T {
         BackendRuntime::has_resident_activation(self, tensor)
     }
 
+    fn runtime_resident_activation_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+    ) -> Option<residency::ResidentResource> {
+        BackendRuntime::resident_activation_resource(self, tensor)
+    }
+
     fn runtime_resolve_resident_activation(
         &self,
         tensor: &kiln_tensor::Tensor,
@@ -2961,6 +2992,26 @@ pub fn for_device_kt(device: &kiln_tensor::Device) -> Arc<dyn BackendRuntime> {
 mod tests {
     use super::*;
 
+    #[derive(Debug)]
+    struct ResidentActivationProbeBackend {
+        name: &'static str,
+        resident: bool,
+    }
+
+    impl BackendRuntime for ResidentActivationProbeBackend {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn device(&self) -> kiln_tensor::Device {
+            kiln_tensor::Device::Cpu
+        }
+
+        fn has_resident_activation(&self, _tensor: &kiln_tensor::Tensor) -> bool {
+            self.resident
+        }
+    }
+
     #[test]
     fn portable_training_capabilities_are_conservative() {
         let caps = TrainingCapabilities::portable();
@@ -2981,6 +3032,32 @@ mod tests {
             "CPU backend must decline resident decode so non-Vulkan call sites \
              continue to use the existing per-call kt-tensor path"
         );
+    }
+
+    #[test]
+    fn resident_activation_resource_describes_reported_resident_tensor() -> Result<()> {
+        let tensor = kiln_tensor::Tensor::from_slice(&[1.0_f32, 2.0], vec![2])?;
+        let backend = ResidentActivationProbeBackend {
+            name: "vulkan",
+            resident: false,
+        };
+
+        assert!(backend.resident_activation_resource(&tensor).is_none());
+
+        let backend = ResidentActivationProbeBackend {
+            name: "vulkan",
+            resident: true,
+        };
+        let resource = backend.resident_activation_resource(&tensor).unwrap();
+
+        assert_eq!(resource.tensor_id, tensor.id());
+        assert_eq!(resource.family, residency::ResidentResourceFamily::Activation);
+        assert_eq!(resource.ownership, residency::ResidentOwnership::RegistryOwned);
+        assert_eq!(resource.state, residency::ResidentResourceState::RegisteredClean);
+        assert_eq!(resource.device, kiln_tensor::Device::Cpu);
+        assert_eq!(resource.shape, vec![2]);
+        assert_eq!(resource.byte_len, 8);
+        Ok(())
     }
 
     #[cfg(feature = "cuda")]
@@ -3116,6 +3193,11 @@ mod tests {
             ResidencyBackend::runtime_supports_resident_activation(&cpu),
             BackendRuntime::supports_resident_activation(&cpu)
         );
+        let t = kiln_tensor::Tensor::zeros_cpu(vec![1], kiln_tensor::DType::F32);
+        assert_eq!(
+            ResidencyBackend::runtime_resident_activation_resource(&cpu, &t),
+            BackendRuntime::resident_activation_resource(&cpu, &t)
+        );
         assert_eq!(
             ResidencyBackend::runtime_enter_gdn_recurrent_resident_state_scope(&cpu),
             BackendRuntime::enter_gdn_recurrent_resident_state_scope(&cpu)
@@ -3135,7 +3217,6 @@ mod tests {
             BackendRuntime::training_capabilities(&cpu)
         );
 
-        let t = kiln_tensor::Tensor::zeros_cpu(vec![1], kiln_tensor::DType::F32);
         assert_eq!(
             OptimizerBackend::runtime_dispatch_sgd_step(&cpu, &t, &t, 0.1)?,
             BackendRuntime::dispatch_sgd_step(&cpu, &t, &t, 0.1)?

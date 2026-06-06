@@ -1570,5 +1570,5 @@
       "enforcement": "SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines"
     }
   },
-  "trait_method_count": 92
+  "trait_method_count": 93
 }
