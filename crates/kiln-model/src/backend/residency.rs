@@ -41,6 +41,18 @@ pub fn resident_ownership_for_backend(backend_name: &str) -> ResidentOwnership {
     }
 }
 
+/// Runtime backend identity, preserving backend names that use CPU sentinel tensors.
+pub fn resident_backend_for_runtime(backend_name: &str, device: Device) -> Backend {
+    match backend_name {
+        "cpu" | "portable" => Backend::Cpu,
+        "cuda" | "cuda-portable" => Backend::Cuda,
+        "metal" | "metal-portable" => Backend::Metal,
+        "vulkan" | "vulkan-portable" => Backend::Vulkan,
+        "rocm" => Backend::Rocm,
+        _ => device.backend(),
+    }
+}
+
 /// Backend-neutral resident lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResidentResourceState {
@@ -80,6 +92,7 @@ impl ResidentResourceLayout {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResidentResource {
     pub tensor_id: TensorId,
+    pub backend: Backend,
     pub device: Device,
     pub dtype: DType,
     pub shape: Vec<usize>,
@@ -99,12 +112,22 @@ impl ResidentResource {
         family: ResidentResourceFamily,
         ownership: ResidentOwnership,
     ) -> Self {
+        Self::from_tensor_for_backend(tensor, tensor.device().backend(), family, ownership)
+    }
+
+    pub fn from_tensor_for_backend(
+        tensor: &Tensor,
+        backend: Backend,
+        family: ResidentResourceFamily,
+        ownership: ResidentOwnership,
+    ) -> Self {
         let dtype = tensor.dtype();
         let element_count = tensor.element_count();
         let byte_len = dtype.packed_buffer_bytes(element_count);
         let addressable_elements = tensor.layout().addressable_byte_size(1);
         Self {
             tensor_id: tensor.id(),
+            backend,
             device: tensor.device(),
             dtype,
             shape: tensor.shape().to_vec(),
@@ -119,6 +142,11 @@ impl ResidentResource {
         }
     }
 
+    pub fn with_backend(mut self, backend: Backend) -> Self {
+        self.backend = backend;
+        self
+    }
+
     pub fn with_state(mut self, state: ResidentResourceState) -> Self {
         self.state = state;
         self
@@ -130,7 +158,7 @@ impl ResidentResource {
     }
 
     pub fn to_replay_resource_ref(&self) -> ResidentResourceRef {
-        self.to_replay_resource_ref_for_backend(self.device.backend())
+        self.to_replay_resource_ref_for_backend(self.backend)
     }
 
     pub fn to_replay_resource_ref_for_backend(&self, backend: Backend) -> ResidentResourceRef {
@@ -206,6 +234,7 @@ mod tests {
         );
 
         assert_eq!(resource.tensor_id, tensor.id());
+        assert_eq!(resource.backend, Backend::Cpu);
         assert_eq!(resource.device, Device::Cpu);
         assert_eq!(resource.dtype, DType::F32);
         assert_eq!(resource.shape, vec![2, 2]);
@@ -258,6 +287,11 @@ mod tests {
             ResidentOwnership::RegistryOwned,
         )
         .with_replay_stability(ReplayStability::StableWithinStep);
+
+        let vk_resource = resource.clone().with_backend(Backend::Vulkan);
+        let replay_ref = vk_resource.to_replay_resource_ref();
+        assert_eq!(replay_ref.backend, Backend::Vulkan);
+        assert_eq!(replay_ref.tensor_id, Some(resource.tensor_id));
 
         let replay_ref = resource.to_replay_resource_ref_for_backend(Backend::Vulkan);
         assert_eq!(replay_ref.backend, Backend::Vulkan);
@@ -317,6 +351,22 @@ mod tests {
         assert_eq!(
             resident_ownership_for_backend("future-backend"),
             ResidentOwnership::RegistryOwned
+        );
+    }
+
+    #[test]
+    fn resident_backend_for_runtime_preserves_cpu_sentinel_backends() {
+        assert_eq!(
+            resident_backend_for_runtime("vulkan", Device::Cpu),
+            Backend::Vulkan
+        );
+        assert_eq!(
+            resident_backend_for_runtime("metal-portable", Device::Cpu),
+            Backend::Metal
+        );
+        assert_eq!(
+            resident_backend_for_runtime("future-backend", Device::Cpu),
+            Backend::Cpu
         );
     }
 }

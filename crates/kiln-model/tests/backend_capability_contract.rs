@@ -340,6 +340,29 @@ fn generated_capability_report_lists_request_descriptors() {
             "{name} should be present in capability_descriptors"
         );
     }
+
+    let resident_resource_descriptors = report["resident_resource_descriptors"]
+        .as_object()
+        .expect("resident_resource_descriptors should be an object");
+    let resident_resource_fields = resident_resource_descriptors["ResidentResource"]["fields"]
+        .as_array()
+        .expect("ResidentResource fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
+    for field in [
+        "tensor_id",
+        "backend",
+        "device",
+        "ownership",
+        "state",
+        "replay_stability",
+    ] {
+        assert!(
+            resident_resource_fields.contains(&field),
+            "ResidentResource should include {field}"
+        );
+    }
 }
 
 #[test]

@@ -558,8 +558,9 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         tensor: &kiln_tensor::Tensor,
     ) -> Option<residency::ResidentResource> {
         if self.has_resident_activation(tensor) {
-            Some(residency::ResidentResource::from_tensor(
+            Some(residency::ResidentResource::from_tensor_for_backend(
                 tensor,
+                residency::resident_backend_for_runtime(self.name(), tensor.device()),
                 residency::ResidentResourceFamily::Activation,
                 residency::resident_ownership_for_backend(self.name()),
             ))
@@ -3570,16 +3571,21 @@ mod tests {
         let resource = backend.resident_activation_resource(&tensor).unwrap();
 
         assert_eq!(resource.tensor_id, tensor.id());
+        assert_eq!(resource.backend, kiln_tensor::Backend::Vulkan);
+        assert_eq!(resource.device, kiln_tensor::Device::Cpu);
         assert_eq!(resource.family, residency::ResidentResourceFamily::Activation);
         assert_eq!(resource.ownership, residency::ResidentOwnership::RegistryOwned);
         assert_eq!(resource.state, residency::ResidentResourceState::RegisteredClean);
-        assert_eq!(resource.device, kiln_tensor::Device::Cpu);
         assert_eq!(resource.shape, vec![2]);
         assert_eq!(resource.layout.strides, vec![1]);
         assert_eq!(resource.layout.start_offset, 0);
         assert!(resource.layout.contiguous);
         assert_eq!(resource.byte_len, 8);
         assert_eq!(resource.addressable_byte_len, 8);
+        assert_eq!(
+            resource.to_replay_resource_ref().backend,
+            kiln_tensor::Backend::Vulkan
+        );
         Ok(())
     }
 
@@ -3598,6 +3604,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resource.tensor_id, tensor.id());
+        assert_eq!(resource.backend, kiln_tensor::Backend::Vulkan);
         assert_eq!(resource.family, residency::ResidentResourceFamily::Activation);
 
         assert!(residency::ResidentRegistry::has_resident_resource(

@@ -2062,6 +2062,84 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     }
   },
+  "resident_resource_descriptors": {
+    "ResidentResource": {
+      "field_count": 13,
+      "fields": [
+        {
+          "name": "tensor_id",
+          "type": "TensorId"
+        },
+        {
+          "name": "backend",
+          "type": "Backend"
+        },
+        {
+          "name": "device",
+          "type": "Device"
+        },
+        {
+          "name": "dtype",
+          "type": "DType"
+        },
+        {
+          "name": "shape",
+          "type": "Vec<usize>"
+        },
+        {
+          "name": "layout",
+          "type": "ResidentResourceLayout"
+        },
+        {
+          "name": "element_count",
+          "type": "usize"
+        },
+        {
+          "name": "byte_len",
+          "type": "usize"
+        },
+        {
+          "name": "addressable_byte_len",
+          "type": "usize"
+        },
+        {
+          "name": "family",
+          "type": "ResidentResourceFamily"
+        },
+        {
+          "name": "ownership",
+          "type": "ResidentOwnership"
+        },
+        {
+          "name": "state",
+          "type": "ResidentResourceState"
+        },
+        {
+          "name": "replay_stability",
+          "type": "ReplayStability"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/residency.rs"
+    },
+    "ResidentResourceLayout": {
+      "field_count": 3,
+      "fields": [
+        {
+          "name": "strides",
+          "type": "Vec<usize>"
+        },
+        {
+          "name": "start_offset",
+          "type": "usize"
+        },
+        {
+          "name": "contiguous",
+          "type": "bool"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/residency.rs"
+    }
+  },
   "source": {
     "branch": "unify-engines",
     "script": "scripts/generate_backend_capability_report.py"

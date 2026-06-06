@@ -25,6 +25,7 @@ BACKENDS = {
 }
 
 CAPABILITY_RS = ROOT / "crates" / "kiln-model" / "src" / "backend" / "capability.rs"
+RESIDENCY_RS = ROOT / "crates" / "kiln-model" / "src" / "backend" / "residency.rs"
 
 REQUEST_DESCRIPTOR_STRUCTS = [
     "AttentionRequest",
@@ -44,6 +45,11 @@ CAPABILITY_DESCRIPTOR_STRUCTS = [
     "BackendTrainingCapabilities",
     "ReplayCapabilities",
     "BackendFallbackCapabilities",
+]
+
+RESIDENT_RESOURCE_DESCRIPTOR_STRUCTS = [
+    "ResidentResource",
+    "ResidentResourceLayout",
 ]
 
 FEATURE_CRATES = [
@@ -289,6 +295,19 @@ def capability_descriptor_report() -> dict[str, Any]:
     ).items():
         descriptors[name] = {
             "source": str(CAPABILITY_RS.relative_to(ROOT)),
+            "field_count": len(fields),
+            "fields": fields,
+        }
+    return descriptors
+
+
+def resident_resource_descriptor_report() -> dict[str, Any]:
+    descriptors: dict[str, Any] = {}
+    for name, fields in parse_pub_struct_fields(
+        RESIDENCY_RS, RESIDENT_RESOURCE_DESCRIPTOR_STRUCTS
+    ).items():
+        descriptors[name] = {
+            "source": str(RESIDENCY_RS.relative_to(ROOT)),
             "field_count": len(fields),
             "fields": fields,
         }
@@ -562,6 +581,14 @@ def markdown(data: dict[str, Any]) -> str:
         fields = ", ".join(f"`{field['name']}`" for field in info["fields"])
         lines.append(f"| `{name}` | {info['field_count']} | {fields} |")
     lines.append("")
+    lines.append("## Resident Resource Descriptors")
+    lines.append("")
+    lines.append("| Descriptor | Field Count | Fields |")
+    lines.append("|---|---:|---|")
+    for name, info in data["resident_resource_descriptors"].items():
+        fields = ", ".join(f"`{field['name']}`" for field in info["fields"])
+        lines.append(f"| `{name}` | {info['field_count']} | {fields} |")
+    lines.append("")
     lines.append("## Generic DeviceOp Fallback")
     lines.append("")
     lines.append("| Backend | Policy | Counter | Evidence |")
@@ -655,6 +682,7 @@ def main() -> int:
         "trait_method_count": len(trait_methods),
         "request_descriptors": request_descriptor_report(),
         "capability_descriptors": capability_descriptor_report(),
+        "resident_resource_descriptors": resident_resource_descriptor_report(),
         "request_capability_queries": sorted(
             parse_trait_method_names(CAPABILITY_RS, "BackendCapabilityQueries")
         ),

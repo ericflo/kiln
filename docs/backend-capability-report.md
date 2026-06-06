@@ -131,6 +131,13 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `ReplayCapabilities` | 2 | `resident_decode`, `paged_decode_graph_outputs` |
 | `BackendFallbackCapabilities` | 3 | `generic_device_op`, `decode_hot_path`, `training_optimizer` |
 
+## Resident Resource Descriptors
+
+| Descriptor | Field Count | Fields |
+|---|---:|---|
+| `ResidentResource` | 13 | `tensor_id`, `backend`, `device`, `dtype`, `shape`, `layout`, `element_count`, `byte_len`, `addressable_byte_len`, `family`, `ownership`, `state`, `replay_stability` |
+| `ResidentResourceLayout` | 3 | `strides`, `start_offset`, `contiguous` |
+
 ## Generic DeviceOp Fallback
 
 | Backend | Policy | Counter | Evidence |
