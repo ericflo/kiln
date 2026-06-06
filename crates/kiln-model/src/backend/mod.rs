@@ -70,6 +70,8 @@ impl Drop for VulkanActiveGuard {
 
 pub mod cpu;
 
+pub mod residency;
+
 #[cfg(feature = "cuda")]
 pub mod cuda;
 

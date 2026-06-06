@@ -52,6 +52,10 @@ pub use backend::{
     LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend,
     SamplingBackend, TrainingLossBackend,
 };
+pub use backend::residency::{
+    ReplayStability, ResidentOwnership, ResidentResource, ResidentResourceFamily,
+    ResidentResourceState,
+};
 // (#1082 candle removal) `backend::for_device` (candle-typed shim) was deleted
 // with the candle-parity opt-in feature; production uses `for_device_kt`.
 pub use cancel::CancelHandle;
