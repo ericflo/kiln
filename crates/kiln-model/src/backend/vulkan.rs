@@ -29,8 +29,8 @@ use super::vulkan_tensor_bridge::{
     vk_f32_tensors_to_cpu_tensors_batched_vk,
 };
 use super::{
-    vulkan_attention, vulkan_conv1d, vulkan_dense, vulkan_device, vulkan_linear, vulkan_training,
-    vulkan_weights, BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy,
+    vulkan_attention, vulkan_conv1d, vulkan_dense, vulkan_device, vulkan_gdn, vulkan_linear,
+    vulkan_training, vulkan_weights, BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy,
 };
 use crate::forward::GpuWeights;
 
@@ -53,18 +53,18 @@ pub struct VulkanBackend {
     device_kt: kiln_tensor::Device,
     /// Cached at construction: reading env vars per decode step × 24 GDN layers
     /// shows up in decode NVTX captures. Env vars don't change at runtime.
-    gdn_enabled: bool,
+    pub(super) gdn_enabled: bool,
     gdn_prefill_in_proj_enabled: bool,
-    gdn_gates_enabled: bool,
-    gdn_gated_rms_norm_enabled: bool,
-    gdn_full_chunk_forward_enabled: bool,
+    pub(super) gdn_gates_enabled: bool,
+    pub(super) gdn_gated_rms_norm_enabled: bool,
+    pub(super) gdn_full_chunk_forward_enabled: bool,
     pub(super) fused_conv1d_update_enabled: bool,
     pub(super) fused_conv1d_prefill_enabled: bool,
     pub(super) conv1d_prefill_single_submit_enabled: bool,
-    gdn_forward_sub_enabled: bool,
+    pub(super) gdn_forward_sub_enabled: bool,
     gdn_decode_fused_enabled: bool,
-    gdn_recurrent_unexpanded_qk_enabled: bool,
-    gdn_recurrent_qk_norm_unexpanded_enabled: bool,
+    pub(super) gdn_recurrent_unexpanded_qk_enabled: bool,
+    pub(super) gdn_recurrent_qk_norm_unexpanded_enabled: bool,
     pub(super) linear_decode_enabled: bool,
     pub(super) linear_argmax_batch_enabled: bool,
     pub(super) full_attn_qkv_enabled: bool,
@@ -359,22 +359,19 @@ impl BackendRuntime for VulkanBackend {
     }
 
     fn supports_gdn_forward_substitution(&self) -> bool {
-        // solve_tri is experimental: shared-memory layout not yet validated
-        // against CPU parity, and may exceed maxComputeSharedMemorySize on many
-        // GPUs. Opt-in only via KILN_ENABLE_VULKAN_GDN_FORWARD_SUB.
-        self.has_vulkan() && self.gdn_forward_sub_enabled
+        vulkan_gdn::supports_gdn_forward_substitution(self)
     }
 
     fn supports_gdn_recurrent_step(&self) -> bool {
-        self.has_vulkan() && self.gdn_enabled
+        vulkan_gdn::supports_gdn_recurrent_step(self)
     }
 
     fn supports_gdn_recurrent_prefill_native_head_last(&self) -> bool {
-        self.has_vulkan() && self.gdn_recurrent_unexpanded_qk_enabled
+        vulkan_gdn::supports_gdn_recurrent_prefill_native_head_last(self)
     }
 
     fn supports_gdn_recurrent_qk_norm_prefill_native_head_last(&self) -> bool {
-        self.has_vulkan() && self.gdn_recurrent_qk_norm_unexpanded_enabled
+        vulkan_gdn::supports_gdn_recurrent_qk_norm_prefill_native_head_last(self)
     }
 
     fn enter_gdn_recurrent_resident_state_scope(&self) -> bool {
@@ -848,23 +845,23 @@ impl BackendRuntime for VulkanBackend {
     }
 
     fn supports_gdn_chunk_prep(&self) -> bool {
-        self.has_vulkan() && self.gdn_enabled
+        vulkan_gdn::supports_gdn_chunk_prep(self)
     }
 
     fn supports_gdn_chunk_scan(&self) -> bool {
-        self.has_vulkan() && self.gdn_enabled
+        vulkan_gdn::supports_gdn_chunk_scan(self)
     }
 
     fn supports_gdn_full_chunk_forward(&self) -> bool {
-        self.has_vulkan() && self.gdn_full_chunk_forward_enabled
+        vulkan_gdn::supports_gdn_full_chunk_forward(self)
     }
 
     fn supports_gdn_gates(&self) -> bool {
-        self.has_vulkan() && self.gdn_gates_enabled
+        vulkan_gdn::supports_gdn_gates(self)
     }
 
     fn supports_gdn_gated_rms_norm(&self) -> bool {
-        self.has_vulkan() && self.gdn_gated_rms_norm_enabled
+        vulkan_gdn::supports_gdn_gated_rms_norm(self)
     }
 
     fn supports_causal_conv1d_update(&self) -> bool {
@@ -2076,47 +2073,7 @@ impl BackendRuntime for VulkanBackend {
         a_log: &kiln_tensor::Tensor,
         dt_bias: &kiln_tensor::Tensor,
     ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
-        // kt guards read directly off the kt args before the bridge.
-        if !self.has_vulkan() || !self.gdn_gates_enabled {
-            return Ok(None);
-        }
-        if !matches!(
-            a.dtype(),
-            kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
-        ) {
-            return Ok(None);
-        }
-        // (#1082) kt-native: weight buffers keyed on the stable kt id; byte
-        // extraction + reconstruction run on the kt args.
-        let vk_device = self
-            .vulkan_device
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let nv = a_log.elem_count();
-        if dt_bias.elem_count() != nv {
-            return Ok(None);
-        }
-        let a_log_buf = self.cached_f32_weight_buffer_kt(a_log)?;
-        let dt_bias_buf = self.cached_f32_weight_buffer_kt(dt_bias)?;
-
-        // Output shape matches input shape [B, T, nv]
-        let out_shape = a.dims().to_vec();
-        let a_data = kt_tensor_to_f32_bytes_with_shape(a)?.0;
-        let b_data = kt_tensor_to_f32_bytes_with_shape(b)?.0;
-        let output_dtype = a.dtype();
-        let (beta_b, g_b) = kiln_vulkan_kernel::kernels::dispatch_gdn_gates_cached_bytes(
-            vk_device,
-            &a_data,
-            &b_data,
-            &a_log_buf,
-            &dt_bias_buf,
-            nv,
-            &out_shape,
-        )
-        .context("gdn_gates kernel failed")?;
-        let beta = kt_tensor_from_f32_bytes(&beta_b, &out_shape, output_dtype)?;
-        let g = kt_tensor_from_f32_bytes(&g_b, &out_shape, output_dtype)?;
-        Ok(Some((beta, g)))
+        vulkan_gdn::gdn_gates(self, a, b, a_log, dt_bias)
     }
 
     fn gdn_gated_rms_norm(
@@ -2126,45 +2083,7 @@ impl BackendRuntime for VulkanBackend {
         weight: &kiln_tensor::Tensor,
         eps: f64,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        // kt guards read directly off the kt args before the bridge.
-        if !self.has_vulkan() || !self.gdn_gated_rms_norm_enabled {
-            return Ok(None);
-        }
-        if !matches!(
-            x.dtype(),
-            kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
-        ) {
-            return Ok(None);
-        }
-        // (#1082) kt-native: weight buffer keyed on the stable kt id; byte
-        // extraction + reconstruction run on the kt args.
-        let vk_device = self
-            .vulkan_device
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let hidden = weight.elem_count();
-        if hidden == 0 || x.elem_count() % hidden != 0 {
-            return Ok(None);
-        }
-        let weight_buf = self.cached_f32_weight_buffer_kt(weight)?;
-
-        // Output shape matches x shape
-        let out_shape = x.dims().to_vec();
-        let x_data = kt_tensor_to_f32_bytes_with_shape(x)?.0;
-        let z_data = kt_tensor_to_f32_bytes_with_shape(z)?.0;
-        let output_dtype = x.dtype();
-        let out_data = kiln_vulkan_kernel::kernels::dispatch_gdn_gated_rms_norm_cached_bytes(
-            vk_device,
-            &x_data,
-            &z_data,
-            &weight_buf,
-            hidden,
-            eps as f32,
-            &out_shape,
-        )
-        .context("gdn_gated_rms_norm kernel failed")?;
-        let out = kt_tensor_from_f32_bytes(&out_data, &out_shape, output_dtype)?;
-        Ok(Some(out))
+        vulkan_gdn::gdn_gated_rms_norm(self, x, z, weight, eps)
     }
 
     fn causal_conv1d_update(

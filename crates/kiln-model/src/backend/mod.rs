@@ -147,6 +147,9 @@ pub(crate) mod vulkan_dense;
 pub(crate) mod vulkan_device;
 
 #[cfg(feature = "vulkan")]
+pub(crate) mod vulkan_gdn;
+
+#[cfg(feature = "vulkan")]
 pub(crate) mod vulkan_tensor_bridge;
 
 #[cfg(feature = "vulkan")]
