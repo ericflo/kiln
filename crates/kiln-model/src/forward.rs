@@ -14,7 +14,7 @@ use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use crate::backend::{BackendRuntime, SamplingBackend};
+use crate::backend::{BackendRuntime, LinearBackend, SamplingBackend};
 use crate::kv_cache::KvCache;
 use crate::lora_loader::{
     LoraLayerWeights, LoraProjectionWeights, LoraWeights, compute_lora_delta, linear_with_lora_t,
@@ -2795,13 +2795,18 @@ fn add_lora_delta_to_base(
         // #1082 item 4: the BackendRuntime trait is kt-typed — pass kt
         // `base`/`x`/`proj.a`/`proj.b` directly (no candle bridge).
         #[cfg(feature = "cuda")]
-        if let Some(out) = backend.lora_decode_add(&base, x, &proj.a, &proj.b, lora_scale)? {
+        if let Some(out) = LinearBackend::runtime_lora_decode_add(
+            backend, &base, x, &proj.a, &proj.b, lora_scale,
+        )?
+        {
             return Ok(out);
         }
         // Phase 4.1 step 2 + 5: when both A and B are registry-resident,
         // dispatch the LoRA delta on-device (kt-typed backend method).
         #[cfg(feature = "cuda")]
-        if let Some(delta) = backend.lora_delta_resident(x, &proj.a, &proj.b, lora_scale)? {
+        if let Some(delta) =
+            LinearBackend::runtime_lora_delta_resident(backend, x, &proj.a, &proj.b, lora_scale)?
+        {
             let delta = if delta.dtype() == base.dtype() {
                 delta
             } else {
@@ -2903,7 +2908,7 @@ fn linear_with_lora_t_backend_decode_if(
         // adapter returns None without a registered input mapping anyway). AND
         // with `bridge_scope_active()` so only the CP-4 training bridge enters
         // this branch; decode falls straight through to the kt-native
-        // `backend.linear_decode`.
+        // `LinearBackend::runtime_linear_decode`.
         // #1082 seam flip: kt-native linear+LoRA recorder — no kt->candle->kt.
         // (#1082) Vulkan added: `try_tape_lora_linear_kt` is a device-agnostic
         // pure-kt recorder (proven on Vulkan by `vk_sft_step_proof`), and it is
@@ -2925,15 +2930,19 @@ fn linear_with_lora_t_backend_decode_if(
             // Autograd-tracked input → prefer the autograd-safe Vulkan
             // CustomOp1 (linear_prefill_apply).
             if x.track_op() {
-                if let Some(base) = backend.linear_prefill_apply(x, weight_t)? {
+                if let Some(base) =
+                    LinearBackend::runtime_linear_prefill_apply(backend, x, weight_t)?
+                {
                     return add_lora_delta_to_base(Some(backend), base, x, lora, lora_scale);
                 }
             }
-            if let Some(base) = backend.linear_decode(x, weight_t)? {
+            if let Some(base) = LinearBackend::runtime_linear_decode(backend, x, weight_t)? {
                 return add_lora_delta_to_base(Some(backend), base, x, lora, lora_scale);
             }
             // Last-ditch: try the autograd-safe path even for non-tracked inputs.
-            if let Some(base) = backend.linear_prefill_apply(x, weight_t)? {
+            if let Some(base) =
+                LinearBackend::runtime_linear_prefill_apply(backend, x, weight_t)?
+            {
                 return add_lora_delta_to_base(Some(backend), base, x, lora, lora_scale);
             }
         }
@@ -3098,7 +3107,8 @@ fn full_attn_qkv_proj_decode_if(
                 }
             }
         }
-        if let Some(out) = backend.full_attn_qkv_decode(
+        if let Some(out) = LinearBackend::runtime_full_attn_qkv_decode(
+            backend,
             x,
             &attn_weights.q_proj_t,
             &attn_weights.k_proj_t,
@@ -5660,7 +5670,8 @@ fn drop_projection_transposes_enabled() -> bool {
     // Only drop projection transposes when training is actually engaged
     // (KILN_VK_NATIVE_TRAINING set explicitly). Earlier this was widened to
     // every Vulkan-active process — but inference reads `in_proj_qkv_t` /
-    // `in_proj_z_t` / etc. directly via `backend.linear_prefill_apply`, and
+    // `in_proj_z_t` / etc. directly via
+    // `LinearBackend::runtime_linear_prefill_apply`, and
     // when those transposes are replaced with the shape-[1] BF16 stub at
     // load time the GDN prefill matmul fails with "only 2d matrixes are
     // supported [1, T, hidden] [1]" on every chat completion. Keeping the
@@ -5955,8 +5966,8 @@ pub(crate) fn try_kt_matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Option<Tensor>
 /// in_proj_z, in_proj_a, in_proj_b matmuls were going through
 /// `broadcast_matmul_cpu_compatible` directly, bypassing the existing
 /// Vulkan routing in `linear_with_lora_t_backend_decode_if`. This
-/// helper threads them through `backend.linear_prefill_apply` (the
-/// autograd-safe `CustomOp1`) when `KILN_VULKAN_LINEAR=1` is set.
+/// helper threads them through `LinearBackend::runtime_linear_prefill_apply`
+/// (the autograd-safe `CustomOp1`) when `KILN_VULKAN_LINEAR=1` is set.
 /// On Qwen3.5-4B that's 24 GDN layers × 4 in-proj matmuls per layer
 /// — the dominant CPU compute in training before this commit.
 fn gdn_in_proj_matmul(
@@ -5986,7 +5997,7 @@ fn gdn_in_proj_matmul(
     // #1082 item 4: `linear_prefill_apply` is kt-typed — pass kt directly.
     #[cfg(feature = "cuda")]
     {
-        if let Some(out) = backend.linear_prefill_apply(x, weight_t)? {
+        if let Some(out) = LinearBackend::runtime_linear_prefill_apply(backend, x, weight_t)? {
             return Ok(out);
         }
     }
@@ -10702,7 +10713,13 @@ fn swiglu_ffn_impl_no_chunk(
         if let Some(backend) = backend {
             let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
             if let Some(out) =
-                backend.mlp_decode(x, &mlp.gate_proj_t, &mlp.up_proj_t, &mlp.down_proj_t)?
+                LinearBackend::runtime_mlp_decode(
+                    backend,
+                    x,
+                    &mlp.gate_proj_t,
+                    &mlp.up_proj_t,
+                    &mlp.down_proj_t,
+                )?
             {
                 finish_mlp_stage_profile(
                     profile_device,
@@ -10718,7 +10735,12 @@ fn swiglu_ffn_impl_no_chunk(
     if !has_mlp_gate_up_lora && !has_marlin {
         if let Some(backend) = backend {
             let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
-            if let Some(hidden) = backend.mlp_gate_up_decode(x, &mlp.gate_proj_t, &mlp.up_proj_t)? {
+            if let Some(hidden) = LinearBackend::runtime_mlp_gate_up_decode(
+                backend,
+                x,
+                &mlp.gate_proj_t,
+                &mlp.up_proj_t,
+            )? {
                 finish_mlp_stage_profile(
                     profile_device,
                     profile_context,
@@ -11929,7 +11951,7 @@ fn lm_head_forward_backend_decode_if(
         // without a registered input mapping anyway). AND with
         // `bridge_scope_active()` so only the CP-4 training bridge enters this
         // branch; decode falls straight through to the kt-native
-        // `backend.linear_decode`.
+        // `LinearBackend::runtime_linear_decode`.
         // #1082 seam flip: kt-native lm_head linear recorder — no kt->candle->kt.
         // The twin returns the RECORDED kt tape node directly (it IS the lm_head
         // output), so cross_entropy chains to it with no id-remapping.
@@ -11946,11 +11968,15 @@ fn lm_head_forward_backend_decode_if(
             // For autograd-tracked input, prefer the autograd-safe Vulkan
             // CustomOp; otherwise the leaf from linear_decode drops the grad.
             if x.track_op() {
-                if let Some(logits) = backend.linear_prefill_apply(x, embed_tokens_t)? {
+                if let Some(logits) =
+                    LinearBackend::runtime_linear_prefill_apply(backend, x, embed_tokens_t)?
+                {
                     return Ok(logits);
                 }
             }
-            if let Some(logits) = backend.linear_decode(x, embed_tokens_t)? {
+            if let Some(logits) =
+                LinearBackend::runtime_linear_decode(backend, x, embed_tokens_t)?
+            {
                 return Ok(logits);
             }
         }
@@ -28662,10 +28688,10 @@ mod tests {
     /// transpose tensor (`in_proj_qkv_t`, `in_proj_z_t`, `out_proj_t`,
     /// `q_proj_t`, etc.) with `Tensor::zeros((1,), DType::BF16, ...)` at
     /// load time. Inference reads those caches directly via
-    /// `backend.linear_prefill_apply`, and the GDN prefill kernel then
-    /// bailed out with `only 2d matrixes are supported [1, T, hidden] [1]`
-    /// on every single /v1/chat/completions request. The fix narrowed the
-    /// gate back to "training is engaged" (KILN_VK_NATIVE_TRAINING set);
+    /// `LinearBackend::runtime_linear_prefill_apply`, and the GDN prefill
+    /// kernel then bailed out with `only 2d matrixes are supported [1, T, hidden] [1]`
+    /// on every single /v1/chat/completions request. The fix narrowed the gate
+    /// back to "training is engaged" (KILN_VK_NATIVE_TRAINING set);
     /// `keep_projection_originals_enabled()` stays Vulkan-aware because
     /// the trainer needs the originals later.
     ///

@@ -1616,8 +1616,16 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "generate decode sampling gates should import the focused sampling facet"
     );
     assert!(
+        generate_source.contains("LinearBackend"),
+        "generate decode weight residency helpers should import the focused linear facet"
+    );
+    assert!(
         metal_graph_source.contains("SamplingBackend"),
         "Metal graph decode sampling gates should import the focused sampling facet"
+    );
+    assert!(
+        forward_source.contains("LinearBackend"),
+        "forward dense decode helpers should import the focused linear facet"
     );
     assert!(
         forward_source.contains("SamplingBackend"),
@@ -1735,6 +1743,40 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         assert!(
             !inference_decode_sampling_sources.contains(forbidden),
             "inference decode sampling should not call broad BackendRuntime method {forbidden}"
+        );
+    }
+
+    let inference_linear_sources = format!("{generate_source}\n{forward_source}");
+    for required in [
+        "LinearBackend::runtime_prewarm_decode_weights",
+        "LinearBackend::runtime_drop_uploaded_bf16_weights",
+        "LinearBackend::runtime_lora_decode_add",
+        "LinearBackend::runtime_lora_delta_resident",
+        "LinearBackend::runtime_linear_prefill_apply",
+        "LinearBackend::runtime_linear_decode",
+        "LinearBackend::runtime_full_attn_qkv_decode",
+        "LinearBackend::runtime_mlp_decode",
+        "LinearBackend::runtime_mlp_gate_up_decode",
+    ] {
+        assert!(
+            inference_linear_sources.contains(required),
+            "inference dense linear paths should consume focused capability facet method {required}"
+        );
+    }
+    for forbidden in [
+        ".prewarm_decode_weights(",
+        ".drop_uploaded_bf16_weights(",
+        ".lora_decode_add(",
+        ".lora_delta_resident(",
+        ".linear_prefill_apply(",
+        ".linear_decode(",
+        ".full_attn_qkv_decode(",
+        ".mlp_decode(",
+        ".mlp_gate_up_decode(",
+    ] {
+        assert!(
+            !inference_linear_sources.contains(forbidden),
+            "inference dense linear paths should not call broad BackendRuntime method {forbidden}"
         );
     }
 }

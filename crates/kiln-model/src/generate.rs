@@ -19,7 +19,8 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 
 use crate::backend::{
-    self, BackendRuntime, FallbackPolicy, ReplayBackend, SamplingBackend, TrainingLossBackend,
+    self, BackendRuntime, FallbackPolicy, LinearBackend, ReplayBackend, SamplingBackend,
+    TrainingLossBackend,
     capability::{BackendCapabilityQueries, DecodeBatcherPolicy},
 };
 use crate::cancel::CancelHandle;
@@ -1621,11 +1622,14 @@ impl ModelRunner {
     /// ~6-7 GB peak RSS on Qwen3.5-4B at T=918 training shape — see
     /// `docs/audits/candle_cpu_residency_2026-05-11.md`.
     pub fn prewarm_backend_decode_weights(&mut self) -> Result<()> {
-        self.backend.prewarm_decode_weights(&self.weights)?;
+        LinearBackend::runtime_prewarm_decode_weights(self.backend.as_ref(), &self.weights)?;
         // (#1082) `drop_uploaded_bf16_weights` is kt-native — pass kt device.
         let kt_device = self.weights.embed_tokens.device();
-        self.backend
-            .drop_uploaded_bf16_weights(&mut self.weights, &kt_device)?;
+        LinearBackend::runtime_drop_uploaded_bf16_weights(
+            self.backend.as_ref(),
+            &mut self.weights,
+            &kt_device,
+        )?;
         Ok(())
     }
 
