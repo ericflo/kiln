@@ -555,6 +555,63 @@ fn cuda_rocm_optimizer_arg_validation_stays_in_shared_helper() {
 }
 
 #[test]
+fn cuda_rocm_kt_bridge_device_checks_stay_in_shared_helper() {
+    let backend_dir = manifest_dir().join("src/backend");
+    let common_path = backend_dir.join("cuda_rocm_common.rs");
+    let common_source =
+        fs::read_to_string(&common_path).expect("cuda_rocm_common.rs should be readable");
+    assert!(
+        common_source.contains("tensors_on_backend_device"),
+        "cuda_rocm_common.rs should own shared kt tensor device checks"
+    );
+
+    for (backend_file, helper, variant) in [
+        ("cuda.rs", "cuda_tensors_on_device", "Cuda"),
+        ("rocm.rs", "rocm_tensors_on_device", "Rocm"),
+    ] {
+        let path = backend_dir.join(backend_file);
+        let source = fs::read_to_string(&path).expect("backend source should be readable");
+        let compact_source = compact_body(&source);
+        let functions = parse_functions(&path);
+        let linear = functions
+            .get("linear_prefill_apply")
+            .unwrap_or_else(|| panic!("{backend_file} missing linear_prefill_apply"));
+        let offset = functions
+            .get("linear_prefill_apply_offset")
+            .unwrap_or_else(|| panic!("{backend_file} missing linear_prefill_apply_offset"));
+        let lora = functions
+            .get("lora_delta_resident")
+            .unwrap_or_else(|| panic!("{backend_file} missing lora_delta_resident"));
+
+        assert!(
+            compact_body(&linear.body).contains(&format!("{helper}(&[x,weight_t])")),
+            "{backend_file} linear_prefill_apply should use shared kt device validation"
+        );
+        assert!(
+            compact_body(&offset.body).contains(&format!("{helper}(&[x,full_weight_t])")),
+            "{backend_file} linear_prefill_apply_offset should use shared kt device validation"
+        );
+        assert!(
+            compact_body(&lora.body).contains(&format!("{helper}(&[x,a,b])")),
+            "{backend_file} lora_delta_resident should use shared kt device validation"
+        );
+
+        for copied_check in [
+            format!("!matches!(x.device(),kiln_tensor::Device::{variant}(_))"),
+            format!("!matches!(weight_t.device(),kiln_tensor::Device::{variant}(_))"),
+            format!("!matches!(full_weight_t.device(),kiln_tensor::Device::{variant}(_))"),
+            format!("!matches!(a.device(),kiln_tensor::Device::{variant}(_))"),
+            format!("!matches!(b.device(),kiln_tensor::Device::{variant}(_))"),
+        ] {
+            assert!(
+                !compact_source.contains(&copied_check),
+                "{backend_file} should not keep copied kt device check `{copied_check}`"
+            );
+        }
+    }
+}
+
+#[test]
 fn vulkan_gdn_runtime_methods_stay_in_gdn_module() {
     let backend_dir = manifest_dir().join("src/backend");
     let vulkan_rs = backend_dir.join("vulkan.rs");

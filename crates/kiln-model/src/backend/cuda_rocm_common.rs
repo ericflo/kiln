@@ -61,29 +61,35 @@ pub(crate) fn has_resident_activation(
 
 pub(crate) fn optimizer_tensors_supported_for_kt(
     tensors: &[&kiln_tensor::Tensor],
-    device_matches: impl Fn(kiln_tensor::Device) -> bool,
+    device_matches: impl Fn(kiln_tensor::Device) -> bool + Copy,
 ) -> bool {
     let Some(first) = tensors.first() else {
         return false;
     };
     let dtype = first.dtype();
     let element_count = first.element_count();
-    device_matches(first.device())
+    tensors_on_backend_device(tensors, device_matches)
         && matches!(dtype, kiln_tensor::DType::F32 | kiln_tensor::DType::BF16)
         && first.is_contiguous()
         && tensors.iter().all(|tensor| {
-            device_matches(tensor.device())
-                && tensor.dtype() == dtype
+            tensor.dtype() == dtype
                 && tensor.element_count() == element_count
                 && tensor.is_contiguous()
         })
+}
+
+pub(crate) fn tensors_on_backend_device(
+    tensors: &[&kiln_tensor::Tensor],
+    device_matches: impl Fn(kiln_tensor::Device) -> bool,
+) -> bool {
+    tensors.iter().all(|tensor| device_matches(tensor.device()))
 }
 
 pub(crate) fn optimizer_args_ready_for_kt(
     registry: &'static ResidentTensorIdRegistry,
     tensors: &[&kiln_tensor::Tensor],
     poison_message: &'static str,
-    device_matches: impl Fn(kiln_tensor::Device) -> bool,
+    device_matches: impl Fn(kiln_tensor::Device) -> bool + Copy,
 ) -> bool {
     tensors
         .iter()

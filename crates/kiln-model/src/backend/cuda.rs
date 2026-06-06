@@ -78,6 +78,12 @@ fn cuda_optimizer_args_ready_for_kt(tensors: &[&kiln_tensor::Tensor]) -> bool {
     )
 }
 
+fn cuda_tensors_on_device(tensors: &[&kiln_tensor::Tensor]) -> bool {
+    super::cuda_rocm_common::tensors_on_backend_device(tensors, |device| {
+        matches!(device, kiln_tensor::Device::Cuda(_))
+    })
+}
+
 #[derive(Debug)]
 pub struct CudaBackend {
     /// The kt CUDA device this backend was constructed for. (#1082 DoD-100
@@ -1382,8 +1388,7 @@ impl BackendRuntime for CudaBackend {
     }
 
     fn linear_prefill_apply(&self, x: &kiln_tensor::Tensor, weight_t: &kiln_tensor::Tensor) -> Result<Option<kiln_tensor::Tensor>> {
-        if !matches!(x.device(), kiln_tensor::Device::Cuda(_))
-            || !matches!(weight_t.device(), kiln_tensor::Device::Cuda(_))
+        if !cuda_tensors_on_device(&[x, weight_t])
             || x.dims().is_empty()
             || weight_t.dims().len() != 2
             || *x.dims().last().unwrap() != weight_t.dims()[0]
@@ -1483,8 +1488,7 @@ impl BackendRuntime for CudaBackend {
         chunk_start: usize,
         chunk_len: usize,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        if !matches!(x.device(), kiln_tensor::Device::Cuda(_))
-            || !matches!(full_weight_t.device(), kiln_tensor::Device::Cuda(_))
+        if !cuda_tensors_on_device(&[x, full_weight_t])
             || full_weight_t.dims().len() != 2
             || chunk_len == 0
             || chunk_start >= full_weight_t.dims()[1]
@@ -1518,9 +1522,7 @@ impl BackendRuntime for CudaBackend {
         b: &kiln_tensor::Tensor,
         scale: f32,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        if !matches!(x.device(), kiln_tensor::Device::Cuda(_))
-            || !matches!(a.device(), kiln_tensor::Device::Cuda(_))
-            || !matches!(b.device(), kiln_tensor::Device::Cuda(_))
+        if !cuda_tensors_on_device(&[x, a, b])
             || !self.has_resident_activation(a)
             || !self.has_resident_activation(b)
         {
