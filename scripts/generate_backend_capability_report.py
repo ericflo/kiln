@@ -109,6 +109,62 @@ FOCUSED_BACKEND_TRAITS = [
     "ReplayBackend",
 ]
 
+REPLAY_AUTHORITIES = {
+    "cuda": {
+        "production_authority": "model_level_runner",
+        "native_primitive": "CUDA graph",
+        "runner_paths": ["crates/kiln-model/src/cuda_graph.rs"],
+        "graph_crate_paths": ["crates/kiln-graph-cuda/src/lib.rs"],
+        "contract_paths": ["crates/kiln-graph/src/replay_plan.rs"],
+        "parity_sources": ["crates/kiln-model/src/forward.rs"],
+        "parity_tests": ["test_cuda_graph_bs1_decode_matches_eager"],
+    },
+    "rocm": {
+        "production_authority": "model_level_runner",
+        "native_primitive": "HIP graph",
+        "runner_paths": ["crates/kiln-model/src/rocm_graph.rs"],
+        "graph_crate_paths": [],
+        "contract_paths": [
+            "crates/kiln-graph/src/replay_plan.rs",
+            "crates/kiln-tensor/tests/rocm_capture_arena.rs",
+        ],
+        "parity_sources": ["crates/kiln-model/src/rocm_graph.rs"],
+        "parity_tests": ["ROCm graph runner byte-identical eager/replay source contract"],
+    },
+    "metal": {
+        "production_authority": "model_level_runner_with_graph_crate_replay_object",
+        "native_primitive": "Metal ICB",
+        "runner_paths": [
+            "crates/kiln-model/src/metal_graph.rs",
+            "crates/kiln-model/src/backend/metal_paged.rs",
+        ],
+        "graph_crate_paths": ["crates/kiln-graph-metal/src/lib.rs"],
+        "contract_paths": ["crates/kiln-graph/src/replay_plan.rs"],
+        "parity_sources": [
+            "crates/kiln-model/src/forward.rs",
+            "crates/kiln-model/src/backend/metal_paged.rs",
+        ],
+        "parity_tests": [
+            "test_metal_graph_bs1_decode_matches_eager_across_boundaries_and_buckets",
+            "test_metal_graph_batched_decode_matches_eager_and_replays_bucket",
+            "single_token_paged_decode_icb_matches_eager_and_updates_slot",
+            "batched_paged_decode_icb_matches_eager_and_updates_slots",
+        ],
+    },
+    "vulkan": {
+        "production_authority": "resident_decode_command_batch",
+        "native_primitive": "Vulkan CommandBatch",
+        "runner_paths": [
+            "crates/kiln-model/src/vk_decode_resident.rs",
+            "crates/kiln-vulkan-kernel/src/cmd_batch.rs",
+        ],
+        "graph_crate_paths": ["crates/kiln-graph-vulkan/src/lib.rs"],
+        "contract_paths": ["crates/kiln-graph/src/replay_plan.rs"],
+        "parity_sources": ["crates/kiln-model/tests/vk_resident_decode_parity.rs"],
+        "parity_tests": ["vk_resident_decode_matches_nonresident_on_qwen35_4b"],
+    },
+}
+
 FEATURE_CRATES = [
     ROOT / "crates" / "kiln-server" / "Cargo.toml",
     ROOT / "crates" / "kiln-model" / "Cargo.toml",
@@ -389,6 +445,31 @@ def focused_backend_facet_report() -> dict[str, Any]:
             "method_count": len(methods),
             "methods": methods,
             "forwarding_impl": "blanket_backend_runtime" if blanket_impl else "missing",
+        }
+    return report
+
+
+def existing_paths(paths: list[str]) -> list[str]:
+    return [path for path in paths if path_exists(path)]
+
+
+def missing_paths(paths: list[str]) -> list[str]:
+    return [path for path in paths if not path_exists(path)]
+
+
+def replay_authority_report() -> dict[str, Any]:
+    report: dict[str, Any] = {}
+    for backend, info in REPLAY_AUTHORITIES.items():
+        evidence = list(dict.fromkeys([
+            *info["runner_paths"],
+            *info["graph_crate_paths"],
+            *info["contract_paths"],
+            *info["parity_sources"],
+        ]))
+        report[backend] = {
+            **info,
+            "evidence_present": existing_paths(evidence),
+            "evidence_missing": missing_paths(evidence),
         }
     return report
 
@@ -840,6 +921,22 @@ def markdown(data: dict[str, Any]) -> str:
             f"| `{name}` | {info['method_count']} | `{info['forwarding_impl']}` | {methods} |"
         )
     lines.append("")
+    lines.append("## Replay Authority")
+    lines.append("")
+    lines.append(
+        "| Backend | Production Authority | Native Primitive | Runners | Graph Crates | Parity Tests | Missing Evidence |"
+    )
+    lines.append("|---|---|---|---|---|---|---|")
+    for backend, info in data["replay_authority"].items():
+        runners = ", ".join(f"`{path}`" for path in info["runner_paths"]) or "none"
+        graph_crates = ", ".join(f"`{path}`" for path in info["graph_crate_paths"]) or "none"
+        tests = ", ".join(f"`{test}`" for test in info["parity_tests"]) or "none"
+        missing = ", ".join(f"`{path}`" for path in info["evidence_missing"]) or "none"
+        lines.append(
+            f"| `{backend}` | `{info['production_authority']}` | `{info['native_primitive']}` | "
+            f"{runners} | {graph_crates} | {tests} | {missing} |"
+        )
+    lines.append("")
     lines.append("## Support Predicates")
     lines.append("")
     lines.append("| Backend | Method | Predicate Status | Support State | Paired Method | Pair Always Declines | Gates |")
@@ -998,6 +1095,7 @@ def main() -> int:
         "request_descriptors": request_descriptor_report(),
         "capability_descriptors": capability_descriptor_report(),
         "focused_backend_facets": focused_backend_facet_report(),
+        "replay_authority": replay_authority_report(),
         "resident_resource_descriptors": resident_resource_descriptor_report(),
         "conformance_gates": conformance_gate_report(),
         "request_capability_queries": sorted(

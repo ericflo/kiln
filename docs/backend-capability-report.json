@@ -2357,6 +2357,118 @@
       "sgd_step": "overridden"
     }
   },
+  "replay_authority": {
+    "cuda": {
+      "contract_paths": [
+        "crates/kiln-graph/src/replay_plan.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-model/src/cuda_graph.rs",
+        "crates/kiln-graph-cuda/src/lib.rs",
+        "crates/kiln-graph/src/replay_plan.rs",
+        "crates/kiln-model/src/forward.rs"
+      ],
+      "graph_crate_paths": [
+        "crates/kiln-graph-cuda/src/lib.rs"
+      ],
+      "native_primitive": "CUDA graph",
+      "parity_sources": [
+        "crates/kiln-model/src/forward.rs"
+      ],
+      "parity_tests": [
+        "test_cuda_graph_bs1_decode_matches_eager"
+      ],
+      "production_authority": "model_level_runner",
+      "runner_paths": [
+        "crates/kiln-model/src/cuda_graph.rs"
+      ]
+    },
+    "metal": {
+      "contract_paths": [
+        "crates/kiln-graph/src/replay_plan.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-model/src/metal_graph.rs",
+        "crates/kiln-model/src/backend/metal_paged.rs",
+        "crates/kiln-graph-metal/src/lib.rs",
+        "crates/kiln-graph/src/replay_plan.rs",
+        "crates/kiln-model/src/forward.rs"
+      ],
+      "graph_crate_paths": [
+        "crates/kiln-graph-metal/src/lib.rs"
+      ],
+      "native_primitive": "Metal ICB",
+      "parity_sources": [
+        "crates/kiln-model/src/forward.rs",
+        "crates/kiln-model/src/backend/metal_paged.rs"
+      ],
+      "parity_tests": [
+        "test_metal_graph_bs1_decode_matches_eager_across_boundaries_and_buckets",
+        "test_metal_graph_batched_decode_matches_eager_and_replays_bucket",
+        "single_token_paged_decode_icb_matches_eager_and_updates_slot",
+        "batched_paged_decode_icb_matches_eager_and_updates_slots"
+      ],
+      "production_authority": "model_level_runner_with_graph_crate_replay_object",
+      "runner_paths": [
+        "crates/kiln-model/src/metal_graph.rs",
+        "crates/kiln-model/src/backend/metal_paged.rs"
+      ]
+    },
+    "rocm": {
+      "contract_paths": [
+        "crates/kiln-graph/src/replay_plan.rs",
+        "crates/kiln-tensor/tests/rocm_capture_arena.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-model/src/rocm_graph.rs",
+        "crates/kiln-graph/src/replay_plan.rs",
+        "crates/kiln-tensor/tests/rocm_capture_arena.rs"
+      ],
+      "graph_crate_paths": [],
+      "native_primitive": "HIP graph",
+      "parity_sources": [
+        "crates/kiln-model/src/rocm_graph.rs"
+      ],
+      "parity_tests": [
+        "ROCm graph runner byte-identical eager/replay source contract"
+      ],
+      "production_authority": "model_level_runner",
+      "runner_paths": [
+        "crates/kiln-model/src/rocm_graph.rs"
+      ]
+    },
+    "vulkan": {
+      "contract_paths": [
+        "crates/kiln-graph/src/replay_plan.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-model/src/vk_decode_resident.rs",
+        "crates/kiln-vulkan-kernel/src/cmd_batch.rs",
+        "crates/kiln-graph-vulkan/src/lib.rs",
+        "crates/kiln-graph/src/replay_plan.rs",
+        "crates/kiln-model/tests/vk_resident_decode_parity.rs"
+      ],
+      "graph_crate_paths": [
+        "crates/kiln-graph-vulkan/src/lib.rs"
+      ],
+      "native_primitive": "Vulkan CommandBatch",
+      "parity_sources": [
+        "crates/kiln-model/tests/vk_resident_decode_parity.rs"
+      ],
+      "parity_tests": [
+        "vk_resident_decode_matches_nonresident_on_qwen35_4b"
+      ],
+      "production_authority": "resident_decode_command_batch",
+      "runner_paths": [
+        "crates/kiln-model/src/vk_decode_resident.rs",
+        "crates/kiln-vulkan-kernel/src/cmd_batch.rs"
+      ]
+    }
+  },
   "request_capability_queries": [
     "backend_capabilities",
     "capability_snapshot",

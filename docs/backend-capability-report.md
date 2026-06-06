@@ -38,6 +38,15 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `TrainingLossBackend` | 2 | `blanket_backend_runtime` | `runtime_training_capabilities`, `runtime_training_precision_policy` |
 | `ReplayBackend` | 5 | `blanket_backend_runtime` | `runtime_decode_resident_pool_ready`, `runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs`, `runtime_replay_key_for_request`, `runtime_supports_replay_request`, `runtime_supports_resident_decode` |
 
+## Replay Authority
+
+| Backend | Production Authority | Native Primitive | Runners | Graph Crates | Parity Tests | Missing Evidence |
+|---|---|---|---|---|---|---|
+| `cuda` | `model_level_runner` | `CUDA graph` | `crates/kiln-model/src/cuda_graph.rs` | `crates/kiln-graph-cuda/src/lib.rs` | `test_cuda_graph_bs1_decode_matches_eager` | none |
+| `rocm` | `model_level_runner` | `HIP graph` | `crates/kiln-model/src/rocm_graph.rs` | none | `ROCm graph runner byte-identical eager/replay source contract` | none |
+| `metal` | `model_level_runner_with_graph_crate_replay_object` | `Metal ICB` | `crates/kiln-model/src/metal_graph.rs`, `crates/kiln-model/src/backend/metal_paged.rs` | `crates/kiln-graph-metal/src/lib.rs` | `test_metal_graph_bs1_decode_matches_eager_across_boundaries_and_buckets`, `test_metal_graph_batched_decode_matches_eager_and_replays_bucket`, `single_token_paged_decode_icb_matches_eager_and_updates_slot`, `batched_paged_decode_icb_matches_eager_and_updates_slots` | none |
+| `vulkan` | `resident_decode_command_batch` | `Vulkan CommandBatch` | `crates/kiln-model/src/vk_decode_resident.rs`, `crates/kiln-vulkan-kernel/src/cmd_batch.rs` | `crates/kiln-graph-vulkan/src/lib.rs` | `vk_resident_decode_matches_nonresident_on_qwen35_4b` | none |
+
 ## Support Predicates
 
 | Backend | Method | Predicate Status | Support State | Paired Method | Pair Always Declines | Gates |

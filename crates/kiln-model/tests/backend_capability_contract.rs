@@ -1407,6 +1407,9 @@ fn generated_capability_report_gates_replay_contract() {
         "crates/kiln-graph/src/replay_plan.rs",
         "crates/kiln-graph/src/captured_graph.rs",
         "crates/kiln-graph/tests/capture_lifetime.rs",
+        "crates/kiln-graph-cuda/src/lib.rs",
+        "crates/kiln-graph-metal/src/lib.rs",
+        "crates/kiln-graph-vulkan/src/lib.rs",
         "crates/kiln-model/src/backend/capability.rs",
         "crates/kiln-model/src/backend/residency.rs",
         "crates/kiln-model/tests/vk_resident_decode_parity.rs",
@@ -1426,6 +1429,82 @@ fn generated_capability_report_gates_replay_contract() {
         .collect::<Vec<_>>();
     assert!(request_queries.contains(&"supports_replay_request"));
     assert!(request_queries.contains(&"replay_key_for_request"));
+}
+
+#[test]
+fn generated_capability_report_lists_replay_authority() {
+    let root = workspace_root();
+    let report_path = root.join("docs/backend-capability-report.json");
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(&report_path).expect("capability report json should be readable"),
+    )
+    .expect("capability report json should parse");
+    let replay_authority = report["replay_authority"]
+        .as_object()
+        .expect("replay_authority should be an object");
+
+    for (backend, primitive, runner_path) in [
+        ("cuda", "CUDA graph", "crates/kiln-model/src/cuda_graph.rs"),
+        ("rocm", "HIP graph", "crates/kiln-model/src/rocm_graph.rs"),
+        ("metal", "Metal ICB", "crates/kiln-model/src/metal_graph.rs"),
+        (
+            "vulkan",
+            "Vulkan CommandBatch",
+            "crates/kiln-vulkan-kernel/src/cmd_batch.rs",
+        ),
+    ] {
+        let info = replay_authority
+            .get(backend)
+            .unwrap_or_else(|| panic!("replay_authority should list {backend}"));
+        assert_eq!(
+            info["native_primitive"].as_str(),
+            Some(primitive),
+            "{backend} should report its native replay primitive"
+        );
+        let runners = info["runner_paths"]
+            .as_array()
+            .expect("runner_paths should be an array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert!(
+            runners.contains(&runner_path),
+            "{backend} should cite production runner path {runner_path}"
+        );
+        let missing = info["evidence_missing"]
+            .as_array()
+            .expect("evidence_missing should be an array");
+        assert!(
+            missing.is_empty(),
+            "{backend} replay authority should not cite missing paths: {missing:?}"
+        );
+    }
+
+    assert!(
+        replay_authority["rocm"]["graph_crate_paths"]
+            .as_array()
+            .expect("rocm graph_crate_paths should be an array")
+            .is_empty(),
+        "ROCm should honestly report that no kiln-graph-rocm crate exists yet"
+    );
+
+    let metal_tests = replay_authority["metal"]["parity_tests"]
+        .as_array()
+        .expect("metal parity_tests should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        metal_tests.contains(&"test_metal_graph_batched_decode_matches_eager_and_replays_bucket"),
+        "Metal replay authority should cite the batched eager-vs-replay graph test"
+    );
+
+    let report_md = fs::read_to_string(root.join("docs/backend-capability-report.md"))
+        .expect("capability report md should be readable");
+    assert!(
+        report_md.contains("## Replay Authority"),
+        "Markdown report should expose Phase 5 replay authority"
+    );
 }
 
 #[test]
