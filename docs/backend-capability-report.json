@@ -68,7 +68,8 @@
           "paired_method": "causal_conv1d_prefill",
           "paired_method_always_declines": false,
           "paired_method_line": 1681,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_causal_conv1d_update": {
           "env_gates": [],
@@ -82,7 +83,8 @@
           "paired_method": "causal_conv1d_update",
           "paired_method_always_declines": false,
           "paired_method_line": 1656,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_flash_attn_paged_decode": {
           "env_gates": [],
@@ -96,7 +98,8 @@
           "paired_method": "flash_attn_paged_decode",
           "paired_method_always_declines": false,
           "paired_method_line": 508,
-          "status": "literal_true"
+          "status": "literal_true",
+          "support_state": "NativeWithConstraints"
         },
         "supports_flash_attn_prefill": {
           "env_gates": [],
@@ -110,7 +113,8 @@
           "paired_method": "flash_attn_prefill",
           "paired_method_always_declines": false,
           "paired_method_line": 466,
-          "status": "literal_true"
+          "status": "literal_true",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_chunk_prep": {
           "env_gates": [],
@@ -124,7 +128,8 @@
           "paired_method": "gdn_chunk_prep",
           "paired_method_always_declines": false,
           "paired_method_line": 709,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_chunk_scan": {
           "env_gates": [],
@@ -138,7 +143,8 @@
           "paired_method": "gdn_chunk_scan",
           "paired_method_always_declines": false,
           "paired_method_line": 733,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_decode_gates_recurrent_unexpanded_qk": {
           "env_gates": [],
@@ -152,7 +158,8 @@
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_decode_qk_norm_gates_recurrent": {
           "env_gates": [],
@@ -166,7 +173,8 @@
           "paired_method": "gdn_decode_qk_norm_gates_recurrent",
           "paired_method_always_declines": false,
           "paired_method_line": 990,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_forward_substitution": {
           "env_gates": [],
@@ -180,7 +188,8 @@
           "paired_method": "gdn_forward_substitution",
           "paired_method_always_declines": false,
           "paired_method_line": 667,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_full_chunk_forward": {
           "env_gates": [],
@@ -194,7 +203,8 @@
           "paired_method": "gdn_full_chunk_forward",
           "paired_method_always_declines": false,
           "paired_method_line": 757,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_gated_rms_norm": {
           "env_gates": [],
@@ -208,7 +218,8 @@
           "paired_method": "gdn_gated_rms_norm",
           "paired_method_always_declines": false,
           "paired_method_line": 1579,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_gates": {
           "env_gates": [],
@@ -222,7 +233,8 @@
           "paired_method": "gdn_gates",
           "paired_method_always_declines": false,
           "paired_method_line": 1317,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_recurrent_step": {
           "env_gates": [],
@@ -236,7 +248,8 @@
           "paired_method": "gdn_recurrent_step",
           "paired_method_always_declines": false,
           "paired_method_line": 687,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_resident_activation": {
           "env_gates": [],
@@ -250,7 +263,8 @@
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
-          "status": "literal_true"
+          "status": "literal_true",
+          "support_state": "NativeWithConstraints"
         },
         "supports_strict_paged_decode_contiguous_batch": {
           "env_gates": [],
@@ -264,7 +278,8 @@
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
-          "status": "literal_false"
+          "status": "literal_false",
+          "support_state": "Declined"
         }
       }
     },
@@ -386,7 +401,8 @@
           "paired_method": "causal_conv1d_prefill",
           "paired_method_always_declines": false,
           "paired_method_line": 1726,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_causal_conv1d_update": {
           "env_gates": [],
@@ -400,7 +416,8 @@
           "paired_method": "causal_conv1d_update",
           "paired_method_always_declines": false,
           "paired_method_line": 1745,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_flash_attn_paged_decode": {
           "env_gates": [],
@@ -414,7 +431,8 @@
           "paired_method": "flash_attn_paged_decode",
           "paired_method_always_declines": false,
           "paired_method_line": 1608,
-          "status": "literal_true"
+          "status": "literal_true",
+          "support_state": "NativeWithConstraints"
         },
         "supports_flash_attn_prefill": {
           "env_gates": [],
@@ -428,7 +446,8 @@
           "paired_method": "flash_attn_prefill",
           "paired_method_always_declines": false,
           "paired_method_line": 1523,
-          "status": "env_gated"
+          "status": "env_gated",
+          "support_state": "NativeWithConstraints"
         },
         "supports_flash_attn_prefill_head_major": {
           "env_gates": [],
@@ -442,7 +461,8 @@
           "paired_method": "flash_attn_prefill_head_major",
           "paired_method_always_declines": false,
           "paired_method_line": 1571,
-          "status": "env_gated"
+          "status": "env_gated",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_chunk_prep": {
           "env_gates": [],
@@ -456,7 +476,8 @@
           "paired_method": "gdn_chunk_prep",
           "paired_method_always_declines": false,
           "paired_method_line": 1805,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_forward_substitution": {
           "env_gates": [],
@@ -470,7 +491,8 @@
           "paired_method": "gdn_forward_substitution",
           "paired_method_always_declines": false,
           "paired_method_line": 1764,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_full_chunk_forward": {
           "env_gates": [],
@@ -484,7 +506,8 @@
           "paired_method": "gdn_full_chunk_forward",
           "paired_method_always_declines": false,
           "paired_method_line": 1834,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_full_chunk_forward_head_last": {
           "env_gates": [],
@@ -498,7 +521,8 @@
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_gated_rms_norm": {
           "env_gates": [],
@@ -512,7 +536,8 @@
           "paired_method": "gdn_gated_rms_norm",
           "paired_method_always_declines": false,
           "paired_method_line": 1985,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_gates": {
           "env_gates": [],
@@ -526,7 +551,8 @@
           "paired_method": "gdn_gates",
           "paired_method_always_declines": false,
           "paired_method_line": 1969,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_recurrent_prefill_head_last": {
           "env_gates": [],
@@ -540,7 +566,8 @@
           "paired_method": "gdn_recurrent_prefill_head_last",
           "paired_method_always_declines": false,
           "paired_method_line": 1894,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_recurrent_prefill_native_head_last": {
           "env_gates": [],
@@ -554,7 +581,8 @@
           "paired_method": "gdn_recurrent_prefill_native_head_last",
           "paired_method_always_declines": false,
           "paired_method_line": 1914,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_recurrent_step": {
           "env_gates": [],
@@ -568,7 +596,8 @@
           "paired_method": "gdn_recurrent_step",
           "paired_method_always_declines": false,
           "paired_method_line": 1787,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_linear_decode_sample": {
           "env_gates": [],
@@ -582,7 +611,8 @@
           "paired_method": "linear_decode_sample",
           "paired_method_always_declines": false,
           "paired_method_line": 1108,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_linear_decode_sample_batch": {
           "env_gates": [],
@@ -596,7 +626,8 @@
           "paired_method": "linear_decode_sample_batch",
           "paired_method_always_declines": false,
           "paired_method_line": 1186,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_paged_kv_head_major_read": {
           "env_gates": [],
@@ -610,7 +641,8 @@
           "paired_method": "paged_kv_head_major_read",
           "paired_method_always_declines": false,
           "paired_method_line": 1689,
-          "status": "literal_true"
+          "status": "literal_true",
+          "support_state": "NativeWithConstraints"
         },
         "supports_paged_kv_head_major_read_append_token_major": {
           "env_gates": [],
@@ -624,7 +656,8 @@
           "paired_method": "paged_kv_head_major_read_append_token_major",
           "paired_method_always_declines": false,
           "paired_method_line": 1705,
-          "status": "literal_true"
+          "status": "literal_true",
+          "support_state": "NativeWithConstraints"
         },
         "supports_resident_activation": {
           "env_gates": [],
@@ -638,7 +671,8 @@
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
-          "status": "literal_true"
+          "status": "literal_true",
+          "support_state": "NativeWithConstraints"
         }
       }
     },
@@ -720,7 +754,8 @@
           "paired_method": "causal_conv1d_prefill",
           "paired_method_always_declines": false,
           "paired_method_line": 1752,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_causal_conv1d_update": {
           "env_gates": [],
@@ -734,7 +769,8 @@
           "paired_method": "causal_conv1d_update",
           "paired_method_always_declines": false,
           "paired_method_line": 1727,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_flash_attn_paged_decode": {
           "env_gates": [],
@@ -748,7 +784,8 @@
           "paired_method": "flash_attn_paged_decode",
           "paired_method_always_declines": false,
           "paired_method_line": 561,
-          "status": "literal_true"
+          "status": "literal_true",
+          "support_state": "NativeWithConstraints"
         },
         "supports_flash_attn_prefill": {
           "env_gates": [],
@@ -762,7 +799,8 @@
           "paired_method": "flash_attn_prefill",
           "paired_method_always_declines": false,
           "paired_method_line": 484,
-          "status": "literal_true"
+          "status": "literal_true",
+          "support_state": "NativeWithConstraints"
         },
         "supports_flash_attn_prefill_head_major": {
           "env_gates": [
@@ -778,7 +816,8 @@
           "paired_method": "flash_attn_prefill_head_major",
           "paired_method_always_declines": false,
           "paired_method_line": 526,
-          "status": "env_gated"
+          "status": "env_gated",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_chunk_prep": {
           "env_gates": [],
@@ -792,7 +831,8 @@
           "paired_method": "gdn_chunk_prep",
           "paired_method_always_declines": false,
           "paired_method_line": 763,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_chunk_scan": {
           "env_gates": [],
@@ -806,7 +846,8 @@
           "paired_method": "gdn_chunk_scan",
           "paired_method_always_declines": false,
           "paired_method_line": 787,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_decode_gates_recurrent_unexpanded_qk": {
           "env_gates": [],
@@ -820,7 +861,8 @@
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_decode_qk_norm_gates_recurrent": {
           "env_gates": [],
@@ -834,7 +876,8 @@
           "paired_method": "gdn_decode_qk_norm_gates_recurrent",
           "paired_method_always_declines": false,
           "paired_method_line": 1044,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_forward_substitution": {
           "env_gates": [],
@@ -848,7 +891,8 @@
           "paired_method": "gdn_forward_substitution",
           "paired_method_always_declines": false,
           "paired_method_line": 721,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_full_chunk_forward": {
           "env_gates": [],
@@ -862,7 +906,8 @@
           "paired_method": "gdn_full_chunk_forward",
           "paired_method_always_declines": false,
           "paired_method_line": 811,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_gated_rms_norm": {
           "env_gates": [],
@@ -876,7 +921,8 @@
           "paired_method": "gdn_gated_rms_norm",
           "paired_method_always_declines": false,
           "paired_method_line": 1650,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_gates": {
           "env_gates": [],
@@ -890,7 +936,8 @@
           "paired_method": "gdn_gates",
           "paired_method_always_declines": false,
           "paired_method_line": 1371,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_recurrent_step": {
           "env_gates": [],
@@ -904,7 +951,8 @@
           "paired_method": "gdn_recurrent_step",
           "paired_method_always_declines": false,
           "paired_method_line": 741,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_linear_decode_argmax": {
           "env_gates": [],
@@ -918,7 +966,8 @@
           "paired_method": "linear_decode_argmax",
           "paired_method_always_declines": true,
           "paired_method_line": 1472,
-          "status": "literal_false"
+          "status": "literal_false",
+          "support_state": "Declined"
         },
         "supports_resident_activation": {
           "env_gates": [],
@@ -932,7 +981,8 @@
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
-          "status": "literal_true"
+          "status": "literal_true",
+          "support_state": "NativeWithConstraints"
         },
         "supports_strict_paged_decode_contiguous_batch": {
           "env_gates": [],
@@ -946,7 +996,8 @@
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
-          "status": "literal_false"
+          "status": "literal_false",
+          "support_state": "Declined"
         }
       }
     },
@@ -1075,7 +1126,8 @@
           "paired_method": "causal_conv1d_prefill",
           "paired_method_always_declines": false,
           "paired_method_line": 5050,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_causal_conv1d_update": {
           "env_gates": [],
@@ -1089,7 +1141,8 @@
           "paired_method": "causal_conv1d_update",
           "paired_method_always_declines": false,
           "paired_method_line": 4995,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_flash_attn_paged_decode": {
           "env_gates": [],
@@ -1103,7 +1156,8 @@
           "paired_method": "flash_attn_paged_decode",
           "paired_method_always_declines": false,
           "paired_method_line": 2634,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_flash_attn_prefill": {
           "env_gates": [
@@ -1119,7 +1173,8 @@
           "paired_method": "flash_attn_prefill",
           "paired_method_always_declines": false,
           "paired_method_line": 2615,
-          "status": "env_gated"
+          "status": "env_gated",
+          "support_state": "NativeWithConstraints"
         },
         "supports_flash_attn_prefill_head_major": {
           "env_gates": [],
@@ -1133,7 +1188,8 @@
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
-          "status": "literal_false"
+          "status": "literal_false",
+          "support_state": "Declined"
         },
         "supports_gdn_chunk_prep": {
           "env_gates": [],
@@ -1147,7 +1203,8 @@
           "paired_method": "gdn_chunk_prep",
           "paired_method_always_declines": false,
           "paired_method_line": 4729,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_chunk_scan": {
           "env_gates": [],
@@ -1161,7 +1218,8 @@
           "paired_method": "gdn_chunk_scan",
           "paired_method_always_declines": false,
           "paired_method_line": 4781,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_forward_substitution": {
           "env_gates": [],
@@ -1175,7 +1233,8 @@
           "paired_method": "gdn_forward_substitution",
           "paired_method_always_declines": false,
           "paired_method_line": 4198,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_full_chunk_forward": {
           "env_gates": [],
@@ -1189,7 +1248,8 @@
           "paired_method": "gdn_full_chunk_forward",
           "paired_method_always_declines": false,
           "paired_method_line": 4837,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_gated_rms_norm": {
           "env_gates": [],
@@ -1203,7 +1263,8 @@
           "paired_method": "gdn_gated_rms_norm",
           "paired_method_always_declines": false,
           "paired_method_line": 4946,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_gates": {
           "env_gates": [],
@@ -1217,7 +1278,8 @@
           "paired_method": "gdn_gates",
           "paired_method_always_declines": false,
           "paired_method_line": 4897,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_recurrent_prefill_native_head_last": {
           "env_gates": [],
@@ -1231,7 +1293,8 @@
           "paired_method": "gdn_recurrent_prefill_native_head_last",
           "paired_method_always_declines": false,
           "paired_method_line": 4241,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_recurrent_qk_norm_prefill_native_head_last": {
           "env_gates": [],
@@ -1245,7 +1308,8 @@
           "paired_method": "gdn_recurrent_qk_norm_prefill_native_head_last",
           "paired_method_always_declines": false,
           "paired_method_line": 4400,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_gdn_recurrent_step": {
           "env_gates": [],
@@ -1259,7 +1323,8 @@
           "paired_method": "gdn_recurrent_step",
           "paired_method_always_declines": false,
           "paired_method_line": 4484,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_linear_decode_argmax": {
           "env_gates": [],
@@ -1273,7 +1338,8 @@
           "paired_method": "linear_decode_argmax",
           "paired_method_always_declines": false,
           "paired_method_line": 3384,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_linear_decode_argmax_batch": {
           "env_gates": [],
@@ -1287,7 +1353,8 @@
           "paired_method": "linear_decode_argmax_batch",
           "paired_method_always_declines": false,
           "paired_method_line": 3607,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_linear_decode_sample": {
           "env_gates": [],
@@ -1301,7 +1368,8 @@
           "paired_method": "linear_decode_sample",
           "paired_method_always_declines": false,
           "paired_method_line": 3449,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_linear_decode_sample_batch": {
           "env_gates": [],
@@ -1315,7 +1383,8 @@
           "paired_method": "linear_decode_sample_batch",
           "paired_method_always_declines": false,
           "paired_method_line": 3533,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         },
         "supports_resident_activation": {
           "env_gates": [],
@@ -1329,7 +1398,8 @@
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
-          "status": "literal_true"
+          "status": "literal_true",
+          "support_state": "NativeWithConstraints"
         },
         "supports_resident_decode": {
           "env_gates": [],
@@ -1343,7 +1413,8 @@
           "paired_method": "decode_resident_pool_ready",
           "paired_method_always_declines": false,
           "paired_method_line": 1895,
-          "status": "dynamic"
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
         }
       }
     }

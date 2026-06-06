@@ -24,79 +24,79 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 
 ## Support Predicates
 
-| Backend | Method | Status | Paired Method | Pair Always Declines | Gates |
-|---|---|---|---|---|---|
-| `cuda` | `supports_causal_conv1d_prefill` | `dynamic` | `causal_conv1d_prefill` | no | none |
-| `cuda` | `supports_causal_conv1d_update` | `dynamic` | `causal_conv1d_update` | no | none |
-| `cuda` | `supports_flash_attn_paged_decode` | `literal_true` | `flash_attn_paged_decode` | no | none |
-| `cuda` | `supports_flash_attn_prefill` | `literal_true` | `flash_attn_prefill` | no | none |
-| `cuda` | `supports_gdn_chunk_prep` | `dynamic` | `gdn_chunk_prep` | no | none |
-| `cuda` | `supports_gdn_chunk_scan` | `dynamic` | `gdn_chunk_scan` | no | none |
-| `cuda` | `supports_gdn_decode_gates_recurrent_unexpanded_qk` | `dynamic` | `` | no | none |
-| `cuda` | `supports_gdn_decode_qk_norm_gates_recurrent` | `dynamic` | `gdn_decode_qk_norm_gates_recurrent` | no | none |
-| `cuda` | `supports_gdn_forward_substitution` | `dynamic` | `gdn_forward_substitution` | no | none |
-| `cuda` | `supports_gdn_full_chunk_forward` | `dynamic` | `gdn_full_chunk_forward` | no | none |
-| `cuda` | `supports_gdn_gated_rms_norm` | `dynamic` | `gdn_gated_rms_norm` | no | none |
-| `cuda` | `supports_gdn_gates` | `dynamic` | `gdn_gates` | no | none |
-| `cuda` | `supports_gdn_recurrent_step` | `dynamic` | `gdn_recurrent_step` | no | none |
-| `cuda` | `supports_resident_activation` | `literal_true` | `` | no | none |
-| `cuda` | `supports_strict_paged_decode_contiguous_batch` | `literal_false` | `` | no | none |
-| `rocm` | `supports_causal_conv1d_prefill` | `dynamic` | `causal_conv1d_prefill` | no | none |
-| `rocm` | `supports_causal_conv1d_update` | `dynamic` | `causal_conv1d_update` | no | none |
-| `rocm` | `supports_flash_attn_paged_decode` | `literal_true` | `flash_attn_paged_decode` | no | none |
-| `rocm` | `supports_flash_attn_prefill` | `literal_true` | `flash_attn_prefill` | no | none |
-| `rocm` | `supports_flash_attn_prefill_head_major` | `env_gated` | `flash_attn_prefill_head_major` | no | env |
-| `rocm` | `supports_gdn_chunk_prep` | `dynamic` | `gdn_chunk_prep` | no | none |
-| `rocm` | `supports_gdn_chunk_scan` | `dynamic` | `gdn_chunk_scan` | no | none |
-| `rocm` | `supports_gdn_decode_gates_recurrent_unexpanded_qk` | `dynamic` | `` | no | none |
-| `rocm` | `supports_gdn_decode_qk_norm_gates_recurrent` | `dynamic` | `gdn_decode_qk_norm_gates_recurrent` | no | none |
-| `rocm` | `supports_gdn_forward_substitution` | `dynamic` | `gdn_forward_substitution` | no | none |
-| `rocm` | `supports_gdn_full_chunk_forward` | `dynamic` | `gdn_full_chunk_forward` | no | none |
-| `rocm` | `supports_gdn_gated_rms_norm` | `dynamic` | `gdn_gated_rms_norm` | no | none |
-| `rocm` | `supports_gdn_gates` | `dynamic` | `gdn_gates` | no | none |
-| `rocm` | `supports_gdn_recurrent_step` | `dynamic` | `gdn_recurrent_step` | no | none |
-| `rocm` | `supports_linear_decode_argmax` | `literal_false` | `linear_decode_argmax` | yes | none |
-| `rocm` | `supports_resident_activation` | `literal_true` | `` | no | none |
-| `rocm` | `supports_strict_paged_decode_contiguous_batch` | `literal_false` | `` | no | none |
-| `metal` | `supports_causal_conv1d_prefill` | `dynamic` | `causal_conv1d_prefill` | no | none |
-| `metal` | `supports_causal_conv1d_update` | `dynamic` | `causal_conv1d_update` | no | none |
-| `metal` | `supports_flash_attn_paged_decode` | `literal_true` | `flash_attn_paged_decode` | no | none |
-| `metal` | `supports_flash_attn_prefill` | `env_gated` | `flash_attn_prefill` | no | none |
-| `metal` | `supports_flash_attn_prefill_head_major` | `env_gated` | `flash_attn_prefill_head_major` | no | none |
-| `metal` | `supports_gdn_chunk_prep` | `dynamic` | `gdn_chunk_prep` | no | none |
-| `metal` | `supports_gdn_forward_substitution` | `dynamic` | `gdn_forward_substitution` | no | none |
-| `metal` | `supports_gdn_full_chunk_forward` | `dynamic` | `gdn_full_chunk_forward` | no | none |
-| `metal` | `supports_gdn_full_chunk_forward_head_last` | `dynamic` | `` | no | none |
-| `metal` | `supports_gdn_gated_rms_norm` | `dynamic` | `gdn_gated_rms_norm` | no | none |
-| `metal` | `supports_gdn_gates` | `dynamic` | `gdn_gates` | no | none |
-| `metal` | `supports_gdn_recurrent_prefill_head_last` | `dynamic` | `gdn_recurrent_prefill_head_last` | no | none |
-| `metal` | `supports_gdn_recurrent_prefill_native_head_last` | `dynamic` | `gdn_recurrent_prefill_native_head_last` | no | none |
-| `metal` | `supports_gdn_recurrent_step` | `dynamic` | `gdn_recurrent_step` | no | none |
-| `metal` | `supports_linear_decode_sample` | `dynamic` | `linear_decode_sample` | no | none |
-| `metal` | `supports_linear_decode_sample_batch` | `dynamic` | `linear_decode_sample_batch` | no | none |
-| `metal` | `supports_paged_kv_head_major_read` | `literal_true` | `paged_kv_head_major_read` | no | none |
-| `metal` | `supports_paged_kv_head_major_read_append_token_major` | `literal_true` | `paged_kv_head_major_read_append_token_major` | no | none |
-| `metal` | `supports_resident_activation` | `literal_true` | `` | no | none |
-| `vulkan` | `supports_causal_conv1d_prefill` | `dynamic` | `causal_conv1d_prefill` | no | none |
-| `vulkan` | `supports_causal_conv1d_update` | `dynamic` | `causal_conv1d_update` | no | none |
-| `vulkan` | `supports_flash_attn_paged_decode` | `dynamic` | `flash_attn_paged_decode` | no | none |
-| `vulkan` | `supports_flash_attn_prefill` | `env_gated` | `flash_attn_prefill` | no | env |
-| `vulkan` | `supports_flash_attn_prefill_head_major` | `literal_false` | `` | no | none |
-| `vulkan` | `supports_gdn_chunk_prep` | `dynamic` | `gdn_chunk_prep` | no | none |
-| `vulkan` | `supports_gdn_chunk_scan` | `dynamic` | `gdn_chunk_scan` | no | none |
-| `vulkan` | `supports_gdn_forward_substitution` | `dynamic` | `gdn_forward_substitution` | no | none |
-| `vulkan` | `supports_gdn_full_chunk_forward` | `dynamic` | `gdn_full_chunk_forward` | no | none |
-| `vulkan` | `supports_gdn_gated_rms_norm` | `dynamic` | `gdn_gated_rms_norm` | no | none |
-| `vulkan` | `supports_gdn_gates` | `dynamic` | `gdn_gates` | no | none |
-| `vulkan` | `supports_gdn_recurrent_prefill_native_head_last` | `dynamic` | `gdn_recurrent_prefill_native_head_last` | no | none |
-| `vulkan` | `supports_gdn_recurrent_qk_norm_prefill_native_head_last` | `dynamic` | `gdn_recurrent_qk_norm_prefill_native_head_last` | no | none |
-| `vulkan` | `supports_gdn_recurrent_step` | `dynamic` | `gdn_recurrent_step` | no | none |
-| `vulkan` | `supports_linear_decode_argmax` | `dynamic` | `linear_decode_argmax` | no | none |
-| `vulkan` | `supports_linear_decode_argmax_batch` | `dynamic` | `linear_decode_argmax_batch` | no | none |
-| `vulkan` | `supports_linear_decode_sample` | `dynamic` | `linear_decode_sample` | no | none |
-| `vulkan` | `supports_linear_decode_sample_batch` | `dynamic` | `linear_decode_sample_batch` | no | none |
-| `vulkan` | `supports_resident_activation` | `literal_true` | `` | no | none |
-| `vulkan` | `supports_resident_decode` | `dynamic` | `decode_resident_pool_ready` | no | none |
+| Backend | Method | Predicate Status | Support State | Paired Method | Pair Always Declines | Gates |
+|---|---|---|---|---|---|---|
+| `cuda` | `supports_causal_conv1d_prefill` | `dynamic` | `NativeWithConstraints` | `causal_conv1d_prefill` | no | none |
+| `cuda` | `supports_causal_conv1d_update` | `dynamic` | `NativeWithConstraints` | `causal_conv1d_update` | no | none |
+| `cuda` | `supports_flash_attn_paged_decode` | `literal_true` | `NativeWithConstraints` | `flash_attn_paged_decode` | no | none |
+| `cuda` | `supports_flash_attn_prefill` | `literal_true` | `NativeWithConstraints` | `flash_attn_prefill` | no | none |
+| `cuda` | `supports_gdn_chunk_prep` | `dynamic` | `NativeWithConstraints` | `gdn_chunk_prep` | no | none |
+| `cuda` | `supports_gdn_chunk_scan` | `dynamic` | `NativeWithConstraints` | `gdn_chunk_scan` | no | none |
+| `cuda` | `supports_gdn_decode_gates_recurrent_unexpanded_qk` | `dynamic` | `NativeWithConstraints` | `` | no | none |
+| `cuda` | `supports_gdn_decode_qk_norm_gates_recurrent` | `dynamic` | `NativeWithConstraints` | `gdn_decode_qk_norm_gates_recurrent` | no | none |
+| `cuda` | `supports_gdn_forward_substitution` | `dynamic` | `NativeWithConstraints` | `gdn_forward_substitution` | no | none |
+| `cuda` | `supports_gdn_full_chunk_forward` | `dynamic` | `NativeWithConstraints` | `gdn_full_chunk_forward` | no | none |
+| `cuda` | `supports_gdn_gated_rms_norm` | `dynamic` | `NativeWithConstraints` | `gdn_gated_rms_norm` | no | none |
+| `cuda` | `supports_gdn_gates` | `dynamic` | `NativeWithConstraints` | `gdn_gates` | no | none |
+| `cuda` | `supports_gdn_recurrent_step` | `dynamic` | `NativeWithConstraints` | `gdn_recurrent_step` | no | none |
+| `cuda` | `supports_resident_activation` | `literal_true` | `NativeWithConstraints` | `` | no | none |
+| `cuda` | `supports_strict_paged_decode_contiguous_batch` | `literal_false` | `Declined` | `` | no | none |
+| `rocm` | `supports_causal_conv1d_prefill` | `dynamic` | `NativeWithConstraints` | `causal_conv1d_prefill` | no | none |
+| `rocm` | `supports_causal_conv1d_update` | `dynamic` | `NativeWithConstraints` | `causal_conv1d_update` | no | none |
+| `rocm` | `supports_flash_attn_paged_decode` | `literal_true` | `NativeWithConstraints` | `flash_attn_paged_decode` | no | none |
+| `rocm` | `supports_flash_attn_prefill` | `literal_true` | `NativeWithConstraints` | `flash_attn_prefill` | no | none |
+| `rocm` | `supports_flash_attn_prefill_head_major` | `env_gated` | `NativeWithConstraints` | `flash_attn_prefill_head_major` | no | env |
+| `rocm` | `supports_gdn_chunk_prep` | `dynamic` | `NativeWithConstraints` | `gdn_chunk_prep` | no | none |
+| `rocm` | `supports_gdn_chunk_scan` | `dynamic` | `NativeWithConstraints` | `gdn_chunk_scan` | no | none |
+| `rocm` | `supports_gdn_decode_gates_recurrent_unexpanded_qk` | `dynamic` | `NativeWithConstraints` | `` | no | none |
+| `rocm` | `supports_gdn_decode_qk_norm_gates_recurrent` | `dynamic` | `NativeWithConstraints` | `gdn_decode_qk_norm_gates_recurrent` | no | none |
+| `rocm` | `supports_gdn_forward_substitution` | `dynamic` | `NativeWithConstraints` | `gdn_forward_substitution` | no | none |
+| `rocm` | `supports_gdn_full_chunk_forward` | `dynamic` | `NativeWithConstraints` | `gdn_full_chunk_forward` | no | none |
+| `rocm` | `supports_gdn_gated_rms_norm` | `dynamic` | `NativeWithConstraints` | `gdn_gated_rms_norm` | no | none |
+| `rocm` | `supports_gdn_gates` | `dynamic` | `NativeWithConstraints` | `gdn_gates` | no | none |
+| `rocm` | `supports_gdn_recurrent_step` | `dynamic` | `NativeWithConstraints` | `gdn_recurrent_step` | no | none |
+| `rocm` | `supports_linear_decode_argmax` | `literal_false` | `Declined` | `linear_decode_argmax` | yes | none |
+| `rocm` | `supports_resident_activation` | `literal_true` | `NativeWithConstraints` | `` | no | none |
+| `rocm` | `supports_strict_paged_decode_contiguous_batch` | `literal_false` | `Declined` | `` | no | none |
+| `metal` | `supports_causal_conv1d_prefill` | `dynamic` | `NativeWithConstraints` | `causal_conv1d_prefill` | no | none |
+| `metal` | `supports_causal_conv1d_update` | `dynamic` | `NativeWithConstraints` | `causal_conv1d_update` | no | none |
+| `metal` | `supports_flash_attn_paged_decode` | `literal_true` | `NativeWithConstraints` | `flash_attn_paged_decode` | no | none |
+| `metal` | `supports_flash_attn_prefill` | `env_gated` | `NativeWithConstraints` | `flash_attn_prefill` | no | none |
+| `metal` | `supports_flash_attn_prefill_head_major` | `env_gated` | `NativeWithConstraints` | `flash_attn_prefill_head_major` | no | none |
+| `metal` | `supports_gdn_chunk_prep` | `dynamic` | `NativeWithConstraints` | `gdn_chunk_prep` | no | none |
+| `metal` | `supports_gdn_forward_substitution` | `dynamic` | `NativeWithConstraints` | `gdn_forward_substitution` | no | none |
+| `metal` | `supports_gdn_full_chunk_forward` | `dynamic` | `NativeWithConstraints` | `gdn_full_chunk_forward` | no | none |
+| `metal` | `supports_gdn_full_chunk_forward_head_last` | `dynamic` | `NativeWithConstraints` | `` | no | none |
+| `metal` | `supports_gdn_gated_rms_norm` | `dynamic` | `NativeWithConstraints` | `gdn_gated_rms_norm` | no | none |
+| `metal` | `supports_gdn_gates` | `dynamic` | `NativeWithConstraints` | `gdn_gates` | no | none |
+| `metal` | `supports_gdn_recurrent_prefill_head_last` | `dynamic` | `NativeWithConstraints` | `gdn_recurrent_prefill_head_last` | no | none |
+| `metal` | `supports_gdn_recurrent_prefill_native_head_last` | `dynamic` | `NativeWithConstraints` | `gdn_recurrent_prefill_native_head_last` | no | none |
+| `metal` | `supports_gdn_recurrent_step` | `dynamic` | `NativeWithConstraints` | `gdn_recurrent_step` | no | none |
+| `metal` | `supports_linear_decode_sample` | `dynamic` | `NativeWithConstraints` | `linear_decode_sample` | no | none |
+| `metal` | `supports_linear_decode_sample_batch` | `dynamic` | `NativeWithConstraints` | `linear_decode_sample_batch` | no | none |
+| `metal` | `supports_paged_kv_head_major_read` | `literal_true` | `NativeWithConstraints` | `paged_kv_head_major_read` | no | none |
+| `metal` | `supports_paged_kv_head_major_read_append_token_major` | `literal_true` | `NativeWithConstraints` | `paged_kv_head_major_read_append_token_major` | no | none |
+| `metal` | `supports_resident_activation` | `literal_true` | `NativeWithConstraints` | `` | no | none |
+| `vulkan` | `supports_causal_conv1d_prefill` | `dynamic` | `NativeWithConstraints` | `causal_conv1d_prefill` | no | none |
+| `vulkan` | `supports_causal_conv1d_update` | `dynamic` | `NativeWithConstraints` | `causal_conv1d_update` | no | none |
+| `vulkan` | `supports_flash_attn_paged_decode` | `dynamic` | `NativeWithConstraints` | `flash_attn_paged_decode` | no | none |
+| `vulkan` | `supports_flash_attn_prefill` | `env_gated` | `NativeWithConstraints` | `flash_attn_prefill` | no | env |
+| `vulkan` | `supports_flash_attn_prefill_head_major` | `literal_false` | `Declined` | `` | no | none |
+| `vulkan` | `supports_gdn_chunk_prep` | `dynamic` | `NativeWithConstraints` | `gdn_chunk_prep` | no | none |
+| `vulkan` | `supports_gdn_chunk_scan` | `dynamic` | `NativeWithConstraints` | `gdn_chunk_scan` | no | none |
+| `vulkan` | `supports_gdn_forward_substitution` | `dynamic` | `NativeWithConstraints` | `gdn_forward_substitution` | no | none |
+| `vulkan` | `supports_gdn_full_chunk_forward` | `dynamic` | `NativeWithConstraints` | `gdn_full_chunk_forward` | no | none |
+| `vulkan` | `supports_gdn_gated_rms_norm` | `dynamic` | `NativeWithConstraints` | `gdn_gated_rms_norm` | no | none |
+| `vulkan` | `supports_gdn_gates` | `dynamic` | `NativeWithConstraints` | `gdn_gates` | no | none |
+| `vulkan` | `supports_gdn_recurrent_prefill_native_head_last` | `dynamic` | `NativeWithConstraints` | `gdn_recurrent_prefill_native_head_last` | no | none |
+| `vulkan` | `supports_gdn_recurrent_qk_norm_prefill_native_head_last` | `dynamic` | `NativeWithConstraints` | `gdn_recurrent_qk_norm_prefill_native_head_last` | no | none |
+| `vulkan` | `supports_gdn_recurrent_step` | `dynamic` | `NativeWithConstraints` | `gdn_recurrent_step` | no | none |
+| `vulkan` | `supports_linear_decode_argmax` | `dynamic` | `NativeWithConstraints` | `linear_decode_argmax` | no | none |
+| `vulkan` | `supports_linear_decode_argmax_batch` | `dynamic` | `NativeWithConstraints` | `linear_decode_argmax_batch` | no | none |
+| `vulkan` | `supports_linear_decode_sample` | `dynamic` | `NativeWithConstraints` | `linear_decode_sample` | no | none |
+| `vulkan` | `supports_linear_decode_sample_batch` | `dynamic` | `NativeWithConstraints` | `linear_decode_sample_batch` | no | none |
+| `vulkan` | `supports_resident_activation` | `literal_true` | `NativeWithConstraints` | `` | no | none |
+| `vulkan` | `supports_resident_decode` | `dynamic` | `NativeWithConstraints` | `decode_resident_pool_ready` | no | none |
 
 ## Generic DeviceOp Fallback
 

@@ -171,6 +171,18 @@ def support_status(body: str) -> str:
     return "dynamic"
 
 
+def typed_support_state(status: str, pair_declines: bool) -> str:
+    if pair_declines:
+        return "Declined"
+    if status == "literal_false":
+        return "Declined"
+    if status == "env_gated":
+        return "NativeWithConstraints"
+    if status in {"literal_true", "dynamic"}:
+        return "NativeWithConstraints"
+    return "Unsupported"
+
+
 def always_declines(body: str) -> bool:
     stripped = body_without_comments(body)
     compact = re.sub(r"\s+", "", stripped)
@@ -222,6 +234,7 @@ def backend_report(trait_methods: set[str]) -> tuple[dict[str, Any], list[dict[s
             entry = {
                 "line": fun.line,
                 "status": status,
+                "support_state": typed_support_state(status, pair_declines),
                 "paired_method": pair if paired_fun else None,
                 "paired_method_line": paired_fun.line if paired_fun else None,
                 "paired_method_always_declines": pair_declines,
@@ -377,14 +390,17 @@ def markdown(data: dict[str, Any]) -> str:
     lines.append("")
     lines.append("## Support Predicates")
     lines.append("")
-    lines.append("| Backend | Method | Status | Paired Method | Pair Always Declines | Gates |")
-    lines.append("|---|---|---|---|---|---|")
+    lines.append("| Backend | Method | Predicate Status | Support State | Paired Method | Pair Always Declines | Gates |")
+    lines.append("|---|---|---|---|---|---|---|")
     for backend, info in data["backends"].items():
         for method, entry in info["support_methods"].items():
             gates = ",".join(key for key, enabled in entry["gate_hints"].items() if enabled) or "none"
             pair = entry["paired_method"] or ""
             declines = "yes" if entry["paired_method_always_declines"] else "no"
-            lines.append(f"| `{backend}` | `{method}` | `{entry['status']}` | `{pair}` | {declines} | {gates} |")
+            lines.append(
+                f"| `{backend}` | `{method}` | `{entry['status']}` | "
+                f"`{entry['support_state']}` | `{pair}` | {declines} | {gates} |"
+            )
     lines.append("")
     lines.append("## Generic DeviceOp Fallback")
     lines.append("")

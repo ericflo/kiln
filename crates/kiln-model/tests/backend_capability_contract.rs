@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde_json::Value;
+
 #[derive(Debug)]
 struct FunctionDef {
     body: String,
@@ -10,6 +12,14 @@ struct FunctionDef {
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn workspace_root() -> PathBuf {
+    manifest_dir()
+        .parent()
+        .and_then(Path::parent)
+        .expect("kiln-model should live under workspace crates/")
+        .to_path_buf()
 }
 
 fn find_matching_brace(source: &str, open_idx: usize) -> Option<usize> {
@@ -206,6 +216,49 @@ fn literal_true_support_predicates_do_not_pair_with_always_declining_methods() {
     assert!(
         failures.is_empty(),
         "backend support predicate mismatches:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn generated_capability_report_uses_typed_support_states() {
+    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(&report_path).expect("capability report json should be readable"),
+    )
+    .expect("capability report json should parse");
+    let valid = [
+        "Native",
+        "NativeWithConstraints",
+        "HostFallbackAllowed",
+        "Declined",
+        "Unsupported",
+        "DisabledByEnv",
+        "RequiresFeature",
+    ];
+    let mut failures = Vec::new();
+
+    let backends = report["backends"]
+        .as_object()
+        .expect("report backends should be an object");
+    for (backend, info) in backends {
+        let support_methods = info["support_methods"]
+            .as_object()
+            .expect("support_methods should be an object");
+        for (method, entry) in support_methods {
+            let Some(state) = entry["support_state"].as_str() else {
+                failures.push(format!("{backend}.{method} missing support_state"));
+                continue;
+            };
+            if !valid.contains(&state) {
+                failures.push(format!("{backend}.{method} has invalid support_state={state}"));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "invalid generated support states:\n{}",
         failures.join("\n")
     );
 }
