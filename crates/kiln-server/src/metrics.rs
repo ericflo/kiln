@@ -511,6 +511,26 @@ impl Metrics {
             ),
         );
 
+        out.push_str("# HELP kiln_decode_batcher_runner_call_budget_per_token Phase 8 sentinel budget for maximum ModelRunner decode calls per live greedy decode token row.\n");
+        out.push_str("# TYPE kiln_decode_batcher_runner_call_budget_per_token gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_decode_batcher_runner_call_budget_per_token {}",
+                gauges.decode_batcher.runner_call_budget_per_token()
+            ),
+        );
+
+        out.push_str("# HELP kiln_decode_batcher_runner_call_budget_exceeded Whether the observed max runner calls per token exceeded the Phase 8 sentinel budget.\n");
+        out.push_str("# TYPE kiln_decode_batcher_runner_call_budget_exceeded gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_decode_batcher_runner_call_budget_exceeded {}",
+                usize::from(gauges.decode_batcher.runner_call_budget_exceeded())
+            ),
+        );
+
         out.push_str("# HELP kiln_decode_batcher_max_observed_batch Largest live greedy decode batch observed since process start.\n");
         out.push_str("# TYPE kiln_decode_batcher_max_observed_batch gauge\n");
         push_line(
@@ -1265,6 +1285,8 @@ mod tests {
         assert!(output.contains("kiln_decode_batcher_runner_calls_total 2"));
         assert!(output.contains("kiln_decode_batcher_runner_calls_per_token 0.500000"));
         assert!(output.contains("kiln_decode_batcher_max_runner_calls_per_token 1"));
+        assert!(output.contains("kiln_decode_batcher_runner_call_budget_per_token 2"));
+        assert!(output.contains("kiln_decode_batcher_runner_call_budget_exceeded 0"));
         assert!(output.contains("kiln_batching_engine_prefill_admission_cycles_total 6"));
         assert!(output.contains("kiln_batching_engine_decode_tokens_total 128"));
         assert!(output.contains("kiln_batching_engine_prefill_tokens_total 8192"));

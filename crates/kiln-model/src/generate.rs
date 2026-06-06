@@ -833,12 +833,25 @@ pub struct DecodeBatcherStats {
 }
 
 impl DecodeBatcherStats {
+    /// Phase 8 sentinel budget: a live greedy decode row should normally cost
+    /// one runner call, with one extra call allowed for the explicit rowwise
+    /// retry path after a failed batched attempt.
+    pub const MAX_RUNNER_CALLS_PER_TOKEN_BUDGET: usize = 2;
+
     pub fn runner_calls_per_token(&self) -> Option<f64> {
         if self.executed_rows == 0 {
             None
         } else {
             Some(self.runner_calls as f64 / self.executed_rows as f64)
         }
+    }
+
+    pub const fn runner_call_budget_per_token(&self) -> usize {
+        Self::MAX_RUNNER_CALLS_PER_TOKEN_BUDGET
+    }
+
+    pub const fn runner_call_budget_exceeded(&self) -> bool {
+        self.max_runner_calls_per_token > Self::MAX_RUNNER_CALLS_PER_TOKEN_BUDGET
     }
 }
 
@@ -8428,7 +8441,15 @@ mod tests {
 
         assert_eq!(stats.runner_calls_per_token(), Some(1.25));
         assert_eq!(stats.max_runner_calls_per_token, 2);
+        assert_eq!(stats.runner_call_budget_per_token(), 2);
+        assert!(!stats.runner_call_budget_exceeded());
         assert_eq!(DecodeBatcherStats::default().runner_calls_per_token(), None);
+
+        let exceeded = DecodeBatcherStats {
+            max_runner_calls_per_token: 3,
+            ..DecodeBatcherStats::default()
+        };
+        assert!(exceeded.runner_call_budget_exceeded());
     }
 
     #[test]

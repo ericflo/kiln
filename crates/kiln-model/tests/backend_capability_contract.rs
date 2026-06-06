@@ -416,7 +416,7 @@ fn generated_capability_report_lists_request_descriptors() {
         .iter()
         .find(|gate| gate["gate"] == "decode_submit_or_replay_count")
         .expect("decode submit/replay gate should be present");
-    assert_eq!(decode_submit_gate["status"], "partial");
+    assert_eq!(decode_submit_gate["status"], "covered");
     let decode_submit_evidence = decode_submit_gate["evidence_present"]
         .as_array()
         .expect("decode submit/replay evidence should be an array")
@@ -426,6 +426,8 @@ fn generated_capability_report_lists_request_descriptors() {
     for path in [
         "crates/kiln-model/src/generate.rs",
         "crates/kiln-server/src/metrics.rs",
+        "crates/kiln-server/src/api/health.rs",
+        "crates/kiln-server/src/api/debug_model_state.rs",
         "crates/kiln-graph/src/replay_plan.rs",
     ] {
         assert!(

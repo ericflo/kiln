@@ -613,11 +613,13 @@ def conformance_gate_report() -> list[dict[str, Any]]:
         {
             "gate": "decode_submit_or_replay_count",
             "phase8_requirement": "max submit count or replay count per decode token",
-            "status": "partial",
+            "status": "covered",
             "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model decode_batcher_stats_report_runner_calls_per_token && /home/ericflo/.cargo/bin/cargo test -p kiln-server test_metrics_render && /home/ericflo/.cargo/bin/cargo test -p kiln-graph replay",
             "evidence": [
                 "crates/kiln-model/src/generate.rs",
                 "crates/kiln-server/src/metrics.rs",
+                "crates/kiln-server/src/api/health.rs",
+                "crates/kiln-server/src/api/debug_model_state.rs",
                 "crates/kiln-graph/src/captured_graph.rs",
                 "crates/kiln-graph/src/replay_plan.rs",
             ],
