@@ -25,8 +25,7 @@ use super::vulkan_residency::{
 };
 use super::vulkan_tensor_bridge::{
     kt_tensor_from_f32_bytes, kt_tensor_to_f32_bytes_with_shape,
-    kt_tensor_to_packed_bf16_bytes_with_shape, upload_gdn_chunkwise_inputs_from_cpu_bytes_vk,
-    vk_f32_tensors_to_cpu_tensors_batched_vk,
+    kt_tensor_to_packed_bf16_bytes_with_shape,
 };
 use super::{
     vulkan_attention, vulkan_conv1d, vulkan_dense, vulkan_device, vulkan_gdn, vulkan_linear,
@@ -1200,138 +1199,7 @@ impl BackendRuntime for VulkanBackend {
         state_kt: &mut kiln_tensor::Tensor,
         chunk_size: usize,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        // Proper Vulkan GDN prefill: run the chunkwise scan on the GPU in
-        // parallel (`vk_gdn_chunkwise_forward_no_grad`) instead of the CPU
-        // chunkwise (raw kt matmuls on CPU-host tensors). F32 only on Vulkan
-        // (activations are F32). kt-native: extract f32 straight from kt
-        // storage, no candle bridge. (#1082)
-        if !self.has_vulkan() || !self.gdn_enabled {
-            return Ok(None);
-        }
-        if q.dtype() != kiln_tensor::DType::F32 || state_kt.dtype() != kiln_tensor::DType::F32 {
-            return Ok(None);
-        }
-        if std::env::var("KILN_DISABLE_VULKAN_GDN_CHUNKWISE_FORWARD").is_ok() {
-            return Ok(None);
-        }
-        let Some(vk_device) = self.vulkan_device.as_ref() else {
-            return Ok(None);
-        };
-
-        let state_shape = state_kt.shape().to_vec();
-        let (q_vk, k_vk, v_vk, beta_vk, g_vk, mut state_vk) =
-            if let Some([q_vk, k_vk, v_vk, beta_vk, g_vk, state_vk]) =
-                upload_gdn_chunkwise_inputs_from_cpu_bytes_vk(
-                    vk_device, q, k, v, beta, g, state_kt,
-                )?
-            {
-                (q_vk, k_vk, v_vk, beta_vk, g_vk, state_vk)
-            } else {
-                let load =
-                    |t: &kiln_tensor::Tensor| -> Result<kiln_vulkan_kernel::vk_tensor::VkTensor> {
-                        let shape = t.shape().to_vec();
-                        let data = t
-                            .flatten_all()
-                            .map_err(|e| anyhow::anyhow!("gdn_chunkwise_forward: flatten: {e}"))?
-                            .to_vec1::<f32>()
-                            .map_err(|e| {
-                                anyhow::anyhow!("gdn_chunkwise_forward: to_vec1 f32: {e}")
-                            })?;
-                        kiln_vulkan_kernel::vk_tensor::VkTensor::from_f32_slice(
-                            &data,
-                            shape,
-                            vk_device.clone(),
-                        )
-                    };
-                (
-                    load(q)?,
-                    load(k)?,
-                    load(v)?,
-                    load(beta)?,
-                    load(g)?,
-                    load(state_kt)?,
-                )
-            };
-
-        let out_vk = if std::env::var("KILN_DISABLE_VULKAN_GDN_CHUNKWISE_SINGLE_SUBMIT").is_ok() {
-            if kiln_core::env_flag::env_flag("KILN_VULKAN_GDN_CHUNKWISE_FALLBACK", false) {
-                tracing::warn!("single-submit Vulkan GDN chunkwise prefill disabled; falling back");
-                kiln_vulkan_kernel::vk_ops::gdn_chunkwise::vk_gdn_chunkwise_forward_no_grad(
-                    &q_vk,
-                    &k_vk,
-                    &v_vk,
-                    &beta_vk,
-                    &g_vk,
-                    &mut state_vk,
-                    chunk_size,
-                )
-                .context("vk_gdn_chunkwise_forward_no_grad fallback")?
-            } else {
-                anyhow::bail!(
-                    "single-submit Vulkan GDN chunkwise prefill disabled; fallback disabled"
-                );
-            }
-        } else {
-            match kiln_vulkan_kernel::vk_ops::gdn_chunkwise::vk_gdn_chunkwise_forward_no_grad_single_submit(
-                    &q_vk,
-                    &k_vk,
-                    &v_vk,
-                    &beta_vk,
-                    &g_vk,
-                    &mut state_vk,
-                    chunk_size,
-                ) {
-                    Ok(out) => out,
-                    Err(err) => {
-                        if kiln_core::env_flag::env_flag(
-                            "KILN_VULKAN_GDN_CHUNKWISE_FALLBACK",
-                            false,
-                        ) {
-                            tracing::warn!(
-                                error = %err,
-                                "single-submit Vulkan GDN chunkwise prefill failed; falling back"
-                            );
-                            kiln_vulkan_kernel::vk_ops::gdn_chunkwise::vk_gdn_chunkwise_forward_no_grad(
-                                &q_vk,
-                                &k_vk,
-                                &v_vk,
-                                &beta_vk,
-                                &g_vk,
-                                &mut state_vk,
-                                chunk_size,
-                            )
-                            .context("vk_gdn_chunkwise_forward_no_grad fallback")?
-                        } else {
-                            return Err(err).context(
-                                "single-submit Vulkan GDN chunkwise prefill failed; fallback disabled",
-                            );
-                        }
-                    }
-                }
-        };
-
-        // Read back output + the updated state together, then rebuild CPU-host
-        // kt tensors without decoding through an intermediate Vec<f32>.
-        let [out_kt, new_state]: [kiln_tensor::Tensor; 2] =
-            vk_f32_tensors_to_cpu_tensors_batched_vk(&[
-                (&out_vk, "gdn_chunkwise_forward output"),
-                (&state_vk, "gdn_chunkwise_forward state"),
-            ])?
-            .try_into()
-            .map_err(|readbacks: Vec<_>| {
-                anyhow::anyhow!(
-                    "gdn_chunkwise_forward: read back {} tensors, expected 2",
-                    readbacks.len()
-                )
-            })?;
-        anyhow::ensure!(
-            new_state.shape() == state_shape.as_slice(),
-            "gdn_chunkwise_forward: state shape mismatch after readback: got {:?}, expected {:?}",
-            new_state.shape(),
-            state_shape
-        );
-        *state_kt = new_state;
-        Ok(Some(out_kt))
+        vulkan_gdn::gdn_chunkwise_forward(self, q, k, v, beta, g, state_kt, chunk_size)
     }
 
     fn gdn_chunk_prep(
