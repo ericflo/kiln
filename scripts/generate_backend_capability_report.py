@@ -43,6 +43,9 @@ BACKEND_EXTRA_SOURCES = {
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "metal_runtime.rs",
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "metal_training.rs",
     ],
+    "vulkan": [
+        ROOT / "crates" / "kiln-model" / "src" / "backend" / "vulkan_training.rs",
+    ],
 }
 
 CAPABILITY_RS = ROOT / "crates" / "kiln-model" / "src" / "backend" / "capability.rs"
@@ -620,6 +623,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
                 "crates/kiln-model/src/backend/rocm.rs",
                 "crates/kiln-model/src/backend/metal.rs",
                 "crates/kiln-model/src/backend/vulkan.rs",
+                "crates/kiln-model/src/backend/vulkan_training.rs",
                 "crates/kiln-model/src/backend/mod.rs",
                 "crates/kiln-train/src/trainer.rs",
                 "crates/kiln-train/tests/vk_cuda_opd_parity.rs",

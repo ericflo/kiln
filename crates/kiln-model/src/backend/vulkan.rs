@@ -15,8 +15,10 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use super::{BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy};
+use super::{vulkan_training, BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy};
 use crate::forward::{GpuAttentionWeights, GpuWeights};
+
+pub use super::vulkan_training::{dispatch_adamw_step_buffers, dispatch_sgd_step_buffers};
 
 struct F32TensorUpload<'a> {
     bytes: &'a [u8],
@@ -361,7 +363,7 @@ pub struct VulkanBackend {
     /// handle to the device — the candle CustomOp trait requires the op
     /// state to be `'static + Send + Sync`, which a borrow off `&self`
     /// can never satisfy.
-    vulkan_device: Option<Arc<kiln_vulkan_kernel::VulkanDevice>>,
+    pub(super) vulkan_device: Option<Arc<kiln_vulkan_kernel::VulkanDevice>>,
 }
 
 thread_local! {
@@ -399,7 +401,7 @@ fn resident_registry()
 /// mutex. Poison recovery returns the inner data so we never leave
 /// the registry inaccessible just because some panicking code touched
 /// it.
-fn with_resident_registry<F, R>(f: F) -> R
+pub(super) fn with_resident_registry<F, R>(f: F) -> R
 where
     F: FnOnce(&mut HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>) -> R,
 {
@@ -407,74 +409,6 @@ where
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     f(&mut guard)
-}
-
-/// (#1082) Shared, storage-decoupled AdamW optimizer seam over raw Vulkan
-/// device buffers.
-///
-/// This is the single dispatch site for the on-device F32 AdamW step. The
-/// kt-`Tensor`-keyed `BackendRuntime::dispatch_adamw_step` (the CUDA/Metal-
-/// style resident-registry path) and any `VkTensor`-native caller holding
-/// `VulkanBuffer` handles for the param/grad and the persistent first/second-
-/// moment state both route through here. Because every caller funnels into the
-/// *same* SPIR-V `dispatch_adamw_step_f32` kernel with identical push
-/// constants, the optimizer update is numerically identical regardless of
-/// which seam the caller entered through.
-///
-/// `step` is 1-indexed (bias correction is `1 - beta^step`); `param`, `m`,
-/// and `v` are updated in place. Storage-decoupled: it needs only a
-/// `VulkanDevice` plus the four device buffers — no `kiln_tensor::Tensor`
-/// on `Device::Vulkan` is required, so it ships ahead of the storage
-/// keystone (PR2).
-#[allow(clippy::too_many_arguments)]
-pub fn dispatch_adamw_step_buffers(
-    vk_device: &kiln_vulkan_kernel::VulkanDevice,
-    param_buffer: &kiln_vulkan_kernel::VulkanBuffer,
-    grad_buffer: &kiln_vulkan_kernel::VulkanBuffer,
-    first_moment_buffer: &kiln_vulkan_kernel::VulkanBuffer,
-    second_moment_buffer: &kiln_vulkan_kernel::VulkanBuffer,
-    n_elements: usize,
-    lr: f32,
-    beta1: f32,
-    beta2: f32,
-    eps: f32,
-    weight_decay: f32,
-    step: u32,
-) -> Result<()> {
-    kiln_vulkan_kernel::kernels::dispatch_adamw_step_f32(
-        vk_device,
-        param_buffer,
-        grad_buffer,
-        first_moment_buffer,
-        second_moment_buffer,
-        n_elements,
-        lr,
-        beta1,
-        beta2,
-        eps,
-        weight_decay,
-        step,
-    )
-}
-
-/// (#1082) Shared, storage-decoupled SGD optimizer seam over raw Vulkan
-/// device buffers. Counterpart to [`dispatch_adamw_step_buffers`] for the
-/// `Optimizer::Sgd` path; updates `param` in place via the shared SPIR-V
-/// `dispatch_sgd_step_f32` kernel.
-pub fn dispatch_sgd_step_buffers(
-    vk_device: &kiln_vulkan_kernel::VulkanDevice,
-    param_buffer: &kiln_vulkan_kernel::VulkanBuffer,
-    grad_buffer: &kiln_vulkan_kernel::VulkanBuffer,
-    n_elements: usize,
-    lr: f32,
-) -> Result<()> {
-    kiln_vulkan_kernel::kernels::dispatch_sgd_step_f32(
-        vk_device,
-        param_buffer,
-        grad_buffer,
-        n_elements,
-        lr,
-    )
 }
 
 fn recurrent_state_resident_scope_active() -> bool {
@@ -780,6 +714,10 @@ fn kt_tensor_to_packed_bf16_bytes_with_shape(
 }
 
 impl VulkanBackend {
+    pub fn training_capabilities_static() -> TrainingCapabilities {
+        vulkan_training::training_capabilities_static()
+    }
+
     pub fn new(device: kiln_tensor::Device) -> Self {
         let gdn_enabled = std::env::var("KILN_DISABLE_GDN_KERNEL").is_err();
         let gdn_prefill_in_proj_enabled =
@@ -1880,20 +1818,11 @@ impl BackendRuntime for VulkanBackend {
     }
 
     fn training_capabilities(&self) -> TrainingCapabilities {
-        TrainingCapabilities {
-            projection_training: "kt-tape-recorded matmul (legacy autograd wrapper removed #1082)",
-            flce_loss: "Vulkan offset matmul provider when enabled; FLCE remains chunked",
-            rmsnorm_training: "Vulkan RMSNorm autograd path auto-gated by row count",
-            resident_activation: "Vulkan buffer registry",
-            lora_delta_training: "kt-tape-recorded LoRA delta (legacy autograd wrapper removed #1082)",
-            sgd_step: "Vulkan in-place registry update when operands are resident",
-            adamw_step: "Vulkan in-place registry update when operands are resident",
-            native_training: "shared trainer.rs kt-tape path (legacy vk_native_* fork deleted in PR7 #1082)",
-        }
+        Self::training_capabilities_static()
     }
 
     fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
-        TrainingPrecisionPolicy::vulkan()
+        vulkan_training::training_precision_policy()
     }
 
     fn decode_resident_pool_ready(
@@ -2240,63 +2169,7 @@ impl BackendRuntime for VulkanBackend {
     }
 
     fn dispatch_sgd_step(&self, param: &kiln_tensor::Tensor, grad: &kiln_tensor::Tensor, lr: f32) -> Result<bool> {
-        let Some(vk_device) = self.vulkan_device.as_ref() else {
-            return Ok(false);
-        };
-        // (#1082) bridge kt -> candle and re-borrow under the same names so the
-        // (#1082) kt-native: registry keyed on the kt `TensorId`; dispatch
-        // reads dtype/element-count straight off the kt args.
-        // Both operands must be resident — no support for mixed
-        // resident/CPU yet (would require a per-call upload that
-        // defeats the purpose of the on-device update).
-        let param_id = param.id();
-        let grad_id = grad.id();
-        let lookup = with_resident_registry(|cache| {
-            cache
-                .get(&param_id)
-                .and_then(|p| cache.get(&grad_id).map(|g| (Arc::clone(p), Arc::clone(g))))
-        });
-        let Some((param_buf, grad_buf)) = lookup else {
-            return Ok(false);
-        };
-        // Dispatch the dtype-appropriate kernel. Param and grad must
-        // share dtype (mixed-precision SGD is a different design that
-        // would need an F32 master copy). LoRA Vars are BF16 in
-        // production; activations and intermediate buffers are F32.
-        if param.dtype() != grad.dtype() {
-            return Ok(false);
-        }
-        let n_elements: usize = param.element_count();
-        if n_elements != grad.element_count() {
-            anyhow::bail!(
-                "dispatch_sgd_step: param ({:?}) and grad ({:?}) have different element counts",
-                param.dims(),
-                grad.dims(),
-            );
-        }
-        static FIRST_SGD_LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        FIRST_SGD_LOGGED.get_or_init(|| {
-            tracing::info!(
-                n_elements,
-                lr,
-                dtype = ?param.dtype(),
-                "VulkanBackend::dispatch_sgd_step first call"
-            );
-        });
-        match param.dtype() {
-            kiln_tensor::DType::F32 => {
-                // (#1082) Shared buffer-level SGD seam (see dispatch_adamw_step).
-                dispatch_sgd_step_buffers(vk_device, &param_buf, &grad_buf, n_elements, lr)?;
-                Ok(true)
-            }
-            kiln_tensor::DType::BF16 => {
-                kiln_vulkan_kernel::kernels::dispatch_sgd_step_bf16(
-                    vk_device, &param_buf, &grad_buf, n_elements, lr,
-                )?;
-                Ok(true)
-            }
-            _ => Ok(false),
-        }
+        vulkan_training::dispatch_sgd_step(self, param, grad, lr)
     }
 
     fn dispatch_adamw_step(
@@ -2312,107 +2185,19 @@ impl BackendRuntime for VulkanBackend {
         weight_decay: f32,
         step: u32,
     ) -> Result<bool> {
-        let Some(vk_device) = self.vulkan_device.as_ref() else {
-            return Ok(false);
-        };
-        // (#1082) kt-native: registry keyed on the kt `TensorId`; dispatch
-        // reads dtype/element-count straight off the kt args.
-        if step < 1 {
-            anyhow::bail!("dispatch_adamw_step: step must be 1-indexed (>=1), got {step}");
-        }
-        if param.dtype() != grad.dtype()
-            || param.dtype() != first_moment.dtype()
-            || param.dtype() != second_moment.dtype()
-        {
-            anyhow::bail!(
-                "dispatch_adamw_step: dtype mismatch (param={:?}, grad={:?}, m={:?}, v={:?})",
-                param.dtype(),
-                grad.dtype(),
-                first_moment.dtype(),
-                second_moment.dtype(),
-            );
-        }
-        let n_elements: usize = param.element_count();
-        if n_elements != grad.element_count()
-            || n_elements != first_moment.element_count()
-            || n_elements != second_moment.element_count()
-        {
-            anyhow::bail!(
-                "dispatch_adamw_step: element count mismatch (param={}, grad={}, m={}, v={})",
-                n_elements,
-                grad.element_count(),
-                first_moment.element_count(),
-                second_moment.element_count(),
-            );
-        }
-        let p_id = param.id();
-        let g_id = grad.id();
-        let m_id = first_moment.id();
-        let v_id = second_moment.id();
-        let bufs = with_resident_registry(|cache| {
-            let p = cache.get(&p_id).map(Arc::clone)?;
-            let g = cache.get(&g_id).map(Arc::clone)?;
-            let m = cache.get(&m_id).map(Arc::clone)?;
-            let v = cache.get(&v_id).map(Arc::clone)?;
-            Some((p, g, m, v))
-        });
-        let Some((param_buf, grad_buf, m_buf, v_buf)) = bufs else {
-            return Ok(false);
-        };
-        static FIRST_ADAMW_LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        FIRST_ADAMW_LOGGED.get_or_init(|| {
-            tracing::info!(
-                n_elements,
-                lr,
-                beta1,
-                beta2,
-                eps,
-                weight_decay,
-                step,
-                dtype = ?param.dtype(),
-                "VulkanBackend::dispatch_adamw_step first call"
-            );
-        });
-        match param.dtype() {
-            kiln_tensor::DType::F32 => {
-                // (#1082) Route through the shared buffer-level seam so the
-                // kt-`Tensor` resident path and the `VkTensor`-native training
-                // path dispatch the identical AdamW kernel.
-                dispatch_adamw_step_buffers(
-                    vk_device,
-                    &param_buf,
-                    &grad_buf,
-                    &m_buf,
-                    &v_buf,
-                    n_elements,
-                    lr,
-                    beta1,
-                    beta2,
-                    eps,
-                    weight_decay,
-                    step,
-                )?;
-                Ok(true)
-            }
-            kiln_tensor::DType::BF16 => {
-                kiln_vulkan_kernel::kernels::dispatch_adamw_step_bf16(
-                    vk_device,
-                    &param_buf,
-                    &grad_buf,
-                    &m_buf,
-                    &v_buf,
-                    n_elements,
-                    lr,
-                    beta1,
-                    beta2,
-                    eps,
-                    weight_decay,
-                    step,
-                )?;
-                Ok(true)
-            }
-            _ => Ok(false),
-        }
+        vulkan_training::dispatch_adamw_step(
+            self,
+            param,
+            grad,
+            first_moment,
+            second_moment,
+            lr,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            step,
+        )
     }
 
     fn lora_delta_resident(

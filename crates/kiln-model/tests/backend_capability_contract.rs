@@ -359,6 +359,17 @@ fn generated_capability_report_lists_backend_source_modules() {
         metal_sources.contains(&"crates/kiln-model/src/backend/metal_runtime.rs"),
         "Metal backend source modules should include the extracted runtime facade module"
     );
+
+    let vulkan_sources = backends["vulkan"]["source_modules"]
+        .as_array()
+        .expect("vulkan source_modules should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        vulkan_sources.contains(&"crates/kiln-model/src/backend/vulkan_training.rs"),
+        "Vulkan backend source modules should include the extracted training module"
+    );
 }
 
 #[test]
@@ -667,6 +678,7 @@ fn generated_capability_report_lists_optimizer_dispatch_policy() {
         "crates/kiln-model/src/backend/rocm.rs",
         "crates/kiln-model/src/backend/metal.rs",
         "crates/kiln-model/src/backend/vulkan.rs",
+        "crates/kiln-model/src/backend/vulkan_training.rs",
         "crates/kiln-train/src/trainer.rs",
     ] {
         assert!(
