@@ -1596,6 +1596,18 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "trainer should import the request-shaped backend capability query surface"
     );
     assert!(
+        trainer_source.contains("BackendIdentity"),
+        "trainer should import the focused backend identity facet"
+    );
+    assert!(
+        generate_source.contains("BackendIdentity"),
+        "generate should import the focused backend identity facet"
+    );
+    assert!(
+        forward_source.contains("BackendIdentity"),
+        "forward should import the focused backend identity facet"
+    );
+    assert!(
         generate_source.contains("TrainingLossBackend"),
         "ModelRunner should import the focused training loss/capability facet"
     );
@@ -1695,6 +1707,24 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         !trainer_policy_section.contains("match device"),
         "trainer optimizer fallback policy should not branch directly on device kind"
     );
+
+    let orchestration_identity_sources =
+        format!("{trainer_source}\n{generate_source}\n{forward_source}");
+    for required in [
+        "BackendIdentity::runtime_name",
+        "BackendIdentity::runtime_device",
+    ] {
+        assert!(
+            orchestration_identity_sources.contains(required),
+            "orchestration identity reads should consume focused identity facet method {required}"
+        );
+    }
+    for forbidden in ["backend.name()", "backend.device()", "backend.as_any()"] {
+        assert!(
+            !orchestration_identity_sources.contains(forbidden),
+            "orchestration identity reads should not call broad BackendRuntime method {forbidden}"
+        );
+    }
 
     let runner_new_section = source_between(
         &generate_source,

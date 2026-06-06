@@ -19,8 +19,8 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 
 use crate::backend::{
-    self, BackendRuntime, FallbackPolicy, LinearBackend, ReplayBackend, SamplingBackend,
-    TrainingLossBackend,
+    self, BackendIdentity, BackendRuntime, FallbackPolicy, LinearBackend, ReplayBackend,
+    SamplingBackend, TrainingLossBackend,
     capability::{BackendCapabilityQueries, DecodeBatcherPolicy},
 };
 use crate::cancel::CancelHandle;
@@ -716,7 +716,7 @@ fn env_flag_enabled(name: &str, default: bool) -> bool {
 }
 
 fn decode_batcher_rowwise_retry_enabled(backend: &dyn BackendRuntime) -> bool {
-    if backend.name() == "vulkan"
+    if BackendIdentity::runtime_name(backend) == "vulkan"
         && env_flag_enabled("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY", false)
     {
         return true;
@@ -729,7 +729,7 @@ fn decode_batch_generic_fallback_enabled(backend: &dyn BackendRuntime) -> bool {
 }
 
 fn decode_hot_path_fallback_policy(backend: &dyn BackendRuntime) -> FallbackPolicy {
-    if decode_hot_path_debug_fallback_enabled(backend.name()) {
+    if decode_hot_path_debug_fallback_enabled(BackendIdentity::runtime_name(backend)) {
         return FallbackPolicy::WarnAndCount;
     }
     BackendCapabilityQueries::backend_capabilities(backend)
@@ -755,7 +755,7 @@ fn decode_hot_path_fallback_disabled_context(
         "{operation}; fallback policy {:?} for {} decode hot path \
          (set KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 to opt in)",
         decode_hot_path_fallback_policy(backend),
-        backend.name()
+        BackendIdentity::runtime_name(backend)
     )
 }
 
@@ -1566,7 +1566,7 @@ impl ModelRunner {
         let metal_graph = MetalGraphRunner::new(&kt_device, true);
         let training_caps = TrainingLossBackend::runtime_training_capabilities(backend.as_ref());
         tracing::info!(
-            backend = backend.name(),
+            backend = BackendIdentity::runtime_name(backend.as_ref()),
             projection_training = training_caps.projection_training,
             flce_loss = training_caps.flce_loss,
             rmsnorm_training = training_caps.rmsnorm_training,
@@ -1599,7 +1599,11 @@ impl ModelRunner {
     }
 
     pub fn backend_name(&self) -> &'static str {
-        self.backend.name()
+        BackendIdentity::runtime_name(self.backend.as_ref())
+    }
+
+    fn backend_device(&self) -> kiln_tensor::Device {
+        BackendIdentity::runtime_device(self.backend.as_ref())
     }
 
     /// Eagerly allocate the backend-resident decode scratch ring when the
@@ -1727,7 +1731,7 @@ impl ModelRunner {
             .decode_buffer_config
             .get_or_init(|| {
                 DecodeBufferConfig::graph_bucket(
-                    decode_buffer_max_batch(self.backend.name()),
+                    decode_buffer_max_batch(self.backend_name()),
                     self.config.max_position_embeddings,
                     1,
                     16,
@@ -1840,7 +1844,7 @@ impl ModelRunner {
             &self.config,
             1,
             &device,
-            Some(self.backend.name()),
+            Some(self.backend_name()),
         )
     }
 
@@ -2622,7 +2626,7 @@ impl ModelRunner {
         );
 
         let use_greedy_prefill_token = params.is_effectively_greedy()
-            && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+            && matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
             && !streaming_prefill_enabled_for(
                 &self.weights.embed_tokens.device(),
                 prefill_tokens.len(),
@@ -3125,7 +3129,7 @@ impl ModelRunner {
         let positions_uniform = sequence_lengths.iter().all(|&n| n == common_seq_len);
         let cache_is_fp8 = lock_paged_cache(paged_cache)?.is_fp8();
         let has_linear_layers = self.has_linear_attention_layers();
-        let cuda_gdn_row_loop_candidate = self.backend.name() == "cuda"
+        let cuda_gdn_row_loop_candidate = self.backend_name() == "cuda"
             && has_linear_layers
             && cuda_gdn_batched_decode_row_loop_enabled();
         // `model_forward_paged_decode_contiguous_batch_hidden` already handles
@@ -3264,7 +3268,7 @@ impl ModelRunner {
                     .as_ref()
                     .expect("vk_row0_sampling captured for row_count == 1");
                 let sample_result = if !cache_is_fp8
-                    && self.backend.name() == "vulkan"
+                    && self.backend_name() == "vulkan"
                     && self.active_lora.is_none()
                 {
                     let block_table_refs = [&block_tables[0]];
@@ -3336,7 +3340,7 @@ impl ModelRunner {
             && row_count > 1
             && !all_greedy
             && !cache_is_fp8
-            && self.backend.name() == "vulkan"
+            && self.backend_name() == "vulkan"
             && ReplayBackend::runtime_supports_resident_decode(self.backend.as_ref())
             && self.active_lora.is_none()
         {
@@ -3439,7 +3443,7 @@ impl ModelRunner {
         if sampled.is_none()
             && !all_greedy
             && !cache_is_fp8
-            && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+            && matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
             && self.active_lora.is_none()
         {
             let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
@@ -3509,7 +3513,7 @@ impl ModelRunner {
         // outside the captured graph.
         if sampled.is_none()
             && row_count == 1
-            && matches!(self.backend.device(), kiln_tensor::Device::Rocm(_))
+            && matches!(self.backend_device(), kiln_tensor::Device::Rocm(_))
             && self
                 .rocm_graph
                 .lock()
@@ -3992,7 +3996,7 @@ impl ModelRunner {
             let pc_guard = lock_paged_cache(paged_cache)?;
             let mut token = None;
             #[cfg(feature = "metal")]
-            if matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+            if matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
                 && self.active_lora.is_none()
             {
                 let graph_tokens = {
@@ -4075,7 +4079,7 @@ impl ModelRunner {
         // row-loop ONLY the genuinely-fragmented rows and batch the contiguous
         // majority through the fast path. Crash-safe (no non-adjacent pages ever
         // reach the kernel) and a strict superset of #1445's correctness.
-        if self.backend.name() == "cuda" && has_linear_layers {
+        if self.backend_name() == "cuda" && has_linear_layers {
             let row_loop_all = cuda_gdn_batched_decode_row_loop_enabled();
             let block_size = paged_cache.block_size();
             let noncontig: Vec<bool> = (0..batch)
@@ -4298,7 +4302,7 @@ impl ModelRunner {
         let stage_start = profile_stages.then(std::time::Instant::now);
         let tokens = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            let graph_tokens = if matches!(self.backend.device(), kiln_tensor::Device::Metal(_)) {
+            let graph_tokens = if matches!(self.backend_device(), kiln_tensor::Device::Metal(_)) {
                 let mut runner = self
                     .metal_graph
                     .lock()
@@ -4557,7 +4561,7 @@ impl ModelRunner {
         let stage_start = profile_stages.then(std::time::Instant::now);
         let mut tokens = None;
         #[cfg(feature = "metal")]
-        if matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+        if matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
             && self.active_lora.is_none()
         {
             let pc_guard = lock_paged_cache(paged_cache)?;
@@ -4872,7 +4876,7 @@ impl ModelRunner {
     ) -> Result<Option<TokenId>> {
         #[cfg(feature = "metal")]
         {
-            if !matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+            if !matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
                 || self.active_lora.is_some()
             {
                 return Ok(None);
@@ -4935,7 +4939,7 @@ impl ModelRunner {
         #[cfg(feature = "metal")]
         {
             if params.is_effectively_greedy()
-                || !matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+                || !matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
                 || self.active_lora.is_some()
             {
                 return Ok(None);
@@ -5047,7 +5051,7 @@ impl ModelRunner {
         let _skip_scope =
             crate::forward::VulkanSkipGdnStateReadbackScope::new(skip_gdn_state_readback);
         if params.is_effectively_greedy()
-            && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+            && matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
         {
             let linear_state_for_graph = if self.has_linear_attention_layers() {
                 Some(&mut *linear_state)
@@ -5110,7 +5114,7 @@ impl ModelRunner {
         }
 
         if !params.is_effectively_greedy()
-            && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+            && matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
         {
             let linear_state_for_graph = if self.has_linear_attention_layers() {
                 Some(&mut *linear_state)
@@ -5141,7 +5145,7 @@ impl ModelRunner {
         // the graph runner (capture/replay, with eager fallback). When the
         // runner is disabled via `KILN_ROCM_GRAPHS=0`, this is skipped entirely
         // and the eager path below runs unchanged.
-        if matches!(self.backend.device(), kiln_tensor::Device::Rocm(_)) {
+        if matches!(self.backend_device(), kiln_tensor::Device::Rocm(_)) {
             let maybe_logits = {
                 let mut runner = self
                     .rocm_graph
@@ -5485,7 +5489,7 @@ impl ModelRunner {
                 // (#1082) kt-native logits — sampler is kt now; no candle bridge.
                 PrefillSampleSource::Logits(logits)
             } else if params.is_effectively_greedy()
-                && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+                && matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
             {
                 PrefillSampleSource::GreedyToken(
                     model_forward_paged_last_token_greedy(
@@ -5579,7 +5583,7 @@ impl ModelRunner {
             }
 
             next_token = if params.is_effectively_greedy()
-                && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+                && matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
             {
                 let linear_state_for_graph = if self.has_linear_attention_layers() {
                     Some(&mut linear_state)
@@ -5870,7 +5874,7 @@ impl ModelRunner {
             // (#1082) kt-native logits — sampler is kt now; no candle bridge.
             PrefillSampleSource::Logits(logits)
         } else if params.is_effectively_greedy()
-            && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+            && matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
         {
             PrefillSampleSource::GreedyToken(
                 model_forward_paged_last_token_greedy(
@@ -5968,7 +5972,7 @@ impl ModelRunner {
             }
 
             next_token = if params.is_effectively_greedy()
-                && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+                && matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
             {
                 let linear_state_for_graph = if self.has_linear_attention_layers() {
                     Some(&mut linear_state)
@@ -8308,7 +8312,7 @@ impl ModelRunner {
             }
 
             next_token = if params.is_effectively_greedy()
-                && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+                && matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
             {
                 let linear_state_for_graph = if self.has_linear_attention_layers() {
                     Some(&mut linear_state)

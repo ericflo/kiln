@@ -15,8 +15,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::backend::{
-    AttentionBackend, BackendRuntime, ConvBackend, GdnBackend, LinearBackend, PagedKvBackend,
-    ReplayBackend, SamplingBackend,
+    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, GdnBackend, LinearBackend,
+    PagedKvBackend, ReplayBackend, SamplingBackend,
 };
 use crate::kv_cache::KvCache;
 use crate::lora_loader::{
@@ -3473,7 +3473,9 @@ fn flash_attention_forward(
     // GQA: the vendored CUDA FA2 wrapper receives `num_heads_k` separately, so
     // it can consume grouped K/V directly. Other backends still take the
     // historic expanded layout through this trait method.
-    let (k, v) = if num_heads != num_kv_heads && backend.name() != "cuda" {
+    let (k, v) = if num_heads != num_kv_heads
+        && BackendIdentity::runtime_name(backend) != "cuda"
+    {
         let gqa_ratio = num_heads / num_kv_heads;
         let (batch, kv_len, _kv_heads, hd) = k.dims4()?;
         // [batch, kv_len, num_kv_heads, head_dim] -> [batch, kv_len, num_heads, head_dim]
@@ -12784,7 +12786,7 @@ fn gated_rms_norm(
     // `GdnGatedRmsNormBackward` in the caller.
     #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     let skip_backend_for_active_tape = crate::tape_forward::tape_scope_active()
-        && matches!(backend.device(), kiln_tensor::Device::Vulkan(_));
+        && matches!(BackendIdentity::runtime_device(backend), kiln_tensor::Device::Vulkan(_));
     #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
     let skip_backend_for_active_tape = false;
     if !skip_backend_for_active_tape
@@ -13392,7 +13394,7 @@ fn gdn_chunkwise_recurrence(
             && GdnBackend::runtime_supports_gdn_recurrent_step(backend)
             && (dtype == DType::BF16
                 || (dtype == DType::F32
-                    && backend.name() == "vulkan"
+                    && BackendIdentity::runtime_name(backend) == "vulkan"
                     && vulkan_gdn_recurrent_step_f32_enabled()));
         if use_backend_recurrent_step {
             // The five squeeze+contiguous calls below can copy the single-row
@@ -19749,13 +19751,14 @@ fn try_flash_attn_paged_decode(
     // kernel, but otherwise it can build compact K/V views before reaching the
     // real paged path.
     let use_direct_paged_decode =
-        (backend.name() == "cuda" && !cuda_direct_paged_decode_disabled())
-            || backend.name() == "vulkan"
+        (BackendIdentity::runtime_name(backend) == "cuda"
+            && !cuda_direct_paged_decode_disabled())
+            || BackendIdentity::runtime_name(backend) == "vulkan"
             // ROCm: device-resident KV pools + native sq=1 O(n) paged decode
             // (flat ~14 tok/s vs the contiguous block's O(n^2) prefill recompute).
             // Behind KILN_ROCM_PAGED_DECODE (default off) pending the KV-cache
             // correctness fix — see rocm_paged_decode_enabled().
-            || (backend.name() == "rocm" && rocm_paged_decode_enabled());
+            || (BackendIdentity::runtime_name(backend) == "rocm" && rocm_paged_decode_enabled());
     #[cfg(feature = "cuda")]
     let is_fp8 = try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache);
     #[cfg(not(feature = "cuda"))]
@@ -19936,7 +19939,7 @@ fn try_flash_attn_paged_decode(
         // Block table too short for the requested seqlen.
         return Ok(None);
     }
-    if backend.name() != "vulkan" {
+    if BackendIdentity::runtime_name(backend) != "vulkan" {
         for c in 0..n_chunks {
             let base_idx = c * pages_per_chunk;
             if base_idx >= allocated {
@@ -22083,7 +22086,9 @@ fn gqa_attention_paged_with_rope_tables(
             return Ok(out);
         }
         #[cfg(feature = "vulkan")]
-        if backend.name() == "vulkan" && !vulkan_decode_generic_fallback_enabled() {
+        if BackendIdentity::runtime_name(backend) == "vulkan"
+            && !vulkan_decode_generic_fallback_enabled()
+        {
             anyhow::bail!(
                 "vulkan paged decode declined native paged-attention path; \
                  generic fallback disabled (set KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1 to opt in)"
@@ -22917,7 +22922,7 @@ fn transformer_block_detached_cuda_prefill_chunked(
     if crate::tape_forward::tape_scope_active() {
         return Ok(None);
     }
-    if backend.name() != "cuda" || has_kv_cache || x.track_op() {
+    if BackendIdentity::runtime_name(backend) != "cuda" || has_kv_cache || x.track_op() {
         return Ok(None);
     }
     let (_batch, seq_len, _hidden) = x.dims3()?;
@@ -24569,7 +24574,7 @@ fn vulkan_native_resident_decode_required(
     config: &kiln_core::config::ModelConfig,
     lora: Option<&LoraWeights>,
 ) -> bool {
-    backend.name() == "vulkan"
+    BackendIdentity::runtime_name(backend) == "vulkan"
         && !token_ids.is_empty()
         && start_positions.len() == token_ids.len()
         && start_positions.iter().all(|&pos| pos > 0)
@@ -26814,7 +26819,7 @@ pub fn model_forward_paged_batched_decode_hidden(
                     Ok(out) => hidden = out,
                     Err(err) => {
                         #[cfg(feature = "vulkan")]
-                        if backend.name() == "vulkan"
+                        if BackendIdentity::runtime_name(backend) == "vulkan"
                             && !vulkan_decode_generic_fallback_enabled()
                         {
                             return Err(err).with_context(|| {

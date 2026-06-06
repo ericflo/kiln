@@ -63,7 +63,7 @@ use kiln_core::tokenizer::KilnTokenizer;
 // FLCE is kt-native via `kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_kt`.
 use kiln_flce_kernel::DEFAULT_CHUNK_SIZE;
 use kiln_model::backend::{
-    self, BackendRuntime, FallbackPolicy, OptimizerBackend, ResidencyBackend,
+    self, BackendIdentity, BackendRuntime, FallbackPolicy, OptimizerBackend, ResidencyBackend,
 };
 use kiln_model::BackendCapabilityQueries;
 use kiln_model::forward::{
@@ -1977,7 +1977,7 @@ fn adapter_smoke_linear_state(
         model_config,
         1,
         &kt_device,
-        Some(backend.name()),
+        Some(BackendIdentity::runtime_name(backend)),
     )
 }
 
@@ -6687,7 +6687,7 @@ fn training_optimizer_fallback_policy(
     backend: &dyn BackendRuntime,
     _device: kiln_tensor::Device,
 ) -> FallbackPolicy {
-    if training_optimizer_debug_fallback_enabled(backend.name()) {
+    if training_optimizer_debug_fallback_enabled(BackendIdentity::runtime_name(backend)) {
         return FallbackPolicy::WarnAndCount;
     }
     BackendCapabilityQueries::backend_capabilities(backend)
@@ -6704,7 +6704,7 @@ fn ensure_training_optimizer_fallback_allowed(
     if policy.allows_fallback() {
         if matches!(policy, FallbackPolicy::WarnAndCount) {
             tracing::warn!(
-                backend = backend.name(),
+                backend = BackendIdentity::runtime_name(backend),
                 device = %device.short_name(),
                 optimizer = optimizer_name,
                 "training optimizer using explicit debug fallback"
@@ -6716,7 +6716,7 @@ fn ensure_training_optimizer_fallback_allowed(
         "{optimizer_name} optimizer fallback policy {:?} for {} training hot path on {}; \
          native optimizer dispatch required (set KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 to opt in)",
         policy,
-        backend.name(),
+        BackendIdentity::runtime_name(backend),
         device.short_name()
     )
 }
