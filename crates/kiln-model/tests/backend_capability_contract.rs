@@ -700,6 +700,10 @@ fn generated_capability_report_tracks_one_step_training_proof_gap() {
         .iter()
         .find(|gate| gate["gate"] == "one_step_training_proof")
         .expect("one-step training proof gate should be present");
+    let command = training_gate["command"]
+        .as_str()
+        .expect("one-step training proof command should be a string");
+    assert!(command.contains("cuda_sft_step_proof"));
 
     let evidence = training_gate["evidence"]
         .as_array()
@@ -708,9 +712,9 @@ fn generated_capability_report_tracks_one_step_training_proof_gap() {
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
     for path in [
+        "crates/kiln-model/tests/cuda_sft_step_proof.rs",
         "crates/kiln-model/tests/vk_sft_step_proof.rs",
         "crates/kiln-model/tests/rocm_sft_step_proof.rs",
-        "crates/kiln-model/tests/cuda_sft_step_proof.rs",
         "crates/kiln-model/tests/metal_sft_step_proof.rs",
         "crates/kiln-optim/tests/end_to_end_training.rs",
     ] {
@@ -727,6 +731,7 @@ fn generated_capability_report_tracks_one_step_training_proof_gap() {
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
     for path in [
+        "crates/kiln-model/tests/cuda_sft_step_proof.rs",
         "crates/kiln-model/tests/vk_sft_step_proof.rs",
         "crates/kiln-model/tests/rocm_sft_step_proof.rs",
         "crates/kiln-optim/tests/end_to_end_training.rs",
@@ -743,10 +748,7 @@ fn generated_capability_report_tracks_one_step_training_proof_gap() {
         .iter()
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
-    let missing_backend_proofs = [
-        "crates/kiln-model/tests/cuda_sft_step_proof.rs",
-        "crates/kiln-model/tests/metal_sft_step_proof.rs",
-    ];
+    let missing_backend_proofs = ["crates/kiln-model/tests/metal_sft_step_proof.rs"];
     match training_gate["status"].as_str() {
         Some("covered") => {
             assert!(
