@@ -48,10 +48,11 @@ pub mod vk_decode_resident;
 pub mod weights;
 
 pub use backend::{
-    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, FallbackPolicy, GdnBackend,
-    LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend,
-    SamplingBackend, TrainingLossBackend,
+    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, FallbackPolicy,
+    GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend,
+    ResidencyBackend, SamplingBackend, TrainingLossBackend,
 };
+pub use backend::capability::{BackendCapabilitySnapshot, Support};
 pub use backend::residency::{
     ReplayStability, ResidentOwnership, ResidentRegistry, ResidentResource,
     ResidentResourceFamily, ResidentResourceLayout, ResidentResourceState,

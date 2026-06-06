@@ -70,6 +70,8 @@ impl Drop for VulkanActiveGuard {
 
 pub mod cpu;
 
+pub mod capability;
+
 pub mod residency;
 
 #[cfg(feature = "cuda")]
@@ -3071,6 +3073,30 @@ mod tests {
         assert_eq!(caps.resident_activation, "not implemented");
         assert_eq!(caps.native_training, "not implemented");
         assert!(caps.projection_training.contains("candle"));
+    }
+
+    #[test]
+    fn capability_snapshot_maps_cpu_support_predicates() {
+        let cpu = cpu::CpuBackend::new(kiln_tensor::Device::Cpu);
+        let caps = capability::BackendCapabilitySnapshot::from_backend(&cpu);
+
+        assert_eq!(caps.backend, "cpu");
+        assert_eq!(caps.device, kiln_tensor::Device::Cpu);
+        assert_eq!(caps.training, TrainingCapabilities::portable());
+        assert_eq!(caps.resident_decode, capability::Support::Declined);
+        assert_eq!(caps.resident_activation, capability::Support::Declined);
+        assert_eq!(caps.flash_attn_prefill, capability::Support::Declined);
+        assert_eq!(
+            caps.flash_attn_paged_decode,
+            capability::Support::Declined
+        );
+        assert_eq!(
+            caps.paged_kv_head_major_read,
+            capability::Support::Declined
+        );
+        assert_eq!(caps.gdn_recurrent_step, capability::Support::Declined);
+        assert_eq!(caps.causal_conv1d_update, capability::Support::Declined);
+        assert_eq!(caps.linear_decode_argmax, capability::Support::Declined);
     }
 
     #[test]
