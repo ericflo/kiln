@@ -41,18 +41,54 @@ fn time_matmul(m: usize, k: usize, n: usize, iters: usize, dev: Device) -> f64 {
 #[ignore]
 fn bench_matmul_qwen_shapes() {
     let Some(dev) = metal() else { eprintln!("no Metal device; skipping"); return; };
-    // (label, M, K, N, iters) — small iters for the (slow) CPU-fallback baseline.
+    // (metric, label, M, K, N, iters) — small iters for the (slow) CPU-fallback baseline.
     let cases = [
-        ("decode QKV   M=1   2560x4096", 1usize, 2560usize, 4096usize, 50usize),
-        ("prefill QKV  M=256 2560x4096", 256, 2560, 4096, 30),
-        ("prefill gate||up M=256 2560x18432", 256, 2560, 18432, 20),
-        ("prefill QKV  M=512 2560x4096", 512, 2560, 4096, 20),
-        ("lm_head      M=1   2560x152064", 1, 2560, 152064, 20),
+        (
+            "decode_qkv_m1_2560x4096_ms",
+            "decode QKV   M=1   2560x4096",
+            1usize,
+            2560usize,
+            4096usize,
+            50usize,
+        ),
+        (
+            "prefill_qkv_m256_2560x4096_ms",
+            "prefill QKV  M=256 2560x4096",
+            256,
+            2560,
+            4096,
+            30,
+        ),
+        (
+            "prefill_gate_up_m256_2560x18432_ms",
+            "prefill gate||up M=256 2560x18432",
+            256,
+            2560,
+            18432,
+            20,
+        ),
+        (
+            "prefill_qkv_m512_2560x4096_ms",
+            "prefill QKV  M=512 2560x4096",
+            512,
+            2560,
+            4096,
+            20,
+        ),
+        (
+            "lm_head_m1_2560x152064_ms",
+            "lm_head      M=1   2560x152064",
+            1,
+            2560,
+            152064,
+            20,
+        ),
     ];
     println!("\n=== Metal matmul microbench (ops::matmul, BF16) ===");
-    for (label, m, k, n, iters) in cases {
+    for (metric, label, m, k, n, iters) in cases {
         let ms = time_matmul(m, k, n, iters, dev);
         let gflop = 2.0 * m as f64 * k as f64 * n as f64 / 1e9;
+        println!("KILN_LATENCY_METRIC {metric} {ms:.6} ms");
         println!("{label:38} {ms:9.3} ms   {:8.1} GFLOP/s", gflop / (ms / 1000.0));
     }
 }

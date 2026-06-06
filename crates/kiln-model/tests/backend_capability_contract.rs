@@ -2459,6 +2459,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         .as_str()
         .expect("hardware latency command should be a string");
     assert!(command.contains("check_backend_latency_fixtures.py"));
+    assert!(command.contains("write_backend_latency_result_artifact.py"));
     assert!(command.contains("--self-test"));
     assert!(command.contains("--require-covered"));
 
@@ -2477,6 +2478,22 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         );
     }
 
+    let writer_source =
+        fs::read_to_string(root.join("scripts/write_backend_latency_result_artifact.py"))
+            .expect("latency result artifact writer should be readable");
+    for required in [
+        "def parse_metric_log(",
+        "KILN_LATENCY_METRIC",
+        "def build_result_artifact(",
+        "fixture_id",
+        "--self-test",
+    ] {
+        assert!(
+            writer_source.contains(required),
+            "latency result artifact writer should materialize fixture logs: {required}"
+        );
+    }
+
     let evidence_present = hardware_gate["evidence_present"]
         .as_array()
         .expect("hardware latency present evidence should be an array")
@@ -2486,6 +2503,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
     for path in [
         "docs/backend-latency-fixtures.json",
         "docs/backend-latency-result-schema.md",
+        "scripts/write_backend_latency_result_artifact.py",
         "scripts/check_backend_latency_fixtures.py",
         "crates/kiln-server/examples/flce_preflight_bench.rs",
         "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
@@ -2507,6 +2525,8 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "backend",
         "status",
         "metrics",
+        "KILN_LATENCY_METRIC",
+        "write_backend_latency_result_artifact.py",
         "--require-covered",
         "--self-test",
     ] {
@@ -2566,9 +2586,15 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         let source = fixture["source"]
             .as_str()
             .expect("fixture source should be a string");
+        let source_text = fs::read_to_string(root.join(source))
+            .unwrap_or_else(|err| panic!("fixture source should be readable: {source}: {err}"));
         assert!(
             root.join(source).is_file(),
             "fixture source should exist: {source}"
+        );
+        assert!(
+            source_text.contains("KILN_LATENCY_METRIC"),
+            "fixture source should emit machine-readable latency metric lines: {source}"
         );
         let metrics = fixture["metrics"]
             .as_array()
@@ -2581,6 +2607,17 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
             assert!(
                 metric["max"].is_null(),
                 "pending fixture metrics should not pretend thresholds are locked"
+            );
+            let metric_name = metric["name"]
+                .as_str()
+                .expect("fixture metric name should be a string");
+            let source_mentions_metric = source_text.contains(metric_name)
+                || metric_name
+                    .strip_suffix("_us")
+                    .is_some_and(|base| source_text.contains(base));
+            assert!(
+                source_mentions_metric,
+                "fixture source should emit or derive metric {metric_name}: {source}"
             );
         }
     }

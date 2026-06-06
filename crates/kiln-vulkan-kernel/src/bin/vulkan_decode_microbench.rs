@@ -369,6 +369,7 @@ fn time<F: FnMut() -> Result<()>>(label: &str, batch: usize, mut f: F) -> Result
     println!(
         "{label:<32} batch={batch:>3}  per_iter={per_iter_us:>8.1} us  rows/s={rows_per_sec:>10.0}"
     );
+    println!("KILN_LATENCY_METRIC {label}_us {per_iter_us:.6} us");
     Ok(())
 }
 

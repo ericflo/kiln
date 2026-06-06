@@ -107,6 +107,7 @@ fn bench_rocm_matmul_qwen_shapes() {
     for (metric, label, m, k, n, iters) in cases {
         let ms = time_matmul_bf16(m, k, n, iters);
         let gflop = 2.0 * m as f64 * k as f64 * n as f64 / 1e9;
+        println!("KILN_LATENCY_METRIC {metric} {ms:.6} ms");
         println!(
             "{metric} {ms:.3} ms   {label:38} {:8.1} GFLOP/s",
             gflop / (ms / 1000.0)

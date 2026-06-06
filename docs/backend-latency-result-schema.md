@@ -50,5 +50,37 @@ comparison against `max`. For example, `comparison: "<="` requires observed
 latency to be less than or equal to `max`; `comparison: ">="` requires observed
 throughput to be greater than or equal to `max`.
 
+## Metric Log Lines
+
+Fixture benchmarks emit machine-readable metric lines alongside their normal
+human-readable output:
+
+```text
+KILN_LATENCY_METRIC <metric> <value> <unit>
+```
+
+The artifact writer extracts the metric names declared by the selected fixture
+and ignores extra metric lines. Capture a hardware fixture run with `tee`, then
+materialize the result artifact:
+
+```sh
+python3 scripts/write_backend_latency_result_artifact.py \
+  docs/backend-latency-fixtures.json \
+  metal_apple_silicon_matmul_qwen35_4b \
+  /path/to/raw-benchmark.log
+```
+
+By default the script writes the fixture's `result_artifact`; use `--output` for
+a scratch artifact. After reviewing the hardware result, lock numeric
+thresholds in the manifest and run the covered gate:
+
+```sh
+python3 scripts/check_backend_latency_fixtures.py \
+  docs/backend-latency-fixtures.json \
+  --require-covered
+```
+
+Run `python3 scripts/write_backend_latency_result_artifact.py --self-test` to
+validate the log-line parser and artifact writer without hardware.
 Run `python3 scripts/check_backend_latency_fixtures.py --self-test` to validate
 the artifact-checking logic without hardware.
