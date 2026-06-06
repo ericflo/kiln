@@ -1786,6 +1786,64 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     }
 
     for required in [
+        "AttentionBackend::runtime_supports_flash_attn_prefill",
+        "AttentionBackend::runtime_supports_flash_attn_prefill_head_major",
+        "AttentionBackend::runtime_supports_flash_attn_paged_decode",
+        "AttentionBackend::runtime_supports_strict_paged_decode_contiguous_batch",
+        "AttentionBackend::runtime_flash_attn_prefill",
+        "AttentionBackend::runtime_flash_attn_prefill_head_major",
+        "AttentionBackend::runtime_flash_attn_paged_decode_contiguous",
+        "AttentionBackend::runtime_flash_attn_paged_decode_contiguous_batch",
+        "AttentionBackend::runtime_flash_attn_paged_decode",
+        "ReplayBackend::runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs",
+    ] {
+        assert!(
+            forward_source.contains(required),
+            "forward attention paths should consume focused capability facet method {required}"
+        );
+    }
+    for forbidden in [
+        ".supports_flash_attn_prefill(",
+        ".supports_flash_attn_prefill_head_major(",
+        ".supports_flash_attn_paged_decode(",
+        ".supports_strict_paged_decode_contiguous_batch(",
+        ".flash_attn_prefill(",
+        ".flash_attn_prefill_head_major(",
+        ".flash_attn_paged_decode_contiguous(",
+        ".flash_attn_paged_decode_contiguous_batch(",
+        ".flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(",
+        ".flash_attn_paged_decode(",
+    ] {
+        assert!(
+            !forward_source.contains(forbidden),
+            "forward attention paths should not call broad BackendRuntime method {forbidden}"
+        );
+    }
+
+    for required in [
+        "PagedKvBackend::runtime_supports_paged_kv_head_major_read",
+        "PagedKvBackend::runtime_supports_paged_kv_head_major_read_append_token_major",
+        "PagedKvBackend::runtime_paged_kv_head_major_read",
+        "PagedKvBackend::runtime_paged_kv_head_major_read_append_token_major",
+    ] {
+        assert!(
+            forward_source.contains(required),
+            "forward paged-KV paths should consume focused capability facet method {required}"
+        );
+    }
+    for forbidden in [
+        ".supports_paged_kv_head_major_read(",
+        ".supports_paged_kv_head_major_read_append_token_major(",
+        ".paged_kv_head_major_read(",
+        ".paged_kv_head_major_read_append_token_major(",
+    ] {
+        assert!(
+            !forward_source.contains(forbidden),
+            "forward paged-KV paths should not call broad BackendRuntime method {forbidden}"
+        );
+    }
+
+    for required in [
         "ConvBackend::runtime_supports_causal_conv1d_update",
         "ConvBackend::runtime_causal_conv1d_update",
         "ConvBackend::runtime_supports_causal_conv1d_prefill",

@@ -14,7 +14,10 @@ use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use crate::backend::{BackendRuntime, ConvBackend, LinearBackend, ReplayBackend, SamplingBackend};
+use crate::backend::{
+    AttentionBackend, BackendRuntime, ConvBackend, LinearBackend, PagedKvBackend, ReplayBackend,
+    SamplingBackend,
+};
 use crate::kv_cache::KvCache;
 use crate::lora_loader::{
     LoraLayerWeights, LoraProjectionWeights, LoraWeights, compute_lora_delta, linear_with_lora_t,
@@ -3451,7 +3454,7 @@ fn try_kt_softmax_last_dim(x: &Tensor) -> Result<Option<Tensor>> {
 /// K/V may have fewer heads than Q (GQA); they are expanded to match Q's head count
 /// before calling the flash kernel, which requires uniform head counts.
 ///
-/// Routes through `backend.flash_attn_prefill`. Returns `Ok(Some(out))` with
+/// Routes through `AttentionBackend::runtime_flash_attn_prefill`. Returns `Ok(Some(out))` with
 /// `out` shaped `[batch, seq_len, num_heads * head_dim]` (already reshaped for
 /// output projection) when the backend handles it, or `Ok(None)` when the
 /// backend declines — callers must fall back to the portable candle path.
@@ -3489,7 +3492,9 @@ fn flash_attention_forward(
         (k.clone(), v.clone())
     };
 
-    let Some(attn_output) = backend.flash_attn_prefill(q, &k, &v, softmax_scale, causal)? else {
+    let Some(attn_output) =
+        AttentionBackend::runtime_flash_attn_prefill(backend, q, &k, &v, softmax_scale, causal)?
+    else {
         return Ok(None);
     };
 
@@ -3519,15 +3524,21 @@ fn flash_attention_forward_head_major(
     num_heads: usize,
     head_dim: usize,
 ) -> Result<Option<Tensor>> {
-    if !backend.supports_flash_attn_prefill_head_major() {
+    if !AttentionBackend::runtime_supports_flash_attn_prefill_head_major(backend) {
         return Ok(None);
     }
 
     let softmax_scale = 1.0 / (head_dim as f32).sqrt();
     let causal = true;
 
-    let Some(attn_output) =
-        backend.flash_attn_prefill_head_major(q, k, v, softmax_scale, causal)?
+    let Some(attn_output) = AttentionBackend::runtime_flash_attn_prefill_head_major(
+        backend,
+        q,
+        k,
+        v,
+        softmax_scale,
+        causal,
+    )?
     else {
         return Ok(None);
     };
@@ -18460,7 +18471,7 @@ pub fn gqa_attention_core_prefill(
     head_dim: usize,
 ) -> Result<Tensor> {
     let (_batch, seq_len, _heads, _hd) = prepared.q.dims4()?;
-    if seq_len > 1 && backend.supports_flash_attn_prefill() {
+    if seq_len > 1 && AttentionBackend::runtime_supports_flash_attn_prefill(backend) {
         let q = prepared.q.contiguous()?;
         let k = prepared.k.contiguous()?;
         let v = prepared.v.contiguous()?;
@@ -19150,7 +19161,10 @@ pub fn gqa_attention_pre_o(
     // which handles the cache update and Q_len != KV_len masking correctly.
     // Backend declines (returns None) on dtype mismatch so non-BF16 configs
     // (e.g. tests on F32) transparently fall back to naive softmax+matmul.
-    if seq_len > 1 && kv_cache.is_none() && backend.supports_flash_attn_prefill() {
+    if seq_len > 1
+        && kv_cache.is_none()
+        && AttentionBackend::runtime_supports_flash_attn_prefill(backend)
+    {
         let q = q.contiguous()?;
         let k = k.contiguous()?;
         let v = v.contiguous()?;
@@ -19732,7 +19746,8 @@ fn try_flash_attn_paged_decode(
             let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
             let attn_output = {
                 kiln_nvtx::range!(c"kiln/attn/paged_decode_contiguous");
-                backend.flash_attn_paged_decode_contiguous(
+                AttentionBackend::runtime_flash_attn_paged_decode_contiguous(
+                    backend,
                     q,
                     k_pool,
                     v_pool,
@@ -19751,12 +19766,14 @@ fn try_flash_attn_paged_decode(
             let attn_output = if attn_output.is_some() {
                 attn_output
             } else {
-                let fast_head_major = if backend.supports_flash_attn_prefill_head_major()
-                    && backend.supports_paged_kv_head_major_read()
-                {
+                let can_read_head_major =
+                    AttentionBackend::runtime_supports_flash_attn_prefill_head_major(backend)
+                        && PagedKvBackend::runtime_supports_paged_kv_head_major_read(backend);
+                let fast_head_major = if can_read_head_major {
                     kiln_nvtx::range!(c"kiln/kv/head_major_read_decode");
                     let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
-                    let out = backend.paged_kv_head_major_read(
+                    let out = PagedKvBackend::runtime_paged_kv_head_major_read(
+                        backend,
                         k_pool,
                         v_pool,
                         start_slot,
@@ -19773,7 +19790,7 @@ fn try_flash_attn_paged_decode(
                 } else {
                     None
                 };
-                if backend.supports_flash_attn_prefill_head_major() {
+                if AttentionBackend::runtime_supports_flash_attn_prefill_head_major(backend) {
                     // Q is already head-major at the call site. Keep K/V grouped
                     // instead of routing through `flash_attention_forward`, which
                     // expands GQA K/V before Metal SDPA and defeats Candle's
@@ -20040,7 +20057,8 @@ fn try_flash_attn_paged_decode(
                 })?;
                 attn_out.clone()
             } else {
-                match backend.flash_attn_paged_decode(
+                match AttentionBackend::runtime_flash_attn_paged_decode(
+                    backend,
                     &q_fa,
                     k_pool,
                     v_pool,
@@ -20057,7 +20075,8 @@ fn try_flash_attn_paged_decode(
         }
         #[cfg(not(any(feature = "cuda", feature = "rocm")))]
         {
-            match backend.flash_attn_paged_decode(
+            match AttentionBackend::runtime_flash_attn_paged_decode(
+                backend,
                 &q_fa,
                 k_pool,
                 v_pool,
@@ -21019,7 +21038,8 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         // The strict kernel exists on Metal so the predicate defaults
         // `true` and Metal paths keep their preferred-strict
         // dispatch.
-        let backend_supports_strict = backend.supports_strict_paged_decode_contiguous_batch();
+        let backend_supports_strict =
+            AttentionBackend::runtime_supports_strict_paged_decode_contiguous_batch(backend);
         let prefer_strict = !force_dyn_seqlen
             && uniform_start_pos
             && strict_start_slots.is_some()
@@ -21047,7 +21067,8 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
                 )?;
                 q_strict
             };
-            *out_acc = backend.flash_attn_paged_decode_contiguous_batch(
+            *out_acc = AttentionBackend::runtime_flash_attn_paged_decode_contiguous_batch(
+                backend,
                 &q_strict,
                 k_pool,
                 v_pool,
@@ -21066,8 +21087,9 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
             // 3+4). Otherwise the kernel wrapper allocates fresh
             // `Tensor::zeros` inside the captured region, which the
             // captured graph then dangles when the tensors drop.
-            *out_acc = backend
-                .flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
+            *out_acc =
+                ReplayBackend::runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
+                    backend,
                     &q,
                     k_pool,
                     v_pool,
@@ -21680,8 +21702,8 @@ fn gqa_attention_paged_with_rope_tables(
     // `PagedKvCache` on the first prompt tile.
     if seq_len > 1
         && start_pos == 0
-        && (backend.supports_flash_attn_prefill_head_major()
-            || backend.supports_flash_attn_prefill())
+        && (AttentionBackend::runtime_supports_flash_attn_prefill_head_major(backend)
+            || AttentionBackend::runtime_supports_flash_attn_prefill(backend))
     {
         kiln_nvtx::range!(c"kiln/attn/full/prefill_initial");
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
@@ -21706,7 +21728,7 @@ fn gqa_attention_paged_with_rope_tables(
                 stage_profile,
             )?;
             Some(attn_output)
-        } else if backend.supports_flash_attn_prefill() {
+        } else if AttentionBackend::runtime_supports_flash_attn_prefill(backend) {
             finish_full_attn_stage_profile(
                 profile_device,
                 profile_context,
@@ -22003,7 +22025,7 @@ fn gqa_attention_paged_with_rope_tables(
         }
         && (num_heads / num_kv_heads) > 1
         && !fused_paged_decode_disabled()
-        && backend.supports_flash_attn_paged_decode()
+        && AttentionBackend::runtime_supports_flash_attn_paged_decode(backend)
         && !crate::mtp_debug::is_c7_sdpa_capture_armed()
     {
         // Open the fused-decode range around the call so the kernel work is
@@ -22078,11 +22100,13 @@ fn gqa_attention_paged_with_rope_tables(
             #[cfg(not(feature = "cuda"))]
             { !paged_cache.is_fp8() }
         }
-            && backend.supports_flash_attn_prefill_head_major()
+            && AttentionBackend::runtime_supports_flash_attn_prefill_head_major(backend)
             && !crate::mtp_debug::is_c7_sdpa_capture_armed();
+        let append_head_major_read_supported =
+            PagedKvBackend::runtime_supports_paged_kv_head_major_read_append_token_major(backend);
         let prefix_append_fast = if prefix_only_prefill
             && start_pos >= PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS
-            && backend.supports_paged_kv_head_major_read_append_token_major()
+            && append_head_major_read_supported
         {
             contiguous_slot_run_start(
                 block_table,
@@ -22103,7 +22127,8 @@ fn gqa_attention_paged_with_rope_tables(
                 .map(|(start_slot, k_pool, v_pool)| {
                     // #1082: `PagedKvCacheKt::pool_tensors` already yields kt pool
                     // references; pass them straight to the kt backend read.
-                    backend.paged_kv_head_major_read_append_token_major(
+                    PagedKvBackend::runtime_paged_kv_head_major_read_append_token_major(
+                        backend,
                         &k_pool,
                         &v_pool,
                         start_slot,
@@ -22130,8 +22155,8 @@ fn gqa_attention_paged_with_rope_tables(
             #[cfg(not(feature = "cuda"))]
             { !paged_cache.is_fp8() }
         }
-            && backend.supports_paged_kv_head_major_read()
-            && backend.supports_flash_attn_prefill_head_major()
+            && PagedKvBackend::runtime_supports_paged_kv_head_major_read(backend)
+            && AttentionBackend::runtime_supports_flash_attn_prefill_head_major(backend)
         {
             contiguous_slot_run_start(
                 block_table,
@@ -22152,7 +22177,8 @@ fn gqa_attention_paged_with_rope_tables(
                 .map(|(start_slot, k_pool, v_pool)| {
                     // #1082: `PagedKvCacheKt::pool_tensors` already yields kt pool
                     // references; pass them straight to the kt backend read.
-                    backend.paged_kv_head_major_read(
+                    PagedKvBackend::runtime_paged_kv_head_major_read(
+                        backend,
                         &k_pool,
                         &v_pool,
                         start_slot,
@@ -22243,7 +22269,7 @@ fn gqa_attention_paged_with_rope_tables(
     // already returns head-major K/V; on Metal, keep Q/K/V in that layout and
     // avoid token-major transposes plus GQA K/V expansion.
     if seq_len > 1
-        && backend.supports_flash_attn_prefill_head_major()
+        && AttentionBackend::runtime_supports_flash_attn_prefill_head_major(backend)
         && !crate::mtp_debug::is_c7_sdpa_capture_armed()
     {
         kiln_nvtx::range!(c"kiln/attn/full/prefill_head_major");
@@ -22277,7 +22303,7 @@ fn gqa_attention_paged_with_rope_tables(
     // materialize the same K/V we just produced.
     // Paged cache returns [batch, heads, kv_len, head_dim] — transpose to
     // [batch, kv_len, heads, head_dim] for the backend kernel.
-    if seq_len > 1 && backend.supports_flash_attn_prefill() {
+    if seq_len > 1 && AttentionBackend::runtime_supports_flash_attn_prefill(backend) {
         kiln_nvtx::range!(c"kiln/attn/full/prefill");
         let q = q.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_heads, head_dim]
         let k = k.transpose(1, 2)?.contiguous()?; // -> [batch, kv_len, num_kv_heads, head_dim]
