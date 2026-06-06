@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import sys
 import tempfile
@@ -63,6 +64,10 @@ def parse_metric_log(log_path: Path) -> dict[str, tuple[float, str]]:
             raise ArtifactError(
                 f"invalid numeric value for {metric_name!r} at line {line_number}: {raw_value!r}"
             ) from exc
+        if not math.isfinite(value):
+            raise ArtifactError(
+                f"non-finite numeric value for {metric_name!r} at line {line_number}: {raw_value!r}"
+            )
         observations[metric_name] = (value, unit)
 
     if not observations:
@@ -181,6 +186,8 @@ def build_result_artifact(
             missing.append(metric_name)
             continue
         value, observed_unit = observed
+        if not math.isfinite(value):
+            raise ArtifactError(f"non-finite metric value for {metric_name!r}: {value!r}")
         if observed_unit != expected_unit:
             unit_mismatches.append(
                 f"{metric_name}: expected unit {expected_unit!r}, got {observed_unit!r}"
@@ -325,6 +332,35 @@ def self_test() -> int:
                 return 1
         else:
             print(json.dumps({"ok": False, "case": "unit mismatch did not fail"}))
+            return 1
+
+        overflow_log_path = tmp_root / "overflow.log"
+        overflow_log_path.write_text("KILN_LATENCY_METRIC latency_ms 1e1000 ms\n")
+        try:
+            parse_metric_log(overflow_log_path)
+        except ArtifactError as exc:
+            if "non-finite numeric value" not in str(exc):
+                print(json.dumps({"ok": False, "case": "non-finite parse", "error": str(exc)}))
+                return 1
+        else:
+            print(json.dumps({"ok": False, "case": "non-finite parse did not fail"}))
+            return 1
+
+        try:
+            build_result_artifact(
+                fixture,
+                {"latency_ms": (float("inf"), "ms"), "tokens_per_s": (125.0, "tok/s")},
+                "passed",
+                log_path,
+                manifest_path,
+                loaded["schema_version"],
+            )
+        except ArtifactError as exc:
+            if "non-finite metric value" not in str(exc):
+                print(json.dumps({"ok": False, "case": "non-finite artifact", "error": str(exc)}))
+                return 1
+        else:
+            print(json.dumps({"ok": False, "case": "non-finite artifact did not fail"}))
             return 1
 
     print(json.dumps({"ok": True, "self_test": "backend latency artifact writer"}))

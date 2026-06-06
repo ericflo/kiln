@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import sys
 import tempfile
@@ -25,7 +26,7 @@ CHECKSUM_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def require_string(errors: list[str], obj: dict[str, Any], key: str, context: str) -> str:
@@ -57,11 +58,11 @@ def validate_metric(
 
     max_value = metric.get("max")
     if max_value is not None and not is_number(max_value):
-        errors.append(f"{context}.max must be null or numeric")
+        errors.append(f"{context}.max must be null or finite numeric")
     if threshold_state == "locked_threshold" and not is_number(max_value):
-        errors.append(f"{context}.max must be numeric for locked_threshold")
+        errors.append(f"{context}.max must be finite numeric for locked_threshold")
     if require_covered and not is_number(max_value):
-        errors.append(f"{context}.max must be numeric when --require-covered is set")
+        errors.append(f"{context}.max must be finite numeric when --require-covered is set")
 
 
 def metric_threshold_passes(metric: dict[str, Any], observed: float) -> bool:
@@ -198,7 +199,7 @@ def validate_result_artifact(
         observed = observed_metrics.get(metric_name)
         if not is_number(observed):
             errors.append(
-                f"{context}.result_artifact.metrics.{metric_name} must be numeric"
+                f"{context}.result_artifact.metrics.{metric_name} must be finite numeric"
             )
             continue
         if not metric_threshold_passes(metric, observed):
@@ -520,6 +521,37 @@ def self_test() -> int:
             print(
                 json.dumps(
                     {"ok": False, "case": "fixture spec mismatch", "errors": errors},
+                    indent=2,
+                )
+            )
+            return 1
+
+        artifact.write_text(
+            json.dumps(
+                {
+                    "fixture_id": "cuda_fixture",
+                    "backend": "cuda",
+                    "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": fixture_spec_sha256(fixture),
+                    "hardware": "fixture",
+                    "source": str(source.relative_to(ROOT))
+                    if source.is_relative_to(ROOT)
+                    else str(source),
+                    "command": "cargo bench",
+                    "raw_log": str(raw_log),
+                    "raw_log_sha256": raw_log_sha256,
+                    "metrics": {"latency_ms": float("inf"), "tokens_per_s": 125.0},
+                }
+            )
+        )
+        errors = []
+        validate_result_artifact(errors, fixture, artifact, "fixtures[0]", 1, None)
+        if not any("metrics.latency_ms must be finite numeric" in error for error in errors):
+            print(
+                json.dumps(
+                    {"ok": False, "case": "non-finite metric", "errors": errors},
                     indent=2,
                 )
             )

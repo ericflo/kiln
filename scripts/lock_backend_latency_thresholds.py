@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 import tempfile
@@ -25,7 +26,7 @@ class ThresholdLockError(Exception):
 
 
 def is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def load_json(path: Path, label: str) -> dict[str, Any]:
@@ -147,7 +148,7 @@ def lock_fixture_thresholds(
         observed = observations.get(metric_name)
         if not is_number(observed):
             raise ThresholdLockError(
-                f"{fixture_id}.result_artifact.metrics.{metric_name} must be numeric"
+                f"{fixture_id}.result_artifact.metrics.{metric_name} must be finite numeric"
             )
         comparison = metric.get("comparison")
         if not isinstance(comparison, str):
@@ -305,6 +306,34 @@ def self_test() -> int:
                 return 1
         else:
             print(json.dumps({"ok": False, "case": "fixture digest did not fail"}))
+            return 1
+
+        result_path.write_text(
+            json.dumps(
+                {
+                    "fixture_id": "fixture",
+                    "backend": "cuda",
+                    "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": fixture_spec_sha256(manifest["fixtures"][0]),
+                    "hardware": "fixture hardware",
+                    "source": "bench.py",
+                    "command": "python bench.py",
+                    "raw_log": "bench.log",
+                    "raw_log_sha256": "0" * 64,
+                    "metrics": {"latency_ms": float("inf"), "tokens_per_s": 200.0},
+                }
+            )
+        )
+        try:
+            lock_manifest_thresholds(manifest, 0.10)
+        except ThresholdLockError as exc:
+            if "finite numeric" not in str(exc):
+                print(json.dumps({"ok": False, "case": "non-finite metric", "error": str(exc)}))
+                return 1
+        else:
+            print(json.dumps({"ok": False, "case": "non-finite metric did not fail"}))
             return 1
 
     print(json.dumps({"ok": True, "self_test": "backend latency threshold locker"}))

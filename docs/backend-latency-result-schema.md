@@ -63,7 +63,8 @@ Required fields:
 - `command`: exactly matches the fixture `command`
 - `raw_log`: non-empty path or identifier for the captured raw fixture log
 - `raw_log_sha256`: lowercase SHA-256 hex digest of the raw fixture log
-- `metrics`: object containing every metric named by the fixture
+- `metrics`: object containing every metric named by the fixture, with finite
+  numeric values
 
 When the referenced `raw_log` file is present in the checkout, the validator
 also checks that its SHA-256 digest matches `raw_log_sha256`.
@@ -74,10 +75,10 @@ locked from pending to covered. Changing the command, hardware label, source,
 metric identities, units, comparisons, or selected cases requires a fresh
 hardware artifact.
 
-For each fixture metric, the observed value must be numeric and satisfy its
-comparison against `max`. For example, `comparison: "<="` requires observed
-latency to be less than or equal to `max`; `comparison: ">="` requires observed
-throughput to be greater than or equal to `max`.
+For each fixture metric, the observed value must be finite numeric and satisfy
+its comparison against finite numeric `max`. For example, `comparison: "<="`
+requires observed latency to be less than or equal to `max`; `comparison: ">="`
+requires observed throughput to be greater than or equal to `max`.
 
 ## Metric Log Lines
 
