@@ -2472,6 +2472,8 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "def metric_threshold_passes(",
         "fixture_id",
         "status must be passed",
+        "manifest_schema_version",
+        "fixture_spec_sha256",
         "raw_log_sha256",
         "does not satisfy",
     ] {
@@ -2503,6 +2505,8 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "def parse_metric_log(",
         "KILN_LATENCY_METRIC",
         "def build_result_artifact(",
+        "manifest_schema_version",
+        "fixture_spec_sha256",
         "raw_log_sha256",
         "fixture_id",
         "--self-test",
@@ -2520,6 +2524,8 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "def lock_manifest_thresholds(",
         "locked_threshold",
         "status",
+        "manifest_schema_version",
+        "fixture_spec_sha256",
         "covered",
         "--headroom",
         "--self-test",
@@ -2562,6 +2568,8 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "fixture_id",
         "backend",
         "status",
+        "manifest_schema_version",
+        "fixture_spec_sha256",
         "hardware",
         "source",
         "command",
@@ -2687,7 +2695,11 @@ fn generated_capability_report_tracks_migration_phase_status() {
     let phases = report["migration_phase_status"]
         .as_array()
         .expect("migration_phase_status should be an array");
-    assert_eq!(phases.len(), 9, "migration phase status should cover phases 0-8");
+    assert_eq!(
+        phases.len(),
+        9,
+        "migration phase status should cover phases 0-8"
+    );
 
     let valid_statuses = ["covered", "partial", "gap", "fixture_required"];
     let phase_numbers = phases

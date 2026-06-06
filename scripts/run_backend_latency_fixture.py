@@ -76,6 +76,8 @@ def run_fixture_command(command: str, log_path: Path, echo: bool) -> None:
 
 def materialize_result_artifact(
     fixture: dict[str, Any],
+    manifest_path: Path,
+    manifest_schema_version: int,
     log_path: Path,
     output: Path | None,
     status: str,
@@ -83,7 +85,14 @@ def materialize_result_artifact(
     if status not in VALID_RESULT_STATUSES:
         raise FixtureRunError(f"status must be one of {sorted(VALID_RESULT_STATUSES)}")
     observations = parse_metric_log(log_path)
-    artifact = build_result_artifact(fixture, observations, status, log_path)
+    artifact = build_result_artifact(
+        fixture,
+        observations,
+        status,
+        log_path,
+        manifest_path,
+        manifest_schema_version,
+    )
     output_path = output if output is not None else default_output_path(fixture)
     if not output_path.is_absolute():
         output_path = ROOT / output_path
@@ -106,7 +115,14 @@ def run_fixture(
         log_dir = ROOT / log_dir
     log_path = default_log_path(fixture, log_dir)
     run_fixture_command(command, log_path, echo=echo)
-    artifact, output_path = materialize_result_artifact(fixture, log_path, output, status)
+    artifact, output_path = materialize_result_artifact(
+        fixture,
+        manifest_path,
+        manifest.get("schema_version"),
+        log_path,
+        output,
+        status,
+    )
     return {
         "fixture_id": artifact["fixture_id"],
         "backend": artifact["backend"],
@@ -136,6 +152,7 @@ def self_test() -> int:
         manifest_path.write_text(
             json.dumps(
                 {
+                    "schema_version": 1,
                     "fixtures": [
                         {
                             "id": "runner_fixture",
@@ -166,6 +183,9 @@ def self_test() -> int:
             result.get("fixture_id") != "runner_fixture"
             or result.get("backend") != "cuda"
             or result.get("status") != "passed"
+            or result.get("manifest") != str(manifest_path)
+            or result.get("manifest_schema_version") != 1
+            or not isinstance(result.get("fixture_spec_sha256"), str)
             or result.get("hardware") != "fixture hardware"
             or result.get("source") != str(bench_script)
             or result.get("command") != f"{sys.executable} {bench_script}"

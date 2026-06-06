@@ -12,6 +12,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from write_backend_latency_result_artifact import fixture_spec_sha256, repo_relative_path
+
 
 ROOT = Path(__file__).resolve().parents[1]
 VALID_COMPARISONS = {"<=", ">="}
@@ -55,7 +57,12 @@ def rounded_threshold(value: float) -> float:
     return round(value, 6)
 
 
-def lock_fixture_thresholds(fixture: dict[str, Any], headroom: float) -> dict[str, Any]:
+def lock_fixture_thresholds(
+    fixture: dict[str, Any],
+    headroom: float,
+    manifest_schema_version: Any,
+    manifest_path: Path | None,
+) -> dict[str, Any]:
     fixture_id = fixture.get("id")
     backend = fixture.get("backend")
     if not isinstance(fixture_id, str) or not fixture_id:
@@ -81,6 +88,31 @@ def lock_fixture_thresholds(fixture: dict[str, Any], headroom: float) -> dict[st
         )
     if result.get("status") != "passed":
         raise ThresholdLockError(f"{fixture_id}.result_artifact.status must be passed")
+    manifest = result.get("manifest")
+    if not isinstance(manifest, str) or not manifest:
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.manifest must be a non-empty string"
+        )
+    if manifest_path is not None and manifest != repo_relative_path(manifest_path):
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.manifest must be {repo_relative_path(manifest_path)!r}, got {manifest!r}"
+        )
+    if result.get("manifest_schema_version") != manifest_schema_version:
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.manifest_schema_version must be {manifest_schema_version!r}, got {result.get('manifest_schema_version')!r}"
+        )
+    expected_fixture_digest = fixture_spec_sha256(fixture)
+    observed_fixture_digest = result.get("fixture_spec_sha256")
+    if not isinstance(observed_fixture_digest, str) or not CHECKSUM_RE.match(
+        observed_fixture_digest
+    ):
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.fixture_spec_sha256 must be a lowercase sha256 hex digest"
+        )
+    if observed_fixture_digest != expected_fixture_digest:
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.fixture_spec_sha256 must be {expected_fixture_digest!r}, got {observed_fixture_digest!r}"
+        )
     for key in ["hardware", "source", "command"]:
         if result.get(key) != fixture.get(key):
             raise ThresholdLockError(
@@ -127,7 +159,11 @@ def lock_fixture_thresholds(fixture: dict[str, Any], headroom: float) -> dict[st
     return locked
 
 
-def lock_manifest_thresholds(manifest: dict[str, Any], headroom: float) -> dict[str, Any]:
+def lock_manifest_thresholds(
+    manifest: dict[str, Any],
+    headroom: float,
+    manifest_path: Path | None = None,
+) -> dict[str, Any]:
     if not 0.0 <= headroom < 1.0:
         raise ThresholdLockError("--headroom must be >= 0 and < 1")
 
@@ -139,7 +175,15 @@ def lock_manifest_thresholds(manifest: dict[str, Any], headroom: float) -> dict[
         raise ThresholdLockError("missing_fixture_slots must be empty before thresholds can lock")
 
     locked = deepcopy(manifest)
-    locked["fixtures"] = [lock_fixture_thresholds(fixture, headroom) for fixture in fixtures]
+    locked["fixtures"] = [
+        lock_fixture_thresholds(
+            fixture,
+            headroom,
+            manifest.get("schema_version"),
+            manifest_path,
+        )
+        for fixture in fixtures
+    ]
     locked["status"] = "covered"
     return locked
 
@@ -159,6 +203,8 @@ def self_test() -> int:
                     "fixture_id": "fixture",
                     "backend": "cuda",
                     "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
                     "hardware": "fixture hardware",
                     "source": "bench.py",
                     "command": "python bench.py",
@@ -193,6 +239,9 @@ def self_test() -> int:
             ],
             "missing_fixture_slots": [],
         }
+        result = json.loads(result_path.read_text())
+        result["fixture_spec_sha256"] = fixture_spec_sha256(manifest["fixtures"][0])
+        result_path.write_text(json.dumps(result))
         locked = lock_manifest_thresholds(manifest, 0.10)
         metrics = locked["fixtures"][0]["metrics"]
         if locked["status"] != "covered" or locked["fixtures"][0]["threshold_state"] != "locked_threshold":
@@ -208,6 +257,9 @@ def self_test() -> int:
                     "fixture_id": "fixture",
                     "backend": "cuda",
                     "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": fixture_spec_sha256(manifest["fixtures"][0]),
                     "hardware": "fixture hardware",
                     "source": "bench.py",
                     "command": "python bench.py",
@@ -225,6 +277,34 @@ def self_test() -> int:
                 return 1
         else:
             print(json.dumps({"ok": False, "case": "missing metric did not fail"}))
+            return 1
+
+        result_path.write_text(
+            json.dumps(
+                {
+                    "fixture_id": "fixture",
+                    "backend": "cuda",
+                    "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": "1" * 64,
+                    "hardware": "fixture hardware",
+                    "source": "bench.py",
+                    "command": "python bench.py",
+                    "raw_log": "bench.log",
+                    "raw_log_sha256": "0" * 64,
+                    "metrics": {"latency_ms": 10.0, "tokens_per_s": 200.0},
+                }
+            )
+        )
+        try:
+            lock_manifest_thresholds(manifest, 0.10)
+        except ThresholdLockError as exc:
+            if "fixture_spec_sha256" not in str(exc):
+                print(json.dumps({"ok": False, "case": "fixture digest", "error": str(exc)}))
+                return 1
+        else:
+            print(json.dumps({"ok": False, "case": "fixture digest did not fail"}))
             return 1
 
     print(json.dumps({"ok": True, "self_test": "backend latency threshold locker"}))
@@ -278,7 +358,7 @@ def main() -> int:
 
     try:
         manifest = load_json(manifest_path, "manifest")
-        locked = lock_manifest_thresholds(manifest, args.headroom)
+        locked = lock_manifest_thresholds(manifest, args.headroom, manifest_path)
         if not args.check:
             write_manifest(output_path, locked)
     except ThresholdLockError as exc:

@@ -12,6 +12,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from write_backend_latency_result_artifact import fixture_spec_sha256, repo_relative_path
+
 
 ROOT = Path(__file__).resolve().parents[1]
 VALID_BACKENDS = {"cuda", "rocm", "metal", "vulkan"}
@@ -79,7 +81,35 @@ def validate_result_provenance(
     fixture: dict[str, Any],
     result: dict[str, Any],
     context: str,
+    manifest_schema_version: Any,
+    manifest_path: Path | None,
 ) -> None:
+    manifest = result.get("manifest")
+    if not isinstance(manifest, str) or not manifest:
+        errors.append(f"{context}.result_artifact.manifest must be a non-empty string")
+    elif manifest_path is not None and manifest != repo_relative_path(manifest_path):
+        errors.append(
+            f"{context}.result_artifact.manifest must be {repo_relative_path(manifest_path)!r}, got {manifest!r}"
+        )
+
+    if result.get("manifest_schema_version") != manifest_schema_version:
+        errors.append(
+            f"{context}.result_artifact.manifest_schema_version must be {manifest_schema_version!r}, got {result.get('manifest_schema_version')!r}"
+        )
+
+    expected_fixture_digest = fixture_spec_sha256(fixture)
+    observed_fixture_digest = result.get("fixture_spec_sha256")
+    if not isinstance(observed_fixture_digest, str) or not CHECKSUM_RE.match(
+        observed_fixture_digest
+    ):
+        errors.append(
+            f"{context}.result_artifact.fixture_spec_sha256 must be a lowercase sha256 hex digest"
+        )
+    elif observed_fixture_digest != expected_fixture_digest:
+        errors.append(
+            f"{context}.result_artifact.fixture_spec_sha256 must be {expected_fixture_digest!r}, got {observed_fixture_digest!r}"
+        )
+
     for key in ["hardware", "source", "command"]:
         expected = fixture.get(key)
         observed = result.get(key)
@@ -119,6 +149,8 @@ def validate_result_artifact(
     fixture: dict[str, Any],
     result_path: Path,
     context: str,
+    manifest_schema_version: Any,
+    manifest_path: Path | None,
 ) -> None:
     try:
         result = json.loads(result_path.read_text())
@@ -144,7 +176,14 @@ def validate_result_artifact(
     elif status != "passed":
         errors.append(f"{context}.result_artifact.status must be passed")
 
-    validate_result_provenance(errors, fixture, result, context)
+    validate_result_provenance(
+        errors,
+        fixture,
+        result,
+        context,
+        manifest_schema_version,
+        manifest_path,
+    )
 
     observed_metrics = result.get("metrics")
     if not isinstance(observed_metrics, dict):
@@ -169,7 +208,11 @@ def validate_result_artifact(
             )
 
 
-def validate_manifest(manifest: dict[str, Any], require_covered: bool) -> list[str]:
+def validate_manifest(
+    manifest: dict[str, Any],
+    require_covered: bool,
+    manifest_path: Path | None = None,
+) -> list[str]:
     errors: list[str] = []
 
     if manifest.get("schema_version") != 1:
@@ -258,7 +301,14 @@ def validate_manifest(manifest: dict[str, Any], require_covered: bool) -> list[s
                 )
 
         if require_covered and result_exists:
-            validate_result_artifact(errors, fixture, result_path, context)
+            validate_result_artifact(
+                errors,
+                fixture,
+                result_path,
+                context,
+                manifest.get("schema_version"),
+                manifest_path,
+            )
 
     missing_fixture_slots = manifest.get("missing_fixture_slots", [])
     if not isinstance(missing_fixture_slots, list):
@@ -324,6 +374,9 @@ def self_test() -> int:
                     "fixture_id": "cuda_fixture",
                     "backend": "cuda",
                     "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": fixture_spec_sha256(fixture),
                     "hardware": "fixture",
                     "source": str(source.relative_to(ROOT))
                     if source.is_relative_to(ROOT)
@@ -336,7 +389,7 @@ def self_test() -> int:
             )
         )
         errors: list[str] = []
-        validate_result_artifact(errors, fixture, artifact, "fixtures[0]")
+        validate_result_artifact(errors, fixture, artifact, "fixtures[0]", 1, None)
         if errors:
             print(
                 json.dumps(
@@ -352,6 +405,9 @@ def self_test() -> int:
                     "fixture_id": "cuda_fixture",
                     "backend": "cuda",
                     "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": fixture_spec_sha256(fixture),
                     "hardware": "fixture",
                     "source": str(source.relative_to(ROOT))
                     if source.is_relative_to(ROOT)
@@ -364,7 +420,7 @@ def self_test() -> int:
             )
         )
         errors = []
-        validate_result_artifact(errors, fixture, artifact, "fixtures[0]")
+        validate_result_artifact(errors, fixture, artifact, "fixtures[0]", 1, None)
         if not any("does not satisfy <= 10.0" in error for error in errors):
             print(
                 json.dumps(
@@ -380,6 +436,9 @@ def self_test() -> int:
                     "fixture_id": "wrong",
                     "backend": "cuda",
                     "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": fixture_spec_sha256(fixture),
                     "hardware": "fixture",
                     "source": str(source.relative_to(ROOT))
                     if source.is_relative_to(ROOT)
@@ -392,7 +451,7 @@ def self_test() -> int:
             )
         )
         errors = []
-        validate_result_artifact(errors, fixture, artifact, "fixtures[0]")
+        validate_result_artifact(errors, fixture, artifact, "fixtures[0]", 1, None)
         if not any("fixture_id must be" in error for error in errors):
             print(
                 json.dumps(
@@ -408,6 +467,9 @@ def self_test() -> int:
                     "fixture_id": "cuda_fixture",
                     "backend": "cuda",
                     "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": fixture_spec_sha256(fixture),
                     "hardware": "wrong",
                     "source": str(source.relative_to(ROOT))
                     if source.is_relative_to(ROOT)
@@ -420,11 +482,44 @@ def self_test() -> int:
             )
         )
         errors = []
-        validate_result_artifact(errors, fixture, artifact, "fixtures[0]")
+        validate_result_artifact(errors, fixture, artifact, "fixtures[0]", 1, None)
         if not any("hardware must be" in error for error in errors):
             print(
                 json.dumps(
                     {"ok": False, "case": "provenance mismatch", "errors": errors},
+                    indent=2,
+                )
+            )
+            return 1
+
+        stale_fixture = dict(fixture)
+        stale_fixture["command"] = "cargo bench --different"
+        artifact.write_text(
+            json.dumps(
+                {
+                    "fixture_id": "cuda_fixture",
+                    "backend": "cuda",
+                    "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": fixture_spec_sha256(stale_fixture),
+                    "hardware": "fixture",
+                    "source": str(source.relative_to(ROOT))
+                    if source.is_relative_to(ROOT)
+                    else str(source),
+                    "command": "cargo bench",
+                    "raw_log": str(raw_log),
+                    "raw_log_sha256": raw_log_sha256,
+                    "metrics": {"latency_ms": 9.5, "tokens_per_s": 125.0},
+                }
+            )
+        )
+        errors = []
+        validate_result_artifact(errors, fixture, artifact, "fixtures[0]", 1, None)
+        if not any("fixture_spec_sha256 must be" in error for error in errors):
+            print(
+                json.dumps(
+                    {"ok": False, "case": "fixture spec mismatch", "errors": errors},
                     indent=2,
                 )
             )
@@ -462,7 +557,7 @@ def main() -> int:
         manifest_path = ROOT / manifest_path
 
     manifest = json.loads(manifest_path.read_text())
-    errors = validate_manifest(manifest, args.require_covered)
+    errors = validate_manifest(manifest, args.require_covered, manifest_path)
     if errors:
         print(json.dumps({"ok": False, "errors": errors}, indent=2), file=sys.stderr)
         return 1

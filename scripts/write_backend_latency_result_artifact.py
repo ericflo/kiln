@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 METRIC_RE = re.compile(r"^\s*KILN_LATENCY_METRIC\s+(\S+)\s+([-+0-9.eE]+)\s+(\S+)\s*$")
 VALID_RESULT_STATUSES = {"passed", "failed"}
 CHECKSUM_RE = re.compile(r"^[0-9a-f]{64}$")
+FIXTURE_DIGEST_METRIC_FIELDS = ["name", "unit", "comparison"]
 
 
 class ArtifactError(Exception):
@@ -96,13 +97,64 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def fixture_provenance(fixture: dict[str, Any], log_path: Path) -> dict[str, Any]:
+def repo_relative_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def fixture_digest_spec(fixture: dict[str, Any]) -> dict[str, Any]:
+    metric_specs: list[dict[str, Any]] = []
+    metrics = fixture.get("metrics")
+    if not isinstance(metrics, list) or not metrics:
+        raise ArtifactError("fixture.metrics must be a non-empty array")
+    for index, metric in enumerate(metrics):
+        if not isinstance(metric, dict):
+            raise ArtifactError(f"fixture.metrics[{index}] must be an object")
+        metric_specs.append(
+            {field: metric.get(field) for field in FIXTURE_DIGEST_METRIC_FIELDS}
+        )
+
+    spec: dict[str, Any] = {
+        "id": fixture.get("id"),
+        "backend": fixture.get("backend"),
+        "hardware": fixture.get("hardware"),
+        "source": fixture.get("source"),
+        "command": fixture.get("command"),
+        "metrics": metric_specs,
+    }
+    if "selected_cases" in fixture:
+        spec["selected_cases"] = fixture.get("selected_cases")
+    return spec
+
+
+def fixture_spec_sha256(fixture: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        fixture_digest_spec(fixture),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def fixture_provenance(
+    fixture: dict[str, Any],
+    log_path: Path,
+    manifest_path: Path,
+    manifest_schema_version: int,
+) -> dict[str, Any]:
     provenance: dict[str, Any] = {}
     for key in ["hardware", "source", "command"]:
         value = fixture.get(key)
         if not isinstance(value, str) or not value:
             raise ArtifactError(f"fixture.{key} must be a non-empty string")
         provenance[key] = value
+    if not isinstance(manifest_schema_version, int):
+        raise ArtifactError("manifest.schema_version must be an integer")
+    provenance["manifest"] = repo_relative_path(manifest_path)
+    provenance["manifest_schema_version"] = manifest_schema_version
+    provenance["fixture_spec_sha256"] = fixture_spec_sha256(fixture)
     provenance["raw_log"] = str(log_path)
     provenance["raw_log_sha256"] = sha256_file(log_path)
     return provenance
@@ -113,6 +165,8 @@ def build_result_artifact(
     observations: dict[str, tuple[float, str]],
     status: str,
     log_path: Path,
+    manifest_path: Path,
+    manifest_schema_version: int,
 ) -> dict[str, Any]:
     if status not in VALID_RESULT_STATUSES:
         raise ArtifactError(f"status must be one of {sorted(VALID_RESULT_STATUSES)}")
@@ -150,7 +204,7 @@ def build_result_artifact(
         "fixture_id": fixture_id,
         "backend": backend,
         "status": status,
-        **fixture_provenance(fixture, log_path),
+        **fixture_provenance(fixture, log_path, manifest_path, manifest_schema_version),
         "metrics": artifact_metrics,
     }
 
@@ -175,6 +229,7 @@ def self_test() -> int:
         log_path = tmp_root / "bench.log"
         output_path = tmp_root / "result.json"
         manifest = {
+            "schema_version": 1,
             "fixtures": [
                 {
                     "id": "cuda_fixture",
@@ -205,13 +260,23 @@ def self_test() -> int:
         loaded = load_manifest(manifest_path)
         fixture = find_fixture(loaded, "cuda_fixture")
         observations = parse_metric_log(log_path)
-        artifact = build_result_artifact(fixture, observations, "passed", log_path)
+        artifact = build_result_artifact(
+            fixture,
+            observations,
+            "passed",
+            log_path,
+            manifest_path,
+            loaded["schema_version"],
+        )
         write_artifact(output_path, artifact)
         written = json.loads(output_path.read_text())
         if (
             written.get("fixture_id") != "cuda_fixture"
             or written.get("backend") != "cuda"
             or written.get("status") != "passed"
+            or written.get("manifest") != str(manifest_path)
+            or written.get("manifest_schema_version") != 1
+            or not CHECKSUM_RE.match(written.get("fixture_spec_sha256", ""))
             or written.get("hardware") != "fixture hardware"
             or written.get("source") != "bench.rs"
             or written.get("command") != "python bench.py"
@@ -234,6 +299,8 @@ def self_test() -> int:
                 {"latency_ms": (9.5, "ms")},
                 "passed",
                 log_path,
+                manifest_path,
+                loaded["schema_version"],
             )
         except ArtifactError as exc:
             if "missing required metrics" not in str(exc):
@@ -249,6 +316,8 @@ def self_test() -> int:
                 {"latency_ms": (9.5, "s"), "tokens_per_s": (125.0, "tok/s")},
                 "passed",
                 log_path,
+                manifest_path,
+                loaded["schema_version"],
             )
         except ArtifactError as exc:
             if "metric unit mismatch" not in str(exc):
@@ -306,7 +375,14 @@ def main() -> int:
         manifest = load_manifest(manifest_path)
         fixture = find_fixture(manifest, args.fixture_id)
         observations = parse_metric_log(log_path)
-        artifact = build_result_artifact(fixture, observations, args.status, log_path)
+        artifact = build_result_artifact(
+            fixture,
+            observations,
+            args.status,
+            log_path,
+            manifest_path,
+            manifest.get("schema_version"),
+        )
         output_path = Path(args.output) if args.output else default_output_path(fixture)
         if not output_path.is_absolute():
             output_path = ROOT / output_path

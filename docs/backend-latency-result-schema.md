@@ -32,6 +32,9 @@ The result artifact is JSON:
   "fixture_id": "metal_apple_silicon_matmul_qwen35_4b",
   "backend": "metal",
   "status": "passed",
+  "manifest": "docs/backend-latency-fixtures.json",
+  "manifest_schema_version": 1,
+  "fixture_spec_sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
   "hardware": "Apple Silicon Metal fixture",
   "source": "crates/kiln-tensor/tests/metal_matmul_bench.rs",
   "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features metal --test metal_matmul_bench -- --ignored --nocapture",
@@ -48,6 +51,13 @@ Required fields:
 - `fixture_id`: exactly matches the fixture `id`
 - `backend`: exactly matches the fixture `backend`
 - `status`: `passed`
+- `manifest`: non-empty manifest path; checked against the validator input path
+  when available
+- `manifest_schema_version`: exactly matches the fixture manifest
+  `schema_version`
+- `fixture_spec_sha256`: lowercase SHA-256 hex digest of the stable fixture
+  definition (`id`, `backend`, `hardware`, `source`, `command`, metric
+  `name`/`unit`/`comparison`, and `selected_cases` when present)
 - `hardware`: exactly matches the fixture `hardware`
 - `source`: exactly matches the fixture `source`
 - `command`: exactly matches the fixture `command`
@@ -57,6 +67,12 @@ Required fields:
 
 When the referenced `raw_log` file is present in the checkout, the validator
 also checks that its SHA-256 digest matches `raw_log_sha256`.
+
+The fixture digest deliberately excludes metric `max`, `threshold_state`, and
+`result_artifact` so a reviewed artifact remains valid while thresholds are
+locked from pending to covered. Changing the command, hardware label, source,
+metric identities, units, comparisons, or selected cases requires a fresh
+hardware artifact.
 
 For each fixture metric, the observed value must be numeric and satisfy its
 comparison against `max`. For example, `comparison: "<="` requires observed
@@ -109,7 +125,8 @@ python3 scripts/lock_backend_latency_thresholds.py \
 ```
 
 The threshold locker requires every fixture result artifact to exist, have
-`status: "passed"`, match the fixture `id` and `backend`, and contain every
+`status: "passed"`, match the fixture `id`, `backend`, manifest schema version,
+stable fixture digest, hardware/source/command provenance, and contain every
 declared metric. It sets every fixture `threshold_state` to `locked_threshold`,
 sets the manifest `status` to `covered`, and applies the headroom by comparison:
 `<=` thresholds are raised above observed latency, while `>=` thresholds are
