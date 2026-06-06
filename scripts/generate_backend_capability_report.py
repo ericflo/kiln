@@ -87,6 +87,7 @@ CAPABILITY_DESCRIPTOR_STRUCTS = [
     "DecodeBatcherPolicy",
     "BackendTrainingCapabilities",
     "ReplayCapabilities",
+    "ReplayAuthority",
     "BackendFallbackCapabilities",
 ]
 

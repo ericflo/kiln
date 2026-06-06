@@ -36,7 +36,7 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `ResidencyBackend` | 18 | `blanket_backend_runtime` | `runtime_assemble_gdn_recurrent_resident_batch_rows`, `runtime_assemble_linear_attn_gdn_state_batch_kt`, `runtime_enter_gdn_recurrent_resident_state_scope`, `runtime_evict_gdn_recurrent_resident_state`, `runtime_evict_resident_activation`, `runtime_exit_gdn_recurrent_resident_state_scope`, `runtime_has_gdn_recurrent_resident_state`, `runtime_has_linear_attn_gdn_state_kt`, `runtime_has_resident_activation`, `runtime_materialize_gdn_recurrent_resident_state`, `runtime_register_resident_activation`, `runtime_resident_activation_resource`, `runtime_resolve_resident_activation`, `runtime_scatter_gdn_recurrent_resident_batch_rows`, `runtime_scatter_linear_attn_gdn_state_batch_kt`, `runtime_seed_linear_attn_gdn_state_kt`, `runtime_supports_resident_activation`, `runtime_update_resident_activation` |
 | `OptimizerBackend` | 2 | `blanket_backend_runtime` | `runtime_dispatch_adamw_step`, `runtime_dispatch_sgd_step` |
 | `TrainingLossBackend` | 2 | `blanket_backend_runtime` | `runtime_training_capabilities`, `runtime_training_precision_policy` |
-| `ReplayBackend` | 5 | `blanket_backend_runtime` | `runtime_decode_resident_pool_ready`, `runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs`, `runtime_replay_key_for_request`, `runtime_supports_replay_request`, `runtime_supports_resident_decode` |
+| `ReplayBackend` | 6 | `blanket_backend_runtime` | `runtime_decode_resident_pool_ready`, `runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs`, `runtime_replay_authority`, `runtime_replay_key_for_request`, `runtime_supports_replay_request`, `runtime_supports_resident_decode` |
 
 ## Replay Authority
 
@@ -155,7 +155,8 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `DecodeCapabilities` | 6 | `resident_decode`, `paged_decode_graph_outputs`, `linear_argmax`, `linear_argmax_batch`, `linear_sample`, `linear_sample_batch` |
 | `DecodeBatcherPolicy` | 3 | `max_batch`, `wait_micros`, `allow_mixed_seq_lens` |
 | `BackendTrainingCapabilities` | 2 | `hooks`, `precision` |
-| `ReplayCapabilities` | 2 | `resident_decode`, `paged_decode_graph_outputs` |
+| `ReplayCapabilities` | 3 | `resident_decode`, `paged_decode_graph_outputs`, `authority` |
+| `ReplayAuthority` | 4 | `backend`, `production_authority`, `native_primitive`, `graph_crate_role` |
 | `BackendFallbackCapabilities` | 3 | `generic_device_op`, `decode_hot_path`, `training_optimizer` |
 
 ## Resident Resource Descriptors

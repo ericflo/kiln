@@ -780,6 +780,125 @@ pub struct DecodeBatcherPolicy {
 pub struct ReplayCapabilities {
     pub resident_decode: Support,
     pub paged_decode_graph_outputs: Support,
+    pub authority: ReplayAuthority,
+}
+
+/// Which layer currently owns production replay behavior for a backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReplayProductionAuthority {
+    None,
+    ModelLevelRunner,
+    ModelLevelRunnerWithGraphCrateReplayObject,
+    ResidentDecodeCommandBatch,
+}
+
+impl ReplayProductionAuthority {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::ModelLevelRunner => "model_level_runner",
+            Self::ModelLevelRunnerWithGraphCrateReplayObject => {
+                "model_level_runner_with_graph_crate_replay_object"
+            }
+            Self::ResidentDecodeCommandBatch => "resident_decode_command_batch",
+        }
+    }
+}
+
+/// Native backend replay primitive used by production decode replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReplayNativePrimitive {
+    None,
+    CudaGraph,
+    HipGraph,
+    MetalIcb,
+    VulkanCommandBatch,
+}
+
+impl ReplayNativePrimitive {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::CudaGraph => "CUDA graph",
+            Self::HipGraph => "HIP graph",
+            Self::MetalIcb => "Metal ICB",
+            Self::VulkanCommandBatch => "Vulkan CommandBatch",
+        }
+    }
+}
+
+/// Role played by the `kiln-graph-*` crate for a backend today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReplayGraphCrateRole {
+    None,
+    Scaffold,
+    ReplayObject,
+    ResidentPlanScaffold,
+}
+
+impl ReplayGraphCrateRole {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Scaffold => "scaffold",
+            Self::ReplayObject => "replay_object",
+            Self::ResidentPlanScaffold => "resident_plan_scaffold",
+        }
+    }
+}
+
+/// Typed replay authority boundary for runtime diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ReplayAuthority {
+    pub backend: kiln_tensor::Backend,
+    pub production_authority: ReplayProductionAuthority,
+    pub native_primitive: ReplayNativePrimitive,
+    pub graph_crate_role: ReplayGraphCrateRole,
+}
+
+impl ReplayAuthority {
+    pub fn for_backend(name: &str, device: kiln_tensor::Device) -> Self {
+        let backend = backend_kind_for_runtime(name, device);
+        let (production_authority, native_primitive, graph_crate_role) = match backend {
+            kiln_tensor::Backend::Cuda => (
+                ReplayProductionAuthority::ModelLevelRunner,
+                ReplayNativePrimitive::CudaGraph,
+                ReplayGraphCrateRole::Scaffold,
+            ),
+            kiln_tensor::Backend::Rocm => (
+                ReplayProductionAuthority::ModelLevelRunner,
+                ReplayNativePrimitive::HipGraph,
+                ReplayGraphCrateRole::None,
+            ),
+            kiln_tensor::Backend::Metal => (
+                ReplayProductionAuthority::ModelLevelRunnerWithGraphCrateReplayObject,
+                ReplayNativePrimitive::MetalIcb,
+                ReplayGraphCrateRole::ReplayObject,
+            ),
+            kiln_tensor::Backend::Vulkan => (
+                ReplayProductionAuthority::ResidentDecodeCommandBatch,
+                ReplayNativePrimitive::VulkanCommandBatch,
+                ReplayGraphCrateRole::ResidentPlanScaffold,
+            ),
+            kiln_tensor::Backend::Cpu => (
+                ReplayProductionAuthority::None,
+                ReplayNativePrimitive::None,
+                ReplayGraphCrateRole::None,
+            ),
+            _ => (
+                ReplayProductionAuthority::None,
+                ReplayNativePrimitive::None,
+                ReplayGraphCrateRole::None,
+            ),
+        };
+
+        Self {
+            backend,
+            production_authority,
+            native_primitive,
+            graph_crate_role,
+        }
+    }
 }
 
 /// Backend fallback policy surface used by hot-path callers and diagnostics.
@@ -994,6 +1113,7 @@ impl BackendCapabilities {
                     backend,
                     &paged_replay,
                 ),
+                authority: ReplayBackend::runtime_replay_authority(backend),
             },
             fallback: BackendFallbackCapabilities::for_backend(name, device),
         }
@@ -1212,4 +1332,59 @@ impl<T> BackendCapabilityQueries for T where
         + TrainingLossBackend
         + ?Sized
 {
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replay_authority_maps_backends_to_native_primitives() {
+        for (name, device, production_authority, primitive, graph_crate_role) in [
+            (
+                "cpu",
+                kiln_tensor::Device::Cpu,
+                ReplayProductionAuthority::None,
+                ReplayNativePrimitive::None,
+                ReplayGraphCrateRole::None,
+            ),
+            (
+                "cuda",
+                kiln_tensor::Device::Cuda(0),
+                ReplayProductionAuthority::ModelLevelRunner,
+                ReplayNativePrimitive::CudaGraph,
+                ReplayGraphCrateRole::Scaffold,
+            ),
+            (
+                "rocm",
+                kiln_tensor::Device::Rocm(0),
+                ReplayProductionAuthority::ModelLevelRunner,
+                ReplayNativePrimitive::HipGraph,
+                ReplayGraphCrateRole::None,
+            ),
+            (
+                "metal",
+                kiln_tensor::Device::Metal(0),
+                ReplayProductionAuthority::ModelLevelRunnerWithGraphCrateReplayObject,
+                ReplayNativePrimitive::MetalIcb,
+                ReplayGraphCrateRole::ReplayObject,
+            ),
+            (
+                "vulkan",
+                kiln_tensor::Device::Vulkan(0),
+                ReplayProductionAuthority::ResidentDecodeCommandBatch,
+                ReplayNativePrimitive::VulkanCommandBatch,
+                ReplayGraphCrateRole::ResidentPlanScaffold,
+            ),
+        ] {
+            let authority = ReplayAuthority::for_backend(name, device);
+            assert_eq!(authority.backend, device.backend());
+            assert_eq!(authority.production_authority, production_authority);
+            assert_eq!(authority.native_primitive, primitive);
+            assert_eq!(authority.graph_crate_role, graph_crate_role);
+            assert_ne!(authority.native_primitive.label(), "");
+            assert_ne!(authority.production_authority.label(), "");
+            assert_ne!(authority.graph_crate_role.label(), "");
+        }
+    }
 }

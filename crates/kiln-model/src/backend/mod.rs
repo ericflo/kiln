@@ -2179,6 +2179,8 @@ pub trait ReplayBackend: Send + Sync + std::fmt::Debug {
         req: &capability::ReplayRequest,
     ) -> kiln_graph::ReplayKey;
 
+    fn runtime_replay_authority(&self) -> capability::ReplayAuthority;
+
     fn runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
         &self,
         q: &kiln_tensor::Tensor,
@@ -3196,6 +3198,13 @@ impl<T: BackendRuntime + ?Sized> ReplayBackend for T {
         req.replay_key(BackendIdentity::runtime_device(self).backend())
     }
 
+    fn runtime_replay_authority(&self) -> capability::ReplayAuthority {
+        capability::ReplayAuthority::for_backend(
+            BackendIdentity::runtime_name(self),
+            BackendIdentity::runtime_device(self),
+        )
+    }
+
     fn runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
         &self,
         q: &kiln_tensor::Tensor,
@@ -4035,6 +4044,14 @@ mod tests {
             ReplayBackend::runtime_replay_key_for_request(backend, &replay_req),
             capability::BackendCapabilityQueries::replay_key_for_request(backend, &replay_req),
             "replay_key_for_request"
+        );
+        assert_forwards!(
+            ReplayBackend::runtime_replay_authority(backend),
+            capability::ReplayAuthority::for_backend(
+                BackendRuntime::name(backend),
+                BackendRuntime::device(backend),
+            ),
+            "replay_authority"
         );
 
         assert_forwards!(

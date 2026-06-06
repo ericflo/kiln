@@ -1132,11 +1132,39 @@ fn generated_capability_report_lists_request_descriptors() {
         "DecodeBatcherPolicy",
         "BackendTrainingCapabilities",
         "ReplayCapabilities",
+        "ReplayAuthority",
         "BackendFallbackCapabilities",
     ] {
         assert!(
             capability_descriptors.contains_key(name),
             "{name} should be present in capability_descriptors"
+        );
+    }
+    let replay_capability_fields = capability_descriptors["ReplayCapabilities"]["fields"]
+        .as_array()
+        .expect("ReplayCapabilities fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        replay_capability_fields.contains(&"authority"),
+        "ReplayCapabilities should expose typed replay authority"
+    );
+    let replay_authority_fields = capability_descriptors["ReplayAuthority"]["fields"]
+        .as_array()
+        .expect("ReplayAuthority fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
+    for field in [
+        "backend",
+        "production_authority",
+        "native_primitive",
+        "graph_crate_role",
+    ] {
+        assert!(
+            replay_authority_fields.contains(&field),
+            "ReplayAuthority should include {field}"
         );
     }
 
@@ -1524,6 +1552,7 @@ fn capability_queries_consume_focused_backend_facets() {
         "SamplingBackend::runtime_supports_linear_decode_argmax",
         "ReplayBackend::runtime_supports_replay_request",
         "ReplayBackend::runtime_replay_key_for_request",
+        "ReplayBackend::runtime_replay_authority",
     ] {
         assert!(
             capability_source.contains(required),

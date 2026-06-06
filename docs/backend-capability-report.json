@@ -1663,8 +1663,30 @@
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
+    "ReplayAuthority": {
+      "field_count": 4,
+      "fields": [
+        {
+          "name": "backend",
+          "type": "kiln_tensor::Backend"
+        },
+        {
+          "name": "production_authority",
+          "type": "ReplayProductionAuthority"
+        },
+        {
+          "name": "native_primitive",
+          "type": "ReplayNativePrimitive"
+        },
+        {
+          "name": "graph_crate_role",
+          "type": "ReplayGraphCrateRole"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
     "ReplayCapabilities": {
-      "field_count": 2,
+      "field_count": 3,
       "fields": [
         {
           "name": "resident_decode",
@@ -1673,6 +1695,10 @@
         {
           "name": "paged_decode_graph_outputs",
           "type": "Support"
+        },
+        {
+          "name": "authority",
+          "type": "ReplayAuthority"
         }
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"
@@ -2278,10 +2304,11 @@
     },
     "ReplayBackend": {
       "forwarding_impl": "blanket_backend_runtime",
-      "method_count": 5,
+      "method_count": 6,
       "methods": [
         "runtime_decode_resident_pool_ready",
         "runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs",
+        "runtime_replay_authority",
         "runtime_replay_key_for_request",
         "runtime_supports_replay_request",
         "runtime_supports_resident_decode"
