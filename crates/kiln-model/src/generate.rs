@@ -18,7 +18,7 @@ use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 
-use crate::backend::{self, BackendRuntime, FallbackPolicy};
+use crate::backend::{self, BackendRuntime, FallbackPolicy, TrainingLossBackend};
 use crate::cancel::CancelHandle;
 use crate::cuda_graph::CudaGraphRunner;
 use crate::decode_buffers::{DecodeBufferConfig, DecodeBuffers, DecodeElementType};
@@ -1610,7 +1610,7 @@ impl ModelRunner {
         // every other backend.
         let rocm_graph = RocmGraphRunner::new(&kt_device, true);
         let metal_graph = MetalGraphRunner::new(&kt_device, true);
-        let training_caps = backend.training_capabilities();
+        let training_caps = TrainingLossBackend::runtime_training_capabilities(backend.as_ref());
         tracing::info!(
             backend = backend.name(),
             projection_training = training_caps.projection_training,

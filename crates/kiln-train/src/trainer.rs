@@ -65,6 +65,7 @@ use kiln_flce_kernel::DEFAULT_CHUNK_SIZE;
 use kiln_model::backend::{
     self, BackendRuntime, FallbackPolicy, OptimizerBackend, ResidencyBackend,
 };
+use kiln_model::BackendCapabilityQueries;
 use kiln_model::forward::{
     GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, GqaAttentionPrepared, LinearAttentionState,
     gdn_attention_in_projections, gdn_attention_input_norm, gdn_attention_residual_block,
@@ -6684,31 +6685,14 @@ fn training_optimizer_debug_fallback_enabled(backend_name: &str) -> bool {
 
 fn training_optimizer_fallback_policy(
     backend: &dyn BackendRuntime,
-    device: kiln_tensor::Device,
+    _device: kiln_tensor::Device,
 ) -> FallbackPolicy {
-    let debug_fallback_enabled = training_optimizer_debug_fallback_enabled(backend.name());
-    training_optimizer_fallback_policy_for(backend.name(), device, debug_fallback_enabled)
-}
-
-fn training_optimizer_fallback_policy_for(
-    backend_name: &str,
-    device: kiln_tensor::Device,
-    debug_fallback_enabled: bool,
-) -> FallbackPolicy {
-    if debug_fallback_enabled {
+    if training_optimizer_debug_fallback_enabled(backend.name()) {
         return FallbackPolicy::WarnAndCount;
     }
-    match device {
-        kiln_tensor::Device::Cpu => FallbackPolicy::CorrectnessAllowed,
-        kiln_tensor::Device::Cuda(_)
-        | kiln_tensor::Device::Metal(_)
-        | kiln_tensor::Device::Vulkan(_)
-        | kiln_tensor::Device::Rocm(_) => match backend_name {
-            "cuda" | "metal" | "vulkan" | "rocm" => FallbackPolicy::NativeRequired,
-            _ => FallbackPolicy::ErrorInHotPath,
-        },
-        _ => FallbackPolicy::ErrorInHotPath,
-    }
+    BackendCapabilityQueries::backend_capabilities(backend)
+        .fallback
+        .training_optimizer
 }
 
 fn ensure_training_optimizer_fallback_allowed(
@@ -9021,7 +9005,8 @@ pub(crate) mod tests {
     #[test]
     fn training_optimizer_fallback_policy_defaults_to_native_required_on_gpus() {
         assert_eq!(
-            training_optimizer_fallback_policy_for("cpu", kiln_tensor::Device::Cpu, false),
+            kiln_model::BackendFallbackCapabilities::for_backend("cpu", kiln_tensor::Device::Cpu)
+                .training_optimizer,
             FallbackPolicy::CorrectnessAllowed
         );
         for (backend_name, device) in [
@@ -9031,7 +9016,8 @@ pub(crate) mod tests {
             ("rocm", kiln_tensor::Device::Rocm(0)),
         ] {
             assert_eq!(
-                training_optimizer_fallback_policy_for(backend_name, device, false),
+                kiln_model::BackendFallbackCapabilities::for_backend(backend_name, device)
+                    .training_optimizer,
                 FallbackPolicy::NativeRequired
             );
         }
@@ -9039,16 +9025,23 @@ pub(crate) mod tests {
 
     #[test]
     fn training_optimizer_debug_fallback_opt_in_warns_and_counts() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prior = std::env::var("KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK").ok();
+        unsafe {
+            std::env::set_var("KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK", "1");
+        }
         for (backend_name, device) in [
             ("cuda", kiln_tensor::Device::Cuda(0)),
             ("metal", kiln_tensor::Device::Metal(0)),
             ("vulkan", kiln_tensor::Device::Vulkan(0)),
             ("rocm", kiln_tensor::Device::Rocm(0)),
         ] {
-            let policy = training_optimizer_fallback_policy_for(backend_name, device, true);
+            let backend = NamedTestBackend::runtime(backend_name);
+            let policy = training_optimizer_fallback_policy(backend.as_ref(), device);
             assert_eq!(policy, FallbackPolicy::WarnAndCount);
             assert!(policy.allows_fallback());
         }
+        restore_env("KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK", prior);
     }
 
     fn restore_env(key: &str, prior: Option<String>) {

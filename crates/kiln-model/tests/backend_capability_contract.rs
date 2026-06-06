@@ -1579,6 +1579,56 @@ fn lora_residency_call_sites_consume_residency_backend_facet() {
 }
 
 #[test]
+fn training_policy_call_sites_consume_focused_capability_surfaces() {
+    let root = workspace_root();
+    let trainer_source = fs::read_to_string(root.join("crates/kiln-train/src/trainer.rs"))
+        .expect("trainer.rs should be readable");
+    let generate_source = fs::read_to_string(root.join("crates/kiln-model/src/generate.rs"))
+        .expect("generate.rs should be readable");
+
+    assert!(
+        trainer_source.contains("BackendCapabilityQueries"),
+        "trainer should import the request-shaped backend capability query surface"
+    );
+    assert!(
+        generate_source.contains("TrainingLossBackend"),
+        "ModelRunner should import the focused training loss/capability facet"
+    );
+
+    let trainer_policy_section = source_between(
+        &trainer_source,
+        "fn training_optimizer_fallback_policy(",
+        "fn ensure_training_optimizer_fallback_allowed(",
+    );
+    assert!(
+        trainer_policy_section.contains("BackendCapabilityQueries::backend_capabilities"),
+        "trainer optimizer fallback policy should come from the shared backend capability aggregate"
+    );
+    assert!(
+        !trainer_policy_section.contains("training_optimizer_fallback_policy_for"),
+        "trainer should not keep a duplicate backend-name fallback policy table"
+    );
+    assert!(
+        !trainer_policy_section.contains("match device"),
+        "trainer optimizer fallback policy should not branch directly on device kind"
+    );
+
+    let runner_new_section = source_between(
+        &generate_source,
+        "pub fn new_with_options(",
+        "// Phase A.5: registry + decode-buffer config",
+    );
+    assert!(
+        runner_new_section.contains("TrainingLossBackend::runtime_training_capabilities"),
+        "ModelRunner training capability logging should consume the focused training facet"
+    );
+    assert!(
+        !runner_new_section.contains("backend.training_capabilities()"),
+        "ModelRunner should not call the broad BackendRuntime training capability method directly"
+    );
+}
+
+#[test]
 fn generated_capability_report_gates_matmul_linear_contract() {
     let report_path = workspace_root().join("docs/backend-capability-report.json");
     let report: Value = serde_json::from_str(
