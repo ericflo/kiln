@@ -164,6 +164,27 @@ def lock_fixture_thresholds(
             raise ThresholdLockError(
                 f"{fixture_id}.result_artifact.{key} must be {fixture.get(key)!r}, got {result.get(key)!r}"
             )
+    source = fixture.get("source")
+    if not isinstance(source, str) or not source:
+        raise ThresholdLockError(f"{fixture_id}.source must be a non-empty string")
+    if not is_repo_relative_path(source):
+        raise ThresholdLockError(
+            f"{fixture_id}.source must be repo-relative before thresholds can lock"
+        )
+    source_path = resolve_repo_path(source)
+    if not source_path.is_file():
+        raise ThresholdLockError(
+            f"{fixture_id}.source must exist before thresholds can lock: {source}"
+        )
+    source_sha256 = result.get("source_sha256")
+    if not isinstance(source_sha256, str) or not CHECKSUM_RE.match(source_sha256):
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.source_sha256 must be a lowercase sha256 hex digest"
+        )
+    if sha256_file(source_path) != source_sha256:
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.source_sha256 does not match source"
+        )
     raw_log = result.get("raw_log")
     if not isinstance(raw_log, str) or not raw_log:
         raise ThresholdLockError(f"{fixture_id}.result_artifact.raw_log must be a non-empty string")
@@ -259,11 +280,15 @@ def self_test() -> int:
         tmp_root = Path(tmp)
         result_path = tmp_root / "result.json"
         raw_log_path = tmp_root / "bench.log"
+        source_path = tmp_root / "bench.py"
+        source_path.write_text("# latency fixture source\n")
         raw_log_path.write_text("KILN_LATENCY_METRIC latency_ms 10.0 ms\n")
         raw_log_sha256 = sha256_file(raw_log_path)
+        source_sha256 = sha256_file(source_path)
         created_at_utc = "2026-06-06T12:00:00Z"
         result_artifact_path = repo_relative_path(result_path)
         raw_log_artifact_path = repo_relative_path(raw_log_path)
+        source_artifact_path = repo_relative_path(source_path)
         result_path.write_text(
             json.dumps(
                 {
@@ -275,7 +300,8 @@ def self_test() -> int:
                     "manifest": "fixtures.json",
                     "manifest_schema_version": 1,
                     "hardware": "fixture hardware",
-                    "source": "bench.py",
+                    "source": source_artifact_path,
+                    "source_sha256": source_sha256,
                     "command": "python bench.py",
                     "raw_log": raw_log_artifact_path,
                     "raw_log_sha256": raw_log_sha256,
@@ -291,7 +317,7 @@ def self_test() -> int:
                     "id": "fixture",
                     "backend": "cuda",
                     "hardware": "fixture hardware",
-                    "source": "bench.py",
+                    "source": source_artifact_path,
                     "command": "python bench.py",
                     "result_artifact": result_artifact_path,
                     "threshold_state": "pending_fixture_result",
@@ -332,7 +358,8 @@ def self_test() -> int:
                     "manifest_schema_version": 1,
                     "fixture_spec_sha256": fixture_spec_sha256(manifest["fixtures"][0]),
                     "hardware": "fixture hardware",
-                    "source": "bench.py",
+                    "source": source_artifact_path,
+                    "source_sha256": source_sha256,
                     "command": "python bench.py",
                     "raw_log": raw_log_artifact_path,
                     "raw_log_sha256": raw_log_sha256,
@@ -362,7 +389,8 @@ def self_test() -> int:
                     "manifest_schema_version": 1,
                     "fixture_spec_sha256": "1" * 64,
                     "hardware": "fixture hardware",
-                    "source": "bench.py",
+                    "source": source_artifact_path,
+                    "source_sha256": source_sha256,
                     "command": "python bench.py",
                     "raw_log": raw_log_artifact_path,
                     "raw_log_sha256": raw_log_sha256,
@@ -392,7 +420,8 @@ def self_test() -> int:
                     "manifest_schema_version": 1,
                     "fixture_spec_sha256": fixture_spec_sha256(manifest["fixtures"][0]),
                     "hardware": "fixture hardware",
-                    "source": "bench.py",
+                    "source": source_artifact_path,
+                    "source_sha256": source_sha256,
                     "command": "python bench.py",
                     "raw_log": raw_log_artifact_path,
                     "raw_log_sha256": raw_log_sha256,
@@ -422,7 +451,8 @@ def self_test() -> int:
                     "manifest_schema_version": 1,
                     "fixture_spec_sha256": fixture_spec_sha256(manifest["fixtures"][0]),
                     "hardware": "fixture hardware",
-                    "source": "bench.py",
+                    "source": source_artifact_path,
+                    "source_sha256": source_sha256,
                     "command": "python bench.py",
                     "raw_log": raw_log_artifact_path,
                     "raw_log_sha256": raw_log_sha256,
@@ -452,7 +482,8 @@ def self_test() -> int:
                     "manifest_schema_version": 1,
                     "fixture_spec_sha256": fixture_spec_sha256(manifest["fixtures"][0]),
                     "hardware": "fixture hardware",
-                    "source": "bench.py",
+                    "source": source_artifact_path,
+                    "source_sha256": source_sha256,
                     "command": "python bench.py",
                     "raw_log": repo_relative_path(tmp_root / "missing.log"),
                     "raw_log_sha256": raw_log_sha256,
@@ -482,7 +513,8 @@ def self_test() -> int:
                     "manifest_schema_version": 1,
                     "fixture_spec_sha256": fixture_spec_sha256(manifest["fixtures"][0]),
                     "hardware": "fixture hardware",
-                    "source": "bench.py",
+                    "source": source_artifact_path,
+                    "source_sha256": source_sha256,
                     "command": "python bench.py",
                     "raw_log": raw_log_artifact_path,
                     "raw_log_sha256": "1" * 64,
@@ -498,6 +530,37 @@ def self_test() -> int:
                 return 1
         else:
             print(json.dumps({"ok": False, "case": "raw log checksum did not fail"}))
+            return 1
+
+        result_path.write_text(
+            json.dumps(
+                {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": created_at_utc,
+                    "fixture_id": "fixture",
+                    "backend": "cuda",
+                    "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": fixture_spec_sha256(manifest["fixtures"][0]),
+                    "hardware": "fixture hardware",
+                    "source": source_artifact_path,
+                    "source_sha256": "1" * 64,
+                    "command": "python bench.py",
+                    "raw_log": raw_log_artifact_path,
+                    "raw_log_sha256": raw_log_sha256,
+                    "metrics": {"latency_ms": 10.0, "tokens_per_s": 200.0},
+                }
+            )
+        )
+        try:
+            lock_manifest_thresholds(manifest, 0.10)
+        except ThresholdLockError as exc:
+            if "source_sha256 does not match source" not in str(exc):
+                print(json.dumps({"ok": False, "case": "source checksum", "error": str(exc)}))
+                return 1
+        else:
+            print(json.dumps({"ok": False, "case": "source checksum did not fail"}))
             return 1
 
         absolute_manifest = deepcopy(manifest)
@@ -524,7 +587,8 @@ def self_test() -> int:
                     "manifest_schema_version": 1,
                     "fixture_spec_sha256": fixture_spec_sha256(manifest["fixtures"][0]),
                     "hardware": "fixture hardware",
-                    "source": "bench.py",
+                    "source": source_artifact_path,
+                    "source_sha256": source_sha256,
                     "command": "python bench.py",
                     "raw_log": str(raw_log_path),
                     "raw_log_sha256": raw_log_sha256,

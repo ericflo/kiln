@@ -29,7 +29,7 @@ The result artifact is JSON:
 
 ```json
 {
-  "artifact_schema_version": 1,
+  "artifact_schema_version": 2,
   "created_at_utc": "2026-06-06T12:00:00Z",
   "fixture_id": "metal_apple_silicon_matmul_qwen35_4b",
   "backend": "metal",
@@ -39,6 +39,7 @@ The result artifact is JSON:
   "fixture_spec_sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
   "hardware": "Apple Silicon Metal fixture",
   "source": "crates/kiln-tensor/tests/metal_matmul_bench.rs",
+  "source_sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
   "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features metal --test metal_matmul_bench -- --ignored --nocapture",
   "raw_log": "bench-results/backend-latency/raw/metal-apple-silicon-matmul-qwen35-4b-20260606T120000Z.log",
   "raw_log_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -50,7 +51,7 @@ The result artifact is JSON:
 
 Required fields:
 
-- `artifact_schema_version`: result artifact schema version, currently `1`
+- `artifact_schema_version`: result artifact schema version, currently `2`
 - `created_at_utc`: ISO-8601 UTC timestamp ending in `Z` for when the artifact
   was materialized
 - `fixture_id`: exactly matches the fixture `id`
@@ -65,6 +66,7 @@ Required fields:
   `name`/`unit`/`comparison`, and `selected_cases` when present)
 - `hardware`: exactly matches the fixture `hardware`
 - `source`: exactly matches the fixture `source`
+- `source_sha256`: lowercase SHA-256 hex digest of the fixture source file
 - `command`: exactly matches the fixture `command`
 - `raw_log`: non-empty repo-relative path for the captured raw fixture log;
   covered fixtures require this file to exist when validated
@@ -73,15 +75,16 @@ Required fields:
   numeric values
 
 When `--require-covered` is set, the validator requires the fixture
-`result_artifact`, result `manifest`, and result `raw_log` paths to be
-repo-relative. It also requires the referenced `raw_log` file to exist in the
-checkout and checks that its SHA-256 digest matches `raw_log_sha256`.
+`result_artifact`, fixture `source`, result `manifest`, and result `raw_log`
+paths to be repo-relative. It also requires the referenced source and `raw_log`
+files to exist in the checkout and checks that their SHA-256 digests match
+`source_sha256` and `raw_log_sha256`.
 
 The fixture digest deliberately excludes metric `max`, `threshold_state`, and
 `result_artifact` so a reviewed artifact remains valid while thresholds are
-locked from pending to covered. Changing the command, hardware label, source,
-metric identities, units, comparisons, or selected cases requires a fresh
-hardware artifact.
+locked from pending to covered. Changing the command, hardware label, source
+path, source file content, metric identities, units, comparisons, or selected
+cases requires a fresh hardware artifact.
 
 For each fixture metric, the observed value must be finite numeric and satisfy
 its comparison against finite numeric `max`. For example, `comparison: "<="`
@@ -139,9 +142,10 @@ The threshold locker requires every fixture result artifact path to be
 repo-relative, exist, have `status: "passed"`, match the result artifact schema
 version, include a valid UTC creation timestamp, match the fixture `id`,
 `backend`, manifest schema version, stable fixture digest,
-hardware/source/command provenance, and contain every declared metric. It also
-requires the result `manifest` and `raw_log` paths to be repo-relative, and the
-referenced raw log file to exist and match `raw_log_sha256`. It sets every
+hardware/source/command provenance, source file digest, and contain every
+declared metric. It also requires the fixture `source`, result `manifest`, and
+result `raw_log` paths to be repo-relative, and the referenced source and raw
+log files to exist and match `source_sha256`/`raw_log_sha256`. It sets every
 fixture `threshold_state` to
 `locked_threshold`, sets the manifest `status` to `covered`, and applies the
 headroom by comparison: `<=` thresholds are raised above observed latency, while

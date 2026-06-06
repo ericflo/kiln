@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -149,6 +150,7 @@ def self_test() -> int:
             )
             + "\n"
         )
+        source_sha256 = hashlib.sha256(bench_script.read_bytes()).hexdigest()
         manifest_path.write_text(
             json.dumps(
                 {
@@ -188,6 +190,7 @@ def self_test() -> int:
             or not isinstance(result.get("fixture_spec_sha256"), str)
             or result.get("hardware") != "fixture hardware"
             or result.get("source") != str(bench_script)
+            or result.get("source_sha256") != source_sha256
             or result.get("command") != f"{sys.executable} {bench_script}"
             or result.get("metrics") != {"latency_ms": 9.25, "tokens_per_s": 128.0}
             or not isinstance(result.get("raw_log_sha256"), str)

@@ -167,6 +167,24 @@ def validate_result_provenance(
                 f"{context}.result_artifact.{key} must be {expected!r}, got {observed!r}"
             )
 
+    source = fixture.get("source")
+    source_sha256 = result.get("source_sha256")
+    if not isinstance(source_sha256, str) or not CHECKSUM_RE.match(source_sha256):
+        errors.append(
+            f"{context}.result_artifact.source_sha256 must be a lowercase sha256 hex digest"
+        )
+    elif isinstance(source, str) and source:
+        source_path = resolve_artifact_path(source)
+        if source_path.is_file():
+            if raw_log_digest(source_path) != source_sha256:
+                errors.append(
+                    f"{context}.result_artifact.source_sha256 does not match source"
+                )
+        elif require_raw_log_file:
+            errors.append(
+                f"{context}.source must exist when --require-covered is set: {source}"
+            )
+
     raw_log = result.get("raw_log")
     if not isinstance(raw_log, str) or not raw_log:
         errors.append(f"{context}.result_artifact.raw_log must be a non-empty string")
@@ -318,6 +336,8 @@ def validate_manifest(
 
         require_string(errors, fixture, "hardware", context)
         source = require_string(errors, fixture, "source", context)
+        if require_covered and source and not is_repo_relative_path(source):
+            errors.append(f"{context}.source must be repo-relative when --require-covered is set")
         if source and not (ROOT / source).is_file():
             errors.append(f"{context}.source does not exist: {source}")
         require_string(errors, fixture, "command", context)
@@ -413,6 +433,7 @@ def self_test() -> int:
         raw_log = tmp_root / "raw.log"
         raw_log.write_text("KILN_LATENCY_METRIC latency_ms 9.5 ms\n")
         raw_log_sha256 = hashlib.sha256(raw_log.read_bytes()).hexdigest()
+        source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
         created_at_utc = "2026-06-06T12:00:00Z"
         source_path = repo_relative_path(source)
         artifact_path = repo_relative_path(artifact)
@@ -443,6 +464,7 @@ def self_test() -> int:
                     "fixture_spec_sha256": fixture_spec_sha256(fixture),
                     "hardware": "fixture",
                     "source": source_path,
+                    "source_sha256": source_sha256,
                     "command": "cargo bench",
                     "raw_log": raw_log_path,
                     "raw_log_sha256": raw_log_sha256,
@@ -482,6 +504,7 @@ def self_test() -> int:
                     "fixture_spec_sha256": fixture_spec_sha256(fixture),
                     "hardware": "fixture",
                     "source": source_path,
+                    "source_sha256": source_sha256,
                     "command": "cargo bench",
                     "raw_log": repo_relative_path(tmp_root / "missing.log"),
                     "raw_log_sha256": raw_log_sha256,
@@ -521,6 +544,7 @@ def self_test() -> int:
                     "fixture_spec_sha256": fixture_spec_sha256(fixture),
                     "hardware": "fixture",
                     "source": source_path,
+                    "source_sha256": source_sha256,
                     "command": "cargo bench",
                     "raw_log": raw_log_path,
                     "raw_log_sha256": raw_log_sha256,
@@ -552,6 +576,7 @@ def self_test() -> int:
                     "fixture_spec_sha256": fixture_spec_sha256(fixture),
                     "hardware": "fixture",
                     "source": source_path,
+                    "source_sha256": source_sha256,
                     "command": "cargo bench",
                     "raw_log": raw_log_path,
                     "raw_log_sha256": raw_log_sha256,
@@ -583,6 +608,7 @@ def self_test() -> int:
                     "fixture_spec_sha256": fixture_spec_sha256(fixture),
                     "hardware": "wrong",
                     "source": source_path,
+                    "source_sha256": source_sha256,
                     "command": "cargo bench",
                     "raw_log": raw_log_path,
                     "raw_log_sha256": raw_log_sha256,
@@ -616,6 +642,7 @@ def self_test() -> int:
                     "fixture_spec_sha256": fixture_spec_sha256(stale_fixture),
                     "hardware": "fixture",
                     "source": source_path,
+                    "source_sha256": source_sha256,
                     "command": "cargo bench",
                     "raw_log": raw_log_path,
                     "raw_log_sha256": raw_log_sha256,
@@ -647,6 +674,7 @@ def self_test() -> int:
                     "fixture_spec_sha256": fixture_spec_sha256(fixture),
                     "hardware": "fixture",
                     "source": source_path,
+                    "source_sha256": source_sha256,
                     "command": "cargo bench",
                     "raw_log": raw_log_path,
                     "raw_log_sha256": raw_log_sha256,
@@ -678,6 +706,7 @@ def self_test() -> int:
                     "fixture_spec_sha256": fixture_spec_sha256(fixture),
                     "hardware": "fixture",
                     "source": source_path,
+                    "source_sha256": source_sha256,
                     "command": "cargo bench",
                     "raw_log": raw_log_path,
                     "raw_log_sha256": raw_log_sha256,
@@ -709,6 +738,47 @@ def self_test() -> int:
                     "fixture_spec_sha256": fixture_spec_sha256(fixture),
                     "hardware": "fixture",
                     "source": source_path,
+                    "source_sha256": "1" * 64,
+                    "command": "cargo bench",
+                    "raw_log": raw_log_path,
+                    "raw_log_sha256": raw_log_sha256,
+                    "metrics": {"latency_ms": 9.5, "tokens_per_s": 125.0},
+                }
+            )
+        )
+        errors = []
+        validate_result_artifact(
+            errors,
+            fixture,
+            artifact,
+            "fixtures[0]",
+            1,
+            None,
+            require_raw_log_file=True,
+        )
+        if not any("source_sha256 does not match source" in error for error in errors):
+            print(
+                json.dumps(
+                    {"ok": False, "case": "source checksum", "errors": errors},
+                    indent=2,
+                )
+            )
+            return 1
+
+        artifact.write_text(
+            json.dumps(
+                {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": created_at_utc,
+                    "fixture_id": "cuda_fixture",
+                    "backend": "cuda",
+                    "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": fixture_spec_sha256(fixture),
+                    "hardware": "fixture",
+                    "source": source_path,
+                    "source_sha256": source_sha256,
                     "command": "cargo bench",
                     "raw_log": str(raw_log),
                     "raw_log_sha256": raw_log_sha256,

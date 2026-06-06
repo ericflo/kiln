@@ -16,7 +16,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ARTIFACT_SCHEMA_VERSION = 1
+ARTIFACT_SCHEMA_VERSION = 2
 METRIC_RE = re.compile(r"^\s*KILN_LATENCY_METRIC\s+(\S+)\s+([-+0-9.eE]+)\s+(\S+)\s*$")
 VALID_RESULT_STATUSES = {"passed", "failed"}
 CHECKSUM_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -115,6 +115,11 @@ def repo_relative_path(path: Path) -> str:
         return str(path)
 
 
+def resolve_repo_path(path: str) -> Path:
+    candidate = Path(path)
+    return candidate if candidate.is_absolute() else ROOT / candidate
+
+
 def fixture_digest_spec(fixture: dict[str, Any]) -> dict[str, Any]:
     metric_specs: list[dict[str, Any]] = []
     metrics = fixture.get("metrics")
@@ -161,11 +166,15 @@ def fixture_provenance(
         if not isinstance(value, str) or not value:
             raise ArtifactError(f"fixture.{key} must be a non-empty string")
         provenance[key] = value
+    source_path = resolve_repo_path(provenance["source"])
+    if not source_path.is_file():
+        raise ArtifactError(f"fixture.source does not exist: {provenance['source']}")
     if not isinstance(manifest_schema_version, int):
         raise ArtifactError("manifest.schema_version must be an integer")
     provenance["manifest"] = repo_relative_path(manifest_path)
     provenance["manifest_schema_version"] = manifest_schema_version
     provenance["fixture_spec_sha256"] = fixture_spec_sha256(fixture)
+    provenance["source_sha256"] = sha256_file(source_path)
     provenance["raw_log"] = repo_relative_path(log_path)
     provenance["raw_log_sha256"] = sha256_file(log_path)
     return provenance
@@ -243,6 +252,9 @@ def self_test() -> int:
         manifest_path = tmp_root / "fixtures.json"
         log_path = tmp_root / "bench.log"
         output_path = tmp_root / "result.json"
+        source_path = tmp_root / "bench.rs"
+        source_path.write_text("// latency fixture source\n")
+        source_sha256 = sha256_file(source_path)
         manifest = {
             "schema_version": 1,
             "fixtures": [
@@ -250,7 +262,7 @@ def self_test() -> int:
                     "id": "cuda_fixture",
                     "backend": "cuda",
                     "hardware": "fixture hardware",
-                    "source": "bench.rs",
+                    "source": str(source_path),
                     "command": "python bench.py",
                     "result_artifact": str(output_path),
                     "metrics": [
@@ -286,7 +298,7 @@ def self_test() -> int:
         write_artifact(output_path, artifact)
         written = json.loads(output_path.read_text())
         if (
-            written.get("artifact_schema_version") != 1
+            written.get("artifact_schema_version") != ARTIFACT_SCHEMA_VERSION
             or not isinstance(written.get("created_at_utc"), str)
             or not written.get("created_at_utc", "").endswith("Z")
             or written.get("fixture_id") != "cuda_fixture"
@@ -296,7 +308,8 @@ def self_test() -> int:
             or written.get("manifest_schema_version") != 1
             or not CHECKSUM_RE.match(written.get("fixture_spec_sha256", ""))
             or written.get("hardware") != "fixture hardware"
-            or written.get("source") != "bench.rs"
+            or written.get("source") != str(source_path)
+            or written.get("source_sha256") != source_sha256
             or written.get("command") != "python bench.py"
             or written.get("raw_log") != str(log_path)
             or not isinstance(written.get("raw_log_sha256"), str)
