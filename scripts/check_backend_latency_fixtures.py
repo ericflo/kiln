@@ -16,7 +16,9 @@ from typing import Any
 
 from write_backend_latency_result_artifact import (
     ARTIFACT_SCHEMA_VERSION,
+    ArtifactError,
     fixture_spec_sha256,
+    parse_metric_log,
     repo_relative_path,
 )
 
@@ -213,6 +215,53 @@ def validate_result_provenance(
             )
 
 
+def validate_raw_log_metrics(
+    errors: list[str],
+    fixture: dict[str, Any],
+    result: dict[str, Any],
+    observed_metrics: dict[str, Any],
+    context: str,
+    require_raw_log_file: bool,
+) -> None:
+    raw_log = result.get("raw_log")
+    if not isinstance(raw_log, str) or not raw_log:
+        return
+
+    raw_log_path = resolve_artifact_path(raw_log)
+    if not raw_log_path.is_file():
+        return
+
+    try:
+        raw_observations = parse_metric_log(raw_log_path)
+    except ArtifactError as exc:
+        errors.append(f"{context}.result_artifact.raw_log metrics are invalid: {exc}")
+        return
+
+    for metric_idx, metric in enumerate(fixture.get("metrics", [])):
+        if not isinstance(metric, dict):
+            continue
+        metric_name = metric.get("name")
+        if not isinstance(metric_name, str) or not metric_name:
+            continue
+        raw_observed = raw_observations.get(metric_name)
+        if raw_observed is None:
+            if require_raw_log_file:
+                errors.append(
+                    f"{context}.result_artifact.raw_log missing metric {metric_name}"
+                )
+            continue
+        raw_value, raw_unit = raw_observed
+        if raw_unit != metric.get("unit"):
+            errors.append(
+                f"{context}.result_artifact.raw_log metric {metric_name} unit must be {metric.get('unit')!r}, got {raw_unit!r}"
+            )
+        artifact_value = observed_metrics.get(metric_name)
+        if is_number(artifact_value) and raw_value != artifact_value:
+            errors.append(
+                f"{context}.result_artifact.metrics.{metric_name} must match raw_log value {raw_value}"
+            )
+
+
 def validate_result_artifact(
     errors: list[str],
     fixture: dict[str, Any],
@@ -260,6 +309,15 @@ def validate_result_artifact(
     if not isinstance(observed_metrics, dict):
         errors.append(f"{context}.result_artifact.metrics must be an object")
         observed_metrics = {}
+
+    validate_raw_log_metrics(
+        errors,
+        fixture,
+        result,
+        observed_metrics,
+        context,
+        require_raw_log_file,
+    )
 
     for metric_idx, metric in enumerate(fixture.get("metrics", [])):
         if not isinstance(metric, dict):
@@ -431,7 +489,10 @@ def self_test() -> int:
         source.write_text("// fixture source\n")
         artifact = tmp_root / "result.json"
         raw_log = tmp_root / "raw.log"
-        raw_log.write_text("KILN_LATENCY_METRIC latency_ms 9.5 ms\n")
+        raw_log.write_text(
+            "KILN_LATENCY_METRIC latency_ms 9.5 ms\n"
+            "KILN_LATENCY_METRIC tokens_per_s 125.0 tok/s\n"
+        )
         raw_log_sha256 = hashlib.sha256(raw_log.read_bytes()).hexdigest()
         source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
         created_at_utc = "2026-06-06T12:00:00Z"
@@ -558,6 +619,14 @@ def self_test() -> int:
             print(
                 json.dumps(
                     {"ok": False, "case": "threshold failure", "errors": errors},
+                    indent=2,
+                )
+            )
+            return 1
+        if not any("must match raw_log value 9.5" in error for error in errors):
+            print(
+                json.dumps(
+                    {"ok": False, "case": "raw log value mismatch", "errors": errors},
                     indent=2,
                 )
             )

@@ -17,7 +17,9 @@ from typing import Any
 
 from write_backend_latency_result_artifact import (
     ARTIFACT_SCHEMA_VERSION,
+    ArtifactError,
     fixture_spec_sha256,
+    parse_metric_log,
     repo_relative_path,
 )
 
@@ -206,6 +208,12 @@ def lock_fixture_thresholds(
         raise ThresholdLockError(
             f"{fixture_id}.result_artifact.raw_log_sha256 does not match raw_log"
         )
+    try:
+        raw_observations = parse_metric_log(raw_log_path)
+    except ArtifactError as exc:
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.raw_log metrics are invalid: {exc}"
+        ) from exc
 
     observations = result.get("metrics")
     if not isinstance(observations, dict):
@@ -228,6 +236,21 @@ def lock_fixture_thresholds(
         if not is_number(observed):
             raise ThresholdLockError(
                 f"{fixture_id}.result_artifact.metrics.{metric_name} must be finite numeric"
+            )
+        raw_observed = raw_observations.get(metric_name)
+        if raw_observed is None:
+            raise ThresholdLockError(
+                f"{fixture_id}.result_artifact.raw_log missing metric {metric_name}"
+            )
+        raw_value, raw_unit = raw_observed
+        unit = metric.get("unit")
+        if raw_unit != unit:
+            raise ThresholdLockError(
+                f"{fixture_id}.result_artifact.raw_log metric {metric_name} unit must be {unit!r}, got {raw_unit!r}"
+            )
+        if raw_value != observed:
+            raise ThresholdLockError(
+                f"{fixture_id}.result_artifact.metrics.{metric_name} must match raw_log value {raw_value}"
             )
         comparison = metric.get("comparison")
         if not isinstance(comparison, str):
@@ -282,7 +305,10 @@ def self_test() -> int:
         raw_log_path = tmp_root / "bench.log"
         source_path = tmp_root / "bench.py"
         source_path.write_text("# latency fixture source\n")
-        raw_log_path.write_text("KILN_LATENCY_METRIC latency_ms 10.0 ms\n")
+        raw_log_path.write_text(
+            "KILN_LATENCY_METRIC latency_ms 10.0 ms\n"
+            "KILN_LATENCY_METRIC tokens_per_s 200.0 tok/s\n"
+        )
         raw_log_sha256 = sha256_file(raw_log_path)
         source_sha256 = sha256_file(source_path)
         created_at_utc = "2026-06-06T12:00:00Z"
@@ -530,6 +556,37 @@ def self_test() -> int:
                 return 1
         else:
             print(json.dumps({"ok": False, "case": "raw log checksum did not fail"}))
+            return 1
+
+        result_path.write_text(
+            json.dumps(
+                {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": created_at_utc,
+                    "fixture_id": "fixture",
+                    "backend": "cuda",
+                    "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": fixture_spec_sha256(manifest["fixtures"][0]),
+                    "hardware": "fixture hardware",
+                    "source": source_artifact_path,
+                    "source_sha256": source_sha256,
+                    "command": "python bench.py",
+                    "raw_log": raw_log_artifact_path,
+                    "raw_log_sha256": raw_log_sha256,
+                    "metrics": {"latency_ms": 9.0, "tokens_per_s": 200.0},
+                }
+            )
+        )
+        try:
+            lock_manifest_thresholds(manifest, 0.10)
+        except ThresholdLockError as exc:
+            if "must match raw_log value 10.0" not in str(exc):
+                print(json.dumps({"ok": False, "case": "raw log value", "error": str(exc)}))
+                return 1
+        else:
+            print(json.dumps({"ok": False, "case": "raw log value did not fail"}))
             return 1
 
         result_path.write_text(

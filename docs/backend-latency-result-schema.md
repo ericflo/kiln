@@ -78,7 +78,9 @@ When `--require-covered` is set, the validator requires the fixture
 `result_artifact`, fixture `source`, result `manifest`, and result `raw_log`
 paths to be repo-relative. It also requires the referenced source and `raw_log`
 files to exist in the checkout and checks that their SHA-256 digests match
-`source_sha256` and `raw_log_sha256`.
+`source_sha256` and `raw_log_sha256`. It then re-parses the raw log
+`KILN_LATENCY_METRIC` lines and requires every declared artifact metric value
+and unit to match the raw log.
 
 The fixture digest deliberately excludes metric `max`, `threshold_state`, and
 `result_artifact` so a reviewed artifact remains valid while thresholds are
@@ -101,8 +103,11 @@ KILN_LATENCY_METRIC <metric> <value> <unit>
 ```
 
 The artifact writer extracts the metric names declared by the selected fixture
-and ignores extra metric lines. To run one manifest fixture, capture its raw
-log, and materialize the result artifact in one step:
+and ignores extra metric lines. Covered validation later re-parses the same raw
+log and rejects artifacts whose metric values or units do not match the captured
+`KILN_LATENCY_METRIC` lines; artifact metrics must match the raw log. To run
+one manifest fixture, capture its raw log, and materialize the result artifact
+in one step:
 
 ```sh
 python3 scripts/run_backend_latency_fixture.py \
@@ -145,8 +150,9 @@ version, include a valid UTC creation timestamp, match the fixture `id`,
 hardware/source/command provenance, source file digest, and contain every
 declared metric. It also requires the fixture `source`, result `manifest`, and
 result `raw_log` paths to be repo-relative, and the referenced source and raw
-log files to exist and match `source_sha256`/`raw_log_sha256`. It sets every
-fixture `threshold_state` to
+log files to exist and match `source_sha256`/`raw_log_sha256`. It re-parses the
+raw log and requires each artifact metric value and unit to match before deriving
+thresholds. It sets every fixture `threshold_state` to
 `locked_threshold`, sets the manifest `status` to `covered`, and applies the
 headroom by comparison: `<=` thresholds are raised above observed latency, while
 `>=` thresholds are lowered below observed throughput. Use `--check` to validate
