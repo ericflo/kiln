@@ -5,6 +5,8 @@
 //! `BackendRuntime` methods; it is descriptive only and does not change
 //! dispatch behavior.
 
+use kiln_graph::ReplayKey;
+
 use super::{BackendRuntime, TrainingCapabilities};
 
 /// Backend answer for a capability query.
@@ -308,6 +310,15 @@ pub enum ReplayRequestKind {
     PagedDecodeGraphOutputs,
 }
 
+impl ReplayRequestKind {
+    pub const fn operation_name(self) -> &'static str {
+        match self {
+            Self::ResidentDecode => "resident_decode",
+            Self::PagedDecodeGraphOutputs => "paged_decode_graph_outputs",
+        }
+    }
+}
+
 /// Request descriptor for replay/capture capability queries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayRequest {
@@ -315,6 +326,8 @@ pub struct ReplayRequest {
     pub max_hidden: usize,
     pub max_intermediate: usize,
     pub max_batch: usize,
+    pub dtype: Option<kiln_tensor::DType>,
+    pub replay_safe: bool,
 }
 
 impl ReplayRequest {
@@ -328,7 +341,53 @@ impl ReplayRequest {
             max_hidden,
             max_intermediate,
             max_batch,
+            dtype: None,
+            replay_safe: true,
         }
+    }
+
+    pub const fn paged_decode_graph_outputs(
+        max_hidden: usize,
+        max_intermediate: usize,
+        max_batch: usize,
+    ) -> Self {
+        Self {
+            kind: ReplayRequestKind::PagedDecodeGraphOutputs,
+            max_hidden,
+            max_intermediate,
+            max_batch,
+            dtype: None,
+            replay_safe: true,
+        }
+    }
+
+    pub fn with_dtype(mut self, dtype: kiln_tensor::DType) -> Self {
+        self.dtype = Some(dtype);
+        self
+    }
+
+    pub fn with_replay_safe(mut self, replay_safe: bool) -> Self {
+        self.replay_safe = replay_safe;
+        self
+    }
+
+    pub fn shape_key(&self) -> Vec<usize> {
+        vec![self.max_hidden, self.max_intermediate, self.max_batch]
+    }
+
+    pub fn replay_key(&self, backend: kiln_tensor::Backend) -> ReplayKey {
+        ReplayKey::new(
+            backend,
+            self.kind.operation_name(),
+            self.shape_key(),
+            self.dtype,
+            self.max_batch,
+            self.replay_safe,
+        )
+    }
+
+    pub const fn has_valid_bounds(&self) -> bool {
+        self.max_hidden > 0 && self.max_intermediate > 0 && self.max_batch > 0
     }
 }
 
@@ -458,6 +517,10 @@ pub trait BackendCapabilityQueries: BackendRuntime {
     }
 
     fn supports_replay_request(&self, req: &ReplayRequest) -> Support {
+        if !req.replay_safe || !req.has_valid_bounds() {
+            return Support::Unsupported;
+        }
+
         Support::from_supports_predicate(match req.kind {
             ReplayRequestKind::ResidentDecode => self.supports_resident_decode(),
             ReplayRequestKind::PagedDecodeGraphOutputs => self.supports_flash_attn_paged_decode(),

@@ -1977,6 +1977,16 @@ pub trait ReplayBackend: Send + Sync + std::fmt::Debug {
 
     fn runtime_supports_resident_decode(&self) -> bool;
 
+    fn runtime_supports_replay_request(
+        &self,
+        req: &capability::ReplayRequest,
+    ) -> capability::Support;
+
+    fn runtime_replay_key_for_request(
+        &self,
+        req: &capability::ReplayRequest,
+    ) -> kiln_graph::ReplayKey;
+
     fn runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
         &self,
         q: &kiln_tensor::Tensor,
@@ -2958,6 +2968,20 @@ impl<T: BackendRuntime + ?Sized> ReplayBackend for T {
         BackendRuntime::supports_resident_decode(self)
     }
 
+    fn runtime_supports_replay_request(
+        &self,
+        req: &capability::ReplayRequest,
+    ) -> capability::Support {
+        capability::BackendCapabilityQueries::supports_replay_request(self, req)
+    }
+
+    fn runtime_replay_key_for_request(
+        &self,
+        req: &capability::ReplayRequest,
+    ) -> kiln_graph::ReplayKey {
+        req.replay_key(BackendRuntime::device(self).backend())
+    }
+
     fn runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
         &self,
         q: &kiln_tensor::Tensor,
@@ -3131,10 +3155,31 @@ mod tests {
             capability::Support::Declined
         );
 
-        let replay_req = capability::ReplayRequest::resident_decode(8, 16, 2);
+        let replay_req = capability::ReplayRequest::resident_decode(8, 16, 2)
+            .with_dtype(kiln_tensor::DType::BF16);
         assert_eq!(
             capability::BackendCapabilityQueries::supports_replay_request(&cpu, &replay_req),
             capability::Support::Declined
+        );
+        assert_eq!(
+            replay_req.replay_key(kiln_tensor::Backend::Cpu),
+            kiln_graph::ReplayKey::new(
+                kiln_tensor::Backend::Cpu,
+                "resident_decode",
+                vec![8, 16, 2],
+                Some(kiln_tensor::DType::BF16),
+                2,
+                true,
+            )
+        );
+
+        let unsafe_replay_req = replay_req.clone().with_replay_safe(false);
+        assert_eq!(
+            capability::BackendCapabilityQueries::supports_replay_request(
+                &cpu,
+                &unsafe_replay_req,
+            ),
+            capability::Support::Unsupported
         );
     }
 
@@ -3493,6 +3538,16 @@ mod tests {
         assert_eq!(
             ReplayBackend::runtime_supports_resident_decode(&cpu),
             BackendRuntime::supports_resident_decode(&cpu)
+        );
+        let replay_req = capability::ReplayRequest::paged_decode_graph_outputs(8, 16, 2)
+            .with_dtype(kiln_tensor::DType::BF16);
+        assert_eq!(
+            ReplayBackend::runtime_supports_replay_request(&cpu, &replay_req),
+            capability::BackendCapabilityQueries::supports_replay_request(&cpu, &replay_req)
+        );
+        assert_eq!(
+            ReplayBackend::runtime_replay_key_for_request(&cpu, &replay_req),
+            replay_req.replay_key(kiln_tensor::Backend::Cpu)
         );
 
         assert_eq!(
