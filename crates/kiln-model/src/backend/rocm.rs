@@ -89,18 +89,9 @@ fn rocm_or_legacy_disable_env_set(rocm_name: &str, legacy_cuda_name: &str) -> bo
 }
 
 fn rocm_optimizer_tensors_supported_for_kt(tensors: &[&kiln_tensor::Tensor]) -> bool {
-    let Some(first) = tensors.first() else {
-        return false;
-    };
-    matches!(first.device(), kiln_tensor::Device::Rocm(_))
-        && matches!(first.dtype(), kiln_tensor::DType::F32 | kiln_tensor::DType::BF16)
-        && first.is_contiguous()
-        && tensors.iter().all(|tensor| {
-            matches!(tensor.device(), kiln_tensor::Device::Rocm(_))
-                && tensor.dtype() == first.dtype()
-                && tensor.element_count() == first.element_count()
-                && tensor.is_contiguous()
-        })
+    super::cuda_rocm_common::optimizer_tensors_supported_for_kt(tensors, |device| {
+        matches!(device, kiln_tensor::Device::Rocm(_))
+    })
 }
 
 #[derive(Debug)]

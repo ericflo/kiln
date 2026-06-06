@@ -289,6 +289,28 @@ fn generated_capability_report_lists_backend_source_modules() {
         );
     }
 
+    let cuda_sources = backends["cuda"]["source_modules"]
+        .as_array()
+        .expect("cuda source_modules should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        cuda_sources.contains(&"crates/kiln-model/src/backend/cuda_rocm_common.rs"),
+        "CUDA backend source modules should include the shared CUDA/ROCm helper module"
+    );
+
+    let rocm_sources = backends["rocm"]["source_modules"]
+        .as_array()
+        .expect("rocm source_modules should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        rocm_sources.contains(&"crates/kiln-model/src/backend/cuda_rocm_common.rs"),
+        "ROCm backend source modules should include the shared CUDA/ROCm helper module"
+    );
+
     let metal_sources = backends["metal"]["source_modules"]
         .as_array()
         .expect("metal source_modules should be an array")

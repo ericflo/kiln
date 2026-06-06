@@ -25,6 +25,12 @@ BACKENDS = {
 }
 
 BACKEND_EXTRA_SOURCES = {
+    "cuda": [
+        ROOT / "crates" / "kiln-model" / "src" / "backend" / "cuda_rocm_common.rs",
+    ],
+    "rocm": [
+        ROOT / "crates" / "kiln-model" / "src" / "backend" / "cuda_rocm_common.rs",
+    ],
     "metal": [
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "metal_attention.rs",
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "metal_config.rs",

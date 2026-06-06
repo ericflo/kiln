@@ -74,6 +74,9 @@ pub mod capability;
 
 pub mod residency;
 
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub(crate) mod cuda_rocm_common;
+
 #[cfg(feature = "cuda")]
 pub mod cuda;
 
