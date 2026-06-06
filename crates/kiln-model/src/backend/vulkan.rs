@@ -11,12 +11,18 @@
 
 use anyhow::{Context, Result};
 
-use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use super::vulkan_config::VulkanRuntimeConfig;
-use super::vulkan_residency::with_resident_registry;
+use super::vulkan_residency::{
+    contains_recurrent_state_resident_buffer, enter_recurrent_state_resident_scope,
+    exit_recurrent_state_resident_scope, get_recurrent_state_resident_buffer,
+    insert_recurrent_state_resident_buffer, recurrent_state_resident_buffers_for,
+    recurrent_state_resident_scope_active, remove_recurrent_state_resident_buffer,
+    replace_recurrent_state_resident_buffer, take_recurrent_state_resident_buffer,
+    with_resident_registry,
+};
 use super::vulkan_tensor_bridge::{
     kt_tensor_from_f32_bytes, kt_tensor_to_f32_bytes_with_shape,
     kt_tensor_to_packed_bf16_bytes_with_shape, resident_sdpa_prefill_b1,
@@ -149,16 +155,6 @@ pub struct VulkanBackend {
     /// state to be `'static + Send + Sync`, which a borrow off `&self`
     /// can never satisfy.
     pub(super) vulkan_device: Option<Arc<kiln_vulkan_kernel::VulkanDevice>>,
-}
-
-thread_local! {
-    static RECURRENT_STATE_RESIDENT_SCOPE_DEPTH: Cell<usize> = const { Cell::new(0) };
-    static RECURRENT_STATE_RESIDENT_CACHE: RefCell<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>> =
-        RefCell::new(HashMap::new());
-}
-
-fn recurrent_state_resident_scope_active() -> bool {
-    RECURRENT_STATE_RESIDENT_SCOPE_DEPTH.with(|depth| depth.get() > 0)
 }
 
 fn fused_gdn_resident_state_enabled() -> bool {
@@ -319,24 +315,6 @@ fn max_chunk_dim_for_flop(other_dim_product: usize) -> usize {
     let chunk = (max_flop / denom) as usize;
     chunk.max(1)
 }
-
-fn enter_recurrent_state_resident_scope() {
-    RECURRENT_STATE_RESIDENT_SCOPE_DEPTH.with(|depth| {
-        depth.set(depth.get() + 1);
-    });
-}
-
-fn exit_recurrent_state_resident_scope() {
-    RECURRENT_STATE_RESIDENT_SCOPE_DEPTH.with(|depth| {
-        let previous = depth.get();
-        if previous == 0 {
-            return;
-        }
-        let next = previous - 1;
-        depth.set(next);
-    });
-}
-
 
 impl VulkanBackend {
     pub fn training_capabilities_static() -> TrainingCapabilities {
@@ -1458,12 +1436,11 @@ impl BackendRuntime for VulkanBackend {
         if !self.recurrent_state_residency_enabled {
             return Ok(());
         }
-        // (#1082) kt-native: the RECURRENT_STATE_RESIDENT_CACHE is keyed on the
-        // kt `TensorId` directly (stable across the state's lifetime), and the
+        // (#1082) kt-native: the recurrent-state resident cache is keyed on
+        // the kt `TensorId` directly (stable across the state's lifetime), and the
         // materialized state is written back into the kt arg in place.
         let state_id = state_kt.id();
-        let resident_state =
-            RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow_mut().remove(&state_id));
+        let resident_state = take_recurrent_state_resident_buffer(state_id);
         let Some(resident_state) = resident_state else {
             return Ok(());
         };
@@ -1496,9 +1473,7 @@ impl BackendRuntime for VulkanBackend {
         }
         // (#1082) kt-native: key the cache on the kt `TensorId` directly.
         let state_id = state.id();
-        RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
-            cache.borrow_mut().remove(&state_id);
-        });
+        remove_recurrent_state_resident_buffer(state_id);
     }
 
     fn has_gdn_recurrent_resident_state(&self, state: &kiln_tensor::Tensor) -> bool {
@@ -1507,7 +1482,7 @@ impl BackendRuntime for VulkanBackend {
         }
         // (#1082) kt-native: key the cache on the kt `TensorId` directly.
         let state_id = state.id();
-        RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow().contains_key(&state_id))
+        contains_recurrent_state_resident_buffer(state_id)
     }
 
     fn supports_resident_activation(&self) -> bool {
@@ -1784,7 +1759,7 @@ impl BackendRuntime for VulkanBackend {
             return Ok(false);
         }
         // (#1082) kt-native: `rows`/`batch` are already kt; the
-        // RECURRENT_STATE_RESIDENT_CACHE is keyed on the kt `TensorId` directly.
+        // recurrent-state resident cache is keyed on the kt `TensorId` directly.
         let Ok((batch_rows, heads, dk, dv)) = batch.dims4() else {
             return Ok(false);
         };
@@ -1803,12 +1778,7 @@ impl BackendRuntime for VulkanBackend {
             }
         }
 
-        let row_buffers = RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
-            let cache = cache.borrow();
-            rows.iter()
-                .map(|row| cache.get(&row.id()).cloned())
-                .collect::<Option<Vec<_>>>()
-        });
+        let row_buffers = recurrent_state_resident_buffers_for(rows.iter().map(|row| row.id()));
         let Some(row_buffers) = row_buffers else {
             return Ok(false);
         };
@@ -1821,9 +1791,7 @@ impl BackendRuntime for VulkanBackend {
             &row_buffers,
         )
         .context("failed to assemble resident GDN recurrent batch rows")?;
-        RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
-            cache.borrow_mut().insert(batch.id(), batch_buffer);
-        });
+        insert_recurrent_state_resident_buffer(batch.id(), batch_buffer);
         Ok(true)
     }
 
@@ -1848,8 +1816,7 @@ impl BackendRuntime for VulkanBackend {
         if destinations.len() != batch_rows {
             return Ok(false);
         }
-        let batch_buffer =
-            RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow().get(&batch.id()).cloned());
+        let batch_buffer = get_recurrent_state_resident_buffer(batch.id());
         let Some(batch_buffer) = batch_buffer else {
             return Ok(false);
         };
@@ -1882,15 +1849,9 @@ impl BackendRuntime for VulkanBackend {
             **dst = placeholder;
             // kt id of the newly-written destination keys the insert.
             let new_id = dst.id();
-            RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
-                let mut cache = cache.borrow_mut();
-                cache.remove(&old_id);
-                cache.insert(new_id, row_buffer);
-            });
+            replace_recurrent_state_resident_buffer(old_id, new_id, row_buffer);
         }
-        RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
-            cache.borrow_mut().remove(&batch.id());
-        });
+        remove_recurrent_state_resident_buffer(batch.id());
 
         Ok(true)
     }
@@ -2409,8 +2370,7 @@ impl BackendRuntime for VulkanBackend {
             && recurrent_state_resident_scope_active()
         {
             let state_id = state_kt.id();
-            let resident_state =
-                RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow().get(&state_id).cloned());
+            let resident_state = get_recurrent_state_resident_buffer(state_id);
             let (batch_d, _, nv, dk) = q.dims4()?;
             let dv = v.dims4()?.3;
             let q_dtype = q.dtype();
@@ -2444,9 +2404,7 @@ impl BackendRuntime for VulkanBackend {
                 &[batch_d, 1, nv, dv],
                 q_dtype,
             )?;
-            RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
-                cache.borrow_mut().insert(state_id, resident_state);
-            });
+            insert_recurrent_state_resident_buffer(state_id, resident_state);
             return Ok(Some(out));
         }
         let (batch, _, nv, dk) = q.dims4()?;
@@ -3604,7 +3562,7 @@ impl BackendRuntime for VulkanBackend {
             return Ok(None);
         }
         // (#1082) kt-native: all args are already kt; `state_kt` is mutated in
-        // place. The RECURRENT_STATE_RESIDENT_CACHE keys on the kt `TensorId`.
+        // place. The recurrent-state resident cache keys on the kt `TensorId`.
         let Ok((batch, seq_len, q_heads, dk)) = q.dims4() else {
             return Ok(None);
         };
@@ -3655,8 +3613,7 @@ impl BackendRuntime for VulkanBackend {
             && state_kt.dtype() == q.dtype()
         {
             let state_id = state_kt.id();
-            let resident_state =
-                RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow().get(&state_id).cloned());
+            let resident_state = get_recurrent_state_resident_buffer(state_id);
             let q_data = kt_tensor_to_f32_bytes_with_shape(q)?.0;
             let k_data = kt_tensor_to_f32_bytes_with_shape(k)?.0;
             let v_data = kt_tensor_to_f32_bytes_with_shape(v)?.0;
@@ -3687,9 +3644,7 @@ impl BackendRuntime for VulkanBackend {
                 q_dtype,
             )?;
             let out = out_no_seq.unsqueeze(1)?;
-            RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
-                cache.borrow_mut().insert(state_id, resident_state);
-            });
+            insert_recurrent_state_resident_buffer(state_id, resident_state);
             return Ok(Some(out));
         }
         let skip_state_readback = crate::forward::vulkan_skip_gdn_state_readback_active();
@@ -3838,7 +3793,7 @@ impl BackendRuntime for VulkanBackend {
             return Ok(None);
         }
         // (#1082) kt-native: all args are already kt; `state_kt` is mutated in
-        // place. The RECURRENT_STATE_RESIDENT_CACHE keys on the kt `TensorId`.
+        // place. The recurrent-state resident cache keys on the kt `TensorId`.
         let vk_device = self
             .vulkan_device
             .as_ref()
@@ -3846,8 +3801,7 @@ impl BackendRuntime for VulkanBackend {
 
         if self.recurrent_state_residency_enabled && recurrent_state_resident_scope_active() {
             let state_id = state_kt.id();
-            let resident_state =
-                RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow().get(&state_id).cloned());
+            let resident_state = get_recurrent_state_resident_buffer(state_id);
 
             let q_data = kt_tensor_to_f32_bytes_with_shape(q)?.0;
             let k_data = kt_tensor_to_f32_bytes_with_shape(k)?.0;
@@ -3878,9 +3832,7 @@ impl BackendRuntime for VulkanBackend {
                 q_dtype,
             )?;
 
-            RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
-                cache.borrow_mut().insert(state_id, resident_state);
-            });
+            insert_recurrent_state_resident_buffer(state_id, resident_state);
             return Ok(Some(out));
         }
 
