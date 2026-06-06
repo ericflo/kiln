@@ -316,6 +316,10 @@ fn generated_capability_report_lists_backend_source_modules() {
         "Metal backend source modules should include the extracted core module"
     );
     assert!(
+        metal_sources.contains(&"crates/kiln-model/src/backend/metal_gdn.rs"),
+        "Metal backend source modules should include the extracted GDN module"
+    );
+    assert!(
         metal_sources.contains(&"crates/kiln-model/src/backend/metal_icb.rs"),
         "Metal backend source modules should include the extracted ICB module"
     );
