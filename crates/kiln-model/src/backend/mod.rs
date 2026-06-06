@@ -135,6 +135,9 @@ pub mod vulkan;
 pub(crate) mod vulkan_config;
 
 #[cfg(feature = "vulkan")]
+pub(crate) mod vulkan_decode_state;
+
+#[cfg(feature = "vulkan")]
 pub(crate) mod vulkan_device;
 
 #[cfg(feature = "vulkan")]
