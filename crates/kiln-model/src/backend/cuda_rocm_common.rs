@@ -78,3 +78,16 @@ pub(crate) fn optimizer_tensors_supported_for_kt(
                 && tensor.is_contiguous()
         })
 }
+
+pub(crate) fn optimizer_args_ready_for_kt(
+    registry: &'static ResidentTensorIdRegistry,
+    tensors: &[&kiln_tensor::Tensor],
+    poison_message: &'static str,
+    device_matches: impl Fn(kiln_tensor::Device) -> bool,
+) -> bool {
+    tensors
+        .iter()
+        .all(|tensor| has_resident_activation(registry, tensor, poison_message))
+        && optimizer_tensors_supported_for_kt(tensors, device_matches)
+        && kiln_rmsnorm_kernel::supports_optimizer_step_kt(tensors)
+}

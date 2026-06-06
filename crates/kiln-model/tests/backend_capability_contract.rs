@@ -506,6 +506,55 @@ fn cuda_rocm_resident_membership_stays_in_shared_helper() {
 }
 
 #[test]
+fn cuda_rocm_optimizer_arg_validation_stays_in_shared_helper() {
+    let backend_dir = manifest_dir().join("src/backend");
+    let common_path = backend_dir.join("cuda_rocm_common.rs");
+    let common_source =
+        fs::read_to_string(&common_path).expect("cuda_rocm_common.rs should be readable");
+    for required in [
+        "optimizer_tensors_supported_for_kt",
+        "optimizer_args_ready_for_kt",
+        "supports_optimizer_step_kt",
+    ] {
+        assert!(
+            common_source.contains(required),
+            "cuda_rocm_common.rs should own shared optimizer argument validation `{required}`"
+        );
+    }
+
+    for (backend_file, helper) in [
+        ("cuda.rs", "cuda_optimizer_args_ready_for_kt"),
+        ("rocm.rs", "rocm_optimizer_args_ready_for_kt"),
+    ] {
+        let path = backend_dir.join(backend_file);
+        let source = fs::read_to_string(&path).expect("backend source should be readable");
+        let functions = parse_functions(&path);
+        let sgd = functions
+            .get("dispatch_sgd_step")
+            .unwrap_or_else(|| panic!("{backend_file} missing dispatch_sgd_step"));
+        let adamw = functions
+            .get("dispatch_adamw_step")
+            .unwrap_or_else(|| panic!("{backend_file} missing dispatch_adamw_step"));
+
+        assert!(
+            compact_body(&sgd.body).contains(&format!("{helper}(&[param,grad])")),
+            "{backend_file} SGD dispatch should use shared optimizer readiness validation"
+        );
+        assert!(
+            compact_body(&adamw.body).contains(&format!(
+                "{helper}(&[param,grad,first_moment,second_moment])"
+            )),
+            "{backend_file} AdamW dispatch should use shared optimizer readiness validation"
+        );
+        assert!(
+            !source.contains("supports_optimizer_step_kt(&[")
+                && !source.contains("optimizer_tensors_supported_for_kt(&["),
+            "{backend_file} should not keep copied optimizer argument validation"
+        );
+    }
+}
+
+#[test]
 fn vulkan_gdn_runtime_methods_stay_in_gdn_module() {
     let backend_dir = manifest_dir().join("src/backend");
     let vulkan_rs = backend_dir.join("vulkan.rs");

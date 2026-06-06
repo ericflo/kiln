@@ -73,10 +73,13 @@ fn rocm_or_legacy_disable_env_set(rocm_name: &str, legacy_cuda_name: &str) -> bo
     std::env::var(rocm_name).is_ok() || std::env::var(legacy_cuda_name).is_ok()
 }
 
-fn rocm_optimizer_tensors_supported_for_kt(tensors: &[&kiln_tensor::Tensor]) -> bool {
-    super::cuda_rocm_common::optimizer_tensors_supported_for_kt(tensors, |device| {
-        matches!(device, kiln_tensor::Device::Rocm(_))
-    })
+fn rocm_optimizer_args_ready_for_kt(tensors: &[&kiln_tensor::Tensor]) -> bool {
+    super::cuda_rocm_common::optimizer_args_ready_for_kt(
+        &ROCM_RESIDENT_TENSOR_IDS,
+        tensors,
+        ROCM_RESIDENT_TENSOR_IDS_POISONED,
+        |device| matches!(device, kiln_tensor::Device::Rocm(_)),
+    )
 }
 
 #[derive(Debug)]
@@ -294,19 +297,13 @@ impl BackendRuntime for RocmBackend {
     }
 
     fn dispatch_sgd_step(&self, param: &kiln_tensor::Tensor, grad: &kiln_tensor::Tensor, lr: f32) -> Result<bool> {
-        if !self.has_resident_activation(param) || !self.has_resident_activation(grad) {
-            return Ok(false);
-        }
-        if !rocm_optimizer_tensors_supported_for_kt(&[param, grad]) {
+        if !rocm_optimizer_args_ready_for_kt(&[param, grad]) {
             return Ok(false);
         }
         // #1082: args are already kt (BackendRuntime trait flipped to kt),
         // so there is no candle↔kt borrow — the kernel runs directly on the
         // caller's kt tensors. Bit-exact with the prior candle shim (same
         // FFI symbol).
-        if !kiln_rmsnorm_kernel::supports_optimizer_step_kt(&[param, grad]) {
-            return Ok(false);
-        }
         kiln_nvtx::range!(c"kiln/sgd_step_kt");
         match param.dtype() {
             kiln_tensor::DType::F32 => kiln_rmsnorm_kernel::sgd_step_f32_kt(param, grad, lr)
@@ -343,25 +340,13 @@ impl BackendRuntime for RocmBackend {
         weight_decay: f32,
         step: u32,
     ) -> Result<bool> {
-        if !self.has_resident_activation(param)
-            || !self.has_resident_activation(grad)
-            || !self.has_resident_activation(first_moment)
-            || !self.has_resident_activation(second_moment)
-        {
-            return Ok(false);
-        }
-        if !rocm_optimizer_tensors_supported_for_kt(&[param, grad, first_moment, second_moment]) {
+        if !rocm_optimizer_args_ready_for_kt(&[param, grad, first_moment, second_moment]) {
             return Ok(false);
         }
         // #1082: args are already kt (BackendRuntime trait flipped to kt),
         // so there is no candle↔kt borrow — the kernel runs directly on the
         // caller's kt tensors. Bit-exact with the prior candle shim (same
         // FFI symbol).
-        if !kiln_rmsnorm_kernel::supports_optimizer_step_kt(&[
-            param, grad, first_moment, second_moment,
-        ]) {
-            return Ok(false);
-        }
         if step == 0 {
             anyhow::bail!("adamw_step kt: step must be >= 1");
         }

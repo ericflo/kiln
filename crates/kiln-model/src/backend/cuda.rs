@@ -69,10 +69,13 @@ pub fn reset_gdn_full_chunk_forward_dispatch_counts() {
 
 const CUDA_RESIDENT_TENSOR_IDS_POISONED: &str = "CUDA resident TensorId registry mutex poisoned";
 
-fn cuda_optimizer_tensors_supported_for_kt(tensors: &[&kiln_tensor::Tensor]) -> bool {
-    super::cuda_rocm_common::optimizer_tensors_supported_for_kt(tensors, |device| {
-        matches!(device, kiln_tensor::Device::Cuda(_))
-    })
+fn cuda_optimizer_args_ready_for_kt(tensors: &[&kiln_tensor::Tensor]) -> bool {
+    super::cuda_rocm_common::optimizer_args_ready_for_kt(
+        &CUDA_RESIDENT_TENSOR_IDS,
+        tensors,
+        CUDA_RESIDENT_TENSOR_IDS_POISONED,
+        |device| matches!(device, kiln_tensor::Device::Cuda(_)),
+    )
 }
 
 #[derive(Debug)]
@@ -279,19 +282,13 @@ impl BackendRuntime for CudaBackend {
     }
 
     fn dispatch_sgd_step(&self, param: &kiln_tensor::Tensor, grad: &kiln_tensor::Tensor, lr: f32) -> Result<bool> {
-        if !self.has_resident_activation(param) || !self.has_resident_activation(grad) {
-            return Ok(false);
-        }
-        if !cuda_optimizer_tensors_supported_for_kt(&[param, grad]) {
+        if !cuda_optimizer_args_ready_for_kt(&[param, grad]) {
             return Ok(false);
         }
         // #1082: args are already kt (BackendRuntime trait flipped to kt),
         // so there is no candle↔kt borrow — the kernel runs directly on the
         // caller's kt tensors. Bit-exact with the prior candle shim (same
         // FFI symbol).
-        if !kiln_rmsnorm_kernel::supports_optimizer_step_kt(&[param, grad]) {
-            return Ok(false);
-        }
         kiln_nvtx::range!(c"kiln/sgd_step_kt");
         match param.dtype() {
             kiln_tensor::DType::F32 => kiln_rmsnorm_kernel::sgd_step_f32_kt(param, grad, lr)
@@ -328,25 +325,13 @@ impl BackendRuntime for CudaBackend {
         weight_decay: f32,
         step: u32,
     ) -> Result<bool> {
-        if !self.has_resident_activation(param)
-            || !self.has_resident_activation(grad)
-            || !self.has_resident_activation(first_moment)
-            || !self.has_resident_activation(second_moment)
-        {
-            return Ok(false);
-        }
-        if !cuda_optimizer_tensors_supported_for_kt(&[param, grad, first_moment, second_moment]) {
+        if !cuda_optimizer_args_ready_for_kt(&[param, grad, first_moment, second_moment]) {
             return Ok(false);
         }
         // #1082: args are already kt (BackendRuntime trait flipped to kt),
         // so there is no candle↔kt borrow — the kernel runs directly on the
         // caller's kt tensors. Bit-exact with the prior candle shim (same
         // FFI symbol).
-        if !kiln_rmsnorm_kernel::supports_optimizer_step_kt(&[
-            param, grad, first_moment, second_moment,
-        ]) {
-            return Ok(false);
-        }
         if step == 0 {
             anyhow::bail!("adamw_step kt: step must be >= 1");
         }
