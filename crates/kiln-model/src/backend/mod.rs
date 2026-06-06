@@ -2841,6 +2841,59 @@ impl<T: BackendRuntime + ?Sized> ResidencyBackend for T {
     }
 }
 
+impl<T: BackendRuntime + ?Sized> residency::ResidentRegistry for T {
+    fn register_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        family: residency::ResidentResourceFamily,
+    ) -> Result<Option<residency::ResidentResource>> {
+        match family {
+            residency::ResidentResourceFamily::Activation => {
+                BackendRuntime::register_resident_activation(self, tensor)?;
+                Ok(BackendRuntime::resident_activation_resource(self, tensor))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn update_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        family: residency::ResidentResourceFamily,
+    ) -> Result<Option<residency::ResidentResource>> {
+        match family {
+            residency::ResidentResourceFamily::Activation => {
+                BackendRuntime::update_resident_activation(self, tensor)?;
+                Ok(BackendRuntime::resident_activation_resource(self, tensor))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn evict_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        family: residency::ResidentResourceFamily,
+    ) {
+        if family == residency::ResidentResourceFamily::Activation {
+            BackendRuntime::evict_resident_activation(self, tensor);
+        }
+    }
+
+    fn resident_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        family: residency::ResidentResourceFamily,
+    ) -> Option<residency::ResidentResource> {
+        match family {
+            residency::ResidentResourceFamily::Activation => {
+                BackendRuntime::resident_activation_resource(self, tensor)
+            }
+            _ => None,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 impl<T: BackendRuntime + ?Sized> OptimizerBackend for T {
     fn runtime_dispatch_sgd_step(
@@ -3057,6 +3110,67 @@ mod tests {
         assert_eq!(resource.device, kiln_tensor::Device::Cpu);
         assert_eq!(resource.shape, vec![2]);
         assert_eq!(resource.byte_len, 8);
+        Ok(())
+    }
+
+    #[test]
+    fn resident_registry_adapter_routes_activation_family() -> Result<()> {
+        let tensor = kiln_tensor::Tensor::from_slice(&[1.0_f32, 2.0], vec![2])?;
+        let backend = ResidentActivationProbeBackend {
+            name: "vulkan",
+            resident: true,
+        };
+
+        let resource = residency::ResidentRegistry::resident_resource(
+            &backend,
+            &tensor,
+            residency::ResidentResourceFamily::Activation,
+        )
+        .unwrap();
+        assert_eq!(resource.tensor_id, tensor.id());
+        assert_eq!(resource.family, residency::ResidentResourceFamily::Activation);
+
+        assert!(residency::ResidentRegistry::has_resident_resource(
+            &backend,
+            &tensor,
+            residency::ResidentResourceFamily::Activation,
+        ));
+        assert!(
+            residency::ResidentRegistry::register_resource(
+                &backend,
+                &tensor,
+                residency::ResidentResourceFamily::Activation,
+            )?
+            .is_some()
+        );
+        assert!(
+            residency::ResidentRegistry::update_resource(
+                &backend,
+                &tensor,
+                residency::ResidentResourceFamily::Activation,
+            )?
+            .is_some()
+        );
+
+        assert!(residency::ResidentRegistry::resident_resource(
+            &backend,
+            &tensor,
+            residency::ResidentResourceFamily::OptimizerParam,
+        )
+        .is_none());
+        assert!(
+            residency::ResidentRegistry::register_resource(
+                &backend,
+                &tensor,
+                residency::ResidentResourceFamily::PagedKv,
+            )?
+            .is_none()
+        );
+        residency::ResidentRegistry::evict_resource(
+            &backend,
+            &tensor,
+            residency::ResidentResourceFamily::Activation,
+        );
         Ok(())
     }
 

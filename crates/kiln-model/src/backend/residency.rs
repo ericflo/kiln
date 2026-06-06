@@ -5,6 +5,7 @@
 //! already implement through `BackendRuntime` hooks. They are intentionally
 //! backend-neutral and carry no allocation or synchronization behavior.
 
+use anyhow::Result;
 use kiln_tensor::{DType, Device, Tensor, TensorId};
 
 /// High-level operation family that owns a resident resource.
@@ -101,6 +102,37 @@ impl ResidentResource {
     pub fn with_replay_stability(mut self, replay_stability: ReplayStability) -> Self {
         self.replay_stability = replay_stability;
         self
+    }
+}
+
+/// Backend-neutral lifecycle surface for resident tensor-like resources.
+///
+/// Backends can implement this over storage-owned membership (CUDA/ROCm/Metal)
+/// or upload-owned registries (Vulkan). Returning `Ok(None)`/`None` means the
+/// backend declined or does not track that resource family.
+pub trait ResidentRegistry: Send + Sync {
+    fn register_resource(
+        &self,
+        tensor: &Tensor,
+        family: ResidentResourceFamily,
+    ) -> Result<Option<ResidentResource>>;
+
+    fn update_resource(
+        &self,
+        tensor: &Tensor,
+        family: ResidentResourceFamily,
+    ) -> Result<Option<ResidentResource>>;
+
+    fn evict_resource(&self, tensor: &Tensor, family: ResidentResourceFamily);
+
+    fn resident_resource(
+        &self,
+        tensor: &Tensor,
+        family: ResidentResourceFamily,
+    ) -> Option<ResidentResource>;
+
+    fn has_resident_resource(&self, tensor: &Tensor, family: ResidentResourceFamily) -> bool {
+        self.resident_resource(tensor, family).is_some()
     }
 }
 
