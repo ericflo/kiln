@@ -4,23 +4,14 @@
 //! `Ok(None)` responses route the caller to the portable candle path.
 
 use anyhow::{Context, Result};
-use kiln_tensor_id::TensorId;
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use super::{BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy};
 use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 
-/// kt-native `kiln_tensor_id::TensorId` for the resident-activation
-/// registry. (#1082) Candle removal: the BackendRuntime trait surface is
-/// fully kt-typed, so the registry keys directly off the kt tensor id.
-#[inline]
-fn kt_id(tensor: &kiln_tensor::Tensor) -> TensorId {
-    tensor.id()
-}
-
-static CUDA_RESIDENT_TENSOR_IDS: OnceLock<Mutex<HashSet<TensorId>>> = OnceLock::new();
+static CUDA_RESIDENT_TENSOR_IDS: super::cuda_rocm_common::ResidentTensorIdRegistry =
+    OnceLock::new();
 static CUDA_SGD_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static CUDA_ADAMW_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static CUDA_LINEAR_PREFILL_SUCCESSES: AtomicU64 = AtomicU64::new(0);
@@ -76,13 +67,7 @@ pub fn reset_gdn_full_chunk_forward_dispatch_counts() {
     CUDA_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.store(0, Ordering::Relaxed);
 }
 
-fn with_cuda_resident_ids<R>(f: impl FnOnce(&mut HashSet<TensorId>) -> R) -> R {
-    let registry = CUDA_RESIDENT_TENSOR_IDS.get_or_init(|| Mutex::new(HashSet::new()));
-    let mut guard = registry
-        .lock()
-        .expect("CUDA resident TensorId registry mutex poisoned");
-    f(&mut guard)
-}
+const CUDA_RESIDENT_TENSOR_IDS_POISONED: &str = "CUDA resident TensorId registry mutex poisoned";
 
 fn cuda_optimizer_tensors_supported_for_kt(tensors: &[&kiln_tensor::Tensor]) -> bool {
     super::cuda_rocm_common::optimizer_tensors_supported_for_kt(tensors, |device| {
@@ -260,27 +245,37 @@ impl BackendRuntime for CudaBackend {
     }
 
     fn register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
-        with_cuda_resident_ids(|ids| {
-            ids.insert(kt_id(tensor));
-        });
+        super::cuda_rocm_common::mark_resident_activation(
+            &CUDA_RESIDENT_TENSOR_IDS,
+            tensor,
+            CUDA_RESIDENT_TENSOR_IDS_POISONED,
+        );
         Ok(())
     }
 
     fn evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
-        with_cuda_resident_ids(|ids| {
-            ids.remove(&kt_id(tensor));
-        });
+        super::cuda_rocm_common::evict_resident_activation(
+            &CUDA_RESIDENT_TENSOR_IDS,
+            tensor,
+            CUDA_RESIDENT_TENSOR_IDS_POISONED,
+        );
     }
 
     fn update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
-        with_cuda_resident_ids(|ids| {
-            ids.insert(kt_id(tensor));
-        });
+        super::cuda_rocm_common::mark_resident_activation(
+            &CUDA_RESIDENT_TENSOR_IDS,
+            tensor,
+            CUDA_RESIDENT_TENSOR_IDS_POISONED,
+        );
         Ok(())
     }
 
     fn has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
-        with_cuda_resident_ids(|ids| ids.contains(&kt_id(tensor)))
+        super::cuda_rocm_common::has_resident_activation(
+            &CUDA_RESIDENT_TENSOR_IDS,
+            tensor,
+            CUDA_RESIDENT_TENSOR_IDS_POISONED,
+        )
     }
 
     fn dispatch_sgd_step(&self, param: &kiln_tensor::Tensor, grad: &kiln_tensor::Tensor, lr: f32) -> Result<bool> {

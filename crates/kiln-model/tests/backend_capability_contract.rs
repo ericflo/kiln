@@ -443,6 +443,69 @@ fn generated_capability_report_lists_backend_source_modules() {
 }
 
 #[test]
+fn cuda_rocm_resident_membership_stays_in_shared_helper() {
+    let backend_dir = manifest_dir().join("src/backend");
+    let common_path = backend_dir.join("cuda_rocm_common.rs");
+    let common_source =
+        fs::read_to_string(&common_path).expect("cuda_rocm_common.rs should be readable");
+
+    for required in [
+        "ResidentTensorIdRegistry",
+        "kt_tensor_id",
+        "mark_resident_activation",
+        "evict_resident_activation",
+        "has_resident_activation",
+    ] {
+        assert!(
+            common_source.contains(required),
+            "cuda_rocm_common.rs should own shared resident membership helper `{required}`"
+        );
+    }
+
+    for backend_file in ["cuda.rs", "rocm.rs"] {
+        let path = backend_dir.join(backend_file);
+        let source = fs::read_to_string(&path).expect("backend source should be readable");
+        let functions = parse_functions(&path);
+        let register = functions
+            .get("register_resident_activation")
+            .unwrap_or_else(|| panic!("{backend_file} missing register_resident_activation"));
+        let update = functions
+            .get("update_resident_activation")
+            .unwrap_or_else(|| panic!("{backend_file} missing update_resident_activation"));
+        let evict = functions
+            .get("evict_resident_activation")
+            .unwrap_or_else(|| panic!("{backend_file} missing evict_resident_activation"));
+        let has = functions
+            .get("has_resident_activation")
+            .unwrap_or_else(|| panic!("{backend_file} missing has_resident_activation"));
+
+        assert!(
+            compact_body(&register.body).contains("cuda_rocm_common::mark_resident_activation("),
+            "{backend_file} should register residency through cuda_rocm_common"
+        );
+        assert!(
+            compact_body(&update.body).contains("cuda_rocm_common::mark_resident_activation("),
+            "{backend_file} should update residency through cuda_rocm_common"
+        );
+        assert!(
+            compact_body(&evict.body).contains("cuda_rocm_common::evict_resident_activation("),
+            "{backend_file} should evict residency through cuda_rocm_common"
+        );
+        assert!(
+            compact_body(&has.body).contains("cuda_rocm_common::has_resident_activation("),
+            "{backend_file} should query residency through cuda_rocm_common"
+        );
+
+        assert!(
+            !source.contains("with_cuda_resident_ids")
+                && !source.contains("with_rocm_resident_ids")
+                && !source.contains("fn kt_id("),
+            "{backend_file} should not keep copied resident TensorId registry helpers"
+        );
+    }
+}
+
+#[test]
 fn vulkan_gdn_runtime_methods_stay_in_gdn_module() {
     let backend_dir = manifest_dir().join("src/backend");
     let vulkan_rs = backend_dir.join("vulkan.rs");
