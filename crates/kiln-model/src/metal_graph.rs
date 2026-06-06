@@ -19,6 +19,8 @@ use kiln_core::token::TokenId;
 use crate::PagedKvCacheKt;
 use crate::backend::BackendRuntime;
 #[cfg(feature = "metal")]
+use crate::backend::SamplingBackend;
+#[cfg(feature = "metal")]
 use crate::forward::MetalPagedDecodeIcbInputs;
 use crate::forward::{
     GpuAttentionWeights, GpuWeights, LinearAttentionState,
@@ -658,7 +660,10 @@ impl MetalGraphRunner {
         }
         buffers.refresh_batch(token_ids, config, paged_cache, block_tables, seq_lens)?;
 
-        if batch == 1 && lora.is_none() && backend.supports_linear_decode_sample(1) {
+        if batch == 1
+            && lora.is_none()
+            && SamplingBackend::runtime_supports_linear_decode_sample(backend, 1)
+        {
             let metal_icb_inputs = MetalPagedDecodeIcbInputs {
                 q: buffers.stable_q.as_slice(),
                 k: buffers.stable_k.as_slice(),
@@ -832,7 +837,13 @@ impl MetalGraphRunner {
         {
             return Ok(None);
         }
-        if lora.is_some() || !backend.supports_linear_decode_sample_batch(top_k, temperatures) {
+        if lora.is_some()
+            || !SamplingBackend::runtime_supports_linear_decode_sample_batch(
+                backend,
+                top_k,
+                temperatures,
+            )
+        {
             return Ok(None);
         }
 

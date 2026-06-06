@@ -19,7 +19,7 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 
 use crate::backend::{
-    self, BackendRuntime, FallbackPolicy, TrainingLossBackend,
+    self, BackendRuntime, FallbackPolicy, ReplayBackend, SamplingBackend, TrainingLossBackend,
     capability::{BackendCapabilityQueries, DecodeBatcherPolicy},
 };
 use crate::cancel::CancelHandle;
@@ -1364,7 +1364,11 @@ fn run_lm_head_sample_batch_with_contexts(
     );
     let top_k_values: Vec<u32> = params.iter().map(|param| param.top_k).collect();
     let temperature_values: Vec<f32> = params.iter().map(|param| param.temperature).collect();
-    if backend.supports_linear_decode_sample_batch(&top_k_values, &temperature_values) {
+    if SamplingBackend::runtime_supports_linear_decode_sample_batch(
+        backend,
+        &top_k_values,
+        &temperature_values,
+    ) {
         let normed = crate::forward::model_forward_final_norm(hidden, weights, config)
             .context("batched decode final norm for fused sampling")?;
         let repetition_values: Vec<f32> = params
@@ -1601,7 +1605,8 @@ impl ModelRunner {
     /// backend supports it. This keeps the first live decode request from
     /// paying the pool feasibility/allocation cost on the request path.
     pub fn warm_resident_decode_pool(&self, max_batch: usize) -> bool {
-        self.backend.decode_resident_pool_ready(
+        ReplayBackend::runtime_decode_resident_pool_ready(
+            self.backend.as_ref(),
             self.config.hidden_size,
             self.config.intermediate_size,
             max_batch,
@@ -3227,7 +3232,10 @@ impl ModelRunner {
         // Skipped when the contiguous-batched path above already produced tokens
         // (row > 1).
         #[cfg(feature = "vulkan")]
-        if sampled.is_none() && row_count == 1 && self.backend.supports_resident_decode() {
+        if sampled.is_none()
+            && row_count == 1
+            && ReplayBackend::runtime_supports_resident_decode(self.backend.as_ref())
+        {
             let token = if params[0].temperature == 0.0 {
                 let linear_state = if has_linear_layers {
                     Some(&mut *linear_states[0])
@@ -3325,7 +3333,7 @@ impl ModelRunner {
             && !all_greedy
             && !cache_is_fp8
             && self.backend.name() == "vulkan"
-            && self.backend.supports_resident_decode()
+            && ReplayBackend::runtime_supports_resident_decode(self.backend.as_ref())
             && self.active_lora.is_none()
         {
             let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
@@ -4196,8 +4204,9 @@ impl ModelRunner {
 
         let stage_start = profile_stages.then(std::time::Instant::now);
         if has_linear_layers {
-            if self.backend.supports_resident_decode()
-                && self.backend.decode_resident_pool_ready(
+            if ReplayBackend::runtime_supports_resident_decode(self.backend.as_ref())
+                && ReplayBackend::runtime_decode_resident_pool_ready(
+                    self.backend.as_ref(),
                     self.config.hidden_size,
                     self.config.intermediate_size,
                     64,
@@ -4386,10 +4395,11 @@ impl ModelRunner {
     ) -> Result<Option<Vec<TokenId>>> {
         let top_k_values: Vec<u32> = params.iter().map(|param| param.top_k).collect();
         let temperature_values: Vec<f32> = params.iter().map(|param| param.temperature).collect();
-        if !self
-            .backend
-            .supports_linear_decode_sample_batch(&top_k_values, &temperature_values)
-        {
+        if !SamplingBackend::runtime_supports_linear_decode_sample_batch(
+            self.backend.as_ref(),
+            &top_k_values,
+            &temperature_values,
+        ) {
             return Ok(None);
         }
 
@@ -4457,8 +4467,9 @@ impl ModelRunner {
 
         let stage_start = profile_stages.then(std::time::Instant::now);
         if has_linear_layers {
-            if self.backend.supports_resident_decode()
-                && self.backend.decode_resident_pool_ready(
+            if ReplayBackend::runtime_supports_resident_decode(self.backend.as_ref())
+                && ReplayBackend::runtime_decode_resident_pool_ready(
+                    self.backend.as_ref(),
                     self.config.hidden_size,
                     self.config.intermediate_size,
                     64,
@@ -4706,8 +4717,9 @@ impl ModelRunner {
 
         let stage_start = profile_stages.then(std::time::Instant::now);
         if has_linear_layers {
-            if self.backend.supports_resident_decode()
-                && self.backend.decode_resident_pool_ready(
+            if ReplayBackend::runtime_supports_resident_decode(self.backend.as_ref())
+                && ReplayBackend::runtime_decode_resident_pool_ready(
+                    self.backend.as_ref(),
                     self.config.hidden_size,
                     self.config.intermediate_size,
                     64,
@@ -4926,10 +4938,11 @@ impl ModelRunner {
             }
             let top_k = [params.top_k];
             let temperatures = [params.temperature];
-            if !self
-                .backend
-                .supports_linear_decode_sample_batch(&top_k, &temperatures)
-            {
+            if !SamplingBackend::runtime_supports_linear_decode_sample_batch(
+                self.backend.as_ref(),
+                &top_k,
+                &temperatures,
+            ) {
                 return Ok(None);
             }
 

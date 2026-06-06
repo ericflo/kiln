@@ -1586,6 +1586,8 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         .expect("trainer.rs should be readable");
     let generate_source = fs::read_to_string(root.join("crates/kiln-model/src/generate.rs"))
         .expect("generate.rs should be readable");
+    let metal_graph_source = fs::read_to_string(root.join("crates/kiln-model/src/metal_graph.rs"))
+        .expect("metal_graph.rs should be readable");
 
     assert!(
         trainer_source.contains("BackendCapabilityQueries"),
@@ -1602,6 +1604,18 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     assert!(
         generate_source.contains("DecodeBatcherPolicy"),
         "decode batcher defaults should import the backend-owned policy surface"
+    );
+    assert!(
+        generate_source.contains("ReplayBackend"),
+        "generate decode residency gates should import the focused replay facet"
+    );
+    assert!(
+        generate_source.contains("SamplingBackend"),
+        "generate decode sampling gates should import the focused sampling facet"
+    );
+    assert!(
+        metal_graph_source.contains("SamplingBackend"),
+        "Metal graph decode sampling gates should import the focused sampling facet"
     );
 
     let decode_policy_section = source_between(
@@ -1673,6 +1687,29 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         !runner_new_section.contains("backend.training_capabilities()"),
         "ModelRunner should not call the broad BackendRuntime training capability method directly"
     );
+
+    let inference_decode_sources = format!("{generate_source}\n{metal_graph_source}");
+    for required in [
+        "ReplayBackend::runtime_supports_resident_decode",
+        "ReplayBackend::runtime_decode_resident_pool_ready",
+        "SamplingBackend::runtime_supports_linear_decode_sample",
+    ] {
+        assert!(
+            inference_decode_sources.contains(required),
+            "inference decode gates should consume focused capability facet method {required}"
+        );
+    }
+    for forbidden in [
+        ".supports_resident_decode(",
+        ".decode_resident_pool_ready(",
+        ".supports_linear_decode_sample(",
+        ".supports_linear_decode_sample_batch(",
+    ] {
+        assert!(
+            !inference_decode_sources.contains(forbidden),
+            "inference decode gates should not call broad BackendRuntime method {forbidden}"
+        );
+    }
 }
 
 #[test]
