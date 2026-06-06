@@ -5,6 +5,7 @@
 //! `BackendRuntime` facade until they can move in narrower slices.
 
 use anyhow::{Context, Result};
+use std::sync::OnceLock;
 
 use super::vulkan::VulkanBackend;
 use super::vulkan_residency::{
@@ -12,6 +13,13 @@ use super::vulkan_residency::{
     recurrent_state_resident_scope_active,
 };
 use super::vulkan_tensor_bridge::{kt_tensor_from_f32_bytes, kt_tensor_to_f32_bytes_with_shape};
+
+fn fused_gdn_resident_state_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_DISABLE_VULKAN_GDN_DECODE_FUSED_RESIDENT_STATE").is_err()
+    })
+}
 
 pub(super) fn supports_gdn_forward_substitution(backend: &VulkanBackend) -> bool {
     // solve_tri is experimental: shared-memory layout not yet validated
@@ -380,6 +388,157 @@ pub(super) fn gdn_full_chunk_forward(
         kiln_tensor::DType::BF16,
     )?;
     *state_kt = kt_tensor_from_f32_bytes(&new_state_data, &state_dims, kiln_tensor::DType::BF16)?;
+    Ok(Some(out))
+}
+
+pub(super) fn gdn_decode_gates_recurrent_rmsnorm(
+    backend: &VulkanBackend,
+    q: &kiln_tensor::Tensor,
+    k: &kiln_tensor::Tensor,
+    v: &kiln_tensor::Tensor,
+    a: &kiln_tensor::Tensor,
+    b: &kiln_tensor::Tensor,
+    a_log: &kiln_tensor::Tensor,
+    dt_bias: &kiln_tensor::Tensor,
+    state_kt: &mut kiln_tensor::Tensor,
+    z: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
+    eps: f64,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    // kt guards read directly off the kt args before the bridge.
+    if !backend.has_vulkan() || !backend.gdn_enabled || q.dtype() != kiln_tensor::DType::F32 {
+        return Ok(None);
+    }
+    if !matches!(q.device(), kiln_tensor::Device::Cpu)
+        || !matches!(k.device(), kiln_tensor::Device::Cpu)
+        || !matches!(v.device(), kiln_tensor::Device::Cpu)
+        || !matches!(a.device(), kiln_tensor::Device::Cpu)
+        || !matches!(b.device(), kiln_tensor::Device::Cpu)
+        || !matches!(a_log.device(), kiln_tensor::Device::Cpu)
+        || !matches!(dt_bias.device(), kiln_tensor::Device::Cpu)
+        || !matches!(state_kt.device(), kiln_tensor::Device::Cpu)
+        || !matches!(z.device(), kiln_tensor::Device::Cpu)
+        || !matches!(weight.device(), kiln_tensor::Device::Cpu)
+    {
+        return Ok(None);
+    }
+    // (#1082) kt-native: all args are already kt. `state_kt` is mutated in
+    // place at each return that may have updated the recurrent state.
+    let Ok((batch, seq_len, nv, dk)) = q.dims4() else {
+        return Ok(None);
+    };
+    let Ok((k_batch, k_seq, k_nv, k_dk)) = k.dims4() else {
+        return Ok(None);
+    };
+    let Ok((v_batch, v_seq, v_nv, dv)) = v.dims4() else {
+        return Ok(None);
+    };
+    let Ok((z_batch, z_seq, z_nv, z_dv)) = z.dims4() else {
+        return Ok(None);
+    };
+    let Ok((state_batch, state_nv, state_dk, state_dv)) = state_kt.dims4() else {
+        return Ok(None);
+    };
+    if batch == 1 && !backend.gdn_decode_fused_enabled {
+        return Ok(None);
+    }
+    if seq_len != 1
+        || k_batch != batch
+        || k_seq != 1
+        || v_batch != batch
+        || v_seq != 1
+        || z_batch != batch
+        || z_seq != 1
+        || k_nv != nv
+        || v_nv != nv
+        || z_nv != nv
+        || k_dk != dk
+        || state_batch != batch
+        || state_nv != nv
+        || state_dk != dk
+        || state_dv != dv
+        || z_dv != dv
+        || dv > 256
+    {
+        return Ok(None);
+    }
+    if a.dims() != [batch, 1, nv]
+        || b.dims() != [batch, 1, nv]
+        || a_log.dims() != [nv]
+        || dt_bias.dims() != [nv]
+        || weight.dims() != [dv]
+    {
+        return Ok(None);
+    }
+
+    let vk_device = backend
+        .vulkan_device()
+        .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+    let skip_state_readback = crate::forward::vulkan_skip_gdn_state_readback_active();
+    if batch > 1 && fused_gdn_resident_state_enabled() && recurrent_state_resident_scope_active() {
+        let state_id = state_kt.id();
+        let resident_state = get_recurrent_state_resident_buffer(state_id);
+        let (batch_d, _, nv, dk) = q.dims4()?;
+        let dv = v.dims4()?.3;
+        let q_dtype = q.dtype();
+        let q_b = kt_tensor_to_f32_bytes_with_shape(q)?.0;
+        let k_b = kt_tensor_to_f32_bytes_with_shape(k)?.0;
+        let v_b = kt_tensor_to_f32_bytes_with_shape(v)?.0;
+        let a_b = kt_tensor_to_f32_bytes_with_shape(a)?.0;
+        let b_b = kt_tensor_to_f32_bytes_with_shape(b)?.0;
+        let a_log_b = kt_tensor_to_f32_bytes_with_shape(a_log)?.0;
+        let dt_bias_b = kt_tensor_to_f32_bytes_with_shape(dt_bias)?.0;
+        let z_b = kt_tensor_to_f32_bytes_with_shape(z)?.0;
+        let weight_b = kt_tensor_to_f32_bytes_with_shape(weight)?.0;
+        let state_b = if resident_state.is_none() {
+            Some(kt_tensor_to_f32_bytes_with_shape(state_kt)?.0)
+        } else {
+            None
+        };
+        let (out_data, resident_state) =
+            kiln_vulkan_kernel::kernels::dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state_bytes(
+                vk_device,
+                &q_b, &k_b, &v_b, &a_b, &b_b, &a_log_b, &dt_bias_b,
+                state_b.as_deref(),
+                &z_b, &weight_b,
+                batch_d, nv, dk, dv,
+                eps as f32,
+                resident_state,
+            )
+            .context("gdn_decode_gates_recurrent_rmsnorm resident-state kernel failed")?;
+        let out = kt_tensor_from_f32_bytes(&out_data, &[batch_d, 1, nv, dv], q_dtype)?;
+        insert_recurrent_state_resident_buffer(state_id, resident_state);
+        return Ok(Some(out));
+    }
+    let (batch, _, nv, dk) = q.dims4()?;
+    let dv = v.dims4()?.3;
+    let q_dtype = q.dtype();
+    let state_dtype = state_kt.dtype();
+    let state_dims = state_kt.dims().to_vec();
+    let input_tensors: [&kiln_tensor::Tensor; 10] =
+        [q, k, v, a, b, a_log, dt_bias, &*state_kt, z, weight];
+    let mut input_data: Vec<Vec<u8>> = Vec::with_capacity(input_tensors.len());
+    for tensor in &input_tensors {
+        input_data.push(kt_tensor_to_f32_bytes_with_shape(tensor)?.0);
+    }
+    let (out_data, new_state_data) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_decode_gates_recurrent_rmsnorm_bytes(
+            vk_device,
+            &input_data,
+            batch,
+            nv,
+            dk,
+            dv,
+            eps as f32,
+            skip_state_readback,
+        )
+        .context("gdn_decode_gates_recurrent_rmsnorm kernel failed")?;
+    let out = kt_tensor_from_f32_bytes(&out_data, &[batch, 1, nv, dv], q_dtype)?;
+    if !skip_state_readback {
+        if let Some(sd) = new_state_data {
+            *state_kt = kt_tensor_from_f32_bytes(&sd, &state_dims, state_dtype)?;
+        }
+    }
     Ok(Some(out))
 }
 
