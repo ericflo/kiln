@@ -657,11 +657,16 @@ def conformance_gate_report() -> list[dict[str, Any]]:
             "gate": "hardware_latency_thresholds",
             "phase8_requirement": "backend-specific latency thresholds on known hardware fixtures",
             "status": "fixture_required",
-            "command": "hardware runner required",
+            "command": "hardware runner required; python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered",
             "evidence": [
+                "docs/backend-latency-fixtures.json",
+                "scripts/check_backend_latency_fixtures.py",
+                "crates/kiln-server/examples/flce_preflight_bench.rs",
+                "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
                 "crates/kiln-tensor/tests/metal_matmul_bench.rs",
                 "crates/kiln-tensor/tests/metal_sdpa_bench.rs",
-                "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
+                "crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs",
+                "crates/kiln-tensor/tests/rocm_latency_bench.rs",
             ],
         },
         {

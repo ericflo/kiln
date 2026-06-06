@@ -765,3 +765,130 @@ fn generated_capability_report_tracks_one_step_training_proof_gap() {
         other => panic!("unexpected one-step training proof status {other:?}"),
     }
 }
+
+#[test]
+fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
+    let root = workspace_root();
+    let report_path = root.join("docs/backend-capability-report.json");
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(&report_path).expect("capability report json should be readable"),
+    )
+    .expect("capability report json should parse");
+
+    let conformance_gates = report["conformance_gates"]
+        .as_array()
+        .expect("conformance_gates should be an array");
+    let hardware_gate = conformance_gates
+        .iter()
+        .find(|gate| gate["gate"] == "hardware_latency_thresholds")
+        .expect("hardware latency threshold gate should be present");
+
+    assert_eq!(hardware_gate["status"], "fixture_required");
+    let command = hardware_gate["command"]
+        .as_str()
+        .expect("hardware latency command should be a string");
+    assert!(command.contains("check_backend_latency_fixtures.py"));
+    assert!(command.contains("--require-covered"));
+
+    let evidence_present = hardware_gate["evidence_present"]
+        .as_array()
+        .expect("hardware latency present evidence should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    for path in [
+        "docs/backend-latency-fixtures.json",
+        "scripts/check_backend_latency_fixtures.py",
+        "crates/kiln-server/examples/flce_preflight_bench.rs",
+        "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
+        "crates/kiln-tensor/tests/metal_matmul_bench.rs",
+        "crates/kiln-tensor/tests/metal_sdpa_bench.rs",
+        "crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs",
+    ] {
+        assert!(
+            evidence_present.contains(&path),
+            "hardware latency gate should cite existing {path}"
+        );
+    }
+
+    let evidence_missing = hardware_gate["evidence_missing"]
+        .as_array()
+        .expect("hardware latency missing evidence should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        evidence_missing.contains(&"crates/kiln-tensor/tests/rocm_latency_bench.rs"),
+        "hardware latency gate should name the missing ROCm fixture source"
+    );
+
+    let manifest_path = root.join("docs/backend-latency-fixtures.json");
+    let manifest: Value = serde_json::from_str(
+        &fs::read_to_string(&manifest_path).expect("latency fixture manifest should be readable"),
+    )
+    .expect("latency fixture manifest should parse");
+    assert_eq!(manifest["schema_version"], 1);
+    assert_eq!(manifest["status"], "fixture_required");
+
+    let required_backends = manifest["required_backends"]
+        .as_array()
+        .expect("required_backends should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    for backend in ["cuda", "rocm", "metal", "vulkan"] {
+        assert!(
+            required_backends.contains(&backend),
+            "latency fixture manifest should require {backend}"
+        );
+    }
+
+    let fixtures = manifest["fixtures"]
+        .as_array()
+        .expect("fixtures should be an array");
+    let fixture_backends = fixtures
+        .iter()
+        .filter_map(|fixture| fixture["backend"].as_str())
+        .collect::<Vec<_>>();
+    for backend in ["cuda", "metal", "vulkan"] {
+        assert!(
+            fixture_backends.contains(&backend),
+            "latency fixture manifest should have a {backend} fixture"
+        );
+    }
+    for fixture in fixtures {
+        assert_eq!(fixture["threshold_state"], "pending_fixture_result");
+        let source = fixture["source"]
+            .as_str()
+            .expect("fixture source should be a string");
+        assert!(
+            root.join(source).is_file(),
+            "fixture source should exist: {source}"
+        );
+        let metrics = fixture["metrics"]
+            .as_array()
+            .expect("fixture metrics should be an array");
+        assert!(
+            !metrics.is_empty(),
+            "fixture should declare at least one latency metric"
+        );
+        for metric in metrics {
+            assert!(
+                metric["max"].is_null(),
+                "pending fixture metrics should not pretend thresholds are locked"
+            );
+        }
+    }
+
+    let missing_slots = manifest["missing_fixture_slots"]
+        .as_array()
+        .expect("missing_fixture_slots should be an array");
+    let rocm_slot = missing_slots
+        .iter()
+        .find(|slot| slot["backend"] == "rocm")
+        .expect("ROCm latency fixture gap should be explicit");
+    assert_eq!(
+        rocm_slot["required_source"],
+        "crates/kiln-tensor/tests/rocm_latency_bench.rs"
+    );
+}

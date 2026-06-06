@@ -1,0 +1,147 @@
+{
+  "schema_version": 1,
+  "status": "fixture_required",
+  "policy": {
+    "covered_gate_requires": [
+      "Every required backend has at least one known hardware fixture.",
+      "Every fixture has locked numeric thresholds for its required measurements.",
+      "Every locked threshold has a checked hardware-result artifact from the named fixture.",
+      "Default-feature local tests must not mark the hardware latency gate covered."
+    ]
+  },
+  "required_backends": [
+    "cuda",
+    "rocm",
+    "metal",
+    "vulkan"
+  ],
+  "fixtures": [
+    {
+      "id": "cuda_a6000_flce_phase_a_validation",
+      "backend": "cuda",
+      "hardware": "NVIDIA RTX A6000 48GB",
+      "source": "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
+      "command": "/home/ericflo/.cargo/bin/cargo run --release --features cuda -p kiln-server --example flce_phase_a_validation_bench -- --model-path /path/to/Qwen3.5-4B",
+      "result_artifact": "bench-results/backend-latency/cuda-a6000-flce-phase-a.json",
+      "threshold_state": "pending_fixture_result",
+      "metrics": [
+        {
+          "name": "t2048_flce_on_step_secs",
+          "unit": "s",
+          "comparison": "<=",
+          "max": null
+        },
+        {
+          "name": "t8192_streaming_tile4096_step_secs",
+          "unit": "s",
+          "comparison": "<=",
+          "max": null
+        },
+        {
+          "name": "t16384_streaming_tile4096_step_secs",
+          "unit": "s",
+          "comparison": "<=",
+          "max": null
+        }
+      ]
+    },
+    {
+      "id": "metal_apple_silicon_matmul_qwen35_4b",
+      "backend": "metal",
+      "hardware": "Apple Silicon Metal fixture",
+      "source": "crates/kiln-tensor/tests/metal_matmul_bench.rs",
+      "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features metal --test metal_matmul_bench -- --ignored --nocapture",
+      "result_artifact": "bench-results/backend-latency/metal-apple-silicon-matmul.json",
+      "threshold_state": "pending_fixture_result",
+      "metrics": [
+        {
+          "name": "decode_qkv_m1_2560x4096_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": null
+        },
+        {
+          "name": "prefill_qkv_m256_2560x4096_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": null
+        },
+        {
+          "name": "prefill_gate_up_m256_2560x18432_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": null
+        },
+        {
+          "name": "lm_head_m1_2560x152064_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": null
+        }
+      ]
+    },
+    {
+      "id": "metal_apple_silicon_sdpa_qwen35_4b",
+      "backend": "metal",
+      "hardware": "Apple Silicon Metal fixture",
+      "source": "crates/kiln-tensor/tests/metal_sdpa_bench.rs",
+      "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features metal --test metal_sdpa_bench -- --ignored --nocapture",
+      "result_artifact": "bench-results/backend-latency/metal-apple-silicon-sdpa.json",
+      "threshold_state": "pending_fixture_result",
+      "metrics": [
+        {
+          "name": "decode_sq1_sk512_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": null
+        },
+        {
+          "name": "decode_sq1_sk4096_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": null
+        },
+        {
+          "name": "prefill_sq512_sk512_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": null
+        }
+      ]
+    },
+    {
+      "id": "vulkan_rtx6000_decode_microbench",
+      "backend": "vulkan",
+      "hardware": "NVIDIA RTX 6000 Ada or RTX A6000 Vulkan fixture",
+      "source": "crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs",
+      "command": "/home/ericflo/.cargo/bin/cargo run --release -p kiln-vulkan-kernel --bin vulkan_decode_microbench",
+      "result_artifact": "bench-results/backend-latency/vulkan-rtx6000-decode.json",
+      "threshold_state": "pending_fixture_result",
+      "selected_cases": [
+        "full_step_resident",
+        "full_token_resident_paged"
+      ],
+      "metrics": [
+        {
+          "name": "full_step_resident_us",
+          "unit": "us",
+          "comparison": "<=",
+          "max": null
+        },
+        {
+          "name": "full_token_resident_paged_us",
+          "unit": "us",
+          "comparison": "<=",
+          "max": null
+        }
+      ]
+    }
+  ],
+  "missing_fixture_slots": [
+    {
+      "backend": "rocm",
+      "required_source": "crates/kiln-tensor/tests/rocm_latency_bench.rs",
+      "reason": "No ROCm latency benchmark source or hardware-result artifact exists in the current tree."
+    }
+  ]
+}
