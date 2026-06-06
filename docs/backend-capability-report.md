@@ -100,13 +100,13 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 
 ## Typed Request Descriptors
 
-| Descriptor | Field Count | DType | Shape | Batch | Replay Safe | Fields |
-|---|---:|---|---|---|---|---|
-| `AttentionRequest` | 12 | yes | yes | yes | yes | `kind`, `q_shape`, `k_shape`, `v_shape`, `output_shape`, `q_dtype`, `k_dtype`, `v_dtype`, `batch`, `seq_len`, `head_dim`, `replay_safe` |
-| `MatmulRequest` | 12 | yes | yes | yes | yes | `lhs_shape`, `rhs_shape`, `lhs_dtype`, `rhs_dtype`, `out_dtype`, `accumulation`, `lhs_layout`, `rhs_layout`, `out_layout`, `batch`, `epilogue`, `replay_safe` |
-| `MatmulBlasRequest` | 10 | yes | yes | yes | no | `m`, `n`, `k`, `dtype`, `lhs_layout`, `rhs_layout`, `out_layout`, `epilogue`, `batch`, `concurrent_streams` |
-| `LinearRequest` | 11 | yes | yes | yes | yes | `kind`, `input_shape`, `weight_shape`, `output_shape`, `input_dtype`, `weight_dtype`, `output_dtype`, `batch`, `top_k`, `temperatures`, `replay_safe` |
-| `ReplayRequest` | 7 | yes | yes | yes | yes | `kind`, `replay_shape`, `max_hidden`, `max_intermediate`, `max_batch`, `dtype`, `replay_safe` |
+| Descriptor | Field Count | DType | Shape | Layout | Batch | Replay Safe | Fields |
+|---|---:|---|---|---|---|---|---|
+| `AttentionRequest` | 13 | yes | yes | yes | yes | yes | `kind`, `q_shape`, `k_shape`, `v_shape`, `output_shape`, `layout`, `q_dtype`, `k_dtype`, `v_dtype`, `batch`, `seq_len`, `head_dim`, `replay_safe` |
+| `MatmulRequest` | 12 | yes | yes | yes | yes | yes | `lhs_shape`, `rhs_shape`, `lhs_dtype`, `rhs_dtype`, `out_dtype`, `accumulation`, `lhs_layout`, `rhs_layout`, `out_layout`, `batch`, `epilogue`, `replay_safe` |
+| `MatmulBlasRequest` | 10 | yes | yes | yes | yes | no | `m`, `n`, `k`, `dtype`, `lhs_layout`, `rhs_layout`, `out_layout`, `epilogue`, `batch`, `concurrent_streams` |
+| `LinearRequest` | 12 | yes | yes | yes | yes | yes | `kind`, `input_shape`, `weight_shape`, `output_shape`, `layout`, `input_dtype`, `weight_dtype`, `output_dtype`, `batch`, `top_k`, `temperatures`, `replay_safe` |
+| `ReplayRequest` | 8 | yes | yes | yes | yes | yes | `kind`, `replay_shape`, `layout`, `max_hidden`, `max_intermediate`, `max_batch`, `dtype`, `replay_safe` |
 
 ## Request Capability Queries
 

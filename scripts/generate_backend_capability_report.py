@@ -339,6 +339,7 @@ def request_descriptor_report() -> dict[str, Any]:
             "has_dtype": any("dtype" in field_name for field_name in field_names),
             "has_shape": any("shape" in field_name for field_name in field_names)
             or all(dim in field_names for dim in ["m", "n", "k"]),
+            "has_layout": any("layout" in field_name for field_name in field_names),
             "has_batch": any("batch" in field_name for field_name in field_names),
             "has_replay_safe": "replay_safe" in field_names,
         }
@@ -808,14 +809,17 @@ def markdown(data: dict[str, Any]) -> str:
     lines.append("")
     lines.append("## Typed Request Descriptors")
     lines.append("")
-    lines.append("| Descriptor | Field Count | DType | Shape | Batch | Replay Safe | Fields |")
-    lines.append("|---|---:|---|---|---|---|---|")
+    lines.append(
+        "| Descriptor | Field Count | DType | Shape | Layout | Batch | Replay Safe | Fields |"
+    )
+    lines.append("|---|---:|---|---|---|---|---|---|")
     for name, info in data["request_descriptors"].items():
         fields = ", ".join(f"`{field['name']}`" for field in info["fields"])
         lines.append(
             f"| `{name}` | {info['field_count']} | "
             f"{'yes' if info['has_dtype'] else 'no'} | "
             f"{'yes' if info['has_shape'] else 'no'} | "
+            f"{'yes' if info['has_layout'] else 'no'} | "
             f"{'yes' if info['has_batch'] else 'no'} | "
             f"{'yes' if info['has_replay_safe'] else 'no'} | {fields} |"
         )

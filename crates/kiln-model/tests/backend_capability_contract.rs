@@ -944,9 +944,17 @@ fn generated_capability_report_lists_request_descriptors() {
         descriptors["ReplayRequest"]["has_shape"], true,
         "ReplayRequest should carry replay shape metadata for replay key derivation"
     );
+    assert_eq!(
+        descriptors["ReplayRequest"]["has_layout"], true,
+        "ReplayRequest should carry replay resource layout metadata"
+    );
     assert!(
         replay_fields.contains(&"replay_shape"),
         "ReplayRequest should include replay_shape"
+    );
+    assert!(
+        replay_fields.contains(&"layout"),
+        "ReplayRequest should include layout"
     );
 
     let attention = &descriptors["AttentionRequest"];
@@ -954,13 +962,17 @@ fn generated_capability_report_lists_request_descriptors() {
         attention["has_shape"], true,
         "AttentionRequest should carry shape metadata for prefill/decode capability queries"
     );
+    assert_eq!(
+        attention["has_layout"], true,
+        "AttentionRequest should carry layout metadata for prefill/decode capability queries"
+    );
     let attention_fields = attention["fields"]
         .as_array()
         .expect("AttentionRequest fields should be an array")
         .iter()
         .filter_map(|field| field["name"].as_str())
         .collect::<Vec<_>>();
-    for field in ["q_shape", "k_shape", "v_shape", "output_shape"] {
+    for field in ["q_shape", "k_shape", "v_shape", "output_shape", "layout"] {
         assert!(
             attention_fields.contains(&field),
             "AttentionRequest should include {field}"
@@ -972,13 +984,17 @@ fn generated_capability_report_lists_request_descriptors() {
         linear["has_shape"], true,
         "LinearRequest should carry shape metadata for decode/lm-head capability queries"
     );
+    assert_eq!(
+        linear["has_layout"], true,
+        "LinearRequest should carry layout metadata for decode/lm-head capability queries"
+    );
     let linear_fields = linear["fields"]
         .as_array()
         .expect("LinearRequest fields should be an array")
         .iter()
         .filter_map(|field| field["name"].as_str())
         .collect::<Vec<_>>();
-    for field in ["input_shape", "weight_shape", "output_shape"] {
+    for field in ["input_shape", "weight_shape", "output_shape", "layout"] {
         assert!(
             linear_fields.contains(&field),
             "LinearRequest should include {field}"

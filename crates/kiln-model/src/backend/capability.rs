@@ -289,6 +289,24 @@ pub enum AttentionRequestKind {
     FlashPagedDecode,
 }
 
+/// Logical tensor layout for an attention capability request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AttentionLayout {
+    Sdpa,
+    HeadMajor,
+    PagedKv,
+}
+
+impl AttentionLayout {
+    const fn for_kind(kind: AttentionRequestKind) -> Self {
+        match kind {
+            AttentionRequestKind::FlashPrefill => Self::Sdpa,
+            AttentionRequestKind::FlashPrefillHeadMajor => Self::HeadMajor,
+            AttentionRequestKind::FlashPagedDecode => Self::PagedKv,
+        }
+    }
+}
+
 /// Request descriptor for attention capability queries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttentionRequest {
@@ -297,6 +315,7 @@ pub struct AttentionRequest {
     pub k_shape: Vec<usize>,
     pub v_shape: Vec<usize>,
     pub output_shape: Vec<usize>,
+    pub layout: AttentionLayout,
     pub q_dtype: kiln_tensor::DType,
     pub k_dtype: kiln_tensor::DType,
     pub v_dtype: kiln_tensor::DType,
@@ -323,6 +342,7 @@ impl AttentionRequest {
             k_shape: shape.clone(),
             v_shape: shape.clone(),
             output_shape: shape,
+            layout: AttentionLayout::for_kind(AttentionRequestKind::FlashPrefill),
             q_dtype,
             k_dtype,
             v_dtype,
@@ -335,6 +355,7 @@ impl AttentionRequest {
 
     pub fn with_kind(mut self, kind: AttentionRequestKind) -> Self {
         self.kind = kind;
+        self.layout = AttentionLayout::for_kind(kind);
         self
     }
 
@@ -352,6 +373,11 @@ impl AttentionRequest {
 
     pub fn with_replay_safe(mut self, replay_safe: bool) -> Self {
         self.replay_safe = replay_safe;
+        self
+    }
+
+    pub fn with_layout(mut self, layout: AttentionLayout) -> Self {
+        self.layout = layout;
         self
     }
 
@@ -392,6 +418,22 @@ pub enum LinearRequestKind {
     DecodeSampleBatch,
 }
 
+/// Logical tensor layouts for a linear/lm-head capability request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LinearLayouts {
+    pub input: MatmulOperandLayout,
+    pub weight: MatmulOperandLayout,
+    pub output: MatmulOperandLayout,
+}
+
+impl LinearLayouts {
+    pub const ROW_MAJOR: Self = Self {
+        input: MatmulOperandLayout::RowMajor,
+        weight: MatmulOperandLayout::RowMajor,
+        output: MatmulOperandLayout::RowMajor,
+    };
+}
+
 /// Request descriptor for linear/lm-head capability queries.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LinearRequest {
@@ -399,6 +441,7 @@ pub struct LinearRequest {
     pub input_shape: Vec<usize>,
     pub weight_shape: Vec<usize>,
     pub output_shape: Vec<usize>,
+    pub layout: LinearLayouts,
     pub input_dtype: kiln_tensor::DType,
     pub weight_dtype: kiln_tensor::DType,
     pub output_dtype: kiln_tensor::DType,
@@ -425,6 +468,7 @@ impl LinearRequest {
             input_shape: Vec::new(),
             weight_shape: Vec::new(),
             output_shape: Vec::new(),
+            layout: LinearLayouts::ROW_MAJOR,
             input_dtype,
             weight_dtype,
             output_dtype,
@@ -453,6 +497,7 @@ impl LinearRequest {
             input_shape: Vec::new(),
             weight_shape: Vec::new(),
             output_shape: Vec::new(),
+            layout: LinearLayouts::ROW_MAJOR,
             input_dtype,
             weight_dtype,
             output_dtype,
@@ -475,6 +520,11 @@ impl LinearRequest {
         self
     }
 
+    pub fn with_layout(mut self, layout: LinearLayouts) -> Self {
+        self.layout = layout;
+        self
+    }
+
     pub fn shape_key(&self) -> Vec<Vec<usize>> {
         vec![
             self.input_shape.clone(),
@@ -482,6 +532,13 @@ impl LinearRequest {
             self.output_shape.clone(),
         ]
     }
+}
+
+/// Logical resource layout for replay/capture capability queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReplayLayout {
+    StableResident,
+    PagedDecodeGraphOutputs,
 }
 
 /// Replay operation family being queried.
@@ -505,6 +562,7 @@ impl ReplayRequestKind {
 pub struct ReplayRequest {
     pub kind: ReplayRequestKind,
     pub replay_shape: Vec<usize>,
+    pub layout: ReplayLayout,
     pub max_hidden: usize,
     pub max_intermediate: usize,
     pub max_batch: usize,
@@ -518,6 +576,7 @@ impl ReplayRequest {
         Self {
             kind: ReplayRequestKind::ResidentDecode,
             replay_shape,
+            layout: ReplayLayout::StableResident,
             max_hidden,
             max_intermediate,
             max_batch,
@@ -535,6 +594,7 @@ impl ReplayRequest {
         Self {
             kind: ReplayRequestKind::PagedDecodeGraphOutputs,
             replay_shape,
+            layout: ReplayLayout::PagedDecodeGraphOutputs,
             max_hidden,
             max_intermediate,
             max_batch,
@@ -555,6 +615,11 @@ impl ReplayRequest {
 
     pub fn with_replay_shape(mut self, replay_shape: Vec<usize>) -> Self {
         self.replay_shape = replay_shape;
+        self
+    }
+
+    pub fn with_layout(mut self, layout: ReplayLayout) -> Self {
+        self.layout = layout;
         self
     }
 

@@ -3365,6 +3365,7 @@ mod tests {
                 vec![1, 16, 128],
             ]
         );
+        assert_eq!(attention_req.layout, capability::AttentionLayout::Sdpa);
         assert_eq!(
             capability::BackendCapabilityQueries::supports_attention_request(
                 &cpu,
@@ -3385,6 +3386,7 @@ mod tests {
             linear_req.shape_key(),
             vec![vec![1, 4096], vec![32000, 4096], vec![1]]
         );
+        assert_eq!(linear_req.layout, capability::LinearLayouts::ROW_MAJOR);
         assert_eq!(
             capability::BackendCapabilityQueries::supports_linear_request(&cpu, &linear_req),
             capability::Support::Declined
@@ -3393,6 +3395,7 @@ mod tests {
         let replay_req = capability::ReplayRequest::resident_decode(8, 16, 2)
             .with_dtype(kiln_tensor::DType::BF16);
         assert_eq!(replay_req.shape_key(), vec![8, 16, 2]);
+        assert_eq!(replay_req.layout, capability::ReplayLayout::StableResident);
         assert_eq!(
             capability::BackendCapabilityQueries::supports_replay_request(&cpu, &replay_req),
             capability::Support::Declined
