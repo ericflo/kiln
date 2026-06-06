@@ -662,6 +662,38 @@ fn cuda_rocm_blaslt_request_conversion_stays_shared() {
 }
 
 #[test]
+fn cuda_rocm_forward_in_projection_gates_use_rocm_names() {
+    let forward_path = manifest_dir().join("src/forward.rs");
+    let source = fs::read_to_string(&forward_path).expect("forward.rs should be readable");
+    for required in [
+        "cuda_rocm_disable_env_set_for_device",
+        "cuda_rocm_gdn_ab_in_proj_enabled",
+        "cuda_rocm_gdn_prefill_ab_in_proj_enabled",
+        "CUDA_ROCM_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS",
+        "cuda_rocm_full_attn_qkv_in_proj_enabled",
+        "KILN_DISABLE_ROCM_GDN_AB_IN_PROJ",
+        "KILN_DISABLE_ROCM_GDN_PREFILL_AB_IN_PROJ",
+        "KILN_DISABLE_ROCM_FULL_ATTN_QKV_IN_PROJ",
+    ] {
+        assert!(
+            source.contains(required),
+            "forward.rs should use ROCm-native names for shared CUDA/ROCm in-projection gate `{required}`"
+        );
+    }
+    for stale_helper in [
+        "fn cuda_gdn_ab_in_proj_enabled(",
+        "fn cuda_gdn_prefill_ab_in_proj_enabled(",
+        "fn cuda_full_attn_qkv_in_proj_enabled(",
+        "CUDA_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS",
+    ] {
+        assert!(
+            !source.contains(stale_helper),
+            "forward.rs should not keep stale CUDA-only shared gate `{stale_helper}`"
+        );
+    }
+}
+
+#[test]
 fn cuda_rocm_support_predicates_stay_in_shared_helper() {
     let backend_dir = manifest_dir().join("src/backend");
     let common_path = backend_dir.join("cuda_rocm_common.rs");

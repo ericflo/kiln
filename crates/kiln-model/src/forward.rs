@@ -2353,24 +2353,86 @@ fn profile_mlp_stages_enabled() -> bool {
 }
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
-fn cuda_gdn_ab_in_proj_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_GDN_AB_IN_PROJ").is_err())
+const DISABLE_CUDA_GDN_AB_IN_PROJ: &str = "KILN_DISABLE_CUDA_GDN_AB_IN_PROJ";
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+const DISABLE_ROCM_GDN_AB_IN_PROJ: &str = "KILN_DISABLE_ROCM_GDN_AB_IN_PROJ";
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+const DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ: &str = "KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ";
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+const DISABLE_ROCM_GDN_PREFILL_AB_IN_PROJ: &str = "KILN_DISABLE_ROCM_GDN_PREFILL_AB_IN_PROJ";
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+const DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ: &str = "KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ";
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+const DISABLE_ROCM_FULL_ATTN_QKV_IN_PROJ: &str = "KILN_DISABLE_ROCM_FULL_ATTN_QKV_IN_PROJ";
+
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+fn cuda_rocm_disable_env_set_for_device(device: Device, cuda_name: &str, rocm_name: &str) -> bool {
+    match device {
+        Device::Rocm(_) => std::env::var(rocm_name).is_ok() || std::env::var(cuda_name).is_ok(),
+        Device::Cuda(_) => std::env::var(cuda_name).is_ok(),
+        _ => false,
+    }
 }
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
-fn cuda_gdn_prefill_ab_in_proj_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ").is_err())
+fn cuda_rocm_enabled_flag_for_device(
+    device: Device,
+    cuda_name: &str,
+    rocm_name: &str,
+    cuda_enabled: &'static OnceLock<bool>,
+    rocm_enabled: &'static OnceLock<bool>,
+) -> bool {
+    match device {
+        Device::Cuda(_) => *cuda_enabled.get_or_init(|| {
+            !cuda_rocm_disable_env_set_for_device(Device::Cuda(0), cuda_name, rocm_name)
+        }),
+        Device::Rocm(_) => *rocm_enabled.get_or_init(|| {
+            !cuda_rocm_disable_env_set_for_device(Device::Rocm(0), cuda_name, rocm_name)
+        }),
+        _ => false,
+    }
 }
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
-const CUDA_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS: usize = 128;
+fn cuda_rocm_gdn_ab_in_proj_enabled(device: Device) -> bool {
+    static CUDA_ENABLED: OnceLock<bool> = OnceLock::new();
+    static ROCM_ENABLED: OnceLock<bool> = OnceLock::new();
+    cuda_rocm_enabled_flag_for_device(
+        device,
+        DISABLE_CUDA_GDN_AB_IN_PROJ,
+        DISABLE_ROCM_GDN_AB_IN_PROJ,
+        &CUDA_ENABLED,
+        &ROCM_ENABLED,
+    )
+}
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
-fn cuda_full_attn_qkv_in_proj_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ").is_err())
+fn cuda_rocm_gdn_prefill_ab_in_proj_enabled(device: Device) -> bool {
+    static CUDA_ENABLED: OnceLock<bool> = OnceLock::new();
+    static ROCM_ENABLED: OnceLock<bool> = OnceLock::new();
+    cuda_rocm_enabled_flag_for_device(
+        device,
+        DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ,
+        DISABLE_ROCM_GDN_PREFILL_AB_IN_PROJ,
+        &CUDA_ENABLED,
+        &ROCM_ENABLED,
+    )
+}
+
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+const CUDA_ROCM_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS: usize = 128;
+
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+fn cuda_rocm_full_attn_qkv_in_proj_enabled(device: Device) -> bool {
+    static CUDA_ENABLED: OnceLock<bool> = OnceLock::new();
+    static ROCM_ENABLED: OnceLock<bool> = OnceLock::new();
+    cuda_rocm_enabled_flag_for_device(
+        device,
+        DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ,
+        DISABLE_ROCM_FULL_ATTN_QKV_IN_PROJ,
+        &CUDA_ENABLED,
+        &ROCM_ENABLED,
+    )
 }
 
 fn weighted_lm_head_prep_disabled() -> bool {
@@ -2988,7 +3050,7 @@ fn full_attn_qkv_proj_decode_if(
     {
         #[cfg(any(feature = "cuda", feature = "rocm"))]
         {
-            if cuda_full_attn_qkv_in_proj_enabled()
+            if cuda_rocm_full_attn_qkv_in_proj_enabled(x.device())
                 && !x.track_op()
                 && x.dtype() == DType::BF16
                 && cuda_or_rocm_device(x.device())
@@ -16188,10 +16250,10 @@ fn gated_deltanet_forward_decode_if_inner(
                         #[cfg(any(feature = "cuda", feature = "rocm"))]
                         {
                             if out.is_none()
-                                && cuda_gdn_ab_in_proj_enabled()
+                                && cuda_rocm_gdn_ab_in_proj_enabled(x.device())
                                 && (seq_len == 1
-                                    || (seq_len <= CUDA_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS
-                                        && cuda_gdn_prefill_ab_in_proj_enabled()))
+                                    || (seq_len <= CUDA_ROCM_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS
+                                        && cuda_rocm_gdn_prefill_ab_in_proj_enabled(x.device())))
                                 && gdn_forward_only_fastpaths
                                 && seq_len >= 1
                                 && x.dtype() == DType::BF16
@@ -36537,6 +36599,59 @@ mod tests {
             std::env::remove_var("KILN_TAPE_STREAMING_TILE_TOKENS");
             std::env::remove_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS");
             std::env::remove_var("KILN_STREAMING_LAST_TOKEN_LM_HEAD");
+        }
+    }
+
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
+    #[test]
+    fn cuda_rocm_in_projection_disable_envs_are_backend_scoped() {
+        const CUDA_NAME: &str = "KILN_TEST_DISABLE_CUDA_IN_PROJ";
+        const ROCM_NAME: &str = "KILN_TEST_DISABLE_ROCM_IN_PROJ";
+
+        unsafe {
+            std::env::remove_var(CUDA_NAME);
+            std::env::remove_var(ROCM_NAME);
+        }
+        assert!(!cuda_rocm_disable_env_set_for_device(
+            Device::Cuda(0),
+            CUDA_NAME,
+            ROCM_NAME
+        ));
+        assert!(!cuda_rocm_disable_env_set_for_device(
+            Device::Rocm(0),
+            CUDA_NAME,
+            ROCM_NAME
+        ));
+
+        unsafe {
+            std::env::set_var(ROCM_NAME, "1");
+        }
+        assert!(
+            !cuda_rocm_disable_env_set_for_device(Device::Cuda(0), CUDA_NAME, ROCM_NAME),
+            "ROCm-specific in-proj kill switches should not disable CUDA"
+        );
+        assert!(
+            cuda_rocm_disable_env_set_for_device(Device::Rocm(0), CUDA_NAME, ROCM_NAME),
+            "ROCm-specific in-proj kill switches should disable ROCm"
+        );
+
+        unsafe {
+            std::env::remove_var(ROCM_NAME);
+            std::env::set_var(CUDA_NAME, "1");
+        }
+        assert!(cuda_rocm_disable_env_set_for_device(
+            Device::Cuda(0),
+            CUDA_NAME,
+            ROCM_NAME
+        ));
+        assert!(
+            cuda_rocm_disable_env_set_for_device(Device::Rocm(0), CUDA_NAME, ROCM_NAME),
+            "ROCm keeps CUDA env names as legacy aliases"
+        );
+
+        unsafe {
+            std::env::remove_var(CUDA_NAME);
+            std::env::remove_var(ROCM_NAME);
         }
     }
 
