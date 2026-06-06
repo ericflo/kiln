@@ -62,7 +62,7 @@ use kiln_core::tokenizer::KilnTokenizer;
 // `FlceProvider`/`fused_linear_cross_entropy*` opt-in (KILN_CUDA_FLCE) is gone —
 // FLCE is kt-native via `kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_kt`.
 use kiln_flce_kernel::DEFAULT_CHUNK_SIZE;
-use kiln_model::backend::{self, BackendRuntime};
+use kiln_model::backend::{self, BackendRuntime, FallbackPolicy};
 use kiln_model::forward::{
     GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, GqaAttentionPrepared, LinearAttentionState,
     gdn_attention_in_projections, gdn_attention_input_norm, gdn_attention_residual_block,
@@ -6653,6 +6653,80 @@ pub fn optimizer_step_dispatch(
     }
 }
 
+fn training_optimizer_debug_fallback_enabled(backend_name: &str) -> bool {
+    kiln_core::env_flag::env_flag("KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK", false)
+        || match backend_name {
+            "cuda" => {
+                kiln_core::env_flag::env_flag("KILN_CUDA_TRAINING_OPTIMIZER_FALLBACK", false)
+            }
+            "metal" => {
+                kiln_core::env_flag::env_flag("KILN_METAL_TRAINING_OPTIMIZER_FALLBACK", false)
+            }
+            "vulkan" => {
+                kiln_core::env_flag::env_flag("KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK", false)
+            }
+            "rocm" => {
+                kiln_core::env_flag::env_flag("KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK", false)
+            }
+            _ => false,
+        }
+}
+
+fn training_optimizer_fallback_policy(
+    backend: &dyn BackendRuntime,
+    device: kiln_tensor::Device,
+) -> FallbackPolicy {
+    let debug_fallback_enabled = training_optimizer_debug_fallback_enabled(backend.name());
+    training_optimizer_fallback_policy_for(backend.name(), device, debug_fallback_enabled)
+}
+
+fn training_optimizer_fallback_policy_for(
+    backend_name: &str,
+    device: kiln_tensor::Device,
+    debug_fallback_enabled: bool,
+) -> FallbackPolicy {
+    if debug_fallback_enabled {
+        return FallbackPolicy::WarnAndCount;
+    }
+    match device {
+        kiln_tensor::Device::Cpu => FallbackPolicy::CorrectnessAllowed,
+        kiln_tensor::Device::Cuda(_)
+        | kiln_tensor::Device::Metal(_)
+        | kiln_tensor::Device::Vulkan(_)
+        | kiln_tensor::Device::Rocm(_) => match backend_name {
+            "cuda" | "metal" | "vulkan" | "rocm" => FallbackPolicy::NativeRequired,
+            _ => FallbackPolicy::ErrorInHotPath,
+        },
+        _ => FallbackPolicy::ErrorInHotPath,
+    }
+}
+
+fn ensure_training_optimizer_fallback_allowed(
+    backend: &dyn BackendRuntime,
+    device: kiln_tensor::Device,
+    optimizer_name: &'static str,
+) -> Result<()> {
+    let policy = training_optimizer_fallback_policy(backend, device);
+    if policy.allows_fallback() {
+        if matches!(policy, FallbackPolicy::WarnAndCount) {
+            tracing::warn!(
+                backend = backend.name(),
+                device = %device.short_name(),
+                optimizer = optimizer_name,
+                "training optimizer using explicit debug fallback"
+            );
+        }
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{optimizer_name} optimizer fallback policy {:?} for {} training hot path on {}; \
+         native optimizer dispatch required (set KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 to opt in)",
+        policy,
+        backend.name(),
+        device.short_name()
+    )
+}
+
 /// (#1082) LoRA grad-norm observer dispatcher — kt-native only.
 pub fn observe_lora_grad_norms_dispatch(
     accumulator: &mut crate::train_receipt::LoraGradNormAccumulator,
@@ -6702,6 +6776,7 @@ fn apply_sgd_update_kt(
         }
         backend.evict_resident_activation(grad);
     }
+    ensure_training_optimizer_fallback_allowed(backend, primary.device(), "SGD")?;
     // CPU/host fallback: master = master - lr*grad, kt-native (F32
     // accumulate then back to param dtype, mirroring the old candle math).
     let dtype = primary.dtype();
@@ -6808,6 +6883,7 @@ fn apply_adamw_update_kt(
         }
     }
 
+    ensure_training_optimizer_fallback_allowed(backend, primary.device(), "AdamW")?;
     // Host fallback: drive the CPU reference `kiln_optim::AdamW`. It reads
     // `param.amp_policy().backward_compute_dtype` for the grad dtype check
     // (BF16 in production) and `master_dtype` for the master update; cast
@@ -8919,6 +8995,39 @@ pub(crate) mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     #[cfg(feature = "cuda")]
     pub(crate) static CUDA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn training_optimizer_fallback_policy_defaults_to_native_required_on_gpus() {
+        assert_eq!(
+            training_optimizer_fallback_policy_for("cpu", kiln_tensor::Device::Cpu, false),
+            FallbackPolicy::CorrectnessAllowed
+        );
+        for (backend_name, device) in [
+            ("cuda", kiln_tensor::Device::Cuda(0)),
+            ("metal", kiln_tensor::Device::Metal(0)),
+            ("vulkan", kiln_tensor::Device::Vulkan(0)),
+            ("rocm", kiln_tensor::Device::Rocm(0)),
+        ] {
+            assert_eq!(
+                training_optimizer_fallback_policy_for(backend_name, device, false),
+                FallbackPolicy::NativeRequired
+            );
+        }
+    }
+
+    #[test]
+    fn training_optimizer_debug_fallback_opt_in_warns_and_counts() {
+        for (backend_name, device) in [
+            ("cuda", kiln_tensor::Device::Cuda(0)),
+            ("metal", kiln_tensor::Device::Metal(0)),
+            ("vulkan", kiln_tensor::Device::Vulkan(0)),
+            ("rocm", kiln_tensor::Device::Rocm(0)),
+        ] {
+            let policy = training_optimizer_fallback_policy_for(backend_name, device, true);
+            assert_eq!(policy, FallbackPolicy::WarnAndCount);
+            assert!(policy.allows_fallback());
+        }
+    }
 
     fn restore_env(key: &str, prior: Option<String>) {
         unsafe {

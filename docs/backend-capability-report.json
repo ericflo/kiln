@@ -1543,5 +1543,32 @@
     "branch": "unify-engines",
     "script": "scripts/generate_backend_capability_report.py"
   },
+  "training_optimizer_fallback_policy": {
+    "cpu": {
+      "debug_opt_in": "not required",
+      "default_policy": "CorrectnessAllowed",
+      "enforcement": "CPU is the reference optimizer path"
+    },
+    "cuda": {
+      "debug_opt_in": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_CUDA_TRAINING_OPTIMIZER_FALLBACK=1",
+      "default_policy": "NativeRequired",
+      "enforcement": "SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines"
+    },
+    "metal": {
+      "debug_opt_in": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_METAL_TRAINING_OPTIMIZER_FALLBACK=1",
+      "default_policy": "NativeRequired",
+      "enforcement": "SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines"
+    },
+    "rocm": {
+      "debug_opt_in": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK=1",
+      "default_policy": "NativeRequired",
+      "enforcement": "SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines"
+    },
+    "vulkan": {
+      "debug_opt_in": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK=1",
+      "default_policy": "NativeRequired",
+      "enforcement": "SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines"
+    }
+  },
   "trait_method_count": 92
 }

@@ -305,6 +305,36 @@ def decode_hot_path_policy_report() -> dict[str, Any]:
     }
 
 
+def training_optimizer_fallback_policy_report() -> dict[str, Any]:
+    return {
+        "cpu": {
+            "default_policy": "CorrectnessAllowed",
+            "debug_opt_in": "not required",
+            "enforcement": "CPU is the reference optimizer path",
+        },
+        "cuda": {
+            "default_policy": "NativeRequired",
+            "debug_opt_in": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_CUDA_TRAINING_OPTIMIZER_FALLBACK=1",
+            "enforcement": "SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines",
+        },
+        "rocm": {
+            "default_policy": "NativeRequired",
+            "debug_opt_in": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK=1",
+            "enforcement": "SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines",
+        },
+        "metal": {
+            "default_policy": "NativeRequired",
+            "debug_opt_in": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_METAL_TRAINING_OPTIMIZER_FALLBACK=1",
+            "enforcement": "SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines",
+        },
+        "vulkan": {
+            "default_policy": "NativeRequired",
+            "debug_opt_in": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK=1",
+            "enforcement": "SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines",
+        },
+    }
+
+
 def optimizer_dispatch_report(backends: dict[str, Any]) -> dict[str, Any]:
     report: dict[str, Any] = {}
     for backend, info in backends.items():
@@ -376,6 +406,16 @@ def markdown(data: dict[str, Any]) -> str:
             f"{info['enforcement']} |"
         )
     lines.append("")
+    lines.append("## Training Optimizer Fallback")
+    lines.append("")
+    lines.append("| Backend | Default Policy | Debug Opt-In | Enforcement |")
+    lines.append("|---|---|---|---|")
+    for backend, info in data["training_optimizer_fallback_policy"].items():
+        lines.append(
+            f"| `{backend}` | `{info['default_policy']}` | `{info['debug_opt_in']}` | "
+            f"{info['enforcement']} |"
+        )
+    lines.append("")
     lines.append("## Optimizer Dispatch")
     lines.append("")
     lines.append("| Backend | SGD Step | AdamW Step |")
@@ -425,6 +465,7 @@ def main() -> int:
         "backends": backends,
         "fallback_policy": fallback_policy_report(),
         "decode_hot_path_policy": decode_hot_path_policy_report(),
+        "training_optimizer_fallback_policy": training_optimizer_fallback_policy_report(),
         "optimizer_dispatch": optimizer_dispatch_report(backends),
         "mismatches": mismatches,
     }
