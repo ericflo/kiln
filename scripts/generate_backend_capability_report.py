@@ -7,11 +7,15 @@ import json
 import re
 import subprocess
 import sys
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    tomllib = None
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -209,8 +213,77 @@ def run_git(args: list[str]) -> str:
 
 
 def load_toml(path: Path) -> dict[str, Any]:
-    with path.open("rb") as f:
-        return tomllib.load(f)
+    if tomllib is not None:
+        with path.open("rb") as f:
+            return tomllib.load(f)
+    return load_toml_feature_subset(path)
+
+
+def strip_toml_comment(line: str) -> str:
+    in_string = False
+    escape = False
+    for i, ch in enumerate(line):
+        if escape:
+            escape = False
+        elif ch == "\\":
+            escape = True
+        elif ch == '"':
+            in_string = not in_string
+        elif ch == "#" and not in_string:
+            return line[:i]
+    return line
+
+
+def parse_toml_string_array(value: str) -> list[str]:
+    return [
+        bytes(match.group(1), "utf-8").decode("unicode_escape")
+        for match in re.finditer(r'"((?:[^"\\]|\\.)*)"', value, flags=re.S)
+    ]
+
+
+def load_toml_feature_subset(path: Path) -> dict[str, Any]:
+    data: dict[str, Any] = {"package": {}, "features": {}}
+    section = ""
+    pending_feature: str | None = None
+    pending_value = ""
+    bracket_depth = 0
+
+    for raw_line in path.read_text().splitlines():
+        line = strip_toml_comment(raw_line).strip()
+        if not line:
+            continue
+
+        if pending_feature is not None:
+            pending_value += "\n" + line
+            bracket_depth += line.count("[") - line.count("]")
+            if bracket_depth <= 0:
+                data["features"][pending_feature] = parse_toml_string_array(pending_value)
+                pending_feature = None
+                pending_value = ""
+            continue
+
+        if line.startswith("[") and line.endswith("]"):
+            section = line.strip("[]")
+            continue
+
+        if "=" not in line:
+            continue
+        key, value = [part.strip() for part in line.split("=", 1)]
+        key = key.strip('"')
+
+        if section == "package" and key == "name":
+            names = parse_toml_string_array(value)
+            if names:
+                data["package"]["name"] = names[0]
+        elif section == "features":
+            bracket_depth = value.count("[") - value.count("]")
+            if bracket_depth > 0:
+                pending_feature = key
+                pending_value = value
+            else:
+                data["features"][key] = parse_toml_string_array(value)
+
+    return data
 
 
 def find_matching_brace(text: str, open_idx: int) -> int:
@@ -1436,6 +1509,39 @@ def run_self_test() -> int:
             return 1
         if before != after:
             print("--check helper rewrote report files during self-test", file=sys.stderr)
+            return 1
+
+        manifest_path = tmp_root / "Cargo.toml"
+        manifest_path.write_text(
+            '\n'.join(
+                [
+                    "[package]",
+                    'name = "fallback-sample"',
+                    "",
+                    "[features]",
+                    'cuda = ["dep:cudarc", "kiln-tensor/cuda"]',
+                    "rocm = [",
+                    '  "dep:kiln-hip", # comment outside the string',
+                    '  "kiln-tensor/rocm"',
+                    "]",
+                    'metal = []',
+                    'vulkan = ["kiln-vulkan-kernel"]',
+                    "",
+                ]
+            )
+        )
+        fallback_toml = load_toml_feature_subset(manifest_path)
+        expected_features = {
+            "cuda": ["dep:cudarc", "kiln-tensor/cuda"],
+            "rocm": ["dep:kiln-hip", "kiln-tensor/rocm"],
+            "metal": [],
+            "vulkan": ["kiln-vulkan-kernel"],
+        }
+        if fallback_toml.get("package", {}).get("name") != "fallback-sample":
+            print(f"fallback TOML package self-test failed: {fallback_toml}", file=sys.stderr)
+            return 1
+        if fallback_toml.get("features") != expected_features:
+            print(f"fallback TOML feature self-test failed: {fallback_toml}", file=sys.stderr)
             return 1
     return 0
 
