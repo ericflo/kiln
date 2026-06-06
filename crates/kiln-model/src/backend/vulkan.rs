@@ -65,8 +65,8 @@ pub struct VulkanBackend {
     gdn_decode_fused_enabled: bool,
     gdn_recurrent_unexpanded_qk_enabled: bool,
     gdn_recurrent_qk_norm_unexpanded_enabled: bool,
-    linear_decode_enabled: bool,
-    linear_argmax_batch_enabled: bool,
+    pub(super) linear_decode_enabled: bool,
+    pub(super) linear_argmax_batch_enabled: bool,
     full_attn_qkv_enabled: bool,
     pub(super) paged_attn_decode_batch_enabled: bool,
     mlp_decode_enabled: bool,
@@ -267,7 +267,7 @@ impl VulkanBackend {
     }
 
     /// kt-native: whether to use the bf16-packed linear-weight decode path.
-    fn use_bf16_packed_linear_weight_kt(&self, weight: &kiln_tensor::Tensor) -> bool {
+    pub(super) fn use_bf16_packed_linear_weight_kt(&self, weight: &kiln_tensor::Tensor) -> bool {
         vulkan_weights::use_bf16_packed_linear_weight_kt(self, weight)
     }
 }
@@ -1189,83 +1189,15 @@ impl BackendRuntime for VulkanBackend {
         x: &kiln_tensor::Tensor,
         weight_t: &kiln_tensor::Tensor,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        // kt guards read directly off the kt args before the bridge.
-        if !self.has_vulkan() || !self.linear_decode_enabled || x.dtype() != kiln_tensor::DType::F32
-        {
-            return Ok(None);
-        }
-        if !matches!(x.device(), kiln_tensor::Device::Cpu)
-            || !matches!(weight_t.device(), kiln_tensor::Device::Cpu)
-        {
-            return Ok(None);
-        }
-        // (#1082) Fully kt-native: read shapes off the kt tensors, extract
-        // f32 bytes straight from kt storage, and key the weight buffer cache
-        // on the **stable** kt `TensorId`. The old path bridged BOTH x and the
-        // (large) weight through `kt_logits_to_candle` every call — minting a
-        // fresh candle id per token so the weight cache missed every step and
-        // re-uploaded ~1 GB/token. Now the weight uploads exactly once.
-        let Ok((batch, seq_len, hidden)) = x.dims3() else {
-            return Ok(None);
-        };
-        let Ok((weight_hidden, out_dim)) = weight_t.dims2() else {
-            return Ok(None);
-        };
-        if weight_hidden != hidden {
-            return Ok(None);
-        }
-
-        let vk_device = self
-            .vulkan_device
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let row_count = batch * seq_len;
-        // x is [batch, seq_len, hidden] contiguous F32; the kernel consumes a
-        // flat [row_count, hidden] f32 buffer, so the [.,1,.] reshape the candle
-        // path did is a no-op on the bytes — extract them straight from kt.
-        let x_data = kt_tensor_to_f32_bytes_with_shape(x)?.0;
-        let packed = self.use_bf16_packed_linear_weight_kt(weight_t);
-        let weight_buf = if packed {
-            self.cached_bf16_packed_weight_buffer_kt(weight_t)?
-        } else {
-            self.cached_f32_weight_buffer_kt(weight_t)?
-        };
-        let out_data = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bytes(
-            vk_device,
-            &x_data,
-            &weight_buf,
-            row_count,
-            hidden,
-            out_dim,
-            packed,
-        )
-        .context("linear_decode kernel failed")?;
-        Ok(Some(kt_tensor_from_f32_bytes(
-            &out_data,
-            &[batch, seq_len, out_dim],
-            kiln_tensor::DType::F32,
-        )?))
+        vulkan_linear::linear_decode(self, x, weight_t)
     }
 
     fn linear_prefill_apply(
         &self,
-        _x: &kiln_tensor::Tensor,
-        _weight_t: &kiln_tensor::Tensor,
+        x: &kiln_tensor::Tensor,
+        weight_t: &kiln_tensor::Tensor,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        // (#1082) Decline. This hook previously routed the training-time
-        // projection matmul through `VulkanLinearOp` (a
-        // `candle_core::CustomOp1`) so candle's `loss.backward()` could
-        // produce the input gradient. With the kt autograd tape
-        // (`kiln_autograd`) as the sole grad producer that candle autograd
-        // island is gone — the projection matmul is recorded onto the tape
-        // by the portable kt matmul path in forward.rs, and
-        // `Tape::backward()` produces the gradient. Returning `Ok(None)`
-        // routes the caller to that kt-recorded path.
-        //
-        // NOTE: the forward-only inference linear kernel still lives in
-        // `linear_decode` (declines tracked tensors); only the
-        // autograd-wrapping prefill path is removed here.
-        Ok(None)
+        vulkan_linear::linear_prefill_apply(self, x, weight_t)
     }
 
     fn linear_prefill_apply_offset(
@@ -1275,160 +1207,11 @@ impl BackendRuntime for VulkanBackend {
         chunk_start: usize,
         chunk_len: usize,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        // kt guards read directly off the kt args before the bridge.
-        if !self.has_vulkan() || !self.linear_decode_enabled {
-            return Ok(None);
-        }
-        if !matches!(x.device(), kiln_tensor::Device::Cpu)
-            || !matches!(full_weight_t.device(), kiln_tensor::Device::Cpu)
-        {
-            return Ok(None);
-        }
-        // Only the bf16-packed kernel has an offset variant today; require
-        // bf16 weights so the cached buffer matches the dispatch shader.
-        if full_weight_t.dtype() != kiln_tensor::DType::BF16 {
-            return Ok(None);
-        }
-        // (#1082) kt-native: the cached-weight offset kernel + FLOP-ceiling
-        // sub-chunking run directly on the kt args (the FLCE caller owns its
-        // own analytic backward, so this is forward-only).
-        let Ok((_batch, _seq_len, hidden_x)) = x.dims3() else {
-            return Ok(None);
-        };
-        let Ok((hidden_w, full_out_dim)) = full_weight_t.dims2() else {
-            return Ok(None);
-        };
-        if hidden_x != hidden_w {
-            return Ok(None);
-        }
-        if chunk_start + chunk_len > full_out_dim {
-            return Ok(None);
-        }
-        let vk_device = self
-            .vulkan_device
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?
-            .clone();
-        let weight_buffer = self.cached_bf16_packed_weight_buffer_kt(full_weight_t)?;
-        // Promote x to f32 for the kernel (kernel expects f32 input).
-        let x_f32 = if x.dtype() == kiln_tensor::DType::F32 {
-            x.clone()
-        } else {
-            x.to_dtype(kiln_tensor::DType::F32)?
-        };
-        let dims = x_f32.dims().to_vec();
-        let row_count: usize = dims[..dims.len() - 1].iter().product();
-        let dispatch_x = if dims.len() == 3 && dims[1] == 1 {
-            x_f32
-        } else {
-            x_f32.reshape((row_count, 1usize, hidden_x))?
-        };
-        // Per-dispatch FLOP guard. FLCE chunks at chunk_size=4096 sit
-        // right at the 20 GFLOP ceiling for T=918; longer T or larger
-        // chunk_len passed by future callers would put a single submit
-        // over the safety limit. Sub-chunk along the chunk_len dim so
-        // each submit fits — that's strictly better than bailing to
-        // FLCE's CPU fallback because each sub-chunk still uses the
-        // same offset kernel with no re-upload of the weight buffer.
-        let sub_chunk_len = if vulkan_linear::dispatch_exceeds_safety_ceiling(
-            row_count, hidden_x, chunk_len,
-        ) {
-            vulkan_linear::max_chunk_dim_for_flop(row_count.saturating_mul(hidden_x)).min(chunk_len)
-        } else {
-            chunk_len
-        };
-        let out = if sub_chunk_len == chunk_len {
-            let x_data = kt_tensor_to_f32_bytes_with_shape(&dispatch_x)?.0;
-            let out_bytes =
-                kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_offset_bytes(
-                    vk_device.as_ref(),
-                    &x_data,
-                    weight_buffer.as_ref(),
-                    row_count,
-                    hidden_x,
-                    chunk_len,
-                    chunk_start,
-                    full_out_dim,
-                )
-                .context("VulkanBackend: linear_prefill_apply_offset dispatch failed")?;
-            kt_tensor_from_f32_bytes(
-                &out_bytes,
-                &[row_count, 1, chunk_len],
-                kiln_tensor::DType::F32,
-            )?
-        } else {
-            // One-shot trace so the operator can see when FLCE chunks
-            // are themselves being sub-chunked. Combined with the
-            // VulkanLinearOp chunking traces, gives a complete picture
-            // of which paths are exceeding the safety ceiling.
-            static FIRST_OFFSET_SUBCHUNK_LOGGED: std::sync::OnceLock<()> =
-                std::sync::OnceLock::new();
-            FIRST_OFFSET_SUBCHUNK_LOGGED.get_or_init(|| {
-                let total_gflop = (2u64
-                    .saturating_mul(row_count as u64)
-                    .saturating_mul(hidden_x as u64)
-                    .saturating_mul(chunk_len as u64)) as f64
-                    / 1.0e9;
-                let sub_count = chunk_len.div_ceil(sub_chunk_len);
-                tracing::info!(
-                    row_count,
-                    hidden_x,
-                    chunk_len,
-                    full_out_dim,
-                    total_gflop,
-                    sub_chunk_len,
-                    sub_count,
-                    "linear_prefill_apply_offset first sub-chunked dispatch"
-                );
-            });
-            // Walk chunk_len in sub_chunk_len-sized strides; concat
-            // outputs along the last axis. Same kernel/buffer per
-            // sub-dispatch, just different `chunk_start` offsets and
-            // smaller `chunk_len` per submit.
-            let mut sub_outputs: Vec<kiln_tensor::Tensor> = Vec::new();
-            let mut sub_offset = 0usize;
-            let x_data = kt_tensor_to_f32_bytes_with_shape(&dispatch_x)?.0;
-            while sub_offset < chunk_len {
-                let cur_len = (chunk_len - sub_offset).min(sub_chunk_len);
-                let sub_bytes =
-                    kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_offset_bytes(
-                        vk_device.as_ref(),
-                        &x_data,
-                        weight_buffer.as_ref(),
-                        row_count,
-                        hidden_x,
-                        cur_len,
-                        chunk_start + sub_offset,
-                        full_out_dim,
-                    )
-                    .with_context(|| {
-                        format!(
-                            "VulkanBackend: linear_prefill_apply_offset sub-chunk \
-                         (sub_offset={sub_offset}, cur_len={cur_len}, \
-                          chunk_start={chunk_start}, chunk_len={chunk_len}) failed"
-                        )
-                    })?;
-                let sub = kt_tensor_from_f32_bytes(
-                    &sub_bytes,
-                    &[row_count, 1, cur_len],
-                    kiln_tensor::DType::F32,
-                )?;
-                sub_outputs.push(sub);
-                sub_offset += cur_len;
-            }
-            let sub_refs: Vec<&kiln_tensor::Tensor> = sub_outputs.iter().collect();
-            kiln_tensor::ops::concat(&sub_refs, 2).context("offset sub-chunk concat")?
-        };
-        // Output from kernel is `[row_count, 1, chunk_len]`. Restore the
-        // caller's leading dims with chunk_len in the last position.
-        let mut out_dims = dims;
-        *out_dims.last_mut().unwrap() = chunk_len;
-        let reshaped = out.reshape(out_dims.as_slice())?;
-        Ok(Some(reshaped))
+        vulkan_linear::linear_prefill_apply_offset(self, x, full_weight_t, chunk_start, chunk_len)
     }
 
     fn supports_linear_decode_argmax(&self) -> bool {
-        self.has_vulkan() && self.linear_decode_enabled
+        vulkan_linear::supports_linear_decode_argmax(self)
     }
 
     fn linear_decode_argmax(
@@ -1436,71 +1219,15 @@ impl BackendRuntime for VulkanBackend {
         x: &kiln_tensor::Tensor,
         weight_t: &kiln_tensor::Tensor,
     ) -> Result<Option<u32>> {
-        // kt guards read directly off the kt args before the bridge.
-        if !self.has_vulkan() || !self.linear_decode_enabled || x.dtype() != kiln_tensor::DType::F32
-        {
-            return Ok(None);
-        }
-        if !matches!(x.device(), kiln_tensor::Device::Cpu)
-            || !matches!(weight_t.device(), kiln_tensor::Device::Cpu)
-        {
-            return Ok(None);
-        }
-        // (#1082) Fully kt-native: the lm_head weight (the 778 MB table) was
-        // re-bridged + re-uploaded per token under the candle-id cache; key on
-        // the stable kt id so it uploads once.
-        let Ok((batch, seq_len, hidden)) = x.dims3() else {
-            return Ok(None);
-        };
-        if batch != 1 || seq_len != 1 {
-            return Ok(None);
-        }
-        let Ok((weight_hidden, out_dim)) = weight_t.dims2() else {
-            return Ok(None);
-        };
-        if weight_hidden != hidden {
-            return Ok(None);
-        }
-
-        let vk_device = self
-            .vulkan_device
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let x_data = kt_tensor_to_f32_bytes_with_shape(x)?.0;
-        let token = if self.use_bf16_packed_linear_weight_kt(weight_t) {
-            let weight_buf = self.cached_bf16_packed_weight_buffer_kt(weight_t)?;
-            kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_cached_bf16_weights_bytes(
-                vk_device,
-                &x_data,
-                &weight_buf,
-                hidden,
-                out_dim,
-            )
-        } else {
-            let weight_buf = self.cached_f32_weight_buffer_kt(weight_t)?;
-            kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_cached_bytes(
-                vk_device,
-                &x_data,
-                &weight_buf,
-                hidden,
-                out_dim,
-            )
-        }
-        .context("linear_decode_argmax kernel failed")?;
-        Ok(Some(token))
+        vulkan_linear::linear_decode_argmax(self, x, weight_t)
     }
 
     fn supports_linear_decode_argmax_batch(&self) -> bool {
-        self.has_vulkan() && self.linear_decode_enabled && self.linear_argmax_batch_enabled
+        vulkan_linear::supports_linear_decode_argmax_batch(self)
     }
 
     fn supports_linear_decode_sample(&self, top_k: u32) -> bool {
-        // The fused sample kernel only handles top_k in `1..=TOPK_SAMPLE_KERNEL_K_MAX`.
-        // Larger requests fall back to the host sampler.
-        self.has_vulkan()
-            && self.linear_decode_enabled
-            && top_k > 0
-            && top_k <= kiln_vulkan_kernel::kernels::TOPK_SAMPLE_KERNEL_K_MAX
+        vulkan_linear::supports_linear_decode_sample(self, top_k)
     }
 
     fn linear_decode_sample(
@@ -1518,47 +1245,10 @@ impl BackendRuntime for VulkanBackend {
         min_p: f32,
         seed: u64,
     ) -> Result<Option<u32>> {
-        // kt guards read directly off the kt args before the bridge.
-        if !self.supports_linear_decode_sample(top_k) || x.dtype() != kiln_tensor::DType::F32 {
-            return Ok(None);
-        }
-        if !matches!(x.device(), kiln_tensor::Device::Cpu)
-            || !matches!(weight_t.device(), kiln_tensor::Device::Cpu)
-        {
-            return Ok(None);
-        }
-        // (#1082) Fully kt-native: lm_head weight keyed on the stable kt id.
-        let Ok((batch, seq_len, hidden)) = x.dims3() else {
-            return Ok(None);
-        };
-        if batch != 1 || seq_len != 1 {
-            return Ok(None);
-        }
-        let Ok((weight_hidden, out_dim)) = weight_t.dims2() else {
-            return Ok(None);
-        };
-        if weight_hidden != hidden {
-            return Ok(None);
-        }
-
-        let vk_device = self
-            .vulkan_device
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let packed_bf16 = self.use_bf16_packed_linear_weight_kt(weight_t);
-        let weight_buf = if packed_bf16 {
-            self.cached_bf16_packed_weight_buffer_kt(weight_t)?
-        } else {
-            self.cached_f32_weight_buffer_kt(weight_t)?
-        };
-        let x_data = kt_tensor_to_f32_bytes_with_shape(x)?.0;
-        let token = kiln_vulkan_kernel::kernels::dispatch_linear_decode_sample_bytes(
-            vk_device,
-            &x_data,
-            &weight_buf,
-            packed_bf16,
-            hidden,
-            out_dim,
+        vulkan_linear::linear_decode_sample(
+            self,
+            x,
+            weight_t,
             history_indices,
             history_counts,
             repetition_penalty,
@@ -1570,23 +1260,10 @@ impl BackendRuntime for VulkanBackend {
             min_p,
             seed,
         )
-        .context("fused linear_decode_sample dispatch failed")?;
-        Ok(Some(token))
     }
 
     fn supports_linear_decode_sample_batch(&self, top_k: &[u32], temperatures: &[f32]) -> bool {
-        self.has_vulkan()
-            && self.linear_decode_enabled
-            && top_k.len() == temperatures.len()
-            && !top_k.is_empty()
-            && top_k.iter().zip(temperatures.iter()).all(|(&k, &temp)| {
-                let greedy = temp == 0.0 || (k == 1 && temp.is_finite() && temp > 0.0);
-                greedy
-                    || (temp.is_finite()
-                        && temp > 0.0
-                        && k > 0
-                        && k <= kiln_vulkan_kernel::kernels::TOPK_SAMPLE_KERNEL_K_MAX)
-            })
+        vulkan_linear::supports_linear_decode_sample_batch(self, top_k, temperatures)
     }
 
     fn linear_decode_sample_batch(
@@ -1605,48 +1282,10 @@ impl BackendRuntime for VulkanBackend {
         min_p: &[f32],
         seeds: &[u64],
     ) -> Result<Option<Vec<u32>>> {
-        if !self.supports_linear_decode_sample_batch(top_k, temperatures)
-            || x.dtype() != kiln_tensor::DType::F32
-        {
-            return Ok(None);
-        }
-        if !matches!(x.device(), kiln_tensor::Device::Cpu)
-            || !matches!(weight_t.device(), kiln_tensor::Device::Cpu)
-        {
-            return Ok(None);
-        }
-        let Ok((batch, seq_len, hidden)) = x.dims3() else {
-            return Ok(None);
-        };
-        if batch == 0 || seq_len != 1 {
-            return Ok(None);
-        }
-        let Ok((weight_hidden, out_dim)) = weight_t.dims2() else {
-            return Ok(None);
-        };
-        if weight_hidden != hidden {
-            return Ok(None);
-        }
-
-        let vk_device = self
-            .vulkan_device
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let packed_bf16 = self.use_bf16_packed_linear_weight_kt(weight_t);
-        let weight_buf = if packed_bf16 {
-            self.cached_bf16_packed_weight_buffer_kt(weight_t)?
-        } else {
-            self.cached_f32_weight_buffer_kt(weight_t)?
-        };
-        let x_data = kt_tensor_to_f32_bytes_with_shape(x)?.0;
-        let tokens = kiln_vulkan_kernel::kernels::dispatch_linear_decode_sample_batch_bytes(
-            vk_device,
-            &x_data,
-            &weight_buf,
-            packed_bf16,
-            batch,
-            hidden,
-            out_dim,
+        vulkan_linear::linear_decode_sample_batch(
+            self,
+            x,
+            weight_t,
             history_rows,
             history_indices,
             history_counts,
@@ -1659,8 +1298,6 @@ impl BackendRuntime for VulkanBackend {
             min_p,
             seeds,
         )
-        .context("fused linear_decode_sample_batch dispatch failed")?;
-        Ok(Some(tokens))
     }
 
     fn linear_decode_argmax_batch(
@@ -1668,61 +1305,7 @@ impl BackendRuntime for VulkanBackend {
         x: &kiln_tensor::Tensor,
         weight_t: &kiln_tensor::Tensor,
     ) -> Result<Option<Vec<u32>>> {
-        // kt guards read directly off the kt args before the bridge.
-        if !self.has_vulkan()
-            || !self.linear_decode_enabled
-            || !self.linear_argmax_batch_enabled
-            || x.dtype() != kiln_tensor::DType::F32
-        {
-            return Ok(None);
-        }
-        if !matches!(x.device(), kiln_tensor::Device::Cpu)
-            || !matches!(weight_t.device(), kiln_tensor::Device::Cpu)
-        {
-            return Ok(None);
-        }
-        // (#1082) Fully kt-native: lm_head weight keyed on the stable kt id.
-        let Ok((batch, seq_len, hidden)) = x.dims3() else {
-            return Ok(None);
-        };
-        if batch == 0 || seq_len != 1 {
-            return Ok(None);
-        }
-        let Ok((weight_hidden, out_dim)) = weight_t.dims2() else {
-            return Ok(None);
-        };
-        if weight_hidden != hidden {
-            return Ok(None);
-        }
-
-        let vk_device = self
-            .vulkan_device
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let x_data = kt_tensor_to_f32_bytes_with_shape(x)?.0;
-        let tokens = if self.use_bf16_packed_linear_weight_kt(weight_t) {
-            let weight_buf = self.cached_bf16_packed_weight_buffer_kt(weight_t)?;
-            kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_batched_cached_bf16_weights_bytes(
-                vk_device,
-                &x_data,
-                &weight_buf,
-                batch,
-                hidden,
-                out_dim,
-            )
-        } else {
-            let weight_buf = self.cached_f32_weight_buffer_kt(weight_t)?;
-            kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_batched_cached_bytes(
-                vk_device,
-                &x_data,
-                &weight_buf,
-                batch,
-                hidden,
-                out_dim,
-            )
-        }
-        .context("linear_decode_argmax_batch kernel failed")?;
-        Ok(Some(tokens))
+        vulkan_linear::linear_decode_argmax_batch(self, x, weight_t)
     }
 
     fn prewarm_decode_weights(&self, weights: &GpuWeights) -> Result<()> {
