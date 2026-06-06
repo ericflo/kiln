@@ -1706,7 +1706,8 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "ModelRunner should not call the broad BackendRuntime training capability method directly"
     );
 
-    let inference_decode_residency_sources = format!("{generate_source}\n{metal_graph_source}");
+    let inference_decode_residency_sources =
+        format!("{generate_source}\n{metal_graph_source}\n{forward_source}");
     for required in [
         "ReplayBackend::runtime_supports_resident_decode",
         "ReplayBackend::runtime_decode_resident_pool_ready",

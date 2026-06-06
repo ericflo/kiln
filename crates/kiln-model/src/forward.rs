@@ -14,7 +14,7 @@ use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use crate::backend::{BackendRuntime, ConvBackend, LinearBackend, SamplingBackend};
+use crate::backend::{BackendRuntime, ConvBackend, LinearBackend, ReplayBackend, SamplingBackend};
 use crate::kv_cache::KvCache;
 use crate::lora_loader::{
     LoraLayerWeights, LoraProjectionWeights, LoraWeights, compute_lora_delta, linear_with_lora_t,
@@ -24097,7 +24097,7 @@ fn try_vulkan_resident_batched_decode_argmax(
         || lora.is_some()
         || !config.attn_output_gate
         || !kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_NATIVE", true)
-        || !backend.supports_resident_decode()
+        || !ReplayBackend::runtime_supports_resident_decode(backend)
         || !resident_decode_pool_ready(backend, config)
         || crate::mtp_debug::is_subop_capture_armed()
         || crate::mtp_debug::current_b12_layer_is_31()
@@ -24231,7 +24231,7 @@ fn try_vulkan_resident_batched_decode_hidden(
         || lora.is_some()
         || !config.attn_output_gate
         || !kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_NATIVE", true)
-        || !backend.supports_resident_decode()
+        || !ReplayBackend::runtime_supports_resident_decode(backend)
         || !resident_decode_pool_ready(backend, config)
         || crate::mtp_debug::is_subop_capture_armed()
         || crate::mtp_debug::current_b12_layer_is_31()
@@ -24386,7 +24386,7 @@ fn try_vulkan_resident_batched_decode_sample(
         || lora.is_some()
         || !config.attn_output_gate
         || !kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_NATIVE", true)
-        || !backend.supports_resident_decode()
+        || !ReplayBackend::runtime_supports_resident_decode(backend)
         || !resident_decode_pool_ready(backend, config)
         || crate::mtp_debug::is_subop_capture_armed()
         || crate::mtp_debug::current_b12_layer_is_31()
@@ -24528,7 +24528,7 @@ fn vulkan_native_resident_decode_required(
         && lora.is_none()
         && config.attn_output_gate
         && kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_NATIVE", true)
-        && backend.supports_resident_decode()
+        && ReplayBackend::runtime_supports_resident_decode(backend)
         && !crate::mtp_debug::is_subop_capture_armed()
         && !crate::mtp_debug::current_b12_layer_is_31()
         && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
@@ -25267,7 +25267,7 @@ pub fn model_forward_paged(
             && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
             && config.attn_output_gate
             && kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_NATIVE", true)
-            && backend.supports_resident_decode()
+            && ReplayBackend::runtime_supports_resident_decode(backend)
             && resident_decode_pool_ready(backend, config)
         {
             if let Some(vk_backend) = backend
@@ -25523,7 +25523,7 @@ pub fn model_forward_paged_last_token(
             && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
             && config.attn_output_gate
             && kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_NATIVE", true)
-            && backend.supports_resident_decode()
+            && ReplayBackend::runtime_supports_resident_decode(backend)
             && resident_decode_pool_ready(backend, config)
         {
             if let Some(vk_backend) = backend
@@ -25617,7 +25617,7 @@ pub fn model_forward_paged_last_token_resident(
     // Only consumed on `#[cfg(feature = "vulkan")]` below; the allow
     // silences the unused-variable warning on CUDA-only builds.
     #[cfg_attr(not(feature = "vulkan"), allow(unused_variables))]
-    let route_resident = backend.supports_resident_decode()
+    let route_resident = ReplayBackend::runtime_supports_resident_decode(backend)
         && resident_decode_pool_ready(backend, config);
 
     // Native single-submit orchestrator: chains all 32 layers' dispatches
@@ -26052,7 +26052,12 @@ fn resident_decode_pool_ready(
     // batch defaults to 64 per docs/vk_resident_decode_plan.md gate
     // (b). At runtime, an iGPU near its UMA limit lands `None` and
     // routes to the per-call Tensor path.
-    backend.decode_resident_pool_ready(config.hidden_size, config.intermediate_size, 64)
+    ReplayBackend::runtime_decode_resident_pool_ready(
+        backend,
+        config.hidden_size,
+        config.intermediate_size,
+        64,
+    )
 }
 
 /// Paged-KV forward pass for greedy generation prefill.
@@ -26108,7 +26113,7 @@ pub fn model_forward_paged_last_token_greedy(
             && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
             && config.attn_output_gate
             && kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_NATIVE", true)
-            && backend.supports_resident_decode()
+            && ReplayBackend::runtime_supports_resident_decode(backend)
             && resident_decode_pool_ready(backend, config)
         {
             if let Some(vk_backend) = backend
