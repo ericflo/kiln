@@ -1002,6 +1002,7 @@ mod tests {
 
     #[test]
     fn test_recommended_checkpoint_segments() {
+        let _g = clear_checkpoint_override_env_for_test();
         let vram_48gb = GpuVramInfo {
             total_bytes: 48 * 1024 * 1024 * 1024,
             source: VramSource::NvidiaSmi,
@@ -1035,6 +1036,17 @@ mod tests {
         }
     }
 
+    fn clear_checkpoint_override_env_for_test() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("KILN_GRAD_CHECKPOINT_SEGMENTS");
+            std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
+        }
+        guard
+    }
+
     fn act_gib(num_layers: usize, max_seq_len: usize, hidden_size: usize) -> f64 {
         let bytes = (num_layers as u64)
             * (max_seq_len as u64)
@@ -1059,6 +1071,7 @@ mod tests {
 
     #[test]
     fn recommended_checkpoint_plan_disables_on_short_prompts_big_vram() {
+        let _g = clear_checkpoint_override_env_for_test();
         // A6000 (48 GiB) + Qwen3.5-4B + 30-token prompts: activation tape
         // is ~10 MiB. Auto-tune should disable checkpointing entirely.
         // This is the bench scenario where #1071's PR was leaving 10-30%
@@ -1075,6 +1088,7 @@ mod tests {
 
     #[test]
     fn recommended_checkpoint_plan_enables_for_long_prompts_big_vram() {
+        let _g = clear_checkpoint_override_env_for_test();
         // A6000 (48 GiB) + Qwen3.5-4B + 32K prompts: activation tape is
         // ~10.7 GiB. Headroom is ~36 GiB. 30% of headroom is ~11 GiB so
         // a single segment fits — but we still want >=2 segments since
@@ -1100,6 +1114,7 @@ mod tests {
 
     #[test]
     fn recommended_checkpoint_plan_aggressive_on_tight_vram_long_prompts() {
+        let _g = clear_checkpoint_override_env_for_test();
         // RTX 3090 (24 GiB) + Qwen3.5-4B + 16K prompts: activation tape
         // ~5.4 GiB, headroom ~12 GiB → must engage with >= 4 segments
         // (per-segment ~1.4 GiB inside the 30% target).
@@ -1125,6 +1140,7 @@ mod tests {
 
     #[test]
     fn recommended_checkpoint_plan_respects_activation_width() {
+        let _g = clear_checkpoint_override_env_for_test();
         let base_bytes = estimate_base_model_bytes(32, 2560, 10240, 151936, 2);
         let f32_plan = recommended_checkpoint_plan_with_activation_bytes(
             &vram(16),
