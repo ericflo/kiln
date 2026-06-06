@@ -1718,9 +1718,13 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
 
     let orchestration_identity_sources =
         format!("{trainer_source}\n{generate_source}\n{forward_source}");
+    let orchestration_identity_compact = orchestration_identity_sources
+        .split_whitespace()
+        .collect::<String>();
     for required in [
         "BackendIdentity::runtime_name",
         "BackendIdentity::runtime_device",
+        "BackendIdentity::runtime_as_any",
     ] {
         assert!(
             orchestration_identity_sources.contains(required),
@@ -1729,7 +1733,7 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     }
     for forbidden in ["backend.name()", "backend.device()", "backend.as_any()"] {
         assert!(
-            !orchestration_identity_sources.contains(forbidden),
+            !orchestration_identity_compact.contains(forbidden),
             "orchestration identity reads should not call broad BackendRuntime method {forbidden}"
         );
     }

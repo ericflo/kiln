@@ -16220,8 +16220,7 @@ fn gated_deltanet_forward_decode_if_inner(
             && gdn_forward_only_fastpaths
             && kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_GDN", true)
         {
-            if let Some(vk_backend) = backend
-                .as_any()
+            if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
                 .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
             {
                 if let Some(out) =
@@ -23216,8 +23215,7 @@ fn transformer_block_paged_with_rope_tables(
             && config.attn_output_gate
             && kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_BLOCK", true)
         {
-            if let Some(vk_backend) = backend
-                .as_any()
+            if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
                 .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
             {
                 if let Some(out) = try_resident_block_full_attn_b1(
@@ -24170,8 +24168,7 @@ fn try_vulkan_resident_batched_decode_argmax(
         return Ok(None);
     }
 
-    let Some(vk_backend) = backend
-        .as_any()
+    let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
         .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
     else {
         return Ok(None);
@@ -24304,8 +24301,7 @@ fn try_vulkan_resident_batched_decode_hidden(
         return Ok(None);
     }
 
-    let Some(vk_backend) = backend
-        .as_any()
+    let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
         .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
     else {
         return Ok(None);
@@ -24459,8 +24455,7 @@ fn try_vulkan_resident_batched_decode_sample(
         return Ok(None);
     }
 
-    let Some(vk_backend) = backend
-        .as_any()
+    let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
         .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
     else {
         return Ok(None);
@@ -25334,8 +25329,7 @@ pub fn model_forward_paged(
             && ReplayBackend::runtime_supports_resident_decode(backend)
             && resident_decode_pool_ready(backend, config)
         {
-            if let Some(vk_backend) = backend
-                .as_any()
+            if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
                 .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
             {
                 if let Some(logits) = model_forward_paged_last_token_resident_native_vk(
@@ -25590,8 +25584,7 @@ pub fn model_forward_paged_last_token(
             && ReplayBackend::runtime_supports_resident_decode(backend)
             && resident_decode_pool_ready(backend, config)
         {
-            if let Some(vk_backend) = backend
-                .as_any()
+            if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
                 .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
             {
                 if let Some(logits) = model_forward_paged_last_token_resident_native_vk(
@@ -25701,8 +25694,7 @@ pub fn model_forward_paged_last_token_resident(
             && config.attn_output_gate
             && kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_NATIVE", true)
         {
-            if let Some(vk_backend) = backend
-                .as_any()
+            if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
                 .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
             {
                 if let Some(logits) =
@@ -26180,8 +26172,7 @@ pub fn model_forward_paged_last_token_greedy(
             && ReplayBackend::runtime_supports_resident_decode(backend)
             && resident_decode_pool_ready(backend, config)
         {
-            if let Some(vk_backend) = backend
-                .as_any()
+            if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
                 .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
             {
                 if let Some(logits) = model_forward_paged_last_token_resident_native_vk(
@@ -27827,8 +27818,7 @@ fn model_forward_paged_inner(
                             true,
                         )
                     {
-                        if let Some(vk_backend) = backend
-                            .as_any()
+                        if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
                             .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
                         {
                             let recurrent_t = &state.recurrent_states[linear_attn_idx];
