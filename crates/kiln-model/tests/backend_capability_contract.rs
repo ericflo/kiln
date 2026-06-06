@@ -383,6 +383,10 @@ fn generated_capability_report_lists_backend_source_modules() {
         "Vulkan backend source modules should include the extracted decode state module"
     );
     assert!(
+        vulkan_sources.contains(&"crates/kiln-model/src/backend/vulkan_dense.rs"),
+        "Vulkan backend source modules should include the extracted dense projection module"
+    );
+    assert!(
         vulkan_sources.contains(&"crates/kiln-model/src/backend/vulkan_device.rs"),
         "Vulkan backend source modules should include the extracted device module"
     );
