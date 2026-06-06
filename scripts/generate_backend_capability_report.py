@@ -605,13 +605,13 @@ def conformance_gate_report() -> list[dict[str, Any]]:
         {
             "gate": "one_step_training_proof",
             "phase8_requirement": "one-step training proof",
-            "status": "partial",
-            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model cuda_sft_step_proof && /home/ericflo/.cargo/bin/cargo test -p kiln-model vk_sft_step_proof && /home/ericflo/.cargo/bin/cargo test -p kiln-model rocm_sft_step_proof && /home/ericflo/.cargo/bin/cargo test -p kiln-optim --test end_to_end_training && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test backend_capability_contract",
+            "status": "covered",
+            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model cuda_sft_step_proof && /home/ericflo/.cargo/bin/cargo test -p kiln-model metal_sft_step_proof && /home/ericflo/.cargo/bin/cargo test -p kiln-model vk_sft_step_proof && /home/ericflo/.cargo/bin/cargo test -p kiln-model rocm_sft_step_proof && /home/ericflo/.cargo/bin/cargo test -p kiln-optim --test end_to_end_training && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test backend_capability_contract",
             "evidence": [
                 "crates/kiln-model/tests/cuda_sft_step_proof.rs",
+                "crates/kiln-model/tests/metal_sft_step_proof.rs",
                 "crates/kiln-model/tests/vk_sft_step_proof.rs",
                 "crates/kiln-model/tests/rocm_sft_step_proof.rs",
-                "crates/kiln-model/tests/metal_sft_step_proof.rs",
                 "crates/kiln-optim/tests/end_to_end_training.rs",
             ],
         },

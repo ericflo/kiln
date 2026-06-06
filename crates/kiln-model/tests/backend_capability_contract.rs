@@ -686,7 +686,7 @@ fn generated_capability_report_gates_matmul_linear_contract() {
 }
 
 #[test]
-fn generated_capability_report_tracks_one_step_training_proof_gap() {
+fn generated_capability_report_tracks_one_step_training_proof_gate() {
     let report_path = workspace_root().join("docs/backend-capability-report.json");
     let report: Value = serde_json::from_str(
         &fs::read_to_string(&report_path).expect("capability report json should be readable"),
@@ -704,6 +704,7 @@ fn generated_capability_report_tracks_one_step_training_proof_gap() {
         .as_str()
         .expect("one-step training proof command should be a string");
     assert!(command.contains("cuda_sft_step_proof"));
+    assert!(command.contains("metal_sft_step_proof"));
 
     let evidence = training_gate["evidence"]
         .as_array()
@@ -713,9 +714,9 @@ fn generated_capability_report_tracks_one_step_training_proof_gap() {
         .collect::<Vec<_>>();
     for path in [
         "crates/kiln-model/tests/cuda_sft_step_proof.rs",
+        "crates/kiln-model/tests/metal_sft_step_proof.rs",
         "crates/kiln-model/tests/vk_sft_step_proof.rs",
         "crates/kiln-model/tests/rocm_sft_step_proof.rs",
-        "crates/kiln-model/tests/metal_sft_step_proof.rs",
         "crates/kiln-optim/tests/end_to_end_training.rs",
     ] {
         assert!(
@@ -732,6 +733,7 @@ fn generated_capability_report_tracks_one_step_training_proof_gap() {
         .collect::<Vec<_>>();
     for path in [
         "crates/kiln-model/tests/cuda_sft_step_proof.rs",
+        "crates/kiln-model/tests/metal_sft_step_proof.rs",
         "crates/kiln-model/tests/vk_sft_step_proof.rs",
         "crates/kiln-model/tests/rocm_sft_step_proof.rs",
         "crates/kiln-optim/tests/end_to_end_training.rs",
@@ -748,7 +750,12 @@ fn generated_capability_report_tracks_one_step_training_proof_gap() {
         .iter()
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
-    let missing_backend_proofs = ["crates/kiln-model/tests/metal_sft_step_proof.rs"];
+    let backend_proofs = [
+        "crates/kiln-model/tests/cuda_sft_step_proof.rs",
+        "crates/kiln-model/tests/metal_sft_step_proof.rs",
+        "crates/kiln-model/tests/vk_sft_step_proof.rs",
+        "crates/kiln-model/tests/rocm_sft_step_proof.rs",
+    ];
     match training_gate["status"].as_str() {
         Some("covered") => {
             assert!(
@@ -757,11 +764,17 @@ fn generated_capability_report_tracks_one_step_training_proof_gap() {
             );
         }
         Some("partial") => {
-            for path in missing_backend_proofs {
-                assert!(
-                    evidence_missing.contains(&path),
-                    "partial one-step training proof gate should name missing {path}"
-                );
+            assert!(
+                !evidence_missing.is_empty(),
+                "partial one-step training proof gate should name missing evidence"
+            );
+            for path in backend_proofs {
+                if !evidence_present.contains(&path) {
+                    assert!(
+                        evidence_missing.contains(&path),
+                        "partial one-step training proof gate should name missing {path}"
+                    );
+                }
             }
         }
         other => panic!("unexpected one-step training proof status {other:?}"),

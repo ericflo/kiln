@@ -1794,26 +1794,25 @@
       "status": "covered"
     },
     {
-      "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model cuda_sft_step_proof && /home/ericflo/.cargo/bin/cargo test -p kiln-model vk_sft_step_proof && /home/ericflo/.cargo/bin/cargo test -p kiln-model rocm_sft_step_proof && /home/ericflo/.cargo/bin/cargo test -p kiln-optim --test end_to_end_training && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test backend_capability_contract",
+      "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model cuda_sft_step_proof && /home/ericflo/.cargo/bin/cargo test -p kiln-model metal_sft_step_proof && /home/ericflo/.cargo/bin/cargo test -p kiln-model vk_sft_step_proof && /home/ericflo/.cargo/bin/cargo test -p kiln-model rocm_sft_step_proof && /home/ericflo/.cargo/bin/cargo test -p kiln-optim --test end_to_end_training && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test backend_capability_contract",
       "evidence": [
         "crates/kiln-model/tests/cuda_sft_step_proof.rs",
+        "crates/kiln-model/tests/metal_sft_step_proof.rs",
         "crates/kiln-model/tests/vk_sft_step_proof.rs",
         "crates/kiln-model/tests/rocm_sft_step_proof.rs",
-        "crates/kiln-model/tests/metal_sft_step_proof.rs",
         "crates/kiln-optim/tests/end_to_end_training.rs"
       ],
-      "evidence_missing": [
-        "crates/kiln-model/tests/metal_sft_step_proof.rs"
-      ],
+      "evidence_missing": [],
       "evidence_present": [
         "crates/kiln-model/tests/cuda_sft_step_proof.rs",
+        "crates/kiln-model/tests/metal_sft_step_proof.rs",
         "crates/kiln-model/tests/vk_sft_step_proof.rs",
         "crates/kiln-model/tests/rocm_sft_step_proof.rs",
         "crates/kiln-optim/tests/end_to_end_training.rs"
       ],
       "gate": "one_step_training_proof",
       "phase8_requirement": "one-step training proof",
-      "status": "partial"
+      "status": "covered"
     },
     {
       "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor device_op_host_fallback_counts_are_backend_and_arity_specific",
