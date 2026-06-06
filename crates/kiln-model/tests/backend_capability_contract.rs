@@ -818,6 +818,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
         "crates/kiln-tensor/tests/metal_matmul_bench.rs",
         "crates/kiln-tensor/tests/metal_sdpa_bench.rs",
+        "crates/kiln-tensor/tests/rocm_latency_bench.rs",
         "crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs",
     ] {
         assert!(
@@ -833,8 +834,8 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
     assert!(
-        evidence_missing.contains(&"crates/kiln-tensor/tests/rocm_latency_bench.rs"),
-        "hardware latency gate should name the missing ROCm fixture source"
+        evidence_missing.is_empty(),
+        "hardware latency gate should have no missing fixture source evidence: {evidence_missing:?}"
     );
 
     let manifest_path = root.join("docs/backend-latency-fixtures.json");
@@ -865,7 +866,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         .iter()
         .filter_map(|fixture| fixture["backend"].as_str())
         .collect::<Vec<_>>();
-    for backend in ["cuda", "metal", "vulkan"] {
+    for backend in ["cuda", "rocm", "metal", "vulkan"] {
         assert!(
             fixture_backends.contains(&backend),
             "latency fixture manifest should have a {backend} fixture"
@@ -898,12 +899,8 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
     let missing_slots = manifest["missing_fixture_slots"]
         .as_array()
         .expect("missing_fixture_slots should be an array");
-    let rocm_slot = missing_slots
-        .iter()
-        .find(|slot| slot["backend"] == "rocm")
-        .expect("ROCm latency fixture gap should be explicit");
-    assert_eq!(
-        rocm_slot["required_source"],
-        "crates/kiln-tensor/tests/rocm_latency_bench.rs"
+    assert!(
+        missing_slots.is_empty(),
+        "latency fixture manifest should have no missing fixture slots: {missing_slots:?}"
     );
 }

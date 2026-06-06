@@ -110,6 +110,41 @@
       ]
     },
     {
+      "id": "rocm_gfx1151_matmul_qwen35_4b",
+      "backend": "rocm",
+      "hardware": "AMD ROCm gfx1151 or configured ROCm fixture",
+      "source": "crates/kiln-tensor/tests/rocm_latency_bench.rs",
+      "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features rocm --test rocm_latency_bench -- --ignored --nocapture",
+      "result_artifact": "bench-results/backend-latency/rocm-gfx1151-matmul.json",
+      "threshold_state": "pending_fixture_result",
+      "metrics": [
+        {
+          "name": "decode_qkv_m1_2560x4096_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": null
+        },
+        {
+          "name": "prefill_qkv_m256_2560x4096_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": null
+        },
+        {
+          "name": "prefill_gate_up_m256_2560x18432_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": null
+        },
+        {
+          "name": "lm_head_m1_2560x152064_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": null
+        }
+      ]
+    },
+    {
       "id": "vulkan_rtx6000_decode_microbench",
       "backend": "vulkan",
       "hardware": "NVIDIA RTX 6000 Ada or RTX A6000 Vulkan fixture",
@@ -137,11 +172,5 @@
       ]
     }
   ],
-  "missing_fixture_slots": [
-    {
-      "backend": "rocm",
-      "required_source": "crates/kiln-tensor/tests/rocm_latency_bench.rs",
-      "reason": "No ROCm latency benchmark source or hardware-result artifact exists in the current tree."
-    }
-  ]
+  "missing_fixture_slots": []
 }
