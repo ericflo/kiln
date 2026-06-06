@@ -874,6 +874,262 @@ def conformance_gate_report() -> list[dict[str, Any]]:
     return gates
 
 
+def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    gate_statuses = {gate["gate"]: gate["status"] for gate in conformance_gates}
+    phase8_status = (
+        "covered"
+        if all(status == "covered" for status in gate_statuses.values())
+        else "fixture_required"
+        if gate_statuses.get("hardware_latency_thresholds") == "fixture_required"
+        and all(
+            status == "covered"
+            for gate, status in gate_statuses.items()
+            if gate != "hardware_latency_thresholds"
+        )
+        else "partial"
+    )
+    phases = [
+        {
+            "phase": 0,
+            "title": "Audit and stabilize capability reporting",
+            "status": "covered",
+            "deliverables": [
+                "generated Markdown and JSON capability report",
+                "feature fanout, override, support predicate, env gate, and fallback audit",
+                "literal-true support predicate mismatch guard",
+                "stale naming and graph authority clarification evidence",
+            ],
+            "evidence": [
+                "docs/backend-engine-unification-plan.md",
+                "scripts/generate_backend_capability_report.py",
+                "docs/backend-capability-report.md",
+                "docs/backend-capability-report.json",
+                "crates/kiln-model/tests/backend_capability_contract.rs",
+            ],
+            "report_sections": [
+                "Feature Fanout",
+                "BackendRuntime Overrides",
+                "Support Predicates",
+                "Replay Authority",
+                "Mismatch Audit",
+            ],
+            "remaining": [],
+        },
+        {
+            "phase": 1,
+            "title": "Introduce focused backend traits",
+            "status": "covered",
+            "deliverables": [
+                "focused backend trait family",
+                "BackendRuntime compatibility facade",
+                "focused facet forwarding evidence",
+                "call-site contracts against broad facade regressions",
+            ],
+            "evidence": [
+                "crates/kiln-model/src/backend/mod.rs",
+                "scripts/generate_backend_capability_report.py",
+                "crates/kiln-model/tests/backend_capability_contract.rs",
+            ],
+            "report_sections": [
+                "Focused Backend Facets",
+                "Request Capability Queries",
+            ],
+            "remaining": [],
+        },
+        {
+            "phase": 2,
+            "title": "Normalize fallback policy",
+            "status": "covered",
+            "deliverables": [
+                "typed fallback policy per backend and mode",
+                "host fallback counters for non-CUDA bring-up paths",
+                "decode and training hot-path native-required guards",
+                "CPU/correctness fallback observability",
+            ],
+            "evidence": [
+                "crates/kiln-tensor/src/device_op.rs",
+                "crates/kiln-model/src/generate.rs",
+                "crates/kiln-train/src/trainer.rs",
+                "crates/kiln-model/tests/backend_capability_contract.rs",
+            ],
+            "report_sections": [
+                "Generic DeviceOp Fallback",
+                "Decode Hot-Path Fallback",
+                "Training Optimizer Fallback",
+            ],
+            "remaining": [],
+        },
+        {
+            "phase": 3,
+            "title": "Unify resident resource semantics",
+            "status": "covered",
+            "deliverables": [
+                "ResidentResource and ResidentRegistry descriptors",
+                "backend-specific resident resource wrappers",
+                "shared lifecycle state and replay-stability metadata",
+                "focused residency call-site contracts",
+            ],
+            "evidence": [
+                "crates/kiln-model/src/backend/residency.rs",
+                "crates/kiln-model/src/backend/metal_residency.rs",
+                "crates/kiln-model/src/backend/vulkan_residency.rs",
+                "crates/kiln-model/tests/backend_capability_contract.rs",
+            ],
+            "report_sections": [
+                "Resident Resource Descriptors",
+                "Focused Backend Facets",
+            ],
+            "remaining": [],
+        },
+        {
+            "phase": 4,
+            "title": "Unify matmul and linear dispatch",
+            "status": "covered",
+            "deliverables": [
+                "MatmulRequest and LinearRequest descriptors",
+                "BLASLt request projection shared by CUDA and ROCm",
+                "Metal and Vulkan request/capability evidence",
+                "matmul/linear parity and algorithm-cache gates",
+            ],
+            "evidence": [
+                "crates/kiln-model/src/backend/capability.rs",
+                "crates/kiln-model/src/backend/mod.rs",
+                "crates/kiln-blas/src/cublaslt_handle.rs",
+                "crates/kiln-rocblas/src/hipblaslt_handle.rs",
+                "crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs",
+                "crates/kiln-model/tests/backend_capability_contract.rs",
+            ],
+            "report_sections": [
+                "Typed Request Descriptors",
+                "Request Capability Queries",
+                "Conformance And Performance Gates",
+            ],
+            "remaining": [],
+        },
+        {
+            "phase": 5,
+            "title": "Move replay into the authoritative graph layer",
+            "status": "covered",
+            "deliverables": [
+                "ReplayBackend focused facet",
+                "shared replay key and replay authority descriptor",
+                "CUDA/HIP graph, Metal ICB, and Vulkan CommandBatch authority evidence",
+                "eager-vs-replay parity gates",
+            ],
+            "evidence": [
+                "crates/kiln-graph/src/replay_plan.rs",
+                "crates/kiln-graph-cuda/src/lib.rs",
+                "crates/kiln-graph-metal/src/lib.rs",
+                "crates/kiln-graph-vulkan/src/lib.rs",
+                "crates/kiln-model/src/cuda_graph.rs",
+                "crates/kiln-model/src/rocm_graph.rs",
+                "crates/kiln-model/src/metal_graph.rs",
+                "crates/kiln-vulkan-kernel/src/cmd_batch.rs",
+                "crates/kiln-model/tests/backend_capability_contract.rs",
+            ],
+            "report_sections": [
+                "Focused Backend Facets",
+                "Replay Authority",
+                "Conformance And Performance Gates",
+            ],
+            "remaining": [],
+        },
+        {
+            "phase": 6,
+            "title": "Finish shared training integration",
+            "status": "covered",
+            "deliverables": [
+                "SFT/GRPO/OPD policy routed through focused capability surfaces",
+                "TrainingLossBackend and OptimizerBackend evidence",
+                "explicit backend training precision policy",
+                "per-backend one-step training proof gates",
+            ],
+            "evidence": [
+                "crates/kiln-train/src/trainer.rs",
+                "crates/kiln-train/src/sft_tape_shim.rs",
+                "crates/kiln-train/src/grpo_tape_shim.rs",
+                "crates/kiln-train/src/opd_tape_shim.rs",
+                "crates/kiln-model/src/backend/metal_training.rs",
+                "crates/kiln-model/src/backend/vulkan_training.rs",
+                "crates/kiln-model/tests/backend_capability_contract.rs",
+            ],
+            "report_sections": [
+                "Training Optimizer Fallback",
+                "Training Precision Policy",
+                "Optimizer Dispatch",
+                "Conformance And Performance Gates",
+            ],
+            "remaining": [],
+        },
+        {
+            "phase": 7,
+            "title": "Decompose backend modules",
+            "status": "covered",
+            "deliverables": [
+                "Metal split by operation family and runtime concern",
+                "Vulkan split around explicit-resource boundaries",
+                "CUDA/ROCm common helper factoring",
+                "backend-native platform differences preserved",
+            ],
+            "evidence": [
+                "crates/kiln-model/src/backend/metal.rs",
+                "crates/kiln-model/src/backend/metal_attention.rs",
+                "crates/kiln-model/src/backend/metal_gdn.rs",
+                "crates/kiln-model/src/backend/metal_residency.rs",
+                "crates/kiln-model/src/backend/metal_training.rs",
+                "crates/kiln-model/src/backend/vulkan.rs",
+                "crates/kiln-model/src/backend/vulkan_residency.rs",
+                "crates/kiln-model/src/backend/vulkan_tensor_bridge.rs",
+                "crates/kiln-model/src/backend/cuda_rocm_common.rs",
+                "crates/kiln-model/tests/backend_capability_contract.rs",
+            ],
+            "report_sections": [
+                "BackendRuntime Overrides",
+                "Focused Backend Facets",
+            ],
+            "remaining": [],
+        },
+        {
+            "phase": 8,
+            "title": "Conformance and performance gates",
+            "status": phase8_status,
+            "deliverables": [
+                "backend conformance suite",
+                "performance sentinel suite",
+                "checked-in generated capability dashboard",
+                "hardware latency fixture manifest and result schema",
+            ],
+            "evidence": [
+                "docs/backend-capability-report.md",
+                "docs/backend-capability-report.json",
+                "docs/backend-latency-fixtures.json",
+                "docs/backend-latency-result-schema.md",
+                "scripts/check_backend_latency_fixtures.py",
+                "scripts/generate_backend_capability_report.py",
+                "crates/kiln-model/tests/backend_capability_contract.rs",
+            ],
+            "report_sections": [
+                "Conformance And Performance Gates",
+            ],
+            "remaining": []
+            if phase8_status == "covered"
+            else [
+                "hardware_latency_thresholds remains fixture_required until real known-hardware result artifacts satisfy --require-covered",
+            ],
+        },
+    ]
+    for phase in phases:
+        phase["evidence_present"] = existing_paths(phase["evidence"])
+        phase["evidence_missing"] = missing_paths(phase["evidence"])
+        if phase["evidence_missing"] and phase["status"] == "covered":
+            phase["status"] = "partial"
+            phase["remaining"] = [
+                *phase["remaining"],
+                "missing source evidence listed in evidence_missing",
+            ]
+    return phases
+
+
 def optimizer_dispatch_report(backends: dict[str, Any]) -> dict[str, Any]:
     report: dict[str, Any] = {}
     for backend, info in backends.items():
@@ -903,6 +1159,18 @@ def markdown(data: dict[str, Any]) -> str:
             deps = features.get(family)
             row.append("yes" if deps is not None else "no")
         lines.append("| " + " | ".join(f"`{cell}`" if cell not in {"yes", "no"} else cell for cell in row) + " |")
+    lines.append("")
+    lines.append("## Migration Phase Status")
+    lines.append("")
+    lines.append("| Phase | Title | Status | Evidence | Remaining |")
+    lines.append("|---|---|---|---|---|")
+    for phase in data["migration_phase_status"]:
+        evidence = ", ".join(f"`{path}`" for path in phase["evidence_present"]) or "none"
+        remaining = "; ".join(phase["remaining"]) or "none"
+        lines.append(
+            f"| Phase {phase['phase']} | {phase['title']} | `{phase['status']}` | "
+            f"{evidence} | {remaining} |"
+        )
     lines.append("")
     lines.append("## BackendRuntime Overrides")
     lines.append("")
@@ -1178,6 +1446,7 @@ def build_report_data() -> tuple[dict[str, Any], list[dict[str, Any]]]:
         "BackendRuntime",
     )
     backends, mismatches = backend_report(trait_methods)
+    conformance_gates = conformance_gate_report()
     data = {
         "source": {
             "branch": run_git(["branch", "--show-current"]),
@@ -1190,7 +1459,8 @@ def build_report_data() -> tuple[dict[str, Any], list[dict[str, Any]]]:
         "focused_backend_facets": focused_backend_facet_report(),
         "replay_authority": replay_authority_report(),
         "resident_resource_descriptors": resident_resource_descriptor_report(),
-        "conformance_gates": conformance_gate_report(),
+        "migration_phase_status": migration_phase_status_report(conformance_gates),
+        "conformance_gates": conformance_gates,
         "request_capability_queries": sorted(
             parse_trait_method_names(CAPABILITY_RS, "BackendCapabilityQueries")
         ),

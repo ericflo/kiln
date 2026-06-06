@@ -2595,6 +2595,136 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
 }
 
 #[test]
+fn generated_capability_report_tracks_migration_phase_status() {
+    let root = workspace_root();
+    let report_path = root.join("docs/backend-capability-report.json");
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(&report_path).expect("capability report json should be readable"),
+    )
+    .expect("capability report json should parse");
+
+    let phases = report["migration_phase_status"]
+        .as_array()
+        .expect("migration_phase_status should be an array");
+    assert_eq!(phases.len(), 9, "migration phase status should cover phases 0-8");
+
+    let valid_statuses = ["covered", "partial", "gap", "fixture_required"];
+    let phase_numbers = phases
+        .iter()
+        .filter_map(|phase| phase["phase"].as_u64())
+        .collect::<Vec<_>>();
+    for phase in 0..=8 {
+        assert!(
+            phase_numbers.contains(&phase),
+            "migration phase status should include Phase {phase}"
+        );
+    }
+    for phase in phases {
+        let status = phase["status"]
+            .as_str()
+            .expect("migration phase status should be a string");
+        assert!(
+            valid_statuses.contains(&status),
+            "invalid migration phase status {status}"
+        );
+        assert!(
+            !phase["deliverables"]
+                .as_array()
+                .expect("migration phase deliverables should be an array")
+                .is_empty(),
+            "migration phase should list deliverables"
+        );
+        assert!(
+            !phase["evidence_present"]
+                .as_array()
+                .expect("migration phase evidence_present should be an array")
+                .is_empty(),
+            "migration phase should cite source evidence"
+        );
+        assert!(
+            phase["evidence_missing"]
+                .as_array()
+                .expect("migration phase evidence_missing should be an array")
+                .is_empty(),
+            "migration phase should not cite missing source evidence"
+        );
+    }
+
+    let phase0 = phases
+        .iter()
+        .find(|phase| phase["phase"] == 0)
+        .expect("Phase 0 should be present");
+    assert_eq!(phase0["status"], "covered");
+    let phase0_evidence = phase0["evidence_present"]
+        .as_array()
+        .expect("Phase 0 evidence should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    for path in [
+        "docs/backend-engine-unification-plan.md",
+        "scripts/generate_backend_capability_report.py",
+        "docs/backend-capability-report.json",
+    ] {
+        assert!(
+            phase0_evidence.contains(&path),
+            "Phase 0 should cite {path}"
+        );
+    }
+
+    let phase7 = phases
+        .iter()
+        .find(|phase| phase["phase"] == 7)
+        .expect("Phase 7 should be present");
+    assert_eq!(phase7["status"], "covered");
+    let phase7_evidence = phase7["evidence_present"]
+        .as_array()
+        .expect("Phase 7 evidence should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    for path in [
+        "crates/kiln-model/src/backend/metal_attention.rs",
+        "crates/kiln-model/src/backend/vulkan_tensor_bridge.rs",
+        "crates/kiln-model/src/backend/cuda_rocm_common.rs",
+    ] {
+        assert!(
+            phase7_evidence.contains(&path),
+            "Phase 7 should cite backend decomposition evidence {path}"
+        );
+    }
+
+    let phase8 = phases
+        .iter()
+        .find(|phase| phase["phase"] == 8)
+        .expect("Phase 8 should be present");
+    assert_eq!(phase8["status"], "fixture_required");
+    let phase8_remaining = phase8["remaining"]
+        .as_array()
+        .expect("Phase 8 remaining should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        phase8_remaining
+            .iter()
+            .any(|item| item.contains("hardware_latency_thresholds")),
+        "Phase 8 should keep the known-hardware latency artifact requirement visible"
+    );
+
+    let report_md = fs::read_to_string(root.join("docs/backend-capability-report.md"))
+        .expect("capability report markdown should be readable");
+    assert!(
+        report_md.contains("## Migration Phase Status"),
+        "Markdown report should expose migration phase status"
+    );
+    assert!(
+        report_md.contains("| Phase 8 | Conformance and performance gates | `fixture_required` |"),
+        "Markdown report should keep Phase 8 fixture requirement visible"
+    );
+}
+
+#[test]
 fn generated_capability_report_check_mode_is_non_mutating_and_enforced() {
     let root = workspace_root();
     let script_path = root.join("scripts/generate_backend_capability_report.py");

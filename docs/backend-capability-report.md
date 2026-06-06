@@ -13,6 +13,20 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `kiln-tensor` | yes | yes | yes | yes |
 | `kiln-train` | yes | yes | yes | yes |
 
+## Migration Phase Status
+
+| Phase | Title | Status | Evidence | Remaining |
+|---|---|---|---|---|
+| Phase 0 | Audit and stabilize capability reporting | `covered` | `docs/backend-engine-unification-plan.md`, `scripts/generate_backend_capability_report.py`, `docs/backend-capability-report.md`, `docs/backend-capability-report.json`, `crates/kiln-model/tests/backend_capability_contract.rs` | none |
+| Phase 1 | Introduce focused backend traits | `covered` | `crates/kiln-model/src/backend/mod.rs`, `scripts/generate_backend_capability_report.py`, `crates/kiln-model/tests/backend_capability_contract.rs` | none |
+| Phase 2 | Normalize fallback policy | `covered` | `crates/kiln-tensor/src/device_op.rs`, `crates/kiln-model/src/generate.rs`, `crates/kiln-train/src/trainer.rs`, `crates/kiln-model/tests/backend_capability_contract.rs` | none |
+| Phase 3 | Unify resident resource semantics | `covered` | `crates/kiln-model/src/backend/residency.rs`, `crates/kiln-model/src/backend/metal_residency.rs`, `crates/kiln-model/src/backend/vulkan_residency.rs`, `crates/kiln-model/tests/backend_capability_contract.rs` | none |
+| Phase 4 | Unify matmul and linear dispatch | `covered` | `crates/kiln-model/src/backend/capability.rs`, `crates/kiln-model/src/backend/mod.rs`, `crates/kiln-blas/src/cublaslt_handle.rs`, `crates/kiln-rocblas/src/hipblaslt_handle.rs`, `crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs`, `crates/kiln-model/tests/backend_capability_contract.rs` | none |
+| Phase 5 | Move replay into the authoritative graph layer | `covered` | `crates/kiln-graph/src/replay_plan.rs`, `crates/kiln-graph-cuda/src/lib.rs`, `crates/kiln-graph-metal/src/lib.rs`, `crates/kiln-graph-vulkan/src/lib.rs`, `crates/kiln-model/src/cuda_graph.rs`, `crates/kiln-model/src/rocm_graph.rs`, `crates/kiln-model/src/metal_graph.rs`, `crates/kiln-vulkan-kernel/src/cmd_batch.rs`, `crates/kiln-model/tests/backend_capability_contract.rs` | none |
+| Phase 6 | Finish shared training integration | `covered` | `crates/kiln-train/src/trainer.rs`, `crates/kiln-train/src/sft_tape_shim.rs`, `crates/kiln-train/src/grpo_tape_shim.rs`, `crates/kiln-train/src/opd_tape_shim.rs`, `crates/kiln-model/src/backend/metal_training.rs`, `crates/kiln-model/src/backend/vulkan_training.rs`, `crates/kiln-model/tests/backend_capability_contract.rs` | none |
+| Phase 7 | Decompose backend modules | `covered` | `crates/kiln-model/src/backend/metal.rs`, `crates/kiln-model/src/backend/metal_attention.rs`, `crates/kiln-model/src/backend/metal_gdn.rs`, `crates/kiln-model/src/backend/metal_residency.rs`, `crates/kiln-model/src/backend/metal_training.rs`, `crates/kiln-model/src/backend/vulkan.rs`, `crates/kiln-model/src/backend/vulkan_residency.rs`, `crates/kiln-model/src/backend/vulkan_tensor_bridge.rs`, `crates/kiln-model/src/backend/cuda_rocm_common.rs`, `crates/kiln-model/tests/backend_capability_contract.rs` | none |
+| Phase 8 | Conformance and performance gates | `fixture_required` | `docs/backend-capability-report.md`, `docs/backend-capability-report.json`, `docs/backend-latency-fixtures.json`, `docs/backend-latency-result-schema.md`, `scripts/check_backend_latency_fixtures.py`, `scripts/generate_backend_capability_report.py`, `crates/kiln-model/tests/backend_capability_contract.rs` | hardware_latency_thresholds remains fixture_required until real known-hardware result artifacts satisfy --require-covered |
+
 ## BackendRuntime Overrides
 
 | Backend | Source Modules | Override Count | Support Methods | Env Gates |

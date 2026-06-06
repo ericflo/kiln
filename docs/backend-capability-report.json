@@ -2369,6 +2369,316 @@
       "source": "crates/kiln-model/src/backend/mod.rs"
     }
   },
+  "migration_phase_status": [
+    {
+      "deliverables": [
+        "generated Markdown and JSON capability report",
+        "feature fanout, override, support predicate, env gate, and fallback audit",
+        "literal-true support predicate mismatch guard",
+        "stale naming and graph authority clarification evidence"
+      ],
+      "evidence": [
+        "docs/backend-engine-unification-plan.md",
+        "scripts/generate_backend_capability_report.py",
+        "docs/backend-capability-report.md",
+        "docs/backend-capability-report.json",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "docs/backend-engine-unification-plan.md",
+        "scripts/generate_backend_capability_report.py",
+        "docs/backend-capability-report.md",
+        "docs/backend-capability-report.json",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "phase": 0,
+      "remaining": [],
+      "report_sections": [
+        "Feature Fanout",
+        "BackendRuntime Overrides",
+        "Support Predicates",
+        "Replay Authority",
+        "Mismatch Audit"
+      ],
+      "status": "covered",
+      "title": "Audit and stabilize capability reporting"
+    },
+    {
+      "deliverables": [
+        "focused backend trait family",
+        "BackendRuntime compatibility facade",
+        "focused facet forwarding evidence",
+        "call-site contracts against broad facade regressions"
+      ],
+      "evidence": [
+        "crates/kiln-model/src/backend/mod.rs",
+        "scripts/generate_backend_capability_report.py",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-model/src/backend/mod.rs",
+        "scripts/generate_backend_capability_report.py",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "phase": 1,
+      "remaining": [],
+      "report_sections": [
+        "Focused Backend Facets",
+        "Request Capability Queries"
+      ],
+      "status": "covered",
+      "title": "Introduce focused backend traits"
+    },
+    {
+      "deliverables": [
+        "typed fallback policy per backend and mode",
+        "host fallback counters for non-CUDA bring-up paths",
+        "decode and training hot-path native-required guards",
+        "CPU/correctness fallback observability"
+      ],
+      "evidence": [
+        "crates/kiln-tensor/src/device_op.rs",
+        "crates/kiln-model/src/generate.rs",
+        "crates/kiln-train/src/trainer.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-tensor/src/device_op.rs",
+        "crates/kiln-model/src/generate.rs",
+        "crates/kiln-train/src/trainer.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "phase": 2,
+      "remaining": [],
+      "report_sections": [
+        "Generic DeviceOp Fallback",
+        "Decode Hot-Path Fallback",
+        "Training Optimizer Fallback"
+      ],
+      "status": "covered",
+      "title": "Normalize fallback policy"
+    },
+    {
+      "deliverables": [
+        "ResidentResource and ResidentRegistry descriptors",
+        "backend-specific resident resource wrappers",
+        "shared lifecycle state and replay-stability metadata",
+        "focused residency call-site contracts"
+      ],
+      "evidence": [
+        "crates/kiln-model/src/backend/residency.rs",
+        "crates/kiln-model/src/backend/metal_residency.rs",
+        "crates/kiln-model/src/backend/vulkan_residency.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-model/src/backend/residency.rs",
+        "crates/kiln-model/src/backend/metal_residency.rs",
+        "crates/kiln-model/src/backend/vulkan_residency.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "phase": 3,
+      "remaining": [],
+      "report_sections": [
+        "Resident Resource Descriptors",
+        "Focused Backend Facets"
+      ],
+      "status": "covered",
+      "title": "Unify resident resource semantics"
+    },
+    {
+      "deliverables": [
+        "MatmulRequest and LinearRequest descriptors",
+        "BLASLt request projection shared by CUDA and ROCm",
+        "Metal and Vulkan request/capability evidence",
+        "matmul/linear parity and algorithm-cache gates"
+      ],
+      "evidence": [
+        "crates/kiln-model/src/backend/capability.rs",
+        "crates/kiln-model/src/backend/mod.rs",
+        "crates/kiln-blas/src/cublaslt_handle.rs",
+        "crates/kiln-rocblas/src/hipblaslt_handle.rs",
+        "crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-model/src/backend/capability.rs",
+        "crates/kiln-model/src/backend/mod.rs",
+        "crates/kiln-blas/src/cublaslt_handle.rs",
+        "crates/kiln-rocblas/src/hipblaslt_handle.rs",
+        "crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "phase": 4,
+      "remaining": [],
+      "report_sections": [
+        "Typed Request Descriptors",
+        "Request Capability Queries",
+        "Conformance And Performance Gates"
+      ],
+      "status": "covered",
+      "title": "Unify matmul and linear dispatch"
+    },
+    {
+      "deliverables": [
+        "ReplayBackend focused facet",
+        "shared replay key and replay authority descriptor",
+        "CUDA/HIP graph, Metal ICB, and Vulkan CommandBatch authority evidence",
+        "eager-vs-replay parity gates"
+      ],
+      "evidence": [
+        "crates/kiln-graph/src/replay_plan.rs",
+        "crates/kiln-graph-cuda/src/lib.rs",
+        "crates/kiln-graph-metal/src/lib.rs",
+        "crates/kiln-graph-vulkan/src/lib.rs",
+        "crates/kiln-model/src/cuda_graph.rs",
+        "crates/kiln-model/src/rocm_graph.rs",
+        "crates/kiln-model/src/metal_graph.rs",
+        "crates/kiln-vulkan-kernel/src/cmd_batch.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-graph/src/replay_plan.rs",
+        "crates/kiln-graph-cuda/src/lib.rs",
+        "crates/kiln-graph-metal/src/lib.rs",
+        "crates/kiln-graph-vulkan/src/lib.rs",
+        "crates/kiln-model/src/cuda_graph.rs",
+        "crates/kiln-model/src/rocm_graph.rs",
+        "crates/kiln-model/src/metal_graph.rs",
+        "crates/kiln-vulkan-kernel/src/cmd_batch.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "phase": 5,
+      "remaining": [],
+      "report_sections": [
+        "Focused Backend Facets",
+        "Replay Authority",
+        "Conformance And Performance Gates"
+      ],
+      "status": "covered",
+      "title": "Move replay into the authoritative graph layer"
+    },
+    {
+      "deliverables": [
+        "SFT/GRPO/OPD policy routed through focused capability surfaces",
+        "TrainingLossBackend and OptimizerBackend evidence",
+        "explicit backend training precision policy",
+        "per-backend one-step training proof gates"
+      ],
+      "evidence": [
+        "crates/kiln-train/src/trainer.rs",
+        "crates/kiln-train/src/sft_tape_shim.rs",
+        "crates/kiln-train/src/grpo_tape_shim.rs",
+        "crates/kiln-train/src/opd_tape_shim.rs",
+        "crates/kiln-model/src/backend/metal_training.rs",
+        "crates/kiln-model/src/backend/vulkan_training.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-train/src/trainer.rs",
+        "crates/kiln-train/src/sft_tape_shim.rs",
+        "crates/kiln-train/src/grpo_tape_shim.rs",
+        "crates/kiln-train/src/opd_tape_shim.rs",
+        "crates/kiln-model/src/backend/metal_training.rs",
+        "crates/kiln-model/src/backend/vulkan_training.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "phase": 6,
+      "remaining": [],
+      "report_sections": [
+        "Training Optimizer Fallback",
+        "Training Precision Policy",
+        "Optimizer Dispatch",
+        "Conformance And Performance Gates"
+      ],
+      "status": "covered",
+      "title": "Finish shared training integration"
+    },
+    {
+      "deliverables": [
+        "Metal split by operation family and runtime concern",
+        "Vulkan split around explicit-resource boundaries",
+        "CUDA/ROCm common helper factoring",
+        "backend-native platform differences preserved"
+      ],
+      "evidence": [
+        "crates/kiln-model/src/backend/metal.rs",
+        "crates/kiln-model/src/backend/metal_attention.rs",
+        "crates/kiln-model/src/backend/metal_gdn.rs",
+        "crates/kiln-model/src/backend/metal_residency.rs",
+        "crates/kiln-model/src/backend/metal_training.rs",
+        "crates/kiln-model/src/backend/vulkan.rs",
+        "crates/kiln-model/src/backend/vulkan_residency.rs",
+        "crates/kiln-model/src/backend/vulkan_tensor_bridge.rs",
+        "crates/kiln-model/src/backend/cuda_rocm_common.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-model/src/backend/metal.rs",
+        "crates/kiln-model/src/backend/metal_attention.rs",
+        "crates/kiln-model/src/backend/metal_gdn.rs",
+        "crates/kiln-model/src/backend/metal_residency.rs",
+        "crates/kiln-model/src/backend/metal_training.rs",
+        "crates/kiln-model/src/backend/vulkan.rs",
+        "crates/kiln-model/src/backend/vulkan_residency.rs",
+        "crates/kiln-model/src/backend/vulkan_tensor_bridge.rs",
+        "crates/kiln-model/src/backend/cuda_rocm_common.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "phase": 7,
+      "remaining": [],
+      "report_sections": [
+        "BackendRuntime Overrides",
+        "Focused Backend Facets"
+      ],
+      "status": "covered",
+      "title": "Decompose backend modules"
+    },
+    {
+      "deliverables": [
+        "backend conformance suite",
+        "performance sentinel suite",
+        "checked-in generated capability dashboard",
+        "hardware latency fixture manifest and result schema"
+      ],
+      "evidence": [
+        "docs/backend-capability-report.md",
+        "docs/backend-capability-report.json",
+        "docs/backend-latency-fixtures.json",
+        "docs/backend-latency-result-schema.md",
+        "scripts/check_backend_latency_fixtures.py",
+        "scripts/generate_backend_capability_report.py",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "docs/backend-capability-report.md",
+        "docs/backend-capability-report.json",
+        "docs/backend-latency-fixtures.json",
+        "docs/backend-latency-result-schema.md",
+        "scripts/check_backend_latency_fixtures.py",
+        "scripts/generate_backend_capability_report.py",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "phase": 8,
+      "remaining": [
+        "hardware_latency_thresholds remains fixture_required until real known-hardware result artifacts satisfy --require-covered"
+      ],
+      "report_sections": [
+        "Conformance And Performance Gates"
+      ],
+      "status": "fixture_required",
+      "title": "Conformance and performance gates"
+    }
+  ],
   "mismatches": [],
   "optimizer_dispatch": {
     "cuda": {
