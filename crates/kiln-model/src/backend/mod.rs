@@ -117,6 +117,32 @@ impl TrainingCapabilities {
     }
 }
 
+/// Policy for backend fallbacks that leave the intended native path.
+///
+/// Phase 2 uses this to make decode/training behavior explicit: correctness
+/// paths can still use portable CPU references, while hot paths can require a
+/// backend-native implementation or fail with a clear error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallbackPolicy {
+    /// CPU reference or low-risk correctness path; portable fallback is allowed.
+    CorrectnessAllowed,
+    /// Fallback is allowed, but callers should record or log that it happened.
+    WarnAndCount,
+    /// The call is on a hot path; falling back should surface an error.
+    ErrorInHotPath,
+    /// A native backend implementation is required for this operation.
+    NativeRequired,
+}
+
+impl FallbackPolicy {
+    pub const fn allows_fallback(self) -> bool {
+        matches!(
+            self,
+            FallbackPolicy::CorrectnessAllowed | FallbackPolicy::WarnAndCount
+        )
+    }
+}
+
 pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// Human-readable name (`"cuda"`, `"metal"`, `"cpu"`). Surfaced in
     /// `/health` and logs.

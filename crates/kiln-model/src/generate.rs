@@ -18,7 +18,7 @@ use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 
-use crate::backend::{self, BackendRuntime};
+use crate::backend::{self, BackendRuntime, FallbackPolicy};
 use crate::cancel::CancelHandle;
 use crate::cuda_graph::CudaGraphRunner;
 use crate::decode_buffers::{DecodeBufferConfig, DecodeBuffers, DecodeElementType};
@@ -748,19 +748,65 @@ fn env_flag_enabled(name: &str, default: bool) -> bool {
 }
 
 fn decode_batcher_rowwise_retry_enabled(backend: &dyn BackendRuntime) -> bool {
-    if backend.name() == "vulkan" {
-        env_flag_enabled("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY", false)
-    } else {
-        true
+    if backend.name() == "vulkan"
+        && env_flag_enabled("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY", false)
+    {
+        return true;
     }
+    decode_hot_path_fallback_policy(backend).allows_fallback()
 }
 
 fn decode_batch_generic_fallback_enabled(backend: &dyn BackendRuntime) -> bool {
-    if backend.name() == "vulkan" {
-        env_flag_enabled("KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK", false)
-    } else {
-        true
+    decode_hot_path_fallback_policy(backend).allows_fallback()
+}
+
+fn decode_hot_path_fallback_policy(backend: &dyn BackendRuntime) -> FallbackPolicy {
+    let debug_fallback_enabled = decode_hot_path_debug_fallback_enabled(backend.name());
+    decode_hot_path_fallback_policy_for(backend.name(), backend.device(), debug_fallback_enabled)
+}
+
+fn decode_hot_path_fallback_policy_for(
+    backend_name: &str,
+    device: kiln_tensor::Device,
+    debug_fallback_enabled: bool,
+) -> FallbackPolicy {
+    if debug_fallback_enabled {
+        return FallbackPolicy::WarnAndCount;
     }
+    match device {
+        kiln_tensor::Device::Cpu | kiln_tensor::Device::Cuda(_) => {
+            FallbackPolicy::CorrectnessAllowed
+        }
+        kiln_tensor::Device::Metal(_)
+        | kiln_tensor::Device::Vulkan(_)
+        | kiln_tensor::Device::Rocm(_) => match backend_name {
+            "metal" | "vulkan" | "rocm" => FallbackPolicy::NativeRequired,
+            _ => FallbackPolicy::ErrorInHotPath,
+        },
+        _ => FallbackPolicy::ErrorInHotPath,
+    }
+}
+
+fn decode_hot_path_debug_fallback_enabled(backend_name: &str) -> bool {
+    env_flag_enabled("KILN_DECODE_HOT_PATH_DEBUG_FALLBACK", false)
+        || match backend_name {
+            "metal" => env_flag_enabled("KILN_METAL_DECODE_BATCH_GENERIC_FALLBACK", false),
+            "vulkan" => env_flag_enabled("KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK", false),
+            "rocm" => env_flag_enabled("KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK", false),
+            _ => false,
+        }
+}
+
+fn decode_hot_path_fallback_disabled_context(
+    backend: &dyn BackendRuntime,
+    operation: &'static str,
+) -> String {
+    format!(
+        "{operation}; fallback policy {:?} for {} decode hot path \
+         (set KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 to opt in)",
+        decode_hot_path_fallback_policy(backend),
+        backend.name()
+    )
 }
 
 /// Shared live decode rendezvous for greedy streaming requests.
@@ -3156,9 +3202,10 @@ impl ModelRunner {
             match result {
                 Ok(tokens) => sampled = Some(tokens),
                 Err(err) if !decode_batch_generic_fallback_enabled(&*self.backend) => {
-                    return Err(err).context(
-                        "contiguous-batched decode declined and generic fallback is disabled",
-                    );
+                    return Err(err).context(decode_hot_path_fallback_disabled_context(
+                        &*self.backend,
+                        "contiguous-batched decode declined",
+                    ));
                 }
                 Err(err) => {
                     tracing::debug!(
@@ -3362,9 +3409,10 @@ impl ModelRunner {
                         sampled = Some(tokens);
                     }
                     Err(err) if !decode_batch_generic_fallback_enabled(&*self.backend) => {
-                        return Err(err).context(
-                            "resident batched hidden decode declined and generic fallback is disabled",
-                        );
+                        return Err(err).context(decode_hot_path_fallback_disabled_context(
+                            &*self.backend,
+                            "resident batched hidden decode declined",
+                        ));
                     }
                     Err(err) => {
                         tracing::debug!(
@@ -3419,6 +3467,12 @@ impl ModelRunner {
             match sample_result {
                 Ok(Some(tokens)) => sampled = Some(tokens),
                 Ok(None) => {}
+                Err(err) if !decode_batch_generic_fallback_enabled(&*self.backend) => {
+                    return Err(err).context(decode_hot_path_fallback_disabled_context(
+                        &*self.backend,
+                        "Metal sampled decode declined",
+                    ));
+                }
                 Err(err) => {
                     tracing::warn!(
                         batch = row_count,
@@ -3426,6 +3480,15 @@ impl ModelRunner {
                         "Metal sampled decode declined; falling back to eager hidden sample path"
                     );
                 }
+            }
+            if sampled.is_none() && !decode_batch_generic_fallback_enabled(&*self.backend) {
+                anyhow::bail!(
+                    "{}",
+                    decode_hot_path_fallback_disabled_context(
+                        &*self.backend,
+                        "Metal sampled decode did not produce tokens"
+                    )
+                );
             }
         }
 
@@ -3512,6 +3575,15 @@ impl ModelRunner {
         let sampled = if let Some(tokens) = sampled {
             tokens
         } else {
+            if !decode_batch_generic_fallback_enabled(&*self.backend) {
+                anyhow::bail!(
+                    "{}",
+                    decode_hot_path_fallback_disabled_context(
+                        &*self.backend,
+                        "no native batched decode path produced tokens"
+                    )
+                );
+            }
             let pc_guard = lock_paged_cache(paged_cache)?;
             let mut graph_runner = self
                 .cuda_graph
@@ -8398,6 +8470,43 @@ mod tests {
             default_decode_batcher_wait_kt(&device, "metal"),
             std::time::Duration::from_micros(100)
         );
+    }
+
+    #[test]
+    fn test_decode_hot_path_fallback_policy_defaults() {
+        assert_eq!(
+            decode_hot_path_fallback_policy_for("cpu", kiln_tensor::Device::Cpu, false),
+            FallbackPolicy::CorrectnessAllowed
+        );
+        assert_eq!(
+            decode_hot_path_fallback_policy_for("cuda", kiln_tensor::Device::Cuda(0), false),
+            FallbackPolicy::CorrectnessAllowed
+        );
+        assert_eq!(
+            decode_hot_path_fallback_policy_for("metal", kiln_tensor::Device::Metal(0), false),
+            FallbackPolicy::NativeRequired
+        );
+        assert_eq!(
+            decode_hot_path_fallback_policy_for("vulkan", kiln_tensor::Device::Vulkan(0), false),
+            FallbackPolicy::NativeRequired
+        );
+        assert_eq!(
+            decode_hot_path_fallback_policy_for("rocm", kiln_tensor::Device::Rocm(0), false),
+            FallbackPolicy::NativeRequired
+        );
+    }
+
+    #[test]
+    fn test_decode_hot_path_debug_fallback_opt_in_warns_and_counts() {
+        for (backend_name, device) in [
+            ("metal", kiln_tensor::Device::Metal(0)),
+            ("vulkan", kiln_tensor::Device::Vulkan(0)),
+            ("rocm", kiln_tensor::Device::Rocm(0)),
+        ] {
+            let policy = decode_hot_path_fallback_policy_for(backend_name, device, true);
+            assert_eq!(policy, FallbackPolicy::WarnAndCount);
+            assert!(policy.allows_fallback());
+        }
     }
 
     fn block_table_with(blocks: &[u32]) -> BlockTable {

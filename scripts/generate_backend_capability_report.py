@@ -275,6 +275,36 @@ def fallback_policy_report() -> dict[str, Any]:
     }
 
 
+def decode_hot_path_policy_report() -> dict[str, Any]:
+    return {
+        "cpu": {
+            "default_policy": "CorrectnessAllowed",
+            "debug_opt_in": "not required",
+            "enforcement": "CPU is the reference path",
+        },
+        "cuda": {
+            "default_policy": "CorrectnessAllowed",
+            "debug_opt_in": "not required",
+            "enforcement": "CUDA native misses remain device-visible/errors rather than silent host staging",
+        },
+        "rocm": {
+            "default_policy": "NativeRequired",
+            "debug_opt_in": "KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 or KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK=1",
+            "enforcement": "batched decode errors before generic fallback when no ROCm native path produced tokens",
+        },
+        "metal": {
+            "default_policy": "NativeRequired",
+            "debug_opt_in": "KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 or KILN_METAL_DECODE_BATCH_GENERIC_FALLBACK=1",
+            "enforcement": "batched/sample decode errors before generic fallback when no Metal native path produced tokens",
+        },
+        "vulkan": {
+            "default_policy": "NativeRequired",
+            "debug_opt_in": "KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 or KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1",
+            "enforcement": "keeps the existing Vulkan no-generic-fallback default and routes it through FallbackPolicy",
+        },
+    }
+
+
 def optimizer_dispatch_report(backends: dict[str, Any]) -> dict[str, Any]:
     report: dict[str, Any] = {}
     for backend, info in backends.items():
@@ -336,6 +366,16 @@ def markdown(data: dict[str, Any]) -> str:
             f"`{info['counter']}` | {info['evidence']} |"
         )
     lines.append("")
+    lines.append("## Decode Hot-Path Fallback")
+    lines.append("")
+    lines.append("| Backend | Default Policy | Debug Opt-In | Enforcement |")
+    lines.append("|---|---|---|---|")
+    for backend, info in data["decode_hot_path_policy"].items():
+        lines.append(
+            f"| `{backend}` | `{info['default_policy']}` | `{info['debug_opt_in']}` | "
+            f"{info['enforcement']} |"
+        )
+    lines.append("")
     lines.append("## Optimizer Dispatch")
     lines.append("")
     lines.append("| Backend | SGD Step | AdamW Step |")
@@ -384,6 +424,7 @@ def main() -> int:
         "trait_method_count": len(trait_methods),
         "backends": backends,
         "fallback_policy": fallback_policy_report(),
+        "decode_hot_path_policy": decode_hot_path_policy_report(),
         "optimizer_dispatch": optimizer_dispatch_report(backends),
         "mismatches": mismatches,
     }
