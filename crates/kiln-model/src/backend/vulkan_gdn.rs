@@ -1,8 +1,7 @@
 //! Vulkan Gated DeltaNet operation helpers.
 //!
-//! This starts the GDN operation-family split with the small gate and gated
-//! RMSNorm dispatch hooks. The larger recurrent/chunkwise paths stay in the
-//! `BackendRuntime` facade until they can move in narrower slices.
+//! This owns Vulkan's kt-facing GDN support gates and dispatch hooks while
+//! `backend/vulkan.rs` remains the `BackendRuntime` facade.
 
 use anyhow::{Context, Result};
 use std::sync::OnceLock;

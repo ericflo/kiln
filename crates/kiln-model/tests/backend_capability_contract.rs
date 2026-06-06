@@ -421,6 +421,64 @@ fn generated_capability_report_lists_backend_source_modules() {
 }
 
 #[test]
+fn vulkan_gdn_runtime_methods_stay_in_gdn_module() {
+    let backend_dir = manifest_dir().join("src/backend");
+    let vulkan_rs = backend_dir.join("vulkan.rs");
+    let functions = parse_functions(&vulkan_rs);
+    let delegated_methods = [
+        "supports_gdn_forward_substitution",
+        "supports_gdn_recurrent_step",
+        "supports_gdn_recurrent_prefill_native_head_last",
+        "supports_gdn_recurrent_qk_norm_prefill_native_head_last",
+        "supports_gdn_chunk_prep",
+        "supports_gdn_chunk_scan",
+        "supports_gdn_full_chunk_forward",
+        "supports_gdn_gates",
+        "supports_gdn_gated_rms_norm",
+        "gdn_in_proj_decode",
+        "gdn_decode_gates_recurrent_rmsnorm",
+        "gdn_forward_substitution",
+        "gdn_recurrent_prefill_native_head_last",
+        "gdn_recurrent_qk_norm_prefill_native_head_last",
+        "gdn_recurrent_step",
+        "gdn_chunkwise_forward",
+        "gdn_chunk_prep",
+        "gdn_chunk_scan",
+        "gdn_full_chunk_forward",
+        "gdn_gates",
+        "gdn_gated_rms_norm",
+    ];
+    let mut failures = Vec::new();
+
+    for method in delegated_methods {
+        let Some(function) = functions.get(method) else {
+            failures.push(format!("vulkan.rs is missing `{method}`"));
+            continue;
+        };
+        let body = compact_body(&function.body);
+        let delegation = format!("vulkan_gdn::{method}(");
+        if !body.starts_with(&delegation) {
+            failures.push(format!(
+                "vulkan.rs:{} `{method}` should delegate to `{delegation}`",
+                function.line
+            ));
+        }
+        if body.contains("kiln_vulkan_kernel::") || body.contains("std::env::var(") {
+            failures.push(format!(
+                "vulkan.rs:{} `{method}` should not retain kernel/env dispatch logic",
+                function.line
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "Vulkan GDN facade regression:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
 fn generated_capability_report_lists_request_descriptors() {
     let report_path = workspace_root().join("docs/backend-capability-report.json");
     let report: Value = serde_json::from_str(
@@ -692,7 +750,10 @@ fn generated_capability_report_lists_optimizer_dispatch_policy() {
             .get(backend)
             .unwrap_or_else(|| panic!("{backend} optimizer dispatch should be present"));
         assert_eq!(info["sgd_step"], sgd, "{backend} SGD dispatch drifted");
-        assert_eq!(info["adamw_step"], adamw, "{backend} AdamW dispatch drifted");
+        assert_eq!(
+            info["adamw_step"], adamw,
+            "{backend} AdamW dispatch drifted"
+        );
     }
 
     let fallback = report["training_optimizer_fallback_policy"]
