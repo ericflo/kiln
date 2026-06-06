@@ -230,6 +230,17 @@ impl CudaBackend {
             native_training: "not implemented",
         }
     }
+
+    fn support_predicates(&self) -> super::cuda_rocm_common::CudaRocmSupportPredicates {
+        super::cuda_rocm_common::CudaRocmSupportPredicates {
+            gdn_enabled: self.gdn_enabled,
+            gdn_gates_enabled: self.gdn_gates_enabled,
+            gdn_gated_rms_norm_enabled: self.gdn_gated_rms_norm_enabled,
+            gdn_decode_unexpanded_qk_enabled: self.gdn_decode_unexpanded_qk_enabled,
+            gdn_decode_qk_norm_recurrent_enabled: self.gdn_decode_qk_norm_recurrent_enabled,
+            fused_conv1d_enabled: self.fused_conv1d_enabled,
+        }
+    }
 }
 
 impl BackendRuntime for CudaBackend {
@@ -397,11 +408,11 @@ impl BackendRuntime for CudaBackend {
     }
 
     fn supports_flash_attn_prefill(&self) -> bool {
-        true
+        self.support_predicates().supports_flash_attn_prefill()
     }
 
     fn supports_flash_attn_paged_decode(&self) -> bool {
-        true
+        self.support_predicates().supports_flash_attn_paged_decode()
     }
 
     /// CUDA has no impl for the strict `flash_attn_paged_decode_contiguous_batch`
@@ -413,35 +424,39 @@ impl BackendRuntime for CudaBackend {
     /// VA under CUDA graph capture (suspect 6 in
     /// `bench-results/cuda-graph-bs2-secondary-audit.md`, #1082).
     fn supports_strict_paged_decode_contiguous_batch(&self) -> bool {
-        false
+        self.support_predicates()
+            .supports_strict_paged_decode_contiguous_batch()
     }
 
     fn supports_gdn_forward_substitution(&self) -> bool {
-        self.gdn_enabled
+        self.support_predicates()
+            .supports_gdn_forward_substitution()
     }
 
     fn supports_gdn_recurrent_step(&self) -> bool {
-        self.gdn_enabled
+        self.support_predicates().supports_gdn_recurrent_step()
     }
 
     fn supports_gdn_chunk_prep(&self) -> bool {
-        self.gdn_enabled
+        self.support_predicates().supports_gdn_chunk_prep()
     }
 
     fn supports_gdn_chunk_scan(&self) -> bool {
-        self.gdn_enabled
+        self.support_predicates().supports_gdn_chunk_scan()
     }
 
     fn supports_gdn_full_chunk_forward(&self) -> bool {
-        self.gdn_enabled
+        self.support_predicates().supports_gdn_full_chunk_forward()
     }
 
     fn supports_gdn_decode_gates_recurrent_unexpanded_qk(&self) -> bool {
-        self.gdn_decode_unexpanded_qk_enabled
+        self.support_predicates()
+            .supports_gdn_decode_gates_recurrent_unexpanded_qk()
     }
 
     fn supports_gdn_decode_qk_norm_gates_recurrent(&self) -> bool {
-        self.gdn_decode_qk_norm_recurrent_enabled
+        self.support_predicates()
+            .supports_gdn_decode_qk_norm_gates_recurrent()
     }
 
     fn flash_attn_prefill(
@@ -1292,7 +1307,7 @@ impl BackendRuntime for CudaBackend {
     }
 
     fn supports_gdn_gates(&self) -> bool {
-        self.gdn_gates_enabled
+        self.support_predicates().supports_gdn_gates()
     }
 
     fn gdn_gates(
@@ -1357,7 +1372,7 @@ impl BackendRuntime for CudaBackend {
     }
 
     fn supports_gdn_gated_rms_norm(&self) -> bool {
-        self.gdn_gated_rms_norm_enabled
+        self.support_predicates().supports_gdn_gated_rms_norm()
     }
 
     fn lora_decode_add(
@@ -1623,11 +1638,11 @@ impl BackendRuntime for CudaBackend {
     }
 
     fn supports_causal_conv1d_update(&self) -> bool {
-        self.fused_conv1d_enabled
+        self.support_predicates().supports_causal_conv1d_update()
     }
 
     fn supports_causal_conv1d_prefill(&self) -> bool {
-        self.fused_conv1d_enabled
+        self.support_predicates().supports_causal_conv1d_prefill()
     }
 
     fn causal_conv1d_update(

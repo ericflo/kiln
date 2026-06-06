@@ -11,6 +11,74 @@ use kiln_tensor_id::TensorId;
 
 pub(crate) type ResidentTensorIdRegistry = OnceLock<Mutex<HashSet<TensorId>>>;
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CudaRocmSupportPredicates {
+    pub(crate) gdn_enabled: bool,
+    pub(crate) gdn_gates_enabled: bool,
+    pub(crate) gdn_gated_rms_norm_enabled: bool,
+    pub(crate) gdn_decode_unexpanded_qk_enabled: bool,
+    pub(crate) gdn_decode_qk_norm_recurrent_enabled: bool,
+    pub(crate) fused_conv1d_enabled: bool,
+}
+
+impl CudaRocmSupportPredicates {
+    pub(crate) fn supports_flash_attn_prefill(self) -> bool {
+        true
+    }
+
+    pub(crate) fn supports_flash_attn_paged_decode(self) -> bool {
+        true
+    }
+
+    pub(crate) fn supports_strict_paged_decode_contiguous_batch(self) -> bool {
+        false
+    }
+
+    pub(crate) fn supports_gdn_forward_substitution(self) -> bool {
+        self.gdn_enabled
+    }
+
+    pub(crate) fn supports_gdn_recurrent_step(self) -> bool {
+        self.gdn_enabled
+    }
+
+    pub(crate) fn supports_gdn_chunk_prep(self) -> bool {
+        self.gdn_enabled
+    }
+
+    pub(crate) fn supports_gdn_chunk_scan(self) -> bool {
+        self.gdn_enabled
+    }
+
+    pub(crate) fn supports_gdn_full_chunk_forward(self) -> bool {
+        self.gdn_enabled
+    }
+
+    pub(crate) fn supports_gdn_decode_gates_recurrent_unexpanded_qk(self) -> bool {
+        self.gdn_decode_unexpanded_qk_enabled
+    }
+
+    pub(crate) fn supports_gdn_decode_qk_norm_gates_recurrent(self) -> bool {
+        self.gdn_decode_qk_norm_recurrent_enabled
+    }
+
+    pub(crate) fn supports_gdn_gates(self) -> bool {
+        self.gdn_gates_enabled
+    }
+
+    pub(crate) fn supports_gdn_gated_rms_norm(self) -> bool {
+        self.gdn_gated_rms_norm_enabled
+    }
+
+    pub(crate) fn supports_causal_conv1d_update(self) -> bool {
+        self.fused_conv1d_enabled
+    }
+
+    pub(crate) fn supports_causal_conv1d_prefill(self) -> bool {
+        self.fused_conv1d_enabled
+    }
+}
+
 /// kt-native `kiln_tensor_id::TensorId` for CUDA/ROCm resident-activation
 /// membership registries. The BackendRuntime trait surface is kt-typed, so the
 /// shared CUDA/ROCm membership contract keys directly off the kt tensor id.

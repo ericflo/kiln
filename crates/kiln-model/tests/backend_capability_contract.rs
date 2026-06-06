@@ -612,6 +612,57 @@ fn cuda_rocm_kt_bridge_device_checks_stay_in_shared_helper() {
 }
 
 #[test]
+fn cuda_rocm_support_predicates_stay_in_shared_helper() {
+    let backend_dir = manifest_dir().join("src/backend");
+    let common_path = backend_dir.join("cuda_rocm_common.rs");
+    let common_source =
+        fs::read_to_string(&common_path).expect("cuda_rocm_common.rs should be readable");
+    assert!(
+        common_source.contains("CudaRocmSupportPredicates"),
+        "cuda_rocm_common.rs should own the shared CUDA/ROCm support predicate table"
+    );
+
+    let shared_support_methods = [
+        "supports_flash_attn_prefill",
+        "supports_flash_attn_paged_decode",
+        "supports_strict_paged_decode_contiguous_batch",
+        "supports_gdn_forward_substitution",
+        "supports_gdn_recurrent_step",
+        "supports_gdn_chunk_prep",
+        "supports_gdn_chunk_scan",
+        "supports_gdn_full_chunk_forward",
+        "supports_gdn_decode_gates_recurrent_unexpanded_qk",
+        "supports_gdn_decode_qk_norm_gates_recurrent",
+        "supports_gdn_gates",
+        "supports_gdn_gated_rms_norm",
+        "supports_causal_conv1d_update",
+        "supports_causal_conv1d_prefill",
+    ];
+
+    for backend_file in ["cuda.rs", "rocm.rs"] {
+        let path = backend_dir.join(backend_file);
+        let functions = parse_functions(&path);
+        let support_factory = functions
+            .get("support_predicates")
+            .unwrap_or_else(|| panic!("{backend_file} missing support_predicates helper"));
+        assert!(
+            support_factory.body.contains("CudaRocmSupportPredicates"),
+            "{backend_file} should construct shared CUDA/ROCm support predicates"
+        );
+
+        for method in shared_support_methods {
+            let body = functions
+                .get(method)
+                .unwrap_or_else(|| panic!("{backend_file} missing {method}"));
+            assert!(
+                compact_body(&body.body).contains(&format!("support_predicates().{method}()")),
+                "{backend_file} `{method}` should delegate to cuda_rocm_common"
+            );
+        }
+    }
+}
+
+#[test]
 fn vulkan_gdn_runtime_methods_stay_in_gdn_module() {
     let backend_dir = manifest_dir().join("src/backend");
     let vulkan_rs = backend_dir.join("vulkan.rs");
