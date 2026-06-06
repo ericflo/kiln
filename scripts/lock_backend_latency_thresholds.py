@@ -10,10 +10,15 @@ import re
 import sys
 import tempfile
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from write_backend_latency_result_artifact import fixture_spec_sha256, repo_relative_path
+from write_backend_latency_result_artifact import (
+    ARTIFACT_SCHEMA_VERSION,
+    fixture_spec_sha256,
+    repo_relative_path,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,6 +63,16 @@ def rounded_threshold(value: float) -> float:
     return round(value, 6)
 
 
+def valid_utc_timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() == timezone.utc.utcoffset(None)
+
+
 def lock_fixture_thresholds(
     fixture: dict[str, Any],
     headroom: float,
@@ -89,6 +104,14 @@ def lock_fixture_thresholds(
         )
     if result.get("status") != "passed":
         raise ThresholdLockError(f"{fixture_id}.result_artifact.status must be passed")
+    if result.get("artifact_schema_version") != ARTIFACT_SCHEMA_VERSION:
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.artifact_schema_version must be {ARTIFACT_SCHEMA_VERSION!r}, got {result.get('artifact_schema_version')!r}"
+        )
+    if not valid_utc_timestamp(result.get("created_at_utc")):
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.created_at_utc must be an ISO-8601 UTC timestamp ending in Z"
+        )
     manifest = result.get("manifest")
     if not isinstance(manifest, str) or not manifest:
         raise ThresholdLockError(
@@ -198,9 +221,12 @@ def self_test() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_root = Path(tmp)
         result_path = tmp_root / "result.json"
+        created_at_utc = "2026-06-06T12:00:00Z"
         result_path.write_text(
             json.dumps(
                 {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": created_at_utc,
                     "fixture_id": "fixture",
                     "backend": "cuda",
                     "status": "passed",
@@ -255,6 +281,8 @@ def self_test() -> int:
         result_path.write_text(
             json.dumps(
                 {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": created_at_utc,
                     "fixture_id": "fixture",
                     "backend": "cuda",
                     "status": "passed",
@@ -283,6 +311,8 @@ def self_test() -> int:
         result_path.write_text(
             json.dumps(
                 {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": created_at_utc,
                     "fixture_id": "fixture",
                     "backend": "cuda",
                     "status": "passed",
@@ -311,6 +341,8 @@ def self_test() -> int:
         result_path.write_text(
             json.dumps(
                 {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": created_at_utc,
                     "fixture_id": "fixture",
                     "backend": "cuda",
                     "status": "passed",
@@ -334,6 +366,36 @@ def self_test() -> int:
                 return 1
         else:
             print(json.dumps({"ok": False, "case": "non-finite metric did not fail"}))
+            return 1
+
+        result_path.write_text(
+            json.dumps(
+                {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": "2026-06-06T12:00:00-07:00",
+                    "fixture_id": "fixture",
+                    "backend": "cuda",
+                    "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": fixture_spec_sha256(manifest["fixtures"][0]),
+                    "hardware": "fixture hardware",
+                    "source": "bench.py",
+                    "command": "python bench.py",
+                    "raw_log": "bench.log",
+                    "raw_log_sha256": "0" * 64,
+                    "metrics": {"latency_ms": 10.0, "tokens_per_s": 200.0},
+                }
+            )
+        )
+        try:
+            lock_manifest_thresholds(manifest, 0.10)
+        except ThresholdLockError as exc:
+            if "created_at_utc" not in str(exc):
+                print(json.dumps({"ok": False, "case": "artifact timestamp", "error": str(exc)}))
+                return 1
+        else:
+            print(json.dumps({"ok": False, "case": "artifact timestamp did not fail"}))
             return 1
 
     print(json.dumps({"ok": True, "self_test": "backend latency threshold locker"}))

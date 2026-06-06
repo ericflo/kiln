@@ -10,11 +10,13 @@ import math
 import re
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
+ARTIFACT_SCHEMA_VERSION = 1
 METRIC_RE = re.compile(r"^\s*KILN_LATENCY_METRIC\s+(\S+)\s+([-+0-9.eE]+)\s+(\S+)\s*$")
 VALID_RESULT_STATUSES = {"passed", "failed"}
 CHECKSUM_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -100,6 +102,10 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def repo_relative_path(path: Path) -> str:
@@ -208,6 +214,8 @@ def build_result_artifact(
         raise ArtifactError("fixture.backend must be a non-empty string")
 
     return {
+        "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+        "created_at_utc": utc_now_iso(),
         "fixture_id": fixture_id,
         "backend": backend,
         "status": status,
@@ -278,7 +286,10 @@ def self_test() -> int:
         write_artifact(output_path, artifact)
         written = json.loads(output_path.read_text())
         if (
-            written.get("fixture_id") != "cuda_fixture"
+            written.get("artifact_schema_version") != 1
+            or not isinstance(written.get("created_at_utc"), str)
+            or not written.get("created_at_utc", "").endswith("Z")
+            or written.get("fixture_id") != "cuda_fixture"
             or written.get("backend") != "cuda"
             or written.get("status") != "passed"
             or written.get("manifest") != str(manifest_path)

@@ -10,10 +10,15 @@ import math
 import re
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from write_backend_latency_result_artifact import fixture_spec_sha256, repo_relative_path
+from write_backend_latency_result_artifact import (
+    ARTIFACT_SCHEMA_VERSION,
+    fixture_spec_sha256,
+    repo_relative_path,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -77,6 +82,16 @@ def metric_threshold_passes(metric: dict[str, Any], observed: float) -> bool:
     return False
 
 
+def valid_utc_timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() == timezone.utc.utcoffset(None)
+
+
 def validate_result_provenance(
     errors: list[str],
     fixture: dict[str, Any],
@@ -85,6 +100,16 @@ def validate_result_provenance(
     manifest_schema_version: Any,
     manifest_path: Path | None,
 ) -> None:
+    if result.get("artifact_schema_version") != ARTIFACT_SCHEMA_VERSION:
+        errors.append(
+            f"{context}.result_artifact.artifact_schema_version must be {ARTIFACT_SCHEMA_VERSION!r}, got {result.get('artifact_schema_version')!r}"
+        )
+
+    if not valid_utc_timestamp(result.get("created_at_utc")):
+        errors.append(
+            f"{context}.result_artifact.created_at_utc must be an ISO-8601 UTC timestamp ending in Z"
+        )
+
     manifest = result.get("manifest")
     if not isinstance(manifest, str) or not manifest:
         errors.append(f"{context}.result_artifact.manifest must be a non-empty string")
@@ -352,6 +377,7 @@ def self_test() -> int:
         raw_log = tmp_root / "raw.log"
         raw_log.write_text("KILN_LATENCY_METRIC latency_ms 9.5 ms\n")
         raw_log_sha256 = hashlib.sha256(raw_log.read_bytes()).hexdigest()
+        created_at_utc = "2026-06-06T12:00:00Z"
         fixture = {
             "id": "cuda_fixture",
             "backend": "cuda",
@@ -372,6 +398,8 @@ def self_test() -> int:
         artifact.write_text(
             json.dumps(
                 {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": created_at_utc,
                     "fixture_id": "cuda_fixture",
                     "backend": "cuda",
                     "status": "passed",
@@ -403,6 +431,8 @@ def self_test() -> int:
         artifact.write_text(
             json.dumps(
                 {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": created_at_utc,
                     "fixture_id": "cuda_fixture",
                     "backend": "cuda",
                     "status": "passed",
@@ -434,6 +464,8 @@ def self_test() -> int:
         artifact.write_text(
             json.dumps(
                 {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": created_at_utc,
                     "fixture_id": "wrong",
                     "backend": "cuda",
                     "status": "passed",
@@ -465,6 +497,8 @@ def self_test() -> int:
         artifact.write_text(
             json.dumps(
                 {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": created_at_utc,
                     "fixture_id": "cuda_fixture",
                     "backend": "cuda",
                     "status": "passed",
@@ -498,6 +532,8 @@ def self_test() -> int:
         artifact.write_text(
             json.dumps(
                 {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": created_at_utc,
                     "fixture_id": "cuda_fixture",
                     "backend": "cuda",
                     "status": "passed",
@@ -529,6 +565,8 @@ def self_test() -> int:
         artifact.write_text(
             json.dumps(
                 {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": created_at_utc,
                     "fixture_id": "cuda_fixture",
                     "backend": "cuda",
                     "status": "passed",
@@ -552,6 +590,39 @@ def self_test() -> int:
             print(
                 json.dumps(
                     {"ok": False, "case": "non-finite metric", "errors": errors},
+                    indent=2,
+                )
+            )
+            return 1
+
+        artifact.write_text(
+            json.dumps(
+                {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": "2026-06-06T12:00:00-07:00",
+                    "fixture_id": "cuda_fixture",
+                    "backend": "cuda",
+                    "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": fixture_spec_sha256(fixture),
+                    "hardware": "fixture",
+                    "source": str(source.relative_to(ROOT))
+                    if source.is_relative_to(ROOT)
+                    else str(source),
+                    "command": "cargo bench",
+                    "raw_log": str(raw_log),
+                    "raw_log_sha256": raw_log_sha256,
+                    "metrics": {"latency_ms": 9.5, "tokens_per_s": 125.0},
+                }
+            )
+        )
+        errors = []
+        validate_result_artifact(errors, fixture, artifact, "fixtures[0]", 1, None)
+        if not any("created_at_utc must be" in error for error in errors):
+            print(
+                json.dumps(
+                    {"ok": False, "case": "artifact timestamp", "errors": errors},
                     indent=2,
                 )
             )

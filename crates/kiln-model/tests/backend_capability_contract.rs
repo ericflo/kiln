@@ -2470,6 +2470,8 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
     for required in [
         "def validate_result_artifact(",
         "def metric_threshold_passes(",
+        "artifact_schema_version",
+        "created_at_utc",
         "fixture_id",
         "status must be passed",
         "manifest_schema_version",
@@ -2506,6 +2508,8 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "def parse_metric_log(",
         "KILN_LATENCY_METRIC",
         "def build_result_artifact(",
+        "ARTIFACT_SCHEMA_VERSION",
+        "created_at_utc",
         "manifest_schema_version",
         "fixture_spec_sha256",
         "math.isfinite",
@@ -2525,6 +2529,8 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
     for required in [
         "def lock_manifest_thresholds(",
         "locked_threshold",
+        "artifact_schema_version",
+        "created_at_utc",
         "status",
         "manifest_schema_version",
         "fixture_spec_sha256",
@@ -2569,6 +2575,8 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         .expect("latency result schema doc should be readable");
     for required in [
         "fixture_id",
+        "artifact_schema_version",
+        "created_at_utc",
         "backend",
         "status",
         "manifest_schema_version",

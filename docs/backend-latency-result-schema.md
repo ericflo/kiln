@@ -29,6 +29,8 @@ The result artifact is JSON:
 
 ```json
 {
+  "artifact_schema_version": 1,
+  "created_at_utc": "2026-06-06T12:00:00Z",
   "fixture_id": "metal_apple_silicon_matmul_qwen35_4b",
   "backend": "metal",
   "status": "passed",
@@ -48,6 +50,9 @@ The result artifact is JSON:
 
 Required fields:
 
+- `artifact_schema_version`: result artifact schema version, currently `1`
+- `created_at_utc`: ISO-8601 UTC timestamp ending in `Z` for when the artifact
+  was materialized
 - `fixture_id`: exactly matches the fixture `id`
 - `backend`: exactly matches the fixture `backend`
 - `status`: `passed`
@@ -126,12 +131,14 @@ python3 scripts/lock_backend_latency_thresholds.py \
 ```
 
 The threshold locker requires every fixture result artifact to exist, have
-`status: "passed"`, match the fixture `id`, `backend`, manifest schema version,
-stable fixture digest, hardware/source/command provenance, and contain every
-declared metric. It sets every fixture `threshold_state` to `locked_threshold`,
-sets the manifest `status` to `covered`, and applies the headroom by comparison:
-`<=` thresholds are raised above observed latency, while `>=` thresholds are
-lowered below observed throughput. Use `--check` to validate without writing.
+`status: "passed"`, match the result artifact schema version, include a valid
+UTC creation timestamp, match the fixture `id`, `backend`, manifest schema
+version, stable fixture digest, hardware/source/command provenance, and contain
+every declared metric. It sets every fixture `threshold_state` to
+`locked_threshold`, sets the manifest `status` to `covered`, and applies the
+headroom by comparison: `<=` thresholds are raised above observed latency, while
+`>=` thresholds are lowered below observed throughput. Use `--check` to validate
+without writing.
 
 Then run the covered gate:
 
