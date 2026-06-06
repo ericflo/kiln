@@ -308,6 +308,10 @@ fn generated_capability_report_lists_backend_source_modules() {
         "Metal backend source modules should include the extracted config module"
     );
     assert!(
+        metal_sources.contains(&"crates/kiln-model/src/backend/metal_conv1d.rs"),
+        "Metal backend source modules should include the extracted conv1d module"
+    );
+    assert!(
         metal_sources.contains(&"crates/kiln-model/src/backend/metal_core.rs"),
         "Metal backend source modules should include the extracted core module"
     );

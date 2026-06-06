@@ -27,6 +27,7 @@ BACKENDS = {
 BACKEND_EXTRA_SOURCES = {
     "metal": [
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "metal_config.rs",
+        ROOT / "crates" / "kiln-model" / "src" / "backend" / "metal_conv1d.rs",
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "metal_core.rs",
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "metal_icb.rs",
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "metal_lm_head.rs",
