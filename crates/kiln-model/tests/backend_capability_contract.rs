@@ -930,6 +930,19 @@ fn generated_capability_report_lists_request_descriptors() {
             descriptors.contains_key(name),
             "{name} should be present in request_descriptors"
         );
+        let descriptor = &descriptors[name];
+        for flag in [
+            "has_dtype",
+            "has_shape",
+            "has_layout",
+            "has_batch",
+            "has_replay_safe",
+        ] {
+            assert_eq!(
+                descriptor[flag], true,
+                "{name} should expose {flag} in the typed request audit"
+            );
+        }
     }
 
     let replay_fields = descriptors["ReplayRequest"]["fields"]
@@ -1007,7 +1020,15 @@ fn generated_capability_report_lists_request_descriptors() {
         .iter()
         .filter_map(|field| field["name"].as_str())
         .collect::<Vec<_>>();
-    for field in ["m", "n", "k", "dtype", "epilogue", "concurrent_streams"] {
+    for field in [
+        "m",
+        "n",
+        "k",
+        "dtype",
+        "epilogue",
+        "replay_safe",
+        "concurrent_streams",
+    ] {
         assert!(
             matmul_blas_fields.contains(&field),
             "MatmulBlasRequest should include {field}"

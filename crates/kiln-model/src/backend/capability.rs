@@ -125,6 +125,7 @@ pub struct MatmulBlasRequest {
     pub out_layout: MatmulOperandLayout,
     pub epilogue: MatmulEpilogue,
     pub batch: MatmulBatchPolicy,
+    pub replay_safe: bool,
     pub concurrent_streams: u8,
 }
 
@@ -221,6 +222,7 @@ impl MatmulRequest {
             out_layout: self.out_layout,
             epilogue: self.epilogue,
             batch: self.batch,
+            replay_safe: self.replay_safe,
             concurrent_streams,
         })
     }

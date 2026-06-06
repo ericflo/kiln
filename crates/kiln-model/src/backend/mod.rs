@@ -3608,6 +3608,7 @@ mod tests {
         assert_eq!(blas.out_layout.blas_name(), "row");
         assert_eq!(blas.epilogue.blas_name(), "bias");
         assert_eq!(blas.batch, capability::MatmulBatchPolicy::Single);
+        assert!(blas.replay_safe);
         assert_eq!(blas.concurrent_streams, 3);
 
         let batched = capability::MatmulRequest::plain(

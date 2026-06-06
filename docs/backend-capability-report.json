@@ -2287,7 +2287,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "MatmulBlasRequest": {
-      "field_count": 10,
+      "field_count": 11,
       "fields": [
         {
           "name": "m",
@@ -2326,6 +2326,10 @@
           "type": "MatmulBatchPolicy"
         },
         {
+          "name": "replay_safe",
+          "type": "bool"
+        },
+        {
           "name": "concurrent_streams",
           "type": "u8"
         }
@@ -2333,7 +2337,7 @@
       "has_batch": true,
       "has_dtype": true,
       "has_layout": true,
-      "has_replay_safe": false,
+      "has_replay_safe": true,
       "has_shape": true,
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
