@@ -166,14 +166,14 @@ impl MetalPagedKvWriteTokenMajorBatchIcbArgs {
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct MetalPagedAttnDecodeDynSeqlenIcbArgs {
-    batch: MetalGraphScalarBuffer,
-    max_blocks_per_seq: MetalGraphScalarBuffer,
-    max_seqlen_k: MetalGraphScalarBuffer,
-    page_block_size: MetalGraphScalarBuffer,
-    q_heads: MetalGraphScalarBuffer,
-    kv_heads: MetalGraphScalarBuffer,
-    softmax_scale: MetalGraphScalarBuffer,
-    total_slots: MetalGraphScalarBuffer,
+    pub(crate) batch: MetalGraphScalarBuffer,
+    pub(crate) max_blocks_per_seq: MetalGraphScalarBuffer,
+    pub(crate) max_seqlen_k: MetalGraphScalarBuffer,
+    pub(crate) page_block_size: MetalGraphScalarBuffer,
+    pub(crate) q_heads: MetalGraphScalarBuffer,
+    pub(crate) kv_heads: MetalGraphScalarBuffer,
+    pub(crate) softmax_scale: MetalGraphScalarBuffer,
+    pub(crate) total_slots: MetalGraphScalarBuffer,
 }
 
 #[allow(dead_code)]

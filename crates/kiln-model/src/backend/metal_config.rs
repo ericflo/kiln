@@ -220,7 +220,7 @@ pub(super) fn metal_rms_norm_disabled() -> bool {
     env_present(DISABLE_RMSNORM_KERNEL) || env_truthy(DISABLE_METAL_RMSNORM)
 }
 
-pub(super) fn metal_mlp_gate_up_fusion_disabled() -> bool {
+pub(crate) fn metal_mlp_gate_up_fusion_disabled() -> bool {
     env_truthy(DISABLE_METAL_MLP_GATE_UP_FUSION)
 }
 

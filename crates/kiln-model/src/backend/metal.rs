@@ -7,6 +7,7 @@
 //! 256, 512}. For typical transformer head sizes this replaces the vendored
 //! CUDA FlashAttention-2 call on Apple Silicon.
 
+pub(crate) use super::metal_config::metal_mlp_gate_up_fusion_disabled;
 use super::metal_config::*;
 pub(crate) use super::metal_dense::{
     metal_attn_gate_sigmoid_mul_bf16, metal_attn_gate_sigmoid_mul_supports,
