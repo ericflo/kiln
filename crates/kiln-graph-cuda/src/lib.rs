@@ -70,6 +70,33 @@ impl CapturedGraph for CudaCapturedGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kiln_graph::{
+        CapturedGraphReplayPlan, ReplayInputs, ReplayKey, ReplayPlan, ReplayResourceStability,
+        ResidentResourceRef,
+    };
+    use kiln_tensor::{DType, TensorId};
+
+    fn replay_key() -> ReplayKey {
+        ReplayKey::new(
+            Backend::Cuda,
+            "decode",
+            vec![1, 128],
+            Some(DType::F32),
+            1,
+            true,
+        )
+    }
+
+    fn stable_resource() -> ResidentResourceRef {
+        ResidentResourceRef {
+            tensor_id: Some(TensorId::next()),
+            backend: Backend::Cuda,
+            dtype: DType::F32,
+            shape: vec![1, 128],
+            byte_len: 128 * DType::F32.size_in_bytes(),
+            replay_stability: ReplayResourceStability::StableAcrossReplay,
+        }
+    }
 
     #[test]
     fn scaffold_reports_backend() {
@@ -86,5 +113,22 @@ mod tests {
         g.replay().unwrap();
         g.replay().unwrap();
         assert_eq!(g.replay_count(), 3);
+    }
+
+    #[test]
+    fn scaffold_wraps_shared_replay_plan_contract() {
+        let key = replay_key();
+        let input = stable_resource();
+        let graph = CudaCapturedGraph::new(1024);
+        let mut plan = CapturedGraphReplayPlan::new(graph, key.clone(), vec![input.clone()])
+            .expect("CUDA graph backend should match replay key");
+
+        assert_eq!(ReplayPlan::backend(&plan), Backend::Cuda);
+        ReplayPlan::validate_inputs(&plan, &[input.clone()]).unwrap();
+        let outputs = ReplayPlan::replay(&mut plan, ReplayInputs::new(&key, &[input.clone()]))
+            .expect("shared replay plan should replay scaffold graph");
+
+        assert_eq!(outputs.replay_count, 1);
+        assert_eq!(outputs.resources, vec![input]);
     }
 }
