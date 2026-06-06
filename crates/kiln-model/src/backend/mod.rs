@@ -3045,7 +3045,10 @@ impl<T: BackendRuntime + ?Sized> ResidencyBackend for T {
     }
 }
 
-impl<T: BackendRuntime + ?Sized> residency::ResidentRegistry for T {
+impl<T> residency::ResidentRegistry for T
+where
+    T: BackendRuntime + ResidencyBackend + ?Sized,
+{
     fn register_resource(
         &self,
         tensor: &kiln_tensor::Tensor,
@@ -3053,8 +3056,10 @@ impl<T: BackendRuntime + ?Sized> residency::ResidentRegistry for T {
     ) -> Result<Option<residency::ResidentResource>> {
         match family {
             residency::ResidentResourceFamily::Activation => {
-                BackendRuntime::register_resident_activation(self, tensor)?;
-                Ok(BackendRuntime::resident_activation_resource(self, tensor))
+                ResidencyBackend::runtime_register_resident_activation(self, tensor)?;
+                Ok(ResidencyBackend::runtime_resident_activation_resource(
+                    self, tensor,
+                ))
             }
             _ => Ok(None),
         }
@@ -3067,8 +3072,10 @@ impl<T: BackendRuntime + ?Sized> residency::ResidentRegistry for T {
     ) -> Result<Option<residency::ResidentResource>> {
         match family {
             residency::ResidentResourceFamily::Activation => {
-                BackendRuntime::update_resident_activation(self, tensor)?;
-                Ok(BackendRuntime::resident_activation_resource(self, tensor))
+                ResidencyBackend::runtime_update_resident_activation(self, tensor)?;
+                Ok(ResidencyBackend::runtime_resident_activation_resource(
+                    self, tensor,
+                ))
             }
             _ => Ok(None),
         }
@@ -3080,7 +3087,7 @@ impl<T: BackendRuntime + ?Sized> residency::ResidentRegistry for T {
         family: residency::ResidentResourceFamily,
     ) {
         if family == residency::ResidentResourceFamily::Activation {
-            BackendRuntime::evict_resident_activation(self, tensor);
+            ResidencyBackend::runtime_evict_resident_activation(self, tensor);
         }
     }
 
@@ -3091,7 +3098,7 @@ impl<T: BackendRuntime + ?Sized> residency::ResidentRegistry for T {
     ) -> Option<residency::ResidentResource> {
         match family {
             residency::ResidentResourceFamily::Activation => {
-                BackendRuntime::resident_activation_resource(self, tensor)
+                ResidencyBackend::runtime_resident_activation_resource(self, tensor)
             }
             _ => None,
         }

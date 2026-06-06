@@ -2,7 +2,7 @@
 //!
 //! Phase 3 uses these metadata types to describe the residency lifecycle that
 //! CUDA/ROCm/Metal storage-owned registries and Vulkan upload-owned registries
-//! already implement through `BackendRuntime` hooks. They are intentionally
+//! already implement through focused residency hooks. They are intentionally
 //! backend-neutral and carry no allocation or synchronization behavior.
 
 use anyhow::Result;

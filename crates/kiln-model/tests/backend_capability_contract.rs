@@ -1403,6 +1403,46 @@ fn capability_queries_consume_focused_backend_facets() {
 }
 
 #[test]
+fn resident_registry_consumes_focused_residency_facet() {
+    let root = workspace_root();
+    let backend_source = fs::read_to_string(root.join("crates/kiln-model/src/backend/mod.rs"))
+        .expect("backend/mod.rs should be readable");
+    let registry_impl_start = backend_source
+        .find("impl<T> residency::ResidentRegistry for T")
+        .expect("ResidentRegistry blanket impl should be present");
+    let registry_impl = &backend_source[registry_impl_start..];
+    let registry_impl_end = registry_impl
+        .find("impl<T: BackendRuntime + ?Sized> OptimizerBackend for T")
+        .expect("OptimizerBackend blanket impl should follow ResidentRegistry adapter");
+    let registry_impl = &registry_impl[..registry_impl_end];
+
+    for required in [
+        "T: BackendRuntime + ResidencyBackend + ?Sized",
+        "ResidencyBackend::runtime_register_resident_activation",
+        "ResidencyBackend::runtime_update_resident_activation",
+        "ResidencyBackend::runtime_evict_resident_activation",
+        "ResidencyBackend::runtime_resident_activation_resource",
+    ] {
+        assert!(
+            registry_impl.contains(required),
+            "ResidentRegistry adapter should consume focused residency facet surface {required}"
+        );
+    }
+
+    for forbidden in [
+        "BackendRuntime::register_resident_activation",
+        "BackendRuntime::update_resident_activation",
+        "BackendRuntime::evict_resident_activation",
+        "BackendRuntime::resident_activation_resource",
+    ] {
+        assert!(
+            !registry_impl.contains(forbidden),
+            "ResidentRegistry adapter should not reach around ResidencyBackend via {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn generated_capability_report_gates_matmul_linear_contract() {
     let report_path = workspace_root().join("docs/backend-capability-report.json");
     let report: Value = serde_json::from_str(
