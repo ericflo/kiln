@@ -141,6 +141,244 @@ pub(super) fn gdn_in_proj_decode(
     )))
 }
 
+pub(super) fn gdn_forward_substitution(
+    backend: &VulkanBackend,
+    a_strict: &kiln_tensor::Tensor,
+    v_prime: &kiln_tensor::Tensor,
+    beta: &kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    // kt guards read directly off the kt args before the bridge.
+    if !backend.has_vulkan() || !backend.gdn_enabled {
+        return Ok(None);
+    }
+    if a_strict.dtype() != kiln_tensor::DType::BF16 {
+        return Ok(None);
+    }
+    // (#1082) kt-native: byte extraction reads straight from kt storage.
+    let vk_device = backend
+        .vulkan_device()
+        .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+
+    let v_dims = v_prime.dims();
+    let (batch, heads, chunk, dv) = (v_dims[0], v_dims[1], v_dims[2], v_dims[3]);
+    let a_strict_bytes = kt_tensor_to_f32_bytes_with_shape(a_strict)?.0;
+    let v_prime_bytes = kt_tensor_to_f32_bytes_with_shape(v_prime)?.0;
+    let beta_bytes = kt_tensor_to_f32_bytes_with_shape(beta)?.0;
+    let out_data = kiln_vulkan_kernel::kernels::dispatch_gdn_forward_substitution_bytes(
+        vk_device,
+        &a_strict_bytes,
+        &v_prime_bytes,
+        &beta_bytes,
+        batch,
+        heads,
+        chunk,
+        dv,
+    )
+    .context("gdn_forward_substitution kernel failed")?;
+    let out = kt_tensor_from_f32_bytes(
+        &out_data,
+        &[batch, heads, chunk, dv],
+        kiln_tensor::DType::F32,
+    )?;
+    Ok(Some(out))
+}
+
+pub(super) fn gdn_chunk_prep(
+    backend: &VulkanBackend,
+    g: &kiln_tensor::Tensor,
+    v: &kiln_tensor::Tensor,
+    kkt: &kiln_tensor::Tensor,
+    qkt: &kiln_tensor::Tensor,
+    ks_entry: &kiln_tensor::Tensor,
+    q_s: &kiln_tensor::Tensor,
+) -> Result<
+    Option<(
+        kiln_tensor::Tensor,
+        kiln_tensor::Tensor,
+        kiln_tensor::Tensor,
+        kiln_tensor::Tensor,
+        kiln_tensor::Tensor,
+        kiln_tensor::Tensor,
+    )>,
+> {
+    // kt guards read directly off the kt args before the bridge.
+    if !backend.has_vulkan() || !backend.gdn_enabled {
+        return Ok(None);
+    }
+    if g.dtype() != kiln_tensor::DType::BF16 {
+        return Ok(None);
+    }
+    // (#1082) kt-native: byte extraction + reconstruction run on kt args.
+    let vk_device = backend
+        .vulkan_device()
+        .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+
+    let g_data = kt_tensor_to_f32_bytes_with_shape(g)?.0;
+    let v_data = kt_tensor_to_f32_bytes_with_shape(v)?.0;
+    let kkt_data = kt_tensor_to_f32_bytes_with_shape(kkt)?.0;
+    let qkt_data = kt_tensor_to_f32_bytes_with_shape(qkt)?.0;
+    let ks_entry_data = kt_tensor_to_f32_bytes_with_shape(ks_entry)?.0;
+    let q_s_data = kt_tensor_to_f32_bytes_with_shape(q_s)?.0;
+    let g_dims = g.dims();
+    let (batch, heads, chunk) = (g_dims[0], g_dims[1], g_dims[2]);
+    let dv = v.dims()[3];
+    let (a_strict_b, b_mask_b, v_prime_b, q_s_scaled_b, decay_last_col_b, p_last_b) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_chunk_prep_bytes(
+            vk_device,
+            &g_data,
+            &v_data,
+            &kkt_data,
+            &qkt_data,
+            &ks_entry_data,
+            &q_s_data,
+            batch,
+            heads,
+            chunk,
+            dv,
+        )
+        .context("gdn_chunk_prep kernel failed")?;
+    let cc_shape = [batch, heads, chunk, chunk];
+    let cv_shape = [batch, heads, chunk, dv];
+    let decay_shape = [batch, heads, chunk];
+    let p_last_shape = [batch, heads];
+    Ok(Some((
+        kt_tensor_from_f32_bytes(&a_strict_b, &cc_shape, kiln_tensor::DType::BF16)?,
+        kt_tensor_from_f32_bytes(&b_mask_b, &cc_shape, kiln_tensor::DType::BF16)?,
+        kt_tensor_from_f32_bytes(&v_prime_b, &cv_shape, kiln_tensor::DType::BF16)?,
+        kt_tensor_from_f32_bytes(&q_s_scaled_b, &cv_shape, kiln_tensor::DType::BF16)?,
+        kt_tensor_from_f32_bytes(&decay_last_col_b, &decay_shape, kiln_tensor::DType::BF16)?,
+        kt_tensor_from_f32_bytes(&p_last_b, &p_last_shape, kiln_tensor::DType::BF16)?,
+    )))
+}
+
+pub(super) fn gdn_chunk_scan(
+    backend: &VulkanBackend,
+    a_strict: &kiln_tensor::Tensor,
+    b_mask: &kiln_tensor::Tensor,
+    v_prime: &kiln_tensor::Tensor,
+    q_s_scaled: &kiln_tensor::Tensor,
+    beta: &kiln_tensor::Tensor,
+    decay_last_col: &kiln_tensor::Tensor,
+) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+    // kt guards read directly off the kt args before the bridge.
+    if !backend.has_vulkan() || !backend.gdn_enabled {
+        return Ok(None);
+    }
+    if a_strict.dtype() != kiln_tensor::DType::BF16 {
+        return Ok(None);
+    }
+    // (#1082) kt-native: byte extraction + reconstruction run on kt args.
+    let vk_device = backend
+        .vulkan_device()
+        .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+
+    let a_strict_data = kt_tensor_to_f32_bytes_with_shape(a_strict)?.0;
+    let b_mask_data = kt_tensor_to_f32_bytes_with_shape(b_mask)?.0;
+    let v_prime_data = kt_tensor_to_f32_bytes_with_shape(v_prime)?.0;
+    let q_s_scaled_data = kt_tensor_to_f32_bytes_with_shape(q_s_scaled)?.0;
+    let beta_data = kt_tensor_to_f32_bytes_with_shape(beta)?.0;
+    let decay_last_col_data = kt_tensor_to_f32_bytes_with_shape(decay_last_col)?.0;
+    let v_prime_dims = v_prime.dims();
+    let (batch, heads, chunk, dv) = (
+        v_prime_dims[0],
+        v_prime_dims[1],
+        v_prime_dims[2],
+        v_prime_dims[3],
+    );
+    let (out_data, p_out_data) = kiln_vulkan_kernel::kernels::dispatch_gdn_chunk_scan_bytes(
+        vk_device,
+        &a_strict_data,
+        &b_mask_data,
+        &v_prime_data,
+        &q_s_scaled_data,
+        &beta_data,
+        &decay_last_col_data,
+        batch,
+        heads,
+        chunk,
+        dv,
+    )
+    .context("gdn_chunk_scan kernel failed")?;
+    let out_tensor = kt_tensor_from_f32_bytes(
+        &out_data,
+        &[batch, heads, chunk, dv],
+        kiln_tensor::DType::BF16,
+    )?;
+    let p_out_tensor = kt_tensor_from_f32_bytes(
+        &p_out_data,
+        &[batch, heads, chunk, dv],
+        kiln_tensor::DType::BF16,
+    )?;
+    Ok(Some((out_tensor, p_out_tensor)))
+}
+
+pub(super) fn gdn_full_chunk_forward(
+    backend: &VulkanBackend,
+    g: &kiln_tensor::Tensor,
+    v: &kiln_tensor::Tensor,
+    kkt: &kiln_tensor::Tensor,
+    qkt: &kiln_tensor::Tensor,
+    ks_entry: &kiln_tensor::Tensor,
+    q_s: &kiln_tensor::Tensor,
+    beta: &kiln_tensor::Tensor,
+    k_t: &kiln_tensor::Tensor,
+    state_kt: &mut kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    // kt guards read directly off the kt args before the bridge.
+    if !backend.has_vulkan() || !backend.gdn_enabled {
+        return Ok(None);
+    }
+    if g.dtype() != kiln_tensor::DType::BF16 {
+        return Ok(None);
+    }
+    // (#1082) kt-native: all args are already kt; `state_kt` is mutated in
+    // place at the return below.
+    let vk_device = backend
+        .vulkan_device()
+        .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+
+    let g_data = kt_tensor_to_f32_bytes_with_shape(g)?.0;
+    let v_data = kt_tensor_to_f32_bytes_with_shape(v)?.0;
+    let kkt_data = kt_tensor_to_f32_bytes_with_shape(kkt)?.0;
+    let qkt_data = kt_tensor_to_f32_bytes_with_shape(qkt)?.0;
+    let ks_entry_data = kt_tensor_to_f32_bytes_with_shape(ks_entry)?.0;
+    let q_s_data = kt_tensor_to_f32_bytes_with_shape(q_s)?.0;
+    let beta_data = kt_tensor_to_f32_bytes_with_shape(beta)?.0;
+    let k_t_data = kt_tensor_to_f32_bytes_with_shape(k_t)?.0;
+    let state_data = kt_tensor_to_f32_bytes_with_shape(state_kt)?.0;
+    let g_dims = g.dims();
+    let (batch, heads, chunk) = (g_dims[0], g_dims[1], g_dims[2]);
+    let dv = v.dims()[3];
+    let dk = k_t.dims()[2];
+    let state_dims = state_kt.dims().to_vec();
+    let (out_data, new_state_data) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_full_chunk_forward_bytes(
+            vk_device,
+            &g_data,
+            &v_data,
+            &kkt_data,
+            &qkt_data,
+            &ks_entry_data,
+            &q_s_data,
+            &beta_data,
+            &k_t_data,
+            &state_data,
+            batch,
+            heads,
+            chunk,
+            dk,
+            dv,
+        )
+        .context("gdn_full_chunk_forward kernel failed")?;
+    let out = kt_tensor_from_f32_bytes(
+        &out_data,
+        &[batch, heads, chunk, dv],
+        kiln_tensor::DType::BF16,
+    )?;
+    *state_kt = kt_tensor_from_f32_bytes(&new_state_data, &state_dims, kiln_tensor::DType::BF16)?;
+    Ok(Some(out))
+}
+
 pub(super) fn gdn_gates(
     backend: &VulkanBackend,
     a: &kiln_tensor::Tensor,
