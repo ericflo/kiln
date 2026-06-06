@@ -7,6 +7,10 @@
 use anyhow::{Context, Result};
 
 use super::vulkan::VulkanBackend;
+use super::vulkan_residency::{
+    get_recurrent_state_resident_buffer, insert_recurrent_state_resident_buffer,
+    recurrent_state_resident_scope_active,
+};
 use super::vulkan_tensor_bridge::{kt_tensor_from_f32_bytes, kt_tensor_to_f32_bytes_with_shape};
 
 pub(super) fn supports_gdn_forward_substitution(backend: &VulkanBackend) -> bool {
@@ -376,6 +380,107 @@ pub(super) fn gdn_full_chunk_forward(
         kiln_tensor::DType::BF16,
     )?;
     *state_kt = kt_tensor_from_f32_bytes(&new_state_data, &state_dims, kiln_tensor::DType::BF16)?;
+    Ok(Some(out))
+}
+
+pub(super) fn gdn_recurrent_step(
+    backend: &VulkanBackend,
+    q: &kiln_tensor::Tensor,
+    k: &kiln_tensor::Tensor,
+    v: &kiln_tensor::Tensor,
+    beta: &kiln_tensor::Tensor,
+    g: &kiln_tensor::Tensor,
+    state_kt: &mut kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    // kt guards read directly off the kt args before the bridge.
+    if !backend.has_vulkan() || !backend.gdn_enabled {
+        return Ok(None);
+    }
+    if !matches!(
+        q.dtype(),
+        kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
+    ) {
+        return Ok(None);
+    }
+    // (#1082) kt-native: all args are already kt; `state_kt` is mutated in
+    // place. The recurrent-state resident cache keys on the kt `TensorId`.
+    let vk_device = backend
+        .vulkan_device()
+        .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+
+    if backend.recurrent_state_residency_enabled && recurrent_state_resident_scope_active() {
+        let state_id = state_kt.id();
+        let resident_state = get_recurrent_state_resident_buffer(state_id);
+
+        let q_data = kt_tensor_to_f32_bytes_with_shape(q)?.0;
+        let k_data = kt_tensor_to_f32_bytes_with_shape(k)?.0;
+        let v_data = kt_tensor_to_f32_bytes_with_shape(v)?.0;
+        let beta_data = kt_tensor_to_f32_bytes_with_shape(beta)?.0;
+        let g_data = kt_tensor_to_f32_bytes_with_shape(g)?.0;
+        let state_data_owned = if resident_state.is_none() {
+            Some(kt_tensor_to_f32_bytes_with_shape(state_kt)?.0)
+        } else {
+            None
+        };
+        let q_dims = q.dims();
+        let (batch, heads, dk) = (q_dims[0], q_dims[1], q_dims[2]);
+        let dv = v.dims()[2];
+        let q_dtype = q.dtype();
+        let (out_data, resident_state) =
+            kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state_bytes(
+                vk_device,
+                &q_data,
+                &k_data,
+                &v_data,
+                &beta_data,
+                &g_data,
+                state_data_owned.as_deref(),
+                batch,
+                heads,
+                dk,
+                dv,
+                resident_state,
+            )
+            .context("gdn_recurrent_step resident-state kernel failed")?;
+        let out = kt_tensor_from_f32_bytes(&out_data, &[batch, heads, dv], q_dtype)?;
+
+        insert_recurrent_state_resident_buffer(state_id, resident_state);
+        return Ok(Some(out));
+    }
+
+    let skip_state_readback = crate::forward::vulkan_skip_gdn_state_readback_active();
+    let q_dims = q.dims();
+    let (batch, heads, dk) = (q_dims[0], q_dims[1], q_dims[2]);
+    let dv = v.dims()[2];
+    let q_dtype = q.dtype();
+    let state_dtype = state_kt.dtype();
+    let state_dims = state_kt.dims().to_vec();
+    let q_data = kt_tensor_to_f32_bytes_with_shape(q)?.0;
+    let k_data = kt_tensor_to_f32_bytes_with_shape(k)?.0;
+    let v_data = kt_tensor_to_f32_bytes_with_shape(v)?.0;
+    let beta_data = kt_tensor_to_f32_bytes_with_shape(beta)?.0;
+    let g_data = kt_tensor_to_f32_bytes_with_shape(g)?.0;
+    let state_data = kt_tensor_to_f32_bytes_with_shape(state_kt)?.0;
+    let (out_data, new_state_data) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options_bytes(
+            vk_device,
+            &q_data,
+            &k_data,
+            &v_data,
+            &beta_data,
+            &g_data,
+            &state_data,
+            batch,
+            heads,
+            dk,
+            dv,
+            skip_state_readback,
+        )
+        .context("gdn_recurrent_step kernel failed")?;
+    let out = kt_tensor_from_f32_bytes(&out_data, &[batch, heads, dv], q_dtype)?;
+    if let Some(sd) = new_state_data {
+        *state_kt = kt_tensor_from_f32_bytes(&sd, &state_dims, state_dtype)?;
+    }
     Ok(Some(out))
 }
 
