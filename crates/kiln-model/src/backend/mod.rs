@@ -99,6 +99,9 @@ pub(crate) mod metal_lm_head;
 pub(crate) mod metal_msl;
 
 #[cfg(feature = "metal")]
+pub(crate) mod metal_pipeline;
+
+#[cfg(feature = "metal")]
 pub(crate) mod metal_residency;
 
 #[cfg(feature = "metal")]

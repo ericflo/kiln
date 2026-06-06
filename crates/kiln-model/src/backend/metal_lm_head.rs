@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result};
 
-use super::metal::{
+use super::metal_pipeline::{
     metal_lm_head_argmax_batch_pipeline, metal_lm_head_argmax_pipeline,
     metal_lm_head_argmax_reduce_batch_pipeline, metal_lm_head_argmax_reduce_pipeline,
     metal_lm_head_pipeline, metal_lm_head_sample_pipeline,

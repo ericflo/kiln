@@ -6,8 +6,8 @@
 
 use anyhow::Result;
 
-use super::metal::{metal_conv1d_prefill_pipeline, metal_conv1d_update_pipeline};
 use super::metal_core::{kt_metal, kt_metal_alloc};
+use super::metal_pipeline::{metal_conv1d_prefill_pipeline, metal_conv1d_update_pipeline};
 use kiln_tensor::metal_types::buffer_o_kt;
 
 pub(crate) fn metal_conv1d_prefill_supports(
