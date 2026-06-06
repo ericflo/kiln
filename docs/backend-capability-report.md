@@ -19,7 +19,7 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 |---|---|---:|---:|---:|
 | `cuda` | `crates/kiln-model/src/backend/cuda.rs` | 44 | 15 | 4 |
 | `rocm` | `crates/kiln-model/src/backend/rocm.rs` | 48 | 17 | 10 |
-| `metal` | `crates/kiln-model/src/backend/metal.rs` | 50 | 19 | 47 |
+| `metal` | `crates/kiln-model/src/backend/metal.rs` | 51 | 19 | 47 |
 | `vulkan` | `crates/kiln-model/src/backend/vulkan.rs` | 73 | 20 | 32 |
 
 ## Support Predicates
@@ -106,6 +106,15 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `rocm` | `host_round_trip_correctness_fallback` | `kiln_tensor::profile::device_op_host_fallback_counts().rocm_op{1,2,3}` | crates/kiln-tensor/src/device_op.rs ROCm missing native forward stages through CPU |
 | `metal` | `host_round_trip_correctness_fallback` | `kiln_tensor::profile::device_op_host_fallback_counts().metal_op{1,2,3}` | crates/kiln-tensor/src/device_op.rs Metal missing native forward stages through CPU |
 | `vulkan` | `host_round_trip_correctness_fallback` | `kiln_tensor::profile::device_op_host_fallback_counts().vulkan_op{1,2,3}` | crates/kiln-tensor/src/device_op.rs Vulkan missing native forward stages through CPU |
+
+## Optimizer Dispatch
+
+| Backend | SGD Step | AdamW Step |
+|---|---|---|
+| `cuda` | `overridden` | `overridden` |
+| `rocm` | `overridden` | `overridden` |
+| `metal` | `default_decline` | `overridden` |
+| `vulkan` | `overridden` | `overridden` |
 
 ## Mismatch Audit
 

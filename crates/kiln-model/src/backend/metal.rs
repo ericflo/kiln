@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result};
 
-use super::BackendRuntime;
+use super::{BackendRuntime, TrainingCapabilities};
 
 // Phase 7 #1082: module-level imports for the kt-metal chokepoint types,
 // hoisted from ~92 per-function `use` statements so that the chokepoint
@@ -745,6 +745,17 @@ impl MetalBackend {
             disable: MetalKernelDisables::from_env(),
         }
     }
+
+    pub fn training_capabilities_static() -> TrainingCapabilities {
+        let mut caps = TrainingCapabilities::portable();
+        caps.projection_training = "kt-tape-recorded matmul; Metal decode fusions decline tape-tracked tensors";
+        caps.resident_activation = "Metal TensorId membership registry; kt Metal tensors own UMA buffers";
+        caps.lora_delta_training = "kt-tape-recorded LoRA delta; fused lora_decode_add declines tape-tracked tensors";
+        caps.sgd_step = "declined; portable optimizer fallback";
+        caps.adamw_step = "Metal in-place AdamW for resident F32/BF16 tensors";
+        caps.native_training = "shared trainer.rs kt-tape path with Metal residency/AdamW hooks";
+        caps
+    }
 }
 
 /// Compile Kiln's custom Metal library and compute pipelines ahead of the
@@ -889,6 +900,10 @@ impl BackendRuntime for MetalBackend {
 
     fn device(&self) -> kiln_tensor::Device {
         self.device_kt
+    }
+
+    fn training_capabilities(&self) -> TrainingCapabilities {
+        Self::training_capabilities_static()
     }
 
     // ------------------------------------------------------------------

@@ -275,6 +275,17 @@ def fallback_policy_report() -> dict[str, Any]:
     }
 
 
+def optimizer_dispatch_report(backends: dict[str, Any]) -> dict[str, Any]:
+    report: dict[str, Any] = {}
+    for backend, info in backends.items():
+        overrides = set(info["overrides"])
+        report[backend] = {
+            "sgd_step": "overridden" if "dispatch_sgd_step" in overrides else "default_decline",
+            "adamw_step": "overridden" if "dispatch_adamw_step" in overrides else "default_decline",
+        }
+    return report
+
+
 def markdown(data: dict[str, Any]) -> str:
     lines: list[str] = []
     lines.append("# Backend Capability Report")
@@ -325,6 +336,13 @@ def markdown(data: dict[str, Any]) -> str:
             f"`{info['counter']}` | {info['evidence']} |"
         )
     lines.append("")
+    lines.append("## Optimizer Dispatch")
+    lines.append("")
+    lines.append("| Backend | SGD Step | AdamW Step |")
+    lines.append("|---|---|---|")
+    for backend, info in data["optimizer_dispatch"].items():
+        lines.append(f"| `{backend}` | `{info['sgd_step']}` | `{info['adamw_step']}` |")
+    lines.append("")
     lines.append("## Mismatch Audit")
     lines.append("")
     if data["mismatches"]:
@@ -366,6 +384,7 @@ def main() -> int:
         "trait_method_count": len(trait_methods),
         "backends": backends,
         "fallback_policy": fallback_policy_report(),
+        "optimizer_dispatch": optimizer_dispatch_report(backends),
         "mismatches": mismatches,
     }
     REPORT_JSON.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")

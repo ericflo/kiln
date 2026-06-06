@@ -3184,4 +3184,16 @@ mod tests {
         assert!(caps.adamw_step.contains("CUDA in-place optimizer kernel"));
         assert_eq!(caps.native_training, "not implemented");
     }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn metal_training_capabilities_advertise_adamw_but_decline_sgd() {
+        let caps = metal::MetalBackend::training_capabilities_static();
+        assert!(caps.sgd_step.contains("declined"));
+        assert!(caps.adamw_step.contains("Metal in-place AdamW"));
+        assert!(caps.resident_activation.contains("Metal TensorId"));
+
+        let backend = metal::MetalBackend::new(kiln_tensor::Device::Metal(0));
+        assert_eq!(backend.training_capabilities(), caps);
+    }
 }
