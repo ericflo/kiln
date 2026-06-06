@@ -6,7 +6,8 @@
 //! backend-neutral and carry no allocation or synchronization behavior.
 
 use anyhow::Result;
-use kiln_tensor::{DType, Device, Tensor, TensorId};
+use kiln_graph::{ReplayResourceStability, ResidentResourceRef};
+use kiln_tensor::{Backend, DType, Device, Tensor, TensorId};
 
 /// High-level operation family that owns a resident resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -127,6 +128,37 @@ impl ResidentResource {
         self.replay_stability = replay_stability;
         self
     }
+
+    pub fn to_replay_resource_ref(&self) -> ResidentResourceRef {
+        self.to_replay_resource_ref_for_backend(self.device.backend())
+    }
+
+    pub fn to_replay_resource_ref_for_backend(&self, backend: Backend) -> ResidentResourceRef {
+        ResidentResourceRef {
+            tensor_id: Some(self.tensor_id),
+            backend,
+            dtype: self.dtype,
+            shape: self.shape.clone(),
+            byte_len: self.byte_len,
+            replay_stability: self.replay_stability.into(),
+        }
+    }
+}
+
+impl From<ReplayStability> for ReplayResourceStability {
+    fn from(stability: ReplayStability) -> Self {
+        match stability {
+            ReplayStability::NotReplayStable => ReplayResourceStability::NotReplayStable,
+            ReplayStability::StableWithinStep => ReplayResourceStability::StableWithinStep,
+            ReplayStability::StableAcrossReplay => ReplayResourceStability::StableAcrossReplay,
+        }
+    }
+}
+
+impl From<&ResidentResource> for ResidentResourceRef {
+    fn from(resource: &ResidentResource) -> Self {
+        resource.to_replay_resource_ref()
+    }
 }
 
 /// Backend-neutral lifecycle surface for resident tensor-like resources.
@@ -203,7 +235,41 @@ mod tests {
 
         assert_eq!(resource.byte_len, 12);
         assert_eq!(resource.state, ResidentResourceState::DirtyDevice);
-        assert_eq!(resource.replay_stability, ReplayStability::StableAcrossReplay);
+        assert_eq!(
+            resource.replay_stability,
+            ReplayStability::StableAcrossReplay
+        );
+        let replay_ref = resource.to_replay_resource_ref();
+        assert_eq!(replay_ref.tensor_id, Some(resource.tensor_id));
+        assert_eq!(replay_ref.backend, Backend::Cpu);
+        assert_eq!(
+            replay_ref.replay_stability,
+            ReplayResourceStability::StableAcrossReplay
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resident_resource_can_target_explicit_replay_backend() -> anyhow::Result<()> {
+        let tensor = Tensor::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], vec![2, 2])?;
+        let resource = ResidentResource::from_tensor(
+            &tensor,
+            ResidentResourceFamily::ReplayInput,
+            ResidentOwnership::RegistryOwned,
+        )
+        .with_replay_stability(ReplayStability::StableWithinStep);
+
+        let replay_ref = resource.to_replay_resource_ref_for_backend(Backend::Vulkan);
+        assert_eq!(replay_ref.backend, Backend::Vulkan);
+        assert_eq!(replay_ref.tensor_id, Some(resource.tensor_id));
+        assert_eq!(replay_ref.dtype, DType::F32);
+        assert_eq!(replay_ref.shape, vec![2, 2]);
+        assert_eq!(replay_ref.byte_len, resource.byte_len);
+        assert_eq!(
+            replay_ref.replay_stability,
+            ReplayResourceStability::StableWithinStep
+        );
+        assert!(!replay_ref.is_replay_stable());
         Ok(())
     }
 

@@ -43,6 +43,7 @@ impl ReplayKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReplayResourceStability {
     NotReplayStable,
+    StableWithinStep,
     StableAcrossReplay,
 }
 

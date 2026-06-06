@@ -33,6 +33,7 @@ kiln-rmsnorm-kernel = { path = "../kiln-rmsnorm-kernel", optional = true, defaul
 kiln-vulkan-kernel = { workspace = true, optional = true }
 # Bounded HIP runtime binding — pulled under the `rocm` feature. (R.4)
 kiln-hip = { workspace = true, optional = true }
+kiln-graph = { workspace = true }
 kiln-graph-metal = { workspace = true, optional = true }
 # Phase 6a/CP-4 (#1082): experimental tape-forward path under
 # `KILN_USE_TAPE_FORWARD`. Optional so non-cuda builds don't pull in
