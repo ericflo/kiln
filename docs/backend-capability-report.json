@@ -1796,13 +1796,23 @@
       "status": "covered"
     },
     {
-      "command": "none",
-      "evidence": [],
+      "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model decode_batcher_stats_report_runner_calls_per_token && /home/ericflo/.cargo/bin/cargo test -p kiln-server test_metrics_render && /home/ericflo/.cargo/bin/cargo test -p kiln-graph replay",
+      "evidence": [
+        "crates/kiln-model/src/generate.rs",
+        "crates/kiln-server/src/metrics.rs",
+        "crates/kiln-graph/src/captured_graph.rs",
+        "crates/kiln-graph/src/replay_plan.rs"
+      ],
       "evidence_missing": [],
-      "evidence_present": [],
+      "evidence_present": [
+        "crates/kiln-model/src/generate.rs",
+        "crates/kiln-server/src/metrics.rs",
+        "crates/kiln-graph/src/captured_graph.rs",
+        "crates/kiln-graph/src/replay_plan.rs"
+      ],
       "gate": "decode_submit_or_replay_count",
       "phase8_requirement": "max submit count or replay count per decode token",
-      "status": "gap"
+      "status": "partial"
     },
     {
       "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-blas cublaslt_handle_smoke",

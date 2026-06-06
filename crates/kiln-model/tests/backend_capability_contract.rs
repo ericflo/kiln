@@ -251,7 +251,9 @@ fn generated_capability_report_uses_typed_support_states() {
                 continue;
             };
             if !valid.contains(&state) {
-                failures.push(format!("{backend}.{method} has invalid support_state={state}"));
+                failures.push(format!(
+                    "{backend}.{method} has invalid support_state={state}"
+                ));
             }
         }
     }
@@ -409,6 +411,27 @@ fn generated_capability_report_lists_request_descriptors() {
                 "covered conformance gate should have evidence"
             );
         }
+    }
+    let decode_submit_gate = conformance_gates
+        .iter()
+        .find(|gate| gate["gate"] == "decode_submit_or_replay_count")
+        .expect("decode submit/replay gate should be present");
+    assert_eq!(decode_submit_gate["status"], "partial");
+    let decode_submit_evidence = decode_submit_gate["evidence_present"]
+        .as_array()
+        .expect("decode submit/replay evidence should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    for path in [
+        "crates/kiln-model/src/generate.rs",
+        "crates/kiln-server/src/metrics.rs",
+        "crates/kiln-graph/src/replay_plan.rs",
+    ] {
+        assert!(
+            decode_submit_evidence.contains(&path),
+            "decode submit/replay gate should cite {path}"
+        );
     }
 }
 

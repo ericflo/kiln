@@ -825,15 +825,29 @@ pub struct DecodeBatcherStats {
     pub submitted_jobs: usize,
     pub executed_batches: usize,
     pub executed_rows: usize,
+    pub runner_calls: usize,
+    pub max_runner_calls_per_token: usize,
     pub max_observed_batch: usize,
     pub runner_busy_jobs: usize,
     pub failed_jobs: usize,
+}
+
+impl DecodeBatcherStats {
+    pub fn runner_calls_per_token(&self) -> Option<f64> {
+        if self.executed_rows == 0 {
+            None
+        } else {
+            Some(self.runner_calls as f64 / self.executed_rows as f64)
+        }
+    }
 }
 
 struct DecodeBatcherCounters {
     submitted_jobs: AtomicUsize,
     executed_batches: AtomicUsize,
     executed_rows: AtomicUsize,
+    runner_calls: AtomicUsize,
+    max_runner_calls_per_token: AtomicUsize,
     max_observed_batch: AtomicUsize,
     runner_busy_jobs: AtomicUsize,
     failed_jobs: AtomicUsize,
@@ -883,6 +897,8 @@ impl DecodeBatcher {
             submitted_jobs: AtomicUsize::new(0),
             executed_batches: AtomicUsize::new(0),
             executed_rows: AtomicUsize::new(0),
+            runner_calls: AtomicUsize::new(0),
+            max_runner_calls_per_token: AtomicUsize::new(0),
             max_observed_batch: AtomicUsize::new(0),
             runner_busy_jobs: AtomicUsize::new(0),
             failed_jobs: AtomicUsize::new(0),
@@ -914,6 +930,11 @@ impl DecodeBatcher {
             submitted_jobs: self.counters.submitted_jobs.load(Ordering::Relaxed),
             executed_batches: self.counters.executed_batches.load(Ordering::Relaxed),
             executed_rows: self.counters.executed_rows.load(Ordering::Relaxed),
+            runner_calls: self.counters.runner_calls.load(Ordering::Relaxed),
+            max_runner_calls_per_token: self
+                .counters
+                .max_runner_calls_per_token
+                .load(Ordering::Relaxed),
             max_observed_batch: self.counters.max_observed_batch.load(Ordering::Relaxed),
             runner_busy_jobs: self.counters.runner_busy_jobs.load(Ordering::Relaxed),
             failed_jobs: self.counters.failed_jobs.load(Ordering::Relaxed),
@@ -1122,45 +1143,58 @@ fn process_decode_batch_jobs(
     };
 
     let backend = &*runner_guard.backend;
+    let job_count = jobs.len();
+    let mut runner_calls_for_jobs = 1usize;
     let rowwise_retry_enabled = decode_batcher_rowwise_retry_enabled(backend);
-    let tokens = match decode_batch_jobs_with_runner(&runner_guard, paged_cache, &mut jobs) {
-        Ok(tokens) => Ok(tokens),
-        Err(err) if jobs.len() > 1 && rowwise_retry_enabled => {
-            tracing::debug!(
-                batch = jobs.len(),
-                error = %err,
-                "batched greedy decode failed; falling back to rowwise decode jobs"
-            );
-            let mut tokens = Vec::with_capacity(jobs.len());
-            let mut fallback_error = None;
-            for idx in 0..jobs.len() {
-                match decode_batch_jobs_with_runner(
-                    &runner_guard,
-                    paged_cache,
-                    &mut jobs[idx..idx + 1],
-                ) {
-                    Ok(mut row_tokens) => tokens.push(row_tokens.remove(0)),
-                    Err(row_err) => {
-                        fallback_error = Some(row_err);
-                        break;
+    let tokens =
+        match decode_batch_jobs_with_runner(&runner_guard, paged_cache, &mut jobs, counters) {
+            Ok(tokens) => Ok(tokens),
+            Err(err) if jobs.len() > 1 && rowwise_retry_enabled => {
+                tracing::debug!(
+                    batch = jobs.len(),
+                    error = %err,
+                    "batched greedy decode failed; falling back to rowwise decode jobs"
+                );
+                let mut tokens = Vec::with_capacity(jobs.len());
+                let mut fallback_error = None;
+                for idx in 0..jobs.len() {
+                    runner_calls_for_jobs += 1;
+                    match decode_batch_jobs_with_runner(
+                        &runner_guard,
+                        paged_cache,
+                        &mut jobs[idx..idx + 1],
+                        counters,
+                    ) {
+                        Ok(mut row_tokens) => tokens.push(row_tokens.remove(0)),
+                        Err(row_err) => {
+                            fallback_error = Some(row_err);
+                            break;
+                        }
                     }
                 }
+                match fallback_error {
+                    Some(err) => Err(err),
+                    None => Ok(tokens),
+                }
             }
-            match fallback_error {
-                Some(err) => Err(err),
-                None => Ok(tokens),
+            Err(err) if jobs.len() > 1 => {
+                tracing::debug!(
+                    batch = jobs.len(),
+                    error = %err,
+                    "batched greedy decode failed; rowwise retry disabled"
+                );
+                Err(err)
             }
-        }
-        Err(err) if jobs.len() > 1 => {
-            tracing::debug!(
-                batch = jobs.len(),
-                error = %err,
-                "batched greedy decode failed; rowwise retry disabled"
-            );
-            Err(err)
-        }
-        Err(err) => Err(err),
-    };
+            Err(err) => Err(err),
+        };
+    counters.max_runner_calls_per_token.fetch_max(
+        if job_count > 0 && runner_calls_for_jobs > 1 {
+            2
+        } else {
+            usize::from(job_count > 0)
+        },
+        Ordering::Relaxed,
+    );
 
     match tokens {
         Ok(tokens) => {
@@ -1201,7 +1235,9 @@ fn decode_batch_jobs_with_runner(
     runner: &ModelRunner,
     paged_cache: &PagedKvCache,
     jobs: &mut [DecodeBatchJob],
+    counters: &DecodeBatcherCounters,
 ) -> Result<Vec<TokenId>> {
+    counters.runner_calls.fetch_add(1, Ordering::Relaxed);
     let profile_stages = profile_decode_batcher_stages_enabled();
     let total_start = profile_stages.then(std::time::Instant::now);
     let stage_start = profile_stages.then(std::time::Instant::now);
@@ -8380,6 +8416,20 @@ impl ModelRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_batcher_stats_report_runner_calls_per_token() {
+        let stats = DecodeBatcherStats {
+            executed_rows: 4,
+            runner_calls: 5,
+            max_runner_calls_per_token: 2,
+            ..DecodeBatcherStats::default()
+        };
+
+        assert_eq!(stats.runner_calls_per_token(), Some(1.25));
+        assert_eq!(stats.max_runner_calls_per_token, 2);
+        assert_eq!(DecodeBatcherStats::default().runner_calls_per_token(), None);
+    }
 
     #[test]
     fn test_decode_batcher_default_mixed_seq_lens_backend_policy() {
