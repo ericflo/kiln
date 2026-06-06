@@ -1,0 +1,313 @@
+//! Metal ICB graph resource and replay wrappers.
+//!
+//! The low-level command recording still lives next to the Metal kernel
+//! encoders in `metal.rs`; this module owns the reusable scalar buffers,
+//! resource refs, argument blocks, and captured graph wrappers.
+
+use anyhow::Result;
+
+use kiln_tensor::metal_types::{
+    Buffer, MTLResourceOptions, MTLResourceUsage, MetalCompanion, MetalRawDevice,
+};
+
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub(crate) struct MetalGraphScalarBuffer {
+    buffer: Buffer,
+}
+
+#[allow(dead_code)]
+impl MetalGraphScalarBuffer {
+    fn new_u32(device: &MetalRawDevice, value: u32) -> Result<Self> {
+        Self::new_copy(device, &value)
+    }
+
+    fn new_f32(device: &MetalRawDevice, value: f32) -> Result<Self> {
+        Self::new_copy(device, &value)
+    }
+
+    fn new_copy<T: Copy>(device: &MetalRawDevice, value: &T) -> Result<Self> {
+        let byte_len = std::mem::size_of::<T>();
+        let buffer = device
+            .new_buffer_with_data(
+                value as *const T as *const std::ffi::c_void,
+                byte_len,
+                MTLResourceOptions::StorageModeShared,
+            )
+            .map_err(|e| anyhow::anyhow!("MetalGraphScalarBuffer::new_copy: {e:?}"))?;
+        Ok(Self { buffer })
+    }
+
+    pub(crate) fn write_u32(&self, value: u32) -> Result<()> {
+        self.write_copy(&value)
+    }
+
+    pub(crate) fn write_f32(&self, value: f32) -> Result<()> {
+        self.write_copy(&value)
+    }
+
+    fn write_copy<T: Copy>(&self, value: &T) -> Result<()> {
+        let byte_len = std::mem::size_of::<T>();
+        anyhow::ensure!(
+            byte_len <= self.buffer.length(),
+            "MetalGraphScalarBuffer write of {byte_len} bytes exceeds buffer length {}",
+            self.buffer.length()
+        );
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                value as *const T as *const u8,
+                self.buffer.contents(),
+                byte_len,
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn buffer(&self) -> &Buffer {
+        &self.buffer
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub(crate) struct MetalGraphResourceRef {
+    buffer: Buffer,
+    usage: MTLResourceUsage,
+}
+
+impl MetalGraphResourceRef {
+    pub(crate) fn read(buffer: &Buffer) -> Self {
+        Self {
+            buffer: buffer.clone(),
+            usage: MTLResourceUsage::Read,
+        }
+    }
+
+    pub(crate) fn write(buffer: &Buffer) -> Self {
+        Self {
+            buffer: buffer.clone(),
+            usage: MTLResourceUsage::Write,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub(crate) struct MetalPagedKvWriteTokenMajorIcbArgs {
+    pub(crate) slot: MetalGraphScalarBuffer,
+    pub(crate) heads: MetalGraphScalarBuffer,
+    pub(crate) head_dim: MetalGraphScalarBuffer,
+}
+
+#[allow(dead_code)]
+impl MetalPagedKvWriteTokenMajorIcbArgs {
+    pub(crate) fn new(
+        companion: &MetalCompanion,
+        slot: u32,
+        heads: u32,
+        head_dim: u32,
+    ) -> Result<Self> {
+        Ok(Self {
+            slot: MetalGraphScalarBuffer::new_u32(companion.device(), slot)?,
+            heads: MetalGraphScalarBuffer::new_u32(companion.device(), heads)?,
+            head_dim: MetalGraphScalarBuffer::new_u32(companion.device(), head_dim)?,
+        })
+    }
+
+    pub(crate) fn update_slot(&self, slot: u32) -> Result<()> {
+        self.slot.write_u32(slot)
+    }
+
+    pub(crate) fn scalar_resources(&self) -> [MetalGraphResourceRef; 3] {
+        [
+            MetalGraphResourceRef::read(self.slot.buffer()),
+            MetalGraphResourceRef::read(self.heads.buffer()),
+            MetalGraphResourceRef::read(self.head_dim.buffer()),
+        ]
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub(crate) struct MetalPagedKvWriteTokenMajorBatchIcbArgs {
+    pub(crate) batch: MetalGraphScalarBuffer,
+    pub(crate) heads: MetalGraphScalarBuffer,
+    pub(crate) head_dim: MetalGraphScalarBuffer,
+    pub(crate) total_slots: MetalGraphScalarBuffer,
+}
+
+#[allow(dead_code)]
+impl MetalPagedKvWriteTokenMajorBatchIcbArgs {
+    pub(crate) fn new(
+        companion: &MetalCompanion,
+        batch: u32,
+        heads: u32,
+        head_dim: u32,
+        total_slots: u32,
+    ) -> Result<Self> {
+        Ok(Self {
+            batch: MetalGraphScalarBuffer::new_u32(companion.device(), batch)?,
+            heads: MetalGraphScalarBuffer::new_u32(companion.device(), heads)?,
+            head_dim: MetalGraphScalarBuffer::new_u32(companion.device(), head_dim)?,
+            total_slots: MetalGraphScalarBuffer::new_u32(companion.device(), total_slots)?,
+        })
+    }
+
+    pub(crate) fn scalar_resources(&self) -> [MetalGraphResourceRef; 4] {
+        [
+            MetalGraphResourceRef::read(self.batch.buffer()),
+            MetalGraphResourceRef::read(self.heads.buffer()),
+            MetalGraphResourceRef::read(self.head_dim.buffer()),
+            MetalGraphResourceRef::read(self.total_slots.buffer()),
+        ]
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub(crate) struct MetalPagedAttnDecodeDynSeqlenIcbArgs {
+    batch: MetalGraphScalarBuffer,
+    max_blocks_per_seq: MetalGraphScalarBuffer,
+    max_seqlen_k: MetalGraphScalarBuffer,
+    page_block_size: MetalGraphScalarBuffer,
+    q_heads: MetalGraphScalarBuffer,
+    kv_heads: MetalGraphScalarBuffer,
+    softmax_scale: MetalGraphScalarBuffer,
+    total_slots: MetalGraphScalarBuffer,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MetalPagedAttnDecodeDynSeqlenScalars {
+    pub(crate) batch: u32,
+    pub(crate) max_blocks_per_seq: u32,
+    pub(crate) max_seqlen_k: u32,
+    pub(crate) page_block_size: u32,
+    pub(crate) q_heads: u32,
+    pub(crate) kv_heads: u32,
+    pub(crate) softmax_scale: f32,
+    pub(crate) total_slots: u32,
+}
+
+#[allow(dead_code)]
+impl MetalPagedAttnDecodeDynSeqlenIcbArgs {
+    pub(crate) fn new(
+        companion: &MetalCompanion,
+        scalars: MetalPagedAttnDecodeDynSeqlenScalars,
+    ) -> Result<Self> {
+        Ok(Self {
+            batch: MetalGraphScalarBuffer::new_u32(companion.device(), scalars.batch)?,
+            max_blocks_per_seq: MetalGraphScalarBuffer::new_u32(
+                companion.device(),
+                scalars.max_blocks_per_seq,
+            )?,
+            max_seqlen_k: MetalGraphScalarBuffer::new_u32(
+                companion.device(),
+                scalars.max_seqlen_k,
+            )?,
+            page_block_size: MetalGraphScalarBuffer::new_u32(
+                companion.device(),
+                scalars.page_block_size,
+            )?,
+            q_heads: MetalGraphScalarBuffer::new_u32(companion.device(), scalars.q_heads)?,
+            kv_heads: MetalGraphScalarBuffer::new_u32(companion.device(), scalars.kv_heads)?,
+            softmax_scale: MetalGraphScalarBuffer::new_f32(
+                companion.device(),
+                scalars.softmax_scale,
+            )?,
+            total_slots: MetalGraphScalarBuffer::new_u32(companion.device(), scalars.total_slots)?,
+        })
+    }
+
+    pub(crate) fn update_max_seqlen_k(&self, max_seqlen_k: u32) -> Result<()> {
+        self.max_seqlen_k.write_u32(max_seqlen_k)
+    }
+
+    pub(crate) fn update_softmax_scale(&self, softmax_scale: f32) -> Result<()> {
+        self.softmax_scale.write_f32(softmax_scale)
+    }
+
+    pub(crate) fn scalar_resources(&self) -> [MetalGraphResourceRef; 8] {
+        [
+            MetalGraphResourceRef::read(self.batch.buffer()),
+            MetalGraphResourceRef::read(self.max_blocks_per_seq.buffer()),
+            MetalGraphResourceRef::read(self.max_seqlen_k.buffer()),
+            MetalGraphResourceRef::read(self.page_block_size.buffer()),
+            MetalGraphResourceRef::read(self.q_heads.buffer()),
+            MetalGraphResourceRef::read(self.kv_heads.buffer()),
+            MetalGraphResourceRef::read(self.softmax_scale.buffer()),
+            MetalGraphResourceRef::read(self.total_slots.buffer()),
+        ]
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub(crate) struct MetalSingleTokenPagedDecodeIcbGraph {
+    pub(crate) captured: kiln_graph_metal::MetalCapturedGraph,
+    pub(crate) kv_args: MetalPagedKvWriteTokenMajorIcbArgs,
+    pub(crate) attn_args: MetalPagedAttnDecodeDynSeqlenIcbArgs,
+}
+
+#[allow(dead_code)]
+impl MetalSingleTokenPagedDecodeIcbGraph {
+    pub(crate) fn replay(&self, slot: u32, max_seqlen_k: u32, softmax_scale: f32) -> Result<()> {
+        self.kv_args.update_slot(slot)?;
+        self.attn_args.update_max_seqlen_k(max_seqlen_k)?;
+        self.attn_args.update_softmax_scale(softmax_scale)?;
+        self.captured
+            .replay()
+            .map_err(|e| anyhow::anyhow!("Metal ICB paged decode replay: {e}"))?;
+        self.captured
+            .wait_until_completed()
+            .map_err(|e| anyhow::anyhow!("Metal ICB paged decode wait: {e}"))?;
+        Ok(())
+    }
+
+    pub(crate) fn replay_count(&self) -> u64 {
+        self.captured.replay_count()
+    }
+}
+
+#[allow(dead_code, clippy::too_many_arguments)]
+#[derive(Debug)]
+pub(crate) struct MetalPagedDecodeIcbGraph {
+    pub(crate) captured: kiln_graph_metal::MetalCapturedGraph,
+    pub(crate) attn_args: MetalPagedAttnDecodeDynSeqlenIcbArgs,
+}
+
+#[allow(dead_code)]
+impl MetalPagedDecodeIcbGraph {
+    pub(crate) fn replay(&self, max_seqlen_k: u32, softmax_scale: f32) -> Result<()> {
+        self.attn_args.update_max_seqlen_k(max_seqlen_k)?;
+        self.attn_args.update_softmax_scale(softmax_scale)?;
+        self.captured
+            .replay()
+            .map_err(|e| anyhow::anyhow!("Metal ICB paged decode replay: {e}"))?;
+        self.captured
+            .wait_until_completed()
+            .map_err(|e| anyhow::anyhow!("Metal ICB paged decode wait: {e}"))?;
+        Ok(())
+    }
+
+    pub(crate) fn replay_count(&self) -> u64 {
+        self.captured.replay_count()
+    }
+}
+
+pub(crate) fn merge_metal_graph_resources(
+    resources: impl IntoIterator<Item = MetalGraphResourceRef>,
+) -> Result<Vec<kiln_graph_metal::MetalGraphResource>> {
+    let mut merged: Vec<MetalGraphResourceRef> = Vec::new();
+    for resource in resources {
+        if let Some(existing) = merged.iter_mut().find(|r| r.buffer == resource.buffer) {
+            existing.usage |= resource.usage;
+        } else {
+            merged.push(resource);
+        }
+    }
+    Ok(merged
+        .into_iter()
+        .map(|resource| kiln_graph_metal::MetalGraphResource::new(resource.buffer, resource.usage))
+        .collect())
+}

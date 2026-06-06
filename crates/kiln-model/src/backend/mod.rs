@@ -84,6 +84,9 @@ pub mod metal;
 pub(crate) mod metal_config;
 
 #[cfg(feature = "metal")]
+pub(crate) mod metal_icb;
+
+#[cfg(feature = "metal")]
 pub(crate) mod metal_residency;
 
 #[cfg(feature = "metal")]
