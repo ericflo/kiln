@@ -515,3 +515,67 @@ fn generated_capability_report_lists_training_precision_policy() {
         .collect::<Vec<_>>();
     assert!(base_weight_dtypes.contains(&"BF16"));
 }
+
+#[test]
+fn generated_capability_report_lists_optimizer_dispatch_policy() {
+    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(&report_path).expect("capability report json should be readable"),
+    )
+    .expect("capability report json should parse");
+
+    let dispatch = report["optimizer_dispatch"]
+        .as_object()
+        .expect("optimizer_dispatch should be an object");
+    for (backend, sgd, adamw) in [
+        ("cuda", "overridden", "overridden"),
+        ("rocm", "overridden", "overridden"),
+        ("metal", "default_decline", "overridden"),
+        ("vulkan", "overridden", "overridden"),
+    ] {
+        let info = dispatch
+            .get(backend)
+            .unwrap_or_else(|| panic!("{backend} optimizer dispatch should be present"));
+        assert_eq!(info["sgd_step"], sgd, "{backend} SGD dispatch drifted");
+        assert_eq!(info["adamw_step"], adamw, "{backend} AdamW dispatch drifted");
+    }
+
+    let fallback = report["training_optimizer_fallback_policy"]
+        .as_object()
+        .expect("training_optimizer_fallback_policy should be an object");
+    assert_eq!(fallback["cpu"]["default_policy"], "CorrectnessAllowed");
+    for backend in ["cuda", "rocm", "metal", "vulkan"] {
+        assert_eq!(
+            fallback[backend]["default_policy"], "NativeRequired",
+            "{backend} optimizer fallback policy should require native dispatch"
+        );
+    }
+
+    let conformance_gates = report["conformance_gates"]
+        .as_array()
+        .expect("conformance_gates should be an array");
+    let optimizer_gate = conformance_gates
+        .iter()
+        .find(|gate| gate["gate"] == "optimizer_parity")
+        .expect("optimizer parity gate should be present");
+    assert_eq!(optimizer_gate["status"], "covered");
+    let evidence = optimizer_gate["evidence_present"]
+        .as_array()
+        .expect("optimizer parity evidence should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    for path in [
+        "crates/kiln-optim/tests/integration.rs",
+        "crates/kiln-model/src/backend/cuda.rs",
+        "crates/kiln-model/src/backend/rocm.rs",
+        "crates/kiln-model/src/backend/metal.rs",
+        "crates/kiln-model/src/backend/vulkan.rs",
+        "crates/kiln-train/src/trainer.rs",
+    ] {
+        assert!(
+            evidence.contains(&path),
+            "optimizer parity gate should cite {path}"
+        );
+    }
+}

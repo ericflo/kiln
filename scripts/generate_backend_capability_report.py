@@ -569,11 +569,16 @@ def conformance_gate_report() -> list[dict[str, Any]]:
         {
             "gate": "optimizer_parity",
             "phase8_requirement": "optimizer parity",
-            "status": "partial",
-            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-train training_optimizer",
+            "status": "covered",
+            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-optim --test integration && /home/ericflo/.cargo/bin/cargo test -p kiln-train training_optimizer && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test backend_capability_contract",
             "evidence": [
                 "crates/kiln-optim/tests/integration.rs",
+                "crates/kiln-model/src/backend/cuda.rs",
+                "crates/kiln-model/src/backend/rocm.rs",
+                "crates/kiln-model/src/backend/metal.rs",
+                "crates/kiln-model/src/backend/vulkan.rs",
                 "crates/kiln-model/src/backend/mod.rs",
+                "crates/kiln-train/src/trainer.rs",
                 "crates/kiln-train/tests/vk_cuda_opd_parity.rs",
             ],
         },
