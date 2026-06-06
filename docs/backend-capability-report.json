@@ -1146,6 +1146,7 @@
         "crates/kiln-model/src/backend/vulkan.rs",
         "crates/kiln-model/src/backend/vulkan_attention.rs",
         "crates/kiln-model/src/backend/vulkan_config.rs",
+        "crates/kiln-model/src/backend/vulkan_conv1d.rs",
         "crates/kiln-model/src/backend/vulkan_decode_state.rs",
         "crates/kiln-model/src/backend/vulkan_dense.rs",
         "crates/kiln-model/src/backend/vulkan_device.rs",
@@ -1165,10 +1166,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 875,
+          "line": 17,
           "paired_method": "causal_conv1d_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 2225,
+          "paired_method_line": 74,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1180,10 +1181,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 870,
+          "line": 12,
           "paired_method": "causal_conv1d_update",
           "paired_method_always_declines": false,
-          "paired_method_line": 2171,
+          "paired_method_line": 21,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1245,7 +1246,7 @@
           "line": 850,
           "paired_method": "gdn_chunk_prep",
           "paired_method_always_declines": false,
-          "paired_method_line": 1873,
+          "paired_method_line": 1872,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1260,7 +1261,7 @@
           "line": 854,
           "paired_method": "gdn_chunk_scan",
           "paired_method_always_declines": false,
-          "paired_method_line": 1942,
+          "paired_method_line": 1941,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1275,7 +1276,7 @@
           "line": 361,
           "paired_method": "gdn_forward_substitution",
           "paired_method_always_declines": false,
-          "paired_method_line": 1358,
+          "paired_method_line": 1357,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1290,7 +1291,7 @@
           "line": 858,
           "paired_method": "gdn_full_chunk_forward",
           "paired_method_always_declines": false,
-          "paired_method_line": 2004,
+          "paired_method_line": 2003,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1305,7 +1306,7 @@
           "line": 866,
           "paired_method": "gdn_gated_rms_norm",
           "paired_method_always_declines": false,
-          "paired_method_line": 2123,
+          "paired_method_line": 2122,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1320,7 +1321,7 @@
           "line": 862,
           "paired_method": "gdn_gates",
           "paired_method_always_declines": false,
-          "paired_method_line": 2073,
+          "paired_method_line": 2072,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1335,7 +1336,7 @@
           "line": 372,
           "paired_method": "gdn_recurrent_prefill_native_head_last",
           "paired_method_always_declines": false,
-          "paired_method_line": 1401,
+          "paired_method_line": 1400,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1350,7 +1351,7 @@
           "line": 376,
           "paired_method": "gdn_recurrent_qk_norm_prefill_native_head_last",
           "paired_method_always_declines": false,
-          "paired_method_line": 1548,
+          "paired_method_line": 1547,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1365,7 +1366,7 @@
           "line": 368,
           "paired_method": "gdn_recurrent_step",
           "paired_method_always_declines": false,
-          "paired_method_line": 1627,
+          "paired_method_line": 1626,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
