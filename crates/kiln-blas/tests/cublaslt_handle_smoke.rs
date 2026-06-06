@@ -295,6 +295,14 @@ fn algo_cache_hit_skips_heuristic_and_matches() {
     // Cache has exactly one entry.
     assert_eq!(cache.lock().unwrap().len(), 1);
 
+    let stats = handle.algo_cache_stats();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.inserts, 1);
+    assert_eq!(stats.hits, 1);
+    assert_eq!(stats.lookups(), 2);
+    assert_eq!(stats.hit_rate(), Some(0.5));
+
     // Workspace pool saw two calls.
     let pool = handle.workspace_pool();
     assert_eq!(pool.call_count, 2);

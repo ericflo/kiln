@@ -449,6 +449,29 @@ fn generated_capability_report_lists_request_descriptors() {
         host_transfer_evidence.contains(&"crates/kiln-tensor/src/tensor.rs"),
         "host transfer gate should cite Tensor::to_device support classification"
     );
+
+    let matmul_cache_gate = conformance_gates
+        .iter()
+        .find(|gate| gate["gate"] == "matmul_algorithm_cache_reporting")
+        .expect("matmul algorithm/cache reporting gate should be present");
+    assert_eq!(matmul_cache_gate["status"], "covered");
+    let matmul_cache_evidence = matmul_cache_gate["evidence_present"]
+        .as_array()
+        .expect("matmul cache evidence should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    for path in [
+        "crates/kiln-blas/src/algo_cache.rs",
+        "crates/kiln-blas/src/cublaslt_handle.rs",
+        "crates/kiln-rocblas/src/algo_cache.rs",
+        "crates/kiln-rocblas/src/hipblaslt_handle.rs",
+    ] {
+        assert!(
+            matmul_cache_evidence.contains(&path),
+            "matmul cache reporting gate should cite {path}"
+        );
+    }
 }
 
 #[test]

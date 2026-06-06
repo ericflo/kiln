@@ -50,12 +50,13 @@
 use std::ffi::c_void;
 use std::os::raw::{c_int, c_uchar};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cudarc::driver::sys::CUstream;
 use cudarc::driver::{CudaContext, CudaSlice, DevicePtr};
 
-use crate::{AlgoCache, AlgoCacheValue, BackendMatmul,
+use crate::{AlgoCache, AlgoCacheStats, AlgoCacheValue, BackendMatmul,
             Epilogue, MatmulOutcome, MatmulRequest, WorkspacePool};
 
 // ----------------------------------------------------------------------
@@ -246,6 +247,12 @@ struct HandleInner {
     /// Persistent autotune cache. Shared across handles so warm
     /// shapes survive a handle drop/recreate cycle.
     algo_cache: Arc<Mutex<AlgoCache>>,
+    /// Runtime cache hits that supplied a non-empty cached algo blob.
+    algo_cache_hits: AtomicU64,
+    /// Runtime cache misses that had to ask cublasLt for a heuristic.
+    algo_cache_misses: AtomicU64,
+    /// Runtime heuristic results inserted into the shared cache.
+    algo_cache_inserts: AtomicU64,
     /// Workspace policy + counters.
     workspace_pool: Mutex<WorkspacePool>,
     /// Backing workspace buffer. Allocated lazily on the first
@@ -263,12 +270,16 @@ unsafe impl Sync for HandleInner {}
 
 impl std::fmt::Debug for CublasLtMatmulHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let stats = self.algo_cache_stats();
         f.debug_struct("CublasLtMatmulHandle")
             .field("device_index", &self.inner.device_index)
             .field("workspace_max_bytes", &self.workspace_pool().max_bytes)
             .field("workspace_peak_bytes", &self.workspace_pool().peak_bytes)
             .field("workspace_call_count", &self.workspace_pool().call_count)
-            .field("algo_cache_len", &self.algo_cache().len())
+            .field("algo_cache_len", &stats.entries)
+            .field("algo_cache_hits", &stats.hits)
+            .field("algo_cache_misses", &stats.misses)
+            .field("algo_cache_inserts", &stats.inserts)
             .finish()
     }
 }
@@ -313,6 +324,9 @@ impl CublasLtMatmulHandle {
                 cuda_ctx,
                 device_index,
                 algo_cache,
+                algo_cache_hits: AtomicU64::new(0),
+                algo_cache_misses: AtomicU64::new(0),
+                algo_cache_inserts: AtomicU64::new(0),
                 workspace_pool: Mutex::new(pool),
                 workspace_buf: Mutex::new(None),
             }),
@@ -356,6 +370,22 @@ impl CublasLtMatmulHandle {
             .lock()
             .expect("algo cache mutex poisoned")
             .clone()
+    }
+
+    /// Snapshot runtime cache visibility for this handle.
+    pub fn algo_cache_stats(&self) -> AlgoCacheStats {
+        let entries = self
+            .inner
+            .algo_cache
+            .lock()
+            .expect("algo cache mutex poisoned")
+            .len();
+        AlgoCacheStats {
+            entries,
+            hits: self.inner.algo_cache_hits.load(Ordering::Relaxed),
+            misses: self.inner.algo_cache_misses.load(Ordering::Relaxed),
+            inserts: self.inner.algo_cache_inserts.load(Ordering::Relaxed),
+        }
     }
 
     /// CUDA device index this handle is bound to.
@@ -419,17 +449,24 @@ impl CublasLtMatmulHandle {
         // Look up an existing algo for this shape; fall back to
         // heuristic search on a miss.
         let cache_key = request.cache_key();
-        let (cached_blob, cached_workspace_bytes) = {
+        let (cached_blob, cached_workspace_bytes, cache_hit) = {
             let cache = self
                 .inner
                 .algo_cache
                 .lock()
                 .expect("algo cache mutex poisoned");
             match cache.get(&cache_key) {
-                Some(v) => (v.algo_blob.clone(), v.workspace_bytes),
-                None => (Vec::new(), 0),
+                Some(v) if !v.algo_blob.is_empty() => {
+                    (v.algo_blob.clone(), v.workspace_bytes, true)
+                }
+                _ => (Vec::new(), 0, false),
             }
         };
+        if cache_hit {
+            self.inner.algo_cache_hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.inner.algo_cache_misses.fetch_add(1, Ordering::Relaxed);
+        }
 
         let (workspace_ptr_raw, workspace_bytes) =
             self.ensure_workspace(cached_workspace_bytes)?;
@@ -497,6 +534,7 @@ impl CublasLtMatmulHandle {
                     algo_blob: algo_blob_out.clone(),
                 },
             );
+            self.inner.algo_cache_inserts.fetch_add(1, Ordering::Relaxed);
         }
 
         let bytes_written = bytes_for_dtype(request.dtype.as_str()) * request.m * request.n;

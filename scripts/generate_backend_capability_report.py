@@ -625,12 +625,14 @@ def conformance_gate_report() -> list[dict[str, Any]]:
         {
             "gate": "matmul_algorithm_cache_reporting",
             "phase8_requirement": "matmul algorithm/cache hit reporting",
-            "status": "partial",
-            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-blas cublaslt_handle_smoke",
+            "status": "covered",
+            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-blas cache_stats_reports_entries_and_hit_rate && /home/ericflo/.cargo/bin/cargo test -p kiln-rocblas cache_stats_reports_entries_and_hit_rate && CUDARC_CUDA_VERSION=12080 /home/ericflo/.cargo/bin/cargo check -p kiln-blas --features cublaslt --tests && /home/ericflo/.cargo/bin/cargo check -p kiln-rocblas --features hipblaslt --tests",
             "evidence": [
                 "crates/kiln-blas/src/algo_cache.rs",
+                "crates/kiln-blas/src/cublaslt_handle.rs",
                 "crates/kiln-blas/tests/cublaslt_handle_smoke.rs",
                 "crates/kiln-rocblas/src/algo_cache.rs",
+                "crates/kiln-rocblas/src/hipblaslt_handle.rs",
             ],
         },
         {
