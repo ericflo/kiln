@@ -315,6 +315,10 @@ fn generated_capability_report_lists_backend_source_modules() {
         metal_sources.contains(&"crates/kiln-model/src/backend/metal_icb.rs"),
         "Metal backend source modules should include the extracted ICB module"
     );
+    assert!(
+        metal_sources.contains(&"crates/kiln-model/src/backend/metal_lm_head.rs"),
+        "Metal backend source modules should include the extracted lm-head module"
+    );
 }
 
 #[test]
