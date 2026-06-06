@@ -1423,6 +1423,218 @@
       }
     }
   },
+  "capability_descriptors": {
+    "AttentionCapabilities": {
+      "field_count": 3,
+      "fields": [
+        {
+          "name": "flash_prefill",
+          "type": "Support"
+        },
+        {
+          "name": "flash_prefill_head_major",
+          "type": "Support"
+        },
+        {
+          "name": "flash_paged_decode",
+          "type": "Support"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "BackendCapabilities": {
+      "field_count": 10,
+      "fields": [
+        {
+          "name": "backend",
+          "type": "&'static str"
+        },
+        {
+          "name": "device",
+          "type": "kiln_tensor::Device"
+        },
+        {
+          "name": "storage",
+          "type": "StorageCapabilities"
+        },
+        {
+          "name": "matmul",
+          "type": "MatmulCapabilities"
+        },
+        {
+          "name": "attention",
+          "type": "AttentionCapabilities"
+        },
+        {
+          "name": "gdn",
+          "type": "GdnCapabilities"
+        },
+        {
+          "name": "decode",
+          "type": "DecodeCapabilities"
+        },
+        {
+          "name": "training",
+          "type": "BackendTrainingCapabilities"
+        },
+        {
+          "name": "graph_replay",
+          "type": "ReplayCapabilities"
+        },
+        {
+          "name": "fallback",
+          "type": "BackendFallbackCapabilities"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "BackendFallbackCapabilities": {
+      "field_count": 3,
+      "fields": [
+        {
+          "name": "generic_device_op",
+          "type": "FallbackPolicy"
+        },
+        {
+          "name": "decode_hot_path",
+          "type": "FallbackPolicy"
+        },
+        {
+          "name": "training_optimizer",
+          "type": "FallbackPolicy"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "BackendTrainingCapabilities": {
+      "field_count": 2,
+      "fields": [
+        {
+          "name": "hooks",
+          "type": "TrainingCapabilities"
+        },
+        {
+          "name": "precision",
+          "type": "TrainingPrecisionPolicy"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "DecodeCapabilities": {
+      "field_count": 6,
+      "fields": [
+        {
+          "name": "resident_decode",
+          "type": "Support"
+        },
+        {
+          "name": "paged_decode_graph_outputs",
+          "type": "Support"
+        },
+        {
+          "name": "linear_argmax",
+          "type": "Support"
+        },
+        {
+          "name": "linear_argmax_batch",
+          "type": "Support"
+        },
+        {
+          "name": "linear_sample",
+          "type": "Support"
+        },
+        {
+          "name": "linear_sample_batch",
+          "type": "Support"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "GdnCapabilities": {
+      "field_count": 6,
+      "fields": [
+        {
+          "name": "recurrent_step",
+          "type": "Support"
+        },
+        {
+          "name": "chunk_prep",
+          "type": "Support"
+        },
+        {
+          "name": "chunk_scan",
+          "type": "Support"
+        },
+        {
+          "name": "full_chunk_forward",
+          "type": "Support"
+        },
+        {
+          "name": "gates",
+          "type": "Support"
+        },
+        {
+          "name": "gated_rms_norm",
+          "type": "Support"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "MatmulCapabilities": {
+      "field_count": 3,
+      "fields": [
+        {
+          "name": "rank2_f32",
+          "type": "Support"
+        },
+        {
+          "name": "batched_bf16",
+          "type": "Support"
+        },
+        {
+          "name": "bias_epilogue",
+          "type": "Support"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "ReplayCapabilities": {
+      "field_count": 2,
+      "fields": [
+        {
+          "name": "resident_decode",
+          "type": "Support"
+        },
+        {
+          "name": "paged_decode_graph_outputs",
+          "type": "Support"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "StorageCapabilities": {
+      "field_count": 4,
+      "fields": [
+        {
+          "name": "backend",
+          "type": "kiln_tensor::Backend"
+        },
+        {
+          "name": "device",
+          "type": "kiln_tensor::Device"
+        },
+        {
+          "name": "resident_activation",
+          "type": "Support"
+        },
+        {
+          "name": "resident_decode",
+          "type": "Support"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    }
+  },
   "decode_hot_path_policy": {
     "cpu": {
       "debug_opt_in": "not required",
@@ -1615,6 +1827,7 @@
     }
   },
   "request_capability_queries": [
+    "backend_capabilities",
     "capability_snapshot",
     "supports_attention_request",
     "supports_linear_request",

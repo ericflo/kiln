@@ -301,10 +301,31 @@ fn generated_capability_report_lists_request_descriptors() {
         .iter()
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
+    assert!(request_queries.contains(&"backend_capabilities"));
     assert!(request_queries.contains(&"supports_attention_request"));
     assert!(request_queries.contains(&"supports_matmul_request"));
     assert!(request_queries.contains(&"supports_linear_request"));
     assert!(request_queries.contains(&"supports_replay_request"));
+
+    let capability_descriptors = report["capability_descriptors"]
+        .as_object()
+        .expect("capability_descriptors should be an object");
+    for name in [
+        "BackendCapabilities",
+        "StorageCapabilities",
+        "MatmulCapabilities",
+        "AttentionCapabilities",
+        "GdnCapabilities",
+        "DecodeCapabilities",
+        "BackendTrainingCapabilities",
+        "ReplayCapabilities",
+        "BackendFallbackCapabilities",
+    ] {
+        assert!(
+            capability_descriptors.contains_key(name),
+            "{name} should be present in capability_descriptors"
+        );
+    }
 }
 
 #[test]

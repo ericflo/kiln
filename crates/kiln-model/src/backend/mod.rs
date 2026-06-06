@@ -3314,6 +3314,71 @@ mod tests {
     }
 
     #[test]
+    fn backend_capabilities_aggregate_maps_cpu_contract() {
+        let cpu = cpu::CpuBackend::new(kiln_tensor::Device::Cpu);
+        let caps = capability::BackendCapabilityQueries::backend_capabilities(&cpu);
+
+        assert_eq!(caps.backend, "cpu");
+        assert_eq!(caps.device, kiln_tensor::Device::Cpu);
+        assert_eq!(caps.storage.backend, kiln_tensor::Backend::Cpu);
+        assert_eq!(
+            caps.storage.resident_activation,
+            capability::Support::Declined
+        );
+        assert_eq!(
+            caps.matmul.rank2_f32,
+            capability::Support::NativeWithConstraints
+        );
+        assert_eq!(
+            caps.matmul.batched_bf16,
+            capability::Support::NativeWithConstraints
+        );
+        assert_eq!(
+            caps.attention.flash_prefill,
+            capability::Support::Declined
+        );
+        assert_eq!(caps.gdn.recurrent_step, capability::Support::Declined);
+        assert_eq!(caps.decode.linear_argmax, capability::Support::Declined);
+        assert_eq!(
+            caps.training.precision,
+            TrainingPrecisionPolicy::portable()
+        );
+        assert_eq!(
+            caps.graph_replay.resident_decode,
+            capability::Support::Declined
+        );
+        assert_eq!(
+            caps.fallback.generic_device_op,
+            FallbackPolicy::CorrectnessAllowed
+        );
+        assert_eq!(
+            caps.fallback.decode_hot_path,
+            FallbackPolicy::CorrectnessAllowed
+        );
+        assert_eq!(
+            caps.fallback.training_optimizer,
+            FallbackPolicy::CorrectnessAllowed
+        );
+
+        let vulkan_probe = ResidentActivationProbeBackend {
+            name: "vulkan",
+            resident: false,
+        };
+        let vulkan_caps =
+            capability::BackendCapabilityQueries::backend_capabilities(&vulkan_probe);
+        assert_eq!(vulkan_caps.device, kiln_tensor::Device::Cpu);
+        assert_eq!(vulkan_caps.storage.backend, kiln_tensor::Backend::Vulkan);
+        assert_eq!(
+            vulkan_caps.fallback.decode_hot_path,
+            FallbackPolicy::NativeRequired
+        );
+        assert_eq!(
+            vulkan_caps.fallback.training_optimizer,
+            FallbackPolicy::NativeRequired
+        );
+    }
+
+    #[test]
     fn matmul_request_capability_is_conservative() {
         let cpu = cpu::CpuBackend::new(kiln_tensor::Device::Cpu);
         let plain = capability::MatmulRequest::plain(

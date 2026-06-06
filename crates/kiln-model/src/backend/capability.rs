@@ -7,7 +7,7 @@
 
 use kiln_graph::ReplayKey;
 
-use super::{BackendRuntime, TrainingCapabilities};
+use super::{BackendRuntime, FallbackPolicy, TrainingCapabilities, TrainingPrecisionPolicy};
 
 /// Backend answer for a capability query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -441,6 +441,317 @@ impl BackendCapabilitySnapshot {
     }
 }
 
+/// Storage and residency capabilities surfaced through one backend descriptor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageCapabilities {
+    pub backend: kiln_tensor::Backend,
+    pub device: kiln_tensor::Device,
+    pub resident_activation: Support,
+    pub resident_decode: Support,
+}
+
+/// Representative matmul capability probes backed by [`MatmulRequest`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatmulCapabilities {
+    pub rank2_f32: Support,
+    pub batched_bf16: Support,
+    pub bias_epilogue: Support,
+}
+
+/// Representative attention capability probes backed by [`AttentionRequest`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttentionCapabilities {
+    pub flash_prefill: Support,
+    pub flash_prefill_head_major: Support,
+    pub flash_paged_decode: Support,
+}
+
+/// Focused GDN capability snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GdnCapabilities {
+    pub recurrent_step: Support,
+    pub chunk_prep: Support,
+    pub chunk_scan: Support,
+    pub full_chunk_forward: Support,
+    pub gates: Support,
+    pub gated_rms_norm: Support,
+}
+
+/// Decode and lm-head capability snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodeCapabilities {
+    pub resident_decode: Support,
+    pub paged_decode_graph_outputs: Support,
+    pub linear_argmax: Support,
+    pub linear_argmax_batch: Support,
+    pub linear_sample: Support,
+    pub linear_sample_batch: Support,
+}
+
+/// Replay capability probes backed by [`ReplayRequest`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayCapabilities {
+    pub resident_decode: Support,
+    pub paged_decode_graph_outputs: Support,
+}
+
+/// Backend fallback policy surface used by hot-path callers and diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendFallbackCapabilities {
+    pub generic_device_op: FallbackPolicy,
+    pub decode_hot_path: FallbackPolicy,
+    pub training_optimizer: FallbackPolicy,
+}
+
+/// Training capability and dtype policy surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendTrainingCapabilities {
+    pub hooks: TrainingCapabilities,
+    pub precision: TrainingPrecisionPolicy,
+}
+
+/// One structured runtime capability descriptor for backend diagnostics.
+///
+/// This is the data-shaped counterpart to [`BackendCapabilityQueries`]. It
+/// intentionally composes today's compatibility predicates and request-shaped
+/// probes without changing dispatch behavior.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendCapabilities {
+    pub backend: &'static str,
+    pub device: kiln_tensor::Device,
+    pub storage: StorageCapabilities,
+    pub matmul: MatmulCapabilities,
+    pub attention: AttentionCapabilities,
+    pub gdn: GdnCapabilities,
+    pub decode: DecodeCapabilities,
+    pub training: BackendTrainingCapabilities,
+    pub graph_replay: ReplayCapabilities,
+    pub fallback: BackendFallbackCapabilities,
+}
+
+impl BackendCapabilities {
+    pub fn from_backend<T: BackendRuntime + ?Sized>(backend: &T) -> Self {
+        let device = backend.device();
+        let backend_kind = backend_kind_for_runtime(backend.name(), device);
+
+        let rank2_f32 = MatmulRequest::plain(
+            vec![2, 3],
+            vec![3, 4],
+            kiln_tensor::DType::F32,
+            false,
+        );
+        let batched_bf16 = MatmulRequest::plain(
+            vec![2, 2, 3],
+            vec![2, 3, 4],
+            kiln_tensor::DType::BF16,
+            true,
+        );
+        let bias_epilogue = rank2_f32.clone().with_epilogue(MatmulEpilogue::Bias);
+        let flash_prefill = AttentionRequest::flash_prefill(
+            kiln_tensor::DType::BF16,
+            kiln_tensor::DType::BF16,
+            kiln_tensor::DType::BF16,
+            1,
+            16,
+            128,
+            false,
+        );
+        let flash_prefill_head_major = AttentionRequest {
+            kind: AttentionRequestKind::FlashPrefillHeadMajor,
+            ..flash_prefill.clone()
+        };
+        let flash_paged_decode = AttentionRequest {
+            kind: AttentionRequestKind::FlashPagedDecode,
+            seq_len: 1,
+            replay_safe: true,
+            ..flash_prefill
+        };
+        let linear_argmax = LinearRequest::decode_argmax(
+            kiln_tensor::DType::BF16,
+            kiln_tensor::DType::BF16,
+            kiln_tensor::DType::I64,
+            1,
+            true,
+        );
+        let linear_argmax_batch = LinearRequest::decode_argmax(
+            kiln_tensor::DType::BF16,
+            kiln_tensor::DType::BF16,
+            kiln_tensor::DType::I64,
+            2,
+            true,
+        );
+        let linear_sample = LinearRequest::decode_sample(
+            kiln_tensor::DType::BF16,
+            kiln_tensor::DType::BF16,
+            kiln_tensor::DType::I64,
+            vec![8],
+            vec![1.0],
+            true,
+        );
+        let linear_sample_batch = LinearRequest::decode_sample(
+            kiln_tensor::DType::BF16,
+            kiln_tensor::DType::BF16,
+            kiln_tensor::DType::I64,
+            vec![8, 8],
+            vec![1.0, 1.0],
+            true,
+        );
+        let resident_replay = ReplayRequest::resident_decode(8, 16, 2)
+            .with_dtype(kiln_tensor::DType::BF16);
+        let paged_replay = ReplayRequest::paged_decode_graph_outputs(8, 16, 2)
+            .with_dtype(kiln_tensor::DType::BF16);
+
+        Self {
+            backend: backend.name(),
+            device,
+            storage: StorageCapabilities {
+                backend: backend_kind,
+                device,
+                resident_activation: Support::from_supports_predicate(
+                    backend.supports_resident_activation(),
+                ),
+                resident_decode: Support::from_supports_predicate(
+                    backend.supports_resident_decode(),
+                ),
+            },
+            matmul: MatmulCapabilities {
+                rank2_f32: BackendCapabilityQueries::supports_matmul_request(
+                    backend,
+                    &rank2_f32,
+                ),
+                batched_bf16: BackendCapabilityQueries::supports_matmul_request(
+                    backend,
+                    &batched_bf16,
+                ),
+                bias_epilogue: BackendCapabilityQueries::supports_matmul_request(
+                    backend,
+                    &bias_epilogue,
+                ),
+            },
+            attention: AttentionCapabilities {
+                flash_prefill: BackendCapabilityQueries::supports_attention_request(
+                    backend,
+                    &flash_prefill,
+                ),
+                flash_prefill_head_major: BackendCapabilityQueries::supports_attention_request(
+                    backend,
+                    &flash_prefill_head_major,
+                ),
+                flash_paged_decode: BackendCapabilityQueries::supports_attention_request(
+                    backend,
+                    &flash_paged_decode,
+                ),
+            },
+            gdn: GdnCapabilities {
+                recurrent_step: Support::from_supports_predicate(
+                    backend.supports_gdn_recurrent_step(),
+                ),
+                chunk_prep: Support::from_supports_predicate(backend.supports_gdn_chunk_prep()),
+                chunk_scan: Support::from_supports_predicate(backend.supports_gdn_chunk_scan()),
+                full_chunk_forward: Support::from_supports_predicate(
+                    backend.supports_gdn_full_chunk_forward(),
+                ),
+                gates: Support::from_supports_predicate(backend.supports_gdn_gates()),
+                gated_rms_norm: Support::from_supports_predicate(
+                    backend.supports_gdn_gated_rms_norm(),
+                ),
+            },
+            decode: DecodeCapabilities {
+                resident_decode: Support::from_supports_predicate(
+                    backend.supports_resident_decode(),
+                ),
+                paged_decode_graph_outputs: BackendCapabilityQueries::supports_replay_request(
+                    backend,
+                    &paged_replay,
+                ),
+                linear_argmax: BackendCapabilityQueries::supports_linear_request(
+                    backend,
+                    &linear_argmax,
+                ),
+                linear_argmax_batch: BackendCapabilityQueries::supports_linear_request(
+                    backend,
+                    &linear_argmax_batch,
+                ),
+                linear_sample: BackendCapabilityQueries::supports_linear_request(
+                    backend,
+                    &linear_sample,
+                ),
+                linear_sample_batch: BackendCapabilityQueries::supports_linear_request(
+                    backend,
+                    &linear_sample_batch,
+                ),
+            },
+            training: BackendTrainingCapabilities {
+                hooks: backend.training_capabilities(),
+                precision: backend.training_precision_policy(),
+            },
+            graph_replay: ReplayCapabilities {
+                resident_decode: BackendCapabilityQueries::supports_replay_request(
+                    backend,
+                    &resident_replay,
+                ),
+                paged_decode_graph_outputs: BackendCapabilityQueries::supports_replay_request(
+                    backend,
+                    &paged_replay,
+                ),
+            },
+            fallback: BackendFallbackCapabilities::for_backend(backend.name(), device),
+        }
+    }
+}
+
+impl BackendFallbackCapabilities {
+    pub fn for_backend(name: &str, device: kiln_tensor::Device) -> Self {
+        Self {
+            generic_device_op: generic_device_op_fallback_policy(name, device),
+            decode_hot_path: decode_hot_path_fallback_policy(name, device),
+            training_optimizer: training_optimizer_fallback_policy(name, device),
+        }
+    }
+}
+
+fn generic_device_op_fallback_policy(
+    name: &str,
+    _device: kiln_tensor::Device,
+) -> FallbackPolicy {
+    match name {
+        "cpu" => FallbackPolicy::CorrectnessAllowed,
+        "cuda" => FallbackPolicy::NativeRequired,
+        "metal" | "vulkan" | "rocm" => FallbackPolicy::WarnAndCount,
+        _ => FallbackPolicy::ErrorInHotPath,
+    }
+}
+
+fn decode_hot_path_fallback_policy(name: &str, _device: kiln_tensor::Device) -> FallbackPolicy {
+    match name {
+        "cpu" | "cuda" => FallbackPolicy::CorrectnessAllowed,
+        "metal" | "vulkan" | "rocm" => FallbackPolicy::NativeRequired,
+        _ => FallbackPolicy::ErrorInHotPath,
+    }
+}
+
+fn training_optimizer_fallback_policy(
+    name: &str,
+    _device: kiln_tensor::Device,
+) -> FallbackPolicy {
+    match name {
+        "cpu" => FallbackPolicy::CorrectnessAllowed,
+        "cuda" | "metal" | "vulkan" | "rocm" => FallbackPolicy::NativeRequired,
+        _ => FallbackPolicy::ErrorInHotPath,
+    }
+}
+
+fn backend_kind_for_runtime(name: &str, device: kiln_tensor::Device) -> kiln_tensor::Backend {
+    match name {
+        "cpu" => kiln_tensor::Backend::Cpu,
+        "cuda" => kiln_tensor::Backend::Cuda,
+        "metal" => kiln_tensor::Backend::Metal,
+        "vulkan" => kiln_tensor::Backend::Vulkan,
+        "rocm" => kiln_tensor::Backend::Rocm,
+        _ => device.backend(),
+    }
+}
+
 /// Request-shaped capability query surface backed by the current runtime.
 ///
 /// This is the compatibility bridge for the target architecture: call sites can
@@ -449,6 +760,10 @@ impl BackendCapabilitySnapshot {
 pub trait BackendCapabilityQueries: BackendRuntime {
     fn capability_snapshot(&self) -> BackendCapabilitySnapshot {
         BackendCapabilitySnapshot::from_backend(self)
+    }
+
+    fn backend_capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities::from_backend(self)
     }
 
     fn supports_attention_request(&self, req: &AttentionRequest) -> Support {

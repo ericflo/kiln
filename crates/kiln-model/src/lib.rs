@@ -53,9 +53,13 @@ pub use backend::{
     ResidencyBackend, SamplingBackend, TrainingLossBackend, TrainingPrecisionPolicy,
 };
 pub use backend::capability::{
-    AttentionRequest, AttentionRequestKind, BackendCapabilityQueries, BackendCapabilitySnapshot,
-    LinearRequest, LinearRequestKind, MatmulAccumulation, MatmulBatchPolicy, MatmulEpilogue,
-    MatmulOperandLayout, MatmulRequest, ReplayRequest, ReplayRequestKind, Support,
+    AttentionCapabilities, AttentionRequest, AttentionRequestKind, BackendCapabilityQueries,
+    BackendCapabilitySnapshot, BackendCapabilities, BackendFallbackCapabilities,
+    BackendTrainingCapabilities, DecodeCapabilities, GdnCapabilities, LinearRequest,
+    LinearRequestKind,
+    MatmulAccumulation, MatmulBatchPolicy, MatmulCapabilities, MatmulEpilogue,
+    MatmulOperandLayout, MatmulRequest, ReplayCapabilities, ReplayRequest, ReplayRequestKind,
+    StorageCapabilities, Support,
 };
 pub use backend::residency::{
     ReplayStability, ResidentOwnership, ResidentRegistry, ResidentResource,

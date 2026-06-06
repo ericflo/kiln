@@ -109,11 +109,26 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 
 ## Request Capability Queries
 
+- `backend_capabilities`
 - `capability_snapshot`
 - `supports_attention_request`
 - `supports_linear_request`
 - `supports_matmul_request`
 - `supports_replay_request`
+
+## Typed Capability Descriptors
+
+| Descriptor | Field Count | Fields |
+|---|---:|---|
+| `BackendCapabilities` | 10 | `backend`, `device`, `storage`, `matmul`, `attention`, `gdn`, `decode`, `training`, `graph_replay`, `fallback` |
+| `StorageCapabilities` | 4 | `backend`, `device`, `resident_activation`, `resident_decode` |
+| `MatmulCapabilities` | 3 | `rank2_f32`, `batched_bf16`, `bias_epilogue` |
+| `AttentionCapabilities` | 3 | `flash_prefill`, `flash_prefill_head_major`, `flash_paged_decode` |
+| `GdnCapabilities` | 6 | `recurrent_step`, `chunk_prep`, `chunk_scan`, `full_chunk_forward`, `gates`, `gated_rms_norm` |
+| `DecodeCapabilities` | 6 | `resident_decode`, `paged_decode_graph_outputs`, `linear_argmax`, `linear_argmax_batch`, `linear_sample`, `linear_sample_batch` |
+| `BackendTrainingCapabilities` | 2 | `hooks`, `precision` |
+| `ReplayCapabilities` | 2 | `resident_decode`, `paged_decode_graph_outputs` |
+| `BackendFallbackCapabilities` | 3 | `generic_device_op`, `decode_hot_path`, `training_optimizer` |
 
 ## Generic DeviceOp Fallback
 

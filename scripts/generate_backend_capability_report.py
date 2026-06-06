@@ -33,6 +33,18 @@ REQUEST_DESCRIPTOR_STRUCTS = [
     "ReplayRequest",
 ]
 
+CAPABILITY_DESCRIPTOR_STRUCTS = [
+    "BackendCapabilities",
+    "StorageCapabilities",
+    "MatmulCapabilities",
+    "AttentionCapabilities",
+    "GdnCapabilities",
+    "DecodeCapabilities",
+    "BackendTrainingCapabilities",
+    "ReplayCapabilities",
+    "BackendFallbackCapabilities",
+]
+
 FEATURE_CRATES = [
     ROOT / "crates" / "kiln-server" / "Cargo.toml",
     ROOT / "crates" / "kiln-model" / "Cargo.toml",
@@ -119,7 +131,7 @@ def find_matching_brace(text: str, open_idx: int) -> int:
             i += 1
         elif ch == '"':
             in_string = True
-        elif ch == "'":
+        elif ch == "'" and not (nxt.isalpha() or nxt == "_"):
             in_char = True
         elif ch == "{":
             depth += 1
@@ -264,6 +276,19 @@ def request_descriptor_report() -> dict[str, Any]:
             "has_shape": any("shape" in field_name for field_name in field_names),
             "has_batch": any("batch" in field_name for field_name in field_names),
             "has_replay_safe": "replay_safe" in field_names,
+        }
+    return descriptors
+
+
+def capability_descriptor_report() -> dict[str, Any]:
+    descriptors: dict[str, Any] = {}
+    for name, fields in parse_pub_struct_fields(
+        CAPABILITY_RS, CAPABILITY_DESCRIPTOR_STRUCTS
+    ).items():
+        descriptors[name] = {
+            "source": str(CAPABILITY_RS.relative_to(ROOT)),
+            "field_count": len(fields),
+            "fields": fields,
         }
     return descriptors
 
@@ -527,6 +552,14 @@ def markdown(data: dict[str, Any]) -> str:
     for method in data["request_capability_queries"]:
         lines.append(f"- `{method}`")
     lines.append("")
+    lines.append("## Typed Capability Descriptors")
+    lines.append("")
+    lines.append("| Descriptor | Field Count | Fields |")
+    lines.append("|---|---:|---|")
+    for name, info in data["capability_descriptors"].items():
+        fields = ", ".join(f"`{field['name']}`" for field in info["fields"])
+        lines.append(f"| `{name}` | {info['field_count']} | {fields} |")
+    lines.append("")
     lines.append("## Generic DeviceOp Fallback")
     lines.append("")
     lines.append("| Backend | Policy | Counter | Evidence |")
@@ -619,6 +652,7 @@ def main() -> int:
         "features": feature_report(),
         "trait_method_count": len(trait_methods),
         "request_descriptors": request_descriptor_report(),
+        "capability_descriptors": capability_descriptor_report(),
         "request_capability_queries": sorted(
             parse_trait_method_names(CAPABILITY_RS, "BackendCapabilityQueries")
         ),
