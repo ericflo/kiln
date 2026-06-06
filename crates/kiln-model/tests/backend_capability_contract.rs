@@ -1588,6 +1588,8 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         .expect("generate.rs should be readable");
     let metal_graph_source = fs::read_to_string(root.join("crates/kiln-model/src/metal_graph.rs"))
         .expect("metal_graph.rs should be readable");
+    let forward_source = fs::read_to_string(root.join("crates/kiln-model/src/forward.rs"))
+        .expect("forward.rs should be readable");
 
     assert!(
         trainer_source.contains("BackendCapabilityQueries"),
@@ -1616,6 +1618,10 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     assert!(
         metal_graph_source.contains("SamplingBackend"),
         "Metal graph decode sampling gates should import the focused sampling facet"
+    );
+    assert!(
+        forward_source.contains("SamplingBackend"),
+        "forward lm-head decode helpers should import the focused sampling facet"
     );
 
     let decode_policy_section = source_between(
@@ -1688,29 +1694,47 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "ModelRunner should not call the broad BackendRuntime training capability method directly"
     );
 
-    let inference_decode_sources = format!("{generate_source}\n{metal_graph_source}");
+    let inference_decode_residency_sources = format!("{generate_source}\n{metal_graph_source}");
     for required in [
         "ReplayBackend::runtime_supports_resident_decode",
         "ReplayBackend::runtime_decode_resident_pool_ready",
-        "SamplingBackend::runtime_supports_linear_decode_sample",
-        "SamplingBackend::runtime_linear_decode_sample",
     ] {
         assert!(
-            inference_decode_sources.contains(required),
+            inference_decode_residency_sources.contains(required),
             "inference decode gates should consume focused capability facet method {required}"
         );
     }
+    for forbidden in [".supports_resident_decode(", ".decode_resident_pool_ready("] {
+        assert!(
+            !inference_decode_residency_sources.contains(forbidden),
+            "inference decode gates should not call broad BackendRuntime method {forbidden}"
+        );
+    }
+
+    let inference_decode_sampling_sources =
+        format!("{generate_source}\n{metal_graph_source}\n{forward_source}");
+    for required in [
+        "SamplingBackend::runtime_supports_linear_decode_sample",
+        "SamplingBackend::runtime_linear_decode_sample",
+        "SamplingBackend::runtime_linear_decode_argmax",
+    ] {
+        assert!(
+            inference_decode_sampling_sources.contains(required),
+            "inference decode sampling should consume focused capability facet method {required}"
+        );
+    }
     for forbidden in [
-        ".supports_resident_decode(",
-        ".decode_resident_pool_ready(",
         ".supports_linear_decode_sample(",
         ".supports_linear_decode_sample_batch(",
+        ".supports_linear_decode_argmax_batch(",
+        ".linear_decode_argmax(",
+        ".linear_decode_argmax_batch(",
         ".linear_decode_sample(",
         ".linear_decode_sample_batch(",
     ] {
         assert!(
-            !inference_decode_sources.contains(forbidden),
-            "inference decode gates should not call broad BackendRuntime method {forbidden}"
+            !inference_decode_sampling_sources.contains(forbidden),
+            "inference decode sampling should not call broad BackendRuntime method {forbidden}"
         );
     }
 }

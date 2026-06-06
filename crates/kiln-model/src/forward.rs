@@ -14,7 +14,7 @@ use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use crate::backend::BackendRuntime;
+use crate::backend::{BackendRuntime, SamplingBackend};
 use crate::kv_cache::KvCache;
 use crate::lora_loader::{
     LoraLayerWeights, LoraProjectionWeights, LoraWeights, compute_lora_delta, linear_with_lora_t,
@@ -12108,7 +12108,9 @@ fn lm_head_argmax_backend_decode_if(
     embed_tokens_t: &Tensor,
 ) -> Result<u32> {
     if let Some(backend) = backend {
-        if let Some(token) = backend.linear_decode_argmax(x, embed_tokens_t)? {
+        if let Some(token) =
+            SamplingBackend::runtime_linear_decode_argmax(backend, x, embed_tokens_t)?
+        {
             return Ok(token);
         }
     }
@@ -12271,11 +12273,12 @@ pub fn lm_head_sample_backend_decode_if(
         }
     }
 
-    if !backend.supports_linear_decode_sample(params.top_k) {
+    if !SamplingBackend::runtime_supports_linear_decode_sample(backend, params.top_k) {
         return Ok(None);
     }
     let normed = rms_norm(hidden, &weights.final_norm, config.rms_norm_eps)?;
-    backend.linear_decode_sample(
+    SamplingBackend::runtime_linear_decode_sample(
+        backend,
         &normed,
         &weights.embed_tokens_t,
         &history_indices,
@@ -12314,8 +12317,10 @@ fn lm_head_argmax_rows_backend_decode_if(
     embed_tokens_t: &Tensor,
 ) -> Result<Vec<u32>> {
     if let Some(backend) = backend {
-        if backend.supports_linear_decode_argmax_batch() {
-            if let Some(tokens) = backend.linear_decode_argmax_batch(x, embed_tokens_t)? {
+        if SamplingBackend::runtime_supports_linear_decode_argmax_batch(backend) {
+            if let Some(tokens) =
+                SamplingBackend::runtime_linear_decode_argmax_batch(backend, x, embed_tokens_t)?
+            {
                 return Ok(tokens);
             }
         }
