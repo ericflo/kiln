@@ -1476,6 +1476,63 @@ fn capability_queries_consume_focused_backend_facets() {
 }
 
 #[test]
+fn generated_capability_report_lists_focused_backend_facets() {
+    let root = workspace_root();
+    let report_path = root.join("docs/backend-capability-report.json");
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(&report_path).expect("capability report json should be readable"),
+    )
+    .expect("capability report json should parse");
+    let facets = report["focused_backend_facets"]
+        .as_object()
+        .expect("focused_backend_facets should be an object");
+
+    for (facet, required_method) in [
+        ("BackendIdentity", "runtime_name"),
+        ("AttentionBackend", "runtime_flash_attn_prefill"),
+        ("PagedKvBackend", "runtime_paged_kv_head_major_read"),
+        ("GdnBackend", "runtime_gdn_recurrent_step"),
+        ("ConvBackend", "runtime_causal_conv1d_update"),
+        ("LinearBackend", "runtime_linear_decode"),
+        ("SamplingBackend", "runtime_linear_decode_sample"),
+        ("ResidencyBackend", "runtime_register_resident_activation"),
+        ("OptimizerBackend", "runtime_dispatch_adamw_step"),
+        ("TrainingLossBackend", "runtime_training_precision_policy"),
+        ("ReplayBackend", "runtime_supports_replay_request"),
+    ] {
+        let info = facets
+            .get(facet)
+            .unwrap_or_else(|| panic!("focused_backend_facets should list {facet}"));
+        assert_eq!(
+            info["forwarding_impl"].as_str(),
+            Some("blanket_backend_runtime"),
+            "{facet} should keep its BackendRuntime blanket forwarding impl while the facade remains"
+        );
+        assert!(
+            info["method_count"].as_u64().unwrap_or_default() > 0,
+            "{facet} should report at least one method"
+        );
+        let methods = info["methods"]
+            .as_array()
+            .expect("focused facet methods should be an array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert!(
+            methods.contains(&required_method),
+            "{facet} should report focused method {required_method}"
+        );
+    }
+
+    let report_md = fs::read_to_string(root.join("docs/backend-capability-report.md"))
+        .expect("capability report md should be readable");
+    assert!(
+        report_md.contains("## Focused Backend Facets"),
+        "Markdown report should expose Phase 1 focused backend facets"
+    );
+}
+
+#[test]
 fn resident_registry_consumes_focused_residency_facet() {
     let root = workspace_root();
     let backend_source = fs::read_to_string(root.join("crates/kiln-model/src/backend/mod.rs"))

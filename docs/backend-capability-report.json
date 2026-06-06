@@ -2163,6 +2163,181 @@
       ]
     }
   },
+  "focused_backend_facets": {
+    "AttentionBackend": {
+      "forwarding_impl": "blanket_backend_runtime",
+      "method_count": 10,
+      "methods": [
+        "runtime_flash_attn_paged_decode",
+        "runtime_flash_attn_paged_decode_contiguous",
+        "runtime_flash_attn_paged_decode_contiguous_batch",
+        "runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen",
+        "runtime_flash_attn_prefill",
+        "runtime_flash_attn_prefill_head_major",
+        "runtime_supports_flash_attn_paged_decode",
+        "runtime_supports_flash_attn_prefill",
+        "runtime_supports_flash_attn_prefill_head_major",
+        "runtime_supports_strict_paged_decode_contiguous_batch"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    },
+    "BackendIdentity": {
+      "forwarding_impl": "blanket_backend_runtime",
+      "method_count": 3,
+      "methods": [
+        "runtime_as_any",
+        "runtime_device",
+        "runtime_name"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    },
+    "ConvBackend": {
+      "forwarding_impl": "blanket_backend_runtime",
+      "method_count": 4,
+      "methods": [
+        "runtime_causal_conv1d_prefill",
+        "runtime_causal_conv1d_update",
+        "runtime_supports_causal_conv1d_prefill",
+        "runtime_supports_causal_conv1d_update"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    },
+    "GdnBackend": {
+      "forwarding_impl": "blanket_backend_runtime",
+      "method_count": 30,
+      "methods": [
+        "runtime_gdn_chunk_prep",
+        "runtime_gdn_chunk_scan",
+        "runtime_gdn_chunkwise_forward",
+        "runtime_gdn_decode_gates_recurrent",
+        "runtime_gdn_decode_gates_recurrent_rmsnorm",
+        "runtime_gdn_decode_qk_norm_gates_recurrent",
+        "runtime_gdn_decode_qk_norm_gates_recurrent_rmsnorm",
+        "runtime_gdn_forward_substitution",
+        "runtime_gdn_full_chunk_forward",
+        "runtime_gdn_full_chunk_forward_head_last_into",
+        "runtime_gdn_gated_rms_norm",
+        "runtime_gdn_gates",
+        "runtime_gdn_in_proj_decode",
+        "runtime_gdn_recurrent_prefill_head_last",
+        "runtime_gdn_recurrent_prefill_native_head_last",
+        "runtime_gdn_recurrent_qk_norm_prefill_native_head_last",
+        "runtime_gdn_recurrent_step",
+        "runtime_supports_gdn_chunk_prep",
+        "runtime_supports_gdn_chunk_scan",
+        "runtime_supports_gdn_decode_gates_recurrent_unexpanded_qk",
+        "runtime_supports_gdn_decode_qk_norm_gates_recurrent",
+        "runtime_supports_gdn_forward_substitution",
+        "runtime_supports_gdn_full_chunk_forward",
+        "runtime_supports_gdn_full_chunk_forward_head_last",
+        "runtime_supports_gdn_gated_rms_norm",
+        "runtime_supports_gdn_gates",
+        "runtime_supports_gdn_recurrent_prefill_head_last",
+        "runtime_supports_gdn_recurrent_prefill_native_head_last",
+        "runtime_supports_gdn_recurrent_qk_norm_prefill_native_head_last",
+        "runtime_supports_gdn_recurrent_step"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    },
+    "LinearBackend": {
+      "forwarding_impl": "blanket_backend_runtime",
+      "method_count": 10,
+      "methods": [
+        "runtime_drop_uploaded_bf16_weights",
+        "runtime_full_attn_qkv_decode",
+        "runtime_linear_decode",
+        "runtime_linear_prefill_apply",
+        "runtime_linear_prefill_apply_offset",
+        "runtime_lora_decode_add",
+        "runtime_lora_delta_resident",
+        "runtime_mlp_decode",
+        "runtime_mlp_gate_up_decode",
+        "runtime_prewarm_decode_weights"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    },
+    "OptimizerBackend": {
+      "forwarding_impl": "blanket_backend_runtime",
+      "method_count": 2,
+      "methods": [
+        "runtime_dispatch_adamw_step",
+        "runtime_dispatch_sgd_step"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    },
+    "PagedKvBackend": {
+      "forwarding_impl": "blanket_backend_runtime",
+      "method_count": 4,
+      "methods": [
+        "runtime_paged_kv_head_major_read",
+        "runtime_paged_kv_head_major_read_append_token_major",
+        "runtime_supports_paged_kv_head_major_read",
+        "runtime_supports_paged_kv_head_major_read_append_token_major"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    },
+    "ReplayBackend": {
+      "forwarding_impl": "blanket_backend_runtime",
+      "method_count": 5,
+      "methods": [
+        "runtime_decode_resident_pool_ready",
+        "runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs",
+        "runtime_replay_key_for_request",
+        "runtime_supports_replay_request",
+        "runtime_supports_resident_decode"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    },
+    "ResidencyBackend": {
+      "forwarding_impl": "blanket_backend_runtime",
+      "method_count": 18,
+      "methods": [
+        "runtime_assemble_gdn_recurrent_resident_batch_rows",
+        "runtime_assemble_linear_attn_gdn_state_batch_kt",
+        "runtime_enter_gdn_recurrent_resident_state_scope",
+        "runtime_evict_gdn_recurrent_resident_state",
+        "runtime_evict_resident_activation",
+        "runtime_exit_gdn_recurrent_resident_state_scope",
+        "runtime_has_gdn_recurrent_resident_state",
+        "runtime_has_linear_attn_gdn_state_kt",
+        "runtime_has_resident_activation",
+        "runtime_materialize_gdn_recurrent_resident_state",
+        "runtime_register_resident_activation",
+        "runtime_resident_activation_resource",
+        "runtime_resolve_resident_activation",
+        "runtime_scatter_gdn_recurrent_resident_batch_rows",
+        "runtime_scatter_linear_attn_gdn_state_batch_kt",
+        "runtime_seed_linear_attn_gdn_state_kt",
+        "runtime_supports_resident_activation",
+        "runtime_update_resident_activation"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    },
+    "SamplingBackend": {
+      "forwarding_impl": "blanket_backend_runtime",
+      "method_count": 8,
+      "methods": [
+        "runtime_linear_decode_argmax",
+        "runtime_linear_decode_argmax_batch",
+        "runtime_linear_decode_sample",
+        "runtime_linear_decode_sample_batch",
+        "runtime_supports_linear_decode_argmax",
+        "runtime_supports_linear_decode_argmax_batch",
+        "runtime_supports_linear_decode_sample",
+        "runtime_supports_linear_decode_sample_batch"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    },
+    "TrainingLossBackend": {
+      "forwarding_impl": "blanket_backend_runtime",
+      "method_count": 2,
+      "methods": [
+        "runtime_training_capabilities",
+        "runtime_training_precision_policy"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    }
+  },
   "mismatches": [],
   "optimizer_dispatch": {
     "cuda": {

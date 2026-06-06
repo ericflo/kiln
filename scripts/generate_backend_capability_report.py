@@ -95,6 +95,20 @@ RESIDENT_RESOURCE_DESCRIPTOR_STRUCTS = [
     "ResidentResourceLayout",
 ]
 
+FOCUSED_BACKEND_TRAITS = [
+    "BackendIdentity",
+    "AttentionBackend",
+    "PagedKvBackend",
+    "GdnBackend",
+    "ConvBackend",
+    "LinearBackend",
+    "SamplingBackend",
+    "ResidencyBackend",
+    "OptimizerBackend",
+    "TrainingLossBackend",
+    "ReplayBackend",
+]
+
 FEATURE_CRATES = [
     ROOT / "crates" / "kiln-server" / "Cargo.toml",
     ROOT / "crates" / "kiln-model" / "Cargo.toml",
@@ -358,6 +372,25 @@ def capability_descriptor_report() -> dict[str, Any]:
             "fields": fields,
         }
     return descriptors
+
+
+def focused_backend_facet_report() -> dict[str, Any]:
+    backend_mod = ROOT / "crates" / "kiln-model" / "src" / "backend" / "mod.rs"
+    source = backend_mod.read_text()
+    report: dict[str, Any] = {}
+    for trait_name in FOCUSED_BACKEND_TRAITS:
+        methods = sorted(parse_trait_method_names(backend_mod, trait_name))
+        blanket_impl = (
+            f"impl<T: BackendRuntime + ?Sized> {trait_name} for T" in source
+            or f"impl<T> {trait_name} for T" in source
+        )
+        report[trait_name] = {
+            "source": str(backend_mod.relative_to(ROOT)),
+            "method_count": len(methods),
+            "methods": methods,
+            "forwarding_impl": "blanket_backend_runtime" if blanket_impl else "missing",
+        }
+    return report
 
 
 def resident_resource_descriptor_report() -> dict[str, Any]:
@@ -797,6 +830,16 @@ def markdown(data: dict[str, Any]) -> str:
             f"{len(info['support_methods'])} | {len(info['env_gates'])} |"
         )
     lines.append("")
+    lines.append("## Focused Backend Facets")
+    lines.append("")
+    lines.append("| Facet | Method Count | Forwarding Impl | Methods |")
+    lines.append("|---|---:|---|---|")
+    for name, info in data["focused_backend_facets"].items():
+        methods = ", ".join(f"`{method}`" for method in info["methods"])
+        lines.append(
+            f"| `{name}` | {info['method_count']} | `{info['forwarding_impl']}` | {methods} |"
+        )
+    lines.append("")
     lines.append("## Support Predicates")
     lines.append("")
     lines.append("| Backend | Method | Predicate Status | Support State | Paired Method | Pair Always Declines | Gates |")
@@ -954,6 +997,7 @@ def main() -> int:
         "trait_method_count": len(trait_methods),
         "request_descriptors": request_descriptor_report(),
         "capability_descriptors": capability_descriptor_report(),
+        "focused_backend_facets": focused_backend_facet_report(),
         "resident_resource_descriptors": resident_resource_descriptor_report(),
         "conformance_gates": conformance_gate_report(),
         "request_capability_queries": sorted(
