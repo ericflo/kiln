@@ -15,8 +15,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::backend::{
-    AttentionBackend, BackendRuntime, ConvBackend, LinearBackend, PagedKvBackend, ReplayBackend,
-    SamplingBackend,
+    AttentionBackend, BackendRuntime, ConvBackend, GdnBackend, LinearBackend, PagedKvBackend,
+    ReplayBackend, SamplingBackend,
 };
 use crate::kv_cache::KvCache;
 use crate::lora_loader::{
@@ -12789,9 +12789,9 @@ fn gated_rms_norm(
     let skip_backend_for_active_tape = false;
     if !skip_backend_for_active_tape
         && !any_kt_tensor_tracks_op(&[x, z, weight])
-        && backend.supports_gdn_gated_rms_norm()
+        && GdnBackend::runtime_supports_gdn_gated_rms_norm(backend)
     {
-        if let Some(out) = backend.gdn_gated_rms_norm(x, z, weight, eps)? {
+        if let Some(out) = GdnBackend::runtime_gdn_gated_rms_norm(backend, x, z, weight, eps)? {
             return Ok(out);
         }
     }
@@ -13168,12 +13168,14 @@ fn compute_w_chunk(
     #[cfg(feature = "cuda")]
     if c <= 128
         && !any_kt_tensor_tracks_op(&[a_strict, v_prime, beta_c])
-        && backend.supports_gdn_forward_substitution()
+        && GdnBackend::runtime_supports_gdn_forward_substitution(backend)
     {
         kiln_nvtx::range!(c"kiln/attn/gdn/chunk");
         // #1082 DoD-101/102: `gdn_forward_substitution` is now kt-typed —
         // pass the kt tensors directly, no candle bridge.
-        if let Some(out) = backend.gdn_forward_substitution(a_strict, v_prime, beta_c)? {
+        if let Some(out) =
+            GdnBackend::runtime_gdn_forward_substitution(backend, a_strict, v_prime, beta_c)?
+        {
             return Ok(out);
         }
     }
@@ -13387,7 +13389,7 @@ fn gdn_chunkwise_recurrence(
     if seq_len == 1 {
         let use_backend_recurrent_step = state.dtype() == dtype
             && !any_kt_tensor_tracks_op(&[q, k, v, beta, g, state])
-            && backend.supports_gdn_recurrent_step()
+            && GdnBackend::runtime_supports_gdn_recurrent_step(backend)
             && (dtype == DType::BF16
                 || (dtype == DType::F32
                     && backend.name() == "vulkan"
@@ -13423,7 +13425,9 @@ fn gdn_chunkwise_recurrence(
                 // #1082 DoD-101/102: `gdn_recurrent_step` is now kt-typed and
                 // mutates `state` in place through the kt `&mut` — pass kt
                 // tensors directly, no candle bridge / write-back.
-                backend.gdn_recurrent_step(&q1, &k1, &v1, &beta1, &g1, state)?
+                GdnBackend::runtime_gdn_recurrent_step(
+                    backend, &q1, &k1, &v1, &beta1, &g1, state,
+                )?
             };
             finish_gdn_recurrent_inner_profile(
                 device,
@@ -13481,7 +13485,9 @@ fn gdn_chunkwise_recurrence(
     #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
     let tape_recording_active = false;
     if seq_len > 1 && !tape_recording_active && !any_kt_tensor_tracks_op(&[q, k, v, beta, g, state]) {
-        if let Some(out) = backend.gdn_chunkwise_forward(q, k, v, beta, g, state, chunk_size)? {
+        if let Some(out) =
+            GdnBackend::runtime_gdn_chunkwise_forward(backend, q, k, v, beta, g, state, chunk_size)?
+        {
             return Ok(out);
         }
     }
@@ -13544,7 +13550,7 @@ fn gdn_chunkwise_recurrence(
             // prep uses transposed-GEMM helpers and can consume K in native
             // chunk layout.
             let k_t_pre =
-                if chunk_size == 64 && backend.supports_gdn_full_chunk_forward() {
+                if chunk_size == 64 && GdnBackend::runtime_supports_gdn_full_chunk_forward(backend) {
                     Some(k_pre.transpose(3, 4)?.contiguous()?)
                 } else {
                     None
@@ -13630,7 +13636,7 @@ fn gdn_chunkwise_recurrence(
 
         let full_chunk_out = if !is_tail
             && c == 64
-            && backend.supports_gdn_full_chunk_forward()
+            && GdnBackend::runtime_supports_gdn_full_chunk_forward(backend)
             && dtype == DType::BF16
         {
             if !any_kt_tensor_tracks_op(&[
@@ -13644,8 +13650,8 @@ fn gdn_chunkwise_recurrence(
                 // #1082 DoD-101/102: `gdn_full_chunk_forward` is now kt-typed and
                 // mutates `state` in place through the kt `&mut` — pass kt tensors
                 // directly, no candle bridge / state write-back.
-                let out_chunk = backend.gdn_full_chunk_forward(
-                    &g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s, &beta_c, &k_t_mat, state,
+                let out_chunk = GdnBackend::runtime_gdn_full_chunk_forward(
+                    backend, &g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s, &beta_c, &k_t_mat, state,
                 )?;
                 finish_gdn_recurrent_inner_profile(
                     device,
@@ -13688,10 +13694,12 @@ fn gdn_chunkwise_recurrence(
             // tensors directly and consume the 6 kt results without a bridge.
             #[cfg(feature = "cuda")]
             let prep_out = if !any_kt_tensor_tracks_op(&[&g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s])
-                && backend.supports_gdn_chunk_prep()
+                && GdnBackend::runtime_supports_gdn_chunk_prep(backend)
                 && dtype == DType::BF16
             {
-                backend.gdn_chunk_prep(&g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s)?
+                GdnBackend::runtime_gdn_chunk_prep(
+                    backend, &g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s,
+                )?
             } else {
                 None
             };
@@ -13847,13 +13855,14 @@ fn gdn_chunkwise_recurrence(
                 &q_s_scaled,
                 &beta_c,
                 &decay_last_col,
-            ]) && backend.supports_gdn_chunk_scan()
+            ]) && GdnBackend::runtime_supports_gdn_chunk_scan(backend)
                 && dtype == DType::BF16
             {
                 // #1082 DoD-101/102: `gdn_chunk_scan` is now kt-typed — pass kt
                 // tensors directly and consume the kt (out_chunk, w_weighted)
                 // pair without a bridge.
-                let scan_out = backend.gdn_chunk_scan(
+                let scan_out = GdnBackend::runtime_gdn_chunk_scan(
+                    backend,
                     &a_strict,
                     &b_mask,
                     &v_prime,
@@ -13965,11 +13974,11 @@ fn gdn_recurrent_prefill_head_last(
         || q.dtype() != DType::BF16
         || state.dtype() != DType::BF16
         || any_kt_tensor_tracks_op(&[q, k, v, beta, g, state])
-        || !backend.supports_gdn_recurrent_prefill_head_last()
+        || !GdnBackend::runtime_supports_gdn_recurrent_prefill_head_last(backend)
     {
         return Ok(None);
     }
-    backend.gdn_recurrent_prefill_head_last(q, k, v, beta, g, state)
+    GdnBackend::runtime_gdn_recurrent_prefill_head_last(backend, q, k, v, beta, g, state)
 }
 
 fn gdn_recurrent_prefill_native_head_last(
@@ -13986,11 +13995,11 @@ fn gdn_recurrent_prefill_native_head_last(
         || q.dtype() != DType::BF16
         || state.dtype() != DType::BF16
         || any_kt_tensor_tracks_op(&[q, k, v, beta, g, state])
-        || !backend.supports_gdn_recurrent_prefill_native_head_last()
+        || !GdnBackend::runtime_supports_gdn_recurrent_prefill_native_head_last(backend)
     {
         return Ok(None);
     }
-    backend.gdn_recurrent_prefill_native_head_last(q, k, v, beta, g, state)
+    GdnBackend::runtime_gdn_recurrent_prefill_native_head_last(backend, q, k, v, beta, g, state)
 }
 
 /// Metal BF16 fast path for full 64-token chunks.
@@ -14016,7 +14025,7 @@ fn gdn_chunkwise_recurrence_head_last_full_chunks(
         || dtype != DType::BF16
         || state.dtype() != DType::BF16
         || any_kt_tensor_tracks_op(&[q, k, v, beta, g, state])
-        || !backend.supports_gdn_full_chunk_forward_head_last()
+        || !GdnBackend::runtime_supports_gdn_full_chunk_forward_head_last(backend)
     {
         return Ok(None);
     }
@@ -14040,9 +14049,9 @@ fn gdn_chunkwise_recurrence_head_last_full_chunks(
         let qkt = q_c.matmul(&k_t_mat)?; // [B, nv, C, C]
         let q_s = q_c.matmul(&*state)?; // [B, nv, C, dv]
 
-        if !backend.gdn_full_chunk_forward_head_last_into(
-            &g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s, &beta_c, &k_t_mat, state, &out, t_start,
-            seq_len,
+        if !GdnBackend::runtime_gdn_full_chunk_forward_head_last_into(
+            backend, &g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s, &beta_c, &k_t_mat, state, &out,
+            t_start, seq_len,
         )? {
             if ci == 0 {
                 return Ok(None);
@@ -16238,7 +16247,8 @@ fn gated_deltanet_forward_decode_if_inner(
             (mixed_qkv, z, a, b, None::<Tensor>)
         } else if !has_gdn_in_lora
             && gdn_forward_only_fastpaths
-            && let Some((mixed_qkv, z, a, b)) = backend.gdn_in_proj_decode(
+            && let Some((mixed_qkv, z, a, b)) = GdnBackend::runtime_gdn_in_proj_decode(
+                backend,
                 x,
                 &weights.in_proj_qkv_t,
                 &weights.in_proj_z_t,
@@ -16362,7 +16372,7 @@ fn gated_deltanet_forward_decode_if_inner(
         && gqa_ratio > 1
         && !capture_b11_taps
         && !capture_c41_taps
-        && backend.supports_gdn_recurrent_prefill_native_head_last();
+        && GdnBackend::runtime_supports_gdn_recurrent_prefill_native_head_last(backend);
     let fused_decode_unexpanded_qk = input_dtype == DType::BF16
         && gdn_forward_only_fastpaths
         && seq_len == 1
@@ -16370,7 +16380,7 @@ fn gated_deltanet_forward_decode_if_inner(
         && gqa_ratio > 1
         && !capture_b11_taps
         && !capture_c41_taps
-        && backend.supports_gdn_decode_gates_recurrent_unexpanded_qk();
+        && GdnBackend::runtime_supports_gdn_decode_gates_recurrent_unexpanded_qk(backend);
     #[cfg(feature = "metal")]
     let use_unexpanded_qk = recurrent_unexpanded_qk || fused_decode_unexpanded_qk;
     let fused_decode_qkv_conv_norm = {
@@ -16895,7 +16905,7 @@ fn gated_deltanet_forward_decode_if_inner(
                     && !capture_c41_taps
                     && fused_decode_unexpanded_qk
                     && input_dtype == DType::BF16
-                    && backend.supports_gdn_decode_qk_norm_gates_recurrent()
+                    && GdnBackend::runtime_supports_gdn_decode_qk_norm_gates_recurrent(backend)
             }
             #[cfg(not(any(feature = "cuda", feature = "rocm")))]
             {
@@ -16908,7 +16918,7 @@ fn gated_deltanet_forward_decode_if_inner(
             && !capture_c41_taps
             && recurrent_unexpanded_qk
             && input_dtype == DType::BF16
-            && backend.supports_gdn_recurrent_qk_norm_prefill_native_head_last();
+            && GdnBackend::runtime_supports_gdn_recurrent_qk_norm_prefill_native_head_last(backend);
         let normalize_before_gqa_expand_for_tape = tape_recording_active && gqa_ratio > 1;
         let normalize_then_expand_qk_for_tape =
             |q_src: &Tensor, k_src: &Tensor| -> Result<(Tensor, Tensor)> {
@@ -17222,7 +17232,8 @@ fn gated_deltanet_forward_decode_if_inner(
         if fused.is_none() && qk_norm_deferred_to_recurrent {
             kiln_nvtx::range!(c"kiln/gdn/qk_norm_gates_recur_gated_norm");
             let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
-            fused = backend.gdn_decode_qk_norm_gates_recurrent_rmsnorm(
+            fused = GdnBackend::runtime_gdn_decode_qk_norm_gates_recurrent_rmsnorm(
+                backend,
                 &q,
                 &k,
                 &v,
@@ -17258,7 +17269,8 @@ fn gated_deltanet_forward_decode_if_inner(
             if qk_norm_deferred_to_recurrent {
                 kiln_nvtx::range!(c"kiln/gdn/qk_norm_gates_recur");
                 let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
-                let out = if let Some(out) = backend.gdn_decode_qk_norm_gates_recurrent(
+                let out = if let Some(out) = GdnBackend::runtime_gdn_decode_qk_norm_gates_recurrent(
+                    backend,
                     &q,
                     &k,
                     &v,
@@ -17273,21 +17285,21 @@ fn gated_deltanet_forward_decode_if_inner(
                     out
                 } else {
                     let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
-                    backend
-                        .gdn_decode_gates_recurrent(
-                            &q,
-                            &k,
-                            &v,
-                            &a,
-                            &b,
-                            &weights.a_log_gates,
-                            &weights.dt_bias,
-                            recurrent_state,
-                            &z,
-                            &weights.norm,
-                            config.rms_norm_eps,
-                        )?
-                        .context("CUDA deferred qk_norm fallback recurrent path declined")?
+                    GdnBackend::runtime_gdn_decode_gates_recurrent(
+                        backend,
+                        &q,
+                        &k,
+                        &v,
+                        &a,
+                        &b,
+                        &weights.a_log_gates,
+                        &weights.dt_bias,
+                        recurrent_state,
+                        &z,
+                        &weights.norm,
+                        config.rms_norm_eps,
+                    )?
+                    .context("CUDA deferred qk_norm fallback recurrent path declined")?
                 };
                 finish_gdn_stage_profile(
                     profile_device,
@@ -17297,7 +17309,8 @@ fn gated_deltanet_forward_decode_if_inner(
                     stage_profile,
                 )?;
                 Some(out)
-            } else if let Some(out) = backend.gdn_decode_gates_recurrent(
+            } else if let Some(out) = GdnBackend::runtime_gdn_decode_gates_recurrent(
+                backend,
                 &q,
                 &k,
                 &v,
@@ -17525,9 +17538,17 @@ fn gated_deltanet_forward_decode_if_inner(
         let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
         let (beta, g) = {
             kiln_nvtx::range!(c"kiln/gdn/gates");
-            if gdn_forward_only_fastpaths && use_fused_gdn_gates && backend.supports_gdn_gates() {
-                if let Some((beta, g)) = backend
-                    .gdn_gates(&a, &b, &weights.a_log_gates, &weights.dt_bias)
+            if gdn_forward_only_fastpaths
+                && use_fused_gdn_gates
+                && GdnBackend::runtime_supports_gdn_gates(backend)
+            {
+                if let Some((beta, g)) = GdnBackend::runtime_gdn_gates(
+                    backend,
+                    &a,
+                    &b,
+                    &weights.a_log_gates,
+                    &weights.dt_bias,
+                )
                     .context("gdn decode gates fused backend")?
                 {
                     (beta, g)
@@ -17564,7 +17585,8 @@ fn gated_deltanet_forward_decode_if_inner(
         let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
         let native_recurrent_result = if qk_norm_deferred_to_native_recurrent {
             let v_recur = v.to_dtype(input_dtype)?;
-            match backend.gdn_recurrent_qk_norm_prefill_native_head_last(
+            match GdnBackend::runtime_gdn_recurrent_qk_norm_prefill_native_head_last(
+                backend,
                 &q,
                 &k,
                 &v_recur,
@@ -29623,7 +29645,7 @@ mod tests {
             }
         };
         let backend = crate::backend::for_device_kt(&device);
-        if !backend.supports_gdn_gated_rms_norm() {
+        if !GdnBackend::runtime_supports_gdn_gated_rms_norm(backend.as_ref()) {
             eprintln!("CUDA gated RMSNorm disabled, skipping parity test");
             return Ok(());
         }
@@ -29653,12 +29675,22 @@ mod tests {
         let weight = weight_f32.to_dtype(DType::BF16)?;
 
         let fallback = gated_rms_norm_fallback(&x, &z, &weight, 1e-6)?;
-        let fused = backend
-            .gdn_gated_rms_norm(&x, &z, &weight, 1e-6)?
+        let fused = GdnBackend::runtime_gdn_gated_rms_norm(
+            backend.as_ref(),
+            &x,
+            &z,
+            &weight,
+            1e-6,
+        )?
             .context("CUDA backend declined gated RMSNorm test shape")?;
         let fallback_f32_weight = gated_rms_norm_fallback(&x, &z, &weight_f32, 1e-6)?;
-        let fused_f32_weight = backend
-            .gdn_gated_rms_norm(&x, &z, &weight_f32, 1e-6)?
+        let fused_f32_weight = GdnBackend::runtime_gdn_gated_rms_norm(
+            backend.as_ref(),
+            &x,
+            &z,
+            &weight_f32,
+            1e-6,
+        )?
             .context("CUDA backend declined gated RMSNorm f32-weight test shape")?;
 
         assert_eq!(fused.dims(), fallback.dims());
@@ -29714,7 +29746,7 @@ mod tests {
             return Ok(());
         };
         let backend = crate::backend::for_device_kt(&device);
-        if !backend.supports_gdn_gated_rms_norm() {
+        if !GdnBackend::runtime_supports_gdn_gated_rms_norm(backend.as_ref()) {
             eprintln!("Metal gated RMSNorm disabled, skipping parity test");
             return Ok(());
         }
@@ -29743,8 +29775,13 @@ mod tests {
         let weight = Tensor::from_slice(&w_data, (hidden,))?.to_device(device)?.to_dtype(DType::BF16)?;
 
         let fallback = gated_rms_norm_fallback(&x, &z, &weight, 1e-6)?;
-        let fused = backend
-            .gdn_gated_rms_norm(&x, &z, &weight, 1e-6)?
+        let fused = GdnBackend::runtime_gdn_gated_rms_norm(
+            backend.as_ref(),
+            &x,
+            &z,
+            &weight,
+            1e-6,
+        )?
             .context("Metal backend declined gated RMSNorm test shape")?;
 
         assert_eq!(fused.dims(), fallback.dims());
@@ -34977,7 +35014,7 @@ mod tests {
             gdn_sequential_reference(&q_ref, &k_ref, &v_ref, &beta_ref, &g_ref, &mut state_ref)?;
 
         let backend = crate::backend::for_device_kt(&device);
-        if !backend.supports_gdn_recurrent_step() {
+        if !GdnBackend::runtime_supports_gdn_recurrent_step(backend.as_ref()) {
             eprintln!("Metal recurrent kernel disabled, skipping parity test");
             return Ok(());
         }

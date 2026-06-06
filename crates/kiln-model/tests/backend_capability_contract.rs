@@ -1632,6 +1632,10 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "forward conv decode helpers should import the focused conv facet"
     );
     assert!(
+        forward_source.contains("GdnBackend"),
+        "forward GDN helpers should import the focused GDN facet"
+    );
+    assert!(
         forward_source.contains("SamplingBackend"),
         "forward lm-head decode helpers should import the focused sampling facet"
     );
@@ -1840,6 +1844,67 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         assert!(
             !forward_source.contains(forbidden),
             "forward paged-KV paths should not call broad BackendRuntime method {forbidden}"
+        );
+    }
+
+    for required in [
+        "GdnBackend::runtime_supports_gdn_gated_rms_norm",
+        "GdnBackend::runtime_gdn_gated_rms_norm",
+        "GdnBackend::runtime_supports_gdn_forward_substitution",
+        "GdnBackend::runtime_gdn_forward_substitution",
+        "GdnBackend::runtime_supports_gdn_recurrent_step",
+        "GdnBackend::runtime_gdn_recurrent_step",
+        "GdnBackend::runtime_gdn_chunkwise_forward",
+        "GdnBackend::runtime_supports_gdn_full_chunk_forward",
+        "GdnBackend::runtime_gdn_full_chunk_forward",
+        "GdnBackend::runtime_supports_gdn_chunk_prep",
+        "GdnBackend::runtime_gdn_chunk_prep",
+        "GdnBackend::runtime_supports_gdn_chunk_scan",
+        "GdnBackend::runtime_gdn_chunk_scan",
+        "GdnBackend::runtime_supports_gdn_recurrent_prefill_head_last",
+        "GdnBackend::runtime_gdn_recurrent_prefill_head_last",
+        "GdnBackend::runtime_supports_gdn_recurrent_prefill_native_head_last",
+        "GdnBackend::runtime_gdn_recurrent_prefill_native_head_last",
+        "GdnBackend::runtime_supports_gdn_full_chunk_forward_head_last",
+        "GdnBackend::runtime_gdn_full_chunk_forward_head_last_into",
+        "GdnBackend::runtime_gdn_in_proj_decode",
+        "GdnBackend::runtime_supports_gdn_decode_gates_recurrent_unexpanded_qk",
+        "GdnBackend::runtime_supports_gdn_decode_qk_norm_gates_recurrent",
+        "GdnBackend::runtime_supports_gdn_recurrent_qk_norm_prefill_native_head_last",
+        "GdnBackend::runtime_gdn_decode_qk_norm_gates_recurrent_rmsnorm",
+        "GdnBackend::runtime_gdn_decode_qk_norm_gates_recurrent",
+        "GdnBackend::runtime_gdn_decode_gates_recurrent",
+        "GdnBackend::runtime_supports_gdn_gates",
+        "GdnBackend::runtime_gdn_gates",
+        "GdnBackend::runtime_gdn_recurrent_qk_norm_prefill_native_head_last",
+    ] {
+        assert!(
+            forward_source.contains(required),
+            "forward GDN paths should consume focused capability facet method {required}"
+        );
+    }
+    for forbidden in [
+        ".supports_gdn_",
+        ".gdn_forward_substitution(",
+        ".gdn_recurrent_step(",
+        ".gdn_chunkwise_forward(",
+        ".gdn_chunk_prep(",
+        ".gdn_chunk_scan(",
+        ".gdn_full_chunk_forward(",
+        ".gdn_full_chunk_forward_head_last_into(",
+        ".gdn_recurrent_prefill_head_last(",
+        ".gdn_recurrent_prefill_native_head_last(",
+        ".gdn_recurrent_qk_norm_prefill_native_head_last(",
+        ".gdn_decode_gates_recurrent(",
+        ".gdn_decode_qk_norm_gates_recurrent(",
+        ".gdn_decode_qk_norm_gates_recurrent_rmsnorm(",
+        ".gdn_in_proj_decode(",
+        ".gdn_gates(",
+        ".gdn_gated_rms_norm(",
+    ] {
+        assert!(
+            !forward_source.contains(forbidden),
+            "forward GDN paths should not call broad BackendRuntime method {forbidden}"
         );
     }
 
