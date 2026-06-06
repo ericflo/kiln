@@ -21,7 +21,8 @@ To cover the gate, each fixture must:
 
 - set `threshold_state` to `locked_threshold`
 - set every metric `max` to a numeric threshold
-- write the referenced repo-relative `result_artifact`
+- write the referenced repo-relative `result_artifact` under
+  `bench-results/backend-latency` with a `.json` extension
 - set the manifest `status` to `covered`
 - pass `python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered`
 
@@ -69,7 +70,9 @@ Required fields:
 - `source_sha256`: lowercase SHA-256 hex digest of the fixture source file
 - `command`: exactly matches the fixture `command`
 - `raw_log`: non-empty repo-relative path for the captured raw fixture log;
-  covered fixtures require this file to exist when validated
+  covered fixtures require this file to live under
+  `bench-results/backend-latency/raw`, use a `.log` extension, and exist when
+  validated
 - `raw_log_sha256`: lowercase SHA-256 hex digest of the raw fixture log
 - `metrics`: object containing exactly every metric named by the fixture, with
   finite numeric values
@@ -80,8 +83,11 @@ should bump `artifact_schema_version` and update the validator.
 
 When `--require-covered` is set, the validator requires the fixture
 `result_artifact`, fixture `source`, result `manifest`, and result `raw_log`
-paths to be repo-relative. It also requires the referenced source and `raw_log`
-files to exist in the checkout and checks that their SHA-256 digests match
+paths to be repo-relative. It also requires fixture `result_artifact` paths to
+live under `bench-results/backend-latency` with a `.json` extension, result
+`raw_log` paths to live under `bench-results/backend-latency/raw` with a `.log`
+extension, and the referenced source and `raw_log` files to exist in the
+checkout and checks that their SHA-256 digests match
 `source_sha256` and `raw_log_sha256`. It then re-parses the raw log
 `KILN_LATENCY_METRIC` lines and requires every declared artifact metric value
 and unit to match the raw log. It rejects unknown artifact keys and undeclared
@@ -149,14 +155,17 @@ python3 scripts/lock_backend_latency_thresholds.py \
 ```
 
 The threshold locker requires every fixture result artifact path to be
-repo-relative, exist, have `status: "passed"`, match the result artifact schema
+repo-relative, live under `bench-results/backend-latency` with a `.json`
+extension, exist, have `status: "passed"`, match the result artifact schema
 version, include a valid UTC creation timestamp, match the fixture `id`,
 `backend`, manifest schema version, stable fixture digest,
 hardware/source/command provenance, source file digest, and contain every
 declared metric with no unknown artifact keys or undeclared metrics. It also
 requires the fixture `source`, result `manifest`, and result `raw_log` paths to
-be repo-relative, and the referenced source and raw log files to exist and match
-`source_sha256`/`raw_log_sha256`. It re-parses the raw log and requires each
+be repo-relative, result `raw_log` to live under
+`bench-results/backend-latency/raw` with a `.log` extension, and the referenced
+source and raw log files to exist and match `source_sha256`/`raw_log_sha256`.
+It re-parses the raw log and requires each
 artifact metric value and unit to match before deriving thresholds. It sets every
 fixture `threshold_state` to
 `locked_threshold`, sets the manifest `status` to `covered`, and applies the

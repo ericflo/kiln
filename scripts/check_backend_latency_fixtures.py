@@ -17,8 +17,13 @@ from typing import Any
 from write_backend_latency_result_artifact import (
     ARTIFACT_SCHEMA_VERSION,
     ArtifactError,
+    LATENCY_RAW_LOG_DIR,
+    LATENCY_RESULT_ARTIFACT_DIR,
     RESULT_ARTIFACT_KEYS,
     fixture_spec_sha256,
+    is_canonical_raw_log_path,
+    is_canonical_result_artifact_path,
+    is_repo_relative_path,
     parse_metric_log,
     repo_relative_path,
 )
@@ -98,11 +103,6 @@ def valid_utc_timestamp(value: Any) -> bool:
 def resolve_artifact_path(path: str) -> Path:
     candidate = Path(path)
     return candidate if candidate.is_absolute() else ROOT / candidate
-
-
-def is_repo_relative_path(path: str) -> bool:
-    candidate = Path(path)
-    return not candidate.is_absolute() and ".." not in candidate.parts
 
 
 def raw_log_digest(path: Path) -> str:
@@ -194,6 +194,11 @@ def validate_result_provenance(
     elif require_raw_log_file and not is_repo_relative_path(raw_log):
         errors.append(
             f"{context}.result_artifact.raw_log must be repo-relative when --require-covered is set"
+        )
+    elif require_raw_log_file and not is_canonical_raw_log_path(raw_log):
+        errors.append(
+            f"{context}.result_artifact.raw_log must live under {LATENCY_RAW_LOG_DIR} "
+            "with a .log extension when --require-covered is set"
         )
 
     raw_log_sha256 = result.get("raw_log_sha256")
@@ -441,6 +446,15 @@ def validate_manifest(
             errors.append(
                 f"{context}.result_artifact must be repo-relative when --require-covered is set"
             )
+        elif (
+            require_covered
+            and result_artifact
+            and not is_canonical_result_artifact_path(result_artifact)
+        ):
+            errors.append(
+                f"{context}.result_artifact must live under {LATENCY_RESULT_ARTIFACT_DIR} "
+                "with a .json extension when --require-covered is set"
+            )
         result_path = ROOT / result_artifact if result_artifact else None
         result_exists = result_path is not None and result_path.is_file()
         if require_covered and result_artifact and not result_exists:
@@ -518,14 +532,24 @@ def validate_manifest(
 def self_test() -> int:
     temp_parent = ROOT / "target"
     temp_parent.mkdir(parents=True, exist_ok=True)
+    result_parent = ROOT / LATENCY_RESULT_ARTIFACT_DIR
+    raw_parent = ROOT / LATENCY_RAW_LOG_DIR
+    result_parent.mkdir(parents=True, exist_ok=True)
+    raw_parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix="backend-latency-validator-", dir=temp_parent
-    ) as tmp:
+    ) as tmp, tempfile.TemporaryDirectory(
+        prefix="backend-latency-validator-", dir=result_parent
+    ) as result_tmp, tempfile.TemporaryDirectory(
+        prefix="backend-latency-validator-", dir=raw_parent
+    ) as raw_tmp:
         tmp_root = Path(tmp)
+        result_root = Path(result_tmp)
+        raw_root = Path(raw_tmp)
         source = tmp_root / "bench.rs"
         source.write_text("// fixture source\n")
-        artifact = tmp_root / "result.json"
-        raw_log = tmp_root / "raw.log"
+        artifact = result_root / "result.json"
+        raw_log = raw_root / "raw.log"
         raw_log.write_text(
             "KILN_LATENCY_METRIC latency_ms 9.5 ms\n"
             "KILN_LATENCY_METRIC tokens_per_s 125.0 tok/s\n"
@@ -648,7 +672,7 @@ def self_test() -> int:
                     "source": source_path,
                     "source_sha256": source_sha256,
                     "command": "cargo bench",
-                    "raw_log": repo_relative_path(tmp_root / "missing.log"),
+                    "raw_log": repo_relative_path(raw_root / "missing.log"),
                     "raw_log_sha256": raw_log_sha256,
                     "metrics": {"latency_ms": 9.5, "tokens_per_s": 125.0},
                 }
@@ -910,6 +934,98 @@ def self_test() -> int:
             print(
                 json.dumps(
                     {"ok": False, "case": "source checksum", "errors": errors},
+                    indent=2,
+                )
+            )
+            return 1
+
+        noncanonical_artifact = tmp_root / "result.json"
+        noncanonical_artifact.write_text(
+            json.dumps(
+                {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": created_at_utc,
+                    "fixture_id": "cuda_fixture",
+                    "backend": "cuda",
+                    "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": fixture_spec_sha256(fixture),
+                    "hardware": "fixture",
+                    "source": source_path,
+                    "source_sha256": source_sha256,
+                    "command": "cargo bench",
+                    "raw_log": raw_log_path,
+                    "raw_log_sha256": raw_log_sha256,
+                    "metrics": {"latency_ms": 9.5, "tokens_per_s": 125.0},
+                }
+            )
+        )
+        noncanonical_fixture = dict(fixture)
+        noncanonical_fixture["result_artifact"] = repo_relative_path(noncanonical_artifact)
+        errors = validate_manifest(
+            {
+                "schema_version": 1,
+                "status": "covered",
+                "required_backends": ["cuda"],
+                "fixtures": [noncanonical_fixture],
+                "missing_fixture_slots": [],
+            },
+            require_covered=True,
+        )
+        if not any("result_artifact must live under" in error for error in errors):
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "case": "noncanonical result artifact",
+                        "errors": errors,
+                    },
+                    indent=2,
+                )
+            )
+            return 1
+
+        noncanonical_raw_log = tmp_root / "raw.log"
+        noncanonical_raw_log.write_text(raw_log.read_text())
+        noncanonical_raw_log_path = repo_relative_path(noncanonical_raw_log)
+        artifact.write_text(
+            json.dumps(
+                {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": created_at_utc,
+                    "fixture_id": "cuda_fixture",
+                    "backend": "cuda",
+                    "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": fixture_spec_sha256(fixture),
+                    "hardware": "fixture",
+                    "source": source_path,
+                    "source_sha256": source_sha256,
+                    "command": "cargo bench",
+                    "raw_log": noncanonical_raw_log_path,
+                    "raw_log_sha256": hashlib.sha256(
+                        noncanonical_raw_log.read_bytes()
+                    ).hexdigest(),
+                    "metrics": {"latency_ms": 9.5, "tokens_per_s": 125.0},
+                }
+            )
+        )
+        errors = []
+        validate_result_artifact(
+            errors,
+            fixture,
+            artifact,
+            "fixtures[0]",
+            1,
+            None,
+            require_raw_log_file=True,
+        )
+        if not any("raw_log must live under" in error for error in errors):
+            print(
+                json.dumps(
+                    {"ok": False, "case": "noncanonical raw log", "errors": errors},
                     indent=2,
                 )
             )

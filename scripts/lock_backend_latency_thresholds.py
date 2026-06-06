@@ -18,8 +18,13 @@ from typing import Any
 from write_backend_latency_result_artifact import (
     ARTIFACT_SCHEMA_VERSION,
     ArtifactError,
+    LATENCY_RAW_LOG_DIR,
+    LATENCY_RESULT_ARTIFACT_DIR,
     RESULT_ARTIFACT_KEYS,
     fixture_spec_sha256,
+    is_canonical_raw_log_path,
+    is_canonical_result_artifact_path,
+    is_repo_relative_path,
     parse_metric_log,
     repo_relative_path,
 )
@@ -51,11 +56,6 @@ def load_json(path: Path, label: str) -> dict[str, Any]:
 def resolve_repo_path(path: str) -> Path:
     candidate = Path(path)
     return candidate if candidate.is_absolute() else ROOT / candidate
-
-
-def is_repo_relative_path(path: str) -> bool:
-    candidate = Path(path)
-    return not candidate.is_absolute() and ".." not in candidate.parts
 
 
 def sha256_file(path: Path) -> str:
@@ -131,6 +131,11 @@ def lock_fixture_thresholds(
     if not is_repo_relative_path(result_artifact):
         raise ThresholdLockError(
             f"{fixture_id}.result_artifact must be repo-relative before thresholds can lock"
+        )
+    if not is_canonical_result_artifact_path(result_artifact):
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact must live under {LATENCY_RESULT_ARTIFACT_DIR} "
+            "with a .json extension before thresholds can lock"
         )
     result_path = resolve_repo_path(result_artifact)
     if not result_path.is_file():
@@ -213,10 +218,17 @@ def lock_fixture_thresholds(
         )
     raw_log = result.get("raw_log")
     if not isinstance(raw_log, str) or not raw_log:
-        raise ThresholdLockError(f"{fixture_id}.result_artifact.raw_log must be a non-empty string")
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.raw_log must be a non-empty string"
+        )
     if not is_repo_relative_path(raw_log):
         raise ThresholdLockError(
             f"{fixture_id}.result_artifact.raw_log must be repo-relative before thresholds can lock"
+        )
+    if not is_canonical_raw_log_path(raw_log):
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.raw_log must live under {LATENCY_RAW_LOG_DIR} "
+            "with a .log extension before thresholds can lock"
         )
     raw_log_path = resolve_repo_path(raw_log)
     if not raw_log_path.is_file():
@@ -328,10 +340,20 @@ def write_manifest(path: Path, manifest: dict[str, Any]) -> None:
 def self_test() -> int:
     temp_parent = ROOT / "target"
     temp_parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="backend-latency-locker-", dir=temp_parent) as tmp:
+    result_parent = ROOT / LATENCY_RESULT_ARTIFACT_DIR
+    raw_parent = ROOT / LATENCY_RAW_LOG_DIR
+    result_parent.mkdir(parents=True, exist_ok=True)
+    raw_parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="backend-latency-locker-", dir=temp_parent
+    ) as tmp, tempfile.TemporaryDirectory(
+        prefix="backend-latency-locker-", dir=result_parent
+    ) as result_tmp, tempfile.TemporaryDirectory(
+        prefix="backend-latency-locker-", dir=raw_parent
+    ) as raw_tmp:
         tmp_root = Path(tmp)
-        result_path = tmp_root / "result.json"
-        raw_log_path = tmp_root / "bench.log"
+        result_path = Path(result_tmp) / "result.json"
+        raw_log_path = Path(raw_tmp) / "bench.log"
         source_path = tmp_root / "bench.py"
         source_path.write_text("# latency fixture source\n")
         raw_log_path.write_text(
@@ -566,7 +588,7 @@ def self_test() -> int:
                     "source": source_artifact_path,
                     "source_sha256": source_sha256,
                     "command": "python bench.py",
-                    "raw_log": repo_relative_path(tmp_root / "missing.log"),
+                    "raw_log": repo_relative_path(Path(raw_tmp) / "missing.log"),
                     "raw_log_sha256": raw_log_sha256,
                     "metrics": {"latency_ms": 10.0, "tokens_per_s": 200.0},
                 }
@@ -673,6 +695,99 @@ def self_test() -> int:
                 return 1
         else:
             print(json.dumps({"ok": False, "case": "source checksum did not fail"}))
+            return 1
+
+        noncanonical_result_path = tmp_root / "result.json"
+        noncanonical_result_path.write_text(
+            json.dumps(
+                {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": created_at_utc,
+                    "fixture_id": "fixture",
+                    "backend": "cuda",
+                    "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": fixture_spec_sha256(manifest["fixtures"][0]),
+                    "hardware": "fixture hardware",
+                    "source": source_artifact_path,
+                    "source_sha256": source_sha256,
+                    "command": "python bench.py",
+                    "raw_log": raw_log_artifact_path,
+                    "raw_log_sha256": raw_log_sha256,
+                    "metrics": {"latency_ms": 10.0, "tokens_per_s": 200.0},
+                }
+            )
+        )
+        noncanonical_manifest = deepcopy(manifest)
+        noncanonical_manifest["fixtures"][0]["result_artifact"] = repo_relative_path(
+            noncanonical_result_path
+        )
+        try:
+            lock_manifest_thresholds(noncanonical_manifest, 0.10)
+        except ThresholdLockError as exc:
+            if "result_artifact must live under" not in str(exc):
+                print(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "case": "noncanonical artifact",
+                            "error": str(exc),
+                        }
+                    )
+                )
+                return 1
+        else:
+            print(
+                json.dumps(
+                    {"ok": False, "case": "noncanonical artifact did not fail"}
+                )
+            )
+            return 1
+
+        noncanonical_raw_log = tmp_root / "bench.log"
+        noncanonical_raw_log.write_text(raw_log_path.read_text())
+        result_path.write_text(
+            json.dumps(
+                {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": created_at_utc,
+                    "fixture_id": "fixture",
+                    "backend": "cuda",
+                    "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": fixture_spec_sha256(manifest["fixtures"][0]),
+                    "hardware": "fixture hardware",
+                    "source": source_artifact_path,
+                    "source_sha256": source_sha256,
+                    "command": "python bench.py",
+                    "raw_log": repo_relative_path(noncanonical_raw_log),
+                    "raw_log_sha256": sha256_file(noncanonical_raw_log),
+                    "metrics": {"latency_ms": 10.0, "tokens_per_s": 200.0},
+                }
+            )
+        )
+        try:
+            lock_manifest_thresholds(manifest, 0.10)
+        except ThresholdLockError as exc:
+            if "raw_log must live under" not in str(exc):
+                print(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "case": "noncanonical raw log",
+                            "error": str(exc),
+                        }
+                    )
+                )
+                return 1
+        else:
+            print(
+                json.dumps(
+                    {"ok": False, "case": "noncanonical raw log did not fail"}
+                )
+            )
             return 1
 
         absolute_manifest = deepcopy(manifest)

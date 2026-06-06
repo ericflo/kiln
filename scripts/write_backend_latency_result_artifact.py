@@ -17,6 +17,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT_SCHEMA_VERSION = 2
+LATENCY_RESULT_ARTIFACT_DIR = Path("bench-results/backend-latency")
+LATENCY_RAW_LOG_DIR = LATENCY_RESULT_ARTIFACT_DIR / "raw"
 METRIC_RE = re.compile(r"^\s*KILN_LATENCY_METRIC\s+(\S+)\s+([-+0-9.eE]+)\s+(\S+)\s*$")
 VALID_RESULT_STATUSES = {"passed", "failed"}
 CHECKSUM_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -130,6 +132,33 @@ def repo_relative_path(path: Path) -> str:
         return str(path.resolve().relative_to(ROOT))
     except ValueError:
         return str(path)
+
+
+def is_repo_relative_path(path: str) -> bool:
+    candidate = Path(path)
+    return not candidate.is_absolute() and ".." not in candidate.parts
+
+
+def is_under_repo_dir(path: str, directory: Path) -> bool:
+    if not is_repo_relative_path(path):
+        return False
+    try:
+        Path(path).relative_to(directory)
+    except ValueError:
+        return False
+    return True
+
+
+def is_canonical_result_artifact_path(path: str) -> bool:
+    return (
+        is_under_repo_dir(path, LATENCY_RESULT_ARTIFACT_DIR)
+        and not is_under_repo_dir(path, LATENCY_RAW_LOG_DIR)
+        and Path(path).suffix == ".json"
+    )
+
+
+def is_canonical_raw_log_path(path: str) -> bool:
+    return is_under_repo_dir(path, LATENCY_RAW_LOG_DIR) and Path(path).suffix == ".log"
 
 
 def resolve_repo_path(path: str) -> Path:
