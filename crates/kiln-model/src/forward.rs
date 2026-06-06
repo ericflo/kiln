@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use crate::backend::{
     AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, GdnBackend, LinearBackend,
-    PagedKvBackend, ReplayBackend, SamplingBackend,
+    PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend,
 };
 use crate::kv_cache::KvCache;
 use crate::lora_loader::{
@@ -4942,7 +4942,8 @@ impl LinearAttentionState {
                 .iter()
                 .map(|row| &row.recurrent_states[layer_idx])
                 .collect();
-            assembled_any |= backend.assemble_gdn_recurrent_resident_batch_rows(
+            assembled_any |= ResidencyBackend::runtime_assemble_gdn_recurrent_resident_batch_rows(
+                backend,
                 &row_tensors,
                 &self.recurrent_states[layer_idx],
             )?;
@@ -4971,8 +4972,9 @@ impl LinearAttentionState {
                 .map(|row| row.recurrent_states[layer_idx].id())
                 .collect();
             let batch_key = self.recurrent_states[layer_idx].id();
-            assembled_any |=
-                backend.assemble_linear_attn_gdn_state_batch_kt(&row_keys, batch_key)?;
+            assembled_any |= ResidencyBackend::runtime_assemble_linear_attn_gdn_state_batch_kt(
+                backend, &row_keys, batch_key,
+            )?;
         }
         Ok(assembled_any)
     }
@@ -5069,7 +5071,8 @@ impl LinearAttentionState {
                 .iter_mut()
                 .map(|dst| &mut dst.recurrent_states[layer_idx])
                 .collect();
-            if !backend.scatter_gdn_recurrent_resident_batch_rows(
+            if !ResidencyBackend::runtime_scatter_gdn_recurrent_resident_batch_rows(
+                backend,
                 &self.recurrent_states[layer_idx],
                 &mut dst_tensors,
             )? {
@@ -5128,8 +5131,9 @@ impl LinearAttentionState {
                 .map(|dst| dst.recurrent_states[layer_idx].id())
                 .collect();
             let batch_key = self.recurrent_states[layer_idx].id();
-            scattered_any |=
-                backend.scatter_linear_attn_gdn_state_batch_kt(batch_key, &row_keys)?;
+            scattered_any |= ResidencyBackend::runtime_scatter_linear_attn_gdn_state_batch_kt(
+                backend, batch_key, &row_keys,
+            )?;
         }
         Ok(scattered_any)
     }
@@ -5139,21 +5143,21 @@ impl LinearAttentionState {
         backend: &dyn BackendRuntime,
     ) -> Result<()> {
         for state in &mut self.recurrent_states {
-            backend.materialize_gdn_recurrent_resident_state(state)?;
+            ResidencyBackend::runtime_materialize_gdn_recurrent_resident_state(backend, state)?;
         }
         Ok(())
     }
 
     pub fn evict_gdn_recurrent_resident_states(&self, backend: &dyn BackendRuntime) {
         for state in &self.recurrent_states {
-            backend.evict_gdn_recurrent_resident_state(state);
+            ResidencyBackend::runtime_evict_gdn_recurrent_resident_state(backend, state);
         }
     }
 
     pub fn has_any_gdn_recurrent_resident_state(&self, backend: &dyn BackendRuntime) -> bool {
-        self.recurrent_states
-            .iter()
-            .any(|state| backend.has_gdn_recurrent_resident_state(state))
+        self.recurrent_states.iter().any(|state| {
+            ResidencyBackend::runtime_has_gdn_recurrent_resident_state(backend, state)
+        })
     }
 
     pub fn has_all_gdn_recurrent_resident_states(&self, backend: &dyn BackendRuntime) -> bool {
@@ -5161,13 +5165,17 @@ impl LinearAttentionState {
             && self
                 .recurrent_states
                 .iter()
-                .all(|state| backend.has_gdn_recurrent_resident_state(state))
+                .all(|state| {
+                    ResidencyBackend::runtime_has_gdn_recurrent_resident_state(backend, state)
+                })
     }
 
     pub fn has_any_gdn_state_resident_kt(&self, backend: &dyn BackendRuntime) -> bool {
         self.recurrent_states
             .iter()
-            .any(|state| backend.has_linear_attn_gdn_state_kt(state.id()))
+            .any(|state| {
+                ResidencyBackend::runtime_has_linear_attn_gdn_state_kt(backend, state.id())
+            })
     }
 
     pub fn has_all_gdn_state_resident_kt(&self, backend: &dyn BackendRuntime) -> bool {
@@ -5175,7 +5183,9 @@ impl LinearAttentionState {
             && self
                 .recurrent_states
                 .iter()
-                .all(|state| backend.has_linear_attn_gdn_state_kt(state.id()))
+                .all(|state| {
+                    ResidencyBackend::runtime_has_linear_attn_gdn_state_kt(backend, state.id())
+                })
     }
 
     pub fn ensure_gdn_state_resident_kt(&self, backend: &dyn BackendRuntime) -> Result<bool> {
@@ -5188,7 +5198,8 @@ impl LinearAttentionState {
         }
         let mut seeded_any = false;
         for layer_idx in 0..self.recurrent_states.len() {
-            seeded_any |= backend.seed_linear_attn_gdn_state_kt(
+            seeded_any |= ResidencyBackend::runtime_seed_linear_attn_gdn_state_kt(
+                backend,
                 &self.recurrent_states[layer_idx],
                 &self.conv_states[layer_idx],
             )?;

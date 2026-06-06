@@ -20,7 +20,7 @@ use kiln_core::tokenizer::KilnTokenizer;
 
 use crate::backend::{
     self, BackendIdentity, BackendRuntime, FallbackPolicy, LinearBackend, ReplayBackend,
-    SamplingBackend, TrainingLossBackend,
+    ResidencyBackend, SamplingBackend, TrainingLossBackend,
     capability::{BackendCapabilityQueries, DecodeBatcherPolicy},
 };
 use crate::cancel::CancelHandle;
@@ -117,7 +117,7 @@ struct GdnRecurrentResidentStateScope<'a> {
 
 impl<'a> GdnRecurrentResidentStateScope<'a> {
     fn new(backend: &'a dyn BackendRuntime) -> Self {
-        let active = backend.enter_gdn_recurrent_resident_state_scope();
+        let active = ResidencyBackend::runtime_enter_gdn_recurrent_resident_state_scope(backend);
         Self { backend, active }
     }
 }
@@ -125,7 +125,7 @@ impl<'a> GdnRecurrentResidentStateScope<'a> {
 impl Drop for GdnRecurrentResidentStateScope<'_> {
     fn drop(&mut self) {
         if self.active {
-            self.backend.exit_gdn_recurrent_resident_state_scope();
+            ResidencyBackend::runtime_exit_gdn_recurrent_resident_state_scope(self.backend);
         }
     }
 }

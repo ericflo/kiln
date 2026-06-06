@@ -1624,6 +1624,10 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "generate decode residency gates should import the focused replay facet"
     );
     assert!(
+        generate_source.contains("ResidencyBackend"),
+        "generate GDN recurrent residency scopes should import the focused residency facet"
+    );
+    assert!(
         generate_source.contains("SamplingBackend"),
         "generate decode sampling gates should import the focused sampling facet"
     );
@@ -1646,6 +1650,10 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     assert!(
         forward_source.contains("GdnBackend"),
         "forward GDN helpers should import the focused GDN facet"
+    );
+    assert!(
+        forward_source.contains("ResidencyBackend"),
+        "forward GDN recurrent residency helpers should import the focused residency facet"
     );
     assert!(
         forward_source.contains("SamplingBackend"),
@@ -1755,6 +1763,44 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         assert!(
             !inference_decode_residency_sources.contains(forbidden),
             "inference decode gates should not call broad BackendRuntime method {forbidden}"
+        );
+    }
+
+    let gdn_recurrent_residency_sources = format!("{generate_source}\n{forward_source}");
+    for required in [
+        "ResidencyBackend::runtime_enter_gdn_recurrent_resident_state_scope",
+        "ResidencyBackend::runtime_exit_gdn_recurrent_resident_state_scope",
+        "ResidencyBackend::runtime_materialize_gdn_recurrent_resident_state",
+        "ResidencyBackend::runtime_evict_gdn_recurrent_resident_state",
+        "ResidencyBackend::runtime_has_gdn_recurrent_resident_state",
+        "ResidencyBackend::runtime_assemble_gdn_recurrent_resident_batch_rows",
+        "ResidencyBackend::runtime_scatter_gdn_recurrent_resident_batch_rows",
+        "ResidencyBackend::runtime_assemble_linear_attn_gdn_state_batch_kt",
+        "ResidencyBackend::runtime_scatter_linear_attn_gdn_state_batch_kt",
+        "ResidencyBackend::runtime_seed_linear_attn_gdn_state_kt",
+        "ResidencyBackend::runtime_has_linear_attn_gdn_state_kt",
+    ] {
+        assert!(
+            gdn_recurrent_residency_sources.contains(required),
+            "GDN recurrent residency should consume focused residency facet method {required}"
+        );
+    }
+    for forbidden in [
+        ".enter_gdn_recurrent_resident_state_scope(",
+        ".exit_gdn_recurrent_resident_state_scope(",
+        ".materialize_gdn_recurrent_resident_state(",
+        ".evict_gdn_recurrent_resident_state(",
+        ".has_gdn_recurrent_resident_state(",
+        ".assemble_gdn_recurrent_resident_batch_rows(",
+        ".scatter_gdn_recurrent_resident_batch_rows(",
+        ".assemble_linear_attn_gdn_state_batch_kt(",
+        ".scatter_linear_attn_gdn_state_batch_kt(",
+        ".seed_linear_attn_gdn_state_kt(",
+        ".has_linear_attn_gdn_state_kt(",
+    ] {
+        assert!(
+            !gdn_recurrent_residency_sources.contains(forbidden),
+            "GDN recurrent residency should not call broad BackendRuntime method {forbidden}"
         );
     }
 
