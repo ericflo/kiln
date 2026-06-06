@@ -395,6 +395,7 @@
       "source": "crates/kiln-model/src/backend/metal.rs",
       "source_modules": [
         "crates/kiln-model/src/backend/metal.rs",
+        "crates/kiln-model/src/backend/metal_attention.rs",
         "crates/kiln-model/src/backend/metal_config.rs",
         "crates/kiln-model/src/backend/metal_conv1d.rs",
         "crates/kiln-model/src/backend/metal_core.rs",
@@ -419,10 +420,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 481,
+          "line": 484,
           "paired_method": "causal_conv1d_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 728,
+          "paired_method_line": 614,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -434,10 +435,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 485,
+          "line": 488,
           "paired_method": "causal_conv1d_update",
           "paired_method_always_declines": false,
-          "paired_method_line": 747,
+          "paired_method_line": 633,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -449,10 +450,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 311,
+          "line": 314,
           "paired_method": "flash_attn_paged_decode",
           "paired_method_always_declines": false,
-          "paired_method_line": 610,
+          "paired_method_line": 554,
           "status": "literal_true",
           "support_state": "NativeWithConstraints"
         },
@@ -464,11 +465,11 @@
             "layout": false,
             "shape": false
           },
-          "line": 298,
+          "line": 301,
           "paired_method": "flash_attn_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 525,
-          "status": "env_gated",
+          "paired_method_line": 528,
+          "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
         "supports_flash_attn_prefill_head_major": {
@@ -479,11 +480,11 @@
             "layout": false,
             "shape": false
           },
-          "line": 302,
+          "line": 305,
           "paired_method": "flash_attn_prefill_head_major",
           "paired_method_always_declines": false,
-          "paired_method_line": 573,
-          "status": "env_gated",
+          "paired_method_line": 539,
+          "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
         "supports_gdn_chunk_prep": {
@@ -494,10 +495,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 497,
+          "line": 500,
           "paired_method": "gdn_chunk_prep",
           "paired_method_always_declines": false,
-          "paired_method_line": 807,
+          "paired_method_line": 693,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -509,10 +510,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 489,
+          "line": 492,
           "paired_method": "gdn_forward_substitution",
           "paired_method_always_declines": false,
-          "paired_method_line": 766,
+          "paired_method_line": 652,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -524,10 +525,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 501,
+          "line": 504,
           "paired_method": "gdn_full_chunk_forward",
           "paired_method_always_declines": false,
-          "paired_method_line": 836,
+          "paired_method_line": 722,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -539,7 +540,7 @@
             "layout": false,
             "shape": false
           },
-          "line": 505,
+          "line": 508,
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
@@ -554,10 +555,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 521,
+          "line": 524,
           "paired_method": "gdn_gated_rms_norm",
           "paired_method_always_declines": false,
-          "paired_method_line": 987,
+          "paired_method_line": 873,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -569,10 +570,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 517,
+          "line": 520,
           "paired_method": "gdn_gates",
           "paired_method_always_declines": false,
-          "paired_method_line": 971,
+          "paired_method_line": 857,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -584,10 +585,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 509,
+          "line": 512,
           "paired_method": "gdn_recurrent_prefill_head_last",
           "paired_method_always_declines": false,
-          "paired_method_line": 896,
+          "paired_method_line": 782,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -599,10 +600,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 513,
+          "line": 516,
           "paired_method": "gdn_recurrent_prefill_native_head_last",
           "paired_method_always_declines": false,
-          "paired_method_line": 916,
+          "paired_method_line": 802,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -614,10 +615,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 493,
+          "line": 496,
           "paired_method": "gdn_recurrent_step",
           "paired_method_always_declines": false,
-          "paired_method_line": 789,
+          "paired_method_line": 675,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -629,10 +630,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 105,
+          "line": 108,
           "paired_method": "linear_decode_sample",
           "paired_method_always_declines": false,
-          "paired_method_line": 110,
+          "paired_method_line": 113,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -644,10 +645,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 168,
+          "line": 171,
           "paired_method": "linear_decode_sample_batch",
           "paired_method_always_declines": false,
-          "paired_method_line": 188,
+          "paired_method_line": 191,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -659,10 +660,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 473,
+          "line": 476,
           "paired_method": "paged_kv_head_major_read",
           "paired_method_always_declines": false,
-          "paired_method_line": 691,
+          "paired_method_line": 577,
           "status": "literal_true",
           "support_state": "NativeWithConstraints"
         },
@@ -674,10 +675,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 477,
+          "line": 480,
           "paired_method": "paged_kv_head_major_read_append_token_major",
           "paired_method_always_declines": false,
-          "paired_method_line": 707,
+          "paired_method_line": 593,
           "status": "literal_true",
           "support_state": "NativeWithConstraints"
         },
@@ -689,7 +690,7 @@
             "layout": false,
             "shape": false
           },
-          "line": 43,
+          "line": 46,
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
