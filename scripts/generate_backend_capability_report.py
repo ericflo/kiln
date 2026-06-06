@@ -10,6 +10,7 @@ import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 
@@ -854,10 +855,11 @@ def conformance_gate_report() -> list[dict[str, Any]]:
             "gate": "generated_capability_dashboard",
             "phase8_requirement": "generated capability dashboard checked into docs or build artifacts",
             "status": "covered",
-            "command": "python3 scripts/generate_backend_capability_report.py --check",
+            "command": "python3 scripts/generate_backend_capability_report.py --self-test && python3 scripts/generate_backend_capability_report.py --check",
             "evidence": [
                 "docs/backend-capability-report.md",
                 "docs/backend-capability-report.json",
+                "scripts/generate_backend_capability_report.py",
             ],
         },
     ]
@@ -1081,7 +1083,96 @@ def markdown(data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def main() -> int:
+def report_outputs(data: dict[str, Any]) -> tuple[str, str]:
+    return (
+        json.dumps(data, indent=2, sort_keys=True) + "\n",
+        markdown(data) + "\n",
+    )
+
+
+def write_report_files(json_text: str, markdown_text: str) -> None:
+    REPORT_JSON.write_text(json_text)
+    REPORT_MD.write_text(markdown_text)
+
+
+def display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def check_report_files(
+    expected_json: str,
+    expected_markdown: str,
+    json_path: Path = REPORT_JSON,
+    markdown_path: Path = REPORT_MD,
+) -> list[str]:
+    failures: list[str] = []
+    for label, path, expected in [
+        ("JSON", json_path, expected_json),
+        ("Markdown", markdown_path, expected_markdown),
+    ]:
+        if not path.exists():
+            failures.append(f"{label} report is missing: {display_path(path)}")
+            continue
+        actual = path.read_text()
+        if actual != expected:
+            failures.append(
+                f"{label} report is stale: run scripts/generate_backend_capability_report.py"
+            )
+    return failures
+
+
+def run_self_test() -> int:
+    expected_json = '{"status": "fresh"}\n'
+    expected_markdown = "# Fresh\n"
+    with TemporaryDirectory() as tmp:
+        tmp_root = Path(tmp)
+        json_path = tmp_root / "backend-capability-report.json"
+        markdown_path = tmp_root / "backend-capability-report.md"
+
+        missing = check_report_files(
+            expected_json,
+            expected_markdown,
+            json_path=json_path,
+            markdown_path=markdown_path,
+        )
+        if len(missing) != 2 or not all("missing" in failure for failure in missing):
+            print(f"missing-report self-test failed: {missing}", file=sys.stderr)
+            return 1
+
+        json_path.write_text(expected_json)
+        markdown_path.write_text(expected_markdown)
+        fresh = check_report_files(
+            expected_json,
+            expected_markdown,
+            json_path=json_path,
+            markdown_path=markdown_path,
+        )
+        if fresh:
+            print(f"fresh-report self-test failed: {fresh}", file=sys.stderr)
+            return 1
+
+        markdown_path.write_text("# Stale\n")
+        before = markdown_path.read_text()
+        stale = check_report_files(
+            expected_json,
+            expected_markdown,
+            json_path=json_path,
+            markdown_path=markdown_path,
+        )
+        after = markdown_path.read_text()
+        if len(stale) != 1 or "Markdown report is stale" not in stale[0]:
+            print(f"stale-report self-test failed: {stale}", file=sys.stderr)
+            return 1
+        if before != after:
+            print("--check helper rewrote report files during self-test", file=sys.stderr)
+            return 1
+    return 0
+
+
+def build_report_data() -> tuple[dict[str, Any], list[dict[str, Any]]]:
     trait_methods = parse_trait_method_names(
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "mod.rs",
         "BackendRuntime",
@@ -1111,11 +1202,25 @@ def main() -> int:
         "optimizer_dispatch": optimizer_dispatch_report(backends),
         "mismatches": mismatches,
     }
-    REPORT_JSON.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
-    REPORT_MD.write_text(markdown(data) + "\n")
-    if "--check" in sys.argv and mismatches:
-        print(json.dumps(mismatches, indent=2), file=sys.stderr)
-        return 1
+    return data, mismatches
+
+
+def main() -> int:
+    if "--self-test" in sys.argv:
+        return run_self_test()
+
+    data, mismatches = build_report_data()
+    json_text, markdown_text = report_outputs(data)
+
+    if "--check" in sys.argv:
+        failures = check_report_files(json_text, markdown_text)
+        if mismatches:
+            print(json.dumps(mismatches, indent=2), file=sys.stderr)
+        for failure in failures:
+            print(failure, file=sys.stderr)
+        return 1 if mismatches or failures else 0
+
+    write_report_files(json_text, markdown_text)
     return 0
 
 

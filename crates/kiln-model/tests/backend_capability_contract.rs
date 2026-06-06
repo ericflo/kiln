@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde_json::Value;
 
@@ -2590,5 +2591,94 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
     assert!(
         missing_slots.is_empty(),
         "latency fixture manifest should have no missing fixture slots: {missing_slots:?}"
+    );
+}
+
+#[test]
+fn generated_capability_report_check_mode_is_non_mutating_and_enforced() {
+    let root = workspace_root();
+    let script_path = root.join("scripts/generate_backend_capability_report.py");
+
+    let self_test = Command::new("python3")
+        .arg(&script_path)
+        .arg("--self-test")
+        .current_dir(&root)
+        .output()
+        .expect("capability report generator self-test should run");
+    assert!(
+        self_test.status.success(),
+        "capability report generator self-test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&self_test.stdout),
+        String::from_utf8_lossy(&self_test.stderr)
+    );
+
+    let markdown_path = root.join("docs/backend-capability-report.md");
+    let json_path = root.join("docs/backend-capability-report.json");
+    let markdown_before =
+        fs::read_to_string(&markdown_path).expect("capability report markdown should be readable");
+    let json_before =
+        fs::read_to_string(&json_path).expect("capability report json should be readable");
+
+    let check = Command::new("python3")
+        .arg(&script_path)
+        .arg("--check")
+        .current_dir(&root)
+        .output()
+        .expect("capability report generator check should run");
+    assert!(
+        check.status.success(),
+        "capability report generator --check failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&markdown_path)
+            .expect("capability report markdown should remain readable"),
+        markdown_before,
+        "capability report --check should not rewrite Markdown"
+    );
+    assert_eq!(
+        fs::read_to_string(&json_path).expect("capability report json should remain readable"),
+        json_before,
+        "capability report --check should not rewrite JSON"
+    );
+
+    let script_source =
+        fs::read_to_string(&script_path).expect("capability report generator should be readable");
+    for required in [
+        "def check_report_files(",
+        "def run_self_test(",
+        "Markdown report is stale",
+        "write_report_files(json_text, markdown_text)",
+    ] {
+        assert!(
+            script_source.contains(required),
+            "capability report generator should keep check-mode contract: {required}"
+        );
+    }
+
+    let report: Value =
+        serde_json::from_str(&json_before).expect("capability report json should parse");
+    let conformance_gates = report["conformance_gates"]
+        .as_array()
+        .expect("conformance_gates should be an array");
+    let dashboard_gate = conformance_gates
+        .iter()
+        .find(|gate| gate["gate"] == "generated_capability_dashboard")
+        .expect("generated capability dashboard gate should be present");
+    let command = dashboard_gate["command"]
+        .as_str()
+        .expect("generated dashboard command should be a string");
+    assert!(command.contains("--self-test"));
+    assert!(command.contains("--check"));
+    let evidence_present = dashboard_gate["evidence_present"]
+        .as_array()
+        .expect("generated dashboard evidence should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        evidence_present.contains(&"scripts/generate_backend_capability_report.py"),
+        "generated dashboard gate should cite the generator itself"
     );
 }
