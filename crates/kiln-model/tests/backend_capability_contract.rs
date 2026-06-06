@@ -1068,6 +1068,7 @@ fn generated_capability_report_lists_request_descriptors() {
         "AttentionCapabilities",
         "GdnCapabilities",
         "DecodeCapabilities",
+        "DecodeBatcherPolicy",
         "BackendTrainingCapabilities",
         "ReplayCapabilities",
         "BackendFallbackCapabilities",
@@ -1598,6 +1599,10 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         generate_source.contains("BackendCapabilityQueries"),
         "decode fallback policy should import the shared backend capability query surface"
     );
+    assert!(
+        generate_source.contains("DecodeBatcherPolicy"),
+        "decode batcher defaults should import the backend-owned policy surface"
+    );
 
     let decode_policy_section = source_between(
         &generate_source,
@@ -1616,6 +1621,26 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         !decode_policy_section.contains("match device"),
         "decode fallback policy should not branch directly on device kind"
     );
+
+    let decode_batcher_config_section = source_between(
+        &generate_source,
+        "pub fn from_env_for_backend_kt(",
+        "pub fn from_env_for_device_kt(",
+    );
+    assert!(
+        decode_batcher_config_section.contains("DecodeBatcherPolicy::for_backend"),
+        "decode batcher backend-aware defaults should come from the shared policy object"
+    );
+    for removed_helper in [
+        "fn default_decode_batcher_max_batch_kt",
+        "fn default_decode_batcher_allow_mixed_seq_lens_kt",
+        "fn default_decode_batcher_wait_kt",
+    ] {
+        assert!(
+            !generate_source.contains(removed_helper),
+            "generate should not keep local decode batcher backend policy helper {removed_helper}"
+        );
+    }
 
     let trainer_policy_section = source_between(
         &trainer_source,

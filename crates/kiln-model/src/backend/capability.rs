@@ -767,6 +767,14 @@ pub struct DecodeCapabilities {
     pub linear_sample_batch: Support,
 }
 
+/// Backend-owned defaults for the live decode rendezvous worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodeBatcherPolicy {
+    pub max_batch: usize,
+    pub wait_micros: u64,
+    pub allow_mixed_seq_lens: bool,
+}
+
 /// Replay capability probes backed by [`ReplayRequest`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayCapabilities {
@@ -803,6 +811,7 @@ pub struct BackendCapabilities {
     pub attention: AttentionCapabilities,
     pub gdn: GdnCapabilities,
     pub decode: DecodeCapabilities,
+    pub decode_batcher: DecodeBatcherPolicy,
     pub training: BackendTrainingCapabilities,
     pub graph_replay: ReplayCapabilities,
     pub fallback: BackendFallbackCapabilities,
@@ -971,6 +980,7 @@ impl BackendCapabilities {
                     &linear_sample_batch,
                 ),
             },
+            decode_batcher: DecodeBatcherPolicy::for_backend(name, device),
             training: BackendTrainingCapabilities {
                 hooks: TrainingLossBackend::runtime_training_capabilities(backend),
                 precision: TrainingLossBackend::runtime_training_precision_policy(backend),
@@ -986,6 +996,38 @@ impl BackendCapabilities {
                 ),
             },
             fallback: BackendFallbackCapabilities::for_backend(name, device),
+        }
+    }
+}
+
+impl DecodeBatcherPolicy {
+    pub const DEFAULT_MAX_BATCH: usize = 8;
+    pub const VULKAN_MAX_BATCH: usize = 64;
+    pub const METAL_WAIT_MICROS: u64 = 100;
+    pub const VULKAN_WAIT_MICROS: u64 = 5_000;
+
+    pub fn for_backend(name: &str, device: kiln_tensor::Device) -> Self {
+        match backend_kind_for_runtime(name, device) {
+            kiln_tensor::Backend::Cuda => Self {
+                max_batch: 1,
+                wait_micros: 0,
+                allow_mixed_seq_lens: false,
+            },
+            kiln_tensor::Backend::Metal => Self {
+                max_batch: Self::DEFAULT_MAX_BATCH,
+                wait_micros: Self::METAL_WAIT_MICROS,
+                allow_mixed_seq_lens: true,
+            },
+            kiln_tensor::Backend::Vulkan => Self {
+                max_batch: Self::VULKAN_MAX_BATCH,
+                wait_micros: Self::VULKAN_WAIT_MICROS,
+                allow_mixed_seq_lens: true,
+            },
+            _ => Self {
+                max_batch: Self::DEFAULT_MAX_BATCH,
+                wait_micros: 0,
+                allow_mixed_seq_lens: false,
+            },
         }
     }
 }

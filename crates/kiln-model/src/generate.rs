@@ -19,7 +19,8 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 
 use crate::backend::{
-    self, BackendRuntime, FallbackPolicy, TrainingLossBackend, capability::BackendCapabilityQueries,
+    self, BackendRuntime, FallbackPolicy, TrainingLossBackend,
+    capability::{BackendCapabilityQueries, DecodeBatcherPolicy},
 };
 use crate::cancel::CancelHandle;
 use crate::cuda_graph::CudaGraphRunner;
@@ -510,9 +511,6 @@ fn env_positive_usize(name: &str) -> Option<usize> {
         .filter(|&value| value > 0)
 }
 
-const DEFAULT_DECODE_BUFFER_MAX_BATCH: usize = 8;
-const VULKAN_DECODE_BUFFER_MAX_BATCH: usize = 64;
-
 fn decode_buffer_max_batch(backend_name: &str) -> usize {
     let explicit = env_positive_usize("KILN_DECODE_BUFFER_MAX_BATCH");
     if let Some(value) = explicit {
@@ -524,11 +522,8 @@ fn decode_buffer_max_batch(backend_name: &str) -> usize {
     // because its resident path keeps scaling past b16 on this target.
     let actor_max = env_positive_usize("KILN_MAX_DECODE_BATCH").unwrap_or(0);
     let live_batcher_max = env_positive_usize("KILN_DECODE_BATCH_MAX").unwrap_or(0);
-    let backend_default = if backend_name == "vulkan" {
-        VULKAN_DECODE_BUFFER_MAX_BATCH
-    } else {
-        DEFAULT_DECODE_BUFFER_MAX_BATCH
-    };
+    let backend_default =
+        DecodeBatcherPolicy::for_backend(backend_name, kiln_tensor::Device::Cpu).max_batch;
     actor_max.max(live_batcher_max).max(backend_default)
 }
 
@@ -677,16 +672,16 @@ impl DecodeBatcherConfig {
     /// defaults derived from the kt `Device`.
     pub fn from_env_for_backend_kt(device: &kiln_tensor::Device, backend_name: &str) -> Self {
         let mut config = Self::from_env();
+        let policy = DecodeBatcherPolicy::for_backend(backend_name, *device);
         if env_positive_usize("KILN_DECODE_BATCH_MAX").is_none() {
-            config.max_batch = env_positive_usize("KILN_MAX_DECODE_BATCH")
-                .unwrap_or_else(|| default_decode_batcher_max_batch_kt(device, backend_name));
+            config.max_batch =
+                env_positive_usize("KILN_MAX_DECODE_BATCH").unwrap_or(policy.max_batch);
         }
         if std::env::var_os("KILN_DECODE_BATCH_WAIT_US").is_none() {
-            config.wait = default_decode_batcher_wait_kt(device, backend_name);
+            config.wait = std::time::Duration::from_micros(policy.wait_micros);
         }
         if env_flag_value("KILN_DECODE_BATCH_MIXED_SEQ").is_none() {
-            config.allow_mixed_seq_lens =
-                default_decode_batcher_allow_mixed_seq_lens_kt(device, backend_name);
+            config.allow_mixed_seq_lens = policy.allow_mixed_seq_lens;
         }
         config
     }
@@ -703,38 +698,8 @@ impl DecodeBatcherConfig {
     }
 }
 
-fn default_decode_batcher_max_batch_kt(device: &kiln_tensor::Device, backend_name: &str) -> usize {
-    if matches!(device, kiln_tensor::Device::Cuda(_)) || backend_name == "cuda" {
-        1
-    } else if matches!(device, kiln_tensor::Device::Vulkan(_)) || backend_name == "vulkan" {
-        VULKAN_DECODE_BUFFER_MAX_BATCH
-    } else {
-        DecodeBatcherConfig::default().max_batch
-    }
-}
-
-fn default_decode_batcher_allow_mixed_seq_lens_kt(
-    device: &kiln_tensor::Device,
-    backend_name: &str,
-) -> bool {
-    matches!(device, kiln_tensor::Device::Metal(_)) || backend_name == "vulkan"
-}
-
-fn default_decode_batcher_wait_kt(
-    device: &kiln_tensor::Device,
-    backend_name: &str,
-) -> std::time::Duration {
-    if matches!(device, kiln_tensor::Device::Metal(_)) || backend_name == "metal" {
-        std::time::Duration::from_micros(100)
-    } else if backend_name == "vulkan" {
-        std::time::Duration::from_micros(5_000)
-    } else {
-        std::time::Duration::ZERO
-    }
-}
-
-// (#1082) candle-typed `default_decode_batcher_*` helpers deleted — the kt
-// twins above (`*_kt`) are the sole implementations now.
+// (#1082) candle-typed `default_decode_batcher_*` helpers deleted. Backend
+// defaults now come from `DecodeBatcherPolicy`; env overrides stay here.
 
 fn env_flag_value(name: &str) -> Option<bool> {
     let value = std::env::var(name).ok()?;
@@ -8492,30 +8457,30 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_batcher_default_mixed_seq_lens_backend_policy() {
-        // (#1082) kt Device; candle-typed helper deleted.
-        let device = kiln_tensor::Device::Cpu;
-
-        assert!(!default_decode_batcher_allow_mixed_seq_lens_kt(
-            &device, "cpu"
-        ));
-        assert!(!default_decode_batcher_allow_mixed_seq_lens_kt(
-            &device, "cuda"
-        ));
-        assert!(default_decode_batcher_allow_mixed_seq_lens_kt(
-            &device, "vulkan"
-        ));
-    }
-
-    #[test]
-    fn test_decode_batcher_default_max_batch_backend_policy() {
-        // (#1082) kt Device; candle-typed helper deleted.
-        let device = kiln_tensor::Device::Cpu;
-
-        assert_eq!(default_decode_batcher_max_batch_kt(&device, "cpu"), 8);
-        assert_eq!(default_decode_batcher_max_batch_kt(&device, "cuda"), 1);
-        assert_eq!(default_decode_batcher_max_batch_kt(&device, "vulkan"), 64);
-        assert_eq!(default_decode_batcher_max_batch_kt(&device, "metal"), 8);
+    fn test_decode_batcher_default_backend_policy() {
+        for (backend_name, device, max_batch, wait_micros, allow_mixed_seq_lens) in [
+            ("cpu", kiln_tensor::Device::Cpu, 8, 0, false),
+            ("cuda", kiln_tensor::Device::Cpu, 1, 0, false),
+            ("cuda", kiln_tensor::Device::Cuda(0), 1, 0, false),
+            ("metal", kiln_tensor::Device::Metal(0), 8, 100, true),
+            ("vulkan", kiln_tensor::Device::Cpu, 64, 5_000, true),
+            ("vulkan", kiln_tensor::Device::Vulkan(0), 64, 5_000, true),
+            ("rocm", kiln_tensor::Device::Rocm(0), 8, 0, false),
+        ] {
+            let policy = DecodeBatcherPolicy::for_backend(backend_name, device);
+            assert_eq!(
+                policy.max_batch, max_batch,
+                "{backend_name} max batch policy drifted"
+            );
+            assert_eq!(
+                policy.wait_micros, wait_micros,
+                "{backend_name} wait policy drifted"
+            );
+            assert_eq!(
+                policy.allow_mixed_seq_lens, allow_mixed_seq_lens,
+                "{backend_name} mixed-seq policy drifted"
+            );
+        }
     }
 
     #[test]
@@ -8557,29 +8522,6 @@ mod tests {
             Some(v) => unsafe { std::env::set_var("KILN_MAX_DECODE_BATCH", v) },
             None => unsafe { std::env::remove_var("KILN_MAX_DECODE_BATCH") },
         }
-    }
-
-    #[test]
-    fn test_decode_batcher_default_wait_backend_policy() {
-        // (#1082) kt Device; candle-typed helper deleted.
-        let device = kiln_tensor::Device::Cpu;
-
-        assert_eq!(
-            default_decode_batcher_wait_kt(&device, "cpu"),
-            std::time::Duration::ZERO
-        );
-        assert_eq!(
-            default_decode_batcher_wait_kt(&device, "cuda"),
-            std::time::Duration::ZERO
-        );
-        assert_eq!(
-            default_decode_batcher_wait_kt(&device, "vulkan"),
-            std::time::Duration::from_micros(5_000)
-        );
-        assert_eq!(
-            default_decode_batcher_wait_kt(&device, "metal"),
-            std::time::Duration::from_micros(100)
-        );
     }
 
     #[test]

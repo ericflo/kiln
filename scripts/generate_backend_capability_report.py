@@ -84,6 +84,7 @@ CAPABILITY_DESCRIPTOR_STRUCTS = [
     "AttentionCapabilities",
     "GdnCapabilities",
     "DecodeCapabilities",
+    "DecodeBatcherPolicy",
     "BackendTrainingCapabilities",
     "ReplayCapabilities",
     "BackendFallbackCapabilities",

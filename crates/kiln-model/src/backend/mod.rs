@@ -3466,6 +3466,9 @@ mod tests {
         );
         assert_eq!(caps.gdn.recurrent_step, capability::Support::Declined);
         assert_eq!(caps.decode.linear_argmax, capability::Support::Declined);
+        assert_eq!(caps.decode_batcher.max_batch, 8);
+        assert_eq!(caps.decode_batcher.wait_micros, 0);
+        assert!(!caps.decode_batcher.allow_mixed_seq_lens);
         assert_eq!(
             caps.training.precision,
             TrainingPrecisionPolicy::portable()
@@ -3495,6 +3498,9 @@ mod tests {
             capability::BackendCapabilityQueries::backend_capabilities(&vulkan_probe);
         assert_eq!(vulkan_caps.device, kiln_tensor::Device::Cpu);
         assert_eq!(vulkan_caps.storage.backend, kiln_tensor::Backend::Vulkan);
+        assert_eq!(vulkan_caps.decode_batcher.max_batch, 64);
+        assert_eq!(vulkan_caps.decode_batcher.wait_micros, 5_000);
+        assert!(vulkan_caps.decode_batcher.allow_mixed_seq_lens);
         assert_eq!(
             vulkan_caps.fallback.decode_hot_path,
             FallbackPolicy::NativeRequired

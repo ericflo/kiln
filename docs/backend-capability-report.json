@@ -1486,7 +1486,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "BackendCapabilities": {
-      "field_count": 10,
+      "field_count": 11,
       "fields": [
         {
           "name": "backend",
@@ -1515,6 +1515,10 @@
         {
           "name": "decode",
           "type": "DecodeCapabilities"
+        },
+        {
+          "name": "decode_batcher",
+          "type": "DecodeBatcherPolicy"
         },
         {
           "name": "training",
@@ -1559,6 +1563,24 @@
         {
           "name": "precision",
           "type": "TrainingPrecisionPolicy"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "DecodeBatcherPolicy": {
+      "field_count": 3,
+      "fields": [
+        {
+          "name": "max_batch",
+          "type": "usize"
+        },
+        {
+          "name": "wait_micros",
+          "type": "u64"
+        },
+        {
+          "name": "allow_mixed_seq_lens",
+          "type": "bool"
         }
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"
