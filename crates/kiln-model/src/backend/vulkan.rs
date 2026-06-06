@@ -28,8 +28,10 @@ use super::vulkan_tensor_bridge::{
     kt_tensor_to_packed_bf16_bytes_with_shape, resident_sdpa_prefill_b1,
     upload_gdn_chunkwise_inputs_from_cpu_bytes_vk, vk_f32_tensors_to_cpu_tensors_batched_vk,
 };
-use super::{vulkan_training, BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy};
-use crate::forward::{GpuAttentionWeights, GpuWeights};
+use super::{
+    vulkan_training, vulkan_weights, BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy,
+};
+use crate::forward::GpuWeights;
 
 pub use super::vulkan_training::{dispatch_adamw_step_buffers, dispatch_sgd_step_buffers};
 
@@ -66,11 +68,11 @@ pub struct VulkanBackend {
     mlp_decode_enabled: bool,
     mlp_gate_up_enabled: bool,
     mlp_bf16_gate_up_f32_down_enabled: bool,
-    bf16_packed_linear_weights_enabled: bool,
-    bf16_packed_gdn_in_proj_weights_enabled: bool,
-    bf16_packed_full_attn_qkv_weights_enabled: bool,
-    bf16_packed_mlp_decode_weights_enabled: bool,
-    weight_prewarm_enabled: bool,
+    pub(super) bf16_packed_linear_weights_enabled: bool,
+    pub(super) bf16_packed_gdn_in_proj_weights_enabled: bool,
+    pub(super) bf16_packed_full_attn_qkv_weights_enabled: bool,
+    pub(super) bf16_packed_mlp_decode_weights_enabled: bool,
+    pub(super) weight_prewarm_enabled: bool,
     recurrent_state_residency_enabled: bool,
     /// Cached `supports_resident_decode()` evaluation. The trait method
     /// is called per-call on the hot path; reading env vars and checking
@@ -87,15 +89,13 @@ pub struct VulkanBackend {
     /// feasibility check (Strix Halo near the 16 GiB UMA limit) caches
     /// the `None` and routes every subsequent call to the per-call
     /// kt `kiln_tensor::Tensor` path without re-checking.
-    decode_resident_pool:
-        OnceLock<Option<Arc<kiln_vulkan_kernel::DecodeResidentPool>>>,
+    decode_resident_pool: OnceLock<Option<Arc<kiln_vulkan_kernel::DecodeResidentPool>>>,
     /// Lazily constructed Vulkan-resident paged KV cache. Mirrors the
     /// legacy `PagedKvCache` layout in device-local f32 buffers so the
     /// resident decode dispatchers can read/write K/V without crossing
     /// the host boundary. The first resident decode call that needs the
     /// cache constructs it for the active model geometry.
-    vk_paged_kv_cache:
-        OnceLock<Option<Arc<kiln_vulkan_kernel::VkPagedKvCache>>>,
+    vk_paged_kv_cache: OnceLock<Option<Arc<kiln_vulkan_kernel::VkPagedKvCache>>>,
     /// Set of full-attention layer indices whose K/V state has already
     /// been seeded into the Vulkan-resident paged cache from the legacy
     /// candle pool. Each full-attention layer is seeded once at the
@@ -144,8 +144,9 @@ pub struct VulkanBackend {
     ///
     /// This field must drop before `vulkan_device`: `VulkanBuffer` owns raw
     /// memory that must be freed before the logical Vulkan device is destroyed.
-    weight_cache_kt: Mutex<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
-    bf16_packed_weight_cache_kt:
+    pub(super) weight_cache_kt:
+        Mutex<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
+    pub(super) bf16_packed_weight_cache_kt:
         Mutex<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
     /// Vulkan device (owned, not from candle-core).
     ///
@@ -171,9 +172,7 @@ fn fused_gdn_resident_state_enabled() -> bool {
 /// helper error for parity comparisons.
 fn paged_decode_gpu_gather_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_DISABLE_VULKAN_PAGED_DECODE_GPU_GATHER").is_err()
-    })
+    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_PAGED_DECODE_GPU_GATHER").is_err())
 }
 
 fn generic_paged_decode_splitk_chunks(batch: usize, max_blocks_per_seq: usize) -> usize {
@@ -676,9 +675,7 @@ impl VulkanBackend {
 
     fn assemble_linear_attn_state_batch_kt(
         &self,
-        state_map: &Mutex<
-            HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>,
-        >,
+        state_map: &Mutex<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
         row_keys: &[kiln_tensor::TensorId],
         batch_key: kiln_tensor::TensorId,
         label: &'static str,
@@ -714,9 +711,7 @@ impl VulkanBackend {
 
     fn scatter_linear_attn_state_batch_kt(
         &self,
-        state_map: &Mutex<
-            HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>,
-        >,
+        state_map: &Mutex<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
         batch_key: kiln_tensor::TensorId,
         row_keys: &[kiln_tensor::TensorId],
         label: &'static str,
@@ -858,11 +853,7 @@ impl VulkanBackend {
         let conv_bytes = (conv_t.elem_count() * std::mem::size_of::<f32>()) as u64;
         let recurrent_buf = self.linear_attn_recurrent_state_buffer_kt(key, recurrent_bytes)?;
         let conv_buf = self.linear_attn_conv_state_buffer_kt(key, conv_bytes)?;
-        crate::vk_decode_resident::seed_recurrent_state_kt(
-            vk_device,
-            &recurrent_buf,
-            recurrent_t,
-        )?;
+        crate::vk_decode_resident::seed_recurrent_state_kt(vk_device, &recurrent_buf, recurrent_t)?;
         crate::vk_decode_resident::seed_conv_state_kt(vk_device, &conv_buf, conv_t)?;
         self.mark_linear_attn_layer_seeded_kt(key);
         Ok(true)
@@ -957,266 +948,28 @@ impl VulkanBackend {
         Ok(arc)
     }
 
-    /// kt-native f32 weight buffer cache: keys the buffer
-    /// cache on the **kt** `TensorId` (stable for the model's lifetime) and
-    /// extracts f32 bytes straight from kt storage on a miss — no candle
-    /// bridge, so a cache hit (every token after the first) does zero copy
-    /// work. (#1082)
+    /// kt-native f32 weight buffer cache: keys the buffer cache on the kt
+    /// `TensorId` and uploads on cache miss.
     pub fn cached_f32_weight_buffer_kt(
         &self,
         weight: &kiln_tensor::Tensor,
     ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
-        let vk_device = self
-            .vulkan_device
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let key = weight.id();
-        {
-            let cache = self
-                .weight_cache_kt
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Vulkan kt weight cache mutex poisoned"))?;
-            if let Some(buffer) = cache.get(&key) {
-                return Ok(Arc::clone(buffer));
-            }
-        }
-        let weight_f32_data: Vec<f32> = weight
-            .flatten_all()
-            .context("kt weight flatten_all")?
-            .to_dtype(kiln_tensor::DType::F32)
-            .context("kt weight to f32")?
-            .to_vec1::<f32>()
-            .context("kt weight to_vec1 f32")?;
-        let buffer = Arc::new(
-            kiln_vulkan_kernel::kernels::upload_f32_buffer_from_slice(vk_device, &weight_f32_data)
-                .context("upload kt f32 weight to Vulkan")?,
-        );
-        let mut cache = self
-            .weight_cache_kt
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Vulkan kt weight cache mutex poisoned"))?;
-        Ok(Arc::clone(cache.entry(key).or_insert(buffer)))
+        vulkan_weights::cached_f32_weight_buffer_kt(self, weight)
     }
 
-    /// kt-native bf16-packed weight buffer cache. Stable-kt-id keying;
-    /// extracts bf16 straight from kt storage on a miss. (#1082)
+    /// kt-native bf16-packed weight buffer cache keyed on the kt `TensorId`.
     pub fn cached_bf16_packed_weight_buffer_kt(
         &self,
         weight: &kiln_tensor::Tensor,
     ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
-        let vk_device = self
-            .vulkan_device
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let key = weight.id();
-        {
-            let cache = self
-                .bf16_packed_weight_cache_kt
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Vulkan kt packed bf16 weight cache mutex poisoned"))?;
-            if let Some(buffer) = cache.get(&key) {
-                return Ok(Arc::clone(buffer));
-            }
-        }
-        anyhow::ensure!(
-            weight.dtype() == kiln_tensor::DType::BF16,
-            "packed bf16 upload requires BF16 kt tensor, got {:?}",
-            weight.dtype()
-        );
-        let weight_bf16_data: Vec<half::bf16> = weight
-            .flatten_all()
-            .context("kt bf16 weight flatten_all")?
-            .to_vec1::<half::bf16>()
-            .context("kt bf16 weight to_vec1")?;
-        let buffer = Arc::new(
-            kiln_vulkan_kernel::kernels::upload_bf16_packed_buffer_from_slice(
-                vk_device,
-                &weight_bf16_data,
-            )
-            .context("upload kt packed BF16 weight to Vulkan")?,
-        );
-        let mut cache = self
-            .bf16_packed_weight_cache_kt
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Vulkan kt packed bf16 weight cache mutex poisoned"))?;
-        Ok(Arc::clone(cache.entry(key).or_insert(buffer)))
+        vulkan_weights::cached_bf16_packed_weight_buffer_kt(self, weight)
     }
 
     /// kt-native: whether to use the bf16-packed linear-weight decode path.
     fn use_bf16_packed_linear_weight_kt(&self, weight: &kiln_tensor::Tensor) -> bool {
-        self.bf16_packed_linear_weights_enabled && weight.dtype() == kiln_tensor::DType::BF16
+        vulkan_weights::use_bf16_packed_linear_weight_kt(self, weight)
     }
 
-    fn use_bf16_packed_gdn_in_proj_weights_kt(&self, weights: &[&kiln_tensor::Tensor]) -> bool {
-        self.bf16_packed_gdn_in_proj_weights_enabled
-            && weights
-                .iter()
-                .all(|weight| weight.dtype() == kiln_tensor::DType::BF16)
-    }
-
-    fn use_bf16_packed_full_attn_qkv_weights_kt(
-        &self,
-        weights: &[&kiln_tensor::Tensor],
-    ) -> bool {
-        self.bf16_packed_full_attn_qkv_weights_enabled
-            && weights
-                .iter()
-                .all(|weight| weight.dtype() == kiln_tensor::DType::BF16)
-    }
-
-    fn use_bf16_packed_mlp_decode_weights_kt(&self, weights: &[&kiln_tensor::Tensor]) -> bool {
-        self.bf16_packed_mlp_decode_weights_enabled
-            && weights
-                .iter()
-                .all(|weight| weight.dtype() == kiln_tensor::DType::BF16)
-    }
-
-    fn prewarm_f32_weight_kt(
-        &self,
-        name: &str,
-        weight: &kiln_tensor::Tensor,
-        count: &mut usize,
-        bytes: &mut usize,
-    ) -> Result<()> {
-        self.cached_f32_weight_buffer_kt(weight)
-            .with_context(|| format!("prewarm Vulkan decode weight {name}"))?;
-        *count += 1;
-        *bytes += weight.elem_count() * std::mem::size_of::<f32>();
-        Ok(())
-    }
-
-    fn prewarm_bf16_packed_weight_kt(
-        &self,
-        name: &str,
-        weight: &kiln_tensor::Tensor,
-        count: &mut usize,
-        bytes: &mut usize,
-    ) -> Result<()> {
-        self.cached_bf16_packed_weight_buffer_kt(weight)
-            .with_context(|| format!("prewarm Vulkan packed BF16 decode weight {name}"))?;
-        *count += 1;
-        *bytes += weight.elem_count().div_ceil(2) * std::mem::size_of::<u32>();
-        Ok(())
-    }
-
-    fn prewarm_linear_weight_kt(
-        &self,
-        name: &str,
-        weight: &kiln_tensor::Tensor,
-        f32_count: &mut usize,
-        f32_bytes: &mut usize,
-        bf16_count: &mut usize,
-        bf16_bytes: &mut usize,
-    ) -> Result<()> {
-        if self.use_bf16_packed_linear_weight_kt(weight) {
-            self.prewarm_bf16_packed_weight_kt(name, weight, bf16_count, bf16_bytes)
-        } else {
-            self.prewarm_f32_weight_kt(name, weight, f32_count, f32_bytes)
-        }
-    }
-
-    fn prewarm_gdn_in_proj_weight_kt(
-        &self,
-        name: &str,
-        weight: &kiln_tensor::Tensor,
-        f32_count: &mut usize,
-        f32_bytes: &mut usize,
-        bf16_count: &mut usize,
-        bf16_bytes: &mut usize,
-    ) -> Result<()> {
-        if self.use_bf16_packed_gdn_in_proj_weights_kt(&[weight]) {
-            self.prewarm_bf16_packed_weight_kt(name, weight, bf16_count, bf16_bytes)
-        } else {
-            self.prewarm_f32_weight_kt(name, weight, f32_count, f32_bytes)
-        }
-    }
-
-    fn prewarm_full_attn_qkv_weights_kt(
-        &self,
-        layer_idx: usize,
-        q_weight_t: &kiln_tensor::Tensor,
-        k_weight_t: &kiln_tensor::Tensor,
-        v_weight_t: &kiln_tensor::Tensor,
-        f32_count: &mut usize,
-        f32_bytes: &mut usize,
-        bf16_count: &mut usize,
-        bf16_bytes: &mut usize,
-    ) -> Result<()> {
-        let weights = [
-            ("q_proj_t", q_weight_t),
-            ("k_proj_t", k_weight_t),
-            ("v_proj_t", v_weight_t),
-        ];
-        if self.use_bf16_packed_full_attn_qkv_weights_kt(&[q_weight_t, k_weight_t, v_weight_t]) {
-            for (suffix, weight) in weights {
-                self.prewarm_bf16_packed_weight_kt(
-                    &format!("layers.{layer_idx}.attention.{suffix}"),
-                    weight,
-                    bf16_count,
-                    bf16_bytes,
-                )?;
-            }
-        } else {
-            for (suffix, weight) in weights {
-                self.prewarm_f32_weight_kt(
-                    &format!("layers.{layer_idx}.attention.{suffix}"),
-                    weight,
-                    f32_count,
-                    f32_bytes,
-                )?;
-            }
-        }
-        Ok(())
-    }
-
-    fn prewarm_mlp_decode_weights_kt(
-        &self,
-        layer_idx: usize,
-        gate_weight_t: &kiln_tensor::Tensor,
-        up_weight_t: &kiln_tensor::Tensor,
-        down_weight_t: &kiln_tensor::Tensor,
-        f32_count: &mut usize,
-        f32_bytes: &mut usize,
-        bf16_count: &mut usize,
-        bf16_bytes: &mut usize,
-    ) -> Result<()> {
-        let weights = [
-            ("gate_proj_t", gate_weight_t),
-            ("up_proj_t", up_weight_t),
-            ("down_proj_t", down_weight_t),
-        ];
-        if self.use_bf16_packed_mlp_decode_weights_kt(&[gate_weight_t, up_weight_t, down_weight_t])
-        {
-            for (suffix, weight) in weights {
-                self.prewarm_bf16_packed_weight_kt(
-                    &format!("layers.{layer_idx}.mlp.{suffix}"),
-                    weight,
-                    bf16_count,
-                    bf16_bytes,
-                )?;
-            }
-            for (suffix, weight) in weights {
-                self.prewarm_f32_weight_kt(
-                    &format!("layers.{layer_idx}.mlp.{suffix}"),
-                    weight,
-                    f32_count,
-                    f32_bytes,
-                )?;
-            }
-        } else {
-            for (suffix, weight) in weights {
-                self.prewarm_f32_weight_kt(
-                    &format!("layers.{layer_idx}.mlp.{suffix}"),
-                    weight,
-                    f32_count,
-                    f32_bytes,
-                )?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Dispatch FlashAttention-2 prefill kernel via Vulkan.
     fn flash_attn_prefill_vulkan(
         &self,
         q: &kiln_tensor::Tensor,
@@ -1335,7 +1088,11 @@ impl Drop for VulkanBackend {
 // #1082 DoD-101/102: BackendRuntime decode methods flipped to kt; metal/vulkan impls need matching flip when their builds are restored.
 impl BackendRuntime for VulkanBackend {
     fn name(&self) -> &'static str {
-        if self.has_vulkan() { "vulkan" } else { "cpu" }
+        if self.has_vulkan() {
+            "vulkan"
+        } else {
+            "cpu"
+        }
     }
 
     fn device(&self) -> kiln_tensor::Device {
@@ -1432,7 +1189,10 @@ impl BackendRuntime for VulkanBackend {
         }
     }
 
-    fn materialize_gdn_recurrent_resident_state(&self, state_kt: &mut kiln_tensor::Tensor) -> Result<()> {
+    fn materialize_gdn_recurrent_resident_state(
+        &self,
+        state_kt: &mut kiln_tensor::Tensor,
+    ) -> Result<()> {
         if !self.recurrent_state_residency_enabled {
             return Ok(());
         }
@@ -1459,11 +1219,7 @@ impl BackendRuntime for VulkanBackend {
             &resident_state,
         )
         .context("failed to materialize resident GDN recurrent state")?;
-        *state_kt = kt_tensor_from_f32_bytes(
-            &data,
-            &state_dims,
-            state_dtype,
-        )?;
+        *state_kt = kt_tensor_from_f32_bytes(&data, &state_dims, state_dtype)?;
         Ok(())
     }
 
@@ -1694,7 +1450,12 @@ impl BackendRuntime for VulkanBackend {
         Ok(Some(resolved))
     }
 
-    fn dispatch_sgd_step(&self, param: &kiln_tensor::Tensor, grad: &kiln_tensor::Tensor, lr: f32) -> Result<bool> {
+    fn dispatch_sgd_step(
+        &self,
+        param: &kiln_tensor::Tensor,
+        grad: &kiln_tensor::Tensor,
+        lr: f32,
+    ) -> Result<bool> {
         vulkan_training::dispatch_sgd_step(self, param, grad, lr)
     }
 
@@ -2202,7 +1963,14 @@ impl BackendRuntime for VulkanBackend {
         in_proj_z_t: &kiln_tensor::Tensor,
         in_proj_a_t: &kiln_tensor::Tensor,
         in_proj_b_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+    ) -> Result<
+        Option<(
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+        )>,
+    > {
         // kt guards read directly off the kt args before the bridge.
         if !self.has_vulkan() || !self.gdn_enabled || x.dtype() != kiln_tensor::DType::F32 {
             return Ok(None);
@@ -2399,11 +2167,7 @@ impl BackendRuntime for VulkanBackend {
                     resident_state,
                 )
                 .context("gdn_decode_gates_recurrent_rmsnorm resident-state kernel failed")?;
-            let out = kt_tensor_from_f32_bytes(
-                &out_data,
-                &[batch_d, 1, nv, dv],
-                q_dtype,
-            )?;
+            let out = kt_tensor_from_f32_bytes(&out_data, &[batch_d, 1, nv, dv], q_dtype)?;
             insert_recurrent_state_resident_buffer(state_id, resident_state);
             return Ok(Some(out));
         }
@@ -2430,29 +2194,28 @@ impl BackendRuntime for VulkanBackend {
                 skip_state_readback,
             )
             .context("gdn_decode_gates_recurrent_rmsnorm kernel failed")?;
-        let out = kt_tensor_from_f32_bytes(
-            &out_data,
-            &[batch, 1, nv, dv],
-            q_dtype,
-        )?;
+        let out = kt_tensor_from_f32_bytes(&out_data, &[batch, 1, nv, dv], q_dtype)?;
         if !skip_state_readback {
             if let Some(sd) = new_state_data {
-                *state_kt = kt_tensor_from_f32_bytes(
-                    &sd,
-                    &state_dims,
-                    state_dtype,
-                )?;
+                *state_kt = kt_tensor_from_f32_bytes(&sd, &state_dims, state_dtype)?;
             }
         }
         Ok(Some(out))
     }
 
-    fn linear_decode(&self, x: &kiln_tensor::Tensor, weight_t: &kiln_tensor::Tensor) -> Result<Option<kiln_tensor::Tensor>> {
+    fn linear_decode(
+        &self,
+        x: &kiln_tensor::Tensor,
+        weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         // kt guards read directly off the kt args before the bridge.
-        if !self.has_vulkan() || !self.linear_decode_enabled || x.dtype() != kiln_tensor::DType::F32 {
+        if !self.has_vulkan() || !self.linear_decode_enabled || x.dtype() != kiln_tensor::DType::F32
+        {
             return Ok(None);
         }
-        if !matches!(x.device(), kiln_tensor::Device::Cpu) || !matches!(weight_t.device(), kiln_tensor::Device::Cpu) {
+        if !matches!(x.device(), kiln_tensor::Device::Cpu)
+            || !matches!(weight_t.device(), kiln_tensor::Device::Cpu)
+        {
             return Ok(None);
         }
         // (#1082) Fully kt-native: read shapes off the kt tensors, extract
@@ -2503,7 +2266,11 @@ impl BackendRuntime for VulkanBackend {
         )?))
     }
 
-    fn linear_prefill_apply(&self, _x: &kiln_tensor::Tensor, _weight_t: &kiln_tensor::Tensor) -> Result<Option<kiln_tensor::Tensor>> {
+    fn linear_prefill_apply(
+        &self,
+        _x: &kiln_tensor::Tensor,
+        _weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         // (#1082) Decline. This hook previously routed the training-time
         // projection matmul through `VulkanLinearOp` (a
         // `candle_core::CustomOp1`) so candle's `loss.backward()` could
@@ -2531,7 +2298,9 @@ impl BackendRuntime for VulkanBackend {
         if !self.has_vulkan() || !self.linear_decode_enabled {
             return Ok(None);
         }
-        if !matches!(x.device(), kiln_tensor::Device::Cpu) || !matches!(full_weight_t.device(), kiln_tensor::Device::Cpu) {
+        if !matches!(x.device(), kiln_tensor::Device::Cpu)
+            || !matches!(full_weight_t.device(), kiln_tensor::Device::Cpu)
+        {
             return Ok(None);
         }
         // Only the bf16-packed kernel has an offset variant today; require
@@ -2679,12 +2448,19 @@ impl BackendRuntime for VulkanBackend {
         self.has_vulkan() && self.linear_decode_enabled
     }
 
-    fn linear_decode_argmax(&self, x: &kiln_tensor::Tensor, weight_t: &kiln_tensor::Tensor) -> Result<Option<u32>> {
+    fn linear_decode_argmax(
+        &self,
+        x: &kiln_tensor::Tensor,
+        weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<u32>> {
         // kt guards read directly off the kt args before the bridge.
-        if !self.has_vulkan() || !self.linear_decode_enabled || x.dtype() != kiln_tensor::DType::F32 {
+        if !self.has_vulkan() || !self.linear_decode_enabled || x.dtype() != kiln_tensor::DType::F32
+        {
             return Ok(None);
         }
-        if !matches!(x.device(), kiln_tensor::Device::Cpu) || !matches!(weight_t.device(), kiln_tensor::Device::Cpu) {
+        if !matches!(x.device(), kiln_tensor::Device::Cpu)
+            || !matches!(weight_t.device(), kiln_tensor::Device::Cpu)
+        {
             return Ok(None);
         }
         // (#1082) Fully kt-native: the lm_head weight (the 778 MB table) was
@@ -2763,7 +2539,9 @@ impl BackendRuntime for VulkanBackend {
         if !self.supports_linear_decode_sample(top_k) || x.dtype() != kiln_tensor::DType::F32 {
             return Ok(None);
         }
-        if !matches!(x.device(), kiln_tensor::Device::Cpu) || !matches!(weight_t.device(), kiln_tensor::Device::Cpu) {
+        if !matches!(x.device(), kiln_tensor::Device::Cpu)
+            || !matches!(weight_t.device(), kiln_tensor::Device::Cpu)
+        {
             return Ok(None);
         }
         // (#1082) Fully kt-native: lm_head weight keyed on the stable kt id.
@@ -2915,7 +2693,9 @@ impl BackendRuntime for VulkanBackend {
         {
             return Ok(None);
         }
-        if !matches!(x.device(), kiln_tensor::Device::Cpu) || !matches!(weight_t.device(), kiln_tensor::Device::Cpu) {
+        if !matches!(x.device(), kiln_tensor::Device::Cpu)
+            || !matches!(weight_t.device(), kiln_tensor::Device::Cpu)
+        {
             return Ok(None);
         }
         // (#1082) Fully kt-native: lm_head weight keyed on the stable kt id.
@@ -2963,289 +2743,15 @@ impl BackendRuntime for VulkanBackend {
     }
 
     fn prewarm_decode_weights(&self, weights: &GpuWeights) -> Result<()> {
-        if !self.has_vulkan() || !self.weight_prewarm_enabled {
-            return Ok(());
-        }
-
-        let start = std::time::Instant::now();
-        let mut count = 0usize;
-        let mut bytes = 0usize;
-        let mut bf16_packed_count = 0usize;
-        let mut bf16_packed_bytes = 0usize;
-
-        self.prewarm_linear_weight_kt(
-            "embed_tokens_t",
-            &weights.embed_tokens_t,
-            &mut count,
-            &mut bytes,
-            &mut bf16_packed_count,
-            &mut bf16_packed_bytes,
-        )?;
-
-        for (layer_idx, layer) in weights.layers.iter().enumerate() {
-            match &layer.attention {
-                GpuAttentionWeights::Full(attn) => {
-                    self.prewarm_full_attn_qkv_weights_kt(
-                        layer_idx,
-                        &attn.q_proj_t,
-                        &attn.k_proj_t,
-                        &attn.v_proj_t,
-                        &mut count,
-                        &mut bytes,
-                        &mut bf16_packed_count,
-                        &mut bf16_packed_bytes,
-                    )?;
-                    self.prewarm_linear_weight_kt(
-                        &format!("layers.{layer_idx}.attention.o_proj_t"),
-                        &attn.o_proj_t,
-                        &mut count,
-                        &mut bytes,
-                        &mut bf16_packed_count,
-                        &mut bf16_packed_bytes,
-                    )?;
-                }
-                GpuAttentionWeights::Linear(attn) => {
-                    self.prewarm_gdn_in_proj_weight_kt(
-                        &format!("layers.{layer_idx}.attention.in_proj_qkv_t"),
-                        &attn.in_proj_qkv_t,
-                        &mut count,
-                        &mut bytes,
-                        &mut bf16_packed_count,
-                        &mut bf16_packed_bytes,
-                    )?;
-                    self.prewarm_gdn_in_proj_weight_kt(
-                        &format!("layers.{layer_idx}.attention.in_proj_z_t"),
-                        &attn.in_proj_z_t,
-                        &mut count,
-                        &mut bytes,
-                        &mut bf16_packed_count,
-                        &mut bf16_packed_bytes,
-                    )?;
-                    self.prewarm_gdn_in_proj_weight_kt(
-                        &format!("layers.{layer_idx}.attention.in_proj_a_t"),
-                        &attn.in_proj_a_t,
-                        &mut count,
-                        &mut bytes,
-                        &mut bf16_packed_count,
-                        &mut bf16_packed_bytes,
-                    )?;
-                    self.prewarm_gdn_in_proj_weight_kt(
-                        &format!("layers.{layer_idx}.attention.in_proj_b_t"),
-                        &attn.in_proj_b_t,
-                        &mut count,
-                        &mut bytes,
-                        &mut bf16_packed_count,
-                        &mut bf16_packed_bytes,
-                    )?;
-                    self.prewarm_linear_weight_kt(
-                        &format!("layers.{layer_idx}.attention.out_proj_t"),
-                        &attn.out_proj_t,
-                        &mut count,
-                        &mut bytes,
-                        &mut bf16_packed_count,
-                        &mut bf16_packed_bytes,
-                    )?;
-                }
-            }
-
-            self.prewarm_mlp_decode_weights_kt(
-                layer_idx,
-                &layer.mlp.gate_proj_t,
-                &layer.mlp.up_proj_t,
-                &layer.mlp.down_proj_t,
-                &mut count,
-                &mut bytes,
-                &mut bf16_packed_count,
-                &mut bf16_packed_bytes,
-            )?;
-        }
-
-        tracing::info!(
-            weights = count,
-            f32_cache_mb = bytes / (1024 * 1024),
-            bf16_packed_weights = bf16_packed_count,
-            bf16_packed_cache_mb = bf16_packed_bytes / (1024 * 1024),
-            elapsed_ms = start.elapsed().as_millis() as u64,
-            "Vulkan decode weight cache prewarmed"
-        );
-        Ok(())
+        vulkan_weights::prewarm_decode_weights(self, weights)
     }
 
-    /// Phase 4.x residency: drop the CPU storage of every
-    /// pre-transposed weight cache (`*_proj_t`, `embed_tokens_t`)
-    /// whose BF16-packed bytes are already resident in
-    /// `bf16_packed_weight_cache_kt`. Replace each with a
-    /// 1-element BF16 stub and re-key the cache so subsequent
-    /// lookups against the new kt `TensorId` still find the same
-    /// `Arc<VulkanBuffer>`.
-    ///
-    /// Saves ~6-7 GB peak RSS on Qwen3.5-4B training at T=918 — the
-    /// transposed-cache copies are the dominant remaining
-    /// CPU-side residency item documented in
-    /// `docs/audits/candle_cpu_residency_2026-05-11.md`.
-    ///
-    /// Safe because:
-    /// - The bf16-packed Vulkan code paths read the weight via the
-    ///   `Arc<VulkanBuffer>` looked up in `bf16_packed_weight_cache_kt`.
-    ///   They never re-read the CPU storage of the source tensor
-    ///   after the buffer is cached.
-    /// - `VulkanLinearOp::bwd` for BF16 weights routes through the
-    ///   transposed Vulkan kernel (also buffer-backed). The F32
-    ///   fallback bwd path that *does* read `self.weight_t` cannot
-    ///   fire for BF16 weights.
-    /// - Non-BF16 tensors and tensors not in the cache are skipped.
     fn drop_uploaded_bf16_weights(
         &self,
         weights: &mut crate::forward::GpuWeights,
         device: &kiln_tensor::Device,
     ) -> Result<usize> {
-        if !self.has_vulkan() {
-            return Ok(0);
-        }
-        // Broadcast-base for cheap shape-preserving stubs. Source has
-        // 2 bytes of storage; broadcast_as(target_shape) creates views
-        // with stride [0, 0] sharing the same backing storage. Each per-
-        // weight stub costs ~24 bytes of metadata (Layout + Tensor
-        // struct), not `hidden * out_dim * 2` bytes. The weights are
-        // kt-typed (#1082 forward-flip), and the Vulkan buffer cache is
-        // re-keyed directly from the old kt TensorId to the stub's kt
-        // TensorId.
-        let broadcast_base = kiln_tensor::Tensor::zeros(
-            (1usize, 1usize),
-            kiln_tensor::DType::BF16,
-            kiln_tensor::Device::Cpu,
-        )
-        .context("drop_uploaded_bf16_weights: create broadcast base")?;
-        let _ = device;
-        let mut bf16_cache = self
-            .bf16_packed_weight_cache_kt
-            .lock()
-            .map_err(|_| anyhow::anyhow!("bf16 weight cache mutex poisoned"))?;
-        let mut f32_cache = self
-            .weight_cache_kt
-            .lock()
-            .map_err(|_| anyhow::anyhow!("f32 weight cache mutex poisoned"))?;
-
-        // Per-tensor replacement closure. Returns true if the tensor
-        // was stubbed (was BF16, rank-2, and in the cache).
-        //
-        // - Reads the original `[hidden, out_dim]` shape from `t.dims()`
-        //   *before* replacement.
-        // - Creates a shape-preserving stub by broadcasting the
-        //   2-byte base to that shape (so downstream `weight_t.dims2()`
-        //   reads continue to return the right shape, but the storage
-        //   bytes drop to ~zero).
-        // - Re-keys the packed cache and any F32 shadow cache entry so
-        //   subsequent kt-native lookups by the stub's new TensorId still find
-        //   the original `Arc<VulkanBuffer>`s.
-        fn replace(
-            t: &mut kiln_tensor::Tensor,
-            bf16_cache: &mut std::collections::HashMap<
-                kiln_tensor::TensorId,
-                Arc<kiln_vulkan_kernel::VulkanBuffer>,
-            >,
-            f32_cache: &mut std::collections::HashMap<
-                kiln_tensor::TensorId,
-                Arc<kiln_vulkan_kernel::VulkanBuffer>,
-            >,
-            broadcast_base: &kiln_tensor::Tensor,
-        ) -> bool {
-            if t.dtype() != kiln_tensor::DType::BF16 {
-                return false;
-            }
-            let dims = t.dims();
-            if dims.len() != 2 {
-                return false; // Only rank-2 transposed-cache tensors are stubbable.
-            }
-            let (d0, d1) = (dims[0], dims[1]);
-            let old_id = t.id();
-            let Some(bf16_buf) = bf16_cache.remove(&old_id) else {
-                return false;
-            };
-            let f32_buf = f32_cache.remove(&old_id);
-            let Ok(new_stub) = broadcast_base.broadcast_as((d0, d1)) else {
-                bf16_cache.insert(old_id, bf16_buf); // restore on failure
-                if let Some(buf) = f32_buf {
-                    f32_cache.insert(old_id, buf);
-                }
-                return false;
-            };
-            let new_id = new_stub.id();
-            *t = new_stub;
-            bf16_cache.insert(new_id, bf16_buf);
-            if let Some(buf) = f32_buf {
-                f32_cache.insert(new_id, buf);
-            }
-            true
-        }
-
-        let mut stubbed = 0usize;
-
-        // Intentionally NOT stubbing `weights.embed_tokens_t`:
-        // `embedding_lookup_from_transposed_index` calls
-        // `embed_tokens_t.index_select(idx, 1)` which reads the
-        // tensor's data (not just shape), so a 1-element stub would
-        // make the embedding lookup return garbage. The other `*_proj_t`
-        // caches go through the kt TensorId → Arc<VulkanBuffer> packed cache,
-        // so they only need shape/dtype metadata locally. Embedding savings
-        // (~750 MB) are small
-        // next to the per-layer transposes (~5-6 GB across 32 layers).
-
-        // Per-layer attention + MLP transposes.
-        for layer in weights.layers.iter_mut() {
-            match &mut layer.attention {
-                crate::forward::GpuAttentionWeights::Full(attn) => {
-                    for t in [
-                        &mut attn.q_proj_t,
-                        &mut attn.k_proj_t,
-                        &mut attn.v_proj_t,
-                        &mut attn.o_proj_t,
-                    ] {
-                        if replace(t, &mut bf16_cache, &mut f32_cache, &broadcast_base) {
-                            stubbed += 1;
-                        }
-                    }
-                    if let Some(qkv_t) = attn.qkv_proj_t.as_mut() {
-                        if replace(qkv_t, &mut bf16_cache, &mut f32_cache, &broadcast_base) {
-                            stubbed += 1;
-                        }
-                    }
-                }
-                crate::forward::GpuAttentionWeights::Linear(attn) => {
-                    for t in [
-                        &mut attn.in_proj_qkv_t,
-                        &mut attn.in_proj_z_t,
-                        &mut attn.in_proj_a_t,
-                        &mut attn.in_proj_b_t,
-                        &mut attn.out_proj_t,
-                    ] {
-                        if replace(t, &mut bf16_cache, &mut f32_cache, &broadcast_base) {
-                            stubbed += 1;
-                        }
-                    }
-                    if let Some(ab_t) = attn.in_proj_ab_t.as_mut() {
-                        if replace(ab_t, &mut bf16_cache, &mut f32_cache, &broadcast_base) {
-                            stubbed += 1;
-                        }
-                    }
-                }
-            }
-            for t in [
-                &mut layer.mlp.gate_proj_t,
-                &mut layer.mlp.up_proj_t,
-                &mut layer.mlp.down_proj_t,
-            ] {
-                if replace(t, &mut bf16_cache, &mut f32_cache, &broadcast_base) {
-                    stubbed += 1;
-                }
-            }
-        }
-
-        tracing::info!(
-            stubbed,
-            "dropped CPU storage of pre-transposed bf16 weight caches"
-        );
-        Ok(stubbed)
+        vulkan_weights::drop_uploaded_bf16_weights(self, weights, device)
     }
 
     fn full_attn_qkv_decode(
@@ -3254,9 +2760,16 @@ impl BackendRuntime for VulkanBackend {
         q_weight_t: &kiln_tensor::Tensor,
         k_weight_t: &kiln_tensor::Tensor,
         v_weight_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+    ) -> Result<
+        Option<(
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+        )>,
+    > {
         // kt guards read directly off the kt args before the bridge.
-        if !self.has_vulkan() || !self.full_attn_qkv_enabled || x.dtype() != kiln_tensor::DType::F32 {
+        if !self.has_vulkan() || !self.full_attn_qkv_enabled || x.dtype() != kiln_tensor::DType::F32
+        {
             return Ok(None);
         }
         if !matches!(x.device(), kiln_tensor::Device::Cpu)
@@ -3463,8 +2976,15 @@ impl BackendRuntime for VulkanBackend {
                 let up_buf = self.cached_bf16_packed_weight_buffer_kt(up_weight_t)?;
                 let down_buf = self.cached_f32_weight_buffer_kt(down_weight_t)?;
                 kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_gate_up_f32_down_bytes(
-                    vk_device, &x_data, row_count, &gate_buf, &up_buf, &down_buf, hidden,
-                    intermediate, out_dim,
+                    vk_device,
+                    &x_data,
+                    row_count,
+                    &gate_buf,
+                    &up_buf,
+                    &down_buf,
+                    hidden,
+                    intermediate,
+                    out_dim,
                 )
                 .context("mlp_decode kernel failed")?
             } else if use_bf16_mlp_weights {
@@ -3472,8 +2992,15 @@ impl BackendRuntime for VulkanBackend {
                 let up_buf = self.cached_bf16_packed_weight_buffer_kt(up_weight_t)?;
                 let down_buf = self.cached_bf16_packed_weight_buffer_kt(down_weight_t)?;
                 kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_weights_bytes(
-                    vk_device, &x_data, row_count, &gate_buf, &up_buf, &down_buf, hidden,
-                    intermediate, out_dim,
+                    vk_device,
+                    &x_data,
+                    row_count,
+                    &gate_buf,
+                    &up_buf,
+                    &down_buf,
+                    hidden,
+                    intermediate,
+                    out_dim,
                 )
                 .context("mlp_decode kernel failed")?
             } else {
@@ -3481,8 +3008,15 @@ impl BackendRuntime for VulkanBackend {
                 let up_buf = self.cached_f32_weight_buffer_kt(up_weight_t)?;
                 let down_buf = self.cached_f32_weight_buffer_kt(down_weight_t)?;
                 kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bytes(
-                    vk_device, &x_data, row_count, &gate_buf, &up_buf, &down_buf, hidden,
-                    intermediate, out_dim,
+                    vk_device,
+                    &x_data,
+                    row_count,
+                    &gate_buf,
+                    &up_buf,
+                    &down_buf,
+                    hidden,
+                    intermediate,
+                    out_dim,
                 )
                 .context("mlp_decode kernel failed")?
             };
@@ -3548,7 +3082,10 @@ impl BackendRuntime for VulkanBackend {
         // kt guards read directly off the kt args before the bridge.
         if !self.has_vulkan()
             || !self.gdn_recurrent_unexpanded_qk_enabled
-            || !matches!(q.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F32)
+            || !matches!(
+                q.dtype(),
+                kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
+            )
         {
             return Ok(None);
         }
@@ -3638,11 +3175,7 @@ impl BackendRuntime for VulkanBackend {
                 .context("gdn_recurrent_step native-head resident-state Vulkan kernel failed")?;
             // `out_data` is the un-unsqueezed [batch, heads, dv] layout.
             // Reconstruct the kt tensor and re-unsqueeze to match prior public shape.
-            let out_no_seq = kt_tensor_from_f32_bytes(
-                &out_data,
-                &[batch, heads, dv],
-                q_dtype,
-            )?;
+            let out_no_seq = kt_tensor_from_f32_bytes(&out_data, &[batch, heads, dv], q_dtype)?;
             let out = out_no_seq.unsqueeze(1)?;
             insert_recurrent_state_resident_buffer(state_id, resident_state);
             return Ok(Some(out));
@@ -3676,18 +3209,10 @@ impl BackendRuntime for VulkanBackend {
                 skip_state_readback,
             )
             .context("gdn_recurrent_step native-head Vulkan kernel failed")?;
-        let out = kt_tensor_from_f32_bytes(
-            &out_data,
-            &[batch, heads, dv],
-            q_dtype,
-        )?
-        .unsqueeze(1)?;
+        let out =
+            kt_tensor_from_f32_bytes(&out_data, &[batch, heads, dv], q_dtype)?.unsqueeze(1)?;
         if let Some(sd) = new_state_data {
-            *state_kt = kt_tensor_from_f32_bytes(
-                &sd,
-                &state_dims,
-                state_dtype,
-            )?;
+            *state_kt = kt_tensor_from_f32_bytes(&sd, &state_dims, state_dtype)?;
         }
         Ok(Some(out))
     }
@@ -3706,7 +3231,10 @@ impl BackendRuntime for VulkanBackend {
         // kt guards read directly off the kt args before the bridge.
         if !self.has_vulkan()
             || !self.gdn_recurrent_qk_norm_unexpanded_enabled
-            || !matches!(q.dtype(), kiln_tensor::DType::F32 | kiln_tensor::DType::BF16)
+            || !matches!(
+                q.dtype(),
+                kiln_tensor::DType::F32 | kiln_tensor::DType::BF16
+            )
         {
             return Ok(None);
         }
@@ -3760,18 +3288,10 @@ impl BackendRuntime for VulkanBackend {
                 skip_state_readback,
             )
             .context("gdn_recurrent_qk_norm native-head Vulkan kernel failed")?;
-        let out = kt_tensor_from_f32_bytes(
-            &out_data,
-            &[batch, heads, dv],
-            state_dtype,
-        )?
-        .unsqueeze(1)?;
+        let out =
+            kt_tensor_from_f32_bytes(&out_data, &[batch, heads, dv], state_dtype)?.unsqueeze(1)?;
         if let Some(sd) = new_state_data {
-            *state_kt = kt_tensor_from_f32_bytes(
-                &sd,
-                &state_dims,
-                state_dtype,
-            )?;
+            *state_kt = kt_tensor_from_f32_bytes(&sd, &state_dims, state_dtype)?;
         }
         Ok(Some(out))
     }
@@ -3789,7 +3309,10 @@ impl BackendRuntime for VulkanBackend {
         if !self.has_vulkan() || !self.gdn_enabled {
             return Ok(None);
         }
-        if !matches!(q.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F32) {
+        if !matches!(
+            q.dtype(),
+            kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
+        ) {
             return Ok(None);
         }
         // (#1082) kt-native: all args are already kt; `state_kt` is mutated in
@@ -3820,17 +3343,20 @@ impl BackendRuntime for VulkanBackend {
             let (out_data, resident_state) =
                 kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state_bytes(
                     vk_device,
-                    &q_data, &k_data, &v_data, &beta_data, &g_data,
+                    &q_data,
+                    &k_data,
+                    &v_data,
+                    &beta_data,
+                    &g_data,
                     state_data_owned.as_deref(),
-                    batch, heads, dk, dv,
+                    batch,
+                    heads,
+                    dk,
+                    dv,
                     resident_state,
                 )
                 .context("gdn_recurrent_step resident-state kernel failed")?;
-            let out = kt_tensor_from_f32_bytes(
-                &out_data,
-                &[batch, heads, dv],
-                q_dtype,
-            )?;
+            let out = kt_tensor_from_f32_bytes(&out_data, &[batch, heads, dv], q_dtype)?;
 
             insert_recurrent_state_resident_buffer(state_id, resident_state);
             return Ok(Some(out));
@@ -3865,17 +3391,9 @@ impl BackendRuntime for VulkanBackend {
                 skip_state_readback,
             )
             .context("gdn_recurrent_step kernel failed")?;
-        let out = kt_tensor_from_f32_bytes(
-            &out_data,
-            &[batch, heads, dv],
-            q_dtype,
-        )?;
+        let out = kt_tensor_from_f32_bytes(&out_data, &[batch, heads, dv], q_dtype)?;
         if let Some(sd) = new_state_data {
-            *state_kt = kt_tensor_from_f32_bytes(
-                &sd,
-                &state_dims,
-                state_dtype,
-            )?;
+            *state_kt = kt_tensor_from_f32_bytes(&sd, &state_dims, state_dtype)?;
         }
         Ok(Some(out))
     }
@@ -3924,39 +3442,45 @@ impl BackendRuntime for VulkanBackend {
                             .flatten_all()
                             .map_err(|e| anyhow::anyhow!("gdn_chunkwise_forward: flatten: {e}"))?
                             .to_vec1::<f32>()
-                            .map_err(|e| anyhow::anyhow!("gdn_chunkwise_forward: to_vec1 f32: {e}"))?;
+                            .map_err(|e| {
+                                anyhow::anyhow!("gdn_chunkwise_forward: to_vec1 f32: {e}")
+                            })?;
                         kiln_vulkan_kernel::vk_tensor::VkTensor::from_f32_slice(
                             &data,
                             shape,
                             vk_device.clone(),
                         )
                     };
-                (load(q)?, load(k)?, load(v)?, load(beta)?, load(g)?, load(state_kt)?)
+                (
+                    load(q)?,
+                    load(k)?,
+                    load(v)?,
+                    load(beta)?,
+                    load(g)?,
+                    load(state_kt)?,
+                )
             };
 
-        let out_vk =
-            if std::env::var("KILN_DISABLE_VULKAN_GDN_CHUNKWISE_SINGLE_SUBMIT").is_ok() {
-                if kiln_core::env_flag::env_flag("KILN_VULKAN_GDN_CHUNKWISE_FALLBACK", false) {
-                    tracing::warn!(
-                        "single-submit Vulkan GDN chunkwise prefill disabled; falling back"
-                    );
-                    kiln_vulkan_kernel::vk_ops::gdn_chunkwise::vk_gdn_chunkwise_forward_no_grad(
-                        &q_vk,
-                        &k_vk,
-                        &v_vk,
-                        &beta_vk,
-                        &g_vk,
-                        &mut state_vk,
-                        chunk_size,
-                    )
-                    .context("vk_gdn_chunkwise_forward_no_grad fallback")?
-                } else {
-                    anyhow::bail!(
-                        "single-submit Vulkan GDN chunkwise prefill disabled; fallback disabled"
-                    );
-                }
+        let out_vk = if std::env::var("KILN_DISABLE_VULKAN_GDN_CHUNKWISE_SINGLE_SUBMIT").is_ok() {
+            if kiln_core::env_flag::env_flag("KILN_VULKAN_GDN_CHUNKWISE_FALLBACK", false) {
+                tracing::warn!("single-submit Vulkan GDN chunkwise prefill disabled; falling back");
+                kiln_vulkan_kernel::vk_ops::gdn_chunkwise::vk_gdn_chunkwise_forward_no_grad(
+                    &q_vk,
+                    &k_vk,
+                    &v_vk,
+                    &beta_vk,
+                    &g_vk,
+                    &mut state_vk,
+                    chunk_size,
+                )
+                .context("vk_gdn_chunkwise_forward_no_grad fallback")?
             } else {
-                match kiln_vulkan_kernel::vk_ops::gdn_chunkwise::vk_gdn_chunkwise_forward_no_grad_single_submit(
+                anyhow::bail!(
+                    "single-submit Vulkan GDN chunkwise prefill disabled; fallback disabled"
+                );
+            }
+        } else {
+            match kiln_vulkan_kernel::vk_ops::gdn_chunkwise::vk_gdn_chunkwise_forward_no_grad_single_submit(
                     &q_vk,
                     &k_vk,
                     &v_vk,
@@ -3992,7 +3516,7 @@ impl BackendRuntime for VulkanBackend {
                         }
                     }
                 }
-            };
+        };
 
         // Read back output + the updated state together, then rebuild CPU-host
         // kt tensors without decoding through an intermediate Vec<f32>.
@@ -4026,7 +3550,16 @@ impl BackendRuntime for VulkanBackend {
         qkt: &kiln_tensor::Tensor,
         ks_entry: &kiln_tensor::Tensor,
         q_s: &kiln_tensor::Tensor,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+    ) -> Result<
+        Option<(
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+        )>,
+    > {
         // kt guards read directly off the kt args before the bridge.
         if !self.has_vulkan() || !self.gdn_enabled {
             return Ok(None);
@@ -4052,8 +3585,16 @@ impl BackendRuntime for VulkanBackend {
         let (a_strict_b, b_mask_b, v_prime_b, q_s_scaled_b, decay_last_col_b, p_last_b) =
             kiln_vulkan_kernel::kernels::dispatch_gdn_chunk_prep_bytes(
                 vk_device,
-                &g_data, &v_data, &kkt_data, &qkt_data, &ks_entry_data, &q_s_data,
-                batch, heads, chunk, dv,
+                &g_data,
+                &v_data,
+                &kkt_data,
+                &qkt_data,
+                &ks_entry_data,
+                &q_s_data,
+                batch,
+                heads,
+                chunk,
+                dv,
             )
             .context("gdn_chunk_prep kernel failed")?;
         let cc_shape = [batch, heads, chunk, chunk];
@@ -4099,20 +3640,26 @@ impl BackendRuntime for VulkanBackend {
         let beta_data = kt_tensor_to_f32_bytes_with_shape(beta)?.0;
         let decay_last_col_data = kt_tensor_to_f32_bytes_with_shape(decay_last_col)?.0;
         let v_prime_dims = v_prime.dims();
-        let (batch, heads, chunk, dv) =
-            (v_prime_dims[0], v_prime_dims[1], v_prime_dims[2], v_prime_dims[3]);
-        let (out_data, p_out_data) =
-            kiln_vulkan_kernel::kernels::dispatch_gdn_chunk_scan_bytes(
-                vk_device,
-                &a_strict_data,
-                &b_mask_data,
-                &v_prime_data,
-                &q_s_scaled_data,
-                &beta_data,
-                &decay_last_col_data,
-                batch, heads, chunk, dv,
-            )
-            .context("gdn_chunk_scan kernel failed")?;
+        let (batch, heads, chunk, dv) = (
+            v_prime_dims[0],
+            v_prime_dims[1],
+            v_prime_dims[2],
+            v_prime_dims[3],
+        );
+        let (out_data, p_out_data) = kiln_vulkan_kernel::kernels::dispatch_gdn_chunk_scan_bytes(
+            vk_device,
+            &a_strict_data,
+            &b_mask_data,
+            &v_prime_data,
+            &q_s_scaled_data,
+            &beta_data,
+            &decay_last_col_data,
+            batch,
+            heads,
+            chunk,
+            dv,
+        )
+        .context("gdn_chunk_scan kernel failed")?;
         let out_tensor = kt_tensor_from_f32_bytes(
             &out_data,
             &[batch, heads, chunk, dv],
@@ -4168,9 +3715,21 @@ impl BackendRuntime for VulkanBackend {
         let state_dims = state_kt.dims().to_vec();
         let (out_data, new_state_data) =
             kiln_vulkan_kernel::kernels::dispatch_gdn_full_chunk_forward_bytes(
-                vk_device, &g_data, &v_data, &kkt_data, &qkt_data, &ks_entry_data,
-                &q_s_data, &beta_data, &k_t_data, &state_data,
-                batch, heads, chunk, dk, dv,
+                vk_device,
+                &g_data,
+                &v_data,
+                &kkt_data,
+                &qkt_data,
+                &ks_entry_data,
+                &q_s_data,
+                &beta_data,
+                &k_t_data,
+                &state_data,
+                batch,
+                heads,
+                chunk,
+                dk,
+                dv,
             )
             .context("gdn_full_chunk_forward kernel failed")?;
         let out = kt_tensor_from_f32_bytes(
@@ -4178,11 +3737,8 @@ impl BackendRuntime for VulkanBackend {
             &[batch, heads, chunk, dv],
             kiln_tensor::DType::BF16,
         )?;
-        *state_kt = kt_tensor_from_f32_bytes(
-            &new_state_data,
-            &state_dims,
-            kiln_tensor::DType::BF16,
-        )?;
+        *state_kt =
+            kt_tensor_from_f32_bytes(&new_state_data, &state_dims, kiln_tensor::DType::BF16)?;
         Ok(Some(out))
     }
 
@@ -4197,7 +3753,10 @@ impl BackendRuntime for VulkanBackend {
         if !self.has_vulkan() || !self.gdn_gates_enabled {
             return Ok(None);
         }
-        if !matches!(a.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F32) {
+        if !matches!(
+            a.dtype(),
+            kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
+        ) {
             return Ok(None);
         }
         // (#1082) kt-native: weight buffers keyed on the stable kt id; byte
@@ -4228,10 +3787,8 @@ impl BackendRuntime for VulkanBackend {
             &out_shape,
         )
         .context("gdn_gates kernel failed")?;
-        let beta =
-            kt_tensor_from_f32_bytes(&beta_b, &out_shape, output_dtype)?;
-        let g =
-            kt_tensor_from_f32_bytes(&g_b, &out_shape, output_dtype)?;
+        let beta = kt_tensor_from_f32_bytes(&beta_b, &out_shape, output_dtype)?;
+        let g = kt_tensor_from_f32_bytes(&g_b, &out_shape, output_dtype)?;
         Ok(Some((beta, g)))
     }
 
@@ -4246,7 +3803,10 @@ impl BackendRuntime for VulkanBackend {
         if !self.has_vulkan() || !self.gdn_gated_rms_norm_enabled {
             return Ok(None);
         }
-        if !matches!(x.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F32) {
+        if !matches!(
+            x.dtype(),
+            kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
+        ) {
             return Ok(None);
         }
         // (#1082) kt-native: weight buffer keyed on the stable kt id; byte
@@ -4276,11 +3836,7 @@ impl BackendRuntime for VulkanBackend {
             &out_shape,
         )
         .context("gdn_gated_rms_norm kernel failed")?;
-        let out = kt_tensor_from_f32_bytes(
-            &out_data,
-            &out_shape,
-            output_dtype,
-        )?;
+        let out = kt_tensor_from_f32_bytes(&out_data, &out_shape, output_dtype)?;
         Ok(Some(out))
     }
 
@@ -4295,7 +3851,10 @@ impl BackendRuntime for VulkanBackend {
         if !self.has_vulkan() || !self.fused_conv1d_update_enabled {
             return Ok(None);
         }
-        if !matches!(x.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F32) {
+        if !matches!(
+            x.dtype(),
+            kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
+        ) {
             return Ok(None);
         }
         // (#1082) kt-native: all args are already kt; `conv_state_kt` is
@@ -4329,13 +3888,9 @@ impl BackendRuntime for VulkanBackend {
             )
             .context("causal_conv1d_update kernel failed")?;
         let out_shape: Vec<usize> = dims.to_vec();
-        let out =
-            kt_tensor_from_f32_bytes(&out_data, &out_shape, kiln_tensor::DType::F32)?;
-        *conv_state_kt = kt_tensor_from_f32_bytes(
-            &state_data_out,
-            &conv_state_shape,
-            kiln_tensor::DType::F32,
-        )?;
+        let out = kt_tensor_from_f32_bytes(&out_data, &out_shape, kiln_tensor::DType::F32)?;
+        *conv_state_kt =
+            kt_tensor_from_f32_bytes(&state_data_out, &conv_state_shape, kiln_tensor::DType::F32)?;
         Ok(Some(out))
     }
 
@@ -4350,7 +3905,10 @@ impl BackendRuntime for VulkanBackend {
         if !self.has_vulkan() || !self.fused_conv1d_prefill_enabled {
             return Ok(None);
         }
-        if !matches!(x.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F32) {
+        if !matches!(
+            x.dtype(),
+            kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
+        ) {
             return Ok(None);
         }
         // (#1082) kt-native: all args are already kt; `conv_state_kt` is
@@ -4379,11 +3937,7 @@ impl BackendRuntime for VulkanBackend {
                     kernel_size,
                 )
                 .context("causal_conv1d_prefill cached-weight single-submit kernel failed")?;
-            let out = kt_tensor_from_f32_bytes(
-                &out_data,
-                x_dims,
-                kiln_tensor::DType::F32,
-            )?;
+            let out = kt_tensor_from_f32_bytes(&out_data, x_dims, kiln_tensor::DType::F32)?;
             let new_state = kt_tensor_from_f32_bytes(
                 &new_state_data,
                 &conv_state_dims,
@@ -4410,11 +3964,7 @@ impl BackendRuntime for VulkanBackend {
                         kernel_size,
                     )
                     .context("causal_conv1d_prefill kernel failed")?;
-                let out = kt_tensor_from_f32_bytes(
-                    &out_data,
-                    x_dims,
-                    kiln_tensor::DType::F32,
-                )?;
+                let out = kt_tensor_from_f32_bytes(&out_data, x_dims, kiln_tensor::DType::F32)?;
                 let new_state = kt_tensor_from_f32_bytes(
                     &new_state_data,
                     &conv_state_dims,
