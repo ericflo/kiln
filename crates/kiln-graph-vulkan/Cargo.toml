@@ -1,18 +1,17 @@
 [package]
 name = "kiln-graph-vulkan"
-description = "Vulkan CapturedGraph impl — extends kiln-vulkan-kernel cmd_batch.rs for the Phase 5 capture/replay surface."
+description = "Vulkan CapturedGraph scaffold for the Phase 5 replay vocabulary."
 version.workspace = true
 publish = false
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# Per Phase 5 of #1082, kiln-graph-vulkan extends
-# `kiln_vulkan_kernel::cmd_batch` (the existing secondary command
-# buffer batcher) to implement the `kiln_graph::CapturedGraph` trait.
-# Vulkan's "graph" equivalent is a `VkSecondaryCommandBuffer` recorded
-# once and resubmitted; the Phase 5.x integration plugs into the same
-# `kiln-vulkan-kernel` device/queue plumbing.
+# Per Phase 5 of #1082, kiln-graph-vulkan implements the shared
+# `kiln_graph::CapturedGraph` trait as a scaffold. Production Vulkan replay
+# still lives in `crates/kiln-model/src/vk_decode_resident.rs` and
+# `crates/kiln-vulkan-kernel/src/cmd_batch.rs`, where command batching remains
+# the native replay primitive.
 #
 # Internal-only — no semver commitment.
 

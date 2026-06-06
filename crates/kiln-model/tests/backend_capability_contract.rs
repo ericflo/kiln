@@ -694,6 +694,112 @@ fn cuda_rocm_forward_in_projection_gates_use_rocm_names() {
 }
 
 #[test]
+fn graph_crates_disclose_scaffold_authority_boundary() {
+    let root = workspace_root();
+    let required_by_file: &[(&str, &[&str])] = &[
+        (
+            "crates/kiln-graph/src/lib.rs",
+            &[
+                "shared replay vocabulary",
+                "not the current",
+                "production replay authority",
+                "model-level runners",
+            ],
+        ),
+        (
+            "crates/kiln-graph-cuda/src/lib.rs",
+            &[
+                "scaffold",
+                "production CUDA decode graph",
+                "not yet the authoritative replay layer",
+            ],
+        ),
+        (
+            "crates/kiln-graph-metal/src/lib.rs",
+            &[
+                "scaffold plus a reusable ICB replay object",
+                "production Metal replay orchestration",
+                "not yet",
+                "authoritative replay layer",
+            ],
+        ),
+        (
+            "crates/kiln-graph/Cargo.toml",
+            &[
+                "Backend-agnostic replay vocabulary",
+                "Production decode replay still lives",
+                "model-level",
+            ],
+        ),
+        (
+            "crates/kiln-graph-vulkan/src/lib.rs",
+            &[
+                "scaffold",
+                "production Vulkan replay path",
+                "not yet",
+                "authoritative replay layer",
+            ],
+        ),
+        (
+            "crates/kiln-graph-cuda/Cargo.toml",
+            &[
+                "CUDA CapturedGraph scaffold",
+                "It does not yet wrap",
+                "production CUDA decode",
+                "graph runner still lives",
+            ],
+        ),
+        (
+            "crates/kiln-graph-metal/Cargo.toml",
+            &[
+                "Metal CapturedGraph scaffold",
+                "production Metal replay orchestration still lives",
+                "moves or wraps it",
+            ],
+        ),
+        (
+            "crates/kiln-graph-vulkan/Cargo.toml",
+            &[
+                "Vulkan CapturedGraph scaffold",
+                "Production Vulkan replay",
+                "still lives",
+                "command batching remains",
+            ],
+        ),
+    ];
+
+    for (relative_path, required_phrases) in required_by_file {
+        let source = fs::read_to_string(root.join(relative_path))
+            .unwrap_or_else(|err| panic!("{relative_path} should be readable: {err}"));
+        for required in *required_phrases {
+            assert!(
+                source.contains(required),
+                "{relative_path} should disclose the current graph authority boundary with `{required}`"
+            );
+        }
+    }
+
+    for relative_path in [
+        "crates/kiln-graph-cuda/Cargo.toml",
+        "crates/kiln-graph-metal/Cargo.toml",
+        "crates/kiln-graph-vulkan/Cargo.toml",
+    ] {
+        let source = fs::read_to_string(root.join(relative_path))
+            .unwrap_or_else(|err| panic!("{relative_path} should be readable: {err}"));
+        for stale in [
+            "wraps cudarc CudaGraph + CudaGraphExec for the Phase 5 capture/replay surface",
+            "for the production capture/replay path",
+            "extends kiln-vulkan-kernel cmd_batch.rs for the Phase 5 capture/replay surface",
+        ] {
+            assert!(
+                !source.contains(stale),
+                "{relative_path} should not imply kiln-graph-* is already production replay authority: `{stale}`"
+            );
+        }
+    }
+}
+
+#[test]
 fn cuda_rocm_support_predicates_stay_in_shared_helper() {
     let backend_dir = manifest_dir().join("src/backend");
     let common_path = backend_dir.join("cuda_rocm_common.rs");
