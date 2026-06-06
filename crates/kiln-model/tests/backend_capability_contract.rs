@@ -612,6 +612,56 @@ fn cuda_rocm_kt_bridge_device_checks_stay_in_shared_helper() {
 }
 
 #[test]
+fn cuda_rocm_blaslt_request_conversion_stays_shared() {
+    let tensor_dir = workspace_root().join("crates/kiln-tensor/src");
+    let helper_path = tensor_dir.join("blaslt_request.rs");
+    let helper_source =
+        fs::read_to_string(&helper_path).expect("blaslt_request.rs should be readable");
+    for required in [
+        "BlasLtMatmulRequest",
+        "BlasLtMatmulLayout",
+        "BlasLtEpilogue",
+        "blaslt_dtype_name",
+    ] {
+        assert!(
+            helper_source.contains(required),
+            "blaslt_request.rs should own shared CUDA/ROCm BLASLt request conversion `{required}`"
+        );
+    }
+
+    for (backend_file, concrete_mapper) in [
+        ("cuda_matmul.rs", "cuda_blaslt_request"),
+        ("rocm_matmul.rs", "rocm_blaslt_request"),
+    ] {
+        let path = tensor_dir.join(backend_file);
+        let source = fs::read_to_string(&path).expect("matmul source should be readable");
+        let compact_source = compact_body(&source);
+
+        assert!(
+            compact_source.contains(&format!(
+                "letrequest={concrete_mapper}(BlasLtMatmulRequest::new("
+            )),
+            "{backend_file} should build BLASLt requests through the shared descriptor"
+        );
+        assert!(
+            compact_source.contains("blaslt_dtype_name(dtype,"),
+            "{backend_file} should use the shared BLASLt dtype envelope"
+        );
+        assert!(
+            !source.contains("let request = MatmulRequest {"),
+            "{backend_file} should not keep copied request construction at dispatch sites"
+        );
+        assert!(
+            !source.contains("fn dtype_str(")
+                && !source.contains("DType::F32 => \"f32\"")
+                && !source.contains("DType::BF16 => \"bf16\"")
+                && !source.contains("DType::F16 => \"f16\""),
+            "{backend_file} should not keep copied CUDA/ROCm BLASLt dtype conversion"
+        );
+    }
+}
+
+#[test]
 fn cuda_rocm_support_predicates_stay_in_shared_helper() {
     let backend_dir = manifest_dir().join("src/backend");
     let common_path = backend_dir.join("cuda_rocm_common.rs");

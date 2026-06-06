@@ -22,6 +22,8 @@
 
 mod activation_registry;
 mod allocator;
+#[cfg(any(feature = "cuda", feature = "rocm", test))]
+mod blaslt_request;
 mod cpu_allocator;
 mod determinism;
 mod device;

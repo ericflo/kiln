@@ -40,6 +40,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use cudarc::driver::CudaContext;
 use kiln_blas::{AlgoCache, CublasLtMatmulHandle, Epilogue, MatmulLayout, MatmulRequest};
 
+use crate::blaslt_request::{
+    blaslt_dtype_name, BlasLtEpilogue, BlasLtMatmulLayout, BlasLtMatmulRequest,
+};
 use crate::cuda_storage::CudaStorage;
 use crate::{DType, Layout, Result, Storage, Tensor, TensorId};
 
@@ -179,6 +182,34 @@ pub fn load_algo_cache_from_disk(device_index: usize) -> usize {
     n
 }
 
+fn cuda_blaslt_layout(layout: BlasLtMatmulLayout) -> MatmulLayout {
+    match layout {
+        BlasLtMatmulLayout::RowMajor => MatmulLayout::RowMajor,
+        BlasLtMatmulLayout::ColMajor => MatmulLayout::ColMajor,
+    }
+}
+
+fn cuda_blaslt_epilogue(epilogue: BlasLtEpilogue) -> Epilogue {
+    match epilogue {
+        BlasLtEpilogue::Identity => Epilogue::Identity,
+        BlasLtEpilogue::Bias => Epilogue::Bias,
+    }
+}
+
+fn cuda_blaslt_request(request: BlasLtMatmulRequest) -> MatmulRequest {
+    MatmulRequest {
+        m: request.m,
+        n: request.n,
+        k: request.k,
+        dtype: request.dtype_name().to_string(),
+        a_layout: cuda_blaslt_layout(request.a_layout),
+        b_layout: cuda_blaslt_layout(request.b_layout),
+        c_layout: cuda_blaslt_layout(request.c_layout),
+        epilogue: cuda_blaslt_epilogue(request.epilogue),
+        concurrent_streams: request.concurrent_streams,
+    }
+}
+
 // ----------------------------------------------------------------------
 // Public entry point
 // ----------------------------------------------------------------------
@@ -235,16 +266,7 @@ pub fn cuda_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         )));
     }
     let dtype = a.dtype();
-    let dtype_str = match dtype {
-        DType::F32 => "f32",
-        DType::BF16 => "bf16",
-        DType::F16 => "f16",
-        other => {
-            return Err(crate::Error::Msg(format!(
-                "cuda_matmul: unsupported dtype {other}"
-            )));
-        }
-    };
+    blaslt_dtype_name(dtype, "cuda_matmul")?;
     if !a.is_contiguous() || !b.is_contiguous() {
         return Err(crate::Error::Msg(
             "cuda_matmul: contiguous inputs required (call .contiguous() first)".to_string(),
@@ -261,10 +283,9 @@ pub fn cuda_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         n,
         k_a,
         dtype,
-        dtype_str,
         out_shape,
-        MatmulLayout::RowMajor,
-        MatmulLayout::RowMajor,
+        BlasLtMatmulLayout::RowMajor,
+        BlasLtMatmulLayout::RowMajor,
         "cuda_matmul",
     )
 }
@@ -316,16 +337,7 @@ pub fn cuda_matmul_lhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         )));
     }
     let dtype = a.dtype();
-    let dtype_str = match dtype {
-        DType::F32 => "f32",
-        DType::BF16 => "bf16",
-        DType::F16 => "f16",
-        other => {
-            return Err(crate::Error::Msg(format!(
-                "cuda_matmul_lhs_transposed: unsupported dtype {other}"
-            )));
-        }
-    };
+    blaslt_dtype_name(dtype, "cuda_matmul_lhs_transposed")?;
     if !a.is_contiguous() || !b.is_contiguous() {
         return Err(crate::Error::Msg(
             "cuda_matmul_lhs_transposed: contiguous inputs required".to_string(),
@@ -342,10 +354,9 @@ pub fn cuda_matmul_lhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         n,
         k_a,
         dtype,
-        dtype_str,
         out_shape,
-        MatmulLayout::ColMajor,
-        MatmulLayout::RowMajor,
+        BlasLtMatmulLayout::ColMajor,
+        BlasLtMatmulLayout::RowMajor,
         "cuda_matmul_lhs_transposed",
     )
 }
@@ -394,16 +405,7 @@ pub fn cuda_matmul_rhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         )));
     }
     let dtype = a.dtype();
-    let dtype_str = match dtype {
-        DType::F32 => "f32",
-        DType::BF16 => "bf16",
-        DType::F16 => "f16",
-        other => {
-            return Err(crate::Error::Msg(format!(
-                "cuda_matmul_rhs_transposed: unsupported dtype {other}"
-            )));
-        }
-    };
+    blaslt_dtype_name(dtype, "cuda_matmul_rhs_transposed")?;
     if !a.is_contiguous() || !b.is_contiguous() {
         return Err(crate::Error::Msg(
             "cuda_matmul_rhs_transposed: contiguous inputs required".to_string(),
@@ -420,10 +422,9 @@ pub fn cuda_matmul_rhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         n,
         k_a,
         dtype,
-        dtype_str,
         out_shape,
-        MatmulLayout::RowMajor,
-        MatmulLayout::ColMajor,
+        BlasLtMatmulLayout::RowMajor,
+        BlasLtMatmulLayout::ColMajor,
         "cuda_matmul_rhs_transposed",
     )
 }
@@ -436,10 +437,9 @@ fn cuda_matmul_dispatch(
     n: usize,
     k: usize,
     dtype: DType,
-    dtype_str: &'static str,
     out_shape: Vec<usize>,
-    a_layout: MatmulLayout,
-    b_layout: MatmulLayout,
+    a_layout: BlasLtMatmulLayout,
+    b_layout: BlasLtMatmulLayout,
     caller: &str,
 ) -> Result<Tensor> {
     // ---- resolve CUDA storage + device ----
@@ -512,17 +512,18 @@ fn cuda_matmul_dispatch(
     let a_off_root = (a.layout().start_offset() * bpe) as u64;
     let b_off_root = (b.layout().start_offset() * bpe) as u64;
 
-    let request = MatmulRequest {
-        m: m as u64,
-        n: n as u64,
-        k: k as u64,
-        dtype: dtype_str.to_string(),
+    let request = cuda_blaslt_request(BlasLtMatmulRequest::new(
+        m,
+        n,
+        k,
+        dtype,
         a_layout,
         b_layout,
-        c_layout: MatmulLayout::RowMajor,
-        epilogue: Epilogue::Identity,
-        concurrent_streams: 1,
-    };
+        BlasLtMatmulLayout::RowMajor,
+        BlasLtEpilogue::Identity,
+        1,
+        caller,
+    )?);
 
     for batch_i in 0..batch {
         let a_off = a_off_root + (batch_i as u64) * a_batch_stride;
@@ -608,16 +609,7 @@ pub fn cuda_matmul_into(a: &Tensor, b: &Tensor, dst: &Tensor) -> Result<()> {
         )));
     }
     let dtype = a.dtype();
-    let dtype_str = match dtype {
-        DType::F32 => "f32",
-        DType::BF16 => "bf16",
-        DType::F16 => "f16",
-        other => {
-            return Err(crate::Error::Msg(format!(
-                "cuda_matmul_into: unsupported dtype {other}"
-            )));
-        }
-    };
+    blaslt_dtype_name(dtype, "cuda_matmul_into")?;
     if !a.is_contiguous() || !b.is_contiguous() {
         return Err(crate::Error::Msg(
             "cuda_matmul_into: contiguous inputs required (call .contiguous() first)".to_string(),
@@ -715,17 +707,18 @@ pub fn cuda_matmul_into(a: &Tensor, b: &Tensor, dst: &Tensor) -> Result<()> {
     let b_off_root = (b.layout().start_offset() * bpe) as u64;
     let dst_off_root = (dst.layout().start_offset() * bpe) as u64;
 
-    let request = MatmulRequest {
-        m: m as u64,
-        n: n as u64,
-        k: k_a as u64,
-        dtype: dtype_str.to_string(),
-        a_layout: MatmulLayout::RowMajor,
-        b_layout: MatmulLayout::RowMajor,
-        c_layout: MatmulLayout::RowMajor,
-        epilogue: Epilogue::Identity,
-        concurrent_streams: 1,
-    };
+    let request = cuda_blaslt_request(BlasLtMatmulRequest::new(
+        m,
+        n,
+        k_a,
+        dtype,
+        BlasLtMatmulLayout::RowMajor,
+        BlasLtMatmulLayout::RowMajor,
+        BlasLtMatmulLayout::RowMajor,
+        BlasLtEpilogue::Identity,
+        1,
+        "cuda_matmul_into",
+    )?);
 
     for batch_i in 0..batch {
         let a_off = a_off_root + (batch_i as u64) * a_batch_stride;
@@ -810,16 +803,7 @@ pub fn cuda_matmul_with_bias(a: &Tensor, b: &Tensor, bias: &Tensor) -> Result<Te
             bias.dtype()
         )));
     }
-    let dtype_str = match dtype {
-        DType::F32 => "f32",
-        DType::BF16 => "bf16",
-        DType::F16 => "f16",
-        other => {
-            return Err(crate::Error::Msg(format!(
-                "cuda_matmul_with_bias: unsupported dtype {other}"
-            )));
-        }
-    };
+    blaslt_dtype_name(dtype, "cuda_matmul_with_bias")?;
     if !a.is_contiguous() || !b.is_contiguous() || !bias.is_contiguous() {
         return Err(crate::Error::Msg(
             "cuda_matmul_with_bias: inputs must be contiguous".to_string(),
@@ -905,17 +889,18 @@ pub fn cuda_matmul_with_bias(a: &Tensor, b: &Tensor, bias: &Tensor) -> Result<Te
     let b_off_root = (b.layout().start_offset() * bpe) as u64;
     let bias_off_root = (bias.layout().start_offset() * bpe) as u64;
 
-    let request = MatmulRequest {
-        m: m as u64,
-        n: n as u64,
-        k: k_a as u64,
-        dtype: dtype_str.to_string(),
-        a_layout: MatmulLayout::RowMajor,
-        b_layout: MatmulLayout::RowMajor,
-        c_layout: MatmulLayout::RowMajor,
-        epilogue: Epilogue::Bias,
-        concurrent_streams: 1,
-    };
+    let request = cuda_blaslt_request(BlasLtMatmulRequest::new(
+        m,
+        n,
+        k_a,
+        dtype,
+        BlasLtMatmulLayout::RowMajor,
+        BlasLtMatmulLayout::RowMajor,
+        BlasLtMatmulLayout::RowMajor,
+        BlasLtEpilogue::Bias,
+        1,
+        "cuda_matmul_with_bias",
+    )?);
 
     let b_ptr = (b_base + b_off_root) as *const core::ffi::c_void;
     let bias_ptr = (bias_base + bias_off_root) as *const core::ffi::c_void;
