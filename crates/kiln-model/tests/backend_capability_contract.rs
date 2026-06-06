@@ -299,6 +299,10 @@ fn generated_capability_report_lists_backend_source_modules() {
         metal_sources.contains(&"crates/kiln-model/src/backend/metal_training.rs"),
         "Metal backend source modules should include the extracted training module"
     );
+    assert!(
+        metal_sources.contains(&"crates/kiln-model/src/backend/metal_residency.rs"),
+        "Metal backend source modules should include the extracted residency module"
+    );
 }
 
 #[test]

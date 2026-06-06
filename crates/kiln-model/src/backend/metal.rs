@@ -9,7 +9,9 @@
 
 use anyhow::{Context, Result};
 
-use super::{metal_training, BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy};
+use super::{
+    metal_residency, metal_training, BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy,
+};
 
 // Phase 7 #1082: module-level imports for the kt-metal chokepoint types,
 // hoisted from ~92 per-function `use` statements so that the chokepoint
@@ -851,40 +853,6 @@ pub fn precompile_custom_kernels(device: &kiln_tensor::Device) -> Result<()> {
     Ok(())
 }
 
-/// Resident-activation registry for the Metal backend (#1082), the Metal
-/// analog of Vulkan's `RESIDENT_ACTIVATION_REGISTRY`. Process-global so worker
-/// threads (rayon, etc.) see the same set the registering thread wrote.
-///
-/// Unlike Vulkan — which uploads tensor bytes to a *fresh* device-local
-/// `VulkanBuffer` and keys the registry on `TensorId → VulkanBuffer` — Metal
-/// tensors already carry their GPU buffer (`MetalStorage` in UMA
-/// `StorageModeShared`). There is nothing to upload, so the registry only
-/// tracks *membership*: which kt `TensorId`s are registered for the on-device
-/// optimizer path. `dispatch_adamw_step` reads each operand's `MetalBuffer`
-/// straight off the kt tensor passed in. This keeps the same Ok(true)/Ok(false)
-/// dispatch contract and the same register/has/update/evict/resolve semantics
-/// as Vulkan, without the byte round-trips.
-static METAL_RESIDENT_ACTIVATION_REGISTRY: OnceLock<
-    Mutex<std::collections::HashSet<kiln_tensor::TensorId>>,
-> = OnceLock::new();
-
-fn metal_resident_registry() -> &'static Mutex<std::collections::HashSet<kiln_tensor::TensorId>> {
-    METAL_RESIDENT_ACTIVATION_REGISTRY.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
-}
-
-/// Short, self-recovering accessor over the registry mutex (poison recovery
-/// returns the inner data so a panicking caller can't wedge the registry).
-/// Mirrors Vulkan's `with_resident_registry`.
-fn with_metal_resident_registry<F, R>(f: F) -> R
-where
-    F: FnOnce(&mut std::collections::HashSet<kiln_tensor::TensorId>) -> R,
-{
-    let mut guard = metal_resident_registry()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    f(&mut guard)
-}
-
 // #1082 DoD-101/102: BackendRuntime decode methods flipped to kt; metal/vulkan impls need matching flip when their builds are restored.
 impl BackendRuntime for MetalBackend {
     fn name(&self) -> &'static str {
@@ -912,51 +880,23 @@ impl BackendRuntime for MetalBackend {
     // ------------------------------------------------------------------
 
     fn supports_resident_activation(&self) -> bool {
-        // Metal implements all the residency hooks against
-        // METAL_RESIDENT_ACTIVATION_REGISTRY. Mirrors Vulkan's "true even
-        // when conditions short-circuit a register to Ok(())" capability
-        // semantics.
         true
     }
 
     fn register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
-        // Metal tensors already carry their GPU buffer; registration only
-        // records membership. Decline (silently, like Vulkan's empty-buffer
-        // bail) any tensor that isn't Metal-backed — `has_resident_activation`
-        // then returns false and the caller falls through to its host path.
-        if kt_metal(tensor).is_err() {
-            return Ok(());
-        }
-        // Mirror Vulkan: a zero-element tensor has no use as a registry entry.
-        if tensor.element_count() == 0 {
-            return Ok(());
-        }
-        let id = tensor.id();
-        with_metal_resident_registry(|set| {
-            set.insert(id);
-        });
-        Ok(())
+        metal_residency::register_resident_activation(tensor)
     }
 
     fn has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
-        let id = tensor.id();
-        with_metal_resident_registry(|set| set.contains(&id))
+        metal_residency::has_resident_activation(tensor)
     }
 
     fn update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
-        // No-op when registered: the registry holds no separate copy, so the
-        // tensor's own UMA buffer (which the AdamW kernel mutated in place) is
-        // already the source of truth. Matches Vulkan's "no-op when not
-        // registered" contract; here it's a no-op either way.
-        let _ = tensor;
-        Ok(())
+        metal_residency::update_resident_activation(tensor)
     }
 
     fn evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
-        let id = tensor.id();
-        with_metal_resident_registry(|set| {
-            set.remove(&id);
-        });
+        metal_residency::evict_resident_activation(tensor);
     }
 
     fn resolve_resident_activation(
@@ -965,31 +905,7 @@ impl BackendRuntime for MetalBackend {
         shape: &[usize],
         dtype: kiln_tensor::DType,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        // Inverse of register: when the tensor is resident, its current value
-        // IS its UMA buffer (the AdamW kernel updated it in place). Deep-copy
-        // the live buffer to a fresh tensor (the copy waits for outstanding GPU
-        // work first, so it reflects the latest step). Return None when not
-        // registered — matching Vulkan so `sync_to_master` skips it.
-        let id = tensor.id();
-        let resident = with_metal_resident_registry(|set| set.contains(&id));
-        if !resident {
-            return Ok(None);
-        }
-        let resolved = kiln_tensor::metal_deep_copy(tensor)
-            .context("resolve_resident_activation: metal_deep_copy")?;
-        // The registered param's own dims/dtype are what the trainer passes;
-        // assert they line up rather than reshaping silently.
-        if resolved.dims() != shape || resolved.dtype() != dtype {
-            anyhow::bail!(
-                "resolve_resident_activation: registry tensor shape/dtype ({:?},{:?}) \
-                 != requested ({:?},{:?})",
-                resolved.dims(),
-                resolved.dtype(),
-                shape,
-                dtype,
-            );
-        }
-        Ok(Some(resolved))
+        metal_residency::resolve_resident_activation(tensor, shape, dtype)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1006,15 +922,10 @@ impl BackendRuntime for MetalBackend {
         weight_decay: f32,
         step: u32,
     ) -> Result<bool> {
-        let p_id = param.id();
-        let g_id = grad.id();
-        let m_id = first_moment.id();
-        let v_id = second_moment.id();
         // All four operands must be resident: no mixed resident/host update,
         // since that would need a per-call upload and defeat on-device AdamW.
-        let all_resident = with_metal_resident_registry(|set| {
-            set.contains(&p_id) && set.contains(&g_id) && set.contains(&m_id) && set.contains(&v_id)
-        });
+        let all_resident =
+            metal_residency::all_registered(&[param, grad, first_moment, second_moment]);
         metal_training::dispatch_adamw_step(
             param,
             grad,
