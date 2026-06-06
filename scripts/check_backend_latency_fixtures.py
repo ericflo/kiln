@@ -17,6 +17,7 @@ from typing import Any
 from write_backend_latency_result_artifact import (
     ARTIFACT_SCHEMA_VERSION,
     ArtifactError,
+    RESULT_ARTIFACT_KEYS,
     fixture_spec_sha256,
     parse_metric_log,
     repo_relative_path,
@@ -215,6 +216,38 @@ def validate_result_provenance(
             )
 
 
+def validate_result_keys(errors: list[str], result: dict[str, Any], context: str) -> None:
+    observed_keys = set(result)
+    missing_keys = sorted(RESULT_ARTIFACT_KEYS - observed_keys)
+    extra_keys = sorted(observed_keys - RESULT_ARTIFACT_KEYS)
+    if missing_keys:
+        errors.append(f"{context}.result_artifact missing required keys: {missing_keys}")
+    if extra_keys:
+        errors.append(f"{context}.result_artifact contains unknown keys: {extra_keys}")
+
+
+def expected_metric_names(fixture: dict[str, Any]) -> set[str]:
+    return {
+        metric["name"]
+        for metric in fixture.get("metrics", [])
+        if isinstance(metric, dict) and isinstance(metric.get("name"), str)
+    }
+
+
+def validate_result_metric_keys(
+    errors: list[str],
+    fixture: dict[str, Any],
+    observed_metrics: dict[str, Any],
+    context: str,
+) -> None:
+    expected = expected_metric_names(fixture)
+    extra_metrics = sorted(set(observed_metrics) - expected)
+    if extra_metrics:
+        errors.append(
+            f"{context}.result_artifact.metrics contains undeclared metrics: {extra_metrics}"
+        )
+
+
 def validate_raw_log_metrics(
     errors: list[str],
     fixture: dict[str, Any],
@@ -277,6 +310,8 @@ def validate_result_artifact(
         errors.append(f"{context}.result_artifact is not readable JSON: {exc}")
         return
 
+    validate_result_keys(errors, result, context)
+
     fixture_id = fixture.get("id")
     backend = fixture.get("backend")
     if result.get("fixture_id") != fixture_id:
@@ -309,6 +344,8 @@ def validate_result_artifact(
     if not isinstance(observed_metrics, dict):
         errors.append(f"{context}.result_artifact.metrics must be an object")
         observed_metrics = {}
+    else:
+        validate_result_metric_keys(errors, fixture, observed_metrics, context)
 
     validate_raw_log_metrics(
         errors,
@@ -547,6 +584,50 @@ def self_test() -> int:
             print(
                 json.dumps(
                     {"ok": False, "case": "passing artifact", "errors": errors},
+                    indent=2,
+                )
+            )
+            return 1
+
+        result = json.loads(artifact.read_text())
+        result["unexpected"] = True
+        artifact.write_text(json.dumps(result))
+        errors = []
+        validate_result_artifact(
+            errors,
+            fixture,
+            artifact,
+            "fixtures[0]",
+            1,
+            None,
+            require_raw_log_file=True,
+        )
+        if not any("contains unknown keys" in error for error in errors):
+            print(
+                json.dumps(
+                    {"ok": False, "case": "unknown artifact key", "errors": errors},
+                    indent=2,
+                )
+            )
+            return 1
+
+        result.pop("unexpected")
+        result["metrics"]["undeclared_ms"] = 1.0
+        artifact.write_text(json.dumps(result))
+        errors = []
+        validate_result_artifact(
+            errors,
+            fixture,
+            artifact,
+            "fixtures[0]",
+            1,
+            None,
+            require_raw_log_file=True,
+        )
+        if not any("contains undeclared metrics" in error for error in errors):
+            print(
+                json.dumps(
+                    {"ok": False, "case": "undeclared metric", "errors": errors},
                     indent=2,
                 )
             )

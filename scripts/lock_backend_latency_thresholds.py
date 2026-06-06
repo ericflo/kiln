@@ -18,6 +18,7 @@ from typing import Any
 from write_backend_latency_result_artifact import (
     ARTIFACT_SCHEMA_VERSION,
     ArtifactError,
+    RESULT_ARTIFACT_KEYS,
     fixture_spec_sha256,
     parse_metric_log,
     repo_relative_path,
@@ -89,6 +90,28 @@ def valid_utc_timestamp(value: Any) -> bool:
     return parsed.tzinfo is not None and parsed.utcoffset() == timezone.utc.utcoffset(None)
 
 
+def validate_result_keys(result: dict[str, Any], fixture_id: str) -> None:
+    observed_keys = set(result)
+    missing_keys = sorted(RESULT_ARTIFACT_KEYS - observed_keys)
+    extra_keys = sorted(observed_keys - RESULT_ARTIFACT_KEYS)
+    if missing_keys:
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact missing required keys: {missing_keys}"
+        )
+    if extra_keys:
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact contains unknown keys: {extra_keys}"
+        )
+
+
+def expected_metric_names(fixture: dict[str, Any]) -> set[str]:
+    return {
+        metric["name"]
+        for metric in fixture.get("metrics", [])
+        if isinstance(metric, dict) and isinstance(metric.get("name"), str)
+    }
+
+
 def lock_fixture_thresholds(
     fixture: dict[str, Any],
     headroom: float,
@@ -114,6 +137,7 @@ def lock_fixture_thresholds(
         raise ThresholdLockError(f"{fixture_id}.result_artifact does not exist: {result_artifact}")
 
     result = load_json(result_path, f"{fixture_id}.result_artifact")
+    validate_result_keys(result, fixture_id)
     if result.get("fixture_id") != fixture_id:
         raise ThresholdLockError(
             f"{fixture_id}.result_artifact.fixture_id must be {fixture_id!r}, got {result.get('fixture_id')!r}"
@@ -218,6 +242,11 @@ def lock_fixture_thresholds(
     observations = result.get("metrics")
     if not isinstance(observations, dict):
         raise ThresholdLockError(f"{fixture_id}.result_artifact.metrics must be an object")
+    extra_metrics = sorted(set(observations) - expected_metric_names(fixture))
+    if extra_metrics:
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.metrics contains undeclared metrics: {extra_metrics}"
+        )
 
     metrics = fixture.get("metrics")
     if not isinstance(metrics, list) or not metrics:
@@ -370,6 +399,32 @@ def self_test() -> int:
             return 1
         if metrics[0]["max"] != 11.0 or metrics[1]["max"] != 180.0:
             print(json.dumps({"ok": False, "case": "headroom", "metrics": metrics}, indent=2))
+            return 1
+
+        result = json.loads(result_path.read_text())
+        result["unexpected"] = True
+        result_path.write_text(json.dumps(result))
+        try:
+            lock_manifest_thresholds(manifest, 0.10)
+        except ThresholdLockError as exc:
+            if "contains unknown keys" not in str(exc):
+                print(json.dumps({"ok": False, "case": "unknown artifact key", "error": str(exc)}))
+                return 1
+        else:
+            print(json.dumps({"ok": False, "case": "unknown artifact key did not fail"}))
+            return 1
+
+        result.pop("unexpected")
+        result["metrics"]["undeclared_ms"] = 1.0
+        result_path.write_text(json.dumps(result))
+        try:
+            lock_manifest_thresholds(manifest, 0.10)
+        except ThresholdLockError as exc:
+            if "contains undeclared metrics" not in str(exc):
+                print(json.dumps({"ok": False, "case": "undeclared metric", "error": str(exc)}))
+                return 1
+        else:
+            print(json.dumps({"ok": False, "case": "undeclared metric did not fail"}))
             return 1
 
         result_path.write_text(

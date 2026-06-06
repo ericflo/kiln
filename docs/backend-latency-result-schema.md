@@ -71,8 +71,12 @@ Required fields:
 - `raw_log`: non-empty repo-relative path for the captured raw fixture log;
   covered fixtures require this file to exist when validated
 - `raw_log_sha256`: lowercase SHA-256 hex digest of the raw fixture log
-- `metrics`: object containing every metric named by the fixture, with finite
-  numeric values
+- `metrics`: object containing exactly every metric named by the fixture, with
+  finite numeric values
+
+Covered result artifacts must not contain additional top-level keys, and
+`metrics` must not contain undeclared metric names. Additive schema changes
+should bump `artifact_schema_version` and update the validator.
 
 When `--require-covered` is set, the validator requires the fixture
 `result_artifact`, fixture `source`, result `manifest`, and result `raw_log`
@@ -80,7 +84,8 @@ paths to be repo-relative. It also requires the referenced source and `raw_log`
 files to exist in the checkout and checks that their SHA-256 digests match
 `source_sha256` and `raw_log_sha256`. It then re-parses the raw log
 `KILN_LATENCY_METRIC` lines and requires every declared artifact metric value
-and unit to match the raw log.
+and unit to match the raw log. It rejects unknown artifact keys and undeclared
+artifact metrics.
 
 The fixture digest deliberately excludes metric `max`, `threshold_state`, and
 `result_artifact` so a reviewed artifact remains valid while thresholds are
@@ -148,11 +153,12 @@ repo-relative, exist, have `status: "passed"`, match the result artifact schema
 version, include a valid UTC creation timestamp, match the fixture `id`,
 `backend`, manifest schema version, stable fixture digest,
 hardware/source/command provenance, source file digest, and contain every
-declared metric. It also requires the fixture `source`, result `manifest`, and
-result `raw_log` paths to be repo-relative, and the referenced source and raw
-log files to exist and match `source_sha256`/`raw_log_sha256`. It re-parses the
-raw log and requires each artifact metric value and unit to match before deriving
-thresholds. It sets every fixture `threshold_state` to
+declared metric with no unknown artifact keys or undeclared metrics. It also
+requires the fixture `source`, result `manifest`, and result `raw_log` paths to
+be repo-relative, and the referenced source and raw log files to exist and match
+`source_sha256`/`raw_log_sha256`. It re-parses the raw log and requires each
+artifact metric value and unit to match before deriving thresholds. It sets every
+fixture `threshold_state` to
 `locked_threshold`, sets the manifest `status` to `covered`, and applies the
 headroom by comparison: `<=` thresholds are raised above observed latency, while
 `>=` thresholds are lowered below observed throughput. Use `--check` to validate

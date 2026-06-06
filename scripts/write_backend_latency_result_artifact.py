@@ -21,6 +21,23 @@ METRIC_RE = re.compile(r"^\s*KILN_LATENCY_METRIC\s+(\S+)\s+([-+0-9.eE]+)\s+(\S+)
 VALID_RESULT_STATUSES = {"passed", "failed"}
 CHECKSUM_RE = re.compile(r"^[0-9a-f]{64}$")
 FIXTURE_DIGEST_METRIC_FIELDS = ["name", "unit", "comparison"]
+RESULT_ARTIFACT_KEYS = {
+    "artifact_schema_version",
+    "backend",
+    "command",
+    "created_at_utc",
+    "fixture_id",
+    "fixture_spec_sha256",
+    "hardware",
+    "manifest",
+    "manifest_schema_version",
+    "metrics",
+    "raw_log",
+    "raw_log_sha256",
+    "source",
+    "source_sha256",
+    "status",
+}
 
 
 class ArtifactError(Exception):
@@ -298,7 +315,8 @@ def self_test() -> int:
         write_artifact(output_path, artifact)
         written = json.loads(output_path.read_text())
         if (
-            written.get("artifact_schema_version") != ARTIFACT_SCHEMA_VERSION
+            set(written) != RESULT_ARTIFACT_KEYS
+            or written.get("artifact_schema_version") != ARTIFACT_SCHEMA_VERSION
             or not isinstance(written.get("created_at_utc"), str)
             or not written.get("created_at_utc", "").endswith("Z")
             or written.get("fixture_id") != "cuda_fixture"
