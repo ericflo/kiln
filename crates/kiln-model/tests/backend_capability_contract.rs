@@ -336,6 +336,10 @@ fn generated_capability_report_lists_backend_source_modules() {
         "Metal backend source modules should include the extracted MSL source module"
     );
     assert!(
+        metal_sources.contains(&"crates/kiln-model/src/backend/metal_norm.rs"),
+        "Metal backend source modules should include the extracted norm/rotary module"
+    );
+    assert!(
         metal_sources.contains(&"crates/kiln-model/src/backend/metal_paged.rs"),
         "Metal backend source modules should include the extracted paged attention/KV module"
     );
