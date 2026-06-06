@@ -2165,11 +2165,27 @@
   ],
   "request_descriptors": {
     "AttentionRequest": {
-      "field_count": 8,
+      "field_count": 12,
       "fields": [
         {
           "name": "kind",
           "type": "AttentionRequestKind"
+        },
+        {
+          "name": "q_shape",
+          "type": "Vec<usize>"
+        },
+        {
+          "name": "k_shape",
+          "type": "Vec<usize>"
+        },
+        {
+          "name": "v_shape",
+          "type": "Vec<usize>"
+        },
+        {
+          "name": "output_shape",
+          "type": "Vec<usize>"
         },
         {
           "name": "q_dtype",
@@ -2203,7 +2219,7 @@
       "has_batch": true,
       "has_dtype": true,
       "has_replay_safe": true,
-      "has_shape": false,
+      "has_shape": true,
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "LinearRequest": {

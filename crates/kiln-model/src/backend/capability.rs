@@ -293,6 +293,10 @@ pub enum AttentionRequestKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttentionRequest {
     pub kind: AttentionRequestKind,
+    pub q_shape: Vec<usize>,
+    pub k_shape: Vec<usize>,
+    pub v_shape: Vec<usize>,
+    pub output_shape: Vec<usize>,
     pub q_dtype: kiln_tensor::DType,
     pub k_dtype: kiln_tensor::DType,
     pub v_dtype: kiln_tensor::DType,
@@ -303,7 +307,7 @@ pub struct AttentionRequest {
 }
 
 impl AttentionRequest {
-    pub const fn flash_prefill(
+    pub fn flash_prefill(
         q_dtype: kiln_tensor::DType,
         k_dtype: kiln_tensor::DType,
         v_dtype: kiln_tensor::DType,
@@ -312,8 +316,13 @@ impl AttentionRequest {
         head_dim: usize,
         replay_safe: bool,
     ) -> Self {
+        let shape = Self::shape_from_dims(batch, seq_len, head_dim);
         Self {
             kind: AttentionRequestKind::FlashPrefill,
+            q_shape: shape.clone(),
+            k_shape: shape.clone(),
+            v_shape: shape.clone(),
+            output_shape: shape,
             q_dtype,
             k_dtype,
             v_dtype,
@@ -322,6 +331,55 @@ impl AttentionRequest {
             head_dim,
             replay_safe,
         }
+    }
+
+    pub fn with_kind(mut self, kind: AttentionRequestKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    pub fn with_dims(mut self, batch: usize, seq_len: usize, head_dim: usize) -> Self {
+        self.batch = batch;
+        self.seq_len = seq_len;
+        self.head_dim = head_dim;
+        let shape = Self::shape_from_dims(batch, seq_len, head_dim);
+        self.q_shape = shape.clone();
+        self.k_shape = shape.clone();
+        self.v_shape = shape.clone();
+        self.output_shape = shape;
+        self
+    }
+
+    pub fn with_replay_safe(mut self, replay_safe: bool) -> Self {
+        self.replay_safe = replay_safe;
+        self
+    }
+
+    pub fn with_shapes(
+        mut self,
+        q_shape: Vec<usize>,
+        k_shape: Vec<usize>,
+        v_shape: Vec<usize>,
+        output_shape: Vec<usize>,
+    ) -> Self {
+        self.q_shape = q_shape;
+        self.k_shape = k_shape;
+        self.v_shape = v_shape;
+        self.output_shape = output_shape;
+        self
+    }
+
+    pub fn shape_key(&self) -> Vec<Vec<usize>> {
+        vec![
+            self.q_shape.clone(),
+            self.k_shape.clone(),
+            self.v_shape.clone(),
+            self.output_shape.clone(),
+        ]
+    }
+
+    fn shape_from_dims(batch: usize, seq_len: usize, head_dim: usize) -> Vec<usize> {
+        vec![batch, seq_len, head_dim]
     }
 }
 
@@ -669,16 +727,14 @@ impl BackendCapabilities {
             128,
             false,
         );
-        let flash_prefill_head_major = AttentionRequest {
-            kind: AttentionRequestKind::FlashPrefillHeadMajor,
-            ..flash_prefill.clone()
-        };
-        let flash_paged_decode = AttentionRequest {
-            kind: AttentionRequestKind::FlashPagedDecode,
-            seq_len: 1,
-            replay_safe: true,
-            ..flash_prefill
-        };
+        let flash_prefill_head_major = flash_prefill
+            .clone()
+            .with_kind(AttentionRequestKind::FlashPrefillHeadMajor);
+        let flash_paged_decode = flash_prefill
+            .clone()
+            .with_kind(AttentionRequestKind::FlashPagedDecode)
+            .with_dims(1, 1, 128)
+            .with_replay_safe(true);
         let linear_argmax = LinearRequest::decode_argmax(
             kiln_tensor::DType::BF16,
             kiln_tensor::DType::BF16,

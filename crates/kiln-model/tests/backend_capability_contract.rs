@@ -941,6 +941,24 @@ fn generated_capability_report_lists_request_descriptors() {
     assert!(replay_fields.contains(&"dtype"));
     assert!(replay_fields.contains(&"replay_safe"));
 
+    let attention = &descriptors["AttentionRequest"];
+    assert_eq!(
+        attention["has_shape"], true,
+        "AttentionRequest should carry shape metadata for prefill/decode capability queries"
+    );
+    let attention_fields = attention["fields"]
+        .as_array()
+        .expect("AttentionRequest fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
+    for field in ["q_shape", "k_shape", "v_shape", "output_shape"] {
+        assert!(
+            attention_fields.contains(&field),
+            "AttentionRequest should include {field}"
+        );
+    }
+
     let linear = &descriptors["LinearRequest"];
     assert_eq!(
         linear["has_shape"], true,

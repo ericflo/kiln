@@ -3357,6 +3357,15 @@ mod tests {
             false,
         );
         assert_eq!(
+            attention_req.shape_key(),
+            vec![
+                vec![1, 16, 128],
+                vec![1, 16, 128],
+                vec![1, 16, 128],
+                vec![1, 16, 128],
+            ]
+        );
+        assert_eq!(
             capability::BackendCapabilityQueries::supports_attention_request(
                 &cpu,
                 &attention_req
