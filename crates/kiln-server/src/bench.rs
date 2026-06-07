@@ -20,7 +20,6 @@ use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::{ChatMessage, KilnTokenizer};
 use kiln_memory::vram::{detect_used_vram_bytes, detect_vram};
-use kiln_model::ModelRunner;
 use kiln_model::PagedKvCacheKt;
 use kiln_model::backend as runtime_backend;
 use kiln_model::forward::{
@@ -50,6 +49,7 @@ use kiln_model::speculative::{
     SpeculativeConfig, speculative_decode_step, speculative_decode_step_paged_greedy,
     speculative_mtp_decode_step,
 };
+use kiln_model::{BackendCapabilityQueries, ModelRunner};
 use kiln_server::config::SpecMethod;
 
 /// Block size used for the paged-path benchmark. Matches the real server default.
@@ -1378,17 +1378,6 @@ fn bench_long_prompt_skip_layer_min_prompt_tokens(backend_name: &str) -> usize {
     }
 }
 
-fn bench_native_mtp_allowed(backend_name: &str) -> bool {
-    if backend_name == "metal" {
-        std::env::var("KILN_ENABLE_METAL_NATIVE_MTP")
-            .ok()
-            .as_deref()
-            .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-    } else {
-        true
-    }
-}
-
 fn bench_force_raw_mtp() -> bool {
     std::env::var("KILN_BENCH_FORCE_MTP")
         .ok()
@@ -1407,7 +1396,8 @@ fn resolve_bench_spec_method(
     max_output_tokens: usize,
     temperature: f32,
     mtp_supported: bool,
-    backend_name: &str,
+    native_mtp_allowed: bool,
+    long_prompt_skip_layer_min_prompt_tokens: usize,
 ) -> SpecMethod {
     resolve_bench_spec_method_with_force(
         configured,
@@ -1415,8 +1405,8 @@ fn resolve_bench_spec_method(
         max_output_tokens,
         temperature,
         mtp_supported,
-        bench_native_mtp_allowed(backend_name),
-        bench_long_prompt_skip_layer_min_prompt_tokens(backend_name),
+        native_mtp_allowed,
+        long_prompt_skip_layer_min_prompt_tokens,
         bench_force_raw_mtp(),
     )
 }
@@ -2839,12 +2829,20 @@ fn main() -> Result<()> {
     // backend selector accept the kt device directly (issue #1082,
     // candle removal).
     let device_kt = kiln_server::device::select_device_kt()?;
-    let backend_name = runtime_backend::for_device_kt(&device_kt).name();
+    let backend = runtime_backend::for_device_kt(&device_kt);
+    let backend_name = backend.name();
     if backend_name == "cpu" {
         anyhow::bail!(
             "No accelerated backend available — benchmarks require CUDA, Metal, or Vulkan"
         );
     }
+    let backend_capabilities = BackendCapabilityQueries::backend_capabilities(backend.as_ref());
+    let native_mtp_allowed = backend_capabilities
+        .decode
+        .mtp_speculative_generation
+        .is_native();
+    let long_prompt_skip_layer_min_prompt_tokens =
+        bench_long_prompt_skip_layer_min_prompt_tokens(backend_name);
 
     let gpu_weights = GpuWeights::from_model_weights_kt(&model_weights, &model_config, &device_kt)
         .context("failed to transfer weights to GPU")?;
@@ -2891,7 +2889,8 @@ fn main() -> Result<()> {
         args.max_output_tokens,
         args.temperature,
         gpu_weights.mtp.is_some(),
-        backend_name,
+        native_mtp_allowed,
+        long_prompt_skip_layer_min_prompt_tokens,
     );
     if spec_method != requested_spec_method {
         let mut stderr = std::io::stderr();

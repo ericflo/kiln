@@ -2419,6 +2419,11 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     let server_batching_source =
         fs::read_to_string(root.join("crates/kiln-server/src/batching_engine.rs"))
             .expect("kiln-server batching_engine.rs should be readable");
+    let server_completions_source =
+        fs::read_to_string(root.join("crates/kiln-server/src/api/completions.rs"))
+            .expect("kiln-server api/completions.rs should be readable");
+    let server_bench_source = fs::read_to_string(root.join("crates/kiln-server/src/bench.rs"))
+        .expect("kiln-server bench.rs should be readable");
 
     assert_no_broad_backend_runtime_calls(
         &backend_source,
@@ -3068,6 +3073,45 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         generate_source.contains("paged_cache_device(self.backend.as_ref(),"),
         "native MTP paged-cache allocation call sites should pass the active backend"
     );
+    let server_mtp_resolver_section = source_between(
+        &server_completions_source,
+        "fn native_mtp_allowed_for_state(",
+        "fn long_prompt_skip_layer_min_prompt_tokens_for_state(",
+    );
+    assert!(
+        server_mtp_resolver_section.contains("backend_capabilities()")
+            && server_mtp_resolver_section.contains("mtp_speculative_generation")
+            && server_mtp_resolver_section.contains(".is_native()"),
+        "server native MTP request resolution should read DecodeCapabilities"
+    );
+    for forbidden in [
+        "KILN_ENABLE_METAL_NATIVE_MTP",
+        "weights.device_kt()",
+        "Device::Metal",
+        "kiln_tensor::Device::Metal",
+    ] {
+        assert!(
+            !server_mtp_resolver_section.contains(forbidden),
+            "server native MTP request resolution should not keep a local backend/env policy table: {forbidden}"
+        );
+    }
+    let bench_mtp_resolver_section = source_between(
+        &server_bench_source,
+        "fn resolve_bench_spec_method(",
+        "fn resolve_bench_spec_method_with_force(",
+    );
+    assert!(
+        server_bench_source.contains("BackendCapabilityQueries::backend_capabilities")
+            && server_bench_source.contains("mtp_speculative_generation")
+            && bench_mtp_resolver_section.contains("native_mtp_allowed"),
+        "kiln-bench native MTP resolution should receive DecodeCapabilities-derived support"
+    );
+    for forbidden in ["KILN_ENABLE_METAL_NATIVE_MTP", "bench_native_mtp_allowed"] {
+        assert!(
+            !server_bench_source.contains(forbidden),
+            "kiln-bench native MTP resolution should not keep a local backend/env policy table: {forbidden}"
+        );
+    }
     let gdn_contiguity_partition_section = source_between(
         &generate_source,
         "// #1082 PERF + CRASHER FIX (per-row contiguity partition).",

@@ -1370,6 +1370,10 @@ fn detached_chunked_prefill_support(name: &str) -> Support {
 fn mtp_speculative_generation_support(name: &str) -> Support {
     match name {
         "cuda" => Support::NativeWithConstraints,
+        "metal" if kiln_core::env_flag::env_flag("KILN_ENABLE_METAL_NATIVE_MTP", false) => {
+            Support::NativeWithConstraints
+        }
+        "metal" => Support::DisabledByEnv,
         _ => Support::Declined,
     }
 }

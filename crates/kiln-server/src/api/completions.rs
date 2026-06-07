@@ -3257,23 +3257,16 @@ const LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT: usize = 1024;
 const LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL: usize = 4096;
 const LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS_DEFAULT: usize = 32;
 
-fn native_mtp_enabled_for_metal() -> bool {
-    std::env::var("KILN_ENABLE_METAL_NATIVE_MTP")
-        .ok()
-        .as_deref()
-        .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-}
-
 fn native_mtp_allowed_for_state(state: &AppState) -> bool {
     let ModelBackend::Real { runner, .. } = state.backend.as_ref() else {
         return true;
     };
     let runner_guard = runner.read().unwrap();
-    // Migrated to kt::Device via GpuWeights::device_kt() (#1082).
-    match runner_guard.weights.device_kt() {
-        kiln_tensor::Device::Metal(_) => native_mtp_enabled_for_metal(),
-        _ => true,
-    }
+    runner_guard
+        .backend_capabilities()
+        .decode
+        .mtp_speculative_generation
+        .is_native()
 }
 
 fn long_prompt_skip_layer_min_prompt_tokens_for_state(state: &AppState) -> usize {
@@ -3624,10 +3617,8 @@ async fn real_prompt_logprobs(
         // whole path is kt.
         let device_kt = runner_guard.weights.device_kt();
         let backend = kiln_model::backend::for_device_kt(&device_kt);
-        let mut linear_state = kiln_model::forward::LinearAttentionState::new(
-            &runner_guard.config,
-            &device_kt,
-        )?;
+        let mut linear_state =
+            kiln_model::forward::LinearAttentionState::new(&runner_guard.config, &device_kt)?;
         let logits = kiln_model::forward::model_forward_kt(
             &*backend,
             &prompt_tokens_owned,
@@ -4623,8 +4614,7 @@ async fn ensure_composed_adapter_swap(
 
     tokio::task::spawn_blocking(move || {
         // #1082: LoraWeights::load is kt-native — pass the kt device directly.
-        let lora =
-            LoraWeights::load(&cache_dir, num_layers, device).map_err(|e| format!("{e}"))?;
+        let lora = LoraWeights::load(&cache_dir, num_layers, device).map_err(|e| format!("{e}"))?;
         let mut guard = runner.write().unwrap();
         guard.swap_lora(Some(lora));
         *active_name.write().unwrap() = Some(composed_active);
