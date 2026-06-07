@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -571,6 +572,62 @@ def missing_paths(paths: list[str]) -> list[str]:
     return [path for path in paths if not path_exists(path)]
 
 
+def finite_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def hardware_latency_coverage_blockers() -> list[str]:
+    manifest_path = ROOT / "docs" / "backend-latency-fixtures.json"
+    if not manifest_path.is_file():
+        return ["docs/backend-latency-fixtures.json is missing"]
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return [f"docs/backend-latency-fixtures.json is unreadable: {exc}"]
+
+    blockers: list[str] = []
+    status = manifest.get("status")
+    if status != "covered":
+        blockers.append(f"manifest status is {status!r}, expected 'covered'")
+
+    fixtures = manifest.get("fixtures", [])
+    if not isinstance(fixtures, list):
+        return [*blockers, "fixtures must be an array"]
+
+    for index, fixture in enumerate(fixtures):
+        if not isinstance(fixture, dict):
+            blockers.append(f"fixtures[{index}] must be an object")
+            continue
+        fixture_id = fixture.get("id") if isinstance(fixture.get("id"), str) else f"fixtures[{index}]"
+        result_artifact = fixture.get("result_artifact")
+        if isinstance(result_artifact, str) and result_artifact:
+            if not path_exists(result_artifact):
+                blockers.append(f"{fixture_id}: missing result artifact {result_artifact}")
+        else:
+            blockers.append(f"{fixture_id}: result_artifact is missing")
+
+        threshold_state = fixture.get("threshold_state")
+        if threshold_state != "locked_threshold":
+            blockers.append(
+                f"{fixture_id}: threshold_state is {threshold_state!r}, expected 'locked_threshold'"
+            )
+
+        metrics = fixture.get("metrics", [])
+        if not isinstance(metrics, list):
+            blockers.append(f"{fixture_id}: metrics must be an array")
+            continue
+        for metric_index, metric in enumerate(metrics):
+            if not isinstance(metric, dict):
+                blockers.append(f"{fixture_id}.metrics[{metric_index}] must be an object")
+                continue
+            metric_name = metric.get("name")
+            label = metric_name if isinstance(metric_name, str) and metric_name else f"metrics[{metric_index}]"
+            if not finite_number(metric.get("max")):
+                blockers.append(f"{fixture_id}.{label}: max threshold is not finite numeric")
+
+    return blockers
+
+
 def replay_authority_report() -> dict[str, Any]:
     report: dict[str, Any] = {}
     for backend, info in REPLAY_AUTHORITIES.items():
@@ -1115,6 +1172,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
             "phase8_requirement": "backend-specific latency thresholds on known hardware fixtures",
             "status": "fixture_required",
             "command": "python3 scripts/run_backend_latency_fixture.py --self-test && python3 scripts/write_backend_latency_result_artifact.py --self-test && python3 scripts/lock_backend_latency_thresholds.py --self-test && python3 scripts/check_backend_latency_fixtures.py --self-test && hardware runner required; python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered",
+            "coverage_blockers": hardware_latency_coverage_blockers(),
             "evidence": [
                 "docs/backend-latency-fixtures.json",
                 "docs/backend-latency-result-schema.md",
@@ -1146,6 +1204,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
 
     for gate in gates:
         gate["supplemental_commands"] = gate.get("supplemental_commands", [])
+        gate["coverage_blockers"] = gate.get("coverage_blockers", [])
         gate["evidence_present"] = [
             evidence for evidence in gate["evidence"] if path_exists(evidence)
         ]
@@ -1551,9 +1610,9 @@ def markdown(data: dict[str, Any]) -> str:
     lines.append("## Conformance And Performance Gates")
     lines.append("")
     lines.append(
-        "| Gate | Phase 8 Requirement | Status | Command | Supplemental Commands | Evidence | Missing Evidence |"
+        "| Gate | Phase 8 Requirement | Status | Command | Supplemental Commands | Evidence | Missing Evidence | Coverage Blockers |"
     )
-    lines.append("|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|")
     for gate in data["conformance_gates"]:
         supplemental = (
             "; ".join(
@@ -1564,9 +1623,13 @@ def markdown(data: dict[str, Any]) -> str:
         )
         evidence = ", ".join(f"`{path}`" for path in gate["evidence_present"]) or "none"
         missing = ", ".join(f"`{path}`" for path in gate["evidence_missing"]) or "none"
+        blockers = (
+            "; ".join(f"`{blocker}`" for blocker in gate["coverage_blockers"]) or "none"
+        )
         lines.append(
             f"| `{gate['gate']}` | {gate['phase8_requirement']} | "
-            f"`{gate['status']}` | `{gate['command']}` | {supplemental} | {evidence} | {missing} |"
+            f"`{gate['status']}` | `{gate['command']}` | {supplemental} | "
+            f"{evidence} | {missing} | {blockers} |"
         )
     lines.append("")
     lines.append("## Generic DeviceOp Fallback")

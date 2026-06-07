@@ -1680,6 +1680,9 @@ fn generated_capability_report_lists_request_descriptors() {
         let supplemental_commands = gate["supplemental_commands"]
             .as_array()
             .expect("supplemental_commands should be an array");
+        let coverage_blockers = gate["coverage_blockers"]
+            .as_array()
+            .expect("coverage_blockers should be an array");
         for supplemental in supplemental_commands {
             assert!(
                 !supplemental["scope"].as_str().unwrap_or("").is_empty(),
@@ -1697,6 +1700,10 @@ fn generated_capability_report_lists_request_descriptors() {
                     .expect("evidence_present should be an array")
                     .is_empty(),
                 "covered conformance gate should have evidence"
+            );
+            assert!(
+                coverage_blockers.is_empty(),
+                "covered conformance gate should not cite coverage blockers: {coverage_blockers:?}"
             );
         }
     }
@@ -5322,6 +5329,32 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         evidence_missing.is_empty(),
         "hardware latency gate should have no missing fixture source evidence: {evidence_missing:?}"
     );
+    let coverage_blockers = hardware_gate["coverage_blockers"]
+        .as_array()
+        .expect("hardware latency coverage blockers should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        !coverage_blockers.is_empty(),
+        "fixture_required hardware latency gate should expose known-hardware coverage blockers"
+    );
+    for expected in [
+        "missing result artifact bench-results/backend-latency/cuda-a6000-flce-phase-a.json",
+        "missing result artifact bench-results/backend-latency/metal-apple-silicon-matmul.json",
+        "missing result artifact bench-results/backend-latency/metal-apple-silicon-sdpa.json",
+        "missing result artifact bench-results/backend-latency/rocm-gfx1151-matmul.json",
+        "missing result artifact bench-results/backend-latency/vulkan-rtx6000-decode.json",
+        "threshold_state is 'pending_fixture_result'",
+        "max threshold is not finite numeric",
+    ] {
+        assert!(
+            coverage_blockers
+                .iter()
+                .any(|blocker| blocker.contains(expected)),
+            "hardware latency coverage blockers should include {expected}: {coverage_blockers:?}"
+        );
+    }
 
     let manifest_path = root.join("docs/backend-latency-fixtures.json");
     let manifest: Value = serde_json::from_str(
