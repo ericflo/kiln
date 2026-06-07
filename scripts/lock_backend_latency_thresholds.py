@@ -34,6 +34,7 @@ from write_backend_latency_result_artifact import (
 ROOT = Path(__file__).resolve().parents[1]
 VALID_COMPARISONS = {"<=", ">="}
 VALID_BACKENDS = {"cuda", "rocm", "metal", "vulkan"}
+VALID_STATUS = {"fixture_required", "covered"}
 CHECKSUM_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -90,6 +91,16 @@ def valid_utc_timestamp(value: Any) -> bool:
     except ValueError:
         return False
     return parsed.tzinfo is not None and parsed.utcoffset() == timezone.utc.utcoffset(None)
+
+
+def validate_manifest_header_for_lock(manifest: dict[str, Any]) -> None:
+    if manifest.get("schema_version") != 1:
+        raise ThresholdLockError("schema_version must be 1 before thresholds can lock")
+    status = manifest.get("status")
+    if status not in VALID_STATUS:
+        raise ThresholdLockError(
+            f"status must be one of {sorted(VALID_STATUS)} before thresholds can lock"
+        )
 
 
 def validate_result_keys(result: dict[str, Any], fixture_id: str) -> None:
@@ -370,6 +381,7 @@ def lock_manifest_thresholds(
     if not 0.0 <= headroom < 1.0:
         raise ThresholdLockError("--headroom must be >= 0 and < 1")
 
+    validate_manifest_header_for_lock(manifest)
     fixtures = manifest.get("fixtures")
     if not isinstance(fixtures, list) or not fixtures:
         raise ThresholdLockError("manifest.fixtures must be a non-empty array")
@@ -486,6 +498,54 @@ def self_test() -> int:
             return 1
         if metrics[0]["max"] != 11.0 or metrics[1]["max"] != 180.0:
             print(json.dumps({"ok": False, "case": "headroom", "metrics": metrics}, indent=2))
+            return 1
+
+        invalid_schema_manifest = deepcopy(manifest)
+        invalid_schema_manifest["schema_version"] = 2
+        try:
+            lock_manifest_thresholds(invalid_schema_manifest, 0.10)
+        except ThresholdLockError as exc:
+            if "schema_version must be 1 before thresholds can lock" not in str(exc):
+                print(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "case": "invalid manifest schema",
+                            "error": str(exc),
+                        }
+                    )
+                )
+                return 1
+        else:
+            print(
+                json.dumps(
+                    {"ok": False, "case": "invalid manifest schema did not fail"}
+                )
+            )
+            return 1
+
+        invalid_status_manifest = deepcopy(manifest)
+        invalid_status_manifest["status"] = "pending"
+        try:
+            lock_manifest_thresholds(invalid_status_manifest, 0.10)
+        except ThresholdLockError as exc:
+            if "status must be one of" not in str(exc):
+                print(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "case": "invalid manifest status",
+                            "error": str(exc),
+                        }
+                    )
+                )
+                return 1
+        else:
+            print(
+                json.dumps(
+                    {"ok": False, "case": "invalid manifest status did not fail"}
+                )
+            )
             return 1
 
         missing_required_backend_manifest = deepcopy(manifest)

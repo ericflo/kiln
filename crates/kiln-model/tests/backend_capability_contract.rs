@@ -2562,6 +2562,9 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
             .expect("latency threshold locker should be readable");
     for required in [
         "def lock_manifest_thresholds(",
+        "def validate_manifest_header_for_lock(",
+        "schema_version must be 1 before thresholds can lock",
+        "status must be one of",
         "required_backends",
         "def validate_required_backend_coverage(",
         "required backend has no fixture before thresholds can lock",
@@ -2632,6 +2635,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         .expect("latency result schema doc should be readable");
     for required in [
         "fixture_id",
+        "schema_version: 1",
         "artifact_schema_version",
         "created_at_utc",
         "required_backends",
