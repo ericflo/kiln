@@ -1424,6 +1424,14 @@ impl InferenceRecurrentStatePolicy {
             },
         }
     }
+
+    pub fn supports_dtype(self, dtype: kiln_tensor::DType) -> bool {
+        match dtype {
+            kiln_tensor::DType::BF16 => self.bf16.is_native(),
+            kiln_tensor::DType::F16 => self.f16.is_native(),
+            _ => false,
+        }
+    }
 }
 
 fn support_unless_env_set(env_var: &'static str) -> Support {

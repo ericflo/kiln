@@ -2738,11 +2738,11 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     );
     let server_startup_policy_section = source_between(
         &server_state_source,
-        "let (backend_name, backend_capabilities) =",
+        "let backend_name = runner.backend_name();",
         "let decode_batcher = if let Some(config) = decode_batcher_config",
     );
     assert!(
-        server_startup_policy_section.contains("runner_guard.backend_capabilities()")
+        server_startup_policy_section.contains("runner.backend_capabilities()")
             && server_startup_policy_section.contains("decode_batcher_policy")
             && server_startup_policy_section.contains("from_env_for_policy")
             && server_startup_policy_section.contains("warm_resident_decode_pool_on_startup")
@@ -2750,6 +2750,29 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             && server_startup_policy_section.contains("kv_cache_device_memory_pressure"),
         "kiln-server startup decode defaults should consume BackendCapabilities/DecodeBatcherPolicy"
     );
+    let server_prefix_cache_state_section = source_between(
+        &server_state_source,
+        "fn linear_attention_state_bytes(",
+        "fn default_prefix_cache_max_entries(",
+    );
+    assert!(
+        server_startup_policy_section.contains("inference_recurrent_state_policy")
+            && server_prefix_cache_state_section.contains("InferenceRecurrentStatePolicy")
+            && server_prefix_cache_state_section.contains("policy.supports_dtype"),
+        "kiln-server prefix-cache state sizing should consume the backend-owned inference recurrent-state policy"
+    );
+    for forbidden in [
+        "KILN_DISABLE_CUDA_BF16_INFERENCE_STATE",
+        "KILN_DISABLE_ROCM_BF16_INFERENCE_STATE",
+        "KILN_DISABLE_VULKAN_BF16_INFERENCE_STATE",
+        "match device.backend()",
+        "compact_recurrent_state",
+    ] {
+        assert!(
+            !server_prefix_cache_state_section.contains(forbidden),
+            "kiln-server prefix-cache state sizing should not keep a local backend/env policy table: {forbidden}"
+        );
+    }
     for forbidden in [
         "backend_name == \"vulkan\"",
         "backend_name == \"metal\"",

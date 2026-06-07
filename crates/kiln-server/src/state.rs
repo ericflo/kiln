@@ -12,8 +12,8 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::Engine;
 use kiln_model::{
-    DecodeBatcher, DecodeBatcherConfig, LinearAttentionState, ModelRunner, PagedKvCacheKt,
-    PagedPrefixNextToken, PagedPrefixRegistration,
+    DecodeBatcher, DecodeBatcherConfig, InferenceRecurrentStatePolicy, LinearAttentionState,
+    ModelRunner, PagedKvCacheKt, PagedPrefixNextToken, PagedPrefixRegistration,
 };
 use kiln_scheduler::{PrefixCacheStats, Scheduler};
 use kiln_tensor::DType;
@@ -2098,6 +2098,9 @@ impl AppState {
             );
         }
 
+        let backend_name = runner.backend_name();
+        let backend_capabilities = runner.backend_capabilities();
+        let inference_recurrent_state_policy = backend_capabilities.gdn.inference_recurrent_state;
         let prefix_cache_max_blocks = if prefix_cache_cfg.enabled {
             prefix_cache_cfg
                 .max_blocks
@@ -2106,7 +2109,7 @@ impl AppState {
             0
         };
         let prefix_cache_state_bytes_per_entry =
-            linear_attention_state_bytes(&model_config, &device_kt);
+            linear_attention_state_bytes(&model_config, inference_recurrent_state_policy);
         let prefix_cache_max_entries = if prefix_cache_cfg.enabled {
             prefix_cache_cfg.max_entries.unwrap_or_else(|| {
                 default_prefix_cache_max_entries(total_vram, prefix_cache_state_bytes_per_entry)
@@ -2137,13 +2140,6 @@ impl AppState {
         let paged_cache = Arc::new(paged_cache);
         let prefix_cache = Arc::new(std::sync::Mutex::new(prefix_cache));
         let gpu_lock = Arc::new(std::sync::RwLock::new(()));
-        let (backend_name, backend_capabilities) = {
-            let runner_guard = runner.read().unwrap();
-            (
-                runner_guard.backend_name(),
-                runner_guard.backend_capabilities(),
-            )
-        };
         let decode_batcher_policy = backend_capabilities.decode_batcher;
         let max_decode_batch =
             crate::batching_engine::env_max_decode_batch_for_policy(Some(decode_batcher_policy));
@@ -2315,34 +2311,24 @@ impl AppState {
     }
 }
 
-fn linear_attention_state_bytes(config: &ModelConfig, device: &kiln_tensor::Device) -> u64 {
+fn linear_attention_state_bytes(
+    config: &ModelConfig,
+    policy: InferenceRecurrentStatePolicy,
+) -> u64 {
     let num_linear_layers = config
         .num_layers
         .saturating_sub(config.num_full_attention_layers) as u64;
-    // Inference recurrent state mirrors `LinearAttentionState`'s compact
-    // backend policy: CUDA/ROCm/Metal/Vulkan use model dtype for bf16/fp16
-    // unless the backend-specific inference-state escape hatch is set.
-    let compact_recurrent_state = match device.backend() {
-        kiln_tensor::Backend::Cuda => {
-            std::env::var("KILN_DISABLE_CUDA_BF16_INFERENCE_STATE").is_err()
-        }
-        kiln_tensor::Backend::Rocm => {
-            std::env::var("KILN_DISABLE_ROCM_BF16_INFERENCE_STATE").is_err()
-        }
-        kiln_tensor::Backend::Metal => true,
-        kiln_tensor::Backend::Vulkan => {
-            std::env::var("KILN_DISABLE_VULKAN_BF16_INFERENCE_STATE").is_err()
-        }
-        _ => false,
+    // Mirrors `LinearAttentionState` inference recurrent-state allocation
+    // through the backend-owned capability policy, so prefix-cache sizing does
+    // not keep a separate server-side backend/env table.
+    let recurrent_dtype = match config.dtype {
+        kiln_core::config::DType::BF16 if policy.supports_dtype(DType::BF16) => DType::BF16,
+        kiln_core::config::DType::FP16 if policy.supports_dtype(DType::F16) => DType::F16,
+        _ => DType::F32,
     };
-    let recurrent_dtype_bytes = if compact_recurrent_state
-        && matches!(
-            config.dtype,
-            kiln_core::config::DType::BF16 | kiln_core::config::DType::FP16
-        ) {
-        2
-    } else {
-        4
+    let recurrent_dtype_bytes = match recurrent_dtype {
+        DType::BF16 | DType::F16 => 2,
+        _ => 4,
     };
     let recurrent_elems = (config.linear_num_value_heads
         * config.linear_key_head_dim
