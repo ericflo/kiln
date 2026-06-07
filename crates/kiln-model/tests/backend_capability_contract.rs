@@ -3261,6 +3261,28 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             && !server_bench_source.contains("matches!(device_kt, kiln_tensor::Device::Rocm(_))"),
         "kiln-bench graph routing should not branch on ROCm device identity"
     );
+    let bench_paged_latency_section = source_between(
+        &server_bench_source,
+        "fn bench_latency_paged(",
+        "fn bench_latency_skiplayer(",
+    );
+    assert!(
+        bench_paged_latency_section.contains("backend_capabilities.decode.linear_argmax")
+            && bench_paged_latency_section
+                .contains("backend_capabilities.decode_batcher.use_greedy_token_decode")
+            && bench_paged_latency_section.contains("greedy_token_decode_enabled"),
+        "kiln-bench greedy paged latency routing should consume DecodeCapabilities/DecodeBatcherPolicy"
+    );
+    for forbidden in [
+        "device_is_metal",
+        "Backend::Metal",
+        "supports_linear_decode_argmax()",
+    ] {
+        assert!(
+            !bench_paged_latency_section.contains(forbidden),
+            "kiln-bench greedy paged latency routing should not keep a local backend/support table: {forbidden}"
+        );
+    }
     let gdn_contiguity_partition_section = source_between(
         &generate_source,
         "// #1082 PERF + CRASHER FIX (per-row contiguity partition).",

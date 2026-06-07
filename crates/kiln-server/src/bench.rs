@@ -146,13 +146,6 @@ fn kiln_config_dtype_to_kt(dtype: kiln_core::config::DType) -> kiln_tensor::DTyp
     }
 }
 
-/// Returns true when the kt device is a Metal device. The bench code
-/// uses this to gate Metal-specific argmax paths without naming the
-/// candle Metal variant directly (issue #1082, candle removal).
-fn device_is_metal(device: &kiln_tensor::Device) -> bool {
-    device.backend() == kiln_tensor::Backend::Metal
-}
-
 /// Greedy-sample a single token from kt logits.
 ///
 /// The paged forward entry points now return kt `Tensor`s, and the sampler is
@@ -993,6 +986,9 @@ fn bench_latency_paged(
     }
 
     let backend = runtime_backend_for_bench(&device_kt, weights)?;
+    let backend_capabilities = BackendCapabilityQueries::backend_capabilities(backend.as_ref());
+    let greedy_token_decode_enabled = backend_capabilities.decode.linear_argmax.is_native()
+        || backend_capabilities.decode_batcher.use_greedy_token_decode;
     let mut rocm_graph = kiln_model::rocm_graph::RocmGraphRunner::new(&device_kt, true);
     let hip_graph_decode_enabled = bench_paged_decode_replay_primitive_enabled(
         backend.as_ref(),
@@ -1092,7 +1088,7 @@ fn bench_latency_paged(
         )
         .context("paged prefill forward pass (streaming) failed")?;
         greedy_sample_kt(&logits)?
-    } else if device_is_metal(&device_kt) || backend.supports_linear_decode_argmax() {
+    } else if greedy_token_decode_enabled {
         model_forward_paged_last_token_greedy(
             &*backend,
             &prompt_token_ids,
@@ -1220,7 +1216,7 @@ fn bench_latency_paged(
                     None,
                 )
                 .context("paged ROCm graph greedy decode forward pass failed")?
-        } else if device_is_metal(&device_kt) || backend.supports_linear_decode_argmax() {
+        } else if greedy_token_decode_enabled {
             model_forward_paged_next_token_greedy(
                 &*backend,
                 next_token,
