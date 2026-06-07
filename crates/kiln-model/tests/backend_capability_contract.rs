@@ -5395,7 +5395,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "latency_runner_labels_json",
         "runner_labels",
         "rocm-gfx1151",
-        "vulkan-rtx6000",
+        "vulkan-strix-halo",
         "fixture_spec_sha256",
         "plan_backend_latency_fixture_dispatch.py",
         "gh_run_download",
@@ -5441,8 +5441,6 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
     );
     for expected in [
         "missing result artifact bench-results/backend-latency/cuda-a6000-flce-phase-a.json",
-        "missing result artifact bench-results/backend-latency/rocm-gfx1151-matmul.json",
-        "missing result artifact bench-results/backend-latency/vulkan-rtx6000-decode.json",
         "threshold_state is 'pending_fixture_result'",
         "max threshold is not finite numeric",
     ] {
@@ -5539,7 +5537,9 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         let expected_runner_labels: &[&str] = match fixture["id"].as_str() {
             Some("cuda_a6000_flce_phase_a_validation") => &["self-hosted", "linux", "cuda-a6000"],
             Some("rocm_gfx1151_matmul_qwen35_4b") => &["self-hosted", "linux", "rocm-gfx1151"],
-            Some("vulkan_rtx6000_decode_microbench") => &["self-hosted", "linux", "vulkan-rtx6000"],
+            Some("vulkan_strix_halo_decode_microbench") => {
+                &["self-hosted", "linux", "vulkan-strix-halo"]
+            }
             _ => &[],
         };
         if !expected_runner_labels.is_empty() {

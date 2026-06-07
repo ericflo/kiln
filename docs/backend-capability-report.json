@@ -2661,16 +2661,15 @@
         "cuda_a6000_flce_phase_a_validation.t2048_flce_on_step_secs: max threshold is not finite numeric",
         "cuda_a6000_flce_phase_a_validation.t8192_streaming_tile4096_step_secs: max threshold is not finite numeric",
         "cuda_a6000_flce_phase_a_validation.t16384_streaming_tile4096_step_secs: max threshold is not finite numeric",
-        "rocm_gfx1151_matmul_qwen35_4b: missing result artifact bench-results/backend-latency/rocm-gfx1151-matmul.json",
         "rocm_gfx1151_matmul_qwen35_4b: threshold_state is 'pending_fixture_result', expected 'locked_threshold'",
         "rocm_gfx1151_matmul_qwen35_4b.decode_qkv_m1_2560x4096_ms: max threshold is not finite numeric",
         "rocm_gfx1151_matmul_qwen35_4b.prefill_qkv_m256_2560x4096_ms: max threshold is not finite numeric",
         "rocm_gfx1151_matmul_qwen35_4b.prefill_gate_up_m256_2560x18432_ms: max threshold is not finite numeric",
         "rocm_gfx1151_matmul_qwen35_4b.lm_head_m1_2560x152064_ms: max threshold is not finite numeric",
-        "vulkan_rtx6000_decode_microbench: missing result artifact bench-results/backend-latency/vulkan-rtx6000-decode.json",
-        "vulkan_rtx6000_decode_microbench: threshold_state is 'pending_fixture_result', expected 'locked_threshold'",
-        "vulkan_rtx6000_decode_microbench.full_step_resident_us: max threshold is not finite numeric",
-        "vulkan_rtx6000_decode_microbench.full_token_resident_paged_us: max threshold is not finite numeric"
+        "vulkan_strix_halo_decode_microbench: missing result artifact bench-results/backend-latency/vulkan-strix-halo-decode.json",
+        "vulkan_strix_halo_decode_microbench: threshold_state is 'pending_fixture_result', expected 'locked_threshold'",
+        "vulkan_strix_halo_decode_microbench.full_step_resident_us: max threshold is not finite numeric",
+        "vulkan_strix_halo_decode_microbench.full_token_resident_paged_us: max threshold is not finite numeric"
       ],
       "evidence": [
         "docs/backend-latency-fixtures.json",

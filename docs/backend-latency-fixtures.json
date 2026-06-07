@@ -155,17 +155,17 @@
       ]
     },
     {
-      "id": "vulkan_rtx6000_decode_microbench",
+      "id": "vulkan_strix_halo_decode_microbench",
       "backend": "vulkan",
-      "hardware": "NVIDIA RTX 6000 Ada or RTX A6000 Vulkan fixture",
+      "hardware": "AMD Ryzen AI MAX+ 395 / Radeon 8060S Graphics (RADV STRIX_HALO, gfx1151)",
       "runner_labels": [
         "self-hosted",
         "linux",
-        "vulkan-rtx6000"
+        "vulkan-strix-halo"
       ],
       "source": "crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs",
-      "command": "cargo run --release -p kiln-vulkan-kernel --bin vulkan_decode_microbench",
-      "result_artifact": "bench-results/backend-latency/vulkan-rtx6000-decode.json",
+      "command": "KILN_VK_MICROBENCH_ONLY=full_step_resident,full_token_resident_paged KILN_VK_MICROBENCH_BATCHES=1 cargo run --release -p kiln-vulkan-kernel --bin vulkan_decode_microbench",
+      "result_artifact": "bench-results/backend-latency/vulkan-strix-halo-decode.json",
       "threshold_state": "pending_fixture_result",
       "selected_cases": [
         "full_step_resident",
