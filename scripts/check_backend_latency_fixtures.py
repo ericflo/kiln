@@ -365,6 +365,7 @@ def validate_result_artifact(
     manifest_path: Path | None,
     require_raw_log_file: bool = False,
     require_tracked_files: bool = False,
+    require_threshold_pass: bool = True,
 ) -> None:
     try:
         result = json.loads(result_path.read_text())
@@ -430,7 +431,7 @@ def validate_result_artifact(
                 f"{context}.result_artifact.metrics.{metric_name} must be finite numeric"
             )
             continue
-        if not metric_threshold_passes(metric, observed):
+        if require_threshold_pass and not metric_threshold_passes(metric, observed):
             errors.append(
                 f"{metric_context} observed value {observed} does not satisfy "
                 f"{metric.get('comparison')} {metric.get('max')}"
@@ -714,6 +715,34 @@ def self_test() -> int:
             print(
                 json.dumps(
                     {"ok": False, "case": "passing artifact", "errors": errors},
+                    indent=2,
+                )
+            )
+            return 1
+
+        pending_fixture = json.loads(json.dumps(fixture))
+        pending_fixture["threshold_state"] = "pending_fixture_result"
+        for metric in pending_fixture["metrics"]:
+            metric["max"] = None
+        errors = []
+        validate_result_artifact(
+            errors,
+            pending_fixture,
+            artifact,
+            "fixtures[0]",
+            1,
+            None,
+            require_raw_log_file=True,
+            require_threshold_pass=False,
+        )
+        if errors:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "case": "pending artifact before threshold lock",
+                        "errors": errors,
+                    },
                     indent=2,
                 )
             )

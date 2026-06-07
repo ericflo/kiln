@@ -38,6 +38,7 @@ on:
       - 'docs/backend-latency-result-schema.md'
       - 'scripts/run_backend_latency_fixture.py'
       - 'scripts/write_backend_latency_result_artifact.py'
+      - 'scripts/import_backend_latency_artifact.py'
       - 'scripts/lock_backend_latency_thresholds.py'
       - 'scripts/check_backend_latency_fixtures.py'
       - '.github/workflows/perf-regression-nightly.yml'
@@ -106,6 +107,7 @@ jobs:
         run: |
           python3 scripts/run_backend_latency_fixture.py --self-test
           python3 scripts/write_backend_latency_result_artifact.py --self-test
+          python3 scripts/import_backend_latency_artifact.py --self-test
           python3 scripts/lock_backend_latency_thresholds.py --self-test
           python3 scripts/check_backend_latency_fixtures.py --self-test
           python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json

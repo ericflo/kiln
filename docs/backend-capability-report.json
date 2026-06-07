@@ -2653,7 +2653,7 @@
       "supplemental_commands": []
     },
     {
-      "command": "python3 scripts/run_backend_latency_fixture.py --self-test && python3 scripts/write_backend_latency_result_artifact.py --self-test && python3 scripts/lock_backend_latency_thresholds.py --self-test && python3 scripts/check_backend_latency_fixtures.py --self-test && hardware runner required; python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered",
+      "command": "python3 scripts/run_backend_latency_fixture.py --self-test && python3 scripts/write_backend_latency_result_artifact.py --self-test && python3 scripts/import_backend_latency_artifact.py --self-test && python3 scripts/lock_backend_latency_thresholds.py --self-test && python3 scripts/check_backend_latency_fixtures.py --self-test && hardware runner required; python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered",
       "coverage_blockers": [
         "manifest status is 'fixture_required', expected 'covered'",
         "cuda_a6000_flce_phase_a_validation: missing result artifact bench-results/backend-latency/cuda-a6000-flce-phase-a.json",
@@ -2689,6 +2689,7 @@
         ".github/workflows/perf-regression-nightly.yml",
         "scripts/run_backend_latency_fixture.py",
         "scripts/write_backend_latency_result_artifact.py",
+        "scripts/import_backend_latency_artifact.py",
         "scripts/lock_backend_latency_thresholds.py",
         "scripts/check_backend_latency_fixtures.py",
         "crates/kiln-server/examples/flce_preflight_bench.rs",
@@ -2705,6 +2706,7 @@
         ".github/workflows/perf-regression-nightly.yml",
         "scripts/run_backend_latency_fixture.py",
         "scripts/write_backend_latency_result_artifact.py",
+        "scripts/import_backend_latency_artifact.py",
         "scripts/lock_backend_latency_thresholds.py",
         "scripts/check_backend_latency_fixtures.py",
         "crates/kiln-server/examples/flce_preflight_bench.rs",
@@ -3391,6 +3393,7 @@
         ".github/workflows/perf-regression-nightly.yml",
         "scripts/run_backend_latency_fixture.py",
         "scripts/write_backend_latency_result_artifact.py",
+        "scripts/import_backend_latency_artifact.py",
         "scripts/lock_backend_latency_thresholds.py",
         "scripts/check_backend_latency_fixtures.py",
         "scripts/generate_backend_capability_report.py",
@@ -3405,6 +3408,7 @@
         ".github/workflows/perf-regression-nightly.yml",
         "scripts/run_backend_latency_fixture.py",
         "scripts/write_backend_latency_result_artifact.py",
+        "scripts/import_backend_latency_artifact.py",
         "scripts/lock_backend_latency_thresholds.py",
         "scripts/check_backend_latency_fixtures.py",
         "scripts/generate_backend_capability_report.py",

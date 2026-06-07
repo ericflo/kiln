@@ -178,6 +178,22 @@ uploads both `bench-results/backend-latency/*.json` and
 `bench-results/backend-latency/raw/*.log` as workflow artifacts for review and
 check-in before threshold locking.
 
+After downloading the workflow artifact zip, import the result JSON and raw log
+into their canonical repository paths before locking thresholds:
+
+```sh
+python3 scripts/import_backend_latency_artifact.py \
+  /path/to/backend-latency-metal_apple_silicon_matmul_qwen35_4b-123456789.zip \
+  --fixture-id metal_apple_silicon_matmul_qwen35_4b
+```
+
+The importer accepts either the downloaded zip or an extracted artifact
+directory. It validates the result schema, fixture provenance, source digest,
+raw-log digest, metric values, Git commit, and clean-checkout marker, but it does
+not require locked `max` thresholds. If canonical files already exist with
+different content, pass `--force` only after deciding the newer hardware run
+should replace them.
+
 ## Locking Thresholds
 
 After reviewing the hardware result artifacts, lock numeric thresholds in the

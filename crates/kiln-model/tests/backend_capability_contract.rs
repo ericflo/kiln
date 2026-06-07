@@ -5057,6 +5057,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
     assert!(command.contains("check_backend_latency_fixtures.py"));
     assert!(command.contains("run_backend_latency_fixture.py"));
     assert!(command.contains("write_backend_latency_result_artifact.py"));
+    assert!(command.contains("import_backend_latency_artifact.py"));
     assert!(command.contains("lock_backend_latency_thresholds.py"));
     assert!(command.contains("--self-test"));
     assert!(command.contains("--require-covered"));
@@ -5173,6 +5174,34 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         );
     }
 
+    let importer_source =
+        fs::read_to_string(root.join("scripts/import_backend_latency_artifact.py"))
+            .expect("latency artifact importer should be readable");
+    for required in [
+        "def import_backend_latency_artifact(",
+        "def safe_extract_zip(",
+        "zipfile",
+        "artifact_bundle",
+        "locate_raw_log",
+        "validate_result_artifact",
+        "require_threshold_pass=False",
+        "raw log checksum does not match",
+        "LATENCY_RESULT_ARTIFACT_DIR",
+        "LATENCY_RAW_LOG_DIR",
+        "is_canonical_result_artifact_path",
+        "is_canonical_raw_log_path",
+        "fixture_spec_sha256",
+        "git_tracked_dirty",
+        "--force",
+        "--fixture-id",
+        "--self-test",
+    ] {
+        assert!(
+            importer_source.contains(required),
+            "latency artifact importer should validate downloaded workflow artifacts: {required}"
+        );
+    }
+
     let threshold_locker_source =
         fs::read_to_string(root.join("scripts/lock_backend_latency_thresholds.py"))
             .expect("latency threshold locker should be readable");
@@ -5233,6 +5262,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "Verify backend latency fixture contract",
         "scripts/run_backend_latency_fixture.py --self-test",
         "scripts/write_backend_latency_result_artifact.py --self-test",
+        "scripts/import_backend_latency_artifact.py --self-test",
         "scripts/lock_backend_latency_thresholds.py --self-test",
         "scripts/check_backend_latency_fixtures.py --self-test",
         "scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json",
@@ -5263,6 +5293,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         ".github/workflows/perf-regression-nightly.yml",
         "scripts/run_backend_latency_fixture.py",
         "scripts/write_backend_latency_result_artifact.py",
+        "scripts/import_backend_latency_artifact.py",
         "scripts/lock_backend_latency_thresholds.py",
         "scripts/check_backend_latency_fixtures.py",
         "crates/kiln-server/examples/flce_preflight_bench.rs",
@@ -5315,12 +5346,14 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "KILN_LATENCY_METRIC",
         "run_backend_latency_fixture.py",
         "write_backend_latency_result_artifact.py",
+        "import_backend_latency_artifact.py",
         "lock_backend_latency_thresholds.py",
         "workflow_dispatch",
         "latency_fixture_id",
         "latency_runner_labels_json",
         "bench-results/backend-latency/*.json",
         "bench-results/backend-latency/raw/*.log",
+        "--force",
         "--require-covered",
         "--self-test",
     ] {
