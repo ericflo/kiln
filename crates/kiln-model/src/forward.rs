@@ -237,6 +237,12 @@ fn paged_decode_requires_contiguous_kv_chunks(backend: &dyn BackendRuntime) -> b
         .paged_decode_requires_contiguous_kv_chunks
 }
 
+fn flash_prefill_consumes_grouped_kv(backend: &dyn BackendRuntime) -> bool {
+    BackendCapabilityQueries::backend_capabilities(backend)
+        .attention
+        .flash_prefill_consumes_grouped_kv
+}
+
 #[cfg(feature = "cuda")]
 fn cuda_fused_rotary_qk_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
@@ -3473,12 +3479,10 @@ fn flash_attention_forward(
     let softmax_scale = 1.0 / (head_dim as f32).sqrt();
     let causal = true;
 
-    // GQA: the vendored CUDA FA2 wrapper receives `num_heads_k` separately, so
-    // it can consume grouped K/V directly. Other backends still take the
-    // historic expanded layout through this trait method.
-    let (k, v) = if num_heads != num_kv_heads
-        && BackendIdentity::runtime_name(backend) != "cuda"
-    {
+    // GQA: backends with a grouped-KV flash-prefill ABI receive `num_heads_k`
+    // separately and can consume grouped K/V directly. Other backends still
+    // take the historic expanded layout through this trait method.
+    let (k, v) = if num_heads != num_kv_heads && !flash_prefill_consumes_grouped_kv(backend) {
         let gqa_ratio = num_heads / num_kv_heads;
         let (batch, kv_len, _kv_heads, hd) = k.dims4()?;
         // [batch, kv_len, num_kv_heads, head_dim] -> [batch, kv_len, num_heads, head_dim]

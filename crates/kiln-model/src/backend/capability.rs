@@ -743,6 +743,7 @@ pub struct AttentionCapabilities {
     pub flash_prefill: Support,
     pub flash_prefill_head_major: Support,
     pub flash_paged_decode: Support,
+    pub flash_prefill_consumes_grouped_kv: bool,
 }
 
 /// Focused GDN capability snapshot.
@@ -1087,6 +1088,7 @@ impl BackendCapabilities {
                     backend,
                     &flash_paged_decode,
                 ),
+                flash_prefill_consumes_grouped_kv: flash_prefill_consumes_grouped_kv(name),
             },
             gdn: GdnCapabilities {
                 recurrent_step: Support::from_supports_predicate(
@@ -1243,6 +1245,10 @@ impl DecodeBatcherPolicy {
         self.prefer_direct_paged_decode_attention
             && self.direct_paged_decode_attention_env_gate.allows()
     }
+}
+
+fn flash_prefill_consumes_grouped_kv(name: &str) -> bool {
+    matches!(name, "cuda")
 }
 
 impl BackendFallbackCapabilities {

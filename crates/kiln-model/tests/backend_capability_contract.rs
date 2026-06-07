@@ -1165,6 +1165,16 @@ fn generated_capability_report_lists_request_descriptors() {
         replay_capability_fields.contains(&"authority"),
         "ReplayCapabilities should expose typed replay authority"
     );
+    let attention_capability_fields = capability_descriptors["AttentionCapabilities"]["fields"]
+        .as_array()
+        .expect("AttentionCapabilities fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        attention_capability_fields.contains(&"flash_prefill_consumes_grouped_kv"),
+        "AttentionCapabilities should own flash-prefill grouped-KV ABI routing"
+    );
     let decode_batcher_policy_fields = capability_descriptors["DecodeBatcherPolicy"]["fields"]
         .as_array()
         .expect("DecodeBatcherPolicy fields should be an array")
@@ -2400,6 +2410,11 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "forward direct paged-decode attention routing should read DecodeBatcherPolicy"
     );
     assert!(
+        forward_source.contains("flash_prefill_consumes_grouped_kv")
+            && capability_source.contains("flash_prefill_consumes_grouped_kv"),
+        "forward flash-prefill GQA routing should read AttentionCapabilities"
+    );
+    assert!(
         forward_source.contains("paged_decode_requires_contiguous_kv_chunks")
             && capability_source.contains("paged_decode_requires_contiguous_kv_chunks"),
         "forward paged-decode KV contiguity routing should read DecodeBatcherPolicy"
@@ -2519,6 +2534,19 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             "try_flash_attn_paged_decode should not branch locally on backend identity/env helper: {forbidden}"
         );
     }
+    let flash_prefill_gqa_section = source_between(
+        &forward_source,
+        "fn flash_attention_forward(",
+        "let Some(attn_output)",
+    );
+    assert!(
+        flash_prefill_gqa_section.contains("flash_prefill_consumes_grouped_kv(backend)"),
+        "flash_attention_forward should route grouped-KV expansion through AttentionCapabilities"
+    );
+    assert!(
+        !flash_prefill_gqa_section.contains("BackendIdentity::runtime_name(backend) != \"cuda\""),
+        "flash_attention_forward should not branch on CUDA backend identity for grouped-KV expansion"
+    );
     let paged_decode_kv_contiguity_section = source_between(
         &forward_source,
         "// Verify intra-chunk contiguity.",
