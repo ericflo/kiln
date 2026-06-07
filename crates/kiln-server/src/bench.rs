@@ -49,7 +49,7 @@ use kiln_model::speculative::{
     SpeculativeConfig, speculative_decode_step, speculative_decode_step_paged_greedy,
     speculative_mtp_decode_step,
 };
-use kiln_model::{BackendCapabilityQueries, ModelRunner};
+use kiln_model::{BackendCapabilityQueries, ModelRunner, SpeculativeDecodePolicy};
 use kiln_server::config::SpecMethod;
 
 /// Block size used for the paged-path benchmark. Matches the real server default.
@@ -1365,19 +1365,6 @@ fn read_spec_method_from_env() -> SpecMethod {
     }
 }
 
-const BENCH_MTP_MAX_PROMPT_TOKENS: usize = 128;
-const BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT: usize = 1024;
-const BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL: usize = 4096;
-const BENCH_LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS: usize = 32;
-
-fn bench_long_prompt_skip_layer_min_prompt_tokens(backend_name: &str) -> usize {
-    if backend_name == "metal" {
-        BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL
-    } else {
-        BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT
-    }
-}
-
 fn bench_force_raw_mtp() -> bool {
     std::env::var("KILN_BENCH_FORCE_MTP")
         .ok()
@@ -1397,7 +1384,7 @@ fn resolve_bench_spec_method(
     temperature: f32,
     mtp_supported: bool,
     native_mtp_allowed: bool,
-    long_prompt_skip_layer_min_prompt_tokens: usize,
+    speculative_policy: SpeculativeDecodePolicy,
 ) -> SpecMethod {
     resolve_bench_spec_method_with_force(
         configured,
@@ -1406,7 +1393,7 @@ fn resolve_bench_spec_method(
         temperature,
         mtp_supported,
         native_mtp_allowed,
-        long_prompt_skip_layer_min_prompt_tokens,
+        speculative_policy,
         bench_force_raw_mtp(),
     )
 }
@@ -1418,7 +1405,7 @@ fn resolve_bench_spec_method_with_force(
     temperature: f32,
     mtp_supported: bool,
     native_mtp_allowed: bool,
-    long_prompt_skip_layer_min_prompt_tokens: usize,
+    speculative_policy: SpeculativeDecodePolicy,
     force_raw_mtp: bool,
 ) -> SpecMethod {
     match configured {
@@ -1432,12 +1419,13 @@ fn resolve_bench_spec_method_with_force(
             if mtp_supported
                 && native_mtp_allowed
                 && greedy
-                && requested_prompt_tokens <= BENCH_MTP_MAX_PROMPT_TOKENS
+                && requested_prompt_tokens <= speculative_policy.mtp_max_prompt_tokens
             {
                 SpecMethod::Mtp
             } else if greedy
-                && requested_prompt_tokens >= long_prompt_skip_layer_min_prompt_tokens
-                && max_output_tokens >= BENCH_LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS
+                && requested_prompt_tokens
+                    >= speculative_policy.long_prompt_skip_layer_min_prompt_tokens
+                && max_output_tokens >= speculative_policy.long_prompt_skip_layer_min_output_tokens
             {
                 SpecMethod::SkipLayer
             } else {
@@ -1451,6 +1439,14 @@ fn resolve_bench_spec_method_with_force(
 mod tests {
     use super::*;
 
+    fn default_speculative_policy_for_test() -> SpeculativeDecodePolicy {
+        SpeculativeDecodePolicy::default()
+    }
+
+    fn metal_speculative_policy_for_test() -> SpeculativeDecodePolicy {
+        SpeculativeDecodePolicy::for_backend("metal", kiln_tensor::Device::Metal(0))
+    }
+
     #[test]
     fn bench_mtp_short_prompt_stays_mtp() {
         assert_eq!(
@@ -1461,7 +1457,7 @@ mod tests {
                 0.0,
                 true,
                 true,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                default_speculative_policy_for_test(),
                 false
             ),
             SpecMethod::Mtp
@@ -1473,12 +1469,12 @@ mod tests {
         assert_eq!(
             resolve_bench_spec_method_with_force(
                 SpecMethod::Mtp,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
                 64,
                 0.0,
                 true,
                 true,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                default_speculative_policy_for_test(),
                 false
             ),
             SpecMethod::SkipLayer
@@ -1490,12 +1486,12 @@ mod tests {
         assert_eq!(
             resolve_bench_spec_method_with_force(
                 SpecMethod::Mtp,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
                 31,
                 0.0,
                 true,
                 true,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                default_speculative_policy_for_test(),
                 false
             ),
             SpecMethod::Off
@@ -1503,12 +1499,12 @@ mod tests {
         assert_eq!(
             resolve_bench_spec_method_with_force(
                 SpecMethod::Mtp,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
                 64,
                 0.7,
                 true,
                 true,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                default_speculative_policy_for_test(),
                 false
             ),
             SpecMethod::Off
@@ -1525,7 +1521,7 @@ mod tests {
                 0.0,
                 true,
                 true,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                default_speculative_policy_for_test(),
                 false
             ),
             SpecMethod::Off
@@ -1542,7 +1538,7 @@ mod tests {
                 0.0,
                 true,
                 false,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                default_speculative_policy_for_test(),
                 false
             ),
             SpecMethod::Off
@@ -1559,7 +1555,7 @@ mod tests {
                 0.0,
                 true,
                 false,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                default_speculative_policy_for_test(),
                 true
             ),
             SpecMethod::Mtp
@@ -1576,7 +1572,7 @@ mod tests {
                 0.0,
                 true,
                 false,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
+                metal_speculative_policy_for_test(),
                 false
             ),
             SpecMethod::Off
@@ -1588,12 +1584,12 @@ mod tests {
         assert_eq!(
             resolve_bench_spec_method_with_force(
                 SpecMethod::Mtp,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
+                SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
                 64,
                 0.0,
                 true,
                 false,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
+                metal_speculative_policy_for_test(),
                 false
             ),
             SpecMethod::SkipLayer
@@ -2841,8 +2837,7 @@ fn main() -> Result<()> {
         .decode
         .mtp_speculative_generation
         .is_native();
-    let long_prompt_skip_layer_min_prompt_tokens =
-        bench_long_prompt_skip_layer_min_prompt_tokens(backend_name);
+    let speculative_policy = backend_capabilities.decode.speculative_policy;
 
     let gpu_weights = GpuWeights::from_model_weights_kt(&model_weights, &model_config, &device_kt)
         .context("failed to transfer weights to GPU")?;
@@ -2890,7 +2885,7 @@ fn main() -> Result<()> {
         args.temperature,
         gpu_weights.mtp.is_some(),
         native_mtp_allowed,
-        long_prompt_skip_layer_min_prompt_tokens,
+        speculative_policy,
     );
     if spec_method != requested_spec_method {
         let mut stderr = std::io::stderr();

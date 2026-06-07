@@ -1768,7 +1768,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "DecodeCapabilities": {
-      "field_count": 7,
+      "field_count": 8,
       "fields": [
         {
           "name": "resident_decode",
@@ -1781,6 +1781,10 @@
         {
           "name": "mtp_speculative_generation",
           "type": "Support"
+        },
+        {
+          "name": "speculative_policy",
+          "type": "SpeculativeDecodePolicy"
         },
         {
           "name": "linear_argmax",
@@ -1911,6 +1915,24 @@
         {
           "name": "authority",
           "type": "ReplayAuthority"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "SpeculativeDecodePolicy": {
+      "field_count": 3,
+      "fields": [
+        {
+          "name": "mtp_max_prompt_tokens",
+          "type": "usize"
+        },
+        {
+          "name": "long_prompt_skip_layer_min_prompt_tokens",
+          "type": "usize"
+        },
+        {
+          "name": "long_prompt_skip_layer_min_output_tokens",
+          "type": "usize"
         }
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"

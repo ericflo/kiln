@@ -92,6 +92,7 @@ CAPABILITY_DESCRIPTOR_STRUCTS = [
     "GdnCapabilities",
     "InferenceRecurrentStatePolicy",
     "DecodeCapabilities",
+    "SpeculativeDecodePolicy",
     "DecodeBatcherPolicy",
     "BackendTrainingCapabilities",
     "ReplayCapabilities",

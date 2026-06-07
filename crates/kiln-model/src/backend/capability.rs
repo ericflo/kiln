@@ -790,10 +790,19 @@ pub struct DecodeCapabilities {
     pub resident_decode: Support,
     pub paged_decode_graph_outputs: Support,
     pub mtp_speculative_generation: Support,
+    pub speculative_policy: SpeculativeDecodePolicy,
     pub linear_argmax: Support,
     pub linear_argmax_batch: Support,
     pub linear_sample: Support,
     pub linear_sample_batch: Support,
+}
+
+/// Backend-owned speculative decode routing thresholds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpeculativeDecodePolicy {
+    pub mtp_max_prompt_tokens: usize,
+    pub long_prompt_skip_layer_min_prompt_tokens: usize,
+    pub long_prompt_skip_layer_min_output_tokens: usize,
 }
 
 /// Backend-owned defaults for the live decode rendezvous worker.
@@ -1163,6 +1172,7 @@ impl BackendCapabilities {
                     &paged_replay,
                 ),
                 mtp_speculative_generation: mtp_speculative_generation_support(name),
+                speculative_policy: SpeculativeDecodePolicy::for_backend(name, device),
                 linear_argmax: BackendCapabilityQueries::supports_linear_request(
                     backend,
                     &linear_argmax,
@@ -1237,6 +1247,33 @@ impl StartupCapabilities {
                 decode_weight_prewarm_when_native_training: false,
             },
         }
+    }
+}
+
+impl SpeculativeDecodePolicy {
+    pub const MTP_MAX_PROMPT_TOKENS_DEFAULT: usize = 128;
+    pub const LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT: usize = 1024;
+    pub const LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL: usize = 4096;
+    pub const LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS_DEFAULT: usize = 32;
+
+    pub fn for_backend(name: &str, device: kiln_tensor::Device) -> Self {
+        let long_prompt_skip_layer_min_prompt_tokens = match backend_kind_for_runtime(name, device)
+        {
+            kiln_tensor::Backend::Metal => Self::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
+            _ => Self::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+        };
+        Self {
+            mtp_max_prompt_tokens: Self::MTP_MAX_PROMPT_TOKENS_DEFAULT,
+            long_prompt_skip_layer_min_prompt_tokens,
+            long_prompt_skip_layer_min_output_tokens:
+                Self::LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS_DEFAULT,
+        }
+    }
+}
+
+impl Default for SpeculativeDecodePolicy {
+    fn default() -> Self {
+        Self::for_backend("cpu", kiln_tensor::Device::Cpu)
     }
 }
 

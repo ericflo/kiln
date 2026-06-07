@@ -1146,6 +1146,7 @@ fn generated_capability_report_lists_request_descriptors() {
         "GdnCapabilities",
         "InferenceRecurrentStatePolicy",
         "DecodeCapabilities",
+        "SpeculativeDecodePolicy",
         "DecodeBatcherPolicy",
         "BackendTrainingCapabilities",
         "ReplayCapabilities",
@@ -1245,6 +1246,36 @@ fn generated_capability_report_lists_request_descriptors() {
         decode_capability_fields.contains(&"mtp_speculative_generation"),
         "DecodeCapabilities should expose native MTP speculative generation support"
     );
+    assert!(
+        decode_capability_fields.contains(&"speculative_policy"),
+        "DecodeCapabilities should expose backend-owned speculative decode thresholds"
+    );
+    let speculative_decode_policy_fields =
+        capability_descriptors["SpeculativeDecodePolicy"]["fields"]
+            .as_array()
+            .expect("SpeculativeDecodePolicy fields should be an array")
+            .iter()
+            .filter_map(|field| field["name"].as_str())
+            .collect::<Vec<_>>();
+    for (field, message) in [
+        (
+            "mtp_max_prompt_tokens",
+            "SpeculativeDecodePolicy should own the native MTP prompt threshold",
+        ),
+        (
+            "long_prompt_skip_layer_min_prompt_tokens",
+            "SpeculativeDecodePolicy should own the long-prompt skip-layer crossover",
+        ),
+        (
+            "long_prompt_skip_layer_min_output_tokens",
+            "SpeculativeDecodePolicy should own the skip-layer output threshold",
+        ),
+    ] {
+        assert!(
+            speculative_decode_policy_fields.contains(&field),
+            "{message}"
+        );
+    }
     let gdn_capability_fields = capability_descriptors["GdnCapabilities"]["fields"]
         .as_array()
         .expect("GdnCapabilities fields should be an array")
@@ -3075,14 +3106,15 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     );
     let server_mtp_resolver_section = source_between(
         &server_completions_source,
-        "fn native_mtp_allowed_for_state(",
-        "fn long_prompt_skip_layer_min_prompt_tokens_for_state(",
+        "fn speculative_decode_policy_for_state(",
+        "fn resolve_skip_layer_config(",
     );
     assert!(
         server_mtp_resolver_section.contains("backend_capabilities()")
             && server_mtp_resolver_section.contains("mtp_speculative_generation")
-            && server_mtp_resolver_section.contains(".is_native()"),
-        "server native MTP request resolution should read DecodeCapabilities"
+            && server_mtp_resolver_section.contains(".is_native()")
+            && server_mtp_resolver_section.contains("speculative_policy"),
+        "server speculative request resolution should read DecodeCapabilities"
     );
     for forbidden in [
         "KILN_ENABLE_METAL_NATIVE_MTP",
@@ -3092,7 +3124,7 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     ] {
         assert!(
             !server_mtp_resolver_section.contains(forbidden),
-            "server native MTP request resolution should not keep a local backend/env policy table: {forbidden}"
+            "server speculative request resolution should not keep a local backend/env policy table: {forbidden}"
         );
     }
     let bench_mtp_resolver_section = source_between(
@@ -3103,13 +3135,19 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     assert!(
         server_bench_source.contains("BackendCapabilityQueries::backend_capabilities")
             && server_bench_source.contains("mtp_speculative_generation")
+            && server_bench_source.contains("speculative_policy")
             && bench_mtp_resolver_section.contains("native_mtp_allowed"),
-        "kiln-bench native MTP resolution should receive DecodeCapabilities-derived support"
+        "kiln-bench speculative resolution should receive DecodeCapabilities-derived support"
     );
-    for forbidden in ["KILN_ENABLE_METAL_NATIVE_MTP", "bench_native_mtp_allowed"] {
+    for forbidden in [
+        "KILN_ENABLE_METAL_NATIVE_MTP",
+        "bench_native_mtp_allowed",
+        "bench_long_prompt_skip_layer_min_prompt_tokens",
+        "BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL",
+    ] {
         assert!(
             !server_bench_source.contains(forbidden),
-            "kiln-bench native MTP resolution should not keep a local backend/env policy table: {forbidden}"
+            "kiln-bench speculative resolution should not keep a local backend/env policy table: {forbidden}"
         );
     }
     let gdn_contiguity_partition_section = source_between(
