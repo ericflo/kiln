@@ -1184,6 +1184,10 @@ fn generated_capability_report_lists_request_descriptors() {
         "DecodeBatcherPolicy should own direct paged-decode attention env gates"
     );
     assert!(
+        decode_batcher_policy_fields.contains(&"allow_prefix_cache_split_snapshot"),
+        "DecodeBatcherPolicy should own prefix-cache split snapshot routing"
+    );
+    assert!(
         decode_batcher_policy_fields.contains(&"use_greedy_token_decode"),
         "DecodeBatcherPolicy should own greedy-token decode shortcut routing"
     );
@@ -2343,6 +2347,11 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "greedy-token decode routing should read DecodeBatcherPolicy"
     );
     assert!(
+        generate_source.contains("prefix_cache_split_snapshot_allowed")
+            && generate_source.contains("allow_prefix_cache_split_snapshot"),
+        "prefix-cache split snapshot routing should read DecodeBatcherPolicy"
+    );
+    assert!(
         generate_source.contains("ReplayBackend"),
         "generate decode residency gates should import the focused replay facet"
     );
@@ -2451,6 +2460,21 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         !decode_batcher_retry_section.contains("runtime_name")
             && !decode_batcher_retry_section.contains("\"vulkan\""),
         "decode batcher rowwise retry should not branch on backend name locally"
+    );
+    let prefix_cache_split_section = source_between(
+        &generate_source,
+        "let capture_prefix_split =",
+        "let split_pos = capture_prefix_split",
+    );
+    assert!(
+        prefix_cache_split_section
+            .contains("prefix_cache_split_snapshot_allowed(self.backend.as_ref())"),
+        "prefix-cache split snapshot routing should read the backend policy helper"
+    );
+    assert!(
+        !prefix_cache_split_section.contains("Device::Rocm")
+            && !prefix_cache_split_section.contains("self.weights.embed_tokens.device()"),
+        "prefix-cache split snapshot routing should not branch on ROCm device identity"
     );
     let direct_paged_decode_attention_helper = source_between(
         &forward_source,

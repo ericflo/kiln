@@ -738,6 +738,12 @@ fn greedy_token_decode_enabled(backend: &dyn BackendRuntime) -> bool {
         .use_greedy_token_decode
 }
 
+fn prefix_cache_split_snapshot_allowed(backend: &dyn BackendRuntime) -> bool {
+    BackendCapabilityQueries::backend_capabilities(backend)
+        .decode_batcher
+        .allow_prefix_cache_split_snapshot
+}
+
 fn decode_hot_path_fallback_policy(backend: &dyn BackendRuntime) -> FallbackPolicy {
     let fallback = BackendCapabilityQueries::backend_capabilities(backend).fallback;
     if decode_hot_path_debug_fallback_enabled(fallback.decode_hot_path_debug_env) {
@@ -2887,11 +2893,8 @@ impl ModelRunner {
         // every subsequent turn's prompt does NOT contain — without this
         // snapshot, multi-turn lookups miss because the cached entry's
         // last block contains generation-prompt-only tokens.
-        let capture_prefix_split = capture_prefix_split
-            && !matches!(
-                self.weights.embed_tokens.device(),
-                kiln_tensor::Device::Rocm(_)
-            );
+        let capture_prefix_split =
+            capture_prefix_split && prefix_cache_split_snapshot_allowed(self.backend.as_ref());
         let split_pos = capture_prefix_split
             .then(|| strict_prompt_prefix_split_pos(prompt_tokens.len(), cached_tokens, block_size))
             .flatten();
