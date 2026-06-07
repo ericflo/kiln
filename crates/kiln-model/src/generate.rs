@@ -716,8 +716,9 @@ fn env_flag_enabled(name: &str, default: bool) -> bool {
 }
 
 fn decode_batcher_rowwise_retry_enabled(backend: &dyn BackendRuntime) -> bool {
-    if BackendIdentity::runtime_name(backend) == "vulkan"
-        && env_flag_enabled("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY", false)
+    let policy = BackendCapabilityQueries::backend_capabilities(backend).decode_batcher;
+    if let Some(env_var) = policy.rowwise_retry_env
+        && env_flag_enabled(env_var, false)
     {
         return true;
     }
@@ -8407,6 +8408,7 @@ mod tests {
         "KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK",
         "KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK",
     ];
+    const DECODE_BATCHER_ROWWISE_ENV: &[&str] = &["KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY"];
 
     struct EnvRestore(Vec<(&'static str, Option<String>)>);
 
@@ -8479,14 +8481,35 @@ mod tests {
 
     #[test]
     fn test_decode_batcher_default_backend_policy() {
-        for (backend_name, device, max_batch, wait_micros, allow_mixed_seq_lens) in [
-            ("cpu", kiln_tensor::Device::Cpu, 8, 0, false),
-            ("cuda", kiln_tensor::Device::Cpu, 1, 0, false),
-            ("cuda", kiln_tensor::Device::Cuda(0), 1, 0, false),
-            ("metal", kiln_tensor::Device::Metal(0), 8, 100, true),
-            ("vulkan", kiln_tensor::Device::Cpu, 64, 5_000, true),
-            ("vulkan", kiln_tensor::Device::Vulkan(0), 64, 5_000, true),
-            ("rocm", kiln_tensor::Device::Rocm(0), 8, 0, false),
+        for (
+            backend_name,
+            device,
+            max_batch,
+            wait_micros,
+            allow_mixed_seq_lens,
+            rowwise_retry_env,
+        ) in [
+            ("cpu", kiln_tensor::Device::Cpu, 8, 0, false, None),
+            ("cuda", kiln_tensor::Device::Cpu, 1, 0, false, None),
+            ("cuda", kiln_tensor::Device::Cuda(0), 1, 0, false, None),
+            ("metal", kiln_tensor::Device::Metal(0), 8, 100, true, None),
+            (
+                "vulkan",
+                kiln_tensor::Device::Cpu,
+                64,
+                5_000,
+                true,
+                Some("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY"),
+            ),
+            (
+                "vulkan",
+                kiln_tensor::Device::Vulkan(0),
+                64,
+                5_000,
+                true,
+                Some("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY"),
+            ),
+            ("rocm", kiln_tensor::Device::Rocm(0), 8, 0, false, None),
         ] {
             let policy = DecodeBatcherPolicy::for_backend(backend_name, device);
             assert_eq!(
@@ -8500,6 +8523,10 @@ mod tests {
             assert_eq!(
                 policy.allow_mixed_seq_lens, allow_mixed_seq_lens,
                 "{backend_name} mixed-seq policy drifted"
+            );
+            assert_eq!(
+                policy.rowwise_retry_env, rowwise_retry_env,
+                "{backend_name} rowwise retry policy drifted"
             );
         }
     }
@@ -8543,6 +8570,34 @@ mod tests {
             Some(v) => unsafe { std::env::set_var("KILN_MAX_DECODE_BATCH", v) },
             None => unsafe { std::env::remove_var("KILN_MAX_DECODE_BATCH") },
         }
+    }
+
+    #[test]
+    fn test_decode_batcher_rowwise_retry_uses_backend_policy() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _fallback_env = EnvRestore::clear(DECODE_FALLBACK_ENV);
+        let _rowwise_env = EnvRestore::clear(DECODE_BATCHER_ROWWISE_ENV);
+
+        let vulkan_cpu_sentinel = NamedTestBackend {
+            name: "vulkan",
+            device: kiln_tensor::Device::Cpu,
+        };
+        let metal = NamedTestBackend {
+            name: "metal",
+            device: kiln_tensor::Device::Metal(0),
+        };
+
+        assert!(!decode_batcher_rowwise_retry_enabled(&vulkan_cpu_sentinel));
+        assert!(!decode_batcher_rowwise_retry_enabled(&metal));
+
+        unsafe {
+            std::env::set_var("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY", "1");
+        }
+        assert!(decode_batcher_rowwise_retry_enabled(&vulkan_cpu_sentinel));
+        assert!(
+            !decode_batcher_rowwise_retry_enabled(&metal),
+            "Vulkan rowwise retry env should not apply to Metal policy"
+        );
     }
 
     #[test]

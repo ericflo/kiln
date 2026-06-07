@@ -1911,6 +1911,10 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "decode batcher defaults should import the backend-owned policy surface"
     );
     assert!(
+        generate_source.contains("rowwise_retry_env"),
+        "decode batcher rowwise retry should be backend-owned policy, not a local backend-name branch"
+    );
+    assert!(
         generate_source.contains("ReplayBackend"),
         "generate decode residency gates should import the focused replay facet"
     );
@@ -1977,6 +1981,20 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     assert!(
         decode_batcher_config_section.contains("DecodeBatcherPolicy::for_backend"),
         "decode batcher backend-aware defaults should come from the shared policy object"
+    );
+    let decode_batcher_retry_section = source_between(
+        &generate_source,
+        "fn decode_batcher_rowwise_retry_enabled(",
+        "fn decode_batch_generic_fallback_enabled(",
+    );
+    assert!(
+        decode_batcher_retry_section.contains("BackendCapabilityQueries::backend_capabilities"),
+        "decode batcher rowwise retry should come from the shared backend capability aggregate"
+    );
+    assert!(
+        !decode_batcher_retry_section.contains("runtime_name")
+            && !decode_batcher_retry_section.contains("\"vulkan\""),
+        "decode batcher rowwise retry should not branch on backend name locally"
     );
     for removed_helper in [
         "fn default_decode_batcher_max_batch_kt",

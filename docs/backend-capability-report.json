@@ -1568,7 +1568,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "DecodeBatcherPolicy": {
-      "field_count": 3,
+      "field_count": 4,
       "fields": [
         {
           "name": "max_batch",
@@ -1581,6 +1581,10 @@
         {
           "name": "allow_mixed_seq_lens",
           "type": "bool"
+        },
+        {
+          "name": "rowwise_retry_env",
+          "type": "Option<&'static str>"
         }
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"
