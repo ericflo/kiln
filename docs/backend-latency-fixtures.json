@@ -21,7 +21,7 @@
       "backend": "cuda",
       "hardware": "NVIDIA RTX A6000 48GB",
       "source": "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
-      "command": "/home/ericflo/.cargo/bin/cargo run --release --features cuda -p kiln-server --example flce_phase_a_validation_bench -- --model-path /path/to/Qwen3.5-4B",
+      "command": "cargo run --release --features cuda -p kiln-server --example flce_phase_a_validation_bench -- --model-path /path/to/Qwen3.5-4B",
       "result_artifact": "bench-results/backend-latency/cuda-a6000-flce-phase-a.json",
       "threshold_state": "pending_fixture_result",
       "metrics": [
@@ -50,7 +50,7 @@
       "backend": "metal",
       "hardware": "Apple Silicon Metal fixture",
       "source": "crates/kiln-tensor/tests/metal_matmul_bench.rs",
-      "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features metal --test metal_matmul_bench -- --ignored --nocapture",
+      "command": "cargo test -p kiln-tensor --features metal --test metal_matmul_bench -- --ignored --nocapture",
       "result_artifact": "bench-results/backend-latency/metal-apple-silicon-matmul.json",
       "threshold_state": "pending_fixture_result",
       "metrics": [
@@ -85,7 +85,7 @@
       "backend": "metal",
       "hardware": "Apple Silicon Metal fixture",
       "source": "crates/kiln-tensor/tests/metal_sdpa_bench.rs",
-      "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features metal --test metal_sdpa_bench -- --ignored --nocapture",
+      "command": "cargo test -p kiln-tensor --features metal --test metal_sdpa_bench -- --ignored --nocapture",
       "result_artifact": "bench-results/backend-latency/metal-apple-silicon-sdpa.json",
       "threshold_state": "pending_fixture_result",
       "metrics": [
@@ -114,7 +114,7 @@
       "backend": "rocm",
       "hardware": "AMD ROCm gfx1151 or configured ROCm fixture",
       "source": "crates/kiln-tensor/tests/rocm_latency_bench.rs",
-      "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features rocm --test rocm_latency_bench -- --ignored --nocapture",
+      "command": "cargo test -p kiln-tensor --features rocm --test rocm_latency_bench -- --ignored --nocapture",
       "result_artifact": "bench-results/backend-latency/rocm-gfx1151-matmul.json",
       "threshold_state": "pending_fixture_result",
       "metrics": [
@@ -149,7 +149,7 @@
       "backend": "vulkan",
       "hardware": "NVIDIA RTX 6000 Ada or RTX A6000 Vulkan fixture",
       "source": "crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs",
-      "command": "/home/ericflo/.cargo/bin/cargo run --release -p kiln-vulkan-kernel --bin vulkan_decode_microbench",
+      "command": "cargo run --release -p kiln-vulkan-kernel --bin vulkan_decode_microbench",
       "result_artifact": "bench-results/backend-latency/vulkan-rtx6000-decode.json",
       "threshold_state": "pending_fixture_result",
       "selected_cases": [

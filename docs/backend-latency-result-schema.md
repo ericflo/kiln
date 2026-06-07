@@ -18,6 +18,11 @@ Pending fixtures live in `docs/backend-latency-fixtures.json` with:
 This state is valid for local and default-feature CI. It must not mark the
 hardware latency conformance gate covered.
 
+Fixture `command` strings are part of the stable fixture digest used by
+reviewed result artifacts. Keep them runner-portable, such as `cargo ...` with
+environment variables or fixture arguments for local model paths, and do not
+bake a developer-local Cargo installation path into the manifest.
+
 ## Covered Fixtures
 
 To cover the gate, each fixture must:
@@ -50,7 +55,7 @@ The result artifact is JSON:
   "hardware": "Apple Silicon Metal fixture",
   "source": "crates/kiln-tensor/tests/metal_matmul_bench.rs",
   "source_sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
-  "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features metal --test metal_matmul_bench -- --ignored --nocapture",
+  "command": "cargo test -p kiln-tensor --features metal --test metal_matmul_bench -- --ignored --nocapture",
   "raw_log": "bench-results/backend-latency/raw/metal-apple-silicon-matmul-qwen35-4b-20260606T120000Z.log",
   "raw_log_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "git_commit": "1111111111111111111111111111111111111111",

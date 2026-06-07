@@ -5428,6 +5428,17 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         let metrics = fixture["metrics"]
             .as_array()
             .expect("fixture metrics should be an array");
+        let command = fixture["command"]
+            .as_str()
+            .expect("fixture command should be a string");
+        assert!(
+            !command.contains("/home/") && !command.contains("/Users/"),
+            "fixture command should be runner-portable because it is part of the stable fixture digest: {command}"
+        );
+        assert!(
+            command.contains("cargo "),
+            "fixture command should invoke cargo through the runner PATH: {command}"
+        );
         assert!(
             !metrics.is_empty(),
             "fixture should declare at least one latency metric"
