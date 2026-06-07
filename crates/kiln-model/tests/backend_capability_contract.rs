@@ -2513,6 +2513,27 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         decode_policy_section.contains("decode_hot_path_debug_env"),
         "decode debug fallback opt-in should be read from BackendFallbackCapabilities"
     );
+    let decode_buffer_max_batch_section = source_between(
+        &generate_source,
+        "fn decode_buffer_max_batch(",
+        "enum PrefillSampleSource",
+    );
+    assert!(
+        decode_buffer_max_batch_section
+            .contains("BackendCapabilityQueries::backend_capabilities(backend)")
+            && decode_buffer_max_batch_section.contains(".decode_batcher")
+            && decode_buffer_max_batch_section.contains(".max_batch"),
+        "decode buffer max-batch default should come from DecodeBatcherPolicy on the active backend"
+    );
+    assert!(
+        !decode_buffer_max_batch_section.contains("DecodeBatcherPolicy::for_backend")
+            && !decode_buffer_max_batch_section.contains("backend_name"),
+        "decode buffer max-batch default should not rebuild policy from a backend name"
+    );
+    assert!(
+        generate_source.contains("decode_buffer_max_batch(self.backend.as_ref())"),
+        "decode buffer config should pass the active backend to max-batch policy"
+    );
     let decode_debug_policy_section = source_between(
         &generate_source,
         "fn decode_hot_path_debug_fallback_enabled(",

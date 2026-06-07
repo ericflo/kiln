@@ -522,7 +522,7 @@ fn env_positive_usize(name: &str) -> Option<usize> {
         .filter(|&value| value > 0)
 }
 
-fn decode_buffer_max_batch(backend_name: &str) -> usize {
+fn decode_buffer_max_batch(backend: &dyn BackendRuntime) -> usize {
     let explicit = env_positive_usize("KILN_DECODE_BUFFER_MAX_BATCH");
     if let Some(value) = explicit {
         return value;
@@ -533,8 +533,9 @@ fn decode_buffer_max_batch(backend_name: &str) -> usize {
     // because its resident path keeps scaling past b16 on this target.
     let actor_max = env_positive_usize("KILN_MAX_DECODE_BATCH").unwrap_or(0);
     let live_batcher_max = env_positive_usize("KILN_DECODE_BATCH_MAX").unwrap_or(0);
-    let backend_default =
-        DecodeBatcherPolicy::for_backend(backend_name, kiln_tensor::Device::Cpu).max_batch;
+    let backend_default = BackendCapabilityQueries::backend_capabilities(backend)
+        .decode_batcher
+        .max_batch;
     actor_max.max(live_batcher_max).max(backend_default)
 }
 
@@ -1771,7 +1772,7 @@ impl ModelRunner {
             .decode_buffer_config
             .get_or_init(|| {
                 DecodeBufferConfig::graph_bucket(
-                    decode_buffer_max_batch(self.backend_name()),
+                    decode_buffer_max_batch(self.backend.as_ref()),
                     self.config.max_position_embeddings,
                     1,
                     16,
