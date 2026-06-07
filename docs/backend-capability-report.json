@@ -1782,7 +1782,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "GdnCapabilities": {
-      "field_count": 8,
+      "field_count": 9,
       "fields": [
         {
           "name": "recurrent_step",
@@ -1815,6 +1815,10 @@
         {
           "name": "gated_rms_norm",
           "type": "Support"
+        },
+        {
+          "name": "gated_rms_norm_preserves_tape_residency",
+          "type": "bool"
         }
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"

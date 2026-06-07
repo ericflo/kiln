@@ -12852,10 +12852,9 @@ fn gated_rms_norm(
     // `GdnGatedRmsNormBackward` in the caller.
     #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     let skip_backend_for_active_tape = crate::tape_forward::tape_scope_active()
-        && matches!(
-            BackendIdentity::runtime_device(backend),
-            kiln_tensor::Device::Vulkan(_)
-        );
+        && !BackendCapabilityQueries::backend_capabilities(backend)
+            .gdn
+            .gated_rms_norm_preserves_tape_residency;
     #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
     let skip_backend_for_active_tape = false;
     if !skip_backend_for_active_tape

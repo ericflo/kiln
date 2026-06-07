@@ -1204,6 +1204,10 @@ fn generated_capability_report_lists_request_descriptors() {
         gdn_capability_fields.contains(&"inference_recurrent_state"),
         "GdnCapabilities should own inference recurrent-state dtype policy"
     );
+    assert!(
+        gdn_capability_fields.contains(&"gated_rms_norm_preserves_tape_residency"),
+        "GdnCapabilities should own active-tape GDN RMSNorm residency policy"
+    );
     let inference_recurrent_state_policy_fields =
         capability_descriptors["InferenceRecurrentStatePolicy"]["fields"]
             .as_array()
@@ -2475,6 +2479,25 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "forward GDN helpers should import the focused GDN facet"
     );
     assert!(
+        forward_source.contains("gated_rms_norm_preserves_tape_residency")
+            && capability_source.contains("gated_rms_norm_preserves_tape_residency"),
+        "forward GDN gated RMSNorm active-tape routing should read GdnCapabilities"
+    );
+    let gated_rms_norm_section = source_between(
+        &forward_source,
+        "fn gated_rms_norm(",
+        "fn gated_rms_norm_fallback(",
+    );
+    for forbidden in [
+        "BackendIdentity::runtime_device(backend)",
+        "kiln_tensor::Device::Vulkan(_)",
+    ] {
+        assert!(
+            !gated_rms_norm_section.contains(forbidden),
+            "gated_rms_norm should not branch locally on backend/device residency policy: {forbidden}"
+        );
+    }
+    assert!(
         forward_source.contains("direct_paged_decode_attention_enabled")
             && capability_source.contains("prefer_direct_paged_decode_attention")
             && capability_source.contains("direct_paged_decode_attention_env_gate"),
@@ -2966,7 +2989,6 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         .collect::<String>();
     for required in [
         "BackendIdentity::runtime_name",
-        "BackendIdentity::runtime_device",
         "BackendIdentity::runtime_as_any",
     ] {
         assert!(

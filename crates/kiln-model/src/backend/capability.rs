@@ -758,6 +758,7 @@ pub struct GdnCapabilities {
     pub full_chunk_forward: Support,
     pub gates: Support,
     pub gated_rms_norm: Support,
+    pub gated_rms_norm_preserves_tape_residency: bool,
 }
 
 /// Backend-owned dtype policy for GDN recurrent state in inference.
@@ -1127,6 +1128,8 @@ impl BackendCapabilities {
                 gated_rms_norm: Support::from_supports_predicate(
                     GdnBackend::runtime_supports_gdn_gated_rms_norm(backend),
                 ),
+                gated_rms_norm_preserves_tape_residency:
+                    gdn_gated_rms_norm_preserves_tape_residency(name, device),
             },
             decode: DecodeCapabilities {
                 resident_decode: Support::from_supports_predicate(
@@ -1286,6 +1289,18 @@ fn mtp_speculative_generation_support(name: &str) -> Support {
     match name {
         "cuda" => Support::NativeWithConstraints,
         _ => Support::Declined,
+    }
+}
+
+fn gdn_gated_rms_norm_preserves_tape_residency(
+    name: &str,
+    device: kiln_tensor::Device,
+) -> bool {
+    match backend_kind_for_runtime(name, device) {
+        kiln_tensor::Backend::Cuda | kiln_tensor::Backend::Rocm | kiln_tensor::Backend::Metal => {
+            true
+        }
+        _ => false,
     }
 }
 
