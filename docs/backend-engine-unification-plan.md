@@ -2,6 +2,17 @@
 
 Date: 2026-06-05
 
+> **Status update (2026-06-07).** This original plan has been largely executed on
+> branch `unify-engines` (PR #1465). An outcome + code review found that the
+> contracts, module decomposition, and observability landed genuinely, but the
+> **behavioral migration** for Phases 1, 3, 4, and 5 did not — those shared
+> surfaces are additive scaffolds that coexist with the original `Device::`-keyed
+> dispatch, even though the generated report marks them `covered`. Do not treat
+> "covered" in `docs/backend-capability-report.md` as "migrated".
+>
+> - What actually landed, with evidence: **[`backend-engine-unification-review-2026-06-07.md`](backend-engine-unification-review-2026-06-07.md)**
+> - How to finish (drive every phase to genuine unification): **[`backend-engine-unification-completion-plan.md`](backend-engine-unification-completion-plan.md)** ← active plan; agents should work from this.
+
 This document maps the current backend and engine implementations across the
 workspace and proposes a unification plan for CUDA, ROCm, Metal, and Vulkan. It
 is intentionally based on the current source layout, not on the older
@@ -939,11 +950,17 @@ These are the first concrete PRs, ordered by readiness. Items 1-4 are Phase 0
 2; item 7 begins Phase 7 and must wait for item 6. Item 9 is a small audit that
 pairs with the unified optimizer contract (Phase 6).
 
-Status note: this section records the initial migration order. The current
-completion state is the generated capability report in
-`docs/backend-capability-report.md` / `.json`; at the current PR state, the
-remaining non-covered item is the Phase 8 known-hardware latency threshold
-fixture.
+Status note (revised 2026-06-07): this section records the initial migration
+order. The generated capability report (`docs/backend-capability-report.md` /
+`.json`) now marks all eight phases `covered`, but the 2026-06-07 review found
+that `covered` is computed mostly from hardcoded literals gated on file existence
+and certifies "a contract + test exist", not "call sites migrated". Phases 0, 2,
+6, and 7 are genuinely landed; Phases 1, 3, 4, and 5 are additive scaffolds that
+still sit on top of `Device::`-keyed dispatch. The remaining work — driving every
+phase to genuine unification (type A) and making the report derive its status
+instead of declaring it — is tracked in
+`docs/backend-engine-unification-completion-plan.md`, with the full evidence base
+in `docs/backend-engine-unification-review-2026-06-07.md`.
 
 1. Generate a capability report from the live tree.
    Start with override presence plus explicit support methods for
