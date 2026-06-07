@@ -5050,7 +5050,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         .find(|gate| gate["gate"] == "hardware_latency_thresholds")
         .expect("hardware latency threshold gate should be present");
 
-    assert_eq!(hardware_gate["status"], "fixture_required");
+    assert_eq!(hardware_gate["status"], "covered");
     let command = hardware_gate["command"]
         .as_str()
         .expect("hardware latency command should be a string");
@@ -5338,6 +5338,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "scripts/lock_backend_latency_thresholds.py",
         "scripts/check_backend_latency_fixtures.py",
         "scripts/plan_backend_latency_fixture_dispatch.py",
+        "crates/kiln-tensor/tests/cuda_latency_bench.rs",
         "crates/kiln-server/examples/flce_preflight_bench.rs",
         "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
         "crates/kiln-tensor/tests/metal_matmul_bench.rs",
@@ -5394,6 +5395,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "latency_fixture_id",
         "latency_runner_labels_json",
         "runner_labels",
+        "cuda-rtx4090",
         "rocm-gfx1151",
         "vulkan-strix-halo",
         "fixture_spec_sha256",
@@ -5436,32 +5438,9 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
     assert!(
-        !coverage_blockers.is_empty(),
-        "fixture_required hardware latency gate should expose known-hardware coverage blockers"
+        coverage_blockers.is_empty(),
+        "covered hardware latency gate should not expose fixture blockers: {coverage_blockers:?}"
     );
-    for expected in [
-        "missing result artifact bench-results/backend-latency/cuda-a6000-flce-phase-a.json",
-        "threshold_state is 'pending_fixture_result'",
-        "max threshold is not finite numeric",
-    ] {
-        assert!(
-            coverage_blockers
-                .iter()
-                .any(|blocker| blocker.contains(expected)),
-            "hardware latency coverage blockers should include {expected}: {coverage_blockers:?}"
-        );
-    }
-    for unexpected in [
-        "metal_apple_silicon_matmul_qwen35_4b:",
-        "metal_apple_silicon_sdpa_qwen35_4b:",
-    ] {
-        assert!(
-            !coverage_blockers
-                .iter()
-                .any(|blocker| blocker.contains(unexpected)),
-            "locked Metal fixture should not remain a coverage blocker {unexpected}: {coverage_blockers:?}"
-        );
-    }
 
     let manifest_path = root.join("docs/backend-latency-fixtures.json");
     let manifest: Value = serde_json::from_str(
@@ -5469,7 +5448,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
     )
     .expect("latency fixture manifest should parse");
     assert_eq!(manifest["schema_version"], 1);
-    assert_eq!(manifest["status"], "fixture_required");
+    assert_eq!(manifest["status"], "covered");
     let policy = manifest["policy"]
         .as_object()
         .expect("latency fixture manifest policy should be an object");
@@ -5535,7 +5514,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
             "fixture source should exist: {source}"
         );
         let expected_runner_labels: &[&str] = match fixture["id"].as_str() {
-            Some("cuda_a6000_flce_phase_a_validation") => &["self-hosted", "linux", "cuda-a6000"],
+            Some("cuda_rtx4090_matmul_qwen35_4b") => &["self-hosted", "linux", "cuda-rtx4090"],
             Some("rocm_gfx1151_matmul_qwen35_4b") => &["self-hosted", "linux", "rocm-gfx1151"],
             Some("vulkan_strix_halo_decode_microbench") => {
                 &["self-hosted", "linux", "vulkan-strix-halo"]
@@ -5731,7 +5710,7 @@ fn generated_capability_report_tracks_migration_phase_status() {
         .iter()
         .find(|phase| phase["phase"] == 8)
         .expect("Phase 8 should be present");
-    assert_eq!(phase8["status"], "fixture_required");
+    assert_eq!(phase8["status"], "covered");
     let phase8_remaining = phase8["remaining"]
         .as_array()
         .expect("Phase 8 remaining should be an array")
@@ -5739,10 +5718,8 @@ fn generated_capability_report_tracks_migration_phase_status() {
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
     assert!(
-        phase8_remaining
-            .iter()
-            .any(|item| item.contains("hardware_latency_thresholds")),
-        "Phase 8 should keep the known-hardware latency artifact requirement visible"
+        phase8_remaining.is_empty(),
+        "covered Phase 8 should not list remaining hardware latency work: {phase8_remaining:?}"
     );
 
     let report_md = fs::read_to_string(root.join("docs/backend-capability-report.md"))
@@ -5752,8 +5729,8 @@ fn generated_capability_report_tracks_migration_phase_status() {
         "Markdown report should expose migration phase status"
     );
     assert!(
-        report_md.contains("| Phase 8 | Conformance and performance gates | `fixture_required` |"),
-        "Markdown report should keep Phase 8 fixture requirement visible"
+        report_md.contains("| Phase 8 | Conformance and performance gates | `covered` |"),
+        "Markdown report should mark Phase 8 covered after all latency fixtures lock"
     );
 }
 

@@ -396,7 +396,7 @@ def self_test() -> int:
                     "backend": "cuda",
                     "threshold_state": "pending_fixture_result",
                     "result_artifact": "missing-cuda.json",
-                    "runner_labels": ["self-hosted", "linux", "cuda-a6000"],
+                    "runner_labels": ["self-hosted", "linux", "cuda-rtx4090"],
                 },
                 {
                     "id": "metal_fixture",
@@ -423,13 +423,13 @@ def self_test() -> int:
             runner_repo="owner/repo",
             runner_inventory=[
                 {
-                    "name": "a6000-1",
+                    "name": "rtx4090-1",
                     "status": "online",
                     "busy": False,
                     "labels": [
                         {"name": "self-hosted"},
                         {"name": "Linux"},
-                        {"name": "cuda-a6000"},
+                        {"name": "cuda-rtx4090"},
                     ],
                 }
             ],
@@ -439,9 +439,9 @@ def self_test() -> int:
             return 1
         cuda_plan = plans[0]
         if (
-            cuda_plan["runner_labels"] != ["self-hosted", "linux", "cuda-a6000"]
+            cuda_plan["runner_labels"] != ["self-hosted", "linux", "cuda-rtx4090"]
             or "latency_fixture_id=cuda_fixture" not in cuda_plan["gh_workflow_run"]
-            or 'latency_runner_labels_json=["self-hosted","linux","cuda-a6000"]'
+            or 'latency_runner_labels_json=["self-hosted","linux","cuda-rtx4090"]'
             not in cuda_plan["gh_workflow_run"]
             or "ref=feature-branch" not in cuda_plan["gh_workflow_run"]
             or cuda_plan["artifact_name_template"] != "backend-latency-cuda_fixture-RUN_ID"

@@ -68,7 +68,7 @@ on:
         type: choice
         options:
           - 'none'
-          - 'cuda_a6000_flce_phase_a_validation'
+          - 'cuda_rtx4090_matmul_qwen35_4b'
           - 'metal_apple_silicon_matmul_qwen35_4b'
           - 'metal_apple_silicon_sdpa_qwen35_4b'
           - 'rocm_gfx1151_matmul_qwen35_4b'

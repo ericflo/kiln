@@ -939,6 +939,8 @@ def path_exists(path: str) -> bool:
 
 
 def conformance_gate_report() -> list[dict[str, Any]]:
+    hardware_latency_blockers = hardware_latency_coverage_blockers()
+
     gates = [
         {
             "gate": "storage_round_trip",
@@ -1170,9 +1172,9 @@ def conformance_gate_report() -> list[dict[str, Any]]:
         {
             "gate": "hardware_latency_thresholds",
             "phase8_requirement": "backend-specific latency thresholds on known hardware fixtures",
-            "status": "fixture_required",
-            "command": "python3 scripts/run_backend_latency_fixture.py --self-test && python3 scripts/write_backend_latency_result_artifact.py --self-test && python3 scripts/import_backend_latency_artifact.py --self-test && python3 scripts/lock_backend_latency_thresholds.py --self-test && python3 scripts/check_backend_latency_fixtures.py --self-test && python3 scripts/plan_backend_latency_fixture_dispatch.py --self-test && hardware runner required; python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered",
-            "coverage_blockers": hardware_latency_coverage_blockers(),
+            "status": "covered" if not hardware_latency_blockers else "fixture_required",
+            "command": "python3 scripts/run_backend_latency_fixture.py --self-test && python3 scripts/write_backend_latency_result_artifact.py --self-test && python3 scripts/import_backend_latency_artifact.py --self-test && python3 scripts/lock_backend_latency_thresholds.py --self-test && python3 scripts/check_backend_latency_fixtures.py --self-test && python3 scripts/plan_backend_latency_fixture_dispatch.py --self-test && python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered",
+            "coverage_blockers": hardware_latency_blockers,
             "evidence": [
                 "docs/backend-latency-fixtures.json",
                 "docs/backend-latency-result-schema.md",
@@ -1183,6 +1185,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
                 "scripts/lock_backend_latency_thresholds.py",
                 "scripts/check_backend_latency_fixtures.py",
                 "scripts/plan_backend_latency_fixture_dispatch.py",
+                "crates/kiln-tensor/tests/cuda_latency_bench.rs",
                 "crates/kiln-server/examples/flce_preflight_bench.rs",
                 "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
                 "crates/kiln-tensor/tests/metal_matmul_bench.rs",

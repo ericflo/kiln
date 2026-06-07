@@ -176,8 +176,9 @@ a scratch artifact.
 The GitHub `Perf regression nightly` workflow also exposes a manual
 `workflow_dispatch` handoff for known-hardware runs. Set `latency_fixture_id` to
 one manifest fixture and set `latency_runner_labels_json` to the target
-self-hosted runner labels, such as `["self-hosted","linux","cuda-a6000"]` or a
-site-local Metal/ROCm/Vulkan label set. The checked-in pending fixtures use
+self-hosted runner labels, such as `["self-hosted","linux","cuda-rtx4090"]` or a
+site-local Metal/ROCm/Vulkan label set. The checked-in fixtures use
+`["self-hosted","linux","cuda-rtx4090"]` for the CUDA RTX 4090 fixture,
 `["self-hosted","linux","rocm-gfx1151"]` for the ROCm gfx1151 fixture and
 `["self-hosted","linux","vulkan-strix-halo"]` for the Vulkan Strix Halo
 fixture, so the planner can emit runnable dispatch commands before the hardware
@@ -211,7 +212,7 @@ or from an explicit override:
 
 ```sh
 python3 scripts/plan_backend_latency_fixture_dispatch.py \
-  --fixture-id cuda_a6000_flce_phase_a_validation \
+  --fixture-id cuda_rtx4090_matmul_qwen35_4b \
   --shell
 ```
 

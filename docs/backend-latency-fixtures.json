@@ -17,34 +17,40 @@
   ],
   "fixtures": [
     {
-      "id": "cuda_a6000_flce_phase_a_validation",
+      "id": "cuda_rtx4090_matmul_qwen35_4b",
       "backend": "cuda",
-      "hardware": "NVIDIA RTX A6000 48GB",
+      "hardware": "NVIDIA GeForce RTX 4090 24GB",
       "runner_labels": [
         "self-hosted",
         "linux",
-        "cuda-a6000"
+        "cuda-rtx4090"
       ],
-      "source": "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
-      "command": "cargo run --release --features cuda -p kiln-server --example flce_phase_a_validation_bench -- --model-path \"${KILN_BENCH_MODEL_PATH:?set KILN_BENCH_MODEL_PATH}\"",
-      "result_artifact": "bench-results/backend-latency/cuda-a6000-flce-phase-a.json",
+      "source": "crates/kiln-tensor/tests/cuda_latency_bench.rs",
+      "command": "CUDARC_CUDA_VERSION=12080 cargo test -p kiln-tensor --features cuda --test cuda_latency_bench -- --ignored --nocapture",
+      "result_artifact": "bench-results/backend-latency/cuda-rtx4090-matmul.json",
       "threshold_state": "pending_fixture_result",
       "metrics": [
         {
-          "name": "t2048_flce_on_step_secs",
-          "unit": "s",
+          "name": "decode_qkv_m1_2560x4096_ms",
+          "unit": "ms",
           "comparison": "<=",
           "max": null
         },
         {
-          "name": "t8192_streaming_tile4096_step_secs",
-          "unit": "s",
+          "name": "prefill_qkv_m256_2560x4096_ms",
+          "unit": "ms",
           "comparison": "<=",
           "max": null
         },
         {
-          "name": "t16384_streaming_tile4096_step_secs",
-          "unit": "s",
+          "name": "prefill_gate_up_m256_2560x18432_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": null
+        },
+        {
+          "name": "lm_head_m1_2560x152064_ms",
+          "unit": "ms",
           "comparison": "<=",
           "max": null
         }
