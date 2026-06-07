@@ -184,6 +184,12 @@ source-truth; its phase-status/conformance/policy sections are author-asserted.
 
 ## Confirmed defects worth fixing (ranked)
 
+> Remediation note: per the project's tooling stance (de-emphasize GitHub Actions /
+> hosted runners; keep issue + branch coordination), the GitHub-flavored items below
+> (#1 stale dropdown, the `pull_request.paths` gap in #3) are fixed by moving
+> enforcement into a runner-agnostic local gate rather than by hardening the GitHub
+> workflow. See the completion plan's Tooling stance and W0.3/W0.4.
+
 1. **(High, operational) Stale CI dispatch dropdown.**
    `.github/workflows/perf-regression-nightly.yml:75` still offers
    `vulkan_rtx6000_decode_microbench`, renamed to
