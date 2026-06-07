@@ -992,6 +992,31 @@ pub struct BackendFallbackCapabilities {
 pub struct BackendTrainingCapabilities {
     pub hooks: TrainingCapabilities,
     pub precision: TrainingPrecisionPolicy,
+    pub server_dispatch: ServerTrainingDispatchPolicy,
+}
+
+/// Server-side native training route selected by backend policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ServerTrainingNativeRoute {
+    SharedKtTape,
+    LegacyCudaNative,
+}
+
+impl ServerTrainingNativeRoute {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::SharedKtTape => "shared_kt_tape",
+            Self::LegacyCudaNative => "legacy_cuda_native",
+        }
+    }
+}
+
+/// Backend-owned SFT/GRPO dispatch policy consumed by `kiln-server`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ServerTrainingDispatchPolicy {
+    pub native_route: ServerTrainingNativeRoute,
+    pub native_training_env: Option<&'static str>,
+    pub native_training_default_enabled: bool,
 }
 
 /// One structured runtime capability descriptor for backend diagnostics.
@@ -1198,6 +1223,7 @@ impl BackendCapabilities {
             training: BackendTrainingCapabilities {
                 hooks: TrainingLossBackend::runtime_training_capabilities(backend),
                 precision: TrainingLossBackend::runtime_training_precision_policy(backend),
+                server_dispatch: ServerTrainingDispatchPolicy::for_backend(name, device),
             },
             graph_replay: ReplayCapabilities {
                 resident_decode: BackendCapabilityQueries::supports_replay_request(
@@ -1249,6 +1275,23 @@ impl StartupCapabilities {
                 native_training_default_enabled: false,
                 native_training_env: None,
                 decode_weight_prewarm_when_native_training: false,
+            },
+        }
+    }
+}
+
+impl ServerTrainingDispatchPolicy {
+    pub fn for_backend(name: &str, device: kiln_tensor::Device) -> Self {
+        match backend_kind_for_runtime(name, device) {
+            kiln_tensor::Backend::Cuda => Self {
+                native_route: ServerTrainingNativeRoute::LegacyCudaNative,
+                native_training_env: Some("KILN_CUDA_NATIVE_TRAINING"),
+                native_training_default_enabled: false,
+            },
+            _ => Self {
+                native_route: ServerTrainingNativeRoute::SharedKtTape,
+                native_training_env: None,
+                native_training_default_enabled: false,
             },
         }
     }

@@ -1149,6 +1149,7 @@ fn generated_capability_report_lists_request_descriptors() {
         "SpeculativeDecodePolicy",
         "DecodeBatcherPolicy",
         "BackendTrainingCapabilities",
+        "ServerTrainingDispatchPolicy",
         "ReplayCapabilities",
         "ReplayAuthority",
         "BackendFallbackCapabilities",
@@ -1372,6 +1373,33 @@ fn generated_capability_report_lists_request_descriptors() {
         ),
     ] {
         assert!(decode_batcher_policy_fields.contains(&field), "{message}");
+    }
+    let backend_training_fields = capability_descriptors["BackendTrainingCapabilities"]["fields"]
+        .as_array()
+        .expect("BackendTrainingCapabilities fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        backend_training_fields.contains(&"server_dispatch"),
+        "BackendTrainingCapabilities should expose server-side training dispatch policy"
+    );
+    let server_training_dispatch_fields =
+        capability_descriptors["ServerTrainingDispatchPolicy"]["fields"]
+            .as_array()
+            .expect("ServerTrainingDispatchPolicy fields should be an array")
+            .iter()
+            .filter_map(|field| field["name"].as_str())
+            .collect::<Vec<_>>();
+    for field in [
+        "native_route",
+        "native_training_env",
+        "native_training_default_enabled",
+    ] {
+        assert!(
+            server_training_dispatch_fields.contains(&field),
+            "ServerTrainingDispatchPolicy should include {field}"
+        );
     }
     let replay_authority_fields = capability_descriptors["ReplayAuthority"]["fields"]
         .as_array()
@@ -2459,6 +2487,9 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             .expect("kiln-server api/completions.rs should be readable");
     let server_bench_source = fs::read_to_string(root.join("crates/kiln-server/src/bench.rs"))
         .expect("kiln-server bench.rs should be readable");
+    let server_training_queue_source =
+        fs::read_to_string(root.join("crates/kiln-server/src/training_queue.rs"))
+            .expect("kiln-server training_queue.rs should be readable");
 
     assert_no_broad_backend_runtime_calls(
         &backend_source,
@@ -2882,6 +2913,25 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             "kiln-server prewarm routing should not branch locally on backend/device policy: {forbidden}"
         );
     }
+    let server_training_dispatch_section = source_between(
+        &server_training_queue_source,
+        "let result: std::result::Result<PathBuf, String> = match entry.job {",
+        "QueuedJob::Opd",
+    );
+    assert!(
+        server_training_dispatch_section
+            .contains("backend_capabilities().training.server_dispatch")
+            && server_training_dispatch_section.contains("server_native_training_enabled")
+            && server_training_queue_source.contains("ServerTrainingDispatchPolicy")
+            && server_training_queue_source.contains("ServerTrainingNativeRoute"),
+        "kiln-server SFT/GRPO dispatch should consume BackendTrainingCapabilities server policy"
+    );
+    assert!(
+        !server_training_dispatch_section.contains("KILN_CUDA_NATIVE_TRAINING")
+            && !server_training_dispatch_section
+                .contains("native_training_env_enabled(\"KILN_CUDA_NATIVE_TRAINING\")"),
+        "kiln-server SFT/GRPO dispatch should not read the legacy CUDA native-training env locally"
+    );
     assert!(
         server_batching_source.contains("env_max_decode_batch_for_policy")
             && server_batching_source.contains("env_prefill_admission_quantum_for_policy")

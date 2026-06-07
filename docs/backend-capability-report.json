@@ -1680,7 +1680,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "BackendTrainingCapabilities": {
-      "field_count": 2,
+      "field_count": 3,
       "fields": [
         {
           "name": "hooks",
@@ -1689,6 +1689,10 @@
         {
           "name": "precision",
           "type": "TrainingPrecisionPolicy"
+        },
+        {
+          "name": "server_dispatch",
+          "type": "ServerTrainingDispatchPolicy"
         }
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"
@@ -1915,6 +1919,24 @@
         {
           "name": "authority",
           "type": "ReplayAuthority"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "ServerTrainingDispatchPolicy": {
+      "field_count": 3,
+      "fields": [
+        {
+          "name": "native_route",
+          "type": "ServerTrainingNativeRoute"
+        },
+        {
+          "name": "native_training_env",
+          "type": "Option<&'static str>"
+        },
+        {
+          "name": "native_training_default_enabled",
+          "type": "bool"
         }
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"

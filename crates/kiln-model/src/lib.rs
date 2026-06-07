@@ -55,7 +55,8 @@ pub use backend::capability::{
     MatmulBatchPolicy, MatmulBlasRequest, MatmulCapabilities, MatmulEpilogue, MatmulOperandLayout,
     MatmulRequest, MatmulRequestProjectionError, ReplayAuthority, ReplayCapabilities,
     ReplayGraphCrateRole, ReplayNativePrimitive, ReplayProductionAuthority, ReplayRequest,
-    ReplayRequestKind, SpeculativeDecodePolicy, StartupCapabilities, StorageCapabilities, Support,
+    ReplayRequestKind, ServerTrainingDispatchPolicy, ServerTrainingNativeRoute,
+    SpeculativeDecodePolicy, StartupCapabilities, StorageCapabilities, Support,
 };
 pub use backend::residency::{
     ReplayStability, ResidentOwnership, ResidentRegistry, ResidentResource, ResidentResourceFamily,

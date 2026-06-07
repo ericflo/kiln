@@ -172,7 +172,8 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `DecodeCapabilities` | 8 | `resident_decode`, `paged_decode_graph_outputs`, `mtp_speculative_generation`, `speculative_policy`, `linear_argmax`, `linear_argmax_batch`, `linear_sample`, `linear_sample_batch` |
 | `SpeculativeDecodePolicy` | 3 | `mtp_max_prompt_tokens`, `long_prompt_skip_layer_min_prompt_tokens`, `long_prompt_skip_layer_min_output_tokens` |
 | `DecodeBatcherPolicy` | 17 | `max_batch`, `wait_micros`, `allow_mixed_seq_lens`, `rowwise_retry_env`, `require_native_decode_attention`, `prefer_direct_paged_decode_attention`, `direct_paged_decode_attention_env_gate`, `allow_prefix_cache_split_snapshot`, `paged_decode_requires_contiguous_kv_chunks`, `use_greedy_token_decode`, `use_native_sampled_contiguous_decode`, `sampled_contiguous_decode_requires_resident_decode`, `partition_noncontiguous_gdn_kv_tiles`, `use_decode_width_prefill_admission`, `burst_prefill_admission`, `batching_engine_default_enabled`, `warm_resident_decode_pool_on_startup` |
-| `BackendTrainingCapabilities` | 2 | `hooks`, `precision` |
+| `BackendTrainingCapabilities` | 3 | `hooks`, `precision`, `server_dispatch` |
+| `ServerTrainingDispatchPolicy` | 3 | `native_route`, `native_training_env`, `native_training_default_enabled` |
 | `ReplayCapabilities` | 3 | `resident_decode`, `paged_decode_graph_outputs`, `authority` |
 | `ReplayAuthority` | 4 | `backend`, `production_authority`, `native_primitive`, `graph_crate_role` |
 | `BackendFallbackCapabilities` | 5 | `generic_device_op`, `decode_hot_path`, `decode_hot_path_debug_env`, `training_optimizer`, `training_optimizer_debug_env` |
