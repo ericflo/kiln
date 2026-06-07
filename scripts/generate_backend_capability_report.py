@@ -945,7 +945,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
         {
             "gate": "storage_round_trip",
             "phase8_requirement": "storage round trip",
-            "status": "covered",
+            "status": None,
             "command": "cargo test -p kiln-tensor --features rocm --test rocm_storage_smoke && cargo test -p kiln-vulkan-kernel --test vk_tensor_parity",
             "supplemental_commands": [
                 {
@@ -965,7 +965,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
         {
             "gate": "host_transfer_to_device_parity",
             "phase8_requirement": "host transfer / to_device parity with explicit unsupported errors",
-            "status": "covered",
+            "status": None,
             "command": "cargo test -p kiln-tensor device_transfer_support_classifies_explicit_transitions && cargo test -p kiln-tensor to_device_without_gpu_features_reports_explicit_unsupported_transition",
             "supplemental_commands": [
                 {
@@ -996,7 +996,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
         {
             "gate": "device_op_parity",
             "phase8_requirement": "DeviceOp parity",
-            "status": "covered",
+            "status": None,
             "command": "cargo test -p kiln-tensor device_op::tests",
             "supplemental_commands": [
                 {
@@ -1017,7 +1017,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
         {
             "gate": "matmul_linear_parity",
             "phase8_requirement": "matmul/linear parity",
-            "status": "covered",
+            "status": None,
             "command": "cargo test -p kiln-model matmul_request_projects_to_blas_shape_contract && cargo test -p kiln-tensor --features rocm --test rocm_matmul_parity && cargo test -p kiln-tensor matmul_matrix_core && cargo test -p kiln-vulkan-kernel --test vk_matmul_parity && cargo test -p kiln-vulkan-kernel --test linear_decode_argmax && cargo test -p kiln-vulkan-kernel --test linear_decode_sample && cargo test -p kiln-model tape_forward_matmul_bit_exact_parity_with_baseline && CUDARC_CUDA_VERSION=12080 cargo check -p kiln-blas --features cublaslt --tests && cargo test -p kiln-model --test backend_capability_contract",
             "supplemental_commands": [
                 {
@@ -1045,7 +1045,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
         {
             "gate": "attention_gdn_conv_parity",
             "phase8_requirement": "attention/GDN/conv parity",
-            "status": "covered",
+            "status": None,
             "command": "cargo test -p kiln-model --no-default-features --features rocm --test rocm_flash_attn_bwd_gradcheck && cargo test -p kiln-flash-attn --no-default-features --features rocm --test rocm_flash_attn_parity && cargo test -p kiln-gdn-kernel --no-default-features --features rocm --test rocm_gdn_parity && cargo test -p kiln-conv1d-kernel --no-default-features --features rocm --test rocm_conv1d_parity && cargo test -p kiln-vulkan-kernel --test vk_attention_parity && cargo test -p kiln-vulkan-kernel --test vk_sdpa_prefill_kernel_parity && cargo test -p kiln-vulkan-kernel --test vk_gdn_foundation_parity && cargo test -p kiln-vulkan-kernel --test vk_gdn_backward_parity && cargo test -p kiln-vulkan-kernel --test gdn_parity",
             "evidence": [
                 "crates/kiln-model/tests/rocm_flash_attn_bwd_gradcheck.rs",
@@ -1062,7 +1062,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
         {
             "gate": "optimizer_parity",
             "phase8_requirement": "optimizer parity",
-            "status": "covered",
+            "status": None,
             "command": "cargo test -p kiln-optim --test integration && cargo test -p kiln-train training_optimizer && cargo test -p kiln-model --test backend_capability_contract",
             "supplemental_commands": [
                 {
@@ -1085,7 +1085,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
         {
             "gate": "replay_parity",
             "phase8_requirement": "replay parity",
-            "status": "covered",
+            "status": None,
             "command": "cargo test -p kiln-graph replay && cargo test -p kiln-graph --test capture_lifetime && cargo test -p kiln-graph-cuda replay && cargo test -p kiln-graph-metal replay && cargo test -p kiln-graph-vulkan replay && cargo test -p kiln-model --features vulkan --test vk_resident_decode_parity && cargo test -p kiln-tensor --features rocm --test rocm_capture_arena && cargo test -p kiln-model --test backend_capability_contract",
             "evidence": [
                 "crates/kiln-graph/src/replay_plan.rs",
@@ -1103,7 +1103,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
         {
             "gate": "one_step_training_proof",
             "phase8_requirement": "one-step training proof",
-            "status": "covered",
+            "status": None,
             "command": "cargo test -p kiln-optim --test end_to_end_training && cargo test -p kiln-model --test backend_capability_contract",
             "supplemental_commands": [
                 {
@@ -1134,7 +1134,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
         {
             "gate": "no_unexpected_host_fallback",
             "phase8_requirement": "no unexpected host fallback in decode/training hot paths",
-            "status": "covered",
+            "status": None,
             "command": "cargo test -p kiln-tensor device_op_host_fallback_counts_are_backend_and_arity_specific",
             "evidence": [
                 "crates/kiln-tensor/src/device_op.rs",
@@ -1145,7 +1145,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
         {
             "gate": "decode_submit_or_replay_count",
             "phase8_requirement": "max submit count or replay count per decode token",
-            "status": "covered",
+            "status": None,
             "command": "cargo test -p kiln-model decode_batcher_stats_report_runner_calls_per_token && cargo test -p kiln-server test_metrics_render && cargo test -p kiln-graph replay",
             "evidence": [
                 "crates/kiln-model/src/generate.rs",
@@ -1159,7 +1159,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
         {
             "gate": "matmul_algorithm_cache_reporting",
             "phase8_requirement": "matmul algorithm/cache hit reporting",
-            "status": "covered",
+            "status": None,
             "command": "cargo test -p kiln-blas cache_stats_reports_entries_and_hit_rate && cargo test -p kiln-rocblas cache_stats_reports_entries_and_hit_rate && CUDARC_CUDA_VERSION=12080 cargo check -p kiln-blas --features cublaslt --tests && cargo check -p kiln-rocblas --features hipblaslt --tests",
             "evidence": [
                 "crates/kiln-blas/src/algo_cache.rs",
@@ -1172,7 +1172,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
         {
             "gate": "hardware_latency_thresholds",
             "phase8_requirement": "backend-specific latency thresholds on known hardware fixtures",
-            "status": "covered" if not hardware_latency_blockers else "fixture_required",
+            "status": "fixture_required" if hardware_latency_blockers else None,
             "command": "python3 scripts/run_backend_latency_fixture.py --self-test && python3 scripts/write_backend_latency_result_artifact.py --self-test && python3 scripts/import_backend_latency_artifact.py --self-test && python3 scripts/lock_backend_latency_thresholds.py --self-test && python3 scripts/check_backend_latency_fixtures.py --self-test && python3 scripts/plan_backend_latency_fixture_dispatch.py --self-test && python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered",
             "coverage_blockers": hardware_latency_blockers,
             "evidence": [
@@ -1197,7 +1197,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
         {
             "gate": "generated_capability_dashboard",
             "phase8_requirement": "generated capability dashboard checked into docs or build artifacts",
-            "status": "covered",
+            "status": None,
             "command": "python3 scripts/generate_backend_capability_report.py --self-test && python3 scripts/generate_backend_capability_report.py --check",
             "evidence": [
                 "docs/backend-capability-report.md",
@@ -1217,7 +1217,152 @@ def conformance_gate_report() -> list[dict[str, Any]]:
         gate["evidence_missing"] = [
             evidence for evidence in gate["evidence"] if not path_exists(evidence)
         ]
+        if gate["status"] is None:
+            gate["status"] = "covered" if not gate["evidence_missing"] else "gap"
     return gates
+
+
+def phase_status(contract: str, migration: str) -> str:
+    if contract == "absent":
+        return "gap"
+    if migration == "complete":
+        return "covered"
+    if migration == "partial":
+        return "partial"
+    return "gap"
+
+
+def phase_signal(name: str, passed: bool, observed: Any, expected: Any, evidence: list[str]) -> dict[str, Any]:
+    return {
+        "name": name,
+        "passed": passed,
+        "observed": observed,
+        "expected": expected,
+        "evidence": evidence,
+    }
+
+
+def migration_from_signals(signals: list[dict[str, Any]]) -> str:
+    if signals and all(signal["passed"] for signal in signals):
+        return "complete"
+    if any(signal["passed"] for signal in signals):
+        return "partial"
+    return "none"
+
+
+def file_text(path: str) -> str:
+    try:
+        return (ROOT / path).read_text()
+    except OSError:
+        return ""
+
+
+def regex_count(path: str, pattern: str) -> int:
+    return len(re.findall(pattern, file_text(path), flags=re.MULTILINE | re.DOTALL))
+
+
+def focused_trait_forwarding_shim_count() -> int:
+    return regex_count(
+        "crates/kiln-model/src/backend/mod.rs",
+        r"impl<T(?::|>).*?BackendRuntime.*?>\s+\w+Backend\s+for\s+T",
+    )
+
+
+def resident_registry_forwarding_shim_count() -> int:
+    return regex_count(
+        "crates/kiln-model/src/backend/mod.rs",
+        r"impl<T>\s+residency::ResidentRegistry\s+for\s+T",
+    )
+
+
+def matmul_identity_dispatch_count() -> int:
+    paths = [
+        "crates/kiln-tensor/src/ops/matmul.rs",
+        "crates/kiln-model/src/forward.rs",
+        "crates/kiln-model/src/backend/capability.rs",
+    ]
+    pattern = r"Device::(?:Cuda|Rocm|Metal|Vulkan)|match\s+self\.name\(\)"
+    return sum(regex_count(path, pattern) for path in paths)
+
+
+def replay_production_replay_plan_mentions() -> int:
+    paths = [
+        "crates/kiln-model/src/cuda_graph.rs",
+        "crates/kiln-model/src/rocm_graph.rs",
+        "crates/kiln-model/src/metal_graph.rs",
+        "crates/kiln-vulkan-kernel/src/cmd_batch.rs",
+    ]
+    return sum(file_text(path).count("ReplayPlan") for path in paths)
+
+
+def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
+    if phase == 1:
+        shim_count = focused_trait_forwarding_shim_count()
+        method_count = len(
+            parse_trait_method_names(
+                ROOT / "crates" / "kiln-model" / "src" / "backend" / "mod.rs",
+                "BackendRuntime",
+            )
+        )
+        return [
+            phase_signal(
+                "focused_trait_forwarding_shims_removed",
+                shim_count == 0,
+                shim_count,
+                0,
+                ["crates/kiln-model/src/backend/mod.rs"],
+            ),
+            phase_signal(
+                "backend_runtime_method_count_below_gate",
+                method_count <= 8,
+                method_count,
+                "<= 8",
+                ["crates/kiln-model/src/backend/mod.rs"],
+            ),
+        ]
+    if phase == 3:
+        shim_count = resident_registry_forwarding_shim_count()
+        return [
+            phase_signal(
+                "resident_registry_blanket_adapter_removed",
+                shim_count == 0,
+                shim_count,
+                0,
+                ["crates/kiln-model/src/backend/mod.rs"],
+            ),
+        ]
+    if phase == 4:
+        dispatch_count = matmul_identity_dispatch_count()
+        return [
+            phase_signal(
+                "matmul_linear_identity_dispatch_removed",
+                dispatch_count == 0,
+                dispatch_count,
+                0,
+                [
+                    "crates/kiln-tensor/src/ops/matmul.rs",
+                    "crates/kiln-model/src/forward.rs",
+                    "crates/kiln-model/src/backend/capability.rs",
+                ],
+            ),
+        ]
+    if phase == 5:
+        replay_plan_mentions = replay_production_replay_plan_mentions()
+        return [
+            phase_signal(
+                "production_replay_paths_use_replay_plan",
+                replay_plan_mentions > 0,
+                replay_plan_mentions,
+                "> 0",
+                [
+                    "crates/kiln-model/src/cuda_graph.rs",
+                    "crates/kiln-model/src/rocm_graph.rs",
+                    "crates/kiln-model/src/metal_graph.rs",
+                    "crates/kiln-vulkan-kernel/src/cmd_batch.rs",
+                ],
+            ),
+        ]
+    return []
 
 
 def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1234,11 +1379,24 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
         )
         else "partial"
     )
+    phase8_migration = "complete" if phase8_status == "covered" else "partial"
+    migration_by_phase = {
+        0: "complete",
+        2: "complete",
+        6: "complete",
+        7: "complete",
+        8: phase8_migration,
+    }
+    for phase in [1, 3, 4, 5]:
+        migration_by_phase[phase] = migration_from_signals(phase_migration_signals(phase))
     phases = [
         {
             "phase": 0,
             "title": "Audit and stabilize capability reporting",
-            "status": "covered",
+            "contract": "landed",
+            "migration": migration_by_phase[0],
+            "genuine": migration_by_phase[0] == "complete",
+            "status": phase_status("landed", migration_by_phase[0]),
             "deliverables": [
                 "generated Markdown and JSON capability report",
                 "feature fanout, override, support predicate, env gate, and fallback audit",
@@ -1259,12 +1417,16 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
                 "Replay Authority",
                 "Mismatch Audit",
             ],
+            "migration_signals": [],
             "remaining": [],
         },
         {
             "phase": 1,
             "title": "Introduce focused backend traits",
-            "status": "covered",
+            "contract": "landed",
+            "migration": migration_by_phase[1],
+            "genuine": migration_by_phase[1] == "complete",
+            "status": phase_status("landed", migration_by_phase[1]),
             "deliverables": [
                 "focused backend trait family",
                 "BackendRuntime compatibility facade",
@@ -1280,12 +1442,20 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
                 "Focused Backend Facets",
                 "Request Capability Queries",
             ],
-            "remaining": [],
+            "migration_signals": phase_migration_signals(1),
+            "remaining": []
+            if migration_by_phase[1] == "complete"
+            else [
+                "focused traits still forward through BackendRuntime and BackendRuntime remains above the method-count gate",
+            ],
         },
         {
             "phase": 2,
             "title": "Normalize fallback policy",
-            "status": "covered",
+            "contract": "landed",
+            "migration": migration_by_phase[2],
+            "genuine": migration_by_phase[2] == "complete",
+            "status": phase_status("landed", migration_by_phase[2]),
             "deliverables": [
                 "typed fallback policy per backend and mode",
                 "host fallback counters for non-CUDA bring-up paths",
@@ -1303,12 +1473,16 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
                 "Decode Hot-Path Fallback",
                 "Training Optimizer Fallback",
             ],
+            "migration_signals": [],
             "remaining": [],
         },
         {
             "phase": 3,
             "title": "Unify resident resource semantics",
-            "status": "covered",
+            "contract": "landed",
+            "migration": migration_by_phase[3],
+            "genuine": migration_by_phase[3] == "complete",
+            "status": phase_status("landed", migration_by_phase[3]),
             "deliverables": [
                 "ResidentResource and ResidentRegistry descriptors",
                 "backend-specific resident resource wrappers",
@@ -1325,12 +1499,20 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
                 "Resident Resource Descriptors",
                 "Focused Backend Facets",
             ],
-            "remaining": [],
+            "migration_signals": phase_migration_signals(3),
+            "remaining": []
+            if migration_by_phase[3] == "complete"
+            else [
+                "ResidentRegistry remains a blanket adapter and production residency APIs have not been inverted through it",
+            ],
         },
         {
             "phase": 4,
             "title": "Unify matmul and linear dispatch",
-            "status": "covered",
+            "contract": "landed",
+            "migration": migration_by_phase[4],
+            "genuine": migration_by_phase[4] == "complete",
+            "status": phase_status("landed", migration_by_phase[4]),
             "deliverables": [
                 "MatmulRequest and LinearRequest descriptors",
                 "BLASLt request projection shared by CUDA and ROCm",
@@ -1350,12 +1532,20 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
                 "Request Capability Queries",
                 "Conformance And Performance Gates",
             ],
-            "remaining": [],
+            "migration_signals": phase_migration_signals(4),
+            "remaining": []
+            if migration_by_phase[4] == "complete"
+            else [
+                "matmul/linear dispatch still contains backend identity branches and request routing is not authoritative",
+            ],
         },
         {
             "phase": 5,
             "title": "Move replay into the authoritative graph layer",
-            "status": "covered",
+            "contract": "landed",
+            "migration": migration_by_phase[5],
+            "genuine": migration_by_phase[5] == "complete",
+            "status": phase_status("landed", migration_by_phase[5]),
             "deliverables": [
                 "ReplayBackend focused facet",
                 "shared replay key and replay authority descriptor",
@@ -1378,12 +1568,20 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
                 "Replay Authority",
                 "Conformance And Performance Gates",
             ],
-            "remaining": [],
+            "migration_signals": phase_migration_signals(5),
+            "remaining": []
+            if migration_by_phase[5] == "complete"
+            else [
+                "production replay runners are not wired through ReplayPlan",
+            ],
         },
         {
             "phase": 6,
             "title": "Finish shared training integration",
-            "status": "covered",
+            "contract": "landed",
+            "migration": migration_by_phase[6],
+            "genuine": migration_by_phase[6] == "complete",
+            "status": phase_status("landed", migration_by_phase[6]),
             "deliverables": [
                 "SFT/GRPO/OPD policy routed through focused capability surfaces",
                 "TrainingLossBackend and OptimizerBackend evidence",
@@ -1406,12 +1604,16 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
                 "Optimizer Dispatch",
                 "Conformance And Performance Gates",
             ],
+            "migration_signals": [],
             "remaining": [],
         },
         {
             "phase": 7,
             "title": "Decompose backend modules",
-            "status": "covered",
+            "contract": "landed",
+            "migration": migration_by_phase[7],
+            "genuine": migration_by_phase[7] == "complete",
+            "status": phase_status("landed", migration_by_phase[7]),
             "deliverables": [
                 "Metal split by operation family and runtime concern",
                 "Vulkan split around explicit-resource boundaries",
@@ -1434,11 +1636,15 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
                 "BackendRuntime Overrides",
                 "Focused Backend Facets",
             ],
+            "migration_signals": [],
             "remaining": [],
         },
         {
             "phase": 8,
             "title": "Conformance and performance gates",
+            "contract": "landed",
+            "migration": migration_by_phase[8],
+            "genuine": migration_by_phase[8] == "complete",
             "status": phase8_status,
             "deliverables": [
                 "backend conformance suite",
@@ -1464,6 +1670,7 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
             "report_sections": [
                 "Conformance And Performance Gates",
             ],
+            "migration_signals": [],
             "remaining": []
             if phase8_status == "covered"
             else [
@@ -1474,8 +1681,10 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
     for phase in phases:
         phase["evidence_present"] = existing_paths(phase["evidence"])
         phase["evidence_missing"] = missing_paths(phase["evidence"])
-        if phase["evidence_missing"] and phase["status"] == "covered":
+        if phase["evidence_missing"]:
+            phase["contract"] = "absent"
             phase["status"] = "partial"
+            phase["genuine"] = False
             phase["remaining"] = [
                 *phase["remaining"],
                 "missing source evidence listed in evidence_missing",
@@ -1515,13 +1724,15 @@ def markdown(data: dict[str, Any]) -> str:
     lines.append("")
     lines.append("## Migration Phase Status")
     lines.append("")
-    lines.append("| Phase | Title | Status | Evidence | Remaining |")
-    lines.append("|---|---|---|---|---|")
+    lines.append("| Phase | Title | Status | Contract | Migration | Genuine | Evidence | Remaining |")
+    lines.append("|---|---|---|---|---|---|---|---|")
     for phase in data["migration_phase_status"]:
         evidence = ", ".join(f"`{path}`" for path in phase["evidence_present"]) or "none"
         remaining = "; ".join(phase["remaining"]) or "none"
+        genuine = "yes" if phase["genuine"] else "no"
         lines.append(
             f"| Phase {phase['phase']} | {phase['title']} | `{phase['status']}` | "
+            f"`{phase['contract']}` | `{phase['migration']}` | {genuine} | "
             f"{evidence} | {remaining} |"
         )
     lines.append("")

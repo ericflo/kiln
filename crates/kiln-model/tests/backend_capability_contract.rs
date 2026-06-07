@@ -5648,6 +5648,8 @@ fn generated_capability_report_tracks_migration_phase_status() {
     );
 
     let valid_statuses = ["covered", "partial", "gap", "fixture_required"];
+    let valid_contract_states = ["landed", "absent"];
+    let valid_migration_states = ["none", "partial", "complete"];
     let phase_numbers = phases
         .iter()
         .filter_map(|phase| phase["phase"].as_u64())
@@ -5665,6 +5667,24 @@ fn generated_capability_report_tracks_migration_phase_status() {
         assert!(
             valid_statuses.contains(&status),
             "invalid migration phase status {status}"
+        );
+        let contract = phase["contract"]
+            .as_str()
+            .expect("migration phase contract state should be a string");
+        assert!(
+            valid_contract_states.contains(&contract),
+            "invalid migration phase contract state {contract}"
+        );
+        let migration = phase["migration"]
+            .as_str()
+            .expect("migration phase migration state should be a string");
+        assert!(
+            valid_migration_states.contains(&migration),
+            "invalid migration phase migration state {migration}"
+        );
+        assert!(
+            phase["genuine"].is_boolean(),
+            "migration phase genuine flag should be boolean"
         );
         assert!(
             !phase["deliverables"]
@@ -5694,6 +5714,9 @@ fn generated_capability_report_tracks_migration_phase_status() {
         .find(|phase| phase["phase"] == 0)
         .expect("Phase 0 should be present");
     assert_eq!(phase0["status"], "covered");
+    assert_eq!(phase0["contract"], "landed");
+    assert_eq!(phase0["migration"], "complete");
+    assert_eq!(phase0["genuine"], true);
     let phase0_evidence = phase0["evidence_present"]
         .as_array()
         .expect("Phase 0 evidence should be an array")
@@ -5711,11 +5734,46 @@ fn generated_capability_report_tracks_migration_phase_status() {
         );
     }
 
+    for (phase_number, signal_name) in [
+        (1, "focused_trait_forwarding_shims_removed"),
+        (3, "resident_registry_blanket_adapter_removed"),
+        (4, "matmul_linear_identity_dispatch_removed"),
+        (5, "production_replay_paths_use_replay_plan"),
+    ] {
+        let phase = phases
+            .iter()
+            .find(|phase| phase["phase"] == phase_number)
+            .unwrap_or_else(|| panic!("Phase {phase_number} should be present"));
+        assert_eq!(
+            phase["status"], "gap",
+            "Phase {phase_number} should not self-certify covered while migration signals fail"
+        );
+        assert_eq!(phase["contract"], "landed");
+        assert_eq!(phase["migration"], "none");
+        assert_eq!(phase["genuine"], false);
+        let signals = phase["migration_signals"]
+            .as_array()
+            .expect("migration-bearing phases should list machine signals");
+        let signal = signals
+            .iter()
+            .find(|signal| signal["name"] == signal_name)
+            .unwrap_or_else(|| {
+                panic!("Phase {phase_number} should include migration signal {signal_name}")
+            });
+        assert_eq!(
+            signal["passed"], false,
+            "Phase {phase_number} signal {signal_name} should fail until the legacy scaffold is removed"
+        );
+    }
+
     let phase7 = phases
         .iter()
         .find(|phase| phase["phase"] == 7)
         .expect("Phase 7 should be present");
     assert_eq!(phase7["status"], "covered");
+    assert_eq!(phase7["contract"], "landed");
+    assert_eq!(phase7["migration"], "complete");
+    assert_eq!(phase7["genuine"], true);
     let phase7_evidence = phase7["evidence_present"]
         .as_array()
         .expect("Phase 7 evidence should be an array")
@@ -5738,6 +5796,9 @@ fn generated_capability_report_tracks_migration_phase_status() {
         .find(|phase| phase["phase"] == 8)
         .expect("Phase 8 should be present");
     assert_eq!(phase8["status"], "covered");
+    assert_eq!(phase8["contract"], "landed");
+    assert_eq!(phase8["migration"], "complete");
+    assert_eq!(phase8["genuine"], true);
     let phase8_remaining = phase8["remaining"]
         .as_array()
         .expect("Phase 8 remaining should be an array")
@@ -5751,12 +5812,33 @@ fn generated_capability_report_tracks_migration_phase_status() {
 
     let report_md = fs::read_to_string(root.join("docs/backend-capability-report.md"))
         .expect("capability report markdown should be readable");
+    let generator_source =
+        fs::read_to_string(root.join("scripts/generate_backend_capability_report.py"))
+            .expect("capability report generator should be readable");
+    assert!(
+        !generator_source.contains("\"status\": \"covered\""),
+        "capability report generator should derive covered status instead of hardcoding it"
+    );
+    assert!(
+        !generator_source.contains("\"genuine\": true"),
+        "capability report generator should compute genuine flags instead of hardcoding them"
+    );
+    assert!(
+        !generator_source.contains("\"genuine\": True"),
+        "capability report generator should compute genuine flags instead of hardcoding them"
+    );
     assert!(
         report_md.contains("## Migration Phase Status"),
         "Markdown report should expose migration phase status"
     );
     assert!(
-        report_md.contains("| Phase 8 | Conformance and performance gates | `covered` |"),
+        report_md.contains(
+            "| Phase 1 | Introduce focused backend traits | `gap` | `landed` | `none` | no |"
+        ),
+        "Markdown report should expose Phase 1 as a non-genuine scaffold migration"
+    );
+    assert!(
+        report_md.contains("| Phase 8 | Conformance and performance gates | `covered` | `landed` | `complete` | yes |"),
         "Markdown report should mark Phase 8 covered after all latency fixtures lock"
     );
 }

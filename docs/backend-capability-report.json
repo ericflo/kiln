@@ -3084,6 +3084,7 @@
   },
   "migration_phase_status": [
     {
+      "contract": "landed",
       "deliverables": [
         "generated Markdown and JSON capability report",
         "feature fanout, override, support predicate, env gate, and fallback audit",
@@ -3105,6 +3106,9 @@
         "docs/backend-capability-report.json",
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
+      "genuine": true,
+      "migration": "complete",
+      "migration_signals": [],
       "phase": 0,
       "remaining": [],
       "report_sections": [
@@ -3118,6 +3122,7 @@
       "title": "Audit and stabilize capability reporting"
     },
     {
+      "contract": "landed",
       "deliverables": [
         "focused backend trait family",
         "BackendRuntime compatibility facade",
@@ -3135,16 +3140,41 @@
         "scripts/generate_backend_capability_report.py",
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
+      "genuine": false,
+      "migration": "none",
+      "migration_signals": [
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs"
+          ],
+          "expected": 0,
+          "name": "focused_trait_forwarding_shims_removed",
+          "observed": 11,
+          "passed": false
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs"
+          ],
+          "expected": "<= 8",
+          "name": "backend_runtime_method_count_below_gate",
+          "observed": 95,
+          "passed": false
+        }
+      ],
       "phase": 1,
-      "remaining": [],
+      "remaining": [
+        "focused traits still forward through BackendRuntime and BackendRuntime remains above the method-count gate"
+      ],
       "report_sections": [
         "Focused Backend Facets",
         "Request Capability Queries"
       ],
-      "status": "covered",
+      "status": "gap",
       "title": "Introduce focused backend traits"
     },
     {
+      "contract": "landed",
       "deliverables": [
         "typed fallback policy per backend and mode",
         "host fallback counters for non-CUDA bring-up paths",
@@ -3164,6 +3194,9 @@
         "crates/kiln-train/src/trainer.rs",
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
+      "genuine": true,
+      "migration": "complete",
+      "migration_signals": [],
       "phase": 2,
       "remaining": [],
       "report_sections": [
@@ -3175,6 +3208,7 @@
       "title": "Normalize fallback policy"
     },
     {
+      "contract": "landed",
       "deliverables": [
         "ResidentResource and ResidentRegistry descriptors",
         "backend-specific resident resource wrappers",
@@ -3194,16 +3228,32 @@
         "crates/kiln-model/src/backend/vulkan_residency.rs",
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
+      "genuine": false,
+      "migration": "none",
+      "migration_signals": [
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs"
+          ],
+          "expected": 0,
+          "name": "resident_registry_blanket_adapter_removed",
+          "observed": 1,
+          "passed": false
+        }
+      ],
       "phase": 3,
-      "remaining": [],
+      "remaining": [
+        "ResidentRegistry remains a blanket adapter and production residency APIs have not been inverted through it"
+      ],
       "report_sections": [
         "Resident Resource Descriptors",
         "Focused Backend Facets"
       ],
-      "status": "covered",
+      "status": "gap",
       "title": "Unify resident resource semantics"
     },
     {
+      "contract": "landed",
       "deliverables": [
         "MatmulRequest and LinearRequest descriptors",
         "BLASLt request projection shared by CUDA and ROCm",
@@ -3227,17 +3277,35 @@
         "crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs",
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
+      "genuine": false,
+      "migration": "none",
+      "migration_signals": [
+        {
+          "evidence": [
+            "crates/kiln-tensor/src/ops/matmul.rs",
+            "crates/kiln-model/src/forward.rs",
+            "crates/kiln-model/src/backend/capability.rs"
+          ],
+          "expected": 0,
+          "name": "matmul_linear_identity_dispatch_removed",
+          "observed": 208,
+          "passed": false
+        }
+      ],
       "phase": 4,
-      "remaining": [],
+      "remaining": [
+        "matmul/linear dispatch still contains backend identity branches and request routing is not authoritative"
+      ],
       "report_sections": [
         "Typed Request Descriptors",
         "Request Capability Queries",
         "Conformance And Performance Gates"
       ],
-      "status": "covered",
+      "status": "gap",
       "title": "Unify matmul and linear dispatch"
     },
     {
+      "contract": "landed",
       "deliverables": [
         "ReplayBackend focused facet",
         "shared replay key and replay authority descriptor",
@@ -3267,17 +3335,36 @@
         "crates/kiln-vulkan-kernel/src/cmd_batch.rs",
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
+      "genuine": false,
+      "migration": "none",
+      "migration_signals": [
+        {
+          "evidence": [
+            "crates/kiln-model/src/cuda_graph.rs",
+            "crates/kiln-model/src/rocm_graph.rs",
+            "crates/kiln-model/src/metal_graph.rs",
+            "crates/kiln-vulkan-kernel/src/cmd_batch.rs"
+          ],
+          "expected": "> 0",
+          "name": "production_replay_paths_use_replay_plan",
+          "observed": 0,
+          "passed": false
+        }
+      ],
       "phase": 5,
-      "remaining": [],
+      "remaining": [
+        "production replay runners are not wired through ReplayPlan"
+      ],
       "report_sections": [
         "Focused Backend Facets",
         "Replay Authority",
         "Conformance And Performance Gates"
       ],
-      "status": "covered",
+      "status": "gap",
       "title": "Move replay into the authoritative graph layer"
     },
     {
+      "contract": "landed",
       "deliverables": [
         "SFT/GRPO/OPD policy routed through focused capability surfaces",
         "TrainingLossBackend and OptimizerBackend evidence",
@@ -3303,6 +3390,9 @@
         "crates/kiln-model/src/backend/vulkan_training.rs",
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
+      "genuine": true,
+      "migration": "complete",
+      "migration_signals": [],
       "phase": 6,
       "remaining": [],
       "report_sections": [
@@ -3316,6 +3406,7 @@
       "title": "Finish shared training integration"
     },
     {
+      "contract": "landed",
       "deliverables": [
         "Metal split by operation family and runtime concern",
         "Vulkan split around explicit-resource boundaries",
@@ -3347,6 +3438,9 @@
         "crates/kiln-model/src/backend/cuda_rocm_common.rs",
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
+      "genuine": true,
+      "migration": "complete",
+      "migration_signals": [],
       "phase": 7,
       "remaining": [],
       "report_sections": [
@@ -3357,6 +3451,7 @@
       "title": "Decompose backend modules"
     },
     {
+      "contract": "landed",
       "deliverables": [
         "backend conformance suite",
         "performance sentinel suite",
@@ -3394,6 +3489,9 @@
         "scripts/generate_backend_capability_report.py",
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
+      "genuine": true,
+      "migration": "complete",
+      "migration_signals": [],
       "phase": 8,
       "remaining": [],
       "report_sections": [
