@@ -88,6 +88,7 @@ CAPABILITY_DESCRIPTOR_STRUCTS = [
     "StorageCapabilities",
     "KvCacheAutoBlockPolicy",
     "KvCacheMemoryTierBlockCap",
+    "KvCacheFp8Policy",
     "StartupCapabilities",
     "MatmulCapabilities",
     "AttentionCapabilities",

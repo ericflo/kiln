@@ -734,6 +734,7 @@ pub struct StorageCapabilities {
     pub kv_cache_device_memory_pressure: bool,
     pub kv_sizing_residency_model_multiplier: u64,
     pub kv_auto_block_policy: KvCacheAutoBlockPolicy,
+    pub kv_cache_fp8_policy: KvCacheFp8Policy,
 }
 
 /// Backend-owned policy for server KV auto-sizing block caps.
@@ -754,6 +755,14 @@ pub struct KvCacheMemoryTierBlockCap {
     pub mid_memory_bytes_exclusive: u64,
     pub mid_max_blocks: usize,
     pub high_max_blocks: usize,
+}
+
+/// Backend-owned policy for honoring requested FP8 paged-KV cache storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KvCacheFp8Policy {
+    pub allow_when_requested_by_default: bool,
+    pub explicit_enable_env: Option<&'static str>,
+    pub disabled_reason: Option<&'static str>,
 }
 
 /// Backend-owned server startup and prewarm policy.
@@ -1158,6 +1167,7 @@ impl BackendCapabilities {
                     name, device,
                 ),
                 kv_auto_block_policy: KvCacheAutoBlockPolicy::for_backend(name, device),
+                kv_cache_fp8_policy: KvCacheFp8Policy::for_backend(name, device),
             },
             startup: StartupCapabilities::for_backend(name, device),
             matmul: MatmulCapabilities {
@@ -1573,6 +1583,42 @@ impl KvCacheMemoryTierBlockCap {
         } else {
             self.high_max_blocks
         }
+    }
+}
+
+impl KvCacheFp8Policy {
+    pub const ALLOW_WHEN_REQUESTED: Self = Self {
+        allow_when_requested_by_default: true,
+        explicit_enable_env: None,
+        disabled_reason: None,
+    };
+
+    pub fn for_backend(name: &str, device: kiln_tensor::Device) -> Self {
+        match backend_kind_for_runtime(name, device) {
+            kiln_tensor::Backend::Metal => Self {
+                allow_when_requested_by_default: false,
+                explicit_enable_env: Some("KILN_ALLOW_FP8_ON_METAL"),
+                disabled_reason: Some("CPU round-trip cost"),
+            },
+            _ => Self::ALLOW_WHEN_REQUESTED,
+        }
+    }
+
+    pub fn enabled(self, requested: bool) -> bool {
+        if !requested {
+            return false;
+        }
+        self.allow_when_requested_by_default || self.explicit_enable_env_is_truthy()
+    }
+
+    pub fn explicit_enable_env_is_truthy(self) -> bool {
+        let Some(name) = self.explicit_enable_env else {
+            return false;
+        };
+        matches!(
+            std::env::var(name).as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE")
+        )
     }
 }
 

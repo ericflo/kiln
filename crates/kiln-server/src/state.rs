@@ -1863,34 +1863,21 @@ impl AppState {
             }
         };
 
-        // FP8 (E4M3FN) packing currently uses a CPU round-trip on every
-        // write — fine on CUDA where bf16→fp8 packing is amortized over the
-        // kernel work, but on Metal the round-trip dominates decode. Gate it
-        // off on Metal with a warning rather than silently shipping a slow
-        // path; users who know what they're doing can re-enable via
-        // KILN_ALLOW_FP8_ON_METAL=1.
+        // Backend storage policy owns whether requested FP8 KV cache storage is
+        // allowed by default. Some backends can still expose an explicit env
+        // opt-in when the default is disabled for performance reasons.
         let fp8_enabled = {
             let requested = memory_cfg.kv_cache_fp8;
-            // Require an explicit opt-in value (`1`/`true`) so the common
-            // misreading `KILN_ALLOW_FP8_ON_METAL=0` disables FP8 as intended
-            // instead of flipping the gate because the variable happens to
-            // be set.
-            let metal_override = matches!(
-                std::env::var("KILN_ALLOW_FP8_ON_METAL").as_deref(),
-                Ok("1") | Ok("true") | Ok("TRUE")
-            );
-            // `is_metal_device` takes `&kt::Device` after the Phase 7+
-            // migration, so this site uses the bridged `device_kt` from
-            // above instead of calling kt-bridge again here. (#1082)
-            if requested && is_metal_device(&device_kt) && !metal_override {
+            let policy = storage_capabilities.kv_cache_fp8_policy;
+            let enabled = policy.enabled(requested);
+            if requested && !enabled {
                 tracing::warn!(
-                    "FP8 cache disabled on Metal (CPU round-trip cost); \
-                     set KILN_ALLOW_FP8_ON_METAL=1 to override"
+                    override_env = policy.explicit_enable_env,
+                    reason = policy.disabled_reason,
+                    "FP8 KV cache disabled by backend storage policy"
                 );
-                false
-            } else {
-                requested
             }
+            enabled
         };
         // Allocation closure: try to build the paged KV cache for `n` blocks.
         // Used by the auto-sizer retry loop below. CUDA OOM bubbles up here as
@@ -2483,16 +2470,6 @@ fn validate_kv_allocation_against_live_allocator(
         requested_gb = requested as f64 / (1024.0 * 1024.0 * 1024.0),
         budget_gb = allocator_budget as f64 / (1024.0 * 1024.0 * 1024.0),
     )
-}
-
-fn is_metal_device(device: &kiln_tensor::Device) -> bool {
-    // Migrated to take `&kt::Device` directly so this helper no longer
-    // names the candle Metal variant or the kt-bridge converter. The
-    // kt-bridge `metal` feature is forwarded under `kiln-server/metal`,
-    // so callers in non-metal builds will never construct a
-    // `kt::Device::Metal(_)` and the cfg-gated behavior is preserved.
-    // (#1082)
-    device.backend() == kiln_tensor::Backend::Metal
 }
 
 /// Query total GPU memory in bytes. Returns 0 for CPU devices.

@@ -1142,6 +1142,7 @@ fn generated_capability_report_lists_request_descriptors() {
         "StorageCapabilities",
         "KvCacheAutoBlockPolicy",
         "KvCacheMemoryTierBlockCap",
+        "KvCacheFp8Policy",
         "StartupCapabilities",
         "MatmulCapabilities",
         "AttentionCapabilities",
@@ -1233,6 +1234,10 @@ fn generated_capability_report_lists_request_descriptors() {
         storage_capability_fields.contains(&"kv_auto_block_policy"),
         "StorageCapabilities should own backend-specific KV auto block cap policy"
     );
+    assert!(
+        storage_capability_fields.contains(&"kv_cache_fp8_policy"),
+        "StorageCapabilities should own backend-specific KV FP8 cache policy"
+    );
     let kv_auto_block_policy_fields = capability_descriptors["KvCacheAutoBlockPolicy"]["fields"]
         .as_array()
         .expect("KvCacheAutoBlockPolicy fields should be an array")
@@ -1248,6 +1253,22 @@ fn generated_capability_report_lists_request_descriptors() {
         assert!(
             kv_auto_block_policy_fields.contains(&field),
             "KvCacheAutoBlockPolicy should include {field}"
+        );
+    }
+    let kv_cache_fp8_policy_fields = capability_descriptors["KvCacheFp8Policy"]["fields"]
+        .as_array()
+        .expect("KvCacheFp8Policy fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
+    for field in [
+        "allow_when_requested_by_default",
+        "explicit_enable_env",
+        "disabled_reason",
+    ] {
+        assert!(
+            kv_cache_fp8_policy_fields.contains(&field),
+            "KvCacheFp8Policy should include {field}"
         );
     }
     let attention_capability_fields = capability_descriptors["AttentionCapabilities"]["fields"]
@@ -2891,7 +2912,7 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     let server_kv_auto_sizing_helpers = source_between(
         &server_state_source,
         "fn auto_num_blocks_for_fraction(",
-        "fn is_metal_device(",
+        "fn runtime_used_vram_for_device(",
     );
     assert!(
         server_kv_auto_sizing_helpers.contains("KvCacheAutoBlockPolicy")
@@ -2912,6 +2933,31 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         assert!(
             !server_kv_auto_sizing_helpers.contains(forbidden),
             "kiln-server KV auto-sizing helpers should not keep a local backend/device cap table: {forbidden}"
+        );
+    }
+    let server_kv_fp8_section = source_between(
+        &server_state_source,
+        "let fp8_enabled = {",
+        "// Allocation closure: try to build the paged KV cache for `n` blocks.",
+    );
+    assert!(
+        server_kv_fp8_section.contains("kv_cache_fp8_policy")
+            && server_kv_fp8_section.contains("policy.enabled(requested)")
+            && server_kv_fp8_section.contains("explicit_enable_env")
+            && server_kv_fp8_section.contains("disabled_reason"),
+        "kiln-server KV FP8 routing should consume StorageCapabilities.kv_cache_fp8_policy"
+    );
+    for forbidden in [
+        "KILN_ALLOW_FP8_ON_METAL",
+        "is_metal_device",
+        "Device::Metal",
+        "Backend::Metal",
+        "metal_override",
+        "on Metal",
+    ] {
+        assert!(
+            !server_kv_fp8_section.contains(forbidden),
+            "kiln-server KV FP8 routing should not keep a local backend/env policy table: {forbidden}"
         );
     }
     assert!(

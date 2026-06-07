@@ -163,9 +163,10 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | Descriptor | Field Count | Fields |
 |---|---:|---|
 | `BackendCapabilities` | 12 | `backend`, `device`, `storage`, `startup`, `matmul`, `attention`, `gdn`, `decode`, `decode_batcher`, `training`, `graph_replay`, `fallback` |
-| `StorageCapabilities` | 7 | `backend`, `device`, `resident_activation`, `resident_decode`, `kv_cache_device_memory_pressure`, `kv_sizing_residency_model_multiplier`, `kv_auto_block_policy` |
+| `StorageCapabilities` | 8 | `backend`, `device`, `resident_activation`, `resident_decode`, `kv_cache_device_memory_pressure`, `kv_sizing_residency_model_multiplier`, `kv_auto_block_policy`, `kv_cache_fp8_policy` |
 | `KvCacheAutoBlockPolicy` | 4 | `context_window_cap`, `static_max_blocks`, `memory_tier_cap`, `allow_min_blocks_below_live_budget` |
 | `KvCacheMemoryTierBlockCap` | 5 | `low_memory_bytes_exclusive`, `low_max_blocks`, `mid_memory_bytes_exclusive`, `mid_max_blocks`, `high_max_blocks` |
+| `KvCacheFp8Policy` | 3 | `allow_when_requested_by_default`, `explicit_enable_env`, `disabled_reason` |
 | `StartupCapabilities` | 6 | `run_inference_prewarm`, `require_inference_prewarm_for_health`, `precompile_custom_kernels`, `native_training_default_enabled`, `native_training_env`, `decode_weight_prewarm_when_native_training` |
 | `MatmulCapabilities` | 3 | `rank2_f32`, `batched_bf16`, `bias_epilogue` |
 | `AttentionCapabilities` | 5 | `flash_prefill`, `flash_prefill_head_major`, `flash_paged_decode`, `flash_prefill_consumes_grouped_kv`, `detached_chunked_prefill` |

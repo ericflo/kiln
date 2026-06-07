@@ -1887,6 +1887,24 @@
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
+    "KvCacheFp8Policy": {
+      "field_count": 3,
+      "fields": [
+        {
+          "name": "allow_when_requested_by_default",
+          "type": "bool"
+        },
+        {
+          "name": "explicit_enable_env",
+          "type": "Option<&'static str>"
+        },
+        {
+          "name": "disabled_reason",
+          "type": "Option<&'static str>"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
     "KvCacheMemoryTierBlockCap": {
       "field_count": 5,
       "fields": [
@@ -2038,7 +2056,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "StorageCapabilities": {
-      "field_count": 7,
+      "field_count": 8,
       "fields": [
         {
           "name": "backend",
@@ -2067,6 +2085,10 @@
         {
           "name": "kv_auto_block_policy",
           "type": "KvCacheAutoBlockPolicy"
+        },
+        {
+          "name": "kv_cache_fp8_policy",
+          "type": "KvCacheFp8Policy"
         }
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"
