@@ -787,7 +787,17 @@ def conformance_gate_report() -> list[dict[str, Any]]:
             "gate": "storage_round_trip",
             "phase8_requirement": "storage round trip",
             "status": "covered",
-            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor rocm_storage_smoke",
+            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features rocm --test rocm_storage_smoke && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_tensor_parity",
+            "supplemental_commands": [
+                {
+                    "scope": "ROCm feature lane",
+                    "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features rocm --test rocm_storage_smoke",
+                },
+                {
+                    "scope": "Vulkan kernel lane",
+                    "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_tensor_parity",
+                },
+            ],
             "evidence": [
                 "crates/kiln-tensor/tests/rocm_storage_smoke.rs",
                 "crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs",
@@ -797,7 +807,25 @@ def conformance_gate_report() -> list[dict[str, Any]]:
             "gate": "host_transfer_to_device_parity",
             "phase8_requirement": "host transfer / to_device parity with explicit unsupported errors",
             "status": "covered",
-            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor device_transfer_support_classifies_explicit_transitions && /home/ericflo/.cargo/bin/cargo test -p kiln-tensor to_device_without_gpu_features_reports_explicit_unsupported_transition && /home/ericflo/.cargo/bin/cargo test -p kiln-tensor cuda_resize_copy_primitives",
+            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor device_transfer_support_classifies_explicit_transitions && /home/ericflo/.cargo/bin/cargo test -p kiln-tensor to_device_without_gpu_features_reports_explicit_unsupported_transition",
+            "supplemental_commands": [
+                {
+                    "scope": "CUDA hardware lane",
+                    "command": "CUDARC_CUDA_VERSION=12080 /home/ericflo/.cargo/bin/cargo test -p kiln-tensor --no-default-features --features cuda --test cuda_resize_copy_primitives",
+                },
+                {
+                    "scope": "ROCm feature lane",
+                    "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features rocm --test rocm_compare_parity",
+                },
+                {
+                    "scope": "macOS Metal feature lane",
+                    "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features metal --test metal_ops_parity",
+                },
+                {
+                    "scope": "Vulkan kernel lane",
+                    "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_tensor_parity",
+                },
+            ],
             "evidence": [
                 "crates/kiln-tensor/src/tensor.rs",
                 "crates/kiln-tensor/tests/cuda_resize_copy_primitives.rs",
@@ -811,6 +839,16 @@ def conformance_gate_report() -> list[dict[str, Any]]:
             "phase8_requirement": "DeviceOp parity",
             "status": "covered",
             "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor device_op::tests",
+            "supplemental_commands": [
+                {
+                    "scope": "ROCm feature lane",
+                    "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features rocm --test rocm_scalar_op_parity",
+                },
+                {
+                    "scope": "macOS Metal feature lane",
+                    "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features metal --test metal_ops_parity",
+                },
+            ],
             "evidence": [
                 "crates/kiln-tensor/src/device_op.rs",
                 "crates/kiln-tensor/tests/rocm_scalar_op_parity.rs",
@@ -821,7 +859,17 @@ def conformance_gate_report() -> list[dict[str, Any]]:
             "gate": "matmul_linear_parity",
             "phase8_requirement": "matmul/linear parity",
             "status": "covered",
-            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model matmul_request_projects_to_blas_shape_contract && /home/ericflo/.cargo/bin/cargo test -p kiln-tensor rocm_matmul_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-tensor matmul_matrix_core && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel vk_matmul && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel linear_decode && /home/ericflo/.cargo/bin/cargo test -p kiln-model tape_forward_matmul_bit_exact_parity_with_baseline && /home/ericflo/.cargo/bin/cargo test -p kiln-blas cublaslt_handle_smoke && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test backend_capability_contract",
+            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model matmul_request_projects_to_blas_shape_contract && /home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features rocm --test rocm_matmul_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-tensor matmul_matrix_core && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_matmul_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test linear_decode_argmax && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test linear_decode_sample && /home/ericflo/.cargo/bin/cargo test -p kiln-model tape_forward_matmul_bit_exact_parity_with_baseline && CUDARC_CUDA_VERSION=12080 /home/ericflo/.cargo/bin/cargo check -p kiln-blas --features cublaslt --tests && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test backend_capability_contract",
+            "supplemental_commands": [
+                {
+                    "scope": "CUDA cublasLt hardware lane",
+                    "command": "CUDARC_CUDA_VERSION=12080 /home/ericflo/.cargo/bin/cargo test -p kiln-blas --features cublaslt --test cublaslt_handle_smoke",
+                },
+                {
+                    "scope": "macOS Metal feature lane",
+                    "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features metal --test metal_ops_parity",
+                },
+            ],
             "evidence": [
                 "crates/kiln-model/src/backend/capability.rs",
                 "crates/kiln-model/src/backend/mod.rs",
@@ -839,7 +887,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
             "gate": "attention_gdn_conv_parity",
             "phase8_requirement": "attention/GDN/conv parity",
             "status": "covered",
-            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model rocm_flash_attn_bwd_gradcheck && /home/ericflo/.cargo/bin/cargo test -p kiln-flash-attn --no-default-features --features rocm --test rocm_flash_attn_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-gdn-kernel --no-default-features --features rocm --test rocm_gdn_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-conv1d-kernel --no-default-features --features rocm --test rocm_conv1d_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_attention_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_sdpa_prefill_kernel_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_gdn_foundation_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_gdn_backward_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test gdn_parity",
+            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model --no-default-features --features rocm --test rocm_flash_attn_bwd_gradcheck && /home/ericflo/.cargo/bin/cargo test -p kiln-flash-attn --no-default-features --features rocm --test rocm_flash_attn_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-gdn-kernel --no-default-features --features rocm --test rocm_gdn_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-conv1d-kernel --no-default-features --features rocm --test rocm_conv1d_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_attention_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_sdpa_prefill_kernel_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_gdn_foundation_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_gdn_backward_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test gdn_parity",
             "evidence": [
                 "crates/kiln-model/tests/rocm_flash_attn_bwd_gradcheck.rs",
                 "crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs",
@@ -857,6 +905,12 @@ def conformance_gate_report() -> list[dict[str, Any]]:
             "phase8_requirement": "optimizer parity",
             "status": "covered",
             "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-optim --test integration && /home/ericflo/.cargo/bin/cargo test -p kiln-train training_optimizer && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test backend_capability_contract",
+            "supplemental_commands": [
+                {
+                    "scope": "CUDA plus Vulkan OPD hardware lane",
+                    "command": "CUDARC_CUDA_VERSION=12080 /home/ericflo/.cargo/bin/cargo test -p kiln-train --features cuda,vulkan --test vk_cuda_opd_parity",
+                },
+            ],
             "evidence": [
                 "crates/kiln-optim/tests/integration.rs",
                 "crates/kiln-model/src/backend/cuda.rs",
@@ -873,7 +927,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
             "gate": "replay_parity",
             "phase8_requirement": "replay parity",
             "status": "covered",
-            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-graph replay && /home/ericflo/.cargo/bin/cargo test -p kiln-graph --test capture_lifetime && /home/ericflo/.cargo/bin/cargo test -p kiln-graph-cuda replay && /home/ericflo/.cargo/bin/cargo test -p kiln-graph-metal replay && /home/ericflo/.cargo/bin/cargo test -p kiln-graph-vulkan replay && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test vk_resident_decode_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-tensor --test rocm_capture_arena && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test backend_capability_contract",
+            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-graph replay && /home/ericflo/.cargo/bin/cargo test -p kiln-graph --test capture_lifetime && /home/ericflo/.cargo/bin/cargo test -p kiln-graph-cuda replay && /home/ericflo/.cargo/bin/cargo test -p kiln-graph-metal replay && /home/ericflo/.cargo/bin/cargo test -p kiln-graph-vulkan replay && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test vk_resident_decode_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features rocm --test rocm_capture_arena && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test backend_capability_contract",
             "evidence": [
                 "crates/kiln-graph/src/replay_plan.rs",
                 "crates/kiln-graph/src/captured_graph.rs",
@@ -891,7 +945,25 @@ def conformance_gate_report() -> list[dict[str, Any]]:
             "gate": "one_step_training_proof",
             "phase8_requirement": "one-step training proof",
             "status": "covered",
-            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model cuda_sft_step_proof && /home/ericflo/.cargo/bin/cargo test -p kiln-model metal_sft_step_proof && /home/ericflo/.cargo/bin/cargo test -p kiln-model vk_sft_step_proof && /home/ericflo/.cargo/bin/cargo test -p kiln-model rocm_sft_step_proof && /home/ericflo/.cargo/bin/cargo test -p kiln-optim --test end_to_end_training && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test backend_capability_contract",
+            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-optim --test end_to_end_training && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test backend_capability_contract",
+            "supplemental_commands": [
+                {
+                    "scope": "CUDA hardware lane",
+                    "command": "CUDARC_CUDA_VERSION=12080 /home/ericflo/.cargo/bin/cargo test -p kiln-model --features cuda --test cuda_sft_step_proof",
+                },
+                {
+                    "scope": "ROCm feature lane",
+                    "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model --features rocm --test rocm_sft_step_proof",
+                },
+                {
+                    "scope": "macOS Metal feature lane",
+                    "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model --features metal --test metal_sft_step_proof",
+                },
+                {
+                    "scope": "Vulkan hardware opt-in lane",
+                    "command": "KILN_TENSOR_VULKAN_TEST=1 KILN_USE_TAPE_FORWARD=1 KILN_USE_TAPE_LORA_ADD=1 /home/ericflo/.cargo/bin/cargo test -p kiln-model --features vulkan --test vk_sft_step_proof",
+                },
+            ],
             "evidence": [
                 "crates/kiln-model/tests/cuda_sft_step_proof.rs",
                 "crates/kiln-model/tests/metal_sft_step_proof.rs",
@@ -972,6 +1044,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
     ]
 
     for gate in gates:
+        gate["supplemental_commands"] = gate.get("supplemental_commands", [])
         gate["evidence_present"] = [
             evidence for evidence in gate["evidence"] if path_exists(evidence)
         ]
@@ -1374,14 +1447,23 @@ def markdown(data: dict[str, Any]) -> str:
     lines.append("")
     lines.append("## Conformance And Performance Gates")
     lines.append("")
-    lines.append("| Gate | Phase 8 Requirement | Status | Command | Evidence | Missing Evidence |")
-    lines.append("|---|---|---|---|---|---|")
+    lines.append(
+        "| Gate | Phase 8 Requirement | Status | Command | Supplemental Commands | Evidence | Missing Evidence |"
+    )
+    lines.append("|---|---|---|---|---|---|---|")
     for gate in data["conformance_gates"]:
+        supplemental = (
+            "; ".join(
+                f"`{entry['scope']}: {entry['command']}`"
+                for entry in gate["supplemental_commands"]
+            )
+            or "none"
+        )
         evidence = ", ".join(f"`{path}`" for path in gate["evidence_present"]) or "none"
         missing = ", ".join(f"`{path}`" for path in gate["evidence_missing"]) or "none"
         lines.append(
             f"| `{gate['gate']}` | {gate['phase8_requirement']} | "
-            f"`{gate['status']}` | `{gate['command']}` | {evidence} | {missing} |"
+            f"`{gate['status']}` | `{gate['command']}` | {supplemental} | {evidence} | {missing} |"
         )
     lines.append("")
     lines.append("## Generic DeviceOp Fallback")

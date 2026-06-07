@@ -1846,7 +1846,7 @@
   },
   "conformance_gates": [
     {
-      "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor rocm_storage_smoke",
+      "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features rocm --test rocm_storage_smoke && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_tensor_parity",
       "evidence": [
         "crates/kiln-tensor/tests/rocm_storage_smoke.rs",
         "crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs"
@@ -1858,10 +1858,20 @@
       ],
       "gate": "storage_round_trip",
       "phase8_requirement": "storage round trip",
-      "status": "covered"
+      "status": "covered",
+      "supplemental_commands": [
+        {
+          "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features rocm --test rocm_storage_smoke",
+          "scope": "ROCm feature lane"
+        },
+        {
+          "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_tensor_parity",
+          "scope": "Vulkan kernel lane"
+        }
+      ]
     },
     {
-      "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor device_transfer_support_classifies_explicit_transitions && /home/ericflo/.cargo/bin/cargo test -p kiln-tensor to_device_without_gpu_features_reports_explicit_unsupported_transition && /home/ericflo/.cargo/bin/cargo test -p kiln-tensor cuda_resize_copy_primitives",
+      "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor device_transfer_support_classifies_explicit_transitions && /home/ericflo/.cargo/bin/cargo test -p kiln-tensor to_device_without_gpu_features_reports_explicit_unsupported_transition",
       "evidence": [
         "crates/kiln-tensor/src/tensor.rs",
         "crates/kiln-tensor/tests/cuda_resize_copy_primitives.rs",
@@ -1879,7 +1889,25 @@
       ],
       "gate": "host_transfer_to_device_parity",
       "phase8_requirement": "host transfer / to_device parity with explicit unsupported errors",
-      "status": "covered"
+      "status": "covered",
+      "supplemental_commands": [
+        {
+          "command": "CUDARC_CUDA_VERSION=12080 /home/ericflo/.cargo/bin/cargo test -p kiln-tensor --no-default-features --features cuda --test cuda_resize_copy_primitives",
+          "scope": "CUDA hardware lane"
+        },
+        {
+          "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features rocm --test rocm_compare_parity",
+          "scope": "ROCm feature lane"
+        },
+        {
+          "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features metal --test metal_ops_parity",
+          "scope": "macOS Metal feature lane"
+        },
+        {
+          "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_tensor_parity",
+          "scope": "Vulkan kernel lane"
+        }
+      ]
     },
     {
       "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor device_op::tests",
@@ -1896,10 +1924,20 @@
       ],
       "gate": "device_op_parity",
       "phase8_requirement": "DeviceOp parity",
-      "status": "covered"
+      "status": "covered",
+      "supplemental_commands": [
+        {
+          "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features rocm --test rocm_scalar_op_parity",
+          "scope": "ROCm feature lane"
+        },
+        {
+          "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features metal --test metal_ops_parity",
+          "scope": "macOS Metal feature lane"
+        }
+      ]
     },
     {
-      "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model matmul_request_projects_to_blas_shape_contract && /home/ericflo/.cargo/bin/cargo test -p kiln-tensor rocm_matmul_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-tensor matmul_matrix_core && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel vk_matmul && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel linear_decode && /home/ericflo/.cargo/bin/cargo test -p kiln-model tape_forward_matmul_bit_exact_parity_with_baseline && /home/ericflo/.cargo/bin/cargo test -p kiln-blas cublaslt_handle_smoke && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test backend_capability_contract",
+      "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model matmul_request_projects_to_blas_shape_contract && /home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features rocm --test rocm_matmul_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-tensor matmul_matrix_core && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_matmul_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test linear_decode_argmax && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test linear_decode_sample && /home/ericflo/.cargo/bin/cargo test -p kiln-model tape_forward_matmul_bit_exact_parity_with_baseline && CUDARC_CUDA_VERSION=12080 /home/ericflo/.cargo/bin/cargo check -p kiln-blas --features cublaslt --tests && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test backend_capability_contract",
       "evidence": [
         "crates/kiln-model/src/backend/capability.rs",
         "crates/kiln-model/src/backend/mod.rs",
@@ -1927,10 +1965,20 @@
       ],
       "gate": "matmul_linear_parity",
       "phase8_requirement": "matmul/linear parity",
-      "status": "covered"
+      "status": "covered",
+      "supplemental_commands": [
+        {
+          "command": "CUDARC_CUDA_VERSION=12080 /home/ericflo/.cargo/bin/cargo test -p kiln-blas --features cublaslt --test cublaslt_handle_smoke",
+          "scope": "CUDA cublasLt hardware lane"
+        },
+        {
+          "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features metal --test metal_ops_parity",
+          "scope": "macOS Metal feature lane"
+        }
+      ]
     },
     {
-      "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model rocm_flash_attn_bwd_gradcheck && /home/ericflo/.cargo/bin/cargo test -p kiln-flash-attn --no-default-features --features rocm --test rocm_flash_attn_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-gdn-kernel --no-default-features --features rocm --test rocm_gdn_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-conv1d-kernel --no-default-features --features rocm --test rocm_conv1d_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_attention_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_sdpa_prefill_kernel_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_gdn_foundation_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_gdn_backward_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test gdn_parity",
+      "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model --no-default-features --features rocm --test rocm_flash_attn_bwd_gradcheck && /home/ericflo/.cargo/bin/cargo test -p kiln-flash-attn --no-default-features --features rocm --test rocm_flash_attn_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-gdn-kernel --no-default-features --features rocm --test rocm_gdn_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-conv1d-kernel --no-default-features --features rocm --test rocm_conv1d_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_attention_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_sdpa_prefill_kernel_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_gdn_foundation_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_gdn_backward_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test gdn_parity",
       "evidence": [
         "crates/kiln-model/tests/rocm_flash_attn_bwd_gradcheck.rs",
         "crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs",
@@ -1956,7 +2004,8 @@
       ],
       "gate": "attention_gdn_conv_parity",
       "phase8_requirement": "attention/GDN/conv parity",
-      "status": "covered"
+      "status": "covered",
+      "supplemental_commands": []
     },
     {
       "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-optim --test integration && /home/ericflo/.cargo/bin/cargo test -p kiln-train training_optimizer && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test backend_capability_contract",
@@ -1985,10 +2034,16 @@
       ],
       "gate": "optimizer_parity",
       "phase8_requirement": "optimizer parity",
-      "status": "covered"
+      "status": "covered",
+      "supplemental_commands": [
+        {
+          "command": "CUDARC_CUDA_VERSION=12080 /home/ericflo/.cargo/bin/cargo test -p kiln-train --features cuda,vulkan --test vk_cuda_opd_parity",
+          "scope": "CUDA plus Vulkan OPD hardware lane"
+        }
+      ]
     },
     {
-      "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-graph replay && /home/ericflo/.cargo/bin/cargo test -p kiln-graph --test capture_lifetime && /home/ericflo/.cargo/bin/cargo test -p kiln-graph-cuda replay && /home/ericflo/.cargo/bin/cargo test -p kiln-graph-metal replay && /home/ericflo/.cargo/bin/cargo test -p kiln-graph-vulkan replay && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test vk_resident_decode_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-tensor --test rocm_capture_arena && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test backend_capability_contract",
+      "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-graph replay && /home/ericflo/.cargo/bin/cargo test -p kiln-graph --test capture_lifetime && /home/ericflo/.cargo/bin/cargo test -p kiln-graph-cuda replay && /home/ericflo/.cargo/bin/cargo test -p kiln-graph-metal replay && /home/ericflo/.cargo/bin/cargo test -p kiln-graph-vulkan replay && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test vk_resident_decode_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features rocm --test rocm_capture_arena && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test backend_capability_contract",
       "evidence": [
         "crates/kiln-graph/src/replay_plan.rs",
         "crates/kiln-graph/src/captured_graph.rs",
@@ -2016,10 +2071,11 @@
       ],
       "gate": "replay_parity",
       "phase8_requirement": "replay parity",
-      "status": "covered"
+      "status": "covered",
+      "supplemental_commands": []
     },
     {
-      "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model cuda_sft_step_proof && /home/ericflo/.cargo/bin/cargo test -p kiln-model metal_sft_step_proof && /home/ericflo/.cargo/bin/cargo test -p kiln-model vk_sft_step_proof && /home/ericflo/.cargo/bin/cargo test -p kiln-model rocm_sft_step_proof && /home/ericflo/.cargo/bin/cargo test -p kiln-optim --test end_to_end_training && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test backend_capability_contract",
+      "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-optim --test end_to_end_training && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test backend_capability_contract",
       "evidence": [
         "crates/kiln-model/tests/cuda_sft_step_proof.rs",
         "crates/kiln-model/tests/metal_sft_step_proof.rs",
@@ -2037,7 +2093,25 @@
       ],
       "gate": "one_step_training_proof",
       "phase8_requirement": "one-step training proof",
-      "status": "covered"
+      "status": "covered",
+      "supplemental_commands": [
+        {
+          "command": "CUDARC_CUDA_VERSION=12080 /home/ericflo/.cargo/bin/cargo test -p kiln-model --features cuda --test cuda_sft_step_proof",
+          "scope": "CUDA hardware lane"
+        },
+        {
+          "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model --features rocm --test rocm_sft_step_proof",
+          "scope": "ROCm feature lane"
+        },
+        {
+          "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model --features metal --test metal_sft_step_proof",
+          "scope": "macOS Metal feature lane"
+        },
+        {
+          "command": "KILN_TENSOR_VULKAN_TEST=1 KILN_USE_TAPE_FORWARD=1 KILN_USE_TAPE_LORA_ADD=1 /home/ericflo/.cargo/bin/cargo test -p kiln-model --features vulkan --test vk_sft_step_proof",
+          "scope": "Vulkan hardware opt-in lane"
+        }
+      ]
     },
     {
       "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor device_op_host_fallback_counts_are_backend_and_arity_specific",
@@ -2054,7 +2128,8 @@
       ],
       "gate": "no_unexpected_host_fallback",
       "phase8_requirement": "no unexpected host fallback in decode/training hot paths",
-      "status": "covered"
+      "status": "covered",
+      "supplemental_commands": []
     },
     {
       "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model decode_batcher_stats_report_runner_calls_per_token && /home/ericflo/.cargo/bin/cargo test -p kiln-server test_metrics_render && /home/ericflo/.cargo/bin/cargo test -p kiln-graph replay",
@@ -2077,7 +2152,8 @@
       ],
       "gate": "decode_submit_or_replay_count",
       "phase8_requirement": "max submit count or replay count per decode token",
-      "status": "covered"
+      "status": "covered",
+      "supplemental_commands": []
     },
     {
       "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-blas cache_stats_reports_entries_and_hit_rate && /home/ericflo/.cargo/bin/cargo test -p kiln-rocblas cache_stats_reports_entries_and_hit_rate && CUDARC_CUDA_VERSION=12080 /home/ericflo/.cargo/bin/cargo check -p kiln-blas --features cublaslt --tests && /home/ericflo/.cargo/bin/cargo check -p kiln-rocblas --features hipblaslt --tests",
@@ -2098,7 +2174,8 @@
       ],
       "gate": "matmul_algorithm_cache_reporting",
       "phase8_requirement": "matmul algorithm/cache hit reporting",
-      "status": "covered"
+      "status": "covered",
+      "supplemental_commands": []
     },
     {
       "command": "python3 scripts/run_backend_latency_fixture.py --self-test && python3 scripts/write_backend_latency_result_artifact.py --self-test && python3 scripts/lock_backend_latency_thresholds.py --self-test && python3 scripts/check_backend_latency_fixtures.py --self-test && hardware runner required; python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered",
@@ -2133,7 +2210,8 @@
       ],
       "gate": "hardware_latency_thresholds",
       "phase8_requirement": "backend-specific latency thresholds on known hardware fixtures",
-      "status": "fixture_required"
+      "status": "fixture_required",
+      "supplemental_commands": []
     },
     {
       "command": "python3 scripts/generate_backend_capability_report.py --self-test && python3 scripts/generate_backend_capability_report.py --check",
@@ -2150,7 +2228,8 @@
       ],
       "gate": "generated_capability_dashboard",
       "phase8_requirement": "generated capability dashboard checked into docs or build artifacts",
-      "status": "covered"
+      "status": "covered",
+      "supplemental_commands": []
     }
   ],
   "decode_hot_path_policy": {

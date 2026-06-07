@@ -23,6 +23,20 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn assert_supplemental_command(gate: &Value, scope_fragment: &str, command_fragment: &str) {
+    let supplemental_commands = gate["supplemental_commands"]
+        .as_array()
+        .expect("supplemental_commands should be an array");
+    assert!(
+        supplemental_commands.iter().any(|entry| {
+            let scope = entry["scope"].as_str().unwrap_or("");
+            let command = entry["command"].as_str().unwrap_or("");
+            scope.contains(scope_fragment) && command.contains(command_fragment)
+        }),
+        "gate should include supplemental {scope_fragment} command fragment {command_fragment}"
+    );
+}
+
 fn source_between<'a>(source: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
     let start = source
         .find(start_marker)
@@ -1228,6 +1242,19 @@ fn generated_capability_report_lists_request_descriptors() {
             valid_statuses.contains(&status),
             "invalid conformance gate status {status}"
         );
+        let supplemental_commands = gate["supplemental_commands"]
+            .as_array()
+            .expect("supplemental_commands should be an array");
+        for supplemental in supplemental_commands {
+            assert!(
+                !supplemental["scope"].as_str().unwrap_or("").is_empty(),
+                "supplemental command scope should be non-empty"
+            );
+            assert!(
+                !supplemental["command"].as_str().unwrap_or("").is_empty(),
+                "supplemental command should be non-empty"
+            );
+        }
         if status == "covered" {
             assert!(
                 !gate["evidence_present"]
@@ -1238,6 +1265,27 @@ fn generated_capability_report_lists_request_descriptors() {
             );
         }
     }
+    let storage_gate = conformance_gates
+        .iter()
+        .find(|gate| gate["gate"] == "storage_round_trip")
+        .expect("storage round-trip gate should be present");
+    assert_eq!(storage_gate["status"], "covered");
+    let storage_command = storage_gate["command"]
+        .as_str()
+        .expect("storage round-trip command should be a string");
+    assert!(storage_command.contains("kiln-tensor --features rocm --test rocm_storage_smoke"));
+    assert!(storage_command.contains("kiln-vulkan-kernel --test vk_tensor_parity"));
+    assert_supplemental_command(
+        storage_gate,
+        "ROCm",
+        "kiln-tensor --features rocm --test rocm_storage_smoke",
+    );
+    assert_supplemental_command(
+        storage_gate,
+        "Vulkan",
+        "kiln-vulkan-kernel --test vk_tensor_parity",
+    );
+
     let decode_submit_gate = conformance_gates
         .iter()
         .find(|gate| gate["gate"] == "decode_submit_or_replay_count")
@@ -1277,6 +1325,51 @@ fn generated_capability_report_lists_request_descriptors() {
         host_transfer_evidence.contains(&"crates/kiln-tensor/src/tensor.rs"),
         "host transfer gate should cite Tensor::to_device support classification"
     );
+    let host_transfer_command = host_transfer_gate["command"]
+        .as_str()
+        .expect("host transfer command should be a string");
+    assert!(
+        host_transfer_command.contains("device_transfer_support_classifies_explicit_transitions")
+    );
+    assert!(
+        !host_transfer_command.contains("cuda_resize_copy_primitives"),
+        "CUDA feature-gated resize coverage should live in supplemental commands"
+    );
+    assert_supplemental_command(
+        host_transfer_gate,
+        "CUDA",
+        "kiln-tensor --no-default-features --features cuda --test cuda_resize_copy_primitives",
+    );
+    assert_supplemental_command(
+        host_transfer_gate,
+        "ROCm",
+        "kiln-tensor --features rocm --test rocm_compare_parity",
+    );
+    assert_supplemental_command(
+        host_transfer_gate,
+        "Metal",
+        "kiln-tensor --features metal --test metal_ops_parity",
+    );
+    assert_supplemental_command(
+        host_transfer_gate,
+        "Vulkan",
+        "kiln-vulkan-kernel --test vk_tensor_parity",
+    );
+
+    let device_op_gate = conformance_gates
+        .iter()
+        .find(|gate| gate["gate"] == "device_op_parity")
+        .expect("DeviceOp parity gate should be present");
+    assert_supplemental_command(
+        device_op_gate,
+        "ROCm",
+        "kiln-tensor --features rocm --test rocm_scalar_op_parity",
+    );
+    assert_supplemental_command(
+        device_op_gate,
+        "Metal",
+        "kiln-tensor --features metal --test metal_ops_parity",
+    );
 
     let matmul_cache_gate = conformance_gates
         .iter()
@@ -1310,7 +1403,7 @@ fn generated_capability_report_lists_request_descriptors() {
         .as_str()
         .expect("attention/GDN/conv command should be a string");
     for command_fragment in [
-        "kiln-model rocm_flash_attn_bwd_gradcheck",
+        "kiln-model --no-default-features --features rocm --test rocm_flash_attn_bwd_gradcheck",
         "kiln-flash-attn --no-default-features --features rocm --test rocm_flash_attn_parity",
         "kiln-gdn-kernel --no-default-features --features rocm --test rocm_gdn_parity",
         "kiln-conv1d-kernel --no-default-features --features rocm --test rocm_conv1d_parity",
@@ -1455,6 +1548,11 @@ fn generated_capability_report_lists_optimizer_dispatch_policy() {
             "optimizer parity gate should cite {path}"
         );
     }
+    assert_supplemental_command(
+        optimizer_gate,
+        "CUDA plus Vulkan",
+        "kiln-train --features cuda,vulkan --test vk_cuda_opd_parity",
+    );
 }
 
 #[test]
@@ -1483,7 +1581,7 @@ fn generated_capability_report_gates_replay_contract() {
         "kiln-graph-metal replay",
         "kiln-graph-vulkan replay",
         "kiln-model --test vk_resident_decode_parity",
-        "kiln-tensor --test rocm_capture_arena",
+        "kiln-tensor --features rocm --test rocm_capture_arena",
         "kiln-model --test backend_capability_contract",
     ] {
         assert!(
@@ -2476,6 +2574,31 @@ fn generated_capability_report_gates_matmul_linear_contract() {
         .find(|gate| gate["gate"] == "matmul_linear_parity")
         .expect("matmul/linear parity gate should be present");
     assert_eq!(matmul_gate["status"], "covered");
+    let command = matmul_gate["command"]
+        .as_str()
+        .expect("matmul/linear parity command should be a string");
+    for command_fragment in [
+        "kiln-tensor --features rocm --test rocm_matmul_parity",
+        "kiln-vulkan-kernel --test vk_matmul_parity",
+        "kiln-vulkan-kernel --test linear_decode_argmax",
+        "kiln-vulkan-kernel --test linear_decode_sample",
+        "kiln-blas --features cublaslt --tests",
+    ] {
+        assert!(
+            command.contains(command_fragment),
+            "matmul/linear parity command should run {command_fragment}"
+        );
+    }
+    assert_supplemental_command(
+        matmul_gate,
+        "CUDA cublasLt",
+        "kiln-blas --features cublaslt --test cublaslt_handle_smoke",
+    );
+    assert_supplemental_command(
+        matmul_gate,
+        "Metal",
+        "kiln-tensor --features metal --test metal_ops_parity",
+    );
     assert!(
         matmul_gate["evidence_missing"]
             .as_array()
@@ -2536,8 +2659,33 @@ fn generated_capability_report_tracks_one_step_training_proof_gate() {
     let command = training_gate["command"]
         .as_str()
         .expect("one-step training proof command should be a string");
-    assert!(command.contains("cuda_sft_step_proof"));
-    assert!(command.contains("metal_sft_step_proof"));
+    assert!(command.contains("kiln-optim --test end_to_end_training"));
+    assert!(command.contains("kiln-model --test backend_capability_contract"));
+    assert!(
+        !command.contains("cuda_sft_step_proof"),
+        "backend-specific SFT proof commands should live in supplemental commands"
+    );
+    assert_supplemental_command(
+        training_gate,
+        "CUDA",
+        "kiln-model --features cuda --test cuda_sft_step_proof",
+    );
+    assert_supplemental_command(
+        training_gate,
+        "ROCm",
+        "kiln-model --features rocm --test rocm_sft_step_proof",
+    );
+    assert_supplemental_command(
+        training_gate,
+        "Metal",
+        "kiln-model --features metal --test metal_sft_step_proof",
+    );
+    assert_supplemental_command(training_gate, "Vulkan", "KILN_TENSOR_VULKAN_TEST=1");
+    assert_supplemental_command(
+        training_gate,
+        "Vulkan",
+        "kiln-model --features vulkan --test vk_sft_step_proof",
+    );
 
     let evidence = training_gate["evidence"]
         .as_array()
