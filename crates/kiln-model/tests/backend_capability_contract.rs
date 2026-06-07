@@ -1140,6 +1140,7 @@ fn generated_capability_report_lists_request_descriptors() {
     for name in [
         "BackendCapabilities",
         "StorageCapabilities",
+        "StartupCapabilities",
         "MatmulCapabilities",
         "AttentionCapabilities",
         "GdnCapabilities",
@@ -1155,6 +1156,46 @@ fn generated_capability_report_lists_request_descriptors() {
             capability_descriptors.contains_key(name),
             "{name} should be present in capability_descriptors"
         );
+    }
+    let backend_capability_fields = capability_descriptors["BackendCapabilities"]["fields"]
+        .as_array()
+        .expect("BackendCapabilities fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        backend_capability_fields.contains(&"startup"),
+        "BackendCapabilities should expose startup/prewarm policy"
+    );
+    let startup_capability_fields = capability_descriptors["StartupCapabilities"]["fields"]
+        .as_array()
+        .expect("StartupCapabilities fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
+    for (field, message) in [
+        (
+            "run_inference_prewarm",
+            "StartupCapabilities should own whether startup runs inference prewarm",
+        ),
+        (
+            "require_inference_prewarm_for_health",
+            "StartupCapabilities should own health readiness prewarm policy",
+        ),
+        (
+            "native_training_default_enabled",
+            "StartupCapabilities should own native-training default enablement",
+        ),
+        (
+            "native_training_env",
+            "StartupCapabilities should own native-training env override",
+        ),
+        (
+            "decode_weight_prewarm_when_native_training",
+            "StartupCapabilities should own native-training decode-weight prewarm routing",
+        ),
+    ] {
+        assert!(startup_capability_fields.contains(&field), "{message}");
     }
     let replay_capability_fields = capability_descriptors["ReplayCapabilities"]["fields"]
         .as_array()
@@ -2352,6 +2393,8 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         .expect("forward.rs should be readable");
     let server_state_source = fs::read_to_string(root.join("crates/kiln-server/src/state.rs"))
         .expect("kiln-server state.rs should be readable");
+    let server_main_source = fs::read_to_string(root.join("crates/kiln-server/src/main.rs"))
+        .expect("kiln-server main.rs should be readable");
     let server_batching_source =
         fs::read_to_string(root.join("crates/kiln-server/src/batching_engine.rs"))
             .expect("kiln-server batching_engine.rs should be readable");
@@ -2695,6 +2738,39 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         assert!(
             !server_startup_policy_section.contains(forbidden),
             "kiln-server startup should not branch locally on backend/device policy: {forbidden}"
+        );
+    }
+    assert!(
+        server_state_source.contains("require_inference_prewarm_for_health"),
+        "kiln-server health prewarm readiness should consume StartupCapabilities"
+    );
+    assert!(
+        !server_state_source.contains("fn device_needs_inference_prewarm("),
+        "kiln-server should not keep a local backend/device table for prewarm readiness"
+    );
+    let server_prewarm_policy_section = source_between(
+        &server_main_source,
+        "fn spawn_backend_prewarm(",
+        "tokio::spawn(async move {",
+    );
+    assert!(
+        server_prewarm_policy_section.contains("runner_guard.backend_capabilities().startup")
+            && server_prewarm_policy_section.contains("run_inference_prewarm")
+            && server_prewarm_policy_section.contains("decode_weight_prewarm_when_native_training")
+            && server_prewarm_policy_section.contains("native_training_enabled_for_startup"),
+        "kiln-server inference prewarm routing should consume StartupCapabilities"
+    );
+    for forbidden in [
+        "backend_name() == \"vulkan\"",
+        "Device::Metal",
+        "Device::Rocm",
+        "is_vulkan",
+        "is_metal",
+        "is_rocm",
+    ] {
+        assert!(
+            !server_prewarm_policy_section.contains(forbidden),
+            "kiln-server prewarm routing should not branch locally on backend/device policy: {forbidden}"
         );
     }
     assert!(

@@ -1600,7 +1600,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "BackendCapabilities": {
-      "field_count": 11,
+      "field_count": 12,
       "fields": [
         {
           "name": "backend",
@@ -1613,6 +1613,10 @@
         {
           "name": "storage",
           "type": "StorageCapabilities"
+        },
+        {
+          "name": "startup",
+          "type": "StartupCapabilities"
         },
         {
           "name": "matmul",
@@ -1907,6 +1911,32 @@
         {
           "name": "authority",
           "type": "ReplayAuthority"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "StartupCapabilities": {
+      "field_count": 5,
+      "fields": [
+        {
+          "name": "run_inference_prewarm",
+          "type": "bool"
+        },
+        {
+          "name": "require_inference_prewarm_for_health",
+          "type": "bool"
+        },
+        {
+          "name": "native_training_default_enabled",
+          "type": "bool"
+        },
+        {
+          "name": "native_training_env",
+          "type": "Option<&'static str>"
+        },
+        {
+          "name": "decode_weight_prewarm_when_native_training",
+          "type": "bool"
         }
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"

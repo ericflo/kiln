@@ -16,9 +16,9 @@ use kiln_core::config_hashes::{ConfigHashes, kiln_env_config_hash};
 use kiln_core::env_flag::env_tristate;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::tokenizer::KilnTokenizer;
-use kiln_model::ModelRunner;
 use kiln_model::engine::MockEngine;
 use kiln_model::forward::GpuWeights;
+use kiln_model::{ModelRunner, StartupCapabilities};
 use kiln_scheduler::{Scheduler, SchedulerConfig};
 use state::{AppState, ModelBackend};
 
@@ -693,18 +693,15 @@ fn spawn_backend_prewarm(state: AppState) {
         return;
     };
 
-    let (is_gpu, is_vulkan, device_kt) = {
+    let (startup_policy, device_kt) = {
         let runner_guard = runner.read().unwrap();
         // #1082 forward-flip: `GpuWeights::embed_tokens` is now a kt `Tensor`,
         // so `.device()` already returns a kt `Device` — use it directly
         // (no candle bridge needed).
         let device_kt = runner_guard.weights.embed_tokens.device();
-        let is_metal = matches!(device_kt, kiln_tensor::Device::Metal(_));
-        let is_rocm = matches!(device_kt, kiln_tensor::Device::Rocm(_));
-        let is_vulkan = runner_guard.backend_name() == "vulkan";
-        (is_metal || is_rocm || is_vulkan, is_vulkan, device_kt)
+        (runner_guard.backend_capabilities().startup, device_kt)
     };
-    if !is_gpu {
+    if !startup_policy.run_inference_prewarm {
         return;
     }
 
@@ -714,9 +711,11 @@ fn spawn_backend_prewarm(state: AppState) {
     let gpu_lock = state.gpu_lock.clone();
     let prewarm_complete = state.inference_prewarm_complete.clone();
 
-    if vk_native_training_enabled(is_vulkan) {
+    if startup_policy.decode_weight_prewarm_when_native_training
+        && native_training_enabled_for_startup(startup_policy)
+    {
         tracing::info!(
-            "skipping synthetic inference prewarm because Vulkan-native training is enabled"
+            "skipping synthetic inference prewarm because backend native training is enabled"
         );
         spawn_vulkan_decode_weight_prewarm(runner, gpu_lock, device_kt, prewarm_complete);
         return;
@@ -872,18 +871,11 @@ fn spawn_vulkan_decode_weight_prewarm(
     });
 }
 
-fn vk_native_training_enabled(is_vulkan: bool) -> bool {
-    env_tristate("KILN_VK_NATIVE_TRAINING").unwrap_or_else(|| {
-        #[cfg(feature = "vulkan")]
-        {
-            is_vulkan
-        }
-        #[cfg(not(feature = "vulkan"))]
-        {
-            let _ = is_vulkan;
-            false
-        }
-    })
+fn native_training_enabled_for_startup(policy: StartupCapabilities) -> bool {
+    policy
+        .native_training_env
+        .and_then(env_tristate)
+        .unwrap_or(policy.native_training_default_enabled)
 }
 
 fn spawn_tokenizer_warmup(tokenizer: Arc<KilnTokenizer>) {

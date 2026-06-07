@@ -734,6 +734,16 @@ pub struct StorageCapabilities {
     pub kv_cache_device_memory_pressure: bool,
 }
 
+/// Backend-owned server startup and prewarm policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartupCapabilities {
+    pub run_inference_prewarm: bool,
+    pub require_inference_prewarm_for_health: bool,
+    pub native_training_default_enabled: bool,
+    pub native_training_env: Option<&'static str>,
+    pub decode_weight_prewarm_when_native_training: bool,
+}
+
 /// Representative matmul capability probes backed by [`MatmulRequest`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatmulCapabilities {
@@ -983,6 +993,7 @@ pub struct BackendCapabilities {
     pub backend: &'static str,
     pub device: kiln_tensor::Device,
     pub storage: StorageCapabilities,
+    pub startup: StartupCapabilities,
     pub matmul: MatmulCapabilities,
     pub attention: AttentionCapabilities,
     pub gdn: GdnCapabilities,
@@ -1087,6 +1098,7 @@ impl BackendCapabilities {
                 ),
                 kv_cache_device_memory_pressure: kv_cache_device_memory_pressure(name, device),
             },
+            startup: StartupCapabilities::for_backend(name, device),
             matmul: MatmulCapabilities {
                 rank2_f32: BackendCapabilityQueries::supports_matmul_request(backend, &rank2_f32),
                 batched_bf16: BackendCapabilityQueries::supports_matmul_request(
@@ -1184,6 +1196,41 @@ impl BackendCapabilities {
                 authority: ReplayBackend::runtime_replay_authority(backend),
             },
             fallback: BackendFallbackCapabilities::for_backend(name, device),
+        }
+    }
+}
+
+impl StartupCapabilities {
+    pub fn for_backend(name: &str, device: kiln_tensor::Device) -> Self {
+        match backend_kind_for_runtime(name, device) {
+            kiln_tensor::Backend::Metal => Self {
+                run_inference_prewarm: true,
+                require_inference_prewarm_for_health: true,
+                native_training_default_enabled: false,
+                native_training_env: None,
+                decode_weight_prewarm_when_native_training: false,
+            },
+            kiln_tensor::Backend::Vulkan => Self {
+                run_inference_prewarm: true,
+                require_inference_prewarm_for_health: true,
+                native_training_default_enabled: true,
+                native_training_env: Some("KILN_VK_NATIVE_TRAINING"),
+                decode_weight_prewarm_when_native_training: true,
+            },
+            kiln_tensor::Backend::Rocm => Self {
+                run_inference_prewarm: true,
+                require_inference_prewarm_for_health: false,
+                native_training_default_enabled: false,
+                native_training_env: None,
+                decode_weight_prewarm_when_native_training: false,
+            },
+            _ => Self {
+                run_inference_prewarm: false,
+                require_inference_prewarm_for_health: false,
+                native_training_default_enabled: false,
+                native_training_env: None,
+                decode_weight_prewarm_when_native_training: false,
+            },
         }
     }
 }
@@ -1329,10 +1376,7 @@ fn kv_cache_device_memory_pressure(name: &str, device: kiln_tensor::Device) -> b
     )
 }
 
-fn gdn_gated_rms_norm_preserves_tape_residency(
-    name: &str,
-    device: kiln_tensor::Device,
-) -> bool {
+fn gdn_gated_rms_norm_preserves_tape_residency(name: &str, device: kiln_tensor::Device) -> bool {
     match backend_kind_for_runtime(name, device) {
         kiln_tensor::Backend::Cuda | kiln_tensor::Backend::Rocm | kiln_tensor::Backend::Metal => {
             true

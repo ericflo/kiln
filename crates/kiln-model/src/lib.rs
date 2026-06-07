@@ -47,25 +47,25 @@ pub mod vk_bwd_adapter;
 pub mod vk_decode_resident;
 pub mod weights;
 
-pub use backend::{
-    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, FallbackPolicy,
-    GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend,
-    ResidencyBackend, SamplingBackend, TrainingLossBackend, TrainingPrecisionPolicy,
-};
 pub use backend::capability::{
-    AttentionCapabilities, AttentionRequest, AttentionRequestKind, BackendCapabilityQueries,
-    BackendCapabilitySnapshot, BackendCapabilities, BackendFallbackCapabilities,
+    AttentionCapabilities, AttentionRequest, AttentionRequestKind, BackendCapabilities,
+    BackendCapabilityQueries, BackendCapabilitySnapshot, BackendFallbackCapabilities,
     BackendTrainingCapabilities, DecodeBatcherPolicy, DecodeCapabilities, GdnCapabilities,
     LinearRequest, LinearRequestKind, MatmulAccumulation, MatmulBatchPolicy, MatmulBlasRequest,
     MatmulCapabilities, MatmulEpilogue, MatmulOperandLayout, MatmulRequest,
     MatmulRequestProjectionError, ReplayAuthority, ReplayCapabilities, ReplayGraphCrateRole,
     ReplayNativePrimitive, ReplayProductionAuthority, ReplayRequest, ReplayRequestKind,
-    StorageCapabilities, Support,
+    StartupCapabilities, StorageCapabilities, Support,
 };
 pub use backend::residency::{
-    ReplayStability, ResidentOwnership, ResidentRegistry, ResidentResource,
-    ResidentResourceFamily, ResidentResourceLayout, ResidentResourceState,
-    resident_backend_for_runtime, resident_ownership_for_backend,
+    ReplayStability, ResidentOwnership, ResidentRegistry, ResidentResource, ResidentResourceFamily,
+    ResidentResourceLayout, ResidentResourceState, resident_backend_for_runtime,
+    resident_ownership_for_backend,
+};
+pub use backend::{
+    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, FallbackPolicy, GdnBackend,
+    LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend,
+    SamplingBackend, TrainingLossBackend, TrainingPrecisionPolicy,
 };
 // (#1082 candle removal) `backend::for_device` (candle-typed shim) was deleted
 // with the candle-parity opt-in feature; production uses `for_device_kt`.

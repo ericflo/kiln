@@ -2268,9 +2268,11 @@ impl AppState {
             slow_request_warn_threshold: None,
             metrics: Arc::new(Metrics::new()),
             started_at: std::time::Instant::now(),
-            inference_prewarm_complete: Arc::new(AtomicBool::new(!device_needs_inference_prewarm(
-                &device_kt,
-            ))),
+            inference_prewarm_complete: Arc::new(AtomicBool::new(
+                !backend_capabilities
+                    .startup
+                    .require_inference_prewarm_for_health,
+            )),
             checkpoint_interval: None,
             training_webhook_url: None,
             max_queued_training_jobs: 32,
@@ -2528,25 +2530,6 @@ fn is_metal_device(device: &kiln_tensor::Device) -> bool {
     // `kt::Device::Metal(_)` and the cfg-gated behavior is preserved.
     // (#1082)
     device.backend() == kiln_tensor::Backend::Metal
-}
-
-fn device_needs_inference_prewarm(device: &kiln_tensor::Device) -> bool {
-    let is_metal = is_metal_device(device);
-    // The vulkan path carries a `kt::Device::Cpu` by convention (see
-    // `kiln-model::backend::mod::for_device` and
-    // `select_device_with_options_kt` which overrides to Vulkan only when
-    // the feature is active). On vulkan builds we still need the
-    // `vulkan_is_available()` probe to distinguish "CPU because no GPU"
-    // from "CPU as Vulkan placeholder". (#1082)
-    #[cfg(feature = "vulkan")]
-    let is_vulkan = device.backend() == kiln_tensor::Backend::Cpu
-        && kiln_model::backend::vulkan::vulkan_is_available();
-    #[cfg(not(feature = "vulkan"))]
-    let is_vulkan = {
-        let _ = device;
-        false
-    };
-    is_metal || is_vulkan
 }
 
 /// Query total GPU memory in bytes. Returns 0 for CPU devices.

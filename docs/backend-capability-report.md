@@ -161,8 +161,9 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 
 | Descriptor | Field Count | Fields |
 |---|---:|---|
-| `BackendCapabilities` | 11 | `backend`, `device`, `storage`, `matmul`, `attention`, `gdn`, `decode`, `decode_batcher`, `training`, `graph_replay`, `fallback` |
+| `BackendCapabilities` | 12 | `backend`, `device`, `storage`, `startup`, `matmul`, `attention`, `gdn`, `decode`, `decode_batcher`, `training`, `graph_replay`, `fallback` |
 | `StorageCapabilities` | 5 | `backend`, `device`, `resident_activation`, `resident_decode`, `kv_cache_device_memory_pressure` |
+| `StartupCapabilities` | 5 | `run_inference_prewarm`, `require_inference_prewarm_for_health`, `native_training_default_enabled`, `native_training_env`, `decode_weight_prewarm_when_native_training` |
 | `MatmulCapabilities` | 3 | `rank2_f32`, `batched_bf16`, `bias_epilogue` |
 | `AttentionCapabilities` | 5 | `flash_prefill`, `flash_prefill_head_major`, `flash_paged_decode`, `flash_prefill_consumes_grouped_kv`, `detached_chunked_prefill` |
 | `GdnCapabilities` | 9 | `recurrent_step`, `recurrent_step_f32`, `inference_recurrent_state`, `chunk_prep`, `chunk_scan`, `full_chunk_forward`, `gates`, `gated_rms_norm`, `gated_rms_norm_preserves_tape_residency` |
