@@ -5059,6 +5059,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
     assert!(command.contains("write_backend_latency_result_artifact.py"));
     assert!(command.contains("import_backend_latency_artifact.py"));
     assert!(command.contains("lock_backend_latency_thresholds.py"));
+    assert!(command.contains("plan_backend_latency_fixture_dispatch.py"));
     assert!(command.contains("--self-test"));
     assert!(command.contains("--require-covered"));
 
@@ -5068,8 +5069,11 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "def validate_result_artifact(",
         "def metric_threshold_passes(",
         "MANIFEST_KEYS",
+        "FIXTURE_KEYS",
         "REQUIRED_COVERED_GATE_POLICY",
         "manifest contains unknown keys",
+        "runner_labels",
+        "must be a non-empty string array",
         "policy.covered_gate_requires must match",
         "status covered requires --require-covered",
         "artifact_schema_version",
@@ -5267,6 +5271,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "scripts/import_backend_latency_artifact.py --self-test",
         "scripts/lock_backend_latency_thresholds.py --self-test",
         "scripts/check_backend_latency_fixtures.py --self-test",
+        "scripts/plan_backend_latency_fixture_dispatch.py --self-test",
         "scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json",
         "docs/backend-latency-fixtures.json",
         "docs/backend-latency-result-schema.md",
@@ -5281,6 +5286,26 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         assert!(
             perf_workflow.contains(required),
             "perf workflow should run non-hardware latency fixture validation: {required}"
+        );
+    }
+
+    let planner_source =
+        fs::read_to_string(root.join("scripts/plan_backend_latency_fixture_dispatch.py"))
+            .expect("latency fixture dispatch planner should be readable");
+    for required in [
+        "def dispatch_plans(",
+        "gh workflow run",
+        "latency_fixture_id",
+        "latency_runner_labels_json",
+        "runner_labels",
+        "needs_runner_labels",
+        "--runner-labels-json",
+        "--shell",
+        "--self-test",
+    ] {
+        assert!(
+            planner_source.contains(required),
+            "latency fixture dispatch planner should expose workflow commands: {required}"
         );
     }
 
@@ -5299,6 +5324,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "scripts/import_backend_latency_artifact.py",
         "scripts/lock_backend_latency_thresholds.py",
         "scripts/check_backend_latency_fixtures.py",
+        "scripts/plan_backend_latency_fixture_dispatch.py",
         "crates/kiln-server/examples/flce_preflight_bench.rs",
         "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
         "crates/kiln-tensor/tests/metal_matmul_bench.rs",
@@ -5354,6 +5380,9 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "workflow_dispatch",
         "latency_fixture_id",
         "latency_runner_labels_json",
+        "runner_labels",
+        "fixture_spec_sha256",
+        "plan_backend_latency_fixture_dispatch.py",
         "bench-results/backend-latency/*.json",
         "bench-results/backend-latency/raw/*.log",
         "--force",
@@ -5483,6 +5512,20 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
             root.join(source).is_file(),
             "fixture source should exist: {source}"
         );
+        if fixture["id"] == "cuda_a6000_flce_phase_a_validation" {
+            let runner_labels = fixture["runner_labels"]
+                .as_array()
+                .expect("CUDA A6000 fixture should declare stable runner labels")
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>();
+            for label in ["self-hosted", "linux", "cuda-a6000"] {
+                assert!(
+                    runner_labels.contains(&label),
+                    "CUDA A6000 fixture should declare runner label {label}"
+                );
+            }
+        }
         assert!(
             source_text.contains("KILN_LATENCY_METRIC"),
             "fixture source should emit machine-readable latency metric lines: {source}"

@@ -49,6 +49,18 @@ MANIFEST_KEYS = {
     "schema_version",
     "status",
 }
+FIXTURE_KEYS = {
+    "backend",
+    "command",
+    "hardware",
+    "id",
+    "metrics",
+    "result_artifact",
+    "runner_labels",
+    "selected_cases",
+    "source",
+    "threshold_state",
+}
 REQUIRED_COVERED_GATE_POLICY = [
     "Every required backend has at least one known hardware fixture.",
     "Every fixture has locked numeric thresholds for its required measurements.",
@@ -466,6 +478,26 @@ def validate_manifest_policy(errors: list[str], manifest: dict[str, Any]) -> Non
         errors.append("policy.covered_gate_requires must match the hardware latency gate policy")
 
 
+def validate_fixture_keys(errors: list[str], fixture: dict[str, Any], context: str) -> None:
+    extra_keys = sorted(set(fixture) - FIXTURE_KEYS)
+    if extra_keys:
+        errors.append(f"{context} contains unknown keys: {extra_keys}")
+
+
+def validate_runner_labels(errors: list[str], fixture: dict[str, Any], context: str) -> None:
+    if "runner_labels" not in fixture:
+        return
+    labels = fixture.get("runner_labels")
+    if not isinstance(labels, list) or not labels:
+        errors.append(f"{context}.runner_labels must be a non-empty string array")
+        return
+    for label_idx, label in enumerate(labels):
+        if not isinstance(label, str) or not label:
+            errors.append(
+                f"{context}.runner_labels[{label_idx}] must be a non-empty string"
+            )
+
+
 def validate_manifest(
     manifest: dict[str, Any],
     require_covered: bool,
@@ -511,6 +543,9 @@ def validate_manifest(
         if not isinstance(fixture, dict):
             errors.append(f"{context} must be an object")
             continue
+
+        validate_fixture_keys(errors, fixture, context)
+        validate_runner_labels(errors, fixture, context)
 
         fixture_id = require_string(errors, fixture, "id", context)
         if fixture_id:
@@ -1231,6 +1266,32 @@ def self_test() -> int:
                     {
                         "ok": False,
                         "case": "unknown manifest key",
+                        "errors": errors,
+                    },
+                    indent=2,
+                )
+            )
+            return 1
+
+        invalid_runner_labels_fixture = dict(fixture)
+        invalid_runner_labels_fixture["runner_labels"] = ["self-hosted", ""]
+        errors = validate_manifest(
+            {
+                "schema_version": 1,
+                "status": "fixture_required",
+                "policy": policy,
+                "required_backends": ["cuda"],
+                "fixtures": [invalid_runner_labels_fixture],
+                "missing_fixture_slots": [],
+            },
+            require_covered=False,
+        )
+        if not any("runner_labels[1] must be a non-empty string" in error for error in errors):
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "case": "invalid runner labels",
                         "errors": errors,
                     },
                     indent=2,

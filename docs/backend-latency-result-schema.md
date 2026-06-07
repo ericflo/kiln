@@ -183,6 +183,23 @@ uploads both `bench-results/backend-latency/*.json` and
 check-in before threshold locking. When `latency_fixture_id` is anything other
 than `none`, the workflow skips the unrelated A6000 training perf matrix so a
 fixture-only dispatch consumes only the selected hardware fixture runner.
+Fixtures may declare `runner_labels` when the repository already has a stable
+label convention; this operator metadata is not part of
+`fixture_spec_sha256`. Use the dispatch planner to list remaining fixture work
+as JSON, including which fixtures still need site-local labels:
+
+```sh
+python3 scripts/plan_backend_latency_fixture_dispatch.py
+```
+
+Use `--shell` when every selected fixture has labels, either from the manifest
+or from an explicit override:
+
+```sh
+python3 scripts/plan_backend_latency_fixture_dispatch.py \
+  --fixture-id cuda_a6000_flce_phase_a_validation \
+  --shell
+```
 
 After downloading the workflow artifact zip, import the result JSON and raw log
 into their canonical repository paths before locking thresholds:
@@ -252,7 +269,11 @@ Run `python3 scripts/run_backend_latency_fixture.py --self-test` to validate the
 fixture-runner capture path without hardware.
 Run `python3 scripts/write_backend_latency_result_artifact.py --self-test` to
 validate the log-line parser and artifact writer without hardware.
+Run `python3 scripts/import_backend_latency_artifact.py --self-test` to validate
+downloaded workflow artifact import without hardware.
 Run `python3 scripts/lock_backend_latency_thresholds.py --self-test` to validate
 the threshold-locking logic without hardware.
 Run `python3 scripts/check_backend_latency_fixtures.py --self-test` to validate
 the artifact-checking logic without hardware.
+Run `python3 scripts/plan_backend_latency_fixture_dispatch.py --self-test` to
+validate the workflow-dispatch planner without hardware.

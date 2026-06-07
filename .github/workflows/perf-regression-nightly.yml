@@ -41,6 +41,7 @@ on:
       - 'scripts/import_backend_latency_artifact.py'
       - 'scripts/lock_backend_latency_thresholds.py'
       - 'scripts/check_backend_latency_fixtures.py'
+      - 'scripts/plan_backend_latency_fixture_dispatch.py'
       - '.github/workflows/perf-regression-nightly.yml'
   workflow_dispatch:
     inputs:
@@ -110,6 +111,7 @@ jobs:
           python3 scripts/import_backend_latency_artifact.py --self-test
           python3 scripts/lock_backend_latency_thresholds.py --self-test
           python3 scripts/check_backend_latency_fixtures.py --self-test
+          python3 scripts/plan_backend_latency_fixture_dispatch.py --self-test
           python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json
 
       - name: Verify gate accepts a within-tolerance run (no regression)
