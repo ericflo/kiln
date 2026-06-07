@@ -1580,7 +1580,7 @@ fn generated_capability_report_gates_replay_contract() {
         "kiln-graph-cuda replay",
         "kiln-graph-metal replay",
         "kiln-graph-vulkan replay",
-        "kiln-model --test vk_resident_decode_parity",
+        "kiln-model --features vulkan --test vk_resident_decode_parity",
         "kiln-tensor --features rocm --test rocm_capture_arena",
         "kiln-model --test backend_capability_contract",
     ] {

@@ -927,7 +927,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
             "gate": "replay_parity",
             "phase8_requirement": "replay parity",
             "status": "covered",
-            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-graph replay && /home/ericflo/.cargo/bin/cargo test -p kiln-graph --test capture_lifetime && /home/ericflo/.cargo/bin/cargo test -p kiln-graph-cuda replay && /home/ericflo/.cargo/bin/cargo test -p kiln-graph-metal replay && /home/ericflo/.cargo/bin/cargo test -p kiln-graph-vulkan replay && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test vk_resident_decode_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features rocm --test rocm_capture_arena && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test backend_capability_contract",
+            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-graph replay && /home/ericflo/.cargo/bin/cargo test -p kiln-graph --test capture_lifetime && /home/ericflo/.cargo/bin/cargo test -p kiln-graph-cuda replay && /home/ericflo/.cargo/bin/cargo test -p kiln-graph-metal replay && /home/ericflo/.cargo/bin/cargo test -p kiln-graph-vulkan replay && /home/ericflo/.cargo/bin/cargo test -p kiln-model --features vulkan --test vk_resident_decode_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features rocm --test rocm_capture_arena && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test backend_capability_contract",
             "evidence": [
                 "crates/kiln-graph/src/replay_plan.rs",
                 "crates/kiln-graph/src/captured_graph.rs",
