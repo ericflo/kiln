@@ -1196,6 +1196,10 @@ fn generated_capability_report_lists_request_descriptors() {
         .filter_map(|field| field["name"].as_str())
         .collect::<Vec<_>>();
     assert!(
+        decode_batcher_policy_fields.contains(&"require_native_decode_attention"),
+        "DecodeBatcherPolicy should own native decode-attention fallback requirements"
+    );
+    assert!(
         decode_batcher_policy_fields.contains(&"partition_noncontiguous_gdn_kv_tiles"),
         "DecodeBatcherPolicy should own GDN KV contiguity partition routing"
     );
@@ -2536,6 +2540,15 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
                 .contains("AttentionBackend::runtime_supports_flash_attn_paged_decode"),
         "direct paged-decode attention routing should combine backend policy with focused attention capability"
     );
+    assert!(
+        direct_paged_decode_attention_helper.contains("fn native_decode_attention_required(")
+            && direct_paged_decode_attention_helper.contains("require_native_decode_attention")
+            && direct_paged_decode_attention_helper
+                .contains("fn decode_batch_generic_fallback_enabled(")
+            && direct_paged_decode_attention_helper
+                .contains("decode_hot_path_debug_fallback_enabled()"),
+        "decode attention native-required routing should combine DecodeBatcherPolicy with BackendFallbackCapabilities"
+    );
     let direct_paged_decode_attention_section = source_between(
         &forward_source,
         "let use_direct_paged_decode =",
@@ -2556,6 +2569,27 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         assert!(
             !direct_paged_decode_attention_section.contains(forbidden),
             "try_flash_attn_paged_decode should not branch locally on backend identity/env helper: {forbidden}"
+        );
+    }
+    let native_decode_attention_decline_section = source_between(
+        &forward_source,
+        "let out_opt = {",
+        "// Open the fallback-decode range",
+    );
+    assert!(
+        native_decode_attention_decline_section.contains("native_decode_attention_required(backend)")
+            && native_decode_attention_decline_section
+                .contains("decode_batch_generic_fallback_enabled(backend)"),
+        "paged decode attention decline handling should read backend-owned native/fallback policy"
+    );
+    for forbidden in [
+        "BackendIdentity::runtime_name(backend) == \"vulkan\"",
+        "vulkan_decode_generic_fallback_enabled()",
+        "KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK",
+    ] {
+        assert!(
+            !native_decode_attention_decline_section.contains(forbidden),
+            "paged decode attention decline handling should not keep local Vulkan policy/env branch: {forbidden}"
         );
     }
     let flash_prefill_gqa_section = source_between(
@@ -2616,6 +2650,11 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         !native_resident_decode_required_section.contains("BackendIdentity::runtime_name(backend)"),
         "native resident decode requirement should not branch on backend identity"
     );
+    assert!(
+        !forward_source.contains("fn vulkan_decode_generic_fallback_enabled")
+            && !forward_source.contains("KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK"),
+        "forward decode fallback opt-in should come from BackendFallbackCapabilities, not a local Vulkan env helper"
+    );
     let paged_decode_kv_contiguity_section = source_between(
         &forward_source,
         "// Verify intra-chunk contiguity.",
@@ -2630,6 +2669,27 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         !paged_decode_kv_contiguity_section
             .contains("BackendIdentity::runtime_name(backend) != \"vulkan\""),
         "paged-decode KV contiguity guard should not branch on Vulkan backend identity"
+    );
+    let batched_full_attention_decline_section = source_between(
+        &forward_source,
+        "match transformer_block_paged_decode_contiguous_batch(",
+        "tracing::debug!(",
+    );
+    assert!(
+        batched_full_attention_decline_section
+            .contains("native_decode_attention_required(backend)")
+            && batched_full_attention_decline_section
+                .contains("decode_batch_generic_fallback_enabled(backend)"),
+        "batched full-attention decode decline should read backend-owned native/fallback policy"
+    );
+    assert!(
+        !batched_full_attention_decline_section
+            .contains("BackendIdentity::runtime_name(backend) == \"vulkan\"")
+            && !batched_full_attention_decline_section
+                .contains("vulkan_decode_generic_fallback_enabled()")
+            && !batched_full_attention_decline_section
+                .contains("KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK"),
+        "batched full-attention decline should not branch locally on Vulkan identity/env"
     );
     for removed_helper in [
         "fn default_decode_batcher_max_batch_kt",

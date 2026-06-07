@@ -777,6 +777,7 @@ pub struct DecodeBatcherPolicy {
     pub wait_micros: u64,
     pub allow_mixed_seq_lens: bool,
     pub rowwise_retry_env: Option<&'static str>,
+    pub require_native_decode_attention: bool,
     pub prefer_direct_paged_decode_attention: bool,
     pub direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate,
     pub allow_prefix_cache_split_snapshot: bool,
@@ -1176,6 +1177,7 @@ impl DecodeBatcherPolicy {
                 wait_micros: 0,
                 allow_mixed_seq_lens: false,
                 rowwise_retry_env: None,
+                require_native_decode_attention: false,
                 prefer_direct_paged_decode_attention: true,
                 direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate::DisabledWhenSet(
                     "KILN_DISABLE_CUDA_DIRECT_PAGED_DECODE",
@@ -1192,6 +1194,7 @@ impl DecodeBatcherPolicy {
                 wait_micros: Self::METAL_WAIT_MICROS,
                 allow_mixed_seq_lens: true,
                 rowwise_retry_env: None,
+                require_native_decode_attention: false,
                 prefer_direct_paged_decode_attention: false,
                 direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate::None,
                 allow_prefix_cache_split_snapshot: true,
@@ -1206,6 +1209,7 @@ impl DecodeBatcherPolicy {
                 wait_micros: Self::VULKAN_WAIT_MICROS,
                 allow_mixed_seq_lens: true,
                 rowwise_retry_env: Some("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY"),
+                require_native_decode_attention: true,
                 prefer_direct_paged_decode_attention: true,
                 direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate::None,
                 allow_prefix_cache_split_snapshot: true,
@@ -1220,6 +1224,7 @@ impl DecodeBatcherPolicy {
                 wait_micros: 0,
                 allow_mixed_seq_lens: false,
                 rowwise_retry_env: None,
+                require_native_decode_attention: false,
                 prefer_direct_paged_decode_attention: true,
                 direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate::EnabledUnlessOff(
                     "KILN_ROCM_PAGED_DECODE",
@@ -1236,6 +1241,7 @@ impl DecodeBatcherPolicy {
                 wait_micros: 0,
                 allow_mixed_seq_lens: false,
                 rowwise_retry_env: None,
+                require_native_decode_attention: false,
                 prefer_direct_paged_decode_attention: false,
                 direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate::None,
                 allow_prefix_cache_split_snapshot: true,
@@ -1284,6 +1290,14 @@ impl BackendFallbackCapabilities {
             training_optimizer: training_optimizer_fallback_policy(name, device),
             training_optimizer_debug_env: training_optimizer_debug_fallback_env(name, device),
         }
+    }
+
+    pub fn decode_hot_path_debug_fallback_enabled(self) -> bool {
+        kiln_core::env_flag::env_flag("KILN_DECODE_HOT_PATH_DEBUG_FALLBACK", false)
+            || self
+                .decode_hot_path_debug_env
+                .map(|env_var| kiln_core::env_flag::env_flag(env_var, false))
+                .unwrap_or(false)
     }
 }
 

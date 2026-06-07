@@ -233,6 +233,25 @@ fn direct_paged_decode_attention_enabled(backend: &dyn BackendRuntime) -> bool {
         && AttentionBackend::runtime_supports_flash_attn_paged_decode(backend)
 }
 
+fn native_decode_attention_required(backend: &dyn BackendRuntime) -> bool {
+    BackendCapabilityQueries::backend_capabilities(backend)
+        .decode_batcher
+        .require_native_decode_attention
+}
+
+fn decode_batch_generic_fallback_enabled(backend: &dyn BackendRuntime) -> bool {
+    BackendCapabilityQueries::backend_capabilities(backend)
+        .fallback
+        .decode_hot_path_debug_fallback_enabled()
+}
+
+fn decode_batch_generic_fallback_env(backend: &dyn BackendRuntime) -> &'static str {
+    BackendCapabilityQueries::backend_capabilities(backend)
+        .fallback
+        .decode_hot_path_debug_env
+        .unwrap_or("KILN_DECODE_HOT_PATH_DEBUG_FALLBACK")
+}
+
 fn paged_decode_requires_contiguous_kv_chunks(backend: &dyn BackendRuntime) -> bool {
     BackendCapabilityQueries::backend_capabilities(backend)
         .decode_batcher
@@ -22113,13 +22132,13 @@ fn gqa_attention_paged_with_rope_tables(
         if let Some(out) = out_opt {
             return Ok(out);
         }
-        #[cfg(feature = "vulkan")]
-        if BackendIdentity::runtime_name(backend) == "vulkan"
-            && !vulkan_decode_generic_fallback_enabled()
+        if native_decode_attention_required(backend)
+            && !decode_batch_generic_fallback_enabled(backend)
         {
+            let fallback_env = decode_batch_generic_fallback_env(backend);
             anyhow::bail!(
-                "vulkan paged decode declined native paged-attention path; \
-                 generic fallback disabled (set KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1 to opt in)"
+                "native paged decode declined native paged-attention path; \
+                 generic fallback disabled (set {fallback_env}=1 to opt in)"
             );
         }
     }
@@ -23563,11 +23582,12 @@ pub fn model_forward_paged_decode_contiguous_batch_hidden_with_ids(
             start_positions,
             config,
             lora,
-        ) && !vulkan_decode_generic_fallback_enabled()
+        ) && !decode_batch_generic_fallback_enabled(backend)
         {
+            let fallback_env = decode_batch_generic_fallback_env(backend);
             anyhow::bail!(
-                "vulkan batched hidden decode declined native resident path; \
-                 generic fallback disabled (set KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1 to opt in)"
+                "batched hidden decode declined native resident path; \
+                 generic fallback disabled (set {fallback_env}=1 to opt in)"
             );
         }
     }
@@ -24586,11 +24606,6 @@ fn try_vulkan_resident_batched_decode_sample(
 }
 
 #[cfg(feature = "vulkan")]
-fn vulkan_decode_generic_fallback_enabled() -> bool {
-    kiln_core::env_flag::env_flag("KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK", false)
-}
-
-#[cfg(feature = "vulkan")]
 fn native_resident_decode_required(
     backend: &dyn BackendRuntime,
     token_ids: &[u32],
@@ -24674,11 +24689,12 @@ pub fn model_forward_paged_decode_contiguous_batch_greedy_with_ids(
             start_positions,
             config,
             lora,
-        ) && !vulkan_decode_generic_fallback_enabled()
+        ) && !decode_batch_generic_fallback_enabled(backend)
         {
+            let fallback_env = decode_batch_generic_fallback_env(backend);
             anyhow::bail!(
-                "vulkan greedy decode declined native resident path; \
-                 generic fallback disabled (set KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1 to opt in)"
+                "greedy decode declined native resident path; \
+                 generic fallback disabled (set {fallback_env}=1 to opt in)"
             );
         }
     }
@@ -25370,11 +25386,12 @@ pub fn model_forward_paged(
             &[start_pos],
             config,
             lora,
-        ) && !vulkan_decode_generic_fallback_enabled()
+        ) && !decode_batch_generic_fallback_enabled(backend)
         {
+            let fallback_env = decode_batch_generic_fallback_env(backend);
             anyhow::bail!(
-                "vulkan decode declined native resident path; \
-                 generic fallback disabled (set KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1 to opt in)"
+                "decode declined native resident path; \
+                 generic fallback disabled (set {fallback_env}=1 to opt in)"
             );
         }
     }
@@ -25625,11 +25642,12 @@ pub fn model_forward_paged_last_token(
             &[start_pos],
             config,
             lora,
-        ) && !vulkan_decode_generic_fallback_enabled()
+        ) && !decode_batch_generic_fallback_enabled(backend)
         {
+            let fallback_env = decode_batch_generic_fallback_env(backend);
             anyhow::bail!(
-                "vulkan last-token decode declined native resident path; \
-                 generic fallback disabled (set KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1 to opt in)"
+                "last-token decode declined native resident path; \
+                 generic fallback disabled (set {fallback_env}=1 to opt in)"
             );
         }
     }
@@ -25660,8 +25678,8 @@ pub fn model_forward_paged_last_token(
 /// Vulkan-resident decode entry-point. Same signature as
 /// [`model_forward_paged_last_token`]; routes through the Vulkan-resident
 /// dispatchers when the backend supports it AND the per-step buffer pool
-/// is feasible. Vulkan decode declines are visible by default; set
-/// `KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1` for explicit A/B fallback.
+/// is feasible. Resident decode declines are visible by default; use the
+/// backend-owned decode hot-path fallback env for explicit A/B fallback.
 ///
 /// Gate (a)/(c) of `docs/vk_resident_decode_plan.md`. The runtime predicate
 /// `Backend::supports_resident_decode()` returns `false` on CPU / CUDA /
@@ -26224,11 +26242,12 @@ pub fn model_forward_paged_last_token_greedy(
             &start_positions,
             config,
             lora,
-        ) && !vulkan_decode_generic_fallback_enabled()
+        ) && !decode_batch_generic_fallback_enabled(backend)
         {
+            let fallback_env = decode_batch_generic_fallback_env(backend);
             anyhow::bail!(
-                "vulkan greedy decode declined native resident path; \
-                 generic fallback disabled (set KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1 to opt in)"
+                "greedy decode declined native resident path; \
+                 generic fallback disabled (set {fallback_env}=1 to opt in)"
             );
         }
     }
@@ -26837,14 +26856,14 @@ pub fn model_forward_paged_batched_decode_hidden(
                 ) {
                     Ok(out) => hidden = out,
                     Err(err) => {
-                        #[cfg(feature = "vulkan")]
-                        if BackendIdentity::runtime_name(backend) == "vulkan"
-                            && !vulkan_decode_generic_fallback_enabled()
+                        if native_decode_attention_required(backend)
+                            && !decode_batch_generic_fallback_enabled(backend)
                         {
+                            let fallback_env = decode_batch_generic_fallback_env(backend);
                             return Err(err).with_context(|| {
                                 format!(
-                                    "vulkan batched full-attention decode layer {layer_idx} declined; \
-                                     rowwise fallback disabled (set KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1 to opt in)"
+                                    "batched full-attention decode layer {layer_idx} declined; \
+                                     rowwise fallback disabled (set {fallback_env}=1 to opt in)"
                                 )
                             });
                         }
