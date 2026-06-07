@@ -1682,7 +1682,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "DecodeBatcherPolicy": {
-      "field_count": 4,
+      "field_count": 5,
       "fields": [
         {
           "name": "max_batch",
@@ -1699,6 +1699,10 @@
         {
           "name": "rowwise_retry_env",
           "type": "Option<&'static str>"
+        },
+        {
+          "name": "partition_noncontiguous_gdn_kv_tiles",
+          "type": "bool"
         }
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"

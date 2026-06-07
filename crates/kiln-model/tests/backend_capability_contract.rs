@@ -1165,6 +1165,16 @@ fn generated_capability_report_lists_request_descriptors() {
         replay_capability_fields.contains(&"authority"),
         "ReplayCapabilities should expose typed replay authority"
     );
+    let decode_batcher_policy_fields = capability_descriptors["DecodeBatcherPolicy"]["fields"]
+        .as_array()
+        .expect("DecodeBatcherPolicy fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        decode_batcher_policy_fields.contains(&"partition_noncontiguous_gdn_kv_tiles"),
+        "DecodeBatcherPolicy should own GDN KV contiguity partition routing"
+    );
     let replay_authority_fields = capability_descriptors["ReplayAuthority"]["fields"]
         .as_array()
         .expect("ReplayAuthority fields should be an array")
@@ -2297,6 +2307,25 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             "generate should not keep local decode batcher backend policy helper {removed_helper}"
         );
     }
+    let gdn_contiguity_partition_section = source_between(
+        &generate_source,
+        "// #1082 PERF + CRASHER FIX (per-row contiguity partition).",
+        "let pc_guard = lock_paged_cache(paged_cache)?;",
+    );
+    assert!(
+        gdn_contiguity_partition_section
+            .contains("BackendCapabilityQueries::backend_capabilities"),
+        "GDN KV contiguity partition should read DecodeBatcherPolicy"
+    );
+    assert!(
+        gdn_contiguity_partition_section
+            .contains("partition_noncontiguous_gdn_kv_tiles"),
+        "GDN KV contiguity partition should be controlled by backend policy"
+    );
+    assert!(
+        !gdn_contiguity_partition_section.contains("self.backend_name() == \"cuda\""),
+        "GDN KV contiguity partition should not branch on backend name in ModelRunner"
+    );
 
     let trainer_policy_section = source_between(
         &trainer_source,

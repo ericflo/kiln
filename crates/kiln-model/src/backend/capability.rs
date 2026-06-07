@@ -774,6 +774,7 @@ pub struct DecodeBatcherPolicy {
     pub wait_micros: u64,
     pub allow_mixed_seq_lens: bool,
     pub rowwise_retry_env: Option<&'static str>,
+    pub partition_noncontiguous_gdn_kv_tiles: bool,
 }
 
 /// Replay capability probes backed by [`ReplayRequest`].
@@ -1136,24 +1137,28 @@ impl DecodeBatcherPolicy {
                 wait_micros: 0,
                 allow_mixed_seq_lens: false,
                 rowwise_retry_env: None,
+                partition_noncontiguous_gdn_kv_tiles: true,
             },
             kiln_tensor::Backend::Metal => Self {
                 max_batch: Self::DEFAULT_MAX_BATCH,
                 wait_micros: Self::METAL_WAIT_MICROS,
                 allow_mixed_seq_lens: true,
                 rowwise_retry_env: None,
+                partition_noncontiguous_gdn_kv_tiles: false,
             },
             kiln_tensor::Backend::Vulkan => Self {
                 max_batch: Self::VULKAN_MAX_BATCH,
                 wait_micros: Self::VULKAN_WAIT_MICROS,
                 allow_mixed_seq_lens: true,
                 rowwise_retry_env: Some("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY"),
+                partition_noncontiguous_gdn_kv_tiles: false,
             },
             _ => Self {
                 max_batch: Self::DEFAULT_MAX_BATCH,
                 wait_micros: 0,
                 allow_mixed_seq_lens: false,
                 rowwise_retry_env: None,
+                partition_noncontiguous_gdn_kv_tiles: false,
             },
         }
     }

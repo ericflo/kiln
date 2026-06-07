@@ -214,7 +214,7 @@ pub(crate) fn row_has_noncontiguous_kv_tiles(
     false
 }
 
-fn cuda_gdn_batched_decode_row_loop_enabled() -> bool {
+fn gdn_batched_decode_row_loop_debug_enabled() -> bool {
     // Flipped to false-by-default after the matmul broadcast-copy fix made
     // the true-batched contiguous-batch path strictly faster than the
     // row-loop at every bs > 1. nsys profile (May 2026) showed candle's
@@ -3126,9 +3126,6 @@ impl ModelRunner {
         let positions_uniform = sequence_lengths.iter().all(|&n| n == common_seq_len);
         let cache_is_fp8 = lock_paged_cache(paged_cache)?.is_fp8();
         let has_linear_layers = self.has_linear_attention_layers();
-        let cuda_gdn_row_loop_candidate = self.backend_name() == "cuda"
-            && has_linear_layers
-            && cuda_gdn_batched_decode_row_loop_enabled();
         // `model_forward_paged_decode_contiguous_batch_hidden` already handles
         // per-row positions via dyn-seqlen flash attention for full-attn
         // layers, and the GDN layers operate on the batched
@@ -3139,7 +3136,6 @@ impl ModelRunner {
         // launch instead of `run_legacy_lm_head_sample_batch`'s per-row
         // narrow + argmax loop).
         let _ = positions_uniform;
-        let _ = cuda_gdn_row_loop_candidate;
         let try_contiguous_batched = all_greedy && !cache_is_fp8;
 
         let mut sampled: Option<Vec<TokenId>> = None;
@@ -4076,8 +4072,10 @@ impl ModelRunner {
         // row-loop ONLY the genuinely-fragmented rows and batch the contiguous
         // majority through the fast path. Crash-safe (no non-adjacent pages ever
         // reach the kernel) and a strict superset of #1445's correctness.
-        if self.backend_name() == "cuda" && has_linear_layers {
-            let row_loop_all = cuda_gdn_batched_decode_row_loop_enabled();
+        let decode_policy =
+            BackendCapabilityQueries::backend_capabilities(self.backend.as_ref()).decode_batcher;
+        if decode_policy.partition_noncontiguous_gdn_kv_tiles && has_linear_layers {
+            let row_loop_all = gdn_batched_decode_row_loop_debug_enabled();
             let block_size = paged_cache.block_size();
             let noncontig: Vec<bool> = (0..batch)
                 .map(|row| {
@@ -8484,11 +8482,28 @@ mod tests {
             wait_micros,
             allow_mixed_seq_lens,
             rowwise_retry_env,
+            partition_noncontiguous_gdn_kv_tiles,
         ) in [
-            ("cpu", kiln_tensor::Device::Cpu, 8, 0, false, None),
-            ("cuda", kiln_tensor::Device::Cpu, 1, 0, false, None),
-            ("cuda", kiln_tensor::Device::Cuda(0), 1, 0, false, None),
-            ("metal", kiln_tensor::Device::Metal(0), 8, 100, true, None),
+            ("cpu", kiln_tensor::Device::Cpu, 8, 0, false, None, false),
+            ("cuda", kiln_tensor::Device::Cpu, 1, 0, false, None, true),
+            (
+                "cuda",
+                kiln_tensor::Device::Cuda(0),
+                1,
+                0,
+                false,
+                None,
+                true,
+            ),
+            (
+                "metal",
+                kiln_tensor::Device::Metal(0),
+                8,
+                100,
+                true,
+                None,
+                false,
+            ),
             (
                 "vulkan",
                 kiln_tensor::Device::Cpu,
@@ -8496,6 +8511,7 @@ mod tests {
                 5_000,
                 true,
                 Some("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY"),
+                false,
             ),
             (
                 "vulkan",
@@ -8504,8 +8520,17 @@ mod tests {
                 5_000,
                 true,
                 Some("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY"),
+                false,
             ),
-            ("rocm", kiln_tensor::Device::Rocm(0), 8, 0, false, None),
+            (
+                "rocm",
+                kiln_tensor::Device::Rocm(0),
+                8,
+                0,
+                false,
+                None,
+                false,
+            ),
         ] {
             let policy = DecodeBatcherPolicy::for_backend(backend_name, device);
             assert_eq!(
@@ -8523,6 +8548,11 @@ mod tests {
             assert_eq!(
                 policy.rowwise_retry_env, rowwise_retry_env,
                 "{backend_name} rowwise retry policy drifted"
+            );
+            assert_eq!(
+                policy.partition_noncontiguous_gdn_kv_tiles,
+                partition_noncontiguous_gdn_kv_tiles,
+                "{backend_name} GDN KV contiguity partition policy drifted"
             );
         }
     }
