@@ -181,6 +181,10 @@ FEATURE_CRATES = [
 
 FEATURE_FAMILIES = ["cuda", "rocm", "metal", "vulkan"]
 
+LEGACY_ENV_ALIAS_PREFIXES = {
+    "rocm": ("KILN_DISABLE_CUDA_",),
+}
+
 SUPPORT_PAIRS = {
     "supports_flash_attn_prefill": "flash_attn_prefill",
     "supports_flash_attn_prefill_head_major": "flash_attn_prefill_head_major",
@@ -453,6 +457,16 @@ def env_gates(source: str) -> list[str]:
     return sorted(name for name in names if any(key in name for key in FEATURE_FAMILIES + ["CUDA", "ROCM", "METAL", "VULKAN"]))
 
 
+def legacy_env_aliases(backend: str, gates: list[str]) -> list[str]:
+    prefixes = LEGACY_ENV_ALIAS_PREFIXES.get(backend, ())
+    return sorted(gate for gate in gates if gate.startswith(prefixes))
+
+
+def native_env_gates(backend: str, gates: list[str]) -> list[str]:
+    legacy = set(legacy_env_aliases(backend, gates))
+    return sorted(gate for gate in gates if gate not in legacy)
+
+
 def backend_source_paths(backend: str, main_path: Path) -> list[Path]:
     return [main_path, *BACKEND_EXTRA_SOURCES.get(backend, [])]
 
@@ -609,13 +623,16 @@ def backend_report(trait_methods: set[str]) -> tuple[dict[str, Any], list[dict[s
                     }
                 )
         source = read_backend_sources(backend, path)
+        gates = env_gates(source)
         report[backend] = {
             "source": str(path.relative_to(ROOT)),
             "source_modules": [str(source_path.relative_to(ROOT)) for source_path in source_paths],
             "override_count": len(overrides),
             "overrides": overrides,
             "support_methods": support_methods,
-            "env_gates": env_gates(source),
+            "env_gates": gates,
+            "native_env_gates": native_env_gates(backend, gates),
+            "legacy_env_aliases": legacy_env_aliases(backend, gates),
         }
     return report, mismatches
 
@@ -1263,13 +1280,14 @@ def markdown(data: dict[str, Any]) -> str:
     lines.append("")
     lines.append("## BackendRuntime Overrides")
     lines.append("")
-    lines.append("| Backend | Source Modules | Override Count | Support Methods | Env Gates |")
-    lines.append("|---|---|---:|---:|---:|")
+    lines.append("| Backend | Source Modules | Override Count | Support Methods | Native Env Gates | Legacy Env Aliases |")
+    lines.append("|---|---|---:|---:|---:|---:|")
     for backend, info in data["backends"].items():
         sources = ", ".join(f"`{source}`" for source in info.get("source_modules", [info["source"]]))
         lines.append(
             f"| `{backend}` | {sources} | {info['override_count']} | "
-            f"{len(info['support_methods'])} | {len(info['env_gates'])} |"
+            f"{len(info['support_methods'])} | {len(info['native_env_gates'])} | "
+            f"{len(info['legacy_env_aliases'])} |"
         )
     lines.append("")
     lines.append("## Focused Backend Facets")
@@ -1431,11 +1449,16 @@ def markdown(data: dict[str, Any]) -> str:
     lines.append("")
     for backend, info in data["backends"].items():
         lines.append(f"### {backend.upper()}")
-        if info["env_gates"]:
-            for gate in info["env_gates"]:
+        if info["native_env_gates"]:
+            for gate in info["native_env_gates"]:
                 lines.append(f"- `{gate}`")
         else:
             lines.append("- none detected")
+        if info["legacy_env_aliases"]:
+            lines.append("")
+            lines.append("Legacy aliases honored for compatibility:")
+            for gate in info["legacy_env_aliases"]:
+                lines.append(f"- `{gate}`")
         lines.append("")
     return "\n".join(lines)
 

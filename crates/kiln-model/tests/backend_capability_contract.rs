@@ -1585,6 +1585,47 @@ fn capability_queries_consume_focused_backend_facets() {
 }
 
 #[test]
+fn generated_capability_report_separates_rocm_legacy_cuda_env_aliases() {
+    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(&report_path).expect("capability report json should be readable"),
+    )
+    .expect("capability report json should parse");
+
+    let rocm = &report["backends"]["rocm"];
+    let native_env_gates = rocm["native_env_gates"]
+        .as_array()
+        .expect("rocm native_env_gates should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    let legacy_env_aliases = rocm["legacy_env_aliases"]
+        .as_array()
+        .expect("rocm legacy_env_aliases should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+
+    assert!(
+        native_env_gates
+            .iter()
+            .all(|gate| !gate.starts_with("KILN_DISABLE_CUDA_")),
+        "ROCm native env gates should not include legacy CUDA aliases"
+    );
+    for alias in [
+        "KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT",
+        "KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM",
+        "KILN_DISABLE_CUDA_GDN_PREFILL_GATES",
+        "KILN_DISABLE_CUDA_LORA_DECODE_ADD",
+    ] {
+        assert!(
+            legacy_env_aliases.contains(&alias),
+            "ROCm should list {alias} as a legacy compatibility alias"
+        );
+    }
+}
+
+#[test]
 fn generated_capability_report_lists_focused_backend_facets() {
     let root = workspace_root();
     let report_path = root.join("docs/backend-capability-report.json");
