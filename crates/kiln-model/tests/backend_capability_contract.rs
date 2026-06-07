@@ -2603,7 +2603,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
             .unwrap_or_else(|| panic!("focused_backend_facets should list {facet}"));
         let expected_forwarding = if matches!(
             facet,
-            "BackendIdentity" | "StartupBackend" | "ConvBackend"
+            "BackendIdentity" | "StartupBackend" | "ConvBackend" | "SamplingBackend"
         ) {
             "concrete_authoritative"
         } else {
@@ -2630,7 +2630,12 @@ fn generated_capability_report_lists_focused_backend_facets() {
         );
     }
 
-    for facet in ["BackendIdentity", "StartupBackend", "ConvBackend"] {
+    for facet in [
+        "BackendIdentity",
+        "StartupBackend",
+        "ConvBackend",
+        "SamplingBackend",
+    ] {
         let info = facets
             .get(facet)
             .unwrap_or_else(|| panic!("focused_backend_facets should list {facet}"));
@@ -2669,9 +2674,25 @@ fn generated_capability_report_lists_focused_backend_facets() {
         "ConvBackend should not regress to a blanket BackendRuntime forwarding impl"
     );
     assert!(
-        backend_source.contains("BackendIdentity + StartupBackend + ConvBackend"),
-        "BackendRuntime should inherit identity/startup/conv from focused facets"
+        !backend_source.contains("impl<T: BackendRuntime + ?Sized> SamplingBackend for T"),
+        "SamplingBackend should not regress to a blanket BackendRuntime forwarding impl"
     );
+    let runtime_trait_source = source_between(
+        &backend_source,
+        "pub trait BackendRuntime",
+        "pub trait BackendIdentity",
+    );
+    for supertrait in [
+        "BackendIdentity",
+        "StartupBackend",
+        "ConvBackend",
+        "SamplingBackend",
+    ] {
+        assert!(
+            runtime_trait_source.contains(supertrait),
+            "BackendRuntime should inherit {supertrait} from focused facets"
+        );
+    }
 
     let report_md = fs::read_to_string(root.join("docs/backend-capability-report.md"))
         .expect("capability report md should be readable");
@@ -5841,6 +5862,14 @@ fn generated_capability_report_tracks_migration_phase_status() {
     assert_eq!(
         conv_signal["passed"], true,
         "ConvBackend should be a completed W1 family slice"
+    );
+    let sampling_signal = phase1_signals
+        .iter()
+        .find(|signal| signal["name"] == "sampling_backend_facet_authoritative")
+        .expect("Phase 1 should include SamplingBackend authoritative signal");
+    assert_eq!(
+        sampling_signal["passed"], true,
+        "SamplingBackend should be a completed W1 family slice"
     );
     let shim_signal = phase1_signals
         .iter()

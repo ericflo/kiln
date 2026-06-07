@@ -13,8 +13,8 @@ use super::metal_gdn::*;
 use super::metal_lm_head::*;
 use super::metal_paged::*;
 use super::{
-    BackendIdentity, BackendRuntime, ConvBackend, StartupBackend, TrainingCapabilities,
-    TrainingPrecisionPolicy, metal_residency, metal_training,
+    BackendIdentity, BackendRuntime, ConvBackend, SamplingBackend, StartupBackend,
+    TrainingCapabilities, TrainingPrecisionPolicy, metal_residency, metal_training,
 };
 
 impl BackendIdentity for MetalBackend {
@@ -82,93 +82,13 @@ impl ConvBackend for MetalBackend {
     }
 }
 
-// #1082 DoD-101/102: BackendRuntime decode methods flipped to kt; metal/vulkan
-// impls need matching flip when their builds are restored.
-impl BackendRuntime for MetalBackend {
-    fn training_capabilities(&self) -> TrainingCapabilities {
-        Self::training_capabilities_static()
-    }
-
-    fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
-        metal_training::training_precision_policy()
-    }
-
-    // ------------------------------------------------------------------
-    // Resident-activation hooks (#1082) — Metal analog of the Vulkan
-    // registry. The registry tracks membership only (the kt tensor already
-    // owns its GPU buffer); `dispatch_adamw_step` runs a fused on-device
-    // AdamW that updates param/m/v in place. Same Ok(true)/Ok(false) and
-    // register/has/update/evict/resolve semantics as Vulkan.
-    // ------------------------------------------------------------------
-
-    fn supports_resident_activation(&self) -> bool {
-        true
-    }
-
-    fn register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
-        metal_residency::register_resident_activation(tensor)
-    }
-
-    fn has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
-        metal_residency::has_resident_activation(tensor)
-    }
-
-    fn update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
-        metal_residency::update_resident_activation(tensor)
-    }
-
-    fn evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
-        metal_residency::evict_resident_activation(tensor);
-    }
-
-    fn resolve_resident_activation(
-        &self,
-        tensor: &kiln_tensor::Tensor,
-        shape: &[usize],
-        dtype: kiln_tensor::DType,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        metal_residency::resolve_resident_activation(tensor, shape, dtype)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn dispatch_adamw_step(
-        &self,
-        param: &kiln_tensor::Tensor,
-        grad: &kiln_tensor::Tensor,
-        first_moment: &kiln_tensor::Tensor,
-        second_moment: &kiln_tensor::Tensor,
-        lr: f32,
-        beta1: f32,
-        beta2: f32,
-        eps: f32,
-        weight_decay: f32,
-        step: u32,
-    ) -> Result<bool> {
-        // All four operands must be resident: no mixed resident/host update,
-        // since that would need a per-call upload and defeat on-device AdamW.
-        let all_resident =
-            metal_residency::all_registered(&[param, grad, first_moment, second_moment]);
-        metal_training::dispatch_adamw_step(
-            param,
-            grad,
-            first_moment,
-            second_moment,
-            all_resident,
-            lr,
-            beta1,
-            beta2,
-            eps,
-            weight_decay,
-            step,
-        )
-    }
-
-    fn supports_linear_decode_sample(&self, top_k: u32) -> bool {
+#[allow(clippy::too_many_arguments)]
+impl SamplingBackend for MetalBackend {
+    fn runtime_supports_linear_decode_sample(&self, top_k: u32) -> bool {
         top_k > 0 && top_k <= METAL_LM_HEAD_SAMPLE_TOP_K_MAX && !metal_lm_head_sample_disabled()
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn linear_decode_sample(
+    fn runtime_linear_decode_sample(
         &self,
         x: &kiln_tensor::Tensor,
         weight_t: &kiln_tensor::Tensor,
@@ -183,7 +103,7 @@ impl BackendRuntime for MetalBackend {
         min_p: f32,
         seed: u64,
     ) -> Result<Option<u32>> {
-        if !self.supports_linear_decode_sample(top_k) {
+        if !self.runtime_supports_linear_decode_sample(top_k) {
             return Ok(None);
         }
         if !metal_lm_head_sample_supports(x, weight_t, top_k, temperature, history_indices.len()) {
@@ -226,7 +146,11 @@ impl BackendRuntime for MetalBackend {
         Ok(Some(token))
     }
 
-    fn supports_linear_decode_sample_batch(&self, top_k: &[u32], temperatures: &[f32]) -> bool {
+    fn runtime_supports_linear_decode_sample_batch(
+        &self,
+        top_k: &[u32],
+        temperatures: &[f32],
+    ) -> bool {
         if top_k.len() != temperatures.len() || top_k.is_empty() || metal_lm_head_sample_disabled()
         {
             return false;
@@ -245,8 +169,7 @@ impl BackendRuntime for MetalBackend {
         has_sampled_row
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn linear_decode_sample_batch(
+    fn runtime_linear_decode_sample_batch(
         &self,
         x: &kiln_tensor::Tensor,
         weight_t: &kiln_tensor::Tensor,
@@ -262,7 +185,7 @@ impl BackendRuntime for MetalBackend {
         min_p: &[f32],
         seeds: &[u64],
     ) -> Result<Option<Vec<u32>>> {
-        if !self.supports_linear_decode_sample_batch(top_k, temperatures) {
+        if !self.runtime_supports_linear_decode_sample_batch(top_k, temperatures) {
             return Ok(None);
         }
         let Ok((batch, seq_len, _hidden)) = x.dims3() else {
@@ -354,6 +277,88 @@ impl BackendRuntime for MetalBackend {
             tokens.push(token);
         }
         Ok(Some(tokens))
+    }
+}
+
+// #1082 DoD-101/102: BackendRuntime decode methods flipped to kt; metal/vulkan
+// impls need matching flip when their builds are restored.
+impl BackendRuntime for MetalBackend {
+    fn training_capabilities(&self) -> TrainingCapabilities {
+        Self::training_capabilities_static()
+    }
+
+    fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
+        metal_training::training_precision_policy()
+    }
+
+    // ------------------------------------------------------------------
+    // Resident-activation hooks (#1082) — Metal analog of the Vulkan
+    // registry. The registry tracks membership only (the kt tensor already
+    // owns its GPU buffer); `dispatch_adamw_step` runs a fused on-device
+    // AdamW that updates param/m/v in place. Same Ok(true)/Ok(false) and
+    // register/has/update/evict/resolve semantics as Vulkan.
+    // ------------------------------------------------------------------
+
+    fn supports_resident_activation(&self) -> bool {
+        true
+    }
+
+    fn register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
+        metal_residency::register_resident_activation(tensor)
+    }
+
+    fn has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
+        metal_residency::has_resident_activation(tensor)
+    }
+
+    fn update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
+        metal_residency::update_resident_activation(tensor)
+    }
+
+    fn evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
+        metal_residency::evict_resident_activation(tensor);
+    }
+
+    fn resolve_resident_activation(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        shape: &[usize],
+        dtype: kiln_tensor::DType,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        metal_residency::resolve_resident_activation(tensor, shape, dtype)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_adamw_step(
+        &self,
+        param: &kiln_tensor::Tensor,
+        grad: &kiln_tensor::Tensor,
+        first_moment: &kiln_tensor::Tensor,
+        second_moment: &kiln_tensor::Tensor,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        weight_decay: f32,
+        step: u32,
+    ) -> Result<bool> {
+        // All four operands must be resident: no mixed resident/host update,
+        // since that would need a per-call upload and defeat on-device AdamW.
+        let all_resident =
+            metal_residency::all_registered(&[param, grad, first_moment, second_moment]);
+        metal_training::dispatch_adamw_step(
+            param,
+            grad,
+            first_moment,
+            second_moment,
+            all_resident,
+            lr,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            step,
+        )
     }
 
     fn supports_flash_attn_prefill(&self) -> bool {

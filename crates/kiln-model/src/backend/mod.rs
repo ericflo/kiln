@@ -653,7 +653,13 @@ fn precompile_startup_kernels_for_backend(name: &str, device: kiln_tensor::Devic
 }
 
 pub trait BackendRuntime:
-    BackendIdentity + StartupBackend + ConvBackend + Send + Sync + std::fmt::Debug
+    BackendIdentity
+    + StartupBackend
+    + ConvBackend
+    + SamplingBackend
+    + Send
+    + Sync
+    + std::fmt::Debug
 {
     /// Human-readable name (`"cuda"`, `"metal"`, `"cpu"`). Surfaced in
     /// `/health` and logs.
@@ -1612,7 +1618,7 @@ pub trait BackendRuntime:
     }
 
     fn supports_linear_decode_argmax(&self) -> bool {
-        false
+        SamplingBackend::runtime_supports_linear_decode_argmax(self)
     }
 
     /// Single-token transposed linear projection with argmax reduction.
@@ -1621,14 +1627,14 @@ pub trait BackendRuntime:
     /// on the host. `x` is `[1, 1, hidden]`, `weight_t` is `[hidden, out_dim]`.
     fn linear_decode_argmax(
         &self,
-        _x: &kiln_tensor::Tensor,
-        _weight_t: &kiln_tensor::Tensor,
+        x: &kiln_tensor::Tensor,
+        weight_t: &kiln_tensor::Tensor,
     ) -> Result<Option<u32>> {
-        Ok(None)
+        SamplingBackend::runtime_linear_decode_argmax(self, x, weight_t)
     }
 
     fn supports_linear_decode_argmax_batch(&self) -> bool {
-        false
+        SamplingBackend::runtime_supports_linear_decode_argmax_batch(self)
     }
 
     /// Whether the backend has a fused on-device stochastic-sampling
@@ -1640,7 +1646,7 @@ pub trait BackendRuntime:
     /// dummy) keep using candle's on-device sampling via the regular
     /// `linear_decode` → `sample_with_full_params` flow.
     fn supports_linear_decode_sample(&self, _top_k: u32) -> bool {
-        false
+        SamplingBackend::runtime_supports_linear_decode_sample(self, _top_k)
     }
 
     /// Fused stochastic decode: takes the same `(x, weight_t)` inputs
@@ -1653,24 +1659,38 @@ pub trait BackendRuntime:
     #[allow(clippy::too_many_arguments)]
     fn linear_decode_sample(
         &self,
-        _x: &kiln_tensor::Tensor,
-        _weight_t: &kiln_tensor::Tensor,
-        _history_indices: &[u32],
-        _history_counts: &[u32],
-        _repetition_penalty: f32,
-        _presence_penalty: f32,
-        _frequency_penalty: f32,
-        _temperature: f32,
-        _top_k: u32,
-        _top_p: f32,
-        _min_p: f32,
-        _seed: u64,
+        x: &kiln_tensor::Tensor,
+        weight_t: &kiln_tensor::Tensor,
+        history_indices: &[u32],
+        history_counts: &[u32],
+        repetition_penalty: f32,
+        presence_penalty: f32,
+        frequency_penalty: f32,
+        temperature: f32,
+        top_k: u32,
+        top_p: f32,
+        min_p: f32,
+        seed: u64,
     ) -> Result<Option<u32>> {
-        Ok(None)
+        SamplingBackend::runtime_linear_decode_sample(
+            self,
+            x,
+            weight_t,
+            history_indices,
+            history_counts,
+            repetition_penalty,
+            presence_penalty,
+            frequency_penalty,
+            temperature,
+            top_k,
+            top_p,
+            min_p,
+            seed,
+        )
     }
 
-    fn supports_linear_decode_sample_batch(&self, _top_k: &[u32], _temperatures: &[f32]) -> bool {
-        false
+    fn supports_linear_decode_sample_batch(&self, top_k: &[u32], temperatures: &[f32]) -> bool {
+        SamplingBackend::runtime_supports_linear_decode_sample_batch(self, top_k, temperatures)
     }
 
     /// Batched fused stochastic decode. `x` is `[batch, 1, hidden]`,
@@ -1680,21 +1700,36 @@ pub trait BackendRuntime:
     #[allow(clippy::too_many_arguments)]
     fn linear_decode_sample_batch(
         &self,
-        _x: &kiln_tensor::Tensor,
-        _weight_t: &kiln_tensor::Tensor,
-        _history_rows: &[u32],
-        _history_indices: &[u32],
-        _history_counts: &[u32],
-        _repetition_penalties: &[f32],
-        _presence_penalties: &[f32],
-        _frequency_penalties: &[f32],
-        _temperatures: &[f32],
-        _top_k: &[u32],
-        _top_p: &[f32],
-        _min_p: &[f32],
-        _seeds: &[u64],
+        x: &kiln_tensor::Tensor,
+        weight_t: &kiln_tensor::Tensor,
+        history_rows: &[u32],
+        history_indices: &[u32],
+        history_counts: &[u32],
+        repetition_penalties: &[f32],
+        presence_penalties: &[f32],
+        frequency_penalties: &[f32],
+        temperatures: &[f32],
+        top_k: &[u32],
+        top_p: &[f32],
+        min_p: &[f32],
+        seeds: &[u64],
     ) -> Result<Option<Vec<u32>>> {
-        Ok(None)
+        SamplingBackend::runtime_linear_decode_sample_batch(
+            self,
+            x,
+            weight_t,
+            history_rows,
+            history_indices,
+            history_counts,
+            repetition_penalties,
+            presence_penalties,
+            frequency_penalties,
+            temperatures,
+            top_k,
+            top_p,
+            min_p,
+            seeds,
+        )
     }
 
     /// Batched single-token transposed linear projection with argmax reduction.
@@ -1704,10 +1739,10 @@ pub trait BackendRuntime:
     /// `[hidden, out_dim]`, and the result contains one token id per batch row.
     fn linear_decode_argmax_batch(
         &self,
-        _x: &kiln_tensor::Tensor,
-        _weight_t: &kiln_tensor::Tensor,
+        x: &kiln_tensor::Tensor,
+        weight_t: &kiln_tensor::Tensor,
     ) -> Result<Option<Vec<u32>>> {
-        Ok(None)
+        SamplingBackend::runtime_linear_decode_argmax_batch(self, x, weight_t)
     }
 
     /// Forward-only LoRA delta/add for decode.
@@ -2374,65 +2409,81 @@ pub trait LinearBackend: Send + Sync + std::fmt::Debug {
     ) -> Result<Option<kiln_tensor::Tensor>>;
 }
 
-/// Focused `SamplingBackend` facet delegated by the current `BackendRuntime` facade.
+/// Focused `SamplingBackend` facet for fused LM-head token selection.
 #[allow(clippy::too_many_arguments)]
 pub trait SamplingBackend: Send + Sync + std::fmt::Debug {
-    fn runtime_supports_linear_decode_argmax(&self) -> bool;
+    fn runtime_supports_linear_decode_argmax(&self) -> bool {
+        false
+    }
 
     fn runtime_linear_decode_argmax(
         &self,
-        x: &kiln_tensor::Tensor,
-        weight_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<u32>>;
+        _x: &kiln_tensor::Tensor,
+        _weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<u32>> {
+        Ok(None)
+    }
 
-    fn runtime_supports_linear_decode_argmax_batch(&self) -> bool;
+    fn runtime_supports_linear_decode_argmax_batch(&self) -> bool {
+        false
+    }
 
     fn runtime_linear_decode_argmax_batch(
         &self,
-        x: &kiln_tensor::Tensor,
-        weight_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<Vec<u32>>>;
+        _x: &kiln_tensor::Tensor,
+        _weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<Vec<u32>>> {
+        Ok(None)
+    }
 
-    fn runtime_supports_linear_decode_sample(&self, top_k: u32) -> bool;
+    fn runtime_supports_linear_decode_sample(&self, _top_k: u32) -> bool {
+        false
+    }
 
     fn runtime_linear_decode_sample(
         &self,
-        x: &kiln_tensor::Tensor,
-        weight_t: &kiln_tensor::Tensor,
-        history_indices: &[u32],
-        history_counts: &[u32],
-        repetition_penalty: f32,
-        presence_penalty: f32,
-        frequency_penalty: f32,
-        temperature: f32,
-        top_k: u32,
-        top_p: f32,
-        min_p: f32,
-        seed: u64,
-    ) -> Result<Option<u32>>;
+        _x: &kiln_tensor::Tensor,
+        _weight_t: &kiln_tensor::Tensor,
+        _history_indices: &[u32],
+        _history_counts: &[u32],
+        _repetition_penalty: f32,
+        _presence_penalty: f32,
+        _frequency_penalty: f32,
+        _temperature: f32,
+        _top_k: u32,
+        _top_p: f32,
+        _min_p: f32,
+        _seed: u64,
+    ) -> Result<Option<u32>> {
+        Ok(None)
+    }
 
     fn runtime_supports_linear_decode_sample_batch(
         &self,
-        top_k: &[u32],
-        temperatures: &[f32],
-    ) -> bool;
+        _top_k: &[u32],
+        _temperatures: &[f32],
+    ) -> bool {
+        false
+    }
 
     fn runtime_linear_decode_sample_batch(
         &self,
-        x: &kiln_tensor::Tensor,
-        weight_t: &kiln_tensor::Tensor,
-        history_rows: &[u32],
-        history_indices: &[u32],
-        history_counts: &[u32],
-        repetition_penalties: &[f32],
-        presence_penalties: &[f32],
-        frequency_penalties: &[f32],
-        temperatures: &[f32],
-        top_k: &[u32],
-        top_p: &[f32],
-        min_p: &[f32],
-        seeds: &[u64],
-    ) -> Result<Option<Vec<u32>>>;
+        _x: &kiln_tensor::Tensor,
+        _weight_t: &kiln_tensor::Tensor,
+        _history_rows: &[u32],
+        _history_indices: &[u32],
+        _history_counts: &[u32],
+        _repetition_penalties: &[f32],
+        _presence_penalties: &[f32],
+        _frequency_penalties: &[f32],
+        _temperatures: &[f32],
+        _top_k: &[u32],
+        _top_p: &[f32],
+        _min_p: &[f32],
+        _seeds: &[u64],
+    ) -> Result<Option<Vec<u32>>> {
+        Ok(None)
+    }
 }
 
 /// Focused `ResidencyBackend` facet delegated by the current `BackendRuntime` facade.
@@ -3204,111 +3255,6 @@ impl<T: BackendRuntime + ?Sized> LinearBackend for T {
 }
 
 #[allow(clippy::too_many_arguments)]
-impl<T: BackendRuntime + ?Sized> SamplingBackend for T {
-    fn runtime_supports_linear_decode_argmax(&self) -> bool {
-        BackendRuntime::supports_linear_decode_argmax(self)
-    }
-
-    fn runtime_linear_decode_argmax(
-        &self,
-        x: &kiln_tensor::Tensor,
-        weight_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<u32>> {
-        BackendRuntime::linear_decode_argmax(self, x, weight_t)
-    }
-
-    fn runtime_supports_linear_decode_argmax_batch(&self) -> bool {
-        BackendRuntime::supports_linear_decode_argmax_batch(self)
-    }
-
-    fn runtime_linear_decode_argmax_batch(
-        &self,
-        x: &kiln_tensor::Tensor,
-        weight_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<Vec<u32>>> {
-        BackendRuntime::linear_decode_argmax_batch(self, x, weight_t)
-    }
-
-    fn runtime_supports_linear_decode_sample(&self, top_k: u32) -> bool {
-        BackendRuntime::supports_linear_decode_sample(self, top_k)
-    }
-
-    fn runtime_linear_decode_sample(
-        &self,
-        x: &kiln_tensor::Tensor,
-        weight_t: &kiln_tensor::Tensor,
-        history_indices: &[u32],
-        history_counts: &[u32],
-        repetition_penalty: f32,
-        presence_penalty: f32,
-        frequency_penalty: f32,
-        temperature: f32,
-        top_k: u32,
-        top_p: f32,
-        min_p: f32,
-        seed: u64,
-    ) -> Result<Option<u32>> {
-        BackendRuntime::linear_decode_sample(
-            self,
-            x,
-            weight_t,
-            history_indices,
-            history_counts,
-            repetition_penalty,
-            presence_penalty,
-            frequency_penalty,
-            temperature,
-            top_k,
-            top_p,
-            min_p,
-            seed,
-        )
-    }
-
-    fn runtime_supports_linear_decode_sample_batch(
-        &self,
-        top_k: &[u32],
-        temperatures: &[f32],
-    ) -> bool {
-        BackendRuntime::supports_linear_decode_sample_batch(self, top_k, temperatures)
-    }
-
-    fn runtime_linear_decode_sample_batch(
-        &self,
-        x: &kiln_tensor::Tensor,
-        weight_t: &kiln_tensor::Tensor,
-        history_rows: &[u32],
-        history_indices: &[u32],
-        history_counts: &[u32],
-        repetition_penalties: &[f32],
-        presence_penalties: &[f32],
-        frequency_penalties: &[f32],
-        temperatures: &[f32],
-        top_k: &[u32],
-        top_p: &[f32],
-        min_p: &[f32],
-        seeds: &[u64],
-    ) -> Result<Option<Vec<u32>>> {
-        BackendRuntime::linear_decode_sample_batch(
-            self,
-            x,
-            weight_t,
-            history_rows,
-            history_indices,
-            history_counts,
-            repetition_penalties,
-            presence_penalties,
-            frequency_penalties,
-            temperatures,
-            top_k,
-            top_p,
-            min_p,
-            seeds,
-        )
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
 impl<T: BackendRuntime + ?Sized> ResidencyBackend for T {
     fn runtime_supports_resident_activation(&self) -> bool {
         BackendRuntime::supports_resident_activation(self)
@@ -3683,6 +3629,8 @@ mod tests {
     impl StartupBackend for ResidentActivationProbeBackend {}
 
     impl ConvBackend for ResidentActivationProbeBackend {}
+
+    impl SamplingBackend for ResidentActivationProbeBackend {}
 
     impl BackendRuntime for ResidentActivationProbeBackend {
         fn has_resident_activation(&self, _tensor: &kiln_tensor::Tensor) -> bool {

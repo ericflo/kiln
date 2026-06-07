@@ -28,9 +28,9 @@ use super::vulkan_tensor_bridge::{
     kt_tensor_to_packed_bf16_bytes_with_shape,
 };
 use super::{
-    BackendIdentity, BackendRuntime, ConvBackend, StartupBackend, TrainingCapabilities,
-    TrainingPrecisionPolicy, vulkan_attention, vulkan_conv1d, vulkan_dense, vulkan_device,
-    vulkan_gdn, vulkan_linear, vulkan_training, vulkan_weights,
+    BackendIdentity, BackendRuntime, ConvBackend, SamplingBackend, StartupBackend,
+    TrainingCapabilities, TrainingPrecisionPolicy, vulkan_attention, vulkan_conv1d, vulkan_dense,
+    vulkan_device, vulkan_gdn, vulkan_linear, vulkan_training, vulkan_weights,
 };
 use crate::forward::GpuWeights;
 
@@ -323,6 +323,111 @@ impl ConvBackend for VulkanBackend {
         kernel_size: usize,
     ) -> Result<Option<kiln_tensor::Tensor>> {
         vulkan_conv1d::causal_conv1d_prefill(self, x, weight, conv_state_kt, kernel_size)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+impl SamplingBackend for VulkanBackend {
+    fn runtime_supports_linear_decode_argmax(&self) -> bool {
+        vulkan_linear::supports_linear_decode_argmax(self)
+    }
+
+    fn runtime_linear_decode_argmax(
+        &self,
+        x: &kiln_tensor::Tensor,
+        weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<u32>> {
+        vulkan_linear::linear_decode_argmax(self, x, weight_t)
+    }
+
+    fn runtime_supports_linear_decode_argmax_batch(&self) -> bool {
+        vulkan_linear::supports_linear_decode_argmax_batch(self)
+    }
+
+    fn runtime_supports_linear_decode_sample(&self, top_k: u32) -> bool {
+        vulkan_linear::supports_linear_decode_sample(self, top_k)
+    }
+
+    fn runtime_linear_decode_sample(
+        &self,
+        x: &kiln_tensor::Tensor,
+        weight_t: &kiln_tensor::Tensor,
+        history_indices: &[u32],
+        history_counts: &[u32],
+        repetition_penalty: f32,
+        presence_penalty: f32,
+        frequency_penalty: f32,
+        temperature: f32,
+        top_k: u32,
+        top_p: f32,
+        min_p: f32,
+        seed: u64,
+    ) -> Result<Option<u32>> {
+        vulkan_linear::linear_decode_sample(
+            self,
+            x,
+            weight_t,
+            history_indices,
+            history_counts,
+            repetition_penalty,
+            presence_penalty,
+            frequency_penalty,
+            temperature,
+            top_k,
+            top_p,
+            min_p,
+            seed,
+        )
+    }
+
+    fn runtime_supports_linear_decode_sample_batch(
+        &self,
+        top_k: &[u32],
+        temperatures: &[f32],
+    ) -> bool {
+        vulkan_linear::supports_linear_decode_sample_batch(self, top_k, temperatures)
+    }
+
+    fn runtime_linear_decode_sample_batch(
+        &self,
+        x: &kiln_tensor::Tensor,
+        weight_t: &kiln_tensor::Tensor,
+        history_rows: &[u32],
+        history_indices: &[u32],
+        history_counts: &[u32],
+        repetition_penalties: &[f32],
+        presence_penalties: &[f32],
+        frequency_penalties: &[f32],
+        temperatures: &[f32],
+        top_k: &[u32],
+        top_p: &[f32],
+        min_p: &[f32],
+        seeds: &[u64],
+    ) -> Result<Option<Vec<u32>>> {
+        vulkan_linear::linear_decode_sample_batch(
+            self,
+            x,
+            weight_t,
+            history_rows,
+            history_indices,
+            history_counts,
+            repetition_penalties,
+            presence_penalties,
+            frequency_penalties,
+            temperatures,
+            top_k,
+            top_p,
+            min_p,
+            seeds,
+        )
+    }
+
+    fn runtime_linear_decode_argmax_batch(
+        &self,
+        x: &kiln_tensor::Tensor,
+        weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<Vec<u32>>> {
+        vulkan_linear::linear_decode_argmax_batch(self, x, weight_t)
     }
 }
 
@@ -1016,104 +1121,6 @@ impl BackendRuntime for VulkanBackend {
         chunk_len: usize,
     ) -> Result<Option<kiln_tensor::Tensor>> {
         vulkan_linear::linear_prefill_apply_offset(self, x, full_weight_t, chunk_start, chunk_len)
-    }
-
-    fn supports_linear_decode_argmax(&self) -> bool {
-        vulkan_linear::supports_linear_decode_argmax(self)
-    }
-
-    fn linear_decode_argmax(
-        &self,
-        x: &kiln_tensor::Tensor,
-        weight_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<u32>> {
-        vulkan_linear::linear_decode_argmax(self, x, weight_t)
-    }
-
-    fn supports_linear_decode_argmax_batch(&self) -> bool {
-        vulkan_linear::supports_linear_decode_argmax_batch(self)
-    }
-
-    fn supports_linear_decode_sample(&self, top_k: u32) -> bool {
-        vulkan_linear::supports_linear_decode_sample(self, top_k)
-    }
-
-    fn linear_decode_sample(
-        &self,
-        x: &kiln_tensor::Tensor,
-        weight_t: &kiln_tensor::Tensor,
-        history_indices: &[u32],
-        history_counts: &[u32],
-        repetition_penalty: f32,
-        presence_penalty: f32,
-        frequency_penalty: f32,
-        temperature: f32,
-        top_k: u32,
-        top_p: f32,
-        min_p: f32,
-        seed: u64,
-    ) -> Result<Option<u32>> {
-        vulkan_linear::linear_decode_sample(
-            self,
-            x,
-            weight_t,
-            history_indices,
-            history_counts,
-            repetition_penalty,
-            presence_penalty,
-            frequency_penalty,
-            temperature,
-            top_k,
-            top_p,
-            min_p,
-            seed,
-        )
-    }
-
-    fn supports_linear_decode_sample_batch(&self, top_k: &[u32], temperatures: &[f32]) -> bool {
-        vulkan_linear::supports_linear_decode_sample_batch(self, top_k, temperatures)
-    }
-
-    fn linear_decode_sample_batch(
-        &self,
-        x: &kiln_tensor::Tensor,
-        weight_t: &kiln_tensor::Tensor,
-        history_rows: &[u32],
-        history_indices: &[u32],
-        history_counts: &[u32],
-        repetition_penalties: &[f32],
-        presence_penalties: &[f32],
-        frequency_penalties: &[f32],
-        temperatures: &[f32],
-        top_k: &[u32],
-        top_p: &[f32],
-        min_p: &[f32],
-        seeds: &[u64],
-    ) -> Result<Option<Vec<u32>>> {
-        vulkan_linear::linear_decode_sample_batch(
-            self,
-            x,
-            weight_t,
-            history_rows,
-            history_indices,
-            history_counts,
-            repetition_penalties,
-            presence_penalties,
-            frequency_penalties,
-            temperatures,
-            top_k,
-            top_p,
-            min_p,
-            seeds,
-        )
-    }
-
-    fn linear_decode_argmax_batch(
-        &self,
-        x: &kiln_tensor::Tensor,
-        weight_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<Vec<u32>>> {
-        vulkan_linear::linear_decode_argmax_batch(self, x, weight_t)
     }
 
     fn prewarm_decode_weights(&self, weights: &GpuWeights) -> Result<()> {

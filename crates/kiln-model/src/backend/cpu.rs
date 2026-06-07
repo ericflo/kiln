@@ -3,7 +3,7 @@
 //! device. Used on CPU, on Metal until Phase 2 adds a real backend, and
 //! as a safe default for any future device.
 
-use super::{BackendIdentity, BackendRuntime, ConvBackend, StartupBackend};
+use super::{BackendIdentity, BackendRuntime, ConvBackend, SamplingBackend, StartupBackend};
 
 #[derive(Debug)]
 pub struct CpuBackend {
@@ -45,5 +45,7 @@ impl BackendIdentity for CpuBackend {
 impl StartupBackend for CpuBackend {}
 
 impl ConvBackend for CpuBackend {}
+
+impl SamplingBackend for CpuBackend {}
 
 impl BackendRuntime for CpuBackend {}

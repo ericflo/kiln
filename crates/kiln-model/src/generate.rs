@@ -8565,6 +8565,8 @@ mod tests {
 
     impl crate::backend::ConvBackend for NamedTestBackend {}
 
+    impl crate::backend::SamplingBackend for NamedTestBackend {}
+
     impl BackendRuntime for NamedTestBackend {}
 
     #[test]

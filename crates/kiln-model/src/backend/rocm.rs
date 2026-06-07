@@ -8,8 +8,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
-    BackendIdentity, BackendRuntime, ConvBackend, StartupBackend, TrainingCapabilities,
-    TrainingPrecisionPolicy,
+    BackendIdentity, BackendRuntime, ConvBackend, SamplingBackend, StartupBackend,
+    TrainingCapabilities, TrainingPrecisionPolicy,
 };
 use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 
@@ -1647,18 +1647,6 @@ impl BackendRuntime for RocmBackend {
         Ok(Some(out_kt))
     }
 
-    fn supports_linear_decode_argmax(&self) -> bool {
-        false
-    }
-
-    fn linear_decode_argmax(
-        &self,
-        _x: &kiln_tensor::Tensor,
-        _weight_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<u32>> {
-        Ok(None)
-    }
-
     fn linear_prefill_apply(
         &self,
         x: &kiln_tensor::Tensor,
@@ -1964,6 +1952,8 @@ impl ConvBackend for RocmBackend {
         Ok(Some(out_kt))
     }
 }
+
+impl SamplingBackend for RocmBackend {}
 
 #[cfg(test)]
 mod tests {
