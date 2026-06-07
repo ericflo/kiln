@@ -28,9 +28,10 @@ use super::vulkan_tensor_bridge::{
     kt_tensor_to_packed_bf16_bytes_with_shape,
 };
 use super::{
-    BackendIdentity, BackendRuntime, ConvBackend, SamplingBackend, StartupBackend,
-    TrainingCapabilities, TrainingPrecisionPolicy, vulkan_attention, vulkan_conv1d, vulkan_dense,
-    vulkan_device, vulkan_gdn, vulkan_linear, vulkan_training, vulkan_weights,
+    BackendIdentity, BackendRuntime, ConvBackend, OptimizerBackend, SamplingBackend,
+    StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy, vulkan_attention,
+    vulkan_conv1d, vulkan_dense, vulkan_device, vulkan_gdn, vulkan_linear, vulkan_training,
+    vulkan_weights,
 };
 use crate::forward::GpuWeights;
 
@@ -431,6 +432,46 @@ impl SamplingBackend for VulkanBackend {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+impl OptimizerBackend for VulkanBackend {
+    fn runtime_dispatch_sgd_step(
+        &self,
+        param: &kiln_tensor::Tensor,
+        grad: &kiln_tensor::Tensor,
+        lr: f32,
+    ) -> Result<bool> {
+        vulkan_training::dispatch_sgd_step(self, param, grad, lr)
+    }
+
+    fn runtime_dispatch_adamw_step(
+        &self,
+        param: &kiln_tensor::Tensor,
+        grad: &kiln_tensor::Tensor,
+        first_moment: &kiln_tensor::Tensor,
+        second_moment: &kiln_tensor::Tensor,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        weight_decay: f32,
+        step: u32,
+    ) -> Result<bool> {
+        vulkan_training::dispatch_adamw_step(
+            self,
+            param,
+            grad,
+            first_moment,
+            second_moment,
+            lr,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            step,
+        )
+    }
+}
+
 // #1082 DoD-101/102: BackendRuntime decode methods flipped to kt; metal/vulkan impls need matching flip when their builds are restored.
 impl BackendRuntime for VulkanBackend {
     fn training_capabilities(&self) -> TrainingCapabilities {
@@ -775,43 +816,6 @@ impl BackendRuntime for VulkanBackend {
                 .context("resolve_resident_activation: create_tensor_from_data")?
         };
         Ok(Some(resolved))
-    }
-
-    fn dispatch_sgd_step(
-        &self,
-        param: &kiln_tensor::Tensor,
-        grad: &kiln_tensor::Tensor,
-        lr: f32,
-    ) -> Result<bool> {
-        vulkan_training::dispatch_sgd_step(self, param, grad, lr)
-    }
-
-    fn dispatch_adamw_step(
-        &self,
-        param: &kiln_tensor::Tensor,
-        grad: &kiln_tensor::Tensor,
-        first_moment: &kiln_tensor::Tensor,
-        second_moment: &kiln_tensor::Tensor,
-        lr: f32,
-        beta1: f32,
-        beta2: f32,
-        eps: f32,
-        weight_decay: f32,
-        step: u32,
-    ) -> Result<bool> {
-        vulkan_training::dispatch_adamw_step(
-            self,
-            param,
-            grad,
-            first_moment,
-            second_moment,
-            lr,
-            beta1,
-            beta2,
-            eps,
-            weight_decay,
-            step,
-        )
     }
 
     fn lora_delta_resident(

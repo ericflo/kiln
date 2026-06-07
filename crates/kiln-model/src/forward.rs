@@ -28758,6 +28758,8 @@ mod tests {
 
     impl crate::backend::SamplingBackend for FixedLinearBackend {}
 
+    impl crate::backend::OptimizerBackend for FixedLinearBackend {}
+
     impl BackendRuntime for FixedLinearBackend {
         fn linear_decode(
             &self,
@@ -28803,6 +28805,8 @@ mod tests {
     impl crate::backend::ConvBackend for FixedMlpBackend {}
 
     impl crate::backend::SamplingBackend for FixedMlpBackend {}
+
+    impl crate::backend::OptimizerBackend for FixedMlpBackend {}
 
     impl BackendRuntime for FixedMlpBackend {
         fn mlp_decode(

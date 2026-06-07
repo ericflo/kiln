@@ -657,6 +657,7 @@ pub trait BackendRuntime:
     + StartupBackend
     + ConvBackend
     + SamplingBackend
+    + OptimizerBackend
     + Send
     + Sync
     + std::fmt::Debug
@@ -1028,11 +1029,11 @@ pub trait BackendRuntime:
     /// alongside Phase 4.1's resident `TrainableLoraParams`.
     fn dispatch_sgd_step(
         &self,
-        _param: &kiln_tensor::Tensor,
-        _grad: &kiln_tensor::Tensor,
-        _lr: f32,
+        param: &kiln_tensor::Tensor,
+        grad: &kiln_tensor::Tensor,
+        lr: f32,
     ) -> Result<bool> {
-        Ok(false)
+        OptimizerBackend::runtime_dispatch_sgd_step(self, param, grad, lr)
     }
 
     /// AdamW slot per the residency plan §4.2 ("AdamW slot for later
@@ -1050,18 +1051,30 @@ pub trait BackendRuntime:
     #[allow(clippy::too_many_arguments)]
     fn dispatch_adamw_step(
         &self,
-        _param: &kiln_tensor::Tensor,
-        _grad: &kiln_tensor::Tensor,
-        _first_moment: &kiln_tensor::Tensor,
-        _second_moment: &kiln_tensor::Tensor,
-        _lr: f32,
-        _beta1: f32,
-        _beta2: f32,
-        _eps: f32,
-        _weight_decay: f32,
-        _step: u32,
+        param: &kiln_tensor::Tensor,
+        grad: &kiln_tensor::Tensor,
+        first_moment: &kiln_tensor::Tensor,
+        second_moment: &kiln_tensor::Tensor,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        weight_decay: f32,
+        step: u32,
     ) -> Result<bool> {
-        Ok(false)
+        OptimizerBackend::runtime_dispatch_adamw_step(
+            self,
+            param,
+            grad,
+            first_moment,
+            second_moment,
+            lr,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            step,
+        )
     }
 
     /// Phase 4.1 step 2 hook: compute the LoRA delta
@@ -2557,29 +2570,33 @@ pub trait ResidencyBackend: Send + Sync + std::fmt::Debug {
     fn runtime_has_linear_attn_gdn_state_kt(&self, key: kiln_tensor::TensorId) -> bool;
 }
 
-/// Focused `OptimizerBackend` facet delegated by the current `BackendRuntime` facade.
+/// Focused `OptimizerBackend` facet for on-device optimizer updates.
 #[allow(clippy::too_many_arguments)]
 pub trait OptimizerBackend: Send + Sync + std::fmt::Debug {
     fn runtime_dispatch_sgd_step(
         &self,
-        param: &kiln_tensor::Tensor,
-        grad: &kiln_tensor::Tensor,
-        lr: f32,
-    ) -> Result<bool>;
+        _param: &kiln_tensor::Tensor,
+        _grad: &kiln_tensor::Tensor,
+        _lr: f32,
+    ) -> Result<bool> {
+        Ok(false)
+    }
 
     fn runtime_dispatch_adamw_step(
         &self,
-        param: &kiln_tensor::Tensor,
-        grad: &kiln_tensor::Tensor,
-        first_moment: &kiln_tensor::Tensor,
-        second_moment: &kiln_tensor::Tensor,
-        lr: f32,
-        beta1: f32,
-        beta2: f32,
-        eps: f32,
-        weight_decay: f32,
-        step: u32,
-    ) -> Result<bool>;
+        _param: &kiln_tensor::Tensor,
+        _grad: &kiln_tensor::Tensor,
+        _first_moment: &kiln_tensor::Tensor,
+        _second_moment: &kiln_tensor::Tensor,
+        _lr: f32,
+        _beta1: f32,
+        _beta2: f32,
+        _eps: f32,
+        _weight_decay: f32,
+        _step: u32,
+    ) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 /// Focused `TrainingLossBackend` facet delegated by the current `BackendRuntime` facade.
@@ -3421,46 +3438,6 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-impl<T: BackendRuntime + ?Sized> OptimizerBackend for T {
-    fn runtime_dispatch_sgd_step(
-        &self,
-        param: &kiln_tensor::Tensor,
-        grad: &kiln_tensor::Tensor,
-        lr: f32,
-    ) -> Result<bool> {
-        BackendRuntime::dispatch_sgd_step(self, param, grad, lr)
-    }
-
-    fn runtime_dispatch_adamw_step(
-        &self,
-        param: &kiln_tensor::Tensor,
-        grad: &kiln_tensor::Tensor,
-        first_moment: &kiln_tensor::Tensor,
-        second_moment: &kiln_tensor::Tensor,
-        lr: f32,
-        beta1: f32,
-        beta2: f32,
-        eps: f32,
-        weight_decay: f32,
-        step: u32,
-    ) -> Result<bool> {
-        BackendRuntime::dispatch_adamw_step(
-            self,
-            param,
-            grad,
-            first_moment,
-            second_moment,
-            lr,
-            beta1,
-            beta2,
-            eps,
-            weight_decay,
-            step,
-        )
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
 impl<T: BackendRuntime + ?Sized> TrainingLossBackend for T {
     fn runtime_training_capabilities(&self) -> TrainingCapabilities {
         BackendRuntime::training_capabilities(self)
@@ -3631,6 +3608,8 @@ mod tests {
     impl ConvBackend for ResidentActivationProbeBackend {}
 
     impl SamplingBackend for ResidentActivationProbeBackend {}
+
+    impl OptimizerBackend for ResidentActivationProbeBackend {}
 
     impl BackendRuntime for ResidentActivationProbeBackend {
         fn has_resident_activation(&self, _tensor: &kiln_tensor::Tensor) -> bool {

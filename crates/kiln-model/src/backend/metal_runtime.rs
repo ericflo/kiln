@@ -13,8 +13,9 @@ use super::metal_gdn::*;
 use super::metal_lm_head::*;
 use super::metal_paged::*;
 use super::{
-    BackendIdentity, BackendRuntime, ConvBackend, SamplingBackend, StartupBackend,
-    TrainingCapabilities, TrainingPrecisionPolicy, metal_residency, metal_training,
+    BackendIdentity, BackendRuntime, ConvBackend, OptimizerBackend, SamplingBackend,
+    StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy, metal_residency,
+    metal_training,
 };
 
 impl BackendIdentity for MetalBackend {
@@ -280,6 +281,41 @@ impl SamplingBackend for MetalBackend {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+impl OptimizerBackend for MetalBackend {
+    fn runtime_dispatch_adamw_step(
+        &self,
+        param: &kiln_tensor::Tensor,
+        grad: &kiln_tensor::Tensor,
+        first_moment: &kiln_tensor::Tensor,
+        second_moment: &kiln_tensor::Tensor,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        weight_decay: f32,
+        step: u32,
+    ) -> Result<bool> {
+        // All four operands must be resident: no mixed resident/host update,
+        // since that would need a per-call upload and defeat on-device AdamW.
+        let all_resident =
+            metal_residency::all_registered(&[param, grad, first_moment, second_moment]);
+        metal_training::dispatch_adamw_step(
+            param,
+            grad,
+            first_moment,
+            second_moment,
+            all_resident,
+            lr,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            step,
+        )
+    }
+}
+
 // #1082 DoD-101/102: BackendRuntime decode methods flipped to kt; metal/vulkan
 // impls need matching flip when their builds are restored.
 impl BackendRuntime for MetalBackend {
@@ -326,39 +362,6 @@ impl BackendRuntime for MetalBackend {
         dtype: kiln_tensor::DType,
     ) -> Result<Option<kiln_tensor::Tensor>> {
         metal_residency::resolve_resident_activation(tensor, shape, dtype)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn dispatch_adamw_step(
-        &self,
-        param: &kiln_tensor::Tensor,
-        grad: &kiln_tensor::Tensor,
-        first_moment: &kiln_tensor::Tensor,
-        second_moment: &kiln_tensor::Tensor,
-        lr: f32,
-        beta1: f32,
-        beta2: f32,
-        eps: f32,
-        weight_decay: f32,
-        step: u32,
-    ) -> Result<bool> {
-        // All four operands must be resident: no mixed resident/host update,
-        // since that would need a per-call upload and defeat on-device AdamW.
-        let all_resident =
-            metal_residency::all_registered(&[param, grad, first_moment, second_moment]);
-        metal_training::dispatch_adamw_step(
-            param,
-            grad,
-            first_moment,
-            second_moment,
-            all_resident,
-            lr,
-            beta1,
-            beta2,
-            eps,
-            weight_decay,
-            step,
-        )
     }
 
     fn supports_flash_attn_prefill(&self) -> bool {

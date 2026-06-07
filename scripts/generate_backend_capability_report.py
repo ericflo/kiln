@@ -1438,6 +1438,10 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
                 "SamplingBackend",
                 "sampling_backend_facet_authoritative",
             ),
+            focused_trait_authoritative_signal(
+                "OptimizerBackend",
+                "optimizer_backend_facet_authoritative",
+            ),
             phase_signal(
                 "focused_trait_forwarding_shims_removed",
                 shim_count == 0,
@@ -1829,9 +1833,15 @@ def optimizer_dispatch_report(backends: dict[str, Any]) -> dict[str, Any]:
     report: dict[str, Any] = {}
     for backend, info in backends.items():
         overrides = set(info["overrides"])
+        source_paths = [ROOT / source for source in info.get("source_modules", [info["source"]])]
+        functions = parse_backend_functions(source_paths)
         report[backend] = {
-            "sgd_step": "overridden" if "dispatch_sgd_step" in overrides else "default_decline",
-            "adamw_step": "overridden" if "dispatch_adamw_step" in overrides else "default_decline",
+            "sgd_step": "overridden"
+            if "runtime_dispatch_sgd_step" in functions or "dispatch_sgd_step" in overrides
+            else "default_decline",
+            "adamw_step": "overridden"
+            if "runtime_dispatch_adamw_step" in functions or "dispatch_adamw_step" in overrides
+            else "default_decline",
         }
     return report
 

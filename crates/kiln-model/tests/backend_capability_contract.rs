@@ -617,11 +617,11 @@ fn cuda_rocm_optimizer_arg_validation_stays_in_shared_helper() {
         let source = fs::read_to_string(&path).expect("backend source should be readable");
         let functions = parse_functions(&path);
         let sgd = functions
-            .get("dispatch_sgd_step")
-            .unwrap_or_else(|| panic!("{backend_file} missing dispatch_sgd_step"));
+            .get("runtime_dispatch_sgd_step")
+            .unwrap_or_else(|| panic!("{backend_file} missing runtime_dispatch_sgd_step"));
         let adamw = functions
-            .get("dispatch_adamw_step")
-            .unwrap_or_else(|| panic!("{backend_file} missing dispatch_adamw_step"));
+            .get("runtime_dispatch_adamw_step")
+            .unwrap_or_else(|| panic!("{backend_file} missing runtime_dispatch_adamw_step"));
 
         assert!(
             compact_body(&sgd.body).contains(&format!("{helper}(&[param,grad])")),
@@ -2603,7 +2603,11 @@ fn generated_capability_report_lists_focused_backend_facets() {
             .unwrap_or_else(|| panic!("focused_backend_facets should list {facet}"));
         let expected_forwarding = if matches!(
             facet,
-            "BackendIdentity" | "StartupBackend" | "ConvBackend" | "SamplingBackend"
+            "BackendIdentity"
+                | "StartupBackend"
+                | "ConvBackend"
+                | "SamplingBackend"
+                | "OptimizerBackend"
         ) {
             "concrete_authoritative"
         } else {
@@ -2635,6 +2639,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
         "StartupBackend",
         "ConvBackend",
         "SamplingBackend",
+        "OptimizerBackend",
     ] {
         let info = facets
             .get(facet)
@@ -2677,6 +2682,10 @@ fn generated_capability_report_lists_focused_backend_facets() {
         !backend_source.contains("impl<T: BackendRuntime + ?Sized> SamplingBackend for T"),
         "SamplingBackend should not regress to a blanket BackendRuntime forwarding impl"
     );
+    assert!(
+        !backend_source.contains("impl<T: BackendRuntime + ?Sized> OptimizerBackend for T"),
+        "OptimizerBackend should not regress to a blanket BackendRuntime forwarding impl"
+    );
     let runtime_trait_source = source_between(
         &backend_source,
         "pub trait BackendRuntime",
@@ -2687,6 +2696,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
         "StartupBackend",
         "ConvBackend",
         "SamplingBackend",
+        "OptimizerBackend",
     ] {
         assert!(
             runtime_trait_source.contains(supertrait),
@@ -2712,8 +2722,8 @@ fn resident_registry_consumes_focused_residency_facet() {
         .expect("ResidentRegistry blanket impl should be present");
     let registry_impl = &backend_source[registry_impl_start..];
     let registry_impl_end = registry_impl
-        .find("impl<T: BackendRuntime + ?Sized> OptimizerBackend for T")
-        .expect("OptimizerBackend blanket impl should follow ResidentRegistry adapter");
+        .find("impl<T: BackendRuntime + ?Sized> TrainingLossBackend for T")
+        .expect("TrainingLossBackend blanket impl should follow ResidentRegistry adapter");
     let registry_impl = &registry_impl[..registry_impl_end];
 
     for required in [
@@ -5870,6 +5880,14 @@ fn generated_capability_report_tracks_migration_phase_status() {
     assert_eq!(
         sampling_signal["passed"], true,
         "SamplingBackend should be a completed W1 family slice"
+    );
+    let optimizer_signal = phase1_signals
+        .iter()
+        .find(|signal| signal["name"] == "optimizer_backend_facet_authoritative")
+        .expect("Phase 1 should include OptimizerBackend authoritative signal");
+    assert_eq!(
+        optimizer_signal["passed"], true,
+        "OptimizerBackend should be a completed W1 family slice"
     );
     let shim_signal = phase1_signals
         .iter()

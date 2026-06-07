@@ -8,8 +8,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
-    BackendIdentity, BackendRuntime, ConvBackend, SamplingBackend, StartupBackend,
-    TrainingCapabilities, TrainingPrecisionPolicy,
+    BackendIdentity, BackendRuntime, ConvBackend, OptimizerBackend, SamplingBackend,
+    StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
 };
 use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 
@@ -281,54 +281,9 @@ impl BackendIdentity for RocmBackend {
 
 impl StartupBackend for RocmBackend {}
 
-impl BackendRuntime for RocmBackend {
-    fn training_capabilities(&self) -> TrainingCapabilities {
-        Self::training_capabilities_static()
-    }
-
-    fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
-        TrainingPrecisionPolicy::rocm()
-    }
-
-    fn supports_resident_activation(&self) -> bool {
-        true
-    }
-
-    fn register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
-        super::cuda_rocm_common::mark_resident_activation(
-            &ROCM_RESIDENT_TENSOR_IDS,
-            tensor,
-            ROCM_RESIDENT_TENSOR_IDS_POISONED,
-        );
-        Ok(())
-    }
-
-    fn evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
-        super::cuda_rocm_common::evict_resident_activation(
-            &ROCM_RESIDENT_TENSOR_IDS,
-            tensor,
-            ROCM_RESIDENT_TENSOR_IDS_POISONED,
-        );
-    }
-
-    fn update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
-        super::cuda_rocm_common::mark_resident_activation(
-            &ROCM_RESIDENT_TENSOR_IDS,
-            tensor,
-            ROCM_RESIDENT_TENSOR_IDS_POISONED,
-        );
-        Ok(())
-    }
-
-    fn has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
-        super::cuda_rocm_common::has_resident_activation(
-            &ROCM_RESIDENT_TENSOR_IDS,
-            tensor,
-            ROCM_RESIDENT_TENSOR_IDS_POISONED,
-        )
-    }
-
-    fn dispatch_sgd_step(
+#[allow(clippy::too_many_arguments)]
+impl OptimizerBackend for RocmBackend {
+    fn runtime_dispatch_sgd_step(
         &self,
         param: &kiln_tensor::Tensor,
         grad: &kiln_tensor::Tensor,
@@ -338,7 +293,7 @@ impl BackendRuntime for RocmBackend {
             return Ok(false);
         }
         // #1082: args are already kt (BackendRuntime trait flipped to kt),
-        // so there is no candle↔kt borrow — the kernel runs directly on the
+        // so there is no candle<->kt borrow - the kernel runs directly on the
         // caller's kt tensors. Bit-exact with the prior candle shim (same
         // FFI symbol).
         kiln_nvtx::range!(c"kiln/sgd_step_kt");
@@ -363,8 +318,7 @@ impl BackendRuntime for RocmBackend {
         Ok(true)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn dispatch_adamw_step(
+    fn runtime_dispatch_adamw_step(
         &self,
         param: &kiln_tensor::Tensor,
         grad: &kiln_tensor::Tensor,
@@ -381,7 +335,7 @@ impl BackendRuntime for RocmBackend {
             return Ok(false);
         }
         // #1082: args are already kt (BackendRuntime trait flipped to kt),
-        // so there is no candle↔kt borrow — the kernel runs directly on the
+        // so there is no candle<->kt borrow - the kernel runs directly on the
         // caller's kt tensors. Bit-exact with the prior candle shim (same
         // FFI symbol).
         if step == 0 {
@@ -440,6 +394,54 @@ impl BackendRuntime for RocmBackend {
             );
         });
         Ok(true)
+    }
+}
+
+impl BackendRuntime for RocmBackend {
+    fn training_capabilities(&self) -> TrainingCapabilities {
+        Self::training_capabilities_static()
+    }
+
+    fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
+        TrainingPrecisionPolicy::rocm()
+    }
+
+    fn supports_resident_activation(&self) -> bool {
+        true
+    }
+
+    fn register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
+        super::cuda_rocm_common::mark_resident_activation(
+            &ROCM_RESIDENT_TENSOR_IDS,
+            tensor,
+            ROCM_RESIDENT_TENSOR_IDS_POISONED,
+        );
+        Ok(())
+    }
+
+    fn evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
+        super::cuda_rocm_common::evict_resident_activation(
+            &ROCM_RESIDENT_TENSOR_IDS,
+            tensor,
+            ROCM_RESIDENT_TENSOR_IDS_POISONED,
+        );
+    }
+
+    fn update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
+        super::cuda_rocm_common::mark_resident_activation(
+            &ROCM_RESIDENT_TENSOR_IDS,
+            tensor,
+            ROCM_RESIDENT_TENSOR_IDS_POISONED,
+        );
+        Ok(())
+    }
+
+    fn has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
+        super::cuda_rocm_common::has_resident_activation(
+            &ROCM_RESIDENT_TENSOR_IDS,
+            tensor,
+            ROCM_RESIDENT_TENSOR_IDS_POISONED,
+        )
     }
 
     fn supports_flash_attn_prefill(&self) -> bool {
