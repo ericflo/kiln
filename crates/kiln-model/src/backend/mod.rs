@@ -652,10 +652,12 @@ fn precompile_startup_kernels_for_backend(name: &str, device: kiln_tensor::Devic
     }
 }
 
-pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
+pub trait BackendRuntime: BackendIdentity + Send + Sync + std::fmt::Debug {
     /// Human-readable name (`"cuda"`, `"metal"`, `"cpu"`). Surfaced in
     /// `/health` and logs.
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &'static str {
+        BackendIdentity::runtime_name(self)
+    }
 
     /// The `kiln_tensor::Device` this backend drives. All tensors passed to
     /// trait methods must live on this device.
@@ -667,7 +669,9 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// that still need a candle `candle_core::Device` internally (e.g. for the kernel
     /// trait methods that take `candle_core::Tensor` parameters) keep a
     /// candle device cached alongside the kt one and bridge as needed.
-    fn device(&self) -> kiln_tensor::Device;
+    fn device(&self) -> kiln_tensor::Device {
+        BackendIdentity::runtime_device(self)
+    }
 
     /// `dyn Any` downcast target. Used by the Vulkan-resident decode
     /// fast-path in `transformer_block_paged_with_rope_tables` to recover
@@ -676,9 +680,7 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// no-op-`Any`-shaped reference; the concrete backend overrides
     /// this to return `self`.
     fn as_any(&self) -> &dyn std::any::Any {
-        // Default: return a Unit Any so `downcast_ref` against any
-        // concrete type returns None. Concrete backends override.
-        &()
+        BackendIdentity::runtime_as_any(self)
     }
 
     /// Operator-facing summary of which training paths are backend-native,
@@ -1902,9 +1904,6 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
 }
 
 /// Backend identity facet for the Phase 1 `BackendRuntime` split.
-///
-/// The methods are prefixed with `runtime_` so this scaffold can coexist
-/// with the broad compatibility trait while call sites migrate family by family.
 #[allow(clippy::too_many_arguments)]
 pub trait BackendIdentity: Send + Sync + std::fmt::Debug {
     fn runtime_name(&self) -> &'static str;
@@ -2600,21 +2599,6 @@ pub trait ReplayBackend: Send + Sync + std::fmt::Debug {
 
 // Blanket forwarding impls keep the focused traits behavior-identical to the
 // compatibility facade while later PRs move call sites to one facet at a time.
-#[allow(clippy::too_many_arguments)]
-impl<T: BackendRuntime + ?Sized> BackendIdentity for T {
-    fn runtime_name(&self) -> &'static str {
-        BackendRuntime::name(self)
-    }
-
-    fn runtime_device(&self) -> kiln_tensor::Device {
-        BackendRuntime::device(self)
-    }
-
-    fn runtime_as_any(&self) -> &dyn std::any::Any {
-        BackendRuntime::as_any(self)
-    }
-}
-
 impl<T: BackendRuntime + ?Sized> StartupBackend for T {
     fn runtime_precompile_startup_kernels(&self) -> Result<()> {
         BackendRuntime::precompile_startup_kernels(self)
@@ -3707,15 +3691,21 @@ mod tests {
         resident: bool,
     }
 
-    impl BackendRuntime for ResidentActivationProbeBackend {
-        fn name(&self) -> &'static str {
+    impl BackendIdentity for ResidentActivationProbeBackend {
+        fn runtime_name(&self) -> &'static str {
             self.name
         }
 
-        fn device(&self) -> kiln_tensor::Device {
+        fn runtime_device(&self) -> kiln_tensor::Device {
             kiln_tensor::Device::Cpu
         }
 
+        fn runtime_as_any(&self) -> &dyn std::any::Any {
+            &()
+        }
+    }
+
+    impl BackendRuntime for ResidentActivationProbeBackend {
         fn has_resident_activation(&self, _tensor: &kiln_tensor::Tensor) -> bool {
             self.resident
         }

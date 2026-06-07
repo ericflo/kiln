@@ -3,7 +3,7 @@
 //! device. Used on CPU, on Metal until Phase 2 adds a real backend, and
 //! as a safe default for any future device.
 
-use super::BackendRuntime;
+use super::{BackendIdentity, BackendRuntime};
 
 #[derive(Debug)]
 pub struct CpuBackend {
@@ -20,8 +20,8 @@ impl CpuBackend {
     }
 }
 
-impl BackendRuntime for CpuBackend {
-    fn name(&self) -> &'static str {
+impl BackendIdentity for CpuBackend {
+    fn runtime_name(&self) -> &'static str {
         match self.device_kt {
             kiln_tensor::Device::Cpu => "cpu",
             kiln_tensor::Device::Metal(_) => "metal-portable",
@@ -33,7 +33,13 @@ impl BackendRuntime for CpuBackend {
         }
     }
 
-    fn device(&self) -> kiln_tensor::Device {
+    fn runtime_device(&self) -> kiln_tensor::Device {
         self.device_kt
     }
+
+    fn runtime_as_any(&self) -> &dyn std::any::Any {
+        &()
+    }
 }
+
+impl BackendRuntime for CpuBackend {}

@@ -13,20 +13,27 @@ use super::metal_gdn::*;
 use super::metal_lm_head::*;
 use super::metal_paged::*;
 use super::{
-    BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy, metal_residency, metal_training,
+    BackendIdentity, BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy,
+    metal_residency, metal_training,
 };
+
+impl BackendIdentity for MetalBackend {
+    fn runtime_name(&self) -> &'static str {
+        "metal"
+    }
+
+    fn runtime_device(&self) -> kiln_tensor::Device {
+        self.device_kt
+    }
+
+    fn runtime_as_any(&self) -> &dyn std::any::Any {
+        &()
+    }
+}
 
 // #1082 DoD-101/102: BackendRuntime decode methods flipped to kt; metal/vulkan
 // impls need matching flip when their builds are restored.
 impl BackendRuntime for MetalBackend {
-    fn name(&self) -> &'static str {
-        "metal"
-    }
-
-    fn device(&self) -> kiln_tensor::Device {
-        self.device_kt
-    }
-
     fn training_capabilities(&self) -> TrainingCapabilities {
         Self::training_capabilities_static()
     }

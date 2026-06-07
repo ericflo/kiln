@@ -8547,15 +8547,21 @@ mod tests {
         device: kiln_tensor::Device,
     }
 
-    impl BackendRuntime for NamedTestBackend {
-        fn name(&self) -> &'static str {
+    impl BackendIdentity for NamedTestBackend {
+        fn runtime_name(&self) -> &'static str {
             self.name
         }
 
-        fn device(&self) -> kiln_tensor::Device {
+        fn runtime_device(&self) -> kiln_tensor::Device {
             self.device
         }
+
+        fn runtime_as_any(&self) -> &dyn std::any::Any {
+            &()
+        }
     }
+
+    impl BackendRuntime for NamedTestBackend {}
 
     #[test]
     fn decode_batcher_stats_report_runner_calls_per_token() {

@@ -28735,18 +28735,24 @@ mod tests {
         dims: (usize, usize, usize),
     }
 
-    impl BackendRuntime for FixedLinearBackend {
-        fn name(&self) -> &'static str {
+    impl crate::backend::BackendIdentity for FixedLinearBackend {
+        fn runtime_name(&self) -> &'static str {
             "fixed-linear-test"
         }
 
-        fn device(&self) -> kiln_tensor::Device {
+        fn runtime_device(&self) -> kiln_tensor::Device {
             // #1082: the struct's `device` field is now a kt `Device`
             // (`Copy`), so the trait's kt-typed accessor returns it directly
             // — no candle bridge needed.
             self.device
         }
 
+        fn runtime_as_any(&self) -> &dyn std::any::Any {
+            &()
+        }
+    }
+
+    impl BackendRuntime for FixedLinearBackend {
         fn linear_decode(
             &self,
             _x: &Tensor,
@@ -28771,16 +28777,22 @@ mod tests {
         gate_up_calls: std::sync::atomic::AtomicUsize,
     }
 
-    impl BackendRuntime for FixedMlpBackend {
-        fn name(&self) -> &'static str {
+    impl crate::backend::BackendIdentity for FixedMlpBackend {
+        fn runtime_name(&self) -> &'static str {
             "fixed-mlp-test"
         }
 
-        fn device(&self) -> kiln_tensor::Device {
+        fn runtime_device(&self) -> kiln_tensor::Device {
             // #1082: kt `Device` field returned directly.
             self.device
         }
 
+        fn runtime_as_any(&self) -> &dyn std::any::Any {
+            &()
+        }
+    }
+
+    impl BackendRuntime for FixedMlpBackend {
         fn mlp_decode(
             &self,
             _x: &Tensor,

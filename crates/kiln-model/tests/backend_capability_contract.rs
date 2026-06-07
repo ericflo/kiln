@@ -2582,10 +2582,15 @@ fn generated_capability_report_lists_focused_backend_facets() {
         let info = facets
             .get(facet)
             .unwrap_or_else(|| panic!("focused_backend_facets should list {facet}"));
+        let expected_forwarding = if facet == "BackendIdentity" {
+            "concrete_authoritative"
+        } else {
+            "blanket_backend_runtime"
+        };
         assert_eq!(
             info["forwarding_impl"].as_str(),
-            Some("blanket_backend_runtime"),
-            "{facet} should keep its BackendRuntime blanket forwarding impl while the facade remains"
+            Some(expected_forwarding),
+            "{facet} should report its current focused-trait implementation route"
         );
         assert!(
             info["method_count"].as_u64().unwrap_or_default() > 0,
@@ -2602,6 +2607,39 @@ fn generated_capability_report_lists_focused_backend_facets() {
             "{facet} should report focused method {required_method}"
         );
     }
+
+    let identity = facets
+        .get("BackendIdentity")
+        .expect("focused_backend_facets should list BackendIdentity");
+    let identity_impls = identity["concrete_impls"]
+        .as_array()
+        .expect("BackendIdentity concrete_impls should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    for backend in [
+        "CpuBackend",
+        "CudaBackend",
+        "RocmBackend",
+        "MetalBackend",
+        "VulkanBackend",
+    ] {
+        assert!(
+            identity_impls.contains(&backend),
+            "BackendIdentity should be implemented directly by {backend}"
+        );
+    }
+
+    let backend_source = fs::read_to_string(root.join("crates/kiln-model/src/backend/mod.rs"))
+        .expect("backend/mod.rs should be readable");
+    assert!(
+        !backend_source.contains("impl<T: BackendRuntime + ?Sized> BackendIdentity for T"),
+        "BackendIdentity should not regress to a blanket BackendRuntime forwarding impl"
+    );
+    assert!(
+        backend_source.contains("pub trait BackendRuntime: BackendIdentity"),
+        "BackendRuntime should inherit identity from the focused BackendIdentity facet"
+    );
 
     let report_md = fs::read_to_string(root.join("docs/backend-capability-report.md"))
         .expect("capability report md should be readable");
@@ -5734,8 +5772,38 @@ fn generated_capability_report_tracks_migration_phase_status() {
         );
     }
 
+    let phase1 = phases
+        .iter()
+        .find(|phase| phase["phase"] == 1)
+        .expect("Phase 1 should be present");
+    assert_eq!(
+        phase1["status"], "partial",
+        "Phase 1 should expose partial progress after BackendIdentity stops blanket-forwarding"
+    );
+    assert_eq!(phase1["contract"], "landed");
+    assert_eq!(phase1["migration"], "partial");
+    assert_eq!(phase1["genuine"], false);
+    let phase1_signals = phase1["migration_signals"]
+        .as_array()
+        .expect("Phase 1 should list machine signals");
+    let identity_signal = phase1_signals
+        .iter()
+        .find(|signal| signal["name"] == "backend_identity_facet_authoritative")
+        .expect("Phase 1 should include BackendIdentity authoritative signal");
+    assert_eq!(
+        identity_signal["passed"], true,
+        "BackendIdentity should be a completed W1 family slice"
+    );
+    let shim_signal = phase1_signals
+        .iter()
+        .find(|signal| signal["name"] == "focused_trait_forwarding_shims_removed")
+        .expect("Phase 1 should include all-shims-removed signal");
+    assert_eq!(
+        shim_signal["passed"], false,
+        "Phase 1 should stay incomplete while other focused traits still blanket-forward"
+    );
+
     for (phase_number, signal_name) in [
-        (1, "focused_trait_forwarding_shims_removed"),
         (3, "resident_registry_blanket_adapter_removed"),
         (4, "matmul_linear_identity_dispatch_removed"),
         (5, "production_replay_paths_use_replay_plan"),
@@ -5833,9 +5901,9 @@ fn generated_capability_report_tracks_migration_phase_status() {
     );
     assert!(
         report_md.contains(
-            "| Phase 1 | Introduce focused backend traits | `gap` | `landed` | `none` | no |"
+            "| Phase 1 | Introduce focused backend traits | `partial` | `landed` | `partial` | no |"
         ),
-        "Markdown report should expose Phase 1 as a non-genuine scaffold migration"
+        "Markdown report should expose Phase 1 as partially migrated but non-genuine"
     );
     assert!(
         report_md.contains("| Phase 8 | Conformance and performance gates | `covered` | `landed` | `complete` | yes |"),

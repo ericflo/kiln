@@ -28,8 +28,9 @@ use super::vulkan_tensor_bridge::{
     kt_tensor_to_packed_bf16_bytes_with_shape,
 };
 use super::{
-    BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy, vulkan_attention, vulkan_conv1d,
-    vulkan_dense, vulkan_device, vulkan_gdn, vulkan_linear, vulkan_training, vulkan_weights,
+    BackendIdentity, BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy,
+    vulkan_attention, vulkan_conv1d, vulkan_dense, vulkan_device, vulkan_gdn, vulkan_linear,
+    vulkan_training, vulkan_weights,
 };
 use crate::forward::GpuWeights;
 
@@ -278,20 +279,22 @@ impl Drop for VulkanBackend {
     }
 }
 
-// #1082 DoD-101/102: BackendRuntime decode methods flipped to kt; metal/vulkan impls need matching flip when their builds are restored.
-impl BackendRuntime for VulkanBackend {
-    fn name(&self) -> &'static str {
+impl BackendIdentity for VulkanBackend {
+    fn runtime_name(&self) -> &'static str {
         if self.has_vulkan() { "vulkan" } else { "cpu" }
     }
 
-    fn device(&self) -> kiln_tensor::Device {
+    fn runtime_device(&self) -> kiln_tensor::Device {
         self.device_kt
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
+    fn runtime_as_any(&self) -> &dyn std::any::Any {
         self
     }
+}
 
+// #1082 DoD-101/102: BackendRuntime decode methods flipped to kt; metal/vulkan impls need matching flip when their builds are restored.
+impl BackendRuntime for VulkanBackend {
     fn training_capabilities(&self) -> TrainingCapabilities {
         Self::training_capabilities_static()
     }

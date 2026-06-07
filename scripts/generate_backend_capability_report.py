@@ -132,6 +132,14 @@ FOCUSED_BACKEND_TRAITS = [
     "ReplayBackend",
 ]
 
+PRODUCTION_BACKEND_TYPES = {
+    "CpuBackend",
+    "CudaBackend",
+    "RocmBackend",
+    "MetalBackend",
+    "VulkanBackend",
+}
+
 REPLAY_AUTHORITIES = {
     "cuda": {
         "production_authority": "model_level_runner",
@@ -547,7 +555,10 @@ def capability_descriptor_report() -> dict[str, Any]:
 
 def focused_backend_facet_report() -> dict[str, Any]:
     backend_mod = ROOT / "crates" / "kiln-model" / "src" / "backend" / "mod.rs"
-    source = backend_mod.read_text()
+    backend_sources = [backend_mod] + sorted(
+        (ROOT / "crates" / "kiln-model" / "src" / "backend").glob("*.rs")
+    )
+    source = "\n".join(path.read_text() for path in backend_sources)
     report: dict[str, Any] = {}
     for trait_name in FOCUSED_BACKEND_TRAITS:
         methods = sorted(parse_trait_method_names(backend_mod, trait_name))
@@ -555,11 +566,27 @@ def focused_backend_facet_report() -> dict[str, Any]:
             f"impl<T: BackendRuntime + ?Sized> {trait_name} for T" in source
             or f"impl<T> {trait_name} for T" in source
         )
+        concrete_impls = sorted(
+            impl
+            for impl in set(
+                re.findall(rf"impl\s+{trait_name}\s+for\s+([A-Za-z0-9_]+Backend)\b", source)
+            )
+            if impl in PRODUCTION_BACKEND_TYPES
+        )
+        forwarding_impl = (
+            "blanket_backend_runtime"
+            if blanket_impl
+            else "concrete_authoritative"
+            if concrete_impls
+            else "missing"
+        )
         report[trait_name] = {
             "source": str(backend_mod.relative_to(ROOT)),
             "method_count": len(methods),
             "methods": methods,
-            "forwarding_impl": "blanket_backend_runtime" if blanket_impl else "missing",
+            "forwarding_impl": forwarding_impl,
+            "concrete_impl_count": len(concrete_impls),
+            "concrete_impls": concrete_impls,
         }
     return report
 
@@ -1268,6 +1295,30 @@ def focused_trait_forwarding_shim_count() -> int:
     )
 
 
+def focused_trait_blanket_shim_count(trait_name: str) -> int:
+    return regex_count(
+        "crates/kiln-model/src/backend/mod.rs",
+        rf"impl<T(?::|>).*?BackendRuntime.*?>\s+{trait_name}\s+for\s+T",
+    )
+
+
+def focused_trait_concrete_impls(trait_name: str) -> list[str]:
+    backend_sources = [
+        ROOT / "crates" / "kiln-model" / "src" / "backend" / "mod.rs"
+    ] + sorted((ROOT / "crates" / "kiln-model" / "src" / "backend").glob("*.rs"))
+    source = "\n".join(path.read_text() for path in backend_sources)
+    return sorted(
+        impl
+        for impl in set(
+            re.findall(
+                rf"impl\s+{trait_name}\s+for\s+([A-Za-z0-9_]+Backend)\b",
+                source,
+            )
+        )
+        if impl in PRODUCTION_BACKEND_TYPES
+    )
+
+
 def resident_registry_forwarding_shim_count() -> int:
     return regex_count(
         "crates/kiln-model/src/backend/mod.rs",
@@ -1298,6 +1349,13 @@ def replay_production_replay_plan_mentions() -> int:
 def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
     if phase == 1:
         shim_count = focused_trait_forwarding_shim_count()
+        identity_impls = focused_trait_concrete_impls("BackendIdentity")
+        identity_authoritative = (
+            focused_trait_blanket_shim_count("BackendIdentity") == 0
+            and set(identity_impls) == PRODUCTION_BACKEND_TYPES
+            and "pub trait BackendRuntime: BackendIdentity"
+            in file_text("crates/kiln-model/src/backend/mod.rs")
+        )
         method_count = len(
             parse_trait_method_names(
                 ROOT / "crates" / "kiln-model" / "src" / "backend" / "mod.rs",
@@ -1305,6 +1363,20 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
             )
         )
         return [
+            phase_signal(
+                "backend_identity_facet_authoritative",
+                identity_authoritative,
+                identity_impls,
+                sorted(PRODUCTION_BACKEND_TYPES),
+                [
+                    "crates/kiln-model/src/backend/mod.rs",
+                    "crates/kiln-model/src/backend/cpu.rs",
+                    "crates/kiln-model/src/backend/cuda.rs",
+                    "crates/kiln-model/src/backend/rocm.rs",
+                    "crates/kiln-model/src/backend/metal_runtime.rs",
+                    "crates/kiln-model/src/backend/vulkan.rs",
+                ],
+            ),
             phase_signal(
                 "focused_trait_forwarding_shims_removed",
                 shim_count == 0,
@@ -1750,12 +1822,14 @@ def markdown(data: dict[str, Any]) -> str:
     lines.append("")
     lines.append("## Focused Backend Facets")
     lines.append("")
-    lines.append("| Facet | Method Count | Forwarding Impl | Methods |")
-    lines.append("|---|---:|---|---|")
+    lines.append("| Facet | Method Count | Forwarding Impl | Concrete Impl Count | Concrete Impls | Methods |")
+    lines.append("|---|---:|---|---:|---|---|")
     for name, info in data["focused_backend_facets"].items():
         methods = ", ".join(f"`{method}`" for method in info["methods"])
+        concrete_impls = ", ".join(f"`{impl}`" for impl in info["concrete_impls"]) or "none"
         lines.append(
-            f"| `{name}` | {info['method_count']} | `{info['forwarding_impl']}` | {methods} |"
+            f"| `{name}` | {info['method_count']} | `{info['forwarding_impl']}` | "
+            f"{info['concrete_impl_count']} | {concrete_impls} | {methods} |"
         )
     lines.append("")
     lines.append("## Replay Authority")

@@ -10502,12 +10502,12 @@ pub(crate) mod tests {
         }
     }
 
-    impl BackendRuntime for NamedTestBackend {
-        fn name(&self) -> &'static str {
+    impl BackendIdentity for NamedTestBackend {
+        fn runtime_name(&self) -> &'static str {
             self.name
         }
 
-        fn device(&self) -> kiln_tensor::Device {
+        fn runtime_device(&self) -> kiln_tensor::Device {
             // Test mock always constructs with `Device::Cpu` via
             // `NamedTestBackend::runtime`, so the kt identity is the
             // CPU variant. Avoiding the `kiln_kt_bridge` crate keeps
@@ -10519,7 +10519,13 @@ pub(crate) mod tests {
             );
             kiln_tensor::Device::Cpu
         }
+
+        fn runtime_as_any(&self) -> &dyn std::any::Any {
+            &()
+        }
     }
+
+    impl BackendRuntime for NamedTestBackend {}
 
     /// Create a tiny ModelConfig for testing (4 layers, small dims).
     // (#1082) `pub(crate)` so `opd.rs`'s F32-on-Vulkan OPD test can reuse this
