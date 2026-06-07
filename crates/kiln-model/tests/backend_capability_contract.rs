@@ -5386,9 +5386,9 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
     );
     for expected in [
         "missing result artifact bench-results/backend-latency/cuda-a6000-flce-phase-a.json",
-        "missing result artifact bench-results/backend-latency/metal-apple-silicon-matmul.json",
         "missing result artifact bench-results/backend-latency/rocm-gfx1151-matmul.json",
         "missing result artifact bench-results/backend-latency/vulkan-rtx6000-decode.json",
+        "metal_apple_silicon_matmul_qwen35_4b: threshold_state is 'pending_fixture_result'",
         "metal_apple_silicon_sdpa_qwen35_4b: threshold_state is 'pending_fixture_result'",
         "threshold_state is 'pending_fixture_result'",
         "max threshold is not finite numeric",

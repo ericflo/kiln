@@ -2661,7 +2661,6 @@
         "cuda_a6000_flce_phase_a_validation.t2048_flce_on_step_secs: max threshold is not finite numeric",
         "cuda_a6000_flce_phase_a_validation.t8192_streaming_tile4096_step_secs: max threshold is not finite numeric",
         "cuda_a6000_flce_phase_a_validation.t16384_streaming_tile4096_step_secs: max threshold is not finite numeric",
-        "metal_apple_silicon_matmul_qwen35_4b: missing result artifact bench-results/backend-latency/metal-apple-silicon-matmul.json",
         "metal_apple_silicon_matmul_qwen35_4b: threshold_state is 'pending_fixture_result', expected 'locked_threshold'",
         "metal_apple_silicon_matmul_qwen35_4b.decode_qkv_m1_2560x4096_ms: max threshold is not finite numeric",
         "metal_apple_silicon_matmul_qwen35_4b.prefill_qkv_m256_2560x4096_ms: max threshold is not finite numeric",
