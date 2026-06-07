@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Plan gh workflow run dispatches for backend latency hardware fixtures."""
+"""Plan gh workflow run dispatches and gh api runner checks for latency fixtures."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -60,6 +61,28 @@ def current_git_ref() -> str:
     except (OSError, subprocess.CalledProcessError):
         return "HEAD"
     return ref or "HEAD"
+
+
+def current_github_repo() -> str | None:
+    try:
+        remote = subprocess.check_output(
+            ["git", "config", "--get", "remote.origin.url"],
+            cwd=ROOT,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+    patterns = [
+        r"^git@github\.com:([^/]+/[^/]+?)(?:\.git)?$",
+        r"^https://github\.com/([^/]+/[^/]+?)(?:\.git)?$",
+    ]
+    for pattern in patterns:
+        match = re.match(pattern, remote)
+        if match:
+            return match.group(1)
+    return None
 
 
 def repo_path(path: str, root: Path) -> Path:
@@ -171,6 +194,120 @@ def covered_gate_command() -> str:
     )
 
 
+def runner_label_names(runner: dict[str, Any]) -> list[str]:
+    labels = runner.get("labels")
+    if not isinstance(labels, list):
+        return []
+    names: list[str] = []
+    for label in labels:
+        if isinstance(label, dict) and isinstance(label.get("name"), str):
+            names.append(label["name"])
+        elif isinstance(label, str):
+            names.append(label)
+    return names
+
+
+def runner_matches_labels(runner: dict[str, Any], required_labels: list[str]) -> bool:
+    observed = {label.casefold() for label in runner_label_names(runner)}
+    return all(label.casefold() in observed for label in required_labels)
+
+
+def runner_summary(runner: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": runner.get("name"),
+        "status": runner.get("status"),
+        "busy": runner.get("busy"),
+        "labels": sorted(runner_label_names(runner), key=str.casefold),
+    }
+
+
+def runner_check_summary(
+    *,
+    repo: str,
+    runners: list[dict[str, Any]],
+    required_labels: list[str] | None,
+) -> dict[str, Any]:
+    if required_labels is None:
+        return {
+            "repo": repo,
+            "status": "labels_required",
+            "required_labels": None,
+            "total_runners": len(runners),
+            "matching_runners": [],
+            "matching_runner_count": 0,
+            "online_matching_runner_count": 0,
+            "idle_matching_runner_count": 0,
+        }
+
+    matches = [
+        runner for runner in runners if runner_matches_labels(runner, required_labels)
+    ]
+    online_matches = [
+        runner for runner in matches if runner.get("status") == "online"
+    ]
+    idle_matches = [
+        runner for runner in online_matches if runner.get("busy") is False
+    ]
+    if idle_matches:
+        status = "matching_online_idle"
+    elif online_matches:
+        status = "matching_online_busy"
+    elif matches:
+        status = "matching_offline"
+    else:
+        status = "no_matching_runner"
+    return {
+        "repo": repo,
+        "status": status,
+        "required_labels": required_labels,
+        "total_runners": len(runners),
+        "matching_runners": [runner_summary(runner) for runner in matches],
+        "matching_runner_count": len(matches),
+        "online_matching_runner_count": len(online_matches),
+        "idle_matching_runner_count": len(idle_matches),
+    }
+
+
+def runners_from_api_payload(payload: Any) -> list[dict[str, Any]]:
+    pages = payload if isinstance(payload, list) else [payload]
+    runners: list[dict[str, Any]] = []
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        page_runners = page.get("runners")
+        if not isinstance(page_runners, list):
+            continue
+        runners.extend(runner for runner in page_runners if isinstance(runner, dict))
+    return runners
+
+
+def fetch_github_runners(repo: str) -> list[dict[str, Any]]:
+    try:
+        output = subprocess.check_output(
+            [
+                "gh",
+                "api",
+                f"repos/{repo}/actions/runners",
+                "--paginate",
+                "--slurp",
+            ],
+            cwd=ROOT,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise DispatchPlanError("gh CLI is required for --check-runners") from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.strip() if exc.stderr else str(exc)
+        raise DispatchPlanError(f"failed to list GitHub runners for {repo}: {stderr}") from exc
+
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise DispatchPlanError(f"gh runner response was not valid JSON: {exc}") from exc
+    return runners_from_api_payload(payload)
+
+
 def dispatch_plans(
     manifest: dict[str, Any],
     *,
@@ -179,6 +316,8 @@ def dispatch_plans(
     include_covered: bool,
     override_labels: list[str] | None,
     ref: str,
+    runner_repo: str | None = None,
+    runner_inventory: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     fixtures = manifest.get("fixtures")
     if not isinstance(fixtures, list):
@@ -210,28 +349,34 @@ def dispatch_plans(
             if labels is not None
             else None
         )
-        plans.append(
-            {
-                "fixture_id": fixture_id,
-                "backend": fixture.get("backend"),
-                "threshold_state": fixture.get("threshold_state"),
-                "result_artifact": result_artifact,
-                "artifact_exists": artifact_exists,
-                "runner_labels": labels,
-                "needs_runner_labels": labels is None,
-                "workflow": f".github/workflows/{WORKFLOW_FILE}",
-                "ref": ref,
-                "gh_workflow_run": command,
-                "artifact_name_template": artifact_name_template(fixture_id),
-                "artifact_download_dir_template": artifact_download_dir_template(
-                    fixture_id
-                ),
-                "gh_run_download": gh_run_download_command(fixture_id),
-                "import_artifact": import_artifact_command(fixture_id),
-                "lock_threshold": lock_threshold_command(fixture_id),
-                "covered_gate_check": covered_gate_command(),
-            }
-        )
+        plan = {
+            "fixture_id": fixture_id,
+            "backend": fixture.get("backend"),
+            "threshold_state": fixture.get("threshold_state"),
+            "result_artifact": result_artifact,
+            "artifact_exists": artifact_exists,
+            "runner_labels": labels,
+            "needs_runner_labels": labels is None,
+            "workflow": f".github/workflows/{WORKFLOW_FILE}",
+            "ref": ref,
+            "gh_workflow_run": command,
+            "artifact_name_template": artifact_name_template(fixture_id),
+            "artifact_download_dir_template": artifact_download_dir_template(
+                fixture_id
+            ),
+            "gh_run_download": gh_run_download_command(fixture_id),
+            "import_artifact": import_artifact_command(fixture_id),
+            "lock_threshold": lock_threshold_command(fixture_id),
+            "covered_gate_check": covered_gate_command(),
+        }
+        if runner_inventory is not None:
+            assert runner_repo is not None
+            plan["github_runner_check"] = runner_check_summary(
+                repo=runner_repo,
+                runners=runner_inventory,
+                required_labels=labels,
+            )
+        plans.append(plan)
 
     missing = sorted(selected - seen)
     if missing:
@@ -275,6 +420,19 @@ def self_test() -> int:
             include_covered=False,
             override_labels=None,
             ref="feature-branch",
+            runner_repo="owner/repo",
+            runner_inventory=[
+                {
+                    "name": "a6000-1",
+                    "status": "online",
+                    "busy": False,
+                    "labels": [
+                        {"name": "self-hosted"},
+                        {"name": "Linux"},
+                        {"name": "cuda-a6000"},
+                    ],
+                }
+            ],
         )
         if [plan["fixture_id"] for plan in plans] != ["cuda_fixture", "rocm_fixture"]:
             print(json.dumps({"ok": False, "case": "pending plan selection", "plans": plans}))
@@ -294,10 +452,16 @@ def self_test() -> int:
             or "scripts/lock_backend_latency_thresholds.py" not in cuda_plan["lock_threshold"]
             or "--fixture-id cuda_fixture" not in cuda_plan["lock_threshold"]
             or "--require-covered" not in cuda_plan["covered_gate_check"]
+            or cuda_plan["github_runner_check"]["status"] != "matching_online_idle"
+            or cuda_plan["github_runner_check"]["idle_matching_runner_count"] != 1
         ):
             print(json.dumps({"ok": False, "case": "cuda command", "plan": cuda_plan}))
             return 1
-        if not plans[1]["needs_runner_labels"] or plans[1]["gh_workflow_run"] is not None:
+        if (
+            not plans[1]["needs_runner_labels"]
+            or plans[1]["gh_workflow_run"] is not None
+            or plans[1]["github_runner_check"]["status"] != "labels_required"
+        ):
             print(json.dumps({"ok": False, "case": "missing label marker", "plan": plans[1]}))
             return 1
 
@@ -309,14 +473,21 @@ def self_test() -> int:
             include_covered=False,
             override_labels=override,
             ref="feature-branch",
+            runner_repo="owner/repo",
+            runner_inventory=[],
         )[0]
         if (
             rocm_plan["needs_runner_labels"]
             or "latency_fixture_id=rocm_fixture" not in rocm_plan["gh_workflow_run"]
             or 'latency_runner_labels_json=["self-hosted","linux","rocm"]'
             not in rocm_plan["gh_workflow_run"]
+            or rocm_plan["github_runner_check"]["status"] != "no_matching_runner"
         ):
             print(json.dumps({"ok": False, "case": "override labels", "plan": rocm_plan}))
+            return 1
+
+        if current_github_repo() is not None and "/" not in current_github_repo():
+            print(json.dumps({"ok": False, "case": "repo detection"}))
             return 1
 
         try:
@@ -361,6 +532,15 @@ def main() -> int:
         help="Git ref for both the workflow version and checkout input; defaults to the current branch",
     )
     parser.add_argument(
+        "--check-runners",
+        action="store_true",
+        help="Query GitHub self-hosted runners and report whether fixture labels have a matching runner",
+    )
+    parser.add_argument(
+        "--github-repo",
+        help="Repository for --check-runners, in owner/name form; defaults to remote.origin.url",
+    )
+    parser.add_argument(
         "--shell",
         action="store_true",
         help="Print gh workflow run commands instead of a JSON plan",
@@ -387,6 +567,16 @@ def main() -> int:
         )
         manifest = load_manifest(manifest_path)
         ref = args.ref or current_git_ref()
+        runner_repo = None
+        runner_inventory = None
+        if args.check_runners:
+            runner_repo = args.github_repo or current_github_repo()
+            if runner_repo is None:
+                raise DispatchPlanError(
+                    "--check-runners requires --github-repo or a GitHub remote.origin.url"
+                )
+            runner_inventory = fetch_github_runners(runner_repo)
+
         plans = dispatch_plans(
             manifest,
             root=ROOT,
@@ -394,6 +584,8 @@ def main() -> int:
             include_covered=args.include_covered,
             override_labels=override_labels,
             ref=ref,
+            runner_repo=runner_repo,
+            runner_inventory=runner_inventory,
         )
     except (ArtifactError, DispatchPlanError) as exc:
         return fail(str(exc))

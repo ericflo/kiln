@@ -197,6 +197,10 @@ known, plus `gh_run_download`, `import_artifact`, `lock_threshold`, and
 `covered_gate_check` commands for the post-run artifact path. Replace the
 `RUN_ID` placeholder in the download command and artifact name after the
 workflow dispatch is accepted by GitHub Actions.
+Pass `--check-runners` to have the planner query GitHub self-hosted runners via
+`gh api` and attach `github_runner_check` status for each fixture, including
+whether declared labels have an online idle match. Use `--github-repo owner/name`
+when the repository cannot be inferred from `remote.origin.url`.
 
 Use `--shell` when every selected fixture has labels, either from the manifest
 or from an explicit override:
