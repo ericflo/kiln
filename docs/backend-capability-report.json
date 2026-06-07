@@ -1642,7 +1642,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "BackendFallbackCapabilities": {
-      "field_count": 3,
+      "field_count": 5,
       "fields": [
         {
           "name": "generic_device_op",
@@ -1653,8 +1653,16 @@
           "type": "FallbackPolicy"
         },
         {
+          "name": "decode_hot_path_debug_env",
+          "type": "Option<&'static str>"
+        },
+        {
           "name": "training_optimizer",
           "type": "FallbackPolicy"
+        },
+        {
+          "name": "training_optimizer_debug_env",
+          "type": "Option<&'static str>"
         }
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"

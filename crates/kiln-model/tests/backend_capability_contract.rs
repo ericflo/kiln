@@ -2013,6 +2013,22 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         !decode_policy_section.contains("match device"),
         "decode fallback policy should not branch directly on device kind"
     );
+    assert!(
+        decode_policy_section.contains("decode_hot_path_debug_env"),
+        "decode debug fallback opt-in should be read from BackendFallbackCapabilities"
+    );
+    let decode_debug_policy_section = source_between(
+        &generate_source,
+        "fn decode_hot_path_debug_fallback_enabled(",
+        "fn decode_hot_path_fallback_disabled_context(",
+    );
+    assert!(
+        !decode_debug_policy_section.contains("\"metal\"")
+            && !decode_debug_policy_section.contains("\"vulkan\"")
+            && !decode_debug_policy_section.contains("\"rocm\"")
+            && !decode_debug_policy_section.contains("match backend_name"),
+        "decode debug fallback opt-in should not keep a local backend-name env table"
+    );
 
     let decode_batcher_config_section = source_between(
         &generate_source,
@@ -2064,6 +2080,23 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     assert!(
         !trainer_policy_section.contains("match device"),
         "trainer optimizer fallback policy should not branch directly on device kind"
+    );
+    assert!(
+        trainer_policy_section.contains("training_optimizer_debug_env"),
+        "trainer optimizer debug fallback opt-in should be read from BackendFallbackCapabilities"
+    );
+    let trainer_debug_policy_section = source_between(
+        &trainer_source,
+        "fn training_optimizer_debug_fallback_enabled(",
+        "fn training_optimizer_fallback_policy(",
+    );
+    assert!(
+        !trainer_debug_policy_section.contains("\"cuda\"")
+            && !trainer_debug_policy_section.contains("\"metal\"")
+            && !trainer_debug_policy_section.contains("\"vulkan\"")
+            && !trainer_debug_policy_section.contains("\"rocm\"")
+            && !trainer_debug_policy_section.contains("match backend_name"),
+        "trainer optimizer debug fallback opt-in should not keep a local backend-name env table"
     );
 
     let orchestration_identity_sources =

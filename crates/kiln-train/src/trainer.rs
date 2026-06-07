@@ -6664,35 +6664,22 @@ pub fn optimizer_step_dispatch(
     }
 }
 
-fn training_optimizer_debug_fallback_enabled(backend_name: &str) -> bool {
+fn training_optimizer_debug_fallback_enabled(debug_env: Option<&'static str>) -> bool {
     kiln_core::env_flag::env_flag("KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK", false)
-        || match backend_name {
-            "cuda" => {
-                kiln_core::env_flag::env_flag("KILN_CUDA_TRAINING_OPTIMIZER_FALLBACK", false)
-            }
-            "metal" => {
-                kiln_core::env_flag::env_flag("KILN_METAL_TRAINING_OPTIMIZER_FALLBACK", false)
-            }
-            "vulkan" => {
-                kiln_core::env_flag::env_flag("KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK", false)
-            }
-            "rocm" => {
-                kiln_core::env_flag::env_flag("KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK", false)
-            }
-            _ => false,
-        }
+        || debug_env
+            .map(|env_var| kiln_core::env_flag::env_flag(env_var, false))
+            .unwrap_or(false)
 }
 
 fn training_optimizer_fallback_policy(
     backend: &dyn BackendRuntime,
     _device: kiln_tensor::Device,
 ) -> FallbackPolicy {
-    if training_optimizer_debug_fallback_enabled(BackendIdentity::runtime_name(backend)) {
+    let fallback = BackendCapabilityQueries::backend_capabilities(backend).fallback;
+    if training_optimizer_debug_fallback_enabled(fallback.training_optimizer_debug_env) {
         return FallbackPolicy::WarnAndCount;
     }
-    BackendCapabilityQueries::backend_capabilities(backend)
-        .fallback
-        .training_optimizer
+    fallback.training_optimizer
 }
 
 fn ensure_training_optimizer_fallback_allowed(
@@ -9009,16 +8996,40 @@ pub(crate) mod tests {
                 .training_optimizer,
             FallbackPolicy::CorrectnessAllowed
         );
-        for (backend_name, device) in [
-            ("cuda", kiln_tensor::Device::Cuda(0)),
-            ("metal", kiln_tensor::Device::Metal(0)),
-            ("vulkan", kiln_tensor::Device::Vulkan(0)),
-            ("rocm", kiln_tensor::Device::Rocm(0)),
+        assert_eq!(
+            kiln_model::BackendFallbackCapabilities::for_backend("cpu", kiln_tensor::Device::Cpu)
+                .training_optimizer_debug_env,
+            None
+        );
+        for (backend_name, device, debug_env) in [
+            (
+                "cuda",
+                kiln_tensor::Device::Cuda(0),
+                "KILN_CUDA_TRAINING_OPTIMIZER_FALLBACK",
+            ),
+            (
+                "metal",
+                kiln_tensor::Device::Metal(0),
+                "KILN_METAL_TRAINING_OPTIMIZER_FALLBACK",
+            ),
+            (
+                "vulkan",
+                kiln_tensor::Device::Vulkan(0),
+                "KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK",
+            ),
+            (
+                "rocm",
+                kiln_tensor::Device::Rocm(0),
+                "KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK",
+            ),
         ] {
+            let fallback =
+                kiln_model::BackendFallbackCapabilities::for_backend(backend_name, device);
+            assert_eq!(fallback.training_optimizer, FallbackPolicy::NativeRequired);
             assert_eq!(
-                kiln_model::BackendFallbackCapabilities::for_backend(backend_name, device)
-                    .training_optimizer,
-                FallbackPolicy::NativeRequired
+                fallback.training_optimizer_debug_env,
+                Some(debug_env),
+                "{backend_name} training optimizer debug fallback env drifted"
             );
         }
     }
@@ -9042,6 +9053,50 @@ pub(crate) mod tests {
             assert!(policy.allows_fallback());
         }
         restore_env("KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK", prior);
+    }
+
+    #[test]
+    fn training_optimizer_backend_debug_fallback_uses_policy_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let keys = [
+            "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK",
+            "KILN_CUDA_TRAINING_OPTIMIZER_FALLBACK",
+            "KILN_METAL_TRAINING_OPTIMIZER_FALLBACK",
+            "KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK",
+            "KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK",
+        ];
+        let prior = keys
+            .iter()
+            .map(|&key| (key, std::env::var(key).ok()))
+            .collect::<Vec<_>>();
+        unsafe {
+            for &key in &keys {
+                std::env::remove_var(key);
+            }
+        }
+
+        let cuda = NamedTestBackend::runtime("cuda");
+        let metal = NamedTestBackend::runtime("metal");
+        assert_eq!(
+            training_optimizer_fallback_policy(cuda.as_ref(), kiln_tensor::Device::Cuda(0)),
+            FallbackPolicy::NativeRequired
+        );
+        unsafe {
+            std::env::set_var("KILN_METAL_TRAINING_OPTIMIZER_FALLBACK", "1");
+        }
+        assert_eq!(
+            training_optimizer_fallback_policy(metal.as_ref(), kiln_tensor::Device::Metal(0)),
+            FallbackPolicy::WarnAndCount
+        );
+        assert_eq!(
+            training_optimizer_fallback_policy(cuda.as_ref(), kiln_tensor::Device::Cuda(0)),
+            FallbackPolicy::NativeRequired,
+            "Metal optimizer fallback env should not apply to CUDA policy"
+        );
+
+        for (key, value) in prior {
+            restore_env(key, value);
+        }
     }
 
     fn restore_env(key: &str, prior: Option<String>) {

@@ -3494,10 +3494,12 @@ mod tests {
             caps.fallback.decode_hot_path,
             FallbackPolicy::CorrectnessAllowed
         );
+        assert_eq!(caps.fallback.decode_hot_path_debug_env, None);
         assert_eq!(
             caps.fallback.training_optimizer,
             FallbackPolicy::CorrectnessAllowed
         );
+        assert_eq!(caps.fallback.training_optimizer_debug_env, None);
 
         let vulkan_probe = ResidentActivationProbeBackend {
             name: "vulkan",
@@ -3515,8 +3517,16 @@ mod tests {
             FallbackPolicy::NativeRequired
         );
         assert_eq!(
+            vulkan_caps.fallback.decode_hot_path_debug_env,
+            Some("KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK")
+        );
+        assert_eq!(
             vulkan_caps.fallback.training_optimizer,
             FallbackPolicy::NativeRequired
+        );
+        assert_eq!(
+            vulkan_caps.fallback.training_optimizer_debug_env,
+            Some("KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK")
         );
     }
 

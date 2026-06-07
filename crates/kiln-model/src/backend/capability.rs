@@ -907,7 +907,9 @@ impl ReplayAuthority {
 pub struct BackendFallbackCapabilities {
     pub generic_device_op: FallbackPolicy,
     pub decode_hot_path: FallbackPolicy,
+    pub decode_hot_path_debug_env: Option<&'static str>,
     pub training_optimizer: FallbackPolicy,
+    pub training_optimizer_debug_env: Option<&'static str>,
 }
 
 /// Training capability and dtype policy surface.
@@ -1162,7 +1164,9 @@ impl BackendFallbackCapabilities {
         Self {
             generic_device_op: generic_device_op_fallback_policy(name, device),
             decode_hot_path: decode_hot_path_fallback_policy(name, device),
+            decode_hot_path_debug_env: decode_hot_path_debug_fallback_env(name, device),
             training_optimizer: training_optimizer_fallback_policy(name, device),
+            training_optimizer_debug_env: training_optimizer_debug_fallback_env(name, device),
         }
     }
 }
@@ -1184,11 +1188,36 @@ fn decode_hot_path_fallback_policy(name: &str, _device: kiln_tensor::Device) -> 
     }
 }
 
+fn decode_hot_path_debug_fallback_env(
+    name: &str,
+    _device: kiln_tensor::Device,
+) -> Option<&'static str> {
+    match name {
+        "metal" => Some("KILN_METAL_DECODE_BATCH_GENERIC_FALLBACK"),
+        "vulkan" => Some("KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK"),
+        "rocm" => Some("KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK"),
+        _ => None,
+    }
+}
+
 fn training_optimizer_fallback_policy(name: &str, _device: kiln_tensor::Device) -> FallbackPolicy {
     match name {
         "cpu" => FallbackPolicy::CorrectnessAllowed,
         "cuda" | "metal" | "vulkan" | "rocm" => FallbackPolicy::NativeRequired,
         _ => FallbackPolicy::ErrorInHotPath,
+    }
+}
+
+fn training_optimizer_debug_fallback_env(
+    name: &str,
+    _device: kiln_tensor::Device,
+) -> Option<&'static str> {
+    match name {
+        "cuda" => Some("KILN_CUDA_TRAINING_OPTIMIZER_FALLBACK"),
+        "metal" => Some("KILN_METAL_TRAINING_OPTIMIZER_FALLBACK"),
+        "vulkan" => Some("KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK"),
+        "rocm" => Some("KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK"),
+        _ => None,
     }
 }
 

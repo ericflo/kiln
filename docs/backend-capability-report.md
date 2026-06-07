@@ -171,7 +171,7 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `BackendTrainingCapabilities` | 2 | `hooks`, `precision` |
 | `ReplayCapabilities` | 3 | `resident_decode`, `paged_decode_graph_outputs`, `authority` |
 | `ReplayAuthority` | 4 | `backend`, `production_authority`, `native_primitive`, `graph_crate_role` |
-| `BackendFallbackCapabilities` | 3 | `generic_device_op`, `decode_hot_path`, `training_optimizer` |
+| `BackendFallbackCapabilities` | 5 | `generic_device_op`, `decode_hot_path`, `decode_hot_path_debug_env`, `training_optimizer`, `training_optimizer_debug_env` |
 
 ## Resident Resource Descriptors
 
