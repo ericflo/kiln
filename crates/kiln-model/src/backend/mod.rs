@@ -655,6 +655,7 @@ fn precompile_startup_kernels_for_backend(name: &str, device: kiln_tensor::Devic
 pub trait BackendRuntime:
     BackendIdentity
     + StartupBackend
+    + AttentionBackend
     + ConvBackend
     + SamplingBackend
     + OptimizerBackend
@@ -747,15 +748,15 @@ pub trait BackendRuntime:
     }
 
     fn supports_flash_attn_prefill(&self) -> bool {
-        false
+        AttentionBackend::runtime_supports_flash_attn_prefill(self)
     }
 
     fn supports_flash_attn_prefill_head_major(&self) -> bool {
-        false
+        AttentionBackend::runtime_supports_flash_attn_prefill_head_major(self)
     }
 
     fn supports_flash_attn_paged_decode(&self) -> bool {
-        false
+        AttentionBackend::runtime_supports_flash_attn_paged_decode(self)
     }
 
     /// FlashAttention-style decode for the common single-sequence case where
@@ -766,14 +767,22 @@ pub trait BackendRuntime:
     /// num_heads * head_dim]`.
     fn flash_attn_paged_decode_contiguous(
         &self,
-        _q: &kiln_tensor::Tensor,
-        _k_pool: &kiln_tensor::Tensor,
-        _v_pool: &kiln_tensor::Tensor,
-        _start_slot: usize,
-        _total_seqlen_k: usize,
-        _softmax_scale: f32,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        start_slot: usize,
+        total_seqlen_k: usize,
+        softmax_scale: f32,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        AttentionBackend::runtime_flash_attn_paged_decode_contiguous(
+            self,
+            q,
+            k_pool,
+            v_pool,
+            start_slot,
+            total_seqlen_k,
+            softmax_scale,
+        )
     }
 
     /// Batched variant of [`Self::flash_attn_paged_decode_contiguous`] for a
@@ -784,14 +793,22 @@ pub trait BackendRuntime:
     /// Returns `[batch, 1, num_heads * head_dim]`.
     fn flash_attn_paged_decode_contiguous_batch(
         &self,
-        _q: &kiln_tensor::Tensor,
-        _k_pool: &kiln_tensor::Tensor,
-        _v_pool: &kiln_tensor::Tensor,
-        _start_slots: &kiln_tensor::Tensor,
-        _total_seqlen_k: usize,
-        _softmax_scale: f32,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        start_slots: &kiln_tensor::Tensor,
+        total_seqlen_k: usize,
+        softmax_scale: f32,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        AttentionBackend::runtime_flash_attn_paged_decode_contiguous_batch(
+            self,
+            q,
+            k_pool,
+            v_pool,
+            start_slots,
+            total_seqlen_k,
+            softmax_scale,
+        )
     }
 
     /// Whether the backend implements the strict (uniform-`start_pos`)
@@ -814,7 +831,7 @@ pub trait BackendRuntime:
     /// strict kernel has no CUDA impl today and the captured HtoD
     /// scratch is a clean-up wart.
     fn supports_strict_paged_decode_contiguous_batch(&self) -> bool {
-        true
+        AttentionBackend::runtime_supports_strict_paged_decode_contiguous_batch(self)
     }
 
     /// Varlen variant of [`Self::flash_attn_paged_decode_contiguous_batch`] for
@@ -827,17 +844,28 @@ pub trait BackendRuntime:
     /// per-row attention length. Returns `[batch, 1, num_heads, head_dim]`.
     fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
         &self,
-        _q: &kiln_tensor::Tensor,
-        _k_pool: &kiln_tensor::Tensor,
-        _v_pool: &kiln_tensor::Tensor,
-        _block_table: &kiln_tensor::Tensor,
-        _seqused_k: &kiln_tensor::Tensor,
-        _max_seqlen_k: usize,
-        _page_block_size: usize,
-        _softmax_scale: f32,
-        _causal: bool,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        block_table: &kiln_tensor::Tensor,
+        seqused_k: &kiln_tensor::Tensor,
+        max_seqlen_k: usize,
+        page_block_size: usize,
+        softmax_scale: f32,
+        causal: bool,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        AttentionBackend::runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+            self,
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            seqused_k,
+            max_seqlen_k,
+            page_block_size,
+            softmax_scale,
+            causal,
+        )
     }
 
     /// CUDA-graph-aware variant of
@@ -875,7 +903,8 @@ pub trait BackendRuntime:
         softmax_scale: f32,
         causal: bool,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        self.flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+        AttentionBackend::runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+            self,
             q,
             k_pool,
             v_pool,
@@ -1189,13 +1218,13 @@ pub trait BackendRuntime:
     /// `[batch, seq_len, num_heads, head_dim]` bf16.
     fn flash_attn_prefill(
         &self,
-        _q: &kiln_tensor::Tensor,
-        _k: &kiln_tensor::Tensor,
-        _v: &kiln_tensor::Tensor,
-        _softmax_scale: f32,
-        _causal: bool,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        softmax_scale: f32,
+        causal: bool,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        AttentionBackend::runtime_flash_attn_prefill(self, q, k, v, softmax_scale, causal)
     }
 
     /// FlashAttention-2 forward for prefill with Q/K/V already in SDPA layout.
@@ -1206,13 +1235,20 @@ pub trait BackendRuntime:
     /// `[batch, num_heads, seq_len, head_dim]` bf16.
     fn flash_attn_prefill_head_major(
         &self,
-        _q: &kiln_tensor::Tensor,
-        _k: &kiln_tensor::Tensor,
-        _v: &kiln_tensor::Tensor,
-        _softmax_scale: f32,
-        _causal: bool,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        softmax_scale: f32,
+        causal: bool,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        AttentionBackend::runtime_flash_attn_prefill_head_major(
+            self,
+            q,
+            k,
+            v,
+            softmax_scale,
+            causal,
+        )
     }
 
     /// FlashAttention-2 paged decode (single query token against paged K/V pool).
@@ -1227,16 +1263,26 @@ pub trait BackendRuntime:
     #[allow(clippy::too_many_arguments)]
     fn flash_attn_paged_decode(
         &self,
-        _q: &kiln_tensor::Tensor,
-        _k_pool: &kiln_tensor::Tensor,
-        _v_pool: &kiln_tensor::Tensor,
-        _block_table: &kiln_tensor::Tensor,
-        _total_seqlen_k: usize,
-        _page_block_size: usize,
-        _softmax_scale: f32,
-        _causal: bool,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        block_table: &kiln_tensor::Tensor,
+        total_seqlen_k: usize,
+        page_block_size: usize,
+        softmax_scale: f32,
+        causal: bool,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        AttentionBackend::runtime_flash_attn_paged_decode(
+            self,
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            total_seqlen_k,
+            page_block_size,
+            softmax_scale,
+            causal,
+        )
     }
 
     /// Materialize a contiguous head-major K/V view from a contiguous paged
@@ -1252,9 +1298,7 @@ pub trait BackendRuntime:
         start_slot: usize,
         seq_len: usize,
     ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
-        PagedKvBackend::runtime_paged_kv_head_major_read(
-            self, k_pool, v_pool, start_slot, seq_len,
-        )
+        PagedKvBackend::runtime_paged_kv_head_major_read(self, k_pool, v_pool, start_slot, seq_len)
     }
 
     /// Materialize a contiguous head-major K/V view from a contiguous paged
@@ -1978,76 +2022,96 @@ pub trait StartupBackend: BackendIdentity + Send + Sync + std::fmt::Debug {
 /// Focused `AttentionBackend` facet delegated by the current `BackendRuntime` facade.
 #[allow(clippy::too_many_arguments)]
 pub trait AttentionBackend: Send + Sync + std::fmt::Debug {
-    fn runtime_supports_flash_attn_prefill(&self) -> bool;
+    fn runtime_supports_flash_attn_prefill(&self) -> bool {
+        false
+    }
 
-    fn runtime_supports_flash_attn_prefill_head_major(&self) -> bool;
+    fn runtime_supports_flash_attn_prefill_head_major(&self) -> bool {
+        false
+    }
 
-    fn runtime_supports_flash_attn_paged_decode(&self) -> bool;
+    fn runtime_supports_flash_attn_paged_decode(&self) -> bool {
+        false
+    }
 
     fn runtime_flash_attn_paged_decode_contiguous(
         &self,
-        q: &kiln_tensor::Tensor,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        start_slot: usize,
-        total_seqlen_k: usize,
-        softmax_scale: f32,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _q: &kiln_tensor::Tensor,
+        _k_pool: &kiln_tensor::Tensor,
+        _v_pool: &kiln_tensor::Tensor,
+        _start_slot: usize,
+        _total_seqlen_k: usize,
+        _softmax_scale: f32,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
     fn runtime_flash_attn_paged_decode_contiguous_batch(
         &self,
-        q: &kiln_tensor::Tensor,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        start_slots: &kiln_tensor::Tensor,
-        total_seqlen_k: usize,
-        softmax_scale: f32,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _q: &kiln_tensor::Tensor,
+        _k_pool: &kiln_tensor::Tensor,
+        _v_pool: &kiln_tensor::Tensor,
+        _start_slots: &kiln_tensor::Tensor,
+        _total_seqlen_k: usize,
+        _softmax_scale: f32,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
-    fn runtime_supports_strict_paged_decode_contiguous_batch(&self) -> bool;
+    fn runtime_supports_strict_paged_decode_contiguous_batch(&self) -> bool {
+        true
+    }
 
     fn runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
         &self,
-        q: &kiln_tensor::Tensor,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        block_table: &kiln_tensor::Tensor,
-        seqused_k: &kiln_tensor::Tensor,
-        max_seqlen_k: usize,
-        page_block_size: usize,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _q: &kiln_tensor::Tensor,
+        _k_pool: &kiln_tensor::Tensor,
+        _v_pool: &kiln_tensor::Tensor,
+        _block_table: &kiln_tensor::Tensor,
+        _seqused_k: &kiln_tensor::Tensor,
+        _max_seqlen_k: usize,
+        _page_block_size: usize,
+        _softmax_scale: f32,
+        _causal: bool,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
     fn runtime_flash_attn_prefill(
         &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _q: &kiln_tensor::Tensor,
+        _k: &kiln_tensor::Tensor,
+        _v: &kiln_tensor::Tensor,
+        _softmax_scale: f32,
+        _causal: bool,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
     fn runtime_flash_attn_prefill_head_major(
         &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _q: &kiln_tensor::Tensor,
+        _k: &kiln_tensor::Tensor,
+        _v: &kiln_tensor::Tensor,
+        _softmax_scale: f32,
+        _causal: bool,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
     fn runtime_flash_attn_paged_decode(
         &self,
-        q: &kiln_tensor::Tensor,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        block_table: &kiln_tensor::Tensor,
-        total_seqlen_k: usize,
-        page_block_size: usize,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _q: &kiln_tensor::Tensor,
+        _k_pool: &kiln_tensor::Tensor,
+        _v_pool: &kiln_tensor::Tensor,
+        _block_table: &kiln_tensor::Tensor,
+        _total_seqlen_k: usize,
+        _page_block_size: usize,
+        _softmax_scale: f32,
+        _causal: bool,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 }
 
 /// Focused `PagedKvBackend` facet for paged KV cache materialization helpers.
@@ -2692,137 +2756,6 @@ pub trait ReplayBackend: Send + Sync + std::fmt::Debug {
 
 // Blanket forwarding impls keep the focused traits behavior-identical to the
 // compatibility facade while later PRs move call sites to one facet at a time.
-#[allow(clippy::too_many_arguments)]
-impl<T: BackendRuntime + ?Sized> AttentionBackend for T {
-    fn runtime_supports_flash_attn_prefill(&self) -> bool {
-        BackendRuntime::supports_flash_attn_prefill(self)
-    }
-
-    fn runtime_supports_flash_attn_prefill_head_major(&self) -> bool {
-        BackendRuntime::supports_flash_attn_prefill_head_major(self)
-    }
-
-    fn runtime_supports_flash_attn_paged_decode(&self) -> bool {
-        BackendRuntime::supports_flash_attn_paged_decode(self)
-    }
-
-    fn runtime_flash_attn_paged_decode_contiguous(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        start_slot: usize,
-        total_seqlen_k: usize,
-        softmax_scale: f32,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::flash_attn_paged_decode_contiguous(
-            self,
-            q,
-            k_pool,
-            v_pool,
-            start_slot,
-            total_seqlen_k,
-            softmax_scale,
-        )
-    }
-
-    fn runtime_flash_attn_paged_decode_contiguous_batch(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        start_slots: &kiln_tensor::Tensor,
-        total_seqlen_k: usize,
-        softmax_scale: f32,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::flash_attn_paged_decode_contiguous_batch(
-            self,
-            q,
-            k_pool,
-            v_pool,
-            start_slots,
-            total_seqlen_k,
-            softmax_scale,
-        )
-    }
-
-    fn runtime_supports_strict_paged_decode_contiguous_batch(&self) -> bool {
-        BackendRuntime::supports_strict_paged_decode_contiguous_batch(self)
-    }
-
-    fn runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        block_table: &kiln_tensor::Tensor,
-        seqused_k: &kiln_tensor::Tensor,
-        max_seqlen_k: usize,
-        page_block_size: usize,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
-            self,
-            q,
-            k_pool,
-            v_pool,
-            block_table,
-            seqused_k,
-            max_seqlen_k,
-            page_block_size,
-            softmax_scale,
-            causal,
-        )
-    }
-
-    fn runtime_flash_attn_prefill(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::flash_attn_prefill(self, q, k, v, softmax_scale, causal)
-    }
-
-    fn runtime_flash_attn_prefill_head_major(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::flash_attn_prefill_head_major(self, q, k, v, softmax_scale, causal)
-    }
-
-    fn runtime_flash_attn_paged_decode(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        block_table: &kiln_tensor::Tensor,
-        total_seqlen_k: usize,
-        page_block_size: usize,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::flash_attn_paged_decode(
-            self,
-            q,
-            k_pool,
-            v_pool,
-            block_table,
-            total_seqlen_k,
-            page_block_size,
-            softmax_scale,
-            causal,
-        )
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 impl<T: BackendRuntime + ?Sized> GdnBackend for T {
     fn runtime_supports_gdn_forward_substitution(&self) -> bool {
@@ -3582,6 +3515,8 @@ mod tests {
     }
 
     impl StartupBackend for ResidentActivationProbeBackend {}
+
+    impl AttentionBackend for ResidentActivationProbeBackend {}
 
     impl ConvBackend for ResidentActivationProbeBackend {}
 

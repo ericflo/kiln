@@ -8,8 +8,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
-    BackendIdentity, BackendRuntime, ConvBackend, OptimizerBackend, PagedKvBackend, SamplingBackend,
-    StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
+    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, OptimizerBackend,
+    PagedKvBackend, SamplingBackend, StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
 };
 use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 
@@ -282,6 +282,189 @@ impl BackendIdentity for RocmBackend {
 impl StartupBackend for RocmBackend {}
 
 #[allow(clippy::too_many_arguments)]
+impl AttentionBackend for RocmBackend {
+    fn runtime_supports_flash_attn_prefill(&self) -> bool {
+        self.support_predicates().supports_flash_attn_prefill()
+    }
+
+    fn runtime_supports_flash_attn_prefill_head_major(&self) -> bool {
+        kiln_core::env_flag::env_flag("KILN_ROCM_HEAD_MAJOR_PREFILL", true)
+    }
+
+    fn runtime_supports_flash_attn_paged_decode(&self) -> bool {
+        self.support_predicates().supports_flash_attn_paged_decode()
+    }
+
+    /// ROCm has no impl for the strict `flash_attn_paged_decode_contiguous_batch`
+    /// kernel (the bs>1 head-major uniform-`start_pos` path), so the trait
+    /// default `Ok(None)` always declines. Returning `false` here lets the
+    /// `try_strict` probe in `gqa_attention_paged_decode_contiguous_batch`
+    /// skip the `start_slots = Tensor::from_slice(...)` allocation that
+    /// would otherwise emit a captured host-to-device copy to a recycled
+    /// allocation under graph capture.
+    fn runtime_supports_strict_paged_decode_contiguous_batch(&self) -> bool {
+        self.support_predicates()
+            .supports_strict_paged_decode_contiguous_batch()
+    }
+
+    fn runtime_flash_attn_prefill(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        softmax_scale: f32,
+        causal: bool,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // The vendored CUDA/HIP kernel hard-errors on non-BF16. Decline here so
+        // the caller falls back to the portable path instead of bubbling a
+        // hard error up for non-BF16 test configs.
+        if q.track_op() || k.track_op() || v.track_op() {
+            ROCM_FLASH_ATTN_TRACKED_DECLINES.fetch_add(1, Ordering::Relaxed);
+            return Ok(None);
+        }
+        if q.dtype() != kiln_tensor::DType::BF16 {
+            return Ok(None);
+        }
+        // The vendored FA-2 kernel only supports head_dim 128/256 and
+        // hard-errors otherwise. Decline (mirroring the BF16 decline above)
+        // so non-{128,256} configs — e.g. the head_dim=16 tiny test model on
+        // the detached CP-4 tape-authoritative path, which clears the
+        // track_op + BF16 gates above — fall back to the portable SDPA path
+        // instead of bubbling a hard error. (#1082)
+        if !matches!(q.dims().last(), Some(&128) | Some(&256)) {
+            return Ok(None);
+        }
+        // Phase 7 (#1082): kt-typed surface is now the only path. Args
+        // are already kt (#1082 DoD-101/102), so the candle↔kt bridges
+        // are gone — the kernel runs directly on the caller's kt
+        // tensors. candle wrapper discards softmax_lse, kt path does
+        // the same here.
+        kiln_nvtx::range!(c"kiln/flash_attn_kt");
+        let q_c = q.contiguous().context("flash_attn kt: q contiguous")?;
+        let k_c = k.contiguous().context("flash_attn kt: k contiguous")?;
+        let v_c = v.contiguous().context("flash_attn kt: v contiguous")?;
+        let (out_kt, _lse_kt) =
+            kiln_flash_attn::flash_attn_fwd_kt(&q_c, &k_c, &v_c, softmax_scale, causal)
+                .map_err(|e| anyhow::anyhow!("flash_attn kt: flash_attn_fwd_kt: {e}"))?;
+        Ok(Some(out_kt))
+    }
+
+    fn runtime_flash_attn_prefill_head_major(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        softmax_scale: f32,
+        causal: bool,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if q.track_op() || k.track_op() || v.track_op() {
+            ROCM_FLASH_ATTN_TRACKED_DECLINES.fetch_add(1, Ordering::Relaxed);
+            return Ok(None);
+        }
+        if q.dtype() != kiln_tensor::DType::BF16 {
+            return Ok(None);
+        }
+        if !matches!(q.dims().last(), Some(&128) | Some(&256)) {
+            return Ok(None);
+        }
+        kiln_nvtx::range!(c"kiln/flash_attn_head_major_kt");
+        let q_c = q
+            .contiguous()
+            .context("flash_attn head-major kt: q contiguous")?;
+        let k_c = k
+            .contiguous()
+            .context("flash_attn head-major kt: k contiguous")?;
+        let v_c = v
+            .contiguous()
+            .context("flash_attn head-major kt: v contiguous")?;
+        let (out_kt, _lse_kt) =
+            kiln_flash_attn::flash_attn_fwd_head_major_kt(&q_c, &k_c, &v_c, softmax_scale, causal)
+                .map_err(|e| {
+                    anyhow::anyhow!("flash_attn head-major kt: flash_attn_fwd_head_major_kt: {e}")
+                })?;
+        Ok(Some(out_kt))
+    }
+
+    fn runtime_flash_attn_paged_decode(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        block_table: &kiln_tensor::Tensor,
+        total_seqlen_k: usize,
+        page_block_size: usize,
+        softmax_scale: f32,
+        causal: bool,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if q.track_op()
+            || k_pool.track_op()
+            || v_pool.track_op()
+            || block_table.track_op()
+            || q.dtype() != kiln_tensor::DType::BF16
+        {
+            return Ok(None);
+        }
+        // Phase 7 (#1082): kt-only. Args are already kt (#1082
+        // DoD-101/102), so no candle↔kt bridge — the kernel runs
+        // directly on the caller's kt tensors.
+        kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_kt");
+        let out_kt = kiln_flash_attn::flash_attn_paged_decode_kt(
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            total_seqlen_k,
+            page_block_size,
+            softmax_scale,
+            causal,
+        )
+        .map_err(|e| anyhow::anyhow!("flash_attn_paged_decode kt: {e}"))?;
+        Ok(Some(out_kt))
+    }
+
+    fn runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        block_table: &kiln_tensor::Tensor,
+        seqused_k: &kiln_tensor::Tensor,
+        max_seqlen_k: usize,
+        page_block_size: usize,
+        softmax_scale: f32,
+        causal: bool,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if q.track_op()
+            || k_pool.track_op()
+            || v_pool.track_op()
+            || block_table.track_op()
+            || seqused_k.track_op()
+            || q.dtype() != kiln_tensor::DType::BF16
+        {
+            return Ok(None);
+        }
+        // Phase 7 (#1082): kt-only. Args are already kt (#1082
+        // DoD-101/102), so no candle↔kt bridge. This entry always
+        // passed `graph_outputs = None`; the caller-owned-output
+        // variant lives in `_with_graph_outputs` below.
+        kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_dyn_seqlen_kt");
+        let out_kt = kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen_kt(
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            seqused_k,
+            max_seqlen_k,
+            page_block_size,
+            softmax_scale,
+            causal,
+        )
+        .map_err(|e| anyhow::anyhow!("flash_attn_paged_decode_dyn_seqlen kt: {e}"))?;
+        Ok(Some(out_kt))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 impl OptimizerBackend for RocmBackend {
     fn runtime_dispatch_sgd_step(
         &self,
@@ -444,30 +627,6 @@ impl BackendRuntime for RocmBackend {
         )
     }
 
-    fn supports_flash_attn_prefill(&self) -> bool {
-        self.support_predicates().supports_flash_attn_prefill()
-    }
-
-    fn supports_flash_attn_prefill_head_major(&self) -> bool {
-        kiln_core::env_flag::env_flag("KILN_ROCM_HEAD_MAJOR_PREFILL", true)
-    }
-
-    fn supports_flash_attn_paged_decode(&self) -> bool {
-        self.support_predicates().supports_flash_attn_paged_decode()
-    }
-
-    /// ROCm has no impl for the strict `flash_attn_paged_decode_contiguous_batch`
-    /// kernel (the bs>1 head-major uniform-`start_pos` path), so the trait
-    /// default `Ok(None)` always declines. Returning `false` here lets the
-    /// `try_strict` probe in `gqa_attention_paged_decode_contiguous_batch`
-    /// skip the `start_slots = Tensor::from_slice(...)` allocation that
-    /// would otherwise emit a captured host-to-device copy to a recycled
-    /// allocation under graph capture.
-    fn supports_strict_paged_decode_contiguous_batch(&self) -> bool {
-        self.support_predicates()
-            .supports_strict_paged_decode_contiguous_batch()
-    }
-
     fn supports_gdn_forward_substitution(&self) -> bool {
         self.support_predicates()
             .supports_gdn_forward_substitution()
@@ -497,162 +656,6 @@ impl BackendRuntime for RocmBackend {
     fn supports_gdn_decode_qk_norm_gates_recurrent(&self) -> bool {
         self.support_predicates()
             .supports_gdn_decode_qk_norm_gates_recurrent()
-    }
-
-    fn flash_attn_prefill(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        // The vendored CUDA/HIP kernel hard-errors on non-BF16. Decline here so
-        // the caller falls back to the portable path instead of bubbling a
-        // hard error up for non-BF16 test configs.
-        if q.track_op() || k.track_op() || v.track_op() {
-            ROCM_FLASH_ATTN_TRACKED_DECLINES.fetch_add(1, Ordering::Relaxed);
-            return Ok(None);
-        }
-        if q.dtype() != kiln_tensor::DType::BF16 {
-            return Ok(None);
-        }
-        // The vendored FA-2 kernel only supports head_dim 128/256 and
-        // hard-errors otherwise. Decline (mirroring the BF16 decline above)
-        // so non-{128,256} configs — e.g. the head_dim=16 tiny test model on
-        // the detached CP-4 tape-authoritative path, which clears the
-        // track_op + BF16 gates above — fall back to the portable SDPA path
-        // instead of bubbling a hard error. (#1082)
-        if !matches!(q.dims().last(), Some(&128) | Some(&256)) {
-            return Ok(None);
-        }
-        // Phase 7 (#1082): kt-typed surface is now the only path. Args
-        // are already kt (#1082 DoD-101/102), so the candle↔kt bridges
-        // are gone — the kernel runs directly on the caller's kt
-        // tensors. candle wrapper discards softmax_lse, kt path does
-        // the same here.
-        kiln_nvtx::range!(c"kiln/flash_attn_kt");
-        let q_c = q.contiguous().context("flash_attn kt: q contiguous")?;
-        let k_c = k.contiguous().context("flash_attn kt: k contiguous")?;
-        let v_c = v.contiguous().context("flash_attn kt: v contiguous")?;
-        let (out_kt, _lse_kt) =
-            kiln_flash_attn::flash_attn_fwd_kt(&q_c, &k_c, &v_c, softmax_scale, causal)
-                .map_err(|e| anyhow::anyhow!("flash_attn kt: flash_attn_fwd_kt: {e}"))?;
-        Ok(Some(out_kt))
-    }
-
-    fn flash_attn_prefill_head_major(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        if q.track_op() || k.track_op() || v.track_op() {
-            ROCM_FLASH_ATTN_TRACKED_DECLINES.fetch_add(1, Ordering::Relaxed);
-            return Ok(None);
-        }
-        if q.dtype() != kiln_tensor::DType::BF16 {
-            return Ok(None);
-        }
-        if !matches!(q.dims().last(), Some(&128) | Some(&256)) {
-            return Ok(None);
-        }
-        kiln_nvtx::range!(c"kiln/flash_attn_head_major_kt");
-        let q_c = q
-            .contiguous()
-            .context("flash_attn head-major kt: q contiguous")?;
-        let k_c = k
-            .contiguous()
-            .context("flash_attn head-major kt: k contiguous")?;
-        let v_c = v
-            .contiguous()
-            .context("flash_attn head-major kt: v contiguous")?;
-        let (out_kt, _lse_kt) =
-            kiln_flash_attn::flash_attn_fwd_head_major_kt(&q_c, &k_c, &v_c, softmax_scale, causal)
-                .map_err(|e| {
-                    anyhow::anyhow!("flash_attn head-major kt: flash_attn_fwd_head_major_kt: {e}")
-                })?;
-        Ok(Some(out_kt))
-    }
-
-    fn flash_attn_paged_decode(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        block_table: &kiln_tensor::Tensor,
-        total_seqlen_k: usize,
-        page_block_size: usize,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        if q.track_op()
-            || k_pool.track_op()
-            || v_pool.track_op()
-            || block_table.track_op()
-            || q.dtype() != kiln_tensor::DType::BF16
-        {
-            return Ok(None);
-        }
-        // Phase 7 (#1082): kt-only. Args are already kt (#1082
-        // DoD-101/102), so no candle↔kt bridge — the kernel runs
-        // directly on the caller's kt tensors.
-        kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_kt");
-        let out_kt = kiln_flash_attn::flash_attn_paged_decode_kt(
-            q,
-            k_pool,
-            v_pool,
-            block_table,
-            total_seqlen_k,
-            page_block_size,
-            softmax_scale,
-            causal,
-        )
-        .map_err(|e| anyhow::anyhow!("flash_attn_paged_decode kt: {e}"))?;
-        Ok(Some(out_kt))
-    }
-
-    fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        block_table: &kiln_tensor::Tensor,
-        seqused_k: &kiln_tensor::Tensor,
-        max_seqlen_k: usize,
-        page_block_size: usize,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        if q.track_op()
-            || k_pool.track_op()
-            || v_pool.track_op()
-            || block_table.track_op()
-            || seqused_k.track_op()
-            || q.dtype() != kiln_tensor::DType::BF16
-        {
-            return Ok(None);
-        }
-        // Phase 7 (#1082): kt-only. Args are already kt (#1082
-        // DoD-101/102), so no candle↔kt bridge. This entry always
-        // passed `graph_outputs = None`; the caller-owned-output
-        // variant lives in `_with_graph_outputs` below.
-        kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_dyn_seqlen_kt");
-        let out_kt = kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen_kt(
-            q,
-            k_pool,
-            v_pool,
-            block_table,
-            seqused_k,
-            max_seqlen_k,
-            page_block_size,
-            softmax_scale,
-            causal,
-        )
-        .map_err(|e| anyhow::anyhow!("flash_attn_paged_decode_dyn_seqlen kt: {e}"))?;
-        Ok(Some(out_kt))
     }
 
     fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(

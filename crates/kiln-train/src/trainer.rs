@@ -10527,6 +10527,8 @@ pub(crate) mod tests {
 
     impl kiln_model::backend::StartupBackend for NamedTestBackend {}
 
+    impl kiln_model::backend::AttentionBackend for NamedTestBackend {}
+
     impl kiln_model::backend::ConvBackend for NamedTestBackend {}
 
     impl kiln_model::backend::SamplingBackend for NamedTestBackend {}

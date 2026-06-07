@@ -13,9 +13,9 @@ use super::metal_gdn::*;
 use super::metal_lm_head::*;
 use super::metal_paged::*;
 use super::{
-    BackendIdentity, BackendRuntime, ConvBackend, OptimizerBackend, PagedKvBackend, SamplingBackend,
-    StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy, metal_residency,
-    metal_training,
+    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, OptimizerBackend,
+    PagedKvBackend, SamplingBackend, StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
+    metal_residency, metal_training,
 };
 
 impl BackendIdentity for MetalBackend {
@@ -364,6 +364,176 @@ impl PagedKvBackend for MetalBackend {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+impl AttentionBackend for MetalBackend {
+    fn runtime_supports_flash_attn_prefill(&self) -> bool {
+        metal_sdpa_prefill_available()
+    }
+
+    fn runtime_supports_flash_attn_prefill_head_major(&self) -> bool {
+        metal_sdpa_prefill_available()
+    }
+
+    // Note: keep `supports_*` returning true so the planner picks the SDPA
+    // path; the per-call gate inside the kernel functions then decides
+    // whether the *specific* shape is safe and silently falls back to the
+    // naive softmax+matmul path when it isn't.
+    fn runtime_supports_flash_attn_paged_decode(&self) -> bool {
+        true
+    }
+
+    fn runtime_flash_attn_paged_decode_contiguous(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        start_slot: usize,
+        total_seqlen_k: usize,
+        softmax_scale: f32,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // #1082 forward-flip: trait surface is kt; bridge each kt arg to a
+        // candle CPU local (host round-trip, matching this backend's
+        // CPU-resident model), then delegate to the unchanged candle helper.
+        if !metal_paged_attn_decode_contiguous_supports(
+            q,
+            k_pool,
+            v_pool,
+            start_slot,
+            total_seqlen_k,
+        ) {
+            return Ok(None);
+        }
+        let out = metal_paged_attn_decode_contiguous_bf16_d256(
+            q,
+            k_pool,
+            v_pool,
+            start_slot,
+            total_seqlen_k,
+            softmax_scale,
+        )
+        .context("metal contiguous paged decode attention failed")?;
+        Ok(Some(out))
+    }
+
+    fn runtime_flash_attn_paged_decode_contiguous_batch(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        start_slots: &kiln_tensor::Tensor,
+        total_seqlen_k: usize,
+        softmax_scale: f32,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if !metal_paged_attn_decode_contiguous_batch_supports(
+            q,
+            k_pool,
+            v_pool,
+            start_slots,
+            total_seqlen_k,
+        ) {
+            return Ok(None);
+        }
+        let out = metal_paged_attn_decode_contiguous_batch_bf16_d256(
+            q,
+            k_pool,
+            v_pool,
+            start_slots,
+            total_seqlen_k,
+            softmax_scale,
+        )
+        .context("metal contiguous paged batch decode attention failed")?;
+        Ok(Some(out))
+    }
+
+    fn runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        block_table: &kiln_tensor::Tensor,
+        seqused_k: &kiln_tensor::Tensor,
+        max_seqlen_k: usize,
+        page_block_size: usize,
+        softmax_scale: f32,
+        causal: bool,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if !causal
+            || !metal_paged_attn_decode_contiguous_batch_dyn_seqlen_supports(
+                q,
+                k_pool,
+                v_pool,
+                block_table,
+                seqused_k,
+                max_seqlen_k,
+                page_block_size,
+            )
+        {
+            return Ok(None);
+        }
+        let out = metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256(
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            seqused_k,
+            max_seqlen_k,
+            page_block_size,
+            softmax_scale,
+        )
+        .context("metal dyn-seqlen paged batch decode attention failed")?;
+        Ok(Some(out))
+    }
+
+    fn runtime_flash_attn_prefill(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        softmax_scale: f32,
+        causal: bool,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        metal_flash_attn_prefill(q, k, v, softmax_scale, causal)
+    }
+
+    fn runtime_flash_attn_prefill_head_major(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        softmax_scale: f32,
+        causal: bool,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        metal_flash_attn_prefill_head_major(q, k, v, softmax_scale, causal)
+    }
+
+    /// Gather K/V from the paged pool via `index_select` on the block table,
+    /// then call candle's vectorized SDPA (single-query path). The gather
+    /// replaces the slow materializing `paged_cache.read` +
+    /// naive-softmax+matmul fallback — same result, one fused kernel.
+    fn runtime_flash_attn_paged_decode(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        block_table: &kiln_tensor::Tensor,
+        total_seqlen_k: usize,
+        page_block_size: usize,
+        softmax_scale: f32,
+        causal: bool,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        metal_flash_attn_paged_decode(
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            total_seqlen_k,
+            page_block_size,
+            softmax_scale,
+            causal,
+        )
+    }
+}
+
 // #1082 DoD-101/102: BackendRuntime decode methods flipped to kt; metal/vulkan
 // impls need matching flip when their builds are restored.
 impl BackendRuntime for MetalBackend {
@@ -412,125 +582,6 @@ impl BackendRuntime for MetalBackend {
         metal_residency::resolve_resident_activation(tensor, shape, dtype)
     }
 
-    fn supports_flash_attn_prefill(&self) -> bool {
-        metal_sdpa_prefill_available()
-    }
-
-    fn supports_flash_attn_prefill_head_major(&self) -> bool {
-        metal_sdpa_prefill_available()
-    }
-
-    // Note: keep `supports_*` returning true so the planner picks the SDPA
-    // path; the per-call gate inside the kernel functions then decides
-    // whether the *specific* shape is safe and silently falls back to the
-    // naive softmax+matmul path when it isn't.
-
-    fn supports_flash_attn_paged_decode(&self) -> bool {
-        true
-    }
-
-    fn flash_attn_paged_decode_contiguous(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        start_slot: usize,
-        total_seqlen_k: usize,
-        softmax_scale: f32,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        // #1082 forward-flip: trait surface is kt; bridge each kt arg to a
-        // candle CPU local (host round-trip, matching this backend's
-        // CPU-resident model), then delegate to the unchanged candle helper.
-        if !metal_paged_attn_decode_contiguous_supports(
-            q,
-            k_pool,
-            v_pool,
-            start_slot,
-            total_seqlen_k,
-        ) {
-            return Ok(None);
-        }
-        let out = metal_paged_attn_decode_contiguous_bf16_d256(
-            q,
-            k_pool,
-            v_pool,
-            start_slot,
-            total_seqlen_k,
-            softmax_scale,
-        )
-        .context("metal contiguous paged decode attention failed")?;
-        Ok(Some(out))
-    }
-
-    fn flash_attn_paged_decode_contiguous_batch(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        start_slots: &kiln_tensor::Tensor,
-        total_seqlen_k: usize,
-        softmax_scale: f32,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        if !metal_paged_attn_decode_contiguous_batch_supports(
-            q,
-            k_pool,
-            v_pool,
-            start_slots,
-            total_seqlen_k,
-        ) {
-            return Ok(None);
-        }
-        let out = metal_paged_attn_decode_contiguous_batch_bf16_d256(
-            q,
-            k_pool,
-            v_pool,
-            start_slots,
-            total_seqlen_k,
-            softmax_scale,
-        )
-        .context("metal contiguous paged batch decode attention failed")?;
-        Ok(Some(out))
-    }
-
-    fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        block_table: &kiln_tensor::Tensor,
-        seqused_k: &kiln_tensor::Tensor,
-        max_seqlen_k: usize,
-        page_block_size: usize,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        if !causal
-            || !metal_paged_attn_decode_contiguous_batch_dyn_seqlen_supports(
-                q,
-                k_pool,
-                v_pool,
-                block_table,
-                seqused_k,
-                max_seqlen_k,
-                page_block_size,
-            )
-        {
-            return Ok(None);
-        }
-        let out = metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256(
-            q,
-            k_pool,
-            v_pool,
-            block_table,
-            seqused_k,
-            max_seqlen_k,
-            page_block_size,
-            softmax_scale,
-        )
-        .context("metal dyn-seqlen paged batch decode attention failed")?;
-        Ok(Some(out))
-    }
-
     fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
         &self,
         q: &kiln_tensor::Tensor,
@@ -574,7 +625,8 @@ impl BackendRuntime for MetalBackend {
             return Ok(Some(out.clone()));
         }
 
-        self.flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+        AttentionBackend::runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+            self,
             q,
             k_pool,
             v_pool,
@@ -621,55 +673,6 @@ impl BackendRuntime for MetalBackend {
 
     fn supports_gdn_gated_rms_norm(&self) -> bool {
         !self.disable.gated_rms_norm
-    }
-
-    fn flash_attn_prefill(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        metal_flash_attn_prefill(q, k, v, softmax_scale, causal)
-    }
-
-    fn flash_attn_prefill_head_major(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        metal_flash_attn_prefill_head_major(q, k, v, softmax_scale, causal)
-    }
-
-    /// Gather K/V from the paged pool via `index_select` on the block table,
-    /// then call candle's vectorized SDPA (single-query path). The gather
-    /// replaces the slow materializing `paged_cache.read` +
-    /// naive-softmax+matmul fallback — same result, one fused kernel.
-    fn flash_attn_paged_decode(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        block_table: &kiln_tensor::Tensor,
-        total_seqlen_k: usize,
-        page_block_size: usize,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        metal_flash_attn_paged_decode(
-            q,
-            k_pool,
-            v_pool,
-            block_table,
-            total_seqlen_k,
-            page_block_size,
-            softmax_scale,
-            causal,
-        )
     }
 
     fn gdn_forward_substitution(

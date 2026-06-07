@@ -28,10 +28,10 @@ use super::vulkan_tensor_bridge::{
     kt_tensor_to_packed_bf16_bytes_with_shape,
 };
 use super::{
-    BackendIdentity, BackendRuntime, ConvBackend, OptimizerBackend, PagedKvBackend, SamplingBackend,
-    StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy, vulkan_attention,
-    vulkan_conv1d, vulkan_dense, vulkan_device, vulkan_gdn, vulkan_linear, vulkan_training,
-    vulkan_weights,
+    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, OptimizerBackend,
+    PagedKvBackend, SamplingBackend, StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
+    vulkan_attention, vulkan_conv1d, vulkan_dense, vulkan_device, vulkan_gdn, vulkan_linear,
+    vulkan_training, vulkan_weights,
 };
 use crate::forward::GpuWeights;
 
@@ -474,6 +474,93 @@ impl OptimizerBackend for VulkanBackend {
 
 impl PagedKvBackend for VulkanBackend {}
 
+#[allow(clippy::too_many_arguments)]
+impl AttentionBackend for VulkanBackend {
+    fn runtime_supports_flash_attn_prefill(&self) -> bool {
+        // The flash_attn.comp placeholder is replaced by the
+        // sdpa_prefill_f32.comp kernel landed in commit dc4664ed.
+        // Default-enabled now that the kernel is parity-tested at
+        // multiple shapes (including Qwen3.5-4B head_dim=128) and
+        // bounded in dispatch size (workgroup_count = T × H × B
+        // is well under any reasonable Vulkan limit for production
+        // shapes). Set `KILN_VULKAN_SDPA=0` to opt out.
+        if !self.has_vulkan() {
+            return false;
+        }
+        kiln_core::env_flag::env_flag("KILN_VULKAN_SDPA", true)
+    }
+
+    fn runtime_supports_flash_attn_prefill_head_major(&self) -> bool {
+        // Not implemented — return false so callers keep their preamble.
+        false
+    }
+
+    fn runtime_supports_flash_attn_paged_decode(&self) -> bool {
+        self.has_vulkan() && self.paged_attn_decode_batch_enabled
+    }
+
+    fn runtime_flash_attn_prefill(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        softmax_scale: f32,
+        causal: bool,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        vulkan_attention::flash_attn_prefill(self, q, k, v, softmax_scale, causal)
+    }
+
+    fn runtime_flash_attn_paged_decode(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        block_table: &kiln_tensor::Tensor,
+        total_seqlen_k: usize,
+        page_block_size: usize,
+        softmax_scale: f32,
+        causal: bool,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        vulkan_attention::flash_attn_paged_decode(
+            self,
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            total_seqlen_k,
+            page_block_size,
+            softmax_scale,
+            causal,
+        )
+    }
+
+    fn runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        block_table: &kiln_tensor::Tensor,
+        seqused_k: &kiln_tensor::Tensor,
+        max_seqlen_k: usize,
+        page_block_size: usize,
+        softmax_scale: f32,
+        causal: bool,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        vulkan_attention::flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+            self,
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            seqused_k,
+            max_seqlen_k,
+            page_block_size,
+            softmax_scale,
+            causal,
+        )
+    }
+}
+
 // #1082 DoD-101/102: BackendRuntime decode methods flipped to kt; metal/vulkan impls need matching flip when their builds are restored.
 impl BackendRuntime for VulkanBackend {
     fn training_capabilities(&self) -> TrainingCapabilities {
@@ -504,29 +591,6 @@ impl BackendRuntime for VulkanBackend {
         // the minimum pool" rule in gate (b)) is enforced later, the
         // first time a resident decode actually requests a buffer.
         self.has_vulkan() && self.resident_decode_enabled
-    }
-
-    fn supports_flash_attn_prefill(&self) -> bool {
-        // The flash_attn.comp placeholder is replaced by the
-        // sdpa_prefill_f32.comp kernel landed in commit dc4664ed.
-        // Default-enabled now that the kernel is parity-tested at
-        // multiple shapes (including Qwen3.5-4B head_dim=128) and
-        // bounded in dispatch size (workgroup_count = T × H × B
-        // is well under any reasonable Vulkan limit for production
-        // shapes). Set `KILN_VULKAN_SDPA=0` to opt out.
-        if !self.has_vulkan() {
-            return false;
-        }
-        kiln_core::env_flag::env_flag("KILN_VULKAN_SDPA", true)
-    }
-
-    fn supports_flash_attn_prefill_head_major(&self) -> bool {
-        // Not implemented — return false so callers keep their preamble.
-        false
-    }
-
-    fn supports_flash_attn_paged_decode(&self) -> bool {
-        self.has_vulkan() && self.paged_attn_decode_batch_enabled
     }
 
     fn supports_gdn_forward_substitution(&self) -> bool {
@@ -998,67 +1062,6 @@ impl BackendRuntime for VulkanBackend {
         vulkan_gdn::supports_gdn_gated_rms_norm(self)
     }
 
-    fn flash_attn_prefill(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        vulkan_attention::flash_attn_prefill(self, q, k, v, softmax_scale, causal)
-    }
-
-    fn flash_attn_paged_decode(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        block_table: &kiln_tensor::Tensor,
-        total_seqlen_k: usize,
-        page_block_size: usize,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        vulkan_attention::flash_attn_paged_decode(
-            self,
-            q,
-            k_pool,
-            v_pool,
-            block_table,
-            total_seqlen_k,
-            page_block_size,
-            softmax_scale,
-            causal,
-        )
-    }
-
-    fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        block_table: &kiln_tensor::Tensor,
-        seqused_k: &kiln_tensor::Tensor,
-        max_seqlen_k: usize,
-        page_block_size: usize,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        vulkan_attention::flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
-            self,
-            q,
-            k_pool,
-            v_pool,
-            block_table,
-            seqused_k,
-            max_seqlen_k,
-            page_block_size,
-            softmax_scale,
-            causal,
-        )
-    }
-
     fn gdn_in_proj_decode(
         &self,
         x: &kiln_tensor::Tensor,
@@ -1313,5 +1316,4 @@ impl BackendRuntime for VulkanBackend {
     ) -> Result<Option<kiln_tensor::Tensor>> {
         vulkan_gdn::gdn_gated_rms_norm(self, x, z, weight, eps)
     }
-
 }

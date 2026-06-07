@@ -28754,6 +28754,8 @@ mod tests {
 
     impl crate::backend::StartupBackend for FixedLinearBackend {}
 
+    impl crate::backend::AttentionBackend for FixedLinearBackend {}
+
     impl crate::backend::ConvBackend for FixedLinearBackend {}
 
     impl crate::backend::SamplingBackend for FixedLinearBackend {}
@@ -28803,6 +28805,8 @@ mod tests {
     }
 
     impl crate::backend::StartupBackend for FixedMlpBackend {}
+
+    impl crate::backend::AttentionBackend for FixedMlpBackend {}
 
     impl crate::backend::ConvBackend for FixedMlpBackend {}
 

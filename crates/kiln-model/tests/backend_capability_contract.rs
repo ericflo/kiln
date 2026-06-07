@@ -898,9 +898,6 @@ fn cuda_rocm_support_predicates_stay_in_shared_helper() {
     );
 
     let shared_support_methods = [
-        "supports_flash_attn_prefill",
-        "supports_flash_attn_paged_decode",
-        "supports_strict_paged_decode_contiguous_batch",
         "supports_gdn_forward_substitution",
         "supports_gdn_recurrent_step",
         "supports_gdn_chunk_prep",
@@ -910,6 +907,20 @@ fn cuda_rocm_support_predicates_stay_in_shared_helper() {
         "supports_gdn_decode_qk_norm_gates_recurrent",
         "supports_gdn_gates",
         "supports_gdn_gated_rms_norm",
+    ];
+    let shared_attention_support_methods = [
+        (
+            "runtime_supports_flash_attn_prefill",
+            "supports_flash_attn_prefill",
+        ),
+        (
+            "runtime_supports_flash_attn_paged_decode",
+            "supports_flash_attn_paged_decode",
+        ),
+        (
+            "runtime_supports_strict_paged_decode_contiguous_batch",
+            "supports_strict_paged_decode_contiguous_batch",
+        ),
     ];
     let shared_conv_support_methods = [
         (
@@ -940,6 +951,17 @@ fn cuda_rocm_support_predicates_stay_in_shared_helper() {
             assert!(
                 compact_body(&body.body).contains(&format!("support_predicates().{method}()")),
                 "{backend_file} `{method}` should delegate to cuda_rocm_common"
+            );
+        }
+
+        for (runtime_method, predicate_method) in shared_attention_support_methods {
+            let body = functions
+                .get(runtime_method)
+                .unwrap_or_else(|| panic!("{backend_file} missing {runtime_method}"));
+            assert!(
+                compact_body(&body.body)
+                    .contains(&format!("support_predicates().{predicate_method}()")),
+                "{backend_file} `{runtime_method}` should delegate to cuda_rocm_common"
             );
         }
 
@@ -2605,6 +2627,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
             facet,
             "BackendIdentity"
                 | "StartupBackend"
+                | "AttentionBackend"
                 | "ConvBackend"
                 | "SamplingBackend"
                 | "OptimizerBackend"
@@ -2638,6 +2661,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
     for facet in [
         "BackendIdentity",
         "StartupBackend",
+        "AttentionBackend",
         "ConvBackend",
         "SamplingBackend",
         "OptimizerBackend",
@@ -2677,6 +2701,10 @@ fn generated_capability_report_lists_focused_backend_facets() {
         "StartupBackend should not regress to a blanket BackendRuntime forwarding impl"
     );
     assert!(
+        !backend_source.contains("impl<T: BackendRuntime + ?Sized> AttentionBackend for T"),
+        "AttentionBackend should not regress to a blanket BackendRuntime forwarding impl"
+    );
+    assert!(
         !backend_source.contains("impl<T: BackendRuntime + ?Sized> ConvBackend for T"),
         "ConvBackend should not regress to a blanket BackendRuntime forwarding impl"
     );
@@ -2700,6 +2728,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
     for supertrait in [
         "BackendIdentity",
         "StartupBackend",
+        "AttentionBackend",
         "ConvBackend",
         "SamplingBackend",
         "OptimizerBackend",
@@ -5879,6 +5908,14 @@ fn generated_capability_report_tracks_migration_phase_status() {
     assert_eq!(
         conv_signal["passed"], true,
         "ConvBackend should be a completed W1 family slice"
+    );
+    let attention_signal = phase1_signals
+        .iter()
+        .find(|signal| signal["name"] == "attention_backend_facet_authoritative")
+        .expect("Phase 1 should include AttentionBackend authoritative signal");
+    assert_eq!(
+        attention_signal["passed"], true,
+        "AttentionBackend should be a completed W1 family slice"
     );
     let sampling_signal = phase1_signals
         .iter()
