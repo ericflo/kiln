@@ -731,6 +731,7 @@ pub struct StorageCapabilities {
     pub device: kiln_tensor::Device,
     pub resident_activation: Support,
     pub resident_decode: Support,
+    pub projection_load_policy: ProjectionLoadPolicy,
     pub kv_cache_device_memory_pressure: bool,
     pub gpu_memory_detection_policy: GpuMemoryDetectionPolicy,
     pub gpu_memory_budget_policy: GpuMemoryBudgetPolicy,
@@ -739,6 +740,22 @@ pub struct StorageCapabilities {
     pub kv_sizing_residency_model_multiplier: u64,
     pub kv_auto_block_policy: KvCacheAutoBlockPolicy,
     pub kv_cache_fp8_policy: KvCacheFp8Policy,
+}
+
+/// Backend-owned policy for model weight upload and projection residency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectionLoadPolicy {
+    pub backend: kiln_tensor::Backend,
+    pub direct_transposed_upload_for_cached_weights: bool,
+    pub parallel_transposed_projection_upload: bool,
+    pub stub_embedding_table_after_transposed_upload: bool,
+    pub drop_projection_originals: bool,
+    pub drop_projection_transposes: bool,
+    pub synchronize_after_dropping_originals: bool,
+    pub keep_projection_originals_env: Option<&'static str>,
+    pub drop_projection_originals_env: Option<&'static str>,
+    pub native_training_env: Option<&'static str>,
+    pub keep_projection_transposes_env: Option<&'static str>,
 }
 
 /// Backend-owned policy for interpreting server GPU-memory detection.
@@ -1239,6 +1256,7 @@ impl BackendCapabilities {
                 resident_decode: Support::from_supports_predicate(
                     ReplayBackend::runtime_supports_resident_decode(backend),
                 ),
+                projection_load_policy: ProjectionLoadPolicy::for_backend(name, device),
                 kv_cache_device_memory_pressure: kv_cache_device_memory_pressure(name, device),
                 gpu_memory_detection_policy: GpuMemoryDetectionPolicy::for_backend(name, device),
                 gpu_memory_budget_policy: GpuMemoryBudgetPolicy::for_backend(name, device),
@@ -1353,6 +1371,57 @@ impl BackendCapabilities {
                 authority: ReplayBackend::runtime_replay_authority(backend),
             },
             fallback: BackendFallbackCapabilities::for_backend(name, device),
+        }
+    }
+}
+
+impl ProjectionLoadPolicy {
+    pub const KEEP_PROJECTION_ORIGINALS_ENV: &'static str = "KILN_KEEP_PROJECTION_ORIGINALS";
+    pub const DROP_PROJECTION_ORIGINALS_ENV: &'static str = "KILN_DROP_PROJECTION_ORIGINALS";
+    pub const NATIVE_VULKAN_TRAINING_ENV: &'static str = "KILN_VK_NATIVE_TRAINING";
+    pub const KEEP_PROJECTION_TRANSPOSES_ENV: &'static str = "KILN_KEEP_PROJECTION_TRANSPOSES";
+
+    pub fn for_model_loader_device(device: kiln_tensor::Device) -> Self {
+        if crate::backend::vulkan_active() {
+            Self::for_backend("vulkan", device)
+        } else {
+            Self::for_backend("", device)
+        }
+    }
+
+    pub fn for_backend(name: &str, device: kiln_tensor::Device) -> Self {
+        let backend = backend_kind_for_runtime(name, device);
+        let native_vulkan_training = env_enabled(Self::NATIVE_VULKAN_TRAINING_ENV);
+        let keep_projection_originals = matches!(backend, kiln_tensor::Backend::Vulkan)
+            || native_vulkan_training
+            || env_truthy(Self::KEEP_PROJECTION_ORIGINALS_ENV);
+        let drop_projection_transposes =
+            native_vulkan_training && !env_enabled(Self::KEEP_PROJECTION_TRANSPOSES_ENV);
+        let drop_projection_originals = !keep_projection_originals
+            && (matches!(
+                backend,
+                kiln_tensor::Backend::Cuda | kiln_tensor::Backend::Metal
+            ) || env_truthy(Self::DROP_PROJECTION_ORIGINALS_ENV));
+
+        Self {
+            backend,
+            direct_transposed_upload_for_cached_weights: matches!(
+                backend,
+                kiln_tensor::Backend::Metal
+            ),
+            parallel_transposed_projection_upload: matches!(backend, kiln_tensor::Backend::Metal)
+                && drop_projection_originals,
+            stub_embedding_table_after_transposed_upload: matches!(
+                backend,
+                kiln_tensor::Backend::Metal | kiln_tensor::Backend::Vulkan
+            ),
+            drop_projection_originals,
+            drop_projection_transposes: !drop_projection_originals && drop_projection_transposes,
+            synchronize_after_dropping_originals: matches!(backend, kiln_tensor::Backend::Metal),
+            keep_projection_originals_env: Some(Self::KEEP_PROJECTION_ORIGINALS_ENV),
+            drop_projection_originals_env: Some(Self::DROP_PROJECTION_ORIGINALS_ENV),
+            native_training_env: Some(Self::NATIVE_VULKAN_TRAINING_ENV),
+            keep_projection_transposes_env: Some(Self::KEEP_PROJECTION_TRANSPOSES_ENV),
         }
     }
 }
@@ -1988,6 +2057,28 @@ fn training_optimizer_fallback_policy(name: &str, _device: kiln_tensor::Device) 
         "cuda" | "metal" | "vulkan" | "rocm" => FallbackPolicy::NativeRequired,
         _ => FallbackPolicy::ErrorInHotPath,
     }
+}
+
+fn env_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            !v.is_empty() && !matches!(v.as_str(), "0" | "false" | "no")
+        })
+        .unwrap_or(false)
+}
+
+fn env_truthy(name: &str) -> bool {
+    matches!(
+        std::env::var(name)
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
 }
 
 fn training_optimizer_debug_fallback_env(

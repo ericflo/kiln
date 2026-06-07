@@ -163,7 +163,8 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | Descriptor | Field Count | Fields |
 |---|---:|---|
 | `BackendCapabilities` | 12 | `backend`, `device`, `storage`, `startup`, `matmul`, `attention`, `gdn`, `decode`, `decode_batcher`, `training`, `graph_replay`, `fallback` |
-| `StorageCapabilities` | 12 | `backend`, `device`, `resident_activation`, `resident_decode`, `kv_cache_device_memory_pressure`, `gpu_memory_detection_policy`, `gpu_memory_budget_policy`, `gpu_allocator_memory_probe_policy`, `gpu_memory_reclaim_policy`, `kv_sizing_residency_model_multiplier`, `kv_auto_block_policy`, `kv_cache_fp8_policy` |
+| `StorageCapabilities` | 13 | `backend`, `device`, `resident_activation`, `resident_decode`, `projection_load_policy`, `kv_cache_device_memory_pressure`, `gpu_memory_detection_policy`, `gpu_memory_budget_policy`, `gpu_allocator_memory_probe_policy`, `gpu_memory_reclaim_policy`, `kv_sizing_residency_model_multiplier`, `kv_auto_block_policy`, `kv_cache_fp8_policy` |
+| `ProjectionLoadPolicy` | 11 | `backend`, `direct_transposed_upload_for_cached_weights`, `parallel_transposed_projection_upload`, `stub_embedding_table_after_transposed_upload`, `drop_projection_originals`, `drop_projection_transposes`, `synchronize_after_dropping_originals`, `keep_projection_originals_env`, `drop_projection_originals_env`, `native_training_env`, `keep_projection_transposes_env` |
 | `GpuMemoryDetectionPolicy` | 3 | `detected_total_log_message`, `missing_total_warning`, `missing_total_fallback_bytes` |
 | `GpuMemoryBudgetPolicy` | 3 | `use_live_memory_snapshot`, `cap_kv_blocks_by_live_budget`, `retry_kv_allocation_after_reclaim` |
 | `GpuAllocatorMemoryProbePolicy` | 1 | `probe` |

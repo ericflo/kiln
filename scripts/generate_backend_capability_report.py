@@ -86,6 +86,7 @@ REQUEST_DESCRIPTOR_STRUCTS = [
 CAPABILITY_DESCRIPTOR_STRUCTS = [
     "BackendCapabilities",
     "StorageCapabilities",
+    "ProjectionLoadPolicy",
     "GpuMemoryDetectionPolicy",
     "GpuMemoryBudgetPolicy",
     "GpuAllocatorMemoryProbePolicy",

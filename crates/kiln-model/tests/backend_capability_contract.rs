@@ -1140,6 +1140,7 @@ fn generated_capability_report_lists_request_descriptors() {
     for name in [
         "BackendCapabilities",
         "StorageCapabilities",
+        "ProjectionLoadPolicy",
         "GpuMemoryDetectionPolicy",
         "GpuMemoryBudgetPolicy",
         "GpuAllocatorMemoryProbePolicy",
@@ -1233,6 +1234,10 @@ fn generated_capability_report_lists_request_descriptors() {
         "StorageCapabilities should own KV cache device-memory pressure policy"
     );
     assert!(
+        storage_capability_fields.contains(&"projection_load_policy"),
+        "StorageCapabilities should own backend-specific projection load policy"
+    );
+    assert!(
         storage_capability_fields.contains(&"gpu_memory_detection_policy"),
         "StorageCapabilities should own backend-specific GPU memory detection fallback policy"
     );
@@ -1260,13 +1265,36 @@ fn generated_capability_report_lists_request_descriptors() {
         storage_capability_fields.contains(&"kv_cache_fp8_policy"),
         "StorageCapabilities should own backend-specific KV FP8 cache policy"
     );
-    let gpu_memory_detection_policy_fields =
-        capability_descriptors["GpuMemoryDetectionPolicy"]["fields"]
-            .as_array()
-            .expect("GpuMemoryDetectionPolicy fields should be an array")
-            .iter()
-            .filter_map(|field| field["name"].as_str())
-            .collect::<Vec<_>>();
+    let projection_load_policy_fields = capability_descriptors["ProjectionLoadPolicy"]["fields"]
+        .as_array()
+        .expect("ProjectionLoadPolicy fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
+    for field in [
+        "direct_transposed_upload_for_cached_weights",
+        "parallel_transposed_projection_upload",
+        "stub_embedding_table_after_transposed_upload",
+        "drop_projection_originals",
+        "drop_projection_transposes",
+        "synchronize_after_dropping_originals",
+        "keep_projection_originals_env",
+        "drop_projection_originals_env",
+        "native_training_env",
+        "keep_projection_transposes_env",
+    ] {
+        assert!(
+            projection_load_policy_fields.contains(&field),
+            "ProjectionLoadPolicy should include {field}"
+        );
+    }
+    let gpu_memory_detection_policy_fields = capability_descriptors["GpuMemoryDetectionPolicy"]
+        ["fields"]
+        .as_array()
+        .expect("GpuMemoryDetectionPolicy fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
     for field in [
         "detected_total_log_message",
         "missing_total_warning",
@@ -1293,24 +1321,24 @@ fn generated_capability_report_lists_request_descriptors() {
             "GpuMemoryBudgetPolicy should include {field}"
         );
     }
-    let gpu_allocator_memory_probe_policy_fields =
-        capability_descriptors["GpuAllocatorMemoryProbePolicy"]["fields"]
-            .as_array()
-            .expect("GpuAllocatorMemoryProbePolicy fields should be an array")
-            .iter()
-            .filter_map(|field| field["name"].as_str())
-            .collect::<Vec<_>>();
+    let gpu_allocator_memory_probe_policy_fields = capability_descriptors
+        ["GpuAllocatorMemoryProbePolicy"]["fields"]
+        .as_array()
+        .expect("GpuAllocatorMemoryProbePolicy fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
     assert!(
         gpu_allocator_memory_probe_policy_fields.contains(&"probe"),
         "GpuAllocatorMemoryProbePolicy should expose the selected allocator heap probe"
     );
-    let gpu_memory_reclaim_policy_fields =
-        capability_descriptors["GpuMemoryReclaimPolicy"]["fields"]
-            .as_array()
-            .expect("GpuMemoryReclaimPolicy fields should be an array")
-            .iter()
-            .filter_map(|field| field["name"].as_str())
-            .collect::<Vec<_>>();
+    let gpu_memory_reclaim_policy_fields = capability_descriptors["GpuMemoryReclaimPolicy"]
+        ["fields"]
+        .as_array()
+        .expect("GpuMemoryReclaimPolicy fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
     assert!(
         gpu_memory_reclaim_policy_fields.contains(&"reclaimer"),
         "GpuMemoryReclaimPolicy should expose the selected reclaimer"
@@ -1376,13 +1404,13 @@ fn generated_capability_report_lists_request_descriptors() {
         decode_capability_fields.contains(&"speculative_policy"),
         "DecodeCapabilities should expose backend-owned speculative decode thresholds"
     );
-    let speculative_decode_policy_fields =
-        capability_descriptors["SpeculativeDecodePolicy"]["fields"]
-            .as_array()
-            .expect("SpeculativeDecodePolicy fields should be an array")
-            .iter()
-            .filter_map(|field| field["name"].as_str())
-            .collect::<Vec<_>>();
+    let speculative_decode_policy_fields = capability_descriptors["SpeculativeDecodePolicy"]
+        ["fields"]
+        .as_array()
+        .expect("SpeculativeDecodePolicy fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
     for (field, message) in [
         (
             "mtp_max_prompt_tokens",
@@ -1420,13 +1448,13 @@ fn generated_capability_report_lists_request_descriptors() {
         gdn_capability_fields.contains(&"gated_rms_norm_preserves_tape_residency"),
         "GdnCapabilities should own active-tape GDN RMSNorm residency policy"
     );
-    let inference_recurrent_state_policy_fields =
-        capability_descriptors["InferenceRecurrentStatePolicy"]["fields"]
-            .as_array()
-            .expect("InferenceRecurrentStatePolicy fields should be an array")
-            .iter()
-            .filter_map(|field| field["name"].as_str())
-            .collect::<Vec<_>>();
+    let inference_recurrent_state_policy_fields = capability_descriptors
+        ["InferenceRecurrentStatePolicy"]["fields"]
+        .as_array()
+        .expect("InferenceRecurrentStatePolicy fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
     assert!(
         inference_recurrent_state_policy_fields.contains(&"bf16")
             && inference_recurrent_state_policy_fields.contains(&"f16"),
@@ -1509,13 +1537,13 @@ fn generated_capability_report_lists_request_descriptors() {
         backend_training_fields.contains(&"acceleration_profile"),
         "BackendTrainingCapabilities should expose startup training acceleration profile policy"
     );
-    let server_training_dispatch_fields =
-        capability_descriptors["ServerTrainingDispatchPolicy"]["fields"]
-            .as_array()
-            .expect("ServerTrainingDispatchPolicy fields should be an array")
-            .iter()
-            .filter_map(|field| field["name"].as_str())
-            .collect::<Vec<_>>();
+    let server_training_dispatch_fields = capability_descriptors["ServerTrainingDispatchPolicy"]
+        ["fields"]
+        .as_array()
+        .expect("ServerTrainingDispatchPolicy fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
     for field in [
         "native_route",
         "native_training_env",
@@ -1526,13 +1554,13 @@ fn generated_capability_report_lists_request_descriptors() {
             "ServerTrainingDispatchPolicy should include {field}"
         );
     }
-    let training_acceleration_profile_fields =
-        capability_descriptors["TrainingAccelerationProfilePolicy"]["fields"]
-            .as_array()
-            .expect("TrainingAccelerationProfilePolicy fields should be an array")
-            .iter()
-            .filter_map(|field| field["name"].as_str())
-            .collect::<Vec<_>>();
+    let training_acceleration_profile_fields = capability_descriptors
+        ["TrainingAccelerationProfilePolicy"]["fields"]
+        .as_array()
+        .expect("TrainingAccelerationProfilePolicy fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
     for field in [
         "log_message",
         "linear",
@@ -1548,13 +1576,13 @@ fn generated_capability_report_lists_request_descriptors() {
             "TrainingAccelerationProfilePolicy should include {field}"
         );
     }
-    let training_acceleration_env_fields =
-        capability_descriptors["TrainingAccelerationEnvFlagPolicy"]["fields"]
-            .as_array()
-            .expect("TrainingAccelerationEnvFlagPolicy fields should be an array")
-            .iter()
-            .filter_map(|field| field["name"].as_str())
-            .collect::<Vec<_>>();
+    let training_acceleration_env_fields = capability_descriptors
+        ["TrainingAccelerationEnvFlagPolicy"]["fields"]
+        .as_array()
+        .expect("TrainingAccelerationEnvFlagPolicy fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
     for field in ["env", "default_on"] {
         assert!(
             training_acceleration_env_fields.contains(&field),
@@ -3022,6 +3050,72 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             && !trainer_source.contains("Some(BackendIdentity::runtime_name(backend))"),
         "trainer adapter smoke linear-state creation should pass the active backend to recurrent-state policy"
     );
+    let cached_transpose_policy_section = source_between(
+        &forward_source,
+        "fn cached_transpose_for_weight(",
+        "fn dropped_weight_stub(",
+    );
+    assert!(
+        cached_transpose_policy_section.contains("ProjectionLoadPolicy::for_model_loader_device")
+            && cached_transpose_policy_section
+                .contains("direct_transposed_upload_for_cached_weights"),
+        "forward cached transpose upload should consume ProjectionLoadPolicy"
+    );
+    for forbidden in [
+        "matches!(device, Device::Metal(_))",
+        "crate::backend::vulkan_active()",
+    ] {
+        assert!(
+            !cached_transpose_policy_section.contains(forbidden),
+            "cached transpose upload should not keep local backend policy: {forbidden}"
+        );
+    }
+    let projection_load_cache_section = source_between(
+        &forward_source,
+        "struct ProjectionLoadCache",
+        "fn projection_tensors_for_load(",
+    );
+    assert!(
+        projection_load_cache_section.contains("ProjectionLoadPolicy")
+            && projection_load_cache_section.contains("for_model_loader_device")
+            && projection_load_cache_section.contains("drop_projection_originals")
+            && projection_load_cache_section.contains("drop_projection_transposes"),
+        "projection load cache should be backed by ProjectionLoadPolicy"
+    );
+    for forbidden in [
+        "KILN_DROP_PROJECTION_ORIGINALS",
+        "KILN_KEEP_PROJECTION_ORIGINALS",
+        "KILN_KEEP_PROJECTION_TRANSPOSES",
+        "KILN_VK_NATIVE_TRAINING",
+        "matches!(device, Device::Metal",
+        "crate::backend::vulkan_active()",
+    ] {
+        assert!(
+            !projection_load_cache_section.contains(forbidden),
+            "projection load cache should not keep local backend/env policy: {forbidden}"
+        );
+    }
+    let embedding_load_policy_section = source_between(
+        &forward_source,
+        "pub fn from_model_weights(",
+        "let lm_head_w8 =",
+    );
+    assert!(
+        embedding_load_policy_section.contains("ProjectionLoadPolicy::for_model_loader_device")
+            && embedding_load_policy_section
+                .contains("stub_embedding_table_after_transposed_upload"),
+        "embedding table upload/stub decision should consume ProjectionLoadPolicy"
+    );
+    for forbidden in [
+        "stub_embed_tokens_after_upload(",
+        "matches!(device, Device::Metal",
+        "crate::backend::vulkan_active()",
+    ] {
+        assert!(
+            !embedding_load_policy_section.contains(forbidden),
+            "embedding table upload/stub decision should not keep local backend policy: {forbidden}"
+        );
+    }
     assert!(
         forward_source.contains("ResidencyBackend"),
         "forward GDN recurrent residency helpers should import the focused residency facet"

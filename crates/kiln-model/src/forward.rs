@@ -14,7 +14,9 @@ use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use crate::backend::capability::{BackendCapabilityQueries, InferenceRecurrentStatePolicy, Support};
+use crate::backend::capability::{
+    BackendCapabilityQueries, InferenceRecurrentStatePolicy, ProjectionLoadPolicy, Support,
+};
 use crate::backend::{
     AttentionBackend, BackendRuntime, ConvBackend, GdnBackend, LinearBackend, PagedKvBackend,
     ReplayBackend, ResidencyBackend, SamplingBackend, TrainingPrecisionPolicy,
@@ -5622,7 +5624,9 @@ fn cached_transpose_for_weight(
     materialized: &Tensor,
     device: &Device,
 ) -> Result<Tensor> {
-    if matches!(device, Device::Metal(_)) {
+    if ProjectionLoadPolicy::for_model_loader_device(*device)
+        .direct_transposed_upload_for_cached_weights
+    {
         weight_to_transposed_tensor_2d(w, device)
     } else {
         cached_transpose(materialized)
@@ -5636,22 +5640,9 @@ fn dropped_weight_stub(w: &WeightTensor, device: &Device) -> Result<Tensor> {
     Ok(Tensor::zeros(vec![1usize], weight_dtype(w), loader_kt_device(device))?)
 }
 
-/// True when `from_model_weights` should stub the candle CPU storage
-/// for the raw `embed_tokens` table after uploading the transposed
-/// view. Fires on Metal (always) and on Vulkan-active processes
-/// (where the candle "device" reports as Cpu but the real compute
-/// runs on a `vk::Device` that already keeps its own buffer copy of
-/// every weight). On a unified-memory APU this halves the
-/// embedding-table footprint by removing the duplicate candle CPU
-/// mirror.
-fn stub_embed_tokens_after_upload(device: &Device) -> bool {
-    matches!(device, Device::Metal(_)) || crate::backend::vulkan_active()
-}
-
 #[derive(Clone)]
 struct ProjectionLoadCache {
-    drop_projection_originals: bool,
-    drop_projection_transposes: bool,
+    policy: ProjectionLoadPolicy,
     bf16_stub: Option<Tensor>,
     f16_stub: Option<Tensor>,
     f32_stub: Option<Tensor>,
@@ -5659,21 +5650,29 @@ struct ProjectionLoadCache {
 
 impl ProjectionLoadCache {
     fn new(device: &Device) -> Result<Self> {
-        let drop_projection_originals = projection_original_drop_enabled_for_device(device);
-        let drop_projection_transposes =
-            !drop_projection_originals && drop_projection_transposes_enabled();
-        if drop_projection_originals || drop_projection_transposes {
+        let policy = ProjectionLoadPolicy::for_model_loader_device(*device);
+        if policy.drop_projection_originals || policy.drop_projection_transposes {
             Ok(Self {
-                drop_projection_originals,
-                drop_projection_transposes,
-                bf16_stub: Some(Tensor::zeros(vec![1usize], DType::BF16, loader_kt_device(device))?),
-                f16_stub: Some(Tensor::zeros(vec![1usize], DType::F16, loader_kt_device(device))?),
-                f32_stub: Some(Tensor::zeros(vec![1usize], DType::F32, loader_kt_device(device))?),
+                policy,
+                bf16_stub: Some(Tensor::zeros(
+                    vec![1usize],
+                    DType::BF16,
+                    loader_kt_device(device),
+                )?),
+                f16_stub: Some(Tensor::zeros(
+                    vec![1usize],
+                    DType::F16,
+                    loader_kt_device(device),
+                )?),
+                f32_stub: Some(Tensor::zeros(
+                    vec![1usize],
+                    DType::F32,
+                    loader_kt_device(device),
+                )?),
             })
         } else {
             Ok(Self {
-                drop_projection_originals,
-                drop_projection_transposes,
+                policy,
                 bf16_stub: None,
                 f16_stub: None,
                 f32_stub: None,
@@ -5691,81 +5690,20 @@ impl ProjectionLoadCache {
     }
 
     fn drops_projection_originals(&self) -> bool {
-        self.drop_projection_originals
+        self.policy.drop_projection_originals
     }
 
     fn drops_projection_transposes(&self) -> bool {
-        self.drop_projection_transposes
+        self.policy.drop_projection_transposes
     }
-}
 
-fn env_enabled(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            !v.is_empty() && !matches!(v.as_str(), "0" | "false" | "no")
-        })
-        .unwrap_or(false)
-}
-
-fn drop_projection_originals_enabled() -> bool {
-    matches!(
-        std::env::var("KILN_DROP_PROJECTION_ORIGINALS")
-            .ok()
-            .as_deref()
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("1") | Some("true") | Some("yes")
-    )
-}
-
-fn keep_projection_originals_enabled() -> bool {
-    // vk-native training reads projection weight bytes via candle's
-    // CPU storage path (`extract_tensor_packed_bf16_bytes_pub`). If the
-    // originals were stubbed to shape [1] during loading, those reads
-    // come back as zeros and the bf16w matmul silently outputs zero —
-    // the model then collapses to "embedding + residuals" and the loss
-    // is bit-identical across epochs because LoRA gradients vanish.
-    // Keep originals automatically whenever the process has selected the
-    // Vulkan backend. Training may be submitted later, after weights are
-    // loaded, so this cannot depend only on KILN_VK_NATIVE_TRAINING.
-    if crate::backend::vulkan_active() || env_enabled("KILN_VK_NATIVE_TRAINING") {
-        return true;
+    fn parallel_transposed_projection_upload(&self) -> bool {
+        self.policy.parallel_transposed_projection_upload
     }
-    matches!(
-        std::env::var("KILN_KEEP_PROJECTION_ORIGINALS")
-            .ok()
-            .as_deref()
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("1") | Some("true") | Some("yes")
-    )
-}
 
-fn drop_projection_transposes_enabled() -> bool {
-    // Only drop projection transposes when training is actually engaged
-    // (KILN_VK_NATIVE_TRAINING set explicitly). Earlier this was widened to
-    // every Vulkan-active process — but inference reads `in_proj_qkv_t` /
-    // `in_proj_z_t` / etc. directly via
-    // `LinearBackend::runtime_linear_prefill_apply`, and
-    // when those transposes are replaced with the shape-[1] BF16 stub at
-    // load time the GDN prefill matmul fails with "only 2d matrixes are
-    // supported [1, T, hidden] [1]" on every chat completion. Keeping the
-    // originals on vulkan_active stays in keep_projection_originals_enabled
-    // (it's cheap-ish and lets training start later); the transposes are
-    // only dropped when the trainer is genuinely going to be the only
-    // consumer.
-    env_enabled("KILN_VK_NATIVE_TRAINING") && !env_enabled("KILN_KEEP_PROJECTION_TRANSPOSES")
-}
-
-fn projection_original_drop_enabled_for_device(device: &Device) -> bool {
-    !keep_projection_originals_enabled()
-        && (matches!(device, Device::Metal(_) | Device::Cuda(_))
-            || crate::backend::vulkan_active()
-            || drop_projection_originals_enabled())
+    fn synchronizes_after_dropping_originals(&self) -> bool {
+        self.drops_projection_originals() && self.policy.synchronize_after_dropping_originals
+    }
 }
 
 fn projection_tensors_for_load(
@@ -5812,11 +5750,11 @@ fn projection_tensors_for_load_batch(
     device: &Device,
     cache: &ProjectionLoadCache,
 ) -> Result<Vec<(Tensor, Tensor)>> {
-    // Metal-only parallel fast path. It pre-transposes the raw weight bytes in
-    // parallel and uploads them straight into kt Metal tensors. Every other
-    // device falls through to the serial kt-native path below.
+    // Backend policy may allow pre-transposing raw weight bytes in parallel and
+    // uploading them directly into the target tensors. Every other device falls
+    // through to the serial kt-native path below.
     #[cfg(feature = "metal")]
-    if matches!(device, Device::Metal(_)) && !parallel_projection_load_disabled() {
+    if cache.parallel_transposed_projection_upload() && !parallel_projection_load_disabled() {
         use rayon::prelude::*;
 
         let transposed: Result<Vec<CachedTransposedWeightBytes>> = weights
@@ -6635,7 +6573,10 @@ impl GpuWeights {
         // unified-memory APU this is what keeps Phase 0 from sitting on
         // a duplicate embedding table that the Vulkan side has already
         // mirrored to its own buffer cache.
-        let (embed_tokens, embed_tokens_t) = if stub_embed_tokens_after_upload(device) {
+        let projection_load_policy = ProjectionLoadPolicy::for_model_loader_device(*device);
+        let (embed_tokens, embed_tokens_t) = if projection_load_policy
+            .stub_embedding_table_after_transposed_upload
+        {
             let embed_tokens_t =
                 weight_to_transposed_tensor_2d(&weights.embedding.embed_tokens, device)
                     .context("embed_tokens transposed upload")?;
@@ -7114,15 +7055,13 @@ impl GpuWeights {
                 .map(|source| MtpGpuWeightsSlot::lazy_deferred(source.clone(), device))
         };
 
-        if projection_load_cache.drops_projection_originals() && matches!(device, Device::Metal(_))
-        {
+        if projection_load_cache.synchronizes_after_dropping_originals() {
             // #1082: kt-native Metal queue drain after freeing the projection
-            // originals. This whole block only ever runs when `device` is
-            // `Metal(_)` (see the `matches!` guard above). `wait_until_completed`
-            // drains the same MetalCompanion command pool the compute ran on, so
-            // no pending GPU write can read a freed buffer. The vulkan lane never
-            // reaches here (vulkan tensors are CPU-resident, never
-            // `Device::Metal`), so it is excluded from this arm. (#1082)
+            // originals. The backend projection-load policy only enables this
+            // for Metal. `wait_until_completed` drains the same MetalCompanion
+            // command pool the compute ran on, so no pending GPU write can read
+            // a freed buffer. The Vulkan lane never reaches here (Vulkan tensors
+            // are CPU-resident), so it is excluded from this arm. (#1082)
             #[cfg(feature = "metal")]
             {
                 let idx = if let Device::Metal(i) = device { *i } else { 0 };
@@ -28764,9 +28703,9 @@ mod tests {
     }
 
     /// Regression test for the 2026-05-12 → 2026-05-14 silent inference
-    /// outage. Commit 997a608f widened `drop_projection_transposes_enabled`
-    /// from "training is engaged" to "Vulkan is the active backend OR
-    /// training is engaged" — which silently replaced every projection
+    /// outage. Commit 997a608f widened the projection-load transpose drop
+    /// decision from "training is engaged" to "Vulkan is the active backend OR
+    /// training is engaged", which silently replaced every projection
     /// transpose tensor (`in_proj_qkv_t`, `in_proj_z_t`, `out_proj_t`,
     /// `q_proj_t`, etc.) with `Tensor::zeros((1,), DType::BF16, ...)` at
     /// load time. Inference reads those caches directly via
@@ -28774,8 +28713,8 @@ mod tests {
     /// kernel then bailed out with `only 2d matrixes are supported [1, T, hidden] [1]`
     /// on every single /v1/chat/completions request. The fix narrowed the gate
     /// back to "training is engaged" (KILN_VK_NATIVE_TRAINING set);
-    /// `keep_projection_originals_enabled()` stays Vulkan-aware because
-    /// the trainer needs the originals later.
+    /// `ProjectionLoadPolicy` stays Vulkan-aware for originals because the
+    /// trainer needs them later.
     ///
     /// This test pins the contract: turning Vulkan on must NOT drop
     /// transposes by itself.
@@ -28789,8 +28728,8 @@ mod tests {
         }
         let _vk = crate::backend::test_only_set_vulkan_active(true);
         assert!(
-            !drop_projection_transposes_enabled(),
-            "drop_projection_transposes_enabled() must NOT return true just \
+            !ProjectionLoadPolicy::for_model_loader_device(Device::Cpu).drop_projection_transposes,
+            "ProjectionLoadPolicy must NOT drop projection transposes just \
              because Vulkan is active — that breaks every chat completion on \
              Vulkan with `only 2d matrixes are supported [..., hidden] [1]`. \
              Only KILN_VK_NATIVE_TRAINING should opt in to dropping transposes."
@@ -28799,7 +28738,7 @@ mod tests {
         // SAFETY: env mutation serialized by RESIDENCY_ENV_LOCK.
         unsafe { std::env::set_var("KILN_VK_NATIVE_TRAINING", "1") };
         assert!(
-            drop_projection_transposes_enabled(),
+            ProjectionLoadPolicy::for_model_loader_device(Device::Cpu).drop_projection_transposes,
             "KILN_VK_NATIVE_TRAINING=1 should still enable transpose drop"
         );
         // SAFETY: env cleanup serialized by RESIDENCY_ENV_LOCK.
@@ -29284,11 +29223,10 @@ mod tests {
         Ok(())
     }
 
-    /// `stub_embed_tokens_after_upload` must fire on Metal and on
-    /// Vulkan-active processes — both backends route the embedding
-    /// lookup through `embed_tokens_t` and never read the raw
-    /// `embed_tokens` table again, so the candle CPU mirror is
-    /// pure overhead.
+    /// `ProjectionLoadPolicy::stub_embedding_table_after_transposed_upload`
+    /// must fire on Metal and on Vulkan-active processes — both backends route
+    /// the embedding lookup through `embed_tokens_t` and never read the raw
+    /// `embed_tokens` table again, so the candle CPU mirror is pure overhead.
     ///
     /// Phase 1.2 sub-step 1: keep this contract under test so a future
     /// edit can't silently drop the Vulkan branch and reintroduce the
@@ -29311,7 +29249,8 @@ mod tests {
         // skip the assertion rather than make a false negative claim.)
         if !crate::backend::vulkan_active() {
             assert!(
-                !stub_embed_tokens_after_upload(&cpu),
+                !ProjectionLoadPolicy::for_model_loader_device(cpu)
+                    .stub_embedding_table_after_transposed_upload,
                 "plain CPU with no Vulkan must NOT stub"
             );
         }
@@ -29374,10 +29313,8 @@ mod tests {
         }
     }
 
-    /// `keep_projection_originals_enabled()` must default to `false`
-    /// (i.e., projection originals are *eligible* for the drop on the
-    /// devices that ask for it). Pins the residency-audit claim that
-    /// per-layer projection originals are stubbed by default on Vulkan.
+    /// `KILN_KEEP_PROJECTION_ORIGINALS` must default to off: projection
+    /// originals remain eligible for the drop on the backends that ask for it.
     #[test]
     fn test_keep_projection_originals_default_off() {
         let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -29385,15 +29322,16 @@ mod tests {
         unsafe {
             std::env::remove_var("KILN_KEEP_PROJECTION_ORIGINALS");
         }
-        let result = keep_projection_originals_enabled();
+        let result =
+            ProjectionLoadPolicy::for_backend("cuda", Device::Cpu).drop_projection_originals;
         if let Some(prev) = prior {
             unsafe {
                 std::env::set_var("KILN_KEEP_PROJECTION_ORIGINALS", prev);
             }
         }
         assert!(
-            !result,
-            "KILN_KEEP_PROJECTION_ORIGINALS must default to off (drop allowed)"
+            result,
+            "KILN_KEEP_PROJECTION_ORIGINALS must default to off (drop allowed on CUDA)"
         );
     }
 
@@ -29409,7 +29347,7 @@ mod tests {
                 std::env::set_var("KILN_KEEP_PROJECTION_ORIGINALS", value);
             }
             assert!(
-                keep_projection_originals_enabled(),
+                !ProjectionLoadPolicy::for_backend("cuda", Device::Cpu).drop_projection_originals,
                 "KILN_KEEP_PROJECTION_ORIGINALS={value} must keep the originals"
             );
         }
@@ -29424,11 +29362,9 @@ mod tests {
         }
     }
 
-    /// `projection_original_drop_enabled_for_device(Device::Cpu)` is
-    /// `false` on plain CPU absent any overrides. (The Vulkan-active
-    /// and KILN_DROP_PROJECTION_ORIGINALS branches flip it true; both
-    /// are exercised by the integration runs, but the predicate's CPU
-    /// baseline is what this test pins.)
+    /// Projection original drop is `false` on plain CPU absent any overrides.
+    /// The Vulkan-active and KILN_DROP_PROJECTION_ORIGINALS branches are
+    /// exercised by integration runs, but the CPU baseline is what this pins.
     #[test]
     fn test_projection_drop_cpu_default_off() {
         let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -29441,7 +29377,10 @@ mod tests {
         let result = if !crate::backend::vulkan_active() {
             // Safe to assert: vulkan_active=false makes the device
             // pattern-match the only deciding factor for Device::Cpu.
-            Some(projection_original_drop_enabled_for_device(&Device::Cpu))
+            Some(
+                ProjectionLoadPolicy::for_model_loader_device(Device::Cpu)
+                    .drop_projection_originals,
+            )
         } else {
             None
         };
@@ -29464,7 +29403,7 @@ mod tests {
     }
 
     /// Property: when `embed_tokens` is a 1-element stub (the only
-    /// case `stub_embed_tokens_after_upload` produces), the dispatch in
+    /// case ProjectionLoadPolicy produces), the dispatch in
     /// `embedding_lookup_from_weights` must route to
     /// `embedding_lookup_from_transposed`. We can't trivially build a
     /// full `GpuWeights` here, so test the dim-mismatch branch directly
