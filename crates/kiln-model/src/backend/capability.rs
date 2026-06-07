@@ -733,6 +733,7 @@ pub struct StorageCapabilities {
     pub resident_decode: Support,
     pub kv_cache_device_memory_pressure: bool,
     pub gpu_memory_detection_policy: GpuMemoryDetectionPolicy,
+    pub gpu_memory_budget_policy: GpuMemoryBudgetPolicy,
     pub gpu_memory_reclaim_policy: GpuMemoryReclaimPolicy,
     pub kv_sizing_residency_model_multiplier: u64,
     pub kv_auto_block_policy: KvCacheAutoBlockPolicy,
@@ -745,6 +746,14 @@ pub struct GpuMemoryDetectionPolicy {
     pub detected_total_log_message: Option<&'static str>,
     pub missing_total_warning: Option<&'static str>,
     pub missing_total_fallback_bytes: Option<u64>,
+}
+
+/// Backend-owned policy for server GPU-memory budget probes and retries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuMemoryBudgetPolicy {
+    pub use_live_memory_snapshot: bool,
+    pub cap_kv_blocks_by_live_budget: bool,
+    pub retry_kv_allocation_after_reclaim: bool,
 }
 
 /// Backend-owned policy for server GPU-memory pressure reclaim hooks.
@@ -1189,6 +1198,7 @@ impl BackendCapabilities {
                 ),
                 kv_cache_device_memory_pressure: kv_cache_device_memory_pressure(name, device),
                 gpu_memory_detection_policy: GpuMemoryDetectionPolicy::for_backend(name, device),
+                gpu_memory_budget_policy: GpuMemoryBudgetPolicy::for_backend(name, device),
                 gpu_memory_reclaim_policy: GpuMemoryReclaimPolicy::for_backend(name, device),
                 kv_sizing_residency_model_multiplier: kv_sizing_residency_model_multiplier(
                     name, device,
@@ -1585,6 +1595,31 @@ impl GpuMemoryDetectionPolicy {
         } else {
             self.missing_total_fallback_bytes
                 .unwrap_or(detected_total_bytes)
+        }
+    }
+}
+
+impl GpuMemoryBudgetPolicy {
+    pub const DEVICE_MEMORY_AWARE: Self = Self {
+        use_live_memory_snapshot: true,
+        cap_kv_blocks_by_live_budget: true,
+        retry_kv_allocation_after_reclaim: true,
+    };
+
+    pub const HOST_MEMORY_ONLY: Self = Self {
+        use_live_memory_snapshot: false,
+        cap_kv_blocks_by_live_budget: false,
+        retry_kv_allocation_after_reclaim: false,
+    };
+
+    pub fn for_backend(name: &str, device: kiln_tensor::Device) -> Self {
+        if matches!(
+            backend_kind_for_runtime(name, device),
+            kiln_tensor::Backend::Cpu
+        ) {
+            Self::HOST_MEMORY_ONLY
+        } else {
+            Self::DEVICE_MEMORY_AWARE
         }
     }
 }

@@ -12,10 +12,10 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::Engine;
 use kiln_model::{
-    DecodeBatcher, DecodeBatcherConfig, GpuMemoryDetectionPolicy, GpuMemoryReclaimPolicy,
-    GpuMemoryReclaimer, InferenceRecurrentStatePolicy, KvCacheAutoBlockPolicy,
-    LinearAttentionState, ModelRunner, PagedKvCacheKt, PagedPrefixNextToken,
-    PagedPrefixRegistration,
+    DecodeBatcher, DecodeBatcherConfig, GpuMemoryBudgetPolicy, GpuMemoryDetectionPolicy,
+    GpuMemoryReclaimPolicy, GpuMemoryReclaimer, InferenceRecurrentStatePolicy,
+    KvCacheAutoBlockPolicy, LinearAttentionState, ModelRunner, PagedKvCacheKt,
+    PagedPrefixNextToken, PagedPrefixRegistration,
 };
 use kiln_scheduler::{PrefixCacheStats, Scheduler};
 use kiln_tensor::DType;
@@ -1644,6 +1644,7 @@ impl AppState {
         let storage_capabilities = runner.backend_capabilities().storage;
         let kv_auto_block_policy = storage_capabilities.kv_auto_block_policy;
         let gpu_memory_detection_policy = storage_capabilities.gpu_memory_detection_policy;
+        let gpu_memory_budget_policy = storage_capabilities.gpu_memory_budget_policy;
         let gpu_memory_reclaim_policy = storage_capabilities.gpu_memory_reclaim_policy;
 
         // Total AND used come from the SAME live, all-process driver snapshot
@@ -1653,7 +1654,7 @@ impl AppState {
         // when the driver snapshot is unavailable (e.g. Apple Metal). Without
         // this, total came from the carveout heuristic while used came from the
         // snapshot — and `used` could exceed `total`.
-        let snap = if device_kt.backend() != kiln_tensor::Backend::Cpu {
+        let snap = if gpu_memory_budget_policy.use_live_memory_snapshot {
             let s = kiln_memory::vram::current_memory_snapshot();
             (s.total_bytes > 0).then_some(s)
         } else {
@@ -1693,7 +1694,7 @@ impl AppState {
             });
         }
 
-        let post_load_used_vram_info = runtime_used_vram_for_device(&device_kt);
+        let post_load_used_vram_info = runtime_used_vram_for_policy(gpu_memory_budget_policy);
         let post_load_used_vram = snap
             .map(|s| s.used_bytes)
             .or_else(|| post_load_used_vram_info.map(|info| info.used_bytes))
@@ -1731,7 +1732,6 @@ impl AppState {
 
         // Compute num_blocks for a given fraction. Used both for the explicit
         // `memory_cfg.num_blocks` path and the auto-sizer retry loop below.
-        let governor_backend = device_kt.backend();
         let compute_blocks_for_fraction = |fraction: f64| -> usize {
             let n = auto_num_blocks_for_fraction(
                 total_vram,
@@ -1748,7 +1748,7 @@ impl AppState {
             // allocate from. Use the stricter cap when both are available so an
             // optimistic DRM/nvidia-smi snapshot cannot drive a fatal backend
             // allocation.
-            if governor_backend != kiln_tensor::Backend::Cpu && bytes_per_block > 0 {
+            if gpu_memory_budget_policy.cap_kv_blocks_by_live_budget && bytes_per_block > 0 {
                 let governor = kiln_memory::MemoryGovernor::global();
                 let governor_avail = governor.available_bytes();
                 let allocator_budget =
@@ -1836,6 +1836,7 @@ impl AppState {
                 &device_kt,
                 n,
                 bytes_per_block,
+                gpu_memory_budget_policy,
                 kv_auto_block_policy,
                 kiln_memory::MemoryGovernor::global(),
             )?;
@@ -1859,7 +1860,7 @@ impl AppState {
                 // have failed only because freed blocks were still pooled (or a
                 // coexisting job briefly spiked). Cheaper than shrinking the KV
                 // cache if the memory is genuinely reclaimable.
-                Err(first) if governor_backend != kiln_tensor::Backend::Cpu => {
+                Err(first) if gpu_memory_budget_policy.retry_kv_allocation_after_reclaim => {
                     let freed = kiln_memory::MemoryGovernor::global().reclaim(u64::MAX);
                     tracing::warn!(
                         num_blocks = n,
@@ -2373,10 +2374,11 @@ fn validate_kv_allocation_against_live_allocator(
     device: &kiln_tensor::Device,
     num_blocks: usize,
     bytes_per_block: u64,
+    gpu_memory_budget_policy: GpuMemoryBudgetPolicy,
     kv_auto_block_policy: KvCacheAutoBlockPolicy,
     governor: &kiln_memory::MemoryGovernor,
 ) -> anyhow::Result<()> {
-    if device.backend() == kiln_tensor::Backend::Cpu || bytes_per_block == 0 {
+    if !gpu_memory_budget_policy.cap_kv_blocks_by_live_budget || bytes_per_block == 0 {
         return Ok(());
     }
     let Some(allocator_budget) =
@@ -2416,8 +2418,8 @@ fn validate_kv_allocation_against_live_allocator(
 /// Uses the shared VRAM detection from kiln-core (nvidia-smi + sysctl
 /// hw.memsize on Apple Silicon + env override).
 
-fn runtime_used_vram_for_device(
-    device: &kiln_tensor::Device,
+fn runtime_used_vram_for_policy(
+    policy: GpuMemoryBudgetPolicy,
 ) -> Option<kiln_memory::vram::GpuMemoryUsedInfo> {
     // The live used-memory probe is OS-level (nvidia-smi / AMD+Intel DRM sysfs /
     // unified-APU MemAvailable, see `kiln_memory::vram::current_memory_snapshot`),
@@ -2427,7 +2429,7 @@ fn runtime_used_vram_for_device(
     // estimate that is blind to live residency and to coexisting GPU workloads.
     // Wiring it for all GPU backends makes the sizer mindful of the actual VRAM
     // on whatever device the user is running. CPU has no device memory to probe.
-    if device.backend() == kiln_tensor::Backend::Cpu {
+    if !policy.use_live_memory_snapshot {
         return None;
     }
     let snap = kiln_memory::vram::current_memory_snapshot();

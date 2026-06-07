@@ -51,7 +51,7 @@ pub use backend::capability::{
     AttentionCapabilities, AttentionRequest, AttentionRequestKind, BackendCapabilities,
     BackendCapabilityQueries, BackendCapabilitySnapshot, BackendFallbackCapabilities,
     BackendTrainingCapabilities, DecodeBatcherPolicy, DecodeCapabilities, GdnCapabilities,
-    GpuMemoryDetectionPolicy, GpuMemoryReclaimPolicy, GpuMemoryReclaimer,
+    GpuMemoryBudgetPolicy, GpuMemoryDetectionPolicy, GpuMemoryReclaimPolicy, GpuMemoryReclaimer,
     InferenceRecurrentStatePolicy, KvCacheAutoBlockPolicy, KvCacheFp8Policy,
     KvCacheMemoryTierBlockCap, LinearRequest, LinearRequestKind, MatmulAccumulation,
     MatmulBatchPolicy, MatmulBlasRequest, MatmulCapabilities, MatmulEpilogue, MatmulOperandLayout,

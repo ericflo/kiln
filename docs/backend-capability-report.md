@@ -163,8 +163,9 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | Descriptor | Field Count | Fields |
 |---|---:|---|
 | `BackendCapabilities` | 12 | `backend`, `device`, `storage`, `startup`, `matmul`, `attention`, `gdn`, `decode`, `decode_batcher`, `training`, `graph_replay`, `fallback` |
-| `StorageCapabilities` | 10 | `backend`, `device`, `resident_activation`, `resident_decode`, `kv_cache_device_memory_pressure`, `gpu_memory_detection_policy`, `gpu_memory_reclaim_policy`, `kv_sizing_residency_model_multiplier`, `kv_auto_block_policy`, `kv_cache_fp8_policy` |
+| `StorageCapabilities` | 11 | `backend`, `device`, `resident_activation`, `resident_decode`, `kv_cache_device_memory_pressure`, `gpu_memory_detection_policy`, `gpu_memory_budget_policy`, `gpu_memory_reclaim_policy`, `kv_sizing_residency_model_multiplier`, `kv_auto_block_policy`, `kv_cache_fp8_policy` |
 | `GpuMemoryDetectionPolicy` | 3 | `detected_total_log_message`, `missing_total_warning`, `missing_total_fallback_bytes` |
+| `GpuMemoryBudgetPolicy` | 3 | `use_live_memory_snapshot`, `cap_kv_blocks_by_live_budget`, `retry_kv_allocation_after_reclaim` |
 | `GpuMemoryReclaimPolicy` | 1 | `reclaimer` |
 | `KvCacheAutoBlockPolicy` | 4 | `context_window_cap`, `static_max_blocks`, `memory_tier_cap`, `allow_min_blocks_below_live_budget` |
 | `KvCacheMemoryTierBlockCap` | 5 | `low_memory_bytes_exclusive`, `low_max_blocks`, `mid_memory_bytes_exclusive`, `mid_max_blocks`, `high_max_blocks` |

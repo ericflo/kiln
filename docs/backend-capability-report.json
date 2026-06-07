@@ -1851,6 +1851,24 @@
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
+    "GpuMemoryBudgetPolicy": {
+      "field_count": 3,
+      "fields": [
+        {
+          "name": "use_live_memory_snapshot",
+          "type": "bool"
+        },
+        {
+          "name": "cap_kv_blocks_by_live_budget",
+          "type": "bool"
+        },
+        {
+          "name": "retry_kv_allocation_after_reclaim",
+          "type": "bool"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
     "GpuMemoryDetectionPolicy": {
       "field_count": 3,
       "fields": [
@@ -2084,7 +2102,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "StorageCapabilities": {
-      "field_count": 10,
+      "field_count": 11,
       "fields": [
         {
           "name": "backend",
@@ -2109,6 +2127,10 @@
         {
           "name": "gpu_memory_detection_policy",
           "type": "GpuMemoryDetectionPolicy"
+        },
+        {
+          "name": "gpu_memory_budget_policy",
+          "type": "GpuMemoryBudgetPolicy"
         },
         {
           "name": "gpu_memory_reclaim_policy",

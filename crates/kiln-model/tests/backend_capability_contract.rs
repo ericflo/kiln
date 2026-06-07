@@ -1141,6 +1141,7 @@ fn generated_capability_report_lists_request_descriptors() {
         "BackendCapabilities",
         "StorageCapabilities",
         "GpuMemoryDetectionPolicy",
+        "GpuMemoryBudgetPolicy",
         "GpuMemoryReclaimPolicy",
         "KvCacheAutoBlockPolicy",
         "KvCacheMemoryTierBlockCap",
@@ -1233,6 +1234,10 @@ fn generated_capability_report_lists_request_descriptors() {
         "StorageCapabilities should own backend-specific GPU memory detection fallback policy"
     );
     assert!(
+        storage_capability_fields.contains(&"gpu_memory_budget_policy"),
+        "StorageCapabilities should own backend-specific GPU memory budget policy"
+    );
+    assert!(
         storage_capability_fields.contains(&"gpu_memory_reclaim_policy"),
         "StorageCapabilities should own backend-specific GPU memory reclaim policy"
     );
@@ -1263,6 +1268,22 @@ fn generated_capability_report_lists_request_descriptors() {
         assert!(
             gpu_memory_detection_policy_fields.contains(&field),
             "GpuMemoryDetectionPolicy should include {field}"
+        );
+    }
+    let gpu_memory_budget_policy_fields = capability_descriptors["GpuMemoryBudgetPolicy"]["fields"]
+        .as_array()
+        .expect("GpuMemoryBudgetPolicy fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
+    for field in [
+        "use_live_memory_snapshot",
+        "cap_kv_blocks_by_live_budget",
+        "retry_kv_allocation_after_reclaim",
+    ] {
+        assert!(
+            gpu_memory_budget_policy_fields.contains(&field),
+            "GpuMemoryBudgetPolicy should include {field}"
         );
     }
     let gpu_memory_reclaim_policy_fields =
@@ -1756,6 +1777,29 @@ fn generated_capability_report_lists_request_descriptors() {
         assert!(
             attention_evidence.contains(&path),
             "attention/GDN/conv parity gate should cite {path}"
+        );
+    }
+}
+
+#[test]
+fn gpu_memory_budget_policy_routes_live_budget_probes() {
+    use kiln_model::GpuMemoryBudgetPolicy;
+    use kiln_tensor::Device;
+
+    assert_eq!(
+        GpuMemoryBudgetPolicy::for_backend("cpu", Device::Cpu),
+        GpuMemoryBudgetPolicy::HOST_MEMORY_ONLY
+    );
+    for (name, device) in [
+        ("cuda", Device::Cuda(0)),
+        ("rocm", Device::Rocm(0)),
+        ("metal", Device::Metal(0)),
+        ("vulkan", Device::Vulkan(0)),
+    ] {
+        assert_eq!(
+            GpuMemoryBudgetPolicy::for_backend(name, device),
+            GpuMemoryBudgetPolicy::DEVICE_MEMORY_AWARE,
+            "{name} should use live device-memory budget policy"
         );
     }
 }
@@ -2981,7 +3025,7 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     let server_kv_auto_sizing_helpers = source_between(
         &server_state_source,
         "fn auto_num_blocks_for_fraction(",
-        "fn runtime_used_vram_for_device(",
+        "fn runtime_used_vram_for_policy(",
     );
     assert!(
         server_kv_auto_sizing_helpers.contains("KvCacheAutoBlockPolicy")
@@ -3055,10 +3099,58 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             "kiln-server GPU memory detection should not keep backend fallback policy locally: {forbidden}"
         );
     }
+    let server_memory_snapshot_section = source_between(
+        &server_state_source,
+        "let snap = if",
+        "let total_vram = snap",
+    );
+    assert!(
+        server_memory_snapshot_section.contains("gpu_memory_budget_policy")
+            && server_memory_snapshot_section.contains("use_live_memory_snapshot"),
+        "kiln-server live memory snapshot routing should consume StorageCapabilities.gpu_memory_budget_policy"
+    );
+    for forbidden in ["device_kt.backend()", "Backend::Cpu", "governor_backend"] {
+        assert!(
+            !server_memory_snapshot_section.contains(forbidden),
+            "kiln-server live memory snapshot routing should not keep a local backend table: {forbidden}"
+        );
+    }
+    let server_live_budget_section = source_between(
+        &server_state_source,
+        "let compute_blocks_for_fraction = |fraction: f64| -> usize {",
+        "let fp8_enabled = {",
+    );
+    assert!(
+        server_live_budget_section.contains("gpu_memory_budget_policy")
+            && server_live_budget_section.contains("cap_kv_blocks_by_live_budget"),
+        "kiln-server KV live-budget caps should consume StorageCapabilities.gpu_memory_budget_policy"
+    );
+    for forbidden in ["device_kt.backend()", "Backend::Cpu", "governor_backend"] {
+        assert!(
+            !server_live_budget_section.contains(forbidden),
+            "kiln-server KV live-budget caps should not keep local backend policy: {forbidden}"
+        );
+    }
+    let server_allocation_retry_section = source_between(
+        &server_state_source,
+        "let allocate_cache = |n: usize| -> anyhow::Result<PagedKvCacheKt> {",
+        "// Determine num_blocks + paged cache:",
+    );
+    assert!(
+        server_allocation_retry_section.contains("gpu_memory_budget_policy")
+            && server_allocation_retry_section.contains("retry_kv_allocation_after_reclaim"),
+        "kiln-server KV allocation retry should consume StorageCapabilities.gpu_memory_budget_policy"
+    );
+    for forbidden in ["device_kt.backend()", "Backend::Cpu", "governor_backend"] {
+        assert!(
+            !server_allocation_retry_section.contains(forbidden),
+            "kiln-server KV allocation retry should not keep local backend policy: {forbidden}"
+        );
+    }
     let server_memory_reclaim_call_site_section = source_between(
         &server_state_source,
         "static GOVERNOR_WIRED: std::sync::OnceLock<()>",
-        "let post_load_used_vram_info = runtime_used_vram_for_device(",
+        "let post_load_used_vram_info = runtime_used_vram_for_policy(",
     );
     assert!(
         server_memory_reclaim_call_site_section.contains("gpu_memory_reclaim_policy")
