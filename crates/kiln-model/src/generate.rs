@@ -732,6 +732,12 @@ fn decode_batch_generic_fallback_enabled(backend: &dyn BackendRuntime) -> bool {
     decode_hot_path_fallback_policy(backend).allows_fallback()
 }
 
+fn greedy_token_decode_enabled(backend: &dyn BackendRuntime) -> bool {
+    BackendCapabilityQueries::backend_capabilities(backend)
+        .decode_batcher
+        .use_greedy_token_decode
+}
+
 fn decode_hot_path_fallback_policy(backend: &dyn BackendRuntime) -> FallbackPolicy {
     let fallback = BackendCapabilityQueries::backend_capabilities(backend).fallback;
     if decode_hot_path_debug_fallback_enabled(fallback.decode_hot_path_debug_env) {
@@ -1625,10 +1631,6 @@ impl ModelRunner {
 
     pub fn backend_name(&self) -> &'static str {
         BackendIdentity::runtime_name(self.backend.as_ref())
-    }
-
-    fn backend_device(&self) -> kiln_tensor::Device {
-        BackendIdentity::runtime_device(self.backend.as_ref())
     }
 
     /// Eagerly allocate the backend-resident decode scratch ring when the
@@ -2651,7 +2653,7 @@ impl ModelRunner {
         );
 
         let use_greedy_prefill_token = params.is_effectively_greedy()
-            && matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
+            && greedy_token_decode_enabled(self.backend.as_ref())
             && !streaming_prefill_enabled_for(
                 &self.weights.embed_tokens.device(),
                 prefill_tokens.len(),
@@ -5115,9 +5117,7 @@ impl ModelRunner {
         let _resident_scope = GdnRecurrentResidentStateScope::new(&*self.backend);
         let _skip_scope =
             crate::forward::VulkanSkipGdnStateReadbackScope::new(skip_gdn_state_readback);
-        if params.is_effectively_greedy()
-            && matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
-        {
+        if params.is_effectively_greedy() && greedy_token_decode_enabled(self.backend.as_ref()) {
             let linear_state_for_graph = if self.has_linear_attention_layers() {
                 Some(&mut *linear_state)
             } else {
@@ -5179,7 +5179,12 @@ impl ModelRunner {
         }
 
         if !params.is_effectively_greedy()
-            && matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
+            && paged_decode_replay_primitive_enabled(
+                self.backend.as_ref(),
+                &self.config,
+                1,
+                ReplayNativePrimitive::MetalIcb,
+            )
         {
             let linear_state_for_graph = if self.has_linear_attention_layers() {
                 Some(&mut *linear_state)
@@ -5559,7 +5564,7 @@ impl ModelRunner {
                 // (#1082) kt-native logits — sampler is kt now; no candle bridge.
                 PrefillSampleSource::Logits(logits)
             } else if params.is_effectively_greedy()
-                && matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
+                && greedy_token_decode_enabled(self.backend.as_ref())
             {
                 PrefillSampleSource::GreedyToken(
                     model_forward_paged_last_token_greedy(
@@ -5653,7 +5658,7 @@ impl ModelRunner {
             }
 
             next_token = if params.is_effectively_greedy()
-                && matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
+                && greedy_token_decode_enabled(self.backend.as_ref())
             {
                 let linear_state_for_graph = if self.has_linear_attention_layers() {
                     Some(&mut linear_state)
@@ -5944,7 +5949,7 @@ impl ModelRunner {
             // (#1082) kt-native logits — sampler is kt now; no candle bridge.
             PrefillSampleSource::Logits(logits)
         } else if params.is_effectively_greedy()
-            && matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
+            && greedy_token_decode_enabled(self.backend.as_ref())
         {
             PrefillSampleSource::GreedyToken(
                 model_forward_paged_last_token_greedy(
@@ -6042,7 +6047,7 @@ impl ModelRunner {
             }
 
             next_token = if params.is_effectively_greedy()
-                && matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
+                && greedy_token_decode_enabled(self.backend.as_ref())
             {
                 let linear_state_for_graph = if self.has_linear_attention_layers() {
                     Some(&mut linear_state)
@@ -8382,7 +8387,7 @@ impl ModelRunner {
             }
 
             next_token = if params.is_effectively_greedy()
-                && matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
+                && greedy_token_decode_enabled(self.backend.as_ref())
             {
                 let linear_state_for_graph = if self.has_linear_attention_layers() {
                     Some(&mut linear_state)

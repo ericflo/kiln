@@ -1176,6 +1176,10 @@ fn generated_capability_report_lists_request_descriptors() {
         "DecodeBatcherPolicy should own GDN KV contiguity partition routing"
     );
     assert!(
+        decode_batcher_policy_fields.contains(&"use_greedy_token_decode"),
+        "DecodeBatcherPolicy should own greedy-token decode shortcut routing"
+    );
+    assert!(
         decode_batcher_policy_fields.contains(&"use_native_sampled_contiguous_decode"),
         "DecodeBatcherPolicy should own sampled contiguous decode routing"
     );
@@ -2319,6 +2323,11 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "decode batcher rowwise retry should be backend-owned policy, not a local backend-name branch"
     );
     assert!(
+        generate_source.contains("greedy_token_decode_enabled")
+            && generate_source.contains("use_greedy_token_decode"),
+        "greedy-token decode routing should read DecodeBatcherPolicy"
+    );
+    assert!(
         generate_source.contains("ReplayBackend"),
         "generate decode residency gates should import the focused replay facet"
     );
@@ -2469,6 +2478,15 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             .contains("matches!(self.backend_device(), kiln_tensor::Device::Metal(_))"),
         "sampled contiguous decode routing should not branch on Metal device identity in ModelRunner"
     );
+    for forbidden in [
+        "matches!(self.backend_device(), kiln_tensor::Device::Metal(_))",
+        "matches!(self.backend_device(), kiln_tensor::Device::Rocm(_))",
+    ] {
+        assert!(
+            !generate_source.contains(forbidden),
+            "ModelRunner generation routing should not branch on backend device identity: {forbidden}"
+        );
+    }
 
     let graph_replay_routing_section = source_between(
         &generate_source,
