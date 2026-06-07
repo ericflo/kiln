@@ -458,6 +458,26 @@ def support_status(body: str) -> str:
     return "dynamic"
 
 
+def is_support_method_name(name: str) -> bool:
+    return name.startswith("supports_") or name.startswith("runtime_supports_")
+
+
+def normalized_support_method_name(name: str) -> str:
+    if name.startswith("runtime_supports_"):
+        return name.removeprefix("runtime_")
+    return name
+
+
+def support_pair_candidates(name: str) -> list[str]:
+    support_name = normalized_support_method_name(name)
+    pair = SUPPORT_PAIRS.get(support_name, support_name.removeprefix("supports_"))
+    candidates = []
+    if name.startswith("runtime_supports_"):
+        candidates.append(f"runtime_{pair}")
+    candidates.extend([pair, f"runtime_{pair}"])
+    return list(dict.fromkeys(candidates))
+
+
 def typed_support_state(status: str, pair_declines: bool) -> str:
     if pair_declines:
         return "Declined"
@@ -692,12 +712,24 @@ def backend_report(trait_methods: set[str]) -> tuple[dict[str, Any], list[dict[s
         source_paths = backend_source_paths(backend, path)
         functions = parse_backend_functions(source_paths)
         overrides = sorted(name for name in functions if name in trait_methods)
+        runtime_supports = {
+            normalized_support_method_name(name)
+            for name in functions
+            if name.startswith("runtime_supports_")
+        }
         support_methods: dict[str, Any] = {}
         for name, fun in sorted(functions.items()):
-            if not name.startswith("supports_"):
+            if not is_support_method_name(name):
                 continue
-            pair = SUPPORT_PAIRS.get(name, name.removeprefix("supports_"))
-            paired_fun = functions.get(pair)
+            if name.startswith("supports_") and name in runtime_supports:
+                continue
+            pair = support_pair_candidates(name)[0]
+            paired_fun = None
+            for candidate in support_pair_candidates(name):
+                if candidate in functions:
+                    pair = candidate
+                    paired_fun = functions[candidate]
+                    break
             status = support_status(fun.body)
             pair_declines = bool(paired_fun and always_declines(paired_fun.body))
             entry = {
@@ -1397,6 +1429,10 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
             focused_trait_authoritative_signal(
                 "StartupBackend",
                 "startup_backend_facet_authoritative",
+            ),
+            focused_trait_authoritative_signal(
+                "ConvBackend",
+                "conv_backend_facet_authoritative",
             ),
             phase_signal(
                 "focused_trait_forwarding_shims_removed",

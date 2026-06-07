@@ -910,8 +910,16 @@ fn cuda_rocm_support_predicates_stay_in_shared_helper() {
         "supports_gdn_decode_qk_norm_gates_recurrent",
         "supports_gdn_gates",
         "supports_gdn_gated_rms_norm",
-        "supports_causal_conv1d_update",
-        "supports_causal_conv1d_prefill",
+    ];
+    let shared_conv_support_methods = [
+        (
+            "runtime_supports_causal_conv1d_update",
+            "supports_causal_conv1d_update",
+        ),
+        (
+            "runtime_supports_causal_conv1d_prefill",
+            "supports_causal_conv1d_prefill",
+        ),
     ];
 
     for backend_file in ["cuda.rs", "rocm.rs"] {
@@ -932,6 +940,17 @@ fn cuda_rocm_support_predicates_stay_in_shared_helper() {
             assert!(
                 compact_body(&body.body).contains(&format!("support_predicates().{method}()")),
                 "{backend_file} `{method}` should delegate to cuda_rocm_common"
+            );
+        }
+
+        for (runtime_method, predicate_method) in shared_conv_support_methods {
+            let body = functions
+                .get(runtime_method)
+                .unwrap_or_else(|| panic!("{backend_file} missing {runtime_method}"));
+            assert!(
+                compact_body(&body.body)
+                    .contains(&format!("support_predicates().{predicate_method}()")),
+                "{backend_file} `{runtime_method}` should delegate to cuda_rocm_common"
             );
         }
     }
@@ -2582,7 +2601,10 @@ fn generated_capability_report_lists_focused_backend_facets() {
         let info = facets
             .get(facet)
             .unwrap_or_else(|| panic!("focused_backend_facets should list {facet}"));
-        let expected_forwarding = if matches!(facet, "BackendIdentity" | "StartupBackend") {
+        let expected_forwarding = if matches!(
+            facet,
+            "BackendIdentity" | "StartupBackend" | "ConvBackend"
+        ) {
             "concrete_authoritative"
         } else {
             "blanket_backend_runtime"
@@ -2608,7 +2630,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
         );
     }
 
-    for facet in ["BackendIdentity", "StartupBackend"] {
+    for facet in ["BackendIdentity", "StartupBackend", "ConvBackend"] {
         let info = facets
             .get(facet)
             .unwrap_or_else(|| panic!("focused_backend_facets should list {facet}"));
@@ -2643,8 +2665,12 @@ fn generated_capability_report_lists_focused_backend_facets() {
         "StartupBackend should not regress to a blanket BackendRuntime forwarding impl"
     );
     assert!(
-        backend_source.contains("pub trait BackendRuntime: BackendIdentity + StartupBackend"),
-        "BackendRuntime should inherit identity/startup from focused facets"
+        !backend_source.contains("impl<T: BackendRuntime + ?Sized> ConvBackend for T"),
+        "ConvBackend should not regress to a blanket BackendRuntime forwarding impl"
+    );
+    assert!(
+        backend_source.contains("BackendIdentity + StartupBackend + ConvBackend"),
+        "BackendRuntime should inherit identity/startup/conv from focused facets"
     );
 
     let report_md = fs::read_to_string(root.join("docs/backend-capability-report.md"))
@@ -5784,7 +5810,7 @@ fn generated_capability_report_tracks_migration_phase_status() {
         .expect("Phase 1 should be present");
     assert_eq!(
         phase1["status"], "partial",
-        "Phase 1 should expose partial progress after BackendIdentity stops blanket-forwarding"
+        "Phase 1 should expose partial progress while some W1 families remain blanket-forwarded"
     );
     assert_eq!(phase1["contract"], "landed");
     assert_eq!(phase1["migration"], "partial");
@@ -5807,6 +5833,14 @@ fn generated_capability_report_tracks_migration_phase_status() {
     assert_eq!(
         startup_signal["passed"], true,
         "StartupBackend should be a completed W1 family slice"
+    );
+    let conv_signal = phase1_signals
+        .iter()
+        .find(|signal| signal["name"] == "conv_backend_facet_authoritative")
+        .expect("Phase 1 should include ConvBackend authoritative signal");
+    assert_eq!(
+        conv_signal["passed"], true,
+        "ConvBackend should be a completed W1 family slice"
     );
     let shim_signal = phase1_signals
         .iter()

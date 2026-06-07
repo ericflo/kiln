@@ -8,7 +8,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
-    BackendIdentity, BackendRuntime, StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
+    BackendIdentity, BackendRuntime, ConvBackend, StartupBackend, TrainingCapabilities,
+    TrainingPrecisionPolicy,
 };
 use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 
@@ -1904,16 +1905,19 @@ impl BackendRuntime for RocmBackend {
             .context("kt-adapter: gdn_gated_rms_norm reshape out → original failed")?;
         Ok(Some(out))
     }
+}
 
-    fn supports_causal_conv1d_update(&self) -> bool {
+#[allow(clippy::too_many_arguments)]
+impl ConvBackend for RocmBackend {
+    fn runtime_supports_causal_conv1d_update(&self) -> bool {
         self.support_predicates().supports_causal_conv1d_update()
     }
 
-    fn supports_causal_conv1d_prefill(&self) -> bool {
+    fn runtime_supports_causal_conv1d_prefill(&self) -> bool {
         self.support_predicates().supports_causal_conv1d_prefill()
     }
 
-    fn causal_conv1d_update(
+    fn runtime_causal_conv1d_update(
         &self,
         x: &kiln_tensor::Tensor,
         weight: &kiln_tensor::Tensor,
@@ -1939,7 +1943,7 @@ impl BackendRuntime for RocmBackend {
         Ok(Some(out_kt))
     }
 
-    fn causal_conv1d_prefill(
+    fn runtime_causal_conv1d_prefill(
         &self,
         x: &kiln_tensor::Tensor,
         weight: &kiln_tensor::Tensor,

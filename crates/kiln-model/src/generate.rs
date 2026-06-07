@@ -8563,6 +8563,8 @@ mod tests {
 
     impl StartupBackend for NamedTestBackend {}
 
+    impl crate::backend::ConvBackend for NamedTestBackend {}
+
     impl BackendRuntime for NamedTestBackend {}
 
     #[test]

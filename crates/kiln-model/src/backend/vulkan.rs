@@ -28,9 +28,9 @@ use super::vulkan_tensor_bridge::{
     kt_tensor_to_packed_bf16_bytes_with_shape,
 };
 use super::{
-    BackendIdentity, BackendRuntime, StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
-    vulkan_attention, vulkan_conv1d, vulkan_dense, vulkan_device, vulkan_gdn, vulkan_linear,
-    vulkan_training, vulkan_weights,
+    BackendIdentity, BackendRuntime, ConvBackend, StartupBackend, TrainingCapabilities,
+    TrainingPrecisionPolicy, vulkan_attention, vulkan_conv1d, vulkan_dense, vulkan_device,
+    vulkan_gdn, vulkan_linear, vulkan_training, vulkan_weights,
 };
 use crate::forward::GpuWeights;
 
@@ -294,6 +294,37 @@ impl BackendIdentity for VulkanBackend {
 }
 
 impl StartupBackend for VulkanBackend {}
+
+#[allow(clippy::too_many_arguments)]
+impl ConvBackend for VulkanBackend {
+    fn runtime_supports_causal_conv1d_update(&self) -> bool {
+        vulkan_conv1d::supports_causal_conv1d_update(self)
+    }
+
+    fn runtime_supports_causal_conv1d_prefill(&self) -> bool {
+        vulkan_conv1d::supports_causal_conv1d_prefill(self)
+    }
+
+    fn runtime_causal_conv1d_update(
+        &self,
+        x: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
+        conv_state_kt: &mut kiln_tensor::Tensor,
+        kernel_size: usize,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        vulkan_conv1d::causal_conv1d_update(self, x, weight, conv_state_kt, kernel_size)
+    }
+
+    fn runtime_causal_conv1d_prefill(
+        &self,
+        x: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
+        conv_state_kt: &mut kiln_tensor::Tensor,
+        kernel_size: usize,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        vulkan_conv1d::causal_conv1d_prefill(self, x, weight, conv_state_kt, kernel_size)
+    }
+}
 
 // #1082 DoD-101/102: BackendRuntime decode methods flipped to kt; metal/vulkan impls need matching flip when their builds are restored.
 impl BackendRuntime for VulkanBackend {
@@ -856,14 +887,6 @@ impl BackendRuntime for VulkanBackend {
         vulkan_gdn::supports_gdn_gated_rms_norm(self)
     }
 
-    fn supports_causal_conv1d_update(&self) -> bool {
-        vulkan_conv1d::supports_causal_conv1d_update(self)
-    }
-
-    fn supports_causal_conv1d_prefill(&self) -> bool {
-        vulkan_conv1d::supports_causal_conv1d_prefill(self)
-    }
-
     fn flash_attn_prefill(
         &self,
         q: &kiln_tensor::Tensor,
@@ -1278,23 +1301,4 @@ impl BackendRuntime for VulkanBackend {
         vulkan_gdn::gdn_gated_rms_norm(self, x, z, weight, eps)
     }
 
-    fn causal_conv1d_update(
-        &self,
-        x: &kiln_tensor::Tensor,
-        weight: &kiln_tensor::Tensor,
-        conv_state_kt: &mut kiln_tensor::Tensor,
-        kernel_size: usize,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        vulkan_conv1d::causal_conv1d_update(self, x, weight, conv_state_kt, kernel_size)
-    }
-
-    fn causal_conv1d_prefill(
-        &self,
-        x: &kiln_tensor::Tensor,
-        weight: &kiln_tensor::Tensor,
-        conv_state_kt: &mut kiln_tensor::Tensor,
-        kernel_size: usize,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        vulkan_conv1d::causal_conv1d_prefill(self, x, weight, conv_state_kt, kernel_size)
-    }
 }

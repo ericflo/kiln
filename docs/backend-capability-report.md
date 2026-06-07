@@ -31,9 +31,9 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 
 | Backend | Source Modules | Override Count | Support Methods | Native Env Gates | Legacy Env Aliases |
 |---|---|---:|---:|---:|---:|
-| `cuda` | `crates/kiln-model/src/backend/cuda.rs`, `crates/kiln-model/src/backend/cuda_rocm_common.rs` | 43 | 15 | 4 | 0 |
-| `rocm` | `crates/kiln-model/src/backend/rocm.rs`, `crates/kiln-model/src/backend/cuda_rocm_common.rs` | 47 | 17 | 6 | 4 |
-| `metal` | `crates/kiln-model/src/backend/metal.rs`, `crates/kiln-model/src/backend/metal_attention.rs`, `crates/kiln-model/src/backend/metal_config.rs`, `crates/kiln-model/src/backend/metal_conv1d.rs`, `crates/kiln-model/src/backend/metal_core.rs`, `crates/kiln-model/src/backend/metal_dense.rs`, `crates/kiln-model/src/backend/metal_gdn.rs`, `crates/kiln-model/src/backend/metal_icb.rs`, `crates/kiln-model/src/backend/metal_lm_head.rs`, `crates/kiln-model/src/backend/metal_msl.rs`, `crates/kiln-model/src/backend/metal_norm.rs`, `crates/kiln-model/src/backend/metal_paged.rs`, `crates/kiln-model/src/backend/metal_pipeline.rs`, `crates/kiln-model/src/backend/metal_precompile.rs`, `crates/kiln-model/src/backend/metal_residency.rs`, `crates/kiln-model/src/backend/metal_runtime.rs`, `crates/kiln-model/src/backend/metal_training.rs` | 50 | 19 | 47 | 0 |
+| `cuda` | `crates/kiln-model/src/backend/cuda.rs`, `crates/kiln-model/src/backend/cuda_rocm_common.rs` | 41 | 15 | 4 | 0 |
+| `rocm` | `crates/kiln-model/src/backend/rocm.rs`, `crates/kiln-model/src/backend/cuda_rocm_common.rs` | 45 | 17 | 6 | 4 |
+| `metal` | `crates/kiln-model/src/backend/metal.rs`, `crates/kiln-model/src/backend/metal_attention.rs`, `crates/kiln-model/src/backend/metal_config.rs`, `crates/kiln-model/src/backend/metal_conv1d.rs`, `crates/kiln-model/src/backend/metal_core.rs`, `crates/kiln-model/src/backend/metal_dense.rs`, `crates/kiln-model/src/backend/metal_gdn.rs`, `crates/kiln-model/src/backend/metal_icb.rs`, `crates/kiln-model/src/backend/metal_lm_head.rs`, `crates/kiln-model/src/backend/metal_msl.rs`, `crates/kiln-model/src/backend/metal_norm.rs`, `crates/kiln-model/src/backend/metal_paged.rs`, `crates/kiln-model/src/backend/metal_pipeline.rs`, `crates/kiln-model/src/backend/metal_precompile.rs`, `crates/kiln-model/src/backend/metal_residency.rs`, `crates/kiln-model/src/backend/metal_runtime.rs`, `crates/kiln-model/src/backend/metal_training.rs` | 46 | 19 | 47 | 0 |
 | `vulkan` | `crates/kiln-model/src/backend/vulkan.rs`, `crates/kiln-model/src/backend/vulkan_attention.rs`, `crates/kiln-model/src/backend/vulkan_config.rs`, `crates/kiln-model/src/backend/vulkan_conv1d.rs`, `crates/kiln-model/src/backend/vulkan_decode_state.rs`, `crates/kiln-model/src/backend/vulkan_dense.rs`, `crates/kiln-model/src/backend/vulkan_device.rs`, `crates/kiln-model/src/backend/vulkan_gdn.rs`, `crates/kiln-model/src/backend/vulkan_linear.rs`, `crates/kiln-model/src/backend/vulkan_residency.rs`, `crates/kiln-model/src/backend/vulkan_resources.rs`, `crates/kiln-model/src/backend/vulkan_tensor_bridge.rs`, `crates/kiln-model/src/backend/vulkan_training.rs`, `crates/kiln-model/src/backend/vulkan_weights.rs` | 71 | 20 | 32 | 0 |
 
 ## Focused Backend Facets
@@ -45,7 +45,7 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `AttentionBackend` | 10 | `blanket_backend_runtime` | 0 | none | `runtime_flash_attn_paged_decode`, `runtime_flash_attn_paged_decode_contiguous`, `runtime_flash_attn_paged_decode_contiguous_batch`, `runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen`, `runtime_flash_attn_prefill`, `runtime_flash_attn_prefill_head_major`, `runtime_supports_flash_attn_paged_decode`, `runtime_supports_flash_attn_prefill`, `runtime_supports_flash_attn_prefill_head_major`, `runtime_supports_strict_paged_decode_contiguous_batch` |
 | `PagedKvBackend` | 4 | `blanket_backend_runtime` | 0 | none | `runtime_paged_kv_head_major_read`, `runtime_paged_kv_head_major_read_append_token_major`, `runtime_supports_paged_kv_head_major_read`, `runtime_supports_paged_kv_head_major_read_append_token_major` |
 | `GdnBackend` | 30 | `blanket_backend_runtime` | 0 | none | `runtime_gdn_chunk_prep`, `runtime_gdn_chunk_scan`, `runtime_gdn_chunkwise_forward`, `runtime_gdn_decode_gates_recurrent`, `runtime_gdn_decode_gates_recurrent_rmsnorm`, `runtime_gdn_decode_qk_norm_gates_recurrent`, `runtime_gdn_decode_qk_norm_gates_recurrent_rmsnorm`, `runtime_gdn_forward_substitution`, `runtime_gdn_full_chunk_forward`, `runtime_gdn_full_chunk_forward_head_last_into`, `runtime_gdn_gated_rms_norm`, `runtime_gdn_gates`, `runtime_gdn_in_proj_decode`, `runtime_gdn_recurrent_prefill_head_last`, `runtime_gdn_recurrent_prefill_native_head_last`, `runtime_gdn_recurrent_qk_norm_prefill_native_head_last`, `runtime_gdn_recurrent_step`, `runtime_supports_gdn_chunk_prep`, `runtime_supports_gdn_chunk_scan`, `runtime_supports_gdn_decode_gates_recurrent_unexpanded_qk`, `runtime_supports_gdn_decode_qk_norm_gates_recurrent`, `runtime_supports_gdn_forward_substitution`, `runtime_supports_gdn_full_chunk_forward`, `runtime_supports_gdn_full_chunk_forward_head_last`, `runtime_supports_gdn_gated_rms_norm`, `runtime_supports_gdn_gates`, `runtime_supports_gdn_recurrent_prefill_head_last`, `runtime_supports_gdn_recurrent_prefill_native_head_last`, `runtime_supports_gdn_recurrent_qk_norm_prefill_native_head_last`, `runtime_supports_gdn_recurrent_step` |
-| `ConvBackend` | 4 | `blanket_backend_runtime` | 0 | none | `runtime_causal_conv1d_prefill`, `runtime_causal_conv1d_update`, `runtime_supports_causal_conv1d_prefill`, `runtime_supports_causal_conv1d_update` |
+| `ConvBackend` | 4 | `concrete_authoritative` | 5 | `CpuBackend`, `CudaBackend`, `MetalBackend`, `RocmBackend`, `VulkanBackend` | `runtime_causal_conv1d_prefill`, `runtime_causal_conv1d_update`, `runtime_supports_causal_conv1d_prefill`, `runtime_supports_causal_conv1d_update` |
 | `LinearBackend` | 10 | `blanket_backend_runtime` | 0 | none | `runtime_drop_uploaded_bf16_weights`, `runtime_full_attn_qkv_decode`, `runtime_linear_decode`, `runtime_linear_prefill_apply`, `runtime_linear_prefill_apply_offset`, `runtime_lora_decode_add`, `runtime_lora_delta_resident`, `runtime_mlp_decode`, `runtime_mlp_gate_up_decode`, `runtime_prewarm_decode_weights` |
 | `SamplingBackend` | 8 | `blanket_backend_runtime` | 0 | none | `runtime_linear_decode_argmax`, `runtime_linear_decode_argmax_batch`, `runtime_linear_decode_sample`, `runtime_linear_decode_sample_batch`, `runtime_supports_linear_decode_argmax`, `runtime_supports_linear_decode_argmax_batch`, `runtime_supports_linear_decode_sample`, `runtime_supports_linear_decode_sample_batch` |
 | `ResidencyBackend` | 18 | `blanket_backend_runtime` | 0 | none | `runtime_assemble_gdn_recurrent_resident_batch_rows`, `runtime_assemble_linear_attn_gdn_state_batch_kt`, `runtime_enter_gdn_recurrent_resident_state_scope`, `runtime_evict_gdn_recurrent_resident_state`, `runtime_evict_resident_activation`, `runtime_exit_gdn_recurrent_resident_state_scope`, `runtime_has_gdn_recurrent_resident_state`, `runtime_has_linear_attn_gdn_state_kt`, `runtime_has_resident_activation`, `runtime_materialize_gdn_recurrent_resident_state`, `runtime_register_resident_activation`, `runtime_resident_activation_resource`, `runtime_resolve_resident_activation`, `runtime_scatter_gdn_recurrent_resident_batch_rows`, `runtime_scatter_linear_attn_gdn_state_batch_kt`, `runtime_seed_linear_attn_gdn_state_kt`, `runtime_supports_resident_activation`, `runtime_update_resident_activation` |
@@ -66,8 +66,8 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 
 | Backend | Method | Predicate Status | Support State | Paired Method | Pair Always Declines | Gates |
 |---|---|---|---|---|---|---|
-| `cuda` | `supports_causal_conv1d_prefill` | `dynamic` | `NativeWithConstraints` | `causal_conv1d_prefill` | no | none |
-| `cuda` | `supports_causal_conv1d_update` | `dynamic` | `NativeWithConstraints` | `causal_conv1d_update` | no | none |
+| `cuda` | `runtime_supports_causal_conv1d_prefill` | `dynamic` | `NativeWithConstraints` | `runtime_causal_conv1d_prefill` | no | none |
+| `cuda` | `runtime_supports_causal_conv1d_update` | `dynamic` | `NativeWithConstraints` | `runtime_causal_conv1d_update` | no | none |
 | `cuda` | `supports_flash_attn_paged_decode` | `literal_true` | `NativeWithConstraints` | `flash_attn_paged_decode` | no | none |
 | `cuda` | `supports_flash_attn_prefill` | `literal_true` | `NativeWithConstraints` | `flash_attn_prefill` | no | none |
 | `cuda` | `supports_gdn_chunk_prep` | `dynamic` | `NativeWithConstraints` | `gdn_chunk_prep` | no | none |
@@ -81,8 +81,8 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `cuda` | `supports_gdn_recurrent_step` | `dynamic` | `NativeWithConstraints` | `gdn_recurrent_step` | no | none |
 | `cuda` | `supports_resident_activation` | `literal_true` | `NativeWithConstraints` | `` | no | none |
 | `cuda` | `supports_strict_paged_decode_contiguous_batch` | `literal_false` | `Declined` | `` | no | none |
-| `rocm` | `supports_causal_conv1d_prefill` | `dynamic` | `NativeWithConstraints` | `causal_conv1d_prefill` | no | none |
-| `rocm` | `supports_causal_conv1d_update` | `dynamic` | `NativeWithConstraints` | `causal_conv1d_update` | no | none |
+| `rocm` | `runtime_supports_causal_conv1d_prefill` | `dynamic` | `NativeWithConstraints` | `runtime_causal_conv1d_prefill` | no | none |
+| `rocm` | `runtime_supports_causal_conv1d_update` | `dynamic` | `NativeWithConstraints` | `runtime_causal_conv1d_update` | no | none |
 | `rocm` | `supports_flash_attn_paged_decode` | `literal_true` | `NativeWithConstraints` | `flash_attn_paged_decode` | no | none |
 | `rocm` | `supports_flash_attn_prefill` | `literal_true` | `NativeWithConstraints` | `flash_attn_prefill` | no | none |
 | `rocm` | `supports_flash_attn_prefill_head_major` | `env_gated` | `NativeWithConstraints` | `flash_attn_prefill_head_major` | no | env |
@@ -98,8 +98,8 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `rocm` | `supports_linear_decode_argmax` | `literal_false` | `Declined` | `linear_decode_argmax` | yes | none |
 | `rocm` | `supports_resident_activation` | `literal_true` | `NativeWithConstraints` | `` | no | none |
 | `rocm` | `supports_strict_paged_decode_contiguous_batch` | `literal_false` | `Declined` | `` | no | none |
-| `metal` | `supports_causal_conv1d_prefill` | `dynamic` | `NativeWithConstraints` | `causal_conv1d_prefill` | no | none |
-| `metal` | `supports_causal_conv1d_update` | `dynamic` | `NativeWithConstraints` | `causal_conv1d_update` | no | none |
+| `metal` | `runtime_supports_causal_conv1d_prefill` | `dynamic` | `NativeWithConstraints` | `runtime_causal_conv1d_prefill` | no | none |
+| `metal` | `runtime_supports_causal_conv1d_update` | `dynamic` | `NativeWithConstraints` | `runtime_causal_conv1d_update` | no | none |
 | `metal` | `supports_flash_attn_paged_decode` | `literal_true` | `NativeWithConstraints` | `flash_attn_paged_decode` | no | none |
 | `metal` | `supports_flash_attn_prefill` | `dynamic` | `NativeWithConstraints` | `flash_attn_prefill` | no | none |
 | `metal` | `supports_flash_attn_prefill_head_major` | `dynamic` | `NativeWithConstraints` | `flash_attn_prefill_head_major` | no | none |
@@ -117,8 +117,8 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `metal` | `supports_paged_kv_head_major_read` | `literal_true` | `NativeWithConstraints` | `paged_kv_head_major_read` | no | none |
 | `metal` | `supports_paged_kv_head_major_read_append_token_major` | `literal_true` | `NativeWithConstraints` | `paged_kv_head_major_read_append_token_major` | no | none |
 | `metal` | `supports_resident_activation` | `literal_true` | `NativeWithConstraints` | `` | no | none |
-| `vulkan` | `supports_causal_conv1d_prefill` | `dynamic` | `NativeWithConstraints` | `causal_conv1d_prefill` | no | none |
-| `vulkan` | `supports_causal_conv1d_update` | `dynamic` | `NativeWithConstraints` | `causal_conv1d_update` | no | none |
+| `vulkan` | `runtime_supports_causal_conv1d_prefill` | `dynamic` | `NativeWithConstraints` | `runtime_causal_conv1d_prefill` | no | none |
+| `vulkan` | `runtime_supports_causal_conv1d_update` | `dynamic` | `NativeWithConstraints` | `runtime_causal_conv1d_update` | no | none |
 | `vulkan` | `supports_flash_attn_paged_decode` | `dynamic` | `NativeWithConstraints` | `flash_attn_paged_decode` | no | none |
 | `vulkan` | `supports_flash_attn_prefill` | `env_gated` | `NativeWithConstraints` | `flash_attn_prefill` | no | env |
 | `vulkan` | `supports_flash_attn_prefill_head_major` | `literal_false` | `Declined` | `` | no | none |

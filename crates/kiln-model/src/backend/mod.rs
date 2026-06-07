@@ -652,7 +652,9 @@ fn precompile_startup_kernels_for_backend(name: &str, device: kiln_tensor::Devic
     }
 }
 
-pub trait BackendRuntime: BackendIdentity + StartupBackend + Send + Sync + std::fmt::Debug {
+pub trait BackendRuntime:
+    BackendIdentity + StartupBackend + ConvBackend + Send + Sync + std::fmt::Debug
+{
     /// Human-readable name (`"cuda"`, `"metal"`, `"cpu"`). Surfaced in
     /// `/health` and logs.
     fn name(&self) -> &'static str {
@@ -1816,11 +1818,11 @@ pub trait BackendRuntime: BackendIdentity + StartupBackend + Send + Sync + std::
     }
 
     fn supports_causal_conv1d_update(&self) -> bool {
-        false
+        ConvBackend::runtime_supports_causal_conv1d_update(self)
     }
 
     fn supports_causal_conv1d_prefill(&self) -> bool {
-        false
+        ConvBackend::runtime_supports_causal_conv1d_prefill(self)
     }
 
     /// Fused single-step causal depthwise conv1d + state update + silu.
@@ -1841,12 +1843,12 @@ pub trait BackendRuntime: BackendIdentity + StartupBackend + Send + Sync + std::
     /// NOT apply `silu` again — it is fused into the kernel epilogue.
     fn causal_conv1d_update(
         &self,
-        _x: &kiln_tensor::Tensor,
-        _weight: &kiln_tensor::Tensor,
-        _conv_state: &mut kiln_tensor::Tensor,
-        _kernel_size: usize,
+        x: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
+        conv_state: &mut kiln_tensor::Tensor,
+        kernel_size: usize,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        ConvBackend::runtime_causal_conv1d_update(self, x, weight, conv_state, kernel_size)
     }
 
     /// Fused prefill causal depthwise conv1d + state update + silu.
@@ -1860,12 +1862,12 @@ pub trait BackendRuntime: BackendIdentity + StartupBackend + Send + Sync + std::
     /// apply `silu` again.
     fn causal_conv1d_prefill(
         &self,
-        _x: &kiln_tensor::Tensor,
-        _weight: &kiln_tensor::Tensor,
-        _conv_state: &mut kiln_tensor::Tensor,
-        _kernel_size: usize,
+        x: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
+        conv_state: &mut kiln_tensor::Tensor,
+        kernel_size: usize,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        ConvBackend::runtime_causal_conv1d_prefill(self, x, weight, conv_state, kernel_size)
     }
 
     /// Fused GDN gate computation.
@@ -2262,28 +2264,36 @@ pub trait GdnBackend: Send + Sync + std::fmt::Debug {
     ) -> Result<Option<kiln_tensor::Tensor>>;
 }
 
-/// Focused `ConvBackend` facet delegated by the current `BackendRuntime` facade.
+/// Focused `ConvBackend` facet for causal convolution kernels.
 #[allow(clippy::too_many_arguments)]
 pub trait ConvBackend: Send + Sync + std::fmt::Debug {
-    fn runtime_supports_causal_conv1d_update(&self) -> bool;
+    fn runtime_supports_causal_conv1d_update(&self) -> bool {
+        false
+    }
 
-    fn runtime_supports_causal_conv1d_prefill(&self) -> bool;
+    fn runtime_supports_causal_conv1d_prefill(&self) -> bool {
+        false
+    }
 
     fn runtime_causal_conv1d_update(
         &self,
-        x: &kiln_tensor::Tensor,
-        weight: &kiln_tensor::Tensor,
-        conv_state: &mut kiln_tensor::Tensor,
-        kernel_size: usize,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _x: &kiln_tensor::Tensor,
+        _weight: &kiln_tensor::Tensor,
+        _conv_state: &mut kiln_tensor::Tensor,
+        _kernel_size: usize,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
     fn runtime_causal_conv1d_prefill(
         &self,
-        x: &kiln_tensor::Tensor,
-        weight: &kiln_tensor::Tensor,
-        conv_state: &mut kiln_tensor::Tensor,
-        kernel_size: usize,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _x: &kiln_tensor::Tensor,
+        _weight: &kiln_tensor::Tensor,
+        _conv_state: &mut kiln_tensor::Tensor,
+        _kernel_size: usize,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 }
 
 /// Focused `LinearBackend` facet delegated by the current `BackendRuntime` facade.
@@ -3097,37 +3107,6 @@ impl<T: BackendRuntime + ?Sized> GdnBackend for T {
 }
 
 #[allow(clippy::too_many_arguments)]
-impl<T: BackendRuntime + ?Sized> ConvBackend for T {
-    fn runtime_supports_causal_conv1d_update(&self) -> bool {
-        BackendRuntime::supports_causal_conv1d_update(self)
-    }
-
-    fn runtime_supports_causal_conv1d_prefill(&self) -> bool {
-        BackendRuntime::supports_causal_conv1d_prefill(self)
-    }
-
-    fn runtime_causal_conv1d_update(
-        &self,
-        x: &kiln_tensor::Tensor,
-        weight: &kiln_tensor::Tensor,
-        conv_state: &mut kiln_tensor::Tensor,
-        kernel_size: usize,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::causal_conv1d_update(self, x, weight, conv_state, kernel_size)
-    }
-
-    fn runtime_causal_conv1d_prefill(
-        &self,
-        x: &kiln_tensor::Tensor,
-        weight: &kiln_tensor::Tensor,
-        conv_state: &mut kiln_tensor::Tensor,
-        kernel_size: usize,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::causal_conv1d_prefill(self, x, weight, conv_state, kernel_size)
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
 impl<T: BackendRuntime + ?Sized> LinearBackend for T {
     fn runtime_linear_decode(
         &self,
@@ -3702,6 +3681,8 @@ mod tests {
     }
 
     impl StartupBackend for ResidentActivationProbeBackend {}
+
+    impl ConvBackend for ResidentActivationProbeBackend {}
 
     impl BackendRuntime for ResidentActivationProbeBackend {
         fn has_resident_activation(&self, _tensor: &kiln_tensor::Tensor) -> bool {

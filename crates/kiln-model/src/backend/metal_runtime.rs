@@ -13,8 +13,8 @@ use super::metal_gdn::*;
 use super::metal_lm_head::*;
 use super::metal_paged::*;
 use super::{
-    BackendIdentity, BackendRuntime, StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
-    metal_residency, metal_training,
+    BackendIdentity, BackendRuntime, ConvBackend, StartupBackend, TrainingCapabilities,
+    TrainingPrecisionPolicy, metal_residency, metal_training,
 };
 
 impl BackendIdentity for MetalBackend {
@@ -32,6 +32,55 @@ impl BackendIdentity for MetalBackend {
 }
 
 impl StartupBackend for MetalBackend {}
+
+#[allow(clippy::too_many_arguments)]
+impl ConvBackend for MetalBackend {
+    fn runtime_supports_causal_conv1d_prefill(&self) -> bool {
+        !self.disable.conv1d_prefill
+    }
+
+    fn runtime_supports_causal_conv1d_update(&self) -> bool {
+        !self.disable.conv1d_update
+    }
+
+    fn runtime_causal_conv1d_prefill(
+        &self,
+        x: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
+        conv_state: &mut kiln_tensor::Tensor,
+        kernel_size: usize,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // #1082: kt-native - helpers take kt directly; `conv_state` is mutated
+        // in place through its shared UMA buffer (no candle bridge).
+        if self.disable.conv1d_prefill
+            || !metal_conv1d_prefill_supports(x, weight, conv_state, kernel_size)
+        {
+            return Ok(None);
+        }
+        let out = metal_causal_conv1d_prefill_bf16_f32_k4(x, weight, conv_state, kernel_size)
+            .context("metal causal_conv1d_prefill kernel failed")?;
+        Ok(Some(out))
+    }
+
+    fn runtime_causal_conv1d_update(
+        &self,
+        x: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
+        conv_state: &mut kiln_tensor::Tensor,
+        kernel_size: usize,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // #1082: kt-native - helpers take kt directly; `conv_state` is mutated
+        // in place through its shared UMA buffer (no candle bridge).
+        if self.disable.conv1d_update
+            || !metal_conv1d_update_supports(x, weight, conv_state, kernel_size)
+        {
+            return Ok(None);
+        }
+        let out = metal_causal_conv1d_update_bf16_f32_k4(x, weight, conv_state, kernel_size)
+            .context("metal causal_conv1d_update kernel failed")?;
+        Ok(Some(out))
+    }
+}
 
 // #1082 DoD-101/102: BackendRuntime decode methods flipped to kt; metal/vulkan
 // impls need matching flip when their builds are restored.
@@ -490,14 +539,6 @@ impl BackendRuntime for MetalBackend {
         true
     }
 
-    fn supports_causal_conv1d_prefill(&self) -> bool {
-        !self.disable.conv1d_prefill
-    }
-
-    fn supports_causal_conv1d_update(&self) -> bool {
-        !self.disable.conv1d_update
-    }
-
     fn supports_gdn_forward_substitution(&self) -> bool {
         !self.disable.gdn_forward_substitution
     }
@@ -618,44 +659,6 @@ impl BackendRuntime for MetalBackend {
         )
         .context("metal paged_kv_head_major_read_append_token_major failed")?;
         Ok(Some((k_out, v_out)))
-    }
-
-    fn causal_conv1d_prefill(
-        &self,
-        x: &kiln_tensor::Tensor,
-        weight: &kiln_tensor::Tensor,
-        conv_state: &mut kiln_tensor::Tensor,
-        kernel_size: usize,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        // #1082: kt-native — helpers take kt directly; `conv_state` is mutated
-        // in place through its shared UMA buffer (no candle bridge).
-        if self.disable.conv1d_prefill
-            || !metal_conv1d_prefill_supports(x, weight, conv_state, kernel_size)
-        {
-            return Ok(None);
-        }
-        let out = metal_causal_conv1d_prefill_bf16_f32_k4(x, weight, conv_state, kernel_size)
-            .context("metal causal_conv1d_prefill kernel failed")?;
-        Ok(Some(out))
-    }
-
-    fn causal_conv1d_update(
-        &self,
-        x: &kiln_tensor::Tensor,
-        weight: &kiln_tensor::Tensor,
-        conv_state: &mut kiln_tensor::Tensor,
-        kernel_size: usize,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        // #1082: kt-native — helpers take kt directly; `conv_state` is mutated
-        // in place through its shared UMA buffer (no candle bridge).
-        if self.disable.conv1d_update
-            || !metal_conv1d_update_supports(x, weight, conv_state, kernel_size)
-        {
-            return Ok(None);
-        }
-        let out = metal_causal_conv1d_update_bf16_f32_k4(x, weight, conv_state, kernel_size)
-            .context("metal causal_conv1d_update kernel failed")?;
-        Ok(Some(out))
     }
 
     fn gdn_forward_substitution(
