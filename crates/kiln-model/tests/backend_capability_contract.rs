@@ -1473,6 +1473,24 @@ fn generated_capability_report_gates_replay_contract() {
         .find(|gate| gate["gate"] == "replay_parity")
         .expect("replay parity gate should be present");
     assert_eq!(replay_gate["status"], "covered");
+    let command = replay_gate["command"]
+        .as_str()
+        .expect("replay parity command should be a string");
+    for command_fragment in [
+        "kiln-graph replay",
+        "kiln-graph --test capture_lifetime",
+        "kiln-graph-cuda replay",
+        "kiln-graph-metal replay",
+        "kiln-graph-vulkan replay",
+        "kiln-model --test vk_resident_decode_parity",
+        "kiln-tensor --test rocm_capture_arena",
+        "kiln-model --test backend_capability_contract",
+    ] {
+        assert!(
+            command.contains(command_fragment),
+            "replay parity gate command should run {command_fragment}"
+        );
+    }
     let evidence = replay_gate["evidence_present"]
         .as_array()
         .expect("replay parity evidence should be an array")
