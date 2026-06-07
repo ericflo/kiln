@@ -3150,6 +3150,32 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             "kiln-bench speculative resolution should not keep a local backend/env policy table: {forbidden}"
         );
     }
+    let bench_graph_replay_helper = source_between(
+        &server_bench_source,
+        "fn bench_paged_decode_replay_primitive_enabled(",
+        "// (#1082) Deleted `bench_kt_tensor_to_candle`",
+    );
+    assert!(
+        bench_graph_replay_helper.contains("ReplayRequest::paged_decode_graph_outputs")
+            && bench_graph_replay_helper.contains("ReplayBackend::runtime_supports_replay_request")
+            && bench_graph_replay_helper.contains("ReplayBackend::runtime_replay_authority"),
+        "kiln-bench graph replay routing should ask the focused ReplayBackend facet"
+    );
+    let bench_latency_graph_section = source_between(
+        &server_bench_source,
+        "let hip_graph_decode_enabled =",
+        "// #1082 forward-flip: `LinearAttentionState::new_with_batch_for_inference_backend`",
+    );
+    assert!(
+        bench_latency_graph_section.contains("bench_paged_decode_replay_primitive_enabled")
+            && bench_latency_graph_section.contains("ReplayNativePrimitive::HipGraph"),
+        "kiln-bench ROCm graph routing should use replay primitive policy"
+    );
+    assert!(
+        !server_bench_source.contains("Device::Rocm")
+            && !server_bench_source.contains("matches!(device_kt, kiln_tensor::Device::Rocm(_))"),
+        "kiln-bench graph routing should not branch on ROCm device identity"
+    );
     let gdn_contiguity_partition_section = source_between(
         &generate_source,
         "// #1082 PERF + CRASHER FIX (per-row contiguity partition).",

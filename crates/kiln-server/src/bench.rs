@@ -49,7 +49,10 @@ use kiln_model::speculative::{
     SpeculativeConfig, speculative_decode_step, speculative_decode_step_paged_greedy,
     speculative_mtp_decode_step,
 };
-use kiln_model::{BackendCapabilityQueries, ModelRunner, SpeculativeDecodePolicy};
+use kiln_model::{
+    BackendCapabilityQueries, ModelRunner, ReplayBackend, ReplayNativePrimitive, ReplayRequest,
+    SpeculativeDecodePolicy, Support,
+};
 use kiln_server::config::SpecMethod;
 
 /// Block size used for the paged-path benchmark. Matches the real server default.
@@ -166,6 +169,23 @@ fn greedy_sample_kt(logits: &kiln_tensor::Tensor) -> Result<u32> {
         &contig
     };
     greedy_sample(logits)
+}
+
+fn native_replay_support_enabled(support: Support) -> bool {
+    matches!(support, Support::Native | Support::NativeWithConstraints)
+}
+
+fn bench_paged_decode_replay_primitive_enabled(
+    backend: &dyn kiln_model::BackendRuntime,
+    config: &ModelConfig,
+    primitive: ReplayNativePrimitive,
+) -> bool {
+    let request =
+        ReplayRequest::paged_decode_graph_outputs(config.hidden_size, config.intermediate_size, 1)
+            .with_dtype(kiln_config_dtype_to_kt(config.dtype));
+    let support = ReplayBackend::runtime_supports_replay_request(backend, &request);
+    let authority = ReplayBackend::runtime_replay_authority(backend);
+    native_replay_support_enabled(support) && authority.native_primitive == primitive
 }
 
 // (#1082) Deleted `bench_kt_tensor_to_candle`: the MTP bench arm's decode step
@@ -974,6 +994,11 @@ fn bench_latency_paged(
 
     let backend = runtime_backend_for_bench(&device_kt, weights)?;
     let mut rocm_graph = kiln_model::rocm_graph::RocmGraphRunner::new(&device_kt, true);
+    let hip_graph_decode_enabled = bench_paged_decode_replay_primitive_enabled(
+        backend.as_ref(),
+        config,
+        ReplayNativePrimitive::HipGraph,
+    ) && rocm_graph.is_enabled();
     // #1082 forward-flip: `LinearAttentionState::new_with_batch_for_inference_backend`
     // now takes a kt `&Device`, so pass `&device_kt` directly (no candle bridge).
     let mut linear_state = LinearAttentionState::new_with_batch_for_inference_backend(
@@ -1126,37 +1151,36 @@ fn bench_latency_paged(
 
         let step_start = Instant::now();
         next_token = if sampled_decode {
-            let hidden =
-                if matches!(device_kt, kiln_tensor::Device::Rocm(_)) && rocm_graph.is_enabled() {
-                    rocm_graph
-                        .decode_step_paged_hidden(
-                            &*backend,
-                            next_token,
-                            weights,
-                            config,
-                            &paged_cache,
-                            &block_table,
-                            current_pos,
-                            &mut linear_state,
-                            None,
-                        )
-                        .context("paged sampled ROCm graph hidden pass failed")?
-                } else {
-                    let sequence_lengths = [current_pos];
-                    let mut linear_states: [&mut LinearAttentionState; 1] = [&mut linear_state];
-                    model_forward_paged_batched_decode_hidden(
+            let hidden = if hip_graph_decode_enabled {
+                rocm_graph
+                    .decode_step_paged_hidden(
                         &*backend,
-                        &[next_token],
+                        next_token,
                         weights,
                         config,
                         &paged_cache,
-                        std::slice::from_ref(&block_table),
-                        &sequence_lengths,
-                        &mut linear_states,
+                        &block_table,
+                        current_pos,
+                        &mut linear_state,
                         None,
                     )
-                    .context("paged sampled decode hidden pass failed")?
-                };
+                    .context("paged sampled ROCm graph hidden pass failed")?
+            } else {
+                let sequence_lengths = [current_pos];
+                let mut linear_states: [&mut LinearAttentionState; 1] = [&mut linear_state];
+                model_forward_paged_batched_decode_hidden(
+                    &*backend,
+                    &[next_token],
+                    weights,
+                    config,
+                    &paged_cache,
+                    std::slice::from_ref(&block_table),
+                    &sequence_lengths,
+                    &mut linear_states,
+                    None,
+                )
+                .context("paged sampled decode hidden pass failed")?
+            };
             let step_seed = seed.wrapping_add(num_tokens as u64);
             if let Some(token) = lm_head_sample_backend_decode_if(
                 Some(&*backend),
@@ -1182,7 +1206,7 @@ fn bench_latency_paged(
                 )
                 .context("paged sampled decode host sample failed")?
             }
-        } else if matches!(device_kt, kiln_tensor::Device::Rocm(_)) && rocm_graph.is_enabled() {
+        } else if hip_graph_decode_enabled {
             rocm_graph
                 .decode_step_paged_greedy(
                     &*backend,
