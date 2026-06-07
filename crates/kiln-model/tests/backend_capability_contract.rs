@@ -1534,6 +1534,10 @@ fn generated_capability_report_lists_training_loss_policy() {
         "CPU should keep the portable SFT full-logits route"
     );
     assert_eq!(
+        policies["cpu"]["tape_forward_backward_route"], "unsupported",
+        "CPU should not advertise kt tape-authoritative forward/backward"
+    );
+    assert_eq!(
         policies["cpu"]["grpo_loss_route"], "kt_composite",
         "CPU should keep the shared GRPO kt-composite route"
     );
@@ -1548,6 +1552,10 @@ fn generated_capability_report_lists_training_loss_policy() {
     assert_eq!(
         policies["metal"]["sft_flce_loss_route"], "full_logits",
         "Metal should keep the portable SFT full-logits route"
+    );
+    assert_eq!(
+        policies["metal"]["tape_forward_backward_route"], "kt_tape_authoritative",
+        "Metal should advertise kt tape-authoritative forward/backward"
     );
     assert_eq!(
         policies["metal"]["grpo_loss_route"], "kt_composite",
@@ -1566,6 +1574,10 @@ fn generated_capability_report_lists_training_loss_policy() {
         "CUDA should use the kt-tape SFT FLCE route"
     );
     assert_eq!(
+        policies["cuda"]["tape_forward_backward_route"], "kt_tape_authoritative",
+        "CUDA should advertise kt tape-authoritative forward/backward"
+    );
+    assert_eq!(
         policies["cuda"]["grpo_loss_route"], "kt_composite",
         "CUDA should use the shared GRPO kt-composite route"
     );
@@ -1582,6 +1594,10 @@ fn generated_capability_report_lists_training_loss_policy() {
         "ROCm should use the shared kt-tape SFT FLCE route"
     );
     assert_eq!(
+        policies["rocm"]["tape_forward_backward_route"], "kt_tape_authoritative",
+        "ROCm should advertise kt tape-authoritative forward/backward"
+    );
+    assert_eq!(
         policies["rocm"]["grpo_loss_route"], "kt_composite",
         "ROCm should use the shared GRPO kt-composite route"
     );
@@ -1596,6 +1612,10 @@ fn generated_capability_report_lists_training_loss_policy() {
     assert_eq!(
         policies["vulkan"]["sft_flce_loss_route"], "vulkan_active_rows",
         "Vulkan should use its active-row SFT FLCE route"
+    );
+    assert_eq!(
+        policies["vulkan"]["tape_forward_backward_route"], "kt_tape_authoritative",
+        "Vulkan should advertise kt tape-authoritative forward/backward"
     );
     assert_eq!(
         policies["vulkan"]["grpo_loss_route"], "vulkan_active_rows",
@@ -1940,6 +1960,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
         ("ResidencyBackend", "runtime_register_resident_activation"),
         ("OptimizerBackend", "runtime_dispatch_adamw_step"),
         ("TrainingLossBackend", "runtime_training_precision_policy"),
+        ("TrainingLossBackend", "runtime_tape_forward_backward_route"),
         ("TrainingLossBackend", "runtime_grpo_loss_route"),
         ("TrainingLossBackend", "runtime_opd_loss_route"),
         ("TrainingLossBackend", "runtime_opd_phase_b_backward_route"),
@@ -2560,6 +2581,19 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     assert!(
         trainer_source.contains("base_dtype_supports_tape_for_backend(weights, backend)"),
         "SFT/GRPO tape eligibility should consume backend precision policy"
+    );
+    assert!(
+        trainer_source.contains("fn backend_supports_tape_forward_backward(")
+            && trainer_source
+                .contains("TrainingLossBackend::runtime_tape_forward_backward_route(backend)")
+            && trainer_source.contains("backend_supports_tape_forward_backward(backend)"),
+        "SFT/GRPO tape eligibility should consume backend tape-forward/backward capability"
+    );
+    assert!(
+        !compact_body(&trainer_source).contains(
+            "matches!(device,kiln_tensor::Device::Cuda(_)|kiln_tensor::Device::Metal(_)|kiln_tensor::Device::Vulkan(_)|kiln_tensor::Device::Rocm(_))"
+        ),
+        "trainer SFT/GRPO tape eligibility should not hard-code GPU device families"
     );
     assert!(
         trainer_source.contains("SftFlceLossRoute::KtTapeFlce")
@@ -3668,6 +3702,7 @@ fn backend_engine_unification_plan_matches_current_training_status() {
             && plan_source.contains("TrainingLossBackend::runtime_grpo_loss_route")
             && plan_source.contains("TrainingLossBackend::runtime_opd_loss_route")
             && plan_source.contains("TrainingLossBackend::runtime_opd_phase_b_backward_route")
+            && plan_source.contains("TrainingLossBackend::runtime_tape_forward_backward_route")
             && plan_source.contains("TrainingLossBackend::runtime_training_precision_policy"),
         "training source map should describe backend-owned loss and precision routing"
     );

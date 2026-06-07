@@ -222,6 +222,7 @@ impl CudaBackend {
         TrainingCapabilities {
             projection_training: "backend-routed kt cublasLt matmul (tape-recorded) with offset chunk hook",
             flce_loss: "FLCE analytic backward on CUDA tensors; no full logits by default",
+            tape_forward_backward_route: super::TrainingTapeRoute::KtTapeAuthoritative,
             sft_flce_loss_route: super::SftFlceLossRoute::KtTapeFlce,
             grpo_loss_route: super::GrpoLossRoute::KtComposite,
             opd_loss_route: super::OpdLossRoute::KtTapePhaseB,

@@ -11,13 +11,14 @@ use super::vulkan::VulkanBackend;
 use super::vulkan_residency::with_resident_registry;
 use super::{
     GrpoLossRoute, OpdLossRoute, OpdPhaseBBackwardRoute, SftFlceLossRoute, TrainingCapabilities,
-    TrainingPrecisionPolicy,
+    TrainingPrecisionPolicy, TrainingTapeRoute,
 };
 
 pub(super) fn training_capabilities_static() -> TrainingCapabilities {
     TrainingCapabilities {
         projection_training: "kt-tape-recorded matmul (legacy autograd wrapper removed #1082)",
         flce_loss: "Vulkan offset matmul provider when enabled; FLCE remains chunked",
+        tape_forward_backward_route: TrainingTapeRoute::KtTapeAuthoritative,
         sft_flce_loss_route: SftFlceLossRoute::VulkanActiveRows,
         grpo_loss_route: GrpoLossRoute::VulkanActiveRows,
         opd_loss_route: OpdLossRoute::VulkanActiveHidden,

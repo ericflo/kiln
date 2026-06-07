@@ -265,9 +265,28 @@ impl OpdPhaseBBackwardRoute {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrainingTapeRoute {
+    /// kt tape-authoritative forward/backward is not advertised.
+    Unsupported,
+    /// Use kt tape-authoritative forward/backward, with dtype constraints
+    /// supplied by [`TrainingPrecisionPolicy`].
+    KtTapeAuthoritative,
+}
+
+impl TrainingTapeRoute {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            TrainingTapeRoute::Unsupported => "unsupported",
+            TrainingTapeRoute::KtTapeAuthoritative => "kt_tape_authoritative",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrainingCapabilities {
     pub projection_training: &'static str,
     pub flce_loss: &'static str,
+    pub tape_forward_backward_route: TrainingTapeRoute,
     pub sft_flce_loss_route: SftFlceLossRoute,
     pub grpo_loss_route: GrpoLossRoute,
     pub opd_loss_route: OpdLossRoute,
@@ -285,6 +304,7 @@ impl TrainingCapabilities {
         Self {
             projection_training: "portable candle autograd",
             flce_loss: "portable candle/FLCE dispatch when configured",
+            tape_forward_backward_route: TrainingTapeRoute::Unsupported,
             sft_flce_loss_route: SftFlceLossRoute::FullLogits,
             grpo_loss_route: GrpoLossRoute::KtComposite,
             opd_loss_route: OpdLossRoute::Unsupported,
@@ -2333,6 +2353,11 @@ pub trait TrainingLossBackend: Send + Sync + std::fmt::Debug {
         self.runtime_training_capabilities().sft_flce_loss_route
     }
 
+    fn runtime_tape_forward_backward_route(&self) -> TrainingTapeRoute {
+        self.runtime_training_capabilities()
+            .tape_forward_backward_route
+    }
+
     fn runtime_grpo_loss_route(&self) -> GrpoLossRoute {
         self.runtime_training_capabilities().grpo_loss_route
     }
@@ -3509,6 +3534,10 @@ mod tests {
         assert_eq!(caps.resident_activation, "not implemented");
         assert_eq!(caps.native_training, "not implemented");
         assert!(caps.projection_training.contains("candle"));
+        assert_eq!(
+            caps.tape_forward_backward_route,
+            TrainingTapeRoute::Unsupported
+        );
         assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::FullLogits);
         assert_eq!(caps.grpo_loss_route, GrpoLossRoute::KtComposite);
         assert_eq!(caps.opd_loss_route, OpdLossRoute::Unsupported);
@@ -3615,6 +3644,11 @@ mod tests {
         assert_eq!(
             OpdPhaseBBackwardRoute::VulkanActiveHidden.as_str(),
             "vulkan_active_hidden"
+        );
+        assert_eq!(TrainingTapeRoute::Unsupported.as_str(), "unsupported");
+        assert_eq!(
+            TrainingTapeRoute::KtTapeAuthoritative.as_str(),
+            "kt_tape_authoritative"
         );
     }
 
@@ -4468,6 +4502,10 @@ mod tests {
         assert!(caps.sgd_step.contains("CUDA in-place optimizer kernel"));
         assert!(caps.adamw_step.contains("CUDA in-place optimizer kernel"));
         assert_eq!(caps.native_training, "not implemented");
+        assert_eq!(
+            caps.tape_forward_backward_route,
+            TrainingTapeRoute::KtTapeAuthoritative
+        );
         assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::KtTapeFlce);
         assert_eq!(caps.grpo_loss_route, GrpoLossRoute::KtComposite);
         assert_eq!(caps.opd_loss_route, OpdLossRoute::KtTapePhaseB);
@@ -4481,6 +4519,10 @@ mod tests {
     #[test]
     fn rocm_training_capabilities_route_sft_flce_through_kt_tape() {
         let caps = rocm::RocmBackend::training_capabilities_static();
+        assert_eq!(
+            caps.tape_forward_backward_route,
+            TrainingTapeRoute::KtTapeAuthoritative
+        );
         assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::KtTapeFlce);
         assert_eq!(caps.grpo_loss_route, GrpoLossRoute::KtComposite);
         assert_eq!(caps.opd_loss_route, OpdLossRoute::KtTapePhaseB);
@@ -4497,6 +4539,10 @@ mod tests {
         assert!(caps.sgd_step.contains("declined"));
         assert!(caps.adamw_step.contains("Metal in-place AdamW"));
         assert!(caps.resident_activation.contains("Metal TensorId"));
+        assert_eq!(
+            caps.tape_forward_backward_route,
+            TrainingTapeRoute::KtTapeAuthoritative
+        );
         assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::FullLogits);
         assert_eq!(caps.grpo_loss_route, GrpoLossRoute::KtComposite);
         assert_eq!(caps.opd_loss_route, OpdLossRoute::KtTapePhaseB);
@@ -4513,6 +4559,10 @@ mod tests {
     #[test]
     fn vulkan_training_capabilities_route_sft_flce_through_active_rows() {
         let caps = vulkan::VulkanBackend::training_capabilities_static();
+        assert_eq!(
+            caps.tape_forward_backward_route,
+            TrainingTapeRoute::KtTapeAuthoritative
+        );
         assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::VulkanActiveRows);
         assert_eq!(caps.grpo_loss_route, GrpoLossRoute::VulkanActiveRows);
         assert_eq!(caps.opd_loss_route, OpdLossRoute::VulkanActiveHidden);

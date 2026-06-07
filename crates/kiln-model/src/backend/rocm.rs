@@ -234,6 +234,7 @@ impl RocmBackend {
         TrainingCapabilities {
             projection_training: "backend-routed kt hipBLASLt matmul (tape-recorded) with offset chunk hook",
             flce_loss: "FLCE analytic backward on ROCm tensors; no full logits by default",
+            tape_forward_backward_route: super::TrainingTapeRoute::KtTapeAuthoritative,
             sft_flce_loss_route: super::SftFlceLossRoute::KtTapeFlce,
             grpo_loss_route: super::GrpoLossRoute::KtComposite,
             opd_loss_route: super::OpdLossRoute::KtTapePhaseB,

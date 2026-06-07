@@ -73,6 +73,13 @@ use kiln_model::backend::GrpoLossRoute;
     feature = "rocm"
 ))]
 use kiln_model::backend::SftFlceLossRoute;
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+use kiln_model::backend::TrainingTapeRoute;
 use kiln_model::backend::{
     self, BackendIdentity, BackendRuntime, FallbackPolicy, OptimizerBackend, ResidencyBackend,
     TrainingLossBackend, TrainingPrecisionPolicy,
@@ -4973,21 +4980,11 @@ fn train_tokenized_grpo_group_with_grad_norms(
         // eligible, the kt `Tape` records the FULL forward, so gradient
         // checkpointing (the candle reverse-segment loop) is unnecessary — we
         // route to the non-checkpointed tape branch below even when `segments`
-        // is `Some`. Gated to CUDA/Metal (tape adapters), no ACTIVE ECHO
-        // env-CE (no tape root — carved out), and not the `no_policy_loss`
-        // constant-zero-without-ECHO config. Mirrors how OPD's tape path REPLACES
-        // its candle gradient-checkpointing loop. This is the SINGLE source of
-        // truth for the tape-authoritative gate — both the checkpointing-bypass
-        // (`active_segments` below) and the non-checkpointed-branch dispatch read
-        // it. Kept local + cfg-split so the non-cuda build doesn't reference the
-        // cuda-only gate fn.
-        //
-        // (#1082) Vulkan was MISSING from the runtime device match (PR6 missed
-        // this gate), so GRPO silently never tape-authored on Vulkan. Add
-        // `Vulkan(_)`, and add the backend-owned base dtype policy gate so the
-        // check stays consistent with SFT: BF16 base on any GPU, F32 base on
-        // Vulkan only. For a BF16 base this is a no-op; it newly-permits F32 on
-        // Vulkan and explicitly bails F32 on CUDA/Metal (silently-empty before).
+        // is `Some`. Backend eligibility is advertised through
+        // `TrainingLossBackend`; dtype eligibility comes from
+        // `TrainingPrecisionPolicy`. Per-completion loss-shape exclusions stay
+        // local because they depend on ECHO/no-policy-loss semantics rather than
+        // backend identity.
         #[cfg(any(
             feature = "cuda",
             feature = "metal",
@@ -4995,13 +4992,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
             feature = "rocm"
         ))]
         let tape_auth_eligible = tape_authoritative_enabled()
-            && matches!(
-                device,
-                kiln_tensor::Device::Cuda(_)
-                    | kiln_tensor::Device::Metal(_)
-                    | kiln_tensor::Device::Vulkan(_)
-                    | kiln_tensor::Device::Rocm(_)
-            )
+            && backend_supports_tape_forward_backward(backend)
             && base_dtype_supports_tape_for_backend(weights, backend)
             && !(config.loss.echo.is_some()
                 && config.loss.echo_enabled()
@@ -5124,10 +5115,10 @@ fn train_tokenized_grpo_group_with_grad_norms(
         let loss_val: f64;
         anyhow::ensure!(
             tape_auth_eligible,
-            "GRPO requires the kt tape-authoritative path (CUDA + BF16 base, no \
-             ECHO env-CE, no no_policy_loss) post candle-drop. The candle \
-             `loss.backward()` / ECHO / candle-checkpointed GRPO producers were \
-             removed in #1082."
+            "GRPO requires the kt tape-authoritative path (backend tape support, \
+             compatible base dtype, no ECHO env-CE, no no_policy_loss) post \
+             candle-drop. The candle `loss.backward()` / ECHO / candle-checkpointed \
+             GRPO producers were removed in #1082."
         );
         let grads: GradSource = {
             #[cfg(any(
@@ -5198,11 +5189,11 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 feature = "rocm"
             )))]
             {
-                // `tape_auth_eligible` is a const `false` without the cuda or
-                // metal feature, so the ensure! above already bailed; this arm
-                // is unreachable but keeps `loss_val` definitely-assigned.
+                // `tape_auth_eligible` is a const `false` without a GPU backend
+                // feature, so the ensure! above already bailed; this arm is
+                // unreachable but keeps `loss_val` definitely-assigned.
                 let _ = (&ref_log_probs, num_active, comp_env_count, comp_idx);
-                unreachable!("GRPO kt path requires the cuda or metal feature");
+                unreachable!("GRPO kt path requires a GPU backend feature");
             }
         };
         if token_level {
@@ -6210,7 +6201,7 @@ fn has_supervised_shifted_labels(label_mask: &[bool]) -> bool {
 /// `input_ids`: token IDs (used as labels, shifted by 1)
 /// `label_mask`: which positions to include in the loss
 ///
-/// SFT next-token cross-entropy loss VALUE (scalar `f64`), kt-native, CUDA-only.
+/// SFT next-token cross-entropy loss VALUE (scalar `f64`), kt-native.
 ///
 /// (#1082 candle-drop) This is a value-only reader: it returns the scalar loss
 /// for logging / the gradient-checkpoint final-boundary readback. The
@@ -6218,8 +6209,9 @@ fn has_supervised_shifted_labels(label_mask: &[bool]) -> bool {
 /// DIRECTLY by the SFT/GRPO/OPD `with_tape_authoritative_scope_kt` closures — it
 /// does NOT go through here. The old candle `[1, T, V]` bridge + candle
 /// log-sum-exp/gather composite + the candle `try_tape_cross_entropy_cuda`
-/// adapter are deleted; F32/CPU CE is dropped (kt CE is CUDA BF16 only). The kt
-/// CE math itself is covered by `tape_forward_parity`
+/// adapter are deleted; unsupported backend/dtype combinations are rejected by
+/// the backend tape route plus `TrainingPrecisionPolicy`. The kt CE math itself
+/// is covered by `tape_forward_parity`
 /// (`tape_forward_cross_entropy_matches_reference`,
 /// `tape_backward_cross_entropy_matches_analytic_gradient`).
 #[cfg(any(
@@ -6654,11 +6646,9 @@ fn sgd_step(
 /// candle on demand for the `Kt` variant); sites that need the raw
 /// candle store use [`GradSource::candle`].
 ///
-/// CUDA-gating: the `Kt` variant exists ONLY under `feature = "cuda"`
-/// (its producer + the per-Var kt -> candle bridge are CUDA-only). On a
-/// non-cuda build `GradSource` is a single-variant `Candle` wrapper and
-/// `standard_forward_backward` always returns `Candle`, so the CPU smoke
-/// test (`perf_regression_sft_train_cpu_smoke`) is unaffected.
+/// Feature-gating: the `Kt` variant exists when a GPU backend feature is
+/// enabled. The producer is selected through backend training capabilities, and
+/// CPU-only builds keep the candle wrapper variant for legacy tests.
 pub enum GradSource {
     /// kt-native gradients (the SOLE grad producer post-#1082). Keyed by
     /// `Parameter::tensor_id()`; values are `kiln_tensor::Tensor`. The
@@ -7600,13 +7590,13 @@ fn exact_gdn_backward_tile_tokens_for(device: &Device) -> usize {
 /// True unless `KILN_USE_TAPE_AUTHORITATIVE` is set to a disable value —
 /// **DEFAULTS ON** (CP-4 is the production training path). Read FRESH each call
 /// (not cached) so tests can toggle it; checked once per training step, off the
-/// hot path. When on, the SFT step drives backward through the kt `Tape`
-/// (tape-authoritative) instead of candle's `loss.backward()`. Set the env to
-/// `0`/`false`/`no`/off/empty to opt out and fall back to candle's
-/// `loss.backward()` (for debugging / comparison). Note that the dispatch site
-/// additionally device-gates this to CUDA devices only (tape-authoritative
-/// adapters require a CUDA device); CPU always uses the candle path regardless
-/// of this flag. (#1082 CP-4.)
+/// hot path. When on, the SFT/GRPO/OPD steps drive backward through the kt
+/// `Tape` (tape-authoritative) instead of candle's `loss.backward()`. Set the
+/// env to `0`/`false`/`no`/off/empty to opt out for debugging/comparison. The
+/// dispatch sites pair this env gate with
+/// `TrainingLossBackend::runtime_tape_forward_backward_route` and
+/// `TrainingPrecisionPolicy`, so backend and dtype eligibility stay
+/// backend-owned. (#1082 CP-4.)
 // `pub(crate)` so the OPD trainer (`opd.rs`) can reuse the EXACT same gate
 // for its tape-authoritative dispatch — single source of truth for the
 // `KILN_USE_TAPE_AUTHORITATIVE` env semantics (#1082 CP-4 endgame).
@@ -7666,6 +7656,19 @@ fn base_dtype_supports_tape_for_backend(
     backend: &dyn BackendRuntime,
 ) -> bool {
     base_dtype_supports_tape_for_policy(weights, training_precision_policy_for_backend(backend))
+}
+
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+fn backend_supports_tape_forward_backward(backend: &dyn BackendRuntime) -> bool {
+    matches!(
+        TrainingLossBackend::runtime_tape_forward_backward_route(backend),
+        TrainingTapeRoute::KtTapeAuthoritative
+    )
 }
 
 /// (#1082 Increment-0 PR2) kt-native sibling of
@@ -7884,10 +7887,8 @@ fn standard_forward_backward_tape_authoritative_kt(
 /// `KtTensorId`), consumed directly by `optimizer_step_from_kt_grad_store` — no
 /// candle `loss.backward()` and no kt→candle grad copy.
 ///
-/// CUDA-only: the kt tape adapters (`crate::tape_forward`, `#![cfg(cuda)]`)
-/// record only on CUDA, so a CPU checkpointing-tape path would need them
-/// un-gated first (the deeper #1082 endgame). The dispatch below keeps the
-/// candle path for F32/CPU/ECHO.
+/// The dispatch below uses backend training capabilities plus precision policy
+/// for tape eligibility, then keeps local loss-shape exclusions such as ECHO.
 #[cfg(any(
     feature = "cuda",
     feature = "metal",
@@ -8300,12 +8301,12 @@ pub fn standard_forward_backward(
     device: &Device,
 ) -> Result<(f64, GradSource)> {
     // (#1082 candle-drop) The SFT forward/backward is now UNCONDITIONALLY
-    // kt tape-authoritative on CUDA + BF16 base. The candle producers
+    // kt tape-authoritative when the backend capability and precision policy
+    // allow it. The candle producers
     // (`standard_forward_backward_tape_authoritative` F32-hack,
     // `standard_forward_backward_via_tape_bridge`, the inline candle
-    // `loss.backward()` path) are all DELETED. F32/CPU training is dropped
-    // (the kt fused tape adapters are BF16-only; see
-    // `base_dtype_supports_tape` + note `kiln-cp4-tape-adapters-bf16-only`).
+    // `loss.backward()` path) are all DELETED. Unsupported backend/dtype
+    // combinations fail before the kt step is attempted.
     #[cfg(any(
         feature = "cuda",
         feature = "metal",
@@ -8314,16 +8315,10 @@ pub fn standard_forward_backward(
     ))]
     {
         anyhow::ensure!(
-            matches!(
-                device,
-                kiln_tensor::Device::Cuda(_)
-                    | kiln_tensor::Device::Metal(_)
-                    | kiln_tensor::Device::Vulkan(_)
-                    | kiln_tensor::Device::Rocm(_)
-            ),
-            "standard_forward_backward: kt tape-authoritative SFT requires a GPU \
-             device (CUDA/Metal/Vulkan/ROCm) post candle-drop (the candle CPU \
-             `loss.backward()` path was removed in #1082)."
+            backend_supports_tape_forward_backward(backend),
+            "standard_forward_backward: kt tape-authoritative SFT requires a backend \
+             that advertises kt tape-authoritative forward/backward support \
+             (the candle CPU `loss.backward()` path was removed in #1082)."
         );
         anyhow::ensure!(
             base_dtype_supports_tape_for_backend(weights, backend),
@@ -8360,8 +8355,8 @@ pub fn standard_forward_backward(
             device,
         );
         anyhow::bail!(
-            "standard_forward_backward: SFT training requires the `cuda` feature \
-             post candle-drop (kt tape-authoritative backward is CUDA-only)."
+            "standard_forward_backward: SFT training requires a GPU backend feature \
+             post candle-drop because the candle `loss.backward()` path was removed."
         )
     }
 }

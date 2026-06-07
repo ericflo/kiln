@@ -79,7 +79,7 @@
           "line": 77,
           "paired_method": "causal_conv1d_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 1860,
+          "paired_method_line": 1861,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -94,7 +94,7 @@
           "line": 73,
           "paired_method": "causal_conv1d_update",
           "paired_method_always_declines": false,
-          "paired_method_line": 1834,
+          "paired_method_line": 1835,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -109,7 +109,7 @@
           "line": 29,
           "paired_method": "flash_attn_paged_decode",
           "paired_method_always_declines": false,
-          "paired_method_line": 513,
+          "paired_method_line": 514,
           "status": "literal_true",
           "support_state": "NativeWithConstraints"
         },
@@ -124,7 +124,7 @@
           "line": 25,
           "paired_method": "flash_attn_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 471,
+          "paired_method_line": 472,
           "status": "literal_true",
           "support_state": "NativeWithConstraints"
         },
@@ -139,7 +139,7 @@
           "line": 45,
           "paired_method": "gdn_chunk_prep",
           "paired_method_always_declines": false,
-          "paired_method_line": 725,
+          "paired_method_line": 726,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -154,7 +154,7 @@
           "line": 49,
           "paired_method": "gdn_chunk_scan",
           "paired_method_always_declines": false,
-          "paired_method_line": 758,
+          "paired_method_line": 759,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -184,7 +184,7 @@
           "line": 61,
           "paired_method": "gdn_decode_qk_norm_gates_recurrent",
           "paired_method_always_declines": false,
-          "paired_method_line": 1066,
+          "paired_method_line": 1067,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -199,7 +199,7 @@
           "line": 37,
           "paired_method": "gdn_forward_substitution",
           "paired_method_always_declines": false,
-          "paired_method_line": 683,
+          "paired_method_line": 684,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -214,7 +214,7 @@
           "line": 53,
           "paired_method": "gdn_full_chunk_forward",
           "paired_method_always_declines": false,
-          "paired_method_line": 792,
+          "paired_method_line": 793,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -229,7 +229,7 @@
           "line": 69,
           "paired_method": "gdn_gated_rms_norm",
           "paired_method_always_declines": false,
-          "paired_method_line": 1755,
+          "paired_method_line": 1756,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -244,7 +244,7 @@
           "line": 65,
           "paired_method": "gdn_gates",
           "paired_method_always_declines": false,
-          "paired_method_line": 1488,
+          "paired_method_line": 1489,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -259,7 +259,7 @@
           "line": 41,
           "paired_method": "gdn_recurrent_step",
           "paired_method_always_declines": false,
-          "paired_method_line": 703,
+          "paired_method_line": 704,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -271,7 +271,7 @@
             "layout": false,
             "shape": false
           },
-          "line": 267,
+          "line": 268,
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
@@ -854,7 +854,7 @@
           "line": 77,
           "paired_method": "causal_conv1d_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 1929,
+          "paired_method_line": 1930,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -869,7 +869,7 @@
           "line": 73,
           "paired_method": "causal_conv1d_update",
           "paired_method_always_declines": false,
-          "paired_method_line": 1903,
+          "paired_method_line": 1904,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -884,7 +884,7 @@
           "line": 29,
           "paired_method": "flash_attn_paged_decode",
           "paired_method_always_declines": false,
-          "paired_method_line": 564,
+          "paired_method_line": 565,
           "status": "literal_true",
           "support_state": "NativeWithConstraints"
         },
@@ -899,7 +899,7 @@
           "line": 25,
           "paired_method": "flash_attn_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 486,
+          "paired_method_line": 487,
           "status": "literal_true",
           "support_state": "NativeWithConstraints"
         },
@@ -913,10 +913,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 435,
+          "line": 436,
           "paired_method": "flash_attn_prefill_head_major",
           "paired_method_always_declines": false,
-          "paired_method_line": 528,
+          "paired_method_line": 529,
           "status": "env_gated",
           "support_state": "NativeWithConstraints"
         },
@@ -931,7 +931,7 @@
           "line": 45,
           "paired_method": "gdn_chunk_prep",
           "paired_method_always_declines": false,
-          "paired_method_line": 777,
+          "paired_method_line": 778,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -946,7 +946,7 @@
           "line": 49,
           "paired_method": "gdn_chunk_scan",
           "paired_method_always_declines": false,
-          "paired_method_line": 810,
+          "paired_method_line": 811,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -976,7 +976,7 @@
           "line": 61,
           "paired_method": "gdn_decode_qk_norm_gates_recurrent",
           "paired_method_always_declines": false,
-          "paired_method_line": 1118,
+          "paired_method_line": 1119,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -991,7 +991,7 @@
           "line": 37,
           "paired_method": "gdn_forward_substitution",
           "paired_method_always_declines": false,
-          "paired_method_line": 735,
+          "paired_method_line": 736,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1006,7 +1006,7 @@
           "line": 53,
           "paired_method": "gdn_full_chunk_forward",
           "paired_method_always_declines": false,
-          "paired_method_line": 844,
+          "paired_method_line": 845,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1021,7 +1021,7 @@
           "line": 69,
           "paired_method": "gdn_gated_rms_norm",
           "paired_method_always_declines": false,
-          "paired_method_line": 1824,
+          "paired_method_line": 1825,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1036,7 +1036,7 @@
           "line": 65,
           "paired_method": "gdn_gates",
           "paired_method_always_declines": false,
-          "paired_method_line": 1540,
+          "paired_method_line": 1541,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1051,7 +1051,7 @@
           "line": 41,
           "paired_method": "gdn_recurrent_step",
           "paired_method_always_declines": false,
-          "paired_method_line": 755,
+          "paired_method_line": 756,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1063,10 +1063,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 1636,
+          "line": 1637,
           "paired_method": "linear_decode_argmax",
           "paired_method_always_declines": true,
-          "paired_method_line": 1640,
+          "paired_method_line": 1641,
           "status": "literal_false",
           "support_state": "Declined"
         },
@@ -1078,7 +1078,7 @@
             "layout": false,
             "shape": false
           },
-          "line": 279,
+          "line": 280,
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
@@ -2586,12 +2586,13 @@
     },
     "TrainingLossBackend": {
       "forwarding_impl": "blanket_backend_runtime",
-      "method_count": 6,
+      "method_count": 7,
       "methods": [
         "runtime_grpo_loss_route",
         "runtime_opd_loss_route",
         "runtime_opd_phase_b_backward_route",
         "runtime_sft_flce_loss_route",
+        "runtime_tape_forward_backward_route",
         "runtime_training_capabilities",
         "runtime_training_precision_policy"
       ],
@@ -3422,39 +3423,44 @@
   },
   "training_loss_policy": {
     "cpu": {
-      "evidence": "TrainingCapabilities::portable keeps SFT on the portable full-logits loss path, GRPO on the shared kt composite loss root, and OPD unsupported on the portable backend surface",
+      "evidence": "TrainingCapabilities::portable keeps tape forward/backward unsupported, SFT on the portable full-logits loss path, GRPO on the shared kt composite loss root, and OPD unsupported on the portable backend surface",
       "grpo_loss_route": "kt_composite",
       "opd_loss_route": "unsupported",
       "opd_phase_b_backward_route": "unsupported",
-      "sft_flce_loss_route": "full_logits"
+      "sft_flce_loss_route": "full_logits",
+      "tape_forward_backward_route": "unsupported"
     },
     "cuda": {
-      "evidence": "CudaBackend::training_capabilities_static advertises kt-tape FLCE over CUDA tensors, the shared kt GRPO composite route, the shared kt-tape OPD Phase-B route, and the fused CUDA/ROCm Phase-B hidden-gradient leaf",
+      "evidence": "CudaBackend::training_capabilities_static advertises kt tape-authoritative forward/backward, kt-tape FLCE over CUDA tensors, the shared kt GRPO composite route, the shared kt-tape OPD Phase-B route, and the fused CUDA/ROCm Phase-B hidden-gradient leaf",
       "grpo_loss_route": "kt_composite",
       "opd_loss_route": "kt_tape_phase_b",
       "opd_phase_b_backward_route": "cuda_rocm_fused_unit_grad",
-      "sft_flce_loss_route": "kt_tape_flce"
+      "sft_flce_loss_route": "kt_tape_flce",
+      "tape_forward_backward_route": "kt_tape_authoritative"
     },
     "metal": {
-      "evidence": "Metal training capabilities inherit the portable full-logits SFT loss route, shared kt GRPO composite route, shared kt-tape OPD Phase-B route, and device-agnostic kt composite Phase-B backward",
+      "evidence": "Metal training capabilities advertise kt tape-authoritative forward/backward, inherit the portable full-logits SFT loss route, shared kt GRPO composite route, shared kt-tape OPD Phase-B route, and device-agnostic kt composite Phase-B backward",
       "grpo_loss_route": "kt_composite",
       "opd_loss_route": "kt_tape_phase_b",
       "opd_phase_b_backward_route": "kt_composite",
-      "sft_flce_loss_route": "full_logits"
+      "sft_flce_loss_route": "full_logits",
+      "tape_forward_backward_route": "kt_tape_authoritative"
     },
     "rocm": {
-      "evidence": "RocmBackend::training_capabilities_static advertises the shared kt-tape FLCE route over ROCm tensors, the shared kt GRPO composite route, the shared kt-tape OPD Phase-B route, and the fused CUDA/ROCm Phase-B hidden-gradient leaf",
+      "evidence": "RocmBackend::training_capabilities_static advertises kt tape-authoritative forward/backward, the shared kt-tape FLCE route over ROCm tensors, the shared kt GRPO composite route, the shared kt-tape OPD Phase-B route, and the fused CUDA/ROCm Phase-B hidden-gradient leaf",
       "grpo_loss_route": "kt_composite",
       "opd_loss_route": "kt_tape_phase_b",
       "opd_phase_b_backward_route": "cuda_rocm_fused_unit_grad",
-      "sft_flce_loss_route": "kt_tape_flce"
+      "sft_flce_loss_route": "kt_tape_flce",
+      "tape_forward_backward_route": "kt_tape_authoritative"
     },
     "vulkan": {
-      "evidence": "Vulkan training capabilities advertise active-row fused SFT/GRPO shader routes and the active-hidden fused OPD loss/backward shader route",
+      "evidence": "Vulkan training capabilities advertise kt tape-authoritative forward/backward, active-row fused SFT/GRPO shader routes, and the active-hidden fused OPD loss/backward shader route",
       "grpo_loss_route": "vulkan_active_rows",
       "opd_loss_route": "vulkan_active_hidden",
       "opd_phase_b_backward_route": "vulkan_active_hidden",
-      "sft_flce_loss_route": "vulkan_active_rows"
+      "sft_flce_loss_route": "vulkan_active_rows",
+      "tape_forward_backward_route": "kt_tape_authoritative"
     }
   },
   "training_optimizer_fallback_policy": {

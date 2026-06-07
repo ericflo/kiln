@@ -255,6 +255,12 @@ The relevant shims are:
   activation sizing, and tape dtype eligibility. The older device-family helper
   remains only as a compatibility wrapper for tests and call sites that do not
   hold a backend runtime.
+- kt tape-forward/backward eligibility is backend-owned:
+  SFT/GRPO ask `TrainingLossBackend::runtime_tape_forward_backward_route`
+  before entering their tape-authoritative paths, then apply the precision
+  policy for dtype eligibility. CPU/portable reports the tape route as
+  unsupported, while CUDA, ROCm, Metal, and Vulkan advertise the shared kt
+  tape-authoritative route with their backend-specific precision constraints.
 
 Vulkan still has a stronger separate low-level identity than CUDA/ROCm/Metal
 because the SPIR-V leaf layer exposes `VkTensor`, explicit buffer operations,
