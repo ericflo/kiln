@@ -12,8 +12,9 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::Engine;
 use kiln_model::{
-    DecodeBatcher, DecodeBatcherConfig, InferenceRecurrentStatePolicy, LinearAttentionState,
-    ModelRunner, PagedKvCacheKt, PagedPrefixNextToken, PagedPrefixRegistration,
+    DecodeBatcher, DecodeBatcherConfig, InferenceRecurrentStatePolicy, KvCacheAutoBlockPolicy,
+    LinearAttentionState, ModelRunner, PagedKvCacheKt, PagedPrefixNextToken,
+    PagedPrefixRegistration,
 };
 use kiln_scheduler::{PrefixCacheStats, Scheduler};
 use kiln_tensor::DType;
@@ -33,10 +34,6 @@ use crate::training_queue::{SharedTrainingQueue, ShutdownFlag};
 // loop (the n=64 cliff). 64 >= max kBlockN and divides cleanly everywhere.
 const DEFAULT_BLOCK_SIZE: usize = 64;
 const MIN_AUTO_KV_BLOCKS: usize = 64;
-const METAL_AUTO_MAX_KV_BLOCKS_LOW_MEM: usize = 512; // 8K tokens at block_size=16.
-const METAL_AUTO_MAX_KV_BLOCKS_MID_MEM: usize = 1024; // 16K tokens at block_size=16.
-const METAL_AUTO_MAX_KV_BLOCKS_HIGH_MEM: usize = 2048; // 32K tokens at block_size=16.
-const ROCM_AUTO_MAX_KV_BLOCKS: usize = 4096; // 262K tokens at block_size=64.
 const DETERMINISTIC_COMPLETION_CACHE_CAPACITY: usize = 128;
 const DETERMINISTIC_CHAT_REQUEST_CACHE_CAPACITY: usize = 128;
 const DETERMINISTIC_CHAT_CHOICES_CACHE_CAPACITY: usize = 64;
@@ -1644,8 +1641,7 @@ impl AppState {
         // startup doesn't repeat the same probe/logging path.
         let vram_info = kiln_memory::vram::detect_vram();
         let storage_capabilities = runner.backend_capabilities().storage;
-        let is_metal = is_metal_device(&device_kt);
-        let is_rocm = matches!(device_kt, kiln_tensor::Device::Rocm(_));
+        let kv_auto_block_policy = storage_capabilities.kv_auto_block_policy;
 
         // Total AND used come from the SAME live, all-process driver snapshot
         // (VRAM+GTT on AMD, nvidia-smi on NVIDIA) so they're mutually consistent
@@ -1805,8 +1801,7 @@ impl AppState {
                 fraction,
                 model_config.max_position_embeddings,
                 block_size,
-                is_metal,
-                is_rocm,
+                kv_auto_block_policy,
             );
             // Additionally clamp so the KV pool fits within the live budget.
             // The governor provides the OS/driver-wide pressure view; CUDA/ROCm
@@ -1826,7 +1821,7 @@ impl AppState {
                 let max_blocks = (budget / bytes_per_block) as usize;
                 let capped = if max_blocks >= MIN_AUTO_KV_BLOCKS {
                     n.min(max_blocks)
-                } else if matches!(device_kt, kiln_tensor::Device::Rocm(_))
+                } else if kv_auto_block_policy.allow_min_blocks_below_live_budget
                     && allocator_budget != u64::MAX
                 {
                     MIN_AUTO_KV_BLOCKS.min(n)
@@ -1845,7 +1840,7 @@ impl AppState {
                         } else {
                             Some(allocator_budget as f64 / 1e9)
                         },
-                        "KV cache auto-sizer live budget is below the minimum cache size; using conservative ROCm floor when applicable"
+                        "KV cache auto-sizer live budget is below the minimum cache size; using conservative backend policy floor when applicable"
                     );
                 } else if capped < n {
                     tracing::warn!(
@@ -1915,6 +1910,7 @@ impl AppState {
                 &device_kt,
                 n,
                 bytes_per_block,
+                kv_auto_block_policy,
                 kiln_memory::MemoryGovernor::global(),
             )?;
             let attempt = || {
@@ -2020,8 +2016,7 @@ impl AppState {
                         bytes_per_block,
                         block_size,
                         model_config.max_position_embeddings,
-                        is_metal,
-                        is_rocm,
+                        kv_auto_block_policy,
                     );
                     let msg = format_oom_remediation_message(
                         &failure,
@@ -2386,8 +2381,7 @@ fn auto_num_blocks_for_fraction(
     fraction: f64,
     max_position_embeddings: usize,
     block_size: usize,
-    is_metal: bool,
-    is_rocm: bool,
+    kv_auto_block_policy: KvCacheAutoBlockPolicy,
 ) -> usize {
     if total_vram > 0 && bytes_per_block > 0 {
         let available_for_kv =
@@ -2397,8 +2391,7 @@ fn auto_num_blocks_for_fraction(
             raw_auto_blocks,
             max_position_embeddings,
             block_size,
-            is_metal,
-            is_rocm,
+            kv_auto_block_policy,
             total_vram,
         )
     } else {
@@ -2407,8 +2400,7 @@ fn auto_num_blocks_for_fraction(
             raw_auto_blocks,
             max_position_embeddings,
             block_size,
-            is_metal,
-            is_rocm,
+            kv_auto_block_policy,
             total_vram,
         )
     }
@@ -2418,20 +2410,20 @@ fn cap_auto_num_blocks(
     raw_blocks: usize,
     max_position_embeddings: usize,
     block_size: usize,
-    is_metal: bool,
-    is_rocm: bool,
+    kv_auto_block_policy: KvCacheAutoBlockPolicy,
     total_vram_bytes: u64,
 ) -> usize {
-    // On Metal (unified memory), an eagerly-zeroed KV cache larger than the
+    // On UMA backends, an eagerly-zeroed KV cache larger than the
     // model context can dominate memory pressure on the rest of the system,
-    // so we keep the historical "≤ one full context, further capped by
-    // detected memory tier" behavior.
+    // so the backend-owned policy keeps the historical "≤ one full context,
+    // further capped by detected memory tier" behavior where applicable.
     //
     // ROCm's HIP allocator can abort the process on later long-prefill scratch
-    // OOMs instead of returning a catchable allocation error. Keep the default
-    // KV pool to one Qwen3.5-class full-context pool so long prefill has
-    // workspace headroom; explicit `memory.num_blocks` / `KILN_NUM_BLOCKS`
-    // still opts into larger pools for operators who want them.
+    // OOMs instead of returning a catchable allocation error. Its capability
+    // policy keeps the default KV pool to one Qwen3.5-class full-context pool
+    // so long prefill has workspace headroom; explicit `memory.num_blocks` /
+    // `KILN_NUM_BLOCKS` still opts into larger pools for operators who want
+    // them.
     //
     // On CUDA / CPU, memory-aware sizing already drove `raw_blocks` from the
     // available VRAM × `inference_memory_fraction` budget. Capping again at
@@ -2441,38 +2433,21 @@ fn cap_auto_num_blocks(
     // routinely OOM-borderline under realistic load even on a 48 GiB A40.
     // Trust the memory-aware ceiling here; users who want a stricter cap can
     // still set `KILN_NUM_BLOCKS` or `memory.num_blocks` explicitly.
-    let runtime_cap_blocks = if is_metal {
-        let model_cap_blocks = max_position_embeddings
-            .div_ceil(block_size)
-            .max(MIN_AUTO_KV_BLOCKS);
-        model_cap_blocks.min(metal_auto_max_kv_blocks(total_vram_bytes))
-    } else if is_rocm {
-        let model_cap_blocks = max_position_embeddings
-            .div_ceil(block_size)
-            .max(MIN_AUTO_KV_BLOCKS);
-        model_cap_blocks.min(ROCM_AUTO_MAX_KV_BLOCKS)
-    } else {
-        usize::MAX
-    };
+    let runtime_cap_blocks = kv_auto_block_policy.runtime_cap_blocks(
+        max_position_embeddings,
+        block_size,
+        MIN_AUTO_KV_BLOCKS,
+        total_vram_bytes,
+    );
 
     raw_blocks.max(MIN_AUTO_KV_BLOCKS).min(runtime_cap_blocks)
-}
-
-fn metal_auto_max_kv_blocks(total_vram_bytes: u64) -> usize {
-    let gib = total_vram_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-    if gib < 14.0 {
-        METAL_AUTO_MAX_KV_BLOCKS_LOW_MEM
-    } else if gib < 24.0 {
-        METAL_AUTO_MAX_KV_BLOCKS_MID_MEM
-    } else {
-        METAL_AUTO_MAX_KV_BLOCKS_HIGH_MEM
-    }
 }
 
 fn validate_kv_allocation_against_live_allocator(
     device: &kiln_tensor::Device,
     num_blocks: usize,
     bytes_per_block: u64,
+    kv_auto_block_policy: KvCacheAutoBlockPolicy,
     governor: &kiln_memory::MemoryGovernor,
 ) -> anyhow::Result<()> {
     if device.backend() == kiln_tensor::Backend::Cpu || bytes_per_block == 0 {
@@ -2488,7 +2463,7 @@ fn validate_kv_allocation_against_live_allocator(
         return Ok(());
     }
     let max_blocks = (allocator_budget / bytes_per_block) as usize;
-    if matches!(device, kiln_tensor::Device::Rocm(_))
+    if kv_auto_block_policy.allow_min_blocks_below_live_budget
         && max_blocks < MIN_AUTO_KV_BLOCKS
         && num_blocks <= MIN_AUTO_KV_BLOCKS
     {
@@ -2496,7 +2471,7 @@ fn validate_kv_allocation_against_live_allocator(
             num_blocks,
             max_live_budget_blocks = max_blocks,
             min_auto_blocks = MIN_AUTO_KV_BLOCKS,
-            "ROCm allocator probe reports less than the minimum KV cache budget; allowing conservative allocation attempt"
+            "backend allocator probe reports less than the minimum KV cache budget; allowing conservative policy floor allocation attempt"
         );
         return Ok(());
     }
@@ -2671,8 +2646,7 @@ fn suggested_emergency_num_blocks(
     bytes_per_block: u64,
     block_size: usize,
     max_position_embeddings: usize,
-    is_metal: bool,
-    is_rocm: bool,
+    kv_auto_block_policy: KvCacheAutoBlockPolicy,
 ) -> usize {
     if total_vram == 0 || bytes_per_block == 0 {
         // No VRAM signal — fall back to one model context worth of blocks.
@@ -2688,8 +2662,7 @@ fn suggested_emergency_num_blocks(
         raw,
         max_position_embeddings,
         block_size,
-        is_metal,
-        is_rocm,
+        kv_auto_block_policy,
         total_vram,
     )
 }
@@ -3566,8 +3539,7 @@ mod tests {
             0.7,
             262_144,
             DEFAULT_BLOCK_SIZE,
-            false,
-            false,
+            KvCacheAutoBlockPolicy::MEMORY_BUDGET_ONLY,
         );
         let post_load_blocks = auto_num_blocks_for_fraction(
             total,
@@ -3576,8 +3548,7 @@ mod tests {
             0.7,
             262_144,
             DEFAULT_BLOCK_SIZE,
-            false,
-            false,
+            KvCacheAutoBlockPolicy::MEMORY_BUDGET_ONLY,
         );
 
         assert_eq!(old_estimate_blocks, 56570);
@@ -3602,8 +3573,7 @@ mod tests {
                 50_000,
                 262_144,
                 DEFAULT_BLOCK_SIZE,
-                false, // is_metal
-                false, // is_rocm
+                KvCacheAutoBlockPolicy::MEMORY_BUDGET_ONLY,
                 48 * 1024 * 1024 * 1024,
             ),
             50_000
@@ -3615,8 +3585,7 @@ mod tests {
                 4_096,
                 262_144,
                 DEFAULT_BLOCK_SIZE,
-                false,
-                false,
+                KvCacheAutoBlockPolicy::MEMORY_BUDGET_ONLY,
                 10 * 1024 * 1024 * 1024,
             ),
             4_096
@@ -3628,8 +3597,7 @@ mod tests {
                 65_000,
                 262_144,
                 DEFAULT_BLOCK_SIZE,
-                false,
-                false,
+                KvCacheAutoBlockPolicy::MEMORY_BUDGET_ONLY,
                 80 * 1024 * 1024 * 1024,
             ),
             65_000
@@ -3643,11 +3611,10 @@ mod tests {
                 50_000,
                 262_144,
                 DEFAULT_BLOCK_SIZE,
-                false,
-                true,
+                KvCacheAutoBlockPolicy::for_backend("rocm", kiln_tensor::Device::Rocm(0)),
                 120 * 1024 * 1024 * 1024,
             ),
-            ROCM_AUTO_MAX_KV_BLOCKS
+            4096
         );
     }
 
@@ -3662,33 +3629,30 @@ mod tests {
                 50_000,
                 262_144,
                 DEFAULT_BLOCK_SIZE,
-                true,
-                false,
+                KvCacheAutoBlockPolicy::for_backend("metal", kiln_tensor::Device::Metal(0)),
                 10 * 1024 * 1024 * 1024,
             ),
-            METAL_AUTO_MAX_KV_BLOCKS_LOW_MEM
+            512
         );
         assert_eq!(
             cap_auto_num_blocks(
                 50_000,
                 262_144,
                 DEFAULT_BLOCK_SIZE,
-                true,
-                false,
+                KvCacheAutoBlockPolicy::for_backend("metal", kiln_tensor::Device::Metal(0)),
                 16 * 1024 * 1024 * 1024,
             ),
-            METAL_AUTO_MAX_KV_BLOCKS_MID_MEM
+            1024
         );
         assert_eq!(
             cap_auto_num_blocks(
                 50_000,
                 262_144,
                 DEFAULT_BLOCK_SIZE,
-                true,
-                false,
+                KvCacheAutoBlockPolicy::for_backend("metal", kiln_tensor::Device::Metal(0)),
                 32 * 1024 * 1024 * 1024,
             ),
-            METAL_AUTO_MAX_KV_BLOCKS_HIGH_MEM
+            2048
         );
     }
 
@@ -3699,8 +3663,7 @@ mod tests {
                 512,
                 262_144,
                 DEFAULT_BLOCK_SIZE,
-                true,
-                false,
+                KvCacheAutoBlockPolicy::for_backend("metal", kiln_tensor::Device::Metal(0)),
                 10 * 1024 * 1024 * 1024,
             ),
             512
@@ -3710,8 +3673,7 @@ mod tests {
                 1,
                 262_144,
                 DEFAULT_BLOCK_SIZE,
-                true,
-                false,
+                KvCacheAutoBlockPolicy::for_backend("metal", kiln_tensor::Device::Metal(0)),
                 10 * 1024 * 1024 * 1024,
             ),
             MIN_AUTO_KV_BLOCKS
@@ -3900,8 +3862,7 @@ mod tests {
             bytes_per_block,
             DEFAULT_BLOCK_SIZE,
             262_144,
-            false, // CUDA path (Metal cap doesn't apply)
-            false,
+            KvCacheAutoBlockPolicy::MEMORY_BUDGET_ONLY,
         );
         let expected_kv_bytes = ((total - model) as f64 * 0.30) as u64;
         let expected_blocks = (expected_kv_bytes / bytes_per_block) as usize;
@@ -3920,8 +3881,7 @@ mod tests {
             0,
             DEFAULT_BLOCK_SIZE,
             262_144,
-            false,
-            false,
+            KvCacheAutoBlockPolicy::MEMORY_BUDGET_ONLY,
         );
         let expected = (262_144_usize).div_ceil(DEFAULT_BLOCK_SIZE);
         assert_eq!(suggested, expected.max(MIN_AUTO_KV_BLOCKS));

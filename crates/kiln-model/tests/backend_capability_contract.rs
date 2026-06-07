@@ -1140,6 +1140,8 @@ fn generated_capability_report_lists_request_descriptors() {
     for name in [
         "BackendCapabilities",
         "StorageCapabilities",
+        "KvCacheAutoBlockPolicy",
+        "KvCacheMemoryTierBlockCap",
         "StartupCapabilities",
         "MatmulCapabilities",
         "AttentionCapabilities",
@@ -1227,6 +1229,27 @@ fn generated_capability_report_lists_request_descriptors() {
         storage_capability_fields.contains(&"kv_sizing_residency_model_multiplier"),
         "StorageCapabilities should own backend-specific KV sizing residency reserve policy"
     );
+    assert!(
+        storage_capability_fields.contains(&"kv_auto_block_policy"),
+        "StorageCapabilities should own backend-specific KV auto block cap policy"
+    );
+    let kv_auto_block_policy_fields = capability_descriptors["KvCacheAutoBlockPolicy"]["fields"]
+        .as_array()
+        .expect("KvCacheAutoBlockPolicy fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
+    for field in [
+        "context_window_cap",
+        "static_max_blocks",
+        "memory_tier_cap",
+        "allow_min_blocks_below_live_budget",
+    ] {
+        assert!(
+            kv_auto_block_policy_fields.contains(&field),
+            "KvCacheAutoBlockPolicy should include {field}"
+        );
+    }
     let attention_capability_fields = capability_descriptors["AttentionCapabilities"]["fields"]
         .as_array()
         .expect("AttentionCapabilities fields should be an array")
@@ -2842,6 +2865,55 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             && server_kv_sizing_reserve_section.contains("kv_sizing_residency_model_multiplier"),
         "kiln-server KV sizing residency reserve should consume StorageCapabilities"
     );
+    let server_kv_auto_sizing_section = source_between(
+        &server_state_source,
+        "let compute_blocks_for_fraction = |fraction: f64| -> usize {",
+        "let fp8_enabled = {",
+    );
+    assert!(
+        server_state_source.contains("kv_auto_block_policy")
+            && server_kv_auto_sizing_section.contains("kv_auto_block_policy")
+            && server_kv_auto_sizing_section.contains("allow_min_blocks_below_live_budget"),
+        "kiln-server KV auto-sizing caps should consume StorageCapabilities.kv_auto_block_policy"
+    );
+    for forbidden in [
+        "let is_metal",
+        "let is_rocm",
+        "is_metal,",
+        "is_rocm,",
+        "matches!(device_kt, kiln_tensor::Device::Rocm(_))",
+    ] {
+        assert!(
+            !server_kv_auto_sizing_section.contains(forbidden),
+            "kiln-server KV auto-sizing should not keep a local backend/device cap table: {forbidden}"
+        );
+    }
+    let server_kv_auto_sizing_helpers = source_between(
+        &server_state_source,
+        "fn auto_num_blocks_for_fraction(",
+        "fn is_metal_device(",
+    );
+    assert!(
+        server_kv_auto_sizing_helpers.contains("KvCacheAutoBlockPolicy")
+            && server_kv_auto_sizing_helpers.contains("runtime_cap_blocks")
+            && server_kv_auto_sizing_helpers.contains("allow_min_blocks_below_live_budget"),
+        "kiln-server KV auto-sizing helpers should be parameterized by the backend-owned policy"
+    );
+    for forbidden in [
+        "is_metal: bool",
+        "is_rocm: bool",
+        "if is_metal",
+        "else if is_rocm",
+        "metal_auto_max_kv_blocks",
+        "ROCM_AUTO_MAX_KV_BLOCKS",
+        "METAL_AUTO_MAX_KV_BLOCKS",
+        "matches!(device, kiln_tensor::Device::Rocm(_))",
+    ] {
+        assert!(
+            !server_kv_auto_sizing_helpers.contains(forbidden),
+            "kiln-server KV auto-sizing helpers should not keep a local backend/device cap table: {forbidden}"
+        );
+    }
     assert!(
         !server_kv_sizing_reserve_section
             .contains("matches!(device_kt, kiln_tensor::Device::Vulkan(_))"),

@@ -86,6 +86,8 @@ REQUEST_DESCRIPTOR_STRUCTS = [
 CAPABILITY_DESCRIPTOR_STRUCTS = [
     "BackendCapabilities",
     "StorageCapabilities",
+    "KvCacheAutoBlockPolicy",
+    "KvCacheMemoryTierBlockCap",
     "StartupCapabilities",
     "MatmulCapabilities",
     "AttentionCapabilities",

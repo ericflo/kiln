@@ -1865,6 +1865,54 @@
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
+    "KvCacheAutoBlockPolicy": {
+      "field_count": 4,
+      "fields": [
+        {
+          "name": "context_window_cap",
+          "type": "bool"
+        },
+        {
+          "name": "static_max_blocks",
+          "type": "Option<usize>"
+        },
+        {
+          "name": "memory_tier_cap",
+          "type": "Option<KvCacheMemoryTierBlockCap>"
+        },
+        {
+          "name": "allow_min_blocks_below_live_budget",
+          "type": "bool"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "KvCacheMemoryTierBlockCap": {
+      "field_count": 5,
+      "fields": [
+        {
+          "name": "low_memory_bytes_exclusive",
+          "type": "u64"
+        },
+        {
+          "name": "low_max_blocks",
+          "type": "usize"
+        },
+        {
+          "name": "mid_memory_bytes_exclusive",
+          "type": "u64"
+        },
+        {
+          "name": "mid_max_blocks",
+          "type": "usize"
+        },
+        {
+          "name": "high_max_blocks",
+          "type": "usize"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
     "MatmulCapabilities": {
       "field_count": 3,
       "fields": [
@@ -1990,7 +2038,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "StorageCapabilities": {
-      "field_count": 6,
+      "field_count": 7,
       "fields": [
         {
           "name": "backend",
@@ -2015,6 +2063,10 @@
         {
           "name": "kv_sizing_residency_model_multiplier",
           "type": "u64"
+        },
+        {
+          "name": "kv_auto_block_policy",
+          "type": "KvCacheAutoBlockPolicy"
         }
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"

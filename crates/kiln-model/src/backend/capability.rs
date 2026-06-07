@@ -733,6 +733,27 @@ pub struct StorageCapabilities {
     pub resident_decode: Support,
     pub kv_cache_device_memory_pressure: bool,
     pub kv_sizing_residency_model_multiplier: u64,
+    pub kv_auto_block_policy: KvCacheAutoBlockPolicy,
+}
+
+/// Backend-owned policy for server KV auto-sizing block caps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KvCacheAutoBlockPolicy {
+    pub context_window_cap: bool,
+    pub static_max_blocks: Option<usize>,
+    pub memory_tier_cap: Option<KvCacheMemoryTierBlockCap>,
+    pub allow_min_blocks_below_live_budget: bool,
+}
+
+/// Memory-tiered block cap for UMA backends where zero-filled KV pools also
+/// compete with system memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KvCacheMemoryTierBlockCap {
+    pub low_memory_bytes_exclusive: u64,
+    pub low_max_blocks: usize,
+    pub mid_memory_bytes_exclusive: u64,
+    pub mid_max_blocks: usize,
+    pub high_max_blocks: usize,
 }
 
 /// Backend-owned server startup and prewarm policy.
@@ -1136,6 +1157,7 @@ impl BackendCapabilities {
                 kv_sizing_residency_model_multiplier: kv_sizing_residency_model_multiplier(
                     name, device,
                 ),
+                kv_auto_block_policy: KvCacheAutoBlockPolicy::for_backend(name, device),
             },
             startup: StartupCapabilities::for_backend(name, device),
             matmul: MatmulCapabilities {
@@ -1483,6 +1505,74 @@ fn kv_sizing_residency_model_multiplier(name: &str, device: kiln_tensor::Device)
     match backend_kind_for_runtime(name, device) {
         kiln_tensor::Backend::Vulkan => 2,
         _ => 0,
+    }
+}
+
+const GIB: u64 = 1024 * 1024 * 1024;
+
+impl KvCacheAutoBlockPolicy {
+    pub const MEMORY_BUDGET_ONLY: Self = Self {
+        context_window_cap: false,
+        static_max_blocks: None,
+        memory_tier_cap: None,
+        allow_min_blocks_below_live_budget: false,
+    };
+
+    pub fn for_backend(name: &str, device: kiln_tensor::Device) -> Self {
+        match backend_kind_for_runtime(name, device) {
+            kiln_tensor::Backend::Metal => Self {
+                context_window_cap: true,
+                static_max_blocks: None,
+                memory_tier_cap: Some(KvCacheMemoryTierBlockCap {
+                    low_memory_bytes_exclusive: 14 * GIB,
+                    low_max_blocks: 512,
+                    mid_memory_bytes_exclusive: 24 * GIB,
+                    mid_max_blocks: 1024,
+                    high_max_blocks: 2048,
+                }),
+                allow_min_blocks_below_live_budget: false,
+            },
+            kiln_tensor::Backend::Rocm => Self {
+                context_window_cap: true,
+                static_max_blocks: Some(4096),
+                memory_tier_cap: None,
+                allow_min_blocks_below_live_budget: true,
+            },
+            _ => Self::MEMORY_BUDGET_ONLY,
+        }
+    }
+
+    pub fn runtime_cap_blocks(
+        self,
+        max_position_embeddings: usize,
+        block_size: usize,
+        min_blocks: usize,
+        total_vram_bytes: u64,
+    ) -> usize {
+        let mut cap = if self.context_window_cap {
+            max_position_embeddings.div_ceil(block_size).max(min_blocks)
+        } else {
+            usize::MAX
+        };
+        if let Some(static_max) = self.static_max_blocks {
+            cap = cap.min(static_max);
+        }
+        if let Some(tier) = self.memory_tier_cap {
+            cap = cap.min(tier.max_blocks_for_total_vram(total_vram_bytes));
+        }
+        cap
+    }
+}
+
+impl KvCacheMemoryTierBlockCap {
+    pub fn max_blocks_for_total_vram(self, total_vram_bytes: u64) -> usize {
+        if total_vram_bytes < self.low_memory_bytes_exclusive {
+            self.low_max_blocks
+        } else if total_vram_bytes < self.mid_memory_bytes_exclusive {
+            self.mid_max_blocks
+        } else {
+            self.high_max_blocks
+        }
     }
 }
 
