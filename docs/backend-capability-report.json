@@ -2667,7 +2667,6 @@
         "metal_apple_silicon_matmul_qwen35_4b.prefill_qkv_m256_2560x4096_ms: max threshold is not finite numeric",
         "metal_apple_silicon_matmul_qwen35_4b.prefill_gate_up_m256_2560x18432_ms: max threshold is not finite numeric",
         "metal_apple_silicon_matmul_qwen35_4b.lm_head_m1_2560x152064_ms: max threshold is not finite numeric",
-        "metal_apple_silicon_sdpa_qwen35_4b: missing result artifact bench-results/backend-latency/metal-apple-silicon-sdpa.json",
         "metal_apple_silicon_sdpa_qwen35_4b: threshold_state is 'pending_fixture_result', expected 'locked_threshold'",
         "metal_apple_silicon_sdpa_qwen35_4b.decode_sq1_sk512_ms: max threshold is not finite numeric",
         "metal_apple_silicon_sdpa_qwen35_4b.decode_sq1_sk4096_ms: max threshold is not finite numeric",

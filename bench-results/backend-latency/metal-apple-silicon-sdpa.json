@@ -1,0 +1,23 @@
+{
+  "artifact_schema_version": 3,
+  "backend": "metal",
+  "command": "cargo test -p kiln-tensor --features metal --test metal_sdpa_bench -- --ignored --nocapture",
+  "created_at_utc": "2026-06-07T18:43:59Z",
+  "fixture_id": "metal_apple_silicon_sdpa_qwen35_4b",
+  "fixture_spec_sha256": "a16d0a01155cc6b34b81bf42faa67f05d9cbdff6e54a37335dd9769706fecfb7",
+  "git_commit": "41be1ac90acbcedb6105a20d6f4ca9baf186d57c",
+  "git_tracked_dirty": false,
+  "hardware": "Apple Silicon Metal fixture",
+  "manifest": "docs/backend-latency-fixtures.json",
+  "manifest_schema_version": 1,
+  "metrics": {
+    "decode_sq1_sk4096_ms": 0.561028,
+    "decode_sq1_sk512_ms": 0.13077,
+    "prefill_sq512_sk512_ms": 4.101798
+  },
+  "raw_log": "bench-results/backend-latency/raw/metal_apple_silicon_sdpa_qwen35_4b-20260607T184349Z.log",
+  "raw_log_sha256": "f85ab2a2d888336952042d79c00838704211d9073ed2ad0f40b5a871eceb560f",
+  "source": "crates/kiln-tensor/tests/metal_sdpa_bench.rs",
+  "source_sha256": "5a388ff98515110b7731755152cc8a2b8a94e92d9b7f8bcbad10d9e8110836ad",
+  "status": "passed"
+}
