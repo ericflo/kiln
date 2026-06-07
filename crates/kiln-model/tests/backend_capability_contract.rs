@@ -1643,6 +1643,22 @@ fn generated_capability_report_lists_training_precision_policy() {
         "CUDA should own its exact-GDN backward tile default in the training policy"
     );
     assert_eq!(
+        policies["cuda"]["streaming_prefill_tile_tokens"], 1024,
+        "CUDA should own its streaming-prefill tile default in the training policy"
+    );
+    assert_eq!(
+        policies["rocm"]["paged_prefill_medium_tile_tokens"], 1024,
+        "ROCm should own its medium-sequence paged-prefill tile default in the training policy"
+    );
+    assert_eq!(
+        policies["rocm"]["paged_prefill_medium_tile_max_tokens"], 20_000,
+        "ROCm should own its medium-sequence paged-prefill ceiling in the training policy"
+    );
+    assert_eq!(
+        policies["metal"]["tape_streaming_tile_tokens"], 2048,
+        "Metal should own its tape streaming tile default in the training policy"
+    );
+    assert_eq!(
         policies["metal"]["exact_gdn_backward_tile_tokens"],
         Value::Null,
         "Metal should inherit the streaming tile default for exact-GDN backward"
@@ -3281,6 +3297,19 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     assert!(
         !exact_gdn_tile_section.contains("is_cuda_device"),
         "exact-GDN backward tile defaults should not hard-code CUDA in the trainer"
+    );
+    let streaming_tile_section = source_between(
+        &forward_source,
+        "pub fn streaming_tile_tokens_for(",
+        "fn trace_model_segment_timings()",
+    );
+    assert!(
+        streaming_tile_section.contains("TrainingPrecisionPolicy::for_device_family"),
+        "streaming prefill tile defaults should read backend-owned training policy"
+    );
+    assert!(
+        !streaming_tile_section.contains("match streaming_prefill_device_kind"),
+        "streaming tile defaults should not keep a local backend device table"
     );
     let base_dtype_support_section = source_between(
         &trainer_source,

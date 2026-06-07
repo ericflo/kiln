@@ -17,7 +17,7 @@ use std::time::Duration;
 use crate::backend::capability::{BackendCapabilityQueries, InferenceRecurrentStatePolicy, Support};
 use crate::backend::{
     AttentionBackend, BackendRuntime, ConvBackend, GdnBackend, LinearBackend, PagedKvBackend,
-    ReplayBackend, ResidencyBackend, SamplingBackend,
+    ReplayBackend, ResidencyBackend, SamplingBackend, TrainingPrecisionPolicy,
 };
 #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
 use crate::backend::BackendIdentity;
@@ -6260,13 +6260,7 @@ pub fn streaming_tile_tokens() -> usize {
 /// smaller tile because it measured faster for long desktop TTFT.
 pub fn streaming_tile_tokens_for(device: &Device) -> usize {
     streaming_tile_tokens_env_override().unwrap_or_else(|| {
-        match streaming_prefill_device_kind(device) {
-            StreamingPrefillDeviceKind::Cuda => STREAMING_PREFILL_CUDA_DEFAULT_TILE,
-            StreamingPrefillDeviceKind::Rocm => STREAMING_PREFILL_ROCM_DEFAULT_TILE,
-            StreamingPrefillDeviceKind::Metal => STREAMING_PREFILL_METAL_DEFAULT_TILE,
-            StreamingPrefillDeviceKind::Vulkan => STREAMING_PREFILL_VULKAN_DEFAULT_TILE,
-            StreamingPrefillDeviceKind::Cpu => STREAMING_PREFILL_DEFAULT_TILE,
-        }
+        TrainingPrecisionPolicy::for_device_family(*device).streaming_prefill_tile_tokens
     })
 }
 
@@ -6280,26 +6274,14 @@ pub fn streaming_tile_tokens_for(device: &Device) -> usize {
 /// overrides them.
 pub fn tape_streaming_tile_tokens_for(device: &Device) -> usize {
     tape_streaming_tile_tokens_env_override().unwrap_or_else(|| {
-        match streaming_prefill_device_kind(device) {
-            StreamingPrefillDeviceKind::Cuda => STREAMING_PREFILL_CUDA_TAPE_DEFAULT_TILE,
-            StreamingPrefillDeviceKind::Rocm => STREAMING_PREFILL_ROCM_TAPE_DEFAULT_TILE,
-            StreamingPrefillDeviceKind::Metal => STREAMING_PREFILL_METAL_TAPE_DEFAULT_TILE,
-            StreamingPrefillDeviceKind::Vulkan => STREAMING_PREFILL_VULKAN_TAPE_DEFAULT_TILE,
-            StreamingPrefillDeviceKind::Cpu => STREAMING_PREFILL_DEFAULT_TILE,
-        }
+        TrainingPrecisionPolicy::for_device_family(*device).tape_streaming_tile_tokens
     })
 }
 
 fn streaming_tile_tokens_for_paged_prefill(device: &Device, seq_len: usize) -> usize {
     streaming_tile_tokens_env_override().unwrap_or_else(|| {
-        match streaming_prefill_device_kind(device) {
-            StreamingPrefillDeviceKind::Rocm
-                if seq_len <= STREAMING_PREFILL_ROCM_MEDIUM_TILE_MAX_TOKENS =>
-            {
-                STREAMING_PREFILL_ROCM_MEDIUM_TILE
-            }
-            _ => streaming_tile_tokens_for(device),
-        }
+        TrainingPrecisionPolicy::for_device_family(*device)
+            .streaming_prefill_tile_tokens_for_seq_len(seq_len)
     })
 }
 
