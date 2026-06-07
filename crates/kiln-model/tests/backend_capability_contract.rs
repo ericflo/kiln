@@ -1981,8 +1981,14 @@ fn generated_capability_report_lists_training_precision_policy() {
     let vulkan = &policies["vulkan"];
     assert_eq!(vulkan["name"], "vulkan_mixed_f32_bf16");
     assert_eq!(vulkan["loss_accumulation_dtype"], "F32");
+    assert_eq!(vulkan["mixed_rms_norm_weight_dtype"], "BF16");
     assert_eq!(vulkan["exact_gdn_backward_tile_tokens"], Value::Null);
     assert_eq!(vulkan["mixed_precision"], true);
+    assert_eq!(
+        policies["cuda"]["mixed_rms_norm_weight_dtype"],
+        Value::Null,
+        "CUDA should keep equal-dtype RMSNorm training policy"
+    );
     assert_eq!(
         policies["cuda"]["exact_gdn_backward_tile_tokens"], 1024,
         "CUDA should own its exact-GDN backward tile default in the training policy"
@@ -4151,6 +4157,27 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         base_dtype_support_section.contains("uses_f32_activations_for_mixed_base_weights"),
         "base dtype tape support should read mixed F32 activation policy from TrainingPrecisionPolicy"
     );
+    let tape_rms_norm_section = source_between(
+        &tape_forward_source,
+        "pub fn try_tape_rms_norm_kt(",
+        "/// kt-native matmul tape recorder",
+    );
+    assert!(
+        tape_rms_norm_section.contains("TrainingPrecisionPolicy::for_device_family")
+            && tape_rms_norm_section.contains("supports_rms_norm_weight_dtype_for_activation"),
+        "RMSNorm tape dtype routing should consume TrainingPrecisionPolicy"
+    );
+    for forbidden in [
+        "vk_f32x_bf16w",
+        "matches!(x.device(), kiln_tensor::Device::Vulkan(_))",
+        "x.dtype() == kiln_tensor::DType::F32",
+        "weight.dtype() == kiln_tensor::DType::BF16",
+    ] {
+        assert!(
+            !tape_rms_norm_section.contains(forbidden),
+            "RMSNorm tape dtype routing should not keep a local Vulkan mixed-dtype policy: {forbidden}"
+        );
+    }
     assert!(
         trainer_source.contains("base_dtype_supports_tape_for_backend(weights, backend)"),
         "SFT/GRPO tape eligibility should consume backend precision policy"

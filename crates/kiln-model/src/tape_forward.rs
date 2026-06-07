@@ -439,20 +439,10 @@ pub fn try_tape_rms_norm_kt(
     ) {
         return Ok(None);
     }
-    // (#1443 step 3) Mixed-precision RMSNorm on Vulkan: F32 ACTIVATION `x` × a
-    // BF16 NORM WEIGHT (production BF16 checkpoints store BF16 norms). The forward
-    // already casts `weight` to `x.dtype()` (F32) internally, and
-    // `RmsNormKtBackward::apply` casts x/weight/grad to F32 throughout, so the
-    // composite handles F32-x/BF16-weight cleanly. The norm weight is FROZEN in
-    // LoRA training (only `dL/dx` matters), so the dw-dtype is irrelevant. Relax
-    // the strict `x.dtype() == weight.dtype()` gate for this Vulkan case ONLY —
-    // CUDA/Metal run x==weight==BF16 end-to-end and keep the strict equality.
-    #[cfg(feature = "vulkan")]
-    let vk_f32x_bf16w = matches!(x.device(), kiln_tensor::Device::Vulkan(_))
-        && x.dtype() == kiln_tensor::DType::F32
-        && weight.dtype() == kiln_tensor::DType::BF16;
-    #[cfg(not(feature = "vulkan"))]
-    let vk_f32x_bf16w = false;
+    // Mixed-precision RMSNorm exceptions are backend precision policy, not a
+    // local Vulkan special case. Today the policy allows F32 activations with
+    // BF16 norm weights for Vulkan's mixed F32/BF16 training envelope.
+    let precision_policy = crate::backend::TrainingPrecisionPolicy::for_device_family(x.device());
     if weight.rank() != 1
         || x.rank() == 0
         || *x.shape().last().unwrap() != weight.shape()[0]
@@ -460,7 +450,8 @@ pub fn try_tape_rms_norm_kt(
             x.dtype(),
             kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
         )
-        || (x.dtype() != weight.dtype() && !vk_f32x_bf16w)
+        || !precision_policy
+            .supports_rms_norm_weight_dtype_for_activation(x.dtype(), weight.dtype())
         || !x.is_contiguous()
         || !weight.is_contiguous()
     {

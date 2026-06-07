@@ -382,6 +382,7 @@ pub struct TrainingPrecisionPolicy {
     pub lora_parameter_dtypes: &'static [kiln_tensor::DType],
     pub loss_accumulation_dtype: kiln_tensor::DType,
     pub optimizer_parameter_dtypes: &'static [kiln_tensor::DType],
+    pub mixed_rms_norm_weight_dtype: Option<kiln_tensor::DType>,
     pub streaming_prefill_tile_tokens: usize,
     pub tape_streaming_tile_tokens: usize,
     pub paged_prefill_medium_tile_tokens: Option<usize>,
@@ -400,6 +401,7 @@ impl TrainingPrecisionPolicy {
             lora_parameter_dtypes: TRAINING_DTYPE_F32,
             loss_accumulation_dtype: kiln_tensor::DType::F32,
             optimizer_parameter_dtypes: TRAINING_DTYPE_F32,
+            mixed_rms_norm_weight_dtype: None,
             streaming_prefill_tile_tokens: 8192,
             tape_streaming_tile_tokens: 8192,
             paged_prefill_medium_tile_tokens: None,
@@ -418,6 +420,7 @@ impl TrainingPrecisionPolicy {
             lora_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
             loss_accumulation_dtype: kiln_tensor::DType::F32,
             optimizer_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
+            mixed_rms_norm_weight_dtype: None,
             streaming_prefill_tile_tokens: 1024,
             tape_streaming_tile_tokens: 1024,
             paged_prefill_medium_tile_tokens: None,
@@ -436,6 +439,7 @@ impl TrainingPrecisionPolicy {
             lora_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
             loss_accumulation_dtype: kiln_tensor::DType::F32,
             optimizer_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
+            mixed_rms_norm_weight_dtype: None,
             streaming_prefill_tile_tokens: 1024,
             tape_streaming_tile_tokens: 1024,
             paged_prefill_medium_tile_tokens: Some(1024),
@@ -454,6 +458,7 @@ impl TrainingPrecisionPolicy {
             lora_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
             loss_accumulation_dtype: kiln_tensor::DType::F32,
             optimizer_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
+            mixed_rms_norm_weight_dtype: None,
             streaming_prefill_tile_tokens: 2048,
             tape_streaming_tile_tokens: 2048,
             paged_prefill_medium_tile_tokens: None,
@@ -472,6 +477,7 @@ impl TrainingPrecisionPolicy {
             lora_parameter_dtypes: TRAINING_DTYPE_F32,
             loss_accumulation_dtype: kiln_tensor::DType::F32,
             optimizer_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
+            mixed_rms_norm_weight_dtype: Some(kiln_tensor::DType::BF16),
             streaming_prefill_tile_tokens: 2048,
             tape_streaming_tile_tokens: 2048,
             paged_prefill_medium_tile_tokens: None,
@@ -513,6 +519,22 @@ impl TrainingPrecisionPolicy {
                 .base_weight_dtypes
                 .iter()
                 .any(|dtype| *dtype == kiln_tensor::DType::BF16)
+    }
+
+    pub fn supports_rms_norm_weight_dtype_for_activation(
+        &self,
+        activation_dtype: kiln_tensor::DType,
+        weight_dtype: kiln_tensor::DType,
+    ) -> bool {
+        if activation_dtype == weight_dtype {
+            return self
+                .activation_dtypes
+                .iter()
+                .any(|dtype| *dtype == activation_dtype);
+        }
+        self.uses_f32_activations_for_mixed_base_weights()
+            && activation_dtype == kiln_tensor::DType::F32
+            && self.mixed_rms_norm_weight_dtype == Some(weight_dtype)
     }
 
     pub fn exact_gdn_backward_tile_tokens_or(&self, fallback: usize) -> usize {
@@ -3732,6 +3754,10 @@ mod tests {
         let vulkan = TrainingPrecisionPolicy::vulkan();
         assert_eq!(vulkan.activation_dtypes, &[kiln_tensor::DType::F32]);
         assert_eq!(vulkan.lora_parameter_dtypes, &[kiln_tensor::DType::F32]);
+        assert_eq!(
+            vulkan.mixed_rms_norm_weight_dtype,
+            Some(kiln_tensor::DType::BF16)
+        );
         assert_eq!(vulkan.exact_gdn_backward_tile_tokens, None);
         assert_eq!(vulkan.streaming_prefill_tile_tokens, 2048);
         assert_eq!(vulkan.tape_streaming_tile_tokens, 2048);
@@ -3777,6 +3803,22 @@ mod tests {
             kiln_tensor::DType::F32
         );
         assert!(vulkan.uses_f32_activations_for_mixed_base_weights());
+        assert!(vulkan.supports_rms_norm_weight_dtype_for_activation(
+            kiln_tensor::DType::F32,
+            kiln_tensor::DType::BF16
+        ));
+        assert!(
+            !TrainingPrecisionPolicy::cuda().supports_rms_norm_weight_dtype_for_activation(
+                kiln_tensor::DType::F32,
+                kiln_tensor::DType::BF16
+            )
+        );
+        assert!(
+            TrainingPrecisionPolicy::metal().supports_rms_norm_weight_dtype_for_activation(
+                kiln_tensor::DType::BF16,
+                kiln_tensor::DType::BF16
+            )
+        );
         assert!(!TrainingPrecisionPolicy::portable().uses_f32_activations_for_mixed_base_weights());
         assert!(!TrainingPrecisionPolicy::metal().uses_f32_activations_for_mixed_base_weights());
     }

@@ -800,6 +800,7 @@ def training_precision_policy_report() -> dict[str, Any]:
             "lora_parameter_dtypes": ["F32"],
             "loss_accumulation_dtype": "F32",
             "optimizer_parameter_dtypes": ["F32"],
+            "mixed_rms_norm_weight_dtype": None,
             "streaming_prefill_tile_tokens": 8192,
             "tape_streaming_tile_tokens": 8192,
             "paged_prefill_medium_tile_tokens": None,
@@ -815,6 +816,7 @@ def training_precision_policy_report() -> dict[str, Any]:
             "lora_parameter_dtypes": ["F32", "BF16"],
             "loss_accumulation_dtype": "F32",
             "optimizer_parameter_dtypes": ["F32", "BF16"],
+            "mixed_rms_norm_weight_dtype": None,
             "streaming_prefill_tile_tokens": 1024,
             "tape_streaming_tile_tokens": 1024,
             "paged_prefill_medium_tile_tokens": None,
@@ -830,6 +832,7 @@ def training_precision_policy_report() -> dict[str, Any]:
             "lora_parameter_dtypes": ["F32", "BF16"],
             "loss_accumulation_dtype": "F32",
             "optimizer_parameter_dtypes": ["F32", "BF16"],
+            "mixed_rms_norm_weight_dtype": None,
             "streaming_prefill_tile_tokens": 1024,
             "tape_streaming_tile_tokens": 1024,
             "paged_prefill_medium_tile_tokens": 1024,
@@ -845,6 +848,7 @@ def training_precision_policy_report() -> dict[str, Any]:
             "lora_parameter_dtypes": ["F32", "BF16"],
             "loss_accumulation_dtype": "F32",
             "optimizer_parameter_dtypes": ["F32", "BF16"],
+            "mixed_rms_norm_weight_dtype": None,
             "streaming_prefill_tile_tokens": 2048,
             "tape_streaming_tile_tokens": 2048,
             "paged_prefill_medium_tile_tokens": None,
@@ -860,6 +864,7 @@ def training_precision_policy_report() -> dict[str, Any]:
             "lora_parameter_dtypes": ["F32"],
             "loss_accumulation_dtype": "F32",
             "optimizer_parameter_dtypes": ["F32", "BF16"],
+            "mixed_rms_norm_weight_dtype": "BF16",
             "streaming_prefill_tile_tokens": 2048,
             "tape_streaming_tile_tokens": 2048,
             "paged_prefill_medium_tile_tokens": None,
@@ -1595,8 +1600,8 @@ def markdown(data: dict[str, Any]) -> str:
     lines.append("")
     lines.append("## Training Precision Policy")
     lines.append("")
-    lines.append("| Backend | Policy | Activations | Base Weights | LoRA | Loss Accum | Optimizer Params | Streaming Tile | Tape Tile | Paged Medium Tile | Exact GDN Backward Tile | Mixed |")
-    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("| Backend | Policy | Activations | Base Weights | LoRA | Loss Accum | Optimizer Params | Mixed RMSNorm Weight | Streaming Tile | Tape Tile | Paged Medium Tile | Exact GDN Backward Tile | Mixed |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for backend, info in data["training_precision_policy"].items():
         exact_gdn_tile = info["exact_gdn_backward_tile_tokens"]
         exact_gdn_tile_display = (
@@ -1611,6 +1616,7 @@ def markdown(data: dict[str, Any]) -> str:
             if paged_medium_tile is not None and paged_medium_max_tokens is not None
             else "none"
         )
+        mixed_rms_norm_weight_dtype = info["mixed_rms_norm_weight_dtype"] or "none"
         lines.append(
             f"| `{backend}` | `{info['name']}` | "
             f"`{','.join(info['activation_dtypes'])}` | "
@@ -1618,6 +1624,7 @@ def markdown(data: dict[str, Any]) -> str:
             f"`{','.join(info['lora_parameter_dtypes'])}` | "
             f"`{info['loss_accumulation_dtype']}` | "
             f"`{','.join(info['optimizer_parameter_dtypes'])}` | "
+            f"`{mixed_rms_norm_weight_dtype}` | "
             f"`{info['streaming_prefill_tile_tokens']}` | "
             f"`{info['tape_streaming_tile_tokens']}` | "
             f"`{paged_medium_tile_display}` | "

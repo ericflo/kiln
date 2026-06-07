@@ -243,13 +243,13 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 
 ## Training Precision Policy
 
-| Backend | Policy | Activations | Base Weights | LoRA | Loss Accum | Optimizer Params | Streaming Tile | Tape Tile | Paged Medium Tile | Exact GDN Backward Tile | Mixed |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| `cpu` | `cpu_f32_reference` | `F32` | `F32` | `F32` | `F32` | `F32` | `8192` | `8192` | `none` | `streaming_tile_tokens_for(device)` | no |
-| `cuda` | `cuda_native_float` | `F32,BF16,F16` | `F32,BF16,F16` | `F32,BF16` | `F32` | `F32,BF16` | `1024` | `1024` | `none` | `1024` | yes |
-| `rocm` | `rocm_native_float` | `F32,BF16,F16` | `F32,BF16,F16` | `F32,BF16` | `F32` | `F32,BF16` | `1024` | `1024` | `1024 <= 20000` | `streaming_tile_tokens_for(device)` | yes |
-| `metal` | `metal_bf16_uma` | `BF16` | `BF16` | `F32,BF16` | `F32` | `F32,BF16` | `2048` | `2048` | `none` | `streaming_tile_tokens_for(device)` | yes |
-| `vulkan` | `vulkan_mixed_f32_bf16` | `F32` | `F32,BF16` | `F32` | `F32` | `F32,BF16` | `2048` | `2048` | `none` | `streaming_tile_tokens_for(device)` | yes |
+| Backend | Policy | Activations | Base Weights | LoRA | Loss Accum | Optimizer Params | Mixed RMSNorm Weight | Streaming Tile | Tape Tile | Paged Medium Tile | Exact GDN Backward Tile | Mixed |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `cpu` | `cpu_f32_reference` | `F32` | `F32` | `F32` | `F32` | `F32` | `none` | `8192` | `8192` | `none` | `streaming_tile_tokens_for(device)` | no |
+| `cuda` | `cuda_native_float` | `F32,BF16,F16` | `F32,BF16,F16` | `F32,BF16` | `F32` | `F32,BF16` | `none` | `1024` | `1024` | `none` | `1024` | yes |
+| `rocm` | `rocm_native_float` | `F32,BF16,F16` | `F32,BF16,F16` | `F32,BF16` | `F32` | `F32,BF16` | `none` | `1024` | `1024` | `1024 <= 20000` | `streaming_tile_tokens_for(device)` | yes |
+| `metal` | `metal_bf16_uma` | `BF16` | `BF16` | `F32,BF16` | `F32` | `F32,BF16` | `none` | `2048` | `2048` | `none` | `streaming_tile_tokens_for(device)` | yes |
+| `vulkan` | `vulkan_mixed_f32_bf16` | `F32` | `F32,BF16` | `F32` | `F32` | `F32,BF16` | `BF16` | `2048` | `2048` | `none` | `streaming_tile_tokens_for(device)` | yes |
 
 ## Training Loss Routing
 

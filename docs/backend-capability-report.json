@@ -3890,6 +3890,7 @@
       ],
       "loss_accumulation_dtype": "F32",
       "mixed_precision": false,
+      "mixed_rms_norm_weight_dtype": null,
       "name": "cpu_f32_reference",
       "notes": "CPU reference training uses F32 tensors and portable optimizer math.",
       "optimizer_parameter_dtypes": [
@@ -3918,6 +3919,7 @@
       ],
       "loss_accumulation_dtype": "F32",
       "mixed_precision": true,
+      "mixed_rms_norm_weight_dtype": null,
       "name": "cuda_native_float",
       "notes": "CUDA keeps kt tape authoritative and routes BF16/F16/F32 leaves through CUDA-native kernels where available.",
       "optimizer_parameter_dtypes": [
@@ -3943,6 +3945,7 @@
       ],
       "loss_accumulation_dtype": "F32",
       "mixed_precision": true,
+      "mixed_rms_norm_weight_dtype": null,
       "name": "metal_bf16_uma",
       "notes": "Metal training is BF16-focused on UMA buffers, with F32 loss accumulation and F32/BF16 AdamW residency.",
       "optimizer_parameter_dtypes": [
@@ -3972,6 +3975,7 @@
       ],
       "loss_accumulation_dtype": "F32",
       "mixed_precision": true,
+      "mixed_rms_norm_weight_dtype": null,
       "name": "rocm_native_float",
       "notes": "ROCm mirrors CUDA's kt-tape dtype envelope while dispatching through HIP/hipBLASLt-native leaves where available.",
       "optimizer_parameter_dtypes": [
@@ -3997,6 +4001,7 @@
       ],
       "loss_accumulation_dtype": "F32",
       "mixed_precision": true,
+      "mixed_rms_norm_weight_dtype": "BF16",
       "name": "vulkan_mixed_f32_bf16",
       "notes": "Vulkan keeps training activations and LoRA parameters F32 while allowing BF16 base weights through explicit VkTensor buffer bridges.",
       "optimizer_parameter_dtypes": [
