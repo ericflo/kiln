@@ -50,8 +50,8 @@ use kiln_model::speculative::{
     speculative_mtp_decode_step,
 };
 use kiln_model::{
-    BackendCapabilityQueries, ModelRunner, ReplayBackend, ReplayNativePrimitive, ReplayRequest,
-    ServerTrainingDispatchPolicy, SpeculativeDecodePolicy, Support,
+    BackendCapabilityQueries, BackendIdentity, ModelRunner, ReplayBackend, ReplayNativePrimitive,
+    ReplayRequest, ServerTrainingDispatchPolicy, SpeculativeDecodePolicy, Support,
 };
 use kiln_server::config::SpecMethod;
 
@@ -791,7 +791,7 @@ fn bench_latency(
         config,
         1,
         &device_kt,
-        Some(backend.name()),
+        Some(BackendIdentity::runtime_name(backend.as_ref())),
     )?;
 
     let eos_token_ids = tokenizer.eos_token_ids();
@@ -1001,7 +1001,7 @@ fn bench_latency_paged(
         config,
         1,
         &device_kt,
-        Some(backend.name()),
+        Some(BackendIdentity::runtime_name(backend.as_ref())),
     )?;
 
     // Build a block table that maps logical block i -> physical block i (sequential).
@@ -1700,7 +1700,7 @@ fn bench_latency_skiplayer(
         config,
         1,
         &device_kt,
-        Some(backend.name()),
+        Some(BackendIdentity::runtime_name(backend.as_ref())),
     )?;
 
     let eos_token_ids = tokenizer.eos_token_ids();
@@ -1916,7 +1916,7 @@ fn bench_latency_paged_skiplayer(
         config,
         1,
         &device_kt,
-        Some(backend.name()),
+        Some(BackendIdentity::runtime_name(backend.as_ref())),
     )?;
 
     let mut block_table = BlockTable::new();
@@ -2200,7 +2200,7 @@ fn bench_latency_paged_mtp(
         config,
         1,
         &device_kt,
-        Some(backend.name()),
+        Some(BackendIdentity::runtime_name(backend.as_ref())),
     )?;
 
     let mut base_block_table = BlockTable::new();
@@ -2853,7 +2853,7 @@ fn main() -> Result<()> {
     // candle removal).
     let device_kt = kiln_server::device::select_device_kt()?;
     let backend = runtime_backend::for_device_kt(&device_kt);
-    let backend_name = backend.name();
+    let backend_name = BackendIdentity::runtime_name(backend.as_ref());
     if backend_name == "cpu" {
         anyhow::bail!(
             "No accelerated backend available — benchmarks require CUDA, Metal, or Vulkan"

@@ -4028,6 +4028,11 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             "orchestration identity reads should not call broad BackendRuntime method {forbidden}"
         );
     }
+    assert!(
+        server_bench_source.contains("BackendIdentity::runtime_name")
+            && !server_bench_source.contains("backend.name()"),
+        "kiln-bench backend identity reads should consume focused BackendIdentity"
+    );
 
     let runner_new_section = source_between(
         &generate_source,
