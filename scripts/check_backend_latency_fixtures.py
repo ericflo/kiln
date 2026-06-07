@@ -21,7 +21,9 @@ from write_backend_latency_result_artifact import (
     LATENCY_RAW_LOG_DIR,
     LATENCY_RESULT_ARTIFACT_DIR,
     RESULT_ARTIFACT_KEYS,
+    current_git_commit,
     fixture_spec_sha256,
+    git_commit_exists,
     is_canonical_raw_log_path,
     is_canonical_result_artifact_path,
     is_repo_relative_path,
@@ -137,6 +139,10 @@ def validate_result_provenance(
     if not isinstance(git_commit, str) or not GIT_COMMIT_RE.match(git_commit):
         errors.append(
             f"{context}.result_artifact.git_commit must be a lowercase 40-character git commit"
+        )
+    elif require_raw_log_file and not git_commit_exists(git_commit):
+        errors.append(
+            f"{context}.result_artifact.git_commit must exist in the local repository when --require-covered is set"
         )
 
     git_tracked_dirty = result.get("git_tracked_dirty")
@@ -572,7 +578,7 @@ def self_test() -> int:
         raw_log_sha256 = hashlib.sha256(raw_log.read_bytes()).hexdigest()
         source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
         created_at_utc = "2026-06-06T12:00:00Z"
-        git_commit = "a" * 40
+        git_commit = current_git_commit()
         git_tracked_dirty = False
         source_path = repo_relative_path(source)
         artifact_path = repo_relative_path(artifact)
@@ -950,6 +956,29 @@ def self_test() -> int:
             print(
                 json.dumps(
                     {"ok": False, "case": "dirty git checkout", "errors": errors},
+                    indent=2,
+                )
+            )
+            return 1
+
+        missing_commit_result = json.loads(artifact.read_text())
+        missing_commit_result["git_commit"] = "0" * 40
+        missing_commit_result["git_tracked_dirty"] = False
+        artifact.write_text(json.dumps(missing_commit_result))
+        errors = []
+        validate_result_artifact(
+            errors,
+            fixture,
+            artifact,
+            "fixtures[0]",
+            1,
+            None,
+            require_raw_log_file=True,
+        )
+        if not any("git_commit must exist in the local repository" in error for error in errors):
+            print(
+                json.dumps(
+                    {"ok": False, "case": "missing git commit", "errors": errors},
                     indent=2,
                 )
             )

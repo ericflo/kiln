@@ -76,7 +76,7 @@ Required fields:
   `bench-results/backend-latency/raw`, use a `.log` extension, and exist when
   validated
 - `raw_log_sha256`: lowercase SHA-256 hex digest of the raw fixture log
-- `git_commit`: lowercase 40-character git commit for the checkout that
+- `git_commit`: lowercase 40-character git commit object for the checkout that
   captured the artifact
 - `git_tracked_dirty`: boolean reporting whether tracked files were dirty when
   the artifact was materialized; covered fixtures require this to be `false`
@@ -95,11 +95,11 @@ live under `bench-results/backend-latency` with a `.json` extension, result
 extension, and the referenced source and `raw_log` files to exist in the
 checkout and checks that their SHA-256 digests match
 `source_sha256` and `raw_log_sha256`. It requires `git_commit` to be a
-lowercase 40-character commit and `git_tracked_dirty` to be `false` for covered
-validation. It then re-parses the raw log
-`KILN_LATENCY_METRIC` lines and requires every declared artifact metric value
-and unit to match the raw log. It rejects unknown artifact keys and undeclared
-artifact metrics.
+lowercase 40-character commit that exists in the local repository and
+`git_tracked_dirty` to be `false` for covered validation. It then re-parses the
+raw log `KILN_LATENCY_METRIC` lines and requires every declared artifact metric
+value and unit to match the raw log. It rejects unknown artifact keys and
+undeclared artifact metrics.
 
 The fixture digest deliberately excludes metric `max`, `threshold_state`, and
 `result_artifact` so a reviewed artifact remains valid while thresholds are
@@ -176,8 +176,9 @@ requires the fixture `source`, result `manifest`, and result `raw_log` paths to
 be repo-relative, result `raw_log` to live under
 `bench-results/backend-latency/raw` with a `.log` extension, and the referenced
 source and raw log files to exist and match `source_sha256`/`raw_log_sha256`.
-It requires `git_commit` to be a lowercase 40-character commit and
-`git_tracked_dirty` to be `false` before thresholds can lock. It re-parses the
+It requires `git_commit` to be a lowercase 40-character commit that exists in
+the local repository and `git_tracked_dirty` to be `false` before thresholds can
+lock. It re-parses the
 raw log and requires each
 artifact metric value and unit to match before deriving thresholds. It sets every
 fixture `threshold_state` to

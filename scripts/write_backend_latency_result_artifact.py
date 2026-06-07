@@ -153,6 +153,16 @@ def current_git_commit() -> str:
     return commit
 
 
+def git_commit_exists(commit: str) -> bool:
+    if not GIT_COMMIT_RE.match(commit):
+        return False
+    try:
+        git_output(["cat-file", "-e", f"{commit}^{{commit}}"])
+    except ArtifactError:
+        return False
+    return True
+
+
 def tracked_git_dirty() -> bool:
     return bool(git_output(["status", "--porcelain", "--untracked-files=no"]))
 
@@ -387,6 +397,7 @@ def self_test() -> int:
             or written.get("manifest_schema_version") != 1
             or not CHECKSUM_RE.match(written.get("fixture_spec_sha256", ""))
             or not GIT_COMMIT_RE.match(written.get("git_commit", ""))
+            or not git_commit_exists(written.get("git_commit", ""))
             or not isinstance(written.get("git_tracked_dirty"), bool)
             or written.get("hardware") != "fixture hardware"
             or written.get("source") != str(source_path)

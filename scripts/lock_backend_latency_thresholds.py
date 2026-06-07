@@ -22,7 +22,9 @@ from write_backend_latency_result_artifact import (
     LATENCY_RAW_LOG_DIR,
     LATENCY_RESULT_ARTIFACT_DIR,
     RESULT_ARTIFACT_KEYS,
+    current_git_commit,
     fixture_spec_sha256,
+    git_commit_exists,
     is_canonical_raw_log_path,
     is_canonical_result_artifact_path,
     is_repo_relative_path,
@@ -221,6 +223,10 @@ def lock_fixture_thresholds(
     if not isinstance(git_commit, str) or not GIT_COMMIT_RE.match(git_commit):
         raise ThresholdLockError(
             f"{fixture_id}.result_artifact.git_commit must be a lowercase 40-character git commit"
+        )
+    if not git_commit_exists(git_commit):
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.git_commit must exist in the local repository before thresholds can lock"
         )
     git_tracked_dirty = result.get("git_tracked_dirty")
     if not isinstance(git_tracked_dirty, bool):
@@ -435,7 +441,7 @@ def self_test() -> int:
         raw_log_sha256 = sha256_file(raw_log_path)
         source_sha256 = sha256_file(source_path)
         created_at_utc = "2026-06-06T12:00:00Z"
-        git_commit = "a" * 40
+        git_commit = current_git_commit()
         git_tracked_dirty = False
         result_artifact_path = repo_relative_path(result_path)
         raw_log_artifact_path = repo_relative_path(raw_log_path)
@@ -745,6 +751,20 @@ def self_test() -> int:
                 return 1
         else:
             print(json.dumps({"ok": False, "case": "dirty git checkout did not fail"}))
+            return 1
+
+        missing_commit_result = json.loads(result_path.read_text())
+        missing_commit_result["git_commit"] = "0" * 40
+        missing_commit_result["git_tracked_dirty"] = False
+        result_path.write_text(json.dumps(missing_commit_result))
+        try:
+            lock_manifest_thresholds(manifest, 0.10)
+        except ThresholdLockError as exc:
+            if "git_commit must exist in the local repository" not in str(exc):
+                print(json.dumps({"ok": False, "case": "missing git commit", "error": str(exc)}))
+                return 1
+        else:
+            print(json.dumps({"ok": False, "case": "missing git commit did not fail"}))
             return 1
 
         result_path.write_text(
