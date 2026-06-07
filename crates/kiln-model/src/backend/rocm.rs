@@ -238,6 +238,7 @@ impl RocmBackend {
             projection_training: "backend-routed kt hipBLASLt matmul (tape-recorded) with offset chunk hook",
             flce_loss: "FLCE analytic backward on ROCm tensors; no full logits by default",
             sft_flce_loss_route: super::SftFlceLossRoute::KtTapeFlce,
+            grpo_loss_route: super::GrpoLossRoute::KtComposite,
             rmsnorm_training: "ROCm kt-tape rmsnorm behind 47 GiB autograd VRAM gate",
             resident_activation: "kt TensorId lifecycle registry; kt ROCm tensors are canonical",
             lora_delta_training: "kt tape-recorded LoRA delta; fused lora_decode_add declines tape-tracked tensors",

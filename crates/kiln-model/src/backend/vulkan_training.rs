@@ -9,13 +9,14 @@ use std::sync::{Arc, OnceLock};
 
 use super::vulkan::VulkanBackend;
 use super::vulkan_residency::with_resident_registry;
-use super::{SftFlceLossRoute, TrainingCapabilities, TrainingPrecisionPolicy};
+use super::{GrpoLossRoute, SftFlceLossRoute, TrainingCapabilities, TrainingPrecisionPolicy};
 
 pub(super) fn training_capabilities_static() -> TrainingCapabilities {
     TrainingCapabilities {
         projection_training: "kt-tape-recorded matmul (legacy autograd wrapper removed #1082)",
         flce_loss: "Vulkan offset matmul provider when enabled; FLCE remains chunked",
         sft_flce_loss_route: SftFlceLossRoute::VulkanActiveRows,
+        grpo_loss_route: GrpoLossRoute::VulkanActiveRows,
         rmsnorm_training: "Vulkan RMSNorm autograd path auto-gated by row count",
         resident_activation: "Vulkan buffer registry",
         lora_delta_training: "kt-tape-recorded LoRA delta (legacy autograd wrapper removed #1082)",

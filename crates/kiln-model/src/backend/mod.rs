@@ -205,10 +205,28 @@ impl SftFlceLossRoute {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrpoLossRoute {
+    /// Use the shared kt composite GRPO loss root and backend/device fast paths it owns.
+    KtComposite,
+    /// Use Vulkan's active-row fused GRPO loss shaders.
+    VulkanActiveRows,
+}
+
+impl GrpoLossRoute {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            GrpoLossRoute::KtComposite => "kt_composite",
+            GrpoLossRoute::VulkanActiveRows => "vulkan_active_rows",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrainingCapabilities {
     pub projection_training: &'static str,
     pub flce_loss: &'static str,
     pub sft_flce_loss_route: SftFlceLossRoute,
+    pub grpo_loss_route: GrpoLossRoute,
     pub rmsnorm_training: &'static str,
     pub resident_activation: &'static str,
     pub lora_delta_training: &'static str,
@@ -223,6 +241,7 @@ impl TrainingCapabilities {
             projection_training: "portable candle autograd",
             flce_loss: "portable candle/FLCE dispatch when configured",
             sft_flce_loss_route: SftFlceLossRoute::FullLogits,
+            grpo_loss_route: GrpoLossRoute::KtComposite,
             rmsnorm_training: "portable candle autograd",
             resident_activation: "not implemented",
             lora_delta_training: "portable candle autograd",
@@ -2214,6 +2233,10 @@ pub trait TrainingLossBackend: Send + Sync + std::fmt::Debug {
     fn runtime_sft_flce_loss_route(&self) -> SftFlceLossRoute {
         self.runtime_training_capabilities().sft_flce_loss_route
     }
+
+    fn runtime_grpo_loss_route(&self) -> GrpoLossRoute {
+        self.runtime_training_capabilities().grpo_loss_route
+    }
 }
 
 /// Focused `ReplayBackend` facet delegated by the current `BackendRuntime` facade.
@@ -3453,6 +3476,11 @@ mod tests {
             SftFlceLossRoute::VulkanActiveRows.as_str(),
             "vulkan_active_rows"
         );
+        assert_eq!(GrpoLossRoute::KtComposite.as_str(), "kt_composite");
+        assert_eq!(
+            GrpoLossRoute::VulkanActiveRows.as_str(),
+            "vulkan_active_rows"
+        );
     }
 
     #[test]
@@ -4183,6 +4211,11 @@ mod tests {
             "sft_flce_loss_route"
         );
         assert_forwards!(
+            TrainingLossBackend::runtime_grpo_loss_route(backend),
+            BackendRuntime::training_capabilities(backend).grpo_loss_route,
+            "grpo_loss_route"
+        );
+        assert_forwards!(
             TrainingLossBackend::runtime_training_precision_policy(backend),
             BackendRuntime::training_precision_policy(backend),
             "training_precision_policy"
@@ -4303,6 +4336,7 @@ mod tests {
         assert!(caps.adamw_step.contains("CUDA in-place optimizer kernel"));
         assert_eq!(caps.native_training, "not implemented");
         assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::KtTapeFlce);
+        assert_eq!(caps.grpo_loss_route, GrpoLossRoute::KtComposite);
     }
 
     #[cfg(feature = "rocm")]
@@ -4310,6 +4344,7 @@ mod tests {
     fn rocm_training_capabilities_route_sft_flce_through_kt_tape() {
         let caps = rocm::RocmBackend::training_capabilities_static();
         assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::KtTapeFlce);
+        assert_eq!(caps.grpo_loss_route, GrpoLossRoute::KtComposite);
     }
 
     #[cfg(feature = "metal")]
@@ -4320,6 +4355,7 @@ mod tests {
         assert!(caps.adamw_step.contains("Metal in-place AdamW"));
         assert!(caps.resident_activation.contains("Metal TensorId"));
         assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::FullLogits);
+        assert_eq!(caps.grpo_loss_route, GrpoLossRoute::KtComposite);
 
         let backend = metal::MetalBackend::new(kiln_tensor::Device::Metal(0));
         assert_eq!(backend.training_capabilities(), caps);
@@ -4333,5 +4369,6 @@ mod tests {
             caps.sft_flce_loss_route,
             SftFlceLossRoute::VulkanActiveRows
         );
+        assert_eq!(caps.grpo_loss_route, GrpoLossRoute::VulkanActiveRows);
     }
 }

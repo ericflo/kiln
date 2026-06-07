@@ -68,6 +68,8 @@ use kiln_model::backend::{
 };
 #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
 use kiln_model::backend::{SftFlceLossRoute, TrainingLossBackend};
+#[cfg(feature = "vulkan")]
+use kiln_model::backend::GrpoLossRoute;
 use kiln_model::BackendCapabilityQueries;
 use kiln_model::forward::{
     GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, GqaAttentionPrepared, LinearAttentionState,
@@ -394,15 +396,6 @@ fn is_metal_device(device: &Device) -> bool {
 #[inline]
 fn is_cuda_device(device: &Device) -> bool {
     matches!(device, Device::Cuda(_))
-}
-
-/// Check whether `device` is a kt Vulkan device. Mirrors [`is_metal_device`].
-/// (#1082) Used to gate F32-base tape training to the Vulkan backend only:
-/// Vulkan's kt tape adapters accept `BF16 | F32` activations, whereas CUDA/Metal
-/// record genuinely BF16-only fused kernels (FFI / MSL).
-#[inline]
-fn is_vulkan_device(device: &Device) -> bool {
-    matches!(device, Device::Vulkan(_))
 }
 
 #[inline]
@@ -8373,19 +8366,20 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
             .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
 
             #[cfg(feature = "vulkan")]
-            let mut loss_opt = if is_vulkan_device(device) {
-                crate::grpo_tape_shim::try_tape_grpo_pg_loss_from_normed_hidden_vulkan_kt(
-                    &policy_hidden,
-                    &weights.embed_tokens,
-                    input_ids,
-                    action_mask,
-                    &ref_log_probs,
-                    loss_params,
-                )
-                .context("GRPO tape-authoritative(kt) Vulkan fused scalar loss")
-                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
-            } else {
-                None
+            let mut loss_opt = match TrainingLossBackend::runtime_grpo_loss_route(backend) {
+                GrpoLossRoute::VulkanActiveRows => {
+                    crate::grpo_tape_shim::try_tape_grpo_pg_loss_from_normed_hidden_vulkan_kt(
+                        &policy_hidden,
+                        &weights.embed_tokens,
+                        input_ids,
+                        action_mask,
+                        &ref_log_probs,
+                        loss_params,
+                    )
+                    .context("GRPO tape-authoritative(kt) Vulkan fused scalar loss")
+                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
+                }
+                GrpoLossRoute::KtComposite => None,
             };
             #[cfg(not(feature = "vulkan"))]
             let mut loss_opt = None;
@@ -8557,18 +8551,19 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
     let normed = model_forward_final_norm(&final_hidden, weights, model_config)
         .context("checkpointed GRPO final norm")?;
     #[cfg(feature = "vulkan")]
-    let fused_vulkan_tail = if is_vulkan_device(device) {
-        crate::grpo_tape_shim::vulkan_grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
-            &normed,
-            &weights.embed_tokens,
-            input_ids,
-            action_mask,
-            ref_log_probs,
-            loss_params,
-        )
-        .context("checkpointed GRPO Vulkan fused tail loss/gradient")?
-    } else {
-        None
+    let fused_vulkan_tail = match TrainingLossBackend::runtime_grpo_loss_route(backend) {
+        GrpoLossRoute::VulkanActiveRows => {
+            crate::grpo_tape_shim::vulkan_grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
+                &normed,
+                &weights.embed_tokens,
+                input_ids,
+                action_mask,
+                ref_log_probs,
+                loss_params,
+            )
+            .context("checkpointed GRPO Vulkan fused tail loss/gradient")?
+        }
+        GrpoLossRoute::KtComposite => None,
     };
     #[cfg(not(feature = "vulkan"))]
     let fused_vulkan_tail = None;
