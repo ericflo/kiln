@@ -265,6 +265,24 @@ impl OpdPhaseBBackwardRoute {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalRmsNormBackwardRoute {
+    /// Use the device-agnostic kt composite final RMSNorm backward.
+    KtComposite,
+    /// Allow the CUDA/ROCm fused final-RMSNorm tail leaf when its shape/dtype
+    /// envelope matches, falling back to the kt composite math otherwise.
+    CudaRocmFusedTail,
+}
+
+impl FinalRmsNormBackwardRoute {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            FinalRmsNormBackwardRoute::KtComposite => "kt_composite",
+            FinalRmsNormBackwardRoute::CudaRocmFusedTail => "cuda_rocm_fused_tail",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrainingTapeRoute {
     /// kt tape-authoritative forward/backward is not advertised.
     Unsupported,
@@ -291,6 +309,7 @@ pub struct TrainingCapabilities {
     pub grpo_loss_route: GrpoLossRoute,
     pub opd_loss_route: OpdLossRoute,
     pub opd_phase_b_backward_route: OpdPhaseBBackwardRoute,
+    pub final_rmsnorm_backward_route: FinalRmsNormBackwardRoute,
     pub rmsnorm_training: &'static str,
     pub resident_activation: &'static str,
     pub lora_delta_training: &'static str,
@@ -309,6 +328,7 @@ impl TrainingCapabilities {
             grpo_loss_route: GrpoLossRoute::KtComposite,
             opd_loss_route: OpdLossRoute::Unsupported,
             opd_phase_b_backward_route: OpdPhaseBBackwardRoute::Unsupported,
+            final_rmsnorm_backward_route: FinalRmsNormBackwardRoute::KtComposite,
             rmsnorm_training: "portable candle autograd",
             resident_activation: "not implemented",
             lora_delta_training: "portable candle autograd",
@@ -2370,6 +2390,11 @@ pub trait TrainingLossBackend: Send + Sync + std::fmt::Debug {
         self.runtime_training_capabilities()
             .opd_phase_b_backward_route
     }
+
+    fn runtime_final_rmsnorm_backward_route(&self) -> FinalRmsNormBackwardRoute {
+        self.runtime_training_capabilities()
+            .final_rmsnorm_backward_route
+    }
 }
 
 /// Focused `ReplayBackend` facet delegated by the current `BackendRuntime` facade.
@@ -3545,6 +3570,10 @@ mod tests {
             caps.opd_phase_b_backward_route,
             OpdPhaseBBackwardRoute::Unsupported
         );
+        assert_eq!(
+            caps.final_rmsnorm_backward_route,
+            FinalRmsNormBackwardRoute::KtComposite
+        );
 
         let policy = TrainingPrecisionPolicy::portable();
         assert_eq!(policy.name, "cpu_f32_reference");
@@ -3644,6 +3673,14 @@ mod tests {
         assert_eq!(
             OpdPhaseBBackwardRoute::VulkanActiveHidden.as_str(),
             "vulkan_active_hidden"
+        );
+        assert_eq!(
+            FinalRmsNormBackwardRoute::KtComposite.as_str(),
+            "kt_composite"
+        );
+        assert_eq!(
+            FinalRmsNormBackwardRoute::CudaRocmFusedTail.as_str(),
+            "cuda_rocm_fused_tail"
         );
         assert_eq!(TrainingTapeRoute::Unsupported.as_str(), "unsupported");
         assert_eq!(
@@ -4513,6 +4550,10 @@ mod tests {
             caps.opd_phase_b_backward_route,
             OpdPhaseBBackwardRoute::CudaRocmFusedUnitGrad
         );
+        assert_eq!(
+            caps.final_rmsnorm_backward_route,
+            FinalRmsNormBackwardRoute::CudaRocmFusedTail
+        );
     }
 
     #[cfg(feature = "rocm")]
@@ -4529,6 +4570,10 @@ mod tests {
         assert_eq!(
             caps.opd_phase_b_backward_route,
             OpdPhaseBBackwardRoute::CudaRocmFusedUnitGrad
+        );
+        assert_eq!(
+            caps.final_rmsnorm_backward_route,
+            FinalRmsNormBackwardRoute::CudaRocmFusedTail
         );
     }
 
@@ -4550,6 +4595,10 @@ mod tests {
             caps.opd_phase_b_backward_route,
             OpdPhaseBBackwardRoute::KtComposite
         );
+        assert_eq!(
+            caps.final_rmsnorm_backward_route,
+            FinalRmsNormBackwardRoute::KtComposite
+        );
 
         let backend = metal::MetalBackend::new(kiln_tensor::Device::Metal(0));
         assert_eq!(backend.training_capabilities(), caps);
@@ -4569,6 +4618,10 @@ mod tests {
         assert_eq!(
             caps.opd_phase_b_backward_route,
             OpdPhaseBBackwardRoute::VulkanActiveHidden
+        );
+        assert_eq!(
+            caps.final_rmsnorm_backward_route,
+            FinalRmsNormBackwardRoute::KtComposite
         );
     }
 }

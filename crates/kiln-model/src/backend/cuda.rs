@@ -227,6 +227,7 @@ impl CudaBackend {
             grpo_loss_route: super::GrpoLossRoute::KtComposite,
             opd_loss_route: super::OpdLossRoute::KtTapePhaseB,
             opd_phase_b_backward_route: super::OpdPhaseBBackwardRoute::CudaRocmFusedUnitGrad,
+            final_rmsnorm_backward_route: super::FinalRmsNormBackwardRoute::CudaRocmFusedTail,
             rmsnorm_training: "CUDA kt-tape rmsnorm behind 47 GiB autograd VRAM gate",
             resident_activation: "kt TensorId lifecycle registry; kt CUDA tensors are canonical",
             lora_delta_training: "kt tape-recorded LoRA delta; fused lora_decode_add declines tape-tracked tensors",

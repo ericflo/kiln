@@ -10,8 +10,8 @@ use std::sync::{Arc, OnceLock};
 use super::vulkan::VulkanBackend;
 use super::vulkan_residency::with_resident_registry;
 use super::{
-    GrpoLossRoute, OpdLossRoute, OpdPhaseBBackwardRoute, SftFlceLossRoute, TrainingCapabilities,
-    TrainingPrecisionPolicy, TrainingTapeRoute,
+    FinalRmsNormBackwardRoute, GrpoLossRoute, OpdLossRoute, OpdPhaseBBackwardRoute,
+    SftFlceLossRoute, TrainingCapabilities, TrainingPrecisionPolicy, TrainingTapeRoute,
 };
 
 pub(super) fn training_capabilities_static() -> TrainingCapabilities {
@@ -23,6 +23,7 @@ pub(super) fn training_capabilities_static() -> TrainingCapabilities {
         grpo_loss_route: GrpoLossRoute::VulkanActiveRows,
         opd_loss_route: OpdLossRoute::VulkanActiveHidden,
         opd_phase_b_backward_route: OpdPhaseBBackwardRoute::VulkanActiveHidden,
+        final_rmsnorm_backward_route: FinalRmsNormBackwardRoute::KtComposite,
         rmsnorm_training: "Vulkan RMSNorm autograd path auto-gated by row count",
         resident_activation: "Vulkan buffer registry",
         lora_delta_training: "kt-tape-recorded LoRA delta (legacy autograd wrapper removed #1082)",

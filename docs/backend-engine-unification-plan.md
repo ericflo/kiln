@@ -261,6 +261,12 @@ The relevant shims are:
   policy for dtype eligibility. CPU/portable reports the tape route as
   unsupported, while CUDA, ROCm, Metal, and Vulkan advertise the shared kt
   tape-authoritative route with their backend-specific precision constraints.
+- Final RMSNorm backward routing is backend-owned:
+  SFT/GRPO/OPD ask
+  `TrainingLossBackend::runtime_final_rmsnorm_backward_route` before seeding the
+  checkpoint tail. CUDA/ROCm advertise the fused final-tail leaf and fall back to
+  the kt-composite math outside the fused envelope; CPU, Metal, and Vulkan
+  advertise the kt-composite route.
 
 Vulkan still has a stronger separate low-level identity than CUDA/ROCm/Metal
 because the SPIR-V leaf layer exposes `VkTensor`, explicit buffer operations,

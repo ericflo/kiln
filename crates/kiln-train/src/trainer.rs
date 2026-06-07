@@ -81,8 +81,8 @@ use kiln_model::backend::SftFlceLossRoute;
 ))]
 use kiln_model::backend::TrainingTapeRoute;
 use kiln_model::backend::{
-    self, BackendIdentity, BackendRuntime, FallbackPolicy, OptimizerBackend, ResidencyBackend,
-    TrainingLossBackend, TrainingPrecisionPolicy,
+    self, BackendIdentity, BackendRuntime, FallbackPolicy, FinalRmsNormBackwardRoute,
+    OptimizerBackend, ResidencyBackend, TrainingLossBackend, TrainingPrecisionPolicy,
 };
 use kiln_model::forward::{
     GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, GqaAttentionPrepared, LinearAttentionState,
@@ -441,14 +441,17 @@ pub(crate) fn training_activation_bytes_per_elem(weights: &GpuWeights, device: &
     )
 }
 
-#[cfg(any(feature = "cuda", feature = "rocm"))]
 #[inline]
-fn fused_rms_norm_tail_backend_enabled(device: &Device) -> bool {
-    match device {
-        Device::Cuda(_) => cfg!(feature = "cuda"),
-        Device::Rocm(_) => cfg!(feature = "rocm"),
-        _ => false,
-    }
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+fn final_rmsnorm_backward_route_for_backend(
+    backend: &dyn BackendRuntime,
+) -> FinalRmsNormBackwardRoute {
+    TrainingLossBackend::runtime_final_rmsnorm_backward_route(backend)
 }
 // ---------------------------------------------------------------------------
 // (#1082) The candle facade — type aliases, generic constructor helpers,
@@ -6253,6 +6256,7 @@ fn synchronize_tail_chunk(_context: &'static str) -> Result<()> {
 }
 
 fn analytic_sft_tail_grad_pre_final_norm(
+    final_rmsnorm_backward_route: FinalRmsNormBackwardRoute,
     hidden: &Tensor,
     final_norm_weight: &Tensor,
     head_t: &Tensor,
@@ -6273,6 +6277,7 @@ fn analytic_sft_tail_grad_pre_final_norm(
     let normed = rms_norm(hidden, final_norm_weight, rms_norm_eps)
         .context("analytic SFT tail final RMSNorm")?;
     analytic_sft_tail_grad_from_validated_normed_pre_final_norm(
+        final_rmsnorm_backward_route,
         hidden,
         &normed,
         final_norm_weight,
@@ -6286,6 +6291,7 @@ fn analytic_sft_tail_grad_pre_final_norm(
 }
 
 fn analytic_sft_tail_grad_from_normed_pre_final_norm(
+    final_rmsnorm_backward_route: FinalRmsNormBackwardRoute,
     hidden: &Tensor,
     normed: &Tensor,
     final_norm_weight: &Tensor,
@@ -6305,6 +6311,7 @@ fn analytic_sft_tail_grad_from_normed_pre_final_norm(
         chunk_size,
     )?;
     analytic_sft_tail_grad_from_validated_normed_pre_final_norm(
+        final_rmsnorm_backward_route,
         hidden,
         normed,
         final_norm_weight,
@@ -6318,6 +6325,7 @@ fn analytic_sft_tail_grad_from_normed_pre_final_norm(
 }
 
 fn analytic_sft_tail_grad_from_normed_pre_final_norm_with_flce_metadata(
+    final_rmsnorm_backward_route: FinalRmsNormBackwardRoute,
     hidden: &Tensor,
     normed: &Tensor,
     final_norm_weight: &Tensor,
@@ -6338,6 +6346,7 @@ fn analytic_sft_tail_grad_from_normed_pre_final_norm_with_flce_metadata(
         chunk_size,
     )?;
     analytic_sft_tail_grad_from_validated_normed_pre_final_norm(
+        final_rmsnorm_backward_route,
         hidden,
         normed,
         final_norm_weight,
@@ -6351,6 +6360,7 @@ fn analytic_sft_tail_grad_from_normed_pre_final_norm_with_flce_metadata(
 }
 
 fn analytic_sft_tail_grad_from_validated_normed_pre_final_norm(
+    final_rmsnorm_backward_route: FinalRmsNormBackwardRoute,
     hidden: &Tensor,
     normed: &Tensor,
     final_norm_weight: &Tensor,
@@ -6371,8 +6381,14 @@ fn analytic_sft_tail_grad_from_validated_normed_pre_final_norm(
         )
     }
     .map_err(|e| anyhow::anyhow!("analytic SFT tail FLCE hidden gradient: {e}"))?;
-    rms_norm_backward_pre_final_norm(hidden, final_norm_weight, &grad_normed, rms_norm_eps)
-        .context("analytic SFT tail final RMSNorm backward")
+    rms_norm_backward_pre_final_norm(
+        final_rmsnorm_backward_route,
+        hidden,
+        final_norm_weight,
+        &grad_normed,
+        rms_norm_eps,
+    )
+    .context("analytic SFT tail final RMSNorm backward")
 }
 
 fn validate_analytic_sft_tail_grad_inputs(
@@ -6435,6 +6451,7 @@ fn validate_analytic_sft_tail_grad_inputs(
 }
 
 pub(crate) fn rms_norm_backward_pre_final_norm(
+    _final_rmsnorm_backward_route: FinalRmsNormBackwardRoute,
     hidden: &Tensor,
     final_norm_weight: &Tensor,
     grad_normed: &Tensor,
@@ -6460,12 +6477,13 @@ pub(crate) fn rms_norm_backward_pre_final_norm(
 
     #[cfg(any(feature = "cuda", feature = "rocm"))]
     {
-        let device = hidden.device();
-        let fused_backend = fused_rms_norm_tail_backend_enabled(&device);
-        let same_device = final_norm_weight.device() == device && grad_normed.device() == device;
+        let same_device = final_norm_weight.device() == hidden.device()
+            && grad_normed.device() == hidden.device();
         let non_empty_rows = dims[0] > 0 && dims[1] > 0;
-        let fused_envelope = fused_backend
-            && same_device
+        let fused_envelope = matches!(
+            _final_rmsnorm_backward_route,
+            FinalRmsNormBackwardRoute::CudaRocmFusedTail
+        ) && same_device
             && non_empty_rows
             && kiln_rmsnorm_kernel::supports_rmsnorm_kt(hidden, final_norm_weight)
             && grad_normed.dtype() == KtDType::BF16
@@ -8119,6 +8137,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
                 let loss_val = loss_kt.to_scalar::<f32>()? as f64;
                 tail_grad_override = Some(
                     rms_norm_backward_pre_final_norm(
+                        final_rmsnorm_backward_route_for_backend(backend),
                         &final_hidden_kt,
                         &weights.final_norm,
                         &grad_normed,
@@ -8152,6 +8171,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     } else {
         match normed_for_tail.as_ref() {
             Some(normed) => analytic_sft_tail_grad_from_normed_pre_final_norm_with_flce_metadata(
+                final_rmsnorm_backward_route_for_backend(backend),
                 &final_hidden_kt,
                 normed,
                 &weights.final_norm,
@@ -8163,6 +8183,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
                 flce_active_metadata_for_tail.as_ref(),
             ),
             None => analytic_sft_tail_grad_pre_final_norm(
+                final_rmsnorm_backward_route_for_backend(backend),
                 &final_hidden_kt,
                 &weights.final_norm,
                 &weights.embed_tokens_t,
@@ -8655,6 +8676,7 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
     };
     let loss_val = loss_kt.to_scalar::<f32>()? as f64;
     let mut upstream_grad = rms_norm_backward_pre_final_norm(
+        final_rmsnorm_backward_route_for_backend(backend),
         &final_hidden,
         &weights.final_norm,
         &grad_normed,
@@ -12388,6 +12410,7 @@ pub(crate) mod tests {
         let normed = rms_norm(&hidden, &final_norm_weight, eps)?;
 
         let wrapper = analytic_sft_tail_grad_pre_final_norm(
+            FinalRmsNormBackwardRoute::KtComposite,
             &hidden,
             &final_norm_weight,
             &head_t,
@@ -12397,6 +12420,7 @@ pub(crate) mod tests {
             chunk_size,
         )?;
         let from_normed = analytic_sft_tail_grad_from_normed_pre_final_norm(
+            FinalRmsNormBackwardRoute::KtComposite,
             &hidden,
             &normed,
             &final_norm_weight,
@@ -12450,6 +12474,7 @@ pub(crate) mod tests {
         let head_t = Tensor::from_vec_on(device, head_data, vec![hidden_size, vocab_size])?;
 
         let grad = analytic_sft_tail_grad_pre_final_norm(
+            FinalRmsNormBackwardRoute::KtComposite,
             &hidden,
             &final_norm_weight,
             &head_t,
@@ -12535,8 +12560,14 @@ pub(crate) mod tests {
             .to_dtype(KtDType::BF16)?;
         let weight_cpu = Tensor::from_vec_on(cpu, weight_data.clone(), vec![hidden_size])?
             .to_dtype(KtDType::BF16)?;
-        let expected = rms_norm_backward_pre_final_norm(&hidden_cpu, &weight_cpu, &grad_cpu, eps)?
-            .to_vec::<f32>()?;
+        let expected = rms_norm_backward_pre_final_norm(
+            FinalRmsNormBackwardRoute::KtComposite,
+            &hidden_cpu,
+            &weight_cpu,
+            &grad_cpu,
+            eps,
+        )?
+        .to_vec::<f32>()?;
 
         let cuda = Device::Cuda(0);
         let hidden_cuda = Tensor::from_vec_on(cuda, hidden_data, vec![1, seq_len, hidden_size])?
@@ -12553,7 +12584,13 @@ pub(crate) mod tests {
             &weight_cuda
         ));
 
-        let got = rms_norm_backward_pre_final_norm(&hidden_cuda, &weight_cuda, &grad_cuda, eps)?;
+        let got = rms_norm_backward_pre_final_norm(
+            FinalRmsNormBackwardRoute::CudaRocmFusedTail,
+            &hidden_cuda,
+            &weight_cuda,
+            &grad_cuda,
+            eps,
+        )?;
         assert_eq!(
             got.dtype(),
             KtDType::BF16,

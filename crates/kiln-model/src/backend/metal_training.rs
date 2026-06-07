@@ -14,6 +14,7 @@ pub(super) fn training_capabilities_static() -> TrainingCapabilities {
     caps.grpo_loss_route = super::GrpoLossRoute::KtComposite;
     caps.opd_loss_route = super::OpdLossRoute::KtTapePhaseB;
     caps.opd_phase_b_backward_route = super::OpdPhaseBBackwardRoute::KtComposite;
+    caps.final_rmsnorm_backward_route = super::FinalRmsNormBackwardRoute::KtComposite;
     caps.projection_training =
         "kt-tape-recorded matmul; Metal decode fusions decline tape-tracked tensors";
     caps.resident_activation =

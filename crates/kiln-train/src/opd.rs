@@ -3636,6 +3636,7 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
         }
     };
     let mut upstream_grad = crate::trainer::rms_norm_backward_pre_final_norm(
+        TrainingLossBackend::runtime_final_rmsnorm_backward_route(backend_rt),
         &final_hidden,
         &weights.final_norm,
         &grad_normed,
