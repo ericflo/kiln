@@ -774,6 +774,8 @@ pub struct DecodeBatcherPolicy {
     pub wait_micros: u64,
     pub allow_mixed_seq_lens: bool,
     pub rowwise_retry_env: Option<&'static str>,
+    pub use_native_sampled_contiguous_decode: bool,
+    pub sampled_contiguous_decode_requires_resident_decode: bool,
     pub partition_noncontiguous_gdn_kv_tiles: bool,
 }
 
@@ -1137,6 +1139,8 @@ impl DecodeBatcherPolicy {
                 wait_micros: 0,
                 allow_mixed_seq_lens: false,
                 rowwise_retry_env: None,
+                use_native_sampled_contiguous_decode: false,
+                sampled_contiguous_decode_requires_resident_decode: false,
                 partition_noncontiguous_gdn_kv_tiles: true,
             },
             kiln_tensor::Backend::Metal => Self {
@@ -1144,6 +1148,8 @@ impl DecodeBatcherPolicy {
                 wait_micros: Self::METAL_WAIT_MICROS,
                 allow_mixed_seq_lens: true,
                 rowwise_retry_env: None,
+                use_native_sampled_contiguous_decode: true,
+                sampled_contiguous_decode_requires_resident_decode: false,
                 partition_noncontiguous_gdn_kv_tiles: false,
             },
             kiln_tensor::Backend::Vulkan => Self {
@@ -1151,6 +1157,8 @@ impl DecodeBatcherPolicy {
                 wait_micros: Self::VULKAN_WAIT_MICROS,
                 allow_mixed_seq_lens: true,
                 rowwise_retry_env: Some("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY"),
+                use_native_sampled_contiguous_decode: true,
+                sampled_contiguous_decode_requires_resident_decode: true,
                 partition_noncontiguous_gdn_kv_tiles: false,
             },
             _ => Self {
@@ -1158,6 +1166,8 @@ impl DecodeBatcherPolicy {
                 wait_micros: 0,
                 allow_mixed_seq_lens: false,
                 rowwise_retry_env: None,
+                use_native_sampled_contiguous_decode: false,
+                sampled_contiguous_decode_requires_resident_decode: false,
                 partition_noncontiguous_gdn_kv_tiles: false,
             },
         }

@@ -3126,6 +3126,18 @@ impl ModelRunner {
         let positions_uniform = sequence_lengths.iter().all(|&n| n == common_seq_len);
         let cache_is_fp8 = lock_paged_cache(paged_cache)?.is_fp8();
         let has_linear_layers = self.has_linear_attention_layers();
+        #[cfg(any(feature = "vulkan", feature = "metal"))]
+        let decode_batcher_policy =
+            BackendCapabilityQueries::backend_capabilities(self.backend.as_ref()).decode_batcher;
+        #[cfg(feature = "vulkan")]
+        let sampled_contiguous_resident_decode_ready = decode_batcher_policy
+            .use_native_sampled_contiguous_decode
+            && decode_batcher_policy.sampled_contiguous_decode_requires_resident_decode
+            && ReplayBackend::runtime_supports_resident_decode(self.backend.as_ref());
+        #[cfg(feature = "metal")]
+        let sampled_contiguous_nonresident_decode_ready = decode_batcher_policy
+            .use_native_sampled_contiguous_decode
+            && !decode_batcher_policy.sampled_contiguous_decode_requires_resident_decode;
         // `model_forward_paged_decode_contiguous_batch_hidden` already handles
         // per-row positions via dyn-seqlen flash attention for full-attn
         // layers, and the GDN layers operate on the batched
@@ -3261,7 +3273,7 @@ impl ModelRunner {
                     .as_ref()
                     .expect("vk_row0_sampling captured for row_count == 1");
                 let sample_result = if !cache_is_fp8
-                    && self.backend_name() == "vulkan"
+                    && sampled_contiguous_resident_decode_ready
                     && self.active_lora.is_none()
                 {
                     let block_table_refs = [&block_tables[0]];
@@ -3333,8 +3345,7 @@ impl ModelRunner {
             && row_count > 1
             && !all_greedy
             && !cache_is_fp8
-            && self.backend_name() == "vulkan"
-            && ReplayBackend::runtime_supports_resident_decode(self.backend.as_ref())
+            && sampled_contiguous_resident_decode_ready
             && self.active_lora.is_none()
         {
             let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
@@ -3436,7 +3447,7 @@ impl ModelRunner {
         if sampled.is_none()
             && !all_greedy
             && !cache_is_fp8
-            && matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
+            && sampled_contiguous_nonresident_decode_ready
             && self.active_lora.is_none()
         {
             let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
@@ -8482,10 +8493,32 @@ mod tests {
             wait_micros,
             allow_mixed_seq_lens,
             rowwise_retry_env,
+            use_native_sampled_contiguous_decode,
+            sampled_contiguous_decode_requires_resident_decode,
             partition_noncontiguous_gdn_kv_tiles,
         ) in [
-            ("cpu", kiln_tensor::Device::Cpu, 8, 0, false, None, false),
-            ("cuda", kiln_tensor::Device::Cpu, 1, 0, false, None, true),
+            (
+                "cpu",
+                kiln_tensor::Device::Cpu,
+                8,
+                0,
+                false,
+                None,
+                false,
+                false,
+                false,
+            ),
+            (
+                "cuda",
+                kiln_tensor::Device::Cpu,
+                1,
+                0,
+                false,
+                None,
+                false,
+                false,
+                true,
+            ),
             (
                 "cuda",
                 kiln_tensor::Device::Cuda(0),
@@ -8493,6 +8526,8 @@ mod tests {
                 0,
                 false,
                 None,
+                false,
+                false,
                 true,
             ),
             (
@@ -8502,6 +8537,8 @@ mod tests {
                 100,
                 true,
                 None,
+                true,
+                false,
                 false,
             ),
             (
@@ -8511,6 +8548,8 @@ mod tests {
                 5_000,
                 true,
                 Some("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY"),
+                true,
+                true,
                 false,
             ),
             (
@@ -8520,6 +8559,8 @@ mod tests {
                 5_000,
                 true,
                 Some("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY"),
+                true,
+                true,
                 false,
             ),
             (
@@ -8529,6 +8570,8 @@ mod tests {
                 0,
                 false,
                 None,
+                false,
+                false,
                 false,
             ),
         ] {
@@ -8550,8 +8593,16 @@ mod tests {
                 "{backend_name} rowwise retry policy drifted"
             );
             assert_eq!(
-                policy.partition_noncontiguous_gdn_kv_tiles,
-                partition_noncontiguous_gdn_kv_tiles,
+                policy.use_native_sampled_contiguous_decode, use_native_sampled_contiguous_decode,
+                "{backend_name} sampled contiguous decode policy drifted"
+            );
+            assert_eq!(
+                policy.sampled_contiguous_decode_requires_resident_decode,
+                sampled_contiguous_decode_requires_resident_decode,
+                "{backend_name} sampled contiguous resident requirement policy drifted"
+            );
+            assert_eq!(
+                policy.partition_noncontiguous_gdn_kv_tiles, partition_noncontiguous_gdn_kv_tiles,
                 "{backend_name} GDN KV contiguity partition policy drifted"
             );
         }

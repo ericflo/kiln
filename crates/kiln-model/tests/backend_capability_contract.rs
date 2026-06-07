@@ -1175,6 +1175,15 @@ fn generated_capability_report_lists_request_descriptors() {
         decode_batcher_policy_fields.contains(&"partition_noncontiguous_gdn_kv_tiles"),
         "DecodeBatcherPolicy should own GDN KV contiguity partition routing"
     );
+    assert!(
+        decode_batcher_policy_fields.contains(&"use_native_sampled_contiguous_decode"),
+        "DecodeBatcherPolicy should own sampled contiguous decode routing"
+    );
+    assert!(
+        decode_batcher_policy_fields
+            .contains(&"sampled_contiguous_decode_requires_resident_decode"),
+        "DecodeBatcherPolicy should own sampled contiguous resident-decode requirements"
+    );
     let replay_authority_fields = capability_descriptors["ReplayAuthority"]["fields"]
         .as_array()
         .expect("ReplayAuthority fields should be an array")
@@ -2313,18 +2322,36 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "let pc_guard = lock_paged_cache(paged_cache)?;",
     );
     assert!(
-        gdn_contiguity_partition_section
-            .contains("BackendCapabilityQueries::backend_capabilities"),
+        gdn_contiguity_partition_section.contains("BackendCapabilityQueries::backend_capabilities"),
         "GDN KV contiguity partition should read DecodeBatcherPolicy"
     );
     assert!(
-        gdn_contiguity_partition_section
-            .contains("partition_noncontiguous_gdn_kv_tiles"),
+        gdn_contiguity_partition_section.contains("partition_noncontiguous_gdn_kv_tiles"),
         "GDN KV contiguity partition should be controlled by backend policy"
     );
     assert!(
         !gdn_contiguity_partition_section.contains("self.backend_name() == \"cuda\""),
         "GDN KV contiguity partition should not branch on backend name in ModelRunner"
+    );
+    let sampled_contiguous_decode_section = source_between(
+        &generate_source,
+        "let sampled_contiguous_resident_decode_ready =",
+        "// R.9: ROCm HIP-graph single-row decode",
+    );
+    assert!(
+        sampled_contiguous_decode_section.contains("use_native_sampled_contiguous_decode")
+            && sampled_contiguous_decode_section
+                .contains("sampled_contiguous_decode_requires_resident_decode"),
+        "sampled contiguous decode routing should read DecodeBatcherPolicy"
+    );
+    assert!(
+        !sampled_contiguous_decode_section.contains("self.backend_name() == \"vulkan\""),
+        "sampled contiguous decode routing should not branch on backend name in ModelRunner"
+    );
+    assert!(
+        !sampled_contiguous_decode_section
+            .contains("matches!(self.backend_device(), kiln_tensor::Device::Metal(_))"),
+        "sampled contiguous decode routing should not branch on Metal device identity in ModelRunner"
     );
 
     let trainer_policy_section = source_between(
@@ -3162,8 +3189,9 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         );
     }
 
-    let perf_workflow = fs::read_to_string(root.join(".github/workflows/perf-regression-nightly.yml"))
-        .expect("perf regression workflow should be readable");
+    let perf_workflow =
+        fs::read_to_string(root.join(".github/workflows/perf-regression-nightly.yml"))
+            .expect("perf regression workflow should be readable");
     for required in [
         "Verify backend latency fixture contract",
         "scripts/run_backend_latency_fixture.py --self-test",
@@ -3538,13 +3566,11 @@ fn backend_engine_unification_plan_matches_current_training_status() {
         "plan should point readers at the generated report for current completion status"
     );
     assert_eq!(
-        report["training_loss_policy"]["rocm"]["sft_flce_loss_route"],
-        "kt_tape_flce",
+        report["training_loss_policy"]["rocm"]["sft_flce_loss_route"], "kt_tape_flce",
         "ROCm report should agree with the plan's kt-tape SFT FLCE route"
     );
     assert_eq!(
-        report["optimizer_dispatch"]["metal"]["sgd_step"],
-        "default_decline",
+        report["optimizer_dispatch"]["metal"]["sgd_step"], "default_decline",
         "Metal optimizer status should agree with the plan's default-decline language"
     );
 }
