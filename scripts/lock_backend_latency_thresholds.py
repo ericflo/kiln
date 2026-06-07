@@ -33,6 +33,7 @@ from write_backend_latency_result_artifact import (
 
 ROOT = Path(__file__).resolve().parents[1]
 VALID_COMPARISONS = {"<=", ">="}
+VALID_BACKENDS = {"cuda", "rocm", "metal", "vulkan"}
 CHECKSUM_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -111,6 +112,49 @@ def expected_metric_names(fixture: dict[str, Any]) -> set[str]:
         for metric in fixture.get("metrics", [])
         if isinstance(metric, dict) and isinstance(metric.get("name"), str)
     }
+
+
+def required_backend_set(manifest: dict[str, Any]) -> set[str]:
+    required_backends = manifest.get("required_backends")
+    if not isinstance(required_backends, list) or not required_backends:
+        raise ThresholdLockError(
+            "required_backends must be a non-empty array before thresholds can lock"
+        )
+
+    required: set[str] = set()
+    for index, backend in enumerate(required_backends):
+        if backend not in VALID_BACKENDS:
+            raise ThresholdLockError(
+                f"required_backends[{index}] is not a valid backend: {backend!r}"
+            )
+        required.add(backend)
+    return required
+
+
+def validate_required_backend_coverage(
+    manifest: dict[str, Any],
+    fixtures: list[Any],
+) -> None:
+    required = required_backend_set(manifest)
+    fixture_backends: set[str] = set()
+    for index, fixture in enumerate(fixtures):
+        if not isinstance(fixture, dict):
+            raise ThresholdLockError(
+                f"fixtures[{index}] must be an object before thresholds can lock"
+            )
+        backend = fixture.get("backend")
+        if backend not in VALID_BACKENDS:
+            raise ThresholdLockError(
+                f"fixtures[{index}].backend is not a valid backend: {backend!r}"
+            )
+        fixture_backends.add(backend)
+
+    missing = sorted(required - fixture_backends)
+    if missing:
+        raise ThresholdLockError(
+            "required backend has no fixture before thresholds can lock: "
+            + ", ".join(missing)
+        )
 
 
 def lock_fixture_thresholds(
@@ -332,6 +376,7 @@ def lock_manifest_thresholds(
     missing_slots = manifest.get("missing_fixture_slots", [])
     if missing_slots:
         raise ThresholdLockError("missing_fixture_slots must be empty before thresholds can lock")
+    validate_required_backend_coverage(manifest, fixtures)
 
     locked = deepcopy(manifest)
     locked["fixtures"] = [
@@ -408,6 +453,7 @@ def self_test() -> int:
         manifest = {
             "schema_version": 1,
             "status": "fixture_required",
+            "required_backends": ["cuda"],
             "fixtures": [
                 {
                     "id": "fixture",
@@ -440,6 +486,33 @@ def self_test() -> int:
             return 1
         if metrics[0]["max"] != 11.0 or metrics[1]["max"] != 180.0:
             print(json.dumps({"ok": False, "case": "headroom", "metrics": metrics}, indent=2))
+            return 1
+
+        missing_required_backend_manifest = deepcopy(manifest)
+        missing_required_backend_manifest["required_backends"] = ["cuda", "rocm"]
+        try:
+            lock_manifest_thresholds(missing_required_backend_manifest, 0.10)
+        except ThresholdLockError as exc:
+            if "required backend has no fixture before thresholds can lock: rocm" not in str(exc):
+                print(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "case": "missing required backend fixture",
+                            "error": str(exc),
+                        }
+                    )
+                )
+                return 1
+        else:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "case": "missing required backend fixture did not fail",
+                    }
+                )
+            )
             return 1
 
         result = json.loads(result_path.read_text())

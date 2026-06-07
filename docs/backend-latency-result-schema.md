@@ -162,7 +162,9 @@ python3 scripts/lock_backend_latency_thresholds.py \
   --headroom 0.10
 ```
 
-The threshold locker requires every fixture result artifact path to be
+The threshold locker requires `required_backends` to be a non-empty array of
+valid backend names and refuses to lock until every required backend has at
+least one fixture. It also requires every fixture result artifact path to be
 repo-relative, live under `bench-results/backend-latency` with a `.json`
 extension, exist, have `status: "passed"`, match the result artifact schema
 version, include a valid UTC creation timestamp, match the fixture `id`,

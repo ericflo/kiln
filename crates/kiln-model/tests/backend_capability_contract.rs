@@ -2562,6 +2562,9 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
             .expect("latency threshold locker should be readable");
     for required in [
         "def lock_manifest_thresholds(",
+        "required_backends",
+        "def validate_required_backend_coverage(",
+        "required backend has no fixture before thresholds can lock",
         "locked_threshold",
         "artifact_schema_version",
         "created_at_utc",
@@ -2631,6 +2634,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "fixture_id",
         "artifact_schema_version",
         "created_at_utc",
+        "required_backends",
         "git_commit",
         "git_tracked_dirty",
         "40-character git commit",
