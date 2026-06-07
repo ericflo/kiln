@@ -91,13 +91,20 @@ fn paged_cache_kt_dtype(dtype: kiln_core::config::DType) -> kiln_tensor::DType {
 /// (#1082) Validate + return the device the kt paged cache allocates its
 /// pools on. The cache now allocates per-arm on the model's *runtime* device
 /// (`PagedKvCacheKt::new_with_fp8` matches on the `Device`), so we hand it the
-/// `Device` directly instead of a bare index. This native MTP generation path
-/// is only kept open on CUDA for now; ROCm MTP currently benchmarks slower than
-/// normal batching.
-fn paged_cache_device(device: &kiln_tensor::Device) -> Result<kiln_tensor::Device> {
-    match device {
-        kiln_tensor::Device::Cuda(idx) => Ok(kiln_tensor::Device::Cuda(*idx)),
-        other => anyhow::bail!("paged kv cache requires a CUDA device, got {other:?}"),
+/// `Device` directly instead of a bare index. Native MTP generation support is
+/// backend-owned capability data; unsupported backends fail before allocating
+/// speculative caches.
+fn paged_cache_device(
+    backend: &dyn BackendRuntime,
+    device: &kiln_tensor::Device,
+) -> Result<kiln_tensor::Device> {
+    let support = BackendCapabilityQueries::backend_capabilities(backend)
+        .decode
+        .mtp_speculative_generation;
+    if matches!(support, Support::Native | Support::NativeWithConstraints) {
+        Ok(*device)
+    } else {
+        anyhow::bail!("native MTP speculative generation requires backend support; got {support:?}")
     }
 }
 
@@ -6410,7 +6417,8 @@ impl ModelRunner {
         let max_total = prompt_tokens.len() + params.max_tokens;
         // (#1082) kt-native paged cache — `PagedKvCacheKt::new` allocates pools
         // on the model's runtime `Device` (kiln is single-GPU).
-        let cache_device = paged_cache_device(&self.weights.embed_tokens.device())?;
+        let cache_device =
+            paged_cache_device(self.backend.as_ref(), &self.weights.embed_tokens.device())?;
         let dtype = paged_cache_kt_dtype(self.config.dtype);
 
         // Two independent paged caches:
@@ -6866,7 +6874,8 @@ impl ModelRunner {
 
         let max_total = prompt_tokens.len() + params.max_tokens;
         // (#1082) kt-native paged cache — kt `DType` + runtime `Device`.
-        let cache_device = paged_cache_device(&self.weights.embed_tokens.device())?;
+        let cache_device =
+            paged_cache_device(self.backend.as_ref(), &self.weights.embed_tokens.device())?;
         let dtype = paged_cache_kt_dtype(self.config.dtype);
 
         let num_blocks = Self::blocks_needed(max_total, BLOCK_SIZE);

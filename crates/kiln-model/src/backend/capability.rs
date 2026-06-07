@@ -764,6 +764,7 @@ pub struct GdnCapabilities {
 pub struct DecodeCapabilities {
     pub resident_decode: Support,
     pub paged_decode_graph_outputs: Support,
+    pub mtp_speculative_generation: Support,
     pub linear_argmax: Support,
     pub linear_argmax_batch: Support,
     pub linear_sample: Support,
@@ -1126,6 +1127,7 @@ impl BackendCapabilities {
                     backend,
                     &paged_replay,
                 ),
+                mtp_speculative_generation: mtp_speculative_generation_support(name),
                 linear_argmax: BackendCapabilityQueries::supports_linear_request(
                     backend,
                     &linear_argmax,
@@ -1265,6 +1267,13 @@ fn flash_prefill_consumes_grouped_kv(name: &str) -> bool {
 }
 
 fn detached_chunked_prefill_support(name: &str) -> Support {
+    match name {
+        "cuda" => Support::NativeWithConstraints,
+        _ => Support::Declined,
+    }
+}
+
+fn mtp_speculative_generation_support(name: &str) -> Support {
     match name {
         "cuda" => Support::NativeWithConstraints,
         _ => Support::Declined,

@@ -1179,6 +1179,16 @@ fn generated_capability_report_lists_request_descriptors() {
         attention_capability_fields.contains(&"detached_chunked_prefill"),
         "AttentionCapabilities should own detached chunked prefill routing"
     );
+    let decode_capability_fields = capability_descriptors["DecodeCapabilities"]["fields"]
+        .as_array()
+        .expect("DecodeCapabilities fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        decode_capability_fields.contains(&"mtp_speculative_generation"),
+        "DecodeCapabilities should expose native MTP speculative generation support"
+    );
     let gdn_capability_fields = capability_descriptors["GdnCapabilities"]["fields"]
         .as_array()
         .expect("GdnCapabilities fields should be an array")
@@ -2603,7 +2613,8 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "// Open the fallback-decode range",
     );
     assert!(
-        native_decode_attention_decline_section.contains("native_decode_attention_required(backend)")
+        native_decode_attention_decline_section
+            .contains("native_decode_attention_required(backend)")
             && native_decode_attention_decline_section
                 .contains("decode_batch_generic_fallback_enabled(backend)"),
         "paged decode attention decline handling should read backend-owned native/fallback policy"
@@ -2727,6 +2738,26 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             "generate should not keep local decode batcher backend policy helper {removed_helper}"
         );
     }
+    let mtp_paged_cache_device_section = source_between(
+        &generate_source,
+        "fn paged_cache_device(",
+        "fn fast_batched_linear_state_scatter_enabled(",
+    );
+    assert!(
+        mtp_paged_cache_device_section
+            .contains("BackendCapabilityQueries::backend_capabilities(backend)")
+            && mtp_paged_cache_device_section.contains("mtp_speculative_generation"),
+        "native MTP paged-cache allocation should read DecodeCapabilities"
+    );
+    assert!(
+        !mtp_paged_cache_device_section.contains("Device::Cuda")
+            && !mtp_paged_cache_device_section.contains("kiln_tensor::Device::Cuda"),
+        "native MTP paged-cache allocation should not branch locally on CUDA device identity"
+    );
+    assert!(
+        generate_source.contains("paged_cache_device(self.backend.as_ref(),"),
+        "native MTP paged-cache allocation call sites should pass the active backend"
+    );
     let gdn_contiguity_partition_section = source_between(
         &generate_source,
         "// #1082 PERF + CRASHER FIX (per-row contiguity partition).",

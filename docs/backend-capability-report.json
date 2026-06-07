@@ -1748,7 +1748,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "DecodeCapabilities": {
-      "field_count": 6,
+      "field_count": 7,
       "fields": [
         {
           "name": "resident_decode",
@@ -1756,6 +1756,10 @@
         },
         {
           "name": "paged_decode_graph_outputs",
+          "type": "Support"
+        },
+        {
+          "name": "mtp_speculative_generation",
           "type": "Support"
         },
         {
