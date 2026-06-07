@@ -33,6 +33,10 @@ impl Support {
             Support::Declined
         }
     }
+
+    pub const fn is_native(self) -> bool {
+        matches!(self, Support::Native | Support::NativeWithConstraints)
+    }
 }
 
 /// Accumulation precision requested by a matmul.
@@ -727,6 +731,7 @@ pub struct StorageCapabilities {
     pub device: kiln_tensor::Device,
     pub resident_activation: Support,
     pub resident_decode: Support,
+    pub kv_cache_device_memory_pressure: bool,
 }
 
 /// Representative matmul capability probes backed by [`MatmulRequest`].
@@ -796,6 +801,10 @@ pub struct DecodeBatcherPolicy {
     pub use_native_sampled_contiguous_decode: bool,
     pub sampled_contiguous_decode_requires_resident_decode: bool,
     pub partition_noncontiguous_gdn_kv_tiles: bool,
+    pub use_decode_width_prefill_admission: bool,
+    pub burst_prefill_admission: bool,
+    pub batching_engine_default_enabled: bool,
+    pub warm_resident_decode_pool_on_startup: bool,
 }
 
 /// Environment gate attached to backend decode-attention routing policy.
@@ -1076,6 +1085,7 @@ impl BackendCapabilities {
                 resident_decode: Support::from_supports_predicate(
                     ReplayBackend::runtime_supports_resident_decode(backend),
                 ),
+                kv_cache_device_memory_pressure: kv_cache_device_memory_pressure(name, device),
             },
             matmul: MatmulCapabilities {
                 rank2_f32: BackendCapabilityQueries::supports_matmul_request(backend, &rank2_f32),
@@ -1202,6 +1212,10 @@ impl DecodeBatcherPolicy {
                 use_native_sampled_contiguous_decode: false,
                 sampled_contiguous_decode_requires_resident_decode: false,
                 partition_noncontiguous_gdn_kv_tiles: true,
+                use_decode_width_prefill_admission: true,
+                burst_prefill_admission: true,
+                batching_engine_default_enabled: true,
+                warm_resident_decode_pool_on_startup: false,
             },
             kiln_tensor::Backend::Metal => Self {
                 max_batch: Self::DEFAULT_MAX_BATCH,
@@ -1217,6 +1231,10 @@ impl DecodeBatcherPolicy {
                 use_native_sampled_contiguous_decode: true,
                 sampled_contiguous_decode_requires_resident_decode: false,
                 partition_noncontiguous_gdn_kv_tiles: false,
+                use_decode_width_prefill_admission: false,
+                burst_prefill_admission: false,
+                batching_engine_default_enabled: false,
+                warm_resident_decode_pool_on_startup: false,
             },
             kiln_tensor::Backend::Vulkan => Self {
                 max_batch: Self::VULKAN_MAX_BATCH,
@@ -1232,6 +1250,10 @@ impl DecodeBatcherPolicy {
                 use_native_sampled_contiguous_decode: true,
                 sampled_contiguous_decode_requires_resident_decode: true,
                 partition_noncontiguous_gdn_kv_tiles: false,
+                use_decode_width_prefill_admission: true,
+                burst_prefill_admission: false,
+                batching_engine_default_enabled: true,
+                warm_resident_decode_pool_on_startup: true,
             },
             kiln_tensor::Backend::Rocm => Self {
                 max_batch: Self::DEFAULT_MAX_BATCH,
@@ -1249,6 +1271,10 @@ impl DecodeBatcherPolicy {
                 use_native_sampled_contiguous_decode: false,
                 sampled_contiguous_decode_requires_resident_decode: false,
                 partition_noncontiguous_gdn_kv_tiles: false,
+                use_decode_width_prefill_admission: false,
+                burst_prefill_admission: false,
+                batching_engine_default_enabled: true,
+                warm_resident_decode_pool_on_startup: false,
             },
             _ => Self {
                 max_batch: Self::DEFAULT_MAX_BATCH,
@@ -1264,6 +1290,10 @@ impl DecodeBatcherPolicy {
                 use_native_sampled_contiguous_decode: false,
                 sampled_contiguous_decode_requires_resident_decode: false,
                 partition_noncontiguous_gdn_kv_tiles: false,
+                use_decode_width_prefill_admission: false,
+                burst_prefill_admission: false,
+                batching_engine_default_enabled: true,
+                warm_resident_decode_pool_on_startup: false,
             },
         }
     }
@@ -1290,6 +1320,13 @@ fn mtp_speculative_generation_support(name: &str) -> Support {
         "cuda" => Support::NativeWithConstraints,
         _ => Support::Declined,
     }
+}
+
+fn kv_cache_device_memory_pressure(name: &str, device: kiln_tensor::Device) -> bool {
+    matches!(
+        backend_kind_for_runtime(name, device),
+        kiln_tensor::Backend::Cuda | kiln_tensor::Backend::Rocm
+    )
 }
 
 fn gdn_gated_rms_norm_preserves_tape_residency(

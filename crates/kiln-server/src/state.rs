@@ -2137,12 +2137,21 @@ impl AppState {
         let paged_cache = Arc::new(paged_cache);
         let prefix_cache = Arc::new(std::sync::Mutex::new(prefix_cache));
         let gpu_lock = Arc::new(std::sync::RwLock::new(()));
-        let backend_name = runner.read().unwrap().backend_name();
+        let (backend_name, backend_capabilities) = {
+            let runner_guard = runner.read().unwrap();
+            (
+                runner_guard.backend_name(),
+                runner_guard.backend_capabilities(),
+            )
+        };
+        let decode_batcher_policy = backend_capabilities.decode_batcher;
         let max_decode_batch =
-            crate::batching_engine::env_max_decode_batch_for_backend(Some(backend_name));
+            crate::batching_engine::env_max_decode_batch_for_policy(Some(decode_batcher_policy));
         let decode_batcher_config = DecodeBatcherConfig::enabled_for_device_kt(&device_kt)
-            .then(|| DecodeBatcherConfig::from_env_for_backend_kt(&device_kt, backend_name));
-        if backend_name == "vulkan" {
+            .then(|| DecodeBatcherConfig::from_env_for_policy(decode_batcher_policy));
+        if decode_batcher_policy.warm_resident_decode_pool_on_startup
+            && backend_capabilities.decode.resident_decode.is_native()
+        {
             let resident_max_batch = max_decode_batch.max(
                 decode_batcher_config
                     .map(|config| config.max_batch)
@@ -2155,24 +2164,20 @@ impl AppState {
             tracing::info!(
                 max_batch = resident_max_batch,
                 ready,
-                "Vulkan resident decode pool startup allocation"
+                "resident decode pool startup allocation"
             );
         }
-        // Batching engine is on by default for backends where the batching
-        // actor is the fast path. Metal currently regresses bs=1 Qwen decode
-        // by paying the GDN state-copy path on every generated token, while the
-        // direct loop can stay on the graph-backed Metal sampler. Keep Metal
-        // direct by default until its batching path has resident/in-place GDN
-        // state parity; operators can still opt in with KILN_BATCHING_ENGINE=1.
+        // Batching engine defaults are owned by the backend decode policy.
+        // Operators can still override with KILN_BATCHING_ENGINE.
         let batching_engine_env = std::env::var("KILN_BATCHING_ENGINE").ok();
         let batching_engine_disabled = match batching_engine_env.as_deref() {
             Some("0" | "false" | "FALSE" | "off" | "OFF") => true,
             Some("1" | "true" | "TRUE" | "on" | "ON") => false,
-            _ => backend_name == "metal",
+            _ => !decode_batcher_policy.batching_engine_default_enabled,
         };
-        if batching_engine_disabled && backend_name == "metal" {
+        if batching_engine_disabled && !decode_batcher_policy.batching_engine_default_enabled {
             tracing::info!(
-                "batching engine disabled by default for Metal; set KILN_BATCHING_ENGINE=1 to opt in"
+                "batching engine disabled by backend policy; set KILN_BATCHING_ENGINE=1 to opt in"
             );
         }
         let batching_engine = (!batching_engine_disabled).then(|| {
@@ -2190,7 +2195,7 @@ impl AppState {
                     gpu_lock.clone(),
                 )),
                 max_decode_batch,
-                Some(backend_name),
+                Some(decode_batcher_policy),
             )
         });
         // #24/#26: drive dynamic KV resize from live memory pressure on GPU
@@ -2201,11 +2206,7 @@ impl AppState {
         // back when headroom returns; the resize itself runs on the engine actor
         // at its barrier under exclusive GPU access.
         if let Some(engine) = batching_engine.clone() {
-            let device_resident = matches!(
-                paged_cache.device(),
-                Some(kiln_tensor::Device::Rocm(_)) | Some(kiln_tensor::Device::Cuda(_))
-            );
-            if device_resident {
+            if backend_capabilities.storage.kv_cache_device_memory_pressure {
                 crate::kv_autoscaler::spawn(engine, paged_cache.clone());
             }
         }

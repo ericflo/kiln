@@ -55,8 +55,8 @@ pub use backend::{
 pub use backend::capability::{
     AttentionCapabilities, AttentionRequest, AttentionRequestKind, BackendCapabilityQueries,
     BackendCapabilitySnapshot, BackendCapabilities, BackendFallbackCapabilities,
-    BackendTrainingCapabilities, DecodeCapabilities, GdnCapabilities, LinearRequest,
-    LinearRequestKind, MatmulAccumulation, MatmulBatchPolicy, MatmulBlasRequest,
+    BackendTrainingCapabilities, DecodeBatcherPolicy, DecodeCapabilities, GdnCapabilities,
+    LinearRequest, LinearRequestKind, MatmulAccumulation, MatmulBatchPolicy, MatmulBlasRequest,
     MatmulCapabilities, MatmulEpilogue, MatmulOperandLayout, MatmulRequest,
     MatmulRequestProjectionError, ReplayAuthority, ReplayCapabilities, ReplayGraphCrateRole,
     ReplayNativePrimitive, ReplayProductionAuthority, ReplayRequest, ReplayRequestKind,

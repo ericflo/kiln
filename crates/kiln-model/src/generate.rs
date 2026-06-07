@@ -22,8 +22,8 @@ use crate::backend::{
     self, BackendIdentity, BackendRuntime, FallbackPolicy, LinearBackend, ReplayBackend,
     ResidencyBackend, SamplingBackend, TrainingLossBackend,
     capability::{
-        BackendCapabilityQueries, DecodeBatcherPolicy, ReplayNativePrimitive, ReplayRequest,
-        Support,
+        BackendCapabilities, BackendCapabilityQueries, DecodeBatcherPolicy, ReplayNativePrimitive,
+        ReplayRequest, Support,
     },
 };
 use crate::cancel::CancelHandle;
@@ -681,10 +681,9 @@ impl DecodeBatcherConfig {
     // `Device`.
 
     /// Builds the decode-batcher config from env, applying backend-aware
-    /// defaults derived from the kt `Device`.
-    pub fn from_env_for_backend_kt(device: &kiln_tensor::Device, backend_name: &str) -> Self {
+    /// defaults derived from the backend policy.
+    pub fn from_env_for_policy(policy: DecodeBatcherPolicy) -> Self {
         let mut config = Self::from_env();
-        let policy = DecodeBatcherPolicy::for_backend(backend_name, *device);
         if env_positive_usize("KILN_DECODE_BATCH_MAX").is_none() {
             config.max_batch =
                 env_positive_usize("KILN_MAX_DECODE_BATCH").unwrap_or(policy.max_batch);
@@ -696,6 +695,12 @@ impl DecodeBatcherConfig {
             config.allow_mixed_seq_lens = policy.allow_mixed_seq_lens;
         }
         config
+    }
+
+    /// Builds the decode-batcher config from env, applying backend-aware
+    /// defaults derived from the kt `Device`.
+    pub fn from_env_for_backend_kt(device: &kiln_tensor::Device, backend_name: &str) -> Self {
+        Self::from_env_for_policy(DecodeBatcherPolicy::for_backend(backend_name, *device))
     }
 
     /// kt-typed parallel of [`Self::from_env_for_device`].
@@ -1645,6 +1650,10 @@ impl ModelRunner {
 
     pub fn backend_name(&self) -> &'static str {
         BackendIdentity::runtime_name(self.backend.as_ref())
+    }
+
+    pub fn backend_capabilities(&self) -> BackendCapabilities {
+        BackendCapabilityQueries::backend_capabilities(self.backend.as_ref())
     }
 
     /// Eagerly allocate the backend-resident decode scratch ring when the

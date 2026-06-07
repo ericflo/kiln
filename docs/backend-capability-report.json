@@ -1690,7 +1690,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "DecodeBatcherPolicy": {
-      "field_count": 13,
+      "field_count": 17,
       "fields": [
         {
           "name": "max_batch",
@@ -1742,6 +1742,22 @@
         },
         {
           "name": "partition_noncontiguous_gdn_kv_tiles",
+          "type": "bool"
+        },
+        {
+          "name": "use_decode_width_prefill_admission",
+          "type": "bool"
+        },
+        {
+          "name": "burst_prefill_admission",
+          "type": "bool"
+        },
+        {
+          "name": "batching_engine_default_enabled",
+          "type": "bool"
+        },
+        {
+          "name": "warm_resident_decode_pool_on_startup",
           "type": "bool"
         }
       ],
@@ -1896,7 +1912,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "StorageCapabilities": {
-      "field_count": 4,
+      "field_count": 5,
       "fields": [
         {
           "name": "backend",
@@ -1913,6 +1929,10 @@
         {
           "name": "resident_decode",
           "type": "Support"
+        },
+        {
+          "name": "kv_cache_device_memory_pressure",
+          "type": "bool"
         }
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"

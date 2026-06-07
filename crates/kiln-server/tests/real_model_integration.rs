@@ -22,7 +22,6 @@ use kiln_model::forward::{
 };
 use kiln_server::api;
 use kiln_server::state::AppState;
-use kiln_server::training_queue::QueuedJob;
 
 /// Create a tiny model config for testing.
 fn tiny_config() -> ModelConfig {
@@ -199,6 +198,8 @@ fn test_tokenizer() -> KilnTokenizer {
 #[cfg(feature = "vulkan")]
 #[tokio::test]
 async fn submit_grpo_dataset_path_route_defaults_to_vulkan_streaming_queue() {
+    use kiln_server::training_queue::QueuedJob;
+
     if !kiln_model::backend::vulkan::vulkan_is_available() {
         eprintln!("Vulkan unavailable, skipping route-level native GRPO dataset_path test");
         return;
@@ -314,7 +315,7 @@ async fn submit_grpo_dataset_path_route_defaults_to_vulkan_streaming_queue() {
                 "route should trim and preserve dataset_path for the streaming worker"
             );
         }
-        QueuedJob::Sft(_) => panic!("expected queued GRPO job"),
+        _ => panic!("expected queued GRPO job"),
     }
 }
 

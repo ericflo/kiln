@@ -1166,6 +1166,16 @@ fn generated_capability_report_lists_request_descriptors() {
         replay_capability_fields.contains(&"authority"),
         "ReplayCapabilities should expose typed replay authority"
     );
+    let storage_capability_fields = capability_descriptors["StorageCapabilities"]["fields"]
+        .as_array()
+        .expect("StorageCapabilities fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        storage_capability_fields.contains(&"kv_cache_device_memory_pressure"),
+        "StorageCapabilities should own KV cache device-memory pressure policy"
+    );
     let attention_capability_fields = capability_descriptors["AttentionCapabilities"]["fields"]
         .as_array()
         .expect("AttentionCapabilities fields should be an array")
@@ -1263,6 +1273,26 @@ fn generated_capability_report_lists_request_descriptors() {
             .contains(&"sampled_contiguous_decode_requires_resident_decode"),
         "DecodeBatcherPolicy should own sampled contiguous resident-decode requirements"
     );
+    for (field, message) in [
+        (
+            "use_decode_width_prefill_admission",
+            "DecodeBatcherPolicy should own prefill admission width defaults",
+        ),
+        (
+            "burst_prefill_admission",
+            "DecodeBatcherPolicy should own burst prefill admission defaults",
+        ),
+        (
+            "batching_engine_default_enabled",
+            "DecodeBatcherPolicy should own server batching-engine defaults",
+        ),
+        (
+            "warm_resident_decode_pool_on_startup",
+            "DecodeBatcherPolicy should own resident decode pool startup warmup",
+        ),
+    ] {
+        assert!(decode_batcher_policy_fields.contains(&field), "{message}");
+    }
     let replay_authority_fields = capability_descriptors["ReplayAuthority"]["fields"]
         .as_array()
         .expect("ReplayAuthority fields should be an array")
@@ -2320,6 +2350,11 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             .expect("tape_forward.rs should be readable");
     let forward_source = fs::read_to_string(root.join("crates/kiln-model/src/forward.rs"))
         .expect("forward.rs should be readable");
+    let server_state_source = fs::read_to_string(root.join("crates/kiln-server/src/state.rs"))
+        .expect("kiln-server state.rs should be readable");
+    let server_batching_source =
+        fs::read_to_string(root.join("crates/kiln-server/src/batching_engine.rs"))
+            .expect("kiln-server batching_engine.rs should be readable");
 
     assert_no_broad_backend_runtime_calls(
         &backend_source,
@@ -2633,6 +2668,53 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         decode_batcher_config_section.contains("DecodeBatcherPolicy::for_backend"),
         "decode batcher backend-aware defaults should come from the shared policy object"
     );
+    assert!(
+        generate_source.contains("pub fn from_env_for_policy(policy: DecodeBatcherPolicy)"),
+        "decode batcher config should expose a policy-consuming constructor"
+    );
+    let server_startup_policy_section = source_between(
+        &server_state_source,
+        "let (backend_name, backend_capabilities) =",
+        "let decode_batcher = if let Some(config) = decode_batcher_config",
+    );
+    assert!(
+        server_startup_policy_section.contains("runner_guard.backend_capabilities()")
+            && server_startup_policy_section.contains("decode_batcher_policy")
+            && server_startup_policy_section.contains("from_env_for_policy")
+            && server_startup_policy_section.contains("warm_resident_decode_pool_on_startup")
+            && server_startup_policy_section.contains("batching_engine_default_enabled")
+            && server_startup_policy_section.contains("kv_cache_device_memory_pressure"),
+        "kiln-server startup decode defaults should consume BackendCapabilities/DecodeBatcherPolicy"
+    );
+    for forbidden in [
+        "backend_name == \"vulkan\"",
+        "backend_name == \"metal\"",
+        "Some(kiln_tensor::Device::Rocm(_))",
+        "Some(kiln_tensor::Device::Cuda(_))",
+    ] {
+        assert!(
+            !server_startup_policy_section.contains(forbidden),
+            "kiln-server startup should not branch locally on backend/device policy: {forbidden}"
+        );
+    }
+    assert!(
+        server_batching_source.contains("env_max_decode_batch_for_policy")
+            && server_batching_source.contains("env_prefill_admission_quantum_for_policy")
+            && server_batching_source.contains("DecodeBatcherPolicy"),
+        "kiln-server batching engine defaults should consume DecodeBatcherPolicy"
+    );
+    for forbidden in [
+        "env_max_decode_batch_for_backend",
+        "env_prefill_admission_quantum_for_backend",
+        "Some(\"vulkan\")",
+        "Some(\"cuda\")",
+        "Some(\"metal\")",
+    ] {
+        assert!(
+            !server_batching_source.contains(forbidden),
+            "kiln-server batching engine should not keep backend-name default tables: {forbidden}"
+        );
+    }
     let decode_batcher_retry_section = source_between(
         &generate_source,
         "fn decode_batcher_rowwise_retry_enabled(",
