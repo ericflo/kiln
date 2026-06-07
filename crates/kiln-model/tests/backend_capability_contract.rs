@@ -2608,6 +2608,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
                 | "ConvBackend"
                 | "SamplingBackend"
                 | "OptimizerBackend"
+                | "PagedKvBackend"
         ) {
             "concrete_authoritative"
         } else {
@@ -2640,6 +2641,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
         "ConvBackend",
         "SamplingBackend",
         "OptimizerBackend",
+        "PagedKvBackend",
     ] {
         let info = facets
             .get(facet)
@@ -2686,6 +2688,10 @@ fn generated_capability_report_lists_focused_backend_facets() {
         !backend_source.contains("impl<T: BackendRuntime + ?Sized> OptimizerBackend for T"),
         "OptimizerBackend should not regress to a blanket BackendRuntime forwarding impl"
     );
+    assert!(
+        !backend_source.contains("impl<T: BackendRuntime + ?Sized> PagedKvBackend for T"),
+        "PagedKvBackend should not regress to a blanket BackendRuntime forwarding impl"
+    );
     let runtime_trait_source = source_between(
         &backend_source,
         "pub trait BackendRuntime",
@@ -2697,6 +2703,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
         "ConvBackend",
         "SamplingBackend",
         "OptimizerBackend",
+        "PagedKvBackend",
     ] {
         assert!(
             runtime_trait_source.contains(supertrait),
@@ -5888,6 +5895,14 @@ fn generated_capability_report_tracks_migration_phase_status() {
     assert_eq!(
         optimizer_signal["passed"], true,
         "OptimizerBackend should be a completed W1 family slice"
+    );
+    let paged_kv_signal = phase1_signals
+        .iter()
+        .find(|signal| signal["name"] == "paged_kv_backend_facet_authoritative")
+        .expect("Phase 1 should include PagedKvBackend authoritative signal");
+    assert_eq!(
+        paged_kv_signal["passed"], true,
+        "PagedKvBackend should be a completed W1 family slice"
     );
     let shim_signal = phase1_signals
         .iter()

@@ -1442,6 +1442,10 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
                 "OptimizerBackend",
                 "optimizer_backend_facet_authoritative",
             ),
+            focused_trait_authoritative_signal(
+                "PagedKvBackend",
+                "paged_kv_backend_facet_authoritative",
+            ),
             phase_signal(
                 "focused_trait_forwarding_shims_removed",
                 shim_count == 0,

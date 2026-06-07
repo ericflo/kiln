@@ -8569,6 +8569,8 @@ mod tests {
 
     impl crate::backend::OptimizerBackend for NamedTestBackend {}
 
+    impl crate::backend::PagedKvBackend for NamedTestBackend {}
+
     impl BackendRuntime for NamedTestBackend {}
 
     #[test]

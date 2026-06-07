@@ -10533,6 +10533,8 @@ pub(crate) mod tests {
 
     impl kiln_model::backend::OptimizerBackend for NamedTestBackend {}
 
+    impl kiln_model::backend::PagedKvBackend for NamedTestBackend {}
+
     impl BackendRuntime for NamedTestBackend {}
 
     /// Create a tiny ModelConfig for testing (4 layers, small dims).

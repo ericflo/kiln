@@ -4,7 +4,7 @@
 //! as a safe default for any future device.
 
 use super::{
-    BackendIdentity, BackendRuntime, ConvBackend, OptimizerBackend, SamplingBackend,
+    BackendIdentity, BackendRuntime, ConvBackend, OptimizerBackend, PagedKvBackend, SamplingBackend,
     StartupBackend,
 };
 
@@ -52,5 +52,7 @@ impl ConvBackend for CpuBackend {}
 impl SamplingBackend for CpuBackend {}
 
 impl OptimizerBackend for CpuBackend {}
+
+impl PagedKvBackend for CpuBackend {}
 
 impl BackendRuntime for CpuBackend {}

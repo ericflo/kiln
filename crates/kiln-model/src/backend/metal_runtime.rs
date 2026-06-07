@@ -13,7 +13,7 @@ use super::metal_gdn::*;
 use super::metal_lm_head::*;
 use super::metal_paged::*;
 use super::{
-    BackendIdentity, BackendRuntime, ConvBackend, OptimizerBackend, SamplingBackend,
+    BackendIdentity, BackendRuntime, ConvBackend, OptimizerBackend, PagedKvBackend, SamplingBackend,
     StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy, metal_residency,
     metal_training,
 };
@@ -316,6 +316,54 @@ impl OptimizerBackend for MetalBackend {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+impl PagedKvBackend for MetalBackend {
+    fn runtime_supports_paged_kv_head_major_read(&self) -> bool {
+        true
+    }
+
+    fn runtime_supports_paged_kv_head_major_read_append_token_major(&self) -> bool {
+        true
+    }
+
+    fn runtime_paged_kv_head_major_read(
+        &self,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        start_slot: usize,
+        seq_len: usize,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        if !metal_paged_kv_head_major_read_supports(k_pool, v_pool, start_slot, seq_len) {
+            return Ok(None);
+        }
+        let (k_out, v_out) =
+            metal_paged_kv_head_major_read_bf16(k_pool, v_pool, start_slot, seq_len)
+                .context("metal paged_kv_head_major_read failed")?;
+        Ok(Some((k_out, v_out)))
+    }
+
+    fn runtime_paged_kv_head_major_read_append_token_major(
+        &self,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        start_slot: usize,
+        prefix_len: usize,
+        k_tail: &kiln_tensor::Tensor,
+        v_tail: &kiln_tensor::Tensor,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        if !metal_paged_kv_head_major_read_append_token_major_supports(
+            k_pool, v_pool, start_slot, prefix_len, k_tail, v_tail,
+        ) {
+            return Ok(None);
+        }
+        let (k_out, v_out) = metal_paged_kv_head_major_read_append_token_major_bf16(
+            k_pool, v_pool, start_slot, prefix_len, k_tail, v_tail,
+        )
+        .context("metal paged_kv_head_major_read_append_token_major failed")?;
+        Ok(Some((k_out, v_out)))
+    }
+}
+
 // #1082 DoD-101/102: BackendRuntime decode methods flipped to kt; metal/vulkan
 // impls need matching flip when their builds are restored.
 impl BackendRuntime for MetalBackend {
@@ -539,14 +587,6 @@ impl BackendRuntime for MetalBackend {
         )
     }
 
-    fn supports_paged_kv_head_major_read(&self) -> bool {
-        true
-    }
-
-    fn supports_paged_kv_head_major_read_append_token_major(&self) -> bool {
-        true
-    }
-
     fn supports_gdn_forward_substitution(&self) -> bool {
         !self.disable.gdn_forward_substitution
     }
@@ -630,43 +670,6 @@ impl BackendRuntime for MetalBackend {
             softmax_scale,
             causal,
         )
-    }
-
-    fn paged_kv_head_major_read(
-        &self,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        start_slot: usize,
-        seq_len: usize,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
-        if !metal_paged_kv_head_major_read_supports(k_pool, v_pool, start_slot, seq_len) {
-            return Ok(None);
-        }
-        let (k_out, v_out) =
-            metal_paged_kv_head_major_read_bf16(k_pool, v_pool, start_slot, seq_len)
-                .context("metal paged_kv_head_major_read failed")?;
-        Ok(Some((k_out, v_out)))
-    }
-
-    fn paged_kv_head_major_read_append_token_major(
-        &self,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        start_slot: usize,
-        prefix_len: usize,
-        k_tail: &kiln_tensor::Tensor,
-        v_tail: &kiln_tensor::Tensor,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
-        if !metal_paged_kv_head_major_read_append_token_major_supports(
-            k_pool, v_pool, start_slot, prefix_len, k_tail, v_tail,
-        ) {
-            return Ok(None);
-        }
-        let (k_out, v_out) = metal_paged_kv_head_major_read_append_token_major_bf16(
-            k_pool, v_pool, start_slot, prefix_len, k_tail, v_tail,
-        )
-        .context("metal paged_kv_head_major_read_append_token_major failed")?;
-        Ok(Some((k_out, v_out)))
     }
 
     fn gdn_forward_substitution(

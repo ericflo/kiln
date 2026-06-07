@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
-    BackendIdentity, BackendRuntime, ConvBackend, OptimizerBackend, SamplingBackend,
+    BackendIdentity, BackendRuntime, ConvBackend, OptimizerBackend, PagedKvBackend, SamplingBackend,
     StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
 };
 use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
@@ -1899,6 +1899,8 @@ impl ConvBackend for CudaBackend {
 }
 
 impl SamplingBackend for CudaBackend {}
+
+impl PagedKvBackend for CudaBackend {}
 
 #[cfg(test)]
 mod tests {

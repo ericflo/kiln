@@ -658,6 +658,7 @@ pub trait BackendRuntime:
     + ConvBackend
     + SamplingBackend
     + OptimizerBackend
+    + PagedKvBackend
     + Send
     + Sync
     + std::fmt::Debug
@@ -888,11 +889,11 @@ pub trait BackendRuntime:
     }
 
     fn supports_paged_kv_head_major_read(&self) -> bool {
-        false
+        PagedKvBackend::runtime_supports_paged_kv_head_major_read(self)
     }
 
     fn supports_paged_kv_head_major_read_append_token_major(&self) -> bool {
-        false
+        PagedKvBackend::runtime_supports_paged_kv_head_major_read_append_token_major(self)
     }
 
     fn supports_gdn_forward_substitution(&self) -> bool {
@@ -1246,12 +1247,14 @@ pub trait BackendRuntime:
     /// head-major SDPA.
     fn paged_kv_head_major_read(
         &self,
-        _k_pool: &kiln_tensor::Tensor,
-        _v_pool: &kiln_tensor::Tensor,
-        _start_slot: usize,
-        _seq_len: usize,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        start_slot: usize,
+        seq_len: usize,
     ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
-        Ok(None)
+        PagedKvBackend::runtime_paged_kv_head_major_read(
+            self, k_pool, v_pool, start_slot, seq_len,
+        )
     }
 
     /// Materialize a contiguous head-major K/V view from a contiguous paged
@@ -1263,14 +1266,16 @@ pub trait BackendRuntime:
     /// Returns `[1, num_kv_heads, prefix_len + tail_len, head_dim]` tensors.
     fn paged_kv_head_major_read_append_token_major(
         &self,
-        _k_pool: &kiln_tensor::Tensor,
-        _v_pool: &kiln_tensor::Tensor,
-        _start_slot: usize,
-        _prefix_len: usize,
-        _k_tail: &kiln_tensor::Tensor,
-        _v_tail: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        start_slot: usize,
+        prefix_len: usize,
+        k_tail: &kiln_tensor::Tensor,
+        v_tail: &kiln_tensor::Tensor,
     ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
-        Ok(None)
+        PagedKvBackend::runtime_paged_kv_head_major_read_append_token_major(
+            self, k_pool, v_pool, start_slot, prefix_len, k_tail, v_tail,
+        )
     }
 
     /// Gated DeltaNet chunkwise forward-substitution (prefill path).
@@ -2045,30 +2050,38 @@ pub trait AttentionBackend: Send + Sync + std::fmt::Debug {
     ) -> Result<Option<kiln_tensor::Tensor>>;
 }
 
-/// Focused `PagedKvBackend` facet delegated by the current `BackendRuntime` facade.
+/// Focused `PagedKvBackend` facet for paged KV cache materialization helpers.
 #[allow(clippy::too_many_arguments)]
 pub trait PagedKvBackend: Send + Sync + std::fmt::Debug {
-    fn runtime_supports_paged_kv_head_major_read(&self) -> bool;
+    fn runtime_supports_paged_kv_head_major_read(&self) -> bool {
+        false
+    }
 
-    fn runtime_supports_paged_kv_head_major_read_append_token_major(&self) -> bool;
+    fn runtime_supports_paged_kv_head_major_read_append_token_major(&self) -> bool {
+        false
+    }
 
     fn runtime_paged_kv_head_major_read(
         &self,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        start_slot: usize,
-        seq_len: usize,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>>;
+        _k_pool: &kiln_tensor::Tensor,
+        _v_pool: &kiln_tensor::Tensor,
+        _start_slot: usize,
+        _seq_len: usize,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        Ok(None)
+    }
 
     fn runtime_paged_kv_head_major_read_append_token_major(
         &self,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        start_slot: usize,
-        prefix_len: usize,
-        k_tail: &kiln_tensor::Tensor,
-        v_tail: &kiln_tensor::Tensor,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>>;
+        _k_pool: &kiln_tensor::Tensor,
+        _v_pool: &kiln_tensor::Tensor,
+        _start_slot: usize,
+        _prefix_len: usize,
+        _k_tail: &kiln_tensor::Tensor,
+        _v_tail: &kiln_tensor::Tensor,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        Ok(None)
+    }
 }
 
 /// Focused `GdnBackend` facet delegated by the current `BackendRuntime` facade.
@@ -2806,41 +2819,6 @@ impl<T: BackendRuntime + ?Sized> AttentionBackend for T {
             page_block_size,
             softmax_scale,
             causal,
-        )
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-impl<T: BackendRuntime + ?Sized> PagedKvBackend for T {
-    fn runtime_supports_paged_kv_head_major_read(&self) -> bool {
-        BackendRuntime::supports_paged_kv_head_major_read(self)
-    }
-
-    fn runtime_supports_paged_kv_head_major_read_append_token_major(&self) -> bool {
-        BackendRuntime::supports_paged_kv_head_major_read_append_token_major(self)
-    }
-
-    fn runtime_paged_kv_head_major_read(
-        &self,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        start_slot: usize,
-        seq_len: usize,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
-        BackendRuntime::paged_kv_head_major_read(self, k_pool, v_pool, start_slot, seq_len)
-    }
-
-    fn runtime_paged_kv_head_major_read_append_token_major(
-        &self,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        start_slot: usize,
-        prefix_len: usize,
-        k_tail: &kiln_tensor::Tensor,
-        v_tail: &kiln_tensor::Tensor,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
-        BackendRuntime::paged_kv_head_major_read_append_token_major(
-            self, k_pool, v_pool, start_slot, prefix_len, k_tail, v_tail,
         )
     }
 }
@@ -3610,6 +3588,8 @@ mod tests {
     impl SamplingBackend for ResidentActivationProbeBackend {}
 
     impl OptimizerBackend for ResidentActivationProbeBackend {}
+
+    impl PagedKvBackend for ResidentActivationProbeBackend {}
 
     impl BackendRuntime for ResidentActivationProbeBackend {
         fn has_resident_activation(&self, _tensor: &kiln_tensor::Tensor) -> bool {
