@@ -5394,6 +5394,8 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "latency_fixture_id",
         "latency_runner_labels_json",
         "runner_labels",
+        "rocm-gfx1151",
+        "vulkan-rtx6000",
         "fixture_spec_sha256",
         "plan_backend_latency_fixture_dispatch.py",
         "gh_run_download",
@@ -5534,17 +5536,26 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
             root.join(source).is_file(),
             "fixture source should exist: {source}"
         );
-        if fixture["id"] == "cuda_a6000_flce_phase_a_validation" {
+        let expected_runner_labels: &[&str] = match fixture["id"].as_str() {
+            Some("cuda_a6000_flce_phase_a_validation") => &["self-hosted", "linux", "cuda-a6000"],
+            Some("rocm_gfx1151_matmul_qwen35_4b") => &["self-hosted", "linux", "rocm-gfx1151"],
+            Some("vulkan_rtx6000_decode_microbench") => &["self-hosted", "linux", "vulkan-rtx6000"],
+            _ => &[],
+        };
+        if !expected_runner_labels.is_empty() {
+            let fixture_id = fixture["id"]
+                .as_str()
+                .expect("fixture id should be a string");
             let runner_labels = fixture["runner_labels"]
                 .as_array()
-                .expect("CUDA A6000 fixture should declare stable runner labels")
+                .unwrap_or_else(|| panic!("{fixture_id} should declare stable runner labels"))
                 .iter()
                 .filter_map(Value::as_str)
                 .collect::<Vec<_>>();
-            for label in ["self-hosted", "linux", "cuda-a6000"] {
+            for label in expected_runner_labels {
                 assert!(
-                    runner_labels.contains(&label),
-                    "CUDA A6000 fixture should declare runner label {label}"
+                    runner_labels.contains(label),
+                    "{fixture_id} should declare runner label {label}"
                 );
             }
         }

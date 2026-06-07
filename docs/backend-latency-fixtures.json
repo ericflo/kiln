@@ -118,6 +118,11 @@
       "id": "rocm_gfx1151_matmul_qwen35_4b",
       "backend": "rocm",
       "hardware": "AMD ROCm gfx1151 or configured ROCm fixture",
+      "runner_labels": [
+        "self-hosted",
+        "linux",
+        "rocm-gfx1151"
+      ],
       "source": "crates/kiln-tensor/tests/rocm_latency_bench.rs",
       "command": "cargo test -p kiln-tensor --features rocm --test rocm_latency_bench -- --ignored --nocapture",
       "result_artifact": "bench-results/backend-latency/rocm-gfx1151-matmul.json",
@@ -153,6 +158,11 @@
       "id": "vulkan_rtx6000_decode_microbench",
       "backend": "vulkan",
       "hardware": "NVIDIA RTX 6000 Ada or RTX A6000 Vulkan fixture",
+      "runner_labels": [
+        "self-hosted",
+        "linux",
+        "vulkan-rtx6000"
+      ],
       "source": "crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs",
       "command": "cargo run --release -p kiln-vulkan-kernel --bin vulkan_decode_microbench",
       "result_artifact": "bench-results/backend-latency/vulkan-rtx6000-decode.json",

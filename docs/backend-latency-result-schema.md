@@ -177,8 +177,12 @@ The GitHub `Perf regression nightly` workflow also exposes a manual
 `workflow_dispatch` handoff for known-hardware runs. Set `latency_fixture_id` to
 one manifest fixture and set `latency_runner_labels_json` to the target
 self-hosted runner labels, such as `["self-hosted","linux","cuda-a6000"]` or a
-site-local Metal/ROCm/Vulkan label set. The job runs the same fixture runner and
-uploads both `bench-results/backend-latency/*.json` and
+site-local Metal/ROCm/Vulkan label set. The checked-in pending fixtures use
+`["self-hosted","linux","rocm-gfx1151"]` for the ROCm gfx1151 fixture and
+`["self-hosted","linux","vulkan-rtx6000"]` for the Vulkan RTX6000 fixture, so
+the planner can emit runnable dispatch commands before the hardware runners are
+online. The job runs the same fixture runner and uploads both
+`bench-results/backend-latency/*.json` and
 `bench-results/backend-latency/raw/*.log` as workflow artifacts for review and
 check-in before threshold locking. When `latency_fixture_id` is anything other
 than `none`, the workflow skips the unrelated A6000 training perf matrix so a
