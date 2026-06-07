@@ -2602,6 +2602,20 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
                 .contains("vulkan_gdn_recurrent_step_f32_enabled()"),
         "single-token GDN recurrent-step routing should not branch on Vulkan identity/env locally"
     );
+    let native_resident_decode_required_section = source_between(
+        &forward_source,
+        "fn native_resident_decode_required(",
+        "/// Strict batched single-token paged decode",
+    );
+    assert!(
+        native_resident_decode_required_section
+            .contains("ReplayBackend::runtime_supports_resident_decode(backend)"),
+        "native resident decode requirement should be gated by ReplayBackend capabilities"
+    );
+    assert!(
+        !native_resident_decode_required_section.contains("BackendIdentity::runtime_name(backend)"),
+        "native resident decode requirement should not branch on backend identity"
+    );
     let paged_decode_kv_contiguity_section = source_between(
         &forward_source,
         "// Verify intra-chunk contiguity.",

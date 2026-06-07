@@ -12824,7 +12824,7 @@ fn gated_rms_norm(
     #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     let skip_backend_for_active_tape = crate::tape_forward::tape_scope_active()
         && matches!(
-            backend.runtime_device(),
+            BackendIdentity::runtime_device(backend),
             kiln_tensor::Device::Vulkan(_)
         );
     #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
@@ -23557,7 +23557,7 @@ pub fn model_forward_paged_decode_contiguous_batch_hidden_with_ids(
             return Ok(hidden);
         }
 
-        if vulkan_native_resident_decode_required(
+        if native_resident_decode_required(
             backend,
             token_ids,
             start_positions,
@@ -24591,15 +24591,14 @@ fn vulkan_decode_generic_fallback_enabled() -> bool {
 }
 
 #[cfg(feature = "vulkan")]
-fn vulkan_native_resident_decode_required(
+fn native_resident_decode_required(
     backend: &dyn BackendRuntime,
     token_ids: &[u32],
     start_positions: &[usize],
     config: &kiln_core::config::ModelConfig,
     lora: Option<&LoraWeights>,
 ) -> bool {
-    BackendIdentity::runtime_name(backend) == "vulkan"
-        && !token_ids.is_empty()
+    !token_ids.is_empty()
         && start_positions.len() == token_ids.len()
         && start_positions.iter().all(|&pos| pos > 0)
         && lora.is_none()
@@ -24669,7 +24668,7 @@ pub fn model_forward_paged_decode_contiguous_batch_greedy_with_ids(
             return Ok(next_tokens);
         }
 
-        if vulkan_native_resident_decode_required(
+        if native_resident_decode_required(
             backend,
             token_ids,
             start_positions,
@@ -25365,7 +25364,7 @@ pub fn model_forward_paged(
             }
         }
 
-        if vulkan_native_resident_decode_required(
+        if native_resident_decode_required(
             backend,
             token_ids,
             &[start_pos],
@@ -25620,7 +25619,7 @@ pub fn model_forward_paged_last_token(
             }
         }
 
-        if vulkan_native_resident_decode_required(
+        if native_resident_decode_required(
             backend,
             token_ids,
             &[start_pos],
@@ -26219,7 +26218,7 @@ pub fn model_forward_paged_last_token_greedy(
             }
         }
 
-        if vulkan_native_resident_decode_required(
+        if native_resident_decode_required(
             backend,
             token_ids,
             &start_positions,
