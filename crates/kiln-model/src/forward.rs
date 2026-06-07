@@ -231,6 +231,12 @@ fn direct_paged_decode_attention_enabled(backend: &dyn BackendRuntime) -> bool {
         && AttentionBackend::runtime_supports_flash_attn_paged_decode(backend)
 }
 
+fn paged_decode_requires_contiguous_kv_chunks(backend: &dyn BackendRuntime) -> bool {
+    BackendCapabilityQueries::backend_capabilities(backend)
+        .decode_batcher
+        .paged_decode_requires_contiguous_kv_chunks
+}
+
 #[cfg(feature = "cuda")]
 fn cuda_fused_rotary_qk_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
@@ -19938,7 +19944,7 @@ fn try_flash_attn_paged_decode(
         // Block table too short for the requested seqlen.
         return Ok(None);
     }
-    if BackendIdentity::runtime_name(backend) != "vulkan" {
+    if paged_decode_requires_contiguous_kv_chunks(backend) {
         for c in 0..n_chunks {
             let base_idx = c * pages_per_chunk;
             if base_idx >= allocated {

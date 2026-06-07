@@ -167,7 +167,7 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `AttentionCapabilities` | 3 | `flash_prefill`, `flash_prefill_head_major`, `flash_paged_decode` |
 | `GdnCapabilities` | 6 | `recurrent_step`, `chunk_prep`, `chunk_scan`, `full_chunk_forward`, `gates`, `gated_rms_norm` |
 | `DecodeCapabilities` | 6 | `resident_decode`, `paged_decode_graph_outputs`, `linear_argmax`, `linear_argmax_batch`, `linear_sample`, `linear_sample_batch` |
-| `DecodeBatcherPolicy` | 11 | `max_batch`, `wait_micros`, `allow_mixed_seq_lens`, `rowwise_retry_env`, `prefer_direct_paged_decode_attention`, `direct_paged_decode_attention_env_gate`, `allow_prefix_cache_split_snapshot`, `use_greedy_token_decode`, `use_native_sampled_contiguous_decode`, `sampled_contiguous_decode_requires_resident_decode`, `partition_noncontiguous_gdn_kv_tiles` |
+| `DecodeBatcherPolicy` | 12 | `max_batch`, `wait_micros`, `allow_mixed_seq_lens`, `rowwise_retry_env`, `prefer_direct_paged_decode_attention`, `direct_paged_decode_attention_env_gate`, `allow_prefix_cache_split_snapshot`, `paged_decode_requires_contiguous_kv_chunks`, `use_greedy_token_decode`, `use_native_sampled_contiguous_decode`, `sampled_contiguous_decode_requires_resident_decode`, `partition_noncontiguous_gdn_kv_tiles` |
 | `BackendTrainingCapabilities` | 2 | `hooks`, `precision` |
 | `ReplayCapabilities` | 3 | `resident_decode`, `paged_decode_graph_outputs`, `authority` |
 | `ReplayAuthority` | 4 | `backend`, `production_authority`, `native_primitive`, `graph_crate_role` |

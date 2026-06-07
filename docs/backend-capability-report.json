@@ -1682,7 +1682,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "DecodeBatcherPolicy": {
-      "field_count": 11,
+      "field_count": 12,
       "fields": [
         {
           "name": "max_batch",
@@ -1710,6 +1710,10 @@
         },
         {
           "name": "allow_prefix_cache_split_snapshot",
+          "type": "bool"
+        },
+        {
+          "name": "paged_decode_requires_contiguous_kv_chunks",
           "type": "bool"
         },
         {

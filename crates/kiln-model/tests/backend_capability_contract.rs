@@ -1188,6 +1188,10 @@ fn generated_capability_report_lists_request_descriptors() {
         "DecodeBatcherPolicy should own prefix-cache split snapshot routing"
     );
     assert!(
+        decode_batcher_policy_fields.contains(&"paged_decode_requires_contiguous_kv_chunks"),
+        "DecodeBatcherPolicy should own paged-decode KV chunk contiguity requirements"
+    );
+    assert!(
         decode_batcher_policy_fields.contains(&"use_greedy_token_decode"),
         "DecodeBatcherPolicy should own greedy-token decode shortcut routing"
     );
@@ -2396,6 +2400,11 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "forward direct paged-decode attention routing should read DecodeBatcherPolicy"
     );
     assert!(
+        forward_source.contains("paged_decode_requires_contiguous_kv_chunks")
+            && capability_source.contains("paged_decode_requires_contiguous_kv_chunks"),
+        "forward paged-decode KV contiguity routing should read DecodeBatcherPolicy"
+    );
+    assert!(
         forward_source.contains("ResidencyBackend"),
         "forward GDN recurrent residency helpers should import the focused residency facet"
     );
@@ -2510,6 +2519,21 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             "try_flash_attn_paged_decode should not branch locally on backend identity/env helper: {forbidden}"
         );
     }
+    let paged_decode_kv_contiguity_section = source_between(
+        &forward_source,
+        "// Verify intra-chunk contiguity.",
+        "// Build a padded block_table tensor",
+    );
+    assert!(
+        paged_decode_kv_contiguity_section
+            .contains("paged_decode_requires_contiguous_kv_chunks(backend)"),
+        "paged-decode KV contiguity guard should read the backend policy helper"
+    );
+    assert!(
+        !paged_decode_kv_contiguity_section
+            .contains("BackendIdentity::runtime_name(backend) != \"vulkan\""),
+        "paged-decode KV contiguity guard should not branch on Vulkan backend identity"
+    );
     for removed_helper in [
         "fn default_decode_batcher_max_batch_kt",
         "fn default_decode_batcher_allow_mixed_seq_lens_kt",
