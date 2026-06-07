@@ -2276,6 +2276,8 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         .expect("lora_loader.rs should be readable");
     let speculative_source = fs::read_to_string(root.join("crates/kiln-model/src/speculative.rs"))
         .expect("speculative.rs should be readable");
+    let sampling_source = fs::read_to_string(root.join("crates/kiln-model/src/sampling.rs"))
+        .expect("sampling.rs should be readable");
     let cuda_graph_source = fs::read_to_string(root.join("crates/kiln-model/src/cuda_graph.rs"))
         .expect("cuda_graph.rs should be readable");
     let rocm_graph_source = fs::read_to_string(root.join("crates/kiln-model/src/rocm_graph.rs"))
@@ -2349,6 +2351,30 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         speculative_source.contains("try_device_logits_to_probs"),
         "speculative rejection sampling should expose a device-dispatched logits-to-probs path"
     );
+    assert!(
+        sampling_source.contains("pub fn try_topk_on_device("),
+        "sampling should expose the shared device top-k helper for non-generation callers"
+    );
+    let entropy_kl_threshold_section = source_between(
+        &trainer_source,
+        "fn entropy_aware_kl_threshold_from_policy_log_probs(",
+        "let plp_host:",
+    );
+    assert!(
+        entropy_kl_threshold_section.contains("try_topk_on_device(&flat, idx + 1)"),
+        "entropy-aware KL threshold should consume the shared device top-k helper"
+    );
+    for forbidden in [
+        "matches!(flat.device(), Device::Cuda(_))",
+        "matches!(flat.device(), Device::Rocm(_))",
+        "cuda_topk_last_axis",
+        "rocm_topk_last_axis",
+    ] {
+        assert!(
+            !entropy_kl_threshold_section.contains(forbidden),
+            "entropy-aware KL threshold should not branch locally on backend top-k dispatch: {forbidden}"
+        );
+    }
     assert!(
         speculative_source.contains("kiln_tensor::ops::div_scalar")
             && speculative_source.contains("softmax_last_dim"),

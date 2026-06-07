@@ -99,7 +99,7 @@ use kiln_model::forward::{
     transformer_mlp_down_from_gated, transformer_mlp_gated_hidden,
 };
 use kiln_model::lora_loader::{LoraLayerWeights, LoraProjectionWeights, LoraWeights};
-use kiln_model::sampling::greedy_sample;
+use kiln_model::sampling::{greedy_sample, try_topk_on_device};
 
 use crate::replay::{
     self, BaseModel, Lineage, OutcomeRecord, OutcomeStatus, ParentLora, ReplayKind, ReplayLog,
@@ -8864,27 +8864,19 @@ fn entropy_aware_kl_threshold_from_policy_log_probs(
             .flatten_all()?
             .reshape(vec![num_active])?
             .contiguous()?;
-        #[cfg(not(any(feature = "cuda", feature = "rocm")))]
-        let _ = &flat;
-        #[cfg(feature = "cuda")]
-        if matches!(flat.device(), Device::Cuda(_)) {
-            let (values, _indices) = kiln_tensor::cuda_topk_last_axis(&flat, idx + 1)
-                .map_err(|e| anyhow::anyhow!("entropy-aware KL CUDA top-k threshold: {e}"))?;
-            let threshold = values
-                .get(idx)
-                .copied()
-                .ok_or_else(|| anyhow::anyhow!("entropy-aware KL top-k returned too few values"))?;
-            return Ok(threshold);
-        }
-        #[cfg(feature = "rocm")]
-        if matches!(flat.device(), Device::Rocm(_)) {
-            let (values, _indices) = kiln_tensor::rocm_topk_last_axis(&flat, idx + 1)
-                .map_err(|e| anyhow::anyhow!("entropy-aware KL ROCm top-k threshold: {e}"))?;
-            let threshold = values
-                .get(idx)
-                .copied()
-                .ok_or_else(|| anyhow::anyhow!("entropy-aware KL top-k returned too few values"))?;
-            return Ok(threshold);
+        match try_topk_on_device(&flat, idx + 1) {
+            Ok(pairs) => {
+                let threshold = pairs.get(idx).map(|(_, value)| *value).ok_or_else(|| {
+                    anyhow::anyhow!("entropy-aware KL top-k returned too few values")
+                })?;
+                return Ok(threshold);
+            }
+            Err(err) => {
+                tracing::debug!(
+                    error = %err,
+                    "entropy-aware KL device top-k declined; falling back to host threshold sort"
+                );
+            }
         }
     }
 

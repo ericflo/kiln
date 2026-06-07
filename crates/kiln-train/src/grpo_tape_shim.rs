@@ -2027,17 +2027,17 @@ mod tests {
     // logit-grad. CPU-only tests are enabled under backend features that expose
     // the kt GRPO helpers.
 
-    #[cfg(any(feature = "cuda", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "vulkan", feature = "rocm"))]
     use super::grpo_pg_loss_from_logits_grad_kt;
-    #[cfg(any(feature = "cuda", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "vulkan", feature = "rocm"))]
     use crate::trainer::GrpoLossParams;
-    #[cfg(any(feature = "cuda", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "vulkan", feature = "rocm"))]
     use crate::trainer::{grpo_loss, token_log_probs};
-    #[cfg(any(feature = "cuda", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "vulkan", feature = "rocm"))]
     use crate::{IsLevel, KlEstimator};
-    #[cfg(any(feature = "cuda", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "vulkan", feature = "rocm"))]
     use kiln_model::backend::GrpoKlAuxiliaryRoute;
-    #[cfg(any(feature = "cuda", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "vulkan", feature = "rocm"))]
     use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
     #[cfg(feature = "cuda")]
     use rand::rngs::StdRng;

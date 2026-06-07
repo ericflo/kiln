@@ -713,7 +713,7 @@ fn try_kt_full_distribution_probs(scaled: &Tensor) -> Result<Option<Vec<f32>>> {
 /// where a host read is local, not a PCIe transfer — it returns `Err` so
 /// callers fall back to `topk_via_host_sort`. Also returns `Err` if the
 /// CUDA op itself fails, so the host fallback preserves correctness.
-fn try_topk_on_device(scaled: &Tensor, top_k: usize) -> Result<Vec<(u32, f32)>> {
+pub fn try_topk_on_device(scaled: &Tensor, top_k: usize) -> Result<Vec<(u32, f32)>> {
     // #1082 perf-fix H9: on CUDA, select the top-k on-device and transfer
     // ONLY the ~k (value, index) pairs (~k * 12 bytes) back to host —
     // instead of the `topk_via_host_sort` fallback's full-[V] f32
