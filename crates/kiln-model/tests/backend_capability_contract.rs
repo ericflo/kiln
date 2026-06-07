@@ -2323,6 +2323,12 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "generate decode residency gates should import the focused replay facet"
     );
     assert!(
+        generate_source.contains("ReplayNativePrimitive")
+            && generate_source.contains("ReplayRequest")
+            && generate_source.contains("paged_decode_replay_primitive_enabled"),
+        "generate graph replay routing should consume typed replay requests and replay authority"
+    );
+    assert!(
         generate_source.contains("ResidencyBackend"),
         "generate GDN recurrent residency scopes should import the focused residency facet"
     );
@@ -2462,6 +2468,50 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         !sampled_contiguous_decode_section
             .contains("matches!(self.backend_device(), kiln_tensor::Device::Metal(_))"),
         "sampled contiguous decode routing should not branch on Metal device identity in ModelRunner"
+    );
+
+    let graph_replay_routing_section = source_between(
+        &generate_source,
+        "fn paged_decode_replay_primitive_enabled(",
+        "fn decode_hot_path_fallback_disabled_context(",
+    );
+    assert!(
+        graph_replay_routing_section.contains("ReplayBackend::runtime_supports_replay_request")
+            && graph_replay_routing_section.contains("ReplayBackend::runtime_replay_authority")
+            && graph_replay_routing_section.contains("native_support_enabled"),
+        "paged decode graph replay routing should use the focused ReplayBackend facet"
+    );
+
+    let batched_rocm_graph_section = source_between(
+        &generate_source,
+        "// R.9: ROCm HIP-graph single-row decode for the batched/batching-engine",
+        "let pc_guard = lock_paged_cache(paged_cache)?;",
+    );
+    assert!(
+        batched_rocm_graph_section.contains("paged_decode_replay_primitive_enabled")
+            && batched_rocm_graph_section.contains("ReplayNativePrimitive::HipGraph"),
+        "batched ROCm graph routing should use replay primitive policy"
+    );
+    assert!(
+        !batched_rocm_graph_section
+            .contains("matches!(self.backend_device(), kiln_tensor::Device::Rocm(_))"),
+        "batched ROCm graph routing should not branch on device identity"
+    );
+
+    let greedy_metal_graph_section = source_between(
+        &generate_source,
+        "fn decode_next_token_paged_greedy_metal_graph(",
+        "fn decode_next_token_paged_sample_metal_graph(",
+    );
+    assert!(
+        greedy_metal_graph_section.contains("paged_decode_replay_primitive_enabled")
+            && greedy_metal_graph_section.contains("ReplayNativePrimitive::MetalIcb"),
+        "single-row Metal graph routing should use replay primitive policy"
+    );
+    assert!(
+        !greedy_metal_graph_section
+            .contains("matches!(self.backend_device(), kiln_tensor::Device::Metal(_))"),
+        "single-row Metal graph routing should not branch on device identity"
     );
 
     let trainer_policy_section = source_between(

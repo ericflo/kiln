@@ -21,7 +21,10 @@ use kiln_core::tokenizer::KilnTokenizer;
 use crate::backend::{
     self, BackendIdentity, BackendRuntime, FallbackPolicy, LinearBackend, ReplayBackend,
     ResidencyBackend, SamplingBackend, TrainingLossBackend,
-    capability::{BackendCapabilityQueries, DecodeBatcherPolicy},
+    capability::{
+        BackendCapabilityQueries, DecodeBatcherPolicy, ReplayNativePrimitive, ReplayRequest,
+        Support,
+    },
 };
 use crate::cancel::CancelHandle;
 use crate::cuda_graph::CudaGraphRunner;
@@ -742,6 +745,31 @@ fn decode_hot_path_debug_fallback_enabled(debug_env: Option<&'static str>) -> bo
         || debug_env
             .map(|env_var| env_flag_enabled(env_var, false))
             .unwrap_or(false)
+}
+
+fn native_support_enabled(support: Support) -> bool {
+    matches!(support, Support::Native | Support::NativeWithConstraints)
+}
+
+fn paged_decode_graph_replay_request(config: &ModelConfig, max_batch: usize) -> ReplayRequest {
+    ReplayRequest::paged_decode_graph_outputs(
+        config.hidden_size,
+        config.intermediate_size,
+        max_batch.max(1),
+    )
+    .with_dtype(paged_cache_kt_dtype(config.dtype))
+}
+
+fn paged_decode_replay_primitive_enabled(
+    backend: &dyn BackendRuntime,
+    config: &ModelConfig,
+    max_batch: usize,
+    primitive: ReplayNativePrimitive,
+) -> bool {
+    let req = paged_decode_graph_replay_request(config, max_batch);
+    let support = ReplayBackend::runtime_supports_replay_request(backend, &req);
+    let authority = ReplayBackend::runtime_replay_authority(backend);
+    native_support_enabled(support) && authority.native_primitive == primitive
 }
 
 fn decode_hot_path_fallback_disabled_context(
@@ -3517,7 +3545,12 @@ impl ModelRunner {
         // outside the captured graph.
         if sampled.is_none()
             && row_count == 1
-            && matches!(self.backend_device(), kiln_tensor::Device::Rocm(_))
+            && paged_decode_replay_primitive_enabled(
+                self.backend.as_ref(),
+                &self.config,
+                1,
+                ReplayNativePrimitive::HipGraph,
+            )
             && self
                 .rocm_graph
                 .lock()
@@ -3998,49 +4031,57 @@ impl ModelRunner {
         if batch == 1 {
             let stage_start = profile_stages.then(std::time::Instant::now);
             let pc_guard = lock_paged_cache(paged_cache)?;
-            let mut token = None;
             #[cfg(feature = "metal")]
-            if matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
-                && self.active_lora.is_none()
-            {
-                let graph_tokens = {
-                    let one_tokens = [input_tokens[0]];
-                    let one_block_tables = [block_tables[0]];
-                    let one_seq_lens = [seq_lens[0]];
-                    let linear_state_for_graph = if has_linear_layers {
-                        Some(&mut *linear_states[0])
-                    } else {
-                        None
+            let token = {
+                let mut token = None;
+                if paged_decode_replay_primitive_enabled(
+                    self.backend.as_ref(),
+                    &self.config,
+                    1,
+                    ReplayNativePrimitive::MetalIcb,
+                ) && self.active_lora.is_none()
+                {
+                    let graph_tokens = {
+                        let one_tokens = [input_tokens[0]];
+                        let one_block_tables = [block_tables[0]];
+                        let one_seq_lens = [seq_lens[0]];
+                        let linear_state_for_graph = if has_linear_layers {
+                            Some(&mut *linear_states[0])
+                        } else {
+                            None
+                        };
+                        let mut runner = self.metal_graph.lock().map_err(|e| {
+                            anyhow::anyhow!("failed to lock Metal graph runner: {e}")
+                        })?;
+                        if runner.is_enabled() {
+                            runner.decode_step_paged_greedy_batch(
+                                &*self.backend,
+                                &one_tokens,
+                                &self.weights,
+                                &self.config,
+                                pc_guard,
+                                &one_block_tables,
+                                &one_seq_lens,
+                                linear_state_for_graph,
+                                self.active_lora.as_ref(),
+                            )?
+                        } else {
+                            None
+                        }
                     };
-                    let mut runner = self
-                        .metal_graph
-                        .lock()
-                        .map_err(|e| anyhow::anyhow!("failed to lock Metal graph runner: {e}"))?;
-                    if runner.is_enabled() {
-                        runner.decode_step_paged_greedy_batch(
-                            &*self.backend,
-                            &one_tokens,
-                            &self.weights,
-                            &self.config,
-                            pc_guard,
-                            &one_block_tables,
-                            &one_seq_lens,
-                            linear_state_for_graph,
-                            self.active_lora.as_ref(),
-                        )?
-                    } else {
-                        None
+                    if let Some(graph_tokens) = graph_tokens {
+                        anyhow::ensure!(
+                            graph_tokens.len() == 1,
+                            "Metal graph single-row greedy returned {} tokens",
+                            graph_tokens.len()
+                        );
+                        token = graph_tokens.first().copied();
                     }
-                };
-                if let Some(graph_tokens) = graph_tokens {
-                    anyhow::ensure!(
-                        graph_tokens.len() == 1,
-                        "Metal graph single-row greedy returned {} tokens",
-                        graph_tokens.len()
-                    );
-                    token = graph_tokens.first().copied();
                 }
-            }
+                token
+            };
+            #[cfg(not(feature = "metal"))]
+            let token = None;
             let token = (match token {
                 Some(token) => Ok(token),
                 None => {
@@ -4308,7 +4349,12 @@ impl ModelRunner {
         let stage_start = profile_stages.then(std::time::Instant::now);
         let tokens = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            let graph_tokens = if matches!(self.backend_device(), kiln_tensor::Device::Metal(_)) {
+            let graph_tokens = if paged_decode_replay_primitive_enabled(
+                self.backend.as_ref(),
+                &self.config,
+                batch,
+                ReplayNativePrimitive::MetalIcb,
+            ) {
                 let mut runner = self
                     .metal_graph
                     .lock()
@@ -4567,8 +4613,12 @@ impl ModelRunner {
         let stage_start = profile_stages.then(std::time::Instant::now);
         let mut tokens = None;
         #[cfg(feature = "metal")]
-        if matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
-            && self.active_lora.is_none()
+        if paged_decode_replay_primitive_enabled(
+            self.backend.as_ref(),
+            &self.config,
+            batch,
+            ReplayNativePrimitive::MetalIcb,
+        ) && self.active_lora.is_none()
         {
             let pc_guard = lock_paged_cache(paged_cache)?;
             let linear_state_for_graph = if has_linear_layers {
@@ -4882,8 +4932,12 @@ impl ModelRunner {
     ) -> Result<Option<TokenId>> {
         #[cfg(feature = "metal")]
         {
-            if !matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
-                || self.active_lora.is_some()
+            if !paged_decode_replay_primitive_enabled(
+                self.backend.as_ref(),
+                &self.config,
+                1,
+                ReplayNativePrimitive::MetalIcb,
+            ) || self.active_lora.is_some()
             {
                 return Ok(None);
             }
@@ -4945,7 +4999,12 @@ impl ModelRunner {
         #[cfg(feature = "metal")]
         {
             if params.is_effectively_greedy()
-                || !matches!(self.backend_device(), kiln_tensor::Device::Metal(_))
+                || !paged_decode_replay_primitive_enabled(
+                    self.backend.as_ref(),
+                    &self.config,
+                    1,
+                    ReplayNativePrimitive::MetalIcb,
+                )
                 || self.active_lora.is_some()
             {
                 return Ok(None);
@@ -5151,7 +5210,12 @@ impl ModelRunner {
         // the graph runner (capture/replay, with eager fallback). When the
         // runner is disabled via `KILN_ROCM_GRAPHS=0`, this is skipped entirely
         // and the eager path below runs unchanged.
-        if matches!(self.backend_device(), kiln_tensor::Device::Rocm(_)) {
+        if paged_decode_replay_primitive_enabled(
+            self.backend.as_ref(),
+            &self.config,
+            1,
+            ReplayNativePrimitive::HipGraph,
+        ) {
             let maybe_logits = {
                 let mut runner = self
                     .rocm_graph
