@@ -1178,7 +1178,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
             "evidence": [
                 "docs/backend-latency-fixtures.json",
                 "docs/backend-latency-result-schema.md",
-                ".github/workflows/perf-regression-nightly.yml",
+                "scripts/check_unification_gates.sh",
                 "scripts/run_backend_latency_fixture.py",
                 "scripts/write_backend_latency_result_artifact.py",
                 "scripts/import_backend_latency_artifact.py",
@@ -1203,6 +1203,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
                 "docs/backend-capability-report.md",
                 "docs/backend-capability-report.json",
                 "scripts/generate_backend_capability_report.py",
+                "scripts/check_unification_gates.sh",
             ],
         },
     ]
@@ -1450,7 +1451,7 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
                 "docs/backend-capability-report.json",
                 "docs/backend-latency-fixtures.json",
                 "docs/backend-latency-result-schema.md",
-                ".github/workflows/perf-regression-nightly.yml",
+                "scripts/check_unification_gates.sh",
                 "scripts/run_backend_latency_fixture.py",
                 "scripts/write_backend_latency_result_artifact.py",
                 "scripts/import_backend_latency_artifact.py",

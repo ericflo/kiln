@@ -177,8 +177,12 @@ def git_commit_exists(commit: str) -> bool:
     return True
 
 
+def git_dirty_status_lines() -> list[str]:
+    return git_output(["status", "--porcelain", "--untracked-files=all"]).splitlines()
+
+
 def tracked_git_dirty() -> bool:
-    return bool(git_output(["status", "--porcelain", "--untracked-files=no"]))
+    return bool(git_dirty_status_lines())
 
 
 def repo_relative_path(path: Path) -> str:
@@ -518,6 +522,38 @@ def self_test() -> int:
         else:
             print(json.dumps({"ok": False, "case": "non-finite artifact did not fail"}))
             return 1
+
+        probe = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                dir=ROOT,
+                prefix=".backend-latency-writer-untracked-",
+                delete=False,
+            ) as handle:
+                handle.write("untracked latency provenance probe\n")
+                probe = Path(handle.name)
+            probe_repo_path = repo_relative_path(probe)
+            status_lines = git_dirty_status_lines()
+            if not any(
+                line.startswith("?? ") and line.endswith(probe_repo_path)
+                for line in status_lines
+            ):
+                print(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "case": "untracked dirty probe",
+                            "probe": probe_repo_path,
+                            "status_lines": status_lines,
+                        },
+                        indent=2,
+                    )
+                )
+                return 1
+        finally:
+            if probe is not None:
+                probe.unlink(missing_ok=True)
 
     print(json.dumps({"ok": True, "self_test": "backend latency artifact writer"}))
     return 0

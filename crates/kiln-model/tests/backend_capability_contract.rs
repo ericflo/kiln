@@ -5157,9 +5157,10 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "git_output_bytes",
         "ls-files",
         "git_output_bytes([\"show\", f\"{commit}:{path}\"])",
+        "git_dirty_status_lines",
         "tracked_git_dirty",
         "rev-parse",
-        "--untracked-files=no",
+        "--untracked-files=all",
         "LATENCY_RESULT_ARTIFACT_DIR",
         "LATENCY_RAW_LOG_DIR",
         "bench-results/backend-latency",
@@ -5289,6 +5290,30 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         );
     }
 
+    let local_gate_source = fs::read_to_string(root.join("scripts/check_unification_gates.sh"))
+        .expect("local unification gate should be readable");
+    for required in [
+        "set -euo pipefail",
+        "PYTHON_BIN",
+        "CARGO_BIN",
+        "scripts/generate_backend_capability_report.py",
+        "--check",
+        "test --locked -p kiln-model --test backend_capability_contract",
+        "scripts/run_backend_latency_fixture.py --self-test",
+        "scripts/write_backend_latency_result_artifact.py --self-test",
+        "scripts/import_backend_latency_artifact.py --self-test",
+        "scripts/lock_backend_latency_thresholds.py --self-test",
+        "scripts/check_backend_latency_fixtures.py --self-test",
+        "scripts/plan_backend_latency_fixture_dispatch.py --self-test",
+        "docs/backend-latency-fixtures.json",
+        "--require-covered",
+    ] {
+        assert!(
+            local_gate_source.contains(required),
+            "local unification gate should run {required}"
+        );
+    }
+
     let planner_source =
         fs::read_to_string(root.join("scripts/plan_backend_latency_fixture_dispatch.py"))
             .expect("latency fixture dispatch planner should be readable");
@@ -5331,7 +5356,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
     for path in [
         "docs/backend-latency-fixtures.json",
         "docs/backend-latency-result-schema.md",
-        ".github/workflows/perf-regression-nightly.yml",
+        "scripts/check_unification_gates.sh",
         "scripts/run_backend_latency_fixture.py",
         "scripts/write_backend_latency_result_artifact.py",
         "scripts/import_backend_latency_artifact.py",
@@ -5362,6 +5387,8 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "required_backends",
         "git_commit",
         "git_tracked_dirty",
+        "untracked repo files",
+        "--untracked-files=all",
         "40-character git commit",
         "local repository",
         "source bytes at that commit",
@@ -5873,5 +5900,9 @@ fn generated_capability_report_check_mode_is_non_mutating_and_enforced() {
     assert!(
         evidence_present.contains(&"scripts/generate_backend_capability_report.py"),
         "generated dashboard gate should cite the generator itself"
+    );
+    assert!(
+        evidence_present.contains(&"scripts/check_unification_gates.sh"),
+        "generated dashboard gate should cite the local unification gate"
     );
 }

@@ -93,14 +93,24 @@ Required fields:
 - `raw_log_sha256`: lowercase SHA-256 hex digest of the raw fixture log
 - `git_commit`: lowercase 40-character git commit object for the checkout that
   captured the artifact
-- `git_tracked_dirty`: boolean reporting whether tracked files were dirty when
-  the artifact was materialized; covered fixtures require this to be `false`
+- `git_tracked_dirty`: historical field name for the writer's clean-checkout
+  marker. The writer computes it from
+  `git status --porcelain --untracked-files=all`, so tracked modifications and
+  untracked repo files both make the artifact dirty. Covered fixtures require
+  this to be `false`
 - `metrics`: object containing exactly every metric named by the fixture, with
   finite numeric values
 
 Covered result artifacts must not contain additional top-level keys, and
 `metrics` must not contain undeclared metric names. Additive schema changes
 should bump `artifact_schema_version` and update the validator.
+
+The validator's trust boundary is repository evidence, not a hardware oracle:
+it checks that reviewed artifact JSON, raw logs, fixture source, commit
+provenance, metric values, and locked thresholds are mutually consistent and
+tracked. A clean-checkout artifact must not be materialized while new
+untracked repo evidence is present; this keeps local scratch files from
+claiming the same provenance as checked-in hardware evidence.
 
 When `--require-covered` is set, the validator requires the fixture
 `result_artifact`, fixture `source`, result `manifest`, and result `raw_log`
@@ -114,7 +124,8 @@ their SHA-256 digests match
 lowercase 40-character commit that exists in the local repository, requires the
 fixture source to exist at `git_commit`, requires `source_sha256` to match the
 source bytes at that commit, and requires `git_tracked_dirty` to be `false` for
-covered validation. It then re-parses the
+covered validation. The writer sets that field from
+`git status --porcelain --untracked-files=all`. It then re-parses the
 raw log `KILN_LATENCY_METRIC` lines and requires every declared artifact metric
 value and unit to match the raw log. It rejects unknown artifact keys and
 undeclared artifact metrics.
@@ -261,8 +272,9 @@ source and raw log files to exist and match `source_sha256`/`raw_log_sha256`.
 It requires `git_commit` to be a lowercase 40-character commit that exists in
 the local repository, requires the fixture source to exist at `git_commit`,
 requires `source_sha256` to match the source bytes at that commit, and requires
-`git_tracked_dirty` to be `false` before thresholds can lock. It re-parses the
-raw log and requires each
+`git_tracked_dirty` to be `false` before thresholds can lock. That field is
+computed with `--untracked-files=all`, so new untracked repo files invalidate
+the clean-checkout marker. It re-parses the raw log and requires each
 artifact metric value and unit to match before deriving thresholds. Pass
 `--fixture-id` repeatedly to lock only selected fixtures as their artifacts land;
 unselected fixtures stay `pending_fixture_result`, and manifest `status` remains
