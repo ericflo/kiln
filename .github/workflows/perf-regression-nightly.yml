@@ -98,6 +98,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v6
@@ -112,7 +113,7 @@ jobs:
           python3 scripts/lock_backend_latency_thresholds.py --self-test
           python3 scripts/check_backend_latency_fixtures.py --self-test
           python3 scripts/plan_backend_latency_fixture_dispatch.py --self-test
-          python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json
+          python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered
 
       - name: Verify gate accepts a within-tolerance run (no regression)
         run: |
@@ -272,6 +273,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
 
       - name: Install Rust stable
         run: |
@@ -366,9 +368,9 @@ jobs:
             docs/backend-latency-fixtures.json \
             "${{ inputs.latency_fixture_id }}"
 
-      - name: Validate pending latency fixture manifest
+      - name: Validate covered latency fixture manifest
         run: |
-          python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json
+          python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered
 
       - name: Upload backend latency fixture artifacts
         if: ${{ always() }}

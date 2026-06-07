@@ -2653,15 +2653,8 @@
       "supplemental_commands": []
     },
     {
-      "command": "python3 scripts/run_backend_latency_fixture.py --self-test && python3 scripts/write_backend_latency_result_artifact.py --self-test && python3 scripts/import_backend_latency_artifact.py --self-test && python3 scripts/lock_backend_latency_thresholds.py --self-test && python3 scripts/check_backend_latency_fixtures.py --self-test && python3 scripts/plan_backend_latency_fixture_dispatch.py --self-test && hardware runner required; python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered",
-      "coverage_blockers": [
-        "manifest status is 'fixture_required', expected 'covered'",
-        "cuda_a6000_flce_phase_a_validation: missing result artifact bench-results/backend-latency/cuda-a6000-flce-phase-a.json",
-        "cuda_a6000_flce_phase_a_validation: threshold_state is 'pending_fixture_result', expected 'locked_threshold'",
-        "cuda_a6000_flce_phase_a_validation.t2048_flce_on_step_secs: max threshold is not finite numeric",
-        "cuda_a6000_flce_phase_a_validation.t8192_streaming_tile4096_step_secs: max threshold is not finite numeric",
-        "cuda_a6000_flce_phase_a_validation.t16384_streaming_tile4096_step_secs: max threshold is not finite numeric"
-      ],
+      "command": "python3 scripts/run_backend_latency_fixture.py --self-test && python3 scripts/write_backend_latency_result_artifact.py --self-test && python3 scripts/import_backend_latency_artifact.py --self-test && python3 scripts/lock_backend_latency_thresholds.py --self-test && python3 scripts/check_backend_latency_fixtures.py --self-test && python3 scripts/plan_backend_latency_fixture_dispatch.py --self-test && python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered",
+      "coverage_blockers": [],
       "evidence": [
         "docs/backend-latency-fixtures.json",
         "docs/backend-latency-result-schema.md",
@@ -2672,6 +2665,7 @@
         "scripts/lock_backend_latency_thresholds.py",
         "scripts/check_backend_latency_fixtures.py",
         "scripts/plan_backend_latency_fixture_dispatch.py",
+        "crates/kiln-tensor/tests/cuda_latency_bench.rs",
         "crates/kiln-server/examples/flce_preflight_bench.rs",
         "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
         "crates/kiln-tensor/tests/metal_matmul_bench.rs",
@@ -2690,6 +2684,7 @@
         "scripts/lock_backend_latency_thresholds.py",
         "scripts/check_backend_latency_fixtures.py",
         "scripts/plan_backend_latency_fixture_dispatch.py",
+        "crates/kiln-tensor/tests/cuda_latency_bench.rs",
         "crates/kiln-server/examples/flce_preflight_bench.rs",
         "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
         "crates/kiln-tensor/tests/metal_matmul_bench.rs",
@@ -2699,7 +2694,7 @@
       ],
       "gate": "hardware_latency_thresholds",
       "phase8_requirement": "backend-specific latency thresholds on known hardware fixtures",
-      "status": "fixture_required",
+      "status": "covered",
       "supplemental_commands": []
     },
     {
@@ -3398,13 +3393,11 @@
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
       "phase": 8,
-      "remaining": [
-        "hardware_latency_thresholds remains fixture_required until real known-hardware result artifacts satisfy --require-covered"
-      ],
+      "remaining": [],
       "report_sections": [
         "Conformance And Performance Gates"
       ],
-      "status": "fixture_required",
+      "status": "covered",
       "title": "Conformance and performance gates"
     }
   ],

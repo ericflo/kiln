@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "status": "fixture_required",
+  "status": "covered",
   "policy": {
     "covered_gate_requires": [
       "Every required backend has at least one known hardware fixture.",
@@ -28,31 +28,31 @@
       "source": "crates/kiln-tensor/tests/cuda_latency_bench.rs",
       "command": "CUDARC_CUDA_VERSION=12080 cargo test -p kiln-tensor --features cuda --test cuda_latency_bench -- --ignored --nocapture",
       "result_artifact": "bench-results/backend-latency/cuda-rtx4090-matmul.json",
-      "threshold_state": "pending_fixture_result",
+      "threshold_state": "locked_threshold",
       "metrics": [
         {
           "name": "decode_qkv_m1_2560x4096_ms",
           "unit": "ms",
           "comparison": "<=",
-          "max": null
+          "max": 0.073941
         },
         {
           "name": "prefill_qkv_m256_2560x4096_ms",
           "unit": "ms",
           "comparison": "<=",
-          "max": null
+          "max": 0.088925
         },
         {
           "name": "prefill_gate_up_m256_2560x18432_ms",
           "unit": "ms",
           "comparison": "<=",
-          "max": null
+          "max": 0.216678
         },
         {
           "name": "lm_head_m1_2560x152064_ms",
           "unit": "ms",
           "comparison": "<=",
-          "max": null
+          "max": 0.994028
         }
       ]
     },
