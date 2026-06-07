@@ -20,7 +20,7 @@ use kiln_core::tokenizer::KilnTokenizer;
 
 use crate::backend::{
     self, BackendIdentity, BackendRuntime, FallbackPolicy, LinearBackend, ReplayBackend,
-    ResidencyBackend, SamplingBackend, TrainingLossBackend,
+    ResidencyBackend, SamplingBackend, StartupBackend, TrainingLossBackend,
     capability::{
         BackendCapabilities, BackendCapabilityQueries, DecodeBatcherPolicy, ReplayNativePrimitive,
         ReplayRequest, Support,
@@ -1666,6 +1666,10 @@ impl ModelRunner {
             self.config.intermediate_size,
             max_batch,
         )
+    }
+
+    pub fn precompile_backend_startup_kernels(&self) -> Result<()> {
+        StartupBackend::runtime_precompile_startup_kernels(self.backend.as_ref())
     }
 
     /// Preload backend-specific decode weights into any persistent device cache.

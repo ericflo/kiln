@@ -1916,7 +1916,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "StartupCapabilities": {
-      "field_count": 5,
+      "field_count": 6,
       "fields": [
         {
           "name": "run_inference_prewarm",
@@ -1924,6 +1924,10 @@
         },
         {
           "name": "require_inference_prewarm_for_health",
+          "type": "bool"
+        },
+        {
+          "name": "precompile_custom_kernels",
           "type": "bool"
         },
         {
@@ -2693,6 +2697,14 @@
         "runtime_supports_linear_decode_argmax_batch",
         "runtime_supports_linear_decode_sample",
         "runtime_supports_linear_decode_sample_batch"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    },
+    "StartupBackend": {
+      "forwarding_impl": "blanket_backend_runtime",
+      "method_count": 1,
+      "methods": [
+        "runtime_precompile_startup_kernels"
       ],
       "source": "crates/kiln-model/src/backend/mod.rs"
     },
@@ -3727,5 +3739,5 @@
       ]
     }
   },
-  "trait_method_count": 94
+  "trait_method_count": 95
 }

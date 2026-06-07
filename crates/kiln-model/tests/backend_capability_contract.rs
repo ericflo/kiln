@@ -1183,6 +1183,10 @@ fn generated_capability_report_lists_request_descriptors() {
             "StartupCapabilities should own health readiness prewarm policy",
         ),
         (
+            "precompile_custom_kernels",
+            "StartupCapabilities should own startup custom-kernel precompile policy",
+        ),
+        (
             "native_training_default_enabled",
             "StartupCapabilities should own native-training default enablement",
         ),
@@ -2141,6 +2145,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
 
     for (facet, required_method) in [
         ("BackendIdentity", "runtime_name"),
+        ("StartupBackend", "runtime_precompile_startup_kernels"),
         ("AttentionBackend", "runtime_flash_attn_prefill"),
         ("PagedKvBackend", "runtime_paged_kv_head_major_read"),
         ("GdnBackend", "runtime_gdn_recurrent_step"),
@@ -2759,6 +2764,16 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             && server_prewarm_policy_section.contains("decode_weight_prewarm_when_native_training")
             && server_prewarm_policy_section.contains("native_training_enabled_for_startup"),
         "kiln-server inference prewarm routing should consume StartupCapabilities"
+    );
+    assert!(
+        server_main_source.contains("precompile_backend_startup_kernels")
+            && !server_main_source.contains("fn precompile_metal_custom_kernels")
+            && !server_main_source.contains("fn precompile_vulkan_custom_kernels")
+            && !server_main_source
+                .contains("kiln_model::backend::metal::precompile_custom_kernels")
+            && !server_main_source
+                .contains("kiln_model::backend::vulkan::precompile_custom_kernels"),
+        "kiln-server startup custom-kernel precompile should route through StartupBackend"
     );
     for forbidden in [
         "backend_name() == \"vulkan\"",

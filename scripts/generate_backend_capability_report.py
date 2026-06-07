@@ -106,6 +106,7 @@ RESIDENT_RESOURCE_DESCRIPTOR_STRUCTS = [
 
 FOCUSED_BACKEND_TRAITS = [
     "BackendIdentity",
+    "StartupBackend",
     "AttentionBackend",
     "PagedKvBackend",
     "GdnBackend",

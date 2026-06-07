@@ -522,6 +522,53 @@ impl FallbackPolicy {
     }
 }
 
+fn startup_backend_kind(name: &str, device: kiln_tensor::Device) -> kiln_tensor::Backend {
+    match name {
+        "cpu" => kiln_tensor::Backend::Cpu,
+        "cuda" => kiln_tensor::Backend::Cuda,
+        "metal" => kiln_tensor::Backend::Metal,
+        "vulkan" => kiln_tensor::Backend::Vulkan,
+        "rocm" => kiln_tensor::Backend::Rocm,
+        _ => device.backend(),
+    }
+}
+
+fn precompile_startup_kernels_for_backend(name: &str, device: kiln_tensor::Device) -> Result<()> {
+    match startup_backend_kind(name, device) {
+        #[cfg(feature = "metal")]
+        kiln_tensor::Backend::Metal => {
+            let start = std::time::Instant::now();
+            match metal::precompile_custom_kernels(&device) {
+                Ok(()) => tracing::info!(
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "Metal custom kernels precompiled during background prewarm"
+                ),
+                Err(err) => tracing::warn!(
+                    error = %err,
+                    "Metal custom kernel precompile failed; falling back to lazy compilation"
+                ),
+            }
+            Ok(())
+        }
+        #[cfg(feature = "vulkan")]
+        kiln_tensor::Backend::Vulkan => {
+            let start = std::time::Instant::now();
+            match vulkan::precompile_custom_kernels() {
+                Ok(()) => tracing::info!(
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "Vulkan custom kernels precompiled during background prewarm"
+                ),
+                Err(err) => tracing::warn!(
+                    error = %err,
+                    "Vulkan custom kernel precompile failed; falling back to lazy compilation"
+                ),
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// Human-readable name (`"cuda"`, `"metal"`, `"cpu"`). Surfaced in
     /// `/health` and logs.
@@ -560,6 +607,10 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
 
     fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
         TrainingPrecisionPolicy::portable()
+    }
+
+    fn precompile_startup_kernels(&self) -> Result<()> {
+        precompile_startup_kernels_for_backend(self.name(), self.device())
     }
 
     /// First-use feasibility check for the Vulkan-resident decode pool:
@@ -1780,6 +1831,11 @@ pub trait BackendIdentity: Send + Sync + std::fmt::Debug {
     fn runtime_as_any(&self) -> &dyn std::any::Any;
 }
 
+/// Focused startup/prewarm facet delegated by the current `BackendRuntime` facade.
+pub trait StartupBackend: Send + Sync + std::fmt::Debug {
+    fn runtime_precompile_startup_kernels(&self) -> Result<()>;
+}
+
 /// Focused `AttentionBackend` facet delegated by the current `BackendRuntime` facade.
 #[allow(clippy::too_many_arguments)]
 pub trait AttentionBackend: Send + Sync + std::fmt::Debug {
@@ -2473,6 +2529,12 @@ impl<T: BackendRuntime + ?Sized> BackendIdentity for T {
 
     fn runtime_as_any(&self) -> &dyn std::any::Any {
         BackendRuntime::as_any(self)
+    }
+}
+
+impl<T: BackendRuntime + ?Sized> StartupBackend for T {
+    fn runtime_precompile_startup_kernels(&self) -> Result<()> {
+        BackendRuntime::precompile_startup_kernels(self)
     }
 }
 

@@ -739,6 +739,7 @@ pub struct StorageCapabilities {
 pub struct StartupCapabilities {
     pub run_inference_prewarm: bool,
     pub require_inference_prewarm_for_health: bool,
+    pub precompile_custom_kernels: bool,
     pub native_training_default_enabled: bool,
     pub native_training_env: Option<&'static str>,
     pub decode_weight_prewarm_when_native_training: bool,
@@ -1206,6 +1207,7 @@ impl StartupCapabilities {
             kiln_tensor::Backend::Metal => Self {
                 run_inference_prewarm: true,
                 require_inference_prewarm_for_health: true,
+                precompile_custom_kernels: true,
                 native_training_default_enabled: false,
                 native_training_env: None,
                 decode_weight_prewarm_when_native_training: false,
@@ -1213,6 +1215,7 @@ impl StartupCapabilities {
             kiln_tensor::Backend::Vulkan => Self {
                 run_inference_prewarm: true,
                 require_inference_prewarm_for_health: true,
+                precompile_custom_kernels: true,
                 native_training_default_enabled: true,
                 native_training_env: Some("KILN_VK_NATIVE_TRAINING"),
                 decode_weight_prewarm_when_native_training: true,
@@ -1220,6 +1223,7 @@ impl StartupCapabilities {
             kiln_tensor::Backend::Rocm => Self {
                 run_inference_prewarm: true,
                 require_inference_prewarm_for_health: false,
+                precompile_custom_kernels: false,
                 native_training_default_enabled: false,
                 native_training_env: None,
                 decode_weight_prewarm_when_native_training: false,
@@ -1227,6 +1231,7 @@ impl StartupCapabilities {
             _ => Self {
                 run_inference_prewarm: false,
                 require_inference_prewarm_for_health: false,
+                precompile_custom_kernels: false,
                 native_training_default_enabled: false,
                 native_training_env: None,
                 decode_weight_prewarm_when_native_training: false,
