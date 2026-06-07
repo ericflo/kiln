@@ -393,6 +393,7 @@ def lock_manifest_thresholds(
     manifest: dict[str, Any],
     headroom: float,
     manifest_path: Path | None = None,
+    fixture_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     if not 0.0 <= headroom < 1.0:
         raise ThresholdLockError("--headroom must be >= 0 and < 1")
@@ -406,17 +407,41 @@ def lock_manifest_thresholds(
         raise ThresholdLockError("missing_fixture_slots must be empty before thresholds can lock")
     validate_required_backend_coverage(manifest, fixtures)
 
+    selected_ids = fixture_ids
+    if selected_ids is not None:
+        fixture_id_set = {
+            fixture.get("id")
+            for fixture in fixtures
+            if isinstance(fixture, dict) and isinstance(fixture.get("id"), str)
+        }
+        unknown_ids = sorted(selected_ids - fixture_id_set)
+        if unknown_ids:
+            raise ThresholdLockError(
+                "requested fixture-id not present in manifest: " + ", ".join(unknown_ids)
+            )
+
     locked = deepcopy(manifest)
-    locked["fixtures"] = [
-        lock_fixture_thresholds(
-            fixture,
-            headroom,
-            manifest.get("schema_version"),
-            manifest_path,
-        )
-        for fixture in fixtures
-    ]
-    locked["status"] = "covered"
+    locked_fixtures = []
+    for fixture in fixtures:
+        fixture_id = fixture.get("id") if isinstance(fixture, dict) else None
+        if selected_ids is None or fixture_id in selected_ids:
+            locked_fixtures.append(
+                lock_fixture_thresholds(
+                    fixture,
+                    headroom,
+                    manifest.get("schema_version"),
+                    manifest_path,
+                )
+            )
+        else:
+            locked_fixtures.append(deepcopy(fixture))
+    locked["fixtures"] = locked_fixtures
+    all_locked = all(
+        isinstance(fixture, dict)
+        and fixture.get("threshold_state") == "locked_threshold"
+        for fixture in locked_fixtures
+    )
+    locked["status"] = "covered" if all_locked else "fixture_required"
     return locked
 
 
@@ -515,6 +540,55 @@ def self_test() -> int:
             return 1
         if metrics[0]["max"] != 11.0 or metrics[1]["max"] != 180.0:
             print(json.dumps({"ok": False, "case": "headroom", "metrics": metrics}, indent=2))
+            return 1
+
+        partial_manifest = deepcopy(manifest)
+        partial_manifest["required_backends"] = ["cuda", "rocm"]
+        partial_manifest["fixtures"].append(
+            {
+                "id": "pending_fixture",
+                "backend": "rocm",
+                "hardware": "pending fixture hardware",
+                "source": source_artifact_path,
+                "command": "python bench.py",
+                "result_artifact": repo_relative_path(Path(result_tmp) / "pending.json"),
+                "threshold_state": "pending_fixture_result",
+                "metrics": [
+                    {"name": "latency_ms", "unit": "ms", "comparison": "<=", "max": None}
+                ],
+            }
+        )
+        partial_locked = lock_manifest_thresholds(
+            partial_manifest,
+            0.10,
+            fixture_ids={"fixture"},
+        )
+        if (
+            partial_locked["status"] != "fixture_required"
+            or partial_locked["fixtures"][0]["threshold_state"] != "locked_threshold"
+            or partial_locked["fixtures"][1]["threshold_state"] != "pending_fixture_result"
+            or partial_locked["fixtures"][1]["metrics"][0]["max"] is not None
+        ):
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "case": "partial fixture lock",
+                        "manifest": partial_locked,
+                    },
+                    indent=2,
+                )
+            )
+            return 1
+
+        try:
+            lock_manifest_thresholds(manifest, 0.10, fixture_ids={"missing_fixture"})
+        except ThresholdLockError as exc:
+            if "requested fixture-id not present in manifest: missing_fixture" not in str(exc):
+                print(json.dumps({"ok": False, "case": "unknown fixture id", "error": str(exc)}))
+                return 1
+        else:
+            print(json.dumps({"ok": False, "case": "unknown fixture id did not fail"}))
             return 1
 
         invalid_schema_manifest = deepcopy(manifest)
@@ -1119,6 +1193,15 @@ def main() -> int:
         help="Fractional threshold headroom applied to observed metrics; default 0.10",
     )
     parser.add_argument(
+        "--fixture-id",
+        action="append",
+        dest="fixture_ids",
+        help=(
+            "Lock only this fixture id; repeat to lock multiple fixtures. "
+            "When omitted, every fixture is locked and status becomes covered."
+        ),
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="Validate that thresholds can lock without writing the manifest",
@@ -1133,6 +1216,10 @@ def main() -> int:
     if args.self_test:
         return self_test()
 
+    selected_fixture_ids = set(args.fixture_ids) if args.fixture_ids else None
+    if args.fixture_ids and len(selected_fixture_ids) != len(args.fixture_ids):
+        return fail("--fixture-id values must be unique")
+
     manifest_path = Path(args.manifest)
     if not manifest_path.is_absolute():
         manifest_path = ROOT / manifest_path
@@ -1142,7 +1229,12 @@ def main() -> int:
 
     try:
         manifest = load_json(manifest_path, "manifest")
-        locked = lock_manifest_thresholds(manifest, args.headroom, manifest_path)
+        locked = lock_manifest_thresholds(
+            manifest,
+            args.headroom,
+            manifest_path,
+            fixture_ids=selected_fixture_ids,
+        )
         if not args.check:
             write_manifest(output_path, locked)
     except ThresholdLockError as exc:
@@ -1154,6 +1246,9 @@ def main() -> int:
                 "ok": True,
                 "status": locked["status"],
                 "fixtures": len(locked["fixtures"]),
+                "locked_fixture_ids": sorted(selected_fixture_ids)
+                if selected_fixture_ids is not None
+                else "all",
                 "headroom": args.headroom,
                 "output": None if args.check else str(output_path),
             },

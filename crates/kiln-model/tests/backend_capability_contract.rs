@@ -5388,8 +5388,6 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "missing result artifact bench-results/backend-latency/cuda-a6000-flce-phase-a.json",
         "missing result artifact bench-results/backend-latency/rocm-gfx1151-matmul.json",
         "missing result artifact bench-results/backend-latency/vulkan-rtx6000-decode.json",
-        "metal_apple_silicon_matmul_qwen35_4b: threshold_state is 'pending_fixture_result'",
-        "metal_apple_silicon_sdpa_qwen35_4b: threshold_state is 'pending_fixture_result'",
         "threshold_state is 'pending_fixture_result'",
         "max threshold is not finite numeric",
     ] {
@@ -5398,6 +5396,17 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
                 .iter()
                 .any(|blocker| blocker.contains(expected)),
             "hardware latency coverage blockers should include {expected}: {coverage_blockers:?}"
+        );
+    }
+    for unexpected in [
+        "metal_apple_silicon_matmul_qwen35_4b:",
+        "metal_apple_silicon_sdpa_qwen35_4b:",
+    ] {
+        assert!(
+            !coverage_blockers
+                .iter()
+                .any(|blocker| blocker.contains(unexpected)),
+            "locked Metal fixture should not remain a coverage blocker {unexpected}: {coverage_blockers:?}"
         );
     }
 
@@ -5456,7 +5465,13 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         );
     }
     for fixture in fixtures {
-        assert_eq!(fixture["threshold_state"], "pending_fixture_result");
+        let threshold_state = fixture["threshold_state"]
+            .as_str()
+            .expect("fixture threshold_state should be a string");
+        assert!(
+            threshold_state == "pending_fixture_result" || threshold_state == "locked_threshold",
+            "fixture threshold_state should be pending or locked: {threshold_state}"
+        );
         let source = fixture["source"]
             .as_str()
             .expect("fixture source should be a string");
@@ -5493,10 +5508,20 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
             "fixture should declare at least one latency metric"
         );
         for metric in metrics {
-            assert!(
-                metric["max"].is_null(),
-                "pending fixture metrics should not pretend thresholds are locked"
-            );
+            if threshold_state == "pending_fixture_result" {
+                assert!(
+                    metric["max"].is_null(),
+                    "pending fixture metrics should not pretend thresholds are locked"
+                );
+            } else {
+                let max = metric["max"]
+                    .as_f64()
+                    .expect("locked fixture metric max should be numeric");
+                assert!(
+                    max.is_finite() && max > 0.0,
+                    "locked fixture metric max should be finite and positive: {max}"
+                );
+            }
             let metric_name = metric["name"]
                 .as_str()
                 .expect("fixture metric name should be a string");

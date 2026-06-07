@@ -52,31 +52,31 @@
       "source": "crates/kiln-tensor/tests/metal_matmul_bench.rs",
       "command": "cargo test -p kiln-tensor --features metal --test metal_matmul_bench -- --ignored --nocapture",
       "result_artifact": "bench-results/backend-latency/metal-apple-silicon-matmul.json",
-      "threshold_state": "pending_fixture_result",
+      "threshold_state": "locked_threshold",
       "metrics": [
         {
           "name": "decode_qkv_m1_2560x4096_ms",
           "unit": "ms",
           "comparison": "<=",
-          "max": null
+          "max": 1.416912
         },
         {
           "name": "prefill_qkv_m256_2560x4096_ms",
           "unit": "ms",
           "comparison": "<=",
-          "max": null
+          "max": 4.284225
         },
         {
           "name": "prefill_gate_up_m256_2560x18432_ms",
           "unit": "ms",
           "comparison": "<=",
-          "max": null
+          "max": 19.164885
         },
         {
           "name": "lm_head_m1_2560x152064_ms",
           "unit": "ms",
           "comparison": "<=",
-          "max": null
+          "max": 42.799126
         }
       ]
     },
@@ -87,25 +87,25 @@
       "source": "crates/kiln-tensor/tests/metal_sdpa_bench.rs",
       "command": "cargo test -p kiln-tensor --features metal --test metal_sdpa_bench -- --ignored --nocapture",
       "result_artifact": "bench-results/backend-latency/metal-apple-silicon-sdpa.json",
-      "threshold_state": "pending_fixture_result",
+      "threshold_state": "locked_threshold",
       "metrics": [
         {
           "name": "decode_sq1_sk512_ms",
           "unit": "ms",
           "comparison": "<=",
-          "max": null
+          "max": 0.143847
         },
         {
           "name": "decode_sq1_sk4096_ms",
           "unit": "ms",
           "comparison": "<=",
-          "max": null
+          "max": 0.617131
         },
         {
           "name": "prefill_sq512_sk512_ms",
           "unit": "ms",
           "comparison": "<=",
-          "max": null
+          "max": 4.511978
         }
       ]
     },

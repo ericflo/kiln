@@ -204,7 +204,8 @@ manifest with explicit headroom:
 ```sh
 python3 scripts/lock_backend_latency_thresholds.py \
   docs/backend-latency-fixtures.json \
-  --headroom 0.10
+  --headroom 0.10 \
+  --fixture-id metal_apple_silicon_matmul_qwen35_4b
 ```
 
 The threshold locker requires manifest `schema_version: 1`, a recognized
@@ -226,12 +227,14 @@ the local repository, requires the fixture source to exist at `git_commit`,
 requires `source_sha256` to match the source bytes at that commit, and requires
 `git_tracked_dirty` to be `false` before thresholds can lock. It re-parses the
 raw log and requires each
-artifact metric value and unit to match before deriving thresholds. It sets every
-fixture `threshold_state` to
-`locked_threshold`, sets the manifest `status` to `covered`, and applies the
-headroom by comparison: `<=` thresholds are raised above observed latency, while
-`>=` thresholds are lowered below observed throughput. Use `--check` to validate
-without writing.
+artifact metric value and unit to match before deriving thresholds. Pass
+`--fixture-id` repeatedly to lock only selected fixtures as their artifacts land;
+unselected fixtures stay `pending_fixture_result`, and manifest `status` remains
+`fixture_required`. When `--fixture-id` is omitted, it locks every fixture and
+sets the manifest `status` to `covered` once all fixture thresholds are locked.
+The locker applies the headroom by comparison: `<=` thresholds are raised above
+observed latency, while `>=` thresholds are lowered below observed throughput.
+Use `--check` to validate without writing.
 
 Then run the covered gate:
 
