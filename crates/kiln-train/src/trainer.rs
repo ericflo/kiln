@@ -2005,12 +2005,7 @@ fn adapter_smoke_linear_state(
     // (#1082) `Tensor::device()` returns an owned kt `Device` (Copy); the
     // constructor wants `&Device`, so bind to a local and borrow.
     let kt_device = weights.embed_tokens.device();
-    LinearAttentionState::new_with_batch_for_inference_backend(
-        model_config,
-        1,
-        &kt_device,
-        Some(BackendIdentity::runtime_name(backend)),
-    )
+    LinearAttentionState::new_with_batch_for_inference_runtime(model_config, 1, &kt_device, backend)
 }
 
 fn adapter_smoke_forward_logits(

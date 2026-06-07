@@ -14,7 +14,7 @@ use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use crate::backend::capability::{BackendCapabilityQueries, Support};
+use crate::backend::capability::{BackendCapabilityQueries, InferenceRecurrentStatePolicy, Support};
 use crate::backend::{
     AttentionBackend, BackendRuntime, ConvBackend, GdnBackend, LinearBackend, PagedKvBackend,
     ReplayBackend, ResidencyBackend, SamplingBackend,
@@ -4621,11 +4621,36 @@ impl LinearAttentionState {
         device: &Device,
         backend_name: Option<&str>,
     ) -> Result<Self> {
+        let policy =
+            InferenceRecurrentStatePolicy::for_backend(backend_name.unwrap_or_default(), *device);
+        Self::new_with_batch_for_inference_policy(config, batch, device, policy)
+    }
+
+    /// Create fresh inference state for `batch` decode rows using the active
+    /// backend's capability snapshot as the dtype policy authority.
+    pub fn new_with_batch_for_inference_runtime(
+        config: &kiln_core::config::ModelConfig,
+        batch: usize,
+        device: &Device,
+        backend: &dyn BackendRuntime,
+    ) -> Result<Self> {
+        let policy = BackendCapabilityQueries::backend_capabilities(backend)
+            .gdn
+            .inference_recurrent_state;
+        Self::new_with_batch_for_inference_policy(config, batch, device, policy)
+    }
+
+    fn new_with_batch_for_inference_policy(
+        config: &kiln_core::config::ModelConfig,
+        batch: usize,
+        device: &Device,
+        policy: InferenceRecurrentStatePolicy,
+    ) -> Result<Self> {
         Self::new_with_batch_and_recurrent_dtype(
             config,
             batch,
             device,
-            Self::inference_recurrent_dtype(config, device, backend_name),
+            Self::inference_recurrent_dtype(config, device, policy),
         )
     }
 
@@ -4655,38 +4680,23 @@ impl LinearAttentionState {
     fn inference_recurrent_dtype(
         config: &kiln_core::config::ModelConfig,
         device: &Device,
-        backend_name: Option<&str>,
+        policy: InferenceRecurrentStatePolicy,
     ) -> DType {
-        let cuda_bf16_state_disabled =
-            std::env::var("KILN_DISABLE_CUDA_BF16_INFERENCE_STATE").is_ok();
-        let rocm_bf16_state_disabled =
-            std::env::var("KILN_DISABLE_ROCM_BF16_INFERENCE_STATE").is_ok();
-        let vulkan_bf16_state_disabled =
-            std::env::var("KILN_DISABLE_VULKAN_BF16_INFERENCE_STATE").is_ok();
-        match (device, config.dtype) {
-            (Device::Cuda(_), _) if cuda_bf16_state_disabled => {
-                Self::training_recurrent_dtype(config, device)
-            }
-            (Device::Rocm(_), _) if rocm_bf16_state_disabled => {
-                Self::training_recurrent_dtype(config, device)
-            }
-            (Device::Cuda(_), kiln_core::config::DType::BF16)
-            | (Device::Rocm(_), kiln_core::config::DType::BF16)
-            | (Device::Metal(_), kiln_core::config::DType::BF16) => DType::BF16,
-            (Device::Cuda(_), kiln_core::config::DType::FP16)
-            | (Device::Rocm(_), kiln_core::config::DType::FP16)
-            | (Device::Metal(_), kiln_core::config::DType::FP16) => DType::F16,
-            (_, kiln_core::config::DType::BF16)
-                if backend_name == Some("vulkan") && !vulkan_bf16_state_disabled =>
+        match config.dtype {
+            kiln_core::config::DType::BF16
+                if matches!(
+                    policy.bf16,
+                    Support::Native | Support::NativeWithConstraints
+                ) =>
             {
                 DType::BF16
             }
-            (_, kiln_core::config::DType::FP16)
-                if backend_name == Some("vulkan") && !vulkan_bf16_state_disabled =>
+            kiln_core::config::DType::FP16
+                if matches!(policy.f16, Support::Native | Support::NativeWithConstraints) =>
             {
                 DType::F16
             }
-            _ => DType::F32,
+            _ => Self::training_recurrent_dtype(config, device),
         }
     }
 

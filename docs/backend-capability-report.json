@@ -1782,7 +1782,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "GdnCapabilities": {
-      "field_count": 7,
+      "field_count": 8,
       "fields": [
         {
           "name": "recurrent_step",
@@ -1791,6 +1791,10 @@
         {
           "name": "recurrent_step_f32",
           "type": "Support"
+        },
+        {
+          "name": "inference_recurrent_state",
+          "type": "InferenceRecurrentStatePolicy"
         },
         {
           "name": "chunk_prep",
@@ -1810,6 +1814,20 @@
         },
         {
           "name": "gated_rms_norm",
+          "type": "Support"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "InferenceRecurrentStatePolicy": {
+      "field_count": 2,
+      "fields": [
+        {
+          "name": "bf16",
+          "type": "Support"
+        },
+        {
+          "name": "f16",
           "type": "Support"
         }
       ],

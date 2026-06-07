@@ -1881,11 +1881,11 @@ impl ModelRunner {
     fn new_linear_state(&self) -> Result<LinearAttentionState> {
         // #1082: kt `Device` by value -> pass by reference.
         let device = self.weights.embed_tokens.device();
-        LinearAttentionState::new_with_batch_for_inference_backend(
+        LinearAttentionState::new_with_batch_for_inference_runtime(
             &self.config,
             1,
             &device,
-            Some(self.backend_name()),
+            self.backend.as_ref(),
         )
     }
 

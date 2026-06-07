@@ -1143,6 +1143,7 @@ fn generated_capability_report_lists_request_descriptors() {
         "MatmulCapabilities",
         "AttentionCapabilities",
         "GdnCapabilities",
+        "InferenceRecurrentStatePolicy",
         "DecodeCapabilities",
         "DecodeBatcherPolicy",
         "BackendTrainingCapabilities",
@@ -1198,6 +1199,22 @@ fn generated_capability_report_lists_request_descriptors() {
     assert!(
         gdn_capability_fields.contains(&"recurrent_step_f32"),
         "GdnCapabilities should own dtype-specific recurrent-step routing"
+    );
+    assert!(
+        gdn_capability_fields.contains(&"inference_recurrent_state"),
+        "GdnCapabilities should own inference recurrent-state dtype policy"
+    );
+    let inference_recurrent_state_policy_fields =
+        capability_descriptors["InferenceRecurrentStatePolicy"]["fields"]
+            .as_array()
+            .expect("InferenceRecurrentStatePolicy fields should be an array")
+            .iter()
+            .filter_map(|field| field["name"].as_str())
+            .collect::<Vec<_>>();
+    assert!(
+        inference_recurrent_state_policy_fields.contains(&"bf16")
+            && inference_recurrent_state_policy_fields.contains(&"f16"),
+        "InferenceRecurrentStatePolicy should expose BF16 and F16 support"
     );
     let decode_batcher_policy_fields = capability_descriptors["DecodeBatcherPolicy"]["fields"]
         .as_array()
@@ -2482,6 +2499,43 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         forward_source.contains("gdn_recurrent_step_supports_dtype")
             && capability_source.contains("recurrent_step_f32"),
         "forward GDN recurrent-step dtype routing should read GdnCapabilities"
+    );
+    assert!(
+        forward_source.contains("InferenceRecurrentStatePolicy")
+            && capability_source.contains("inference_recurrent_state"),
+        "forward inference recurrent-state dtype routing should read GdnCapabilities"
+    );
+    let inference_recurrent_dtype_section = source_between(
+        &forward_source,
+        "fn inference_recurrent_dtype(",
+        "fn new_with_batch_and_recurrent_dtype(",
+    );
+    assert!(
+        inference_recurrent_dtype_section.contains("InferenceRecurrentStatePolicy")
+            && inference_recurrent_dtype_section.contains("policy.bf16")
+            && inference_recurrent_dtype_section.contains("policy.f16"),
+        "LinearAttentionState inference recurrent dtype should consume the backend policy"
+    );
+    for forbidden in [
+        "backend_name == Some(\"vulkan\")",
+        "KILN_DISABLE_CUDA_BF16_INFERENCE_STATE",
+        "KILN_DISABLE_ROCM_BF16_INFERENCE_STATE",
+        "KILN_DISABLE_VULKAN_BF16_INFERENCE_STATE",
+    ] {
+        assert!(
+            !inference_recurrent_dtype_section.contains(forbidden),
+            "LinearAttentionState inference recurrent dtype should not branch locally on backend/env policy: {forbidden}"
+        );
+    }
+    assert!(
+        generate_source.contains("new_with_batch_for_inference_runtime(")
+            && generate_source.contains("self.backend.as_ref()"),
+        "ModelRunner linear-state creation should pass the active backend to recurrent-state policy"
+    );
+    assert!(
+        trainer_source.contains("new_with_batch_for_inference_runtime(")
+            && !trainer_source.contains("Some(BackendIdentity::runtime_name(backend))"),
+        "trainer adapter smoke linear-state creation should pass the active backend to recurrent-state policy"
     );
     assert!(
         forward_source.contains("ResidencyBackend"),

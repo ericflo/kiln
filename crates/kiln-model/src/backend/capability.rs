@@ -752,11 +752,19 @@ pub struct AttentionCapabilities {
 pub struct GdnCapabilities {
     pub recurrent_step: Support,
     pub recurrent_step_f32: Support,
+    pub inference_recurrent_state: InferenceRecurrentStatePolicy,
     pub chunk_prep: Support,
     pub chunk_scan: Support,
     pub full_chunk_forward: Support,
     pub gates: Support,
     pub gated_rms_norm: Support,
+}
+
+/// Backend-owned dtype policy for GDN recurrent state in inference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InferenceRecurrentStatePolicy {
+    pub bf16: Support,
+    pub f16: Support,
 }
 
 /// Decode and lm-head capability snapshot.
@@ -1103,6 +1111,7 @@ impl BackendCapabilities {
                     name,
                     GdnBackend::runtime_supports_gdn_recurrent_step(backend),
                 ),
+                inference_recurrent_state: InferenceRecurrentStatePolicy::for_backend(name, device),
                 chunk_prep: Support::from_supports_predicate(
                     GdnBackend::runtime_supports_gdn_chunk_prep(backend),
                 ),
@@ -1277,6 +1286,50 @@ fn mtp_speculative_generation_support(name: &str) -> Support {
     match name {
         "cuda" => Support::NativeWithConstraints,
         _ => Support::Declined,
+    }
+}
+
+impl InferenceRecurrentStatePolicy {
+    pub fn for_backend(name: &str, device: kiln_tensor::Device) -> Self {
+        match backend_kind_for_runtime(name, device) {
+            kiln_tensor::Backend::Cuda => {
+                let support = support_unless_env_set("KILN_DISABLE_CUDA_BF16_INFERENCE_STATE");
+                Self {
+                    bf16: support,
+                    f16: support,
+                }
+            }
+            kiln_tensor::Backend::Rocm => {
+                let support = support_unless_env_set("KILN_DISABLE_ROCM_BF16_INFERENCE_STATE");
+                Self {
+                    bf16: support,
+                    f16: support,
+                }
+            }
+            kiln_tensor::Backend::Metal => Self {
+                bf16: Support::NativeWithConstraints,
+                f16: Support::NativeWithConstraints,
+            },
+            kiln_tensor::Backend::Vulkan => {
+                let support = support_unless_env_set("KILN_DISABLE_VULKAN_BF16_INFERENCE_STATE");
+                Self {
+                    bf16: support,
+                    f16: support,
+                }
+            }
+            _ => Self {
+                bf16: Support::Declined,
+                f16: Support::Declined,
+            },
+        }
+    }
+}
+
+fn support_unless_env_set(env_var: &'static str) -> Support {
+    if std::env::var(env_var).is_ok() {
+        Support::DisabledByEnv
+    } else {
+        Support::NativeWithConstraints
     }
 }
 

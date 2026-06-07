@@ -89,6 +89,7 @@ CAPABILITY_DESCRIPTOR_STRUCTS = [
     "MatmulCapabilities",
     "AttentionCapabilities",
     "GdnCapabilities",
+    "InferenceRecurrentStatePolicy",
     "DecodeCapabilities",
     "DecodeBatcherPolicy",
     "BackendTrainingCapabilities",
