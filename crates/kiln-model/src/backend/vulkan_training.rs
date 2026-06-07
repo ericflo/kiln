@@ -10,8 +10,9 @@ use std::sync::{Arc, OnceLock};
 use super::vulkan::VulkanBackend;
 use super::vulkan_residency::with_resident_registry;
 use super::{
-    FinalRmsNormBackwardRoute, GrpoLossRoute, OpdLossRoute, OpdPhaseBBackwardRoute,
-    SftFlceLossRoute, TrainingCapabilities, TrainingPrecisionPolicy, TrainingTapeRoute,
+    FinalRmsNormBackwardRoute, GrpoKlAuxiliaryRoute, GrpoLossRoute, OpdLossRoute,
+    OpdPhaseBBackwardRoute, SftFlceLossRoute, TrainingCapabilities, TrainingPrecisionPolicy,
+    TrainingTapeRoute,
 };
 
 pub(super) fn training_capabilities_static() -> TrainingCapabilities {
@@ -21,6 +22,7 @@ pub(super) fn training_capabilities_static() -> TrainingCapabilities {
         tape_forward_backward_route: TrainingTapeRoute::KtTapeAuthoritative,
         sft_flce_loss_route: SftFlceLossRoute::VulkanActiveRows,
         grpo_loss_route: GrpoLossRoute::VulkanActiveRows,
+        grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute::HostComposite,
         opd_loss_route: OpdLossRoute::VulkanActiveHidden,
         opd_phase_b_backward_route: OpdPhaseBBackwardRoute::VulkanActiveHidden,
         final_rmsnorm_backward_route: FinalRmsNormBackwardRoute::KtComposite,

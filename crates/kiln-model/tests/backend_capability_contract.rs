@@ -1542,6 +1542,10 @@ fn generated_capability_report_lists_training_loss_policy() {
         "CPU should keep the shared GRPO kt-composite route"
     );
     assert_eq!(
+        policies["cpu"]["grpo_kl_auxiliary_route"], "host_composite",
+        "CPU should keep GRPO KL auxiliaries on the host-composite route"
+    );
+    assert_eq!(
         policies["cpu"]["opd_loss_route"], "unsupported",
         "CPU should not advertise a portable OPD training route"
     );
@@ -1564,6 +1568,10 @@ fn generated_capability_report_lists_training_loss_policy() {
     assert_eq!(
         policies["metal"]["grpo_loss_route"], "kt_composite",
         "Metal should keep the shared GRPO kt-composite route"
+    );
+    assert_eq!(
+        policies["metal"]["grpo_kl_auxiliary_route"], "host_composite",
+        "Metal should keep GRPO KL auxiliaries on the host-composite route"
     );
     assert_eq!(
         policies["metal"]["opd_loss_route"], "kt_tape_phase_b",
@@ -1590,6 +1598,10 @@ fn generated_capability_report_lists_training_loss_policy() {
         "CUDA should use the shared GRPO kt-composite route"
     );
     assert_eq!(
+        policies["cuda"]["grpo_kl_auxiliary_route"], "cuda_rocm_device_fast_path",
+        "CUDA should advertise device fast paths for GRPO KL auxiliaries"
+    );
+    assert_eq!(
         policies["cuda"]["opd_loss_route"], "kt_tape_phase_b",
         "CUDA should use the shared OPD kt-tape Phase-B route"
     );
@@ -1614,6 +1626,10 @@ fn generated_capability_report_lists_training_loss_policy() {
         "ROCm should use the shared GRPO kt-composite route"
     );
     assert_eq!(
+        policies["rocm"]["grpo_kl_auxiliary_route"], "cuda_rocm_device_fast_path",
+        "ROCm should advertise device fast paths for GRPO KL auxiliaries"
+    );
+    assert_eq!(
         policies["rocm"]["opd_loss_route"], "kt_tape_phase_b",
         "ROCm should use the shared OPD kt-tape Phase-B route"
     );
@@ -1636,6 +1652,10 @@ fn generated_capability_report_lists_training_loss_policy() {
     assert_eq!(
         policies["vulkan"]["grpo_loss_route"], "vulkan_active_rows",
         "Vulkan should use its active-row GRPO route"
+    );
+    assert_eq!(
+        policies["vulkan"]["grpo_kl_auxiliary_route"], "host_composite",
+        "Vulkan should keep GRPO KL auxiliaries on the host-composite route"
     );
     assert_eq!(
         policies["vulkan"]["opd_loss_route"], "vulkan_active_hidden",
@@ -1982,6 +2002,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
         ("TrainingLossBackend", "runtime_training_precision_policy"),
         ("TrainingLossBackend", "runtime_tape_forward_backward_route"),
         ("TrainingLossBackend", "runtime_grpo_loss_route"),
+        ("TrainingLossBackend", "runtime_grpo_kl_auxiliary_route"),
         ("TrainingLossBackend", "runtime_opd_loss_route"),
         ("TrainingLossBackend", "runtime_opd_phase_b_backward_route"),
         (
@@ -2194,6 +2215,8 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         .expect("backend/mod.rs should be readable");
     let trainer_source = fs::read_to_string(root.join("crates/kiln-train/src/trainer.rs"))
         .expect("trainer.rs should be readable");
+    let grpo_tape_source = fs::read_to_string(root.join("crates/kiln-train/src/grpo_tape_shim.rs"))
+        .expect("grpo_tape_shim.rs should be readable");
     let opd_source = fs::read_to_string(root.join("crates/kiln-train/src/opd.rs"))
         .expect("opd.rs should be readable");
     let generate_source = fs::read_to_string(root.join("crates/kiln-model/src/generate.rs"))
@@ -2518,6 +2541,13 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     assert!(
         trainer_source.contains("TrainingLossBackend::runtime_grpo_loss_route"),
         "GRPO loss routing should consume the focused training-loss capability facet"
+    );
+    assert!(
+        trainer_source.contains("TrainingLossBackend::runtime_grpo_kl_auxiliary_route")
+            && grpo_tape_source.contains("grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute")
+            && grpo_tape_source.contains("grpo_loss_with_kl_auxiliary_route")
+            && grpo_tape_source.contains("GrpoKlAuxiliaryRoute::CudaRocmDeviceFastPath"),
+        "GRPO KL auxiliary routing should consume backend policy and route shim fast paths through it"
     );
     assert!(
         trainer_source.contains("TrainingLossBackend::runtime_final_rmsnorm_backward_route"),
@@ -3746,6 +3776,7 @@ fn backend_engine_unification_plan_matches_current_training_status() {
     assert!(
         plan_source.contains("TrainingLossBackend::runtime_sft_flce_loss_route")
             && plan_source.contains("TrainingLossBackend::runtime_grpo_loss_route")
+            && plan_source.contains("TrainingLossBackend::runtime_grpo_kl_auxiliary_route")
             && plan_source.contains("TrainingLossBackend::runtime_opd_loss_route")
             && plan_source.contains("TrainingLossBackend::runtime_opd_phase_b_backward_route")
             && plan_source.contains("TrainingLossBackend::runtime_final_rmsnorm_backward_route")

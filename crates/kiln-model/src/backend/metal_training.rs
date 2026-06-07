@@ -12,6 +12,7 @@ pub(super) fn training_capabilities_static() -> TrainingCapabilities {
     let mut caps = TrainingCapabilities::portable();
     caps.tape_forward_backward_route = super::TrainingTapeRoute::KtTapeAuthoritative;
     caps.grpo_loss_route = super::GrpoLossRoute::KtComposite;
+    caps.grpo_kl_auxiliary_route = super::GrpoKlAuxiliaryRoute::HostComposite;
     caps.opd_loss_route = super::OpdLossRoute::KtTapePhaseB;
     caps.opd_phase_b_backward_route = super::OpdPhaseBBackwardRoute::KtComposite;
     caps.final_rmsnorm_backward_route = super::FinalRmsNormBackwardRoute::KtComposite;

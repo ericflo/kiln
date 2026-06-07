@@ -237,6 +237,7 @@ impl RocmBackend {
             tape_forward_backward_route: super::TrainingTapeRoute::KtTapeAuthoritative,
             sft_flce_loss_route: super::SftFlceLossRoute::KtTapeFlce,
             grpo_loss_route: super::GrpoLossRoute::KtComposite,
+            grpo_kl_auxiliary_route: super::GrpoKlAuxiliaryRoute::CudaRocmDeviceFastPath,
             opd_loss_route: super::OpdLossRoute::KtTapePhaseB,
             opd_phase_b_backward_route: super::OpdPhaseBBackwardRoute::CudaRocmFusedUnitGrad,
             final_rmsnorm_backward_route: super::FinalRmsNormBackwardRoute::CudaRocmFusedTail,

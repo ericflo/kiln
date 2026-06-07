@@ -79,7 +79,7 @@
           "line": 77,
           "paired_method": "causal_conv1d_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 1862,
+          "paired_method_line": 1863,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -94,7 +94,7 @@
           "line": 73,
           "paired_method": "causal_conv1d_update",
           "paired_method_always_declines": false,
-          "paired_method_line": 1836,
+          "paired_method_line": 1837,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -109,7 +109,7 @@
           "line": 29,
           "paired_method": "flash_attn_paged_decode",
           "paired_method_always_declines": false,
-          "paired_method_line": 515,
+          "paired_method_line": 516,
           "status": "literal_true",
           "support_state": "NativeWithConstraints"
         },
@@ -124,7 +124,7 @@
           "line": 25,
           "paired_method": "flash_attn_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 473,
+          "paired_method_line": 474,
           "status": "literal_true",
           "support_state": "NativeWithConstraints"
         },
@@ -139,7 +139,7 @@
           "line": 45,
           "paired_method": "gdn_chunk_prep",
           "paired_method_always_declines": false,
-          "paired_method_line": 727,
+          "paired_method_line": 728,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -154,7 +154,7 @@
           "line": 49,
           "paired_method": "gdn_chunk_scan",
           "paired_method_always_declines": false,
-          "paired_method_line": 760,
+          "paired_method_line": 761,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -184,7 +184,7 @@
           "line": 61,
           "paired_method": "gdn_decode_qk_norm_gates_recurrent",
           "paired_method_always_declines": false,
-          "paired_method_line": 1068,
+          "paired_method_line": 1069,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -199,7 +199,7 @@
           "line": 37,
           "paired_method": "gdn_forward_substitution",
           "paired_method_always_declines": false,
-          "paired_method_line": 685,
+          "paired_method_line": 686,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -214,7 +214,7 @@
           "line": 53,
           "paired_method": "gdn_full_chunk_forward",
           "paired_method_always_declines": false,
-          "paired_method_line": 794,
+          "paired_method_line": 795,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -229,7 +229,7 @@
           "line": 69,
           "paired_method": "gdn_gated_rms_norm",
           "paired_method_always_declines": false,
-          "paired_method_line": 1757,
+          "paired_method_line": 1758,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -244,7 +244,7 @@
           "line": 65,
           "paired_method": "gdn_gates",
           "paired_method_always_declines": false,
-          "paired_method_line": 1490,
+          "paired_method_line": 1491,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -259,7 +259,7 @@
           "line": 41,
           "paired_method": "gdn_recurrent_step",
           "paired_method_always_declines": false,
-          "paired_method_line": 705,
+          "paired_method_line": 706,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -271,7 +271,7 @@
             "layout": false,
             "shape": false
           },
-          "line": 269,
+          "line": 270,
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
@@ -854,7 +854,7 @@
           "line": 77,
           "paired_method": "causal_conv1d_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 1931,
+          "paired_method_line": 1932,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -869,7 +869,7 @@
           "line": 73,
           "paired_method": "causal_conv1d_update",
           "paired_method_always_declines": false,
-          "paired_method_line": 1905,
+          "paired_method_line": 1906,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -884,7 +884,7 @@
           "line": 29,
           "paired_method": "flash_attn_paged_decode",
           "paired_method_always_declines": false,
-          "paired_method_line": 566,
+          "paired_method_line": 567,
           "status": "literal_true",
           "support_state": "NativeWithConstraints"
         },
@@ -899,7 +899,7 @@
           "line": 25,
           "paired_method": "flash_attn_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 488,
+          "paired_method_line": 489,
           "status": "literal_true",
           "support_state": "NativeWithConstraints"
         },
@@ -913,10 +913,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 437,
+          "line": 438,
           "paired_method": "flash_attn_prefill_head_major",
           "paired_method_always_declines": false,
-          "paired_method_line": 530,
+          "paired_method_line": 531,
           "status": "env_gated",
           "support_state": "NativeWithConstraints"
         },
@@ -931,7 +931,7 @@
           "line": 45,
           "paired_method": "gdn_chunk_prep",
           "paired_method_always_declines": false,
-          "paired_method_line": 779,
+          "paired_method_line": 780,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -946,7 +946,7 @@
           "line": 49,
           "paired_method": "gdn_chunk_scan",
           "paired_method_always_declines": false,
-          "paired_method_line": 812,
+          "paired_method_line": 813,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -976,7 +976,7 @@
           "line": 61,
           "paired_method": "gdn_decode_qk_norm_gates_recurrent",
           "paired_method_always_declines": false,
-          "paired_method_line": 1120,
+          "paired_method_line": 1121,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -991,7 +991,7 @@
           "line": 37,
           "paired_method": "gdn_forward_substitution",
           "paired_method_always_declines": false,
-          "paired_method_line": 737,
+          "paired_method_line": 738,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1006,7 +1006,7 @@
           "line": 53,
           "paired_method": "gdn_full_chunk_forward",
           "paired_method_always_declines": false,
-          "paired_method_line": 846,
+          "paired_method_line": 847,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1021,7 +1021,7 @@
           "line": 69,
           "paired_method": "gdn_gated_rms_norm",
           "paired_method_always_declines": false,
-          "paired_method_line": 1826,
+          "paired_method_line": 1827,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1036,7 +1036,7 @@
           "line": 65,
           "paired_method": "gdn_gates",
           "paired_method_always_declines": false,
-          "paired_method_line": 1542,
+          "paired_method_line": 1543,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1051,7 +1051,7 @@
           "line": 41,
           "paired_method": "gdn_recurrent_step",
           "paired_method_always_declines": false,
-          "paired_method_line": 757,
+          "paired_method_line": 758,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1063,10 +1063,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 1638,
+          "line": 1639,
           "paired_method": "linear_decode_argmax",
           "paired_method_always_declines": true,
-          "paired_method_line": 1642,
+          "paired_method_line": 1643,
           "status": "literal_false",
           "support_state": "Declined"
         },
@@ -1078,7 +1078,7 @@
             "layout": false,
             "shape": false
           },
-          "line": 281,
+          "line": 282,
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
@@ -2586,9 +2586,10 @@
     },
     "TrainingLossBackend": {
       "forwarding_impl": "blanket_backend_runtime",
-      "method_count": 8,
+      "method_count": 9,
       "methods": [
         "runtime_final_rmsnorm_backward_route",
+        "runtime_grpo_kl_auxiliary_route",
         "runtime_grpo_loss_route",
         "runtime_opd_loss_route",
         "runtime_opd_phase_b_backward_route",
@@ -3424,8 +3425,9 @@
   },
   "training_loss_policy": {
     "cpu": {
-      "evidence": "TrainingCapabilities::portable keeps tape forward/backward unsupported, SFT on the portable full-logits loss path, GRPO on the shared kt composite loss root, OPD unsupported on the portable backend surface, and final RMSNorm backward on the kt-composite route",
+      "evidence": "TrainingCapabilities::portable keeps tape forward/backward unsupported, SFT on the portable full-logits loss path, GRPO on the shared kt composite loss root, GRPO KL auxiliaries on the host-composite route, OPD unsupported on the portable backend surface, and final RMSNorm backward on the kt-composite route",
       "final_rmsnorm_backward_route": "kt_composite",
+      "grpo_kl_auxiliary_route": "host_composite",
       "grpo_loss_route": "kt_composite",
       "opd_loss_route": "unsupported",
       "opd_phase_b_backward_route": "unsupported",
@@ -3433,8 +3435,9 @@
       "tape_forward_backward_route": "unsupported"
     },
     "cuda": {
-      "evidence": "CudaBackend::training_capabilities_static advertises kt tape-authoritative forward/backward, kt-tape FLCE over CUDA tensors, the shared kt GRPO composite route, the shared kt-tape OPD Phase-B route, the fused CUDA/ROCm Phase-B hidden-gradient leaf, and the fused final-RMSNorm tail route",
+      "evidence": "CudaBackend::training_capabilities_static advertises kt tape-authoritative forward/backward, kt-tape FLCE over CUDA tensors, the shared kt GRPO composite route, CUDA/ROCm device fast paths for GRPO KL auxiliaries, the shared kt-tape OPD Phase-B route, the fused CUDA/ROCm Phase-B hidden-gradient leaf, and the fused final-RMSNorm tail route",
       "final_rmsnorm_backward_route": "cuda_rocm_fused_tail",
+      "grpo_kl_auxiliary_route": "cuda_rocm_device_fast_path",
       "grpo_loss_route": "kt_composite",
       "opd_loss_route": "kt_tape_phase_b",
       "opd_phase_b_backward_route": "cuda_rocm_fused_unit_grad",
@@ -3442,8 +3445,9 @@
       "tape_forward_backward_route": "kt_tape_authoritative"
     },
     "metal": {
-      "evidence": "Metal training capabilities advertise kt tape-authoritative forward/backward, inherit the portable full-logits SFT loss route, shared kt GRPO composite route, shared kt-tape OPD Phase-B route, device-agnostic kt composite Phase-B backward, and kt-composite final RMSNorm backward",
+      "evidence": "Metal training capabilities advertise kt tape-authoritative forward/backward, inherit the portable full-logits SFT loss route, shared kt GRPO composite route, host-composite GRPO KL auxiliaries, shared kt-tape OPD Phase-B route, device-agnostic kt composite Phase-B backward, and kt-composite final RMSNorm backward",
       "final_rmsnorm_backward_route": "kt_composite",
+      "grpo_kl_auxiliary_route": "host_composite",
       "grpo_loss_route": "kt_composite",
       "opd_loss_route": "kt_tape_phase_b",
       "opd_phase_b_backward_route": "kt_composite",
@@ -3451,8 +3455,9 @@
       "tape_forward_backward_route": "kt_tape_authoritative"
     },
     "rocm": {
-      "evidence": "RocmBackend::training_capabilities_static advertises kt tape-authoritative forward/backward, the shared kt-tape FLCE route over ROCm tensors, the shared kt GRPO composite route, the shared kt-tape OPD Phase-B route, the fused CUDA/ROCm Phase-B hidden-gradient leaf, and the fused final-RMSNorm tail route",
+      "evidence": "RocmBackend::training_capabilities_static advertises kt tape-authoritative forward/backward, the shared kt-tape FLCE route over ROCm tensors, the shared kt GRPO composite route, CUDA/ROCm device fast paths for GRPO KL auxiliaries, the shared kt-tape OPD Phase-B route, the fused CUDA/ROCm Phase-B hidden-gradient leaf, and the fused final-RMSNorm tail route",
       "final_rmsnorm_backward_route": "cuda_rocm_fused_tail",
+      "grpo_kl_auxiliary_route": "cuda_rocm_device_fast_path",
       "grpo_loss_route": "kt_composite",
       "opd_loss_route": "kt_tape_phase_b",
       "opd_phase_b_backward_route": "cuda_rocm_fused_unit_grad",
@@ -3460,8 +3465,9 @@
       "tape_forward_backward_route": "kt_tape_authoritative"
     },
     "vulkan": {
-      "evidence": "Vulkan training capabilities advertise kt tape-authoritative forward/backward, active-row fused SFT/GRPO shader routes, the active-hidden fused OPD loss/backward shader route, and kt-composite final RMSNorm backward",
+      "evidence": "Vulkan training capabilities advertise kt tape-authoritative forward/backward, active-row fused SFT/GRPO shader routes, host-composite GRPO KL auxiliaries, the active-hidden fused OPD loss/backward shader route, and kt-composite final RMSNorm backward",
       "final_rmsnorm_backward_route": "kt_composite",
+      "grpo_kl_auxiliary_route": "host_composite",
       "grpo_loss_route": "vulkan_active_rows",
       "opd_loss_route": "vulkan_active_hidden",
       "opd_phase_b_backward_route": "vulkan_active_hidden",

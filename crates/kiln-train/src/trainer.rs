@@ -82,7 +82,8 @@ use kiln_model::backend::SftFlceLossRoute;
 use kiln_model::backend::TrainingTapeRoute;
 use kiln_model::backend::{
     self, BackendIdentity, BackendRuntime, FallbackPolicy, FinalRmsNormBackwardRoute,
-    OptimizerBackend, ResidencyBackend, TrainingLossBackend, TrainingPrecisionPolicy,
+    GrpoKlAuxiliaryRoute, OptimizerBackend, ResidencyBackend, TrainingLossBackend,
+    TrainingPrecisionPolicy,
 };
 use kiln_model::forward::{
     GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, GqaAttentionPrepared, LinearAttentionState,
@@ -452,6 +453,17 @@ fn final_rmsnorm_backward_route_for_backend(
     backend: &dyn BackendRuntime,
 ) -> FinalRmsNormBackwardRoute {
     TrainingLossBackend::runtime_final_rmsnorm_backward_route(backend)
+}
+
+#[inline]
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+fn grpo_kl_auxiliary_route_for_backend(backend: &dyn BackendRuntime) -> GrpoKlAuxiliaryRoute {
+    TrainingLossBackend::runtime_grpo_kl_auxiliary_route(backend)
 }
 // ---------------------------------------------------------------------------
 // (#1082) The candle facade — type aliases, generic constructor helpers,
@@ -8480,6 +8492,7 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
                         action_mask,
                         &ref_log_probs,
                         loss_params,
+                        grpo_kl_auxiliary_route_for_backend(backend),
                         device,
                         DEFAULT_CHUNK_SIZE,
                     )
@@ -8668,6 +8681,7 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
             action_mask,
             ref_log_probs,
             loss_params,
+            grpo_kl_auxiliary_route_for_backend(backend),
             1.0,
             device,
             DEFAULT_CHUNK_SIZE,
@@ -8824,6 +8838,7 @@ impl GrpoLossParams {
 }
 
 fn entropy_aware_kl_threshold_from_policy_log_probs(
+    grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute,
     policy_log_probs: &Tensor,
     q: f32,
     num_active: usize,
@@ -8835,24 +8850,42 @@ fn entropy_aware_kl_threshold_from_policy_log_probs(
     let idx = ((q as f64) * (num_active.saturating_sub(1)) as f64).round() as usize;
     let idx = idx.min(num_active.saturating_sub(1));
 
-    // Reuse the inference CUDA top-k kernel when the requested quantile rank is
-    // small. The kernel is intentionally k-pass, so for large ranks a single
-    // host threshold read + CPU sort is less work than asking it for most of the
-    // active-token vector.
-    #[cfg(feature = "cuda")]
-    if matches!(policy_log_probs.device(), Device::Cuda(_)) && idx < 1024 {
+    // Reuse backend top-k kernels when the requested quantile rank is small.
+    // The kernels are intentionally k-pass, so for large ranks a single host
+    // threshold read + CPU sort is less work than asking for most of the vector.
+    if idx < 1024
+        && matches!(
+            grpo_kl_auxiliary_route,
+            GrpoKlAuxiliaryRoute::CudaRocmDeviceFastPath
+        )
+    {
         let flat = policy_log_probs
             .to_f32_dtype()?
             .flatten_all()?
             .reshape(vec![num_active])?
             .contiguous()?;
-        let (values, _indices) = kiln_tensor::cuda_topk_last_axis(&flat, idx + 1)
-            .map_err(|e| anyhow::anyhow!("entropy-aware KL CUDA top-k threshold: {e}"))?;
-        let threshold = values
-            .get(idx)
-            .copied()
-            .ok_or_else(|| anyhow::anyhow!("entropy-aware KL top-k returned too few values"))?;
-        return Ok(threshold);
+        #[cfg(not(any(feature = "cuda", feature = "rocm")))]
+        let _ = &flat;
+        #[cfg(feature = "cuda")]
+        if matches!(flat.device(), Device::Cuda(_)) {
+            let (values, _indices) = kiln_tensor::cuda_topk_last_axis(&flat, idx + 1)
+                .map_err(|e| anyhow::anyhow!("entropy-aware KL CUDA top-k threshold: {e}"))?;
+            let threshold = values
+                .get(idx)
+                .copied()
+                .ok_or_else(|| anyhow::anyhow!("entropy-aware KL top-k returned too few values"))?;
+            return Ok(threshold);
+        }
+        #[cfg(feature = "rocm")]
+        if matches!(flat.device(), Device::Rocm(_)) {
+            let (values, _indices) = kiln_tensor::rocm_topk_last_axis(&flat, idx + 1)
+                .map_err(|e| anyhow::anyhow!("entropy-aware KL ROCm top-k threshold: {e}"))?;
+            let threshold = values
+                .get(idx)
+                .copied()
+                .ok_or_else(|| anyhow::anyhow!("entropy-aware KL top-k returned too few values"))?;
+            return Ok(threshold);
+        }
     }
 
     let plp_host: Vec<f32> = policy_log_probs
@@ -8871,6 +8904,7 @@ fn entropy_aware_kl_threshold_from_policy_log_probs(
 }
 
 pub(crate) fn entropy_aware_kl_mask_kt(
+    grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute,
     policy_log_probs: &Tensor,
     params: GrpoLossParams,
     device: &Device,
@@ -8887,8 +8921,12 @@ pub(crate) fn entropy_aware_kl_mask_kt(
         return Ok(Some(zeros_f32_on(policy_log_probs.shape(), device)?));
     }
 
-    let threshold =
-        entropy_aware_kl_threshold_from_policy_log_probs(policy_log_probs, q, num_active)?;
+    let threshold = entropy_aware_kl_threshold_from_policy_log_probs(
+        grpo_kl_auxiliary_route,
+        policy_log_probs,
+        q,
+        num_active,
+    )?;
     let policy_f32 = policy_log_probs
         .to_f32_dtype()?
         .flatten_all()?
@@ -8922,6 +8960,22 @@ pub(crate) fn entropy_aware_kl_mask_kt(
 // (`crate::grpo_tape_shim`) can recompute the EXACT same scalar PG (+ KL)
 // loss inside its candle-autograd backward composite (#1082 CP-4).
 pub(crate) fn grpo_loss(
+    policy_log_probs: &Tensor,
+    ref_log_probs: &Tensor,
+    params: GrpoLossParams,
+    device: &Device,
+) -> Result<Tensor> {
+    grpo_loss_with_kl_auxiliary_route(
+        GrpoKlAuxiliaryRoute::HostComposite,
+        policy_log_probs,
+        ref_log_probs,
+        params,
+        device,
+    )
+}
+
+pub(crate) fn grpo_loss_with_kl_auxiliary_route(
+    grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute,
     policy_log_probs: &Tensor,
     ref_log_probs: &Tensor,
     params: GrpoLossParams,
@@ -8977,8 +9031,13 @@ pub(crate) fn grpo_loss(
     // Phase 3c — selective KL gating: zero KL on tokens below the proxy-entropy threshold.
     let kl_penalty = if let Some(q) = params.entropy_aware_kl_quantile {
         if q.is_finite() && (0.0..1.0).contains(&q) {
-            let mask = entropy_aware_kl_mask_kt(policy_log_probs, params, device)?
-                .ok_or_else(|| anyhow::anyhow!("entropy-aware KL mask unexpectedly absent"))?;
+            let mask = entropy_aware_kl_mask_kt(
+                grpo_kl_auxiliary_route,
+                policy_log_probs,
+                params,
+                device,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("entropy-aware KL mask unexpectedly absent"))?;
             (&kl_penalty_raw * &mask)?
         } else {
             kl_penalty_raw

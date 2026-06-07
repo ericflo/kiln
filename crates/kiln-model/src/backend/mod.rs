@@ -222,6 +222,23 @@ impl GrpoLossRoute {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrpoKlAuxiliaryRoute {
+    /// Use host-side composite threshold/coeff computation.
+    HostComposite,
+    /// Use CUDA/ROCm device-side auxiliary reductions when their envelopes match.
+    CudaRocmDeviceFastPath,
+}
+
+impl GrpoKlAuxiliaryRoute {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            GrpoKlAuxiliaryRoute::HostComposite => "host_composite",
+            GrpoKlAuxiliaryRoute::CudaRocmDeviceFastPath => "cuda_rocm_device_fast_path",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpdLossRoute {
     /// OPD is not advertised for the portable backend capability surface.
     Unsupported,
@@ -307,6 +324,7 @@ pub struct TrainingCapabilities {
     pub tape_forward_backward_route: TrainingTapeRoute,
     pub sft_flce_loss_route: SftFlceLossRoute,
     pub grpo_loss_route: GrpoLossRoute,
+    pub grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute,
     pub opd_loss_route: OpdLossRoute,
     pub opd_phase_b_backward_route: OpdPhaseBBackwardRoute,
     pub final_rmsnorm_backward_route: FinalRmsNormBackwardRoute,
@@ -326,6 +344,7 @@ impl TrainingCapabilities {
             tape_forward_backward_route: TrainingTapeRoute::Unsupported,
             sft_flce_loss_route: SftFlceLossRoute::FullLogits,
             grpo_loss_route: GrpoLossRoute::KtComposite,
+            grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute::HostComposite,
             opd_loss_route: OpdLossRoute::Unsupported,
             opd_phase_b_backward_route: OpdPhaseBBackwardRoute::Unsupported,
             final_rmsnorm_backward_route: FinalRmsNormBackwardRoute::KtComposite,
@@ -2382,6 +2401,10 @@ pub trait TrainingLossBackend: Send + Sync + std::fmt::Debug {
         self.runtime_training_capabilities().grpo_loss_route
     }
 
+    fn runtime_grpo_kl_auxiliary_route(&self) -> GrpoKlAuxiliaryRoute {
+        self.runtime_training_capabilities().grpo_kl_auxiliary_route
+    }
+
     fn runtime_opd_loss_route(&self) -> OpdLossRoute {
         self.runtime_training_capabilities().opd_loss_route
     }
@@ -3565,6 +3588,10 @@ mod tests {
         );
         assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::FullLogits);
         assert_eq!(caps.grpo_loss_route, GrpoLossRoute::KtComposite);
+        assert_eq!(
+            caps.grpo_kl_auxiliary_route,
+            GrpoKlAuxiliaryRoute::HostComposite
+        );
         assert_eq!(caps.opd_loss_route, OpdLossRoute::Unsupported);
         assert_eq!(
             caps.opd_phase_b_backward_route,
@@ -3657,6 +3684,14 @@ mod tests {
         assert_eq!(
             GrpoLossRoute::VulkanActiveRows.as_str(),
             "vulkan_active_rows"
+        );
+        assert_eq!(
+            GrpoKlAuxiliaryRoute::HostComposite.as_str(),
+            "host_composite"
+        );
+        assert_eq!(
+            GrpoKlAuxiliaryRoute::CudaRocmDeviceFastPath.as_str(),
+            "cuda_rocm_device_fast_path"
         );
         assert_eq!(OpdLossRoute::Unsupported.as_str(), "unsupported");
         assert_eq!(OpdLossRoute::KtTapePhaseB.as_str(), "kt_tape_phase_b");
@@ -4545,6 +4580,10 @@ mod tests {
         );
         assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::KtTapeFlce);
         assert_eq!(caps.grpo_loss_route, GrpoLossRoute::KtComposite);
+        assert_eq!(
+            caps.grpo_kl_auxiliary_route,
+            GrpoKlAuxiliaryRoute::CudaRocmDeviceFastPath
+        );
         assert_eq!(caps.opd_loss_route, OpdLossRoute::KtTapePhaseB);
         assert_eq!(
             caps.opd_phase_b_backward_route,
@@ -4566,6 +4605,10 @@ mod tests {
         );
         assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::KtTapeFlce);
         assert_eq!(caps.grpo_loss_route, GrpoLossRoute::KtComposite);
+        assert_eq!(
+            caps.grpo_kl_auxiliary_route,
+            GrpoKlAuxiliaryRoute::CudaRocmDeviceFastPath
+        );
         assert_eq!(caps.opd_loss_route, OpdLossRoute::KtTapePhaseB);
         assert_eq!(
             caps.opd_phase_b_backward_route,
@@ -4590,6 +4633,10 @@ mod tests {
         );
         assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::FullLogits);
         assert_eq!(caps.grpo_loss_route, GrpoLossRoute::KtComposite);
+        assert_eq!(
+            caps.grpo_kl_auxiliary_route,
+            GrpoKlAuxiliaryRoute::HostComposite
+        );
         assert_eq!(caps.opd_loss_route, OpdLossRoute::KtTapePhaseB);
         assert_eq!(
             caps.opd_phase_b_backward_route,
@@ -4614,6 +4661,10 @@ mod tests {
         );
         assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::VulkanActiveRows);
         assert_eq!(caps.grpo_loss_route, GrpoLossRoute::VulkanActiveRows);
+        assert_eq!(
+            caps.grpo_kl_auxiliary_route,
+            GrpoKlAuxiliaryRoute::HostComposite
+        );
         assert_eq!(caps.opd_loss_route, OpdLossRoute::VulkanActiveHidden);
         assert_eq!(
             caps.opd_phase_b_backward_route,

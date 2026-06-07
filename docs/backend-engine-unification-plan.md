@@ -235,6 +235,11 @@ The relevant shims are:
   trainer chooses GRPO loss roots through
   `TrainingLossBackend::runtime_grpo_loss_route`: CPU/CUDA/ROCm/Metal use the
   shared kt-composite route and Vulkan uses the active-row fused shader route.
+  GRPO KL auxiliary reductions and gradient-coefficient fast paths are also
+  backend-owned through
+  `TrainingLossBackend::runtime_grpo_kl_auxiliary_route`: CUDA/ROCm advertise
+  device fast paths for the entropy-aware threshold and coefficient/chunk
+  helpers, while CPU/Metal/Vulkan keep the host-composite route.
 - `opd_tape_shim.rs`: records the OPD top-K/reverse-KL scalar-mean loss root and
   owns the Vulkan-specific active-hidden fused-shader loss/grad paths. The
   trainer chooses OPD loss roots through

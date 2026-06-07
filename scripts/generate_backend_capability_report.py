@@ -728,46 +728,51 @@ def training_loss_policy_report() -> dict[str, Any]:
             "sft_flce_loss_route": "full_logits",
             "tape_forward_backward_route": "unsupported",
             "grpo_loss_route": "kt_composite",
+            "grpo_kl_auxiliary_route": "host_composite",
             "opd_loss_route": "unsupported",
             "opd_phase_b_backward_route": "unsupported",
             "final_rmsnorm_backward_route": "kt_composite",
-            "evidence": "TrainingCapabilities::portable keeps tape forward/backward unsupported, SFT on the portable full-logits loss path, GRPO on the shared kt composite loss root, OPD unsupported on the portable backend surface, and final RMSNorm backward on the kt-composite route",
+            "evidence": "TrainingCapabilities::portable keeps tape forward/backward unsupported, SFT on the portable full-logits loss path, GRPO on the shared kt composite loss root, GRPO KL auxiliaries on the host-composite route, OPD unsupported on the portable backend surface, and final RMSNorm backward on the kt-composite route",
         },
         "cuda": {
             "sft_flce_loss_route": "kt_tape_flce",
             "tape_forward_backward_route": "kt_tape_authoritative",
             "grpo_loss_route": "kt_composite",
+            "grpo_kl_auxiliary_route": "cuda_rocm_device_fast_path",
             "opd_loss_route": "kt_tape_phase_b",
             "opd_phase_b_backward_route": "cuda_rocm_fused_unit_grad",
             "final_rmsnorm_backward_route": "cuda_rocm_fused_tail",
-            "evidence": "CudaBackend::training_capabilities_static advertises kt tape-authoritative forward/backward, kt-tape FLCE over CUDA tensors, the shared kt GRPO composite route, the shared kt-tape OPD Phase-B route, the fused CUDA/ROCm Phase-B hidden-gradient leaf, and the fused final-RMSNorm tail route",
+            "evidence": "CudaBackend::training_capabilities_static advertises kt tape-authoritative forward/backward, kt-tape FLCE over CUDA tensors, the shared kt GRPO composite route, CUDA/ROCm device fast paths for GRPO KL auxiliaries, the shared kt-tape OPD Phase-B route, the fused CUDA/ROCm Phase-B hidden-gradient leaf, and the fused final-RMSNorm tail route",
         },
         "rocm": {
             "sft_flce_loss_route": "kt_tape_flce",
             "tape_forward_backward_route": "kt_tape_authoritative",
             "grpo_loss_route": "kt_composite",
+            "grpo_kl_auxiliary_route": "cuda_rocm_device_fast_path",
             "opd_loss_route": "kt_tape_phase_b",
             "opd_phase_b_backward_route": "cuda_rocm_fused_unit_grad",
             "final_rmsnorm_backward_route": "cuda_rocm_fused_tail",
-            "evidence": "RocmBackend::training_capabilities_static advertises kt tape-authoritative forward/backward, the shared kt-tape FLCE route over ROCm tensors, the shared kt GRPO composite route, the shared kt-tape OPD Phase-B route, the fused CUDA/ROCm Phase-B hidden-gradient leaf, and the fused final-RMSNorm tail route",
+            "evidence": "RocmBackend::training_capabilities_static advertises kt tape-authoritative forward/backward, the shared kt-tape FLCE route over ROCm tensors, the shared kt GRPO composite route, CUDA/ROCm device fast paths for GRPO KL auxiliaries, the shared kt-tape OPD Phase-B route, the fused CUDA/ROCm Phase-B hidden-gradient leaf, and the fused final-RMSNorm tail route",
         },
         "metal": {
             "sft_flce_loss_route": "full_logits",
             "tape_forward_backward_route": "kt_tape_authoritative",
             "grpo_loss_route": "kt_composite",
+            "grpo_kl_auxiliary_route": "host_composite",
             "opd_loss_route": "kt_tape_phase_b",
             "opd_phase_b_backward_route": "kt_composite",
             "final_rmsnorm_backward_route": "kt_composite",
-            "evidence": "Metal training capabilities advertise kt tape-authoritative forward/backward, inherit the portable full-logits SFT loss route, shared kt GRPO composite route, shared kt-tape OPD Phase-B route, device-agnostic kt composite Phase-B backward, and kt-composite final RMSNorm backward",
+            "evidence": "Metal training capabilities advertise kt tape-authoritative forward/backward, inherit the portable full-logits SFT loss route, shared kt GRPO composite route, host-composite GRPO KL auxiliaries, shared kt-tape OPD Phase-B route, device-agnostic kt composite Phase-B backward, and kt-composite final RMSNorm backward",
         },
         "vulkan": {
             "sft_flce_loss_route": "vulkan_active_rows",
             "tape_forward_backward_route": "kt_tape_authoritative",
             "grpo_loss_route": "vulkan_active_rows",
+            "grpo_kl_auxiliary_route": "host_composite",
             "opd_loss_route": "vulkan_active_hidden",
             "opd_phase_b_backward_route": "vulkan_active_hidden",
             "final_rmsnorm_backward_route": "kt_composite",
-            "evidence": "Vulkan training capabilities advertise kt tape-authoritative forward/backward, active-row fused SFT/GRPO shader routes, the active-hidden fused OPD loss/backward shader route, and kt-composite final RMSNorm backward",
+            "evidence": "Vulkan training capabilities advertise kt tape-authoritative forward/backward, active-row fused SFT/GRPO shader routes, host-composite GRPO KL auxiliaries, the active-hidden fused OPD loss/backward shader route, and kt-composite final RMSNorm backward",
         },
     }
 
@@ -1579,14 +1584,15 @@ def markdown(data: dict[str, Any]) -> str:
     lines.append("## Training Loss Routing")
     lines.append("")
     lines.append(
-        "| Backend | Tape Forward/Backward Route | SFT FLCE Route | GRPO Route | OPD Route | OPD Phase-B Backward Route | Final RMSNorm Backward Route | Evidence |"
+        "| Backend | Tape Forward/Backward Route | SFT FLCE Route | GRPO Route | GRPO KL Auxiliary Route | OPD Route | OPD Phase-B Backward Route | Final RMSNorm Backward Route | Evidence |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|")
     for backend, info in data["training_loss_policy"].items():
         lines.append(
             f"| `{backend}` | `{info['tape_forward_backward_route']}` | "
             f"`{info['sft_flce_loss_route']}` | "
-            f"`{info['grpo_loss_route']}` | `{info['opd_loss_route']}` | "
+            f"`{info['grpo_loss_route']}` | "
+            f"`{info['grpo_kl_auxiliary_route']}` | `{info['opd_loss_route']}` | "
             f"`{info['opd_phase_b_backward_route']}` | "
             f"`{info['final_rmsnorm_backward_route']}` | {info['evidence']} |"
         )
