@@ -744,6 +744,7 @@ pub struct AttentionCapabilities {
     pub flash_prefill_head_major: Support,
     pub flash_paged_decode: Support,
     pub flash_prefill_consumes_grouped_kv: bool,
+    pub detached_chunked_prefill: Support,
 }
 
 /// Focused GDN capability snapshot.
@@ -1090,6 +1091,7 @@ impl BackendCapabilities {
                     &flash_paged_decode,
                 ),
                 flash_prefill_consumes_grouped_kv: flash_prefill_consumes_grouped_kv(name),
+                detached_chunked_prefill: detached_chunked_prefill_support(name),
             },
             gdn: GdnCapabilities {
                 recurrent_step: Support::from_supports_predicate(
@@ -1254,6 +1256,13 @@ impl DecodeBatcherPolicy {
 
 fn flash_prefill_consumes_grouped_kv(name: &str) -> bool {
     matches!(name, "cuda")
+}
+
+fn detached_chunked_prefill_support(name: &str) -> Support {
+    match name {
+        "cuda" => Support::NativeWithConstraints,
+        _ => Support::Declined,
+    }
 }
 
 fn gdn_recurrent_step_f32_support(name: &str, recurrent_step_supported: bool) -> Support {

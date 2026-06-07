@@ -164,7 +164,7 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `BackendCapabilities` | 11 | `backend`, `device`, `storage`, `matmul`, `attention`, `gdn`, `decode`, `decode_batcher`, `training`, `graph_replay`, `fallback` |
 | `StorageCapabilities` | 4 | `backend`, `device`, `resident_activation`, `resident_decode` |
 | `MatmulCapabilities` | 3 | `rank2_f32`, `batched_bf16`, `bias_epilogue` |
-| `AttentionCapabilities` | 4 | `flash_prefill`, `flash_prefill_head_major`, `flash_paged_decode`, `flash_prefill_consumes_grouped_kv` |
+| `AttentionCapabilities` | 5 | `flash_prefill`, `flash_prefill_head_major`, `flash_paged_decode`, `flash_prefill_consumes_grouped_kv`, `detached_chunked_prefill` |
 | `GdnCapabilities` | 7 | `recurrent_step`, `recurrent_step_f32`, `chunk_prep`, `chunk_scan`, `full_chunk_forward`, `gates`, `gated_rms_norm` |
 | `DecodeCapabilities` | 6 | `resident_decode`, `paged_decode_graph_outputs`, `linear_argmax`, `linear_argmax_batch`, `linear_sample`, `linear_sample_batch` |
 | `DecodeBatcherPolicy` | 12 | `max_batch`, `wait_micros`, `allow_mixed_seq_lens`, `rowwise_retry_env`, `prefer_direct_paged_decode_attention`, `direct_paged_decode_attention_env_gate`, `allow_prefix_cache_split_snapshot`, `paged_decode_requires_contiguous_kv_chunks`, `use_greedy_token_decode`, `use_native_sampled_contiguous_decode`, `sampled_contiguous_decode_requires_resident_decode`, `partition_noncontiguous_gdn_kv_tiles` |

@@ -16,9 +16,11 @@ use std::time::Duration;
 
 use crate::backend::capability::{BackendCapabilityQueries, Support};
 use crate::backend::{
-    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, GdnBackend, LinearBackend,
-    PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend,
+    AttentionBackend, BackendRuntime, ConvBackend, GdnBackend, LinearBackend, PagedKvBackend,
+    ReplayBackend, ResidencyBackend, SamplingBackend,
 };
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+use crate::backend::BackendIdentity;
 use crate::kv_cache::KvCache;
 use crate::lora_loader::{
     LoraLayerWeights, LoraProjectionWeights, LoraWeights, compute_lora_delta, linear_with_lora_t,
@@ -241,6 +243,15 @@ fn flash_prefill_consumes_grouped_kv(backend: &dyn BackendRuntime) -> bool {
     BackendCapabilityQueries::backend_capabilities(backend)
         .attention
         .flash_prefill_consumes_grouped_kv
+}
+
+fn detached_chunked_prefill_supported(backend: &dyn BackendRuntime) -> bool {
+    matches!(
+        BackendCapabilityQueries::backend_capabilities(backend)
+            .attention
+            .detached_chunked_prefill,
+        Support::Native | Support::NativeWithConstraints
+    )
 }
 
 fn gdn_recurrent_step_supports_dtype(backend: &dyn BackendRuntime, dtype: DType) -> bool {
@@ -12812,7 +12823,10 @@ fn gated_rms_norm(
     // `GdnGatedRmsNormBackward` in the caller.
     #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     let skip_backend_for_active_tape = crate::tape_forward::tape_scope_active()
-        && matches!(BackendIdentity::runtime_device(backend), kiln_tensor::Device::Vulkan(_));
+        && matches!(
+            backend.runtime_device(),
+            kiln_tensor::Device::Vulkan(_)
+        );
     #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
     let skip_backend_for_active_tape = false;
     if !skip_backend_for_active_tape
@@ -22833,7 +22847,7 @@ pub fn transformer_block(
         && kv_cache.is_some()
         && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
 
-    if let Some(out) = transformer_block_detached_cuda_prefill_chunked(
+    if let Some(out) = transformer_block_detached_prefill_chunked(
         backend,
         x,
         layer,
@@ -22916,7 +22930,7 @@ pub fn transformer_block(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn transformer_block_detached_cuda_prefill_chunked(
+fn transformer_block_detached_prefill_chunked(
     backend: &dyn BackendRuntime,
     x: &Tensor,
     layer: &GpuLayerWeights,
@@ -22936,7 +22950,7 @@ fn transformer_block_detached_cuda_prefill_chunked(
     if crate::tape_forward::tape_scope_active() {
         return Ok(None);
     }
-    if BackendIdentity::runtime_name(backend) != "cuda" || has_kv_cache || x.track_op() {
+    if !detached_chunked_prefill_supported(backend) || has_kv_cache || x.track_op() {
         return Ok(None);
     }
     let (_batch, seq_len, _hidden) = x.dims3()?;
@@ -22956,7 +22970,7 @@ fn transformer_block_detached_cuda_prefill_chunked(
         layer = full_attn_layer_idx,
         seq_len,
         tile_size,
-        "detached CUDA full-attention prefill chunked"
+        "detached full-attention prefill chunked"
     );
 
     let normed = {

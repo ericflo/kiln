@@ -1574,7 +1574,7 @@
   },
   "capability_descriptors": {
     "AttentionCapabilities": {
-      "field_count": 4,
+      "field_count": 5,
       "fields": [
         {
           "name": "flash_prefill",
@@ -1591,6 +1591,10 @@
         {
           "name": "flash_prefill_consumes_grouped_kv",
           "type": "bool"
+        },
+        {
+          "name": "detached_chunked_prefill",
+          "type": "Support"
         }
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"

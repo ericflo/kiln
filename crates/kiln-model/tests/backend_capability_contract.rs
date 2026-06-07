@@ -1175,6 +1175,10 @@ fn generated_capability_report_lists_request_descriptors() {
         attention_capability_fields.contains(&"flash_prefill_consumes_grouped_kv"),
         "AttentionCapabilities should own flash-prefill grouped-KV ABI routing"
     );
+    assert!(
+        attention_capability_fields.contains(&"detached_chunked_prefill"),
+        "AttentionCapabilities should own detached chunked prefill routing"
+    );
     let gdn_capability_fields = capability_descriptors["GdnCapabilities"]["fields"]
         .as_array()
         .expect("GdnCapabilities fields should be an array")
@@ -2425,6 +2429,11 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "forward flash-prefill GQA routing should read AttentionCapabilities"
     );
     assert!(
+        forward_source.contains("detached_chunked_prefill_supported")
+            && capability_source.contains("detached_chunked_prefill"),
+        "forward detached chunked prefill routing should read AttentionCapabilities"
+    );
+    assert!(
         forward_source.contains("paged_decode_requires_contiguous_kv_chunks")
             && capability_source.contains("paged_decode_requires_contiguous_kv_chunks"),
         "forward paged-decode KV contiguity routing should read DecodeBatcherPolicy"
@@ -2561,6 +2570,20 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     assert!(
         !flash_prefill_gqa_section.contains("BackendIdentity::runtime_name(backend) != \"cuda\""),
         "flash_attention_forward should not branch on CUDA backend identity for grouped-KV expansion"
+    );
+    let detached_chunked_prefill_section = source_between(
+        &forward_source,
+        "fn transformer_block_detached_prefill_chunked(",
+        "let (_batch, seq_len, _hidden) = x.dims3()?",
+    );
+    assert!(
+        detached_chunked_prefill_section.contains("detached_chunked_prefill_supported(backend)"),
+        "detached chunked prefill should route through AttentionCapabilities"
+    );
+    assert!(
+        !detached_chunked_prefill_section
+            .contains("BackendIdentity::runtime_name(backend) != \"cuda\""),
+        "detached chunked prefill should not branch on CUDA backend identity"
     );
     let gdn_recurrent_step_dtype_section = source_between(
         &forward_source,
