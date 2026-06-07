@@ -1887,6 +1887,26 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "decode fallback policy should import the shared backend capability query surface"
     );
     assert!(
+        speculative_source.contains("try_device_logits_to_probs"),
+        "speculative rejection sampling should expose a device-dispatched logits-to-probs path"
+    );
+    assert!(
+        speculative_source.contains("kiln_tensor::ops::div_scalar")
+            && speculative_source.contains("softmax_last_dim"),
+        "speculative rejection sampling should use kt device-dispatched scalar and softmax ops"
+    );
+    for forbidden in [
+        "try_kt_logits_to_probs",
+        "kiln_tensor::cuda_scalar_op",
+        "kiln_tensor::cuda_softmax_last_axis",
+        "matches!(logits.device(), kiln_tensor::Device::Cuda(_))",
+    ] {
+        assert!(
+            !speculative_source.contains(forbidden),
+            "speculative rejection sampling should not depend on CUDA-only logits probability path {forbidden}"
+        );
+    }
+    assert!(
         generate_source.contains("DecodeBatcherPolicy"),
         "decode batcher defaults should import the backend-owned policy surface"
     );
