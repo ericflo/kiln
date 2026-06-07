@@ -5269,6 +5269,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "docs/backend-latency-fixtures.json",
         "docs/backend-latency-result-schema.md",
         "latency_fixture_id",
+        "inputs.latency_fixture_id == 'none'",
         "latency_runner_labels_json",
         "Run selected backend latency fixture",
         "Upload backend latency fixture artifacts",

@@ -27,9 +27,9 @@ on:
   # #1082 §9 "CPU-only smoke variant" — fires the GHA-hosted
   # `gate-self-test` job on every PR that touches the gate scripts,
   # baselines, latency fixture contract, or workflow YAML. The heavy
-  # `cuda-bench` job is gated by `if: github.event_name == 'schedule' ||
-  # ... 'workflow_dispatch'` so it stays off the PR-time critical path
-  # until the self-hosted A6000 runner comes online.
+  # `cuda-bench` job is gated by schedule or a workflow_dispatch without a
+  # selected backend latency fixture, so fixture-only dispatches can collect
+  # threshold artifacts without also running the training perf matrix.
   pull_request:
     paths:
       - 'bench-results/check_sft_train_regression.py'
@@ -259,7 +259,7 @@ jobs:
     name: A6000 perf gate (${{ matrix.trainer }})
     runs-on: [self-hosted, linux, cuda-a6000]
     needs: gate-self-test
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.latency_fixture_id == 'none') }}
     strategy:
       fail-fast: false
       matrix:

@@ -176,7 +176,9 @@ self-hosted runner labels, such as `["self-hosted","linux","cuda-a6000"]` or a
 site-local Metal/ROCm/Vulkan label set. The job runs the same fixture runner and
 uploads both `bench-results/backend-latency/*.json` and
 `bench-results/backend-latency/raw/*.log` as workflow artifacts for review and
-check-in before threshold locking.
+check-in before threshold locking. When `latency_fixture_id` is anything other
+than `none`, the workflow skips the unrelated A6000 training perf matrix so a
+fixture-only dispatch consumes only the selected hardware fixture runner.
 
 After downloading the workflow artifact zip, import the result JSON and raw log
 into their canonical repository paths before locking thresholds:
