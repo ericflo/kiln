@@ -3013,6 +3013,24 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         );
     }
 
+    let perf_workflow = fs::read_to_string(root.join(".github/workflows/perf-regression-nightly.yml"))
+        .expect("perf regression workflow should be readable");
+    for required in [
+        "Verify backend latency fixture contract",
+        "scripts/run_backend_latency_fixture.py --self-test",
+        "scripts/write_backend_latency_result_artifact.py --self-test",
+        "scripts/lock_backend_latency_thresholds.py --self-test",
+        "scripts/check_backend_latency_fixtures.py --self-test",
+        "scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json",
+        "docs/backend-latency-fixtures.json",
+        "docs/backend-latency-result-schema.md",
+    ] {
+        assert!(
+            perf_workflow.contains(required),
+            "perf workflow should run non-hardware latency fixture validation: {required}"
+        );
+    }
+
     let evidence_present = hardware_gate["evidence_present"]
         .as_array()
         .expect("hardware latency present evidence should be an array")
@@ -3022,6 +3040,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
     for path in [
         "docs/backend-latency-fixtures.json",
         "docs/backend-latency-result-schema.md",
+        ".github/workflows/perf-regression-nightly.yml",
         "scripts/run_backend_latency_fixture.py",
         "scripts/write_backend_latency_result_artifact.py",
         "scripts/lock_backend_latency_thresholds.py",
