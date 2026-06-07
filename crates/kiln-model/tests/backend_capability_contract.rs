@@ -1175,6 +1175,16 @@ fn generated_capability_report_lists_request_descriptors() {
         attention_capability_fields.contains(&"flash_prefill_consumes_grouped_kv"),
         "AttentionCapabilities should own flash-prefill grouped-KV ABI routing"
     );
+    let gdn_capability_fields = capability_descriptors["GdnCapabilities"]["fields"]
+        .as_array()
+        .expect("GdnCapabilities fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        gdn_capability_fields.contains(&"recurrent_step_f32"),
+        "GdnCapabilities should own dtype-specific recurrent-step routing"
+    );
     let decode_batcher_policy_fields = capability_descriptors["DecodeBatcherPolicy"]["fields"]
         .as_array()
         .expect("DecodeBatcherPolicy fields should be an array")
@@ -2420,6 +2430,11 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "forward paged-decode KV contiguity routing should read DecodeBatcherPolicy"
     );
     assert!(
+        forward_source.contains("gdn_recurrent_step_supports_dtype")
+            && capability_source.contains("recurrent_step_f32"),
+        "forward GDN recurrent-step dtype routing should read GdnCapabilities"
+    );
+    assert!(
         forward_source.contains("ResidencyBackend"),
         "forward GDN recurrent residency helpers should import the focused residency facet"
     );
@@ -2546,6 +2561,23 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     assert!(
         !flash_prefill_gqa_section.contains("BackendIdentity::runtime_name(backend) != \"cuda\""),
         "flash_attention_forward should not branch on CUDA backend identity for grouped-KV expansion"
+    );
+    let gdn_recurrent_step_dtype_section = source_between(
+        &forward_source,
+        "// Single-token decode fast path.",
+        "if use_backend_recurrent_step {",
+    );
+    assert!(
+        gdn_recurrent_step_dtype_section
+            .contains("gdn_recurrent_step_supports_dtype(backend, dtype)"),
+        "single-token GDN recurrent-step routing should ask the dtype capability helper"
+    );
+    assert!(
+        !gdn_recurrent_step_dtype_section
+            .contains("BackendIdentity::runtime_name(backend) == \"vulkan\"")
+            && !gdn_recurrent_step_dtype_section
+                .contains("vulkan_gdn_recurrent_step_f32_enabled()"),
+        "single-token GDN recurrent-step routing should not branch on Vulkan identity/env locally"
     );
     let paged_decode_kv_contiguity_section = source_between(
         &forward_source,

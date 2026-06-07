@@ -1770,10 +1770,14 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "GdnCapabilities": {
-      "field_count": 6,
+      "field_count": 7,
       "fields": [
         {
           "name": "recurrent_step",
+          "type": "Support"
+        },
+        {
+          "name": "recurrent_step_f32",
           "type": "Support"
         },
         {

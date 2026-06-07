@@ -750,6 +750,7 @@ pub struct AttentionCapabilities {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GdnCapabilities {
     pub recurrent_step: Support,
+    pub recurrent_step_f32: Support,
     pub chunk_prep: Support,
     pub chunk_scan: Support,
     pub full_chunk_forward: Support,
@@ -1094,6 +1095,10 @@ impl BackendCapabilities {
                 recurrent_step: Support::from_supports_predicate(
                     GdnBackend::runtime_supports_gdn_recurrent_step(backend),
                 ),
+                recurrent_step_f32: gdn_recurrent_step_f32_support(
+                    name,
+                    GdnBackend::runtime_supports_gdn_recurrent_step(backend),
+                ),
                 chunk_prep: Support::from_supports_predicate(
                     GdnBackend::runtime_supports_gdn_chunk_prep(backend),
                 ),
@@ -1249,6 +1254,16 @@ impl DecodeBatcherPolicy {
 
 fn flash_prefill_consumes_grouped_kv(name: &str) -> bool {
     matches!(name, "cuda")
+}
+
+fn gdn_recurrent_step_f32_support(name: &str, recurrent_step_supported: bool) -> Support {
+    match name {
+        "vulkan" if std::env::var("KILN_DISABLE_VULKAN_GDN_RECURRENT_STEP_F32").is_ok() => {
+            Support::DisabledByEnv
+        }
+        "vulkan" if recurrent_step_supported => Support::NativeWithConstraints,
+        _ => Support::Declined,
+    }
 }
 
 impl BackendFallbackCapabilities {

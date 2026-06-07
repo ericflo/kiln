@@ -14,7 +14,7 @@ use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use crate::backend::capability::BackendCapabilityQueries;
+use crate::backend::capability::{BackendCapabilityQueries, Support};
 use crate::backend::{
     AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, GdnBackend, LinearBackend,
     PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend,
@@ -241,6 +241,19 @@ fn flash_prefill_consumes_grouped_kv(backend: &dyn BackendRuntime) -> bool {
     BackendCapabilityQueries::backend_capabilities(backend)
         .attention
         .flash_prefill_consumes_grouped_kv
+}
+
+fn gdn_recurrent_step_supports_dtype(backend: &dyn BackendRuntime, dtype: DType) -> bool {
+    match dtype {
+        DType::BF16 => true,
+        DType::F32 => matches!(
+            BackendCapabilityQueries::backend_capabilities(backend)
+                .gdn
+                .recurrent_step_f32,
+            Support::Native | Support::NativeWithConstraints
+        ),
+        _ => false,
+    }
 }
 
 #[cfg(feature = "cuda")]
@@ -2450,11 +2463,6 @@ fn cuda_rocm_full_attn_qkv_in_proj_enabled(device: Device) -> bool {
 fn weighted_lm_head_prep_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
     *DISABLED.get_or_init(|| env_truthy_for_profile("KILN_DISABLE_WEIGHTED_LM_HEAD_PREP"))
-}
-
-fn vulkan_gdn_recurrent_step_f32_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_RECURRENT_STEP_F32").is_err())
 }
 
 fn synchronize_for_profile(device: &Device) -> Result<()> {
@@ -13404,16 +13412,13 @@ fn gdn_chunkwise_recurrence(
     // decay matrix, KKT, forward sub, B_mask) costs more than the per-token
     // recurrence itself when seq_len == 1, which is the cause of the −54%
     // decode regression in PR #80. The backend's `gdn_recurrent_step`
-    // kernel (CUDA today) collapses the whole recurrence into one block
-    // per (B,H).
+    // kernel collapses the whole recurrence into one block per (B,H). Backend
+    // capabilities own dtype-specific eligibility.
     if seq_len == 1 {
         let use_backend_recurrent_step = state.dtype() == dtype
             && !any_kt_tensor_tracks_op(&[q, k, v, beta, g, state])
             && GdnBackend::runtime_supports_gdn_recurrent_step(backend)
-            && (dtype == DType::BF16
-                || (dtype == DType::F32
-                    && BackendIdentity::runtime_name(backend) == "vulkan"
-                    && vulkan_gdn_recurrent_step_f32_enabled()));
+            && gdn_recurrent_step_supports_dtype(backend, dtype);
         if use_backend_recurrent_step {
             // The five squeeze+contiguous calls below can copy the single-row
             // inputs before the recurrent forward runs. The dedicated NVTX
