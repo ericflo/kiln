@@ -6651,7 +6651,7 @@ impl GpuWeights {
                     let qkv_proj_t = {
                         #[cfg(any(feature = "cuda", feature = "rocm"))]
                         {
-                            if cuda_or_rocm_device(*device) {
+                            if projection_load_policy.cache_full_attention_qkv_transpose_concat {
                                 Some(
                                     Tensor::cat(
                                         &[&q_proj_t, &k_proj_t, &v_proj_t],

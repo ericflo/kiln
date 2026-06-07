@@ -751,6 +751,7 @@ pub struct ProjectionLoadPolicy {
     pub parallel_transposed_projection_upload_disable_env: Option<&'static str>,
     pub parallel_auxiliary_weight_upload: bool,
     pub parallel_auxiliary_weight_upload_disable_env: Option<&'static str>,
+    pub cache_full_attention_qkv_transpose_concat: bool,
     pub cache_linear_attention_ab_transpose_concat: bool,
     pub cache_mlp_gate_up_transpose_concat: bool,
     pub stub_embedding_table_after_transposed_upload: bool,
@@ -1425,6 +1426,10 @@ impl ProjectionLoadPolicy {
             parallel_auxiliary_weight_upload: matches!(backend, kiln_tensor::Backend::Metal),
             parallel_auxiliary_weight_upload_disable_env: Some(
                 Self::DISABLE_PARALLEL_AUXILIARY_LOAD_ENV,
+            ),
+            cache_full_attention_qkv_transpose_concat: matches!(
+                backend,
+                kiln_tensor::Backend::Cuda | kiln_tensor::Backend::Rocm
             ),
             cache_linear_attention_ab_transpose_concat: matches!(
                 backend,

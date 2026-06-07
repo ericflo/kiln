@@ -1277,6 +1277,7 @@ fn generated_capability_report_lists_request_descriptors() {
         "parallel_transposed_projection_upload_disable_env",
         "parallel_auxiliary_weight_upload",
         "parallel_auxiliary_weight_upload_disable_env",
+        "cache_full_attention_qkv_transpose_concat",
         "cache_linear_attention_ab_transpose_concat",
         "cache_mlp_gate_up_transpose_concat",
         "stub_embedding_table_after_transposed_upload",
@@ -3138,6 +3139,26 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         assert!(
             !embedding_load_policy_section.contains(forbidden),
             "embedding table upload/stub decision should not keep local backend policy: {forbidden}"
+        );
+    }
+    let full_qkv_concat_policy_section = source_between(
+        &forward_source,
+        "let qkv_proj_t = {",
+        "// KILN_W4A16=1 opt-in: queue q_proj",
+    );
+    assert!(
+        full_qkv_concat_policy_section
+            .contains("projection_load_policy.cache_full_attention_qkv_transpose_concat"),
+        "full-attention qkv_proj_t cache should consume ProjectionLoadPolicy"
+    );
+    for forbidden in [
+        "cuda_or_rocm_device(*device)",
+        "matches!(device, Device::Cuda",
+        "matches!(device, Device::Rocm",
+    ] {
+        assert!(
+            !full_qkv_concat_policy_section.contains(forbidden),
+            "full-attention qkv_proj_t cache should not keep local backend policy: {forbidden}"
         );
     }
     let linear_ab_concat_policy_section = source_between(
