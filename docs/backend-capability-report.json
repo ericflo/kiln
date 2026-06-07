@@ -1851,6 +1851,24 @@
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
+    "GpuMemoryDetectionPolicy": {
+      "field_count": 3,
+      "fields": [
+        {
+          "name": "detected_total_log_message",
+          "type": "Option<&'static str>"
+        },
+        {
+          "name": "missing_total_warning",
+          "type": "Option<&'static str>"
+        },
+        {
+          "name": "missing_total_fallback_bytes",
+          "type": "Option<u64>"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
     "InferenceRecurrentStatePolicy": {
       "field_count": 2,
       "fields": [
@@ -2056,7 +2074,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "StorageCapabilities": {
-      "field_count": 8,
+      "field_count": 9,
       "fields": [
         {
           "name": "backend",
@@ -2077,6 +2095,10 @@
         {
           "name": "kv_cache_device_memory_pressure",
           "type": "bool"
+        },
+        {
+          "name": "gpu_memory_detection_policy",
+          "type": "GpuMemoryDetectionPolicy"
         },
         {
           "name": "kv_sizing_residency_model_multiplier",

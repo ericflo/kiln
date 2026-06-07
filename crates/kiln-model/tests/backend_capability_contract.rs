@@ -1140,6 +1140,7 @@ fn generated_capability_report_lists_request_descriptors() {
     for name in [
         "BackendCapabilities",
         "StorageCapabilities",
+        "GpuMemoryDetectionPolicy",
         "KvCacheAutoBlockPolicy",
         "KvCacheMemoryTierBlockCap",
         "KvCacheFp8Policy",
@@ -1227,6 +1228,10 @@ fn generated_capability_report_lists_request_descriptors() {
         "StorageCapabilities should own KV cache device-memory pressure policy"
     );
     assert!(
+        storage_capability_fields.contains(&"gpu_memory_detection_policy"),
+        "StorageCapabilities should own backend-specific GPU memory detection fallback policy"
+    );
+    assert!(
         storage_capability_fields.contains(&"kv_sizing_residency_model_multiplier"),
         "StorageCapabilities should own backend-specific KV sizing residency reserve policy"
     );
@@ -1238,6 +1243,23 @@ fn generated_capability_report_lists_request_descriptors() {
         storage_capability_fields.contains(&"kv_cache_fp8_policy"),
         "StorageCapabilities should own backend-specific KV FP8 cache policy"
     );
+    let gpu_memory_detection_policy_fields =
+        capability_descriptors["GpuMemoryDetectionPolicy"]["fields"]
+            .as_array()
+            .expect("GpuMemoryDetectionPolicy fields should be an array")
+            .iter()
+            .filter_map(|field| field["name"].as_str())
+            .collect::<Vec<_>>();
+    for field in [
+        "detected_total_log_message",
+        "missing_total_warning",
+        "missing_total_fallback_bytes",
+    ] {
+        assert!(
+            gpu_memory_detection_policy_fields.contains(&field),
+            "GpuMemoryDetectionPolicy should include {field}"
+        );
+    }
     let kv_auto_block_policy_fields = capability_descriptors["KvCacheAutoBlockPolicy"]["fields"]
         .as_array()
         .expect("KvCacheAutoBlockPolicy fields should be an array")
@@ -2958,6 +2980,32 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         assert!(
             !server_kv_fp8_section.contains(forbidden),
             "kiln-server KV FP8 routing should not keep a local backend/env policy table: {forbidden}"
+        );
+    }
+    let server_gpu_memory_detection_section = source_between(
+        &server_state_source,
+        "fn detected_gpu_total_memory(",
+        "/// Successful auto-sizer outcome.",
+    );
+    assert!(
+        server_state_source.contains("gpu_memory_detection_policy")
+            && server_gpu_memory_detection_section.contains("GpuMemoryDetectionPolicy")
+            && server_gpu_memory_detection_section.contains("policy.total_memory_bytes"),
+        "kiln-server GPU memory detection should consume StorageCapabilities.gpu_memory_detection_policy"
+    );
+    for forbidden in [
+        "Device::Cuda",
+        "Device::Metal",
+        "Backend::Cuda",
+        "Backend::Metal",
+        "24 * 1024 * 1024 * 1024",
+        "16 * 1024 * 1024 * 1024",
+        "assuming 24GB",
+        "assuming 16GB",
+    ] {
+        assert!(
+            !server_gpu_memory_detection_section.contains(forbidden),
+            "kiln-server GPU memory detection should not keep backend fallback policy locally: {forbidden}"
         );
     }
     assert!(

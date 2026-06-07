@@ -732,9 +732,18 @@ pub struct StorageCapabilities {
     pub resident_activation: Support,
     pub resident_decode: Support,
     pub kv_cache_device_memory_pressure: bool,
+    pub gpu_memory_detection_policy: GpuMemoryDetectionPolicy,
     pub kv_sizing_residency_model_multiplier: u64,
     pub kv_auto_block_policy: KvCacheAutoBlockPolicy,
     pub kv_cache_fp8_policy: KvCacheFp8Policy,
+}
+
+/// Backend-owned policy for interpreting server GPU-memory detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuMemoryDetectionPolicy {
+    pub detected_total_log_message: Option<&'static str>,
+    pub missing_total_warning: Option<&'static str>,
+    pub missing_total_fallback_bytes: Option<u64>,
 }
 
 /// Backend-owned policy for server KV auto-sizing block caps.
@@ -1163,6 +1172,7 @@ impl BackendCapabilities {
                     ReplayBackend::runtime_supports_resident_decode(backend),
                 ),
                 kv_cache_device_memory_pressure: kv_cache_device_memory_pressure(name, device),
+                gpu_memory_detection_policy: GpuMemoryDetectionPolicy::for_backend(name, device),
                 kv_sizing_residency_model_multiplier: kv_sizing_residency_model_multiplier(
                     name, device,
                 ),
@@ -1519,6 +1529,48 @@ fn kv_sizing_residency_model_multiplier(name: &str, device: kiln_tensor::Device)
 }
 
 const GIB: u64 = 1024 * 1024 * 1024;
+
+impl GpuMemoryDetectionPolicy {
+    pub const DETECTED_TOTAL_LOG_DEFAULT: &'static str = "GPU VRAM detected";
+    pub const DETECTED_TOTAL_LOG_METAL: &'static str = "unified memory detected (Apple Silicon)";
+    pub const CUDA_MISSING_TOTAL_WARNING: &'static str =
+        "CUDA device present but VRAM detection failed";
+    pub const METAL_MISSING_TOTAL_WARNING: &'static str =
+        "Metal device present but unified memory detection failed";
+    pub const CUDA_MISSING_TOTAL_FALLBACK_BYTES: u64 = 24 * GIB;
+    pub const METAL_MISSING_TOTAL_FALLBACK_BYTES: u64 = 16 * GIB;
+
+    pub const DETECTED_TOTAL_ONLY: Self = Self {
+        detected_total_log_message: None,
+        missing_total_warning: None,
+        missing_total_fallback_bytes: None,
+    };
+
+    pub fn for_backend(name: &str, device: kiln_tensor::Device) -> Self {
+        match backend_kind_for_runtime(name, device) {
+            kiln_tensor::Backend::Cuda => Self {
+                detected_total_log_message: Some(Self::DETECTED_TOTAL_LOG_DEFAULT),
+                missing_total_warning: Some(Self::CUDA_MISSING_TOTAL_WARNING),
+                missing_total_fallback_bytes: Some(Self::CUDA_MISSING_TOTAL_FALLBACK_BYTES),
+            },
+            kiln_tensor::Backend::Metal => Self {
+                detected_total_log_message: Some(Self::DETECTED_TOTAL_LOG_METAL),
+                missing_total_warning: Some(Self::METAL_MISSING_TOTAL_WARNING),
+                missing_total_fallback_bytes: Some(Self::METAL_MISSING_TOTAL_FALLBACK_BYTES),
+            },
+            _ => Self::DETECTED_TOTAL_ONLY,
+        }
+    }
+
+    pub fn total_memory_bytes(self, detected_total_bytes: u64) -> u64 {
+        if detected_total_bytes > 0 {
+            detected_total_bytes
+        } else {
+            self.missing_total_fallback_bytes
+                .unwrap_or(detected_total_bytes)
+        }
+    }
+}
 
 impl KvCacheAutoBlockPolicy {
     pub const MEMORY_BUDGET_ONLY: Self = Self {

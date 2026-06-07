@@ -12,9 +12,9 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::Engine;
 use kiln_model::{
-    DecodeBatcher, DecodeBatcherConfig, InferenceRecurrentStatePolicy, KvCacheAutoBlockPolicy,
-    LinearAttentionState, ModelRunner, PagedKvCacheKt, PagedPrefixNextToken,
-    PagedPrefixRegistration,
+    DecodeBatcher, DecodeBatcherConfig, GpuMemoryDetectionPolicy, InferenceRecurrentStatePolicy,
+    KvCacheAutoBlockPolicy, LinearAttentionState, ModelRunner, PagedKvCacheKt,
+    PagedPrefixNextToken, PagedPrefixRegistration,
 };
 use kiln_scheduler::{PrefixCacheStats, Scheduler};
 use kiln_tensor::DType;
@@ -1642,6 +1642,7 @@ impl AppState {
         let vram_info = kiln_memory::vram::detect_vram();
         let storage_capabilities = runner.backend_capabilities().storage;
         let kv_auto_block_policy = storage_capabilities.kv_auto_block_policy;
+        let gpu_memory_detection_policy = storage_capabilities.gpu_memory_detection_policy;
 
         // Total AND used come from the SAME live, all-process driver snapshot
         // (VRAM+GTT on AMD, nvidia-smi on NVIDIA) so they're mutually consistent
@@ -1658,7 +1659,7 @@ impl AppState {
         };
         let total_vram = snap
             .map(|s| s.total_bytes)
-            .unwrap_or_else(|| detected_gpu_total_memory(&device_kt, &vram_info));
+            .unwrap_or_else(|| detected_gpu_total_memory(gpu_memory_detection_policy, &vram_info));
         let allocator_memory_snapshot = crate::device_memory::allocator_memory_snapshot(&device_kt);
         if let Some(allocator) = allocator_memory_snapshot {
             tracing::info!(
@@ -2499,46 +2500,30 @@ fn runtime_used_vram_for_device(
 }
 
 fn detected_gpu_total_memory(
-    device: &kiln_tensor::Device,
+    policy: GpuMemoryDetectionPolicy,
     vram: &kiln_memory::vram::GpuVramInfo,
 ) -> u64 {
-    // Migrated to take `&kt::Device` directly. The cuda and metal arms
-    // remain feature-gated to preserve the previous cfg-gated behavior
-    // (a `kt::Device::Cuda` / `kt::Device::Metal` can only be
-    // constructed when the corresponding feature is built in). (#1082)
-    let backend = device.backend();
-    #[cfg(feature = "cuda")]
-    if backend == kiln_tensor::Backend::Cuda {
-        return if vram.total_bytes > 0 {
+    if vram.total_bytes > 0 {
+        if let Some(message) = policy.detected_total_log_message {
             tracing::info!(
                 total_gb = vram.total_bytes as f64 / 1e9,
                 source = %vram.source,
-                "GPU VRAM detected"
+                memory_detection_policy = message,
+                "backend total memory detected"
             );
-            vram.total_bytes
-        } else {
-            tracing::warn!("CUDA device present but VRAM detection failed; assuming 24GB");
-            24 * 1024 * 1024 * 1024
-        };
+        }
+        return policy.total_memory_bytes(vram.total_bytes);
     }
-    #[cfg(feature = "metal")]
-    if backend == kiln_tensor::Backend::Metal {
-        return if vram.total_bytes > 0 {
-            tracing::info!(
-                total_gb = vram.total_bytes as f64 / 1e9,
-                source = %vram.source,
-                "unified memory detected (Apple Silicon)"
-            );
-            vram.total_bytes
-        } else {
-            tracing::warn!(
-                "Metal device present but unified memory detection failed; assuming 16GB"
-            );
-            16 * 1024 * 1024 * 1024
-        };
+    if let Some(warning) = policy.missing_total_warning {
+        tracing::warn!(
+            memory_detection_policy = warning,
+            fallback_total_gb = policy
+                .missing_total_fallback_bytes
+                .map(|bytes| bytes as f64 / 1e9),
+            "backend total memory detection failed; using policy fallback"
+        );
     }
-    let _ = backend;
-    vram.total_bytes
+    policy.total_memory_bytes(vram.total_bytes)
 }
 
 /// Successful auto-sizer outcome. Carries the live cache plus the metadata
@@ -3533,6 +3518,56 @@ mod tests {
             post_load_blocks < old_estimate_blocks,
             "post-load residency must reduce the default A6000 KV budget: old={old_estimate_blocks} post_load={post_load_blocks}"
         );
+    }
+
+    #[test]
+    fn test_detected_gpu_total_memory_uses_backend_policy_fallbacks() {
+        let missing = kiln_memory::vram::GpuVramInfo {
+            total_bytes: 0,
+            source: kiln_memory::vram::VramSource::None,
+        };
+
+        assert_eq!(
+            detected_gpu_total_memory(
+                GpuMemoryDetectionPolicy::for_backend("cuda", kiln_tensor::Device::Cuda(0)),
+                &missing,
+            ),
+            GpuMemoryDetectionPolicy::CUDA_MISSING_TOTAL_FALLBACK_BYTES
+        );
+        assert_eq!(
+            detected_gpu_total_memory(
+                GpuMemoryDetectionPolicy::for_backend("metal", kiln_tensor::Device::Metal(0)),
+                &missing,
+            ),
+            GpuMemoryDetectionPolicy::METAL_MISSING_TOTAL_FALLBACK_BYTES
+        );
+        assert_eq!(
+            detected_gpu_total_memory(
+                GpuMemoryDetectionPolicy::for_backend("vulkan", kiln_tensor::Device::Vulkan(0)),
+                &missing,
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn test_detected_gpu_total_memory_preserves_detected_total() {
+        let detected = kiln_memory::vram::GpuVramInfo {
+            total_bytes: 40 * 1024 * 1024 * 1024,
+            source: kiln_memory::vram::VramSource::EnvOverride,
+        };
+
+        for policy in [
+            GpuMemoryDetectionPolicy::for_backend("cuda", kiln_tensor::Device::Cuda(0)),
+            GpuMemoryDetectionPolicy::for_backend("metal", kiln_tensor::Device::Metal(0)),
+            GpuMemoryDetectionPolicy::for_backend("rocm", kiln_tensor::Device::Rocm(0)),
+            GpuMemoryDetectionPolicy::for_backend("vulkan", kiln_tensor::Device::Vulkan(0)),
+        ] {
+            assert_eq!(
+                detected_gpu_total_memory(policy, &detected),
+                detected.total_bytes
+            );
+        }
     }
 
     #[test]
