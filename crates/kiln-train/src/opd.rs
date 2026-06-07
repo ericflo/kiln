@@ -2368,6 +2368,8 @@ pub fn opd_train(
     // now takes the kt device directly; the candle round-trip bridge is gone.
     let device_kt = weights.embed_tokens.device();
     let backend_rt = backend::for_device_kt(&device_kt);
+    let training_precision_policy =
+        crate::trainer::training_precision_policy_for_backend(backend_rt.as_ref());
 
     // Cache VRAM + base-model footprint estimate for the per-step
     // gradient-checkpointing auto-tune below. OPD's input_ids length
@@ -2385,7 +2387,10 @@ pub fn opd_train(
         2, // BF16 base weights
     );
     let opd_activation_bytes_per_elem =
-        crate::trainer::training_activation_bytes_per_elem(weights, &device_kt);
+        crate::trainer::training_activation_bytes_per_elem_for_backend(
+            weights,
+            backend_rt.as_ref(),
+        );
 
     // §6 data-multiplier: auto-scale samples_per_prompt when the
     // dataset is small. Lu (2025) §3.5.4: 4 if |prompts| ≥ 200,
@@ -2454,13 +2459,14 @@ pub fn opd_train(
     // `mut`: `sync_to_master` (checkpoint + final save) takes `&mut self`
     // (it swaps each param's forward/backward storage to the resolved kt
     // master). Mirrors `sft_train`'s `let mut params`. (#1082)
-    let mut params = TrainableLoraParams::initialize_seeded(
+    let mut params = TrainableLoraParams::initialize_seeded_with_precision_policy(
         model_config,
         weights,
         config.lora_rank,
         config.lora_alpha,
         &device_kt,
         effective_seed,
+        training_precision_policy,
     )?;
     params.register_with_backend(&*backend_rt)?;
 

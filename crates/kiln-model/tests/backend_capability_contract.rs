@@ -2466,6 +2466,10 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "trainer should centralize device-family precision policy lookup"
     );
     assert!(
+        trainer_source.contains("fn training_precision_policy_for_backend("),
+        "trainer production paths should centralize backend precision policy lookup"
+    );
+    assert!(
         !trainer_source.contains("fn is_metal_device(")
             && !trainer_source.contains("fn is_cuda_device("),
         "trainer should not keep local backend identity helpers for training policy"
@@ -2476,10 +2480,19 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "// Kaiming uniform bound",
     );
     assert!(
-        compact_body(lora_init_section).contains(
-            "training_precision_policy_for_device(device).lora_parameter_dtype_for_base_weight(weights.embed_tokens.dtype())"
-        ),
+        lora_init_section.contains("initialize_seeded_with_precision_policy")
+            && compact_body(lora_init_section).contains(
+                "precision_policy.lora_parameter_dtype_for_base_weight(weights.embed_tokens.dtype())"
+            ),
         "LoRA initialization should choose parameter dtype through TrainingPrecisionPolicy"
+    );
+    assert!(
+        trainer_source.contains("training_precision_policy_for_backend(backend.as_ref())")
+            && trainer_source
+                .contains("TrainableLoraParams::initialize_seeded_with_precision_policy")
+            && opd_source.contains("training_precision_policy_for_backend(backend_rt.as_ref())")
+            && opd_source.contains("TrainableLoraParams::initialize_seeded_with_precision_policy"),
+        "SFT/GRPO/OPD production setup should pass backend precision policy into LoRA initialization"
     );
     assert!(
         !lora_init_section.contains("let lora_dtype = if is_vulkan_device(device)"),
@@ -2487,12 +2500,19 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     );
     let activation_bytes_section = source_between(
         &trainer_source,
+        "fn training_activation_bytes_per_elem_for_policy(",
         "pub(crate) fn training_activation_bytes_per_elem(",
-        "#[cfg(any(feature = \"cuda\", feature = \"rocm\"))]",
     );
     assert!(
         activation_bytes_section.contains("uses_f32_activations_for_mixed_base_weights"),
         "training activation sizing should read F32-activation policy from TrainingPrecisionPolicy"
+    );
+    assert!(
+        compact_body(&trainer_source).contains(
+            "training_activation_bytes_per_elem_for_policy(weights,training_precision_policy)"
+        ) && compact_body(&opd_source).contains("training_activation_bytes_per_elem_for_backend(")
+            && compact_body(&opd_source).contains("backend_rt.as_ref()"),
+        "SFT/GRPO/OPD production checkpoint sizing should consume backend precision policy"
     );
     let exact_gdn_tile_section = source_between(
         &trainer_source,
@@ -2509,12 +2529,16 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     );
     let base_dtype_support_section = source_between(
         &trainer_source,
-        "fn base_dtype_supports_tape(",
+        "fn base_dtype_supports_tape_for_policy(",
         "/// (#1082 Increment-0 PR2) kt-native sibling",
     );
     assert!(
         base_dtype_support_section.contains("uses_f32_activations_for_mixed_base_weights"),
         "base dtype tape support should read mixed F32 activation policy from TrainingPrecisionPolicy"
+    );
+    assert!(
+        trainer_source.contains("base_dtype_supports_tape_for_backend(weights, backend)"),
+        "SFT/GRPO tape eligibility should consume backend precision policy"
     );
     assert!(
         trainer_source.contains("SftFlceLossRoute::KtTapeFlce")
@@ -3611,8 +3635,9 @@ fn backend_engine_unification_plan_matches_current_training_status() {
     assert!(
         plan_source.contains("TrainingLossBackend::runtime_sft_flce_loss_route")
             && plan_source.contains("TrainingLossBackend::runtime_grpo_loss_route")
-            && plan_source.contains("TrainingLossBackend::runtime_opd_loss_route"),
-        "training source map should describe backend-owned loss routing"
+            && plan_source.contains("TrainingLossBackend::runtime_opd_loss_route")
+            && plan_source.contains("TrainingLossBackend::runtime_training_precision_policy"),
+        "training source map should describe backend-owned loss and precision routing"
     );
     assert!(
         plan_source.contains("generated capability report"),

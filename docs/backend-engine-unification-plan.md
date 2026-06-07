@@ -245,6 +245,12 @@ The relevant shims are:
   kt-composite backward live in the `kiln-opd-loss-kernel` crate (the
   `kt_tape.rs` `BackwardOp::apply` dispatcher over `kt_api.rs`), which this shim
   calls.
+- Training precision policy is also backend-owned in production setup:
+  SFT/GRPO/OPD read `TrainingLossBackend::runtime_training_precision_policy`
+  from the active backend before choosing LoRA parameter dtype, checkpoint
+  activation sizing, and tape dtype eligibility. The older device-family helper
+  remains only as a compatibility wrapper for tests and call sites that do not
+  hold a backend runtime.
 
 Vulkan still has a stronger separate low-level identity than CUDA/ROCm/Metal
 because the SPIR-V leaf layer exposes `VkTensor`, explicit buffer operations,
