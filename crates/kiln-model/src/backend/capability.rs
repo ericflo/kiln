@@ -734,6 +734,7 @@ pub struct StorageCapabilities {
     pub kv_cache_device_memory_pressure: bool,
     pub gpu_memory_detection_policy: GpuMemoryDetectionPolicy,
     pub gpu_memory_budget_policy: GpuMemoryBudgetPolicy,
+    pub gpu_allocator_memory_probe_policy: GpuAllocatorMemoryProbePolicy,
     pub gpu_memory_reclaim_policy: GpuMemoryReclaimPolicy,
     pub kv_sizing_residency_model_multiplier: u64,
     pub kv_auto_block_policy: KvCacheAutoBlockPolicy,
@@ -754,6 +755,20 @@ pub struct GpuMemoryBudgetPolicy {
     pub use_live_memory_snapshot: bool,
     pub cap_kv_blocks_by_live_budget: bool,
     pub retry_kv_allocation_after_reclaim: bool,
+}
+
+/// Backend-owned policy for server allocator-heap probes used by KV sizing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuAllocatorMemoryProbePolicy {
+    pub probe: GpuAllocatorMemoryProbe,
+}
+
+/// Concrete allocator-heap probe selected by [`GpuAllocatorMemoryProbePolicy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuAllocatorMemoryProbe {
+    None,
+    CudaMemGetInfo,
+    RocmMemGetInfo { include_pool_spare: bool },
 }
 
 /// Backend-owned policy for server GPU-memory pressure reclaim hooks.
@@ -1199,6 +1214,9 @@ impl BackendCapabilities {
                 kv_cache_device_memory_pressure: kv_cache_device_memory_pressure(name, device),
                 gpu_memory_detection_policy: GpuMemoryDetectionPolicy::for_backend(name, device),
                 gpu_memory_budget_policy: GpuMemoryBudgetPolicy::for_backend(name, device),
+                gpu_allocator_memory_probe_policy: GpuAllocatorMemoryProbePolicy::for_backend(
+                    name, device,
+                ),
                 gpu_memory_reclaim_policy: GpuMemoryReclaimPolicy::for_backend(name, device),
                 kv_sizing_residency_model_multiplier: kv_sizing_residency_model_multiplier(
                     name, device,
@@ -1620,6 +1638,28 @@ impl GpuMemoryBudgetPolicy {
             Self::HOST_MEMORY_ONLY
         } else {
             Self::DEVICE_MEMORY_AWARE
+        }
+    }
+}
+
+impl GpuAllocatorMemoryProbePolicy {
+    pub const NONE: Self = Self {
+        probe: GpuAllocatorMemoryProbe::None,
+    };
+    pub const CUDA_MEM_GET_INFO: Self = Self {
+        probe: GpuAllocatorMemoryProbe::CudaMemGetInfo,
+    };
+    pub const ROCM_MEM_GET_INFO_WITH_POOL_SPARE: Self = Self {
+        probe: GpuAllocatorMemoryProbe::RocmMemGetInfo {
+            include_pool_spare: true,
+        },
+    };
+
+    pub fn for_backend(name: &str, device: kiln_tensor::Device) -> Self {
+        match backend_kind_for_runtime(name, device) {
+            kiln_tensor::Backend::Cuda => Self::CUDA_MEM_GET_INFO,
+            kiln_tensor::Backend::Rocm => Self::ROCM_MEM_GET_INFO_WITH_POOL_SPARE,
+            _ => Self::NONE,
         }
     }
 }

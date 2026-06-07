@@ -1851,6 +1851,16 @@
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
+    "GpuAllocatorMemoryProbePolicy": {
+      "field_count": 1,
+      "fields": [
+        {
+          "name": "probe",
+          "type": "GpuAllocatorMemoryProbe"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
     "GpuMemoryBudgetPolicy": {
       "field_count": 3,
       "fields": [
@@ -2102,7 +2112,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "StorageCapabilities": {
-      "field_count": 11,
+      "field_count": 12,
       "fields": [
         {
           "name": "backend",
@@ -2131,6 +2141,10 @@
         {
           "name": "gpu_memory_budget_policy",
           "type": "GpuMemoryBudgetPolicy"
+        },
+        {
+          "name": "gpu_allocator_memory_probe_policy",
+          "type": "GpuAllocatorMemoryProbePolicy"
         },
         {
           "name": "gpu_memory_reclaim_policy",

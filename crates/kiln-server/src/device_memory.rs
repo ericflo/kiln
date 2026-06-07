@@ -5,6 +5,7 @@
 //! backend allocators expose a narrower "can this allocation succeed right now?"
 //! heap. CUDA and ROCm both provide that via `cuMemGetInfo` / `hipMemGetInfo`.
 
+use kiln_model::{GpuAllocatorMemoryProbe, GpuAllocatorMemoryProbePolicy};
 use kiln_tensor::Device;
 
 #[derive(Debug, Clone, Copy)]
@@ -21,66 +22,106 @@ pub(crate) struct AllocatorMemorySnapshot {
     pub pool_used_bytes: Option<u64>,
 }
 
-pub(crate) fn allocator_memory_snapshot(device: &Device) -> Option<AllocatorMemorySnapshot> {
-    match *device {
-        #[cfg(feature = "cuda")]
-        Device::Cuda(idx) => match kiln_tensor::cuda_mem_get_info(idx) {
-            Ok((free, total)) => Some(AllocatorMemorySnapshot {
-                free_bytes: free as u64,
-                total_bytes: total as u64,
-                source: "cuMemGetInfo",
-                pool_reserved_bytes: None,
-                pool_used_bytes: None,
-            }),
-            Err(err) => {
-                tracing::warn!(
-                    device = %device.short_name(),
-                    error = %err,
-                    "CUDA allocator memory probe failed; falling back to OS memory snapshot"
-                );
-                None
-            }
-        },
-        #[cfg(feature = "rocm")]
-        Device::Rocm(idx) => match kiln_tensor::rocm_mem_get_info(idx) {
-            Ok((free, total)) => {
-                let (pool_reserved, pool_used) = kiln_tensor::rocm_pool_stats(idx)
-                    .map(|(reserved, used)| (Some(reserved), Some(used)))
-                    .unwrap_or((None, None));
-                let pool_spare = pool_reserved
-                    .zip(pool_used)
-                    .map(|(reserved, used)| reserved.saturating_sub(used))
-                    .unwrap_or(0);
-                Some(AllocatorMemorySnapshot {
-                    free_bytes: (free as u64).saturating_add(pool_spare),
-                    total_bytes: total as u64,
-                    source: if pool_reserved.is_some() {
-                        "hipMemGetInfo+hipMemPool"
-                    } else {
-                        "hipMemGetInfo"
-                    },
-                    pool_reserved_bytes: pool_reserved,
-                    pool_used_bytes: pool_used,
-                })
-            }
-            Err(err) => {
-                tracing::warn!(
-                    device = %device.short_name(),
-                    error = %err,
-                    "ROCm allocator memory probe failed; falling back to OS memory snapshot"
-                );
-                None
-            }
-        },
-        _ => None,
+pub(crate) fn allocator_memory_snapshot(
+    policy: GpuAllocatorMemoryProbePolicy,
+    device: &Device,
+) -> Option<AllocatorMemorySnapshot> {
+    match policy.probe {
+        GpuAllocatorMemoryProbe::None => None,
+        GpuAllocatorMemoryProbe::CudaMemGetInfo => cuda_allocator_memory_snapshot(device),
+        GpuAllocatorMemoryProbe::RocmMemGetInfo { include_pool_spare } => {
+            rocm_allocator_memory_snapshot(device, include_pool_spare)
+        }
     }
 }
 
+#[cfg(feature = "cuda")]
+fn cuda_allocator_memory_snapshot(device: &Device) -> Option<AllocatorMemorySnapshot> {
+    let Device::Cuda(idx) = *device else {
+        return None;
+    };
+    match kiln_tensor::cuda_mem_get_info(idx) {
+        Ok((free, total)) => Some(AllocatorMemorySnapshot {
+            free_bytes: free as u64,
+            total_bytes: total as u64,
+            source: "cuMemGetInfo",
+            pool_reserved_bytes: None,
+            pool_used_bytes: None,
+        }),
+        Err(err) => {
+            tracing::warn!(
+                device = %device.short_name(),
+                error = %err,
+                "CUDA allocator memory probe failed; falling back to OS memory snapshot"
+            );
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "cuda"))]
+fn cuda_allocator_memory_snapshot(_device: &Device) -> Option<AllocatorMemorySnapshot> {
+    None
+}
+
+#[cfg(feature = "rocm")]
+fn rocm_allocator_memory_snapshot(
+    device: &Device,
+    include_pool_spare: bool,
+) -> Option<AllocatorMemorySnapshot> {
+    let Device::Rocm(idx) = *device else {
+        return None;
+    };
+    match kiln_tensor::rocm_mem_get_info(idx) {
+        Ok((free, total)) => {
+            let (pool_reserved, pool_used) = if include_pool_spare {
+                kiln_tensor::rocm_pool_stats(idx)
+                    .map(|(reserved, used)| (Some(reserved), Some(used)))
+                    .unwrap_or((None, None))
+            } else {
+                (None, None)
+            };
+            let pool_spare = pool_reserved
+                .zip(pool_used)
+                .map(|(reserved, used)| reserved.saturating_sub(used))
+                .unwrap_or(0);
+            Some(AllocatorMemorySnapshot {
+                free_bytes: (free as u64).saturating_add(pool_spare),
+                total_bytes: total as u64,
+                source: if pool_reserved.is_some() {
+                    "hipMemGetInfo+hipMemPool"
+                } else {
+                    "hipMemGetInfo"
+                },
+                pool_reserved_bytes: pool_reserved,
+                pool_used_bytes: pool_used,
+            })
+        }
+        Err(err) => {
+            tracing::warn!(
+                device = %device.short_name(),
+                error = %err,
+                "ROCm allocator memory probe failed; falling back to OS memory snapshot"
+            );
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "rocm"))]
+fn rocm_allocator_memory_snapshot(
+    _device: &Device,
+    _include_pool_spare: bool,
+) -> Option<AllocatorMemorySnapshot> {
+    None
+}
+
 pub(crate) fn allocator_safe_available_bytes(
+    policy: GpuAllocatorMemoryProbePolicy,
     governor: &kiln_memory::MemoryGovernor,
     device: &Device,
 ) -> Option<u64> {
-    let snap = allocator_memory_snapshot(device)?;
+    let snap = allocator_memory_snapshot(policy, device)?;
     Some(safe_available_bytes_from_free(
         snap.free_bytes,
         governor.config().floor_bytes,
@@ -89,11 +130,12 @@ pub(crate) fn allocator_safe_available_bytes(
 }
 
 pub(crate) fn allocator_kv_budget_bytes_for_fraction(
+    policy: GpuAllocatorMemoryProbePolicy,
     governor: &kiln_memory::MemoryGovernor,
     device: &Device,
     fraction: f64,
 ) -> Option<u64> {
-    let snap = allocator_memory_snapshot(device)?;
+    let snap = allocator_memory_snapshot(policy, device)?;
     Some(kv_budget_bytes_from_free(
         snap.free_bytes,
         governor.config().floor_bytes,

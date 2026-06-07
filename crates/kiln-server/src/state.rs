@@ -12,10 +12,10 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::Engine;
 use kiln_model::{
-    DecodeBatcher, DecodeBatcherConfig, GpuMemoryBudgetPolicy, GpuMemoryDetectionPolicy,
-    GpuMemoryReclaimPolicy, GpuMemoryReclaimer, InferenceRecurrentStatePolicy,
-    KvCacheAutoBlockPolicy, LinearAttentionState, ModelRunner, PagedKvCacheKt,
-    PagedPrefixNextToken, PagedPrefixRegistration,
+    DecodeBatcher, DecodeBatcherConfig, GpuAllocatorMemoryProbePolicy, GpuMemoryBudgetPolicy,
+    GpuMemoryDetectionPolicy, GpuMemoryReclaimPolicy, GpuMemoryReclaimer,
+    InferenceRecurrentStatePolicy, KvCacheAutoBlockPolicy, LinearAttentionState, ModelRunner,
+    PagedKvCacheKt, PagedPrefixNextToken, PagedPrefixRegistration,
 };
 use kiln_scheduler::{PrefixCacheStats, Scheduler};
 use kiln_tensor::DType;
@@ -1645,6 +1645,8 @@ impl AppState {
         let kv_auto_block_policy = storage_capabilities.kv_auto_block_policy;
         let gpu_memory_detection_policy = storage_capabilities.gpu_memory_detection_policy;
         let gpu_memory_budget_policy = storage_capabilities.gpu_memory_budget_policy;
+        let gpu_allocator_memory_probe_policy =
+            storage_capabilities.gpu_allocator_memory_probe_policy;
         let gpu_memory_reclaim_policy = storage_capabilities.gpu_memory_reclaim_policy;
 
         // Total AND used come from the SAME live, all-process driver snapshot
@@ -1663,7 +1665,10 @@ impl AppState {
         let total_vram = snap
             .map(|s| s.total_bytes)
             .unwrap_or_else(|| detected_gpu_total_memory(gpu_memory_detection_policy, &vram_info));
-        let allocator_memory_snapshot = crate::device_memory::allocator_memory_snapshot(&device_kt);
+        let allocator_memory_snapshot = crate::device_memory::allocator_memory_snapshot(
+            gpu_allocator_memory_probe_policy,
+            &device_kt,
+        );
         if let Some(allocator) = allocator_memory_snapshot {
             tracing::info!(
                 allocator_free_gb = allocator.free_bytes as f64 / 1e9,
@@ -1753,7 +1758,10 @@ impl AppState {
                 let governor_avail = governor.available_bytes();
                 let allocator_budget =
                     crate::device_memory::allocator_kv_budget_bytes_for_fraction(
-                        governor, &device_kt, fraction,
+                        gpu_allocator_memory_probe_policy,
+                        governor,
+                        &device_kt,
+                        fraction,
                     )
                     .unwrap_or(u64::MAX);
                 let budget = governor_avail.min(allocator_budget);
@@ -1837,6 +1845,7 @@ impl AppState {
                 n,
                 bytes_per_block,
                 gpu_memory_budget_policy,
+                gpu_allocator_memory_probe_policy,
                 kv_auto_block_policy,
                 kiln_memory::MemoryGovernor::global(),
             )?;
@@ -2127,7 +2136,11 @@ impl AppState {
         // at its barrier under exclusive GPU access.
         if let Some(engine) = batching_engine.clone() {
             if backend_capabilities.storage.kv_cache_device_memory_pressure {
-                crate::kv_autoscaler::spawn(engine, paged_cache.clone());
+                crate::kv_autoscaler::spawn(
+                    engine,
+                    paged_cache.clone(),
+                    gpu_allocator_memory_probe_policy,
+                );
             }
         }
         let decode_batcher = if let Some(config) = decode_batcher_config {
@@ -2375,15 +2388,18 @@ fn validate_kv_allocation_against_live_allocator(
     num_blocks: usize,
     bytes_per_block: u64,
     gpu_memory_budget_policy: GpuMemoryBudgetPolicy,
+    gpu_allocator_memory_probe_policy: GpuAllocatorMemoryProbePolicy,
     kv_auto_block_policy: KvCacheAutoBlockPolicy,
     governor: &kiln_memory::MemoryGovernor,
 ) -> anyhow::Result<()> {
     if !gpu_memory_budget_policy.cap_kv_blocks_by_live_budget || bytes_per_block == 0 {
         return Ok(());
     }
-    let Some(allocator_budget) =
-        crate::device_memory::allocator_safe_available_bytes(governor, device)
-    else {
+    let Some(allocator_budget) = crate::device_memory::allocator_safe_available_bytes(
+        gpu_allocator_memory_probe_policy,
+        governor,
+        device,
+    ) else {
         return Ok(());
     };
     let requested = (num_blocks as u64).saturating_mul(bytes_per_block);

@@ -1142,6 +1142,7 @@ fn generated_capability_report_lists_request_descriptors() {
         "StorageCapabilities",
         "GpuMemoryDetectionPolicy",
         "GpuMemoryBudgetPolicy",
+        "GpuAllocatorMemoryProbePolicy",
         "GpuMemoryReclaimPolicy",
         "KvCacheAutoBlockPolicy",
         "KvCacheMemoryTierBlockCap",
@@ -1238,6 +1239,10 @@ fn generated_capability_report_lists_request_descriptors() {
         "StorageCapabilities should own backend-specific GPU memory budget policy"
     );
     assert!(
+        storage_capability_fields.contains(&"gpu_allocator_memory_probe_policy"),
+        "StorageCapabilities should own backend-specific allocator memory probe policy"
+    );
+    assert!(
         storage_capability_fields.contains(&"gpu_memory_reclaim_policy"),
         "StorageCapabilities should own backend-specific GPU memory reclaim policy"
     );
@@ -1286,6 +1291,17 @@ fn generated_capability_report_lists_request_descriptors() {
             "GpuMemoryBudgetPolicy should include {field}"
         );
     }
+    let gpu_allocator_memory_probe_policy_fields =
+        capability_descriptors["GpuAllocatorMemoryProbePolicy"]["fields"]
+            .as_array()
+            .expect("GpuAllocatorMemoryProbePolicy fields should be an array")
+            .iter()
+            .filter_map(|field| field["name"].as_str())
+            .collect::<Vec<_>>();
+    assert!(
+        gpu_allocator_memory_probe_policy_fields.contains(&"probe"),
+        "GpuAllocatorMemoryProbePolicy should expose the selected allocator heap probe"
+    );
     let gpu_memory_reclaim_policy_fields =
         capability_descriptors["GpuMemoryReclaimPolicy"]["fields"]
             .as_array()
@@ -1800,6 +1816,34 @@ fn gpu_memory_budget_policy_routes_live_budget_probes() {
             GpuMemoryBudgetPolicy::for_backend(name, device),
             GpuMemoryBudgetPolicy::DEVICE_MEMORY_AWARE,
             "{name} should use live device-memory budget policy"
+        );
+    }
+}
+
+#[test]
+fn gpu_allocator_memory_probe_policy_routes_heap_probes() {
+    use kiln_model::{GpuAllocatorMemoryProbe, GpuAllocatorMemoryProbePolicy};
+    use kiln_tensor::Device;
+
+    assert_eq!(
+        GpuAllocatorMemoryProbePolicy::for_backend("cuda", Device::Cuda(0)).probe,
+        GpuAllocatorMemoryProbe::CudaMemGetInfo
+    );
+    assert_eq!(
+        GpuAllocatorMemoryProbePolicy::for_backend("rocm", Device::Rocm(0)).probe,
+        GpuAllocatorMemoryProbe::RocmMemGetInfo {
+            include_pool_spare: true
+        }
+    );
+    for (name, device) in [
+        ("cpu", Device::Cpu),
+        ("metal", Device::Metal(0)),
+        ("vulkan", Device::Vulkan(0)),
+    ] {
+        assert_eq!(
+            GpuAllocatorMemoryProbePolicy::for_backend(name, device).probe,
+            GpuAllocatorMemoryProbe::None,
+            "{name} should not expose a backend allocator heap probe"
         );
     }
 }
@@ -2634,6 +2678,10 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         .expect("forward.rs should be readable");
     let server_state_source = fs::read_to_string(root.join("crates/kiln-server/src/state.rs"))
         .expect("kiln-server state.rs should be readable");
+    let server_device_memory_path = root.join("crates/kiln-server/src/device_memory.rs");
+    let server_kv_autoscaler_source =
+        fs::read_to_string(root.join("crates/kiln-server/src/kv_autoscaler.rs"))
+            .expect("kv_autoscaler.rs should be readable");
     let server_main_source = fs::read_to_string(root.join("crates/kiln-server/src/main.rs"))
         .expect("kiln-server main.rs should be readable");
     let server_batching_source =
@@ -3131,6 +3179,57 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             "kiln-server KV live-budget caps should not keep local backend policy: {forbidden}"
         );
     }
+    assert!(
+        server_state_source.contains("gpu_allocator_memory_probe_policy")
+            && server_live_budget_section.contains("gpu_allocator_memory_probe_policy")
+            && server_live_budget_section.contains("allocator_kv_budget_bytes_for_fraction("),
+        "kiln-server KV live-budget caps should consume StorageCapabilities.gpu_allocator_memory_probe_policy"
+    );
+    let server_allocator_snapshot_section = source_between(
+        &server_state_source,
+        "let allocator_memory_snapshot = crate::device_memory::allocator_memory_snapshot(",
+        "if let Some(allocator) = allocator_memory_snapshot {",
+    );
+    assert!(
+        server_allocator_snapshot_section.contains("gpu_allocator_memory_probe_policy"),
+        "kiln-server allocator memory snapshot logging should consume the backend-owned allocator probe policy"
+    );
+    let server_allocator_probe_functions = parse_functions(&server_device_memory_path);
+    let allocator_memory_snapshot = server_allocator_probe_functions
+        .get("allocator_memory_snapshot")
+        .expect("device_memory should define allocator_memory_snapshot");
+    let allocator_memory_snapshot_body = body_without_comments(&allocator_memory_snapshot.body);
+    assert!(
+        allocator_memory_snapshot_body.contains("policy.probe")
+            && allocator_memory_snapshot_body.contains("GpuAllocatorMemoryProbe::CudaMemGetInfo")
+            && allocator_memory_snapshot_body.contains("GpuAllocatorMemoryProbe::RocmMemGetInfo"),
+        "device_memory allocator snapshot should dispatch through GpuAllocatorMemoryProbe"
+    );
+    assert!(
+        !allocator_memory_snapshot_body.contains("match *device"),
+        "device_memory allocator snapshot should not choose allocator probe policy from Device identity"
+    );
+    let compact_server_kv_autoscaler_source = compact_body(&server_kv_autoscaler_source);
+    assert!(
+        server_kv_autoscaler_source.contains("GpuAllocatorMemoryProbePolicy")
+            && server_kv_autoscaler_source.contains("gpu_allocator_memory_probe_policy")
+            && compact_server_kv_autoscaler_source
+                .contains("allocator_safe_available_bytes(gpu_allocator_memory_probe_policy,"),
+        "KV autoscaler should receive and consume the backend-owned allocator probe policy"
+    );
+    for forbidden in [
+        "GpuAllocatorMemoryProbePolicy::for_backend",
+        "Device::Cuda",
+        "Device::Rocm",
+        "Backend::Cuda",
+        "Backend::Rocm",
+        "device.backend()",
+    ] {
+        assert!(
+            !server_kv_autoscaler_source.contains(forbidden),
+            "KV autoscaler should not choose allocator probe policy locally: {forbidden}"
+        );
+    }
     let server_allocation_retry_section = source_between(
         &server_state_source,
         "let allocate_cache = |n: usize| -> anyhow::Result<PagedKvCacheKt> {",
@@ -3140,6 +3239,12 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         server_allocation_retry_section.contains("gpu_memory_budget_policy")
             && server_allocation_retry_section.contains("retry_kv_allocation_after_reclaim"),
         "kiln-server KV allocation retry should consume StorageCapabilities.gpu_memory_budget_policy"
+    );
+    assert!(
+        server_allocation_retry_section.contains("gpu_allocator_memory_probe_policy")
+            && server_allocation_retry_section
+                .contains("validate_kv_allocation_against_live_allocator("),
+        "kiln-server KV allocation validation should consume StorageCapabilities.gpu_allocator_memory_probe_policy"
     );
     for forbidden in ["device_kt.backend()", "Backend::Cpu", "governor_backend"] {
         assert!(

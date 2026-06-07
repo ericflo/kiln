@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use kiln_memory::{MemoryGovernor, MemoryPressure};
-use kiln_model::PagedKvCacheKt;
+use kiln_model::{GpuAllocatorMemoryProbePolicy, PagedKvCacheKt};
 
 use crate::batching_engine::BatchingEngineHandle;
 
@@ -57,7 +57,11 @@ fn is_disabled() -> bool {
 
 /// Spawn the autoscaler thread. No-op (returns without spawning) if disabled, or
 /// if the cache can't report its geometry. Idempotent is the CALLER's concern.
-pub fn spawn(engine: BatchingEngineHandle, paged_cache: Arc<PagedKvCacheKt>) {
+pub fn spawn(
+    engine: BatchingEngineHandle,
+    paged_cache: Arc<PagedKvCacheKt>,
+    gpu_allocator_memory_probe_policy: GpuAllocatorMemoryProbePolicy,
+) {
     if is_disabled() {
         tracing::info!("KV autoscaler disabled (KILN_KV_AUTOSCALE=0)");
         return;
@@ -82,13 +86,22 @@ pub fn spawn(engine: BatchingEngineHandle, paged_cache: Arc<PagedKvCacheKt>) {
 
     std::thread::Builder::new()
         .name("kiln-kv-autoscaler".to_string())
-        .spawn(move || run(engine, paged_cache, bytes_per_block as u64, bounds))
+        .spawn(move || {
+            run(
+                engine,
+                paged_cache,
+                gpu_allocator_memory_probe_policy,
+                bytes_per_block as u64,
+                bounds,
+            )
+        })
         .expect("spawn kv autoscaler");
 }
 
 fn run(
     engine: BatchingEngineHandle,
     paged_cache: Arc<PagedKvCacheKt>,
+    gpu_allocator_memory_probe_policy: GpuAllocatorMemoryProbePolicy,
     bytes_per_block: u64,
     bounds: Bounds,
 ) {
@@ -104,7 +117,7 @@ fn run(
     {
         let requested = target;
         let cur = paged_cache.num_blocks();
-        let avail = live_safe_available_bytes(gov, &paged_cache);
+        let avail = live_safe_available_bytes(gpu_allocator_memory_probe_policy, gov, &paged_cache);
         let target = cap_grow_target_by_available(cur, requested, avail, bytes_per_block);
         if target < requested {
             tracing::warn!(
@@ -139,7 +152,7 @@ fn run(
             continue;
         }
         let cur = paged_cache.num_blocks();
-        let avail = live_safe_available_bytes(gov, &paged_cache);
+        let avail = live_safe_available_bytes(gpu_allocator_memory_probe_policy, gov, &paged_cache);
         let pressure = gov.pressure();
 
         let target = decide_target(cur, avail, bytes_per_block, pressure, bounds);
@@ -167,15 +180,23 @@ fn run(
     }
 }
 
-fn live_safe_available_bytes(gov: &MemoryGovernor, paged_cache: &PagedKvCacheKt) -> u64 {
+fn live_safe_available_bytes(
+    gpu_allocator_memory_probe_policy: GpuAllocatorMemoryProbePolicy,
+    gov: &MemoryGovernor,
+    paged_cache: &PagedKvCacheKt,
+) -> u64 {
     // available_bytes is the governor's all-process free-VRAM estimate minus
     // soft reservations. CUDA/ROCm also expose the allocator heap the KV tensors
     // actually grow from; use the stricter signal when present so an optimistic
     // OS snapshot cannot drive a backend allocation failure.
     let governor_avail = gov.available_bytes();
-    let allocator_avail = paged_cache
-        .device()
-        .and_then(|device| crate::device_memory::allocator_safe_available_bytes(gov, &device));
+    let allocator_avail = paged_cache.device().and_then(|device| {
+        crate::device_memory::allocator_safe_available_bytes(
+            gpu_allocator_memory_probe_policy,
+            gov,
+            &device,
+        )
+    });
     allocator_avail
         .map(|allocator| governor_avail.min(allocator))
         .unwrap_or(governor_avail)
