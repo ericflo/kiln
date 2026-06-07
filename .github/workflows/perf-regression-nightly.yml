@@ -59,6 +59,22 @@ on:
         options:
           - 'false'
           - 'true'
+      latency_fixture_id:
+        description: 'Optional backend latency fixture id to run and upload (use none to skip)'
+        required: false
+        default: 'none'
+        type: choice
+        options:
+          - 'none'
+          - 'cuda_a6000_flce_phase_a_validation'
+          - 'metal_apple_silicon_matmul_qwen35_4b'
+          - 'metal_apple_silicon_sdpa_qwen35_4b'
+          - 'rocm_gfx1151_matmul_qwen35_4b'
+          - 'vulkan_rtx6000_decode_microbench'
+      latency_runner_labels_json:
+        description: 'JSON runs-on labels for the selected latency fixture'
+        required: false
+        default: '["self-hosted"]'
 
 env:
   CARGO_TERM_COLOR: always
@@ -316,4 +332,47 @@ jobs:
         with:
           name: sft-${{ matrix.trainer }}-bench-${{ github.run_id }}
           path: /tmp/kiln_bench_stdout.txt
+          retention-days: 30
+
+  backend-latency-fixture:
+    name: Backend latency fixture (${{ inputs.latency_fixture_id }})
+    runs-on: ${{ fromJSON(inputs.latency_runner_labels_json || '["self-hosted"]') }}
+    needs: gate-self-test
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.latency_fixture_id != 'none' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install Rust stable
+        run: |
+          rustup set profile minimal
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Run selected backend latency fixture
+        run: |
+          python3 scripts/run_backend_latency_fixture.py \
+            docs/backend-latency-fixtures.json \
+            "${{ inputs.latency_fixture_id }}"
+
+      - name: Validate pending latency fixture manifest
+        run: |
+          python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json
+
+      - name: Upload backend latency fixture artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: backend-latency-${{ inputs.latency_fixture_id }}-${{ github.run_id }}
+          path: |
+            bench-results/backend-latency/*.json
+            bench-results/backend-latency/raw/*.log
+          if-no-files-found: error
           retention-days: 30

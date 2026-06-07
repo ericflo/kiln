@@ -168,6 +168,15 @@ python3 scripts/write_backend_latency_result_artifact.py \
 By default the script writes the fixture's `result_artifact`; use `--output` for
 a scratch artifact.
 
+The GitHub `Perf regression nightly` workflow also exposes a manual
+`workflow_dispatch` handoff for known-hardware runs. Set `latency_fixture_id` to
+one manifest fixture and set `latency_runner_labels_json` to the target
+self-hosted runner labels, such as `["self-hosted","linux","cuda-a6000"]` or a
+site-local Metal/ROCm/Vulkan label set. The job runs the same fixture runner and
+uploads both `bench-results/backend-latency/*.json` and
+`bench-results/backend-latency/raw/*.log` as workflow artifacts for review and
+check-in before threshold locking.
+
 ## Locking Thresholds
 
 After reviewing the hardware result artifacts, lock numeric thresholds in the

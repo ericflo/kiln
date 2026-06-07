@@ -5238,6 +5238,12 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json",
         "docs/backend-latency-fixtures.json",
         "docs/backend-latency-result-schema.md",
+        "latency_fixture_id",
+        "latency_runner_labels_json",
+        "Run selected backend latency fixture",
+        "Upload backend latency fixture artifacts",
+        "bench-results/backend-latency/*.json",
+        "bench-results/backend-latency/raw/*.log",
     ] {
         assert!(
             perf_workflow.contains(required),
@@ -5310,6 +5316,11 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "run_backend_latency_fixture.py",
         "write_backend_latency_result_artifact.py",
         "lock_backend_latency_thresholds.py",
+        "workflow_dispatch",
+        "latency_fixture_id",
+        "latency_runner_labels_json",
+        "bench-results/backend-latency/*.json",
+        "bench-results/backend-latency/raw/*.log",
         "--require-covered",
         "--self-test",
     ] {
