@@ -1300,6 +1300,53 @@ fn generated_capability_report_lists_request_descriptors() {
             "matmul cache reporting gate should cite {path}"
         );
     }
+
+    let attention_gate = conformance_gates
+        .iter()
+        .find(|gate| gate["gate"] == "attention_gdn_conv_parity")
+        .expect("attention/GDN/conv parity gate should be present");
+    assert_eq!(attention_gate["status"], "covered");
+    let attention_command = attention_gate["command"]
+        .as_str()
+        .expect("attention/GDN/conv command should be a string");
+    for command_fragment in [
+        "kiln-model rocm_flash_attn_bwd_gradcheck",
+        "kiln-flash-attn --no-default-features --features rocm --test rocm_flash_attn_parity",
+        "kiln-gdn-kernel --no-default-features --features rocm --test rocm_gdn_parity",
+        "kiln-conv1d-kernel --no-default-features --features rocm --test rocm_conv1d_parity",
+        "kiln-vulkan-kernel --test vk_attention_parity",
+        "kiln-vulkan-kernel --test vk_sdpa_prefill_kernel_parity",
+        "kiln-vulkan-kernel --test vk_gdn_foundation_parity",
+        "kiln-vulkan-kernel --test vk_gdn_backward_parity",
+        "kiln-vulkan-kernel --test gdn_parity",
+    ] {
+        assert!(
+            attention_command.contains(command_fragment),
+            "attention/GDN/conv parity gate command should run {command_fragment}"
+        );
+    }
+    let attention_evidence = attention_gate["evidence_present"]
+        .as_array()
+        .expect("attention/GDN/conv evidence should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    for path in [
+        "crates/kiln-model/tests/rocm_flash_attn_bwd_gradcheck.rs",
+        "crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs",
+        "crates/kiln-gdn-kernel/tests/rocm_gdn_parity.rs",
+        "crates/kiln-conv1d-kernel/tests/rocm_conv1d_parity.rs",
+        "crates/kiln-vulkan-kernel/tests/vk_attention_parity.rs",
+        "crates/kiln-vulkan-kernel/tests/vk_sdpa_prefill_kernel_parity.rs",
+        "crates/kiln-vulkan-kernel/tests/vk_gdn_foundation_parity.rs",
+        "crates/kiln-vulkan-kernel/tests/vk_gdn_backward_parity.rs",
+        "crates/kiln-vulkan-kernel/tests/gdn_parity.rs",
+    ] {
+        assert!(
+            attention_evidence.contains(&path),
+            "attention/GDN/conv parity gate should cite {path}"
+        );
+    }
 }
 
 #[test]

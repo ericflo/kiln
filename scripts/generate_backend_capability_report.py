@@ -839,13 +839,17 @@ def conformance_gate_report() -> list[dict[str, Any]]:
             "gate": "attention_gdn_conv_parity",
             "phase8_requirement": "attention/GDN/conv parity",
             "status": "covered",
-            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model rocm_flash_attn_bwd_gradcheck",
+            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model rocm_flash_attn_bwd_gradcheck && /home/ericflo/.cargo/bin/cargo test -p kiln-flash-attn --no-default-features --features rocm --test rocm_flash_attn_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-gdn-kernel --no-default-features --features rocm --test rocm_gdn_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-conv1d-kernel --no-default-features --features rocm --test rocm_conv1d_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_attention_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_sdpa_prefill_kernel_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_gdn_foundation_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test vk_gdn_backward_parity && /home/ericflo/.cargo/bin/cargo test -p kiln-vulkan-kernel --test gdn_parity",
             "evidence": [
+                "crates/kiln-model/tests/rocm_flash_attn_bwd_gradcheck.rs",
                 "crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs",
                 "crates/kiln-gdn-kernel/tests/rocm_gdn_parity.rs",
                 "crates/kiln-conv1d-kernel/tests/rocm_conv1d_parity.rs",
                 "crates/kiln-vulkan-kernel/tests/vk_attention_parity.rs",
+                "crates/kiln-vulkan-kernel/tests/vk_sdpa_prefill_kernel_parity.rs",
                 "crates/kiln-vulkan-kernel/tests/vk_gdn_foundation_parity.rs",
+                "crates/kiln-vulkan-kernel/tests/vk_gdn_backward_parity.rs",
+                "crates/kiln-vulkan-kernel/tests/gdn_parity.rs",
             ],
         },
         {
