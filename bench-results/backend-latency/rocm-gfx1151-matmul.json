@@ -1,0 +1,24 @@
+{
+  "artifact_schema_version": 3,
+  "backend": "rocm",
+  "command": "cargo test -p kiln-tensor --features rocm --test rocm_latency_bench -- --ignored --nocapture",
+  "created_at_utc": "2026-06-07T20:41:17Z",
+  "fixture_id": "rocm_gfx1151_matmul_qwen35_4b",
+  "fixture_spec_sha256": "b6934ceb3f493cde7d199c47d3a7bd6b51de494f502c3d77bf9436c2c7493eaf",
+  "git_commit": "e1416ba901c2852265605b202d2ee052f319d12a",
+  "git_tracked_dirty": false,
+  "hardware": "AMD ROCm gfx1151 or configured ROCm fixture",
+  "manifest": "docs/backend-latency-fixtures.json",
+  "manifest_schema_version": 1,
+  "metrics": {
+    "decode_qkv_m1_2560x4096_ms": 0.079427,
+    "lm_head_m1_2560x152064_ms": 3.435642,
+    "prefill_gate_up_m256_2560x18432_ms": 0.913267,
+    "prefill_qkv_m256_2560x4096_ms": 0.172701
+  },
+  "raw_log": "bench-results/backend-latency/raw/rocm_gfx1151_matmul_qwen35_4b-20260607T204059Z.log",
+  "raw_log_sha256": "7201d0691195b41d0c4bfeae2e14b6db95d77177536dff5f65c00b8d43ea3c20",
+  "source": "crates/kiln-tensor/tests/rocm_latency_bench.rs",
+  "source_sha256": "22c4618acb5c1925bb32d1bc5f2b818730eb72b6c6e6a23f8444e5390c6e7306",
+  "status": "passed"
+}

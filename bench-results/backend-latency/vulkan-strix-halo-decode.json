@@ -1,0 +1,22 @@
+{
+  "artifact_schema_version": 3,
+  "backend": "vulkan",
+  "command": "KILN_VK_MICROBENCH_ONLY=full_step_resident,full_token_resident_paged KILN_VK_MICROBENCH_BATCHES=1 cargo run --release -p kiln-vulkan-kernel --bin vulkan_decode_microbench",
+  "created_at_utc": "2026-06-07T20:44:42Z",
+  "fixture_id": "vulkan_strix_halo_decode_microbench",
+  "fixture_spec_sha256": "80ba810040c81d273b154ee943b594511b05a5d5211458a4b1ba722f0f0de1a7",
+  "git_commit": "2ca5579d1dd357235c004c0e02e97c8d20d57a41",
+  "git_tracked_dirty": false,
+  "hardware": "AMD Ryzen AI MAX+ 395 / Radeon 8060S Graphics (RADV STRIX_HALO, gfx1151)",
+  "manifest": "docs/backend-latency-fixtures.json",
+  "manifest_schema_version": 1,
+  "metrics": {
+    "full_step_resident_us": 1567.416167,
+    "full_token_resident_paged_us": 50808.595233
+  },
+  "raw_log": "bench-results/backend-latency/raw/vulkan_strix_halo_decode_microbench-20260607T204433Z.log",
+  "raw_log_sha256": "485fecf4b0fb6c16133d1af29089d63761b43a275658648baa90e9a33ac1816d",
+  "source": "crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs",
+  "source_sha256": "624e1150a93f304ea0c268e577ca6db7481a8a4f90aa612384704568a51dee62",
+  "status": "passed"
+}
