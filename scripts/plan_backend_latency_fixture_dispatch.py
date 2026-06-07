@@ -18,6 +18,7 @@ from write_backend_latency_result_artifact import ArtifactError, load_manifest
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "docs" / "backend-latency-fixtures.json"
 WORKFLOW_FILE = "perf-regression-nightly.yml"
+DEFAULT_ARTIFACT_DOWNLOAD_DIR = "/tmp/kiln-backend-latency"
 
 
 class DispatchPlanError(Exception):
@@ -112,6 +113,64 @@ def gh_workflow_command(
     )
 
 
+def artifact_name_template(fixture_id: str) -> str:
+    return f"backend-latency-{fixture_id}-RUN_ID"
+
+
+def artifact_download_dir_template(fixture_id: str) -> str:
+    return f"{DEFAULT_ARTIFACT_DOWNLOAD_DIR}/{fixture_id}-RUN_ID"
+
+
+def gh_run_download_command(fixture_id: str) -> str:
+    return shlex.join(
+        [
+            "gh",
+            "run",
+            "download",
+            "RUN_ID",
+            "--name",
+            artifact_name_template(fixture_id),
+            "--dir",
+            artifact_download_dir_template(fixture_id),
+        ]
+    )
+
+
+def import_artifact_command(fixture_id: str) -> str:
+    return shlex.join(
+        [
+            "python3",
+            "scripts/import_backend_latency_artifact.py",
+            artifact_download_dir_template(fixture_id),
+            "--fixture-id",
+            fixture_id,
+        ]
+    )
+
+
+def lock_threshold_command(fixture_id: str) -> str:
+    return shlex.join(
+        [
+            "python3",
+            "scripts/lock_backend_latency_thresholds.py",
+            "docs/backend-latency-fixtures.json",
+            "--fixture-id",
+            fixture_id,
+        ]
+    )
+
+
+def covered_gate_command() -> str:
+    return shlex.join(
+        [
+            "python3",
+            "scripts/check_backend_latency_fixtures.py",
+            "docs/backend-latency-fixtures.json",
+            "--require-covered",
+        ]
+    )
+
+
 def dispatch_plans(
     manifest: dict[str, Any],
     *,
@@ -163,6 +222,14 @@ def dispatch_plans(
                 "workflow": f".github/workflows/{WORKFLOW_FILE}",
                 "ref": ref,
                 "gh_workflow_run": command,
+                "artifact_name_template": artifact_name_template(fixture_id),
+                "artifact_download_dir_template": artifact_download_dir_template(
+                    fixture_id
+                ),
+                "gh_run_download": gh_run_download_command(fixture_id),
+                "import_artifact": import_artifact_command(fixture_id),
+                "lock_threshold": lock_threshold_command(fixture_id),
+                "covered_gate_check": covered_gate_command(),
             }
         )
 
@@ -219,6 +286,14 @@ def self_test() -> int:
             or 'latency_runner_labels_json=["self-hosted","linux","cuda-a6000"]'
             not in cuda_plan["gh_workflow_run"]
             or "ref=feature-branch" not in cuda_plan["gh_workflow_run"]
+            or cuda_plan["artifact_name_template"] != "backend-latency-cuda_fixture-RUN_ID"
+            or "gh run download RUN_ID" not in cuda_plan["gh_run_download"]
+            or "backend-latency-cuda_fixture-RUN_ID" not in cuda_plan["gh_run_download"]
+            or "scripts/import_backend_latency_artifact.py" not in cuda_plan["import_artifact"]
+            or "--fixture-id cuda_fixture" not in cuda_plan["import_artifact"]
+            or "scripts/lock_backend_latency_thresholds.py" not in cuda_plan["lock_threshold"]
+            or "--fixture-id cuda_fixture" not in cuda_plan["lock_threshold"]
+            or "--require-covered" not in cuda_plan["covered_gate_check"]
         ):
             print(json.dumps({"ok": False, "case": "cuda command", "plan": cuda_plan}))
             return 1

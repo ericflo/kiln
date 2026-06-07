@@ -192,6 +192,12 @@ as JSON, including which fixtures still need site-local labels:
 python3 scripts/plan_backend_latency_fixture_dispatch.py
 ```
 
+Each JSON plan includes the `gh_workflow_run` dispatch command when labels are
+known, plus `gh_run_download`, `import_artifact`, `lock_threshold`, and
+`covered_gate_check` commands for the post-run artifact path. Replace the
+`RUN_ID` placeholder in the download command and artifact name after the
+workflow dispatch is accepted by GitHub Actions.
+
 Use `--shell` when every selected fixture has labels, either from the manifest
 or from an explicit override:
 
@@ -201,8 +207,8 @@ python3 scripts/plan_backend_latency_fixture_dispatch.py \
   --shell
 ```
 
-After downloading the workflow artifact zip, import the result JSON and raw log
-into their canonical repository paths before locking thresholds:
+After downloading the workflow artifact zip or directory, import the result JSON
+and raw log into their canonical repository paths before locking thresholds:
 
 ```sh
 python3 scripts/import_backend_latency_artifact.py \
