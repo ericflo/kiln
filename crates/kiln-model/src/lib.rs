@@ -60,6 +60,8 @@ pub use backend::capability::{
     ReplayGraphCrateRole, ReplayNativePrimitive, ReplayProductionAuthority, ReplayRequest,
     ReplayRequestKind, ServerTrainingDispatchPolicy, ServerTrainingNativeRoute,
     SpeculativeDecodePolicy, StartupCapabilities, StorageCapabilities, Support,
+    TrainingAccelerationEnvFlagPolicy, TrainingAccelerationProfileLogMessage,
+    TrainingAccelerationProfilePolicy,
 };
 pub use backend::residency::{
     ReplayStability, ResidentOwnership, ResidentRegistry, ResidentResource, ResidentResourceFamily,

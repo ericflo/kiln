@@ -1680,7 +1680,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "BackendTrainingCapabilities": {
-      "field_count": 3,
+      "field_count": 4,
       "fields": [
         {
           "name": "hooks",
@@ -1693,6 +1693,10 @@
         {
           "name": "server_dispatch",
           "type": "ServerTrainingDispatchPolicy"
+        },
+        {
+          "name": "acceleration_profile",
+          "type": "TrainingAccelerationProfilePolicy"
         }
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"
@@ -2161,6 +2165,58 @@
         {
           "name": "kv_cache_fp8_policy",
           "type": "KvCacheFp8Policy"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "TrainingAccelerationEnvFlagPolicy": {
+      "field_count": 2,
+      "fields": [
+        {
+          "name": "env",
+          "type": "&'static str"
+        },
+        {
+          "name": "default_on",
+          "type": "bool"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "TrainingAccelerationProfilePolicy": {
+      "field_count": 8,
+      "fields": [
+        {
+          "name": "log_message",
+          "type": "TrainingAccelerationProfileLogMessage"
+        },
+        {
+          "name": "linear",
+          "type": "Option<TrainingAccelerationEnvFlagPolicy>"
+        },
+        {
+          "name": "sdpa",
+          "type": "Option<TrainingAccelerationEnvFlagPolicy>"
+        },
+        {
+          "name": "rmsnorm_inference",
+          "type": "Option<TrainingAccelerationEnvFlagPolicy>"
+        },
+        {
+          "name": "rmsnorm_training",
+          "type": "&'static str"
+        },
+        {
+          "name": "flce_provider",
+          "type": "&'static str"
+        },
+        {
+          "name": "resident_activation",
+          "type": "&'static str"
+        },
+        {
+          "name": "sgd_step_on_device",
+          "type": "&'static str"
         }
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"

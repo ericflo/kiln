@@ -1157,6 +1157,8 @@ fn generated_capability_report_lists_request_descriptors() {
         "DecodeBatcherPolicy",
         "BackendTrainingCapabilities",
         "ServerTrainingDispatchPolicy",
+        "TrainingAccelerationProfilePolicy",
+        "TrainingAccelerationEnvFlagPolicy",
         "ReplayCapabilities",
         "ReplayAuthority",
         "BackendFallbackCapabilities",
@@ -1503,6 +1505,10 @@ fn generated_capability_report_lists_request_descriptors() {
         backend_training_fields.contains(&"server_dispatch"),
         "BackendTrainingCapabilities should expose server-side training dispatch policy"
     );
+    assert!(
+        backend_training_fields.contains(&"acceleration_profile"),
+        "BackendTrainingCapabilities should expose startup training acceleration profile policy"
+    );
     let server_training_dispatch_fields =
         capability_descriptors["ServerTrainingDispatchPolicy"]["fields"]
             .as_array()
@@ -1518,6 +1524,41 @@ fn generated_capability_report_lists_request_descriptors() {
         assert!(
             server_training_dispatch_fields.contains(&field),
             "ServerTrainingDispatchPolicy should include {field}"
+        );
+    }
+    let training_acceleration_profile_fields =
+        capability_descriptors["TrainingAccelerationProfilePolicy"]["fields"]
+            .as_array()
+            .expect("TrainingAccelerationProfilePolicy fields should be an array")
+            .iter()
+            .filter_map(|field| field["name"].as_str())
+            .collect::<Vec<_>>();
+    for field in [
+        "log_message",
+        "linear",
+        "sdpa",
+        "rmsnorm_inference",
+        "rmsnorm_training",
+        "flce_provider",
+        "resident_activation",
+        "sgd_step_on_device",
+    ] {
+        assert!(
+            training_acceleration_profile_fields.contains(&field),
+            "TrainingAccelerationProfilePolicy should include {field}"
+        );
+    }
+    let training_acceleration_env_fields =
+        capability_descriptors["TrainingAccelerationEnvFlagPolicy"]["fields"]
+            .as_array()
+            .expect("TrainingAccelerationEnvFlagPolicy fields should be an array")
+            .iter()
+            .filter_map(|field| field["name"].as_str())
+            .collect::<Vec<_>>();
+    for field in ["env", "default_on"] {
+        assert!(
+            training_acceleration_env_fields.contains(&field),
+            "TrainingAccelerationEnvFlagPolicy should include {field}"
         );
     }
     let replay_authority_fields = capability_descriptors["ReplayAuthority"]["fields"]
@@ -1877,6 +1918,46 @@ fn gpu_memory_reclaim_policy_routes_backend_hooks() {
         GpuMemoryReclaimPolicy::for_backend("cpu", Device::Cpu).reclaimer,
         GpuMemoryReclaimer::None
     );
+}
+
+#[test]
+fn training_acceleration_profile_policy_routes_vulkan_startup_log() {
+    use kiln_model::{TrainingAccelerationProfileLogMessage, TrainingAccelerationProfilePolicy};
+    use kiln_tensor::Device;
+
+    let vulkan = TrainingAccelerationProfilePolicy::for_backend("vulkan", Device::Vulkan(0));
+    assert_eq!(
+        vulkan.log_message,
+        TrainingAccelerationProfileLogMessage::Vulkan
+    );
+    assert_eq!(
+        vulkan.linear.expect("linear env policy").env,
+        "KILN_VULKAN_LINEAR"
+    );
+    assert_eq!(
+        vulkan.sdpa.expect("sdpa env policy").env,
+        "KILN_VULKAN_SDPA"
+    );
+    assert_eq!(
+        vulkan
+            .rmsnorm_inference
+            .expect("rmsnorm inference env policy")
+            .env,
+        "KILN_VULKAN_RMSNORM"
+    );
+
+    for (name, device) in [
+        ("cpu", Device::Cpu),
+        ("cuda", Device::Cuda(0)),
+        ("rocm", Device::Rocm(0)),
+        ("metal", Device::Metal(0)),
+    ] {
+        assert_eq!(
+            TrainingAccelerationProfilePolicy::for_backend(name, device).log_message,
+            TrainingAccelerationProfileLogMessage::None,
+            "{name} should not log the Vulkan training acceleration profile"
+        );
+    }
 }
 
 #[test]
@@ -3302,6 +3383,56 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         assert!(
             !server_memory_reclaim_helper_section.contains(forbidden),
             "kiln-server memory-governor helper should not keep Metal/Vulkan no-op policy locally: {forbidden}"
+        );
+    }
+    let server_training_acceleration_profile_call_section = source_between(
+        &server_state_source,
+        "\"GPU memory budget\"",
+        "let inference_recurrent_state_policy = backend_capabilities.gdn.inference_recurrent_state;",
+    );
+    assert!(
+        server_training_acceleration_profile_call_section
+            .contains("backend_capabilities.training.acceleration_profile")
+            && server_training_acceleration_profile_call_section
+                .contains("log_backend_training_acceleration_profile("),
+        "kiln-server training acceleration startup profile should consume BackendTrainingCapabilities"
+    );
+    for forbidden in [
+        "VramSource::LinuxDrmSysfs",
+        "VramSource::LinuxDrmSysfsUnified",
+        "KILN_VULKAN_LINEAR",
+        "KILN_VULKAN_SDPA",
+        "KILN_VULKAN_RMSNORM",
+        "env_flag = |",
+    ] {
+        assert!(
+            !server_training_acceleration_profile_call_section.contains(forbidden),
+            "kiln-server training acceleration startup profile should not keep local Vulkan/DRM policy: {forbidden}"
+        );
+    }
+    let server_training_acceleration_profile_helper_section = source_between(
+        &server_state_source,
+        "fn training_acceleration_env_flag_status(",
+        "fn linear_attention_state_bytes(",
+    );
+    assert!(
+        server_training_acceleration_profile_helper_section
+            .contains("TrainingAccelerationProfilePolicy")
+            && server_training_acceleration_profile_helper_section
+                .contains("TrainingAccelerationProfileLogMessage::Vulkan")
+            && server_training_acceleration_profile_helper_section.contains("policy.env")
+            && server_training_acceleration_profile_helper_section.contains("policy.default_on"),
+        "kiln-server training acceleration profile helper should format the backend-owned policy"
+    );
+    for forbidden in [
+        "KILN_VULKAN_LINEAR",
+        "KILN_VULKAN_SDPA",
+        "KILN_VULKAN_RMSNORM",
+        "VramSource::LinuxDrmSysfs",
+    ] {
+        assert!(
+            !server_training_acceleration_profile_helper_section.contains(forbidden),
+            "kiln-server training acceleration profile helper should not own backend env/source tables: {forbidden}"
         );
     }
     assert!(

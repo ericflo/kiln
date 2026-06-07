@@ -16,6 +16,8 @@ use kiln_model::{
     GpuMemoryDetectionPolicy, GpuMemoryReclaimPolicy, GpuMemoryReclaimer,
     InferenceRecurrentStatePolicy, KvCacheAutoBlockPolicy, LinearAttentionState, ModelRunner,
     PagedKvCacheKt, PagedPrefixNextToken, PagedPrefixRegistration,
+    TrainingAccelerationEnvFlagPolicy, TrainingAccelerationProfileLogMessage,
+    TrainingAccelerationProfilePolicy,
 };
 use kiln_scheduler::{PrefixCacheStats, Scheduler};
 use kiln_tensor::DType;
@@ -1983,6 +1985,8 @@ impl AppState {
             inference_fraction,
             memory_cfg.training_memory_gb,
         );
+        let backend_name = runner.backend_name();
+        let backend_capabilities = runner.backend_capabilities();
 
         tracing::info!(
             total_vram_gb = memory_budget.total_vram_bytes as f64 / 1e9,
@@ -1996,43 +2000,9 @@ impl AppState {
             "GPU memory budget"
         );
 
-        // Surface which Vulkan training acceleration paths are
-        // active so the operator can confirm the runtime profile
-        // at-a-glance instead of diff'ing env vars against the docs.
-        // Only logged when there's an actual Vulkan device — on CPU
-        // or non-Vulkan backends these flags are irrelevant.
-        if vram_info.source == kiln_memory::vram::VramSource::LinuxDrmSysfs
-            || vram_info.source == kiln_memory::vram::VramSource::LinuxDrmSysfsUnified
-        {
-            // Same truthy/falsy semantics as kiln_core::env_flag::env_flag,
-            // but we want to surface whether the value came from the env
-            // or the default — env_flag collapses both to a bool.
-            let env_flag = |name: &str, default_on: bool| -> &'static str {
-                let raw = std::env::var(name).ok();
-                let lower = raw.as_deref().map(str::trim).map(str::to_ascii_lowercase);
-                let truthy = matches!(lower.as_deref(), Some("1") | Some("true") | Some("yes"));
-                let falsy = matches!(lower.as_deref(), Some("0") | Some("false") | Some("no"));
-                match (truthy, falsy, default_on) {
-                    (true, _, _) => "on (env)",
-                    (_, true, _) => "off (env)",
-                    (_, _, true) => "on (default)",
-                    (_, _, false) => "off (default)",
-                }
-            };
-            tracing::info!(
-                linear = env_flag("KILN_VULKAN_LINEAR", true),
-                sdpa = env_flag("KILN_VULKAN_SDPA", true),
-                rmsnorm_inference = env_flag("KILN_VULKAN_RMSNORM", true),
-                rmsnorm_training = "auto (row_count >= 1024)",
-                flce_provider = "auto (active_count >= 16)",
-                resident_activation = "always (Phase 3.1 hooks)",
-                sgd_step_on_device = "auto (Phase 4.2: gated on registry residency)",
-                "Vulkan training acceleration profile"
-            );
-        }
-
-        let backend_name = runner.backend_name();
-        let backend_capabilities = runner.backend_capabilities();
+        log_backend_training_acceleration_profile(
+            backend_capabilities.training.acceleration_profile,
+        );
         let inference_recurrent_state_policy = backend_capabilities.gdn.inference_recurrent_state;
         let prefix_cache_max_blocks = if prefix_cache_cfg.enabled {
             prefix_cache_cfg
@@ -2244,6 +2214,45 @@ impl AppState {
             judgment_store: None,
             max_queued_eval_jobs: 32,
             max_tracked_eval_jobs: 1024,
+        }
+    }
+}
+
+fn training_acceleration_env_flag_status(
+    policy: Option<TrainingAccelerationEnvFlagPolicy>,
+) -> &'static str {
+    let Some(policy) = policy else {
+        return "n/a";
+    };
+    let raw = std::env::var(policy.env).ok();
+    let lower = raw.as_deref().map(str::trim).map(str::to_ascii_lowercase);
+    let truthy = matches!(lower.as_deref(), Some("1") | Some("true") | Some("yes"));
+    let falsy = matches!(lower.as_deref(), Some("0") | Some("false") | Some("no"));
+    match (truthy, falsy, policy.default_on) {
+        (true, _, _) => "on (env)",
+        (_, true, _) => "off (env)",
+        (_, _, true) => "on (default)",
+        (_, _, false) => "off (default)",
+    }
+}
+
+fn log_backend_training_acceleration_profile(policy: TrainingAccelerationProfilePolicy) {
+    let linear = training_acceleration_env_flag_status(policy.linear);
+    let sdpa = training_acceleration_env_flag_status(policy.sdpa);
+    let rmsnorm_inference = training_acceleration_env_flag_status(policy.rmsnorm_inference);
+    match policy.log_message {
+        TrainingAccelerationProfileLogMessage::None => {}
+        TrainingAccelerationProfileLogMessage::Vulkan => {
+            tracing::info!(
+                linear,
+                sdpa,
+                rmsnorm_inference,
+                rmsnorm_training = policy.rmsnorm_training,
+                flce_provider = policy.flce_provider,
+                resident_activation = policy.resident_activation,
+                sgd_step_on_device = policy.sgd_step_on_device,
+                "Vulkan training acceleration profile"
+            );
         }
     }
 }

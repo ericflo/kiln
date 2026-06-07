@@ -1072,6 +1072,7 @@ pub struct BackendTrainingCapabilities {
     pub hooks: TrainingCapabilities,
     pub precision: TrainingPrecisionPolicy,
     pub server_dispatch: ServerTrainingDispatchPolicy,
+    pub acceleration_profile: TrainingAccelerationProfilePolicy,
 }
 
 /// Server-side native training route selected by backend policy.
@@ -1096,6 +1097,33 @@ pub struct ServerTrainingDispatchPolicy {
     pub native_route: ServerTrainingNativeRoute,
     pub native_training_env: Option<&'static str>,
     pub native_training_default_enabled: bool,
+}
+
+/// Startup log profile for backend training acceleration switches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TrainingAccelerationProfilePolicy {
+    pub log_message: TrainingAccelerationProfileLogMessage,
+    pub linear: Option<TrainingAccelerationEnvFlagPolicy>,
+    pub sdpa: Option<TrainingAccelerationEnvFlagPolicy>,
+    pub rmsnorm_inference: Option<TrainingAccelerationEnvFlagPolicy>,
+    pub rmsnorm_training: &'static str,
+    pub flce_provider: &'static str,
+    pub resident_activation: &'static str,
+    pub sgd_step_on_device: &'static str,
+}
+
+/// Stable training acceleration profile log message selected by backend policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TrainingAccelerationProfileLogMessage {
+    None,
+    Vulkan,
+}
+
+/// Env flag whose startup status should be surfaced in a backend profile log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TrainingAccelerationEnvFlagPolicy {
+    pub env: &'static str,
+    pub default_on: bool,
 }
 
 /// One structured runtime capability descriptor for backend diagnostics.
@@ -1311,6 +1339,7 @@ impl BackendCapabilities {
                 hooks: TrainingLossBackend::runtime_training_capabilities(backend),
                 precision: TrainingLossBackend::runtime_training_precision_policy(backend),
                 server_dispatch: ServerTrainingDispatchPolicy::for_backend(name, device),
+                acceleration_profile: TrainingAccelerationProfilePolicy::for_backend(name, device),
             },
             graph_replay: ReplayCapabilities {
                 resident_decode: BackendCapabilityQueries::supports_replay_request(
@@ -1390,6 +1419,46 @@ impl ServerTrainingDispatchPolicy {
                 .map(|env| kiln_core::env_flag::env_flag(env, self.native_training_default_enabled))
                 .unwrap_or(self.native_training_default_enabled),
             ServerTrainingNativeRoute::SharedKtTape => false,
+        }
+    }
+}
+
+impl TrainingAccelerationProfilePolicy {
+    pub const NONE: Self = Self {
+        log_message: TrainingAccelerationProfileLogMessage::None,
+        linear: None,
+        sdpa: None,
+        rmsnorm_inference: None,
+        rmsnorm_training: "",
+        flce_provider: "",
+        resident_activation: "",
+        sgd_step_on_device: "",
+    };
+
+    pub const VULKAN: Self = Self {
+        log_message: TrainingAccelerationProfileLogMessage::Vulkan,
+        linear: Some(TrainingAccelerationEnvFlagPolicy {
+            env: "KILN_VULKAN_LINEAR",
+            default_on: true,
+        }),
+        sdpa: Some(TrainingAccelerationEnvFlagPolicy {
+            env: "KILN_VULKAN_SDPA",
+            default_on: true,
+        }),
+        rmsnorm_inference: Some(TrainingAccelerationEnvFlagPolicy {
+            env: "KILN_VULKAN_RMSNORM",
+            default_on: true,
+        }),
+        rmsnorm_training: "auto (row_count >= 1024)",
+        flce_provider: "auto (active_count >= 16)",
+        resident_activation: "always (Phase 3.1 hooks)",
+        sgd_step_on_device: "auto (Phase 4.2: gated on registry residency)",
+    };
+
+    pub fn for_backend(name: &str, device: kiln_tensor::Device) -> Self {
+        match backend_kind_for_runtime(name, device) {
+            kiln_tensor::Backend::Vulkan => Self::VULKAN,
+            _ => Self::NONE,
         }
     }
 }
