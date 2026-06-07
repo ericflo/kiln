@@ -13464,8 +13464,10 @@ fn gdn_chunkwise_recurrence(
     // sequence tensors once to chunk-major layout (`[B, num_chunks, nv, C, …]`)
     // turns each per-chunk slice into a stride-free `narrow + squeeze` view:
     // 5 launches per layer instead of 160, with the same byte count moved.
-    let pre_permute_chunks = cfg!(feature = "cuda")
-        && matches!(device, Device::Cuda(_))
+    let pre_permute_chunks = BackendCapabilityQueries::backend_capabilities(backend)
+        .gdn
+        .chunk_pre_permute_bf16
+        .is_native()
         && dtype == DType::BF16
         && full_chunks > 0
         && !any_kt_tensor_tracks_op(&[q, k, v, beta, g])

@@ -873,6 +873,7 @@ pub struct GdnCapabilities {
     pub recurrent_step: Support,
     pub recurrent_step_f32: Support,
     pub inference_recurrent_state: InferenceRecurrentStatePolicy,
+    pub chunk_pre_permute_bf16: Support,
     pub chunk_prep: Support,
     pub chunk_scan: Support,
     pub full_chunk_forward: Support,
@@ -1314,6 +1315,7 @@ impl BackendCapabilities {
                     GdnBackend::runtime_supports_gdn_recurrent_step(backend),
                 ),
                 inference_recurrent_state: InferenceRecurrentStatePolicy::for_backend(name, device),
+                chunk_pre_permute_bf16: gdn_chunk_pre_permute_bf16_support(name, device),
                 chunk_prep: Support::from_supports_predicate(
                     GdnBackend::runtime_supports_gdn_chunk_prep(backend),
                 ),
@@ -1985,6 +1987,13 @@ fn gdn_gated_rms_norm_preserves_tape_residency(name: &str, device: kiln_tensor::
             true
         }
         _ => false,
+    }
+}
+
+fn gdn_chunk_pre_permute_bf16_support(name: &str, device: kiln_tensor::Device) -> Support {
+    match backend_kind_for_runtime(name, device) {
+        kiln_tensor::Backend::Cuda => Support::NativeWithConstraints,
+        _ => Support::Declined,
     }
 }
 

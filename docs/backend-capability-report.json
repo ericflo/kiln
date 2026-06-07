@@ -1814,7 +1814,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "GdnCapabilities": {
-      "field_count": 9,
+      "field_count": 10,
       "fields": [
         {
           "name": "recurrent_step",
@@ -1827,6 +1827,10 @@
         {
           "name": "inference_recurrent_state",
           "type": "InferenceRecurrentStatePolicy"
+        },
+        {
+          "name": "chunk_pre_permute_bf16",
+          "type": "Support"
         },
         {
           "name": "chunk_prep",

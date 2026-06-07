@@ -175,7 +175,7 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `StartupCapabilities` | 6 | `run_inference_prewarm`, `require_inference_prewarm_for_health`, `precompile_custom_kernels`, `native_training_default_enabled`, `native_training_env`, `decode_weight_prewarm_when_native_training` |
 | `MatmulCapabilities` | 3 | `rank2_f32`, `batched_bf16`, `bias_epilogue` |
 | `AttentionCapabilities` | 5 | `flash_prefill`, `flash_prefill_head_major`, `flash_paged_decode`, `flash_prefill_consumes_grouped_kv`, `detached_chunked_prefill` |
-| `GdnCapabilities` | 9 | `recurrent_step`, `recurrent_step_f32`, `inference_recurrent_state`, `chunk_prep`, `chunk_scan`, `full_chunk_forward`, `gates`, `gated_rms_norm`, `gated_rms_norm_preserves_tape_residency` |
+| `GdnCapabilities` | 10 | `recurrent_step`, `recurrent_step_f32`, `inference_recurrent_state`, `chunk_pre_permute_bf16`, `chunk_prep`, `chunk_scan`, `full_chunk_forward`, `gates`, `gated_rms_norm`, `gated_rms_norm_preserves_tape_residency` |
 | `InferenceRecurrentStatePolicy` | 2 | `bf16`, `f16` |
 | `DecodeCapabilities` | 8 | `resident_decode`, `paged_decode_graph_outputs`, `mtp_speculative_generation`, `speculative_policy`, `linear_argmax`, `linear_argmax_batch`, `linear_sample`, `linear_sample_batch` |
 | `SpeculativeDecodePolicy` | 3 | `mtp_max_prompt_tokens`, `long_prompt_skip_layer_min_prompt_tokens`, `long_prompt_skip_layer_min_output_tokens` |

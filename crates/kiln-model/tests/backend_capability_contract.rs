@@ -1452,6 +1452,10 @@ fn generated_capability_report_lists_request_descriptors() {
         "GdnCapabilities should own inference recurrent-state dtype policy"
     );
     assert!(
+        gdn_capability_fields.contains(&"chunk_pre_permute_bf16"),
+        "GdnCapabilities should own GDN chunk pre-permute policy"
+    );
+    assert!(
         gdn_capability_fields.contains(&"gated_rms_norm_preserves_tape_residency"),
         "GdnCapabilities should own active-tape GDN RMSNorm residency policy"
     );
@@ -3021,6 +3025,11 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "forward GDN recurrent-step dtype routing should read GdnCapabilities"
     );
     assert!(
+        forward_source.contains("chunk_pre_permute_bf16")
+            && capability_source.contains("chunk_pre_permute_bf16"),
+        "forward GDN chunk pre-permute routing should read GdnCapabilities"
+    );
+    assert!(
         forward_source.contains("InferenceRecurrentStatePolicy")
             && capability_source.contains("inference_recurrent_state"),
         "forward inference recurrent-state dtype routing should read GdnCapabilities"
@@ -3217,6 +3226,27 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         !projection_w8_pack_policy_section.contains("matches!(*device, Device::Rocm"),
         "W8A16 projection row packing should not keep local ROCm device checks"
     );
+    let gdn_chunk_pre_permute_policy_section = source_between(
+        &forward_source,
+        "let pre_permute_chunks =",
+        "let pre_permuted:",
+    );
+    assert!(
+        gdn_chunk_pre_permute_policy_section
+            .contains("BackendCapabilityQueries::backend_capabilities(backend)")
+            && gdn_chunk_pre_permute_policy_section.contains("chunk_pre_permute_bf16"),
+        "GDN chunk pre-permute decision should consume GdnCapabilities"
+    );
+    for forbidden in [
+        "cfg!(feature = \"cuda\")",
+        "matches!(device, Device::Cuda",
+        "matches!(*device, Device::Cuda",
+    ] {
+        assert!(
+            !gdn_chunk_pre_permute_policy_section.contains(forbidden),
+            "GDN chunk pre-permute decision should not keep local CUDA policy: {forbidden}"
+        );
+    }
     assert!(
         forward_source.contains("ResidencyBackend"),
         "forward GDN recurrent residency helpers should import the focused residency facet"
