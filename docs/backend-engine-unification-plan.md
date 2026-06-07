@@ -226,14 +226,15 @@ backend-gated fast paths for fused loss roots and optimizer dispatch.
 The relevant shims are:
 
 - `sft_tape_shim.rs`: Vulkan-specific SFT FLCE bridges (kt tensor <->
-  `VkTensor`, fused active-row FLCE loss/backward). The CUDA FLCE fast path is
-  not in this shim; it lives in `trainer.rs` (gated on `is_cuda_device`, which
-  matches `Device::Cuda(_)` only) via `kiln-flce-kernel`'s kt FLCE API. ROCm has
-  no native fused FLCE: the kt composite has no `rocm_fwd`, so ROCm FLCE
-  host-stages down to CPU and back, unlike the OPD path below where ROCm joins
-  CUDA's fused FFI kernel.
-- `grpo_tape_shim.rs`: GRPO scalar loss roots and analytic kt backward, with
-  CUDA/ROCm fused fast paths and Vulkan-specific loss/grad paths.
+  `VkTensor`, fused active-row FLCE loss/backward). The trainer chooses the SFT
+  FLCE loss root through `TrainingLossBackend::runtime_sft_flce_loss_route`:
+  CUDA and ROCm advertise the shared kt-tape FLCE route, Vulkan advertises the
+  active-row fused shader route, and CPU/Metal keep the portable full-logits
+  route.
+- `grpo_tape_shim.rs`: GRPO scalar loss roots and analytic kt backward. The
+  trainer chooses GRPO loss roots through
+  `TrainingLossBackend::runtime_grpo_loss_route`: CPU/CUDA/ROCm/Metal use the
+  shared kt-composite route and Vulkan uses the active-row fused shader route.
 - `opd_tape_shim.rs`: records the OPD top-K/reverse-KL scalar-mean loss root and
   owns the Vulkan-specific active-hidden fused-shader loss/grad paths. The
   CUDA/ROCm fused-FFI kernel dispatch and the Metal/CPU/Vulkan device-agnostic
@@ -300,9 +301,10 @@ Capability profile:
   kernel crates.
 - ROCm has head-major prefill support gated by `KILN_ROCM_HEAD_MAJOR_PREFILL`.
 - Some code still carries CUDA names, comments, and telemetry strings.
-- At least one support method should be audited: `supports_linear_decode_argmax`
-  returns true while the current `linear_decode_argmax` override returns
-  `Ok(None)`.
+- The earlier `supports_linear_decode_argmax` mismatch is resolved: ROCm now
+  reports `Declined` for that support predicate until a native argmax path
+  lands, so the capability report does not claim native support for an
+  always-declining method body.
 
 ROCm should be unified with CUDA where the abstraction is genuinely shared:
 device pointer extraction, stream/capture lifecycle, BLASLt request descriptors,
@@ -333,8 +335,8 @@ Capability profile:
   graph-output forms.
 - Native GDN recurrent/chunk/gates/gated-RMSNorm and conv1d paths.
 - Native sampled lm-head paths, including batch mixed greedy/sampling forms.
-- AdamW dispatch exists; SGD is not currently overridden in the backend trait
-  list.
+- AdamW dispatch exists; SGD intentionally default-declines in the optimizer
+  dispatch report rather than claiming native Metal coverage.
 - The implementation is large and monolithic, especially `backend/metal.rs`,
   which mixes runtime trait implementation, MSL strings, pipeline setup,
   residency, decode helpers, and tests.
@@ -905,6 +907,12 @@ These are the first concrete PRs, ordered by readiness. Items 1-4 are Phase 0
 (no refactor, do these first); item 6 begins Phase 1; items 5 and 8 begin Phase
 2; item 7 begins Phase 7 and must wait for item 6. Item 9 is a small audit that
 pairs with the unified optimizer contract (Phase 6).
+
+Status note: this section records the initial migration order. The current
+completion state is the generated capability report in
+`docs/backend-capability-report.md` / `.json`; at the current PR state, the
+remaining non-covered item is the Phase 8 known-hardware latency threshold
+fixture.
 
 1. Generate a capability report from the live tree.
    Start with override presence plus explicit support methods for

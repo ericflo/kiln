@@ -3475,6 +3475,52 @@ fn generated_capability_report_tracks_migration_phase_status() {
 }
 
 #[test]
+fn backend_engine_unification_plan_matches_current_training_status() {
+    let root = workspace_root();
+    let plan_source = fs::read_to_string(root.join("docs/backend-engine-unification-plan.md"))
+        .expect("backend engine unification plan should be readable");
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("docs/backend-capability-report.json"))
+            .expect("capability report json should be readable"),
+    )
+    .expect("capability report json should parse");
+
+    for stale in [
+        "`is_cuda_device`",
+        "`is_metal_device`",
+        "no native fused FLCE",
+        "host-stages down to CPU",
+        "returns true while the current `linear_decode_argmax` override returns",
+        "SGD is not currently overridden",
+    ] {
+        assert!(
+            !plan_source.contains(stale),
+            "backend unification plan should not keep stale implementation claim: {stale}"
+        );
+    }
+
+    assert!(
+        plan_source.contains("TrainingLossBackend::runtime_sft_flce_loss_route")
+            && plan_source.contains("TrainingLossBackend::runtime_grpo_loss_route"),
+        "training source map should describe backend-owned loss routing"
+    );
+    assert!(
+        plan_source.contains("generated capability report"),
+        "plan should point readers at the generated report for current completion status"
+    );
+    assert_eq!(
+        report["training_loss_policy"]["rocm"]["sft_flce_loss_route"],
+        "kt_tape_flce",
+        "ROCm report should agree with the plan's kt-tape SFT FLCE route"
+    );
+    assert_eq!(
+        report["optimizer_dispatch"]["metal"]["sgd_step"],
+        "default_decline",
+        "Metal optimizer status should agree with the plan's default-decline language"
+    );
+}
+
+#[test]
 fn generated_capability_report_check_mode_is_non_mutating_and_enforced() {
     let root = workspace_root();
     let script_path = root.join("scripts/generate_backend_capability_report.py");
