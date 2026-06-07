@@ -1542,6 +1542,10 @@ fn generated_capability_report_lists_training_loss_policy() {
         "CPU should not advertise a portable OPD training route"
     );
     assert_eq!(
+        policies["cpu"]["opd_phase_b_backward_route"], "unsupported",
+        "CPU should not advertise OPD Phase-B backward"
+    );
+    assert_eq!(
         policies["metal"]["sft_flce_loss_route"], "full_logits",
         "Metal should keep the portable SFT full-logits route"
     );
@@ -1552,6 +1556,10 @@ fn generated_capability_report_lists_training_loss_policy() {
     assert_eq!(
         policies["metal"]["opd_loss_route"], "kt_tape_phase_b",
         "Metal should use the shared OPD kt-tape Phase-B route"
+    );
+    assert_eq!(
+        policies["metal"]["opd_phase_b_backward_route"], "kt_composite",
+        "Metal should use the device-agnostic kt composite OPD Phase-B backward"
     );
     assert_eq!(
         policies["cuda"]["sft_flce_loss_route"], "kt_tape_flce",
@@ -1566,6 +1574,10 @@ fn generated_capability_report_lists_training_loss_policy() {
         "CUDA should use the shared OPD kt-tape Phase-B route"
     );
     assert_eq!(
+        policies["cuda"]["opd_phase_b_backward_route"], "cuda_rocm_fused_unit_grad",
+        "CUDA should advertise the fused OPD Phase-B unit-gradient leaf"
+    );
+    assert_eq!(
         policies["rocm"]["sft_flce_loss_route"], "kt_tape_flce",
         "ROCm should use the shared kt-tape SFT FLCE route"
     );
@@ -1578,6 +1590,10 @@ fn generated_capability_report_lists_training_loss_policy() {
         "ROCm should use the shared OPD kt-tape Phase-B route"
     );
     assert_eq!(
+        policies["rocm"]["opd_phase_b_backward_route"], "cuda_rocm_fused_unit_grad",
+        "ROCm should advertise the fused OPD Phase-B unit-gradient leaf"
+    );
+    assert_eq!(
         policies["vulkan"]["sft_flce_loss_route"], "vulkan_active_rows",
         "Vulkan should use its active-row SFT FLCE route"
     );
@@ -1588,6 +1604,10 @@ fn generated_capability_report_lists_training_loss_policy() {
     assert_eq!(
         policies["vulkan"]["opd_loss_route"], "vulkan_active_hidden",
         "Vulkan should use its active-hidden OPD route"
+    );
+    assert_eq!(
+        policies["vulkan"]["opd_phase_b_backward_route"], "vulkan_active_hidden",
+        "Vulkan should advertise active-hidden OPD loss/backward routing"
     );
 }
 
@@ -1922,6 +1942,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
         ("TrainingLossBackend", "runtime_training_precision_policy"),
         ("TrainingLossBackend", "runtime_grpo_loss_route"),
         ("TrainingLossBackend", "runtime_opd_loss_route"),
+        ("TrainingLossBackend", "runtime_opd_phase_b_backward_route"),
         ("ReplayBackend", "runtime_supports_replay_request"),
     ] {
         let info = facets
@@ -2603,9 +2624,19 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "checkpointed OPD tail should route fused loss roots through TrainingLossBackend"
     );
     assert!(
+        checkpointed_opd_section
+            .contains("TrainingLossBackend::runtime_opd_phase_b_backward_route"),
+        "checkpointed OPD tail should route Phase-B backward through TrainingLossBackend"
+    );
+    assert!(
         !checkpointed_opd_section
             .contains("matches!(normed.device(), kiln_tensor::Device::Vulkan(_))"),
         "checkpointed OPD tail should not hard-code Vulkan loss routing"
+    );
+    assert!(
+        !checkpointed_opd_section
+            .contains("kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Rocm(_)"),
+        "checkpointed OPD tail should not hard-code CUDA/ROCm Phase-B backward routing"
     );
 
     let inference_decode_residency_sources =
@@ -3636,6 +3667,7 @@ fn backend_engine_unification_plan_matches_current_training_status() {
         plan_source.contains("TrainingLossBackend::runtime_sft_flce_loss_route")
             && plan_source.contains("TrainingLossBackend::runtime_grpo_loss_route")
             && plan_source.contains("TrainingLossBackend::runtime_opd_loss_route")
+            && plan_source.contains("TrainingLossBackend::runtime_opd_phase_b_backward_route")
             && plan_source.contains("TrainingLossBackend::runtime_training_precision_policy"),
         "training source map should describe backend-owned loss and precision routing"
     );

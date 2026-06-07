@@ -103,7 +103,7 @@ use crate::{ChatMessage, Optimizer, default_alpha, default_rank};
     feature = "vulkan",
     feature = "rocm"
 ))]
-use kiln_model::backend::{OpdLossRoute, TrainingLossBackend};
+use kiln_model::backend::{OpdLossRoute, OpdPhaseBBackwardRoute, TrainingLossBackend};
 // (#1082) Production caller migration: the per-position OPD loss now
 // routes through `KtForwardOp1` (kiln-kt-bridge::forward_op::KtForwardOp1,
 // commit `095f1c74`) over the kt-typed forward
@@ -3546,63 +3546,64 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
         let loss_val = loss.to_scalar::<f32>()? as f64;
 
         let grad_normed = {
-            #[cfg(any(feature = "cuda", feature = "rocm"))]
-            if matches!(
-                normed.device(),
-                kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Rocm(_)
-            ) {
-                if let Some(active_metadata) = _opd_active_metadata.as_ref() {
-                    opd_loss::opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_with_metadata_kt(
-                        &normed,
-                        head_for_loss,
-                        &prepared.teacher_topk_indices,
-                        &prepared.teacher_topk_logprobs,
-                        &prepared.label_mask,
-                        prepared.resolved_top_k,
-                        active_metadata,
-                    )
-                    .map_err(|e| anyhow!("checkpointed OPD fused hidden gradient: {e}"))?
-                } else {
-                    opd_loss::opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_kt(
-                        &normed,
-                        head_for_loss,
-                        &prepared.teacher_topk_indices,
-                        &prepared.teacher_topk_logprobs,
-                        &prepared.label_mask,
-                        prepared.resolved_top_k,
-                    )
-                    .map_err(|e| anyhow!("checkpointed OPD fused hidden gradient: {e}"))?
+            let opd_backward_route =
+                TrainingLossBackend::runtime_opd_phase_b_backward_route(backend_rt);
+            let composite_grad = || -> Result<kiln_tensor::Tensor> {
+                let grad_loss = kiln_tensor::Tensor::from_vec_on(*device, vec![1.0f32], vec![])
+                    .context("checkpointed OPD grad_loss seed")?;
+                opd_loss::kt_api::opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
+                    &normed,
+                    head_for_loss,
+                    &prepared.teacher_topk_indices,
+                    &prepared.teacher_topk_logprobs,
+                    &prepared.label_mask,
+                    &grad_loss,
+                    prepared.resolved_top_k,
+                    opd_loss::OpdLossOutputKt::ScalarMean,
+                )
+                .map_err(|e| anyhow!("checkpointed OPD composite hidden gradient: {e}"))
+            };
+            match opd_backward_route {
+                #[cfg(any(feature = "cuda", feature = "rocm"))]
+                OpdPhaseBBackwardRoute::CudaRocmFusedUnitGrad => {
+                    if let Some(active_metadata) = _opd_active_metadata.as_ref() {
+                        opd_loss::opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_with_metadata_kt(
+                            &normed,
+                            head_for_loss,
+                            &prepared.teacher_topk_indices,
+                            &prepared.teacher_topk_logprobs,
+                            &prepared.label_mask,
+                            prepared.resolved_top_k,
+                            active_metadata,
+                        )
+                        .map_err(|e| anyhow!("checkpointed OPD fused hidden gradient: {e}"))?
+                    } else {
+                        opd_loss::opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_kt(
+                            &normed,
+                            head_for_loss,
+                            &prepared.teacher_topk_indices,
+                            &prepared.teacher_topk_logprobs,
+                            &prepared.label_mask,
+                            prepared.resolved_top_k,
+                        )
+                        .map_err(|e| anyhow!("checkpointed OPD fused hidden gradient: {e}"))?
+                    }
                 }
-            } else {
-                let grad_loss = kiln_tensor::Tensor::from_vec_on(*device, vec![1.0f32], vec![])
-                    .context("checkpointed OPD grad_loss seed")?;
-                opd_loss::kt_api::opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
-                    &normed,
-                    head_for_loss,
-                    &prepared.teacher_topk_indices,
-                    &prepared.teacher_topk_logprobs,
-                    &prepared.label_mask,
-                    &grad_loss,
-                    prepared.resolved_top_k,
-                    opd_loss::OpdLossOutputKt::ScalarMean,
-                )
-                .map_err(|e| anyhow!("checkpointed OPD composite hidden gradient: {e}"))?
-            }
-            #[cfg(not(any(feature = "cuda", feature = "rocm")))]
-            {
-                let grad_loss = kiln_tensor::Tensor::from_vec_on(*device, vec![1.0f32], vec![])
-                    .context("checkpointed OPD grad_loss seed")?;
-                opd_loss::kt_api::opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
-                    &normed,
-                    head_for_loss,
-                    &prepared.teacher_topk_indices,
-                    &prepared.teacher_topk_logprobs,
-                    &prepared.label_mask,
-                    &grad_loss,
-                    prepared.resolved_top_k,
-                    opd_loss::OpdLossOutputKt::ScalarMean,
-                )
-                .map_err(|e| anyhow!("checkpointed OPD composite hidden gradient: {e}"))?
+                #[cfg(not(any(feature = "cuda", feature = "rocm")))]
+                OpdPhaseBBackwardRoute::CudaRocmFusedUnitGrad => {
+                    anyhow::bail!(
+                        "checkpointed OPD CUDA/ROCm fused Phase-B backward route requires cuda or rocm feature"
+                    )
+                }
+                OpdPhaseBBackwardRoute::KtComposite => composite_grad()?,
+                OpdPhaseBBackwardRoute::VulkanActiveHidden => {
+                    anyhow::bail!(
+                        "checkpointed OPD Vulkan active-hidden backward route should use the fused Vulkan loss/grad path"
+                    )
+                }
+                OpdPhaseBBackwardRoute::Unsupported => {
+                    anyhow::bail!("checkpointed OPD Phase-B backward route is unsupported")
+                }
             }
         };
         Ok((loss_val, grad_normed))

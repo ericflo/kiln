@@ -242,12 +242,36 @@ impl OpdLossRoute {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpdPhaseBBackwardRoute {
+    /// OPD Phase-B backward is not advertised for this backend.
+    Unsupported,
+    /// Use the device-agnostic kt composite backward.
+    KtComposite,
+    /// Use the CUDA/ROCm fused unit-gradient Phase-B backward leaf.
+    CudaRocmFusedUnitGrad,
+    /// Use Vulkan's active-hidden fused loss/gradient shader pair.
+    VulkanActiveHidden,
+}
+
+impl OpdPhaseBBackwardRoute {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            OpdPhaseBBackwardRoute::Unsupported => "unsupported",
+            OpdPhaseBBackwardRoute::KtComposite => "kt_composite",
+            OpdPhaseBBackwardRoute::CudaRocmFusedUnitGrad => "cuda_rocm_fused_unit_grad",
+            OpdPhaseBBackwardRoute::VulkanActiveHidden => "vulkan_active_hidden",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrainingCapabilities {
     pub projection_training: &'static str,
     pub flce_loss: &'static str,
     pub sft_flce_loss_route: SftFlceLossRoute,
     pub grpo_loss_route: GrpoLossRoute,
     pub opd_loss_route: OpdLossRoute,
+    pub opd_phase_b_backward_route: OpdPhaseBBackwardRoute,
     pub rmsnorm_training: &'static str,
     pub resident_activation: &'static str,
     pub lora_delta_training: &'static str,
@@ -264,6 +288,7 @@ impl TrainingCapabilities {
             sft_flce_loss_route: SftFlceLossRoute::FullLogits,
             grpo_loss_route: GrpoLossRoute::KtComposite,
             opd_loss_route: OpdLossRoute::Unsupported,
+            opd_phase_b_backward_route: OpdPhaseBBackwardRoute::Unsupported,
             rmsnorm_training: "portable candle autograd",
             resident_activation: "not implemented",
             lora_delta_training: "portable candle autograd",
@@ -2315,6 +2340,11 @@ pub trait TrainingLossBackend: Send + Sync + std::fmt::Debug {
     fn runtime_opd_loss_route(&self) -> OpdLossRoute {
         self.runtime_training_capabilities().opd_loss_route
     }
+
+    fn runtime_opd_phase_b_backward_route(&self) -> OpdPhaseBBackwardRoute {
+        self.runtime_training_capabilities()
+            .opd_phase_b_backward_route
+    }
 }
 
 /// Focused `ReplayBackend` facet delegated by the current `BackendRuntime` facade.
@@ -3482,6 +3512,10 @@ mod tests {
         assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::FullLogits);
         assert_eq!(caps.grpo_loss_route, GrpoLossRoute::KtComposite);
         assert_eq!(caps.opd_loss_route, OpdLossRoute::Unsupported);
+        assert_eq!(
+            caps.opd_phase_b_backward_route,
+            OpdPhaseBBackwardRoute::Unsupported
+        );
 
         let policy = TrainingPrecisionPolicy::portable();
         assert_eq!(policy.name, "cpu_f32_reference");
@@ -3570,6 +3604,16 @@ mod tests {
         assert_eq!(OpdLossRoute::KtTapePhaseB.as_str(), "kt_tape_phase_b");
         assert_eq!(
             OpdLossRoute::VulkanActiveHidden.as_str(),
+            "vulkan_active_hidden"
+        );
+        assert_eq!(OpdPhaseBBackwardRoute::Unsupported.as_str(), "unsupported");
+        assert_eq!(OpdPhaseBBackwardRoute::KtComposite.as_str(), "kt_composite");
+        assert_eq!(
+            OpdPhaseBBackwardRoute::CudaRocmFusedUnitGrad.as_str(),
+            "cuda_rocm_fused_unit_grad"
+        );
+        assert_eq!(
+            OpdPhaseBBackwardRoute::VulkanActiveHidden.as_str(),
             "vulkan_active_hidden"
         );
     }
@@ -4427,6 +4471,10 @@ mod tests {
         assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::KtTapeFlce);
         assert_eq!(caps.grpo_loss_route, GrpoLossRoute::KtComposite);
         assert_eq!(caps.opd_loss_route, OpdLossRoute::KtTapePhaseB);
+        assert_eq!(
+            caps.opd_phase_b_backward_route,
+            OpdPhaseBBackwardRoute::CudaRocmFusedUnitGrad
+        );
     }
 
     #[cfg(feature = "rocm")]
@@ -4436,6 +4484,10 @@ mod tests {
         assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::KtTapeFlce);
         assert_eq!(caps.grpo_loss_route, GrpoLossRoute::KtComposite);
         assert_eq!(caps.opd_loss_route, OpdLossRoute::KtTapePhaseB);
+        assert_eq!(
+            caps.opd_phase_b_backward_route,
+            OpdPhaseBBackwardRoute::CudaRocmFusedUnitGrad
+        );
     }
 
     #[cfg(feature = "metal")]
@@ -4448,6 +4500,10 @@ mod tests {
         assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::FullLogits);
         assert_eq!(caps.grpo_loss_route, GrpoLossRoute::KtComposite);
         assert_eq!(caps.opd_loss_route, OpdLossRoute::KtTapePhaseB);
+        assert_eq!(
+            caps.opd_phase_b_backward_route,
+            OpdPhaseBBackwardRoute::KtComposite
+        );
 
         let backend = metal::MetalBackend::new(kiln_tensor::Device::Metal(0));
         assert_eq!(backend.training_capabilities(), caps);
@@ -4460,5 +4516,9 @@ mod tests {
         assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::VulkanActiveRows);
         assert_eq!(caps.grpo_loss_route, GrpoLossRoute::VulkanActiveRows);
         assert_eq!(caps.opd_loss_route, OpdLossRoute::VulkanActiveHidden);
+        assert_eq!(
+            caps.opd_phase_b_backward_route,
+            OpdPhaseBBackwardRoute::VulkanActiveHidden
+        );
     }
 }

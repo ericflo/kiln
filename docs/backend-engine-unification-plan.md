@@ -240,11 +240,15 @@ The relevant shims are:
   trainer chooses OPD loss roots through
   `TrainingLossBackend::runtime_opd_loss_route`: CUDA, ROCm, and Metal use the
   shared kt-tape Phase-B route, Vulkan uses the active-hidden fused shader
-  route, and CPU/portable reports OPD as unsupported. The CUDA/ROCm fused-FFI
-  kernel dispatch and the Metal/CPU/Vulkan device-agnostic analytic
-  kt-composite backward live in the `kiln-opd-loss-kernel` crate (the
-  `kt_tape.rs` `BackwardOp::apply` dispatcher over `kt_api.rs`), which this shim
-  calls.
+  route, and CPU/portable reports OPD as unsupported. Checkpointed OPD chooses
+  the Phase-B hidden-gradient path through
+  `TrainingLossBackend::runtime_opd_phase_b_backward_route`: CUDA/ROCm use the
+  fused unit-gradient leaf, Metal uses the device-agnostic kt-composite
+  backward, Vulkan uses its active-hidden fused loss/grad path, and CPU/portable
+  remains unsupported. The CUDA/ROCm fused-FFI kernel dispatch and the
+  Metal/CPU/Vulkan device-agnostic analytic kt-composite backward live in the
+  `kiln-opd-loss-kernel` crate (the `kt_tape.rs` `BackwardOp::apply` dispatcher
+  over `kt_api.rs`), which this shim calls.
 - Training precision policy is also backend-owned in production setup:
   SFT/GRPO/OPD read `TrainingLossBackend::runtime_training_precision_policy`
   from the active backend before choosing LoRA parameter dtype, checkpoint
