@@ -1682,7 +1682,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "DecodeBatcherPolicy": {
-      "field_count": 8,
+      "field_count": 10,
       "fields": [
         {
           "name": "max_batch",
@@ -1699,6 +1699,14 @@
         {
           "name": "rowwise_retry_env",
           "type": "Option<&'static str>"
+        },
+        {
+          "name": "prefer_direct_paged_decode_attention",
+          "type": "bool"
+        },
+        {
+          "name": "direct_paged_decode_attention_env_gate",
+          "type": "DecodeAttentionEnvGate"
         },
         {
           "name": "use_greedy_token_decode",

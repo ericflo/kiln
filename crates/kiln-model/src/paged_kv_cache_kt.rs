@@ -154,10 +154,9 @@ fn alloc_pool_pair(
             (k, v)
         }
         // #1082 ROCm: device-resident KV pools (mirror the CUDA arm),
-        // gated on KILN_ROCM_PAGED_DECODE so it pairs with the native
-        // sq=1 paged-decode routing in forward.rs (both default off until
-        // the KV-cache correctness fix lands). When off, ROCm falls to the
-        // `other` => CPU pool + the correct contiguous-decode path.
+        // gated by the same backend decode policy as native sq=1 paged-decode
+        // routing in forward.rs. When off, ROCm falls to the `other` => CPU
+        // pool + the correct contiguous-decode path.
         #[cfg(feature = "rocm")]
         kiln_tensor::Device::Rocm(i) if crate::forward::rocm_paged_decode_enabled() => {
             let k_storage = kiln_tensor::rocm_zeros_ctx(i, storage_dtype, n_elements)

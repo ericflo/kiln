@@ -14,6 +14,7 @@ use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+use crate::backend::capability::BackendCapabilityQueries;
 use crate::backend::{
     AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, GdnBackend, LinearBackend,
     PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend,
@@ -211,27 +212,23 @@ fn fused_paged_decode_disabled() -> bool {
     *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok())
 }
 
-fn cuda_direct_paged_decode_disabled() -> bool {
-    static DISABLED: OnceLock<bool> = OnceLock::new();
-    *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_DIRECT_PAGED_DECODE").is_ok())
-}
-
 /// ROCm device-resident KV pools + the native sq=1 O(n) paged-decode path
 /// (correct + faster at every context length: ~13 tok/s @32, ~12 @128, ~11 @256
 /// vs the contiguous O(n^2) prefill recompute's 10.5 degrading to ~8). DEFAULT
-/// ON; set `KILN_ROCM_PAGED_DECODE=0` to fall back to the contiguous path. Read
-/// by both `use_direct_paged_decode` here AND the KV-pool device-routing in
-/// `PagedKvCacheKt::new` (they must agree).
+/// ON; set `KILN_ROCM_PAGED_DECODE=0` to fall back to the contiguous path.
+/// `PagedKvCacheKt::new` also reads this policy, so KV-pool routing and
+/// attention routing agree.
+#[cfg(feature = "rocm")]
 pub(crate) fn rocm_paged_decode_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_ROCM_PAGED_DECODE")
-            .map(|v| {
-                let v = v.trim().to_ascii_lowercase();
-                !(v == "0" || v == "false" || v == "no" || v == "off")
-            })
-            .unwrap_or(true)
-    })
+    crate::backend::capability::DecodeBatcherPolicy::for_backend("rocm", Device::Rocm(0))
+        .direct_paged_decode_attention_enabled()
+}
+
+fn direct_paged_decode_attention_enabled(backend: &dyn BackendRuntime) -> bool {
+    BackendCapabilityQueries::backend_capabilities(backend)
+        .decode_batcher
+        .direct_paged_decode_attention_enabled()
+        && AttentionBackend::runtime_supports_flash_attn_paged_decode(backend)
 }
 
 #[cfg(feature = "cuda")]
@@ -19760,15 +19757,7 @@ fn try_flash_attn_paged_decode(
     // branch below is useful for backends with an implemented contiguous decode
     // kernel, but otherwise it can build compact K/V views before reaching the
     // real paged path.
-    let use_direct_paged_decode =
-        (BackendIdentity::runtime_name(backend) == "cuda"
-            && !cuda_direct_paged_decode_disabled())
-            || BackendIdentity::runtime_name(backend) == "vulkan"
-            // ROCm: device-resident KV pools + native sq=1 O(n) paged decode
-            // (flat ~14 tok/s vs the contiguous block's O(n^2) prefill recompute).
-            // Behind KILN_ROCM_PAGED_DECODE (default off) pending the KV-cache
-            // correctness fix — see rocm_paged_decode_enabled().
-            || (BackendIdentity::runtime_name(backend) == "rocm" && rocm_paged_decode_enabled());
+    let use_direct_paged_decode = direct_paged_decode_attention_enabled(backend);
     #[cfg(feature = "cuda")]
     let is_fp8 = try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache);
     #[cfg(not(feature = "cuda"))]

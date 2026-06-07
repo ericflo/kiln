@@ -774,10 +774,35 @@ pub struct DecodeBatcherPolicy {
     pub wait_micros: u64,
     pub allow_mixed_seq_lens: bool,
     pub rowwise_retry_env: Option<&'static str>,
+    pub prefer_direct_paged_decode_attention: bool,
+    pub direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate,
     pub use_greedy_token_decode: bool,
     pub use_native_sampled_contiguous_decode: bool,
     pub sampled_contiguous_decode_requires_resident_decode: bool,
     pub partition_noncontiguous_gdn_kv_tiles: bool,
+}
+
+/// Environment gate attached to backend decode-attention routing policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodeAttentionEnvGate {
+    None,
+    DisabledWhenSet(&'static str),
+    EnabledUnlessOff(&'static str),
+}
+
+impl DecodeAttentionEnvGate {
+    pub fn allows(self) -> bool {
+        match self {
+            Self::None => true,
+            Self::DisabledWhenSet(name) => std::env::var(name).is_err(),
+            Self::EnabledUnlessOff(name) => std::env::var(name)
+                .map(|value| {
+                    let value = value.trim().to_ascii_lowercase();
+                    !(value == "0" || value == "false" || value == "no" || value == "off")
+                })
+                .unwrap_or(true),
+        }
+    }
 }
 
 /// Replay capability probes backed by [`ReplayRequest`].
@@ -1140,6 +1165,10 @@ impl DecodeBatcherPolicy {
                 wait_micros: 0,
                 allow_mixed_seq_lens: false,
                 rowwise_retry_env: None,
+                prefer_direct_paged_decode_attention: true,
+                direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate::DisabledWhenSet(
+                    "KILN_DISABLE_CUDA_DIRECT_PAGED_DECODE",
+                ),
                 use_greedy_token_decode: false,
                 use_native_sampled_contiguous_decode: false,
                 sampled_contiguous_decode_requires_resident_decode: false,
@@ -1150,6 +1179,8 @@ impl DecodeBatcherPolicy {
                 wait_micros: Self::METAL_WAIT_MICROS,
                 allow_mixed_seq_lens: true,
                 rowwise_retry_env: None,
+                prefer_direct_paged_decode_attention: false,
+                direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate::None,
                 use_greedy_token_decode: true,
                 use_native_sampled_contiguous_decode: true,
                 sampled_contiguous_decode_requires_resident_decode: false,
@@ -1160,9 +1191,25 @@ impl DecodeBatcherPolicy {
                 wait_micros: Self::VULKAN_WAIT_MICROS,
                 allow_mixed_seq_lens: true,
                 rowwise_retry_env: Some("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY"),
+                prefer_direct_paged_decode_attention: true,
+                direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate::None,
                 use_greedy_token_decode: false,
                 use_native_sampled_contiguous_decode: true,
                 sampled_contiguous_decode_requires_resident_decode: true,
+                partition_noncontiguous_gdn_kv_tiles: false,
+            },
+            kiln_tensor::Backend::Rocm => Self {
+                max_batch: Self::DEFAULT_MAX_BATCH,
+                wait_micros: 0,
+                allow_mixed_seq_lens: false,
+                rowwise_retry_env: None,
+                prefer_direct_paged_decode_attention: true,
+                direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate::EnabledUnlessOff(
+                    "KILN_ROCM_PAGED_DECODE",
+                ),
+                use_greedy_token_decode: false,
+                use_native_sampled_contiguous_decode: false,
+                sampled_contiguous_decode_requires_resident_decode: false,
                 partition_noncontiguous_gdn_kv_tiles: false,
             },
             _ => Self {
@@ -1170,12 +1217,19 @@ impl DecodeBatcherPolicy {
                 wait_micros: 0,
                 allow_mixed_seq_lens: false,
                 rowwise_retry_env: None,
+                prefer_direct_paged_decode_attention: false,
+                direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate::None,
                 use_greedy_token_decode: false,
                 use_native_sampled_contiguous_decode: false,
                 sampled_contiguous_decode_requires_resident_decode: false,
                 partition_noncontiguous_gdn_kv_tiles: false,
             },
         }
+    }
+
+    pub fn direct_paged_decode_attention_enabled(self) -> bool {
+        self.prefer_direct_paged_decode_attention
+            && self.direct_paged_decode_attention_env_gate.allows()
     }
 }
 

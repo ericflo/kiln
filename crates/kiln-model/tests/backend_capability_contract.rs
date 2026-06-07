@@ -1176,6 +1176,14 @@ fn generated_capability_report_lists_request_descriptors() {
         "DecodeBatcherPolicy should own GDN KV contiguity partition routing"
     );
     assert!(
+        decode_batcher_policy_fields.contains(&"prefer_direct_paged_decode_attention"),
+        "DecodeBatcherPolicy should own direct paged-decode attention path preference"
+    );
+    assert!(
+        decode_batcher_policy_fields.contains(&"direct_paged_decode_attention_env_gate"),
+        "DecodeBatcherPolicy should own direct paged-decode attention env gates"
+    );
+    assert!(
         decode_batcher_policy_fields.contains(&"use_greedy_token_decode"),
         "DecodeBatcherPolicy should own greedy-token decode shortcut routing"
     );
@@ -2217,6 +2225,9 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     let root = workspace_root();
     let backend_source = fs::read_to_string(root.join("crates/kiln-model/src/backend/mod.rs"))
         .expect("backend/mod.rs should be readable");
+    let capability_source =
+        fs::read_to_string(root.join("crates/kiln-model/src/backend/capability.rs"))
+            .expect("backend/capability.rs should be readable");
     let trainer_source = fs::read_to_string(root.join("crates/kiln-train/src/trainer.rs"))
         .expect("trainer.rs should be readable");
     let grpo_tape_source = fs::read_to_string(root.join("crates/kiln-train/src/grpo_tape_shim.rs"))
@@ -2285,6 +2296,10 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     assert!(
         forward_source.contains("BackendIdentity"),
         "forward should import the focused backend identity facet"
+    );
+    assert!(
+        forward_source.contains("BackendCapabilityQueries"),
+        "forward should import the shared backend capability query surface"
     );
     assert!(
         generate_source.contains("TrainingLossBackend"),
@@ -2366,6 +2381,12 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "forward GDN helpers should import the focused GDN facet"
     );
     assert!(
+        forward_source.contains("direct_paged_decode_attention_enabled")
+            && capability_source.contains("prefer_direct_paged_decode_attention")
+            && capability_source.contains("direct_paged_decode_attention_env_gate"),
+        "forward direct paged-decode attention routing should read DecodeBatcherPolicy"
+    );
+    assert!(
         forward_source.contains("ResidencyBackend"),
         "forward GDN recurrent residency helpers should import the focused residency facet"
     );
@@ -2431,6 +2452,40 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             && !decode_batcher_retry_section.contains("\"vulkan\""),
         "decode batcher rowwise retry should not branch on backend name locally"
     );
+    let direct_paged_decode_attention_helper = source_between(
+        &forward_source,
+        "fn direct_paged_decode_attention_enabled(",
+        "/// Try the fused paged-decode flash-attention kernel.",
+    );
+    assert!(
+        direct_paged_decode_attention_helper
+            .contains("BackendCapabilityQueries::backend_capabilities")
+            && direct_paged_decode_attention_helper
+                .contains("AttentionBackend::runtime_supports_flash_attn_paged_decode"),
+        "direct paged-decode attention routing should combine backend policy with focused attention capability"
+    );
+    let direct_paged_decode_attention_section = source_between(
+        &forward_source,
+        "let use_direct_paged_decode =",
+        "#[cfg(feature = \"cuda\")]",
+    );
+    assert!(
+        direct_paged_decode_attention_section
+            .contains("direct_paged_decode_attention_enabled(backend)"),
+        "try_flash_attn_paged_decode should read the shared direct paged-decode attention helper"
+    );
+    for forbidden in [
+        "BackendIdentity::runtime_name(backend) == \"cuda\"",
+        "BackendIdentity::runtime_name(backend) == \"vulkan\"",
+        "BackendIdentity::runtime_name(backend) == \"rocm\"",
+        "cuda_direct_paged_decode_disabled()",
+        "rocm_paged_decode_enabled()",
+    ] {
+        assert!(
+            !direct_paged_decode_attention_section.contains(forbidden),
+            "try_flash_attn_paged_decode should not branch locally on backend identity/env helper: {forbidden}"
+        );
+    }
     for removed_helper in [
         "fn default_decode_batcher_max_batch_kt",
         "fn default_decode_batcher_allow_mixed_seq_lens_kt",
