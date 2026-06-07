@@ -5447,6 +5447,10 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
             "fixture command should be runner-portable because it is part of the stable fixture digest: {command}"
         );
         assert!(
+            !command.contains("/path/to"),
+            "fixture command should not contain placeholder paths because workflow_dispatch runs it verbatim: {command}"
+        );
+        assert!(
             command.contains("cargo "),
             "fixture command should invoke cargo through the runner PATH: {command}"
         );

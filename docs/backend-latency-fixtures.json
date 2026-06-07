@@ -21,7 +21,7 @@
       "backend": "cuda",
       "hardware": "NVIDIA RTX A6000 48GB",
       "source": "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
-      "command": "cargo run --release --features cuda -p kiln-server --example flce_phase_a_validation_bench -- --model-path /path/to/Qwen3.5-4B",
+      "command": "cargo run --release --features cuda -p kiln-server --example flce_phase_a_validation_bench -- --model-path \"${KILN_BENCH_MODEL_PATH:?set KILN_BENCH_MODEL_PATH}\"",
       "result_artifact": "bench-results/backend-latency/cuda-a6000-flce-phase-a.json",
       "threshold_state": "pending_fixture_result",
       "metrics": [

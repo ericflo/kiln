@@ -21,7 +21,8 @@ hardware latency conformance gate covered.
 Fixture `command` strings are part of the stable fixture digest used by
 reviewed result artifacts. Keep them runner-portable, such as `cargo ...` with
 environment variables or fixture arguments for local model paths, and do not
-bake a developer-local Cargo installation path into the manifest.
+bake a developer-local Cargo installation path or placeholder `/path/to/...`
+value into the manifest.
 
 ## Covered Fixtures
 
