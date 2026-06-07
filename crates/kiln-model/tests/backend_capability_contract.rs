@@ -1222,6 +1222,10 @@ fn generated_capability_report_lists_request_descriptors() {
         storage_capability_fields.contains(&"kv_cache_device_memory_pressure"),
         "StorageCapabilities should own KV cache device-memory pressure policy"
     );
+    assert!(
+        storage_capability_fields.contains(&"kv_sizing_residency_model_multiplier"),
+        "StorageCapabilities should own backend-specific KV sizing residency reserve policy"
+    );
     let attention_capability_fields = capability_descriptors["AttentionCapabilities"]["fields"]
         .as_array()
         .expect("AttentionCapabilities fields should be an array")
@@ -2796,6 +2800,21 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             && server_prefix_cache_state_section.contains("InferenceRecurrentStatePolicy")
             && server_prefix_cache_state_section.contains("policy.supports_dtype"),
         "kiln-server prefix-cache state sizing should consume the backend-owned inference recurrent-state policy"
+    );
+    let server_kv_sizing_reserve_section = source_between(
+        &server_state_source,
+        "let mut sizing_residency_bytes = post_load_used_vram.max(estimated_model_bytes);",
+        "if post_load_used_vram > 0 {",
+    );
+    assert!(
+        server_state_source.contains("runner.backend_capabilities().storage")
+            && server_kv_sizing_reserve_section.contains("kv_sizing_residency_model_multiplier"),
+        "kiln-server KV sizing residency reserve should consume StorageCapabilities"
+    );
+    assert!(
+        !server_kv_sizing_reserve_section
+            .contains("matches!(device_kt, kiln_tensor::Device::Vulkan(_))"),
+        "kiln-server KV sizing residency reserve should not branch locally on Vulkan device identity"
     );
     for forbidden in [
         "KILN_DISABLE_CUDA_BF16_INFERENCE_STATE",

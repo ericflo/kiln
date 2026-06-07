@@ -732,6 +732,7 @@ pub struct StorageCapabilities {
     pub resident_activation: Support,
     pub resident_decode: Support,
     pub kv_cache_device_memory_pressure: bool,
+    pub kv_sizing_residency_model_multiplier: u64,
 }
 
 /// Backend-owned server startup and prewarm policy.
@@ -1107,6 +1108,9 @@ impl BackendCapabilities {
                     ReplayBackend::runtime_supports_resident_decode(backend),
                 ),
                 kv_cache_device_memory_pressure: kv_cache_device_memory_pressure(name, device),
+                kv_sizing_residency_model_multiplier: kv_sizing_residency_model_multiplier(
+                    name, device,
+                ),
             },
             startup: StartupCapabilities::for_backend(name, device),
             matmul: MatmulCapabilities {
@@ -1420,6 +1424,13 @@ fn kv_cache_device_memory_pressure(name: &str, device: kiln_tensor::Device) -> b
         backend_kind_for_runtime(name, device),
         kiln_tensor::Backend::Cuda | kiln_tensor::Backend::Rocm
     )
+}
+
+fn kv_sizing_residency_model_multiplier(name: &str, device: kiln_tensor::Device) -> u64 {
+    match backend_kind_for_runtime(name, device) {
+        kiln_tensor::Backend::Vulkan => 2,
+        _ => 0,
+    }
 }
 
 fn gdn_gated_rms_norm_preserves_tape_residency(name: &str, device: kiln_tensor::Device) -> bool {

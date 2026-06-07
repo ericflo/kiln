@@ -1643,6 +1643,7 @@ impl AppState {
         // Detect VRAM once and reuse it for both auto-sizing and reporting so
         // startup doesn't repeat the same probe/logging path.
         let vram_info = kiln_memory::vram::detect_vram();
+        let storage_capabilities = runner.backend_capabilities().storage;
         let is_metal = is_metal_device(&device_kt);
         let is_rocm = matches!(device_kt, kiln_tensor::Device::Rocm(_));
 
@@ -1769,9 +1770,10 @@ impl AppState {
         // allocates, so without reserving for it the KV auto-sizer over-budgets
         // and the prewarm OOMs (KV pool + model + prewarm > VRAM). Reserve ~2x
         // the model here so the KV sizer leaves headroom for the prewarm.
-        if matches!(device_kt, kiln_tensor::Device::Vulkan(_)) {
-            sizing_residency_bytes =
-                sizing_residency_bytes.saturating_add(estimated_model_bytes.saturating_mul(2));
+        let reserve_multiplier = storage_capabilities.kv_sizing_residency_model_multiplier;
+        if reserve_multiplier > 0 {
+            sizing_residency_bytes = sizing_residency_bytes
+                .saturating_add(estimated_model_bytes.saturating_mul(reserve_multiplier));
         }
         if post_load_used_vram > 0 {
             let used_source = snap

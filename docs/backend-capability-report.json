@@ -1968,7 +1968,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "StorageCapabilities": {
-      "field_count": 5,
+      "field_count": 6,
       "fields": [
         {
           "name": "backend",
@@ -1989,6 +1989,10 @@
         {
           "name": "kv_cache_device_memory_pressure",
           "type": "bool"
+        },
+        {
+          "name": "kv_sizing_residency_model_multiplier",
+          "type": "u64"
         }
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"
