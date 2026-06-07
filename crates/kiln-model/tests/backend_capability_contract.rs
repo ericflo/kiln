@@ -2582,7 +2582,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
         let info = facets
             .get(facet)
             .unwrap_or_else(|| panic!("focused_backend_facets should list {facet}"));
-        let expected_forwarding = if facet == "BackendIdentity" {
+        let expected_forwarding = if matches!(facet, "BackendIdentity" | "StartupBackend") {
             "concrete_authoritative"
         } else {
             "blanket_backend_runtime"
@@ -2608,26 +2608,28 @@ fn generated_capability_report_lists_focused_backend_facets() {
         );
     }
 
-    let identity = facets
-        .get("BackendIdentity")
-        .expect("focused_backend_facets should list BackendIdentity");
-    let identity_impls = identity["concrete_impls"]
-        .as_array()
-        .expect("BackendIdentity concrete_impls should be an array")
-        .iter()
-        .filter_map(Value::as_str)
-        .collect::<Vec<_>>();
-    for backend in [
-        "CpuBackend",
-        "CudaBackend",
-        "RocmBackend",
-        "MetalBackend",
-        "VulkanBackend",
-    ] {
-        assert!(
-            identity_impls.contains(&backend),
-            "BackendIdentity should be implemented directly by {backend}"
-        );
+    for facet in ["BackendIdentity", "StartupBackend"] {
+        let info = facets
+            .get(facet)
+            .unwrap_or_else(|| panic!("focused_backend_facets should list {facet}"));
+        let concrete_impls = info["concrete_impls"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{facet} concrete_impls should be an array"))
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        for backend in [
+            "CpuBackend",
+            "CudaBackend",
+            "RocmBackend",
+            "MetalBackend",
+            "VulkanBackend",
+        ] {
+            assert!(
+                concrete_impls.contains(&backend),
+                "{facet} should be implemented directly by {backend}"
+            );
+        }
     }
 
     let backend_source = fs::read_to_string(root.join("crates/kiln-model/src/backend/mod.rs"))
@@ -2637,8 +2639,12 @@ fn generated_capability_report_lists_focused_backend_facets() {
         "BackendIdentity should not regress to a blanket BackendRuntime forwarding impl"
     );
     assert!(
-        backend_source.contains("pub trait BackendRuntime: BackendIdentity"),
-        "BackendRuntime should inherit identity from the focused BackendIdentity facet"
+        !backend_source.contains("impl<T: BackendRuntime + ?Sized> StartupBackend for T"),
+        "StartupBackend should not regress to a blanket BackendRuntime forwarding impl"
+    );
+    assert!(
+        backend_source.contains("pub trait BackendRuntime: BackendIdentity + StartupBackend"),
+        "BackendRuntime should inherit identity/startup from focused facets"
     );
 
     let report_md = fs::read_to_string(root.join("docs/backend-capability-report.md"))
@@ -5793,6 +5799,14 @@ fn generated_capability_report_tracks_migration_phase_status() {
     assert_eq!(
         identity_signal["passed"], true,
         "BackendIdentity should be a completed W1 family slice"
+    );
+    let startup_signal = phase1_signals
+        .iter()
+        .find(|signal| signal["name"] == "startup_backend_facet_authoritative")
+        .expect("Phase 1 should include StartupBackend authoritative signal");
+    assert_eq!(
+        startup_signal["passed"], true,
+        "StartupBackend should be a completed W1 family slice"
     );
     let shim_signal = phase1_signals
         .iter()

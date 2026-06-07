@@ -28,7 +28,7 @@ use super::vulkan_tensor_bridge::{
     kt_tensor_to_packed_bf16_bytes_with_shape,
 };
 use super::{
-    BackendIdentity, BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy,
+    BackendIdentity, BackendRuntime, StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
     vulkan_attention, vulkan_conv1d, vulkan_dense, vulkan_device, vulkan_gdn, vulkan_linear,
     vulkan_training, vulkan_weights,
 };
@@ -292,6 +292,8 @@ impl BackendIdentity for VulkanBackend {
         self
     }
 }
+
+impl StartupBackend for VulkanBackend {}
 
 // #1082 DoD-101/102: BackendRuntime decode methods flipped to kt; metal/vulkan impls need matching flip when their builds are restored.
 impl BackendRuntime for VulkanBackend {

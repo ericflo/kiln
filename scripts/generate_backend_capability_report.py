@@ -1319,6 +1319,40 @@ def focused_trait_concrete_impls(trait_name: str) -> list[str]:
     )
 
 
+def backend_runtime_supertraits() -> set[str]:
+    match = re.search(
+        r"pub\s+trait\s+BackendRuntime\s*:\s*([^{]+)\{",
+        file_text("crates/kiln-model/src/backend/mod.rs"),
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if not match:
+        return set()
+    return set(re.findall(r"\b[A-Z][A-Za-z0-9_]*\b", match.group(1)))
+
+
+def focused_trait_authoritative_signal(trait_name: str, signal_name: str) -> dict[str, Any]:
+    concrete_impls = focused_trait_concrete_impls(trait_name)
+    authoritative = (
+        focused_trait_blanket_shim_count(trait_name) == 0
+        and set(concrete_impls) == PRODUCTION_BACKEND_TYPES
+        and trait_name in backend_runtime_supertraits()
+    )
+    return phase_signal(
+        signal_name,
+        authoritative,
+        concrete_impls,
+        sorted(PRODUCTION_BACKEND_TYPES),
+        [
+            "crates/kiln-model/src/backend/mod.rs",
+            "crates/kiln-model/src/backend/cpu.rs",
+            "crates/kiln-model/src/backend/cuda.rs",
+            "crates/kiln-model/src/backend/rocm.rs",
+            "crates/kiln-model/src/backend/metal_runtime.rs",
+            "crates/kiln-model/src/backend/vulkan.rs",
+        ],
+    )
+
+
 def resident_registry_forwarding_shim_count() -> int:
     return regex_count(
         "crates/kiln-model/src/backend/mod.rs",
@@ -1349,13 +1383,6 @@ def replay_production_replay_plan_mentions() -> int:
 def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
     if phase == 1:
         shim_count = focused_trait_forwarding_shim_count()
-        identity_impls = focused_trait_concrete_impls("BackendIdentity")
-        identity_authoritative = (
-            focused_trait_blanket_shim_count("BackendIdentity") == 0
-            and set(identity_impls) == PRODUCTION_BACKEND_TYPES
-            and "pub trait BackendRuntime: BackendIdentity"
-            in file_text("crates/kiln-model/src/backend/mod.rs")
-        )
         method_count = len(
             parse_trait_method_names(
                 ROOT / "crates" / "kiln-model" / "src" / "backend" / "mod.rs",
@@ -1363,19 +1390,13 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
             )
         )
         return [
-            phase_signal(
+            focused_trait_authoritative_signal(
+                "BackendIdentity",
                 "backend_identity_facet_authoritative",
-                identity_authoritative,
-                identity_impls,
-                sorted(PRODUCTION_BACKEND_TYPES),
-                [
-                    "crates/kiln-model/src/backend/mod.rs",
-                    "crates/kiln-model/src/backend/cpu.rs",
-                    "crates/kiln-model/src/backend/cuda.rs",
-                    "crates/kiln-model/src/backend/rocm.rs",
-                    "crates/kiln-model/src/backend/metal_runtime.rs",
-                    "crates/kiln-model/src/backend/vulkan.rs",
-                ],
+            ),
+            focused_trait_authoritative_signal(
+                "StartupBackend",
+                "startup_backend_facet_authoritative",
             ),
             phase_signal(
                 "focused_trait_forwarding_shims_removed",

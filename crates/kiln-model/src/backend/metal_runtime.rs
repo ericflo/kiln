@@ -13,7 +13,7 @@ use super::metal_gdn::*;
 use super::metal_lm_head::*;
 use super::metal_paged::*;
 use super::{
-    BackendIdentity, BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy,
+    BackendIdentity, BackendRuntime, StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
     metal_residency, metal_training,
 };
 
@@ -30,6 +30,8 @@ impl BackendIdentity for MetalBackend {
         &()
     }
 }
+
+impl StartupBackend for MetalBackend {}
 
 // #1082 DoD-101/102: BackendRuntime decode methods flipped to kt; metal/vulkan
 // impls need matching flip when their builds are restored.

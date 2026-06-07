@@ -10525,6 +10525,8 @@ pub(crate) mod tests {
         }
     }
 
+    impl kiln_model::backend::StartupBackend for NamedTestBackend {}
+
     impl BackendRuntime for NamedTestBackend {}
 
     /// Create a tiny ModelConfig for testing (4 layers, small dims).

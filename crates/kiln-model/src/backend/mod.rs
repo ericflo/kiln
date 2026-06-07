@@ -652,7 +652,7 @@ fn precompile_startup_kernels_for_backend(name: &str, device: kiln_tensor::Devic
     }
 }
 
-pub trait BackendRuntime: BackendIdentity + Send + Sync + std::fmt::Debug {
+pub trait BackendRuntime: BackendIdentity + StartupBackend + Send + Sync + std::fmt::Debug {
     /// Human-readable name (`"cuda"`, `"metal"`, `"cpu"`). Surfaced in
     /// `/health` and logs.
     fn name(&self) -> &'static str {
@@ -695,7 +695,7 @@ pub trait BackendRuntime: BackendIdentity + Send + Sync + std::fmt::Debug {
     }
 
     fn precompile_startup_kernels(&self) -> Result<()> {
-        precompile_startup_kernels_for_backend(self.name(), self.device())
+        StartupBackend::runtime_precompile_startup_kernels(self)
     }
 
     /// First-use feasibility check for the Vulkan-resident decode pool:
@@ -1913,9 +1913,11 @@ pub trait BackendIdentity: Send + Sync + std::fmt::Debug {
     fn runtime_as_any(&self) -> &dyn std::any::Any;
 }
 
-/// Focused startup/prewarm facet delegated by the current `BackendRuntime` facade.
-pub trait StartupBackend: Send + Sync + std::fmt::Debug {
-    fn runtime_precompile_startup_kernels(&self) -> Result<()>;
+/// Focused startup/prewarm facet for backend-owned startup work.
+pub trait StartupBackend: BackendIdentity + Send + Sync + std::fmt::Debug {
+    fn runtime_precompile_startup_kernels(&self) -> Result<()> {
+        precompile_startup_kernels_for_backend(self.runtime_name(), self.runtime_device())
+    }
 }
 
 /// Focused `AttentionBackend` facet delegated by the current `BackendRuntime` facade.
@@ -2599,12 +2601,6 @@ pub trait ReplayBackend: Send + Sync + std::fmt::Debug {
 
 // Blanket forwarding impls keep the focused traits behavior-identical to the
 // compatibility facade while later PRs move call sites to one facet at a time.
-impl<T: BackendRuntime + ?Sized> StartupBackend for T {
-    fn runtime_precompile_startup_kernels(&self) -> Result<()> {
-        BackendRuntime::precompile_startup_kernels(self)
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 impl<T: BackendRuntime + ?Sized> AttentionBackend for T {
     fn runtime_supports_flash_attn_prefill(&self) -> bool {
@@ -3704,6 +3700,8 @@ mod tests {
             &()
         }
     }
+
+    impl StartupBackend for ResidentActivationProbeBackend {}
 
     impl BackendRuntime for ResidentActivationProbeBackend {
         fn has_resident_activation(&self, _tensor: &kiln_tensor::Tensor) -> bool {

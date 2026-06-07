@@ -8561,6 +8561,8 @@ mod tests {
         }
     }
 
+    impl StartupBackend for NamedTestBackend {}
+
     impl BackendRuntime for NamedTestBackend {}
 
     #[test]

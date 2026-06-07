@@ -7,7 +7,9 @@ use anyhow::{Context, Result};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::{BackendIdentity, BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy};
+use super::{
+    BackendIdentity, BackendRuntime, StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
+};
 use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 
 static ROCM_RESIDENT_TENSOR_IDS: super::cuda_rocm_common::ResidentTensorIdRegistry =
@@ -275,6 +277,8 @@ impl BackendIdentity for RocmBackend {
         &()
     }
 }
+
+impl StartupBackend for RocmBackend {}
 
 impl BackendRuntime for RocmBackend {
     fn training_capabilities(&self) -> TrainingCapabilities {
