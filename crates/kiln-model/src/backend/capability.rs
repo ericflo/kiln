@@ -733,6 +733,7 @@ pub struct StorageCapabilities {
     pub resident_decode: Support,
     pub kv_cache_device_memory_pressure: bool,
     pub gpu_memory_detection_policy: GpuMemoryDetectionPolicy,
+    pub gpu_memory_reclaim_policy: GpuMemoryReclaimPolicy,
     pub kv_sizing_residency_model_multiplier: u64,
     pub kv_auto_block_policy: KvCacheAutoBlockPolicy,
     pub kv_cache_fp8_policy: KvCacheFp8Policy,
@@ -744,6 +745,21 @@ pub struct GpuMemoryDetectionPolicy {
     pub detected_total_log_message: Option<&'static str>,
     pub missing_total_warning: Option<&'static str>,
     pub missing_total_fallback_bytes: Option<u64>,
+}
+
+/// Backend-owned policy for server GPU-memory pressure reclaim hooks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuMemoryReclaimPolicy {
+    pub reclaimer: GpuMemoryReclaimer,
+}
+
+/// Concrete reclaimer selected by [`GpuMemoryReclaimPolicy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuMemoryReclaimer {
+    None,
+    CudaTrimPool,
+    RocmTrimPool,
+    LoggedNoop { log_message: &'static str },
 }
 
 /// Backend-owned policy for server KV auto-sizing block caps.
@@ -1173,6 +1189,7 @@ impl BackendCapabilities {
                 ),
                 kv_cache_device_memory_pressure: kv_cache_device_memory_pressure(name, device),
                 gpu_memory_detection_policy: GpuMemoryDetectionPolicy::for_backend(name, device),
+                gpu_memory_reclaim_policy: GpuMemoryReclaimPolicy::for_backend(name, device),
                 kv_sizing_residency_model_multiplier: kv_sizing_residency_model_multiplier(
                     name, device,
                 ),
@@ -1569,6 +1586,33 @@ impl GpuMemoryDetectionPolicy {
             self.missing_total_fallback_bytes
                 .unwrap_or(detected_total_bytes)
         }
+    }
+}
+
+impl GpuMemoryReclaimPolicy {
+    pub const METAL_LOGGED_NOOP_MESSAGE: &'static str =
+        "metal reclaimer: UMA, no pool to trim (no-op)";
+    pub const VULKAN_LOGGED_NOOP_MESSAGE: &'static str =
+        "vulkan reclaimer: cache-drain not yet implemented (no-op)";
+
+    pub const NONE: Self = Self {
+        reclaimer: GpuMemoryReclaimer::None,
+    };
+
+    pub fn for_backend(name: &str, device: kiln_tensor::Device) -> Self {
+        let reclaimer = match backend_kind_for_runtime(name, device) {
+            kiln_tensor::Backend::Cuda => GpuMemoryReclaimer::CudaTrimPool,
+            kiln_tensor::Backend::Rocm => GpuMemoryReclaimer::RocmTrimPool,
+            kiln_tensor::Backend::Metal => GpuMemoryReclaimer::LoggedNoop {
+                log_message: Self::METAL_LOGGED_NOOP_MESSAGE,
+            },
+            kiln_tensor::Backend::Vulkan => GpuMemoryReclaimer::LoggedNoop {
+                log_message: Self::VULKAN_LOGGED_NOOP_MESSAGE,
+            },
+            kiln_tensor::Backend::Cpu => GpuMemoryReclaimer::None,
+            _ => GpuMemoryReclaimer::None,
+        };
+        Self { reclaimer }
     }
 }
 

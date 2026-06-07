@@ -1141,6 +1141,7 @@ fn generated_capability_report_lists_request_descriptors() {
         "BackendCapabilities",
         "StorageCapabilities",
         "GpuMemoryDetectionPolicy",
+        "GpuMemoryReclaimPolicy",
         "KvCacheAutoBlockPolicy",
         "KvCacheMemoryTierBlockCap",
         "KvCacheFp8Policy",
@@ -1232,6 +1233,10 @@ fn generated_capability_report_lists_request_descriptors() {
         "StorageCapabilities should own backend-specific GPU memory detection fallback policy"
     );
     assert!(
+        storage_capability_fields.contains(&"gpu_memory_reclaim_policy"),
+        "StorageCapabilities should own backend-specific GPU memory reclaim policy"
+    );
+    assert!(
         storage_capability_fields.contains(&"kv_sizing_residency_model_multiplier"),
         "StorageCapabilities should own backend-specific KV sizing residency reserve policy"
     );
@@ -1260,6 +1265,17 @@ fn generated_capability_report_lists_request_descriptors() {
             "GpuMemoryDetectionPolicy should include {field}"
         );
     }
+    let gpu_memory_reclaim_policy_fields =
+        capability_descriptors["GpuMemoryReclaimPolicy"]["fields"]
+            .as_array()
+            .expect("GpuMemoryReclaimPolicy fields should be an array")
+            .iter()
+            .filter_map(|field| field["name"].as_str())
+            .collect::<Vec<_>>();
+    assert!(
+        gpu_memory_reclaim_policy_fields.contains(&"reclaimer"),
+        "GpuMemoryReclaimPolicy should expose the selected reclaimer"
+    );
     let kv_auto_block_policy_fields = capability_descriptors["KvCacheAutoBlockPolicy"]["fields"]
         .as_array()
         .expect("KvCacheAutoBlockPolicy fields should be an array")
@@ -1742,6 +1758,37 @@ fn generated_capability_report_lists_request_descriptors() {
             "attention/GDN/conv parity gate should cite {path}"
         );
     }
+}
+
+#[test]
+fn gpu_memory_reclaim_policy_routes_backend_hooks() {
+    use kiln_model::{GpuMemoryReclaimPolicy, GpuMemoryReclaimer};
+    use kiln_tensor::Device;
+
+    assert_eq!(
+        GpuMemoryReclaimPolicy::for_backend("cuda", Device::Cuda(0)).reclaimer,
+        GpuMemoryReclaimer::CudaTrimPool
+    );
+    assert_eq!(
+        GpuMemoryReclaimPolicy::for_backend("rocm", Device::Rocm(0)).reclaimer,
+        GpuMemoryReclaimer::RocmTrimPool
+    );
+    assert_eq!(
+        GpuMemoryReclaimPolicy::for_backend("metal", Device::Metal(0)).reclaimer,
+        GpuMemoryReclaimer::LoggedNoop {
+            log_message: GpuMemoryReclaimPolicy::METAL_LOGGED_NOOP_MESSAGE,
+        }
+    );
+    assert_eq!(
+        GpuMemoryReclaimPolicy::for_backend("vulkan", Device::Vulkan(0)).reclaimer,
+        GpuMemoryReclaimer::LoggedNoop {
+            log_message: GpuMemoryReclaimPolicy::VULKAN_LOGGED_NOOP_MESSAGE,
+        }
+    );
+    assert_eq!(
+        GpuMemoryReclaimPolicy::for_backend("cpu", Device::Cpu).reclaimer,
+        GpuMemoryReclaimer::None
+    );
 }
 
 #[test]
@@ -3006,6 +3053,58 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         assert!(
             !server_gpu_memory_detection_section.contains(forbidden),
             "kiln-server GPU memory detection should not keep backend fallback policy locally: {forbidden}"
+        );
+    }
+    let server_memory_reclaim_call_site_section = source_between(
+        &server_state_source,
+        "static GOVERNOR_WIRED: std::sync::OnceLock<()>",
+        "let post_load_used_vram_info = runtime_used_vram_for_device(",
+    );
+    assert!(
+        server_memory_reclaim_call_site_section.contains("gpu_memory_reclaim_policy")
+            && server_memory_reclaim_call_site_section
+                .contains("register_backend_memory_reclaimer(gpu_memory_reclaim_policy"),
+        "kiln-server memory-governor startup should consume StorageCapabilities.gpu_memory_reclaim_policy"
+    );
+    for forbidden in [
+        "Device::Cuda",
+        "Device::Rocm",
+        "Device::Metal",
+        "Device::Vulkan",
+        "matches!(device_kt",
+        "cuda_set_pool_release_threshold",
+        "cuda_trim_pool",
+        "rocm_trim_pool",
+        "metal reclaimer",
+        "vulkan reclaimer",
+    ] {
+        assert!(
+            !server_memory_reclaim_call_site_section.contains(forbidden),
+            "kiln-server memory-governor startup should not keep backend reclaimer policy locally: {forbidden}"
+        );
+    }
+    let server_memory_reclaim_helper_section = source_between(
+        &server_state_source,
+        "fn register_backend_memory_reclaimer(",
+        "/// Auto-size the KV cache by trying",
+    );
+    assert!(
+        server_memory_reclaim_helper_section.contains("GpuMemoryReclaimPolicy")
+            && server_memory_reclaim_helper_section.contains("GpuMemoryReclaimer::CudaTrimPool")
+            && server_memory_reclaim_helper_section.contains("GpuMemoryReclaimer::RocmTrimPool")
+            && server_memory_reclaim_helper_section.contains("GpuMemoryReclaimer::LoggedNoop"),
+        "kiln-server memory-governor helper should dispatch through the backend-owned reclaim policy"
+    );
+    for forbidden in [
+        "Device::Metal",
+        "Device::Vulkan",
+        "matches!(device",
+        "metal reclaimer",
+        "vulkan reclaimer",
+    ] {
+        assert!(
+            !server_memory_reclaim_helper_section.contains(forbidden),
+            "kiln-server memory-governor helper should not keep Metal/Vulkan no-op policy locally: {forbidden}"
         );
     }
     assert!(

@@ -1869,6 +1869,16 @@
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
+    "GpuMemoryReclaimPolicy": {
+      "field_count": 1,
+      "fields": [
+        {
+          "name": "reclaimer",
+          "type": "GpuMemoryReclaimer"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
     "InferenceRecurrentStatePolicy": {
       "field_count": 2,
       "fields": [
@@ -2074,7 +2084,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "StorageCapabilities": {
-      "field_count": 9,
+      "field_count": 10,
       "fields": [
         {
           "name": "backend",
@@ -2099,6 +2109,10 @@
         {
           "name": "gpu_memory_detection_policy",
           "type": "GpuMemoryDetectionPolicy"
+        },
+        {
+          "name": "gpu_memory_reclaim_policy",
+          "type": "GpuMemoryReclaimPolicy"
         },
         {
           "name": "kv_sizing_residency_model_multiplier",

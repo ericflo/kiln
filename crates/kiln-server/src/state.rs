@@ -12,9 +12,10 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::Engine;
 use kiln_model::{
-    DecodeBatcher, DecodeBatcherConfig, GpuMemoryDetectionPolicy, InferenceRecurrentStatePolicy,
-    KvCacheAutoBlockPolicy, LinearAttentionState, ModelRunner, PagedKvCacheKt,
-    PagedPrefixNextToken, PagedPrefixRegistration,
+    DecodeBatcher, DecodeBatcherConfig, GpuMemoryDetectionPolicy, GpuMemoryReclaimPolicy,
+    GpuMemoryReclaimer, InferenceRecurrentStatePolicy, KvCacheAutoBlockPolicy,
+    LinearAttentionState, ModelRunner, PagedKvCacheKt, PagedPrefixNextToken,
+    PagedPrefixRegistration,
 };
 use kiln_scheduler::{PrefixCacheStats, Scheduler};
 use kiln_tensor::DType;
@@ -1643,6 +1644,7 @@ impl AppState {
         let storage_capabilities = runner.backend_capabilities().storage;
         let kv_auto_block_policy = storage_capabilities.kv_auto_block_policy;
         let gpu_memory_detection_policy = storage_capabilities.gpu_memory_detection_policy;
+        let gpu_memory_reclaim_policy = storage_capabilities.gpu_memory_reclaim_policy;
 
         // Total AND used come from the SAME live, all-process driver snapshot
         // (VRAM+GTT on AMD, nvidia-smi on NVIDIA) so they're mutually consistent
@@ -1686,71 +1688,7 @@ impl AppState {
         {
             static GOVERNOR_WIRED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
             GOVERNOR_WIRED.get_or_init(|| {
-                #[cfg(feature = "rocm")]
-                if let kiln_tensor::Device::Rocm(idx) = device_kt {
-                    kiln_memory::MemoryGovernor::global().register_reclaimer(move |_target| {
-                        // Best-effort: return all pooled-but-unused VRAM (keep 0).
-                        // Device-synced inside, so it's race-free; HIP doesn't
-                        // surface bytes freed, so report 0.
-                        let _ = kiln_tensor::rocm_trim_pool(idx, 0);
-                        0
-                    });
-                }
-                // CUDA mirror: on a DISCRETE card cuMemPoolTrimTo actually returns
-                // VRAM to the OS, so a coexisting process / training reservation
-                // gets headroom under pressure. Device-synced inside (race-free).
-                #[cfg(feature = "cuda")]
-                if let kiln_tensor::Device::Cuda(idx) = device_kt {
-                    // (#32) cudarc allocates from the stream-ordered mempool
-                    // (cuMemAllocAsync). Its RELEASE_THRESHOLD defaults to 0, so
-                    // the pool returns every freed page to the OS at each sync —
-                    // perf-churny AND it leaves cuda_trim_pool nothing to reclaim
-                    // (the governor's CUDA reclaimer was a redundant no-op). Raise
-                    // the threshold so the pool HOARDS freed pages for fast reuse,
-                    // turning the reclaimer below into the real release valve that
-                    // trims the hoard back to the OS under memory pressure.
-                    let _ = kiln_tensor::cuda_set_pool_release_threshold(idx, u64::MAX);
-                    kiln_memory::MemoryGovernor::global().register_reclaimer(move |_target| {
-                        // Measure bytes actually returned to the OS via the live
-                        // free-VRAM delta (the driver doesn't report trim yield).
-                        let before = kiln_tensor::cuda_mem_get_info(idx)
-                            .map(|(f, _)| f)
-                            .unwrap_or(0);
-                        let _ = kiln_tensor::cuda_trim_pool(idx, 0);
-                        let after = kiln_tensor::cuda_mem_get_info(idx)
-                            .map(|(f, _)| f)
-                            .unwrap_or(0);
-                        after.saturating_sub(before) as u64
-                    });
-                }
-                // Metal: UMA — shared-mode buffers are CPU-addressable, there is no
-                // discrete pool to hand back. Register a logged no-op so the
-                // registry is uniform across backends.
-                #[cfg(feature = "metal")]
-                if matches!(device_kt, kiln_tensor::Device::Metal(_)) {
-                    kiln_memory::MemoryGovernor::global().register_reclaimer(|_target| {
-                        static LOGGED: std::sync::Once = std::sync::Once::new();
-                        LOGGED.call_once(|| {
-                            tracing::info!("metal reclaimer: UMA, no pool to trim (no-op)")
-                        });
-                        0
-                    });
-                }
-                // Vulkan: the kt allocator's VkDeviceMemory cache has no
-                // free-to-OS trim wired yet. Logged no-op for now (a cache-drain
-                // reclaimer is a follow-up — see kv-memory notes).
-                #[cfg(feature = "vulkan")]
-                if matches!(device_kt, kiln_tensor::Device::Vulkan(_)) {
-                    kiln_memory::MemoryGovernor::global().register_reclaimer(|_target| {
-                        static LOGGED: std::sync::Once = std::sync::Once::new();
-                        LOGGED.call_once(|| {
-                            tracing::info!(
-                                "vulkan reclaimer: cache-drain not yet implemented (no-op)"
-                            )
-                        });
-                        0
-                    });
-                }
+                register_backend_memory_reclaimer(gpu_memory_reclaim_policy, device_kt);
                 kiln_memory::MemoryGovernor::global().start_monitor();
             });
         }
@@ -2541,6 +2479,56 @@ struct AutoSizeSuccess {
 struct AutoSizeFailure {
     /// `(fraction, num_blocks, error)` for every attempt in order.
     attempts: Vec<(f64, usize, String)>,
+}
+
+fn register_backend_memory_reclaimer(policy: GpuMemoryReclaimPolicy, device: kiln_tensor::Device) {
+    let _ = device;
+    match policy.reclaimer {
+        GpuMemoryReclaimer::None => {}
+        GpuMemoryReclaimer::RocmTrimPool => {
+            #[cfg(feature = "rocm")]
+            if let kiln_tensor::Device::Rocm(idx) = device {
+                kiln_memory::MemoryGovernor::global().register_reclaimer(move |_target| {
+                    // Best-effort: return all pooled-but-unused VRAM (keep 0).
+                    // Device-synced inside, so it's race-free; HIP doesn't
+                    // surface bytes freed, so report 0.
+                    let _ = kiln_tensor::rocm_trim_pool(idx, 0);
+                    0
+                });
+            }
+        }
+        GpuMemoryReclaimer::CudaTrimPool => {
+            #[cfg(feature = "cuda")]
+            if let kiln_tensor::Device::Cuda(idx) = device {
+                // (#32) cudarc allocates from the stream-ordered mempool
+                // (cuMemAllocAsync). Its RELEASE_THRESHOLD defaults to 0, so
+                // the pool returns every freed page to the OS at each sync:
+                // perf-churny and it leaves cuda_trim_pool nothing to reclaim.
+                // Raise the threshold so the pool hoards freed pages for fast
+                // reuse, turning this reclaimer into the pressure release valve.
+                let _ = kiln_tensor::cuda_set_pool_release_threshold(idx, u64::MAX);
+                kiln_memory::MemoryGovernor::global().register_reclaimer(move |_target| {
+                    // Measure bytes actually returned to the OS via the live
+                    // free-VRAM delta (the driver doesn't report trim yield).
+                    let before = kiln_tensor::cuda_mem_get_info(idx)
+                        .map(|(f, _)| f)
+                        .unwrap_or(0);
+                    let _ = kiln_tensor::cuda_trim_pool(idx, 0);
+                    let after = kiln_tensor::cuda_mem_get_info(idx)
+                        .map(|(f, _)| f)
+                        .unwrap_or(0);
+                    after.saturating_sub(before) as u64
+                });
+            }
+        }
+        GpuMemoryReclaimer::LoggedNoop { log_message } => {
+            kiln_memory::MemoryGovernor::global().register_reclaimer(move |_target| {
+                static LOGGED: std::sync::Once = std::sync::Once::new();
+                LOGGED.call_once(|| tracing::info!("{}", log_message));
+                0
+            });
+        }
+    }
 }
 
 /// Auto-size the KV cache by trying `configured_fraction` first and then each

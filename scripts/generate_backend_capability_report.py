@@ -87,6 +87,7 @@ CAPABILITY_DESCRIPTOR_STRUCTS = [
     "BackendCapabilities",
     "StorageCapabilities",
     "GpuMemoryDetectionPolicy",
+    "GpuMemoryReclaimPolicy",
     "KvCacheAutoBlockPolicy",
     "KvCacheMemoryTierBlockCap",
     "KvCacheFp8Policy",
