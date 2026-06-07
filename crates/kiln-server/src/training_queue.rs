@@ -8,9 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use kiln_core::env_flag::env_tristate;
 use kiln_model::lora_loader::LoraWeights;
-use kiln_model::{ServerTrainingDispatchPolicy, ServerTrainingNativeRoute};
 use kiln_train::trainer;
 use kiln_train::{
     self, DistillMergeRequest, DistillPumpRequest, DistillRefreshRequest, DistillSelfRequest,
@@ -384,20 +382,6 @@ fn run_sft(
         Some(replay_ctx),
     )
     .map_err(|e| format!("{e:#}"))
-}
-
-fn native_training_env_enabled(name: &'static str, default_enabled: bool) -> bool {
-    env_tristate(name).unwrap_or(default_enabled)
-}
-
-fn server_native_training_enabled(policy: ServerTrainingDispatchPolicy) -> bool {
-    match policy.native_route {
-        ServerTrainingNativeRoute::LegacyCudaNative => policy
-            .native_training_env
-            .map(|env| native_training_env_enabled(env, policy.native_training_default_enabled))
-            .unwrap_or(policy.native_training_default_enabled),
-        ServerTrainingNativeRoute::SharedKtTape => false,
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2056,7 +2040,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
             let guard = runner_arc.read().unwrap();
             let training_dispatch = guard.backend_capabilities().training.server_dispatch;
-            let native_route_enabled = server_native_training_enabled(training_dispatch);
+            let native_route_enabled = training_dispatch.native_route_enabled();
             run_sft(
                 native_route_enabled,
                 training_dispatch.native_training_env,
@@ -2087,7 +2071,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
             let guard = runner_arc.read().unwrap();
             let training_dispatch = guard.backend_capabilities().training.server_dispatch;
-            let native_route_enabled = server_native_training_enabled(training_dispatch);
+            let native_route_enabled = training_dispatch.native_route_enabled();
             run_grpo(
                 native_route_enabled,
                 training_dispatch.native_training_env,
@@ -2419,43 +2403,54 @@ fn auto_load_adapter(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kiln_model::{ServerTrainingDispatchPolicy, ServerTrainingNativeRoute};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn native_training_env_enabled_treats_empty_and_zero_as_disabled() {
+    fn server_training_dispatch_policy_treats_empty_and_zero_as_disabled() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         const VAR: &str = "KILN_TEST_NATIVE_TRAINING_FLAG";
+        let policy = ServerTrainingDispatchPolicy {
+            native_route: ServerTrainingNativeRoute::LegacyCudaNative,
+            native_training_env: Some(VAR),
+            native_training_default_enabled: false,
+        };
 
         unsafe {
             std::env::remove_var(VAR);
         }
-        assert!(!native_training_env_enabled(VAR, false));
+        assert!(!policy.native_route_enabled());
 
         unsafe {
             std::env::set_var(VAR, "");
         }
-        assert!(!native_training_env_enabled(VAR, false));
+        assert!(!policy.native_route_enabled());
 
         unsafe {
             std::env::set_var(VAR, "0");
         }
-        assert!(!native_training_env_enabled(VAR, false));
+        assert!(!policy.native_route_enabled());
 
         unsafe {
             std::env::set_var(VAR, "1");
         }
-        assert!(native_training_env_enabled(VAR, false));
+        assert!(policy.native_route_enabled());
 
+        let default_enabled_policy = ServerTrainingDispatchPolicy {
+            native_route: ServerTrainingNativeRoute::LegacyCudaNative,
+            native_training_env: Some(VAR),
+            native_training_default_enabled: true,
+        };
         unsafe {
             std::env::remove_var(VAR);
         }
-        assert!(native_training_env_enabled(VAR, true));
+        assert!(default_enabled_policy.native_route_enabled());
     }
 
     #[test]
-    fn server_native_training_enabled_follows_backend_policy() {
+    fn server_training_dispatch_policy_follows_backend_policy() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         const VAR: &str = "KILN_TEST_SERVER_NATIVE_TRAINING_POLICY";
         let legacy_cuda_policy = ServerTrainingDispatchPolicy {
@@ -2472,18 +2467,18 @@ mod tests {
         unsafe {
             std::env::remove_var(VAR);
         }
-        assert!(!server_native_training_enabled(legacy_cuda_policy));
+        assert!(!legacy_cuda_policy.native_route_enabled());
 
         unsafe {
             std::env::set_var(VAR, "1");
         }
-        assert!(server_native_training_enabled(legacy_cuda_policy));
-        assert!(!server_native_training_enabled(shared_policy));
+        assert!(legacy_cuda_policy.native_route_enabled());
+        assert!(!shared_policy.native_route_enabled());
 
         unsafe {
             std::env::set_var(VAR, "0");
         }
-        assert!(!server_native_training_enabled(legacy_cuda_policy));
+        assert!(!legacy_cuda_policy.native_route_enabled());
 
         unsafe {
             std::env::remove_var(VAR);

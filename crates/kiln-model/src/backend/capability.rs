@@ -1295,6 +1295,16 @@ impl ServerTrainingDispatchPolicy {
             },
         }
     }
+
+    pub fn native_route_enabled(self) -> bool {
+        match self.native_route {
+            ServerTrainingNativeRoute::LegacyCudaNative => self
+                .native_training_env
+                .map(|env| kiln_core::env_flag::env_flag(env, self.native_training_default_enabled))
+                .unwrap_or(self.native_training_default_enabled),
+            ServerTrainingNativeRoute::SharedKtTape => false,
+        }
+    }
 }
 
 impl SpeculativeDecodePolicy {

@@ -2921,7 +2921,7 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     assert!(
         server_training_dispatch_section
             .contains("backend_capabilities().training.server_dispatch")
-            && server_training_dispatch_section.contains("server_native_training_enabled")
+            && server_training_dispatch_section.contains("native_route_enabled")
             && server_training_queue_source.contains("ServerTrainingDispatchPolicy")
             && server_training_queue_source.contains("ServerTrainingNativeRoute"),
         "kiln-server SFT/GRPO dispatch should consume BackendTrainingCapabilities server policy"
@@ -2931,6 +2931,22 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             && !server_training_dispatch_section
                 .contains("native_training_env_enabled(\"KILN_CUDA_NATIVE_TRAINING\")"),
         "kiln-server SFT/GRPO dispatch should not read the legacy CUDA native-training env locally"
+    );
+    let bench_training_dispatch_section = source_between(
+        &server_bench_source,
+        "fn bench_training(",
+        "/// Render one `key  value [unit]` line at the indent used by the summary.",
+    );
+    assert!(
+        bench_training_dispatch_section.contains("ServerTrainingDispatchPolicy")
+            && bench_training_dispatch_section.contains("native_route_enabled")
+            && server_bench_source.contains("backend_capabilities.training.server_dispatch"),
+        "kiln-bench SFT dispatch should consume BackendTrainingCapabilities server policy"
+    );
+    assert!(
+        !bench_training_dispatch_section.contains("std::env::var(\"KILN_CUDA_NATIVE_TRAINING\")")
+            && !bench_training_dispatch_section.contains("let cuda_native"),
+        "kiln-bench SFT dispatch should not read the legacy CUDA native-training env locally"
     );
     assert!(
         server_batching_source.contains("env_max_decode_batch_for_policy")

@@ -51,7 +51,7 @@ use kiln_model::speculative::{
 };
 use kiln_model::{
     BackendCapabilityQueries, ModelRunner, ReplayBackend, ReplayNativePrimitive, ReplayRequest,
-    SpeculativeDecodePolicy, Support,
+    ServerTrainingDispatchPolicy, SpeculativeDecodePolicy, Support,
 };
 use kiln_server::config::SpecMethod;
 
@@ -2446,6 +2446,7 @@ fn bench_training(
     weights: &GpuWeights,
     tokenizer: &KilnTokenizer,
     num_steps: usize,
+    server_training_dispatch: ServerTrainingDispatchPolicy,
 ) -> Result<TrainingResult> {
     use kiln_train::{ChatMessage, SftConfig, SftExample};
 
@@ -2510,15 +2511,10 @@ fn bench_training(
     }) as kiln_train::trainer::ProgressCallback);
 
     let start = Instant::now();
-    #[cfg(feature = "cuda")]
-    let cuda_native = std::env::var("KILN_CUDA_NATIVE_TRAINING")
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false);
-    #[cfg(not(feature = "cuda"))]
-    let _cuda_native = false;
+    let native_route_enabled = server_training_dispatch.native_route_enabled();
 
     #[cfg(feature = "cuda")]
-    let result = if cuda_native {
+    let result = if native_route_enabled {
         kiln_train::cuda_train::cuda_native_sft_train(
             &examples,
             &config,
@@ -2543,17 +2539,28 @@ fn bench_training(
         )
     };
     #[cfg(not(feature = "cuda"))]
-    let result = kiln_train::trainer::sft_train(
-        &examples,
-        &config,
-        model_config,
-        weights,
-        tokenizer,
-        &adapter_dir,
-        "bench-adapter",
-        progress_cb,
-        None,
-    );
+    let result = {
+        if native_route_enabled {
+            let native_route_env = server_training_dispatch
+                .native_training_env
+                .unwrap_or("backend_native_training_policy");
+            eprintln!(
+                "    Native training route enabled via {native_route_env}, but kiln-bench was \
+                 built without --features cuda; falling back to kt-tape SFT"
+            );
+        }
+        kiln_train::trainer::sft_train(
+            &examples,
+            &config,
+            model_config,
+            weights,
+            tokenizer,
+            &adapter_dir,
+            "bench-adapter",
+            progress_cb,
+            None,
+        )
+    };
     let elapsed = start.elapsed();
 
     let peak_vram = current_vram_used_bytes() / (1024 * 1024);
@@ -2973,7 +2980,13 @@ fn main() -> Result<()> {
         None
     } else {
         section_header("Training benchmark");
-        match bench_training(&model_config, &gpu_weights, &tokenizer, args.training_steps) {
+        match bench_training(
+            &model_config,
+            &gpu_weights,
+            &tokenizer,
+            args.training_steps,
+            backend_capabilities.training.server_dispatch,
+        ) {
             Ok(result) => {
                 let mut stderr = std::io::stderr();
                 let _ = writeln!(
