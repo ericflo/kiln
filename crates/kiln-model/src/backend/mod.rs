@@ -185,9 +185,30 @@ pub mod rocm;
 // projection / LoRA matmuls and the tape produces their gradients.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SftFlceLossRoute {
+    /// Materialize logits and use the portable loss path.
+    FullLogits,
+    /// Use the kt-tape FLCE loss root shared by CUDA and ROCm tensors.
+    KtTapeFlce,
+    /// Use Vulkan's active-row fused SFT FLCE shaders.
+    VulkanActiveRows,
+}
+
+impl SftFlceLossRoute {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            SftFlceLossRoute::FullLogits => "full_logits",
+            SftFlceLossRoute::KtTapeFlce => "kt_tape_flce",
+            SftFlceLossRoute::VulkanActiveRows => "vulkan_active_rows",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrainingCapabilities {
     pub projection_training: &'static str,
     pub flce_loss: &'static str,
+    pub sft_flce_loss_route: SftFlceLossRoute,
     pub rmsnorm_training: &'static str,
     pub resident_activation: &'static str,
     pub lora_delta_training: &'static str,
@@ -201,6 +222,7 @@ impl TrainingCapabilities {
         Self {
             projection_training: "portable candle autograd",
             flce_loss: "portable candle/FLCE dispatch when configured",
+            sft_flce_loss_route: SftFlceLossRoute::FullLogits,
             rmsnorm_training: "portable candle autograd",
             resident_activation: "not implemented",
             lora_delta_training: "portable candle autograd",
@@ -2155,6 +2177,10 @@ pub trait TrainingLossBackend: Send + Sync + std::fmt::Debug {
     fn runtime_training_capabilities(&self) -> TrainingCapabilities;
 
     fn runtime_training_precision_policy(&self) -> TrainingPrecisionPolicy;
+
+    fn runtime_sft_flce_loss_route(&self) -> SftFlceLossRoute {
+        self.runtime_training_capabilities().sft_flce_loss_route
+    }
 }
 
 /// Focused `ReplayBackend` facet delegated by the current `BackendRuntime` facade.
@@ -3320,6 +3346,7 @@ mod tests {
         assert_eq!(caps.resident_activation, "not implemented");
         assert_eq!(caps.native_training, "not implemented");
         assert!(caps.projection_training.contains("candle"));
+        assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::FullLogits);
 
         let policy = TrainingPrecisionPolicy::portable();
         assert_eq!(policy.name, "cpu_f32_reference");
@@ -3345,6 +3372,16 @@ mod tests {
         assert_eq!(vulkan.lora_parameter_dtypes, &[kiln_tensor::DType::F32]);
         assert!(vulkan.base_weight_dtypes.contains(&kiln_tensor::DType::BF16));
         assert!(vulkan.mixed_precision);
+    }
+
+    #[test]
+    fn sft_flce_loss_route_strings_are_report_stable() {
+        assert_eq!(SftFlceLossRoute::FullLogits.as_str(), "full_logits");
+        assert_eq!(SftFlceLossRoute::KtTapeFlce.as_str(), "kt_tape_flce");
+        assert_eq!(
+            SftFlceLossRoute::VulkanActiveRows.as_str(),
+            "vulkan_active_rows"
+        );
     }
 
     #[test]
@@ -4070,6 +4107,11 @@ mod tests {
             "training_capabilities"
         );
         assert_forwards!(
+            TrainingLossBackend::runtime_sft_flce_loss_route(backend),
+            BackendRuntime::training_capabilities(backend).sft_flce_loss_route,
+            "sft_flce_loss_route"
+        );
+        assert_forwards!(
             TrainingLossBackend::runtime_training_precision_policy(backend),
             BackendRuntime::training_precision_policy(backend),
             "training_precision_policy"
@@ -4189,6 +4231,14 @@ mod tests {
         assert!(caps.sgd_step.contains("CUDA in-place optimizer kernel"));
         assert!(caps.adamw_step.contains("CUDA in-place optimizer kernel"));
         assert_eq!(caps.native_training, "not implemented");
+        assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::KtTapeFlce);
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn rocm_training_capabilities_route_sft_flce_through_kt_tape() {
+        let caps = rocm::RocmBackend::training_capabilities_static();
+        assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::KtTapeFlce);
     }
 
     #[cfg(feature = "metal")]
@@ -4198,8 +4248,19 @@ mod tests {
         assert!(caps.sgd_step.contains("declined"));
         assert!(caps.adamw_step.contains("Metal in-place AdamW"));
         assert!(caps.resident_activation.contains("Metal TensorId"));
+        assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::FullLogits);
 
         let backend = metal::MetalBackend::new(kiln_tensor::Device::Metal(0));
         assert_eq!(backend.training_capabilities(), caps);
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn vulkan_training_capabilities_route_sft_flce_through_active_rows() {
+        let caps = vulkan::VulkanBackend::training_capabilities_static();
+        assert_eq!(
+            caps.sft_flce_loss_route,
+            SftFlceLossRoute::VulkanActiveRows
+        );
     }
 }

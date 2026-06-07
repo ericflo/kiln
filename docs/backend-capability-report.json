@@ -79,7 +79,7 @@
           "line": 77,
           "paired_method": "causal_conv1d_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 1673,
+          "paired_method_line": 1674,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -94,7 +94,7 @@
           "line": 73,
           "paired_method": "causal_conv1d_update",
           "paired_method_always_declines": false,
-          "paired_method_line": 1648,
+          "paired_method_line": 1649,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -109,7 +109,7 @@
           "line": 29,
           "paired_method": "flash_attn_paged_decode",
           "paired_method_always_declines": false,
-          "paired_method_line": 504,
+          "paired_method_line": 505,
           "status": "literal_true",
           "support_state": "NativeWithConstraints"
         },
@@ -124,7 +124,7 @@
           "line": 25,
           "paired_method": "flash_attn_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 462,
+          "paired_method_line": 463,
           "status": "literal_true",
           "support_state": "NativeWithConstraints"
         },
@@ -139,7 +139,7 @@
           "line": 45,
           "paired_method": "gdn_chunk_prep",
           "paired_method_always_declines": false,
-          "paired_method_line": 705,
+          "paired_method_line": 706,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -154,7 +154,7 @@
           "line": 49,
           "paired_method": "gdn_chunk_scan",
           "paired_method_always_declines": false,
-          "paired_method_line": 729,
+          "paired_method_line": 730,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -184,7 +184,7 @@
           "line": 61,
           "paired_method": "gdn_decode_qk_norm_gates_recurrent",
           "paired_method_always_declines": false,
-          "paired_method_line": 986,
+          "paired_method_line": 987,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -199,7 +199,7 @@
           "line": 37,
           "paired_method": "gdn_forward_substitution",
           "paired_method_always_declines": false,
-          "paired_method_line": 663,
+          "paired_method_line": 664,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -214,7 +214,7 @@
           "line": 53,
           "paired_method": "gdn_full_chunk_forward",
           "paired_method_always_declines": false,
-          "paired_method_line": 753,
+          "paired_method_line": 754,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -229,7 +229,7 @@
           "line": 69,
           "paired_method": "gdn_gated_rms_norm",
           "paired_method_always_declines": false,
-          "paired_method_line": 1571,
+          "paired_method_line": 1572,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -244,7 +244,7 @@
           "line": 65,
           "paired_method": "gdn_gates",
           "paired_method_always_declines": false,
-          "paired_method_line": 1313,
+          "paired_method_line": 1314,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -259,7 +259,7 @@
           "line": 41,
           "paired_method": "gdn_recurrent_step",
           "paired_method_always_declines": false,
-          "paired_method_line": 683,
+          "paired_method_line": 684,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -271,7 +271,7 @@
             "layout": false,
             "shape": false
           },
-          "line": 263,
+          "line": 264,
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
@@ -854,7 +854,7 @@
           "line": 77,
           "paired_method": "causal_conv1d_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 1744,
+          "paired_method_line": 1745,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -869,7 +869,7 @@
           "line": 73,
           "paired_method": "causal_conv1d_update",
           "paired_method_always_declines": false,
-          "paired_method_line": 1719,
+          "paired_method_line": 1720,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -884,7 +884,7 @@
           "line": 29,
           "paired_method": "flash_attn_paged_decode",
           "paired_method_always_declines": false,
-          "paired_method_line": 557,
+          "paired_method_line": 558,
           "status": "literal_true",
           "support_state": "NativeWithConstraints"
         },
@@ -899,7 +899,7 @@
           "line": 25,
           "paired_method": "flash_attn_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 480,
+          "paired_method_line": 481,
           "status": "literal_true",
           "support_state": "NativeWithConstraints"
         },
@@ -913,10 +913,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 429,
+          "line": 430,
           "paired_method": "flash_attn_prefill_head_major",
           "paired_method_always_declines": false,
-          "paired_method_line": 522,
+          "paired_method_line": 523,
           "status": "env_gated",
           "support_state": "NativeWithConstraints"
         },
@@ -931,7 +931,7 @@
           "line": 45,
           "paired_method": "gdn_chunk_prep",
           "paired_method_always_declines": false,
-          "paired_method_line": 759,
+          "paired_method_line": 760,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -946,7 +946,7 @@
           "line": 49,
           "paired_method": "gdn_chunk_scan",
           "paired_method_always_declines": false,
-          "paired_method_line": 783,
+          "paired_method_line": 784,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -976,7 +976,7 @@
           "line": 61,
           "paired_method": "gdn_decode_qk_norm_gates_recurrent",
           "paired_method_always_declines": false,
-          "paired_method_line": 1040,
+          "paired_method_line": 1041,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -991,7 +991,7 @@
           "line": 37,
           "paired_method": "gdn_forward_substitution",
           "paired_method_always_declines": false,
-          "paired_method_line": 717,
+          "paired_method_line": 718,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1006,7 +1006,7 @@
           "line": 53,
           "paired_method": "gdn_full_chunk_forward",
           "paired_method_always_declines": false,
-          "paired_method_line": 807,
+          "paired_method_line": 808,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1021,7 +1021,7 @@
           "line": 69,
           "paired_method": "gdn_gated_rms_norm",
           "paired_method_always_declines": false,
-          "paired_method_line": 1642,
+          "paired_method_line": 1643,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1036,7 +1036,7 @@
           "line": 65,
           "paired_method": "gdn_gates",
           "paired_method_always_declines": false,
-          "paired_method_line": 1367,
+          "paired_method_line": 1368,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1051,7 +1051,7 @@
           "line": 41,
           "paired_method": "gdn_recurrent_step",
           "paired_method_always_declines": false,
-          "paired_method_line": 737,
+          "paired_method_line": 738,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -1063,10 +1063,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 1464,
+          "line": 1465,
           "paired_method": "linear_decode_argmax",
           "paired_method_always_declines": true,
-          "paired_method_line": 1468,
+          "paired_method_line": 1469,
           "status": "literal_false",
           "support_state": "Declined"
         },
@@ -1078,7 +1078,7 @@
             "layout": false,
             "shape": false
           },
-          "line": 278,
+          "line": 279,
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
@@ -2572,8 +2572,9 @@
     },
     "TrainingLossBackend": {
       "forwarding_impl": "blanket_backend_runtime",
-      "method_count": 2,
+      "method_count": 3,
       "methods": [
+        "runtime_sft_flce_loss_route",
         "runtime_training_capabilities",
         "runtime_training_precision_policy"
       ],
@@ -2805,6 +2806,7 @@
       "remaining": [],
       "report_sections": [
         "Training Optimizer Fallback",
+        "Training Loss Routing",
         "Training Precision Policy",
         "Optimizer Dispatch",
         "Conformance And Performance Gates"
@@ -3398,6 +3400,28 @@
   "source": {
     "branch": "unify-engines",
     "script": "scripts/generate_backend_capability_report.py"
+  },
+  "training_loss_policy": {
+    "cpu": {
+      "evidence": "TrainingCapabilities::portable keeps SFT on the portable full-logits loss path",
+      "sft_flce_loss_route": "full_logits"
+    },
+    "cuda": {
+      "evidence": "CudaBackend::training_capabilities_static advertises kt-tape FLCE over CUDA tensors",
+      "sft_flce_loss_route": "kt_tape_flce"
+    },
+    "metal": {
+      "evidence": "Metal training capabilities inherit the portable full-logits SFT loss route",
+      "sft_flce_loss_route": "full_logits"
+    },
+    "rocm": {
+      "evidence": "RocmBackend::training_capabilities_static advertises the shared kt-tape FLCE route over ROCm tensors",
+      "sft_flce_loss_route": "kt_tape_flce"
+    },
+    "vulkan": {
+      "evidence": "Vulkan training capabilities advertise the active-row fused SFT FLCE shader route",
+      "sft_flce_loss_route": "vulkan_active_rows"
+    }
   },
   "training_optimizer_fallback_policy": {
     "cpu": {

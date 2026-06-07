@@ -9,19 +9,19 @@ use std::sync::{Arc, OnceLock};
 
 use super::vulkan::VulkanBackend;
 use super::vulkan_residency::with_resident_registry;
-use super::{TrainingCapabilities, TrainingPrecisionPolicy};
+use super::{SftFlceLossRoute, TrainingCapabilities, TrainingPrecisionPolicy};
 
 pub(super) fn training_capabilities_static() -> TrainingCapabilities {
     TrainingCapabilities {
         projection_training: "kt-tape-recorded matmul (legacy autograd wrapper removed #1082)",
         flce_loss: "Vulkan offset matmul provider when enabled; FLCE remains chunked",
+        sft_flce_loss_route: SftFlceLossRoute::VulkanActiveRows,
         rmsnorm_training: "Vulkan RMSNorm autograd path auto-gated by row count",
         resident_activation: "Vulkan buffer registry",
         lora_delta_training: "kt-tape-recorded LoRA delta (legacy autograd wrapper removed #1082)",
         sgd_step: "Vulkan in-place registry update when operands are resident",
         adamw_step: "Vulkan in-place registry update when operands are resident",
-        native_training:
-            "shared trainer.rs kt-tape path (legacy vk_native_* fork deleted in PR7 #1082)",
+        native_training: "shared trainer.rs kt-tape path (legacy vk_native_* fork deleted in PR7 #1082)",
     }
 }
 

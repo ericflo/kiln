@@ -222,6 +222,7 @@ impl CudaBackend {
         TrainingCapabilities {
             projection_training: "backend-routed kt cublasLt matmul (tape-recorded) with offset chunk hook",
             flce_loss: "FLCE analytic backward on CUDA tensors; no full logits by default",
+            sft_flce_loss_route: super::SftFlceLossRoute::KtTapeFlce,
             rmsnorm_training: "CUDA kt-tape rmsnorm behind 47 GiB autograd VRAM gate",
             resident_activation: "kt TensorId lifecycle registry; kt CUDA tensors are canonical",
             lora_delta_training: "kt tape-recorded LoRA delta; fused lora_decode_add declines tape-tracked tensors",

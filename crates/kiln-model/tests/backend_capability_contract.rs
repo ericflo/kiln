@@ -1483,6 +1483,46 @@ fn generated_capability_report_lists_training_precision_policy() {
 }
 
 #[test]
+fn generated_capability_report_lists_training_loss_policy() {
+    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(&report_path).expect("capability report json should be readable"),
+    )
+    .expect("capability report json should parse");
+
+    let policies = report["training_loss_policy"]
+        .as_object()
+        .expect("training_loss_policy should be an object");
+    for backend in ["cpu", "cuda", "rocm", "metal", "vulkan"] {
+        assert!(
+            policies.contains_key(backend),
+            "{backend} should be present in training_loss_policy"
+        );
+    }
+
+    assert_eq!(
+        policies["cpu"]["sft_flce_loss_route"], "full_logits",
+        "CPU should keep the portable SFT full-logits route"
+    );
+    assert_eq!(
+        policies["metal"]["sft_flce_loss_route"], "full_logits",
+        "Metal should keep the portable SFT full-logits route"
+    );
+    assert_eq!(
+        policies["cuda"]["sft_flce_loss_route"], "kt_tape_flce",
+        "CUDA should use the kt-tape SFT FLCE route"
+    );
+    assert_eq!(
+        policies["rocm"]["sft_flce_loss_route"], "kt_tape_flce",
+        "ROCm should use the shared kt-tape SFT FLCE route"
+    );
+    assert_eq!(
+        policies["vulkan"]["sft_flce_loss_route"], "vulkan_active_rows",
+        "Vulkan should use its active-row SFT FLCE route"
+    );
+}
+
+#[test]
 fn generated_capability_report_lists_optimizer_dispatch_policy() {
     let report_path = workspace_root().join("docs/backend-capability-report.json");
     let report: Value = serde_json::from_str(
@@ -2297,6 +2337,24 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         !runner_new_section.contains("backend.training_capabilities()"),
         "ModelRunner should not call the broad BackendRuntime training capability method directly"
     );
+    assert!(
+        trainer_source.contains("TrainingLossBackend::runtime_sft_flce_loss_route"),
+        "SFT FLCE routing should consume the focused training-loss capability facet"
+    );
+    assert!(
+        trainer_source.contains("SftFlceLossRoute::KtTapeFlce")
+            && trainer_source.contains("SftFlceLossRoute::VulkanActiveRows"),
+        "trainer SFT FLCE routing should match on typed backend-owned loss routes"
+    );
+    for forbidden in [
+        "use_sft_flce && is_cuda_device",
+        "use_sft_flce && is_vulkan_device",
+    ] {
+        assert!(
+            !trainer_source.contains(forbidden),
+            "trainer SFT FLCE routing should not branch directly on device checks: {forbidden}"
+        );
+    }
 
     let inference_decode_residency_sources =
         format!("{generate_source}\n{metal_graph_source}\n{forward_source}");

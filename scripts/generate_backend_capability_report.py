@@ -722,6 +722,31 @@ def training_optimizer_fallback_policy_report() -> dict[str, Any]:
     }
 
 
+def training_loss_policy_report() -> dict[str, Any]:
+    return {
+        "cpu": {
+            "sft_flce_loss_route": "full_logits",
+            "evidence": "TrainingCapabilities::portable keeps SFT on the portable full-logits loss path",
+        },
+        "cuda": {
+            "sft_flce_loss_route": "kt_tape_flce",
+            "evidence": "CudaBackend::training_capabilities_static advertises kt-tape FLCE over CUDA tensors",
+        },
+        "rocm": {
+            "sft_flce_loss_route": "kt_tape_flce",
+            "evidence": "RocmBackend::training_capabilities_static advertises the shared kt-tape FLCE route over ROCm tensors",
+        },
+        "metal": {
+            "sft_flce_loss_route": "full_logits",
+            "evidence": "Metal training capabilities inherit the portable full-logits SFT loss route",
+        },
+        "vulkan": {
+            "sft_flce_loss_route": "vulkan_active_rows",
+            "evidence": "Vulkan training capabilities advertise the active-row fused SFT FLCE shader route",
+        },
+    }
+
+
 def training_precision_policy_report() -> dict[str, Any]:
     return {
         "cpu": {
@@ -1235,6 +1260,7 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
             ],
             "report_sections": [
                 "Training Optimizer Fallback",
+                "Training Loss Routing",
                 "Training Precision Policy",
                 "Optimizer Dispatch",
                 "Conformance And Performance Gates",
@@ -1511,6 +1537,15 @@ def markdown(data: dict[str, Any]) -> str:
             f"{'yes' if info['mixed_precision'] else 'no'} |"
         )
     lines.append("")
+    lines.append("## Training Loss Routing")
+    lines.append("")
+    lines.append("| Backend | SFT FLCE Route | Evidence |")
+    lines.append("|---|---|---|")
+    for backend, info in data["training_loss_policy"].items():
+        lines.append(
+            f"| `{backend}` | `{info['sft_flce_loss_route']}` | {info['evidence']} |"
+        )
+    lines.append("")
     lines.append("## Optimizer Dispatch")
     lines.append("")
     lines.append("| Backend | SGD Step | AdamW Step |")
@@ -1699,6 +1734,7 @@ def build_report_data() -> tuple[dict[str, Any], list[dict[str, Any]]]:
         "fallback_policy": fallback_policy_report(),
         "decode_hot_path_policy": decode_hot_path_policy_report(),
         "training_optimizer_fallback_policy": training_optimizer_fallback_policy_report(),
+        "training_loss_policy": training_loss_policy_report(),
         "training_precision_policy": training_precision_policy_report(),
         "optimizer_dispatch": optimizer_dispatch_report(backends),
         "mismatches": mismatches,

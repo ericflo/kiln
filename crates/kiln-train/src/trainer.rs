@@ -65,6 +65,8 @@ use kiln_flce_kernel::DEFAULT_CHUNK_SIZE;
 use kiln_model::backend::{
     self, BackendIdentity, BackendRuntime, FallbackPolicy, OptimizerBackend, ResidencyBackend,
 };
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+use kiln_model::backend::{SftFlceLossRoute, TrainingLossBackend};
 use kiln_model::BackendCapabilityQueries;
 use kiln_model::forward::{
     GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, GqaAttentionPrepared, LinearAttentionState,
@@ -7653,55 +7655,13 @@ fn standard_forward_backward_tape_authoritative_kt(
 
     let (loss_val, _loss_kt, grads_by_candle_raw) =
         kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(|| {
-            let use_sft_flce = use_flce();
-            let use_vulkan_flce = {
-                #[cfg(feature = "vulkan")]
-                {
-                    use_sft_flce && is_vulkan_device(device)
-                }
-                #[cfg(not(feature = "vulkan"))]
-                {
-                    false
-                }
+            let sft_flce_loss_route = if use_flce() {
+                TrainingLossBackend::runtime_sft_flce_loss_route(backend)
+            } else {
+                SftFlceLossRoute::FullLogits
             };
-            let loss_kt = if use_sft_flce && is_cuda_device(device) {
-                let normed = model_forward_no_head(
-                    backend,
-                    input_ids,
-                    weights,
-                    model_config,
-                    Some(&mut linear_state),
-                    Some(&lora_weights),
-                )
-                .context("tape-authoritative(kt) no-head forward")
-                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
-                // Default SFT records the kt FLCE loss root against final normed hidden
-                // instead of materializing `[1, T, V]` logits. The frozen tied head
-                // receives no gradient; the FLCE tape node returns `dhidden`, keeping
-                // the LoRA path connected through `model_forward_no_head`.
-                kiln_autograd::with_active_tape(|tape| {
-                    kiln_flce_kernel::fused_linear_cross_entropy_phase_b_unit_grad_via_kt_tape(
-                        &normed,
-                        &weights.embed_tokens_t,
-                        input_ids,
-                        label_mask,
-                        DEFAULT_CHUNK_SIZE,
-                        tape,
-                    )
-                })
-                .ok_or_else(|| {
-                    kiln_kt_bridge::BridgeError::new(
-                        "tape-authoritative(kt) SFT FLCE: no active kt tape".to_string(),
-                    )
-                })?
-                .map_err(|e| {
-                    kiln_kt_bridge::BridgeError::new(format!(
-                        "tape-authoritative(kt) SFT FLCE kt-tape: {e}"
-                    ))
-                })?
-            } else if use_vulkan_flce {
-                #[cfg(feature = "vulkan")]
-                {
+            let loss_kt = match sft_flce_loss_route {
+                SftFlceLossRoute::KtTapeFlce => {
                     let normed = model_forward_no_head(
                         backend,
                         input_ids,
@@ -7710,55 +7670,98 @@ fn standard_forward_backward_tape_authoritative_kt(
                         Some(&mut linear_state),
                         Some(&lora_weights),
                     )
-                    .context("tape-authoritative(kt) no-head Vulkan forward")
+                    .context("tape-authoritative(kt) no-head forward")
                     .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
-                    // Vulkan has its own fused FLCE shaders over active rows
-                    // and canonical tied weight [V, H], so route the SFT root
-                    // there instead of materializing [1, T, V] logits.
-                    crate::sft_tape_shim::try_tape_sft_flce_vulkan_kt(
-                        &normed,
-                        &weights.embed_tokens,
+                    // Default SFT records the kt FLCE loss root against final normed hidden
+                    // instead of materializing `[1, T, V]` logits. The frozen tied head
+                    // receives no gradient; the FLCE tape node returns `dhidden`, keeping
+                    // the LoRA path connected through `model_forward_no_head`.
+                    kiln_autograd::with_active_tape(|tape| {
+                        kiln_flce_kernel::fused_linear_cross_entropy_phase_b_unit_grad_via_kt_tape(
+                            &normed,
+                            &weights.embed_tokens_t,
+                            input_ids,
+                            label_mask,
+                            DEFAULT_CHUNK_SIZE,
+                            tape,
+                        )
+                    })
+                    .ok_or_else(|| {
+                        kiln_kt_bridge::BridgeError::new(
+                            "tape-authoritative(kt) SFT FLCE: no active kt tape".to_string(),
+                        )
+                    })?
+                    .map_err(|e| {
+                        kiln_kt_bridge::BridgeError::new(format!(
+                            "tape-authoritative(kt) SFT FLCE kt-tape: {e}"
+                        ))
+                    })?
+                }
+                SftFlceLossRoute::VulkanActiveRows => {
+                    #[cfg(feature = "vulkan")]
+                    {
+                        let normed = model_forward_no_head(
+                            backend,
+                            input_ids,
+                            weights,
+                            model_config,
+                            Some(&mut linear_state),
+                            Some(&lora_weights),
+                        )
+                        .context("tape-authoritative(kt) no-head Vulkan forward")
+                        .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+                        // Vulkan has its own fused FLCE shaders over active rows
+                        // and canonical tied weight [V, H], so route the SFT root
+                        // there instead of materializing [1, T, V] logits.
+                        crate::sft_tape_shim::try_tape_sft_flce_vulkan_kt(
+                            &normed,
+                            &weights.embed_tokens,
+                            input_ids,
+                            label_mask,
+                        )
+                        .context("tape-authoritative(kt) Vulkan SFT FLCE")
+                        .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
+                        .ok_or_else(|| {
+                            kiln_kt_bridge::BridgeError::new(
+                                "tape-authoritative(kt) Vulkan SFT FLCE returned None".to_string(),
+                            )
+                        })?
+                    }
+                    #[cfg(not(feature = "vulkan"))]
+                    {
+                        return Err(kiln_kt_bridge::BridgeError::new(
+                            "backend requested Vulkan SFT FLCE without the vulkan feature"
+                                .to_string(),
+                        ));
+                    }
+                }
+                SftFlceLossRoute::FullLogits => {
+                    let logits = model_forward_kt(
+                        backend,
+                        input_ids,
+                        weights,
+                        model_config,
+                        None,
+                        Some(&mut linear_state),
+                        Some(&lora_weights),
+                    )
+                    .context("tape-authoritative(kt) fallback full forward")
+                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+                    kiln_model::tape_forward::try_tape_cross_entropy_from_logits_kt(
+                        &logits,
                         input_ids,
                         label_mask,
                     )
-                    .context("tape-authoritative(kt) Vulkan SFT FLCE")
+                    .context("tape-authoritative(kt) cross_entropy_from_logits_kt")
                     .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
                     .ok_or_else(|| {
                         kiln_kt_bridge::BridgeError::new(
-                            "tape-authoritative(kt) Vulkan SFT FLCE returned None".to_string(),
+                            "tape-authoritative(kt) SFT: cross_entropy_from_logits_kt returned None \
+                             (kt CE envelope declined — expected [1, T, V] CUDA logits)"
+                                .to_string(),
                         )
                     })?
                 }
-                #[cfg(not(feature = "vulkan"))]
-                {
-                    unreachable!("use_vulkan_flce is false without the vulkan feature")
-                }
-            } else {
-                let logits = model_forward_kt(
-                    backend,
-                    input_ids,
-                    weights,
-                    model_config,
-                    None,
-                    Some(&mut linear_state),
-                    Some(&lora_weights),
-                )
-                .context("tape-authoritative(kt) fallback full forward")
-                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
-                kiln_model::tape_forward::try_tape_cross_entropy_from_logits_kt(
-                    &logits,
-                    input_ids,
-                    label_mask,
-                )
-                .context("tape-authoritative(kt) cross_entropy_from_logits_kt")
-                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
-                .ok_or_else(|| {
-                    kiln_kt_bridge::BridgeError::new(
-                        "tape-authoritative(kt) SFT: cross_entropy_from_logits_kt returned None \
-                         (kt CE envelope declined — expected [1, T, V] CUDA logits)"
-                            .to_string(),
-                    )
-                })?
             };
             let loss_val = loss_kt
                 .to_scalar::<f32>()
@@ -8006,76 +8009,76 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     let mut normed_for_tail = None;
     let mut flce_active_metadata_for_tail = None;
     let tail_grad_override: Option<Tensor>;
-    let use_sft_flce = use_flce();
-    let use_vulkan_flce = {
-        #[cfg(feature = "vulkan")]
-        {
-            use_sft_flce && is_vulkan_device(device)
-        }
-        #[cfg(not(feature = "vulkan"))]
-        {
-            false
-        }
+    let sft_flce_loss_route = if use_flce() {
+        TrainingLossBackend::runtime_sft_flce_loss_route(backend)
+    } else {
+        SftFlceLossRoute::FullLogits
     };
     let tail_loss_start = Instant::now();
-    let loss_val = if use_sft_flce && is_cuda_device(device) {
-        tail_grad_override = None;
-        // (#1082 H-FLCE / candle-drop) FLCE loss-VALUE via the kt-native forward
-        // `fused_linear_cross_entropy_phase_b_kt` — taking the kt `normed` hidden
-        // and the kt `embed_tokens_t` head DIRECTLY (no candle `cd_out` copy, no
-        // ~780MB/step `embed_tokens_t` kt->candle copy, no candle device bridge).
-        // Only the resulting scalar crosses back to host. The same `normed`
-        // tensor is retained for the FLCE/RMSNorm tail seed below.
-        // The candle FLCE provider opt-in (`KILN_CUDA_FLCE`) was removed in the
-        // candle drop — this is now the sole FLCE path.
-        let normed = model_forward_final_norm(&final_hidden_kt, weights, model_config)?;
-        let (loss_kt, active_metadata) =
-            kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_with_metadata_kt(
-            &normed,
-            &weights.embed_tokens_t,
-            input_ids,
-            label_mask,
-            DEFAULT_CHUNK_SIZE,
-        )
-        .map_err(|e| {
-            anyhow::anyhow!("ckpt-kt kt-native fused linear cross-entropy (final boundary): {e}")
-        })?;
-        let loss_val = loss_kt.to_scalar::<f32>()? as f64;
-        flce_active_metadata_for_tail = active_metadata;
-        normed_for_tail = Some(normed);
-        loss_val
-    } else if use_vulkan_flce {
-        #[cfg(feature = "vulkan")]
-        {
+    let loss_val = match sft_flce_loss_route {
+        SftFlceLossRoute::KtTapeFlce => {
+            tail_grad_override = None;
+            // (#1082 H-FLCE / candle-drop) FLCE loss-VALUE via the kt-native forward
+            // `fused_linear_cross_entropy_phase_b_kt` — taking the kt `normed` hidden
+            // and the kt `embed_tokens_t` head DIRECTLY (no candle `cd_out` copy, no
+            // ~780MB/step `embed_tokens_t` kt->candle copy, no candle device bridge).
+            // Only the resulting scalar crosses back to host. The same `normed`
+            // tensor is retained for the FLCE/RMSNorm tail seed below.
+            // The candle FLCE provider opt-in (`KILN_CUDA_FLCE`) was removed in the
+            // candle drop — this is now the sole FLCE path.
             let normed = model_forward_final_norm(&final_hidden_kt, weights, model_config)?;
-            let (loss_kt, grad_normed) =
-                crate::sft_tape_shim::vulkan_sft_flce_loss_and_grad_kt(
+            let (loss_kt, active_metadata) =
+                kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_with_metadata_kt(
                     &normed,
-                    &weights.embed_tokens,
+                    &weights.embed_tokens_t,
                     input_ids,
                     label_mask,
+                    DEFAULT_CHUNK_SIZE,
                 )
-                .map_err(|e| anyhow::anyhow!("ckpt-kt Vulkan fused SFT FLCE tail: {e}"))?;
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "ckpt-kt kt-native fused linear cross-entropy (final boundary): {e}"
+                    )
+                })?;
             let loss_val = loss_kt.to_scalar::<f32>()? as f64;
-            tail_grad_override = Some(
-                rms_norm_backward_pre_final_norm(
-                    &final_hidden_kt,
-                    &weights.final_norm,
-                    &grad_normed,
-                    model_config.rms_norm_eps,
-                )
-                .context("ckpt-kt Vulkan final RMSNorm backward")?,
-            );
+            flce_active_metadata_for_tail = active_metadata;
+            normed_for_tail = Some(normed);
             loss_val
         }
-        #[cfg(not(feature = "vulkan"))]
-        {
-            unreachable!("use_vulkan_flce is false without the vulkan feature")
+        SftFlceLossRoute::VulkanActiveRows => {
+            #[cfg(feature = "vulkan")]
+            {
+                let normed = model_forward_final_norm(&final_hidden_kt, weights, model_config)?;
+                let (loss_kt, grad_normed) =
+                    crate::sft_tape_shim::vulkan_sft_flce_loss_and_grad_kt(
+                        &normed,
+                        &weights.embed_tokens,
+                        input_ids,
+                        label_mask,
+                    )
+                    .map_err(|e| anyhow::anyhow!("ckpt-kt Vulkan fused SFT FLCE tail: {e}"))?;
+                let loss_val = loss_kt.to_scalar::<f32>()? as f64;
+                tail_grad_override = Some(
+                    rms_norm_backward_pre_final_norm(
+                        &final_hidden_kt,
+                        &weights.final_norm,
+                        &grad_normed,
+                        model_config.rms_norm_eps,
+                    )
+                    .context("ckpt-kt Vulkan final RMSNorm backward")?,
+                );
+                loss_val
+            }
+            #[cfg(not(feature = "vulkan"))]
+            {
+                anyhow::bail!("backend requested Vulkan SFT FLCE without the vulkan feature");
+            }
         }
-    } else {
-        tail_grad_override = None;
-        let logits = model_forward_head(&final_hidden_kt, weights, model_config)?;
-        cross_entropy_loss(&logits, input_ids, label_mask, device)?
+        SftFlceLossRoute::FullLogits => {
+            tail_grad_override = None;
+            let logits = model_forward_head(&final_hidden_kt, weights, model_config)?;
+            cross_entropy_loss(&logits, input_ids, label_mask, device)?
+        }
     };
     log_sft_timing(
         trace_timings,
