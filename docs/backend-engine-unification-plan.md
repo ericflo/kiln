@@ -237,8 +237,12 @@ The relevant shims are:
   shared kt-composite route and Vulkan uses the active-row fused shader route.
 - `opd_tape_shim.rs`: records the OPD top-K/reverse-KL scalar-mean loss root and
   owns the Vulkan-specific active-hidden fused-shader loss/grad paths. The
-  CUDA/ROCm fused-FFI kernel dispatch and the Metal/CPU/Vulkan device-agnostic
-  analytic kt-composite backward live in the `kiln-opd-loss-kernel` crate (the
+  trainer chooses OPD loss roots through
+  `TrainingLossBackend::runtime_opd_loss_route`: CUDA, ROCm, and Metal use the
+  shared kt-tape Phase-B route, Vulkan uses the active-hidden fused shader
+  route, and CPU/portable reports OPD as unsupported. The CUDA/ROCm fused-FFI
+  kernel dispatch and the Metal/CPU/Vulkan device-agnostic analytic
+  kt-composite backward live in the `kiln-opd-loss-kernel` crate (the
   `kt_tape.rs` `BackwardOp::apply` dispatcher over `kt_api.rs`), which this shim
   calls.
 

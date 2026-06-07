@@ -49,7 +49,7 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `SamplingBackend` | 8 | `blanket_backend_runtime` | `runtime_linear_decode_argmax`, `runtime_linear_decode_argmax_batch`, `runtime_linear_decode_sample`, `runtime_linear_decode_sample_batch`, `runtime_supports_linear_decode_argmax`, `runtime_supports_linear_decode_argmax_batch`, `runtime_supports_linear_decode_sample`, `runtime_supports_linear_decode_sample_batch` |
 | `ResidencyBackend` | 18 | `blanket_backend_runtime` | `runtime_assemble_gdn_recurrent_resident_batch_rows`, `runtime_assemble_linear_attn_gdn_state_batch_kt`, `runtime_enter_gdn_recurrent_resident_state_scope`, `runtime_evict_gdn_recurrent_resident_state`, `runtime_evict_resident_activation`, `runtime_exit_gdn_recurrent_resident_state_scope`, `runtime_has_gdn_recurrent_resident_state`, `runtime_has_linear_attn_gdn_state_kt`, `runtime_has_resident_activation`, `runtime_materialize_gdn_recurrent_resident_state`, `runtime_register_resident_activation`, `runtime_resident_activation_resource`, `runtime_resolve_resident_activation`, `runtime_scatter_gdn_recurrent_resident_batch_rows`, `runtime_scatter_linear_attn_gdn_state_batch_kt`, `runtime_seed_linear_attn_gdn_state_kt`, `runtime_supports_resident_activation`, `runtime_update_resident_activation` |
 | `OptimizerBackend` | 2 | `blanket_backend_runtime` | `runtime_dispatch_adamw_step`, `runtime_dispatch_sgd_step` |
-| `TrainingLossBackend` | 4 | `blanket_backend_runtime` | `runtime_grpo_loss_route`, `runtime_sft_flce_loss_route`, `runtime_training_capabilities`, `runtime_training_precision_policy` |
+| `TrainingLossBackend` | 5 | `blanket_backend_runtime` | `runtime_grpo_loss_route`, `runtime_opd_loss_route`, `runtime_sft_flce_loss_route`, `runtime_training_capabilities`, `runtime_training_precision_policy` |
 | `ReplayBackend` | 6 | `blanket_backend_runtime` | `runtime_decode_resident_pool_ready`, `runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs`, `runtime_replay_authority`, `runtime_replay_key_for_request`, `runtime_supports_replay_request`, `runtime_supports_resident_decode` |
 
 ## Replay Authority
@@ -239,13 +239,13 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 
 ## Training Loss Routing
 
-| Backend | SFT FLCE Route | GRPO Route | Evidence |
-|---|---|---|---|
-| `cpu` | `full_logits` | `kt_composite` | TrainingCapabilities::portable keeps SFT on the portable full-logits loss path and GRPO on the shared kt composite loss root |
-| `cuda` | `kt_tape_flce` | `kt_composite` | CudaBackend::training_capabilities_static advertises kt-tape FLCE over CUDA tensors and the shared kt GRPO composite route |
-| `rocm` | `kt_tape_flce` | `kt_composite` | RocmBackend::training_capabilities_static advertises the shared kt-tape FLCE route over ROCm tensors and the shared kt GRPO composite route |
-| `metal` | `full_logits` | `kt_composite` | Metal training capabilities inherit the portable full-logits SFT loss route and shared kt GRPO composite route |
-| `vulkan` | `vulkan_active_rows` | `vulkan_active_rows` | Vulkan training capabilities advertise active-row fused SFT and GRPO shader routes |
+| Backend | SFT FLCE Route | GRPO Route | OPD Route | Evidence |
+|---|---|---|---|---|
+| `cpu` | `full_logits` | `kt_composite` | `unsupported` | TrainingCapabilities::portable keeps SFT on the portable full-logits loss path, GRPO on the shared kt composite loss root, and OPD unsupported on the portable backend surface |
+| `cuda` | `kt_tape_flce` | `kt_composite` | `kt_tape_phase_b` | CudaBackend::training_capabilities_static advertises kt-tape FLCE over CUDA tensors, the shared kt GRPO composite route, and the shared kt-tape OPD Phase-B route |
+| `rocm` | `kt_tape_flce` | `kt_composite` | `kt_tape_phase_b` | RocmBackend::training_capabilities_static advertises the shared kt-tape FLCE route over ROCm tensors, the shared kt GRPO composite route, and the shared kt-tape OPD Phase-B route |
+| `metal` | `full_logits` | `kt_composite` | `kt_tape_phase_b` | Metal training capabilities inherit the portable full-logits SFT loss route, shared kt GRPO composite route, and shared kt-tape OPD Phase-B route |
+| `vulkan` | `vulkan_active_rows` | `vulkan_active_rows` | `vulkan_active_hidden` | Vulkan training capabilities advertise active-row fused SFT/GRPO shader routes and the active-hidden fused OPD shader route |
 
 ## Optimizer Dispatch
 

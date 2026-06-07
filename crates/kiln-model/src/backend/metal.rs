@@ -11,43 +11,41 @@ pub(crate) use super::metal_config::metal_mlp_gate_up_fusion_disabled;
 use super::metal_config::*;
 pub(crate) use super::metal_dense::{
     metal_attn_gate_sigmoid_mul_bf16, metal_attn_gate_sigmoid_mul_supports,
-    metal_fused_qkv_transposed_coop_gemv_bf16,
-    metal_fused_qkv_transposed_coop_gemv_supports, metal_lora_add_decode_bf16,
-    metal_lora_add_decode_supports, metal_mlp_gate_up_bf16, metal_mlp_gate_up_supports,
-    metal_mlp_silu_mul_bf16, metal_mlp_silu_mul_supports, metal_transposed_coop_gemv_bf16,
-    metal_transposed_coop_gemv_decode_batch_supports, metal_transposed_coop_gemv_supports,
+    metal_fused_qkv_transposed_coop_gemv_bf16, metal_fused_qkv_transposed_coop_gemv_supports,
+    metal_lora_add_decode_bf16, metal_lora_add_decode_supports, metal_mlp_gate_up_bf16,
+    metal_mlp_gate_up_supports, metal_mlp_silu_mul_bf16, metal_mlp_silu_mul_supports,
+    metal_transposed_coop_gemv_bf16, metal_transposed_coop_gemv_decode_batch_supports,
+    metal_transposed_coop_gemv_supports,
 };
 pub(crate) use super::metal_gdn::{
     metal_gdn_decode_gates_recurrent_bf16, metal_gdn_decode_gates_recurrent_rmsnorm_bf16,
-    metal_gdn_decode_gates_recurrent_rmsnorm_supports,
-    metal_gdn_decode_gates_recurrent_supports, metal_gdn_decode_qkv_conv_norm_bf16,
-    metal_gdn_decode_qkv_conv_norm_supports, metal_gdn_gates_decay_ab_bf16,
-    metal_gdn_gates_decay_ab_supports, metal_gdn_gates_decay_bf16,
+    metal_gdn_decode_gates_recurrent_rmsnorm_supports, metal_gdn_decode_gates_recurrent_supports,
+    metal_gdn_decode_qkv_conv_norm_bf16, metal_gdn_decode_qkv_conv_norm_supports,
+    metal_gdn_gates_decay_ab_bf16, metal_gdn_gates_decay_ab_supports, metal_gdn_gates_decay_bf16,
     metal_gdn_gates_decay_supports, metal_gdn_prefill_ab_in_proj_bf16,
     metal_gdn_prefill_ab_in_proj_supports, metal_gdn_prefill_qkv_conv_split_bf16_f32_k4,
     metal_gdn_prefill_qkv_conv_split_supports, metal_gdn_qk_norm_f32_bf16,
-    metal_gdn_qk_norm_gqa_f32_bf16, metal_gdn_qk_norm_gqa_supports,
-    metal_gdn_qk_norm_supports, metal_gdn_recurrent_prefill_native_head_last_decay_bf16,
+    metal_gdn_qk_norm_gqa_f32_bf16, metal_gdn_qk_norm_gqa_supports, metal_gdn_qk_norm_supports,
+    metal_gdn_recurrent_prefill_native_head_last_decay_bf16,
     metal_gdn_recurrent_prefill_native_head_last_decay_supports,
 };
 pub(crate) use super::metal_icb::{MetalPagedDecodeIcbGraph, MetalSingleTokenPagedDecodeIcbGraph};
-pub(crate) use super::metal_paged::{
-    metal_paged_kv_write_token_major_batch_bf16,
-    metal_paged_kv_write_token_major_batch_supports, metal_paged_kv_write_token_major_bf16,
-    metal_paged_kv_write_token_major_supports, metal_record_paged_decode_icb_graph,
-    metal_record_single_token_paged_decode_icb_graph,
-};
 pub(crate) use super::metal_lm_head::{
-    metal_lm_head_argmax_bf16, metal_lm_head_argmax_rows_bf16,
-    metal_lm_head_argmax_rows_supports, metal_lm_head_argmax_supports, metal_lm_head_bf16,
-    metal_lm_head_sample_bf16, metal_lm_head_sample_supports, metal_lm_head_supports,
+    metal_lm_head_argmax_bf16, metal_lm_head_argmax_rows_bf16, metal_lm_head_argmax_rows_supports,
+    metal_lm_head_argmax_supports, metal_lm_head_bf16, metal_lm_head_sample_bf16,
+    metal_lm_head_sample_supports, metal_lm_head_supports,
 };
 pub(crate) use super::metal_norm::{
     metal_rms_norm_bf16, metal_rms_norm_supports, metal_rotary_embedding_bf16,
     metal_rotary_embedding_supports,
 };
+pub(crate) use super::metal_paged::{
+    metal_paged_kv_write_token_major_batch_bf16, metal_paged_kv_write_token_major_batch_supports,
+    metal_paged_kv_write_token_major_bf16, metal_paged_kv_write_token_major_supports,
+    metal_record_paged_decode_icb_graph, metal_record_single_token_paged_decode_icb_graph,
+};
 pub use super::metal_precompile::precompile_custom_kernels;
-use super::{metal_training, TrainingCapabilities};
+use super::{TrainingCapabilities, metal_training};
 
 // Phase 7 #1082: module-level imports for the kt-metal chokepoint types,
 // hoisted from ~92 per-function `use` statements so that the chokepoint

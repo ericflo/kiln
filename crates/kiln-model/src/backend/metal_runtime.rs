@@ -13,7 +13,7 @@ use super::metal_gdn::*;
 use super::metal_lm_head::*;
 use super::metal_paged::*;
 use super::{
-    metal_residency, metal_training, BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy,
+    BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy, metal_residency, metal_training,
 };
 
 // #1082 DoD-101/102: BackendRuntime decode methods flipped to kt; metal/vulkan

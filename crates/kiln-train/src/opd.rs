@@ -97,6 +97,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::logit_source::{LogitSource, LogprobBatch};
 use crate::{ChatMessage, Optimizer, default_alpha, default_rank};
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+use kiln_model::backend::{OpdLossRoute, TrainingLossBackend};
 // (#1082) Production caller migration: the per-position OPD loss now
 // routes through `KtForwardOp1` (kiln-kt-bridge::forward_op::KtForwardOp1,
 // commit `095f1c74`) over the kt-typed forward
@@ -3299,6 +3306,7 @@ fn opd_step_forward_backward_tape_authoritative(
             )
             .context("opd tape-authoritative forward")
             .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+            let opd_loss_route = TrainingLossBackend::runtime_opd_loss_route(backend_rt);
 
             // (#1082 P-OPD) `model_forward_no_head` returns the kt `normed`
             // (the final-RMSNorm tape node output). Record the SCALAR OPD loss
@@ -3311,35 +3319,30 @@ fn opd_step_forward_backward_tape_authoritative(
             // connected kt logits id). Returns a detached candle scalar (value
             // only, registered for the scope to seed); the gradient lives on the
             // tape.
-            #[cfg(feature = "vulkan")]
-            let loss_candidate = if matches!(normed.device(), kiln_tensor::Device::Vulkan(_)) {
-                crate::opd_tape_shim::try_tape_opd_scalar_mean_vulkan_kt(
-                    &normed,
-                    &weights.embed_tokens,
-                    &prepared.teacher_topk_indices,
-                    &prepared.teacher_topk_logprobs,
-                    &prepared.label_mask,
-                    prepared.resolved_top_k,
-                )
-            } else {
-                crate::opd_tape_shim::try_tape_opd_scalar_mean_cuda_kt(
+            let loss_candidate = match opd_loss_route {
+                #[cfg(feature = "vulkan")]
+                OpdLossRoute::VulkanActiveHidden => {
+                    crate::opd_tape_shim::try_tape_opd_scalar_mean_vulkan_kt(
+                        &normed,
+                        &weights.embed_tokens,
+                        &prepared.teacher_topk_indices,
+                        &prepared.teacher_topk_logprobs,
+                        &prepared.label_mask,
+                        prepared.resolved_top_k,
+                    )
+                }
+                #[cfg(not(feature = "vulkan"))]
+                OpdLossRoute::VulkanActiveHidden => Ok(None),
+                OpdLossRoute::KtTapePhaseB => crate::opd_tape_shim::try_tape_opd_scalar_mean_cuda_kt(
                     &normed,
                     head_t,
                     &prepared.teacher_topk_indices,
                     &prepared.teacher_topk_logprobs,
                     &prepared.label_mask,
                     prepared.resolved_top_k,
-                )
+                ),
+                OpdLossRoute::Unsupported => Ok(None),
             };
-            #[cfg(not(feature = "vulkan"))]
-            let loss_candidate = crate::opd_tape_shim::try_tape_opd_scalar_mean_cuda_kt(
-                &normed,
-                head_t,
-                &prepared.teacher_topk_indices,
-                &prepared.teacher_topk_logprobs,
-                &prepared.label_mask,
-                prepared.resolved_top_k,
-            );
             let loss = match loss_candidate
                 .context("opd tape-authoritative scalar loss")
                 .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
@@ -3352,9 +3355,12 @@ fn opd_step_forward_backward_tape_authoritative(
                     // clean error — the caller's dispatch should not have
                     // selected this path if the envelope was unmet.
                     return Err(kiln_kt_bridge::BridgeError::new(
-                        "opd tape-authoritative: try_tape_opd_scalar_mean_cuda_kt returned None \
-                         (KILN_USE_TAPE_FORWARD off, empty active set, or out-of-envelope \
+                        format!(
+                            "opd tape-authoritative: {:?} returned None \
+                         (KILN_USE_TAPE_FORWARD off, empty active set, unsupported route, or out-of-envelope \
                          inputs). The dispatch should keep this step on the candle path.",
+                            opd_loss_route
+                        ),
                     ));
                 }
             };
@@ -3501,12 +3507,13 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
         .clone();
     let normed = model_forward_final_norm(&final_hidden, weights, model_config)
         .context("checkpointed OPD final norm")?;
+    let opd_loss_route = TrainingLossBackend::runtime_opd_loss_route(backend_rt);
 
     #[cfg(feature = "vulkan")]
     let head_owned;
     #[cfg(feature = "vulkan")]
     let head_for_loss: &kiln_tensor::Tensor =
-        if matches!(normed.device(), kiln_tensor::Device::Vulkan(_))
+        if matches!(opd_loss_route, OpdLossRoute::VulkanActiveHidden)
             && normed.dtype() == kiln_tensor::DType::F32
             && head_t.dtype() == kiln_tensor::DType::BF16
         {
@@ -3596,9 +3603,9 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
     };
 
     let (loss_val, grad_normed) = {
-        #[cfg(feature = "vulkan")]
-        {
-            if matches!(normed.device(), kiln_tensor::Device::Vulkan(_)) {
+        match opd_loss_route {
+            #[cfg(feature = "vulkan")]
+            OpdLossRoute::VulkanActiveHidden => {
                 let (loss, grad_normed) =
                     crate::opd_tape_shim::vulkan_opd_top_k_reverse_kl_scalar_loss_and_grad_kt(
                         &normed,
@@ -3610,13 +3617,15 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
                     )
                     .map_err(|e| anyhow!("checkpointed OPD Vulkan fused loss/grad: {e}"))?;
                 (loss.to_scalar::<f32>()? as f64, grad_normed)
-            } else {
-                generic_loss_and_grad()?
             }
-        }
-        #[cfg(not(feature = "vulkan"))]
-        {
-            generic_loss_and_grad()?
+            #[cfg(not(feature = "vulkan"))]
+            OpdLossRoute::VulkanActiveHidden => {
+                anyhow::bail!("checkpointed OPD Vulkan active-hidden route requires vulkan feature")
+            }
+            OpdLossRoute::KtTapePhaseB => generic_loss_and_grad()?,
+            OpdLossRoute::Unsupported => {
+                anyhow::bail!("checkpointed OPD loss route is unsupported for this backend")
+            }
         }
     };
     let mut upstream_grad = crate::trainer::rms_norm_backward_pre_final_norm(

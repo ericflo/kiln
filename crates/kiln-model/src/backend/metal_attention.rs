@@ -8,7 +8,7 @@
 use anyhow::{Context, Result};
 
 use super::metal_config::{
-    metal_sdpa_full_safe_for_q_seq, metal_sdpa_supports_head_dim, DISABLE_METAL_SDPA,
+    DISABLE_METAL_SDPA, metal_sdpa_full_safe_for_q_seq, metal_sdpa_supports_head_dim,
 };
 
 pub(super) fn metal_sdpa_prefill_available() -> bool {

@@ -11,6 +11,7 @@ use super::{TrainingCapabilities, TrainingPrecisionPolicy};
 pub(super) fn training_capabilities_static() -> TrainingCapabilities {
     let mut caps = TrainingCapabilities::portable();
     caps.grpo_loss_route = super::GrpoLossRoute::KtComposite;
+    caps.opd_loss_route = super::OpdLossRoute::KtTapePhaseB;
     caps.projection_training =
         "kt-tape-recorded matmul; Metal decode fusions decline tape-tracked tensors";
     caps.resident_activation =
@@ -128,7 +129,7 @@ pub(super) fn dispatch_adamw_step(
 #[cfg(test)]
 mod adamw_kt_tests {
     use super::*;
-    use crate::backend::{metal::MetalBackend, BackendRuntime};
+    use crate::backend::{BackendRuntime, metal::MetalBackend};
     use kiln_tensor::{DType, Device, Tensor};
 
     /// `Device::Metal(0)` if a Metal device is reachable, else `None`.

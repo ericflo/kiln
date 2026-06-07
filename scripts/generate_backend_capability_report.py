@@ -727,27 +727,32 @@ def training_loss_policy_report() -> dict[str, Any]:
         "cpu": {
             "sft_flce_loss_route": "full_logits",
             "grpo_loss_route": "kt_composite",
-            "evidence": "TrainingCapabilities::portable keeps SFT on the portable full-logits loss path and GRPO on the shared kt composite loss root",
+            "opd_loss_route": "unsupported",
+            "evidence": "TrainingCapabilities::portable keeps SFT on the portable full-logits loss path, GRPO on the shared kt composite loss root, and OPD unsupported on the portable backend surface",
         },
         "cuda": {
             "sft_flce_loss_route": "kt_tape_flce",
             "grpo_loss_route": "kt_composite",
-            "evidence": "CudaBackend::training_capabilities_static advertises kt-tape FLCE over CUDA tensors and the shared kt GRPO composite route",
+            "opd_loss_route": "kt_tape_phase_b",
+            "evidence": "CudaBackend::training_capabilities_static advertises kt-tape FLCE over CUDA tensors, the shared kt GRPO composite route, and the shared kt-tape OPD Phase-B route",
         },
         "rocm": {
             "sft_flce_loss_route": "kt_tape_flce",
             "grpo_loss_route": "kt_composite",
-            "evidence": "RocmBackend::training_capabilities_static advertises the shared kt-tape FLCE route over ROCm tensors and the shared kt GRPO composite route",
+            "opd_loss_route": "kt_tape_phase_b",
+            "evidence": "RocmBackend::training_capabilities_static advertises the shared kt-tape FLCE route over ROCm tensors, the shared kt GRPO composite route, and the shared kt-tape OPD Phase-B route",
         },
         "metal": {
             "sft_flce_loss_route": "full_logits",
             "grpo_loss_route": "kt_composite",
-            "evidence": "Metal training capabilities inherit the portable full-logits SFT loss route and shared kt GRPO composite route",
+            "opd_loss_route": "kt_tape_phase_b",
+            "evidence": "Metal training capabilities inherit the portable full-logits SFT loss route, shared kt GRPO composite route, and shared kt-tape OPD Phase-B route",
         },
         "vulkan": {
             "sft_flce_loss_route": "vulkan_active_rows",
             "grpo_loss_route": "vulkan_active_rows",
-            "evidence": "Vulkan training capabilities advertise active-row fused SFT and GRPO shader routes",
+            "opd_loss_route": "vulkan_active_hidden",
+            "evidence": "Vulkan training capabilities advertise active-row fused SFT/GRPO shader routes and the active-hidden fused OPD shader route",
         },
     }
 
@@ -1558,12 +1563,12 @@ def markdown(data: dict[str, Any]) -> str:
     lines.append("")
     lines.append("## Training Loss Routing")
     lines.append("")
-    lines.append("| Backend | SFT FLCE Route | GRPO Route | Evidence |")
-    lines.append("|---|---|---|---|")
+    lines.append("| Backend | SFT FLCE Route | GRPO Route | OPD Route | Evidence |")
+    lines.append("|---|---|---|---|---|")
     for backend, info in data["training_loss_policy"].items():
         lines.append(
             f"| `{backend}` | `{info['sft_flce_loss_route']}` | "
-            f"`{info['grpo_loss_route']}` | {info['evidence']} |"
+            f"`{info['grpo_loss_route']}` | `{info['opd_loss_route']}` | {info['evidence']} |"
         )
     lines.append("")
     lines.append("## Optimizer Dispatch")

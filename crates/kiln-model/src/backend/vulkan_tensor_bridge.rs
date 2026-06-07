@@ -36,8 +36,8 @@ fn upload_f32_tensors_from_cpu_bytes_vk(
     vk_device: &Arc<kiln_vulkan_kernel::VulkanDevice>,
     specs: &[F32TensorUpload<'_>],
 ) -> Result<Vec<kiln_vulkan_kernel::vk_tensor::VkTensor>> {
-    use kiln_vulkan_kernel::vk_tensor::{VkDType, VkTensor};
     use kiln_vulkan_kernel::VulkanBuffer;
+    use kiln_vulkan_kernel::vk_tensor::{VkDType, VkTensor};
 
     let mut buffers = Vec::with_capacity(specs.len());
     for spec in specs {
@@ -263,7 +263,7 @@ pub(super) fn resident_sdpa_prefill_b1(
     head_dim: usize,
     scale: f32,
 ) -> Result<kiln_tensor::Tensor> {
-    use kiln_tensor::{kt_tensor_from_vk, vk_tensor_from_kt, DType, Device};
+    use kiln_tensor::{DType, Device, kt_tensor_from_vk, vk_tensor_from_kt};
 
     // F32, [seq, heads, head_dim], contiguous, start_offset==0 (the bridge
     // contract). `to_dtype`/`contiguous` are resident on Vulkan (no host hop);

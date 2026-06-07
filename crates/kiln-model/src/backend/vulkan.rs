@@ -28,8 +28,8 @@ use super::vulkan_tensor_bridge::{
     kt_tensor_to_packed_bf16_bytes_with_shape,
 };
 use super::{
-    vulkan_attention, vulkan_conv1d, vulkan_dense, vulkan_device, vulkan_gdn, vulkan_linear,
-    vulkan_training, vulkan_weights, BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy,
+    BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy, vulkan_attention, vulkan_conv1d,
+    vulkan_dense, vulkan_device, vulkan_gdn, vulkan_linear, vulkan_training, vulkan_weights,
 };
 use crate::forward::GpuWeights;
 
@@ -92,8 +92,7 @@ pub struct VulkanBackend {
     /// feasibility check (Strix Halo near the 16 GiB UMA limit) caches
     /// the `None` and routes every subsequent call to the per-call
     /// kt `kiln_tensor::Tensor` path without re-checking.
-    pub(super) decode_resident_pool:
-        OnceLock<Option<Arc<kiln_vulkan_kernel::DecodeResidentPool>>>,
+    pub(super) decode_resident_pool: OnceLock<Option<Arc<kiln_vulkan_kernel::DecodeResidentPool>>>,
     /// Lazily constructed Vulkan-resident paged KV cache. Mirrors the
     /// legacy `PagedKvCache` layout in device-local f32 buffers so the
     /// resident decode dispatchers can read/write K/V without crossing
@@ -282,11 +281,7 @@ impl Drop for VulkanBackend {
 // #1082 DoD-101/102: BackendRuntime decode methods flipped to kt; metal/vulkan impls need matching flip when their builds are restored.
 impl BackendRuntime for VulkanBackend {
     fn name(&self) -> &'static str {
-        if self.has_vulkan() {
-            "vulkan"
-        } else {
-            "cpu"
-        }
+        if self.has_vulkan() { "vulkan" } else { "cpu" }
     }
 
     fn device(&self) -> kiln_tensor::Device {
@@ -1255,9 +1250,7 @@ impl BackendRuntime for VulkanBackend {
         k_t: &kiln_tensor::Tensor,
         state_kt: &mut kiln_tensor::Tensor,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        vulkan_gdn::gdn_full_chunk_forward(
-            self, g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state_kt,
-        )
+        vulkan_gdn::gdn_full_chunk_forward(self, g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state_kt)
     }
 
     fn gdn_gates(

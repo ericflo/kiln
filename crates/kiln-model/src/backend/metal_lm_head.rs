@@ -7,18 +7,17 @@
 
 use anyhow::{Context, Result};
 
-use super::metal_pipeline::{
-    metal_lm_head_argmax_batch_pipeline, metal_lm_head_argmax_pipeline,
-    metal_lm_head_argmax_reduce_batch_pipeline, metal_lm_head_argmax_reduce_pipeline,
-    metal_lm_head_pipeline, metal_lm_head_sample_pipeline,
-    metal_lm_head_sample_reduce_pipeline,
-};
 use super::metal_config::{
     METAL_LM_HEAD_SAMPLE_TOP_K_MAX, metal_lm_head_argmax_disabled,
     metal_lm_head_argmax_gpu_reduce_disabled, metal_lm_head_argmax_rows_disabled,
     metal_lm_head_sample_disabled,
 };
 use super::metal_core::{kt_metal, kt_metal_alloc};
+use super::metal_pipeline::{
+    metal_lm_head_argmax_batch_pipeline, metal_lm_head_argmax_pipeline,
+    metal_lm_head_argmax_reduce_batch_pipeline, metal_lm_head_argmax_reduce_pipeline,
+    metal_lm_head_pipeline, metal_lm_head_sample_pipeline, metal_lm_head_sample_reduce_pipeline,
+};
 use kiln_tensor::metal_types::buffer_o_kt;
 
 pub(crate) fn metal_lm_head_supports(
@@ -686,7 +685,7 @@ pub(crate) fn metal_lm_head_argmax_rows_bf16(
 #[cfg(test)]
 mod metal_lm_head_sample_tests {
     use super::*;
-    use crate::backend::{metal::MetalBackend, BackendRuntime};
+    use crate::backend::{BackendRuntime, metal::MetalBackend};
     use kiln_tensor::{Device, Tensor};
     use std::cmp::Ordering;
 

@@ -222,11 +222,32 @@ impl GrpoLossRoute {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpdLossRoute {
+    /// OPD is not advertised for the portable backend capability surface.
+    Unsupported,
+    /// Use the shared kt-tape Phase-B OPD loss root.
+    KtTapePhaseB,
+    /// Use Vulkan's active-hidden fused OPD shaders.
+    VulkanActiveHidden,
+}
+
+impl OpdLossRoute {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            OpdLossRoute::Unsupported => "unsupported",
+            OpdLossRoute::KtTapePhaseB => "kt_tape_phase_b",
+            OpdLossRoute::VulkanActiveHidden => "vulkan_active_hidden",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrainingCapabilities {
     pub projection_training: &'static str,
     pub flce_loss: &'static str,
     pub sft_flce_loss_route: SftFlceLossRoute,
     pub grpo_loss_route: GrpoLossRoute,
+    pub opd_loss_route: OpdLossRoute,
     pub rmsnorm_training: &'static str,
     pub resident_activation: &'static str,
     pub lora_delta_training: &'static str,
@@ -242,6 +263,7 @@ impl TrainingCapabilities {
             flce_loss: "portable candle/FLCE dispatch when configured",
             sft_flce_loss_route: SftFlceLossRoute::FullLogits,
             grpo_loss_route: GrpoLossRoute::KtComposite,
+            opd_loss_route: OpdLossRoute::Unsupported,
             rmsnorm_training: "portable candle autograd",
             resident_activation: "not implemented",
             lora_delta_training: "portable candle autograd",
@@ -658,7 +680,10 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
 
     fn exit_gdn_recurrent_resident_state_scope(&self) {}
 
-    fn materialize_gdn_recurrent_resident_state(&self, _state: &mut kiln_tensor::Tensor) -> Result<()> {
+    fn materialize_gdn_recurrent_resident_state(
+        &self,
+        _state: &mut kiln_tensor::Tensor,
+    ) -> Result<()> {
         Ok(())
     }
 
@@ -773,7 +798,12 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// activations first (Phase 3.1 hooks). The default implementation
     /// is a no-op returning false; the Vulkan backend's impl will land
     /// alongside Phase 4.1's resident `TrainableLoraParams`.
-    fn dispatch_sgd_step(&self, _param: &kiln_tensor::Tensor, _grad: &kiln_tensor::Tensor, _lr: f32) -> Result<bool> {
+    fn dispatch_sgd_step(
+        &self,
+        _param: &kiln_tensor::Tensor,
+        _grad: &kiln_tensor::Tensor,
+        _lr: f32,
+    ) -> Result<bool> {
         Ok(false)
     }
 
@@ -1090,7 +1120,16 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         _qkt: &kiln_tensor::Tensor,
         _ks_entry: &kiln_tensor::Tensor,
         _q_s: &kiln_tensor::Tensor,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+    ) -> Result<
+        Option<(
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+        )>,
+    > {
         Ok(None)
     }
 
@@ -1289,7 +1328,14 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         _in_proj_z_t: &kiln_tensor::Tensor,
         _in_proj_a_t: &kiln_tensor::Tensor,
         _in_proj_b_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+    ) -> Result<
+        Option<(
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+        )>,
+    > {
         Ok(None)
     }
 
@@ -1299,7 +1345,11 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// and the output shape is `[batch, seq_len, out_dim]`. Backends should
     /// return `Ok(None)` for unsupported shapes, dtypes, LoRA paths, or debug
     /// modes.
-    fn linear_decode(&self, _x: &kiln_tensor::Tensor, _weight_t: &kiln_tensor::Tensor) -> Result<Option<kiln_tensor::Tensor>> {
+    fn linear_decode(
+        &self,
+        _x: &kiln_tensor::Tensor,
+        _weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         Ok(None)
     }
 
@@ -1310,7 +1360,11 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// real gradient. Backends route through the kt-tape-recording matmul.
     /// Backends without a tape-recording path return `Ok(None)` so the
     /// caller falls back to the portable kt matmul (which the tape records).
-    fn linear_prefill_apply(&self, _x: &kiln_tensor::Tensor, _weight_t: &kiln_tensor::Tensor) -> Result<Option<kiln_tensor::Tensor>> {
+    fn linear_prefill_apply(
+        &self,
+        _x: &kiln_tensor::Tensor,
+        _weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         Ok(None)
     }
 
@@ -1343,7 +1397,11 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     ///
     /// Used by greedy LM-head decode when logits do not need to be materialized
     /// on the host. `x` is `[1, 1, hidden]`, `weight_t` is `[hidden, out_dim]`.
-    fn linear_decode_argmax(&self, _x: &kiln_tensor::Tensor, _weight_t: &kiln_tensor::Tensor) -> Result<Option<u32>> {
+    fn linear_decode_argmax(
+        &self,
+        _x: &kiln_tensor::Tensor,
+        _weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<u32>> {
         Ok(None)
     }
 
@@ -1492,7 +1550,13 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         _q_weight_t: &kiln_tensor::Tensor,
         _k_weight_t: &kiln_tensor::Tensor,
         _v_weight_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+    ) -> Result<
+        Option<(
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+        )>,
+    > {
         Ok(None)
     }
 
@@ -2246,6 +2310,10 @@ pub trait TrainingLossBackend: Send + Sync + std::fmt::Debug {
 
     fn runtime_grpo_loss_route(&self) -> GrpoLossRoute {
         self.runtime_training_capabilities().grpo_loss_route
+    }
+
+    fn runtime_opd_loss_route(&self) -> OpdLossRoute {
+        self.runtime_training_capabilities().opd_loss_route
     }
 }
 
@@ -3381,7 +3449,6 @@ pub fn for_device_kt(device: &kiln_tensor::Device) -> Arc<dyn BackendRuntime> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3413,6 +3480,8 @@ mod tests {
         assert_eq!(caps.native_training, "not implemented");
         assert!(caps.projection_training.contains("candle"));
         assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::FullLogits);
+        assert_eq!(caps.grpo_loss_route, GrpoLossRoute::KtComposite);
+        assert_eq!(caps.opd_loss_route, OpdLossRoute::Unsupported);
 
         let policy = TrainingPrecisionPolicy::portable();
         assert_eq!(policy.name, "cpu_f32_reference");
@@ -3438,7 +3507,11 @@ mod tests {
         assert_eq!(vulkan.activation_dtypes, &[kiln_tensor::DType::F32]);
         assert_eq!(vulkan.lora_parameter_dtypes, &[kiln_tensor::DType::F32]);
         assert_eq!(vulkan.exact_gdn_backward_tile_tokens, None);
-        assert!(vulkan.base_weight_dtypes.contains(&kiln_tensor::DType::BF16));
+        assert!(
+            vulkan
+                .base_weight_dtypes
+                .contains(&kiln_tensor::DType::BF16)
+        );
         assert!(vulkan.mixed_precision);
     }
 
@@ -3493,6 +3566,12 @@ mod tests {
             GrpoLossRoute::VulkanActiveRows.as_str(),
             "vulkan_active_rows"
         );
+        assert_eq!(OpdLossRoute::Unsupported.as_str(), "unsupported");
+        assert_eq!(OpdLossRoute::KtTapePhaseB.as_str(), "kt_tape_phase_b");
+        assert_eq!(
+            OpdLossRoute::VulkanActiveHidden.as_str(),
+            "vulkan_active_hidden"
+        );
     }
 
     #[test]
@@ -3510,14 +3589,8 @@ mod tests {
         assert_eq!(caps.resident_decode, capability::Support::Declined);
         assert_eq!(caps.resident_activation, capability::Support::Declined);
         assert_eq!(caps.flash_attn_prefill, capability::Support::Declined);
-        assert_eq!(
-            caps.flash_attn_paged_decode,
-            capability::Support::Declined
-        );
-        assert_eq!(
-            caps.paged_kv_head_major_read,
-            capability::Support::Declined
-        );
+        assert_eq!(caps.flash_attn_paged_decode, capability::Support::Declined);
+        assert_eq!(caps.paged_kv_head_major_read, capability::Support::Declined);
         assert_eq!(caps.gdn_recurrent_step, capability::Support::Declined);
         assert_eq!(caps.causal_conv1d_update, capability::Support::Declined);
         assert_eq!(caps.linear_decode_argmax, capability::Support::Declined);
@@ -3542,10 +3615,7 @@ mod tests {
         );
         assert_eq!(attention_req.layout, capability::AttentionLayout::Sdpa);
         assert_eq!(
-            capability::BackendCapabilityQueries::supports_attention_request(
-                &cpu,
-                &attention_req
-            ),
+            capability::BackendCapabilityQueries::supports_attention_request(&cpu, &attention_req),
             capability::Support::Declined
         );
 
@@ -3589,10 +3659,7 @@ mod tests {
 
         let unsafe_replay_req = replay_req.clone().with_replay_safe(false);
         assert_eq!(
-            capability::BackendCapabilityQueries::supports_replay_request(
-                &cpu,
-                &unsafe_replay_req,
-            ),
+            capability::BackendCapabilityQueries::supports_replay_request(&cpu, &unsafe_replay_req,),
             capability::Support::Unsupported
         );
     }
@@ -3617,19 +3684,13 @@ mod tests {
             caps.matmul.batched_bf16,
             capability::Support::NativeWithConstraints
         );
-        assert_eq!(
-            caps.attention.flash_prefill,
-            capability::Support::Declined
-        );
+        assert_eq!(caps.attention.flash_prefill, capability::Support::Declined);
         assert_eq!(caps.gdn.recurrent_step, capability::Support::Declined);
         assert_eq!(caps.decode.linear_argmax, capability::Support::Declined);
         assert_eq!(caps.decode_batcher.max_batch, 8);
         assert_eq!(caps.decode_batcher.wait_micros, 0);
         assert!(!caps.decode_batcher.allow_mixed_seq_lens);
-        assert_eq!(
-            caps.training.precision,
-            TrainingPrecisionPolicy::portable()
-        );
+        assert_eq!(caps.training.precision, TrainingPrecisionPolicy::portable());
         assert_eq!(
             caps.graph_replay.resident_decode,
             capability::Support::Declined
@@ -3653,8 +3714,7 @@ mod tests {
             name: "vulkan",
             resident: false,
         };
-        let vulkan_caps =
-            capability::BackendCapabilityQueries::backend_capabilities(&vulkan_probe);
+        let vulkan_caps = capability::BackendCapabilityQueries::backend_capabilities(&vulkan_probe);
         assert_eq!(vulkan_caps.device, kiln_tensor::Device::Cpu);
         assert_eq!(vulkan_caps.storage.backend, kiln_tensor::Backend::Vulkan);
         assert_eq!(vulkan_caps.decode_batcher.max_batch, 64);
@@ -3700,10 +3760,7 @@ mod tests {
             false,
         );
         assert_eq!(
-            capability::BackendCapabilityQueries::supports_matmul_request(
-                &cpu,
-                &incompatible
-            ),
+            capability::BackendCapabilityQueries::supports_matmul_request(&cpu, &incompatible),
             capability::Support::Unsupported
         );
         let fused_relu = plain
@@ -3745,10 +3802,7 @@ mod tests {
             false,
         );
         assert_eq!(
-            capability::BackendCapabilityQueries::supports_matmul_request(
-                &metal,
-                &metal_bf16
-            ),
+            capability::BackendCapabilityQueries::supports_matmul_request(&metal, &metal_bf16),
             capability::Support::NativeWithConstraints
         );
 
@@ -3757,10 +3811,7 @@ mod tests {
             resident: false,
         };
         assert_eq!(
-            capability::BackendCapabilityQueries::supports_matmul_request(
-                &vulkan,
-                &metal_bf16
-            ),
+            capability::BackendCapabilityQueries::supports_matmul_request(&vulkan, &metal_bf16),
             capability::Support::HostFallbackAllowed
         );
         let vulkan_batched_bf16 = capability::MatmulRequest::plain(
@@ -3808,8 +3859,13 @@ mod tests {
             kiln_tensor::DType::F32,
             true,
         );
-        let blas_batched = batched.to_blas_request(1).expect("batched request projects");
-        assert_eq!((blas_batched.m, blas_batched.n, blas_batched.k), (8, 32, 16));
+        let blas_batched = batched
+            .to_blas_request(1)
+            .expect("batched request projects");
+        assert_eq!(
+            (blas_batched.m, blas_batched.n, blas_batched.k),
+            (8, 32, 16)
+        );
         assert_eq!(
             blas_batched.batch,
             capability::MatmulBatchPolicy::Batched { batches: 8 }
@@ -3873,9 +3929,18 @@ mod tests {
         assert_eq!(resource.tensor_id, tensor.id());
         assert_eq!(resource.backend, kiln_tensor::Backend::Vulkan);
         assert_eq!(resource.device, kiln_tensor::Device::Cpu);
-        assert_eq!(resource.family, residency::ResidentResourceFamily::Activation);
-        assert_eq!(resource.ownership, residency::ResidentOwnership::RegistryOwned);
-        assert_eq!(resource.state, residency::ResidentResourceState::RegisteredClean);
+        assert_eq!(
+            resource.family,
+            residency::ResidentResourceFamily::Activation
+        );
+        assert_eq!(
+            resource.ownership,
+            residency::ResidentOwnership::RegistryOwned
+        );
+        assert_eq!(
+            resource.state,
+            residency::ResidentResourceState::RegisteredClean
+        );
         assert_eq!(resource.shape, vec![2]);
         assert_eq!(resource.layout.strides, vec![1]);
         assert_eq!(resource.layout.start_offset, 0);
@@ -3905,7 +3970,10 @@ mod tests {
         .unwrap();
         assert_eq!(resource.tensor_id, tensor.id());
         assert_eq!(resource.backend, kiln_tensor::Backend::Vulkan);
-        assert_eq!(resource.family, residency::ResidentResourceFamily::Activation);
+        assert_eq!(
+            resource.family,
+            residency::ResidentResourceFamily::Activation
+        );
 
         assert!(residency::ResidentRegistry::has_resident_resource(
             &backend,
@@ -3929,12 +3997,14 @@ mod tests {
             .is_some()
         );
 
-        assert!(residency::ResidentRegistry::resident_resource(
-            &backend,
-            &tensor,
-            residency::ResidentResourceFamily::OptimizerParam,
-        )
-        .is_none());
+        assert!(
+            residency::ResidentRegistry::resident_resource(
+                &backend,
+                &tensor,
+                residency::ResidentResourceFamily::OptimizerParam,
+            )
+            .is_none()
+        );
         assert!(
             residency::ResidentRegistry::register_resource(
                 &backend,
@@ -4228,6 +4298,11 @@ mod tests {
             "grpo_loss_route"
         );
         assert_forwards!(
+            TrainingLossBackend::runtime_opd_loss_route(backend),
+            BackendRuntime::training_capabilities(backend).opd_loss_route,
+            "opd_loss_route"
+        );
+        assert_forwards!(
             TrainingLossBackend::runtime_training_precision_policy(backend),
             BackendRuntime::training_precision_policy(backend),
             "training_precision_policy"
@@ -4252,7 +4327,9 @@ mod tests {
             OptimizerBackend::runtime_dispatch_adamw_step(
                 &cpu, &t, &t, &t, &t, 0.1, 0.9, 0.999, 1e-8, 0.0, 1
             )?,
-            BackendRuntime::dispatch_adamw_step(&cpu, &t, &t, &t, &t, 0.1, 0.9, 0.999, 1e-8, 0.0, 1)?
+            BackendRuntime::dispatch_adamw_step(
+                &cpu, &t, &t, &t, &t, 0.1, 0.9, 0.999, 1e-8, 0.0, 1
+            )?
         );
 
         Ok(())
@@ -4349,6 +4426,7 @@ mod tests {
         assert_eq!(caps.native_training, "not implemented");
         assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::KtTapeFlce);
         assert_eq!(caps.grpo_loss_route, GrpoLossRoute::KtComposite);
+        assert_eq!(caps.opd_loss_route, OpdLossRoute::KtTapePhaseB);
     }
 
     #[cfg(feature = "rocm")]
@@ -4357,6 +4435,7 @@ mod tests {
         let caps = rocm::RocmBackend::training_capabilities_static();
         assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::KtTapeFlce);
         assert_eq!(caps.grpo_loss_route, GrpoLossRoute::KtComposite);
+        assert_eq!(caps.opd_loss_route, OpdLossRoute::KtTapePhaseB);
     }
 
     #[cfg(feature = "metal")]
@@ -4368,6 +4447,7 @@ mod tests {
         assert!(caps.resident_activation.contains("Metal TensorId"));
         assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::FullLogits);
         assert_eq!(caps.grpo_loss_route, GrpoLossRoute::KtComposite);
+        assert_eq!(caps.opd_loss_route, OpdLossRoute::KtTapePhaseB);
 
         let backend = metal::MetalBackend::new(kiln_tensor::Device::Metal(0));
         assert_eq!(backend.training_capabilities(), caps);
@@ -4377,10 +4457,8 @@ mod tests {
     #[test]
     fn vulkan_training_capabilities_route_sft_flce_through_active_rows() {
         let caps = vulkan::VulkanBackend::training_capabilities_static();
-        assert_eq!(
-            caps.sft_flce_loss_route,
-            SftFlceLossRoute::VulkanActiveRows
-        );
+        assert_eq!(caps.sft_flce_loss_route, SftFlceLossRoute::VulkanActiveRows);
         assert_eq!(caps.grpo_loss_route, GrpoLossRoute::VulkanActiveRows);
+        assert_eq!(caps.opd_loss_route, OpdLossRoute::VulkanActiveHidden);
     }
 }

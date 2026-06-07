@@ -125,8 +125,8 @@ pub(super) fn replace_recurrent_state_resident_buffer(
 mod tests {
     use anyhow::Result;
 
-    use crate::backend::vulkan::VulkanBackend;
     use crate::backend::BackendRuntime;
+    use crate::backend::vulkan::VulkanBackend;
 
     fn test_backend() -> VulkanBackend {
         VulkanBackend::new(kiln_tensor::Device::Cpu)

@@ -1538,12 +1538,20 @@ fn generated_capability_report_lists_training_loss_policy() {
         "CPU should keep the shared GRPO kt-composite route"
     );
     assert_eq!(
+        policies["cpu"]["opd_loss_route"], "unsupported",
+        "CPU should not advertise a portable OPD training route"
+    );
+    assert_eq!(
         policies["metal"]["sft_flce_loss_route"], "full_logits",
         "Metal should keep the portable SFT full-logits route"
     );
     assert_eq!(
         policies["metal"]["grpo_loss_route"], "kt_composite",
         "Metal should keep the shared GRPO kt-composite route"
+    );
+    assert_eq!(
+        policies["metal"]["opd_loss_route"], "kt_tape_phase_b",
+        "Metal should use the shared OPD kt-tape Phase-B route"
     );
     assert_eq!(
         policies["cuda"]["sft_flce_loss_route"], "kt_tape_flce",
@@ -1554,6 +1562,10 @@ fn generated_capability_report_lists_training_loss_policy() {
         "CUDA should use the shared GRPO kt-composite route"
     );
     assert_eq!(
+        policies["cuda"]["opd_loss_route"], "kt_tape_phase_b",
+        "CUDA should use the shared OPD kt-tape Phase-B route"
+    );
+    assert_eq!(
         policies["rocm"]["sft_flce_loss_route"], "kt_tape_flce",
         "ROCm should use the shared kt-tape SFT FLCE route"
     );
@@ -1562,12 +1574,20 @@ fn generated_capability_report_lists_training_loss_policy() {
         "ROCm should use the shared GRPO kt-composite route"
     );
     assert_eq!(
+        policies["rocm"]["opd_loss_route"], "kt_tape_phase_b",
+        "ROCm should use the shared OPD kt-tape Phase-B route"
+    );
+    assert_eq!(
         policies["vulkan"]["sft_flce_loss_route"], "vulkan_active_rows",
         "Vulkan should use its active-row SFT FLCE route"
     );
     assert_eq!(
         policies["vulkan"]["grpo_loss_route"], "vulkan_active_rows",
         "Vulkan should use its active-row GRPO route"
+    );
+    assert_eq!(
+        policies["vulkan"]["opd_loss_route"], "vulkan_active_hidden",
+        "Vulkan should use its active-hidden OPD route"
     );
 }
 
@@ -1901,6 +1921,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
         ("OptimizerBackend", "runtime_dispatch_adamw_step"),
         ("TrainingLossBackend", "runtime_training_precision_policy"),
         ("TrainingLossBackend", "runtime_grpo_loss_route"),
+        ("TrainingLossBackend", "runtime_opd_loss_route"),
         ("ReplayBackend", "runtime_supports_replay_request"),
     ] {
         let info = facets
@@ -2433,6 +2454,10 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "GRPO loss routing should consume the focused training-loss capability facet"
     );
     assert!(
+        opd_source.contains("TrainingLossBackend::runtime_opd_loss_route"),
+        "OPD loss routing should consume the focused training-loss capability facet"
+    );
+    assert!(
         trainer_source.contains("TrainingPrecisionPolicy"),
         "trainer should import the backend-owned training precision policy"
     );
@@ -2530,6 +2555,33 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     assert!(
         !checkpointed_grpo_section.contains("if is_vulkan_device(device)"),
         "checkpointed GRPO tail should not hard-code Vulkan loss routing"
+    );
+    let opd_step_section = source_between(
+        &opd_source,
+        "fn opd_step_forward_backward_tape_authoritative(",
+        "fn checkpointed_opd_step_forward_backward_tape_authoritative(",
+    );
+    assert!(
+        opd_step_section.contains("TrainingLossBackend::runtime_opd_loss_route"),
+        "OPD tape-authoritative step should route fused loss roots through TrainingLossBackend"
+    );
+    assert!(
+        !opd_step_section.contains("matches!(normed.device(), kiln_tensor::Device::Vulkan(_))"),
+        "OPD tape-authoritative step should not hard-code Vulkan loss routing"
+    );
+    let checkpointed_opd_section = source_between(
+        &opd_source,
+        "fn checkpointed_opd_step_forward_backward_tape_authoritative(",
+        "fn write_opd_train_receipt_best_effort(",
+    );
+    assert!(
+        checkpointed_opd_section.contains("TrainingLossBackend::runtime_opd_loss_route"),
+        "checkpointed OPD tail should route fused loss roots through TrainingLossBackend"
+    );
+    assert!(
+        !checkpointed_opd_section
+            .contains("matches!(normed.device(), kiln_tensor::Device::Vulkan(_))"),
+        "checkpointed OPD tail should not hard-code Vulkan loss routing"
     );
 
     let inference_decode_residency_sources =
@@ -3558,7 +3610,8 @@ fn backend_engine_unification_plan_matches_current_training_status() {
 
     assert!(
         plan_source.contains("TrainingLossBackend::runtime_sft_flce_loss_route")
-            && plan_source.contains("TrainingLossBackend::runtime_grpo_loss_route"),
+            && plan_source.contains("TrainingLossBackend::runtime_grpo_loss_route")
+            && plan_source.contains("TrainingLossBackend::runtime_opd_loss_route"),
         "training source map should describe backend-owned loss routing"
     );
     assert!(

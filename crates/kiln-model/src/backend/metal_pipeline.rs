@@ -103,7 +103,9 @@ pub(super) fn metal_rotary_qk_pipeline(device: &dyn MetalPipelineHost) -> Result
     Ok(pipeline)
 }
 
-pub(super) fn metal_gdn_qk_norm_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
+pub(super) fn metal_gdn_qk_norm_pipeline(
+    device: &dyn MetalPipelineHost,
+) -> Result<ComputePipeline> {
     static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
@@ -125,7 +127,9 @@ pub(super) fn metal_gdn_qk_norm_pipeline(device: &dyn MetalPipelineHost) -> Resu
     Ok(pipeline)
 }
 
-pub(super) fn metal_gdn_qk_norm_gqa_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
+pub(super) fn metal_gdn_qk_norm_gqa_pipeline(
+    device: &dyn MetalPipelineHost,
+) -> Result<ComputePipeline> {
     static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
@@ -193,7 +197,9 @@ pub(super) fn metal_lm_head_pipeline(device: &dyn MetalPipelineHost) -> Result<C
     Ok(pipeline)
 }
 
-pub(super) fn metal_lm_head_argmax_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
+pub(super) fn metal_lm_head_argmax_pipeline(
+    device: &dyn MetalPipelineHost,
+) -> Result<ComputePipeline> {
     static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
@@ -215,7 +221,9 @@ pub(super) fn metal_lm_head_argmax_pipeline(device: &dyn MetalPipelineHost) -> R
     Ok(pipeline)
 }
 
-pub(super) fn metal_lm_head_argmax_reduce_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
+pub(super) fn metal_lm_head_argmax_reduce_pipeline(
+    device: &dyn MetalPipelineHost,
+) -> Result<ComputePipeline> {
     static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
@@ -237,7 +245,9 @@ pub(super) fn metal_lm_head_argmax_reduce_pipeline(device: &dyn MetalPipelineHos
     Ok(pipeline)
 }
 
-pub(super) fn metal_lm_head_argmax_batch_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
+pub(super) fn metal_lm_head_argmax_batch_pipeline(
+    device: &dyn MetalPipelineHost,
+) -> Result<ComputePipeline> {
     static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
@@ -283,7 +293,9 @@ pub(super) fn metal_lm_head_argmax_reduce_batch_pipeline(
     Ok(pipeline)
 }
 
-pub(super) fn metal_lm_head_sample_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
+pub(super) fn metal_lm_head_sample_pipeline(
+    device: &dyn MetalPipelineHost,
+) -> Result<ComputePipeline> {
     static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
@@ -305,7 +317,9 @@ pub(super) fn metal_lm_head_sample_pipeline(device: &dyn MetalPipelineHost) -> R
     Ok(pipeline)
 }
 
-pub(super) fn metal_lm_head_sample_reduce_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
+pub(super) fn metal_lm_head_sample_reduce_pipeline(
+    device: &dyn MetalPipelineHost,
+) -> Result<ComputePipeline> {
     static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
@@ -327,7 +341,9 @@ pub(super) fn metal_lm_head_sample_reduce_pipeline(device: &dyn MetalPipelineHos
     Ok(pipeline)
 }
 
-pub(super) fn metal_mlp_gate_up_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
+pub(super) fn metal_mlp_gate_up_pipeline(
+    device: &dyn MetalPipelineHost,
+) -> Result<ComputePipeline> {
     static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
@@ -349,7 +365,9 @@ pub(super) fn metal_mlp_gate_up_pipeline(device: &dyn MetalPipelineHost) -> Resu
     Ok(pipeline)
 }
 
-pub(super) fn metal_mlp_gate_up_serial_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
+pub(super) fn metal_mlp_gate_up_serial_pipeline(
+    device: &dyn MetalPipelineHost,
+) -> Result<ComputePipeline> {
     static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
@@ -371,7 +389,9 @@ pub(super) fn metal_mlp_gate_up_serial_pipeline(device: &dyn MetalPipelineHost) 
     Ok(pipeline)
 }
 
-pub(super) fn metal_mlp_silu_mul_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
+pub(super) fn metal_mlp_silu_mul_pipeline(
+    device: &dyn MetalPipelineHost,
+) -> Result<ComputePipeline> {
     static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
@@ -393,7 +413,9 @@ pub(super) fn metal_mlp_silu_mul_pipeline(device: &dyn MetalPipelineHost) -> Res
     Ok(pipeline)
 }
 
-pub(super) fn metal_attn_gate_sigmoid_mul_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
+pub(super) fn metal_attn_gate_sigmoid_mul_pipeline(
+    device: &dyn MetalPipelineHost,
+) -> Result<ComputePipeline> {
     static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
@@ -554,7 +576,9 @@ pub(super) fn metal_fused_qkv_transposed_coop_gemv_pipeline(
     Ok(pipeline)
 }
 
-pub(super) fn metal_lora_hidden_decode_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
+pub(super) fn metal_lora_hidden_decode_pipeline(
+    device: &dyn MetalPipelineHost,
+) -> Result<ComputePipeline> {
     static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
@@ -576,7 +600,9 @@ pub(super) fn metal_lora_hidden_decode_pipeline(device: &dyn MetalPipelineHost) 
     Ok(pipeline)
 }
 
-pub(super) fn metal_lora_add_decode_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
+pub(super) fn metal_lora_add_decode_pipeline(
+    device: &dyn MetalPipelineHost,
+) -> Result<ComputePipeline> {
     static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
@@ -598,7 +624,9 @@ pub(super) fn metal_lora_add_decode_pipeline(device: &dyn MetalPipelineHost) -> 
     Ok(pipeline)
 }
 
-pub(super) fn metal_gdn_in_proj_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
+pub(super) fn metal_gdn_in_proj_pipeline(
+    device: &dyn MetalPipelineHost,
+) -> Result<ComputePipeline> {
     static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
@@ -915,7 +943,9 @@ pub(super) fn metal_gdn_gates_pipeline(device: &dyn MetalPipelineHost) -> Result
     Ok(pipeline)
 }
 
-pub(super) fn metal_gdn_gates_decay_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
+pub(super) fn metal_gdn_gates_decay_pipeline(
+    device: &dyn MetalPipelineHost,
+) -> Result<ComputePipeline> {
     static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
@@ -937,7 +967,9 @@ pub(super) fn metal_gdn_gates_decay_pipeline(device: &dyn MetalPipelineHost) -> 
     Ok(pipeline)
 }
 
-pub(super) fn metal_gdn_gates_decay_ab_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
+pub(super) fn metal_gdn_gates_decay_ab_pipeline(
+    device: &dyn MetalPipelineHost,
+) -> Result<ComputePipeline> {
     static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
@@ -1011,7 +1043,9 @@ pub(super) fn metal_gdn_decode_gates_recurrent_rmsnorm_pipeline(
     Ok(pipeline)
 }
 
-pub(super) fn metal_gated_rms_norm_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
+pub(super) fn metal_gated_rms_norm_pipeline(
+    device: &dyn MetalPipelineHost,
+) -> Result<ComputePipeline> {
     static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
@@ -1033,7 +1067,9 @@ pub(super) fn metal_gated_rms_norm_pipeline(device: &dyn MetalPipelineHost) -> R
     Ok(pipeline)
 }
 
-pub(super) fn metal_gdn_recurrent_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
+pub(super) fn metal_gdn_recurrent_pipeline(
+    device: &dyn MetalPipelineHost,
+) -> Result<ComputePipeline> {
     static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
@@ -1127,7 +1163,9 @@ pub(super) fn metal_gdn_forward_substitution_f32_pipeline(
     Ok(pipeline)
 }
 
-pub(super) fn metal_gdn_chunk_prep_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
+pub(super) fn metal_gdn_chunk_prep_pipeline(
+    device: &dyn MetalPipelineHost,
+) -> Result<ComputePipeline> {
     static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
@@ -1197,7 +1235,9 @@ pub(super) fn metal_gdn_full_chunk_forward_pipeline(
     Ok(pipeline)
 }
 
-pub(super) fn metal_conv1d_prefill_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
+pub(super) fn metal_conv1d_prefill_pipeline(
+    device: &dyn MetalPipelineHost,
+) -> Result<ComputePipeline> {
     static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
@@ -1243,7 +1283,9 @@ pub(super) fn metal_gdn_prefill_qkv_conv_split_pipeline(
     Ok(pipeline)
 }
 
-pub(super) fn metal_conv1d_update_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
+pub(super) fn metal_conv1d_update_pipeline(
+    device: &dyn MetalPipelineHost,
+) -> Result<ComputePipeline> {
     static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache

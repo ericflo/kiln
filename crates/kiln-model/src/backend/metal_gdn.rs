@@ -1335,14 +1335,6 @@ pub(crate) fn metal_gdn_decode_qkv_conv_norm_bf16(
     Ok((q_out, k_out, v_out))
 }
 
-
-
-
-
-
-
-
-
 pub(super) fn metal_gdn_gates_bf16(
     a: &kiln_tensor::Tensor,
     b: &kiln_tensor::Tensor,
@@ -1842,8 +1834,6 @@ pub(crate) fn metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
     Ok(out)
 }
 
-
-
 pub(super) fn metal_gated_rms_norm_bf16(
     x: &kiln_tensor::Tensor,
     z: &kiln_tensor::Tensor,
@@ -1925,17 +1915,6 @@ pub(super) fn metal_gated_rms_norm_bf16(
 
     Ok(out)
 }
-
-
-
-
-
-
-
-
-
-
-
 
 pub(super) fn metal_gdn_forward_substitution_bf16(
     a_strict: &kiln_tensor::Tensor,
@@ -2922,11 +2901,6 @@ pub(crate) fn metal_gdn_recurrent_prefill_native_head_last_decay_bf16(
 
     Ok(out)
 }
-
-
-
-
-
 
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]

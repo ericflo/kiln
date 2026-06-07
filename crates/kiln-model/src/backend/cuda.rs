@@ -4,8 +4,8 @@
 //! `Ok(None)` responses route the caller to the portable candle path.
 
 use anyhow::{Context, Result};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy};
 use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
@@ -200,8 +200,8 @@ impl CudaBackend {
         let gdn_decode_qk_norm_recurrent_rmsnorm_enabled = gdn_decode_qk_norm_recurrent_enabled
             && std::env::var("KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM").is_err();
         let lora_decode_add_enabled = std::env::var("KILN_DISABLE_CUDA_LORA_DECODE_ADD").is_err();
-        let gdn_full_chunk_forward_multiblock_enabled = gdn_enabled
-            && std::env::var("KILN_DISABLE_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK").is_err();
+        let gdn_full_chunk_forward_multiblock_enabled =
+            gdn_enabled && std::env::var("KILN_DISABLE_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK").is_err();
         let device_kt = device;
         Self {
             device_kt,
@@ -224,6 +224,7 @@ impl CudaBackend {
             flce_loss: "FLCE analytic backward on CUDA tensors; no full logits by default",
             sft_flce_loss_route: super::SftFlceLossRoute::KtTapeFlce,
             grpo_loss_route: super::GrpoLossRoute::KtComposite,
+            opd_loss_route: super::OpdLossRoute::KtTapePhaseB,
             rmsnorm_training: "CUDA kt-tape rmsnorm behind 47 GiB autograd VRAM gate",
             resident_activation: "kt TensorId lifecycle registry; kt CUDA tensors are canonical",
             lora_delta_training: "kt tape-recorded LoRA delta; fused lora_decode_add declines tape-tracked tensors",
@@ -300,7 +301,12 @@ impl BackendRuntime for CudaBackend {
         )
     }
 
-    fn dispatch_sgd_step(&self, param: &kiln_tensor::Tensor, grad: &kiln_tensor::Tensor, lr: f32) -> Result<bool> {
+    fn dispatch_sgd_step(
+        &self,
+        param: &kiln_tensor::Tensor,
+        grad: &kiln_tensor::Tensor,
+        lr: f32,
+    ) -> Result<bool> {
         if !cuda_optimizer_args_ready_for_kt(&[param, grad]) {
             return Ok(false);
         }
@@ -514,7 +520,10 @@ impl BackendRuntime for CudaBackend {
         softmax_scale: f32,
         causal: bool,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        if q.track_op() || k_pool.track_op() || v_pool.track_op() || block_table.track_op()
+        if q.track_op()
+            || k_pool.track_op()
+            || v_pool.track_op()
+            || block_table.track_op()
             || q.dtype() != kiln_tensor::DType::BF16
         {
             return Ok(None);
@@ -549,8 +558,12 @@ impl BackendRuntime for CudaBackend {
         softmax_scale: f32,
         causal: bool,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        if q.track_op() || k_pool.track_op() || v_pool.track_op() || block_table.track_op()
-            || seqused_k.track_op() || q.dtype() != kiln_tensor::DType::BF16
+        if q.track_op()
+            || k_pool.track_op()
+            || v_pool.track_op()
+            || block_table.track_op()
+            || seqused_k.track_op()
+            || q.dtype() != kiln_tensor::DType::BF16
         {
             return Ok(None);
         }
@@ -587,8 +600,12 @@ impl BackendRuntime for CudaBackend {
         softmax_scale: f32,
         causal: bool,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        if q.track_op() || k_pool.track_op() || v_pool.track_op() || block_table.track_op()
-            || seqused_k.track_op() || q.dtype() != kiln_tensor::DType::BF16
+        if q.track_op()
+            || k_pool.track_op()
+            || v_pool.track_op()
+            || block_table.track_op()
+            || seqused_k.track_op()
+            || q.dtype() != kiln_tensor::DType::BF16
         {
             return Ok(None);
         }
@@ -712,7 +729,16 @@ impl BackendRuntime for CudaBackend {
         qkt: &kiln_tensor::Tensor,
         ks_entry: &kiln_tensor::Tensor,
         q_s: &kiln_tensor::Tensor,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+    ) -> Result<
+        Option<(
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+        )>,
+    > {
         // Phase 7 (#1082): kt-typed surface is now the only path. Args
         // are already kt (#1082 DoD-101/102), so no candle↔kt bridge —
         // the predicate + `gdn_chunk_prep_kt` 6-tuple kernel run
@@ -741,12 +767,22 @@ impl BackendRuntime for CudaBackend {
         // are already kt (#1082 DoD-101/102), so no candle↔kt bridge.
         kiln_nvtx::range!(c"kiln/gdn_chunk_scan_kt");
         if !kiln_gdn_kernel::gdn_chunk_scan_supports_kt(
-            a_strict, b_mask, v_prime, q_s_scaled, beta, decay_last_col,
+            a_strict,
+            b_mask,
+            v_prime,
+            q_s_scaled,
+            beta,
+            decay_last_col,
         ) {
             return Ok(None);
         }
         let (o0, o1) = kiln_gdn_kernel::gdn_chunk_scan_kt(
-            a_strict, b_mask, v_prime, q_s_scaled, beta, decay_last_col,
+            a_strict,
+            b_mask,
+            v_prime,
+            q_s_scaled,
+            beta,
+            decay_last_col,
         )
         .map_err(|e| anyhow::anyhow!("kt gdn_chunk_scan: {e}"))?;
         Ok(Some((o0, o1)))
@@ -858,20 +894,29 @@ impl BackendRuntime for CudaBackend {
             let a_log_bf16 = if a_log.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(a_log.to_dtype(kiln_tensor::DType::BF16)
-                    .with_context(|| "gdn_decode_gates: cast a_log -> bf16")?)
+                Some(
+                    a_log
+                        .to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_gates: cast a_log -> bf16")?,
+                )
             };
             let dt_bias_bf16 = if dt_bias.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(dt_bias.to_dtype(kiln_tensor::DType::BF16)
-                    .with_context(|| "gdn_decode_gates: cast dt_bias -> bf16")?)
+                Some(
+                    dt_bias
+                        .to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_gates: cast dt_bias -> bf16")?,
+                )
             };
             let weight_f32 = if weight.dtype() == kiln_tensor::DType::F32 {
                 None
             } else {
-                Some(weight.to_dtype(kiln_tensor::DType::F32)
-                    .with_context(|| "gdn_decode_gates: cast weight -> f32")?)
+                Some(
+                    weight
+                        .to_dtype(kiln_tensor::DType::F32)
+                        .with_context(|| "gdn_decode_gates: cast weight -> f32")?,
+                )
             };
             // Cast heavy tensors too. q/k/v often arrive F32 from
             // the conv1d kernel epilogue (kernel returns F32 by
@@ -884,23 +929,53 @@ impl BackendRuntime for CudaBackend {
             if state.dtype() != kiln_tensor::DType::BF16 {
                 return Ok(None);
             }
-            let q_bf16 = if q.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(q.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast q -> bf16")?)
+            let q_bf16 = if q.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    q.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_gates: cast q -> bf16")?,
+                )
             };
-            let k_bf16 = if k.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(k.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast k -> bf16")?)
+            let k_bf16 = if k.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    k.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_gates: cast k -> bf16")?,
+                )
             };
-            let v_bf16 = if v.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(v.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast v -> bf16")?)
+            let v_bf16 = if v.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    v.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_gates: cast v -> bf16")?,
+                )
             };
-            let a_bf16 = if a.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(a.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast a -> bf16")?)
+            let a_bf16 = if a.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    a.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_gates: cast a -> bf16")?,
+                )
             };
-            let b_bf16 = if b.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(b.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast b -> bf16")?)
+            let b_bf16 = if b.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    b.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_gates: cast b -> bf16")?,
+                )
             };
-            let z_bf16 = if z.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(z.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast z -> bf16")?)
+            let z_bf16 = if z.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    z.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_gates: cast z -> bf16")?,
+                )
             };
             return self.gdn_decode_gates_recurrent(
                 q_bf16.as_ref().unwrap_or(q),
@@ -961,15 +1036,17 @@ impl BackendRuntime for CudaBackend {
         }
         // Squeeze for the kernel call (3D-expecting). Metadata-only
         // reshape on contiguous inputs; no copy.
-        let q_3d = q.squeeze(1)
+        let q_3d = q
+            .squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_gates q squeeze(1) failed")?;
-        let k_3d = k.squeeze(1)
+        let k_3d = k
+            .squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_gates k squeeze(1) failed")?;
-        let v_3d = v.squeeze(1)
+        let v_3d = v
+            .squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_gates v squeeze(1) failed")?;
         let out_kt = kiln_gdn_kernel::gdn_decode_gates_recurrent_bf16_kt(
-            &q_3d, &k_3d, &v_3d, &a_c, &b_c, &alog_c, &dtb_c, &state_c, &z_c, &weight_c,
-            eps as f32,
+            &q_3d, &k_3d, &v_3d, &a_c, &b_c, &alog_c, &dtb_c, &state_c, &z_c, &weight_c, eps as f32,
         )
         .map_err(|e| anyhow::anyhow!("kt gdn_decode_gates_recurrent: {e}"))?;
         // kt_api allocates a 3D `[B, value_heads, dv]` output (see
@@ -1037,14 +1114,20 @@ impl BackendRuntime for CudaBackend {
             let a_log_bf16 = if a_log.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(a_log.to_dtype(kiln_tensor::DType::BF16)
-                    .with_context(|| "gdn_decode_qk_norm: cast a_log -> bf16")?)
+                Some(
+                    a_log
+                        .to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_qk_norm: cast a_log -> bf16")?,
+                )
             };
             let dt_bias_bf16 = if dt_bias.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(dt_bias.to_dtype(kiln_tensor::DType::BF16)
-                    .with_context(|| "gdn_decode_qk_norm: cast dt_bias -> bf16")?)
+                Some(
+                    dt_bias
+                        .to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_qk_norm: cast dt_bias -> bf16")?,
+                )
             };
             // Same heavy-tensor cast as gdn_decode_gates_recurrent
             // above — required because conv1d kernel emits F32
@@ -1052,20 +1135,45 @@ impl BackendRuntime for CudaBackend {
             if state.dtype() != kiln_tensor::DType::BF16 {
                 return Ok(None);
             }
-            let q_bf16 = if q.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(q.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast q -> bf16")?)
+            let q_bf16 = if q.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    q.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_qk_norm: cast q -> bf16")?,
+                )
             };
-            let k_bf16 = if k.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(k.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast k -> bf16")?)
+            let k_bf16 = if k.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    k.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_qk_norm: cast k -> bf16")?,
+                )
             };
-            let v_bf16 = if v.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(v.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast v -> bf16")?)
+            let v_bf16 = if v.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    v.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_qk_norm: cast v -> bf16")?,
+                )
             };
-            let a_bf16 = if a.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(a.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast a -> bf16")?)
+            let a_bf16 = if a.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    a.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_qk_norm: cast a -> bf16")?,
+                )
             };
-            let b_bf16 = if b.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(b.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast b -> bf16")?)
+            let b_bf16 = if b.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    b.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_qk_norm: cast b -> bf16")?,
+                )
             };
             return self.gdn_decode_qk_norm_gates_recurrent(
                 q_bf16.as_ref().unwrap_or(q),
@@ -1110,15 +1218,26 @@ impl BackendRuntime for CudaBackend {
             return Ok(None);
         }
         // Squeeze for the kernel call (3D-expecting).
-        let q_3d = q.squeeze(1)
+        let q_3d = q
+            .squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_qk_norm q squeeze(1) failed")?;
-        let k_3d = k.squeeze(1)
+        let k_3d = k
+            .squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_qk_norm k squeeze(1) failed")?;
-        let v_3d = v.squeeze(1)
+        let v_3d = v
+            .squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_qk_norm v squeeze(1) failed")?;
         let out_kt = kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_bf16_kt(
-            &q_3d, &k_3d, &v_3d, &a_c, &b_c, &alog_c, &dtb_c, &state_c,
-            q_scale as f32, qk_eps as f32,
+            &q_3d,
+            &k_3d,
+            &v_3d,
+            &a_c,
+            &b_c,
+            &alog_c,
+            &dtb_c,
+            &state_c,
+            q_scale as f32,
+            qk_eps as f32,
         )
         .map_err(|e| anyhow::anyhow!("kt gdn_decode_qk_norm_gates_recurrent: {e}"))?;
         // Same 3D->4D unsqueeze fix as gdn_decode_gates_recurrent
@@ -1191,43 +1310,82 @@ impl BackendRuntime for CudaBackend {
             let a_log_bf16 = if a_log.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(a_log.to_dtype(kiln_tensor::DType::BF16)
-                    .with_context(|| "gdn_decode_rmsnorm: cast a_log -> bf16")?)
+                Some(
+                    a_log
+                        .to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_rmsnorm: cast a_log -> bf16")?,
+                )
             };
             let dt_bias_bf16 = if dt_bias.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(dt_bias.to_dtype(kiln_tensor::DType::BF16)
-                    .with_context(|| "gdn_decode_rmsnorm: cast dt_bias -> bf16")?)
+                Some(
+                    dt_bias
+                        .to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_rmsnorm: cast dt_bias -> bf16")?,
+                )
             };
             let weight_f32 = if weight.dtype() == kiln_tensor::DType::F32 {
                 None
             } else {
-                Some(weight.to_dtype(kiln_tensor::DType::F32)
-                    .with_context(|| "gdn_decode_rmsnorm: cast weight -> f32")?)
+                Some(
+                    weight
+                        .to_dtype(kiln_tensor::DType::F32)
+                        .with_context(|| "gdn_decode_rmsnorm: cast weight -> f32")?,
+                )
             };
             // Same heavy-tensor cast as the sibling functions
             // above — required because conv1d emits F32 q/k/v.
             if state.dtype() != kiln_tensor::DType::BF16 {
                 return Ok(None);
             }
-            let q_bf16 = if q.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(q.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast q -> bf16")?)
+            let q_bf16 = if q.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    q.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_rmsnorm: cast q -> bf16")?,
+                )
             };
-            let k_bf16 = if k.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(k.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast k -> bf16")?)
+            let k_bf16 = if k.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    k.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_rmsnorm: cast k -> bf16")?,
+                )
             };
-            let v_bf16 = if v.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(v.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast v -> bf16")?)
+            let v_bf16 = if v.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    v.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_rmsnorm: cast v -> bf16")?,
+                )
             };
-            let a_bf16 = if a.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(a.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast a -> bf16")?)
+            let a_bf16 = if a.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    a.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_rmsnorm: cast a -> bf16")?,
+                )
             };
-            let b_bf16 = if b.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(b.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast b -> bf16")?)
+            let b_bf16 = if b.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    b.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_rmsnorm: cast b -> bf16")?,
+                )
             };
-            let z_bf16 = if z.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(z.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast z -> bf16")?)
+            let z_bf16 = if z.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    z.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_rmsnorm: cast z -> bf16")?,
+                )
             };
             return self.gdn_decode_qk_norm_gates_recurrent_rmsnorm(
                 q_bf16.as_ref().unwrap_or(q),
@@ -1287,15 +1445,29 @@ impl BackendRuntime for CudaBackend {
             return Ok(None);
         }
         // Squeeze for the kernel call (3D-expecting).
-        let q_3d = q.squeeze(1)
+        let q_3d = q
+            .squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm q squeeze(1) failed")?;
-        let k_3d = k.squeeze(1)
+        let k_3d = k
+            .squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm k squeeze(1) failed")?;
-        let v_3d = v.squeeze(1)
+        let v_3d = v
+            .squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm v squeeze(1) failed")?;
         let out_kt = kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt(
-            &q_3d, &k_3d, &v_3d, &a_c, &b_c, &alog_c, &dtb_c, &state_c, &z_c, &weight_c,
-            q_scale as f32, qk_eps as f32, rms_eps as f32,
+            &q_3d,
+            &k_3d,
+            &v_3d,
+            &a_c,
+            &b_c,
+            &alog_c,
+            &dtb_c,
+            &state_c,
+            &z_c,
+            &weight_c,
+            q_scale as f32,
+            qk_eps as f32,
+            rms_eps as f32,
         )
         .map_err(|e| anyhow::anyhow!("kt gdn_decode_qk_norm_gates_recurrent_rmsnorm: {e}"))?;
         // Same 3D->4D unsqueeze fix as the gdn_decode_gates_recurrent
@@ -1367,9 +1539,8 @@ impl BackendRuntime for CudaBackend {
         if !kiln_gdn_kernel::gdn_gates_supports_kt(&a_c, &b_c, &alog_c, &dtb_c) {
             return Ok(None);
         }
-        let (beta_kt, g_kt) =
-            kiln_gdn_kernel::gdn_gates_bf16_kt(&a_c, &b_c, &alog_c, &dtb_c)
-                .map_err(|e| anyhow::anyhow!("kt gdn_gates_bf16: {e}"))?;
+        let (beta_kt, g_kt) = kiln_gdn_kernel::gdn_gates_bf16_kt(&a_c, &b_c, &alog_c, &dtb_c)
+            .map_err(|e| anyhow::anyhow!("kt gdn_gates_bf16: {e}"))?;
         Ok(Some((beta_kt, g_kt)))
     }
 
@@ -1404,7 +1575,11 @@ impl BackendRuntime for CudaBackend {
         Ok(Some(out_kt))
     }
 
-    fn linear_prefill_apply(&self, x: &kiln_tensor::Tensor, weight_t: &kiln_tensor::Tensor) -> Result<Option<kiln_tensor::Tensor>> {
+    fn linear_prefill_apply(
+        &self,
+        x: &kiln_tensor::Tensor,
+        weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         if !cuda_tensors_on_device(&[x, weight_t])
             || x.dims().is_empty()
             || weight_t.dims().len() != 2
@@ -1447,7 +1622,10 @@ impl BackendRuntime for CudaBackend {
             // NVTX range from try_kt_matmul brackets the call as
             // kiln/matmul_kt in nsys.
             if crate::forward::cuda_use_kt_api_matmul()
-                && matches!(x2d.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F16 | kiln_tensor::DType::F32)
+                && matches!(
+                    x2d.dtype(),
+                    kiln_tensor::DType::BF16 | kiln_tensor::DType::F16 | kiln_tensor::DType::F32
+                )
                 && x2d.dtype() == weight_t.dtype()
                 && x2d.is_contiguous()
                 && weight_t.is_contiguous()
@@ -1475,7 +1653,10 @@ impl BackendRuntime for CudaBackend {
             // as (B × K × N), typically larger by an order of magnitude on
             // Qwen3.5-4B GDN in-proj shapes. (#1082)
             if crate::forward::cuda_use_kt_api_matmul()
-                && matches!(x.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F16 | kiln_tensor::DType::F32)
+                && matches!(
+                    x.dtype(),
+                    kiln_tensor::DType::BF16 | kiln_tensor::DType::F16 | kiln_tensor::DType::F32
+                )
                 && x.dtype() == weight_t.dtype()
                 && weight_t.is_contiguous()
             {
@@ -1596,7 +1777,9 @@ impl BackendRuntime for CudaBackend {
         // The kt variant expects rank-2 [rows, hidden]; flatten higher-rank
         // x/z by folding all leading dims into rows. weight stays [hidden].
         let x_dims = x.dims().to_vec();
-        let hidden = *x_dims.last().expect("x has at least one dim (checked by supports_kt)");
+        let hidden = *x_dims
+            .last()
+            .expect("x has at least one dim (checked by supports_kt)");
         let rows: usize = x_dims.iter().take(x_dims.len() - 1).product();
         // #1082: x/z arrive as transposed views (e.g. [1,7,2,16] strides
         // [224,16,112,1] after the head transpose). candle's reshape silently
@@ -1667,8 +1850,9 @@ impl BackendRuntime for CudaBackend {
         if !kiln_conv1d_kernel::supports_kt(x, weight, conv_state, kernel_size) {
             return Ok(None);
         }
-        let out_kt = kiln_conv1d_kernel::causal_conv1d_update_kt(x, weight, conv_state, kernel_size)
-            .map_err(|e| anyhow::anyhow!("kt causal_conv1d_update: {e}"))?;
+        let out_kt =
+            kiln_conv1d_kernel::causal_conv1d_update_kt(x, weight, conv_state, kernel_size)
+                .map_err(|e| anyhow::anyhow!("kt causal_conv1d_update: {e}"))?;
         Ok(Some(out_kt))
     }
 
@@ -1687,8 +1871,9 @@ impl BackendRuntime for CudaBackend {
         if !kiln_conv1d_kernel::supports_prefill_kt(x, weight, conv_state, kernel_size) {
             return Ok(None);
         }
-        let out_kt = kiln_conv1d_kernel::causal_conv1d_prefill_kt(x, weight, conv_state, kernel_size)
-            .map_err(|e| anyhow::anyhow!("kt causal_conv1d_prefill: {e}"))?;
+        let out_kt =
+            kiln_conv1d_kernel::causal_conv1d_prefill_kt(x, weight, conv_state, kernel_size)
+                .map_err(|e| anyhow::anyhow!("kt causal_conv1d_prefill: {e}"))?;
         Ok(Some(out_kt))
     }
 }
@@ -1869,8 +2054,8 @@ mod tests {
 
         // Build host BF16 then move to CUDA; skip when no device.
         let mk_bf16 = |vals: &[f32]| -> Result<Option<kiln_tensor::Tensor>> {
-            let host = kiln_tensor::Tensor::from_slice(vals, vec![vals.len()])?
-                .to_dtype(KtDType::BF16)?;
+            let host =
+                kiln_tensor::Tensor::from_slice(vals, vec![vals.len()])?.to_dtype(KtDType::BF16)?;
             match host.to_device(KtDevice::Cuda(0)) {
                 Ok(t) => Ok(Some(t)),
                 Err(_) => Ok(None),
@@ -1885,7 +2070,10 @@ mod tests {
         backend.register_resident_activation(&param)?;
         backend.register_resident_activation(&grad)?;
         assert!(backend.dispatch_sgd_step(&param, &grad, 0.5)?);
-        let sgd_actual = param.to_device(KtDevice::Cpu)?.to_dtype(KtDType::F32)?.to_vec1::<f32>()?;
+        let sgd_actual = param
+            .to_device(KtDevice::Cpu)?
+            .to_dtype(KtDType::F32)?
+            .to_vec1::<f32>()?;
         let sgd_expected = [0.875f32, -1.75, 0.25, 3.125];
         for (a, e) in sgd_actual.iter().zip(sgd_expected.iter()) {
             assert!(
@@ -1914,7 +2102,10 @@ mod tests {
             0.1,
             1,
         )?);
-        let adam_actual = adam_param.to_device(KtDevice::Cpu)?.to_dtype(KtDType::F32)?.to_vec1::<f32>()?;
+        let adam_actual = adam_param
+            .to_device(KtDevice::Cpu)?
+            .to_dtype(KtDType::F32)?
+            .to_vec1::<f32>()?;
         let before = [1.0f32, -2.0, 0.5, 3.0];
         let grad_vals = [0.5f32, -0.5, 0.25, -0.25];
         for ((a, p0), g) in adam_actual.iter().zip(before.iter()).zip(grad_vals.iter()) {
@@ -2002,11 +2193,15 @@ mod tests {
         let backend = CudaBackend::new(kiln_tensor::Device::Cpu);
 
         let Some(x) = kt_cuda_2d(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], [2, 3])? else {
-            eprintln!("CUDA unavailable, skipping cuda_linear_prefill_apply_matches_reference_matmul");
+            eprintln!(
+                "CUDA unavailable, skipping cuda_linear_prefill_apply_matches_reference_matmul"
+            );
             return Ok(());
         };
         let w = kt_cuda_2d(
-            &[0.5f32, 1.0, -1.5, 2.0, -0.25, 0.75, 1.25, -0.5, 2.0, -1.0, 0.0, 0.5],
+            &[
+                0.5f32, 1.0, -1.5, 2.0, -0.25, 0.75, 1.25, -0.5, 2.0, -1.0, 0.0, 0.5,
+            ],
             [3, 4],
         )?
         .expect("cuda w");
@@ -2016,8 +2211,12 @@ mod tests {
             .expect("CUDA linear_prefill_apply should accept CUDA tensors");
         let expected = x.broadcast_matmul(&w)?;
         assert_eq!(
-            routed.to_device(kiln_tensor::Device::Cpu)?.to_vec2::<f32>()?,
-            expected.to_device(kiln_tensor::Device::Cpu)?.to_vec2::<f32>()?
+            routed
+                .to_device(kiln_tensor::Device::Cpu)?
+                .to_vec2::<f32>()?,
+            expected
+                .to_device(kiln_tensor::Device::Cpu)?
+                .to_vec2::<f32>()?
         );
         Ok(())
     }
@@ -2027,7 +2226,9 @@ mod tests {
         let backend = CudaBackend::new(kiln_tensor::Device::Cpu);
 
         let Some(x) = kt_cuda_2d(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], [2, 3])? else {
-            eprintln!("CUDA unavailable, skipping cuda_linear_prefill_apply_offset_matches_reference_chunk");
+            eprintln!(
+                "CUDA unavailable, skipping cuda_linear_prefill_apply_offset_matches_reference_chunk"
+            );
             return Ok(());
         };
         let w = kt_cuda_2d(
@@ -2045,8 +2246,12 @@ mod tests {
         let expected_chunk = w.narrow(1, 1, 3)?.contiguous()?;
         let expected = x.broadcast_matmul(&expected_chunk)?;
         assert_eq!(
-            routed.to_device(kiln_tensor::Device::Cpu)?.to_vec2::<f32>()?,
-            expected.to_device(kiln_tensor::Device::Cpu)?.to_vec2::<f32>()?
+            routed
+                .to_device(kiln_tensor::Device::Cpu)?
+                .to_vec2::<f32>()?,
+            expected
+                .to_device(kiln_tensor::Device::Cpu)?
+                .to_vec2::<f32>()?
         );
         Ok(())
     }
@@ -2060,11 +2265,8 @@ mod tests {
             return Ok(());
         };
         let a = kt_cuda_2d(&[0.25f32, -0.5, 1.0, 1.5, 0.0, -1.0], [2, 3])?.expect("cuda a");
-        let b = kt_cuda_2d(
-            &[1.0f32, -0.25, 0.5, 0.75, -1.0, 0.25, 0.0, 1.5],
-            [4, 2],
-        )?
-        .expect("cuda b");
+        let b =
+            kt_cuda_2d(&[1.0f32, -0.25, 0.5, 0.75, -1.0, 0.25, 0.0, 1.5], [4, 2])?.expect("cuda b");
         let scale = 0.5;
 
         assert!(backend.lora_delta_resident(&x, &a, &b, scale)?.is_none());
@@ -2084,8 +2286,12 @@ mod tests {
         )?;
 
         assert_eq!(
-            routed.to_device(kiln_tensor::Device::Cpu)?.to_vec2::<f32>()?,
-            expected.to_device(kiln_tensor::Device::Cpu)?.to_vec2::<f32>()?
+            routed
+                .to_device(kiln_tensor::Device::Cpu)?
+                .to_vec2::<f32>()?,
+            expected
+                .to_device(kiln_tensor::Device::Cpu)?
+                .to_vec2::<f32>()?
         );
         Ok(())
     }
