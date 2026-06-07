@@ -754,6 +754,7 @@ pub struct ProjectionLoadPolicy {
     pub cache_full_attention_qkv_transpose_concat: bool,
     pub cache_linear_attention_ab_transpose_concat: bool,
     pub cache_mlp_gate_up_transpose_concat: bool,
+    pub pack_w8a16_projection_rows: bool,
     pub stub_embedding_table_after_transposed_upload: bool,
     pub drop_projection_originals: bool,
     pub drop_projection_transposes: bool,
@@ -1441,6 +1442,7 @@ impl ProjectionLoadPolicy {
                 backend,
                 kiln_tensor::Backend::Cuda | kiln_tensor::Backend::Rocm
             ),
+            pack_w8a16_projection_rows: matches!(backend, kiln_tensor::Backend::Rocm),
             stub_embedding_table_after_transposed_upload: matches!(
                 backend,
                 kiln_tensor::Backend::Metal | kiln_tensor::Backend::Vulkan

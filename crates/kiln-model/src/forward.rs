@@ -6571,7 +6571,7 @@ impl GpuWeights {
         let lm_head_w8 = {
             #[cfg(feature = "rocm")]
             {
-                if w8a16_enabled && matches!(*device, Device::Rocm(_)) {
+                if w8a16_enabled && projection_load_policy.pack_w8a16_projection_rows {
                     crate::rocm_w8_proj::pack_from_bf16_rows(&embed_tokens)
                         .context("w8 lm_head pack")?
                 } else {
@@ -6684,7 +6684,10 @@ impl GpuWeights {
                     let (qkv_proj_w8, o_proj_w8) = {
                         #[cfg(feature = "rocm")]
                         {
-                            if w8a16_enabled && !w4a16_enabled && matches!(*device, Device::Rocm(_)) {
+                            if w8a16_enabled
+                                && !w4a16_enabled
+                                && projection_load_policy.pack_w8a16_projection_rows
+                            {
                                 let qkv_rows = Tensor::cat(&[&q_proj, &k_proj, &v_proj], 0)?
                                     .contiguous()
                                     .context(ctx("w8 full-attn qkv rows contiguous"))?;
@@ -6810,7 +6813,7 @@ impl GpuWeights {
                     let in_proj_qkvzab_w8 = {
                         #[cfg(feature = "rocm")]
                         {
-                            if w8a16_enabled && matches!(*device, Device::Rocm(_)) {
+                            if w8a16_enabled && projection_load_policy.pack_w8a16_projection_rows {
                                 let rows =
                                     Tensor::cat(&[&in_proj_qkv, &in_proj_z, &in_proj_a, &in_proj_b], 0)?
                                         .contiguous()
@@ -6917,7 +6920,10 @@ impl GpuWeights {
             let (gate_up_proj_w8, down_proj_w8) = {
                 #[cfg(feature = "rocm")]
                 {
-                    if w8a16_enabled && !w4a16_enabled && matches!(*device, Device::Rocm(_)) {
+                    if w8a16_enabled
+                        && !w4a16_enabled
+                        && projection_load_policy.pack_w8a16_projection_rows
+                    {
                         let gate_up_rows = Tensor::cat(&[&gate_proj, &up_proj], 0)?
                             .contiguous()
                             .context(ctx("w8 gate_up rows contiguous"))?;

@@ -1280,6 +1280,7 @@ fn generated_capability_report_lists_request_descriptors() {
         "cache_full_attention_qkv_transpose_concat",
         "cache_linear_attention_ab_transpose_concat",
         "cache_mlp_gate_up_transpose_concat",
+        "pack_w8a16_projection_rows",
         "stub_embedding_table_after_transposed_upload",
         "drop_projection_originals",
         "drop_projection_transposes",
@@ -3202,6 +3203,20 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             "MLP gate/up transpose cache should not keep local backend policy: {forbidden}"
         );
     }
+    let projection_w8_pack_policy_section = source_between(
+        &forward_source,
+        "pub fn from_model_weights(",
+        "if w4a16_enabled && !marlin_pack_inputs.is_empty()",
+    );
+    assert!(
+        projection_w8_pack_policy_section
+            .contains("projection_load_policy.pack_w8a16_projection_rows"),
+        "W8A16 projection row packing should consume ProjectionLoadPolicy"
+    );
+    assert!(
+        !projection_w8_pack_policy_section.contains("matches!(*device, Device::Rocm"),
+        "W8A16 projection row packing should not keep local ROCm device checks"
+    );
     assert!(
         forward_source.contains("ResidencyBackend"),
         "forward GDN recurrent residency helpers should import the focused residency facet"
