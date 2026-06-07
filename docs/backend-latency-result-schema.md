@@ -8,9 +8,12 @@ metrics. The validator is `scripts/check_backend_latency_fixtures.py`.
 
 Pending fixtures live in `docs/backend-latency-fixtures.json` with:
 
+- `schema_version`: `1`
 - `threshold_state`: `pending_fixture_result`
 - metric `max`: `null`
 - `status`: `fixture_required`
+- `policy.covered_gate_requires`: the checked policy list explaining why the
+  hardware latency gate cannot be covered by local/default-feature checks alone
 
 This state is valid for local and default-feature CI. It must not mark the
 hardware latency conformance gate covered.

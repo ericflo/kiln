@@ -41,6 +41,20 @@ VALID_THRESHOLD_STATES = {"pending_fixture_result", "locked_threshold"}
 VALID_COMPARISONS = {"<=", ">="}
 VALID_RESULT_STATUSES = {"passed", "failed"}
 CHECKSUM_RE = re.compile(r"^[0-9a-f]{64}$")
+MANIFEST_KEYS = {
+    "fixtures",
+    "missing_fixture_slots",
+    "policy",
+    "required_backends",
+    "schema_version",
+    "status",
+}
+REQUIRED_COVERED_GATE_POLICY = [
+    "Every required backend has at least one known hardware fixture.",
+    "Every fixture has locked numeric thresholds for its required measurements.",
+    "Every locked threshold has a checked hardware-result artifact from the named fixture.",
+    "Default-feature local tests must not mark the hardware latency gate covered.",
+]
 
 
 def is_number(value: Any) -> bool:
@@ -423,12 +437,42 @@ def validate_result_artifact(
             )
 
 
+def validate_manifest_keys(errors: list[str], manifest: dict[str, Any]) -> None:
+    observed_keys = set(manifest)
+    missing_keys = sorted(MANIFEST_KEYS - observed_keys)
+    extra_keys = sorted(observed_keys - MANIFEST_KEYS)
+    if missing_keys:
+        errors.append(f"manifest missing required keys: {missing_keys}")
+    if extra_keys:
+        errors.append(f"manifest contains unknown keys: {extra_keys}")
+
+
+def validate_manifest_policy(errors: list[str], manifest: dict[str, Any]) -> None:
+    policy = manifest.get("policy")
+    if not isinstance(policy, dict):
+        errors.append("policy must be an object")
+        return
+    observed_keys = set(policy)
+    if observed_keys != {"covered_gate_requires"}:
+        missing = sorted({"covered_gate_requires"} - observed_keys)
+        extra = sorted(observed_keys - {"covered_gate_requires"})
+        if missing:
+            errors.append(f"policy missing required keys: {missing}")
+        if extra:
+            errors.append(f"policy contains unknown keys: {extra}")
+    covered_gate_requires = policy.get("covered_gate_requires")
+    if covered_gate_requires != REQUIRED_COVERED_GATE_POLICY:
+        errors.append("policy.covered_gate_requires must match the hardware latency gate policy")
+
+
 def validate_manifest(
     manifest: dict[str, Any],
     require_covered: bool,
     manifest_path: Path | None = None,
 ) -> list[str]:
     errors: list[str] = []
+    validate_manifest_keys(errors, manifest)
+    validate_manifest_policy(errors, manifest)
 
     if manifest.get("schema_version") != 1:
         errors.append("schema_version must be 1")
@@ -632,6 +676,7 @@ def self_test() -> int:
                 {"name": "tokens_per_s", "unit": "tok/s", "comparison": ">=", "max": 100.0},
             ],
         }
+        policy = {"covered_gate_requires": REQUIRED_COVERED_GATE_POLICY}
         artifact.write_text(
             json.dumps(
                 {
@@ -1119,6 +1164,7 @@ def self_test() -> int:
             {
                 "schema_version": 1,
                 "status": "covered",
+                "policy": policy,
                 "required_backends": ["cuda"],
                 "fixtures": [fixture],
                 "missing_fixture_slots": [],
@@ -1141,7 +1187,56 @@ def self_test() -> int:
         errors = validate_manifest(
             {
                 "schema_version": 1,
+                "status": "fixture_required",
+                "policy": policy,
+                "required_backends": ["cuda"],
+                "fixtures": [fixture],
+                "missing_fixture_slots": [],
+                "unexpected": True,
+            },
+            require_covered=False,
+        )
+        if not any("manifest contains unknown keys" in error for error in errors):
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "case": "unknown manifest key",
+                        "errors": errors,
+                    },
+                    indent=2,
+                )
+            )
+            return 1
+
+        errors = validate_manifest(
+            {
+                "schema_version": 1,
+                "status": "fixture_required",
+                "required_backends": ["cuda"],
+                "fixtures": [fixture],
+                "missing_fixture_slots": [],
+            },
+            require_covered=False,
+        )
+        if not any("policy must be an object" in error for error in errors):
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "case": "missing manifest policy",
+                        "errors": errors,
+                    },
+                    indent=2,
+                )
+            )
+            return 1
+
+        errors = validate_manifest(
+            {
+                "schema_version": 1,
                 "status": "covered",
+                "policy": policy,
                 "required_backends": ["cuda"],
                 "fixtures": [fixture],
                 "missing_fixture_slots": [],
@@ -1203,6 +1298,7 @@ def self_test() -> int:
             {
                 "schema_version": 1,
                 "status": "covered",
+                "policy": policy,
                 "required_backends": ["cuda"],
                 "fixtures": [noncanonical_fixture],
                 "missing_fixture_slots": [],

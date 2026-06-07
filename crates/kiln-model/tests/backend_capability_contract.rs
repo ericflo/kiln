@@ -2470,6 +2470,10 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
     for required in [
         "def validate_result_artifact(",
         "def metric_threshold_passes(",
+        "MANIFEST_KEYS",
+        "REQUIRED_COVERED_GATE_POLICY",
+        "manifest contains unknown keys",
+        "policy.covered_gate_requires must match",
         "status covered requires --require-covered",
         "artifact_schema_version",
         "created_at_utc",
@@ -2717,6 +2721,26 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
     .expect("latency fixture manifest should parse");
     assert_eq!(manifest["schema_version"], 1);
     assert_eq!(manifest["status"], "fixture_required");
+    let policy = manifest["policy"]
+        .as_object()
+        .expect("latency fixture manifest policy should be an object");
+    let covered_gate_requires = policy["covered_gate_requires"]
+        .as_array()
+        .expect("covered_gate_requires should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    for requirement in [
+        "Every required backend has at least one known hardware fixture.",
+        "Every fixture has locked numeric thresholds for its required measurements.",
+        "Every locked threshold has a checked hardware-result artifact from the named fixture.",
+        "Default-feature local tests must not mark the hardware latency gate covered.",
+    ] {
+        assert!(
+            covered_gate_requires.contains(&requirement),
+            "latency fixture manifest policy should include {requirement}"
+        );
+    }
 
     let required_backends = manifest["required_backends"]
         .as_array()
