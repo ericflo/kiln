@@ -1407,21 +1407,15 @@ pub fn try_tape_lora_linear_kt(
     ) {
         return Ok(None);
     }
-    // (#1443 step 2) Mixed-precision base projection on Vulkan: F32 activations ×
-    // a frozen BF16 base weight. The base linear runs through the dedicated
-    // `vk_matmul_bf16w` kernel (recorded with a `MatmulBf16wBackward` dx-only
-    // adjoint) instead of the equal-dtype `MatmulBackward`. Keeping the base
-    // weight BF16 is the VRAM win #1443 buys; the LoRA delta + activations stay
-    // F32 (so the F32-only Vulkan rmsnorm/softmax kernels are untouched). This
-    // branch is Vulkan-only — CUDA/Metal carry their own BF16-base paths and run
-    // BF16 activations end-to-end, so they keep the strict `weight_t == x` gate.
-    #[cfg(feature = "vulkan")]
-    let vk_bf16_base = matches!(x.device(), kiln_tensor::Device::Vulkan(_))
-        && x.dtype() == kiln_tensor::DType::F32
-        && weight_t.dtype() == kiln_tensor::DType::BF16;
-    #[cfg(not(feature = "vulkan"))]
-    let vk_bf16_base = false;
-    if weight_t.dtype() != x.dtype() && !vk_bf16_base {
+    // (#1443 step 2) Mixed-precision base projection: F32 activations × a
+    // frozen BF16 base weight are a backend precision-policy exception, not a
+    // local device-family check. Today the policy admits this for Vulkan's
+    // mixed F32/BF16 envelope; other backends keep the strict equal-dtype gate.
+    let precision_policy = crate::backend::TrainingPrecisionPolicy::for_device_family(x.device());
+    let mixed_base_weight = cfg!(feature = "vulkan")
+        && precision_policy
+            .supports_mixed_base_weight_dtype_for_activation(x.dtype(), weight_t.dtype());
+    if weight_t.dtype() != x.dtype() && !mixed_base_weight {
         return Ok(None);
     }
     let Ok((wk, n)) = weight_t.dims2() else {
@@ -1474,14 +1468,13 @@ pub fn try_tape_lora_linear_kt(
                 input_shape: x.shape().to_vec(),
             }),
         );
-        // (#1443 step 2) Base projection. On the Vulkan mixed-precision path
-        // (`vk_bf16_base`) the frozen base weight is BF16 while `x2d` is F32 — the
-        // equal-dtype kt `matmul` can't run, so route the base linear through the
-        // dedicated `vk_matmul_bf16w` kernel and record a `MatmulBf16wBackward`
-        // (dx only; the weight is frozen, no `dW` edge). Output `base2d` is F32,
-        // so the LoRA delta / residual adds below stay F32-vs-F32. Every other
-        // backend (CUDA/Metal, and the equal-dtype F32/BF16 Vulkan path) keeps
-        // the device-agnostic `MatmulBackward` exactly as before.
+        // (#1443 step 2) Base projection. On the policy-approved mixed-base path
+        // the frozen base weight is BF16 while `x2d` is F32 — the equal-dtype kt
+        // `matmul` can't run, so route the base linear through the dedicated
+        // Vulkan `vk_matmul_bf16w` leaf and record a `MatmulBf16wBackward` (dx
+        // only; the weight is frozen, no `dW` edge). Output `base2d` is F32, so
+        // the LoRA delta / residual adds below stay F32-vs-F32. Every equal-dtype
+        // path keeps the device-agnostic `MatmulBackward` exactly as before.
         //
         // LAYOUT: the production base `weight_t` reaching this recorder is
         // `[K, N]` = `[in, out]` (the pre-transposed layout `matmul(x2d, weight_t)`
@@ -1494,7 +1487,7 @@ pub fn try_tape_lora_linear_kt(
         // the activations, which are F32 on Vulkan by design). The same `[N,K]`
         // weight is stored in the backward op so `dx = grad_out @ W` is computed
         // against the matching layout.
-        let base2d = if vk_bf16_base {
+        let base2d = if mixed_base_weight {
             #[cfg(feature = "vulkan")]
             {
                 let w_nk = weight_t
@@ -1512,7 +1505,7 @@ pub fn try_tape_lora_linear_kt(
                 y
             }
             #[cfg(not(feature = "vulkan"))]
-            unreachable!("vk_bf16_base is false without the vulkan feature")
+            unreachable!("mixed_base_weight is false without the vulkan feature")
         } else {
             let base2d = kiln_tensor::ops::matmul(&x2d, weight_t)
                 .map_err(|e| anyhow::anyhow!("kt matmul x2d@w: {e}"))?;

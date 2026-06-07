@@ -537,6 +537,20 @@ impl TrainingPrecisionPolicy {
             && self.mixed_rms_norm_weight_dtype == Some(weight_dtype)
     }
 
+    pub fn supports_mixed_base_weight_dtype_for_activation(
+        &self,
+        activation_dtype: kiln_tensor::DType,
+        weight_dtype: kiln_tensor::DType,
+    ) -> bool {
+        activation_dtype != weight_dtype
+            && self.uses_f32_activations_for_mixed_base_weights()
+            && activation_dtype == kiln_tensor::DType::F32
+            && self
+                .base_weight_dtypes
+                .iter()
+                .any(|dtype| *dtype == weight_dtype)
+    }
+
     pub fn exact_gdn_backward_tile_tokens_or(&self, fallback: usize) -> usize {
         self.exact_gdn_backward_tile_tokens.unwrap_or(fallback)
     }
@@ -3807,6 +3821,10 @@ mod tests {
             kiln_tensor::DType::F32,
             kiln_tensor::DType::BF16
         ));
+        assert!(vulkan.supports_mixed_base_weight_dtype_for_activation(
+            kiln_tensor::DType::F32,
+            kiln_tensor::DType::BF16
+        ));
         assert!(
             !TrainingPrecisionPolicy::cuda().supports_rms_norm_weight_dtype_for_activation(
                 kiln_tensor::DType::F32,
@@ -3814,7 +3832,19 @@ mod tests {
             )
         );
         assert!(
+            !TrainingPrecisionPolicy::cuda().supports_mixed_base_weight_dtype_for_activation(
+                kiln_tensor::DType::F32,
+                kiln_tensor::DType::BF16
+            )
+        );
+        assert!(
             TrainingPrecisionPolicy::metal().supports_rms_norm_weight_dtype_for_activation(
+                kiln_tensor::DType::BF16,
+                kiln_tensor::DType::BF16
+            )
+        );
+        assert!(
+            !TrainingPrecisionPolicy::metal().supports_mixed_base_weight_dtype_for_activation(
                 kiln_tensor::DType::BF16,
                 kiln_tensor::DType::BF16
             )

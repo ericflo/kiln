@@ -4183,6 +4183,27 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             "RMSNorm tape dtype routing should not keep a local Vulkan mixed-dtype policy: {forbidden}"
         );
     }
+    let tape_lora_linear_section = source_between(
+        &tape_forward_source,
+        "pub fn try_tape_lora_linear_kt(",
+        "let out_kt = out_kt.context(\"tape_forward::try_tape_lora_linear_kt",
+    );
+    assert!(
+        tape_lora_linear_section.contains("TrainingPrecisionPolicy::for_device_family")
+            && tape_lora_linear_section.contains("supports_mixed_base_weight_dtype_for_activation"),
+        "LoRA tape mixed-base routing should consume TrainingPrecisionPolicy"
+    );
+    for forbidden in [
+        "vk_bf16_base",
+        "matches!(x.device(), kiln_tensor::Device::Vulkan(_))",
+        "x.dtype() == kiln_tensor::DType::F32",
+        "weight_t.dtype() == kiln_tensor::DType::BF16",
+    ] {
+        assert!(
+            !tape_lora_linear_section.contains(forbidden),
+            "LoRA tape mixed-base routing should not keep a local Vulkan mixed-dtype policy: {forbidden}"
+        );
+    }
     assert!(
         trainer_source.contains("base_dtype_supports_tape_for_backend(weights, backend)"),
         "SFT/GRPO tape eligibility should consume backend precision policy"
