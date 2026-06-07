@@ -7424,24 +7424,20 @@ fn embedding_lookup_from_weights(token_ids: &[u32], weights: &GpuWeights) -> Res
     embedding_lookup(token_ids, &weights.embed_tokens)
 }
 
-/// (#1443 step 3) Vulkan mixed-precision activation cast. The embedding table
-/// (`embed_tokens`) is BF16 on a production BF16 base, so the embedding-lookup
-/// output is BF16. On Vulkan the ACTIVATION dtype is F32 throughout (the
-/// rmsnorm/softmax kernels are F32-only and the base projections consume BF16
-/// weights × F32 activations via `vk_matmul_bf16w`), so the first hidden state
-/// must be cast BF16→F32 before it enters the transformer layers. This is the
-/// single "cast at the start" the mixed-precision design calls for.
-///
-/// No-op (returns the tensor unchanged) unless the tensor is on Vulkan AND BF16:
-///   - CUDA/Metal run BF16 activations end-to-end → untouched.
-///   - An already-F32 Vulkan base (the prior F32-on-Vulkan path) → untouched.
-/// Cheap and idempotent; safe to call on every forward entry point.
-fn vulkan_cast_activation_to_f32(hidden: Tensor) -> Result<Tensor> {
-    #[cfg(feature = "vulkan")]
-    {
-        if matches!(hidden.device(), Device::Vulkan(_)) && hidden.dtype() == DType::BF16 {
-            return Ok(hidden.to_dtype(DType::F32)?);
-        }
+/// (#1443 step 3) Mixed-precision activation cast after embedding lookup.
+/// Backend precision policy owns whether an embedding output dtype should be
+/// promoted before transformer layers. Today this preserves Vulkan's F32
+/// activation / BF16 base-weight envelope while leaving equal-dtype CUDA/Metal
+/// paths untouched.
+fn cast_embedding_output_to_policy_activation(hidden: Tensor) -> Result<Tensor> {
+    let precision_policy = TrainingPrecisionPolicy::for_device_family(hidden.device());
+    let target_dtype = if cfg!(feature = "vulkan") {
+        precision_policy.activation_dtype_for_embedding_output(hidden.dtype())
+    } else {
+        hidden.dtype()
+    };
+    if target_dtype != hidden.dtype() {
+        return Ok(hidden.to_dtype(target_dtype)?);
     }
     Ok(hidden)
 }
@@ -24746,10 +24742,10 @@ pub fn model_forward_kt(
     let seq_len = token_ids.len();
 
     // 1. Embedding lookup: [seq_len, hidden_size]
-    // (#1443 step 3) On Vulkan the BF16 embedding output is cast BF16→F32 so the
-    // activation dtype is F32 throughout (base projections consume the BF16 base
-    // weights via `vk_matmul_bf16w`). No-op on CUDA/Metal and on an F32 base.
-    let mut hidden = vulkan_cast_activation_to_f32(embedding_lookup_from_weights(token_ids, weights)?)?;
+    // (#1443 step 3) Backend precision policy owns any embedding-output cast
+    // needed before transformer-layer activations.
+    let mut hidden =
+        cast_embedding_output_to_policy_activation(embedding_lookup_from_weights(token_ids, weights)?)?;
 
     // Add batch dimension: [1, seq_len, hidden_size]
     hidden = hidden.unsqueeze(0)?;
@@ -24915,11 +24911,9 @@ pub fn model_forward_segment(
     mut linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
 ) -> Result<Tensor> {
-    // (#1443 step 3) Defensive Vulkan BF16→F32 activation cast for direct
-    // callers (gradient-checkpointing recompute) that may hand in a BF16 hidden.
-    // Idempotent no-op when `hidden` is already F32 (the normal path, since
-    // `model_forward_embed` casts) or on CUDA/Metal.
-    let mut hidden = vulkan_cast_activation_to_f32(hidden)?;
+    // (#1443 step 3) Defensive policy-owned activation cast for direct callers
+    // (gradient-checkpointing recompute) that may hand in a pre-cast hidden.
+    let mut hidden = cast_embedding_output_to_policy_activation(hidden)?;
     // Count full-attention and linear-attention layers before start_layer
     // so we index into the right KV cache / linear state slots.
     let mut full_attn_idx: usize = (0..start_layer)
@@ -25211,10 +25205,10 @@ pub fn model_forward_segment(
 /// and position indices for RoPE (starting from position 0, no KV cache offset).
 pub fn model_forward_embed(token_ids: &[u32], weights: &GpuWeights) -> Result<(Tensor, Vec<u32>)> {
     let seq_len = token_ids.len();
-    // (#1443 step 3) Cast the BF16 embedding output to F32 on Vulkan so the
-    // transformer-layer activations are F32 (mixed precision: BF16 base weights,
-    // F32 activations). No-op on CUDA/Metal and on an F32 base.
-    let mut hidden = vulkan_cast_activation_to_f32(embedding_lookup_from_weights(token_ids, weights)?)?;
+    // (#1443 step 3) Backend precision policy owns any embedding-output cast
+    // needed before transformer-layer activations.
+    let mut hidden =
+        cast_embedding_output_to_policy_activation(embedding_lookup_from_weights(token_ids, weights)?)?;
     hidden = hidden.unsqueeze(0)?;
     let positions: Vec<u32> = (0..seq_len).map(|p| p as u32).collect();
     Ok((hidden, positions))

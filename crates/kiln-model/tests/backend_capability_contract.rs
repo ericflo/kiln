@@ -4153,6 +4153,26 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         !streaming_tile_section.contains("match streaming_prefill_device_kind"),
         "streaming tile defaults should not keep a local backend device table"
     );
+    let embedding_activation_cast_section = source_between(
+        &forward_source,
+        "fn cast_embedding_output_to_policy_activation(",
+        "fn embedding_lookup_from_weights_with_index(",
+    );
+    assert!(
+        embedding_activation_cast_section.contains("TrainingPrecisionPolicy::for_device_family")
+            && embedding_activation_cast_section.contains("activation_dtype_for_embedding_output"),
+        "embedding activation cast should consume TrainingPrecisionPolicy"
+    );
+    for forbidden in [
+        "vulkan_cast_activation_to_f32",
+        "matches!(hidden.device(), Device::Vulkan(_))",
+        "hidden.dtype() == DType::BF16",
+    ] {
+        assert!(
+            !embedding_activation_cast_section.contains(forbidden),
+            "embedding activation cast should not keep a local Vulkan dtype policy: {forbidden}"
+        );
+    }
     let base_dtype_support_section = source_between(
         &trainer_source,
         "fn base_dtype_supports_tape_for_policy(",

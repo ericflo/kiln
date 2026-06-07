@@ -551,6 +551,19 @@ impl TrainingPrecisionPolicy {
                 .any(|dtype| *dtype == weight_dtype)
     }
 
+    pub fn activation_dtype_for_embedding_output(
+        &self,
+        embedding_dtype: kiln_tensor::DType,
+    ) -> kiln_tensor::DType {
+        if self.uses_f32_activations_for_mixed_base_weights()
+            && embedding_dtype == kiln_tensor::DType::BF16
+        {
+            kiln_tensor::DType::F32
+        } else {
+            embedding_dtype
+        }
+    }
+
     pub fn exact_gdn_backward_tile_tokens_or(&self, fallback: usize) -> usize {
         self.exact_gdn_backward_tile_tokens.unwrap_or(fallback)
     }
@@ -3825,6 +3838,10 @@ mod tests {
             kiln_tensor::DType::F32,
             kiln_tensor::DType::BF16
         ));
+        assert_eq!(
+            vulkan.activation_dtype_for_embedding_output(kiln_tensor::DType::BF16),
+            kiln_tensor::DType::F32
+        );
         assert!(
             !TrainingPrecisionPolicy::cuda().supports_rms_norm_weight_dtype_for_activation(
                 kiln_tensor::DType::F32,
@@ -3837,6 +3854,11 @@ mod tests {
                 kiln_tensor::DType::BF16
             )
         );
+        assert_eq!(
+            TrainingPrecisionPolicy::cuda()
+                .activation_dtype_for_embedding_output(kiln_tensor::DType::BF16),
+            kiln_tensor::DType::BF16
+        );
         assert!(
             TrainingPrecisionPolicy::metal().supports_rms_norm_weight_dtype_for_activation(
                 kiln_tensor::DType::BF16,
@@ -3848,6 +3870,11 @@ mod tests {
                 kiln_tensor::DType::BF16,
                 kiln_tensor::DType::BF16
             )
+        );
+        assert_eq!(
+            TrainingPrecisionPolicy::metal()
+                .activation_dtype_for_embedding_output(kiln_tensor::DType::BF16),
+            kiln_tensor::DType::BF16
         );
         assert!(!TrainingPrecisionPolicy::portable().uses_f32_activations_for_mixed_base_weights());
         assert!(!TrainingPrecisionPolicy::metal().uses_f32_activations_for_mixed_base_weights());
