@@ -5698,7 +5698,7 @@ impl ProjectionLoadCache {
     }
 
     fn parallel_transposed_projection_upload(&self) -> bool {
-        self.policy.parallel_transposed_projection_upload
+        self.policy.parallel_transposed_projection_upload_enabled()
     }
 
     fn synchronizes_after_dropping_originals(&self) -> bool {
@@ -5732,19 +5732,6 @@ fn projection_tensors_for_load(
     }
 }
 
-#[cfg(feature = "metal")]
-fn parallel_projection_load_disabled() -> bool {
-    matches!(
-        std::env::var("KILN_DISABLE_PARALLEL_PROJECTION_LOAD")
-            .ok()
-            .as_deref()
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("1") | Some("true") | Some("yes")
-    )
-}
-
 fn projection_tensors_for_load_batch(
     weights: &[(&str, &WeightTensor)],
     device: &Device,
@@ -5754,7 +5741,7 @@ fn projection_tensors_for_load_batch(
     // uploading them directly into the target tensors. Every other device falls
     // through to the serial kt-native path below.
     #[cfg(feature = "metal")]
-    if cache.parallel_transposed_projection_upload() && !parallel_projection_load_disabled() {
+    if cache.parallel_transposed_projection_upload() {
         use rayon::prelude::*;
 
         let transposed: Result<Vec<CachedTransposedWeightBytes>> = weights
@@ -5797,23 +5784,13 @@ fn projection_tensors_for_load_batch(
         .collect()
 }
 
-fn parallel_aux_load_disabled() -> bool {
-    matches!(
-        std::env::var("KILN_DISABLE_PARALLEL_AUX_LOAD")
-            .ok()
-            .as_deref()
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("1") | Some("true") | Some("yes")
-    )
-}
-
 fn aux_tensors_for_load_batch(
     weights: &[(&str, &WeightTensor)],
     device: &Device,
 ) -> Result<Vec<Tensor>> {
-    if !matches!(device, Device::Metal(_)) || parallel_aux_load_disabled() {
+    if !ProjectionLoadPolicy::for_model_loader_device(*device)
+        .parallel_auxiliary_weight_upload_enabled()
+    {
         return weights
             .iter()
             .map(|(name, w)| weight_to_tensor(w, device).with_context(|| format!("{name} tensor")))

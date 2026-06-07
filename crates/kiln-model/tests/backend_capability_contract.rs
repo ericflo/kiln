@@ -1274,6 +1274,9 @@ fn generated_capability_report_lists_request_descriptors() {
     for field in [
         "direct_transposed_upload_for_cached_weights",
         "parallel_transposed_projection_upload",
+        "parallel_transposed_projection_upload_disable_env",
+        "parallel_auxiliary_weight_upload",
+        "parallel_auxiliary_weight_upload_disable_env",
         "stub_embedding_table_after_transposed_upload",
         "drop_projection_originals",
         "drop_projection_transposes",
@@ -3093,6 +3096,25 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         assert!(
             !projection_load_cache_section.contains(forbidden),
             "projection load cache should not keep local backend/env policy: {forbidden}"
+        );
+    }
+    let aux_load_policy_section = source_between(
+        &forward_source,
+        "fn aux_tensors_for_load_batch(",
+        "/// Cache a transpose for repeated GEMMs.",
+    );
+    assert!(
+        aux_load_policy_section.contains("ProjectionLoadPolicy::for_model_loader_device")
+            && aux_load_policy_section.contains("parallel_auxiliary_weight_upload_enabled"),
+        "auxiliary weight batch upload should consume ProjectionLoadPolicy"
+    );
+    for forbidden in [
+        "matches!(device, Device::Metal",
+        "KILN_DISABLE_PARALLEL_AUX_LOAD",
+    ] {
+        assert!(
+            !aux_load_policy_section.contains(forbidden),
+            "auxiliary weight batch upload should not keep local backend/env policy: {forbidden}"
         );
     }
     let embedding_load_policy_section = source_between(

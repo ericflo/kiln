@@ -748,6 +748,9 @@ pub struct ProjectionLoadPolicy {
     pub backend: kiln_tensor::Backend,
     pub direct_transposed_upload_for_cached_weights: bool,
     pub parallel_transposed_projection_upload: bool,
+    pub parallel_transposed_projection_upload_disable_env: Option<&'static str>,
+    pub parallel_auxiliary_weight_upload: bool,
+    pub parallel_auxiliary_weight_upload_disable_env: Option<&'static str>,
     pub stub_embedding_table_after_transposed_upload: bool,
     pub drop_projection_originals: bool,
     pub drop_projection_transposes: bool,
@@ -1380,6 +1383,9 @@ impl ProjectionLoadPolicy {
     pub const DROP_PROJECTION_ORIGINALS_ENV: &'static str = "KILN_DROP_PROJECTION_ORIGINALS";
     pub const NATIVE_VULKAN_TRAINING_ENV: &'static str = "KILN_VK_NATIVE_TRAINING";
     pub const KEEP_PROJECTION_TRANSPOSES_ENV: &'static str = "KILN_KEEP_PROJECTION_TRANSPOSES";
+    pub const DISABLE_PARALLEL_PROJECTION_LOAD_ENV: &'static str =
+        "KILN_DISABLE_PARALLEL_PROJECTION_LOAD";
+    pub const DISABLE_PARALLEL_AUXILIARY_LOAD_ENV: &'static str = "KILN_DISABLE_PARALLEL_AUX_LOAD";
 
     pub fn for_model_loader_device(device: kiln_tensor::Device) -> Self {
         if crate::backend::vulkan_active() {
@@ -1411,6 +1417,13 @@ impl ProjectionLoadPolicy {
             ),
             parallel_transposed_projection_upload: matches!(backend, kiln_tensor::Backend::Metal)
                 && drop_projection_originals,
+            parallel_transposed_projection_upload_disable_env: Some(
+                Self::DISABLE_PARALLEL_PROJECTION_LOAD_ENV,
+            ),
+            parallel_auxiliary_weight_upload: matches!(backend, kiln_tensor::Backend::Metal),
+            parallel_auxiliary_weight_upload_disable_env: Some(
+                Self::DISABLE_PARALLEL_AUXILIARY_LOAD_ENV,
+            ),
             stub_embedding_table_after_transposed_upload: matches!(
                 backend,
                 kiln_tensor::Backend::Metal | kiln_tensor::Backend::Vulkan
@@ -1423,6 +1436,22 @@ impl ProjectionLoadPolicy {
             native_training_env: Some(Self::NATIVE_VULKAN_TRAINING_ENV),
             keep_projection_transposes_env: Some(Self::KEEP_PROJECTION_TRANSPOSES_ENV),
         }
+    }
+
+    pub fn parallel_transposed_projection_upload_enabled(self) -> bool {
+        self.parallel_transposed_projection_upload
+            && !self
+                .parallel_transposed_projection_upload_disable_env
+                .map(env_truthy)
+                .unwrap_or(false)
+    }
+
+    pub fn parallel_auxiliary_weight_upload_enabled(self) -> bool {
+        self.parallel_auxiliary_weight_upload
+            && !self
+                .parallel_auxiliary_weight_upload_disable_env
+                .map(env_truthy)
+                .unwrap_or(false)
     }
 }
 
