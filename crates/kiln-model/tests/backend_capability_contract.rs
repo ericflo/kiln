@@ -2470,6 +2470,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
     for required in [
         "def validate_result_artifact(",
         "def metric_threshold_passes(",
+        "status covered requires --require-covered",
         "artifact_schema_version",
         "created_at_utc",
         "git_commit",

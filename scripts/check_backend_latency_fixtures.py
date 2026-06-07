@@ -428,6 +428,8 @@ def validate_manifest(
     status = manifest.get("status")
     if status not in VALID_STATUS:
         errors.append(f"status must be one of {sorted(VALID_STATUS)}")
+    if status == "covered" and not require_covered:
+        errors.append("status covered requires --require-covered")
     if require_covered and status != "covered":
         errors.append("status must be covered when --require-covered is set")
 
@@ -1090,6 +1092,29 @@ def self_test() -> int:
             print(
                 json.dumps(
                     {"ok": False, "case": "source checksum", "errors": errors},
+                    indent=2,
+                )
+            )
+            return 1
+
+        errors = validate_manifest(
+            {
+                "schema_version": 1,
+                "status": "covered",
+                "required_backends": ["cuda"],
+                "fixtures": [fixture],
+                "missing_fixture_slots": [],
+            },
+            require_covered=False,
+        )
+        if not any("status covered requires --require-covered" in error for error in errors):
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "case": "covered manifest without strict validation",
+                        "errors": errors,
+                    },
                     indent=2,
                 )
             )

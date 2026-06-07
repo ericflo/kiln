@@ -26,6 +26,11 @@ To cover the gate, each fixture must:
 - set the manifest `status` to `covered`
 - pass `python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered`
 
+A manifest with `status: "covered"` is intentionally rejected unless the
+checker is run with `--require-covered`, so default-feature local checks cannot
+mark the hardware latency gate covered without exercising the strict artifact
+contract.
+
 The result artifact is JSON:
 
 ```json
