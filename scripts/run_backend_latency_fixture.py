@@ -51,6 +51,22 @@ def default_log_path(fixture: dict[str, Any], log_dir: Path) -> Path:
     return log_dir / f"{safe_slug(fixture_id)}-{timestamp}.log"
 
 
+def raw_log_tail(log_path: Path, max_lines: int = 20) -> str:
+    try:
+        lines = log_path.read_text(errors="replace").splitlines()
+    except OSError as exc:
+        return f"<raw log unreadable: {exc}>"
+    if not lines:
+        return "<raw log empty>"
+    return "\n".join(lines[-max_lines:])
+
+
+def error_with_raw_log_tail(message: str, log_path: Path) -> FixtureRunError:
+    return FixtureRunError(
+        f"{message}; raw log: {log_path}; raw log tail:\n{raw_log_tail(log_path)}"
+    )
+
+
 def run_fixture_command(command: str, log_path: Path, echo: bool) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w") as log:
@@ -71,8 +87,9 @@ def run_fixture_command(command: str, log_path: Path, echo: bool) -> None:
                 print(line, end="")
         return_code = process.wait()
     if return_code != 0:
-        raise FixtureRunError(
-            f"fixture command exited with status {return_code}; raw log: {log_path}"
+        raise error_with_raw_log_tail(
+            f"fixture command exited with status {return_code}",
+            log_path,
         )
 
 
@@ -86,7 +103,10 @@ def materialize_result_artifact(
 ) -> tuple[dict[str, Any], Path]:
     if status not in VALID_RESULT_STATUSES:
         raise FixtureRunError(f"status must be one of {sorted(VALID_RESULT_STATUSES)}")
-    observations = parse_metric_log(log_path)
+    try:
+        observations = parse_metric_log(log_path)
+    except ArtifactError as exc:
+        raise error_with_raw_log_tail(str(exc), log_path) from exc
     artifact = build_result_artifact(
         fixture,
         observations,
@@ -203,6 +223,50 @@ def self_test() -> int:
         raw_log = Path(summary["raw_log"])
         if not raw_log.is_file() or "KILN_LATENCY_METRIC latency_ms" not in raw_log.read_text():
             print(json.dumps({"ok": False, "case": "raw log", "summary": summary}))
+            return 1
+
+        no_metric_script = tmp_root / "no_metric.py"
+        no_metric_script.write_text("print('fixture skipped: no hardware device')\n")
+        no_metric_result_path = tmp_root / "no-metric-result.json"
+        no_metric_manifest_path = tmp_root / "no-metric-fixtures.json"
+        no_metric_manifest_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "fixtures": [
+                        {
+                            "id": "no_metric_fixture",
+                            "backend": "metal",
+                            "hardware": "fixture hardware",
+                            "source": str(no_metric_script),
+                            "command": f"{sys.executable} {no_metric_script}",
+                            "result_artifact": str(no_metric_result_path),
+                            "metrics": [{"name": "latency_ms", "unit": "ms"}],
+                        }
+                    ],
+                }
+            )
+        )
+        try:
+            run_fixture(
+                no_metric_manifest_path,
+                "no_metric_fixture",
+                log_dir,
+                output=None,
+                status="passed",
+                echo=False,
+            )
+        except FixtureRunError as exc:
+            error = str(exc)
+            if (
+                "no KILN_LATENCY_METRIC lines found" not in error
+                or "raw log tail:" not in error
+                or "fixture skipped: no hardware device" not in error
+            ):
+                print(json.dumps({"ok": False, "case": "no metric tail", "error": error}))
+                return 1
+        else:
+            print(json.dumps({"ok": False, "case": "no metric fixture did not fail"}))
             return 1
 
     print(json.dumps({"ok": True, "self_test": "backend latency fixture runner"}))

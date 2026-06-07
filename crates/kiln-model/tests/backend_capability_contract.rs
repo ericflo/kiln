@@ -5124,6 +5124,8 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "subprocess.Popen",
         "KILN_LATENCY_METRIC",
         "raw_log",
+        "raw_log_tail",
+        "raw log tail:",
         "git_commit",
         "git_tracked_dirty",
         "--self-test",

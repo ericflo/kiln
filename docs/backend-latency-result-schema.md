@@ -154,8 +154,12 @@ python3 scripts/run_backend_latency_fixture.py \
 
 The fixture runner executes the selected fixture `command`, writes a timestamped
 raw log under `bench-results/backend-latency/raw`, and then invokes the same
-artifact materialization contract used by the standalone writer. If the fixture
-has already been run manually, materialize the result artifact from the raw log.
+artifact materialization contract used by the standalone writer. If the command
+exits unsuccessfully, or if it succeeds without emitting the required
+`KILN_LATENCY_METRIC` lines, the runner reports the raw log path and a bounded
+raw-log tail so hardware skips such as a missing GPU device are visible in CI
+logs. If the fixture has already been run manually, materialize the result
+artifact from the raw log.
 Covered artifacts should use a raw log checked into the repository, such as one
 captured by the fixture runner under `bench-results/backend-latency/raw`:
 
