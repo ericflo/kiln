@@ -24,6 +24,7 @@ from write_backend_latency_result_artifact import (
     current_git_commit,
     fixture_spec_sha256,
     git_commit_exists,
+    git_file_sha256_at_commit,
     is_canonical_raw_log_path,
     is_canonical_result_artifact_path,
     is_repo_relative_path,
@@ -204,6 +205,20 @@ def validate_result_provenance(
                 errors.append(
                     f"{context}.result_artifact.source_sha256 does not match source"
                 )
+            elif (
+                require_raw_log_file
+                and isinstance(git_commit, str)
+                and GIT_COMMIT_RE.match(git_commit)
+            ):
+                commit_source_sha256 = git_file_sha256_at_commit(git_commit, source)
+                if commit_source_sha256 is None:
+                    errors.append(
+                        f"{context}.result_artifact.source must exist at git_commit when --require-covered is set"
+                    )
+                elif commit_source_sha256 != source_sha256:
+                    errors.append(
+                        f"{context}.result_artifact.source_sha256 must match source at git_commit"
+                    )
         elif require_raw_log_file:
             errors.append(
                 f"{context}.source must exist when --require-covered is set: {source}"
@@ -567,8 +582,9 @@ def self_test() -> int:
         tmp_root = Path(tmp)
         result_root = Path(result_tmp)
         raw_root = Path(raw_tmp)
-        source = tmp_root / "bench.rs"
-        source.write_text("// fixture source\n")
+        source = ROOT / "crates/kiln-tensor/tests/rocm_latency_bench.rs"
+        untracked_source = tmp_root / "bench.rs"
+        untracked_source.write_text("// fixture source\n")
         artifact = result_root / "result.json"
         raw_log = raw_root / "raw.log"
         raw_log.write_text(
@@ -979,6 +995,59 @@ def self_test() -> int:
             print(
                 json.dumps(
                     {"ok": False, "case": "missing git commit", "errors": errors},
+                    indent=2,
+                )
+            )
+            return 1
+
+        missing_commit_source_path = repo_relative_path(untracked_source)
+        missing_commit_source_fixture = dict(fixture)
+        missing_commit_source_fixture["source"] = missing_commit_source_path
+        artifact.write_text(
+            json.dumps(
+                {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": created_at_utc,
+                    "git_commit": git_commit,
+                    "git_tracked_dirty": git_tracked_dirty,
+                    "fixture_id": "cuda_fixture",
+                    "backend": "cuda",
+                    "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": fixture_spec_sha256(
+                        missing_commit_source_fixture
+                    ),
+                    "hardware": "fixture",
+                    "source": missing_commit_source_path,
+                    "source_sha256": hashlib.sha256(
+                        untracked_source.read_bytes()
+                    ).hexdigest(),
+                    "command": "cargo bench",
+                    "raw_log": raw_log_path,
+                    "raw_log_sha256": raw_log_sha256,
+                    "metrics": {"latency_ms": 9.5, "tokens_per_s": 125.0},
+                }
+            )
+        )
+        errors = []
+        validate_result_artifact(
+            errors,
+            missing_commit_source_fixture,
+            artifact,
+            "fixtures[0]",
+            1,
+            None,
+            require_raw_log_file=True,
+        )
+        if not any("source must exist at git_commit" in error for error in errors):
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "case": "source missing from git commit",
+                        "errors": errors,
+                    },
                     indent=2,
                 )
             )

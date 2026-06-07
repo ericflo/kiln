@@ -25,6 +25,7 @@ from write_backend_latency_result_artifact import (
     current_git_commit,
     fixture_spec_sha256,
     git_commit_exists,
+    git_file_sha256_at_commit,
     is_canonical_raw_log_path,
     is_canonical_result_artifact_path,
     is_repo_relative_path,
@@ -292,6 +293,15 @@ def lock_fixture_thresholds(
         raise ThresholdLockError(
             f"{fixture_id}.result_artifact.source_sha256 does not match source"
         )
+    commit_source_sha256 = git_file_sha256_at_commit(git_commit, source)
+    if commit_source_sha256 is None:
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.source must exist at git_commit before thresholds can lock"
+        )
+    if commit_source_sha256 != source_sha256:
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.source_sha256 must match source at git_commit"
+        )
     raw_log = result.get("raw_log")
     if not isinstance(raw_log, str) or not raw_log:
         raise ThresholdLockError(
@@ -432,8 +442,9 @@ def self_test() -> int:
         tmp_root = Path(tmp)
         result_path = Path(result_tmp) / "result.json"
         raw_log_path = Path(raw_tmp) / "bench.log"
-        source_path = tmp_root / "bench.py"
-        source_path.write_text("# latency fixture source\n")
+        source_path = ROOT / "crates/kiln-tensor/tests/rocm_latency_bench.rs"
+        untracked_source_path = tmp_root / "bench.py"
+        untracked_source_path.write_text("# latency fixture source\n")
         raw_log_path.write_text(
             "KILN_LATENCY_METRIC latency_ms 10.0 ms\n"
             "KILN_LATENCY_METRIC tokens_per_s 200.0 tok/s\n"
@@ -765,6 +776,45 @@ def self_test() -> int:
                 return 1
         else:
             print(json.dumps({"ok": False, "case": "missing git commit did not fail"}))
+            return 1
+
+        missing_commit_source_manifest = deepcopy(manifest)
+        missing_commit_source = missing_commit_source_manifest["fixtures"][0]
+        missing_commit_source_artifact_path = repo_relative_path(untracked_source_path)
+        missing_commit_source["source"] = missing_commit_source_artifact_path
+        result_path.write_text(
+            json.dumps(
+                {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": created_at_utc,
+                    "git_commit": git_commit,
+                    "git_tracked_dirty": git_tracked_dirty,
+                    "fixture_id": "fixture",
+                    "backend": "cuda",
+                    "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": fixture_spec_sha256(
+                        missing_commit_source
+                    ),
+                    "hardware": "fixture hardware",
+                    "source": missing_commit_source_artifact_path,
+                    "source_sha256": sha256_file(untracked_source_path),
+                    "command": "python bench.py",
+                    "raw_log": raw_log_artifact_path,
+                    "raw_log_sha256": raw_log_sha256,
+                    "metrics": {"latency_ms": 10.0, "tokens_per_s": 200.0},
+                }
+            )
+        )
+        try:
+            lock_manifest_thresholds(missing_commit_source_manifest, 0.10)
+        except ThresholdLockError as exc:
+            if "source must exist at git_commit" not in str(exc):
+                print(json.dumps({"ok": False, "case": "source missing from git commit", "error": str(exc)}))
+                return 1
+        else:
+            print(json.dumps({"ok": False, "case": "source missing from git commit did not fail"}))
             return 1
 
         result_path.write_text(

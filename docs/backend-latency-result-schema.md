@@ -95,8 +95,10 @@ live under `bench-results/backend-latency` with a `.json` extension, result
 extension, and the referenced source and `raw_log` files to exist in the
 checkout and checks that their SHA-256 digests match
 `source_sha256` and `raw_log_sha256`. It requires `git_commit` to be a
-lowercase 40-character commit that exists in the local repository and
-`git_tracked_dirty` to be `false` for covered validation. It then re-parses the
+lowercase 40-character commit that exists in the local repository, requires the
+fixture source to exist at `git_commit`, requires `source_sha256` to match the
+source bytes at that commit, and requires `git_tracked_dirty` to be `false` for
+covered validation. It then re-parses the
 raw log `KILN_LATENCY_METRIC` lines and requires every declared artifact metric
 value and unit to match the raw log. It rejects unknown artifact keys and
 undeclared artifact metrics.
@@ -177,8 +179,9 @@ be repo-relative, result `raw_log` to live under
 `bench-results/backend-latency/raw` with a `.log` extension, and the referenced
 source and raw log files to exist and match `source_sha256`/`raw_log_sha256`.
 It requires `git_commit` to be a lowercase 40-character commit that exists in
-the local repository and `git_tracked_dirty` to be `false` before thresholds can
-lock. It re-parses the
+the local repository, requires the fixture source to exist at `git_commit`,
+requires `source_sha256` to match the source bytes at that commit, and requires
+`git_tracked_dirty` to be `false` before thresholds can lock. It re-parses the
 raw log and requires each
 artifact metric value and unit to match before deriving thresholds. It sets every
 fixture `threshold_state` to

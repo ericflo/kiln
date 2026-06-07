@@ -146,6 +146,20 @@ def git_output(args: list[str]) -> str:
     return completed.stdout.strip()
 
 
+def git_output_bytes(args: list[str]) -> bytes:
+    try:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=ROOT,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ArtifactError(f"git {' '.join(args)} failed: {exc}") from exc
+    return completed.stdout
+
+
 def current_git_commit() -> str:
     commit = git_output(["rev-parse", "HEAD"])
     if not GIT_COMMIT_RE.match(commit):
@@ -177,6 +191,16 @@ def repo_relative_path(path: Path) -> str:
 def is_repo_relative_path(path: str) -> bool:
     candidate = Path(path)
     return not candidate.is_absolute() and ".." not in candidate.parts
+
+
+def git_file_sha256_at_commit(commit: str, path: str) -> str | None:
+    if not GIT_COMMIT_RE.match(commit) or not is_repo_relative_path(path):
+        return None
+    try:
+        content = git_output_bytes(["show", f"{commit}:{path}"])
+    except ArtifactError:
+        return None
+    return hashlib.sha256(content).hexdigest()
 
 
 def is_under_repo_dir(path: str, directory: Path) -> bool:
@@ -385,6 +409,7 @@ def self_test() -> int:
         )
         write_artifact(output_path, artifact)
         written = json.loads(output_path.read_text())
+        tracked_fixture_source = "crates/kiln-tensor/tests/rocm_latency_bench.rs"
         if (
             set(written) != RESULT_ARTIFACT_KEYS
             or written.get("artifact_schema_version") != ARTIFACT_SCHEMA_VERSION
@@ -407,6 +432,11 @@ def self_test() -> int:
             or not isinstance(written.get("raw_log_sha256"), str)
             or not CHECKSUM_RE.match(written["raw_log_sha256"])
             or written.get("metrics") != {"latency_ms": 9.5, "tokens_per_s": 125.0}
+            or git_file_sha256_at_commit(
+                written.get("git_commit", ""), tracked_fixture_source
+            )
+            != sha256_file(ROOT / tracked_fixture_source)
+            or git_file_sha256_at_commit("0" * 40, tracked_fixture_source) is not None
         ):
             print(
                 json.dumps(
