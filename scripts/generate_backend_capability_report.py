@@ -761,6 +761,7 @@ def training_precision_policy_report() -> dict[str, Any]:
             "lora_parameter_dtypes": ["F32"],
             "loss_accumulation_dtype": "F32",
             "optimizer_parameter_dtypes": ["F32"],
+            "exact_gdn_backward_tile_tokens": None,
             "mixed_precision": False,
             "notes": "CPU reference training uses F32 tensors and portable optimizer math.",
         },
@@ -771,6 +772,7 @@ def training_precision_policy_report() -> dict[str, Any]:
             "lora_parameter_dtypes": ["F32", "BF16"],
             "loss_accumulation_dtype": "F32",
             "optimizer_parameter_dtypes": ["F32", "BF16"],
+            "exact_gdn_backward_tile_tokens": 1024,
             "mixed_precision": True,
             "notes": "CUDA keeps kt tape authoritative and routes BF16/F16/F32 leaves through CUDA-native kernels where available.",
         },
@@ -781,6 +783,7 @@ def training_precision_policy_report() -> dict[str, Any]:
             "lora_parameter_dtypes": ["F32", "BF16"],
             "loss_accumulation_dtype": "F32",
             "optimizer_parameter_dtypes": ["F32", "BF16"],
+            "exact_gdn_backward_tile_tokens": None,
             "mixed_precision": True,
             "notes": "ROCm mirrors CUDA's kt-tape dtype envelope while dispatching through HIP/hipBLASLt-native leaves where available.",
         },
@@ -791,6 +794,7 @@ def training_precision_policy_report() -> dict[str, Any]:
             "lora_parameter_dtypes": ["F32", "BF16"],
             "loss_accumulation_dtype": "F32",
             "optimizer_parameter_dtypes": ["F32", "BF16"],
+            "exact_gdn_backward_tile_tokens": None,
             "mixed_precision": True,
             "notes": "Metal training is BF16-focused on UMA buffers, with F32 loss accumulation and F32/BF16 AdamW residency.",
         },
@@ -801,6 +805,7 @@ def training_precision_policy_report() -> dict[str, Any]:
             "lora_parameter_dtypes": ["F32"],
             "loss_accumulation_dtype": "F32",
             "optimizer_parameter_dtypes": ["F32", "BF16"],
+            "exact_gdn_backward_tile_tokens": None,
             "mixed_precision": True,
             "notes": "Vulkan keeps training activations and LoRA parameters F32 while allowing BF16 base weights through explicit VkTensor buffer bridges.",
         },
@@ -1531,9 +1536,15 @@ def markdown(data: dict[str, Any]) -> str:
     lines.append("")
     lines.append("## Training Precision Policy")
     lines.append("")
-    lines.append("| Backend | Policy | Activations | Base Weights | LoRA | Loss Accum | Optimizer Params | Mixed |")
-    lines.append("|---|---|---|---|---|---|---|---|")
+    lines.append("| Backend | Policy | Activations | Base Weights | LoRA | Loss Accum | Optimizer Params | Exact GDN Backward Tile | Mixed |")
+    lines.append("|---|---|---|---|---|---|---|---|---|")
     for backend, info in data["training_precision_policy"].items():
+        exact_gdn_tile = info["exact_gdn_backward_tile_tokens"]
+        exact_gdn_tile_display = (
+            str(exact_gdn_tile)
+            if exact_gdn_tile is not None
+            else "streaming_tile_tokens_for(device)"
+        )
         lines.append(
             f"| `{backend}` | `{info['name']}` | "
             f"`{','.join(info['activation_dtypes'])}` | "
@@ -1541,6 +1552,7 @@ def markdown(data: dict[str, Any]) -> str:
             f"`{','.join(info['lora_parameter_dtypes'])}` | "
             f"`{info['loss_accumulation_dtype']}` | "
             f"`{','.join(info['optimizer_parameter_dtypes'])}` | "
+            f"`{exact_gdn_tile_display}` | "
             f"{'yes' if info['mixed_precision'] else 'no'} |"
         )
     lines.append("")

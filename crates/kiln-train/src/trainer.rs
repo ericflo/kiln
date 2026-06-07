@@ -382,22 +382,6 @@ fn lora_param_zeros(
     Ok(lora_parameter_from_kt(master))
 }
 
-/// Check whether `device` is a candle Metal device. Consolidates the
-/// `matches!(device, Device::Metal(_))` pattern (~6 sites in
-/// the GDN training tile / streaming-prefill / Metal-specific code paths).
-#[inline]
-fn is_metal_device(device: &Device) -> bool {
-    matches!(device, Device::Metal(_))
-}
-
-/// Check whether `device` is a candle CUDA device. Consolidates the
-/// `matches!(device, Device::Cuda(_))` pattern (~2 sites in
-/// the spool-checkpoint / exact-GDN-backward-tile path).
-#[inline]
-fn is_cuda_device(device: &Device) -> bool {
-    matches!(device, Device::Cuda(_))
-}
-
 #[inline]
 fn training_precision_policy_for_device(device: &Device) -> TrainingPrecisionPolicy {
     TrainingPrecisionPolicy::for_device_family(*device)
@@ -4796,7 +4780,7 @@ fn chunked_log_probs_for_completion(
                 None => chunk_correct.detach(),
             });
         }
-        synchronize_metal_tail_chunk(device, "synchronize chunked_log_probs_for_completion")?;
+        synchronize_tail_chunk("synchronize chunked_log_probs_for_completion")?;
         chunk_start = chunk_end;
     }
 
@@ -5953,7 +5937,7 @@ fn selected_log_probs_from_normed_hidden_chunked(
                 None => chunk_correct.detach(),
             });
         }
-        synchronize_metal_tail_chunk(&device, "synchronize selected log-prob chunk")?;
+        synchronize_tail_chunk("synchronize selected log-prob chunk")?;
         chunk_start = chunk_end;
     }
 
@@ -6198,12 +6182,10 @@ fn cross_entropy_loss(
 /// chunking over vocab so the full `[T, V]` logits tensor is never
 /// materialized. The returned tensor is F32 with shape `[1, T, H]`; inactive
 /// shifted-label rows and the final sequence row are zero.
-fn synchronize_metal_tail_chunk(device: &Device, _context: &'static str) -> Result<()> {
+fn synchronize_tail_chunk(_context: &'static str) -> Result<()> {
     // (#1082) kt `Device` has no per-device `synchronize()` (candle-only API);
-    // the candle-drop training path is CUDA-only (the kt tape adapters are
-    // BF16/CUDA), so the Metal chunk-tail sync that candle needed is a no-op
-    // here. If kt Metal training is ever wired up it gets its own sync hook.
-    let _ = is_metal_device(device);
+    // the old chunk-tail sync point is retained as a named no-op for caller
+    // structure without branching on backend identity here.
     Ok(())
 }
 
@@ -7487,11 +7469,8 @@ fn exact_gdn_reverse_tile_size(
 
 fn exact_gdn_backward_tile_tokens_for(device: &Device) -> usize {
     fn fallback_tile(device: &Device) -> usize {
-        if is_cuda_device(device) {
-            1024
-        } else {
-            streaming_tile_tokens_for(device)
-        }
+        training_precision_policy_for_device(device)
+            .exact_gdn_backward_tile_tokens_or(streaming_tile_tokens_for(device))
     }
 
     match std::env::var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS") {
@@ -10155,6 +10134,15 @@ pub(crate) mod tests {
 
         unsafe {
             std::env::set_var("KILN_STREAMING_TILE_TOKENS", "256");
+            std::env::remove_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS");
+        }
+        assert_eq!(super::exact_gdn_backward_tile_tokens_for(&cpu_device()), 256);
+        assert_eq!(
+            super::exact_gdn_backward_tile_tokens_for(&Device::Cuda(0)),
+            1024
+        );
+
+        unsafe {
             std::env::set_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS", "128");
         }
         assert_eq!(super::exact_gdn_backward_tile_tokens_for(&cpu_device()), 128);

@@ -3468,6 +3468,7 @@
       "base_weight_dtypes": [
         "F32"
       ],
+      "exact_gdn_backward_tile_tokens": null,
       "lora_parameter_dtypes": [
         "F32"
       ],
@@ -3490,6 +3491,7 @@
         "BF16",
         "F16"
       ],
+      "exact_gdn_backward_tile_tokens": 1024,
       "lora_parameter_dtypes": [
         "F32",
         "BF16"
@@ -3510,6 +3512,7 @@
       "base_weight_dtypes": [
         "BF16"
       ],
+      "exact_gdn_backward_tile_tokens": null,
       "lora_parameter_dtypes": [
         "F32",
         "BF16"
@@ -3534,6 +3537,7 @@
         "BF16",
         "F16"
       ],
+      "exact_gdn_backward_tile_tokens": null,
       "lora_parameter_dtypes": [
         "F32",
         "BF16"
@@ -3555,6 +3559,7 @@
         "F32",
         "BF16"
       ],
+      "exact_gdn_backward_tile_tokens": null,
       "lora_parameter_dtypes": [
         "F32"
       ],

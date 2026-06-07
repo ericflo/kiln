@@ -1463,7 +1463,17 @@ fn generated_capability_report_lists_training_precision_policy() {
     let vulkan = &policies["vulkan"];
     assert_eq!(vulkan["name"], "vulkan_mixed_f32_bf16");
     assert_eq!(vulkan["loss_accumulation_dtype"], "F32");
+    assert_eq!(vulkan["exact_gdn_backward_tile_tokens"], Value::Null);
     assert_eq!(vulkan["mixed_precision"], true);
+    assert_eq!(
+        policies["cuda"]["exact_gdn_backward_tile_tokens"], 1024,
+        "CUDA should own its exact-GDN backward tile default in the training policy"
+    );
+    assert_eq!(
+        policies["metal"]["exact_gdn_backward_tile_tokens"],
+        Value::Null,
+        "Metal should inherit the streaming tile default for exact-GDN backward"
+    );
 
     let activation_dtypes = vulkan["activation_dtypes"]
         .as_array()
@@ -2374,6 +2384,11 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         trainer_source.contains("fn training_precision_policy_for_device("),
         "trainer should centralize device-family precision policy lookup"
     );
+    assert!(
+        !trainer_source.contains("fn is_metal_device(")
+            && !trainer_source.contains("fn is_cuda_device("),
+        "trainer should not keep local backend identity helpers for training policy"
+    );
     let lora_init_section = source_between(
         &trainer_source,
         "pub fn initialize_seeded(",
@@ -2397,6 +2412,19 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     assert!(
         activation_bytes_section.contains("uses_f32_activations_for_mixed_base_weights"),
         "training activation sizing should read F32-activation policy from TrainingPrecisionPolicy"
+    );
+    let exact_gdn_tile_section = source_between(
+        &trainer_source,
+        "fn exact_gdn_backward_tile_tokens_for(",
+        "// (#1082) Deleted three orphaned residues",
+    );
+    assert!(
+        exact_gdn_tile_section.contains("training_precision_policy_for_device"),
+        "exact-GDN backward tile defaults should read backend training policy"
+    );
+    assert!(
+        !exact_gdn_tile_section.contains("is_cuda_device"),
+        "exact-GDN backward tile defaults should not hard-code CUDA in the trainer"
     );
     let base_dtype_support_section = source_between(
         &trainer_source,
