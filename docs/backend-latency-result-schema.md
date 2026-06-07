@@ -23,6 +23,7 @@ To cover the gate, each fixture must:
 - set every metric `max` to a numeric threshold
 - write the referenced repo-relative `result_artifact` under
   `bench-results/backend-latency` with a `.json` extension
+- track the `result_artifact` and referenced `raw_log` in git
 - set the manifest `status` to `covered`
 - pass `python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered`
 
@@ -97,8 +98,9 @@ When `--require-covered` is set, the validator requires the fixture
 paths to be repo-relative. It also requires fixture `result_artifact` paths to
 live under `bench-results/backend-latency` with a `.json` extension, result
 `raw_log` paths to live under `bench-results/backend-latency/raw` with a `.log`
-extension, and the referenced source and `raw_log` files to exist in the
-checkout and checks that their SHA-256 digests match
+extension, the result artifact and raw log to be tracked by git, and the
+referenced source and `raw_log` files to exist in the checkout and checks that
+their SHA-256 digests match
 `source_sha256` and `raw_log_sha256`. It requires `git_commit` to be a
 lowercase 40-character commit that exists in the local repository, requires the
 fixture source to exist at `git_commit`, requires `source_sha256` to match the

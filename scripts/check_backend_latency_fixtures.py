@@ -25,6 +25,7 @@ from write_backend_latency_result_artifact import (
     fixture_spec_sha256,
     git_commit_exists,
     git_file_sha256_at_commit,
+    git_path_is_tracked,
     is_canonical_raw_log_path,
     is_canonical_result_artifact_path,
     is_repo_relative_path,
@@ -125,6 +126,7 @@ def validate_result_provenance(
     manifest_schema_version: Any,
     manifest_path: Path | None,
     require_raw_log_file: bool,
+    require_tracked_files: bool,
 ) -> None:
     if result.get("artifact_schema_version") != ARTIFACT_SCHEMA_VERSION:
         errors.append(
@@ -251,6 +253,10 @@ def validate_result_provenance(
                 errors.append(
                     f"{context}.result_artifact.raw_log_sha256 does not match raw_log"
                 )
+            if require_tracked_files and not git_path_is_tracked(raw_log):
+                errors.append(
+                    f"{context}.result_artifact.raw_log must be tracked by git when --require-covered is set"
+                )
         elif require_raw_log_file:
             errors.append(
                 f"{context}.result_artifact.raw_log must exist when --require-covered is set: {raw_log}"
@@ -344,6 +350,7 @@ def validate_result_artifact(
     manifest_schema_version: Any,
     manifest_path: Path | None,
     require_raw_log_file: bool = False,
+    require_tracked_files: bool = False,
 ) -> None:
     try:
         result = json.loads(result_path.read_text())
@@ -379,6 +386,7 @@ def validate_result_artifact(
         manifest_schema_version,
         manifest_path,
         require_raw_log_file,
+        require_tracked_files,
     )
 
     observed_metrics = result.get("metrics")
@@ -497,6 +505,15 @@ def validate_manifest(
         result_exists = result_path is not None and result_path.is_file()
         if require_covered and result_artifact and not result_exists:
             errors.append(f"{context}.result_artifact does not exist: {result_artifact}")
+        if (
+            require_covered
+            and result_artifact
+            and result_exists
+            and not git_path_is_tracked(result_artifact)
+        ):
+            errors.append(
+                f"{context}.result_artifact must be tracked by git when --require-covered is set"
+            )
 
         threshold_state = require_string(errors, fixture, "threshold_state", context)
         if threshold_state:
@@ -533,6 +550,7 @@ def validate_manifest(
                 manifest.get("schema_version"),
                 manifest_path,
                 require_raw_log_file=require_covered,
+                require_tracked_files=require_covered,
             )
 
     missing_fixture_slots = manifest.get("missing_fixture_slots", [])
@@ -1113,6 +1131,41 @@ def self_test() -> int:
                     {
                         "ok": False,
                         "case": "covered manifest without strict validation",
+                        "errors": errors,
+                    },
+                    indent=2,
+                )
+            )
+            return 1
+
+        errors = validate_manifest(
+            {
+                "schema_version": 1,
+                "status": "covered",
+                "required_backends": ["cuda"],
+                "fixtures": [fixture],
+                "missing_fixture_slots": [],
+            },
+            require_covered=True,
+        )
+        if not any("result_artifact must be tracked by git" in error for error in errors):
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "case": "untracked result artifact",
+                        "errors": errors,
+                    },
+                    indent=2,
+                )
+            )
+            return 1
+        if not any("raw_log must be tracked by git" in error for error in errors):
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "case": "untracked raw log",
                         "errors": errors,
                     },
                     indent=2,

@@ -193,6 +193,16 @@ def is_repo_relative_path(path: str) -> bool:
     return not candidate.is_absolute() and ".." not in candidate.parts
 
 
+def git_path_is_tracked(path: str) -> bool:
+    if not is_repo_relative_path(path):
+        return False
+    try:
+        git_output(["ls-files", "--error-unmatch", "--", path])
+    except ArtifactError:
+        return False
+    return True
+
+
 def git_file_sha256_at_commit(commit: str, path: str) -> str | None:
     if not GIT_COMMIT_RE.match(commit) or not is_repo_relative_path(path):
         return None
