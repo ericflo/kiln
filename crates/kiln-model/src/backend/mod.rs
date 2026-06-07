@@ -326,6 +326,39 @@ impl TrainingPrecisionPolicy {
             notes: "Vulkan keeps training activations and LoRA parameters F32 while allowing BF16 base weights through explicit VkTensor buffer bridges.",
         }
     }
+
+    pub const fn for_device_family(device: kiln_tensor::Device) -> Self {
+        match device {
+            kiln_tensor::Device::Cuda(_) => Self::cuda(),
+            kiln_tensor::Device::Rocm(_) => Self::rocm(),
+            kiln_tensor::Device::Metal(_) => Self::metal(),
+            kiln_tensor::Device::Vulkan(_) => Self::vulkan(),
+            kiln_tensor::Device::Cpu => Self::portable(),
+            _ => Self::portable(),
+        }
+    }
+
+    pub fn lora_parameter_dtype_for_base_weight(
+        &self,
+        base_weight_dtype: kiln_tensor::DType,
+    ) -> kiln_tensor::DType {
+        if self.lora_parameter_dtypes.len() == 1 {
+            self.lora_parameter_dtypes[0]
+        } else {
+            base_weight_dtype
+        }
+    }
+
+    pub fn uses_f32_activations_for_mixed_base_weights(&self) -> bool {
+        self.activation_dtypes.len() == 1
+            && self.activation_dtypes[0] == kiln_tensor::DType::F32
+            && self.lora_parameter_dtypes.len() == 1
+            && self.lora_parameter_dtypes[0] == kiln_tensor::DType::F32
+            && self
+                .base_weight_dtypes
+                .iter()
+                .any(|dtype| *dtype == kiln_tensor::DType::BF16)
+    }
 }
 
 /// Policy for backend fallbacks that leave the intended native path.
@@ -3372,6 +3405,44 @@ mod tests {
         assert_eq!(vulkan.lora_parameter_dtypes, &[kiln_tensor::DType::F32]);
         assert!(vulkan.base_weight_dtypes.contains(&kiln_tensor::DType::BF16));
         assert!(vulkan.mixed_precision);
+    }
+
+    #[test]
+    fn training_precision_policy_maps_device_family() {
+        for (device, expected) in [
+            (kiln_tensor::Device::Cpu, "cpu_f32_reference"),
+            (kiln_tensor::Device::Cuda(0), "cuda_native_float"),
+            (kiln_tensor::Device::Rocm(0), "rocm_native_float"),
+            (kiln_tensor::Device::Metal(0), "metal_bf16_uma"),
+            (kiln_tensor::Device::Vulkan(0), "vulkan_mixed_f32_bf16"),
+        ] {
+            assert_eq!(
+                TrainingPrecisionPolicy::for_device_family(device).name,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn training_precision_policy_selects_lora_parameter_dtype() {
+        let cuda = TrainingPrecisionPolicy::cuda();
+        assert_eq!(
+            cuda.lora_parameter_dtype_for_base_weight(kiln_tensor::DType::BF16),
+            kiln_tensor::DType::BF16
+        );
+        assert_eq!(
+            cuda.lora_parameter_dtype_for_base_weight(kiln_tensor::DType::F16),
+            kiln_tensor::DType::F16
+        );
+
+        let vulkan = TrainingPrecisionPolicy::vulkan();
+        assert_eq!(
+            vulkan.lora_parameter_dtype_for_base_weight(kiln_tensor::DType::BF16),
+            kiln_tensor::DType::F32
+        );
+        assert!(vulkan.uses_f32_activations_for_mixed_base_weights());
+        assert!(!TrainingPrecisionPolicy::portable().uses_f32_activations_for_mixed_base_weights());
+        assert!(!TrainingPrecisionPolicy::metal().uses_f32_activations_for_mixed_base_weights());
     }
 
     #[test]

@@ -2342,6 +2342,47 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "SFT FLCE routing should consume the focused training-loss capability facet"
     );
     assert!(
+        trainer_source.contains("TrainingPrecisionPolicy"),
+        "trainer should import the backend-owned training precision policy"
+    );
+    assert!(
+        trainer_source.contains("fn training_precision_policy_for_device("),
+        "trainer should centralize device-family precision policy lookup"
+    );
+    let lora_init_section = source_between(
+        &trainer_source,
+        "pub fn initialize_seeded(",
+        "// Kaiming uniform bound",
+    );
+    assert!(
+        compact_body(lora_init_section).contains(
+            "training_precision_policy_for_device(device).lora_parameter_dtype_for_base_weight(weights.embed_tokens.dtype())"
+        ),
+        "LoRA initialization should choose parameter dtype through TrainingPrecisionPolicy"
+    );
+    assert!(
+        !lora_init_section.contains("let lora_dtype = if is_vulkan_device(device)"),
+        "LoRA initialization should not hard-code Vulkan for precision policy"
+    );
+    let activation_bytes_section = source_between(
+        &trainer_source,
+        "pub(crate) fn training_activation_bytes_per_elem(",
+        "#[cfg(any(feature = \"cuda\", feature = \"rocm\"))]",
+    );
+    assert!(
+        activation_bytes_section.contains("uses_f32_activations_for_mixed_base_weights"),
+        "training activation sizing should read F32-activation policy from TrainingPrecisionPolicy"
+    );
+    let base_dtype_support_section = source_between(
+        &trainer_source,
+        "fn base_dtype_supports_tape(",
+        "/// (#1082 Increment-0 PR2) kt-native sibling",
+    );
+    assert!(
+        base_dtype_support_section.contains("uses_f32_activations_for_mixed_base_weights"),
+        "base dtype tape support should read mixed F32 activation policy from TrainingPrecisionPolicy"
+    );
+    assert!(
         trainer_source.contains("SftFlceLossRoute::KtTapeFlce")
             && trainer_source.contains("SftFlceLossRoute::VulkanActiveRows"),
         "trainer SFT FLCE routing should match on typed backend-owned loss routes"

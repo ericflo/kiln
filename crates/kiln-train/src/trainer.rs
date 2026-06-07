@@ -64,6 +64,7 @@ use kiln_core::tokenizer::KilnTokenizer;
 use kiln_flce_kernel::DEFAULT_CHUNK_SIZE;
 use kiln_model::backend::{
     self, BackendIdentity, BackendRuntime, FallbackPolicy, OptimizerBackend, ResidencyBackend,
+    TrainingPrecisionPolicy,
 };
 #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
 use kiln_model::backend::{SftFlceLossRoute, TrainingLossBackend};
@@ -404,11 +405,17 @@ fn is_vulkan_device(device: &Device) -> bool {
     matches!(device, Device::Vulkan(_))
 }
 
+#[inline]
+fn training_precision_policy_for_device(device: &Device) -> TrainingPrecisionPolicy {
+    TrainingPrecisionPolicy::for_device_family(*device)
+}
+
 pub(crate) fn training_activation_bytes_per_elem(weights: &GpuWeights, device: &Device) -> usize {
     const GDN_TAPE_EFFECTIVE_BYTES_PER_ELEM: usize = 10;
 
-    if is_vulkan_device(device) {
-        // Vulkan BF16 training explicitly promotes hidden activations to F32.
+    if training_precision_policy_for_device(device).uses_f32_activations_for_mixed_base_weights() {
+        // Backends with mixed BF16 base weights and F32 training activations
+        // keep hidden activations in F32 for the tape path.
         return 4;
     }
     let base = match weights.embed_tokens.dtype() {
@@ -696,11 +703,9 @@ impl TrainableLoraParams {
         let hidden = config.hidden_size;
         let intermediate = config.intermediate_size;
 
-        // (#1082) LoRA-param dtype FOLLOWS the base/activation dtype on
-        // CUDA/Metal: BF16 base ⇒ BF16 LoRA (byte-for-byte no-op vs. the old
-        // hardcoded `DType::BF16`). On an F32 Vulkan base the LoRA A/B match the
-        // F32 activations so `try_tape_lora_linear_kt` fires instead of
-        // declining on a dtype mismatch (`proj.a.dtype() != x.dtype()`).
+        // (#1082) LoRA-param dtype follows the backend-owned training precision
+        // policy. CUDA/ROCm/Metal track the base dtype, while Vulkan keeps LoRA
+        // parameters F32 to match its F32 activation policy.
         //
         // (#1443 step 2) On Vulkan the ACTIVATION dtype is F32 regardless of the
         // base WEIGHT dtype — the mixed-precision design keeps base projection
@@ -711,11 +716,8 @@ impl TrainableLoraParams {
         // BF16 base; otherwise a BF16 LoRA on a BF16 base would mismatch the F32
         // `x2d` in `try_tape_lora_linear_kt`'s LoRA branch and decline. CUDA/Metal
         // keep `embed_tokens.dtype()` (BF16 activations end-to-end) unchanged.
-        let lora_dtype = if is_vulkan_device(device) {
-            kiln_tensor::DType::F32
-        } else {
-            weights.embed_tokens.dtype()
-        };
+        let lora_dtype = training_precision_policy_for_device(device)
+            .lora_parameter_dtype_for_base_weight(weights.embed_tokens.dtype());
 
         // Kaiming uniform bound: sqrt(1 / in_features) for A
         let bound_hidden = (1.0 / hidden as f64).sqrt();
@@ -7611,7 +7613,8 @@ fn base_dtype_supports_tape(weights: &GpuWeights, device: &Device) -> bool {
     // (#1082) `embed_tokens.dtype()` is now kt `DType`.
     match weights.embed_tokens.dtype() {
         kiln_tensor::DType::BF16 => true,
-        kiln_tensor::DType::F32 => is_vulkan_device(device),
+        kiln_tensor::DType::F32 => training_precision_policy_for_device(device)
+            .uses_f32_activations_for_mixed_base_weights(),
         _ => false,
     }
 }
