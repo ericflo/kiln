@@ -1277,6 +1277,8 @@ fn generated_capability_report_lists_request_descriptors() {
         "parallel_transposed_projection_upload_disable_env",
         "parallel_auxiliary_weight_upload",
         "parallel_auxiliary_weight_upload_disable_env",
+        "cache_linear_attention_ab_transpose_concat",
+        "cache_mlp_gate_up_transpose_concat",
         "stub_embedding_table_after_transposed_upload",
         "drop_projection_originals",
         "drop_projection_transposes",
@@ -3136,6 +3138,47 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         assert!(
             !embedding_load_policy_section.contains(forbidden),
             "embedding table upload/stub decision should not keep local backend policy: {forbidden}"
+        );
+    }
+    let linear_ab_concat_policy_section = source_between(
+        &forward_source,
+        "let in_proj_ab_t = {",
+        "let in_proj_qkvzab_w8 =",
+    );
+    assert!(
+        linear_ab_concat_policy_section
+            .contains("projection_load_policy.cache_linear_attention_ab_transpose_concat"),
+        "linear-attention in_proj_ab_t cache should consume ProjectionLoadPolicy"
+    );
+    for forbidden in [
+        "let mut should_cache",
+        "matches!(device, Device::Cuda",
+        "matches!(device, Device::Metal",
+        "matches!(device, Device::Rocm",
+    ] {
+        assert!(
+            !linear_ab_concat_policy_section.contains(forbidden),
+            "linear-attention in_proj_ab_t cache should not keep local backend policy: {forbidden}"
+        );
+    }
+    let mlp_gate_up_concat_policy_section = source_between(
+        &forward_source,
+        "let gate_up_proj_t = {",
+        "let (gate_up_proj_w8, down_proj_w8) =",
+    );
+    assert!(
+        mlp_gate_up_concat_policy_section
+            .contains("projection_load_policy.cache_mlp_gate_up_transpose_concat"),
+        "MLP gate/up transpose cache should consume ProjectionLoadPolicy"
+    );
+    for forbidden in [
+        "cuda_or_rocm_device(*device)",
+        "matches!(device, Device::Cuda",
+        "matches!(device, Device::Rocm",
+    ] {
+        assert!(
+            !mlp_gate_up_concat_policy_section.contains(forbidden),
+            "MLP gate/up transpose cache should not keep local backend policy: {forbidden}"
         );
     }
     assert!(

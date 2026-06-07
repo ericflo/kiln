@@ -6789,20 +6789,7 @@ impl GpuWeights {
                     let in_proj_ab_t = {
                         #[cfg(any(feature = "cuda", feature = "metal", feature = "rocm"))]
                         {
-                            let mut should_cache = false;
-                            #[cfg(feature = "cuda")]
-                            {
-                                should_cache |= matches!(device, Device::Cuda(_));
-                            }
-                            #[cfg(feature = "metal")]
-                            {
-                                should_cache |= matches!(device, Device::Metal(_));
-                            }
-                            #[cfg(feature = "rocm")]
-                            {
-                                should_cache |= matches!(device, Device::Rocm(_));
-                            }
-                            if should_cache {
+                            if projection_load_policy.cache_linear_attention_ab_transpose_concat {
                                 Some(
                                     Tensor::cat(
                                         &[&in_proj_a_t, &in_proj_b_t],
@@ -6910,7 +6897,9 @@ impl GpuWeights {
             let gate_up_proj_t = {
                 #[cfg(any(feature = "cuda", feature = "rocm"))]
                 {
-                    if !w4a16_enabled && cuda_or_rocm_device(*device) {
+                    if !w4a16_enabled
+                        && projection_load_policy.cache_mlp_gate_up_transpose_concat
+                    {
                         Some(
                             Tensor::cat(&[&gate_proj_t, &up_proj_t], LAST_DIM)?
                                 .contiguous()

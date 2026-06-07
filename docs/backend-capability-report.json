@@ -2010,7 +2010,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "ProjectionLoadPolicy": {
-      "field_count": 14,
+      "field_count": 16,
       "fields": [
         {
           "name": "backend",
@@ -2035,6 +2035,14 @@
         {
           "name": "parallel_auxiliary_weight_upload_disable_env",
           "type": "Option<&'static str>"
+        },
+        {
+          "name": "cache_linear_attention_ab_transpose_concat",
+          "type": "bool"
+        },
+        {
+          "name": "cache_mlp_gate_up_transpose_concat",
+          "type": "bool"
         },
         {
           "name": "stub_embedding_table_after_transposed_upload",
