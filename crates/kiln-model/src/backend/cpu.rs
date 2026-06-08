@@ -4,8 +4,8 @@
 //! as a safe default for any future device.
 
 use super::{
-    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, GdnBackend, OptimizerBackend,
-    LinearBackend, PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend,
+    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, GdnBackend, LinearBackend,
+    OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend,
     StartupBackend, TrainingLossBackend,
 };
 
@@ -55,6 +55,8 @@ impl GdnBackend for CpuBackend {}
 impl ConvBackend for CpuBackend {}
 
 impl LinearBackend for CpuBackend {}
+
+impl super::residency::ResidentRegistry for CpuBackend {}
 
 impl ResidencyBackend for CpuBackend {}
 

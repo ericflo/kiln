@@ -10535,6 +10535,8 @@ pub(crate) mod tests {
 
     impl kiln_model::backend::LinearBackend for NamedTestBackend {}
 
+    impl kiln_model::backend::residency::ResidentRegistry for NamedTestBackend {}
+
     impl kiln_model::backend::ResidencyBackend for NamedTestBackend {}
 
     impl kiln_model::backend::SamplingBackend for NamedTestBackend {}

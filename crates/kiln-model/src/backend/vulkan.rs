@@ -883,6 +883,263 @@ impl LinearBackend for VulkanBackend {
     }
 }
 
+fn vulkan_resident_activation_resource(
+    tensor: &kiln_tensor::Tensor,
+    state: super::residency::ResidentResourceState,
+) -> super::residency::ResidentResource {
+    super::residency::ResidentResource::from_tensor_for_backend(
+        tensor,
+        super::residency::resident_backend_for_runtime("vulkan", tensor.device()),
+        super::residency::ResidentResourceFamily::Activation,
+        super::residency::ResidentOwnership::RegistryOwned,
+    )
+    .with_state(state)
+}
+
+impl super::residency::ResidentRegistry for VulkanBackend {
+    fn register_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        family: super::residency::ResidentResourceFamily,
+    ) -> Result<Option<super::residency::ResidentResource>> {
+        if family != super::residency::ResidentResourceFamily::Activation {
+            return Ok(None);
+        }
+        let Some(vk_device) = self.vulkan_device.as_ref() else {
+            return Ok(None);
+        };
+        // (#1082) kt-native: the residency registry is keyed on the kt
+        // `TensorId` directly; byte extraction reads straight from kt storage.
+        let id = tensor.id();
+        let already_registered = with_resident_registry(|cache| cache.contains_key(&id));
+        if already_registered {
+            return Ok(
+                super::residency::ResidentRegistry::resident_resource(self, tensor, family).map(
+                    |resource| {
+                        resource
+                            .with_state(super::residency::ResidentResourceState::RegisteredClean)
+                    },
+                ),
+            );
+        }
+        // Encoding choice per dtype:
+        //   - BF16 -> packed BF16 (2 bytes/elem), byte-compatible with
+        //     every Vulkan kernel that uses `load_weight(idx)` to
+        //     decode `data_w[idx >> 1]` as two BF16 lanes per u32.
+        //     Required for the LoRA `lora_delta_resident` path and
+        //     any future BF16-input training kernel.
+        //   - All other dtypes -> F32 bytes (4 bytes/elem). This is
+        //     what the existing boundary-state resolve path
+        //     expects (`create_tensor_from_data` decodes F32 then
+        //     casts).
+        //
+        // `resolve_resource` knows about both encodings and reconstructs
+        // Tensors appropriately.
+        let bytes = if tensor.dtype() == kiln_tensor::DType::BF16 {
+            kt_tensor_to_packed_bf16_bytes_with_shape(tensor)?.0
+        } else {
+            kt_tensor_to_f32_bytes_with_shape(tensor)?.0
+        };
+        // Some Vulkan drivers reject zero-size buffer allocations; we
+        // also have no use for a zero-byte registry entry. Bail
+        // silently -- has_resident_activation will return false and
+        // the caller falls through to its CPU path.
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        let device = vk_device.device();
+        let device_local_mt = vk_device.device_local_mem_type();
+        let host_visible_mt = vk_device.host_visible_mem_type();
+        let queue = vk_device.queue();
+        let queue_family = vk_device.queue_family_index();
+        let buffer = kiln_vulkan_kernel::VulkanBuffer::create_device_local(
+            device,
+            device_local_mt,
+            bytes.len() as u64,
+        )
+        .context("register_resident_activation: alloc buffer")?;
+        kiln_vulkan_kernel::VulkanBuffer::upload_data(
+            device,
+            host_visible_mt,
+            queue,
+            queue_family,
+            &buffer,
+            &bytes,
+        )
+        .context("register_resident_activation: upload bytes")?;
+        let buffer = Arc::new(buffer);
+        // One-shot trace so the operator can confirm the activation
+        // residency lifecycle is engaging during training without
+        // per-call log spam. The first registration is the most
+        // informative -- usually the embedding boundary at the
+        // start of checkpointed_forward_backward.
+        static FIRST_REGISTERED_LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        FIRST_REGISTERED_LOGGED.get_or_init(|| {
+            tracing::info!(
+                tensor_dims = ?tensor.dims(),
+                tensor_dtype = ?tensor.dtype(),
+                bytes = bytes.len(),
+                "VulkanBackend::register_resident_activation first call"
+            );
+        });
+        with_resident_registry(|cache| {
+            cache.insert(id, buffer);
+        });
+        Ok(Some(vulkan_resident_activation_resource(
+            tensor,
+            super::residency::ResidentResourceState::RegisteredClean,
+        )))
+    }
+
+    fn update_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        family: super::residency::ResidentResourceFamily,
+    ) -> Result<Option<super::residency::ResidentResource>> {
+        if family != super::residency::ResidentResourceFamily::Activation {
+            return Ok(None);
+        }
+        let Some(vk_device) = self.vulkan_device.as_ref() else {
+            return Ok(None);
+        };
+        // (#1082) kt-native: registry keyed on the kt `TensorId` directly.
+        let id = tensor.id();
+        let buffer = with_resident_registry(|cache| cache.get(&id).cloned());
+        let Some(buffer) = buffer else {
+            return Ok(None);
+        };
+        // Same encoding choice as register_resource.
+        let bytes = if tensor.dtype() == kiln_tensor::DType::BF16 {
+            kt_tensor_to_packed_bf16_bytes_with_shape(tensor)?.0
+        } else {
+            kt_tensor_to_f32_bytes_with_shape(tensor)?.0
+        };
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        anyhow::ensure!(
+            bytes.len() as u64 == buffer.size(),
+            "update_resident_activation: tensor bytes ({}) != buffer size ({})",
+            bytes.len(),
+            buffer.size(),
+        );
+        kiln_vulkan_kernel::VulkanBuffer::upload_data(
+            vk_device.device(),
+            vk_device.host_visible_mem_type(),
+            vk_device.queue(),
+            vk_device.queue_family_index(),
+            &buffer,
+            &bytes,
+        )
+        .context("update_resident_activation: re-upload bytes")?;
+        Ok(Some(vulkan_resident_activation_resource(
+            tensor,
+            super::residency::ResidentResourceState::DirtyDevice,
+        )))
+    }
+
+    fn evict_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        family: super::residency::ResidentResourceFamily,
+    ) {
+        if family != super::residency::ResidentResourceFamily::Activation {
+            return;
+        }
+        // (#1082) kt-native: registry keyed on the kt `TensorId` directly.
+        let id = tensor.id();
+        with_resident_registry(|cache| {
+            cache.remove(&id);
+        });
+    }
+
+    fn resident_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        family: super::residency::ResidentResourceFamily,
+    ) -> Option<super::residency::ResidentResource> {
+        if family != super::residency::ResidentResourceFamily::Activation {
+            return None;
+        }
+        // (#1082) kt-native: registry keyed on the kt `TensorId` directly.
+        let id = tensor.id();
+        if with_resident_registry(|cache| cache.contains_key(&id)) {
+            Some(vulkan_resident_activation_resource(
+                tensor,
+                super::residency::ResidentResourceState::RegisteredClean,
+            ))
+        } else {
+            None
+        }
+    }
+
+    fn resolve_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        family: super::residency::ResidentResourceFamily,
+        shape: &[usize],
+        dtype: kiln_tensor::DType,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if family != super::residency::ResidentResourceFamily::Activation {
+            return Ok(None);
+        }
+        let Some(vk_device) = self.vulkan_device.as_ref() else {
+            return Ok(None);
+        };
+        // (#1082) kt-native: registry keyed on the kt `TensorId`; the result
+        // is reconstructed directly as a kt tensor of `dtype`.
+        let id = tensor.id();
+        let buffer = with_resident_registry(|cache| cache.get(&id).cloned());
+        let Some(buffer) = buffer else {
+            return Ok(None);
+        };
+        let bytes = kiln_vulkan_kernel::VulkanBuffer::read_back(
+            vk_device.device(),
+            vk_device.host_visible_mem_type(),
+            vk_device.queue(),
+            vk_device.queue_family_index(),
+            &buffer,
+        )
+        .context("resolve_resident_activation: read_back")?;
+        // Inverse of the encoding choice in register_resource.
+        // BF16 registry entries hold packed bf16 (2 bytes/elem);
+        // other dtypes hold F32 bytes. Reconstruct BF16 by bit-expanding each
+        // 16-bit lane into f32 (`bits << 16`) and then casting back to BF16.
+        let resolved = if dtype == kiln_tensor::DType::BF16 {
+            anyhow::ensure!(
+                bytes.len() % 2 == 0,
+                "resolve_resident_activation BF16: buffer byte count {} is not a multiple of 2",
+                bytes.len()
+            );
+            let elem_count: usize = shape.iter().product();
+            let stored = bytes.len() / 2;
+            anyhow::ensure!(
+                stored >= elem_count,
+                "resolve_resident_activation BF16: buffer holds {} bf16 elements, \
+                 expected at least {} for shape {:?}",
+                stored,
+                elem_count,
+                shape,
+            );
+            let mut f32_data = Vec::with_capacity(elem_count);
+            for i in 0..elem_count {
+                let lo = bytes[i * 2] as u32;
+                let hi = bytes[i * 2 + 1] as u32;
+                let bf16_bits = (hi << 8) | lo;
+                f32_data.push(f32::from_bits(bf16_bits << 16));
+            }
+            kiln_tensor::Tensor::from_vec(f32_data, shape.to_vec())
+                .map_err(|e| anyhow::anyhow!("resolve_resident_activation BF16: from_vec: {e}"))?
+                .to_dtype(kiln_tensor::DType::BF16)
+                .map_err(|e| anyhow::anyhow!("resolve_resident_activation BF16: to_dtype: {e}"))?
+        } else {
+            kt_tensor_from_f32_bytes(&bytes, shape, dtype)
+                .context("resolve_resident_activation: create_tensor_from_data")?
+        };
+        Ok(Some(resolved))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 impl ResidencyBackend for VulkanBackend {
     fn runtime_enter_gdn_recurrent_resident_state_scope(&self) -> bool {
@@ -952,150 +1209,44 @@ impl ResidencyBackend for VulkanBackend {
     }
 
     fn runtime_supports_resident_activation(&self) -> bool {
-        // Vulkan implements all three Phase 3.1 hooks against
-        // RESIDENT_ACTIVATION_REGISTRY. Returns true even when the
-        // process has no Vulkan device — `register_resident_activation`
-        // will short-circuit to Ok(()) in that case, but the
-        // capability semantics are still "this backend's registry is
-        // wired non-trivially when conditions allow."
+        // Vulkan implements resident activation through its concrete
+        // ResidentRegistry. The registry can still decline at call time when
+        // the process has no logical Vulkan device.
         true
     }
 
-    /// Phase 3.1 hook: register a non-weight tensor as resident on the
-    /// device. Uploads `tensor`'s bytes to a fresh `VulkanBuffer` and
-    /// records the buffer under the tensor's `kiln_tensor::TensorId`. The caller
-    /// owns lifecycle — Phase 3.2 will pair every register with a
-    /// matching evict at the appropriate autograd boundary. Until then
-    /// any caller using this hook must clean up explicitly to avoid
-    /// leaking VRAM.
     fn runtime_register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
-        let Some(vk_device) = self.vulkan_device.as_ref() else {
-            return Ok(());
-        };
-        // (#1082) kt-native: the residency registry is keyed on the kt
-        // `TensorId` directly; byte extraction reads straight from kt storage.
-        let id = tensor.id();
-        let already_registered = with_resident_registry(|cache| cache.contains_key(&id));
-        if already_registered {
-            return Ok(());
-        }
-        // Encoding choice per dtype:
-        //   - BF16 → packed BF16 (2 bytes/elem), byte-compatible with
-        //     every Vulkan kernel that uses `load_weight(idx)` to
-        //     decode `data_w[idx >> 1]` as two BF16 lanes per u32.
-        //     Required for the LoRA `lora_delta_resident` path and
-        //     any future BF16-input training kernel.
-        //   - All other dtypes → F32 bytes (4 bytes/elem). This is
-        //     what the existing boundary-state resolve path
-        //     expects (`create_tensor_from_data` decodes F32 then
-        //     casts).
-        //
-        // `resolve_resident_activation` knows about both encodings
-        // and reconstructs Tensors appropriately.
-        let bytes = if tensor.dtype() == kiln_tensor::DType::BF16 {
-            kt_tensor_to_packed_bf16_bytes_with_shape(tensor)?.0
-        } else {
-            kt_tensor_to_f32_bytes_with_shape(tensor)?.0
-        };
-        // Some Vulkan drivers reject zero-size buffer allocations; we
-        // also have no use for a zero-byte registry entry. Bail
-        // silently — has_resident_activation will return false and
-        // the caller falls through to its CPU path.
-        if bytes.is_empty() {
-            return Ok(());
-        }
-        let device = vk_device.device();
-        let device_local_mt = vk_device.device_local_mem_type();
-        let host_visible_mt = vk_device.host_visible_mem_type();
-        let queue = vk_device.queue();
-        let queue_family = vk_device.queue_family_index();
-        let buffer = kiln_vulkan_kernel::VulkanBuffer::create_device_local(
-            device,
-            device_local_mt,
-            bytes.len() as u64,
+        super::residency::ResidentRegistry::register_resource(
+            self,
+            tensor,
+            super::residency::ResidentResourceFamily::Activation,
         )
-        .context("register_resident_activation: alloc buffer")?;
-        kiln_vulkan_kernel::VulkanBuffer::upload_data(
-            device,
-            host_visible_mt,
-            queue,
-            queue_family,
-            &buffer,
-            &bytes,
-        )
-        .context("register_resident_activation: upload bytes")?;
-        let buffer = Arc::new(buffer);
-        // One-shot trace so the operator can confirm the activation
-        // residency lifecycle is engaging during training without
-        // per-call log spam. The first registration is the most
-        // informative — usually the embedding boundary at the
-        // start of checkpointed_forward_backward.
-        static FIRST_REGISTERED_LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        FIRST_REGISTERED_LOGGED.get_or_init(|| {
-            tracing::info!(
-                tensor_dims = ?tensor.dims(),
-                tensor_dtype = ?tensor.dtype(),
-                bytes = bytes.len(),
-                "VulkanBackend::register_resident_activation first call"
-            );
-        });
-        with_resident_registry(|cache| {
-            cache.insert(id, buffer);
-        });
-        Ok(())
+        .map(|_| ())
     }
 
     fn runtime_evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
-        // (#1082) kt-native: registry keyed on the kt `TensorId` directly.
-        let id = tensor.id();
-        with_resident_registry(|cache| {
-            cache.remove(&id);
-        });
+        super::residency::ResidentRegistry::evict_resource(
+            self,
+            tensor,
+            super::residency::ResidentResourceFamily::Activation,
+        );
     }
 
     fn runtime_update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
-        let Some(vk_device) = self.vulkan_device.as_ref() else {
-            return Ok(());
-        };
-        // (#1082) kt-native: registry keyed on the kt `TensorId` directly.
-        let id = tensor.id();
-        let buffer = with_resident_registry(|cache| cache.get(&id).cloned());
-        let Some(buffer) = buffer else {
-            // Not registered — caller probably skipped the registration
-            // path. No-op.
-            return Ok(());
-        };
-        // Same encoding choice as register_resident_activation.
-        let bytes = if tensor.dtype() == kiln_tensor::DType::BF16 {
-            kt_tensor_to_packed_bf16_bytes_with_shape(tensor)?.0
-        } else {
-            kt_tensor_to_f32_bytes_with_shape(tensor)?.0
-        };
-        if bytes.is_empty() {
-            return Ok(());
-        }
-        anyhow::ensure!(
-            bytes.len() as u64 == buffer.size(),
-            "update_resident_activation: tensor bytes ({}) != buffer size ({})",
-            bytes.len(),
-            buffer.size(),
-        );
-        kiln_vulkan_kernel::VulkanBuffer::upload_data(
-            vk_device.device(),
-            vk_device.host_visible_mem_type(),
-            vk_device.queue(),
-            vk_device.queue_family_index(),
-            &buffer,
-            &bytes,
+        super::residency::ResidentRegistry::update_resource(
+            self,
+            tensor,
+            super::residency::ResidentResourceFamily::Activation,
         )
-        .context("update_resident_activation: re-upload bytes")?;
-        Ok(())
+        .map(|_| ())
     }
 
     fn runtime_has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
-        // (#1082) kt-native: registry keyed on the kt `TensorId` directly.
-        let id = tensor.id();
-        with_resident_registry(|cache| cache.contains_key(&id))
+        super::residency::ResidentRegistry::has_resident_resource(
+            self,
+            tensor,
+            super::residency::ResidentResourceFamily::Activation,
+        )
     }
 
     fn runtime_resolve_resident_activation(
@@ -1104,60 +1255,13 @@ impl ResidencyBackend for VulkanBackend {
         shape: &[usize],
         dtype: kiln_tensor::DType,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        let Some(vk_device) = self.vulkan_device.as_ref() else {
-            return Ok(None);
-        };
-        // (#1082) kt-native: registry keyed on the kt `TensorId`; the result
-        // is reconstructed directly as a kt tensor of `dtype`.
-        let id = tensor.id();
-        let buffer = with_resident_registry(|cache| cache.get(&id).cloned());
-        let Some(buffer) = buffer else {
-            return Ok(None);
-        };
-        let bytes = kiln_vulkan_kernel::VulkanBuffer::read_back(
-            vk_device.device(),
-            vk_device.host_visible_mem_type(),
-            vk_device.queue(),
-            vk_device.queue_family_index(),
-            &buffer,
+        super::residency::ResidentRegistry::resolve_resource(
+            self,
+            tensor,
+            super::residency::ResidentResourceFamily::Activation,
+            shape,
+            dtype,
         )
-        .context("resolve_resident_activation: read_back")?;
-        // Inverse of the encoding choice in register_resident_activation.
-        // BF16 registry entries hold packed bf16 (2 bytes/elem);
-        // other dtypes hold F32 bytes. Reconstruct BF16 by bit-expanding each
-        // 16-bit lane into f32 (`bits << 16`) and then casting back to BF16.
-        let resolved = if dtype == kiln_tensor::DType::BF16 {
-            anyhow::ensure!(
-                bytes.len() % 2 == 0,
-                "resolve_resident_activation BF16: buffer byte count {} is not a multiple of 2",
-                bytes.len()
-            );
-            let elem_count: usize = shape.iter().product();
-            let stored = bytes.len() / 2;
-            anyhow::ensure!(
-                stored >= elem_count,
-                "resolve_resident_activation BF16: buffer holds {} bf16 elements, \
-                 expected at least {} for shape {:?}",
-                stored,
-                elem_count,
-                shape,
-            );
-            let mut f32_data = Vec::with_capacity(elem_count);
-            for i in 0..elem_count {
-                let lo = bytes[i * 2] as u32;
-                let hi = bytes[i * 2 + 1] as u32;
-                let bf16_bits = (hi << 8) | lo;
-                f32_data.push(f32::from_bits(bf16_bits << 16));
-            }
-            kiln_tensor::Tensor::from_vec(f32_data, shape.to_vec())
-                .map_err(|e| anyhow::anyhow!("resolve_resident_activation BF16: from_vec: {e}"))?
-                .to_dtype(kiln_tensor::DType::BF16)
-                .map_err(|e| anyhow::anyhow!("resolve_resident_activation BF16: to_dtype: {e}"))?
-        } else {
-            kt_tensor_from_f32_bytes(&bytes, shape, dtype)
-                .context("resolve_resident_activation: create_tensor_from_data")?
-        };
-        Ok(Some(resolved))
     }
 
     fn runtime_assemble_gdn_recurrent_resident_batch_rows(

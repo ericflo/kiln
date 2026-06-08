@@ -30,10 +30,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 1866,
+          "line": 1922,
           "paired_method": "runtime_causal_conv1d_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 1896,
+          "paired_method_line": 1952,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -45,10 +45,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 1862,
+          "line": 1918,
           "paired_method": "runtime_causal_conv1d_update",
           "paired_method_always_declines": false,
-          "paired_method_line": 1870,
+          "paired_method_line": 1926,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -225,7 +225,7 @@
             "layout": false,
             "shape": false
           },
-          "line": 1508,
+          "line": 1598,
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
@@ -650,7 +650,7 @@
             "layout": false,
             "shape": false
           },
-          "line": 827,
+          "line": 908,
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
@@ -702,10 +702,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 1923,
+          "line": 1979,
           "paired_method": "runtime_causal_conv1d_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 1953,
+          "paired_method_line": 2009,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -717,10 +717,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 1919,
+          "line": 1975,
           "paired_method": "runtime_causal_conv1d_update",
           "paired_method_always_declines": false,
-          "paired_method_line": 1927,
+          "paired_method_line": 1983,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -914,7 +914,7 @@
             "layout": false,
             "shape": false
           },
-          "line": 1564,
+          "line": 1654,
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
@@ -1308,7 +1308,7 @@
             "layout": false,
             "shape": false
           },
-          "line": 954,
+          "line": 1211,
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
@@ -1323,10 +1323,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 1329,
+          "line": 1433,
           "paired_method": "runtime_decode_resident_pool_ready",
           "paired_method_always_declines": false,
-          "paired_method_line": 1316,
+          "paired_method_line": 1420,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         }
@@ -3396,7 +3396,7 @@
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
       "genuine": false,
-      "migration": "none",
+      "migration": "partial",
       "migration_signals": [
         {
           "evidence": [
@@ -3404,19 +3404,64 @@
           ],
           "expected": 0,
           "name": "resident_registry_blanket_adapter_removed",
-          "observed": 1,
+          "observed": 0,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/cpu.rs",
+            "crates/kiln-model/src/backend/cuda.rs",
+            "crates/kiln-model/src/backend/rocm.rs",
+            "crates/kiln-model/src/backend/metal_runtime.rs",
+            "crates/kiln-model/src/backend/vulkan.rs"
+          ],
+          "expected": ">= 5",
+          "name": "production_backends_implement_resident_registry",
+          "observed": 5,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs"
+          ],
+          "expected": 7,
+          "name": "residency_backend_facade_delegates_to_registry",
+          "observed": 7,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/cuda.rs",
+            "crates/kiln-model/src/backend/rocm.rs",
+            "crates/kiln-model/src/backend/metal_residency.rs",
+            "crates/kiln-model/src/backend/vulkan_residency.rs"
+          ],
+          "expected": 0,
+          "name": "resident_registry_process_global_statics_removed",
+          "observed": 4,
+          "passed": false
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs",
+            "crates/kiln-model/src/backend/residency.rs"
+          ],
+          "expected": "> 0",
+          "name": "resident_registry_drop_drains_test_present",
+          "observed": 0,
           "passed": false
         }
       ],
       "phase": 3,
       "remaining": [
-        "ResidentRegistry remains a blanket adapter and production residency APIs have not been inverted through it"
+        "resident activation registries still use process-global statics",
+        "drop-drains-registry behavioral test is not present"
       ],
       "report_sections": [
         "Resident Resource Descriptors",
         "Focused Backend Facets"
       ],
-      "status": "gap",
+      "status": "partial",
       "title": "Unify resident resource semantics"
     },
     {

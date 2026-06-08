@@ -1354,51 +1354,73 @@ pub trait SamplingBackend: Send + Sync + std::fmt::Debug {
     }
 }
 
-/// Focused `ResidencyBackend` facet for resident activation/state storage.
+/// Focused `ResidencyBackend` facade over authoritative resident registries.
 #[allow(clippy::too_many_arguments)]
-pub trait ResidencyBackend: BackendIdentity + Send + Sync + std::fmt::Debug {
+pub trait ResidencyBackend:
+    BackendIdentity + residency::ResidentRegistry + Send + Sync + std::fmt::Debug
+{
     fn runtime_supports_resident_activation(&self) -> bool {
         false
     }
 
-    fn runtime_register_resident_activation(&self, _tensor: &kiln_tensor::Tensor) -> Result<()> {
-        Ok(())
+    fn runtime_register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
+        residency::ResidentRegistry::register_resource(
+            self,
+            tensor,
+            residency::ResidentResourceFamily::Activation,
+        )
+        .map(|_| ())
     }
 
-    fn runtime_evict_resident_activation(&self, _tensor: &kiln_tensor::Tensor) {}
-
-    fn runtime_update_resident_activation(&self, _tensor: &kiln_tensor::Tensor) -> Result<()> {
-        Ok(())
+    fn runtime_evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
+        residency::ResidentRegistry::evict_resource(
+            self,
+            tensor,
+            residency::ResidentResourceFamily::Activation,
+        );
     }
 
-    fn runtime_has_resident_activation(&self, _tensor: &kiln_tensor::Tensor) -> bool {
-        false
+    fn runtime_update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
+        residency::ResidentRegistry::update_resource(
+            self,
+            tensor,
+            residency::ResidentResourceFamily::Activation,
+        )
+        .map(|_| ())
+    }
+
+    fn runtime_has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
+        residency::ResidentRegistry::has_resident_resource(
+            self,
+            tensor,
+            residency::ResidentResourceFamily::Activation,
+        )
     }
 
     fn runtime_resident_activation_resource(
         &self,
         tensor: &kiln_tensor::Tensor,
     ) -> Option<residency::ResidentResource> {
-        if self.runtime_has_resident_activation(tensor) {
-            let name = BackendIdentity::runtime_name(self);
-            Some(residency::ResidentResource::from_tensor_for_backend(
-                tensor,
-                residency::resident_backend_for_runtime(name, tensor.device()),
-                residency::ResidentResourceFamily::Activation,
-                residency::resident_ownership_for_backend(name),
-            ))
-        } else {
-            None
-        }
+        residency::ResidentRegistry::resident_resource(
+            self,
+            tensor,
+            residency::ResidentResourceFamily::Activation,
+        )
     }
 
     fn runtime_resolve_resident_activation(
         &self,
-        _tensor: &kiln_tensor::Tensor,
-        _shape: &[usize],
-        _dtype: kiln_tensor::DType,
+        tensor: &kiln_tensor::Tensor,
+        shape: &[usize],
+        dtype: kiln_tensor::DType,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        residency::ResidentRegistry::resolve_resource(
+            self,
+            tensor,
+            residency::ResidentResourceFamily::Activation,
+            shape,
+            dtype,
+        )
     }
 
     fn runtime_enter_gdn_recurrent_resident_state_scope(&self) -> bool {
@@ -1615,69 +1637,6 @@ pub trait ReplayBackend:
     }
 }
 
-// Blanket forwarding impls keep the focused traits behavior-identical to the
-// compatibility facade while later PRs move call sites to one facet at a time.
-
-impl<T> residency::ResidentRegistry for T
-where
-    T: BackendRuntime + ResidencyBackend + ?Sized,
-{
-    fn register_resource(
-        &self,
-        tensor: &kiln_tensor::Tensor,
-        family: residency::ResidentResourceFamily,
-    ) -> Result<Option<residency::ResidentResource>> {
-        match family {
-            residency::ResidentResourceFamily::Activation => {
-                ResidencyBackend::runtime_register_resident_activation(self, tensor)?;
-                Ok(ResidencyBackend::runtime_resident_activation_resource(
-                    self, tensor,
-                ))
-            }
-            _ => Ok(None),
-        }
-    }
-
-    fn update_resource(
-        &self,
-        tensor: &kiln_tensor::Tensor,
-        family: residency::ResidentResourceFamily,
-    ) -> Result<Option<residency::ResidentResource>> {
-        match family {
-            residency::ResidentResourceFamily::Activation => {
-                ResidencyBackend::runtime_update_resident_activation(self, tensor)?;
-                Ok(ResidencyBackend::runtime_resident_activation_resource(
-                    self, tensor,
-                ))
-            }
-            _ => Ok(None),
-        }
-    }
-
-    fn evict_resource(
-        &self,
-        tensor: &kiln_tensor::Tensor,
-        family: residency::ResidentResourceFamily,
-    ) {
-        if family == residency::ResidentResourceFamily::Activation {
-            ResidencyBackend::runtime_evict_resident_activation(self, tensor);
-        }
-    }
-
-    fn resident_resource(
-        &self,
-        tensor: &kiln_tensor::Tensor,
-        family: residency::ResidentResourceFamily,
-    ) -> Option<residency::ResidentResource> {
-        match family {
-            residency::ResidentResourceFamily::Activation => {
-                ResidencyBackend::runtime_resident_activation_resource(self, tensor)
-            }
-            _ => None,
-        }
-    }
-}
-
 // (#1082 candle removal) The candle-typed `for_device` shim was deleted along
 // with the candle-parity opt-in feature that gated it — the last candle
 // activator in the workspace. Production dispatch goes through the kt-native
@@ -1768,11 +1727,50 @@ mod tests {
 
     impl LinearBackend for ResidentActivationProbeBackend {}
 
-    impl ResidencyBackend for ResidentActivationProbeBackend {
-        fn runtime_has_resident_activation(&self, _tensor: &kiln_tensor::Tensor) -> bool {
-            self.resident
+    impl residency::ResidentRegistry for ResidentActivationProbeBackend {
+        fn register_resource(
+            &self,
+            tensor: &kiln_tensor::Tensor,
+            family: residency::ResidentResourceFamily,
+        ) -> Result<Option<residency::ResidentResource>> {
+            Ok(self.resident_resource(tensor, family))
+        }
+
+        fn update_resource(
+            &self,
+            tensor: &kiln_tensor::Tensor,
+            family: residency::ResidentResourceFamily,
+        ) -> Result<Option<residency::ResidentResource>> {
+            Ok(self
+                .resident_resource(tensor, family)
+                .map(|resource| resource.with_state(residency::ResidentResourceState::DirtyDevice)))
+        }
+
+        fn evict_resource(
+            &self,
+            _tensor: &kiln_tensor::Tensor,
+            _family: residency::ResidentResourceFamily,
+        ) {
+        }
+
+        fn resident_resource(
+            &self,
+            tensor: &kiln_tensor::Tensor,
+            family: residency::ResidentResourceFamily,
+        ) -> Option<residency::ResidentResource> {
+            if family != residency::ResidentResourceFamily::Activation || !self.resident {
+                return None;
+            }
+            Some(residency::ResidentResource::from_tensor_for_backend(
+                tensor,
+                residency::resident_backend_for_runtime(self.runtime_name(), tensor.device()),
+                residency::ResidentResourceFamily::Activation,
+                residency::resident_ownership_for_backend(self.runtime_name()),
+            ))
         }
     }
+
+    impl ResidencyBackend for ResidentActivationProbeBackend {}
 
     impl SamplingBackend for ResidentActivationProbeBackend {}
 

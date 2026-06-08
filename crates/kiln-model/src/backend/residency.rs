@@ -197,32 +197,148 @@ impl From<&ResidentResource> for ResidentResourceRef {
 pub trait ResidentRegistry: Send + Sync {
     fn register_resource(
         &self,
-        tensor: &Tensor,
-        family: ResidentResourceFamily,
-    ) -> Result<Option<ResidentResource>>;
+        _tensor: &Tensor,
+        _family: ResidentResourceFamily,
+    ) -> Result<Option<ResidentResource>> {
+        Ok(None)
+    }
 
     fn update_resource(
         &self,
-        tensor: &Tensor,
-        family: ResidentResourceFamily,
-    ) -> Result<Option<ResidentResource>>;
+        _tensor: &Tensor,
+        _family: ResidentResourceFamily,
+    ) -> Result<Option<ResidentResource>> {
+        Ok(None)
+    }
 
-    fn evict_resource(&self, tensor: &Tensor, family: ResidentResourceFamily);
+    fn evict_resource(&self, _tensor: &Tensor, _family: ResidentResourceFamily) {}
 
     fn resident_resource(
         &self,
-        tensor: &Tensor,
-        family: ResidentResourceFamily,
-    ) -> Option<ResidentResource>;
+        _tensor: &Tensor,
+        _family: ResidentResourceFamily,
+    ) -> Option<ResidentResource> {
+        None
+    }
 
     fn has_resident_resource(&self, tensor: &Tensor, family: ResidentResourceFamily) -> bool {
         self.resident_resource(tensor, family).is_some()
+    }
+
+    fn resolve_resource(
+        &self,
+        _tensor: &Tensor,
+        _family: ResidentResourceFamily,
+        _shape: &[usize],
+        _dtype: DType,
+    ) -> Result<Option<Tensor>> {
+        Ok(None)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct LifecycleProbeRegistry {
+        states: Mutex<HashMap<(TensorId, ResidentResourceFamily), ResidentResourceState>>,
+    }
+
+    impl LifecycleProbeRegistry {
+        fn state_for(
+            &self,
+            tensor: &Tensor,
+            family: ResidentResourceFamily,
+        ) -> Option<ResidentResourceState> {
+            self.states
+                .lock()
+                .expect("lifecycle probe registry poisoned")
+                .get(&(tensor.id(), family))
+                .copied()
+        }
+
+        fn resource_with_state(
+            tensor: &Tensor,
+            family: ResidentResourceFamily,
+            state: ResidentResourceState,
+        ) -> ResidentResource {
+            ResidentResource::from_tensor(tensor, family, ResidentOwnership::RegistryOwned)
+                .with_state(state)
+        }
+    }
+
+    impl ResidentRegistry for LifecycleProbeRegistry {
+        fn register_resource(
+            &self,
+            tensor: &Tensor,
+            family: ResidentResourceFamily,
+        ) -> Result<Option<ResidentResource>> {
+            self.states
+                .lock()
+                .expect("lifecycle probe registry poisoned")
+                .insert(
+                    (tensor.id(), family),
+                    ResidentResourceState::RegisteredClean,
+                );
+            Ok(Some(Self::resource_with_state(
+                tensor,
+                family,
+                ResidentResourceState::RegisteredClean,
+            )))
+        }
+
+        fn update_resource(
+            &self,
+            tensor: &Tensor,
+            family: ResidentResourceFamily,
+        ) -> Result<Option<ResidentResource>> {
+            self.states
+                .lock()
+                .expect("lifecycle probe registry poisoned")
+                .insert((tensor.id(), family), ResidentResourceState::DirtyDevice);
+            Ok(Some(Self::resource_with_state(
+                tensor,
+                family,
+                ResidentResourceState::DirtyDevice,
+            )))
+        }
+
+        fn evict_resource(&self, tensor: &Tensor, family: ResidentResourceFamily) {
+            self.states
+                .lock()
+                .expect("lifecycle probe registry poisoned")
+                .insert((tensor.id(), family), ResidentResourceState::Unregistered);
+        }
+
+        fn resident_resource(
+            &self,
+            tensor: &Tensor,
+            family: ResidentResourceFamily,
+        ) -> Option<ResidentResource> {
+            let state = self.state_for(tensor, family)?;
+            if state == ResidentResourceState::Unregistered {
+                return None;
+            }
+            Some(Self::resource_with_state(tensor, family, state))
+        }
+
+        fn resolve_resource(
+            &self,
+            tensor: &Tensor,
+            family: ResidentResourceFamily,
+            _shape: &[usize],
+            _dtype: DType,
+        ) -> Result<Option<Tensor>> {
+            if self.resident_resource(tensor, family).is_some() {
+                Ok(Some(tensor.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+    }
 
     #[test]
     fn resident_resource_describes_tensor_metadata() -> anyhow::Result<()> {
@@ -275,6 +391,49 @@ mod tests {
             replay_ref.replay_stability,
             ReplayResourceStability::StableAcrossReplay
         );
+        Ok(())
+    }
+
+    #[test]
+    fn resident_registry_lifecycle_contract_tracks_register_update_evict() -> anyhow::Result<()> {
+        let registry = LifecycleProbeRegistry::default();
+        let tensor = Tensor::from_slice(&[1.0_f32, 2.0], vec![2])?;
+        let family = ResidentResourceFamily::Activation;
+
+        assert!(
+            ResidentRegistry::resolve_resource(&registry, &tensor, family, &[2], DType::F32)?
+                .is_none()
+        );
+
+        let registered = ResidentRegistry::register_resource(&registry, &tensor, family)?.unwrap();
+        assert_eq!(registered.state, ResidentResourceState::RegisteredClean);
+        assert_eq!(
+            registry.state_for(&tensor, family),
+            Some(ResidentResourceState::RegisteredClean)
+        );
+        assert!(
+            ResidentRegistry::resolve_resource(&registry, &tensor, family, &[2], DType::F32)?
+                .is_some()
+        );
+
+        let updated = ResidentRegistry::update_resource(&registry, &tensor, family)?.unwrap();
+        assert_eq!(updated.state, ResidentResourceState::DirtyDevice);
+        assert_eq!(
+            registry.state_for(&tensor, family),
+            Some(ResidentResourceState::DirtyDevice)
+        );
+
+        ResidentRegistry::evict_resource(&registry, &tensor, family);
+        assert_eq!(
+            registry.state_for(&tensor, family),
+            Some(ResidentResourceState::Unregistered)
+        );
+        assert!(ResidentRegistry::resident_resource(&registry, &tensor, family).is_none());
+        assert!(
+            ResidentRegistry::resolve_resource(&registry, &tensor, family, &[2], DType::F32)?
+                .is_none()
+        );
+
         Ok(())
     }
 

@@ -1560,21 +1560,66 @@ impl GdnBackend for RocmBackend {
     }
 }
 
-impl ResidencyBackend for RocmBackend {
-    fn runtime_supports_resident_activation(&self) -> bool {
-        true
-    }
+fn rocm_resident_activation_resource(
+    tensor: &kiln_tensor::Tensor,
+    state: super::residency::ResidentResourceState,
+) -> super::residency::ResidentResource {
+    super::residency::ResidentResource::from_tensor_for_backend(
+        tensor,
+        super::residency::resident_backend_for_runtime("rocm", tensor.device()),
+        super::residency::ResidentResourceFamily::Activation,
+        super::residency::ResidentOwnership::StorageOwned,
+    )
+    .with_state(state)
+}
 
-    fn runtime_register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
+impl super::residency::ResidentRegistry for RocmBackend {
+    fn register_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        family: super::residency::ResidentResourceFamily,
+    ) -> Result<Option<super::residency::ResidentResource>> {
+        if family != super::residency::ResidentResourceFamily::Activation {
+            return Ok(None);
+        }
         super::cuda_rocm_common::mark_resident_activation(
             &ROCM_RESIDENT_TENSOR_IDS,
             tensor,
             ROCM_RESIDENT_TENSOR_IDS_POISONED,
         );
-        Ok(())
+        Ok(Some(rocm_resident_activation_resource(
+            tensor,
+            super::residency::ResidentResourceState::RegisteredClean,
+        )))
     }
 
-    fn runtime_evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
+    fn update_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        family: super::residency::ResidentResourceFamily,
+    ) -> Result<Option<super::residency::ResidentResource>> {
+        if family != super::residency::ResidentResourceFamily::Activation {
+            return Ok(None);
+        }
+        super::cuda_rocm_common::mark_resident_activation(
+            &ROCM_RESIDENT_TENSOR_IDS,
+            tensor,
+            ROCM_RESIDENT_TENSOR_IDS_POISONED,
+        );
+        Ok(Some(rocm_resident_activation_resource(
+            tensor,
+            super::residency::ResidentResourceState::DirtyDevice,
+        )))
+    }
+
+    fn evict_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        family: super::residency::ResidentResourceFamily,
+    ) {
+        if family != super::residency::ResidentResourceFamily::Activation {
+            return;
+        }
         super::cuda_rocm_common::evict_resident_activation(
             &ROCM_RESIDENT_TENSOR_IDS,
             tensor,
@@ -1582,21 +1627,32 @@ impl ResidencyBackend for RocmBackend {
         );
     }
 
-    fn runtime_update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
-        super::cuda_rocm_common::mark_resident_activation(
+    fn resident_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        family: super::residency::ResidentResourceFamily,
+    ) -> Option<super::residency::ResidentResource> {
+        if family != super::residency::ResidentResourceFamily::Activation {
+            return None;
+        }
+        if super::cuda_rocm_common::has_resident_activation(
             &ROCM_RESIDENT_TENSOR_IDS,
             tensor,
             ROCM_RESIDENT_TENSOR_IDS_POISONED,
-        );
-        Ok(())
+        ) {
+            Some(rocm_resident_activation_resource(
+                tensor,
+                super::residency::ResidentResourceState::RegisteredClean,
+            ))
+        } else {
+            None
+        }
     }
+}
 
-    fn runtime_has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
-        super::cuda_rocm_common::has_resident_activation(
-            &ROCM_RESIDENT_TENSOR_IDS,
-            tensor,
-            ROCM_RESIDENT_TENSOR_IDS_POISONED,
-        )
+impl ResidencyBackend for RocmBackend {
+    fn runtime_supports_resident_activation(&self) -> bool {
+        true
     }
 }
 

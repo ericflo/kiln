@@ -13,10 +13,10 @@ use super::metal_gdn::*;
 use super::metal_lm_head::*;
 use super::metal_paged::*;
 use super::{
-    metal_residency, metal_training, AttentionBackend, BackendIdentity, BackendRuntime,
-    ConvBackend, GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend,
-    ResidencyBackend, SamplingBackend, StartupBackend, TrainingCapabilities, TrainingLossBackend,
-    TrainingPrecisionPolicy,
+    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, GdnBackend, LinearBackend,
+    OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend,
+    StartupBackend, TrainingCapabilities, TrainingLossBackend, TrainingPrecisionPolicy,
+    metal_residency, metal_training,
 };
 
 impl BackendIdentity for MetalBackend {
@@ -815,42 +815,98 @@ impl GdnBackend for MetalBackend {
 
 impl LinearBackend for MetalBackend {}
 
+fn metal_resident_activation_resource(
+    tensor: &kiln_tensor::Tensor,
+    state: super::residency::ResidentResourceState,
+) -> super::residency::ResidentResource {
+    super::residency::ResidentResource::from_tensor_for_backend(
+        tensor,
+        super::residency::resident_backend_for_runtime("metal", tensor.device()),
+        super::residency::ResidentResourceFamily::Activation,
+        super::residency::ResidentOwnership::StorageOwned,
+    )
+    .with_state(state)
+}
+
+impl super::residency::ResidentRegistry for MetalBackend {
+    fn register_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        family: super::residency::ResidentResourceFamily,
+    ) -> Result<Option<super::residency::ResidentResource>> {
+        if family != super::residency::ResidentResourceFamily::Activation {
+            return Ok(None);
+        }
+        metal_residency::register_resident_activation(tensor)?;
+        Ok(self.resident_resource(tensor, family).map(|resource| {
+            resource.with_state(super::residency::ResidentResourceState::RegisteredClean)
+        }))
+    }
+
+    fn update_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        family: super::residency::ResidentResourceFamily,
+    ) -> Result<Option<super::residency::ResidentResource>> {
+        if family != super::residency::ResidentResourceFamily::Activation {
+            return Ok(None);
+        }
+        metal_residency::update_resident_activation(tensor)?;
+        Ok(self.resident_resource(tensor, family).map(|resource| {
+            resource.with_state(super::residency::ResidentResourceState::DirtyDevice)
+        }))
+    }
+
+    fn evict_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        family: super::residency::ResidentResourceFamily,
+    ) {
+        if family == super::residency::ResidentResourceFamily::Activation {
+            metal_residency::evict_resident_activation(tensor);
+        }
+    }
+
+    fn resident_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        family: super::residency::ResidentResourceFamily,
+    ) -> Option<super::residency::ResidentResource> {
+        if family != super::residency::ResidentResourceFamily::Activation
+            || !metal_residency::has_resident_activation(tensor)
+        {
+            return None;
+        }
+        Some(metal_resident_activation_resource(
+            tensor,
+            super::residency::ResidentResourceState::RegisteredClean,
+        ))
+    }
+
+    fn resolve_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        family: super::residency::ResidentResourceFamily,
+        shape: &[usize],
+        dtype: kiln_tensor::DType,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if family != super::residency::ResidentResourceFamily::Activation {
+            return Ok(None);
+        }
+        metal_residency::resolve_resident_activation(tensor, shape, dtype)
+    }
+}
+
 impl ResidencyBackend for MetalBackend {
     // ------------------------------------------------------------------
     // Resident-activation hooks (#1082) — Metal analog of the Vulkan
     // registry. The registry tracks membership only (the kt tensor already
     // owns its GPU buffer); `dispatch_adamw_step` runs a fused on-device
-    // AdamW that updates param/m/v in place. Same Ok(true)/Ok(false) and
-    // register/has/update/evict/resolve semantics as Vulkan.
+    // AdamW that updates param/m/v in place.
     // ------------------------------------------------------------------
 
     fn runtime_supports_resident_activation(&self) -> bool {
         true
-    }
-
-    fn runtime_register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
-        metal_residency::register_resident_activation(tensor)
-    }
-
-    fn runtime_has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
-        metal_residency::has_resident_activation(tensor)
-    }
-
-    fn runtime_update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
-        metal_residency::update_resident_activation(tensor)
-    }
-
-    fn runtime_evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
-        metal_residency::evict_resident_activation(tensor);
-    }
-
-    fn runtime_resolve_resident_activation(
-        &self,
-        tensor: &kiln_tensor::Tensor,
-        shape: &[usize],
-        dtype: kiln_tensor::DType,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        metal_residency::resolve_resident_activation(tensor, shape, dtype)
     }
 }
 

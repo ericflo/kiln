@@ -1332,6 +1332,33 @@ def phase1_remaining_from_signals(signals: list[dict[str, Any]]) -> list[str]:
     return remaining
 
 
+def phase3_remaining_from_signals(signals: list[dict[str, Any]]) -> list[str]:
+    remaining: list[str] = []
+    for signal in signals:
+        if signal["passed"]:
+            continue
+        name = signal["name"]
+        if name == "resident_registry_blanket_adapter_removed":
+            remaining.append("ResidentRegistry blanket adapter remains in backend/mod.rs")
+        elif name == "production_backends_implement_resident_registry":
+            remaining.append(
+                "not all production backends implement ResidentRegistry directly"
+            )
+        elif name == "residency_backend_facade_delegates_to_registry":
+            remaining.append(
+                "ResidencyBackend activation facade does not delegate through ResidentRegistry"
+            )
+        elif name == "resident_registry_process_global_statics_removed":
+            remaining.append(
+                "resident activation registries still use process-global statics"
+            )
+        elif name == "resident_registry_drop_drains_test_present":
+            remaining.append("drop-drains-registry behavioral test is not present")
+        else:
+            remaining.append(f"{name} migration signal is not yet satisfied")
+    return remaining
+
+
 def file_text(path: str) -> str:
     try:
         return (ROOT / path).read_text()
@@ -1412,6 +1439,85 @@ def resident_registry_forwarding_shim_count() -> int:
     return regex_count(
         "crates/kiln-model/src/backend/mod.rs",
         r"impl<T>\s+residency::ResidentRegistry\s+for\s+T",
+    )
+
+
+def concrete_resident_registry_impl_count() -> int:
+    impl_specs = [
+        (
+            "crates/kiln-model/src/backend/cpu.rs",
+            r"impl\s+super::residency::ResidentRegistry\s+for\s+CpuBackend",
+        ),
+        (
+            "crates/kiln-model/src/backend/cuda.rs",
+            r"impl\s+super::residency::ResidentRegistry\s+for\s+CudaBackend",
+        ),
+        (
+            "crates/kiln-model/src/backend/rocm.rs",
+            r"impl\s+super::residency::ResidentRegistry\s+for\s+RocmBackend",
+        ),
+        (
+            "crates/kiln-model/src/backend/metal_runtime.rs",
+            r"impl\s+super::residency::ResidentRegistry\s+for\s+MetalBackend",
+        ),
+        (
+            "crates/kiln-model/src/backend/vulkan.rs",
+            r"impl\s+super::residency::ResidentRegistry\s+for\s+VulkanBackend",
+        ),
+    ]
+    return sum(1 for path, pattern in impl_specs if regex_count(path, pattern) > 0)
+
+
+def residency_backend_facade_registry_delegate_count() -> int:
+    source = file_text("crates/kiln-model/src/backend/mod.rs")
+    trait_start = source.find("pub trait ResidencyBackend:")
+    if trait_start < 0:
+        return 0
+    trait_end = source.find("/// Focused `OptimizerBackend`", trait_start)
+    if trait_end < 0:
+        return 0
+    trait_source = source[trait_start:trait_end]
+    required = [
+        "BackendIdentity + residency::ResidentRegistry",
+        "residency::ResidentRegistry::register_resource",
+        "residency::ResidentRegistry::evict_resource",
+        "residency::ResidentRegistry::update_resource",
+        "residency::ResidentRegistry::has_resident_resource",
+        "residency::ResidentRegistry::resident_resource",
+        "residency::ResidentRegistry::resolve_resource",
+    ]
+    return sum(1 for needle in required if needle in trait_source)
+
+
+def resident_registry_process_global_static_count() -> int:
+    patterns = [
+        (
+            "crates/kiln-model/src/backend/cuda.rs",
+            r"static\s+CUDA_RESIDENT_TENSOR_IDS",
+        ),
+        (
+            "crates/kiln-model/src/backend/rocm.rs",
+            r"static\s+ROCM_RESIDENT_TENSOR_IDS",
+        ),
+        (
+            "crates/kiln-model/src/backend/metal_residency.rs",
+            r"static\s+METAL_RESIDENT_ACTIVATION_REGISTRY",
+        ),
+        (
+            "crates/kiln-model/src/backend/vulkan_residency.rs",
+            r"static\s+RESIDENT_ACTIVATION_REGISTRY",
+        ),
+    ]
+    return sum(regex_count(path, pattern) for path, pattern in patterns)
+
+
+def resident_registry_drop_drains_test_count() -> int:
+    return regex_count(
+        "crates/kiln-model/src/backend/mod.rs",
+        r"drop.*drains.*resident|resident.*drop.*drains",
+    ) + regex_count(
+        "crates/kiln-model/src/backend/residency.rs",
+        r"drop.*drains.*resident|resident.*drop.*drains",
     )
 
 
@@ -1510,6 +1616,10 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
         ]
     if phase == 3:
         shim_count = resident_registry_forwarding_shim_count()
+        concrete_impl_count = concrete_resident_registry_impl_count()
+        delegate_count = residency_backend_facade_registry_delegate_count()
+        process_global_count = resident_registry_process_global_static_count()
+        drop_drains_test_count = resident_registry_drop_drains_test_count()
         return [
             phase_signal(
                 "resident_registry_blanket_adapter_removed",
@@ -1517,6 +1627,48 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
                 shim_count,
                 0,
                 ["crates/kiln-model/src/backend/mod.rs"],
+            ),
+            phase_signal(
+                "production_backends_implement_resident_registry",
+                concrete_impl_count >= 5,
+                concrete_impl_count,
+                ">= 5",
+                [
+                    "crates/kiln-model/src/backend/cpu.rs",
+                    "crates/kiln-model/src/backend/cuda.rs",
+                    "crates/kiln-model/src/backend/rocm.rs",
+                    "crates/kiln-model/src/backend/metal_runtime.rs",
+                    "crates/kiln-model/src/backend/vulkan.rs",
+                ],
+            ),
+            phase_signal(
+                "residency_backend_facade_delegates_to_registry",
+                delegate_count == 7,
+                delegate_count,
+                7,
+                ["crates/kiln-model/src/backend/mod.rs"],
+            ),
+            phase_signal(
+                "resident_registry_process_global_statics_removed",
+                process_global_count == 0,
+                process_global_count,
+                0,
+                [
+                    "crates/kiln-model/src/backend/cuda.rs",
+                    "crates/kiln-model/src/backend/rocm.rs",
+                    "crates/kiln-model/src/backend/metal_residency.rs",
+                    "crates/kiln-model/src/backend/vulkan_residency.rs",
+                ],
+            ),
+            phase_signal(
+                "resident_registry_drop_drains_test_present",
+                drop_drains_test_count > 0,
+                drop_drains_test_count,
+                "> 0",
+                [
+                    "crates/kiln-model/src/backend/mod.rs",
+                    "crates/kiln-model/src/backend/residency.rs",
+                ],
             ),
         ]
     if phase == 4:
@@ -1693,9 +1845,7 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
             "migration_signals": migration_signals_by_phase[3],
             "remaining": []
             if migration_by_phase[3] == "complete"
-            else [
-                "ResidentRegistry remains a blanket adapter and production residency APIs have not been inverted through it",
-            ],
+            else phase3_remaining_from_signals(migration_signals_by_phase[3]),
         },
         {
             "phase": 4,

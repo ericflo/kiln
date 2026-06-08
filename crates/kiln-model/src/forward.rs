@@ -28774,6 +28774,8 @@ mod tests {
 
     impl crate::backend::SamplingBackend for FixedLinearBackend {}
 
+    impl crate::backend::residency::ResidentRegistry for FixedLinearBackend {}
+
     impl crate::backend::ResidencyBackend for FixedLinearBackend {}
 
     impl crate::backend::OptimizerBackend for FixedLinearBackend {}
@@ -28856,6 +28858,8 @@ mod tests {
     }
 
     impl crate::backend::SamplingBackend for FixedMlpBackend {}
+
+    impl crate::backend::residency::ResidentRegistry for FixedMlpBackend {}
 
     impl crate::backend::ResidencyBackend for FixedMlpBackend {}
 

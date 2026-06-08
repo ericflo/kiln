@@ -553,36 +553,34 @@ fn cuda_rocm_resident_membership_stays_in_shared_helper() {
         let path = backend_dir.join(backend_file);
         let source = fs::read_to_string(&path).expect("backend source should be readable");
         let functions = parse_functions(&path);
-        let register = functions
-            .get("runtime_register_resident_activation")
-            .unwrap_or_else(|| {
-                panic!("{backend_file} missing runtime_register_resident_activation")
-            });
+        let register = functions.get("register_resource").unwrap_or_else(|| {
+            panic!("{backend_file} missing ResidentRegistry::register_resource")
+        });
         let update = functions
-            .get("runtime_update_resident_activation")
-            .unwrap_or_else(|| panic!("{backend_file} missing runtime_update_resident_activation"));
+            .get("update_resource")
+            .unwrap_or_else(|| panic!("{backend_file} missing ResidentRegistry::update_resource"));
         let evict = functions
-            .get("runtime_evict_resident_activation")
-            .unwrap_or_else(|| panic!("{backend_file} missing runtime_evict_resident_activation"));
-        let has = functions
-            .get("runtime_has_resident_activation")
-            .unwrap_or_else(|| panic!("{backend_file} missing runtime_has_resident_activation"));
+            .get("evict_resource")
+            .unwrap_or_else(|| panic!("{backend_file} missing ResidentRegistry::evict_resource"));
+        let resident = functions.get("resident_resource").unwrap_or_else(|| {
+            panic!("{backend_file} missing ResidentRegistry::resident_resource")
+        });
 
         assert!(
             compact_body(&register.body).contains("cuda_rocm_common::mark_resident_activation("),
-            "{backend_file} should register residency through cuda_rocm_common"
+            "{backend_file} registry should register residency through cuda_rocm_common"
         );
         assert!(
             compact_body(&update.body).contains("cuda_rocm_common::mark_resident_activation("),
-            "{backend_file} should update residency through cuda_rocm_common"
+            "{backend_file} registry should update residency through cuda_rocm_common"
         );
         assert!(
             compact_body(&evict.body).contains("cuda_rocm_common::evict_resident_activation("),
-            "{backend_file} should evict residency through cuda_rocm_common"
+            "{backend_file} registry should evict residency through cuda_rocm_common"
         );
         assert!(
-            compact_body(&has.body).contains("cuda_rocm_common::has_resident_activation("),
-            "{backend_file} should query residency through cuda_rocm_common"
+            compact_body(&resident.body).contains("cuda_rocm_common::has_resident_activation("),
+            "{backend_file} registry should query residency through cuda_rocm_common"
         );
 
         assert!(
@@ -2579,7 +2577,7 @@ fn capability_queries_consume_focused_backend_facets() {
     let replay_trait = source_between(
         &backend_source,
         "pub trait ReplayBackend",
-        "// Blanket forwarding impls",
+        "// (#1082 candle removal) The candle-typed `for_device` shim was deleted",
     );
     let replay_support_start = replay_trait
         .find("fn runtime_supports_replay_request")
@@ -2838,41 +2836,52 @@ fn generated_capability_report_lists_focused_backend_facets() {
 }
 
 #[test]
-fn resident_registry_consumes_focused_residency_facet() {
+fn residency_facade_delegates_to_authoritative_registries() {
     let root = workspace_root();
     let backend_source = fs::read_to_string(root.join("crates/kiln-model/src/backend/mod.rs"))
         .expect("backend/mod.rs should be readable");
-    let registry_impl_start = backend_source
-        .find("impl<T> residency::ResidentRegistry for T")
-        .expect("ResidentRegistry blanket impl should be present");
-    let registry_impl = &backend_source[registry_impl_start..];
-    let registry_impl_end = registry_impl
-        .find("// (#1082 candle removal) The candle-typed `for_device` shim was deleted")
-        .expect("backend construction section should follow ResidentRegistry adapter");
-    let registry_impl = &registry_impl[..registry_impl_end];
+
+    assert!(
+        !backend_source.contains("impl<T> residency::ResidentRegistry for T"),
+        "ResidentRegistry should not be a blanket adapter over ResidencyBackend"
+    );
+
+    let residency_trait = source_between(
+        &backend_source,
+        "pub trait ResidencyBackend:",
+        "/// Focused `OptimizerBackend`",
+    );
 
     for required in [
-        "T: BackendRuntime + ResidencyBackend + ?Sized",
-        "ResidencyBackend::runtime_register_resident_activation",
-        "ResidencyBackend::runtime_update_resident_activation",
-        "ResidencyBackend::runtime_evict_resident_activation",
-        "ResidencyBackend::runtime_resident_activation_resource",
+        "BackendIdentity + residency::ResidentRegistry",
+        "residency::ResidentRegistry::register_resource",
+        "residency::ResidentRegistry::update_resource",
+        "residency::ResidentRegistry::evict_resource",
+        "residency::ResidentRegistry::has_resident_resource",
+        "residency::ResidentRegistry::resident_resource",
+        "residency::ResidentRegistry::resolve_resource",
     ] {
         assert!(
-            registry_impl.contains(required),
-            "ResidentRegistry adapter should consume focused residency facet surface {required}"
+            residency_trait.contains(required),
+            "ResidencyBackend activation facade should delegate through {required}"
         );
     }
 
-    for forbidden in [
-        "BackendRuntime::register_resident_activation",
-        "BackendRuntime::update_resident_activation",
-        "BackendRuntime::evict_resident_activation",
-        "BackendRuntime::resident_activation_resource",
+    for (backend_file, backend_type) in [
+        ("cpu.rs", "CpuBackend"),
+        ("cuda.rs", "CudaBackend"),
+        ("rocm.rs", "RocmBackend"),
+        ("metal_runtime.rs", "MetalBackend"),
+        ("vulkan.rs", "VulkanBackend"),
     ] {
+        let backend_source =
+            fs::read_to_string(root.join(format!("crates/kiln-model/src/backend/{backend_file}")))
+                .expect("backend source should be readable");
         assert!(
-            !registry_impl.contains(forbidden),
-            "ResidentRegistry adapter should not reach around ResidencyBackend via {forbidden}"
+            backend_source.contains(&format!(
+                "impl super::residency::ResidentRegistry for {backend_type}"
+            )),
+            "{backend_file} should implement ResidentRegistry directly"
         );
     }
 }
@@ -6094,8 +6103,49 @@ fn generated_capability_report_tracks_migration_phase_status() {
         "BackendRuntime should stay identity-only after W1 deletes compatibility methods"
     );
 
+    let phase3 = phases
+        .iter()
+        .find(|phase| phase["phase"] == 3)
+        .expect("Phase 3 should be present");
+    assert_eq!(
+        phase3["status"], "partial",
+        "Phase 3 should show W3.1 registry inversion progress without self-certifying covered"
+    );
+    assert_eq!(phase3["contract"], "landed");
+    assert_eq!(phase3["migration"], "partial");
+    assert_eq!(phase3["genuine"], false);
+    let phase3_signals = phase3["migration_signals"]
+        .as_array()
+        .expect("Phase 3 should list registry migration signals");
+    for signal_name in [
+        "resident_registry_blanket_adapter_removed",
+        "production_backends_implement_resident_registry",
+        "residency_backend_facade_delegates_to_registry",
+    ] {
+        let signal = phase3_signals
+            .iter()
+            .find(|signal| signal["name"] == signal_name)
+            .unwrap_or_else(|| panic!("Phase 3 should include migration signal {signal_name}"));
+        assert_eq!(
+            signal["passed"], true,
+            "Phase 3 signal {signal_name} should pass after registry routing inversion"
+        );
+    }
+    for signal_name in [
+        "resident_registry_process_global_statics_removed",
+        "resident_registry_drop_drains_test_present",
+    ] {
+        let signal = phase3_signals
+            .iter()
+            .find(|signal| signal["name"] == signal_name)
+            .unwrap_or_else(|| panic!("Phase 3 should include migration signal {signal_name}"));
+        assert_eq!(
+            signal["passed"], false,
+            "Phase 3 signal {signal_name} should fail until W3.3 ownership cleanup lands"
+        );
+    }
+
     for (phase_number, signal_name) in [
-        (3, "resident_registry_blanket_adapter_removed"),
         (4, "matmul_linear_identity_dispatch_removed"),
         (5, "production_replay_paths_use_replay_plan"),
     ] {
