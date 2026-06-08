@@ -5451,6 +5451,39 @@ fn forward_packed_mlp_prefill_routes_gate_up_through_matmul_request_contract() {
 }
 
 #[test]
+fn forward_mtp_matmuls_route_through_linear_backend_contract() {
+    let forward_source =
+        fs::read_to_string(workspace_root().join("crates/kiln-model/src/forward.rs"))
+            .expect("forward source should be readable");
+    let mtp_forward = source_between(
+        &forward_source,
+        "pub fn mtp_forward_step(",
+        "fn model_forward_paged_inner(",
+    );
+
+    for required in [
+        "runtime_matmul_or_broadcast(backend, &concat_f32, &fc_t_f32)",
+        "runtime_matmul_or_broadcast(backend, &concat, &mtp.fc_t)",
+        "lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)",
+    ] {
+        assert!(
+            mtp_forward.contains(required),
+            "MTP forward should route matmul through LinearBackend before portable fallback: {required}"
+        );
+    }
+    for forbidden in [
+        "concat_f32.broadcast_matmul(&fc_t_f32)",
+        "concat.broadcast_matmul(&mtp.fc_t)",
+        "lm_head_forward(&normed, &weights.embed_tokens_t)",
+    ] {
+        assert!(
+            !mtp_forward.contains(forbidden),
+            "MTP forward should not bypass the backend matmul contract: {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn forward_full_attn_qkv_combined_routes_through_linear_backend_contract() {
     let forward_source =
         fs::read_to_string(workspace_root().join("crates/kiln-model/src/forward.rs"))

@@ -5545,6 +5545,17 @@ fn runtime_matmul_no_broadcast_copy(
     Ok(Some(out2d.reshape(out_shape)?))
 }
 
+fn runtime_matmul_or_broadcast(
+    backend: &dyn BackendRuntime,
+    lhs: &Tensor,
+    rhs: &Tensor,
+) -> Result<Tensor> {
+    if let Some(out) = runtime_matmul_no_broadcast_copy(backend, lhs, rhs)? {
+        return Ok(out);
+    }
+    broadcast_matmul_cpu_compatible(lhs, rhs)
+}
+
 /// Phase 7 — kt-API matmul migration helper. Routes a 2D matmul through
 /// `kiln_tensor::ops::matmul`, whose `MatmulOp` owns native backend dispatch.
 ///
@@ -26716,9 +26727,9 @@ pub fn mtp_forward_step(
             let in_dtype = concat.dtype();
             let concat_f32 = concat.to_dtype(DType::F32)?;
             let fc_t_f32 = mtp.fc_t.to_dtype(DType::F32)?;
-            concat_f32.broadcast_matmul(&fc_t_f32)?.to_dtype(in_dtype)?
+            runtime_matmul_or_broadcast(backend, &concat_f32, &fc_t_f32)?.to_dtype(in_dtype)?
         } else {
-            concat.broadcast_matmul(&mtp.fc_t)?
+            runtime_matmul_or_broadcast(backend, &concat, &mtp.fc_t)?
         }
     };
     if dump_pre_rope {
@@ -26844,7 +26855,7 @@ pub fn mtp_forward_step(
     }
     let logits = {
         kiln_nvtx::range!(c"kiln/mtp/lm_head");
-        lm_head_forward(&normed, &weights.embed_tokens_t)?
+        lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)?
     };
     // Phase C14 tap 3/3: post-lm_head logits, pre-softmax / pre-sampler.
     if dump_c14_post_block {
