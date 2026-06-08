@@ -699,21 +699,6 @@ pub trait BackendRuntime:
         BackendIdentity::runtime_as_any(self)
     }
 
-    /// Operator-facing summary of which training paths are backend-native,
-    /// candle-on-device, or intentionally declined. This is telemetry only:
-    /// dispatch methods remain the source of truth for actual behavior.
-    fn training_capabilities(&self) -> TrainingCapabilities {
-        TrainingLossBackend::runtime_training_capabilities(self)
-    }
-
-    fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
-        TrainingLossBackend::runtime_training_precision_policy(self)
-    }
-
-    fn precompile_startup_kernels(&self) -> Result<()> {
-        StartupBackend::runtime_precompile_startup_kernels(self)
-    }
-
     /// First-use feasibility check for the Vulkan-resident decode pool:
     /// returns true when a 3-4 slot ring sized to `max(hidden, intermediate)
     /// × max_batch × 4` bytes can be allocated within 1 % of the device-local
@@ -1024,17 +1009,6 @@ pub trait BackendRuntime:
         ResidencyBackend::runtime_has_resident_activation(self, tensor)
     }
 
-    /// Metadata-only descriptor for an activation that the backend already
-    /// reports as resident. This does not allocate or register anything; it
-    /// lets Phase 3 callers reason about residency state through one shared
-    /// contract while concrete registries continue to own the actual bytes.
-    fn resident_activation_resource(
-        &self,
-        tensor: &kiln_tensor::Tensor,
-    ) -> Option<residency::ResidentResource> {
-        ResidencyBackend::runtime_resident_activation_resource(self, tensor)
-    }
-
     /// Read a previously-registered activation back from device into
     /// a fresh CPU `kiln_tensor::Tensor` with the given shape and dtype. Returns
     /// `Ok(None)` when the activation isn't resident — caller should
@@ -1201,14 +1175,6 @@ pub trait BackendRuntime:
 
     fn supports_gdn_full_chunk_forward(&self) -> bool {
         GdnBackend::runtime_supports_gdn_full_chunk_forward(self)
-    }
-
-    fn supports_gdn_full_chunk_forward_head_last(&self) -> bool {
-        GdnBackend::runtime_supports_gdn_full_chunk_forward_head_last(self)
-    }
-
-    fn supports_gdn_recurrent_prefill_head_last(&self) -> bool {
-        GdnBackend::runtime_supports_gdn_recurrent_prefill_head_last(self)
     }
 
     fn supports_gdn_recurrent_prefill_native_head_last(&self) -> bool {
