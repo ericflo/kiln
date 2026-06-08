@@ -6161,10 +6161,7 @@ fn generated_capability_report_tracks_migration_phase_status() {
         );
     }
 
-    for (phase_number, signal_name) in [
-        (4, "matmul_linear_identity_dispatch_removed"),
-        (5, "production_replay_paths_use_replay_plan"),
-    ] {
+    for (phase_number, signal_name) in [(4, "matmul_linear_identity_dispatch_removed")] {
         let phase = phases
             .iter()
             .find(|phase| phase["phase"] == phase_number)
@@ -6190,6 +6187,37 @@ fn generated_capability_report_tracks_migration_phase_status() {
             "Phase {phase_number} signal {signal_name} should fail until the legacy scaffold is removed"
         );
     }
+
+    let phase5 = phases
+        .iter()
+        .find(|phase| phase["phase"] == 5)
+        .expect("Phase 5 should be present");
+    assert_eq!(
+        phase5["status"], "partial",
+        "Phase 5 should show W5.0 replay contract progress without claiming production replay wiring"
+    );
+    assert_eq!(phase5["contract"], "landed");
+    assert_eq!(phase5["migration"], "partial");
+    assert_eq!(phase5["genuine"], false);
+    let phase5_signals = phase5["migration_signals"]
+        .as_array()
+        .expect("Phase 5 should list migration signals");
+    let replay_contract_signal = phase5_signals
+        .iter()
+        .find(|signal| signal["name"] == "replay_contract_w5_0_fixed")
+        .expect("Phase 5 should include W5.0 contract signal");
+    assert_eq!(
+        replay_contract_signal["passed"], true,
+        "Phase 5 W5.0 contract signal should pass after replay contract bugs are fixed"
+    );
+    let production_replay_signal = phase5_signals
+        .iter()
+        .find(|signal| signal["name"] == "production_replay_paths_use_replay_plan")
+        .expect("Phase 5 should include production replay wiring signal");
+    assert_eq!(
+        production_replay_signal["passed"], false,
+        "Phase 5 production wiring signal should fail until decode paths use ReplayPlan"
+    );
 
     let phase7 = phases
         .iter()

@@ -1363,6 +1363,23 @@ def phase3_remaining_from_signals(signals: list[dict[str, Any]]) -> list[str]:
     return remaining
 
 
+def phase5_remaining_from_signals(signals: list[dict[str, Any]]) -> list[str]:
+    remaining: list[str] = []
+    for signal in signals:
+        if signal["passed"]:
+            continue
+        name = signal["name"]
+        if name == "replay_contract_w5_0_fixed":
+            remaining.append(
+                "ReplayPlan contract still lacks W5.0 byte-length, layout, stability, or key-change guards"
+            )
+        elif name == "production_replay_paths_use_replay_plan":
+            remaining.append("production replay runners are not wired through ReplayPlan")
+        else:
+            remaining.append(f"{name} migration signal is not yet satisfied")
+    return remaining
+
+
 def file_text(path: str) -> str:
     try:
         return (ROOT / path).read_text()
@@ -1567,6 +1584,21 @@ def replay_production_replay_plan_mentions() -> int:
     return sum(file_text(path).count("ReplayPlan") for path in paths)
 
 
+def replay_contract_w5_0_signal_count() -> int:
+    source = file_text("crates/kiln-graph/src/replay_plan.rs")
+    required = [
+        "packed_buffer_bytes(element_count)",
+        "pub strides: Vec<usize>",
+        "pub start_offset: usize",
+        "pub contiguous: bool",
+        "fn validate_inputs(&self, inputs: ReplayInputs<'_>)",
+        "replay_state_accepts_stable_within_step_inputs",
+        "replay_resource_ref_tracks_packed_byte_len_and_layout",
+        "replay_plan_validate_inputs_rejects_key_changes",
+    ]
+    return sum(1 for needle in required if needle in source)
+
+
 def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
     if phase == 1:
         shim_count = focused_trait_forwarding_shim_count()
@@ -1726,7 +1758,15 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
         ]
     if phase == 5:
         replay_plan_mentions = replay_production_replay_plan_mentions()
+        replay_contract_count = replay_contract_w5_0_signal_count()
         return [
+            phase_signal(
+                "replay_contract_w5_0_fixed",
+                replay_contract_count == 8,
+                replay_contract_count,
+                8,
+                ["crates/kiln-graph/src/replay_plan.rs"],
+            ),
             phase_signal(
                 "production_replay_paths_use_replay_plan",
                 replay_plan_mentions > 0,
@@ -1950,9 +1990,7 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
             "migration_signals": migration_signals_by_phase[5],
             "remaining": []
             if migration_by_phase[5] == "complete"
-            else [
-                "production replay runners are not wired through ReplayPlan",
-            ],
+            else phase5_remaining_from_signals(migration_signals_by_phase[5]),
         },
         {
             "phase": 6,

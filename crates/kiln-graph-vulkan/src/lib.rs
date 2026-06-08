@@ -76,6 +76,9 @@ mod tests {
             backend: Backend::Vulkan,
             dtype: DType::F32,
             shape: vec![1, 128],
+            strides: vec![128, 1],
+            start_offset: 0,
+            contiguous: true,
             byte_len: 128 * DType::F32.size_in_bytes(),
             replay_stability: ReplayResourceStability::StableAcrossReplay,
         }
@@ -104,7 +107,7 @@ mod tests {
             .expect("Vulkan graph backend should match replay key");
 
         assert_eq!(ReplayPlan::backend(&plan), Backend::Vulkan);
-        ReplayPlan::validate_inputs(&plan, &[input.clone()]).unwrap();
+        ReplayPlan::validate_inputs(&plan, ReplayInputs::new(&key, &[input.clone()])).unwrap();
         let outputs = ReplayPlan::replay(&mut plan, ReplayInputs::new(&key, &[input.clone()]))
             .expect("shared replay plan should replay scaffold graph");
 

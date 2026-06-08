@@ -49,7 +49,7 @@ pub enum ReplayResourceStability {
 
 impl ReplayResourceStability {
     pub const fn is_replay_stable(self) -> bool {
-        matches!(self, Self::StableAcrossReplay)
+        !matches!(self, Self::NotReplayStable)
     }
 }
 
@@ -63,6 +63,9 @@ pub struct ResidentResourceRef {
     pub backend: Backend,
     pub dtype: DType,
     pub shape: Vec<usize>,
+    pub strides: Vec<usize>,
+    pub start_offset: usize,
+    pub contiguous: bool,
     pub byte_len: usize,
     pub replay_stability: ReplayResourceStability,
 }
@@ -73,13 +76,16 @@ impl ResidentResourceRef {
         backend: Backend,
         replay_stability: ReplayResourceStability,
     ) -> Self {
-        let element_count = tensor.shape().iter().product::<usize>().max(1);
+        let element_count = tensor.element_count();
         Self {
             tensor_id: Some(tensor.id()),
             backend,
             dtype: tensor.dtype(),
             shape: tensor.shape().to_vec(),
-            byte_len: element_count * tensor.dtype().size_in_bytes(),
+            strides: tensor.strides().to_vec(),
+            start_offset: tensor.layout().start_offset(),
+            contiguous: tensor.layout().is_contiguous(),
+            byte_len: tensor.dtype().packed_buffer_bytes(element_count),
             replay_stability,
         }
     }
@@ -232,7 +238,7 @@ pub trait ReplayPlan: Send + Sync + std::fmt::Debug {
 
     fn key(&self) -> ReplayKey;
 
-    fn validate_inputs(&self, inputs: &[ResidentResourceRef]) -> Result<(), CaptureError>;
+    fn validate_inputs(&self, inputs: ReplayInputs<'_>) -> Result<(), CaptureError>;
 
     fn replay(&mut self, inputs: ReplayInputs<'_>) -> Result<ReplayOutputs, CaptureError>;
 
@@ -284,8 +290,8 @@ impl<G: CapturedGraph> ReplayPlan for CapturedGraphReplayPlan<G> {
         self.key.clone()
     }
 
-    fn validate_inputs(&self, inputs: &[ResidentResourceRef]) -> Result<(), CaptureError> {
-        self.state.validate(&self.key, inputs)
+    fn validate_inputs(&self, inputs: ReplayInputs<'_>) -> Result<(), CaptureError> {
+        self.state.validate(inputs.key, inputs.resources)
     }
 
     fn replay(&mut self, inputs: ReplayInputs<'_>) -> Result<ReplayOutputs, CaptureError> {
@@ -335,8 +341,8 @@ mod tests {
             self.key.clone()
         }
 
-        fn validate_inputs(&self, inputs: &[ResidentResourceRef]) -> Result<(), CaptureError> {
-            self.state.validate(&self.key, inputs)
+        fn validate_inputs(&self, inputs: ReplayInputs<'_>) -> Result<(), CaptureError> {
+            self.state.validate(inputs.key, inputs.resources)
         }
 
         fn replay(&mut self, inputs: ReplayInputs<'_>) -> Result<ReplayOutputs, CaptureError> {
@@ -349,7 +355,7 @@ mod tests {
         }
 
         fn invalidate_reason(&self, state: &ReplayState) -> Option<InvalidateReason> {
-            state.invalidate_reason(&self.key, &self.state.inputs)
+            self.state.invalidate_reason(&state.key, &state.inputs)
         }
     }
 
@@ -423,6 +429,67 @@ mod tests {
     }
 
     #[test]
+    fn replay_state_accepts_stable_within_step_inputs() {
+        let key = ReplayKey::new(
+            Backend::Cuda,
+            "decode",
+            vec![1, 128],
+            Some(DType::F32),
+            1,
+            true,
+        );
+        let mut input = stable_resource();
+        input.replay_stability = ReplayResourceStability::StableWithinStep;
+        let state = ReplayState::new(key.clone(), vec![input.clone()]);
+        assert_eq!(state.invalidate_reason(&key, &[input]), None);
+    }
+
+    #[test]
+    fn replay_resource_ref_tracks_packed_byte_len_and_layout() {
+        let packed = Tensor::zeros_cpu(vec![9], DType::Int4Packed);
+        let packed_ref = ResidentResourceRef::from_tensor(
+            &packed,
+            Backend::Cuda,
+            ReplayResourceStability::StableAcrossReplay,
+        );
+        assert_eq!(packed_ref.byte_len, 5);
+        assert_eq!(packed_ref.strides, vec![1]);
+        assert_eq!(packed_ref.start_offset, 0);
+        assert!(packed_ref.contiguous);
+
+        let matrix = Tensor::zeros_cpu(vec![2, 3], DType::F32);
+        let transposed = matrix.t().expect("transpose should succeed");
+        let transposed_ref = ResidentResourceRef::from_tensor(
+            &transposed,
+            Backend::Cuda,
+            ReplayResourceStability::StableAcrossReplay,
+        );
+        assert_eq!(transposed_ref.shape, vec![3, 2]);
+        assert_eq!(transposed_ref.start_offset, 0);
+        assert!(!transposed_ref.contiguous);
+    }
+
+    #[test]
+    fn replay_state_rejects_layout_changes() {
+        let key = ReplayKey::new(
+            Backend::Cuda,
+            "decode",
+            vec![1, 128],
+            Some(DType::F32),
+            1,
+            true,
+        );
+        let input = stable_resource();
+        let mut changed = input.clone();
+        changed.contiguous = false;
+        let state = ReplayState::new(key.clone(), vec![input]);
+        assert!(matches!(
+            state.invalidate_reason(&key, &[changed]),
+            Some(InvalidateReason::InputResourceChanged { .. })
+        ));
+    }
+
+    #[test]
     fn replay_plan_validates_inputs_and_counts_replays() {
         let key = ReplayKey::new(
             Backend::Cuda,
@@ -435,12 +502,46 @@ mod tests {
         let input = stable_resource();
         let mut plan = DummyReplayPlan::new(key.clone(), vec![input.clone()]);
 
-        plan.validate_inputs(&[input.clone()]).unwrap();
+        plan.validate_inputs(ReplayInputs::new(&key, &[input.clone()]))
+            .unwrap();
         let outputs = plan
             .replay(ReplayInputs::new(&key, &[input.clone()]))
             .unwrap();
         assert_eq!(outputs.replay_count, 1);
         assert_eq!(outputs.resources, vec![input]);
+    }
+
+    #[test]
+    fn replay_plan_validate_inputs_rejects_key_changes() {
+        let key = ReplayKey::new(
+            Backend::Cuda,
+            "decode",
+            vec![1, 128],
+            Some(DType::F32),
+            1,
+            true,
+        );
+        let changed = ReplayKey::new(
+            Backend::Cuda,
+            "decode",
+            vec![2, 128],
+            Some(DType::F32),
+            2,
+            true,
+        );
+        let input = stable_resource();
+        let plan = DummyReplayPlan::new(key, vec![input.clone()]);
+
+        assert!(matches!(
+            plan.validate_inputs(ReplayInputs::new(&changed, &[input])),
+            Err(CaptureError::ReplayInvalidated { reason }) if reason.contains("replay key changed")
+        ));
+    }
+
+    #[test]
+    fn backend_invalidation_reason_surfaces_backend_message() {
+        let reason = InvalidateReason::Backend("driver reset".to_string());
+        assert_eq!(reason.message(), "driver reset");
     }
 
     #[derive(Debug)]

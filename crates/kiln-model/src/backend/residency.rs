@@ -179,6 +179,9 @@ impl ResidentResource {
             backend,
             dtype: self.dtype,
             shape: self.shape.clone(),
+            strides: self.layout.strides.clone(),
+            start_offset: self.layout.start_offset,
+            contiguous: self.layout.contiguous,
             byte_len: self.byte_len,
             replay_stability: self.replay_stability.into(),
         }

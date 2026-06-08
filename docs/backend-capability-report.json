@@ -3556,8 +3556,17 @@
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
       "genuine": false,
-      "migration": "none",
+      "migration": "partial",
       "migration_signals": [
+        {
+          "evidence": [
+            "crates/kiln-graph/src/replay_plan.rs"
+          ],
+          "expected": 8,
+          "name": "replay_contract_w5_0_fixed",
+          "observed": 8,
+          "passed": true
+        },
         {
           "evidence": [
             "crates/kiln-model/src/cuda_graph.rs",
@@ -3580,7 +3589,7 @@
         "Replay Authority",
         "Conformance And Performance Gates"
       ],
-      "status": "gap",
+      "status": "partial",
       "title": "Move replay into the authoritative graph layer"
     },
     {
