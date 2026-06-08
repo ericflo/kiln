@@ -15,7 +15,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::backend::capability::{
-    BackendCapabilityQueries, InferenceRecurrentStatePolicy, ProjectionLoadPolicy, Support,
+    BackendCapabilityQueries, InferenceRecurrentStatePolicy, MatmulRequest, ProjectionLoadPolicy,
+    Support,
 };
 use crate::backend::{
     AttentionBackend, BackendRuntime, ConvBackend, GdnBackend, LinearBackend, PagedKvBackend,
@@ -5895,6 +5896,46 @@ fn matmul_no_broadcast_copy(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     Ok(lhs.broadcast_matmul(rhs)?)
 }
 
+fn runtime_matmul_no_broadcast_copy(
+    backend: &dyn BackendRuntime,
+    lhs: &Tensor,
+    rhs: &Tensor,
+) -> Result<Option<Tensor>> {
+    let l_dims = lhs.dims();
+    let r_dims = rhs.dims();
+    if r_dims.len() != 2 || l_dims.len() < 2 {
+        return Ok(None);
+    }
+    let k = l_dims[l_dims.len() - 1];
+    if r_dims[0] != k {
+        return Ok(None);
+    }
+
+    let out_n = r_dims[1];
+    let lead: usize = l_dims[..l_dims.len() - 1].iter().product();
+    let lhs2d = if l_dims.len() == 2 {
+        lhs.clone()
+    } else if lhs.is_contiguous() {
+        lhs.reshape((lead, k))?
+    } else {
+        return Ok(None);
+    };
+    let req = MatmulRequest::plain(
+        lhs2d.dims().to_vec(),
+        rhs.dims().to_vec(),
+        lhs2d.dtype(),
+        false,
+    )
+    .with_dtypes(lhs2d.dtype(), rhs.dtype(), lhs2d.dtype());
+    let Some(out2d) = LinearBackend::runtime_matmul(backend, &req, &lhs2d, rhs)? else {
+        return Ok(None);
+    };
+
+    let mut out_shape: Vec<usize> = l_dims[..l_dims.len() - 1].to_vec();
+    out_shape.push(out_n);
+    Ok(Some(out2d.reshape(out_shape)?))
+}
+
 /// Phase 7 — kt-API matmul migration helper. Routes a 2D candle
 /// matmul through `kiln_tensor::cuda_matmul` (which dispatches via
 /// the `kiln_blas::CublasLtMatmulHandle`).
@@ -5987,6 +6028,9 @@ fn gdn_in_proj_matmul(
         {
             return Ok(out);
         }
+    }
+    if let Some(out) = runtime_matmul_no_broadcast_copy(backend, x, weight_t)? {
+        return Ok(out);
     }
     // #1082 item 4: `linear_prefill_apply` is kt-typed — pass kt directly.
     #[cfg(feature = "cuda")]
@@ -30200,6 +30244,30 @@ mod tests {
     /// matmul helper (`broadcast_matmul_cpu_compatible` →
     /// `matmul_no_broadcast_copy`), so any drift would have to come from
     /// cuBLAS's choice of algorithm for different output widths.
+    #[test]
+    fn test_runtime_matmul_no_broadcast_copy_routes_cpu_backend() -> Result<()> {
+        let backend = CpuBackend::new(Device::Cpu);
+        let x = Tensor::from_slice(
+            &[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            vec![1, 2, 3],
+        )?;
+        let weight_t = Tensor::from_slice(
+            &[7.0_f32, 8.0, 9.0, 10.0, 11.0, 12.0],
+            vec![3, 2],
+        )?;
+
+        let routed = runtime_matmul_no_broadcast_copy(&backend, &x, &weight_t)?
+            .expect("CPU backend should route flattened matmul request");
+        let reference = broadcast_matmul_cpu_compatible(&x, &weight_t)?;
+        assert_eq!(routed.dims(), &[1, 2, 2]);
+        assert_eq!(
+            routed.flatten_all()?.to_vec1::<f32>()?,
+            reference.flatten_all()?.to_vec1::<f32>()?
+        );
+
+        Ok(())
+    }
+
     #[test]
     fn test_fused_gate_up_proj_matches_split_path() -> Result<()> {
         let device = Device::Cpu;
