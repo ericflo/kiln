@@ -299,8 +299,10 @@ impl OptimizerBackend for MetalBackend {
     ) -> Result<bool> {
         // All four operands must be resident: no mixed resident/host update,
         // since that would need a per-call upload and defeat on-device AdamW.
-        let all_resident =
-            metal_residency::all_registered(&[param, grad, first_moment, second_moment]);
+        let all_resident = metal_residency::all_registered(
+            &self.resident_activation_registry,
+            &[param, grad, first_moment, second_moment],
+        );
         metal_training::dispatch_adamw_step(
             param,
             grad,
@@ -837,7 +839,7 @@ impl super::residency::ResidentRegistry for MetalBackend {
         if family != super::residency::ResidentResourceFamily::Activation {
             return Ok(None);
         }
-        metal_residency::register_resident_activation(tensor)?;
+        metal_residency::register_resident_activation(&self.resident_activation_registry, tensor)?;
         Ok(self.resident_resource(tensor, family).map(|resource| {
             resource.with_state(super::residency::ResidentResourceState::RegisteredClean)
         }))
@@ -851,7 +853,7 @@ impl super::residency::ResidentRegistry for MetalBackend {
         if family != super::residency::ResidentResourceFamily::Activation {
             return Ok(None);
         }
-        metal_residency::update_resident_activation(tensor)?;
+        metal_residency::update_resident_activation(&self.resident_activation_registry, tensor)?;
         Ok(self.resident_resource(tensor, family).map(|resource| {
             resource.with_state(super::residency::ResidentResourceState::DirtyDevice)
         }))
@@ -863,7 +865,7 @@ impl super::residency::ResidentRegistry for MetalBackend {
         family: super::residency::ResidentResourceFamily,
     ) {
         if family == super::residency::ResidentResourceFamily::Activation {
-            metal_residency::evict_resident_activation(tensor);
+            metal_residency::evict_resident_activation(&self.resident_activation_registry, tensor);
         }
     }
 
@@ -873,7 +875,7 @@ impl super::residency::ResidentRegistry for MetalBackend {
         family: super::residency::ResidentResourceFamily,
     ) -> Option<super::residency::ResidentResource> {
         if family != super::residency::ResidentResourceFamily::Activation
-            || !metal_residency::has_resident_activation(tensor)
+            || !metal_residency::has_resident_activation(&self.resident_activation_registry, tensor)
         {
             return None;
         }
@@ -893,7 +895,12 @@ impl super::residency::ResidentRegistry for MetalBackend {
         if family != super::residency::ResidentResourceFamily::Activation {
             return Ok(None);
         }
-        metal_residency::resolve_resident_activation(tensor, shape, dtype)
+        metal_residency::resolve_resident_activation(
+            &self.resident_activation_registry,
+            tensor,
+            shape,
+            dtype,
+        )
     }
 }
 

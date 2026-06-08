@@ -14,8 +14,6 @@ use super::{
 };
 use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 
-static ROCM_RESIDENT_TENSOR_IDS: super::cuda_rocm_common::ResidentTensorIdRegistry =
-    OnceLock::new();
 static ROCM_SGD_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static ROCM_ADAMW_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static ROCM_LINEAR_PREFILL_SUCCESSES: AtomicU64 = AtomicU64::new(0);
@@ -77,9 +75,12 @@ fn rocm_or_legacy_disable_env_set(rocm_name: &str, legacy_cuda_name: &str) -> bo
     std::env::var(rocm_name).is_ok() || std::env::var(legacy_cuda_name).is_ok()
 }
 
-fn rocm_optimizer_args_ready_for_kt(tensors: &[&kiln_tensor::Tensor]) -> bool {
+fn rocm_optimizer_args_ready_for_kt(
+    registry: &super::cuda_rocm_common::ResidentTensorIdRegistry,
+    tensors: &[&kiln_tensor::Tensor],
+) -> bool {
     super::cuda_rocm_common::optimizer_args_ready_for_kt(
-        &ROCM_RESIDENT_TENSOR_IDS,
+        registry,
         tensors,
         ROCM_RESIDENT_TENSOR_IDS_POISONED,
         |device| matches!(device, kiln_tensor::Device::Rocm(_)),
@@ -98,6 +99,7 @@ pub struct RocmBackend {
     /// step 4: the formerly-cached candle `device` field was dropped — it had
     /// zero reads; `new` now takes a `kiln_tensor::Device` directly.)
     device_kt: kiln_tensor::Device,
+    resident_tensor_ids: super::cuda_rocm_common::ResidentTensorIdRegistry,
     /// Cached at construction: reading env vars per decode step × 24 GDN layers
     /// shows up in decode NVTX captures. Env vars don't change at runtime.
     gdn_enabled: bool,
@@ -221,6 +223,7 @@ impl RocmBackend {
         let device_kt = device;
         Self {
             device_kt,
+            resident_tensor_ids: super::cuda_rocm_common::new_resident_tensor_id_registry(),
             gdn_enabled,
             gdn_gates_enabled,
             gdn_gated_rms_norm_enabled,
@@ -473,7 +476,7 @@ impl OptimizerBackend for RocmBackend {
         grad: &kiln_tensor::Tensor,
         lr: f32,
     ) -> Result<bool> {
-        if !rocm_optimizer_args_ready_for_kt(&[param, grad]) {
+        if !rocm_optimizer_args_ready_for_kt(&self.resident_tensor_ids, &[param, grad]) {
             return Ok(false);
         }
         // #1082: args are already kt (BackendRuntime trait flipped to kt),
@@ -515,7 +518,10 @@ impl OptimizerBackend for RocmBackend {
         weight_decay: f32,
         step: u32,
     ) -> Result<bool> {
-        if !rocm_optimizer_args_ready_for_kt(&[param, grad, first_moment, second_moment]) {
+        if !rocm_optimizer_args_ready_for_kt(
+            &self.resident_tensor_ids,
+            &[param, grad, first_moment, second_moment],
+        ) {
             return Ok(false);
         }
         // #1082: args are already kt (BackendRuntime trait flipped to kt),
@@ -1583,7 +1589,7 @@ impl super::residency::ResidentRegistry for RocmBackend {
             return Ok(None);
         }
         super::cuda_rocm_common::mark_resident_activation(
-            &ROCM_RESIDENT_TENSOR_IDS,
+            &self.resident_tensor_ids,
             tensor,
             ROCM_RESIDENT_TENSOR_IDS_POISONED,
         );
@@ -1602,7 +1608,7 @@ impl super::residency::ResidentRegistry for RocmBackend {
             return Ok(None);
         }
         super::cuda_rocm_common::mark_resident_activation(
-            &ROCM_RESIDENT_TENSOR_IDS,
+            &self.resident_tensor_ids,
             tensor,
             ROCM_RESIDENT_TENSOR_IDS_POISONED,
         );
@@ -1621,7 +1627,7 @@ impl super::residency::ResidentRegistry for RocmBackend {
             return;
         }
         super::cuda_rocm_common::evict_resident_activation(
-            &ROCM_RESIDENT_TENSOR_IDS,
+            &self.resident_tensor_ids,
             tensor,
             ROCM_RESIDENT_TENSOR_IDS_POISONED,
         );
@@ -1636,7 +1642,7 @@ impl super::residency::ResidentRegistry for RocmBackend {
             return None;
         }
         if super::cuda_rocm_common::has_resident_activation(
-            &ROCM_RESIDENT_TENSOR_IDS,
+            &self.resident_tensor_ids,
             tensor,
             ROCM_RESIDENT_TENSOR_IDS_POISONED,
         ) {

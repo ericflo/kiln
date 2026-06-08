@@ -623,14 +623,16 @@ fn cuda_rocm_optimizer_arg_validation_stays_in_shared_helper() {
             .get("runtime_dispatch_adamw_step")
             .unwrap_or_else(|| panic!("{backend_file} missing runtime_dispatch_adamw_step"));
 
+        let sgd_body = compact_body(&sgd.body);
         assert!(
-            compact_body(&sgd.body).contains(&format!("{helper}(&[param,grad])")),
+            sgd_body.contains(&format!("{helper}(&self.resident_tensor_ids,"))
+                && sgd_body.contains("&[param,grad]"),
             "{backend_file} SGD dispatch should use shared optimizer readiness validation"
         );
+        let adamw_body = compact_body(&adamw.body);
         assert!(
-            compact_body(&adamw.body).contains(&format!(
-                "{helper}(&[param,grad,first_moment,second_moment])"
-            )),
+            adamw_body.contains(&format!("{helper}(&self.resident_tensor_ids,"))
+                && adamw_body.contains("&[param,grad,first_moment,second_moment]"),
             "{backend_file} AdamW dispatch should use shared optimizer readiness validation"
         );
         assert!(
@@ -6121,6 +6123,8 @@ fn generated_capability_report_tracks_migration_phase_status() {
         "resident_registry_blanket_adapter_removed",
         "production_backends_implement_resident_registry",
         "residency_backend_facade_delegates_to_registry",
+        "resident_registry_process_global_statics_removed",
+        "resident_registry_drop_drains_test_present",
     ] {
         let signal = phase3_signals
             .iter()
@@ -6131,17 +6135,14 @@ fn generated_capability_report_tracks_migration_phase_status() {
             "Phase 3 signal {signal_name} should pass after registry routing inversion"
         );
     }
-    for signal_name in [
-        "resident_registry_process_global_statics_removed",
-        "resident_registry_drop_drains_test_present",
-    ] {
+    for signal_name in ["resident_registry_lifecycle_metadata_persisted"] {
         let signal = phase3_signals
             .iter()
             .find(|signal| signal["name"] == signal_name)
             .unwrap_or_else(|| panic!("Phase 3 should include migration signal {signal_name}"));
         assert_eq!(
             signal["passed"], false,
-            "Phase 3 signal {signal_name} should fail until W3.3 ownership cleanup lands"
+            "Phase 3 signal {signal_name} should fail until production registries persist lifecycle metadata"
         );
     }
 

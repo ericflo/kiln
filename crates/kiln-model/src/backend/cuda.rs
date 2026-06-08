@@ -14,8 +14,6 @@ use super::{
 };
 use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 
-static CUDA_RESIDENT_TENSOR_IDS: super::cuda_rocm_common::ResidentTensorIdRegistry =
-    OnceLock::new();
 static CUDA_SGD_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static CUDA_ADAMW_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static CUDA_LINEAR_PREFILL_SUCCESSES: AtomicU64 = AtomicU64::new(0);
@@ -73,9 +71,12 @@ pub fn reset_gdn_full_chunk_forward_dispatch_counts() {
 
 const CUDA_RESIDENT_TENSOR_IDS_POISONED: &str = "CUDA resident TensorId registry mutex poisoned";
 
-fn cuda_optimizer_args_ready_for_kt(tensors: &[&kiln_tensor::Tensor]) -> bool {
+fn cuda_optimizer_args_ready_for_kt(
+    registry: &super::cuda_rocm_common::ResidentTensorIdRegistry,
+    tensors: &[&kiln_tensor::Tensor],
+) -> bool {
     super::cuda_rocm_common::optimizer_args_ready_for_kt(
-        &CUDA_RESIDENT_TENSOR_IDS,
+        registry,
         tensors,
         CUDA_RESIDENT_TENSOR_IDS_POISONED,
         |device| matches!(device, kiln_tensor::Device::Cuda(_)),
@@ -94,6 +95,7 @@ pub struct CudaBackend {
     /// step 4: the formerly-cached candle `device` field was dropped — it had
     /// zero reads; `new` now takes a `kiln_tensor::Device` directly.)
     device_kt: kiln_tensor::Device,
+    resident_tensor_ids: super::cuda_rocm_common::ResidentTensorIdRegistry,
     /// Cached at construction: reading env vars per decode step × 24 GDN layers
     /// shows up in decode NVTX captures. Env vars don't change at runtime.
     gdn_enabled: bool,
@@ -209,6 +211,7 @@ impl CudaBackend {
         let device_kt = device;
         Self {
             device_kt,
+            resident_tensor_ids: super::cuda_rocm_common::new_resident_tensor_id_registry(),
             gdn_enabled,
             gdn_gates_enabled,
             gdn_gated_rms_norm_enabled,
@@ -422,7 +425,7 @@ impl OptimizerBackend for CudaBackend {
         grad: &kiln_tensor::Tensor,
         lr: f32,
     ) -> Result<bool> {
-        if !cuda_optimizer_args_ready_for_kt(&[param, grad]) {
+        if !cuda_optimizer_args_ready_for_kt(&self.resident_tensor_ids, &[param, grad]) {
             return Ok(false);
         }
         // #1082: args are already kt (BackendRuntime trait flipped to kt),
@@ -464,7 +467,10 @@ impl OptimizerBackend for CudaBackend {
         weight_decay: f32,
         step: u32,
     ) -> Result<bool> {
-        if !cuda_optimizer_args_ready_for_kt(&[param, grad, first_moment, second_moment]) {
+        if !cuda_optimizer_args_ready_for_kt(
+            &self.resident_tensor_ids,
+            &[param, grad, first_moment, second_moment],
+        ) {
             return Ok(false);
         }
         // #1082: args are already kt (BackendRuntime trait flipped to kt),
@@ -1527,7 +1533,7 @@ impl super::residency::ResidentRegistry for CudaBackend {
             return Ok(None);
         }
         super::cuda_rocm_common::mark_resident_activation(
-            &CUDA_RESIDENT_TENSOR_IDS,
+            &self.resident_tensor_ids,
             tensor,
             CUDA_RESIDENT_TENSOR_IDS_POISONED,
         );
@@ -1546,7 +1552,7 @@ impl super::residency::ResidentRegistry for CudaBackend {
             return Ok(None);
         }
         super::cuda_rocm_common::mark_resident_activation(
-            &CUDA_RESIDENT_TENSOR_IDS,
+            &self.resident_tensor_ids,
             tensor,
             CUDA_RESIDENT_TENSOR_IDS_POISONED,
         );
@@ -1565,7 +1571,7 @@ impl super::residency::ResidentRegistry for CudaBackend {
             return;
         }
         super::cuda_rocm_common::evict_resident_activation(
-            &CUDA_RESIDENT_TENSOR_IDS,
+            &self.resident_tensor_ids,
             tensor,
             CUDA_RESIDENT_TENSOR_IDS_POISONED,
         );
@@ -1580,7 +1586,7 @@ impl super::residency::ResidentRegistry for CudaBackend {
             return None;
         }
         if super::cuda_rocm_common::has_resident_activation(
-            &CUDA_RESIDENT_TENSOR_IDS,
+            &self.resident_tensor_ids,
             tensor,
             CUDA_RESIDENT_TENSOR_IDS_POISONED,
         ) {

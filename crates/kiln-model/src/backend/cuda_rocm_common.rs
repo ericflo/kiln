@@ -5,11 +5,15 @@
 //! in the concrete CUDA/ROCm modules.
 
 use std::collections::HashSet;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 use kiln_tensor_id::TensorId;
 
-pub(crate) type ResidentTensorIdRegistry = OnceLock<Mutex<HashSet<TensorId>>>;
+pub(crate) type ResidentTensorIdRegistry = Mutex<HashSet<TensorId>>;
+
+pub(crate) fn new_resident_tensor_id_registry() -> ResidentTensorIdRegistry {
+    Mutex::new(HashSet::new())
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CudaRocmSupportPredicates {
@@ -88,17 +92,16 @@ fn kt_tensor_id(tensor: &kiln_tensor::Tensor) -> TensorId {
 }
 
 fn with_resident_tensor_ids<R>(
-    registry: &'static ResidentTensorIdRegistry,
+    registry: &ResidentTensorIdRegistry,
     poison_message: &'static str,
     f: impl FnOnce(&mut HashSet<TensorId>) -> R,
 ) -> R {
-    let registry = registry.get_or_init(|| Mutex::new(HashSet::new()));
     let mut guard = registry.lock().expect(poison_message);
     f(&mut guard)
 }
 
 pub(crate) fn mark_resident_activation(
-    registry: &'static ResidentTensorIdRegistry,
+    registry: &ResidentTensorIdRegistry,
     tensor: &kiln_tensor::Tensor,
     poison_message: &'static str,
 ) {
@@ -108,7 +111,7 @@ pub(crate) fn mark_resident_activation(
 }
 
 pub(crate) fn evict_resident_activation(
-    registry: &'static ResidentTensorIdRegistry,
+    registry: &ResidentTensorIdRegistry,
     tensor: &kiln_tensor::Tensor,
     poison_message: &'static str,
 ) {
@@ -118,7 +121,7 @@ pub(crate) fn evict_resident_activation(
 }
 
 pub(crate) fn has_resident_activation(
-    registry: &'static ResidentTensorIdRegistry,
+    registry: &ResidentTensorIdRegistry,
     tensor: &kiln_tensor::Tensor,
     poison_message: &'static str,
 ) -> bool {
@@ -154,7 +157,7 @@ pub(crate) fn tensors_on_backend_device(
 }
 
 pub(crate) fn optimizer_args_ready_for_kt(
-    registry: &'static ResidentTensorIdRegistry,
+    registry: &ResidentTensorIdRegistry,
     tensors: &[&kiln_tensor::Tensor],
     poison_message: &'static str,
     device_matches: impl Fn(kiln_tensor::Device) -> bool + Copy,

@@ -60,6 +60,7 @@ pub struct MetalBackend {
     pub(super) device_kt: kiln_tensor::Device,
     /// Cached at construction to keep env-var reads off per-token support gates.
     pub(super) disable: MetalKernelDisables,
+    pub(super) resident_activation_registry: super::metal_residency::ResidentActivationRegistry,
 }
 
 impl MetalBackend {
@@ -71,6 +72,8 @@ impl MetalBackend {
         Self {
             device_kt: device,
             disable: MetalKernelDisables::from_env(),
+            resident_activation_registry:
+                super::metal_residency::new_resident_activation_registry(),
         }
     }
 

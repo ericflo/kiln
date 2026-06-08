@@ -53,6 +53,7 @@ pub struct VulkanBackend {
     /// by `name()` when `vulkan_device` is `None`. Cached at construction
     /// so the hot trait accessor does not bridge per call. (#1082)
     device_kt: kiln_tensor::Device,
+    pub(super) resident_activation_registry: super::vulkan_residency::ResidentActivationRegistry,
     /// Cached at construction: reading env vars per decode step × 24 GDN layers
     /// shows up in decode NVTX captures. Env vars don't change at runtime.
     pub(super) gdn_enabled: bool,
@@ -189,6 +190,7 @@ impl VulkanBackend {
 
         Self {
             device_kt,
+            resident_activation_registry: super::vulkan_residency::new_resident_activation_registry(),
             gdn_enabled: config.gdn_enabled,
             gdn_prefill_in_proj_enabled: config.gdn_prefill_in_proj_enabled,
             gdn_gates_enabled: config.gdn_gates_enabled,
@@ -911,7 +913,10 @@ impl super::residency::ResidentRegistry for VulkanBackend {
         // (#1082) kt-native: the residency registry is keyed on the kt
         // `TensorId` directly; byte extraction reads straight from kt storage.
         let id = tensor.id();
-        let already_registered = with_resident_registry(|cache| cache.contains_key(&id));
+        let already_registered =
+            with_resident_registry(&self.resident_activation_registry, |cache| {
+                cache.contains_key(&id)
+            });
         if already_registered {
             return Ok(
                 super::residency::ResidentRegistry::resident_resource(self, tensor, family).map(
@@ -982,7 +987,7 @@ impl super::residency::ResidentRegistry for VulkanBackend {
                 "VulkanBackend::register_resident_activation first call"
             );
         });
-        with_resident_registry(|cache| {
+        with_resident_registry(&self.resident_activation_registry, |cache| {
             cache.insert(id, buffer);
         });
         Ok(Some(vulkan_resident_activation_resource(
@@ -1004,7 +1009,9 @@ impl super::residency::ResidentRegistry for VulkanBackend {
         };
         // (#1082) kt-native: registry keyed on the kt `TensorId` directly.
         let id = tensor.id();
-        let buffer = with_resident_registry(|cache| cache.get(&id).cloned());
+        let buffer = with_resident_registry(&self.resident_activation_registry, |cache| {
+            cache.get(&id).cloned()
+        });
         let Some(buffer) = buffer else {
             return Ok(None);
         };
@@ -1048,7 +1055,7 @@ impl super::residency::ResidentRegistry for VulkanBackend {
         }
         // (#1082) kt-native: registry keyed on the kt `TensorId` directly.
         let id = tensor.id();
-        with_resident_registry(|cache| {
+        with_resident_registry(&self.resident_activation_registry, |cache| {
             cache.remove(&id);
         });
     }
@@ -1063,7 +1070,9 @@ impl super::residency::ResidentRegistry for VulkanBackend {
         }
         // (#1082) kt-native: registry keyed on the kt `TensorId` directly.
         let id = tensor.id();
-        if with_resident_registry(|cache| cache.contains_key(&id)) {
+        if with_resident_registry(&self.resident_activation_registry, |cache| {
+            cache.contains_key(&id)
+        }) {
             Some(vulkan_resident_activation_resource(
                 tensor,
                 super::residency::ResidentResourceState::RegisteredClean,
@@ -1089,7 +1098,9 @@ impl super::residency::ResidentRegistry for VulkanBackend {
         // (#1082) kt-native: registry keyed on the kt `TensorId`; the result
         // is reconstructed directly as a kt tensor of `dtype`.
         let id = tensor.id();
-        let buffer = with_resident_registry(|cache| cache.get(&id).cloned());
+        let buffer = with_resident_registry(&self.resident_activation_registry, |cache| {
+            cache.get(&id).cloned()
+        });
         let Some(buffer) = buffer else {
             return Ok(None);
         };

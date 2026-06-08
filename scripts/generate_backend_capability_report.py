@@ -1354,6 +1354,10 @@ def phase3_remaining_from_signals(signals: list[dict[str, Any]]) -> list[str]:
             )
         elif name == "resident_registry_drop_drains_test_present":
             remaining.append("drop-drains-registry behavioral test is not present")
+        elif name == "resident_registry_lifecycle_metadata_persisted":
+            remaining.append(
+                "production resident registries do not persist lifecycle metadata"
+            )
         else:
             remaining.append(f"{name} migration signal is not yet satisfied")
     return remaining
@@ -1521,6 +1525,17 @@ def resident_registry_drop_drains_test_count() -> int:
     )
 
 
+def resident_registry_lifecycle_metadata_store_count() -> int:
+    return sum(
+        regex_count(path, r"ResidentResourceState|ReplayStability")
+        for path in [
+            "crates/kiln-model/src/backend/cuda_rocm_common.rs",
+            "crates/kiln-model/src/backend/metal_residency.rs",
+            "crates/kiln-model/src/backend/vulkan_residency.rs",
+        ]
+    )
+
+
 def matmul_identity_dispatch_count() -> int:
     paths = [
         "crates/kiln-tensor/src/ops/matmul.rs",
@@ -1620,6 +1635,7 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
         delegate_count = residency_backend_facade_registry_delegate_count()
         process_global_count = resident_registry_process_global_static_count()
         drop_drains_test_count = resident_registry_drop_drains_test_count()
+        lifecycle_store_count = resident_registry_lifecycle_metadata_store_count()
         return [
             phase_signal(
                 "resident_registry_blanket_adapter_removed",
@@ -1668,6 +1684,17 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
                 [
                     "crates/kiln-model/src/backend/mod.rs",
                     "crates/kiln-model/src/backend/residency.rs",
+                ],
+            ),
+            phase_signal(
+                "resident_registry_lifecycle_metadata_persisted",
+                lifecycle_store_count > 0,
+                lifecycle_store_count,
+                "> 0",
+                [
+                    "crates/kiln-model/src/backend/cuda_rocm_common.rs",
+                    "crates/kiln-model/src/backend/metal_residency.rs",
+                    "crates/kiln-model/src/backend/vulkan_residency.rs",
                 ],
             ),
         ]

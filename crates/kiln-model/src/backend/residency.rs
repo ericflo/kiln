@@ -239,8 +239,8 @@ pub trait ResidentRegistry: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use std::sync::Mutex;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
     struct LifecycleProbeRegistry {
@@ -340,6 +340,71 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct DropDrainingProbeRegistry {
+        ids: Arc<Mutex<HashSet<TensorId>>>,
+    }
+
+    impl DropDrainingProbeRegistry {
+        fn shared_ids(&self) -> Arc<Mutex<HashSet<TensorId>>> {
+            Arc::clone(&self.ids)
+        }
+    }
+
+    impl Drop for DropDrainingProbeRegistry {
+        fn drop(&mut self) {
+            self.ids
+                .lock()
+                .expect("drop-draining probe registry poisoned")
+                .clear();
+        }
+    }
+
+    impl ResidentRegistry for DropDrainingProbeRegistry {
+        fn register_resource(
+            &self,
+            tensor: &Tensor,
+            family: ResidentResourceFamily,
+        ) -> Result<Option<ResidentResource>> {
+            if family != ResidentResourceFamily::Activation {
+                return Ok(None);
+            }
+            self.ids
+                .lock()
+                .expect("drop-draining probe registry poisoned")
+                .insert(tensor.id());
+            Ok(Some(ResidentResource::from_tensor(
+                tensor,
+                family,
+                ResidentOwnership::RegistryOwned,
+            )))
+        }
+
+        fn resident_resource(
+            &self,
+            tensor: &Tensor,
+            family: ResidentResourceFamily,
+        ) -> Option<ResidentResource> {
+            if family != ResidentResourceFamily::Activation {
+                return None;
+            }
+            if self
+                .ids
+                .lock()
+                .expect("drop-draining probe registry poisoned")
+                .contains(&tensor.id())
+            {
+                Some(ResidentResource::from_tensor(
+                    tensor,
+                    family,
+                    ResidentOwnership::RegistryOwned,
+                ))
+            } else {
+                None
+            }
+        }
+    }
+
     #[test]
     fn resident_resource_describes_tensor_metadata() -> anyhow::Result<()> {
         let tensor = Tensor::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], vec![2, 2])?;
@@ -434,6 +499,42 @@ mod tests {
                 .is_none()
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn resident_registry_drop_drains_registry_on_backend_drop() -> anyhow::Result<()> {
+        let tensor = Tensor::from_slice(&[1.0_f32, 2.0], vec![2])?;
+        let shared_ids = {
+            let registry = DropDrainingProbeRegistry::default();
+            let shared_ids = registry.shared_ids();
+            ResidentRegistry::register_resource(
+                &registry,
+                &tensor,
+                ResidentResourceFamily::Activation,
+            )?;
+            assert!(ResidentRegistry::has_resident_resource(
+                &registry,
+                &tensor,
+                ResidentResourceFamily::Activation
+            ));
+            assert_eq!(
+                shared_ids
+                    .lock()
+                    .expect("drop-draining probe registry poisoned")
+                    .len(),
+                1
+            );
+            shared_ids
+        };
+
+        assert!(
+            shared_ids
+                .lock()
+                .expect("drop-draining probe registry poisoned")
+                .is_empty(),
+            "dropping the backend-owned registry should drain resident membership"
+        );
         Ok(())
     }
 

@@ -120,7 +120,7 @@ pub(super) fn dispatch_sgd_step(
     // resident because a mixed resident/CPU path would need a per-call upload.
     let param_id = param.id();
     let grad_id = grad.id();
-    let lookup = with_resident_registry(|cache| {
+    let lookup = with_resident_registry(&backend.resident_activation_registry, |cache| {
         cache
             .get(&param_id)
             .and_then(|p| cache.get(&grad_id).map(|g| (Arc::clone(p), Arc::clone(g))))
@@ -212,7 +212,7 @@ pub(super) fn dispatch_adamw_step(
     let g_id = grad.id();
     let m_id = first_moment.id();
     let v_id = second_moment.id();
-    let bufs = with_resident_registry(|cache| {
+    let bufs = with_resident_registry(&backend.resident_activation_registry, |cache| {
         let p = cache.get(&p_id).map(Arc::clone)?;
         let g = cache.get(&g_id).map(Arc::clone)?;
         let m = cache.get(&m_id).map(Arc::clone)?;
@@ -339,7 +339,10 @@ mod tests {
         );
 
         // Read back the updated param buffer from the registry.
-        let param_buf = with_resident_registry(|cache| cache.get(&param.id()).cloned())
+        let param_buf =
+            with_resident_registry(&backend.resident_activation_registry, |cache| {
+                cache.get(&param.id()).cloned()
+            })
             .expect("param must still be in registry");
         let device = backend.vulkan_device.as_ref().unwrap();
         let updated_bytes = kiln_vulkan_kernel::VulkanBuffer::read_back(
