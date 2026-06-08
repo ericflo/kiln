@@ -555,7 +555,9 @@ fn cuda_rocm_resident_membership_stays_in_shared_helper() {
         let functions = parse_functions(&path);
         let register = functions
             .get("runtime_register_resident_activation")
-            .unwrap_or_else(|| panic!("{backend_file} missing runtime_register_resident_activation"));
+            .unwrap_or_else(|| {
+                panic!("{backend_file} missing runtime_register_resident_activation")
+            });
         let update = functions
             .get("runtime_update_resident_activation")
             .unwrap_or_else(|| panic!("{backend_file} missing runtime_update_resident_activation"));
@@ -665,7 +667,9 @@ fn cuda_rocm_kt_bridge_device_checks_stay_in_shared_helper() {
             .unwrap_or_else(|| panic!("{backend_file} missing runtime_linear_prefill_apply"));
         let offset = functions
             .get("runtime_linear_prefill_apply_offset")
-            .unwrap_or_else(|| panic!("{backend_file} missing runtime_linear_prefill_apply_offset"));
+            .unwrap_or_else(|| {
+                panic!("{backend_file} missing runtime_linear_prefill_apply_offset")
+            });
         let lora = functions
             .get("runtime_lora_delta_resident")
             .unwrap_or_else(|| panic!("{backend_file} missing runtime_lora_delta_resident"));
@@ -1007,7 +1011,10 @@ fn vulkan_gdn_runtime_methods_stay_in_gdn_module() {
             "runtime_supports_gdn_forward_substitution",
             "supports_gdn_forward_substitution",
         ),
-        ("runtime_supports_gdn_recurrent_step", "supports_gdn_recurrent_step"),
+        (
+            "runtime_supports_gdn_recurrent_step",
+            "supports_gdn_recurrent_step",
+        ),
         (
             "runtime_supports_gdn_recurrent_prefill_native_head_last",
             "supports_gdn_recurrent_prefill_native_head_last",
@@ -1032,7 +1039,10 @@ fn vulkan_gdn_runtime_methods_stay_in_gdn_module() {
             "runtime_gdn_decode_gates_recurrent_rmsnorm",
             "gdn_decode_gates_recurrent_rmsnorm",
         ),
-        ("runtime_gdn_forward_substitution", "gdn_forward_substitution"),
+        (
+            "runtime_gdn_forward_substitution",
+            "gdn_forward_substitution",
+        ),
         (
             "runtime_gdn_recurrent_prefill_native_head_last",
             "gdn_recurrent_prefill_native_head_last",
@@ -1379,13 +1389,13 @@ fn generated_capability_report_lists_request_descriptors() {
             "ProjectionLoadPolicy should include {field}"
         );
     }
-    let gpu_memory_detection_policy_fields = capability_descriptors["GpuMemoryDetectionPolicy"]
-        ["fields"]
-        .as_array()
-        .expect("GpuMemoryDetectionPolicy fields should be an array")
-        .iter()
-        .filter_map(|field| field["name"].as_str())
-        .collect::<Vec<_>>();
+    let gpu_memory_detection_policy_fields =
+        capability_descriptors["GpuMemoryDetectionPolicy"]["fields"]
+            .as_array()
+            .expect("GpuMemoryDetectionPolicy fields should be an array")
+            .iter()
+            .filter_map(|field| field["name"].as_str())
+            .collect::<Vec<_>>();
     for field in [
         "detected_total_log_message",
         "missing_total_warning",
@@ -1412,24 +1422,24 @@ fn generated_capability_report_lists_request_descriptors() {
             "GpuMemoryBudgetPolicy should include {field}"
         );
     }
-    let gpu_allocator_memory_probe_policy_fields = capability_descriptors
-        ["GpuAllocatorMemoryProbePolicy"]["fields"]
-        .as_array()
-        .expect("GpuAllocatorMemoryProbePolicy fields should be an array")
-        .iter()
-        .filter_map(|field| field["name"].as_str())
-        .collect::<Vec<_>>();
+    let gpu_allocator_memory_probe_policy_fields =
+        capability_descriptors["GpuAllocatorMemoryProbePolicy"]["fields"]
+            .as_array()
+            .expect("GpuAllocatorMemoryProbePolicy fields should be an array")
+            .iter()
+            .filter_map(|field| field["name"].as_str())
+            .collect::<Vec<_>>();
     assert!(
         gpu_allocator_memory_probe_policy_fields.contains(&"probe"),
         "GpuAllocatorMemoryProbePolicy should expose the selected allocator heap probe"
     );
-    let gpu_memory_reclaim_policy_fields = capability_descriptors["GpuMemoryReclaimPolicy"]
-        ["fields"]
-        .as_array()
-        .expect("GpuMemoryReclaimPolicy fields should be an array")
-        .iter()
-        .filter_map(|field| field["name"].as_str())
-        .collect::<Vec<_>>();
+    let gpu_memory_reclaim_policy_fields =
+        capability_descriptors["GpuMemoryReclaimPolicy"]["fields"]
+            .as_array()
+            .expect("GpuMemoryReclaimPolicy fields should be an array")
+            .iter()
+            .filter_map(|field| field["name"].as_str())
+            .collect::<Vec<_>>();
     assert!(
         gpu_memory_reclaim_policy_fields.contains(&"reclaimer"),
         "GpuMemoryReclaimPolicy should expose the selected reclaimer"
@@ -1495,13 +1505,13 @@ fn generated_capability_report_lists_request_descriptors() {
         decode_capability_fields.contains(&"speculative_policy"),
         "DecodeCapabilities should expose backend-owned speculative decode thresholds"
     );
-    let speculative_decode_policy_fields = capability_descriptors["SpeculativeDecodePolicy"]
-        ["fields"]
-        .as_array()
-        .expect("SpeculativeDecodePolicy fields should be an array")
-        .iter()
-        .filter_map(|field| field["name"].as_str())
-        .collect::<Vec<_>>();
+    let speculative_decode_policy_fields =
+        capability_descriptors["SpeculativeDecodePolicy"]["fields"]
+            .as_array()
+            .expect("SpeculativeDecodePolicy fields should be an array")
+            .iter()
+            .filter_map(|field| field["name"].as_str())
+            .collect::<Vec<_>>();
     for (field, message) in [
         (
             "mtp_max_prompt_tokens",
@@ -1543,13 +1553,13 @@ fn generated_capability_report_lists_request_descriptors() {
         gdn_capability_fields.contains(&"gated_rms_norm_preserves_tape_residency"),
         "GdnCapabilities should own active-tape GDN RMSNorm residency policy"
     );
-    let inference_recurrent_state_policy_fields = capability_descriptors
-        ["InferenceRecurrentStatePolicy"]["fields"]
-        .as_array()
-        .expect("InferenceRecurrentStatePolicy fields should be an array")
-        .iter()
-        .filter_map(|field| field["name"].as_str())
-        .collect::<Vec<_>>();
+    let inference_recurrent_state_policy_fields =
+        capability_descriptors["InferenceRecurrentStatePolicy"]["fields"]
+            .as_array()
+            .expect("InferenceRecurrentStatePolicy fields should be an array")
+            .iter()
+            .filter_map(|field| field["name"].as_str())
+            .collect::<Vec<_>>();
     assert!(
         inference_recurrent_state_policy_fields.contains(&"bf16")
             && inference_recurrent_state_policy_fields.contains(&"f16"),
@@ -1632,13 +1642,13 @@ fn generated_capability_report_lists_request_descriptors() {
         backend_training_fields.contains(&"acceleration_profile"),
         "BackendTrainingCapabilities should expose startup training acceleration profile policy"
     );
-    let server_training_dispatch_fields = capability_descriptors["ServerTrainingDispatchPolicy"]
-        ["fields"]
-        .as_array()
-        .expect("ServerTrainingDispatchPolicy fields should be an array")
-        .iter()
-        .filter_map(|field| field["name"].as_str())
-        .collect::<Vec<_>>();
+    let server_training_dispatch_fields =
+        capability_descriptors["ServerTrainingDispatchPolicy"]["fields"]
+            .as_array()
+            .expect("ServerTrainingDispatchPolicy fields should be an array")
+            .iter()
+            .filter_map(|field| field["name"].as_str())
+            .collect::<Vec<_>>();
     for field in [
         "native_route",
         "native_training_env",
@@ -1649,13 +1659,13 @@ fn generated_capability_report_lists_request_descriptors() {
             "ServerTrainingDispatchPolicy should include {field}"
         );
     }
-    let training_acceleration_profile_fields = capability_descriptors
-        ["TrainingAccelerationProfilePolicy"]["fields"]
-        .as_array()
-        .expect("TrainingAccelerationProfilePolicy fields should be an array")
-        .iter()
-        .filter_map(|field| field["name"].as_str())
-        .collect::<Vec<_>>();
+    let training_acceleration_profile_fields =
+        capability_descriptors["TrainingAccelerationProfilePolicy"]["fields"]
+            .as_array()
+            .expect("TrainingAccelerationProfilePolicy fields should be an array")
+            .iter()
+            .filter_map(|field| field["name"].as_str())
+            .collect::<Vec<_>>();
     for field in [
         "log_message",
         "linear",
@@ -1671,13 +1681,13 @@ fn generated_capability_report_lists_request_descriptors() {
             "TrainingAccelerationProfilePolicy should include {field}"
         );
     }
-    let training_acceleration_env_fields = capability_descriptors
-        ["TrainingAccelerationEnvFlagPolicy"]["fields"]
-        .as_array()
-        .expect("TrainingAccelerationEnvFlagPolicy fields should be an array")
-        .iter()
-        .filter_map(|field| field["name"].as_str())
-        .collect::<Vec<_>>();
+    let training_acceleration_env_fields =
+        capability_descriptors["TrainingAccelerationEnvFlagPolicy"]["fields"]
+            .as_array()
+            .expect("TrainingAccelerationEnvFlagPolicy fields should be an array")
+            .iter()
+            .filter_map(|field| field["name"].as_str())
+            .collect::<Vec<_>>();
     for field in ["env", "default_on"] {
         assert!(
             training_acceleration_env_fields.contains(&field),
@@ -5955,12 +5965,12 @@ fn generated_capability_report_tracks_migration_phase_status() {
         .find(|phase| phase["phase"] == 1)
         .expect("Phase 1 should be present");
     assert_eq!(
-        phase1["status"], "partial",
-        "Phase 1 should expose partial progress while BackendRuntime remains above the method-count gate"
+        phase1["status"], "covered",
+        "Phase 1 should be covered once focused facets are authoritative and BackendRuntime is identity-only"
     );
     assert_eq!(phase1["contract"], "landed");
-    assert_eq!(phase1["migration"], "partial");
-    assert_eq!(phase1["genuine"], false);
+    assert_eq!(phase1["migration"], "complete");
+    assert_eq!(phase1["genuine"], true);
     let phase1_signals = phase1["migration_signals"]
         .as_array()
         .expect("Phase 1 should list machine signals");
@@ -6073,15 +6083,15 @@ fn generated_capability_report_tracks_migration_phase_status() {
         .find(|signal| signal["name"] == "backend_runtime_method_count_below_gate")
         .expect("Phase 1 should include BackendRuntime method-count gate");
     assert_eq!(
-        method_count_signal["passed"], false,
-        "Phase 1 should stay incomplete while BackendRuntime remains above the method-count gate"
+        method_count_signal["passed"], true,
+        "Phase 1 should stay complete only while BackendRuntime remains below the method-count gate"
     );
-    assert!(
+    assert_eq!(
         method_count_signal["observed"]
             .as_u64()
-            .expect("BackendRuntime method count should be numeric")
-            > 8,
-        "BackendRuntime method count should exceed the W1 completion gate until compatibility methods are deleted"
+            .expect("BackendRuntime method count should be numeric"),
+        3,
+        "BackendRuntime should stay identity-only after W1 deletes compatibility methods"
     );
 
     for (phase_number, signal_name) in [
@@ -6182,9 +6192,9 @@ fn generated_capability_report_tracks_migration_phase_status() {
     );
     assert!(
         report_md.contains(
-            "| Phase 1 | Introduce focused backend traits | `partial` | `landed` | `partial` | no |"
+            "| Phase 1 | Introduce focused backend traits | `covered` | `landed` | `complete` | yes |"
         ),
-        "Markdown report should expose Phase 1 as partially migrated but non-genuine"
+        "Markdown report should expose Phase 1 as complete and genuine"
     );
     assert!(
         report_md.contains("| Phase 8 | Conformance and performance gates | `covered` | `landed` | `complete` | yes |"),

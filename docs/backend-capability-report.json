@@ -14,18 +14,8 @@
         "KILN_DISABLE_CUDA_GDN_PREFILL_GATES",
         "KILN_DISABLE_CUDA_LORA_DECODE_ADD"
       ],
-      "override_count": 9,
-      "overrides": [
-        "supports_gdn_chunk_prep",
-        "supports_gdn_chunk_scan",
-        "supports_gdn_decode_gates_recurrent_unexpanded_qk",
-        "supports_gdn_decode_qk_norm_gates_recurrent",
-        "supports_gdn_forward_substitution",
-        "supports_gdn_full_chunk_forward",
-        "supports_gdn_gated_rms_norm",
-        "supports_gdn_gates",
-        "supports_gdn_recurrent_step"
-      ],
+      "override_count": 0,
+      "overrides": [],
       "source": "crates/kiln-model/src/backend/cuda.rs",
       "source_modules": [
         "crates/kiln-model/src/backend/cuda.rs",
@@ -696,18 +686,8 @@
         "KILN_ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK",
         "KILN_ROCM_HEAD_MAJOR_PREFILL"
       ],
-      "override_count": 9,
-      "overrides": [
-        "supports_gdn_chunk_prep",
-        "supports_gdn_chunk_scan",
-        "supports_gdn_decode_gates_recurrent_unexpanded_qk",
-        "supports_gdn_decode_qk_norm_gates_recurrent",
-        "supports_gdn_forward_substitution",
-        "supports_gdn_full_chunk_forward",
-        "supports_gdn_gated_rms_norm",
-        "supports_gdn_gates",
-        "supports_gdn_recurrent_step"
-      ],
+      "override_count": 0,
+      "overrides": [],
       "source": "crates/kiln-model/src/backend/rocm.rs",
       "source_modules": [
         "crates/kiln-model/src/backend/rocm.rs",
@@ -1028,30 +1008,8 @@
         "KILN_VULKAN_RESIDENT_DECODE",
         "KILN_VULKAN_SDPA"
       ],
-      "override_count": 21,
-      "overrides": [
-        "gdn_chunk_prep",
-        "gdn_chunk_scan",
-        "gdn_chunkwise_forward",
-        "gdn_decode_gates_recurrent_rmsnorm",
-        "gdn_forward_substitution",
-        "gdn_full_chunk_forward",
-        "gdn_gated_rms_norm",
-        "gdn_gates",
-        "gdn_in_proj_decode",
-        "gdn_recurrent_prefill_native_head_last",
-        "gdn_recurrent_qk_norm_prefill_native_head_last",
-        "gdn_recurrent_step",
-        "supports_gdn_chunk_prep",
-        "supports_gdn_chunk_scan",
-        "supports_gdn_forward_substitution",
-        "supports_gdn_full_chunk_forward",
-        "supports_gdn_gated_rms_norm",
-        "supports_gdn_gates",
-        "supports_gdn_recurrent_prefill_native_head_last",
-        "supports_gdn_recurrent_qk_norm_prefill_native_head_last",
-        "supports_gdn_recurrent_step"
-      ],
+      "override_count": 0,
+      "overrides": [],
       "source": "crates/kiln-model/src/backend/vulkan.rs",
       "source_modules": [
         "crates/kiln-model/src/backend/vulkan.rs",
@@ -3039,8 +2997,8 @@
         "scripts/generate_backend_capability_report.py",
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
-      "genuine": false,
-      "migration": "partial",
+      "genuine": true,
+      "migration": "complete",
       "migration_signals": [
         {
           "evidence": [
@@ -3369,19 +3327,17 @@
           ],
           "expected": "<= 8",
           "name": "backend_runtime_method_count_below_gate",
-          "observed": 31,
-          "passed": false
+          "observed": 3,
+          "passed": true
         }
       ],
       "phase": 1,
-      "remaining": [
-        "BackendRuntime remains above the method-count gate"
-      ],
+      "remaining": [],
       "report_sections": [
         "Focused Backend Facets",
         "Request Capability Queries"
       ],
-      "status": "partial",
+      "status": "covered",
       "title": "Introduce focused backend traits"
     },
     {
@@ -4432,5 +4388,5 @@
       "tape_streaming_tile_tokens": 2048
     }
   },
-  "trait_method_count": 31
+  "trait_method_count": 3
 }
