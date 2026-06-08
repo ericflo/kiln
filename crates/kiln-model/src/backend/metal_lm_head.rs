@@ -886,21 +886,21 @@ mod metal_lm_head_sample_tests {
         let logits = lm_head_logits_for_row(&x_data, &weight_data, 0, hidden, vocab);
         let want = raw_argmax(&logits);
 
-        let got = backend
-            .linear_decode_sample(
-                &x,
-                &weight_t,
-                &[want],
-                &[100],
-                1.4,
-                3.0,
-                0.2,
-                0.7,
-                1,
-                0.5,
-                0.1,
-                0xCAFE_F00D_DEAD_BEEF,
-            )?
+        let got = crate::backend::SamplingBackend::runtime_linear_decode_sample(
+            &backend,
+            &x,
+            &weight_t,
+            &[want],
+            &[100],
+            1.4,
+            3.0,
+            0.2,
+            0.7,
+            1,
+            0.5,
+            0.1,
+            0xCAFE_F00D_DEAD_BEEF,
+        )?
             .context("Metal backend declined top_k=1 sampled decode")?;
         assert_eq!(got, want);
         Ok(())
