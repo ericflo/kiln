@@ -108,7 +108,7 @@ impl AgentTraceIndex {
 
     pub fn save_to_path(&self, path: &Path) -> std::io::Result<()> {
         let bytes = serde_json::to_vec_pretty(&self.traces)?;
-        std::fs::write(path, bytes)
+        kiln_resource::locked_atomic_write(path, &bytes)
     }
 }
 

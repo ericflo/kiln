@@ -1249,6 +1249,7 @@ dependencies = [
  "cc",
  "cudarc",
  "half",
+ "kiln-resource",
  "serde",
  "serde_json",
 ]
@@ -1478,6 +1479,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-resource"
+version = "0.3.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "kiln-rmsnorm-kernel"
 version = "0.3.0"
 dependencies = [
@@ -1495,6 +1503,7 @@ dependencies = [
  "cc",
  "half",
  "kiln-hip",
+ "kiln-resource",
  "serde",
  "serde_json",
 ]
@@ -1526,6 +1535,7 @@ dependencies = [
  "kiln-kt-bridge",
  "kiln-memory",
  "kiln-model",
+ "kiln-resource",
  "kiln-scheduler",
  "kiln-tensor",
  "kiln-train",

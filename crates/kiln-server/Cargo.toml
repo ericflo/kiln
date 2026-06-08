@@ -47,6 +47,7 @@ kiln-core = { workspace = true }
 kiln-memory = { workspace = true }
 kiln-eval = { workspace = true }
 kiln-model = { workspace = true }
+kiln-resource = { workspace = true }
 kiln-scheduler = { workspace = true }
 kiln-tensor = { workspace = true }
 # Pure `candle <-> kt` Device/DType enum-mapping helpers are

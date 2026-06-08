@@ -234,12 +234,23 @@ pub fn serialize_to_json(cache: &AlgoCache) -> String {
 }
 
 /// Write the cache to a file. Creates parent directories as needed.
+///
+/// Cross-process safety is part of the cache contract: concurrent Kiln starts
+/// must never expose readers to a truncated JSON file and should not clobber
+/// each other's freshly tuned entries. Writes therefore take a best-effort
+/// lock file, merge with the current on-disk cache, write a process-unique temp
+/// file, fsync it, and atomically rename it into place.
 pub fn save_to_path(cache: &AlgoCache, path: &Path) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, serialize_to_json(cache).as_bytes())?;
-    Ok(())
+    kiln_resource::locked_update(path, |existing| {
+        let mut merged = existing
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .map(deserialize_from_json)
+            .unwrap_or_default();
+        for (k, v) in cache.iter() {
+            merged.insert(k.clone(), v.clone());
+        }
+        Ok(serialize_to_json(&merged).into_bytes())
+    })
 }
 
 /// Parse a JSON cache blob produced by [`serialize_to_json`]. Returns an
@@ -292,7 +303,10 @@ pub fn deserialize_from_json(json: &str) -> AlgoCache {
         };
         let value = AlgoCacheValue {
             algo_id: v.get("algo_id").and_then(|x| x.as_i64()).unwrap_or(-1) as i32,
-            workspace_bytes: v.get("workspace_bytes").and_then(|x| x.as_u64()).unwrap_or(0),
+            workspace_bytes: v
+                .get("workspace_bytes")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0),
             recorded_ms: v.get("recorded_ms").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32,
             algo_blob: v
                 .get("algo_blob_b64")
@@ -341,8 +355,7 @@ fn json_str(s: &str) -> String {
 
 /// Tiny stdlib base64 encoder (avoids pulling in `base64` as a dep).
 fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
     let mut i = 0;
     while i + 3 <= bytes.len() {
@@ -535,6 +548,50 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_save_to_path_merges_entries_without_partial_files() {
+        let dir =
+            std::env::temp_dir().join(format!("kiln-blas-concurrent-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cublaslt-sm00-dev0.json");
+
+        let handles = (0..8u64)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let mut c = AlgoCache::new();
+                    c.insert(
+                        AlgoCacheKey::new(i + 1, i + 2, i + 3, "f32"),
+                        AlgoCacheValue {
+                            algo_id: i as i32,
+                            workspace_bytes: i * 1024,
+                            recorded_ms: i as f32,
+                            algo_blob: vec![i as u8],
+                        },
+                    );
+                    save_to_path(&c, &path).unwrap();
+                })
+            })
+            .collect::<Vec<_>>();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let loaded = load_from_path(&path);
+        assert_eq!(loaded.len(), 8);
+        assert_eq!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp"))
+                .count(),
+            0
+        );
+        assert!(!kiln_resource::lock_path_for(&path).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn base64_known_values() {
         assert_eq!(base64_encode(&[]), "");
         assert_eq!(base64_encode(b"A"), "QQ==");
@@ -629,7 +686,10 @@ mod tests {
         let loaded = load_from_path(&tmp);
         assert_eq!(loaded.len(), 1);
         assert_eq!(
-            loaded.get(&AlgoCacheKey::new(1024, 9216, 2560, "bf16")).unwrap().algo_id,
+            loaded
+                .get(&AlgoCacheKey::new(1024, 9216, 2560, "bf16"))
+                .unwrap()
+                .algo_id,
             11
         );
         let _ = std::fs::remove_file(&tmp);

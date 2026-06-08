@@ -23,6 +23,7 @@ members = [
     "crates/kiln-opd-loss-kernel",
     "crates/kiln-optim",
     "crates/kiln-param",
+    "crates/kiln-resource",
     "crates/kiln-rmsnorm-kernel",
     "crates/kiln-rocblas",
     "crates/kiln-scheduler",
@@ -73,6 +74,7 @@ default-members = [
     "crates/kiln-opd-loss-kernel",
     "crates/kiln-optim",
     "crates/kiln-param",
+    "crates/kiln-resource",
     "crates/kiln-scheduler",
     "crates/kiln-server",
     "crates/kiln-tensor",
@@ -190,6 +192,7 @@ kiln-graph-vulkan = { path = "crates/kiln-graph-vulkan" }
 kiln-model = { path = "crates/kiln-model" }
 kiln-optim = { path = "crates/kiln-optim" }
 kiln-param = { path = "crates/kiln-param" }
+kiln-resource = { path = "crates/kiln-resource" }
 kiln-scheduler = { path = "crates/kiln-scheduler" }
 kiln-server = { path = "crates/kiln-server" }
 kiln-tensor = { path = "crates/kiln-tensor" }

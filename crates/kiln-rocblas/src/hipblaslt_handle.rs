@@ -47,16 +47,19 @@
 //! - Anti-pattern 2: every workspace alloc is logged via the
 //!   `WorkspacePool::record` call; copies-per-call counter exists.
 
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::os::raw::{c_int, c_uchar};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use kiln_hip::{RocmContext, RocmSlice};
+use kiln_hip::{RocmContext, RocmSlice, RocmStream};
 
-use crate::{AlgoCache, AlgoCacheStats, AlgoCacheValue, BackendMatmul,
-            Epilogue, MatmulOutcome, MatmulRequest, WorkspacePool};
+use crate::{
+    AlgoCache, AlgoCacheStats, AlgoCacheValue, BackendMatmul, Epilogue, MatmulOutcome,
+    MatmulRequest, WorkspacePool,
+};
 
 // ----------------------------------------------------------------------
 // C ABI — mirror of crates/kiln-rocblas/csrc/hipblaslt_matmul.cu
@@ -259,10 +262,11 @@ struct HandleInner {
     algo_cache_inserts: AtomicU64,
     /// Workspace policy + counters.
     workspace_pool: Mutex<WorkspacePool>,
-    /// Backing workspace buffer. Allocated lazily on the first
-    /// matmul call; resized if a heuristic requests more bytes than
-    /// the current buffer (clamped by the pool's `max_bytes`).
-    workspace_buf: Mutex<Option<RocmSlice>>,
+    /// Backing workspace buffers keyed by HIP stream handle. Each buffer is
+    /// allocated on and freed by the stream that uses it, so a handle can be
+    /// shared across graph-capture or multi-stream callers without reusing one
+    /// mutable workspace concurrently on unordered streams.
+    workspace_by_stream: Mutex<HashMap<usize, RocmSlice>>,
 }
 
 // SAFETY: the hipBLASLt context is documented as thread-safe (AMD's
@@ -332,7 +336,7 @@ impl HipblasLtMatmulHandle {
                 algo_cache_misses: AtomicU64::new(0),
                 algo_cache_inserts: AtomicU64::new(0),
                 workspace_pool: Mutex::new(pool),
-                workspace_buf: Mutex::new(None),
+                workspace_by_stream: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -418,9 +422,9 @@ impl HipblasLtMatmulHandle {
     /// const; `c_ptr` is written to. `bias_ptr` is optional — pass
     /// `std::ptr::null()` when the epilogue is not a `Bias*` variant.
     ///
-    /// `stream` is the raw HIP stream to enqueue the kernel on. Pass
-    /// the kt-Tensor's stream, typically
-    /// `rocm_stream.hip_stream() as *mut core::ffi::c_void`.
+    /// `stream` is the HIP stream to enqueue the kernel on. It is typed, not
+    /// just a raw `hipStream_t`, so the handle can allocate and retain
+    /// workspace on the same stream by construction.
     ///
     /// On success, returns a [`MatmulOutcome`] documenting how many
     /// bytes were written and which algo was used. The algo blob is
@@ -440,7 +444,7 @@ impl HipblasLtMatmulHandle {
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn matmul(
         &self,
-        stream: HipStream,
+        stream: &Arc<RocmStream>,
         request: &MatmulRequest,
         a_ptr: *const c_void,
         b_ptr: *const c_void,
@@ -472,7 +476,7 @@ impl HipblasLtMatmulHandle {
         }
 
         let (workspace_ptr_raw, workspace_bytes) =
-            self.ensure_workspace(cached_workspace_bytes)?;
+            self.ensure_workspace(stream, cached_workspace_bytes)?;
 
         let mut algo_blob_out = vec![0u8; ALGO_BLOB_MAX];
         let mut algo_blob_out_len: u64 = algo_blob_out.len() as u64;
@@ -482,7 +486,7 @@ impl HipblasLtMatmulHandle {
         let code = unsafe {
             kiln_blas_hipblaslt_matmul(
                 self.inner.ctx.as_ptr(),
-                stream,
+                stream.hip_stream(),
                 &spec,
                 a_ptr,
                 b_ptr,
@@ -537,7 +541,9 @@ impl HipblasLtMatmulHandle {
                     algo_blob: algo_blob_out.clone(),
                 },
             );
-            self.inner.algo_cache_inserts.fetch_add(1, Ordering::Relaxed);
+            self.inner
+                .algo_cache_inserts
+                .fetch_add(1, Ordering::Relaxed);
         }
 
         let bytes_written = bytes_for_dtype(request.dtype.as_str()) * request.m * request.n;
@@ -556,37 +562,36 @@ impl HipblasLtMatmulHandle {
     /// Ensure the workspace buffer is at least `requested_bytes`
     /// large (clamped by the pool's `max_bytes`). Returns the raw
     /// device pointer + the buffer's byte length.
-    fn ensure_workspace(&self, requested_bytes: u64) -> Result<(*mut c_void, u64), FfiError> {
+    fn ensure_workspace(
+        &self,
+        stream: &Arc<RocmStream>,
+        requested_bytes: u64,
+    ) -> Result<(*mut c_void, u64), FfiError> {
         let max_bytes = self.workspace_pool().max_bytes;
         let desired_bytes = std::cmp::min(
-            std::cmp::max(requested_bytes, 1024 * 1024),  // 1 MiB floor
+            std::cmp::max(requested_bytes, 1024 * 1024), // 1 MiB floor
             max_bytes,
         );
+        let stream_key = stream.hip_stream() as usize;
 
-        let mut buf_slot = self
+        let mut by_stream = self
             .inner
-            .workspace_buf
+            .workspace_by_stream
             .lock()
-            .expect("workspace buf mutex poisoned");
+            .expect("workspace map mutex poisoned");
 
-        let need_alloc = match buf_slot.as_ref() {
+        let need_alloc = match by_stream.get(&stream_key) {
             None => true,
             Some(s) => (s.len() as u64) < desired_bytes,
         };
         if need_alloc {
-            // Allocate via the kiln-hip default stream — the ROCm analog
-            // of cudarc's `default_stream().alloc_zeros`. `RocmSlice` frees
-            // itself on the same stream on drop.
-            let new_buf = self
-                .inner
-                .rocm_ctx
-                .default_stream()
+            let new_buf = stream
                 .alloc(desired_bytes as usize)
                 .map_err(|_| FfiError::Preference)?;
-            *buf_slot = Some(new_buf);
+            by_stream.insert(stream_key, new_buf);
         }
 
-        let buf_ref = buf_slot.as_ref().expect("just initialized");
+        let buf_ref = by_stream.get(&stream_key).expect("just initialized");
         // `RocmSlice::device_ptr()` yields a plain `*mut c_void` (no stream
         // guard, unlike cudarc's `device_ptr(&stream) -> (ptr, guard)`).
         let raw_ptr = buf_ref.device_ptr();

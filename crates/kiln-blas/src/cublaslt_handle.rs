@@ -47,6 +47,7 @@
 //! - Anti-pattern 2: every workspace alloc is logged via the
 //!   `WorkspacePool::record` call; copies-per-call counter exists.
 
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::os::raw::{c_int, c_uchar};
 use std::ptr::NonNull;
@@ -54,10 +55,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cudarc::driver::sys::CUstream;
-use cudarc::driver::{CudaContext, CudaSlice, DevicePtr};
+use cudarc::driver::{CudaContext, CudaSlice, CudaStream, DevicePtr};
 
-use crate::{AlgoCache, AlgoCacheStats, AlgoCacheValue, BackendMatmul,
-            Epilogue, MatmulOutcome, MatmulRequest, WorkspacePool};
+use crate::{
+    AlgoCache, AlgoCacheStats, AlgoCacheValue, BackendMatmul, Epilogue, MatmulOutcome,
+    MatmulRequest, WorkspacePool,
+};
 
 // ----------------------------------------------------------------------
 // C ABI — mirror of crates/kiln-blas/csrc/cublaslt_matmul.cu
@@ -255,10 +258,11 @@ struct HandleInner {
     algo_cache_inserts: AtomicU64,
     /// Workspace policy + counters.
     workspace_pool: Mutex<WorkspacePool>,
-    /// Backing workspace buffer. Allocated lazily on the first
-    /// matmul call; resized if a heuristic requests more bytes than
-    /// the current buffer (clamped by the pool's `max_bytes`).
-    workspace_buf: Mutex<Option<CudaSlice<u8>>>,
+    /// Backing workspace buffers keyed by CUDA stream handle. Each buffer is
+    /// allocated on and freed by the stream that uses it, so a handle can be
+    /// shared across graph-capture or multi-stream callers without reusing one
+    /// mutable workspace concurrently on unordered streams.
+    workspace_by_stream: Mutex<HashMap<usize, CudaSlice<u8>>>,
 }
 
 // SAFETY: cublasLt context is documented as thread-safe (per
@@ -328,7 +332,7 @@ impl CublasLtMatmulHandle {
                 algo_cache_misses: AtomicU64::new(0),
                 algo_cache_inserts: AtomicU64::new(0),
                 workspace_pool: Mutex::new(pool),
-                workspace_buf: Mutex::new(None),
+                workspace_by_stream: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -416,8 +420,9 @@ impl CublasLtMatmulHandle {
     /// const; `c_ptr` is written to. `bias_ptr` is optional — pass
     /// `std::ptr::null()` when the epilogue is not a `Bias*` variant.
     ///
-    /// `stream` is the CUDA stream to enqueue the kernel on. Pass
-    /// the kt-Tensor's stream (typically `device.cuda_stream().stream`).
+    /// `stream` is the CUDA stream to enqueue the kernel on. It is typed, not
+    /// just a raw `CUstream`, so the handle can allocate and retain workspace
+    /// on the same stream by construction.
     ///
     /// On success, returns a [`MatmulOutcome`] documenting how many
     /// bytes were written and which algo was used. The algo blob is
@@ -437,7 +442,7 @@ impl CublasLtMatmulHandle {
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn matmul(
         &self,
-        stream: CUstream,
+        stream: &Arc<CudaStream>,
         request: &MatmulRequest,
         a_ptr: *const c_void,
         b_ptr: *const c_void,
@@ -469,7 +474,7 @@ impl CublasLtMatmulHandle {
         }
 
         let (workspace_ptr_raw, workspace_bytes) =
-            self.ensure_workspace(cached_workspace_bytes)?;
+            self.ensure_workspace(stream, cached_workspace_bytes)?;
 
         let mut algo_blob_out = vec![0u8; ALGO_BLOB_MAX];
         let mut algo_blob_out_len: u64 = algo_blob_out.len() as u64;
@@ -479,7 +484,7 @@ impl CublasLtMatmulHandle {
         let code = unsafe {
             kiln_blas_cublaslt_matmul(
                 self.inner.ctx.as_ptr(),
-                stream,
+                stream.cu_stream(),
                 &spec,
                 a_ptr,
                 b_ptr,
@@ -534,7 +539,9 @@ impl CublasLtMatmulHandle {
                     algo_blob: algo_blob_out.clone(),
                 },
             );
-            self.inner.algo_cache_inserts.fetch_add(1, Ordering::Relaxed);
+            self.inner
+                .algo_cache_inserts
+                .fetch_add(1, Ordering::Relaxed);
         }
 
         let bytes_written = bytes_for_dtype(request.dtype.as_str()) * request.m * request.n;
@@ -553,39 +560,37 @@ impl CublasLtMatmulHandle {
     /// Ensure the workspace buffer is at least `requested_bytes`
     /// large (clamped by the pool's `max_bytes`). Returns the raw
     /// device pointer + the buffer's byte length.
-    fn ensure_workspace(&self, requested_bytes: u64) -> Result<(*mut c_void, u64), FfiError> {
+    fn ensure_workspace(
+        &self,
+        stream: &Arc<CudaStream>,
+        requested_bytes: u64,
+    ) -> Result<(*mut c_void, u64), FfiError> {
         let max_bytes = self.workspace_pool().max_bytes;
         let desired_bytes = std::cmp::min(
-            std::cmp::max(requested_bytes, 1024 * 1024),  // 1 MiB floor
+            std::cmp::max(requested_bytes, 1024 * 1024), // 1 MiB floor
             max_bytes,
         );
+        let stream_key = stream.cu_stream() as usize;
 
-        let mut buf_slot = self
+        let mut by_stream = self
             .inner
-            .workspace_buf
+            .workspace_by_stream
             .lock()
-            .expect("workspace buf mutex poisoned");
+            .expect("workspace map mutex poisoned");
 
-        let need_alloc = match buf_slot.as_ref() {
+        let need_alloc = match by_stream.get(&stream_key) {
             None => true,
             Some(s) => (s.len() as u64) < desired_bytes,
         };
         if need_alloc {
-            // Allocate via the cudarc default stream — same code path
-            // candle's `CudaDevice::alloc_zeros` reaches into, just
-            // without the candle wrapper. See #1082 substrate notes.
-            let new_buf = self
-                .inner
-                .cuda_ctx
-                .default_stream()
+            let new_buf = stream
                 .alloc_zeros::<u8>(desired_bytes as usize)
                 .map_err(|_| FfiError::Preference)?;
-            *buf_slot = Some(new_buf);
+            by_stream.insert(stream_key, new_buf);
         }
 
-        let buf_ref = buf_slot.as_ref().expect("just initialized");
-        let stream = self.inner.cuda_ctx.default_stream();
-        let (raw_ptr, _g) = buf_ref.device_ptr(&stream);
+        let buf_ref = by_stream.get(&stream_key).expect("just initialized");
+        let (raw_ptr, _g) = buf_ref.device_ptr(stream);
         let byte_len = buf_ref.len() as u64;
         Ok((raw_ptr as *mut c_void, byte_len))
     }

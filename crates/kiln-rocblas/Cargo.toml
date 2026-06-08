@@ -24,6 +24,7 @@ rocm = ["hipblaslt"]
 # RocmContext / RocmSlice.
 kiln-hip = { workspace = true, optional = true }
 half = "2"
+kiln-resource = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

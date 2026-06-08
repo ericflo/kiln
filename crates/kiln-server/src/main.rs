@@ -614,16 +614,6 @@ async fn main() -> Result<()> {
             );
         }
     }
-    #[cfg(feature = "rocm")]
-    {
-        let restored = kiln_tensor::rocm_load_algo_cache_from_disk(0);
-        if restored > 0 {
-            tracing::info!(
-                entries = restored,
-                "hipblaslt autotune cache restored from disk"
-            );
-        }
-    }
     spawn_backend_prewarm(prewarm_state);
     // Graceful shutdown: listen for SIGTERM/SIGINT, cancel in-flight
     // inference via the batching engine (so SSE streams terminate
@@ -807,16 +797,6 @@ fn spawn_backend_prewarm(state: AppState) {
                         tracing::warn!(error = %e, "cublaslt autotune cache flush failed (continuing)")
                     }
                 }
-                #[cfg(feature = "rocm")]
-                match kiln_tensor::rocm_flush_algo_cache_to_disk(0) {
-                    Ok(n) if n > 0 => {
-                        tracing::info!(entries = n, "hipblaslt autotune cache flushed to disk")
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!(error = %e, "hipblaslt autotune cache flush failed (continuing)")
-                    }
-                }
             }
             Ok(Err(err)) => tracing::warn!(error = %err, "background inference prewarm failed"),
             Err(err) => tracing::warn!(error = %err, "background inference prewarm task failed"),
@@ -956,15 +936,6 @@ async fn shutdown_signal(
         Ok(_) => {}
         Err(e) => tracing::warn!(error = %e, "cublaslt autotune cache flush failed on shutdown"),
     }
-    #[cfg(feature = "rocm")]
-    match kiln_tensor::rocm_flush_algo_cache_to_disk(0) {
-        Ok(n) if n > 0 => {
-            tracing::info!(entries = n, "hipblaslt autotune cache flushed on shutdown")
-        }
-        Ok(_) => {}
-        Err(e) => tracing::warn!(error = %e, "hipblaslt autotune cache flush failed on shutdown"),
-    }
-
     // Proactively cancel every in-flight inference request. Without this
     // step, axum's graceful_shutdown waits for the model to naturally
     // finish generating on every open SSE stream — which can take a

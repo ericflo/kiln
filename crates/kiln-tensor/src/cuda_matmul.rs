@@ -41,7 +41,7 @@ use cudarc::driver::CudaContext;
 use kiln_blas::{AlgoCache, CublasLtMatmulHandle, Epilogue, MatmulLayout, MatmulRequest};
 
 use crate::blaslt_request::{
-    blaslt_dtype_name, BlasLtEpilogue, BlasLtMatmulLayout, BlasLtMatmulRequest,
+    BlasLtEpilogue, BlasLtMatmulLayout, BlasLtMatmulRequest, blaslt_dtype_name,
 };
 use crate::cuda_storage::CudaStorage;
 use crate::{DType, Layout, Result, Storage, Tensor, TensorId};
@@ -501,8 +501,6 @@ fn cuda_matmul_dispatch(
     // #1082 CUDA-graph fix: route through the thread-local active stream
     // (outside a capture scope this is exactly `ctx.default_stream()`).
     let stream = crate::active_cuda_stream(&ctx);
-    let raw_stream = stream.cu_stream();
-
     // Base device pointers for each operand. `device_ptr_raw` honors
     // both Owned and Borrowed (Phase 7 v2 zero-copy candle→kt path).
     let (a_base, _) = a_storage.device_ptr_raw();
@@ -536,7 +534,7 @@ fn cuda_matmul_dispatch(
 
         unsafe {
             handle
-                .matmul(raw_stream, &request, a_ptr, b_ptr, c_ptr, std::ptr::null())
+                .matmul(&stream, &request, a_ptr, b_ptr, c_ptr, std::ptr::null())
                 .map_err(|e| crate::Error::Msg(format!("{caller}: handle.matmul failed: {e}")))?;
         }
     }
@@ -697,8 +695,6 @@ pub fn cuda_matmul_into(a: &Tensor, b: &Tensor, dst: &Tensor) -> Result<()> {
     // #1082 CUDA-graph fix: route through the thread-local active stream
     // (outside a capture scope this is exactly `ctx.default_stream()`).
     let stream = crate::active_cuda_stream(&ctx);
-    let raw_stream = stream.cu_stream();
-
     let (a_base, _) = a_storage.device_ptr_raw();
     let (b_base, _) = b_storage.device_ptr_raw();
     let (dst_base, _) = dst_storage.device_ptr_raw();
@@ -731,7 +727,7 @@ pub fn cuda_matmul_into(a: &Tensor, b: &Tensor, dst: &Tensor) -> Result<()> {
 
         unsafe {
             handle
-                .matmul(raw_stream, &request, a_ptr, b_ptr, c_ptr, std::ptr::null())
+                .matmul(&stream, &request, a_ptr, b_ptr, c_ptr, std::ptr::null())
                 .map_err(|e| {
                     crate::Error::Msg(format!("cuda_matmul_into: handle.matmul failed: {e}"))
                 })?;
@@ -878,8 +874,6 @@ pub fn cuda_matmul_with_bias(a: &Tensor, b: &Tensor, bias: &Tensor) -> Result<Te
     // #1082 CUDA-graph fix: route through the thread-local active stream
     // (outside a capture scope this is exactly `ctx.default_stream()`).
     let stream = crate::active_cuda_stream(&ctx);
-    let raw_stream = stream.cu_stream();
-
     let (a_base, _) = a_storage.device_ptr_raw();
     let (b_base, _) = b_storage.device_ptr_raw();
     let (bias_base, _) = bias_storage.device_ptr_raw();
@@ -914,7 +908,7 @@ pub fn cuda_matmul_with_bias(a: &Tensor, b: &Tensor, bias: &Tensor) -> Result<Te
 
         unsafe {
             handle
-                .matmul(raw_stream, &request, a_ptr, b_ptr, c_ptr, bias_ptr)
+                .matmul(&stream, &request, a_ptr, b_ptr, c_ptr, bias_ptr)
                 .map_err(|e| {
                     crate::Error::Msg(format!("cuda_matmul_with_bias: handle.matmul failed: {e}"))
                 })?;

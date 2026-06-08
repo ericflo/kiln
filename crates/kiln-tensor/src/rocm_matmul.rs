@@ -13,7 +13,7 @@ use kiln_hip::RocmContext;
 use kiln_rocblas::{AlgoCache, Epilogue, HipblasLtMatmulHandle, MatmulLayout, MatmulRequest};
 
 use crate::blaslt_request::{
-    blaslt_dtype_name, BlasLtEpilogue, BlasLtMatmulLayout, BlasLtMatmulRequest,
+    BlasLtEpilogue, BlasLtMatmulLayout, BlasLtMatmulRequest, blaslt_dtype_name,
 };
 use crate::rocm_storage::RocmStorage;
 use crate::{DType, Layout, Result, Storage, Tensor, TensorId};
@@ -61,56 +61,6 @@ fn get_or_init_handle(
     let arc = Arc::new(handle);
     by_device.insert(device_index, Arc::clone(&arc));
     Ok(arc)
-}
-
-/// Snapshot the shared autotune cache (clone — does not affect the registry).
-pub fn rocm_snapshot_algo_cache() -> AlgoCache {
-    handle_registry()
-        .shared_cache
-        .lock()
-        .expect("algo cache mutex poisoned")
-        .clone()
-}
-
-/// Merge a disk-loaded autotune cache into the live shared cache (first-writer
-/// wins). The ROCm analog of `restore_into_shared_cache`.
-pub fn rocm_restore_into_shared_cache(loaded: AlgoCache) {
-    let reg = handle_registry();
-    let mut cache = reg.shared_cache.lock().expect("algo cache mutex poisoned");
-    for (k, v) in loaded.iter() {
-        if cache.get(k).is_none() {
-            cache.insert(k.clone(), v.clone());
-        }
-    }
-}
-
-/// Legacy on-disk path for the hipBLASLt autotune cache on `device_index`.
-///
-/// ROCm load/flush are disabled below, but this helper is retained for callers
-/// that inspect or clean historical `hipblaslt-` cache files.
-pub fn hipblaslt_cache_path(device_index: usize) -> Option<std::path::PathBuf> {
-    let fingerprint = format!("dev{device_index}");
-    Some(AlgoCache::standard_path("hipblaslt", &fingerprint))
-}
-
-/// Flush the live shared autotune cache to disk.
-///
-/// Disabled for ROCm: hipBLASLt algo blobs are process/runtime-local in
-/// practice. Restoring a freshly generated blob in a new kiln process has
-/// produced native segfaults inside `hipblasLtMatmul`, so ROCm keeps autotune
-/// only in the in-process cache.
-pub fn rocm_flush_algo_cache_to_disk(device_index: usize) -> std::io::Result<usize> {
-    let _ = device_index;
-    Ok(0)
-}
-
-/// Load the on-disk autotune cache for `device_index`.
-///
-/// See [`rocm_flush_algo_cache_to_disk`]: ROCm disk cache restore is disabled
-/// because persisted hipBLASLt algo blobs can crash in a later process.
-pub fn rocm_load_algo_cache_from_disk(device_index: usize) -> usize {
-    let _ = device_index;
-    0
 }
 
 fn rocm_storage<'a>(t: &'a Tensor, op: &str, which: &str) -> Result<&'a RocmStorage> {
@@ -410,7 +360,7 @@ fn rocm_matmul_dispatch(
     let b_batch_stride = (k * n * bpe) as u64;
     let c_batch_stride = (m * n * bpe) as u64;
 
-    let raw_stream = a_storage.rocm_stream_raw();
+    let stream = crate::active_rocm_stream(&ctx);
     let (a_base, _) = a_storage.device_ptr_raw();
     let (b_base, _) = b_storage.device_ptr_raw();
     let (out_base, _) = out_storage.device_ptr_raw();
@@ -439,7 +389,7 @@ fn rocm_matmul_dispatch(
         let c_ptr = (out_base + c_off) as *mut core::ffi::c_void;
         unsafe {
             handle
-                .matmul(raw_stream, &request, a_ptr, b_ptr, c_ptr, std::ptr::null())
+                .matmul(&stream, &request, a_ptr, b_ptr, c_ptr, std::ptr::null())
                 .map_err(|e| crate::Error::Msg(format!("{op}: handle.matmul failed: {e}")))?;
         }
     }
@@ -520,7 +470,7 @@ pub fn rocm_matmul_into(a: &Tensor, b: &Tensor, dst: &Tensor) -> Result<()> {
     let b_batch_stride = (k_b * n * bpe) as u64;
     let c_batch_stride = (m * n * bpe) as u64;
 
-    let raw_stream = a_storage.rocm_stream_raw();
+    let stream = crate::active_rocm_stream(&ctx);
     let (a_base, _) = a_storage.device_ptr_raw();
     let (b_base, _) = b_storage.device_ptr_raw();
     let (dst_base, _) = dst_storage.device_ptr_raw();
@@ -550,7 +500,7 @@ pub fn rocm_matmul_into(a: &Tensor, b: &Tensor, dst: &Tensor) -> Result<()> {
         let c_ptr = (dst_base + c_off) as *mut core::ffi::c_void;
         unsafe {
             handle
-                .matmul(raw_stream, &request, a_ptr, b_ptr, c_ptr, std::ptr::null())
+                .matmul(&stream, &request, a_ptr, b_ptr, c_ptr, std::ptr::null())
                 .map_err(|e| crate::Error::Msg(format!("{OP}: handle.matmul failed: {e}")))?;
         }
     }
@@ -630,7 +580,7 @@ pub fn rocm_matmul_with_bias(a: &Tensor, b: &Tensor, bias: &Tensor) -> Result<Te
     let a_batch_stride = (m * k_a * bpe) as u64;
     let c_batch_stride = (m * n * bpe) as u64;
 
-    let raw_stream = a_storage.rocm_stream_raw();
+    let stream = crate::active_rocm_stream(&ctx);
     let (a_base, _) = a_storage.device_ptr_raw();
     let (b_base, _) = b_storage.device_ptr_raw();
     let (bias_base, _) = bias_storage.device_ptr_raw();
@@ -662,22 +612,11 @@ pub fn rocm_matmul_with_bias(a: &Tensor, b: &Tensor, bias: &Tensor) -> Result<Te
         let c_ptr = (out_base + c_off) as *mut core::ffi::c_void;
         unsafe {
             handle
-                .matmul(raw_stream, &request, a_ptr, b_ptr, c_ptr, bias_ptr)
+                .matmul(&stream, &request, a_ptr, b_ptr, c_ptr, bias_ptr)
                 .map_err(|e| crate::Error::Msg(format!("{OP}: handle.matmul failed: {e}")))?;
         }
     }
 
     let storage_arc: Storage = Arc::new(out_storage);
     Tensor::from_parts(storage_arc, Layout::contiguous(out_shape), TensorId::next())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rocm_disk_cache_persistence_is_disabled() {
-        assert_eq!(rocm_load_algo_cache_from_disk(0), 0);
-        assert_eq!(rocm_flush_algo_cache_to_disk(0).unwrap(), 0);
-    }
 }

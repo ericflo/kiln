@@ -1,0 +1,11 @@
+[package]
+name = "kiln-resource"
+description = "Cross-process resource persistence primitives for Kiln"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+libc = "0.2"

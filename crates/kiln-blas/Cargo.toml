@@ -42,6 +42,7 @@ cublaslt = ["dep:cudarc"]
 # that holds a `CudaContext` / `CudaSlice<u8>`.
 cudarc = { workspace = true, optional = true }
 half = "2"
+kiln-resource = { workspace = true }
 
 # Timing + JSON output.
 serde = { workspace = true }

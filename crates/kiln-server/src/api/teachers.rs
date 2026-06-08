@@ -134,7 +134,7 @@ impl TeacherRegistry {
     pub fn save_to_path(&self, path: &std::path::Path) -> std::io::Result<()> {
         let map = self.inner.read().unwrap();
         let bytes = serde_json::to_vec_pretty(&*map)?;
-        std::fs::write(path, bytes)
+        kiln_resource::locked_atomic_write(path, &bytes)
     }
 
     pub fn insert(&self, spec: TeacherSpec) {
