@@ -913,14 +913,6 @@ pub trait BackendRuntime:
         )
     }
 
-    fn supports_paged_kv_head_major_read(&self) -> bool {
-        PagedKvBackend::runtime_supports_paged_kv_head_major_read(self)
-    }
-
-    fn supports_paged_kv_head_major_read_append_token_major(&self) -> bool {
-        PagedKvBackend::runtime_supports_paged_kv_head_major_read_append_token_major(self)
-    }
-
     fn supports_gdn_forward_substitution(&self) -> bool {
         GdnBackend::runtime_supports_gdn_forward_substitution(self)
     }
@@ -1264,43 +1256,6 @@ pub trait BackendRuntime:
             page_block_size,
             softmax_scale,
             causal,
-        )
-    }
-
-    /// Materialize a contiguous head-major K/V view from a contiguous paged
-    /// cache slot run.
-    ///
-    /// `k_pool`/`v_pool`: `[total_slots, num_kv_heads, head_dim]`.
-    /// Returns `[1, num_kv_heads, seq_len, head_dim]` tensors suitable for
-    /// head-major SDPA.
-    fn paged_kv_head_major_read(
-        &self,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        start_slot: usize,
-        seq_len: usize,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
-        PagedKvBackend::runtime_paged_kv_head_major_read(self, k_pool, v_pool, start_slot, seq_len)
-    }
-
-    /// Materialize a contiguous head-major K/V view from a contiguous paged
-    /// cache slot run, then append a contiguous token-major tail directly into
-    /// the same output buffer.
-    ///
-    /// `k_pool`/`v_pool`: `[total_slots, num_kv_heads, head_dim]`.
-    /// `k_tail`/`v_tail`: `[1, tail_len, num_kv_heads, head_dim]`.
-    /// Returns `[1, num_kv_heads, prefix_len + tail_len, head_dim]` tensors.
-    fn paged_kv_head_major_read_append_token_major(
-        &self,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        start_slot: usize,
-        prefix_len: usize,
-        k_tail: &kiln_tensor::Tensor,
-        v_tail: &kiln_tensor::Tensor,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
-        PagedKvBackend::runtime_paged_kv_head_major_read_append_token_major(
-            self, k_pool, v_pool, start_slot, prefix_len, k_tail, v_tail,
         )
     }
 

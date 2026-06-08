@@ -3419,7 +3419,7 @@
           ],
           "expected": "<= 8",
           "name": "backend_runtime_method_count_below_gate",
-          "observed": 89,
+          "observed": 85,
           "passed": false
         }
       ],
@@ -4482,5 +4482,5 @@
       "tape_streaming_tile_tokens": 2048
     }
   },
-  "trait_method_count": 89
+  "trait_method_count": 85
 }
