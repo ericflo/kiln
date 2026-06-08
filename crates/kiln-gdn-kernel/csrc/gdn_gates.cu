@@ -146,6 +146,13 @@ __global__ void gdn_gates_bf16_kernel(
 // _f32_params). Forces strong, kept device entry-point symbols so nvlink
 // cannot dead-code-eliminate them at device-link on any arch (SM90 pruned the
 // implicit weak instantiations — see the external-linkage note above).
+//
+// Windows NVCC/MSVC rejects explicit instantiations of templated __global__
+// entry points here ("no instance ... matches the specified type"). The typed
+// launch wrappers below still instantiate the kernels in this translation unit
+// on Windows; keep the strong-instantiation workaround on non-Windows CUDA
+// builds where the SM90 prune was observed.
+#ifndef _WIN32
 template __global__ void gdn_gates_bf16_kernel<__nv_bfloat16, __nv_bfloat16>(
     const __nv_bfloat16*, const __nv_bfloat16*, const __nv_bfloat16*, const __nv_bfloat16*,
     __nv_bfloat16*, __nv_bfloat16*, int32_t, int32_t, int32_t);
@@ -155,6 +162,7 @@ template __global__ void gdn_gates_bf16_kernel<float, __nv_bfloat16>(
 template __global__ void gdn_gates_bf16_kernel<float, float>(
     const __nv_bfloat16*, const __nv_bfloat16*, const float*, const float*,
     __nv_bfloat16*, __nv_bfloat16*, int32_t, int32_t, int32_t);
+#endif
 
 template <typename ALogT, typename DtBiasT>
 int32_t launch_gdn_gates_bf16(
