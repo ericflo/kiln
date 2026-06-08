@@ -32,7 +32,7 @@ use super::{
     vulkan_training, vulkan_weights, AttentionBackend, BackendIdentity, BackendRuntime,
     ConvBackend, GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend,
     ResidencyBackend, SamplingBackend, StartupBackend, TrainingCapabilities, TrainingLossBackend,
-    TrainingPrecisionPolicy,
+    TrainingPrecisionPolicy, matmul_request_support_rank, matmul_support_from_native,
 };
 use crate::forward::GpuWeights;
 
@@ -792,6 +792,20 @@ impl GdnBackend for VulkanBackend {
 
 #[allow(clippy::too_many_arguments)]
 impl LinearBackend for VulkanBackend {
+    fn runtime_supports_matmul_request(
+        &self,
+        req: &super::capability::MatmulRequest,
+    ) -> super::capability::Support {
+        let Some(rank) = matmul_request_support_rank(req) else {
+            return super::capability::Support::Unsupported;
+        };
+        matmul_support_from_native(
+            matches!(req.epilogue, super::capability::MatmulEpilogue::Identity)
+                && (req.lhs_dtype == kiln_tensor::DType::F32
+                    || req.lhs_dtype == kiln_tensor::DType::BF16 && rank > 2),
+        )
+    }
+
     fn runtime_matmul(
         &self,
         req: &super::capability::MatmulRequest,

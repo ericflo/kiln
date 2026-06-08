@@ -1223,9 +1223,41 @@ pub(crate) fn requested_matmul_layout(
     }
 }
 
+pub(crate) fn matmul_request_support_rank(req: &capability::MatmulRequest) -> Option<usize> {
+    if req.to_blas_request(1).is_err()
+        || req.homogeneous_dtype().is_none()
+        || req.accumulation != capability::MatmulAccumulation::F32
+        || req.lhs_layout != capability::MatmulOperandLayout::RowMajor
+        || req.rhs_layout != capability::MatmulOperandLayout::RowMajor
+        || req.out_layout != capability::MatmulOperandLayout::RowMajor
+        || !matches!(
+            req.epilogue,
+            capability::MatmulEpilogue::Identity | capability::MatmulEpilogue::Bias
+        )
+    {
+        return None;
+    }
+    req.rank()
+}
+
+pub(crate) fn matmul_support_from_native(native: bool) -> capability::Support {
+    if native {
+        capability::Support::NativeWithConstraints
+    } else {
+        capability::Support::HostFallbackAllowed
+    }
+}
+
 /// Focused `LinearBackend` facet delegated by the current `BackendRuntime` facade.
 #[allow(clippy::too_many_arguments)]
 pub trait LinearBackend: Send + Sync + std::fmt::Debug {
+    fn runtime_supports_matmul_request(
+        &self,
+        _req: &capability::MatmulRequest,
+    ) -> capability::Support {
+        capability::Support::Unsupported
+    }
+
     fn runtime_matmul(
         &self,
         _req: &capability::MatmulRequest,
@@ -1778,7 +1810,35 @@ mod tests {
 
     impl ConvBackend for ResidentActivationProbeBackend {}
 
-    impl LinearBackend for ResidentActivationProbeBackend {}
+    impl LinearBackend for ResidentActivationProbeBackend {
+        fn runtime_supports_matmul_request(
+            &self,
+            req: &capability::MatmulRequest,
+        ) -> capability::Support {
+            let Some(rank) = matmul_request_support_rank(req) else {
+                return capability::Support::Unsupported;
+            };
+            let native = match self.name {
+                "cpu" => true,
+                "cuda" | "rocm" => match req.epilogue {
+                    capability::MatmulEpilogue::Identity => true,
+                    capability::MatmulEpilogue::Bias => rank == 2,
+                    _ => false,
+                },
+                "metal" => {
+                    req.lhs_dtype == kiln_tensor::DType::BF16
+                        && matches!(req.epilogue, capability::MatmulEpilogue::Identity)
+                }
+                "vulkan" => {
+                    matches!(req.epilogue, capability::MatmulEpilogue::Identity)
+                        && (req.lhs_dtype == kiln_tensor::DType::F32
+                            || req.lhs_dtype == kiln_tensor::DType::BF16 && rank > 2)
+                }
+                _ => false,
+            };
+            matmul_support_from_native(native)
+        }
+    }
 
     impl residency::ResidentRegistry for ResidentActivationProbeBackend {
         fn register_resource(

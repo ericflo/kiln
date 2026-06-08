@@ -16,7 +16,8 @@ use super::{
     AttentionBackend, BackendIdentity, BackendMatmulLayout, BackendRuntime, ConvBackend,
     GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend,
     SamplingBackend, StartupBackend, TrainingCapabilities, TrainingLossBackend,
-    TrainingPrecisionPolicy, metal_residency, metal_training, requested_matmul_layout,
+    TrainingPrecisionPolicy, matmul_request_support_rank, matmul_support_from_native,
+    metal_residency, metal_training, requested_matmul_layout,
 };
 
 impl BackendIdentity for MetalBackend {
@@ -816,6 +817,19 @@ impl GdnBackend for MetalBackend {
 }
 
 impl LinearBackend for MetalBackend {
+    fn runtime_supports_matmul_request(
+        &self,
+        req: &super::capability::MatmulRequest,
+    ) -> super::capability::Support {
+        if matmul_request_support_rank(req).is_none() {
+            return super::capability::Support::Unsupported;
+        }
+        matmul_support_from_native(
+            req.lhs_dtype == kiln_tensor::DType::BF16
+                && matches!(req.epilogue, super::capability::MatmulEpilogue::Identity),
+        )
+    }
+
     fn runtime_matmul(
         &self,
         req: &super::capability::MatmulRequest,

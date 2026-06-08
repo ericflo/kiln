@@ -11,7 +11,8 @@ use super::{
     AttentionBackend, BackendIdentity, BackendMatmulLayout, BackendRuntime, ConvBackend,
     GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend,
     SamplingBackend, StartupBackend, TrainingCapabilities, TrainingLossBackend,
-    TrainingPrecisionPolicy, requested_matmul_layout,
+    TrainingPrecisionPolicy, matmul_request_support_rank, matmul_support_from_native,
+    requested_matmul_layout,
 };
 use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 
@@ -1712,6 +1713,20 @@ impl ReplayBackend for CudaBackend {
 
 #[allow(clippy::too_many_arguments)]
 impl LinearBackend for CudaBackend {
+    fn runtime_supports_matmul_request(
+        &self,
+        req: &super::capability::MatmulRequest,
+    ) -> super::capability::Support {
+        let Some(rank) = matmul_request_support_rank(req) else {
+            return super::capability::Support::Unsupported;
+        };
+        matmul_support_from_native(match req.epilogue {
+            super::capability::MatmulEpilogue::Identity => true,
+            super::capability::MatmulEpilogue::Bias => rank == 2,
+            _ => false,
+        })
+    }
+
     fn runtime_matmul(
         &self,
         req: &super::capability::MatmulRequest,

@@ -9,8 +9,8 @@ use kiln_graph::ReplayKey;
 
 use super::{
     AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, FallbackPolicy, GdnBackend,
-    PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend, TrainingCapabilities,
-    TrainingLossBackend, TrainingPrecisionPolicy,
+    LinearBackend, PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend,
+    TrainingCapabilities, TrainingLossBackend, TrainingPrecisionPolicy,
 };
 
 /// Backend answer for a capability query.
@@ -378,21 +378,6 @@ impl MatmulRequest {
         self.batch == MatmulBatchPolicy::from_leading_shape(&self.lhs_shape[..rank - 2])
     }
 
-    fn has_supported_dtype_contract(&self) -> bool {
-        self.lhs_dtype == self.rhs_dtype
-            && self.lhs_dtype == self.out_dtype
-            && self.accumulation == MatmulAccumulation::F32
-            && Self::is_supported_blas_dtype(self.lhs_dtype)
-    }
-
-    fn is_row_major_output(&self) -> bool {
-        self.out_layout == MatmulOperandLayout::RowMajor
-    }
-
-    fn is_row_major_input(&self) -> bool {
-        self.lhs_layout == MatmulOperandLayout::RowMajor
-            && self.rhs_layout == MatmulOperandLayout::RowMajor
-    }
 }
 
 /// Attention operation family being queried.
@@ -2306,48 +2291,7 @@ pub trait BackendCapabilityQueries:
     }
 
     fn supports_matmul_request(&self, req: &MatmulRequest) -> Support {
-        if !req.has_compatible_shapes()
-            || !req.has_supported_dtype_contract()
-            || !req.is_row_major_output()
-            || !req.is_row_major_input()
-            || !matches!(
-                req.epilogue,
-                MatmulEpilogue::Identity | MatmulEpilogue::Bias
-            )
-        {
-            return Support::Unsupported;
-        }
-
-        let Some(rank) = req.rank() else {
-            return Support::Unsupported;
-        };
-        let native = match self.name() {
-            "cpu" => matches!(
-                req.epilogue,
-                MatmulEpilogue::Identity | MatmulEpilogue::Bias
-            ),
-            "cuda" | "rocm" => match req.epilogue {
-                MatmulEpilogue::Identity => true,
-                MatmulEpilogue::Bias => rank == 2,
-                _ => false,
-            },
-            "metal" => {
-                req.lhs_dtype == kiln_tensor::DType::BF16
-                    && matches!(req.epilogue, MatmulEpilogue::Identity)
-            }
-            "vulkan" => {
-                matches!(req.epilogue, MatmulEpilogue::Identity)
-                    && (req.lhs_dtype == kiln_tensor::DType::F32
-                        || req.lhs_dtype == kiln_tensor::DType::BF16 && rank > 2)
-            }
-            _ => false,
-        };
-
-        if native {
-            Support::NativeWithConstraints
-        } else {
-            Support::HostFallbackAllowed
-        }
+        LinearBackend::runtime_supports_matmul_request(self, req)
     }
 
     fn supports_linear_request(&self, req: &LinearRequest) -> Support {

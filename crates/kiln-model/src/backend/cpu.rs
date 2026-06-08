@@ -6,7 +6,8 @@
 use super::{
     AttentionBackend, BackendIdentity, BackendMatmulLayout, BackendRuntime, ConvBackend,
     GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend,
-    SamplingBackend, StartupBackend, TrainingLossBackend, requested_matmul_layout,
+    SamplingBackend, StartupBackend, TrainingLossBackend, matmul_request_support_rank,
+    matmul_support_from_native, requested_matmul_layout,
 };
 
 #[derive(Debug)]
@@ -55,6 +56,16 @@ impl GdnBackend for CpuBackend {}
 impl ConvBackend for CpuBackend {}
 
 impl LinearBackend for CpuBackend {
+    fn runtime_supports_matmul_request(
+        &self,
+        req: &super::capability::MatmulRequest,
+    ) -> super::capability::Support {
+        if matmul_request_support_rank(req).is_none() {
+            return super::capability::Support::Unsupported;
+        }
+        matmul_support_from_native(true)
+    }
+
     fn runtime_matmul(
         &self,
         req: &super::capability::MatmulRequest,
