@@ -17875,8 +17875,8 @@ pub fn gqa_attention_prepare_prefill(
 /// + causal_mask) @ v` for the GQA-expanded, head-FIRST operands
 /// (`q`/`k`/`v` all `[B, nq, T, hd]`), routing the **score matmul**
 /// (`q @ kᵀ`) and the **value matmul** (`p @ v`) through the kt substrate
-/// (`kiln_tensor::cuda_matmul`, cublasLt) with a single candle→kt borrow at
-/// each matmul's inputs and a kt→candle copy at each output. The scale,
+/// (`kiln_tensor::ops::{matmul_rhs_transposed, matmul}`) with the active
+/// backend's matmul contract owning native dispatch. The scale,
 /// causal mask, and softmax between the two matmuls are computed by the
 /// EXISTING candle / kt-softmax-gated ops (`affine` div, the additive `-inf`
 /// `broadcast_add` mask via [`apply_causal_mask_with_offset`], and
@@ -17899,11 +17899,11 @@ pub fn gqa_attention_prepare_prefill(
 ///   the candle-computed `attn_output`, exactly as today);
 /// - any kt borrow / matmul / copy-back failure (the candle path then runs).
 ///
-/// Bit-exact to the candle fallback by construction: each matmul bottoms out
-/// in the same cublasLt GEMM family the candle `broadcast_matmul` lowers to on
-/// CUDA; the score matmul uses the RHS-transposed entry to avoid materialising
-/// `k^T`. The intervening scale/mask/softmax ops are physically unchanged
-/// candle tensors. NVTX range `kiln/gqa_sdpa_kt` brackets the migrated region.
+/// Bit-exact to the candle fallback by construction: on CUDA the request ops
+/// bottom out in the same cublasLt GEMM family the candle `broadcast_matmul`
+/// lowers to, and the score matmul uses the RHS-transposed entry to avoid
+/// materialising `k^T`. The intervening scale/mask/softmax ops are physically
+/// unchanged. NVTX range `kiln/gqa_sdpa_kt` brackets the migrated region.
 #[cfg(feature = "cuda")]
 fn try_kt_gqa_sdpa_matmuls(
     q: &Tensor,
@@ -17972,7 +17972,7 @@ fn try_kt_gqa_sdpa_matmuls(
     // --- Score matmul: scores = q @ kᵀ, [B, nq, T, T] ---
     // #1082 forward-flip: q/k/v are already kt; run the GEMMs, scale/mask/
     // softmax all kt-native — no candle borrow / copy-out round-trips.
-    let attn_scores = match kiln_tensor::cuda_matmul_rhs_transposed(q, k) {
+    let attn_scores = match kiln_tensor::ops::matmul_rhs_transposed(q, k) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
@@ -17988,7 +17988,7 @@ fn try_kt_gqa_sdpa_matmuls(
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let attn_output = match kiln_tensor::cuda_matmul(&p_contig, v) {
+    let attn_output = match kiln_tensor::ops::matmul(&p_contig, v) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };

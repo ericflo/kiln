@@ -5398,6 +5398,36 @@ fn forward_lm_head_matmul_routes_through_matmul_op_contract() {
 }
 
 #[test]
+fn forward_gqa_sdpa_matmuls_route_through_matmul_ops_contract() {
+    let forward_source =
+        fs::read_to_string(workspace_root().join("crates/kiln-model/src/forward.rs"))
+            .expect("forward source should be readable");
+    let sdpa_helper = source_between(
+        &forward_source,
+        "fn try_kt_gqa_sdpa_matmuls(",
+        "pub fn gqa_attention_core_prefill(",
+    );
+
+    assert!(
+        sdpa_helper.contains("kiln_tensor::ops::matmul_rhs_transposed(q, k)"),
+        "GQA SDPA score matmul should route through MatmulRhsTransposedOp"
+    );
+    assert!(
+        sdpa_helper.contains("kiln_tensor::ops::matmul(&p_contig, v)"),
+        "GQA SDPA value matmul should route through MatmulOp"
+    );
+    for forbidden in [
+        "kiln_tensor::cuda_matmul_rhs_transposed",
+        "kiln_tensor::cuda_matmul(",
+    ] {
+        assert!(
+            !sdpa_helper.contains(forbidden),
+            "GQA SDPA helper should not bind directly to CUDA matmul primitives: {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn forward_full_attn_qkv_combined_routes_through_linear_backend_contract() {
     let forward_source =
         fs::read_to_string(workspace_root().join("crates/kiln-model/src/forward.rs"))
