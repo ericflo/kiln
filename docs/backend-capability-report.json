@@ -14,12 +14,10 @@
         "KILN_DISABLE_CUDA_GDN_PREFILL_GATES",
         "KILN_DISABLE_CUDA_LORA_DECODE_ADD"
       ],
-      "override_count": 14,
+      "override_count": 11,
       "overrides": [
         "evict_resident_activation",
         "has_resident_activation",
-        "supports_flash_attn_paged_decode",
-        "supports_flash_attn_prefill",
         "supports_gdn_chunk_prep",
         "supports_gdn_chunk_scan",
         "supports_gdn_decode_gates_recurrent_unexpanded_qk",
@@ -28,8 +26,7 @@
         "supports_gdn_full_chunk_forward",
         "supports_gdn_gated_rms_norm",
         "supports_gdn_gates",
-        "supports_gdn_recurrent_step",
-        "supports_strict_paged_decode_contiguous_batch"
+        "supports_gdn_recurrent_step"
       ],
       "source": "crates/kiln-model/src/backend/cuda.rs",
       "source_modules": [
@@ -707,12 +704,10 @@
         "KILN_ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK",
         "KILN_ROCM_HEAD_MAJOR_PREFILL"
       ],
-      "override_count": 14,
+      "override_count": 11,
       "overrides": [
         "evict_resident_activation",
         "has_resident_activation",
-        "supports_flash_attn_paged_decode",
-        "supports_flash_attn_prefill",
         "supports_gdn_chunk_prep",
         "supports_gdn_chunk_scan",
         "supports_gdn_decode_gates_recurrent_unexpanded_qk",
@@ -721,8 +716,7 @@
         "supports_gdn_full_chunk_forward",
         "supports_gdn_gated_rms_norm",
         "supports_gdn_gates",
-        "supports_gdn_recurrent_step",
-        "supports_strict_paged_decode_contiguous_batch"
+        "supports_gdn_recurrent_step"
       ],
       "source": "crates/kiln-model/src/backend/rocm.rs",
       "source_modules": [
@@ -1044,12 +1038,9 @@
         "KILN_VULKAN_RESIDENT_DECODE",
         "KILN_VULKAN_SDPA"
       ],
-      "override_count": 28,
+      "override_count": 25,
       "overrides": [
         "assemble_linear_attn_gdn_state_batch_kt",
-        "flash_attn_paged_decode",
-        "flash_attn_paged_decode_contiguous_batch_dyn_seqlen",
-        "flash_attn_prefill",
         "gdn_chunk_prep",
         "gdn_chunk_scan",
         "gdn_chunkwise_forward",
@@ -3392,7 +3383,7 @@
           ],
           "expected": "<= 8",
           "name": "backend_runtime_method_count_below_gate",
-          "observed": 58,
+          "observed": 48,
           "passed": false
         }
       ],
@@ -4455,5 +4446,5 @@
       "tape_streaming_tile_tokens": 2048
     }
   },
-  "trait_method_count": 58
+  "trait_method_count": 48
 }
