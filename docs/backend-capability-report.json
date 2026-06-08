@@ -3570,7 +3570,7 @@
           ],
           "expected": 0,
           "name": "matmul_linear_identity_dispatch_removed",
-          "observed": 159,
+          "observed": 151,
           "passed": false
         }
       ],

@@ -5864,17 +5864,12 @@ fn matmul_no_broadcast_copy(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             let lead: usize = l_dims[..l_dims.len() - 1].iter().product();
             let lhs2d = lhs.reshape((lead, k))?;
 
-            // Phase 7 opt-in: route the 2D matmul through the kt
-            // cublasLt handle. Falls through to candle's matmul on
-            // any incompatibility (non-CUDA, non-{BF16,F16,F32},
-            // borrowed-storage edge case). The kt path produces a
-            // freshly-allocated kt CudaStorage; we copy the result
-            // back into a candle Tensor via the kt-bridge copy
-            // adapter so the rest of `forward.rs` is untouched.
+            // Phase 7 opt-in: route the 2D matmul through the kt op
+            // contract so the active backend's MatmulOp implementation
+            // owns native dispatch. Falls through to the ordinary kt
+            // Tensor::matmul path when the gate is off.
             #[cfg(feature = "cuda")]
             if cuda_use_kt_api_matmul()
-                && matches!(lhs2d.device(), Device::Cuda(_))
-                && matches!(rhs.device(), Device::Cuda(_))
                 && matches!(lhs2d.dtype(), DType::BF16 | DType::F16 | DType::F32)
                 && lhs2d.dtype() == rhs.dtype()
                 && lhs2d.is_contiguous()
@@ -5936,9 +5931,8 @@ fn runtime_matmul_no_broadcast_copy(
     Ok(Some(out2d.reshape(out_shape)?))
 }
 
-/// Phase 7 — kt-API matmul migration helper. Routes a 2D candle
-/// matmul through `kiln_tensor::cuda_matmul` (which dispatches via
-/// the `kiln_blas::CublasLtMatmulHandle`).
+/// Phase 7 — kt-API matmul migration helper. Routes a 2D matmul through
+/// `kiln_tensor::ops::matmul`, whose `MatmulOp` owns native backend dispatch.
 ///
 /// Returns `Ok(None)` on any incompatibility so the caller falls
 /// through to candle's `Tensor::matmul`. NVTX range `kiln/matmul_kt`
@@ -5977,16 +5971,7 @@ pub(crate) fn try_kt_matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Option<Tensor>
         }
     }
 
-    // Backend-dispatched dense matmul: cuda_matmul on Device::Cuda,
-    // rocm_matmul on Device::Rocm (each cfg-gated to its backend). (R.4)
-    let matmul_result = match lhs.device() {
-        #[cfg(feature = "cuda")]
-        kiln_tensor::Device::Cuda(_) => kiln_tensor::cuda_matmul(lhs, rhs),
-        #[cfg(feature = "rocm")]
-        kiln_tensor::Device::Rocm(_) => kiln_tensor::rocm_matmul(lhs, rhs),
-        _ => return Ok(None),
-    };
-    let out_kt = match matmul_result {
+    let out_kt = match kiln_tensor::ops::matmul(lhs, rhs) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
@@ -10434,8 +10419,8 @@ fn swiglu_ffn_split_gate_up(
 /// a `KtTensor`; the wrapper reshapes it back to the input rank.
 ///
 /// Bit-exact to the existing per-op kt path:
-/// - each projection is `kiln_tensor::cuda_matmul` (the same cublasLt
-///   entry the per-op [`try_kt_matmul`] gate already dispatches to);
+/// - each projection is `kiln_tensor::ops::matmul`, so the kt MatmulOp
+///   contract dispatches through the active backend's native path;
 /// - the SwiGLU activation prefers `fused_mlp_silu_mul_kt` (the exact
 ///   `kiln_fused_mlp_silu_mul_bf16` FFI symbol the existing fused fast
 ///   path uses) when the BF16 fused kernel supports the operands, and
@@ -10450,15 +10435,8 @@ fn swiglu_ffn_split_gate_up(
 /// are preserved so nsys per-stage attribution is unchanged.
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 fn gpu_matmul_for_swiglu(lhs: &KtTensor, rhs: &KtTensor) -> Result<KtTensor> {
-    match lhs.device() {
-        #[cfg(feature = "cuda")]
-        Device::Cuda(_) => kiln_tensor::cuda_matmul(lhs, rhs)
-            .map_err(|e| anyhow::anyhow!("gpu_matmul_for_swiglu: cuda matmul: {e}")),
-        #[cfg(feature = "rocm")]
-        Device::Rocm(_) => kiln_tensor::rocm_matmul(lhs, rhs)
-            .map_err(|e| anyhow::anyhow!("gpu_matmul_for_swiglu: rocm matmul: {e}")),
-        other => anyhow::bail!("gpu_matmul_for_swiglu: unsupported device {other:?}"),
-    }
+    kiln_tensor::ops::matmul(lhs, rhs)
+        .map_err(|e| anyhow::anyhow!("gpu_matmul_for_swiglu: matmul contract: {e}"))
 }
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
