@@ -466,6 +466,16 @@ def production_source_text(path: str) -> str:
     return "".join(pieces)
 
 
+def source_between(source: str, start_marker: str, end_marker: str) -> str:
+    start = source.find(start_marker)
+    if start < 0:
+        return ""
+    end = source.find(end_marker, start)
+    if end < 0:
+        return source[start:]
+    return source[start:end]
+
+
 def support_status(body: str) -> str:
     stripped = body_without_comments(body)
     compact = re.sub(r"\s+", "", stripped)
@@ -1585,13 +1595,83 @@ def resident_registry_lifecycle_metadata_store_count() -> int:
 
 
 def matmul_identity_dispatch_count() -> int:
-    paths = [
-        "crates/kiln-tensor/src/ops/matmul.rs",
-        "crates/kiln-model/src/forward.rs",
-        "crates/kiln-model/src/backend/capability.rs",
-    ]
     pattern = r"Device::(?:Cuda|Rocm|Metal|Vulkan)|match\s+self\.name\(\)"
-    return sum(len(re.findall(pattern, production_source_text(path))) for path in paths)
+    forward = production_source_text("crates/kiln-model/src/forward.rs")
+    capability = production_source_text("crates/kiln-model/src/backend/capability.rs")
+    sections = [
+        production_source_text("crates/kiln-tensor/src/ops/matmul.rs"),
+        source_between(
+            capability,
+            "fn supports_matmul_request(&self, req: &MatmulRequest)",
+            "fn supports_linear_request",
+        ),
+        source_between(
+            forward,
+            "fn matmul_no_broadcast_copy(",
+            "fn runtime_matmul_no_broadcast_copy(",
+        ),
+        source_between(
+            forward,
+            "fn runtime_matmul_no_broadcast_copy(",
+            "fn runtime_matmul_or_broadcast(",
+        ),
+        source_between(
+            forward,
+            "fn runtime_matmul_or_broadcast(",
+            "/// Phase 7 — kt-API matmul migration helper",
+        ),
+        source_between(
+            forward,
+            "fn gdn_in_proj_matmul(",
+            "fn promote_cpu_activation(",
+        ),
+        source_between(
+            forward,
+            "fn kt_lm_head_native(",
+            "/// Phase 7 (#1082) — kt-API LM head migration helper.",
+        ),
+        source_between(
+            forward,
+            "fn try_kt_lm_head(",
+            "fn lm_head_forward_backend_decode_if(",
+        ),
+        source_between(
+            forward,
+            "fn lm_head_forward_backend_decode_if(",
+            "fn lm_head_argmax_with_backend(",
+        ),
+        source_between(
+            forward,
+            "fn try_kt_lm_head_argmax(",
+            "/// Phase 7 (#1082) — kt-API argmax migration helper.",
+        ),
+        source_between(
+            forward,
+            "fn lm_head_argmax_backend_decode_if(",
+            "/// Phase 7 (#1082) — kt-API sampler argmax migration helper",
+        ),
+        source_between(
+            forward,
+            "fn lm_head_argmax_rows_backend_decode_if(",
+            "fn lm_head_weighted_prep_argmax(",
+        ),
+        source_between(
+            forward,
+            "fn full_attn_qkv_proj_decode_if(",
+            "/// CUDA-compatible softmax",
+        ),
+        source_between(
+            forward,
+            "fn gated_deltanet_forward_decode_if_inner(",
+            "// Phase B11b tap",
+        ),
+        source_between(
+            forward,
+            "pub fn mtp_forward_step(",
+            "fn model_forward_paged_inner(",
+        ),
+    ]
+    return sum(len(re.findall(pattern, section)) for section in sections)
 
 
 def matmul_request_descriptor_w4_1_signal_count() -> tuple[int, int]:
@@ -1662,6 +1742,14 @@ def matmul_transposed_request_contract_signal_count() -> tuple[int, int]:
         (
             "crates/kiln-model/src/backend/mod.rs",
             "cpu backend should route rhs-transposed matmul request",
+        ),
+        (
+            "crates/kiln-model/src/backend/mod.rs",
+            "batched CPU backend should route rank-3 matmul request",
+        ),
+        (
+            "crates/kiln-model/src/backend/mod.rs",
+            "mixed dtype CPU request should route through the F32 oracle",
         ),
     ]
     observed = sum(1 for path, needle in required if needle in file_text(path))

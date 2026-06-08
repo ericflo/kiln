@@ -6576,12 +6576,12 @@ fn generated_capability_report_tracks_migration_phase_status() {
         .find(|phase| phase["phase"] == 4)
         .expect("Phase 4 should be present");
     assert_eq!(
-        phase4["status"], "partial",
-        "Phase 4 should report partial W4.1/W4.4 progress without self-certifying completion"
+        phase4["status"], "covered",
+        "Phase 4 should report complete only after request routing and identity-dispatch guards pass"
     );
     assert_eq!(phase4["contract"], "landed");
-    assert_eq!(phase4["migration"], "partial");
-    assert_eq!(phase4["genuine"], false);
+    assert_eq!(phase4["migration"], "complete");
+    assert_eq!(phase4["genuine"], true);
     let phase4_signals = phase4["migration_signals"]
         .as_array()
         .expect("Phase 4 should list machine signals");
@@ -6604,8 +6604,12 @@ fn generated_capability_report_tracks_migration_phase_status() {
         .find(|signal| signal["name"] == "matmul_linear_identity_dispatch_removed")
         .expect("Phase 4 should include the final identity-dispatch migration signal");
     assert_eq!(
-        identity_signal["passed"], false,
-        "Phase 4 must stay non-genuine until legacy matmul/linear identity dispatch is removed"
+        identity_signal["passed"], true,
+        "Phase 4 should be genuine only when scoped matmul/linear identity dispatch is removed"
+    );
+    assert_eq!(
+        identity_signal["observed"], 0,
+        "Phase 4 identity-dispatch guard should observe no W4-owned backend identity branches"
     );
 
     let phase5 = phases

@@ -60,7 +60,12 @@ impl LinearBackend for CpuBackend {
         &self,
         req: &super::capability::MatmulRequest,
     ) -> super::capability::Support {
-        if matmul_request_support_rank(req).is_none() {
+        let homogeneous_native = matmul_request_support_rank(req).is_some();
+        let cpu_oracle_native = req.to_blas_request(1).is_ok()
+            && req.accumulation == super::capability::MatmulAccumulation::F32
+            && req.out_layout == super::capability::MatmulOperandLayout::RowMajor
+            && req.epilogue == super::capability::MatmulEpilogue::Identity;
+        if !homogeneous_native && !cpu_oracle_native {
             return super::capability::Support::Unsupported;
         }
         matmul_support_from_native(true)
@@ -74,8 +79,6 @@ impl LinearBackend for CpuBackend {
     ) -> anyhow::Result<Option<kiln_tensor::Tensor>> {
         if !matches!(lhs.device(), kiln_tensor::Device::Cpu)
             || !matches!(rhs.device(), kiln_tensor::Device::Cpu)
-            || req.out_dtype != lhs.dtype()
-            || req.lhs_dtype != req.rhs_dtype
         {
             return Ok(None);
         }
@@ -83,6 +86,16 @@ impl LinearBackend for CpuBackend {
         let Some(layout) = requested_matmul_layout(req, lhs, rhs) else {
             return Ok(None);
         };
+        let lhs_f32;
+        let rhs_f32;
+        let (lhs, rhs) = if req.lhs_dtype != req.rhs_dtype || req.out_dtype != lhs.dtype() {
+            lhs_f32 = lhs.to_dtype(kiln_tensor::DType::F32)?;
+            rhs_f32 = rhs.to_dtype(kiln_tensor::DType::F32)?;
+            (&lhs_f32, &rhs_f32)
+        } else {
+            (lhs, rhs)
+        };
+
         let out = match layout {
             BackendMatmulLayout::Plain => kiln_tensor::ops::matmul(lhs, rhs)?,
             BackendMatmulLayout::LhsTransposed => {
@@ -98,7 +111,11 @@ impl LinearBackend for CpuBackend {
                 kiln_tensor::ops::matmul(&lhs_t, &rhs_t)?
             }
         };
-        Ok(Some(out))
+        if out.dtype() == req.out_dtype {
+            Ok(Some(out))
+        } else {
+            Ok(Some(out.to_dtype(req.out_dtype)?))
+        }
     }
 }
 

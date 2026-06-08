@@ -2592,12 +2592,58 @@ mod tests {
             vec![58.0, 64.0, 139.0, 154.0]
         );
 
+        let batched_lhs = kiln_tensor::Tensor::from_slice(
+            &[
+                1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+            ],
+            vec![2, 2, 3],
+        )?;
+        let batched_rhs = kiln_tensor::Tensor::from_slice(
+            &[
+                1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+            ],
+            vec![2, 3, 2],
+        )?;
+        let batched_req = capability::MatmulRequest::plain(
+            batched_lhs.dims().to_vec(),
+            batched_rhs.dims().to_vec(),
+            kiln_tensor::DType::F32,
+            false,
+        );
+        let batched_out =
+            LinearBackend::runtime_matmul(&cpu, &batched_req, &batched_lhs, &batched_rhs)?
+                .expect("batched CPU backend should route rank-3 matmul request");
+        assert_eq!(batched_out.dims(), &[2, 2, 2]);
+        assert_eq!(
+            batched_out.flatten_all()?.to_vec1::<f32>()?,
+            vec![22.0, 28.0, 49.0, 64.0, 220.0, 244.0, 301.0, 334.0]
+        );
+
+        let rhs_bf16 = rhs.to_dtype(kiln_tensor::DType::BF16)?;
+        let mixed_req = req
+            .clone()
+            .with_dtypes(kiln_tensor::DType::F32, kiln_tensor::DType::BF16, kiln_tensor::DType::F32);
+        assert_eq!(
+            capability::BackendCapabilityQueries::supports_matmul_request(&cpu, &mixed_req),
+            capability::Support::NativeWithConstraints,
+            "CPU backend should advertise the mixed-dtype request it can route through the oracle"
+        );
+        let mixed_out = LinearBackend::runtime_matmul(&cpu, &mixed_req, &lhs, &rhs_bf16)?
+            .expect("mixed dtype CPU request should route through the F32 oracle");
+        assert_eq!(
+            mixed_out.flatten_all()?.to_vec1::<f32>()?,
+            vec![58.0, 64.0, 139.0, 154.0]
+        );
+
         let mixed_decline = req
             .clone()
             .with_dtypes(kiln_tensor::DType::F32, kiln_tensor::DType::F32, kiln_tensor::DType::BF16);
-        assert!(
-            LinearBackend::runtime_matmul(&cpu, &mixed_decline, &lhs, &rhs)?.is_none(),
-            "CPU runtime_matmul should decline request metadata it cannot honor"
+        let bf16_out = LinearBackend::runtime_matmul(&cpu, &mixed_decline, &lhs, &rhs)?
+            .expect("CPU runtime_matmul should honor requested output dtype");
+        assert_eq!(
+            bf16_out.dtype(),
+            kiln_tensor::DType::BF16,
+            "CPU runtime_matmul should cast to requested output dtype"
         );
 
         Ok(())
