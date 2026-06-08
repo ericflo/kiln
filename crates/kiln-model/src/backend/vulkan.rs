@@ -28,10 +28,10 @@ use super::vulkan_tensor_bridge::{
     kt_tensor_to_packed_bf16_bytes_with_shape,
 };
 use super::{
-    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, OptimizerBackend,
-    PagedKvBackend, SamplingBackend, StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
     vulkan_attention, vulkan_conv1d, vulkan_dense, vulkan_device, vulkan_gdn, vulkan_linear,
-    vulkan_training, vulkan_weights,
+    vulkan_training, vulkan_weights, AttentionBackend, BackendIdentity, BackendRuntime,
+    ConvBackend, GdnBackend, OptimizerBackend, PagedKvBackend, SamplingBackend, StartupBackend,
+    TrainingCapabilities, TrainingPrecisionPolicy,
 };
 use crate::forward::GpuWeights;
 
@@ -282,7 +282,11 @@ impl Drop for VulkanBackend {
 
 impl BackendIdentity for VulkanBackend {
     fn runtime_name(&self) -> &'static str {
-        if self.has_vulkan() { "vulkan" } else { "cpu" }
+        if self.has_vulkan() {
+            "vulkan"
+        } else {
+            "cpu"
+        }
     }
 
     fn runtime_device(&self) -> kiln_tensor::Device {
@@ -562,6 +566,227 @@ impl AttentionBackend for VulkanBackend {
 }
 
 // #1082 DoD-101/102: BackendRuntime decode methods flipped to kt; metal/vulkan impls need matching flip when their builds are restored.
+#[allow(clippy::too_many_arguments)]
+impl GdnBackend for VulkanBackend {
+    fn runtime_supports_gdn_forward_substitution(&self) -> bool {
+        vulkan_gdn::supports_gdn_forward_substitution(self)
+    }
+
+    fn runtime_supports_gdn_recurrent_step(&self) -> bool {
+        vulkan_gdn::supports_gdn_recurrent_step(self)
+    }
+
+    fn runtime_supports_gdn_recurrent_prefill_native_head_last(&self) -> bool {
+        vulkan_gdn::supports_gdn_recurrent_prefill_native_head_last(self)
+    }
+
+    fn runtime_supports_gdn_recurrent_qk_norm_prefill_native_head_last(&self) -> bool {
+        vulkan_gdn::supports_gdn_recurrent_qk_norm_prefill_native_head_last(self)
+    }
+
+    fn runtime_supports_gdn_chunk_prep(&self) -> bool {
+        vulkan_gdn::supports_gdn_chunk_prep(self)
+    }
+
+    fn runtime_supports_gdn_chunk_scan(&self) -> bool {
+        vulkan_gdn::supports_gdn_chunk_scan(self)
+    }
+
+    fn runtime_supports_gdn_full_chunk_forward(&self) -> bool {
+        vulkan_gdn::supports_gdn_full_chunk_forward(self)
+    }
+
+    fn runtime_supports_gdn_gates(&self) -> bool {
+        vulkan_gdn::supports_gdn_gates(self)
+    }
+
+    fn runtime_supports_gdn_gated_rms_norm(&self) -> bool {
+        vulkan_gdn::supports_gdn_gated_rms_norm(self)
+    }
+
+    fn runtime_gdn_in_proj_decode(
+        &self,
+        x: &kiln_tensor::Tensor,
+        in_proj_qkv_t: &kiln_tensor::Tensor,
+        in_proj_z_t: &kiln_tensor::Tensor,
+        in_proj_a_t: &kiln_tensor::Tensor,
+        in_proj_b_t: &kiln_tensor::Tensor,
+    ) -> Result<
+        Option<(
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+        )>,
+    > {
+        vulkan_gdn::gdn_in_proj_decode(
+            self,
+            x,
+            in_proj_qkv_t,
+            in_proj_z_t,
+            in_proj_a_t,
+            in_proj_b_t,
+        )
+    }
+
+    fn runtime_gdn_decode_gates_recurrent_rmsnorm(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
+        a_log: &kiln_tensor::Tensor,
+        dt_bias: &kiln_tensor::Tensor,
+        state_kt: &mut kiln_tensor::Tensor,
+        z: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
+        eps: f64,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        vulkan_gdn::gdn_decode_gates_recurrent_rmsnorm(
+            self, q, k, v, a, b, a_log, dt_bias, state_kt, z, weight, eps,
+        )
+    }
+
+    fn runtime_gdn_forward_substitution(
+        &self,
+        a_strict: &kiln_tensor::Tensor,
+        v_prime: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        vulkan_gdn::gdn_forward_substitution(self, a_strict, v_prime, beta)
+    }
+
+    fn runtime_gdn_recurrent_prefill_native_head_last(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        g: &kiln_tensor::Tensor,
+        state_kt: &mut kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        vulkan_gdn::gdn_recurrent_prefill_native_head_last(self, q, k, v, beta, g, state_kt)
+    }
+
+    fn runtime_gdn_recurrent_qk_norm_prefill_native_head_last(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        g: &kiln_tensor::Tensor,
+        state_kt: &mut kiln_tensor::Tensor,
+        q_scale: f64,
+        qk_eps: f64,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        vulkan_gdn::gdn_recurrent_qk_norm_prefill_native_head_last(
+            self, q, k, v, beta, g, state_kt, q_scale, qk_eps,
+        )
+    }
+
+    fn runtime_gdn_recurrent_step(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        g: &kiln_tensor::Tensor,
+        state_kt: &mut kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        vulkan_gdn::gdn_recurrent_step(self, q, k, v, beta, g, state_kt)
+    }
+
+    fn runtime_gdn_chunkwise_forward(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        g: &kiln_tensor::Tensor,
+        state_kt: &mut kiln_tensor::Tensor,
+        chunk_size: usize,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        vulkan_gdn::gdn_chunkwise_forward(self, q, k, v, beta, g, state_kt, chunk_size)
+    }
+
+    fn runtime_gdn_chunk_prep(
+        &self,
+        g: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        kkt: &kiln_tensor::Tensor,
+        qkt: &kiln_tensor::Tensor,
+        ks_entry: &kiln_tensor::Tensor,
+        q_s: &kiln_tensor::Tensor,
+    ) -> Result<
+        Option<(
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+        )>,
+    > {
+        vulkan_gdn::gdn_chunk_prep(self, g, v, kkt, qkt, ks_entry, q_s)
+    }
+
+    fn runtime_gdn_chunk_scan(
+        &self,
+        a_strict: &kiln_tensor::Tensor,
+        b_mask: &kiln_tensor::Tensor,
+        v_prime: &kiln_tensor::Tensor,
+        q_s_scaled: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        decay_last_col: &kiln_tensor::Tensor,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        vulkan_gdn::gdn_chunk_scan(
+            self,
+            a_strict,
+            b_mask,
+            v_prime,
+            q_s_scaled,
+            beta,
+            decay_last_col,
+        )
+    }
+
+    fn runtime_gdn_full_chunk_forward(
+        &self,
+        g: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        kkt: &kiln_tensor::Tensor,
+        qkt: &kiln_tensor::Tensor,
+        ks_entry: &kiln_tensor::Tensor,
+        q_s: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        k_t: &kiln_tensor::Tensor,
+        state_kt: &mut kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        vulkan_gdn::gdn_full_chunk_forward(self, g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state_kt)
+    }
+
+    fn runtime_gdn_gates(
+        &self,
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
+        a_log: &kiln_tensor::Tensor,
+        dt_bias: &kiln_tensor::Tensor,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        vulkan_gdn::gdn_gates(self, a, b, a_log, dt_bias)
+    }
+
+    fn runtime_gdn_gated_rms_norm(
+        &self,
+        x: &kiln_tensor::Tensor,
+        z: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
+        eps: f64,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        vulkan_gdn::gdn_gated_rms_norm(self, x, z, weight, eps)
+    }
+}
+
 impl BackendRuntime for VulkanBackend {
     fn training_capabilities(&self) -> TrainingCapabilities {
         Self::training_capabilities_static()
@@ -591,22 +816,6 @@ impl BackendRuntime for VulkanBackend {
         // the minimum pool" rule in gate (b)) is enforced later, the
         // first time a resident decode actually requests a buffer.
         self.has_vulkan() && self.resident_decode_enabled
-    }
-
-    fn supports_gdn_forward_substitution(&self) -> bool {
-        vulkan_gdn::supports_gdn_forward_substitution(self)
-    }
-
-    fn supports_gdn_recurrent_step(&self) -> bool {
-        vulkan_gdn::supports_gdn_recurrent_step(self)
-    }
-
-    fn supports_gdn_recurrent_prefill_native_head_last(&self) -> bool {
-        vulkan_gdn::supports_gdn_recurrent_prefill_native_head_last(self)
-    }
-
-    fn supports_gdn_recurrent_qk_norm_prefill_native_head_last(&self) -> bool {
-        vulkan_gdn::supports_gdn_recurrent_qk_norm_prefill_native_head_last(self)
     }
 
     fn enter_gdn_recurrent_resident_state_scope(&self) -> bool {
@@ -1042,70 +1251,6 @@ impl BackendRuntime for VulkanBackend {
         VulkanBackend::has_linear_attn_gdn_state_kt(self, key)
     }
 
-    fn supports_gdn_chunk_prep(&self) -> bool {
-        vulkan_gdn::supports_gdn_chunk_prep(self)
-    }
-
-    fn supports_gdn_chunk_scan(&self) -> bool {
-        vulkan_gdn::supports_gdn_chunk_scan(self)
-    }
-
-    fn supports_gdn_full_chunk_forward(&self) -> bool {
-        vulkan_gdn::supports_gdn_full_chunk_forward(self)
-    }
-
-    fn supports_gdn_gates(&self) -> bool {
-        vulkan_gdn::supports_gdn_gates(self)
-    }
-
-    fn supports_gdn_gated_rms_norm(&self) -> bool {
-        vulkan_gdn::supports_gdn_gated_rms_norm(self)
-    }
-
-    fn gdn_in_proj_decode(
-        &self,
-        x: &kiln_tensor::Tensor,
-        in_proj_qkv_t: &kiln_tensor::Tensor,
-        in_proj_z_t: &kiln_tensor::Tensor,
-        in_proj_a_t: &kiln_tensor::Tensor,
-        in_proj_b_t: &kiln_tensor::Tensor,
-    ) -> Result<
-        Option<(
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-        )>,
-    > {
-        vulkan_gdn::gdn_in_proj_decode(
-            self,
-            x,
-            in_proj_qkv_t,
-            in_proj_z_t,
-            in_proj_a_t,
-            in_proj_b_t,
-        )
-    }
-
-    fn gdn_decode_gates_recurrent_rmsnorm(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        a: &kiln_tensor::Tensor,
-        b: &kiln_tensor::Tensor,
-        a_log: &kiln_tensor::Tensor,
-        dt_bias: &kiln_tensor::Tensor,
-        state_kt: &mut kiln_tensor::Tensor,
-        z: &kiln_tensor::Tensor,
-        weight: &kiln_tensor::Tensor,
-        eps: f64,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        vulkan_gdn::gdn_decode_gates_recurrent_rmsnorm(
-            self, q, k, v, a, b, a_log, dt_bias, state_kt, z, weight, eps,
-        )
-    }
-
     fn linear_decode(
         &self,
         x: &kiln_tensor::Tensor,
@@ -1177,143 +1322,5 @@ impl BackendRuntime for VulkanBackend {
         down_weight_t: &kiln_tensor::Tensor,
     ) -> Result<Option<kiln_tensor::Tensor>> {
         vulkan_dense::mlp_decode(self, x, gate_weight_t, up_weight_t, down_weight_t)
-    }
-
-    fn gdn_forward_substitution(
-        &self,
-        a_strict: &kiln_tensor::Tensor,
-        v_prime: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        vulkan_gdn::gdn_forward_substitution(self, a_strict, v_prime, beta)
-    }
-
-    fn gdn_recurrent_prefill_native_head_last(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        g: &kiln_tensor::Tensor,
-        state_kt: &mut kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        vulkan_gdn::gdn_recurrent_prefill_native_head_last(self, q, k, v, beta, g, state_kt)
-    }
-
-    fn gdn_recurrent_qk_norm_prefill_native_head_last(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        g: &kiln_tensor::Tensor,
-        state_kt: &mut kiln_tensor::Tensor,
-        q_scale: f64,
-        qk_eps: f64,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        vulkan_gdn::gdn_recurrent_qk_norm_prefill_native_head_last(
-            self, q, k, v, beta, g, state_kt, q_scale, qk_eps,
-        )
-    }
-
-    fn gdn_recurrent_step(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        g: &kiln_tensor::Tensor,
-        state_kt: &mut kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        vulkan_gdn::gdn_recurrent_step(self, q, k, v, beta, g, state_kt)
-    }
-
-    fn gdn_chunkwise_forward(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        g: &kiln_tensor::Tensor,
-        state_kt: &mut kiln_tensor::Tensor,
-        chunk_size: usize,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        vulkan_gdn::gdn_chunkwise_forward(self, q, k, v, beta, g, state_kt, chunk_size)
-    }
-
-    fn gdn_chunk_prep(
-        &self,
-        g: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        kkt: &kiln_tensor::Tensor,
-        qkt: &kiln_tensor::Tensor,
-        ks_entry: &kiln_tensor::Tensor,
-        q_s: &kiln_tensor::Tensor,
-    ) -> Result<
-        Option<(
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-        )>,
-    > {
-        vulkan_gdn::gdn_chunk_prep(self, g, v, kkt, qkt, ks_entry, q_s)
-    }
-
-    fn gdn_chunk_scan(
-        &self,
-        a_strict: &kiln_tensor::Tensor,
-        b_mask: &kiln_tensor::Tensor,
-        v_prime: &kiln_tensor::Tensor,
-        q_s_scaled: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        decay_last_col: &kiln_tensor::Tensor,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
-        vulkan_gdn::gdn_chunk_scan(
-            self,
-            a_strict,
-            b_mask,
-            v_prime,
-            q_s_scaled,
-            beta,
-            decay_last_col,
-        )
-    }
-
-    fn gdn_full_chunk_forward(
-        &self,
-        g: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        kkt: &kiln_tensor::Tensor,
-        qkt: &kiln_tensor::Tensor,
-        ks_entry: &kiln_tensor::Tensor,
-        q_s: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        k_t: &kiln_tensor::Tensor,
-        state_kt: &mut kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        vulkan_gdn::gdn_full_chunk_forward(self, g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state_kt)
-    }
-
-    fn gdn_gates(
-        &self,
-        a: &kiln_tensor::Tensor,
-        b: &kiln_tensor::Tensor,
-        a_log: &kiln_tensor::Tensor,
-        dt_bias: &kiln_tensor::Tensor,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
-        vulkan_gdn::gdn_gates(self, a, b, a_log, dt_bias)
-    }
-
-    fn gdn_gated_rms_norm(
-        &self,
-        x: &kiln_tensor::Tensor,
-        z: &kiln_tensor::Tensor,
-        weight: &kiln_tensor::Tensor,
-        eps: f64,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        vulkan_gdn::gdn_gated_rms_norm(self, x, z, weight, eps)
     }
 }

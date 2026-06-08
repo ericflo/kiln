@@ -656,6 +656,7 @@ pub trait BackendRuntime:
     BackendIdentity
     + StartupBackend
     + AttentionBackend
+    + GdnBackend
     + ConvBackend
     + SamplingBackend
     + OptimizerBackend
@@ -926,11 +927,11 @@ pub trait BackendRuntime:
     }
 
     fn supports_gdn_forward_substitution(&self) -> bool {
-        false
+        GdnBackend::runtime_supports_gdn_forward_substitution(self)
     }
 
     fn supports_gdn_recurrent_step(&self) -> bool {
-        false
+        GdnBackend::runtime_supports_gdn_recurrent_step(self)
     }
 
     fn enter_gdn_recurrent_resident_state_scope(&self) -> bool {
@@ -1176,39 +1177,39 @@ pub trait BackendRuntime:
     }
 
     fn supports_gdn_chunk_prep(&self) -> bool {
-        false
+        GdnBackend::runtime_supports_gdn_chunk_prep(self)
     }
 
     fn supports_gdn_chunk_scan(&self) -> bool {
-        false
+        GdnBackend::runtime_supports_gdn_chunk_scan(self)
     }
 
     fn supports_gdn_full_chunk_forward(&self) -> bool {
-        false
+        GdnBackend::runtime_supports_gdn_full_chunk_forward(self)
     }
 
     fn supports_gdn_full_chunk_forward_head_last(&self) -> bool {
-        false
+        GdnBackend::runtime_supports_gdn_full_chunk_forward_head_last(self)
     }
 
     fn supports_gdn_recurrent_prefill_head_last(&self) -> bool {
-        false
+        GdnBackend::runtime_supports_gdn_recurrent_prefill_head_last(self)
     }
 
     fn supports_gdn_recurrent_prefill_native_head_last(&self) -> bool {
-        false
+        GdnBackend::runtime_supports_gdn_recurrent_prefill_native_head_last(self)
     }
 
     fn supports_gdn_recurrent_qk_norm_prefill_native_head_last(&self) -> bool {
-        false
+        GdnBackend::runtime_supports_gdn_recurrent_qk_norm_prefill_native_head_last(self)
     }
 
     fn supports_gdn_decode_gates_recurrent_unexpanded_qk(&self) -> bool {
-        false
+        GdnBackend::runtime_supports_gdn_decode_gates_recurrent_unexpanded_qk(self)
     }
 
     fn supports_gdn_decode_qk_norm_gates_recurrent(&self) -> bool {
-        false
+        GdnBackend::runtime_supports_gdn_decode_qk_norm_gates_recurrent(self)
     }
 
     /// FlashAttention-2 forward for prefill (no KV cache, seq_len > 1).
@@ -1334,11 +1335,11 @@ pub trait BackendRuntime:
     /// they do not handle.
     fn gdn_forward_substitution(
         &self,
-        _a_strict: &kiln_tensor::Tensor,
-        _v_prime: &kiln_tensor::Tensor,
-        _beta: &kiln_tensor::Tensor,
+        a_strict: &kiln_tensor::Tensor,
+        v_prime: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        GdnBackend::runtime_gdn_forward_substitution(self, a_strict, v_prime, beta)
     }
 
     /// Gated DeltaNet single-token recurrent step (decode fast path).
@@ -1348,14 +1349,14 @@ pub trait BackendRuntime:
     /// mutated in place. Returns `out: [B, H, dv]` bf16.
     fn gdn_recurrent_step(
         &self,
-        _q: &kiln_tensor::Tensor,
-        _k: &kiln_tensor::Tensor,
-        _v: &kiln_tensor::Tensor,
-        _beta: &kiln_tensor::Tensor,
-        _g: &kiln_tensor::Tensor,
-        _state: &mut kiln_tensor::Tensor,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        g: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        GdnBackend::runtime_gdn_recurrent_step(self, q, k, v, beta, g, state)
     }
 
     /// Gated DeltaNet PREFILL chunkwise forward (GPU-parallel, forward-only).
@@ -1370,15 +1371,15 @@ pub trait BackendRuntime:
     /// fallback. (#1082) Returns `Ok(None)` to decline (caller uses the CPU path).
     fn gdn_chunkwise_forward(
         &self,
-        _q: &kiln_tensor::Tensor,
-        _k: &kiln_tensor::Tensor,
-        _v: &kiln_tensor::Tensor,
-        _beta: &kiln_tensor::Tensor,
-        _g: &kiln_tensor::Tensor,
-        _state: &mut kiln_tensor::Tensor,
-        _chunk_size: usize,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        g: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+        chunk_size: usize,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        GdnBackend::runtime_gdn_chunkwise_forward(self, q, k, v, beta, g, state, chunk_size)
     }
 
     /// Fused GDN chunk-prep kernel (prefill outer recurrence).
@@ -1404,12 +1405,12 @@ pub trait BackendRuntime:
     /// envelope; callers fall back to the candle-op path.
     fn gdn_chunk_prep(
         &self,
-        _g: &kiln_tensor::Tensor,
-        _v: &kiln_tensor::Tensor,
-        _kkt: &kiln_tensor::Tensor,
-        _qkt: &kiln_tensor::Tensor,
-        _ks_entry: &kiln_tensor::Tensor,
-        _q_s: &kiln_tensor::Tensor,
+        g: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        kkt: &kiln_tensor::Tensor,
+        qkt: &kiln_tensor::Tensor,
+        ks_entry: &kiln_tensor::Tensor,
+        q_s: &kiln_tensor::Tensor,
     ) -> Result<
         Option<(
             kiln_tensor::Tensor,
@@ -1420,92 +1421,106 @@ pub trait BackendRuntime:
             kiln_tensor::Tensor,
         )>,
     > {
-        Ok(None)
+        GdnBackend::runtime_gdn_chunk_prep(self, g, v, kkt, qkt, ks_entry, q_s)
     }
 
     fn gdn_chunk_scan(
         &self,
-        _a_strict: &kiln_tensor::Tensor,
-        _b_mask: &kiln_tensor::Tensor,
-        _v_prime: &kiln_tensor::Tensor,
-        _q_s_scaled: &kiln_tensor::Tensor,
-        _beta: &kiln_tensor::Tensor,
-        _decay_last_col: &kiln_tensor::Tensor,
+        a_strict: &kiln_tensor::Tensor,
+        b_mask: &kiln_tensor::Tensor,
+        v_prime: &kiln_tensor::Tensor,
+        q_s_scaled: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        decay_last_col: &kiln_tensor::Tensor,
     ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
-        Ok(None)
+        GdnBackend::runtime_gdn_chunk_scan(
+            self,
+            a_strict,
+            b_mask,
+            v_prime,
+            q_s_scaled,
+            beta,
+            decay_last_col,
+        )
     }
 
     fn gdn_full_chunk_forward(
         &self,
-        _g: &kiln_tensor::Tensor,
-        _v: &kiln_tensor::Tensor,
-        _kkt: &kiln_tensor::Tensor,
-        _qkt: &kiln_tensor::Tensor,
-        _ks_entry: &kiln_tensor::Tensor,
-        _q_s: &kiln_tensor::Tensor,
-        _beta: &kiln_tensor::Tensor,
-        _k_t: &kiln_tensor::Tensor,
-        _state: &mut kiln_tensor::Tensor,
+        g: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        kkt: &kiln_tensor::Tensor,
+        qkt: &kiln_tensor::Tensor,
+        ks_entry: &kiln_tensor::Tensor,
+        q_s: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        k_t: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        GdnBackend::runtime_gdn_full_chunk_forward(
+            self, g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
     fn gdn_full_chunk_forward_head_last_into(
         &self,
-        _g: &kiln_tensor::Tensor,
-        _v: &kiln_tensor::Tensor,
-        _kkt: &kiln_tensor::Tensor,
-        _qkt: &kiln_tensor::Tensor,
-        _ks_entry: &kiln_tensor::Tensor,
-        _q_s: &kiln_tensor::Tensor,
-        _beta: &kiln_tensor::Tensor,
-        _k_t: &kiln_tensor::Tensor,
-        _state: &mut kiln_tensor::Tensor,
-        _out: &kiln_tensor::Tensor,
-        _t_start: usize,
-        _seq_len: usize,
+        g: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        kkt: &kiln_tensor::Tensor,
+        qkt: &kiln_tensor::Tensor,
+        ks_entry: &kiln_tensor::Tensor,
+        q_s: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        k_t: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+        out: &kiln_tensor::Tensor,
+        t_start: usize,
+        seq_len: usize,
     ) -> Result<bool> {
-        Ok(false)
+        GdnBackend::runtime_gdn_full_chunk_forward_head_last_into(
+            self, g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, out, t_start, seq_len,
+        )
     }
 
     fn gdn_recurrent_prefill_head_last(
         &self,
-        _q: &kiln_tensor::Tensor,
-        _k: &kiln_tensor::Tensor,
-        _v: &kiln_tensor::Tensor,
-        _beta: &kiln_tensor::Tensor,
-        _g: &kiln_tensor::Tensor,
-        _state: &mut kiln_tensor::Tensor,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        g: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        GdnBackend::runtime_gdn_recurrent_prefill_head_last(self, q, k, v, beta, g, state)
     }
 
     fn gdn_recurrent_prefill_native_head_last(
         &self,
-        _q: &kiln_tensor::Tensor,
-        _k: &kiln_tensor::Tensor,
-        _v: &kiln_tensor::Tensor,
-        _beta: &kiln_tensor::Tensor,
-        _g: &kiln_tensor::Tensor,
-        _state: &mut kiln_tensor::Tensor,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        g: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        GdnBackend::runtime_gdn_recurrent_prefill_native_head_last(self, q, k, v, beta, g, state)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn gdn_recurrent_qk_norm_prefill_native_head_last(
         &self,
-        _q: &kiln_tensor::Tensor,
-        _k: &kiln_tensor::Tensor,
-        _v: &kiln_tensor::Tensor,
-        _beta: &kiln_tensor::Tensor,
-        _g: &kiln_tensor::Tensor,
-        _state: &mut kiln_tensor::Tensor,
-        _q_scale: f64,
-        _qk_eps: f64,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        g: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+        q_scale: f64,
+        qk_eps: f64,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        GdnBackend::runtime_gdn_recurrent_qk_norm_prefill_native_head_last(
+            self, q, k, v, beta, g, state, q_scale, qk_eps,
+        )
     }
 
     /// Fused native-MTP GDN decode gates + recurrent update.
@@ -1517,19 +1532,21 @@ pub trait BackendRuntime:
     #[allow(clippy::too_many_arguments)]
     fn gdn_decode_gates_recurrent(
         &self,
-        _q: &kiln_tensor::Tensor,
-        _k: &kiln_tensor::Tensor,
-        _v: &kiln_tensor::Tensor,
-        _a: &kiln_tensor::Tensor,
-        _b: &kiln_tensor::Tensor,
-        _a_log: &kiln_tensor::Tensor,
-        _dt_bias: &kiln_tensor::Tensor,
-        _state: &mut kiln_tensor::Tensor,
-        _z: &kiln_tensor::Tensor,
-        _weight: &kiln_tensor::Tensor,
-        _eps: f64,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
+        a_log: &kiln_tensor::Tensor,
+        dt_bias: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+        z: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
+        eps: f64,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        GdnBackend::runtime_gdn_decode_gates_recurrent(
+            self, q, k, v, a, b, a_log, dt_bias, state, z, weight, eps,
+        )
     }
 
     /// Fused native-MTP GDN decode Q/K L2-normalization + gates + recurrent
@@ -1542,18 +1559,20 @@ pub trait BackendRuntime:
     #[allow(clippy::too_many_arguments)]
     fn gdn_decode_qk_norm_gates_recurrent(
         &self,
-        _q: &kiln_tensor::Tensor,
-        _k: &kiln_tensor::Tensor,
-        _v: &kiln_tensor::Tensor,
-        _a: &kiln_tensor::Tensor,
-        _b: &kiln_tensor::Tensor,
-        _a_log: &kiln_tensor::Tensor,
-        _dt_bias: &kiln_tensor::Tensor,
-        _state: &mut kiln_tensor::Tensor,
-        _q_scale: f64,
-        _qk_eps: f64,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
+        a_log: &kiln_tensor::Tensor,
+        dt_bias: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+        q_scale: f64,
+        qk_eps: f64,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        GdnBackend::runtime_gdn_decode_qk_norm_gates_recurrent(
+            self, q, k, v, a, b, a_log, dt_bias, state, q_scale, qk_eps,
+        )
     }
 
     /// Fused native-MTP GDN decode Q/K L2-normalization + gates + recurrent
@@ -1565,21 +1584,23 @@ pub trait BackendRuntime:
     #[allow(clippy::too_many_arguments)]
     fn gdn_decode_qk_norm_gates_recurrent_rmsnorm(
         &self,
-        _q: &kiln_tensor::Tensor,
-        _k: &kiln_tensor::Tensor,
-        _v: &kiln_tensor::Tensor,
-        _a: &kiln_tensor::Tensor,
-        _b: &kiln_tensor::Tensor,
-        _a_log: &kiln_tensor::Tensor,
-        _dt_bias: &kiln_tensor::Tensor,
-        _state: &mut kiln_tensor::Tensor,
-        _z: &kiln_tensor::Tensor,
-        _weight: &kiln_tensor::Tensor,
-        _q_scale: f64,
-        _qk_eps: f64,
-        _rms_eps: f64,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
+        a_log: &kiln_tensor::Tensor,
+        dt_bias: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+        z: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
+        q_scale: f64,
+        qk_eps: f64,
+        rms_eps: f64,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        GdnBackend::runtime_gdn_decode_qk_norm_gates_recurrent_rmsnorm(
+            self, q, k, v, a, b, a_log, dt_bias, state, z, weight, q_scale, qk_eps, rms_eps,
+        )
     }
 
     /// Fused native-MTP GDN decode gates + recurrent update + gated RMSNorm.
@@ -1589,19 +1610,21 @@ pub trait BackendRuntime:
     #[allow(clippy::too_many_arguments)]
     fn gdn_decode_gates_recurrent_rmsnorm(
         &self,
-        _q: &kiln_tensor::Tensor,
-        _k: &kiln_tensor::Tensor,
-        _v: &kiln_tensor::Tensor,
-        _a: &kiln_tensor::Tensor,
-        _b: &kiln_tensor::Tensor,
-        _a_log: &kiln_tensor::Tensor,
-        _dt_bias: &kiln_tensor::Tensor,
-        _state: &mut kiln_tensor::Tensor,
-        _z: &kiln_tensor::Tensor,
-        _weight: &kiln_tensor::Tensor,
-        _eps: f64,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
+        a_log: &kiln_tensor::Tensor,
+        dt_bias: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+        z: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
+        eps: f64,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        GdnBackend::runtime_gdn_decode_gates_recurrent_rmsnorm(
+            self, q, k, v, a, b, a_log, dt_bias, state, z, weight, eps,
+        )
     }
 
     /// Fused GDN input projections.
@@ -1613,11 +1636,11 @@ pub trait BackendRuntime:
     #[allow(clippy::too_many_arguments)]
     fn gdn_in_proj_decode(
         &self,
-        _x: &kiln_tensor::Tensor,
-        _in_proj_qkv_t: &kiln_tensor::Tensor,
-        _in_proj_z_t: &kiln_tensor::Tensor,
-        _in_proj_a_t: &kiln_tensor::Tensor,
-        _in_proj_b_t: &kiln_tensor::Tensor,
+        x: &kiln_tensor::Tensor,
+        in_proj_qkv_t: &kiln_tensor::Tensor,
+        in_proj_z_t: &kiln_tensor::Tensor,
+        in_proj_a_t: &kiln_tensor::Tensor,
+        in_proj_b_t: &kiln_tensor::Tensor,
     ) -> Result<
         Option<(
             kiln_tensor::Tensor,
@@ -1626,7 +1649,14 @@ pub trait BackendRuntime:
             kiln_tensor::Tensor,
         )>,
     > {
-        Ok(None)
+        GdnBackend::runtime_gdn_in_proj_decode(
+            self,
+            x,
+            in_proj_qkv_t,
+            in_proj_z_t,
+            in_proj_a_t,
+            in_proj_b_t,
+        )
     }
 
     /// Transposed linear projection.
@@ -1907,11 +1937,11 @@ pub trait BackendRuntime:
     }
 
     fn supports_gdn_gates(&self) -> bool {
-        false
+        GdnBackend::runtime_supports_gdn_gates(self)
     }
 
     fn supports_gdn_gated_rms_norm(&self) -> bool {
-        false
+        GdnBackend::runtime_supports_gdn_gated_rms_norm(self)
     }
 
     fn supports_causal_conv1d_update(&self) -> bool {
@@ -1976,12 +2006,12 @@ pub trait BackendRuntime:
     /// the backend declines (wrong dtype, envelope violation, disabled).
     fn gdn_gates(
         &self,
-        _a: &kiln_tensor::Tensor,
-        _b: &kiln_tensor::Tensor,
-        _a_log: &kiln_tensor::Tensor,
-        _dt_bias: &kiln_tensor::Tensor,
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
+        a_log: &kiln_tensor::Tensor,
+        dt_bias: &kiln_tensor::Tensor,
     ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
-        Ok(None)
+        GdnBackend::runtime_gdn_gates(self, a, b, a_log, dt_bias)
     }
 
     /// Fused GDN gated RMSNorm.
@@ -1993,12 +2023,12 @@ pub trait BackendRuntime:
     /// dtype after reshaping, matching the portable fallback.
     fn gdn_gated_rms_norm(
         &self,
-        _x: &kiln_tensor::Tensor,
-        _z: &kiln_tensor::Tensor,
-        _weight: &kiln_tensor::Tensor,
-        _eps: f64,
+        x: &kiln_tensor::Tensor,
+        z: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
+        eps: f64,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        GdnBackend::runtime_gdn_gated_rms_norm(self, x, z, weight, eps)
     }
 }
 
@@ -2151,68 +2181,100 @@ pub trait PagedKvBackend: Send + Sync + std::fmt::Debug {
 /// Focused `GdnBackend` facet delegated by the current `BackendRuntime` facade.
 #[allow(clippy::too_many_arguments)]
 pub trait GdnBackend: Send + Sync + std::fmt::Debug {
-    fn runtime_supports_gdn_forward_substitution(&self) -> bool;
+    fn runtime_supports_gdn_forward_substitution(&self) -> bool {
+        false
+    }
 
-    fn runtime_supports_gdn_recurrent_step(&self) -> bool;
+    fn runtime_supports_gdn_recurrent_step(&self) -> bool {
+        false
+    }
 
-    fn runtime_supports_gdn_chunk_prep(&self) -> bool;
+    fn runtime_supports_gdn_chunk_prep(&self) -> bool {
+        false
+    }
 
-    fn runtime_supports_gdn_chunk_scan(&self) -> bool;
+    fn runtime_supports_gdn_chunk_scan(&self) -> bool {
+        false
+    }
 
-    fn runtime_supports_gdn_full_chunk_forward(&self) -> bool;
+    fn runtime_supports_gdn_full_chunk_forward(&self) -> bool {
+        false
+    }
 
-    fn runtime_supports_gdn_full_chunk_forward_head_last(&self) -> bool;
+    fn runtime_supports_gdn_full_chunk_forward_head_last(&self) -> bool {
+        false
+    }
 
-    fn runtime_supports_gdn_recurrent_prefill_head_last(&self) -> bool;
+    fn runtime_supports_gdn_recurrent_prefill_head_last(&self) -> bool {
+        false
+    }
 
-    fn runtime_supports_gdn_recurrent_prefill_native_head_last(&self) -> bool;
+    fn runtime_supports_gdn_recurrent_prefill_native_head_last(&self) -> bool {
+        false
+    }
 
-    fn runtime_supports_gdn_recurrent_qk_norm_prefill_native_head_last(&self) -> bool;
+    fn runtime_supports_gdn_recurrent_qk_norm_prefill_native_head_last(&self) -> bool {
+        false
+    }
 
-    fn runtime_supports_gdn_decode_gates_recurrent_unexpanded_qk(&self) -> bool;
+    fn runtime_supports_gdn_decode_gates_recurrent_unexpanded_qk(&self) -> bool {
+        false
+    }
 
-    fn runtime_supports_gdn_decode_qk_norm_gates_recurrent(&self) -> bool;
+    fn runtime_supports_gdn_decode_qk_norm_gates_recurrent(&self) -> bool {
+        false
+    }
 
-    fn runtime_supports_gdn_gates(&self) -> bool;
+    fn runtime_supports_gdn_gates(&self) -> bool {
+        false
+    }
 
-    fn runtime_supports_gdn_gated_rms_norm(&self) -> bool;
+    fn runtime_supports_gdn_gated_rms_norm(&self) -> bool {
+        false
+    }
 
     fn runtime_gdn_forward_substitution(
         &self,
-        a_strict: &kiln_tensor::Tensor,
-        v_prime: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _a_strict: &kiln_tensor::Tensor,
+        _v_prime: &kiln_tensor::Tensor,
+        _beta: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
     fn runtime_gdn_recurrent_step(
         &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        g: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _q: &kiln_tensor::Tensor,
+        _k: &kiln_tensor::Tensor,
+        _v: &kiln_tensor::Tensor,
+        _beta: &kiln_tensor::Tensor,
+        _g: &kiln_tensor::Tensor,
+        _state: &mut kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
     fn runtime_gdn_chunkwise_forward(
         &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        g: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-        chunk_size: usize,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _q: &kiln_tensor::Tensor,
+        _k: &kiln_tensor::Tensor,
+        _v: &kiln_tensor::Tensor,
+        _beta: &kiln_tensor::Tensor,
+        _g: &kiln_tensor::Tensor,
+        _state: &mut kiln_tensor::Tensor,
+        _chunk_size: usize,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
     fn runtime_gdn_chunk_prep(
         &self,
-        g: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        kkt: &kiln_tensor::Tensor,
-        qkt: &kiln_tensor::Tensor,
-        ks_entry: &kiln_tensor::Tensor,
-        q_s: &kiln_tensor::Tensor,
+        _g: &kiln_tensor::Tensor,
+        _v: &kiln_tensor::Tensor,
+        _kkt: &kiln_tensor::Tensor,
+        _qkt: &kiln_tensor::Tensor,
+        _ks_entry: &kiln_tensor::Tensor,
+        _q_s: &kiln_tensor::Tensor,
     ) -> Result<
         Option<(
             kiln_tensor::Tensor,
@@ -2222,147 +2284,169 @@ pub trait GdnBackend: Send + Sync + std::fmt::Debug {
             kiln_tensor::Tensor,
             kiln_tensor::Tensor,
         )>,
-    >;
+    > {
+        Ok(None)
+    }
 
     fn runtime_gdn_chunk_scan(
         &self,
-        a_strict: &kiln_tensor::Tensor,
-        b_mask: &kiln_tensor::Tensor,
-        v_prime: &kiln_tensor::Tensor,
-        q_s_scaled: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        decay_last_col: &kiln_tensor::Tensor,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>>;
+        _a_strict: &kiln_tensor::Tensor,
+        _b_mask: &kiln_tensor::Tensor,
+        _v_prime: &kiln_tensor::Tensor,
+        _q_s_scaled: &kiln_tensor::Tensor,
+        _beta: &kiln_tensor::Tensor,
+        _decay_last_col: &kiln_tensor::Tensor,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        Ok(None)
+    }
 
     fn runtime_gdn_full_chunk_forward(
         &self,
-        g: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        kkt: &kiln_tensor::Tensor,
-        qkt: &kiln_tensor::Tensor,
-        ks_entry: &kiln_tensor::Tensor,
-        q_s: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        k_t: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _g: &kiln_tensor::Tensor,
+        _v: &kiln_tensor::Tensor,
+        _kkt: &kiln_tensor::Tensor,
+        _qkt: &kiln_tensor::Tensor,
+        _ks_entry: &kiln_tensor::Tensor,
+        _q_s: &kiln_tensor::Tensor,
+        _beta: &kiln_tensor::Tensor,
+        _k_t: &kiln_tensor::Tensor,
+        _state: &mut kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
     fn runtime_gdn_full_chunk_forward_head_last_into(
         &self,
-        g: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        kkt: &kiln_tensor::Tensor,
-        qkt: &kiln_tensor::Tensor,
-        ks_entry: &kiln_tensor::Tensor,
-        q_s: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        k_t: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-        out: &kiln_tensor::Tensor,
-        t_start: usize,
-        seq_len: usize,
-    ) -> Result<bool>;
+        _g: &kiln_tensor::Tensor,
+        _v: &kiln_tensor::Tensor,
+        _kkt: &kiln_tensor::Tensor,
+        _qkt: &kiln_tensor::Tensor,
+        _ks_entry: &kiln_tensor::Tensor,
+        _q_s: &kiln_tensor::Tensor,
+        _beta: &kiln_tensor::Tensor,
+        _k_t: &kiln_tensor::Tensor,
+        _state: &mut kiln_tensor::Tensor,
+        _out: &kiln_tensor::Tensor,
+        _t_start: usize,
+        _seq_len: usize,
+    ) -> Result<bool> {
+        Ok(false)
+    }
 
     fn runtime_gdn_recurrent_prefill_head_last(
         &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        g: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _q: &kiln_tensor::Tensor,
+        _k: &kiln_tensor::Tensor,
+        _v: &kiln_tensor::Tensor,
+        _beta: &kiln_tensor::Tensor,
+        _g: &kiln_tensor::Tensor,
+        _state: &mut kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
     fn runtime_gdn_recurrent_prefill_native_head_last(
         &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        g: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _q: &kiln_tensor::Tensor,
+        _k: &kiln_tensor::Tensor,
+        _v: &kiln_tensor::Tensor,
+        _beta: &kiln_tensor::Tensor,
+        _g: &kiln_tensor::Tensor,
+        _state: &mut kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
     fn runtime_gdn_recurrent_qk_norm_prefill_native_head_last(
         &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        g: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-        q_scale: f64,
-        qk_eps: f64,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _q: &kiln_tensor::Tensor,
+        _k: &kiln_tensor::Tensor,
+        _v: &kiln_tensor::Tensor,
+        _beta: &kiln_tensor::Tensor,
+        _g: &kiln_tensor::Tensor,
+        _state: &mut kiln_tensor::Tensor,
+        _q_scale: f64,
+        _qk_eps: f64,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
     fn runtime_gdn_decode_gates_recurrent(
         &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        a: &kiln_tensor::Tensor,
-        b: &kiln_tensor::Tensor,
-        a_log: &kiln_tensor::Tensor,
-        dt_bias: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-        z: &kiln_tensor::Tensor,
-        weight: &kiln_tensor::Tensor,
-        eps: f64,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _q: &kiln_tensor::Tensor,
+        _k: &kiln_tensor::Tensor,
+        _v: &kiln_tensor::Tensor,
+        _a: &kiln_tensor::Tensor,
+        _b: &kiln_tensor::Tensor,
+        _a_log: &kiln_tensor::Tensor,
+        _dt_bias: &kiln_tensor::Tensor,
+        _state: &mut kiln_tensor::Tensor,
+        _z: &kiln_tensor::Tensor,
+        _weight: &kiln_tensor::Tensor,
+        _eps: f64,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
     fn runtime_gdn_decode_qk_norm_gates_recurrent(
         &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        a: &kiln_tensor::Tensor,
-        b: &kiln_tensor::Tensor,
-        a_log: &kiln_tensor::Tensor,
-        dt_bias: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-        q_scale: f64,
-        qk_eps: f64,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _q: &kiln_tensor::Tensor,
+        _k: &kiln_tensor::Tensor,
+        _v: &kiln_tensor::Tensor,
+        _a: &kiln_tensor::Tensor,
+        _b: &kiln_tensor::Tensor,
+        _a_log: &kiln_tensor::Tensor,
+        _dt_bias: &kiln_tensor::Tensor,
+        _state: &mut kiln_tensor::Tensor,
+        _q_scale: f64,
+        _qk_eps: f64,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
     fn runtime_gdn_decode_qk_norm_gates_recurrent_rmsnorm(
         &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        a: &kiln_tensor::Tensor,
-        b: &kiln_tensor::Tensor,
-        a_log: &kiln_tensor::Tensor,
-        dt_bias: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-        z: &kiln_tensor::Tensor,
-        weight: &kiln_tensor::Tensor,
-        q_scale: f64,
-        qk_eps: f64,
-        rms_eps: f64,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _q: &kiln_tensor::Tensor,
+        _k: &kiln_tensor::Tensor,
+        _v: &kiln_tensor::Tensor,
+        _a: &kiln_tensor::Tensor,
+        _b: &kiln_tensor::Tensor,
+        _a_log: &kiln_tensor::Tensor,
+        _dt_bias: &kiln_tensor::Tensor,
+        _state: &mut kiln_tensor::Tensor,
+        _z: &kiln_tensor::Tensor,
+        _weight: &kiln_tensor::Tensor,
+        _q_scale: f64,
+        _qk_eps: f64,
+        _rms_eps: f64,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
     fn runtime_gdn_decode_gates_recurrent_rmsnorm(
         &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        a: &kiln_tensor::Tensor,
-        b: &kiln_tensor::Tensor,
-        a_log: &kiln_tensor::Tensor,
-        dt_bias: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-        z: &kiln_tensor::Tensor,
-        weight: &kiln_tensor::Tensor,
-        eps: f64,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _q: &kiln_tensor::Tensor,
+        _k: &kiln_tensor::Tensor,
+        _v: &kiln_tensor::Tensor,
+        _a: &kiln_tensor::Tensor,
+        _b: &kiln_tensor::Tensor,
+        _a_log: &kiln_tensor::Tensor,
+        _dt_bias: &kiln_tensor::Tensor,
+        _state: &mut kiln_tensor::Tensor,
+        _z: &kiln_tensor::Tensor,
+        _weight: &kiln_tensor::Tensor,
+        _eps: f64,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
     fn runtime_gdn_in_proj_decode(
         &self,
-        x: &kiln_tensor::Tensor,
-        in_proj_qkv_t: &kiln_tensor::Tensor,
-        in_proj_z_t: &kiln_tensor::Tensor,
-        in_proj_a_t: &kiln_tensor::Tensor,
-        in_proj_b_t: &kiln_tensor::Tensor,
+        _x: &kiln_tensor::Tensor,
+        _in_proj_qkv_t: &kiln_tensor::Tensor,
+        _in_proj_z_t: &kiln_tensor::Tensor,
+        _in_proj_a_t: &kiln_tensor::Tensor,
+        _in_proj_b_t: &kiln_tensor::Tensor,
     ) -> Result<
         Option<(
             kiln_tensor::Tensor,
@@ -2370,23 +2454,29 @@ pub trait GdnBackend: Send + Sync + std::fmt::Debug {
             kiln_tensor::Tensor,
             kiln_tensor::Tensor,
         )>,
-    >;
+    > {
+        Ok(None)
+    }
 
     fn runtime_gdn_gates(
         &self,
-        a: &kiln_tensor::Tensor,
-        b: &kiln_tensor::Tensor,
-        a_log: &kiln_tensor::Tensor,
-        dt_bias: &kiln_tensor::Tensor,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>>;
+        _a: &kiln_tensor::Tensor,
+        _b: &kiln_tensor::Tensor,
+        _a_log: &kiln_tensor::Tensor,
+        _dt_bias: &kiln_tensor::Tensor,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        Ok(None)
+    }
 
     fn runtime_gdn_gated_rms_norm(
         &self,
-        x: &kiln_tensor::Tensor,
-        z: &kiln_tensor::Tensor,
-        weight: &kiln_tensor::Tensor,
-        eps: f64,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _x: &kiln_tensor::Tensor,
+        _z: &kiln_tensor::Tensor,
+        _weight: &kiln_tensor::Tensor,
+        _eps: f64,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 }
 
 /// Focused `ConvBackend` facet for causal convolution kernels.
@@ -2756,334 +2846,6 @@ pub trait ReplayBackend: Send + Sync + std::fmt::Debug {
 
 // Blanket forwarding impls keep the focused traits behavior-identical to the
 // compatibility facade while later PRs move call sites to one facet at a time.
-#[allow(clippy::too_many_arguments)]
-impl<T: BackendRuntime + ?Sized> GdnBackend for T {
-    fn runtime_supports_gdn_forward_substitution(&self) -> bool {
-        BackendRuntime::supports_gdn_forward_substitution(self)
-    }
-
-    fn runtime_supports_gdn_recurrent_step(&self) -> bool {
-        BackendRuntime::supports_gdn_recurrent_step(self)
-    }
-
-    fn runtime_supports_gdn_chunk_prep(&self) -> bool {
-        BackendRuntime::supports_gdn_chunk_prep(self)
-    }
-
-    fn runtime_supports_gdn_chunk_scan(&self) -> bool {
-        BackendRuntime::supports_gdn_chunk_scan(self)
-    }
-
-    fn runtime_supports_gdn_full_chunk_forward(&self) -> bool {
-        BackendRuntime::supports_gdn_full_chunk_forward(self)
-    }
-
-    fn runtime_supports_gdn_full_chunk_forward_head_last(&self) -> bool {
-        BackendRuntime::supports_gdn_full_chunk_forward_head_last(self)
-    }
-
-    fn runtime_supports_gdn_recurrent_prefill_head_last(&self) -> bool {
-        BackendRuntime::supports_gdn_recurrent_prefill_head_last(self)
-    }
-
-    fn runtime_supports_gdn_recurrent_prefill_native_head_last(&self) -> bool {
-        BackendRuntime::supports_gdn_recurrent_prefill_native_head_last(self)
-    }
-
-    fn runtime_supports_gdn_recurrent_qk_norm_prefill_native_head_last(&self) -> bool {
-        BackendRuntime::supports_gdn_recurrent_qk_norm_prefill_native_head_last(self)
-    }
-
-    fn runtime_supports_gdn_decode_gates_recurrent_unexpanded_qk(&self) -> bool {
-        BackendRuntime::supports_gdn_decode_gates_recurrent_unexpanded_qk(self)
-    }
-
-    fn runtime_supports_gdn_decode_qk_norm_gates_recurrent(&self) -> bool {
-        BackendRuntime::supports_gdn_decode_qk_norm_gates_recurrent(self)
-    }
-
-    fn runtime_supports_gdn_gates(&self) -> bool {
-        BackendRuntime::supports_gdn_gates(self)
-    }
-
-    fn runtime_supports_gdn_gated_rms_norm(&self) -> bool {
-        BackendRuntime::supports_gdn_gated_rms_norm(self)
-    }
-
-    fn runtime_gdn_forward_substitution(
-        &self,
-        a_strict: &kiln_tensor::Tensor,
-        v_prime: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::gdn_forward_substitution(self, a_strict, v_prime, beta)
-    }
-
-    fn runtime_gdn_recurrent_step(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        g: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::gdn_recurrent_step(self, q, k, v, beta, g, state)
-    }
-
-    fn runtime_gdn_chunkwise_forward(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        g: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-        chunk_size: usize,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::gdn_chunkwise_forward(self, q, k, v, beta, g, state, chunk_size)
-    }
-
-    fn runtime_gdn_chunk_prep(
-        &self,
-        g: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        kkt: &kiln_tensor::Tensor,
-        qkt: &kiln_tensor::Tensor,
-        ks_entry: &kiln_tensor::Tensor,
-        q_s: &kiln_tensor::Tensor,
-    ) -> Result<
-        Option<(
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-        )>,
-    > {
-        BackendRuntime::gdn_chunk_prep(self, g, v, kkt, qkt, ks_entry, q_s)
-    }
-
-    fn runtime_gdn_chunk_scan(
-        &self,
-        a_strict: &kiln_tensor::Tensor,
-        b_mask: &kiln_tensor::Tensor,
-        v_prime: &kiln_tensor::Tensor,
-        q_s_scaled: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        decay_last_col: &kiln_tensor::Tensor,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
-        BackendRuntime::gdn_chunk_scan(
-            self,
-            a_strict,
-            b_mask,
-            v_prime,
-            q_s_scaled,
-            beta,
-            decay_last_col,
-        )
-    }
-
-    fn runtime_gdn_full_chunk_forward(
-        &self,
-        g: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        kkt: &kiln_tensor::Tensor,
-        qkt: &kiln_tensor::Tensor,
-        ks_entry: &kiln_tensor::Tensor,
-        q_s: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        k_t: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::gdn_full_chunk_forward(
-            self, g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
-        )
-    }
-
-    fn runtime_gdn_full_chunk_forward_head_last_into(
-        &self,
-        g: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        kkt: &kiln_tensor::Tensor,
-        qkt: &kiln_tensor::Tensor,
-        ks_entry: &kiln_tensor::Tensor,
-        q_s: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        k_t: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-        out: &kiln_tensor::Tensor,
-        t_start: usize,
-        seq_len: usize,
-    ) -> Result<bool> {
-        BackendRuntime::gdn_full_chunk_forward_head_last_into(
-            self, g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, out, t_start, seq_len,
-        )
-    }
-
-    fn runtime_gdn_recurrent_prefill_head_last(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        g: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::gdn_recurrent_prefill_head_last(self, q, k, v, beta, g, state)
-    }
-
-    fn runtime_gdn_recurrent_prefill_native_head_last(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        g: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::gdn_recurrent_prefill_native_head_last(self, q, k, v, beta, g, state)
-    }
-
-    fn runtime_gdn_recurrent_qk_norm_prefill_native_head_last(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        g: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-        q_scale: f64,
-        qk_eps: f64,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::gdn_recurrent_qk_norm_prefill_native_head_last(
-            self, q, k, v, beta, g, state, q_scale, qk_eps,
-        )
-    }
-
-    fn runtime_gdn_decode_gates_recurrent(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        a: &kiln_tensor::Tensor,
-        b: &kiln_tensor::Tensor,
-        a_log: &kiln_tensor::Tensor,
-        dt_bias: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-        z: &kiln_tensor::Tensor,
-        weight: &kiln_tensor::Tensor,
-        eps: f64,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::gdn_decode_gates_recurrent(
-            self, q, k, v, a, b, a_log, dt_bias, state, z, weight, eps,
-        )
-    }
-
-    fn runtime_gdn_decode_qk_norm_gates_recurrent(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        a: &kiln_tensor::Tensor,
-        b: &kiln_tensor::Tensor,
-        a_log: &kiln_tensor::Tensor,
-        dt_bias: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-        q_scale: f64,
-        qk_eps: f64,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::gdn_decode_qk_norm_gates_recurrent(
-            self, q, k, v, a, b, a_log, dt_bias, state, q_scale, qk_eps,
-        )
-    }
-
-    fn runtime_gdn_decode_qk_norm_gates_recurrent_rmsnorm(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        a: &kiln_tensor::Tensor,
-        b: &kiln_tensor::Tensor,
-        a_log: &kiln_tensor::Tensor,
-        dt_bias: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-        z: &kiln_tensor::Tensor,
-        weight: &kiln_tensor::Tensor,
-        q_scale: f64,
-        qk_eps: f64,
-        rms_eps: f64,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::gdn_decode_qk_norm_gates_recurrent_rmsnorm(
-            self, q, k, v, a, b, a_log, dt_bias, state, z, weight, q_scale, qk_eps, rms_eps,
-        )
-    }
-
-    fn runtime_gdn_decode_gates_recurrent_rmsnorm(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        a: &kiln_tensor::Tensor,
-        b: &kiln_tensor::Tensor,
-        a_log: &kiln_tensor::Tensor,
-        dt_bias: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-        z: &kiln_tensor::Tensor,
-        weight: &kiln_tensor::Tensor,
-        eps: f64,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::gdn_decode_gates_recurrent_rmsnorm(
-            self, q, k, v, a, b, a_log, dt_bias, state, z, weight, eps,
-        )
-    }
-
-    fn runtime_gdn_in_proj_decode(
-        &self,
-        x: &kiln_tensor::Tensor,
-        in_proj_qkv_t: &kiln_tensor::Tensor,
-        in_proj_z_t: &kiln_tensor::Tensor,
-        in_proj_a_t: &kiln_tensor::Tensor,
-        in_proj_b_t: &kiln_tensor::Tensor,
-    ) -> Result<
-        Option<(
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-        )>,
-    > {
-        BackendRuntime::gdn_in_proj_decode(
-            self,
-            x,
-            in_proj_qkv_t,
-            in_proj_z_t,
-            in_proj_a_t,
-            in_proj_b_t,
-        )
-    }
-
-    fn runtime_gdn_gates(
-        &self,
-        a: &kiln_tensor::Tensor,
-        b: &kiln_tensor::Tensor,
-        a_log: &kiln_tensor::Tensor,
-        dt_bias: &kiln_tensor::Tensor,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
-        BackendRuntime::gdn_gates(self, a, b, a_log, dt_bias)
-    }
-
-    fn runtime_gdn_gated_rms_norm(
-        &self,
-        x: &kiln_tensor::Tensor,
-        z: &kiln_tensor::Tensor,
-        weight: &kiln_tensor::Tensor,
-        eps: f64,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::gdn_gated_rms_norm(self, x, z, weight, eps)
-    }
-}
 
 #[allow(clippy::too_many_arguments)]
 impl<T: BackendRuntime + ?Sized> LinearBackend for T {
@@ -3518,6 +3280,8 @@ mod tests {
 
     impl AttentionBackend for ResidentActivationProbeBackend {}
 
+    impl GdnBackend for ResidentActivationProbeBackend {}
+
     impl ConvBackend for ResidentActivationProbeBackend {}
 
     impl SamplingBackend for ResidentActivationProbeBackend {}
@@ -3599,11 +3363,9 @@ mod tests {
         assert_eq!(vulkan.exact_gdn_backward_tile_tokens, None);
         assert_eq!(vulkan.streaming_prefill_tile_tokens, 2048);
         assert_eq!(vulkan.tape_streaming_tile_tokens, 2048);
-        assert!(
-            vulkan
-                .base_weight_dtypes
-                .contains(&kiln_tensor::DType::BF16)
-        );
+        assert!(vulkan
+            .base_weight_dtypes
+            .contains(&kiln_tensor::DType::BF16));
         assert!(vulkan.mixed_precision);
     }
 
@@ -4149,39 +3911,31 @@ mod tests {
             &tensor,
             residency::ResidentResourceFamily::Activation,
         ));
-        assert!(
-            residency::ResidentRegistry::register_resource(
-                &backend,
-                &tensor,
-                residency::ResidentResourceFamily::Activation,
-            )?
-            .is_some()
-        );
-        assert!(
-            residency::ResidentRegistry::update_resource(
-                &backend,
-                &tensor,
-                residency::ResidentResourceFamily::Activation,
-            )?
-            .is_some()
-        );
+        assert!(residency::ResidentRegistry::register_resource(
+            &backend,
+            &tensor,
+            residency::ResidentResourceFamily::Activation,
+        )?
+        .is_some());
+        assert!(residency::ResidentRegistry::update_resource(
+            &backend,
+            &tensor,
+            residency::ResidentResourceFamily::Activation,
+        )?
+        .is_some());
 
-        assert!(
-            residency::ResidentRegistry::resident_resource(
-                &backend,
-                &tensor,
-                residency::ResidentResourceFamily::OptimizerParam,
-            )
-            .is_none()
-        );
-        assert!(
-            residency::ResidentRegistry::register_resource(
-                &backend,
-                &tensor,
-                residency::ResidentResourceFamily::PagedKv,
-            )?
-            .is_none()
-        );
+        assert!(residency::ResidentRegistry::resident_resource(
+            &backend,
+            &tensor,
+            residency::ResidentResourceFamily::OptimizerParam,
+        )
+        .is_none());
+        assert!(residency::ResidentRegistry::register_resource(
+            &backend,
+            &tensor,
+            residency::ResidentResourceFamily::PagedKv,
+        )?
+        .is_none());
         residency::ResidentRegistry::evict_resource(
             &backend,
             &tensor,
@@ -4582,10 +4336,9 @@ mod tests {
     fn cuda_training_capabilities_do_not_overclaim_native_training() {
         let caps = cuda::CudaBackend::training_capabilities_static();
         assert!(caps.projection_training.contains("offset chunk hook"));
-        assert!(
-            caps.lora_delta_training
-                .contains("declines tape-tracked tensors")
-        );
+        assert!(caps
+            .lora_delta_training
+            .contains("declines tape-tracked tensors"));
         assert_eq!(
             caps.resident_activation,
             "kt TensorId lifecycle registry; kt CUDA tensors are canonical"

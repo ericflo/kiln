@@ -13,9 +13,9 @@ use super::metal_gdn::*;
 use super::metal_lm_head::*;
 use super::metal_paged::*;
 use super::{
-    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, OptimizerBackend,
-    PagedKvBackend, SamplingBackend, StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
-    metal_residency, metal_training,
+    metal_residency, metal_training, AttentionBackend, BackendIdentity, BackendRuntime,
+    ConvBackend, GdnBackend, OptimizerBackend, PagedKvBackend, SamplingBackend, StartupBackend,
+    TrainingCapabilities, TrainingPrecisionPolicy,
 };
 
 impl BackendIdentity for MetalBackend {
@@ -536,6 +536,282 @@ impl AttentionBackend for MetalBackend {
 
 // #1082 DoD-101/102: BackendRuntime decode methods flipped to kt; metal/vulkan
 // impls need matching flip when their builds are restored.
+#[allow(clippy::too_many_arguments)]
+impl GdnBackend for MetalBackend {
+    fn runtime_supports_gdn_forward_substitution(&self) -> bool {
+        !self.disable.gdn_forward_substitution
+    }
+
+    fn runtime_supports_gdn_recurrent_step(&self) -> bool {
+        !self.disable.gdn_recurrent
+    }
+
+    fn runtime_supports_gdn_chunk_prep(&self) -> bool {
+        !self.disable.gdn_forward_substitution
+    }
+
+    fn runtime_supports_gdn_full_chunk_forward(&self) -> bool {
+        !self.disable.gdn_forward_substitution
+    }
+
+    fn runtime_supports_gdn_full_chunk_forward_head_last(&self) -> bool {
+        !self.disable.gdn_forward_substitution
+    }
+
+    fn runtime_supports_gdn_recurrent_prefill_head_last(&self) -> bool {
+        !self.disable.gdn_recurrent
+    }
+
+    fn runtime_supports_gdn_recurrent_prefill_native_head_last(&self) -> bool {
+        !self.disable.gdn_recurrent
+    }
+
+    fn runtime_supports_gdn_gates(&self) -> bool {
+        !self.disable.gdn_gates
+    }
+
+    fn runtime_supports_gdn_gated_rms_norm(&self) -> bool {
+        !self.disable.gated_rms_norm
+    }
+
+    fn runtime_gdn_forward_substitution(
+        &self,
+        a_strict: &kiln_tensor::Tensor,
+        v_prime: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // #1082: kt-native — helpers take kt directly, no candle bridge.
+        if self.disable.gdn_forward_substitution
+            || !metal_gdn_forward_substitution_supports(a_strict, v_prime, beta)
+        {
+            return Ok(None);
+        }
+        let out = match a_strict.dtype() {
+            kiln_tensor::DType::BF16 => {
+                metal_gdn_forward_substitution_bf16(a_strict, v_prime, beta)
+            }
+            kiln_tensor::DType::F32 => metal_gdn_forward_substitution_f32(a_strict, v_prime, beta),
+            other => anyhow::bail!("unsupported metal gdn_forward_substitution dtype {other:?}"),
+        }
+        .context("metal gdn_forward_substitution kernel failed")?;
+        Ok(Some(out))
+    }
+
+    fn runtime_gdn_recurrent_step(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        g: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // #1082: kt-native — helpers take kt directly, no candle bridge.
+        if self.disable.gdn_recurrent || !metal_gdn_recurrent_supports(q, k, v, beta, g, state) {
+            return Ok(None);
+        }
+        let out = metal_gdn_recurrent_bf16(q, k, v, beta, g, state)
+            .context("metal gdn_recurrent_step kernel failed")?;
+        Ok(Some(out))
+    }
+
+    fn runtime_gdn_chunk_prep(
+        &self,
+        g: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        kkt: &kiln_tensor::Tensor,
+        qkt: &kiln_tensor::Tensor,
+        ks_entry: &kiln_tensor::Tensor,
+        q_s: &kiln_tensor::Tensor,
+    ) -> Result<
+        Option<(
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+        )>,
+    > {
+        // #1082: kt-native — helpers take kt directly, no candle bridge.
+        if self.disable.gdn_forward_substitution
+            || !metal_gdn_chunk_prep_supports(g, v, kkt, qkt, ks_entry, q_s)
+        {
+            return Ok(None);
+        }
+        let (o0, o1, o2, o3, o4, o5) = metal_gdn_chunk_prep_bf16(g, v, kkt, qkt, ks_entry, q_s)
+            .context("metal gdn_chunk_prep kernel failed")?;
+        Ok(Some((o0, o1, o2, o3, o4, o5)))
+    }
+
+    fn runtime_gdn_full_chunk_forward(
+        &self,
+        g: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        kkt: &kiln_tensor::Tensor,
+        qkt: &kiln_tensor::Tensor,
+        ks_entry: &kiln_tensor::Tensor,
+        q_s: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        k_t: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // #1082: kt-native — helpers take kt directly, no candle bridge.
+        if self.disable.gdn_forward_substitution
+            || !metal_gdn_full_chunk_forward_supports(
+                g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
+            )
+        {
+            return Ok(None);
+        }
+        let out =
+            metal_gdn_full_chunk_forward_bf16(g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state)
+                .context("metal gdn_full_chunk_forward kernel failed")?;
+        Ok(Some(out))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    fn runtime_gdn_full_chunk_forward_head_last_into(
+        &self,
+        g: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        kkt: &kiln_tensor::Tensor,
+        qkt: &kiln_tensor::Tensor,
+        ks_entry: &kiln_tensor::Tensor,
+        q_s: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        k_t: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+        out: &kiln_tensor::Tensor,
+        t_start: usize,
+        seq_len: usize,
+    ) -> Result<bool> {
+        // #1082: kt-native — helpers take kt directly, no candle bridge.
+        // `out` is a caller-owned output buffer written in place by the kernel
+        // through its shared UMA buffer; `state` is likewise mutated in place.
+        if self.disable.gdn_forward_substitution
+            || !metal_gdn_full_chunk_forward_head_last_supports(
+                g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, out, t_start, seq_len,
+            )
+        {
+            return Ok(false);
+        }
+        metal_gdn_full_chunk_forward_head_last_into_bf16(
+            g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, out, t_start, seq_len,
+        )
+        .context("metal gdn_full_chunk_forward_head_last_into kernel failed")?;
+        Ok(true)
+    }
+
+    fn runtime_gdn_recurrent_prefill_head_last(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        g: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // #1082: kt-native — helpers take kt directly, no candle bridge.
+        if self.disable.gdn_recurrent
+            || !metal_gdn_recurrent_prefill_head_last_supports(q, k, v, beta, g, state)
+        {
+            return Ok(None);
+        }
+        let out = metal_gdn_recurrent_prefill_head_last_bf16(q, k, v, beta, g, state)
+            .context("metal gdn_recurrent_prefill_head_last kernel failed")?;
+        Ok(Some(out))
+    }
+
+    fn runtime_gdn_recurrent_prefill_native_head_last(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        g: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // #1082: kt-native — helpers take kt directly, no candle bridge.
+        // The recurrent state is mutated in place through its shared UMA
+        // buffer (the &mut state is the same tensor the caller holds).
+        if self.disable.gdn_recurrent
+            || !metal_gdn_recurrent_prefill_native_head_last_supports(q, k, v, beta, g, state)
+        {
+            return Ok(None);
+        }
+        let out = metal_gdn_recurrent_prefill_native_head_last_bf16(q, k, v, beta, g, state)
+            .context("metal gdn_recurrent_prefill_native_head_last kernel failed")?;
+        Ok(Some(out))
+    }
+
+    fn runtime_gdn_in_proj_decode(
+        &self,
+        x: &kiln_tensor::Tensor,
+        in_proj_qkv_t: &kiln_tensor::Tensor,
+        in_proj_z_t: &kiln_tensor::Tensor,
+        in_proj_a_t: &kiln_tensor::Tensor,
+        in_proj_b_t: &kiln_tensor::Tensor,
+    ) -> Result<
+        Option<(
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+        )>,
+    > {
+        // #1082: kt-native — helpers take kt directly, no candle bridge.
+        if self.disable.gdn_in_proj
+            || !metal_gdn_in_proj_decode_supports(
+                x,
+                in_proj_qkv_t,
+                in_proj_z_t,
+                in_proj_a_t,
+                in_proj_b_t,
+            )
+        {
+            return Ok(None);
+        }
+        let (o0, o1, o2, o3) =
+            metal_gdn_in_proj_decode_bf16(x, in_proj_qkv_t, in_proj_z_t, in_proj_a_t, in_proj_b_t)
+                .context("metal gdn_in_proj_decode kernel failed")?;
+        Ok(Some((o0, o1, o2, o3)))
+    }
+
+    fn runtime_gdn_gates(
+        &self,
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
+        a_log: &kiln_tensor::Tensor,
+        dt_bias: &kiln_tensor::Tensor,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        // #1082: kt-native — helpers take kt directly, no candle bridge.
+        if self.disable.gdn_gates || !metal_gdn_gates_supports(a, b, a_log, dt_bias) {
+            return Ok(None);
+        }
+        let (beta, g) =
+            metal_gdn_gates_bf16(a, b, a_log, dt_bias).context("metal gdn_gates kernel failed")?;
+        Ok(Some((beta, g)))
+    }
+
+    fn runtime_gdn_gated_rms_norm(
+        &self,
+        x: &kiln_tensor::Tensor,
+        z: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
+        eps: f64,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // #1082: kt-native — helpers take kt directly, no candle bridge.
+        if self.disable.gated_rms_norm || !metal_gated_rms_norm_supports(x, z, weight) {
+            return Ok(None);
+        }
+        let out = metal_gated_rms_norm_bf16(x, z, weight, eps as f32)
+            .context("metal gated_rms_norm kernel failed")?;
+        Ok(Some(out))
+    }
+}
+
 impl BackendRuntime for MetalBackend {
     fn training_capabilities(&self) -> TrainingCapabilities {
         Self::training_capabilities_static()
@@ -637,278 +913,5 @@ impl BackendRuntime for MetalBackend {
             softmax_scale,
             causal,
         )
-    }
-
-    fn supports_gdn_forward_substitution(&self) -> bool {
-        !self.disable.gdn_forward_substitution
-    }
-
-    fn supports_gdn_recurrent_step(&self) -> bool {
-        !self.disable.gdn_recurrent
-    }
-
-    fn supports_gdn_chunk_prep(&self) -> bool {
-        !self.disable.gdn_forward_substitution
-    }
-
-    fn supports_gdn_full_chunk_forward(&self) -> bool {
-        !self.disable.gdn_forward_substitution
-    }
-
-    fn supports_gdn_full_chunk_forward_head_last(&self) -> bool {
-        !self.disable.gdn_forward_substitution
-    }
-
-    fn supports_gdn_recurrent_prefill_head_last(&self) -> bool {
-        !self.disable.gdn_recurrent
-    }
-
-    fn supports_gdn_recurrent_prefill_native_head_last(&self) -> bool {
-        !self.disable.gdn_recurrent
-    }
-
-    fn supports_gdn_gates(&self) -> bool {
-        !self.disable.gdn_gates
-    }
-
-    fn supports_gdn_gated_rms_norm(&self) -> bool {
-        !self.disable.gated_rms_norm
-    }
-
-    fn gdn_forward_substitution(
-        &self,
-        a_strict: &kiln_tensor::Tensor,
-        v_prime: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        // #1082: kt-native — helpers take kt directly, no candle bridge.
-        if self.disable.gdn_forward_substitution
-            || !metal_gdn_forward_substitution_supports(a_strict, v_prime, beta)
-        {
-            return Ok(None);
-        }
-        let out = match a_strict.dtype() {
-            kiln_tensor::DType::BF16 => {
-                metal_gdn_forward_substitution_bf16(a_strict, v_prime, beta)
-            }
-            kiln_tensor::DType::F32 => metal_gdn_forward_substitution_f32(a_strict, v_prime, beta),
-            other => anyhow::bail!("unsupported metal gdn_forward_substitution dtype {other:?}"),
-        }
-        .context("metal gdn_forward_substitution kernel failed")?;
-        Ok(Some(out))
-    }
-
-    fn gdn_recurrent_step(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        g: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        // #1082: kt-native — helpers take kt directly, no candle bridge.
-        if self.disable.gdn_recurrent || !metal_gdn_recurrent_supports(q, k, v, beta, g, state) {
-            return Ok(None);
-        }
-        let out = metal_gdn_recurrent_bf16(q, k, v, beta, g, state)
-            .context("metal gdn_recurrent_step kernel failed")?;
-        Ok(Some(out))
-    }
-
-    fn gdn_chunk_prep(
-        &self,
-        g: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        kkt: &kiln_tensor::Tensor,
-        qkt: &kiln_tensor::Tensor,
-        ks_entry: &kiln_tensor::Tensor,
-        q_s: &kiln_tensor::Tensor,
-    ) -> Result<
-        Option<(
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-        )>,
-    > {
-        // #1082: kt-native — helpers take kt directly, no candle bridge.
-        if self.disable.gdn_forward_substitution
-            || !metal_gdn_chunk_prep_supports(g, v, kkt, qkt, ks_entry, q_s)
-        {
-            return Ok(None);
-        }
-        let (o0, o1, o2, o3, o4, o5) = metal_gdn_chunk_prep_bf16(g, v, kkt, qkt, ks_entry, q_s)
-            .context("metal gdn_chunk_prep kernel failed")?;
-        Ok(Some((o0, o1, o2, o3, o4, o5)))
-    }
-
-    fn gdn_full_chunk_forward(
-        &self,
-        g: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        kkt: &kiln_tensor::Tensor,
-        qkt: &kiln_tensor::Tensor,
-        ks_entry: &kiln_tensor::Tensor,
-        q_s: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        k_t: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        // #1082: kt-native — helpers take kt directly, no candle bridge.
-        if self.disable.gdn_forward_substitution
-            || !metal_gdn_full_chunk_forward_supports(
-                g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
-            )
-        {
-            return Ok(None);
-        }
-        let out =
-            metal_gdn_full_chunk_forward_bf16(g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state)
-                .context("metal gdn_full_chunk_forward kernel failed")?;
-        Ok(Some(out))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
-    fn gdn_full_chunk_forward_head_last_into(
-        &self,
-        g: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        kkt: &kiln_tensor::Tensor,
-        qkt: &kiln_tensor::Tensor,
-        ks_entry: &kiln_tensor::Tensor,
-        q_s: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        k_t: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-        out: &kiln_tensor::Tensor,
-        t_start: usize,
-        seq_len: usize,
-    ) -> Result<bool> {
-        // #1082: kt-native — helpers take kt directly, no candle bridge.
-        // `out` is a caller-owned output buffer written in place by the kernel
-        // through its shared UMA buffer; `state` is likewise mutated in place.
-        if self.disable.gdn_forward_substitution
-            || !metal_gdn_full_chunk_forward_head_last_supports(
-                g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, out, t_start, seq_len,
-            )
-        {
-            return Ok(false);
-        }
-        metal_gdn_full_chunk_forward_head_last_into_bf16(
-            g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, out, t_start, seq_len,
-        )
-        .context("metal gdn_full_chunk_forward_head_last_into kernel failed")?;
-        Ok(true)
-    }
-
-    fn gdn_recurrent_prefill_head_last(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        g: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        // #1082: kt-native — helpers take kt directly, no candle bridge.
-        if self.disable.gdn_recurrent
-            || !metal_gdn_recurrent_prefill_head_last_supports(q, k, v, beta, g, state)
-        {
-            return Ok(None);
-        }
-        let out = metal_gdn_recurrent_prefill_head_last_bf16(q, k, v, beta, g, state)
-            .context("metal gdn_recurrent_prefill_head_last kernel failed")?;
-        Ok(Some(out))
-    }
-
-    fn gdn_recurrent_prefill_native_head_last(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        beta: &kiln_tensor::Tensor,
-        g: &kiln_tensor::Tensor,
-        state: &mut kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        // #1082: kt-native — helpers take kt directly, no candle bridge.
-        // The recurrent state is mutated in place through its shared UMA
-        // buffer (the &mut state is the same tensor the caller holds).
-        if self.disable.gdn_recurrent
-            || !metal_gdn_recurrent_prefill_native_head_last_supports(q, k, v, beta, g, state)
-        {
-            return Ok(None);
-        }
-        let out = metal_gdn_recurrent_prefill_native_head_last_bf16(q, k, v, beta, g, state)
-            .context("metal gdn_recurrent_prefill_native_head_last kernel failed")?;
-        Ok(Some(out))
-    }
-
-    fn gdn_in_proj_decode(
-        &self,
-        x: &kiln_tensor::Tensor,
-        in_proj_qkv_t: &kiln_tensor::Tensor,
-        in_proj_z_t: &kiln_tensor::Tensor,
-        in_proj_a_t: &kiln_tensor::Tensor,
-        in_proj_b_t: &kiln_tensor::Tensor,
-    ) -> Result<
-        Option<(
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-        )>,
-    > {
-        // #1082: kt-native — helpers take kt directly, no candle bridge.
-        if self.disable.gdn_in_proj
-            || !metal_gdn_in_proj_decode_supports(
-                x,
-                in_proj_qkv_t,
-                in_proj_z_t,
-                in_proj_a_t,
-                in_proj_b_t,
-            )
-        {
-            return Ok(None);
-        }
-        let (o0, o1, o2, o3) =
-            metal_gdn_in_proj_decode_bf16(x, in_proj_qkv_t, in_proj_z_t, in_proj_a_t, in_proj_b_t)
-                .context("metal gdn_in_proj_decode kernel failed")?;
-        Ok(Some((o0, o1, o2, o3)))
-    }
-
-    fn gdn_gates(
-        &self,
-        a: &kiln_tensor::Tensor,
-        b: &kiln_tensor::Tensor,
-        a_log: &kiln_tensor::Tensor,
-        dt_bias: &kiln_tensor::Tensor,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
-        // #1082: kt-native — helpers take kt directly, no candle bridge.
-        if self.disable.gdn_gates || !metal_gdn_gates_supports(a, b, a_log, dt_bias) {
-            return Ok(None);
-        }
-        let (beta, g) =
-            metal_gdn_gates_bf16(a, b, a_log, dt_bias).context("metal gdn_gates kernel failed")?;
-        Ok(Some((beta, g)))
-    }
-
-    fn gdn_gated_rms_norm(
-        &self,
-        x: &kiln_tensor::Tensor,
-        z: &kiln_tensor::Tensor,
-        weight: &kiln_tensor::Tensor,
-        eps: f64,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        // #1082: kt-native — helpers take kt directly, no candle bridge.
-        if self.disable.gated_rms_norm || !metal_gated_rms_norm_supports(x, z, weight) {
-            return Ok(None);
-        }
-        let out = metal_gated_rms_norm_bf16(x, z, weight, eps as f32)
-            .context("metal gated_rms_norm kernel failed")?;
-        Ok(Some(out))
     }
 }

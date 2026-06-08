@@ -8565,6 +8565,8 @@ mod tests {
 
     impl crate::backend::AttentionBackend for NamedTestBackend {}
 
+    impl crate::backend::GdnBackend for NamedTestBackend {}
+
     impl crate::backend::ConvBackend for NamedTestBackend {}
 
     impl crate::backend::SamplingBackend for NamedTestBackend {}

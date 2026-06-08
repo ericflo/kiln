@@ -897,16 +897,34 @@ fn cuda_rocm_support_predicates_stay_in_shared_helper() {
         "cuda_rocm_common.rs should own the shared CUDA/ROCm support predicate table"
     );
 
-    let shared_support_methods = [
-        "supports_gdn_forward_substitution",
-        "supports_gdn_recurrent_step",
-        "supports_gdn_chunk_prep",
-        "supports_gdn_chunk_scan",
-        "supports_gdn_full_chunk_forward",
-        "supports_gdn_decode_gates_recurrent_unexpanded_qk",
-        "supports_gdn_decode_qk_norm_gates_recurrent",
-        "supports_gdn_gates",
-        "supports_gdn_gated_rms_norm",
+    let shared_gdn_support_methods = [
+        (
+            "runtime_supports_gdn_forward_substitution",
+            "supports_gdn_forward_substitution",
+        ),
+        (
+            "runtime_supports_gdn_recurrent_step",
+            "supports_gdn_recurrent_step",
+        ),
+        ("runtime_supports_gdn_chunk_prep", "supports_gdn_chunk_prep"),
+        ("runtime_supports_gdn_chunk_scan", "supports_gdn_chunk_scan"),
+        (
+            "runtime_supports_gdn_full_chunk_forward",
+            "supports_gdn_full_chunk_forward",
+        ),
+        (
+            "runtime_supports_gdn_decode_gates_recurrent_unexpanded_qk",
+            "supports_gdn_decode_gates_recurrent_unexpanded_qk",
+        ),
+        (
+            "runtime_supports_gdn_decode_qk_norm_gates_recurrent",
+            "supports_gdn_decode_qk_norm_gates_recurrent",
+        ),
+        ("runtime_supports_gdn_gates", "supports_gdn_gates"),
+        (
+            "runtime_supports_gdn_gated_rms_norm",
+            "supports_gdn_gated_rms_norm",
+        ),
     ];
     let shared_attention_support_methods = [
         (
@@ -944,13 +962,14 @@ fn cuda_rocm_support_predicates_stay_in_shared_helper() {
             "{backend_file} should construct shared CUDA/ROCm support predicates"
         );
 
-        for method in shared_support_methods {
+        for (runtime_method, predicate_method) in shared_gdn_support_methods {
             let body = functions
-                .get(method)
-                .unwrap_or_else(|| panic!("{backend_file} missing {method}"));
+                .get(runtime_method)
+                .unwrap_or_else(|| panic!("{backend_file} missing {runtime_method}"));
             assert!(
-                compact_body(&body.body).contains(&format!("support_predicates().{method}()")),
-                "{backend_file} `{method}` should delegate to cuda_rocm_common"
+                compact_body(&body.body)
+                    .contains(&format!("support_predicates().{predicate_method}()")),
+                "{backend_file} `{runtime_method}` should delegate to cuda_rocm_common"
             );
         }
 
@@ -984,37 +1003,61 @@ fn vulkan_gdn_runtime_methods_stay_in_gdn_module() {
     let vulkan_rs = backend_dir.join("vulkan.rs");
     let functions = parse_functions(&vulkan_rs);
     let delegated_methods = [
-        "supports_gdn_forward_substitution",
-        "supports_gdn_recurrent_step",
-        "supports_gdn_recurrent_prefill_native_head_last",
-        "supports_gdn_recurrent_qk_norm_prefill_native_head_last",
-        "supports_gdn_chunk_prep",
-        "supports_gdn_chunk_scan",
-        "supports_gdn_full_chunk_forward",
-        "supports_gdn_gates",
-        "supports_gdn_gated_rms_norm",
-        "gdn_in_proj_decode",
-        "gdn_decode_gates_recurrent_rmsnorm",
-        "gdn_forward_substitution",
-        "gdn_recurrent_prefill_native_head_last",
-        "gdn_recurrent_qk_norm_prefill_native_head_last",
-        "gdn_recurrent_step",
-        "gdn_chunkwise_forward",
-        "gdn_chunk_prep",
-        "gdn_chunk_scan",
-        "gdn_full_chunk_forward",
-        "gdn_gates",
-        "gdn_gated_rms_norm",
+        (
+            "runtime_supports_gdn_forward_substitution",
+            "supports_gdn_forward_substitution",
+        ),
+        ("runtime_supports_gdn_recurrent_step", "supports_gdn_recurrent_step"),
+        (
+            "runtime_supports_gdn_recurrent_prefill_native_head_last",
+            "supports_gdn_recurrent_prefill_native_head_last",
+        ),
+        (
+            "runtime_supports_gdn_recurrent_qk_norm_prefill_native_head_last",
+            "supports_gdn_recurrent_qk_norm_prefill_native_head_last",
+        ),
+        ("runtime_supports_gdn_chunk_prep", "supports_gdn_chunk_prep"),
+        ("runtime_supports_gdn_chunk_scan", "supports_gdn_chunk_scan"),
+        (
+            "runtime_supports_gdn_full_chunk_forward",
+            "supports_gdn_full_chunk_forward",
+        ),
+        ("runtime_supports_gdn_gates", "supports_gdn_gates"),
+        (
+            "runtime_supports_gdn_gated_rms_norm",
+            "supports_gdn_gated_rms_norm",
+        ),
+        ("runtime_gdn_in_proj_decode", "gdn_in_proj_decode"),
+        (
+            "runtime_gdn_decode_gates_recurrent_rmsnorm",
+            "gdn_decode_gates_recurrent_rmsnorm",
+        ),
+        ("runtime_gdn_forward_substitution", "gdn_forward_substitution"),
+        (
+            "runtime_gdn_recurrent_prefill_native_head_last",
+            "gdn_recurrent_prefill_native_head_last",
+        ),
+        (
+            "runtime_gdn_recurrent_qk_norm_prefill_native_head_last",
+            "gdn_recurrent_qk_norm_prefill_native_head_last",
+        ),
+        ("runtime_gdn_recurrent_step", "gdn_recurrent_step"),
+        ("runtime_gdn_chunkwise_forward", "gdn_chunkwise_forward"),
+        ("runtime_gdn_chunk_prep", "gdn_chunk_prep"),
+        ("runtime_gdn_chunk_scan", "gdn_chunk_scan"),
+        ("runtime_gdn_full_chunk_forward", "gdn_full_chunk_forward"),
+        ("runtime_gdn_gates", "gdn_gates"),
+        ("runtime_gdn_gated_rms_norm", "gdn_gated_rms_norm"),
     ];
     let mut failures = Vec::new();
 
-    for method in delegated_methods {
+    for (method, delegate) in delegated_methods {
         let Some(function) = functions.get(method) else {
             failures.push(format!("vulkan.rs is missing `{method}`"));
             continue;
         };
         let body = compact_body(&function.body);
-        let delegation = format!("vulkan_gdn::{method}(");
+        let delegation = format!("vulkan_gdn::{delegate}(");
         if !body.starts_with(&delegation) {
             failures.push(format!(
                 "vulkan.rs:{} `{method}` should delegate to `{delegation}`",
@@ -2628,6 +2671,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
             "BackendIdentity"
                 | "StartupBackend"
                 | "AttentionBackend"
+                | "GdnBackend"
                 | "ConvBackend"
                 | "SamplingBackend"
                 | "OptimizerBackend"
@@ -2662,6 +2706,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
         "BackendIdentity",
         "StartupBackend",
         "AttentionBackend",
+        "GdnBackend",
         "ConvBackend",
         "SamplingBackend",
         "OptimizerBackend",
@@ -2705,6 +2750,10 @@ fn generated_capability_report_lists_focused_backend_facets() {
         "AttentionBackend should not regress to a blanket BackendRuntime forwarding impl"
     );
     assert!(
+        !backend_source.contains("impl<T: BackendRuntime + ?Sized> GdnBackend for T"),
+        "GdnBackend should not regress to a blanket BackendRuntime forwarding impl"
+    );
+    assert!(
         !backend_source.contains("impl<T: BackendRuntime + ?Sized> ConvBackend for T"),
         "ConvBackend should not regress to a blanket BackendRuntime forwarding impl"
     );
@@ -2729,6 +2778,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
         "BackendIdentity",
         "StartupBackend",
         "AttentionBackend",
+        "GdnBackend",
         "ConvBackend",
         "SamplingBackend",
         "OptimizerBackend",
@@ -5916,6 +5966,14 @@ fn generated_capability_report_tracks_migration_phase_status() {
     assert_eq!(
         attention_signal["passed"], true,
         "AttentionBackend should be a completed W1 family slice"
+    );
+    let gdn_signal = phase1_signals
+        .iter()
+        .find(|signal| signal["name"] == "gdn_backend_facet_authoritative")
+        .expect("Phase 1 should include GdnBackend authoritative signal");
+    assert_eq!(
+        gdn_signal["passed"], true,
+        "GdnBackend should be a completed W1 family slice"
     );
     let sampling_signal = phase1_signals
         .iter()

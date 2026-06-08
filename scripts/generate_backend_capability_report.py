@@ -1435,6 +1435,10 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
                 "attention_backend_facet_authoritative",
             ),
             focused_trait_authoritative_signal(
+                "GdnBackend",
+                "gdn_backend_facet_authoritative",
+            ),
+            focused_trait_authoritative_signal(
                 "ConvBackend",
                 "conv_backend_facet_authoritative",
             ),

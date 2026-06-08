@@ -4,14 +4,14 @@
 //! `Ok(None)` responses route the caller to the portable candle path.
 
 use anyhow::{Context, Result};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 use super::{
-    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, OptimizerBackend,
+    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, GdnBackend, OptimizerBackend,
     PagedKvBackend, SamplingBackend, StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
 };
-use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
+use crate::lora_loader::{compute_lora_delta, LoraProjectionWeights};
 
 static ROCM_RESIDENT_TENSOR_IDS: super::cuda_rocm_common::ResidentTensorIdRegistry =
     OnceLock::new();
@@ -235,7 +235,8 @@ impl RocmBackend {
 
     pub fn training_capabilities_static() -> TrainingCapabilities {
         TrainingCapabilities {
-            projection_training: "backend-routed kt hipBLASLt matmul (tape-recorded) with offset chunk hook",
+            projection_training:
+                "backend-routed kt hipBLASLt matmul (tape-recorded) with offset chunk hook",
             flce_loss: "FLCE analytic backward on ROCm tensors; no full logits by default",
             tape_forward_backward_route: super::TrainingTapeRoute::KtTapeAuthoritative,
             sft_flce_loss_route: super::SftFlceLossRoute::KtTapeFlce,
@@ -246,7 +247,8 @@ impl RocmBackend {
             final_rmsnorm_backward_route: super::FinalRmsNormBackwardRoute::CudaRocmFusedTail,
             rmsnorm_training: "ROCm kt-tape rmsnorm behind 47 GiB autograd VRAM gate",
             resident_activation: "kt TensorId lifecycle registry; kt ROCm tensors are canonical",
-            lora_delta_training: "kt tape-recorded LoRA delta; fused lora_decode_add declines tape-tracked tensors",
+            lora_delta_training:
+                "kt tape-recorded LoRA delta; fused lora_decode_add declines tape-tracked tensors",
             sgd_step: "ROCm in-place optimizer kernel for resident contiguous F32/BF16 tensors",
             adamw_step: "ROCm in-place optimizer kernel for resident contiguous F32/BF16 tensors",
             native_training: "not implemented",
@@ -580,178 +582,40 @@ impl OptimizerBackend for RocmBackend {
     }
 }
 
-impl BackendRuntime for RocmBackend {
-    fn training_capabilities(&self) -> TrainingCapabilities {
-        Self::training_capabilities_static()
-    }
-
-    fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
-        TrainingPrecisionPolicy::rocm()
-    }
-
-    fn supports_resident_activation(&self) -> bool {
-        true
-    }
-
-    fn register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
-        super::cuda_rocm_common::mark_resident_activation(
-            &ROCM_RESIDENT_TENSOR_IDS,
-            tensor,
-            ROCM_RESIDENT_TENSOR_IDS_POISONED,
-        );
-        Ok(())
-    }
-
-    fn evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
-        super::cuda_rocm_common::evict_resident_activation(
-            &ROCM_RESIDENT_TENSOR_IDS,
-            tensor,
-            ROCM_RESIDENT_TENSOR_IDS_POISONED,
-        );
-    }
-
-    fn update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
-        super::cuda_rocm_common::mark_resident_activation(
-            &ROCM_RESIDENT_TENSOR_IDS,
-            tensor,
-            ROCM_RESIDENT_TENSOR_IDS_POISONED,
-        );
-        Ok(())
-    }
-
-    fn has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
-        super::cuda_rocm_common::has_resident_activation(
-            &ROCM_RESIDENT_TENSOR_IDS,
-            tensor,
-            ROCM_RESIDENT_TENSOR_IDS_POISONED,
-        )
-    }
-
-    fn supports_gdn_forward_substitution(&self) -> bool {
+#[allow(clippy::too_many_arguments)]
+impl GdnBackend for RocmBackend {
+    fn runtime_supports_gdn_forward_substitution(&self) -> bool {
         self.support_predicates()
             .supports_gdn_forward_substitution()
     }
 
-    fn supports_gdn_recurrent_step(&self) -> bool {
+    fn runtime_supports_gdn_recurrent_step(&self) -> bool {
         self.support_predicates().supports_gdn_recurrent_step()
     }
 
-    fn supports_gdn_chunk_prep(&self) -> bool {
+    fn runtime_supports_gdn_chunk_prep(&self) -> bool {
         self.support_predicates().supports_gdn_chunk_prep()
     }
 
-    fn supports_gdn_chunk_scan(&self) -> bool {
+    fn runtime_supports_gdn_chunk_scan(&self) -> bool {
         self.support_predicates().supports_gdn_chunk_scan()
     }
 
-    fn supports_gdn_full_chunk_forward(&self) -> bool {
+    fn runtime_supports_gdn_full_chunk_forward(&self) -> bool {
         self.support_predicates().supports_gdn_full_chunk_forward()
     }
 
-    fn supports_gdn_decode_gates_recurrent_unexpanded_qk(&self) -> bool {
+    fn runtime_supports_gdn_decode_gates_recurrent_unexpanded_qk(&self) -> bool {
         self.support_predicates()
             .supports_gdn_decode_gates_recurrent_unexpanded_qk()
     }
 
-    fn supports_gdn_decode_qk_norm_gates_recurrent(&self) -> bool {
+    fn runtime_supports_gdn_decode_qk_norm_gates_recurrent(&self) -> bool {
         self.support_predicates()
             .supports_gdn_decode_qk_norm_gates_recurrent()
     }
 
-    fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        block_table: &kiln_tensor::Tensor,
-        seqused_k: &kiln_tensor::Tensor,
-        graph_outputs: Option<(&kiln_tensor::Tensor, &kiln_tensor::Tensor)>,
-        max_seqlen_k: usize,
-        page_block_size: usize,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        if q.track_op()
-            || k_pool.track_op()
-            || v_pool.track_op()
-            || block_table.track_op()
-            || seqused_k.track_op()
-            || q.dtype() != kiln_tensor::DType::BF16
-        {
-            return Ok(None);
-        }
-        // Phase 7 opt-in (#1082): route through the kt-typed surface
-        // only when there are no caller-owned graph outputs to write
-        // through to. The kt-typed
-        // `flash_attn_paged_decode_dyn_seqlen_kt` does not (yet)
-        // accept a caller-owned (out, lse) pair — it allocates them
-        // internally through the bridge — so the `graph_outputs ==
-        // Some` case must stay on the candle path. That path
-        // specifically exists to fix the dangling-pointer hazard
-        // documented in
-        // `bench-results/cuda-graph-bs2-secondary-audit.md` suspects
-        // 3+4; the ROCm HIP graph runner follows the same stable-output
-        // contract and re-uses caller-owned
-        // tensors across replays. When `graph_outputs == None` (the
-        // non-graph-capture path), the kt route is bit-exactly
-        // equivalent because both paths bottom out in the same
-        // `kiln_flash_attn_fwd_paged_decode_dyn_seqlen` FFI symbol.
-        // Phase 7 (#1082): kt-only on both branches now that the
-        // kt-typed `flash_attn_paged_decode_dyn_seqlen_kt_with_graph_
-        // outputs` sibling exists. Bit-exact: both bottom out in the
-        // same `kiln_flash_attn_fwd_paged_decode_dyn_seqlen` FFI
-        // symbol. The caller-owned-output path is the
-        // HIP-graph-capture contract (the kernel writes through the
-        // caller's pinned `(out, lse)` pair so graph replays don't
-        // dangle on freshly-allocated scratch).
-        // Phase 7 (#1082): args are already kt (#1082 DoD-101/102), so
-        // no candle↔kt bridge — the kernel runs directly on the
-        // caller's kt tensors.
-        kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_dyn_seqlen_kt");
-        if let Some((out, lse)) = graph_outputs {
-            // Caller owns `(out, lse)` (kt tensors). The kernel writes
-            // in place via the with_graph_outputs kt entry; the
-            // returned `out` is the caller's kt tensor whose ROCm
-            // buffer the kernel mutated.
-            kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs(
-                q,
-                k_pool,
-                v_pool,
-                block_table,
-                seqused_k,
-                out,
-                lse,
-                max_seqlen_k,
-                page_block_size,
-                softmax_scale,
-                causal,
-            )
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "flash_attn_paged_decode_dyn_seqlen (graph variant) kt with_graph_outputs: {e}"
-                )
-            })?;
-            return Ok(Some(out.clone()));
-        }
-        // No caller-owned outputs — allocate internally.
-        let out_kt = kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen_kt(
-            q,
-            k_pool,
-            v_pool,
-            block_table,
-            seqused_k,
-            max_seqlen_k,
-            page_block_size,
-            softmax_scale,
-            causal,
-        )
-        .map_err(|e| {
-            anyhow::anyhow!("flash_attn_paged_decode_dyn_seqlen (graph variant) kt: {e}")
-        })?;
-        Ok(Some(out_kt))
-    }
-
-    fn gdn_forward_substitution(
+    fn runtime_gdn_forward_substitution(
         &self,
         a_strict: &kiln_tensor::Tensor,
         v_prime: &kiln_tensor::Tensor,
@@ -771,7 +635,7 @@ impl BackendRuntime for RocmBackend {
         Ok(Some(out_kt))
     }
 
-    fn gdn_recurrent_step(
+    fn runtime_gdn_recurrent_step(
         &self,
         q: &kiln_tensor::Tensor,
         k: &kiln_tensor::Tensor,
@@ -793,7 +657,7 @@ impl BackendRuntime for RocmBackend {
         Ok(Some(out_kt))
     }
 
-    fn gdn_chunk_prep(
+    fn runtime_gdn_chunk_prep(
         &self,
         g: &kiln_tensor::Tensor,
         v: &kiln_tensor::Tensor,
@@ -826,7 +690,7 @@ impl BackendRuntime for RocmBackend {
         Ok(Some((o0, o1, o2, o3, o4, o5)))
     }
 
-    fn gdn_chunk_scan(
+    fn runtime_gdn_chunk_scan(
         &self,
         a_strict: &kiln_tensor::Tensor,
         b_mask: &kiln_tensor::Tensor,
@@ -860,7 +724,7 @@ impl BackendRuntime for RocmBackend {
         Ok(Some((o0, o1)))
     }
 
-    fn gdn_full_chunk_forward(
+    fn runtime_gdn_full_chunk_forward(
         &self,
         g: &kiln_tensor::Tensor,
         v: &kiln_tensor::Tensor,
@@ -909,7 +773,7 @@ impl BackendRuntime for RocmBackend {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn gdn_decode_gates_recurrent(
+    fn runtime_gdn_decode_gates_recurrent(
         &self,
         q: &kiln_tensor::Tensor,
         k: &kiln_tensor::Tensor,
@@ -1049,7 +913,7 @@ impl BackendRuntime for RocmBackend {
                         .with_context(|| "gdn_decode_gates: cast z -> bf16")?,
                 )
             };
-            return self.gdn_decode_gates_recurrent(
+            return self.runtime_gdn_decode_gates_recurrent(
                 q_bf16.as_ref().unwrap_or(q),
                 k_bf16.as_ref().unwrap_or(k),
                 v_bf16.as_ref().unwrap_or(v),
@@ -1134,7 +998,7 @@ impl BackendRuntime for RocmBackend {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn gdn_decode_qk_norm_gates_recurrent(
+    fn runtime_gdn_decode_qk_norm_gates_recurrent(
         &self,
         q: &kiln_tensor::Tensor,
         k: &kiln_tensor::Tensor,
@@ -1247,7 +1111,7 @@ impl BackendRuntime for RocmBackend {
                         .with_context(|| "gdn_decode_qk_norm: cast b -> bf16")?,
                 )
             };
-            return self.gdn_decode_qk_norm_gates_recurrent(
+            return self.runtime_gdn_decode_qk_norm_gates_recurrent(
                 q_bf16.as_ref().unwrap_or(q),
                 k_bf16.as_ref().unwrap_or(k),
                 v_bf16.as_ref().unwrap_or(v),
@@ -1323,7 +1187,7 @@ impl BackendRuntime for RocmBackend {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn gdn_decode_qk_norm_gates_recurrent_rmsnorm(
+    fn runtime_gdn_decode_qk_norm_gates_recurrent_rmsnorm(
         &self,
         q: &kiln_tensor::Tensor,
         k: &kiln_tensor::Tensor,
@@ -1459,7 +1323,7 @@ impl BackendRuntime for RocmBackend {
                         .with_context(|| "gdn_decode_rmsnorm: cast z -> bf16")?,
                 )
             };
-            return self.gdn_decode_qk_norm_gates_recurrent_rmsnorm(
+            return self.runtime_gdn_decode_qk_norm_gates_recurrent_rmsnorm(
                 q_bf16.as_ref().unwrap_or(q),
                 k_bf16.as_ref().unwrap_or(k),
                 v_bf16.as_ref().unwrap_or(v),
@@ -1552,11 +1416,11 @@ impl BackendRuntime for RocmBackend {
         Ok(Some(out))
     }
 
-    fn supports_gdn_gates(&self) -> bool {
+    fn runtime_supports_gdn_gates(&self) -> bool {
         self.support_predicates().supports_gdn_gates()
     }
 
-    fn gdn_gates(
+    fn runtime_gdn_gates(
         &self,
         a: &kiln_tensor::Tensor,
         b: &kiln_tensor::Tensor,
@@ -1621,8 +1485,220 @@ impl BackendRuntime for RocmBackend {
         Ok(Some((beta_kt, g_kt)))
     }
 
-    fn supports_gdn_gated_rms_norm(&self) -> bool {
+    fn runtime_supports_gdn_gated_rms_norm(&self) -> bool {
         self.support_predicates().supports_gdn_gated_rms_norm()
+    }
+
+    fn runtime_gdn_gated_rms_norm(
+        &self,
+        x: &kiln_tensor::Tensor,
+        z: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
+        eps: f64,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if !self.gdn_gated_rms_norm_enabled {
+            return Ok(None);
+        }
+        // Phase 7 (#1082): kt-typed bf16 activation surface. Qwen3.5 GDN
+        // stores the learned RMSNorm scale as F32 in production, so support
+        // both BF16 and F32 weight while keeping BF16 activations.
+        if !(x.dtype() == kiln_tensor::DType::BF16
+            && z.dtype() == kiln_tensor::DType::BF16
+            && matches!(
+                weight.dtype(),
+                kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
+            ))
+        {
+            return Ok(None);
+        }
+        kiln_nvtx::range!(c"kiln/gdn_gated_rms_norm_kt");
+        // The kt variant expects rank-2 [rows, hidden]; flatten higher-rank
+        // x/z by folding all leading dims into rows. weight stays [hidden].
+        let x_dims = x.dims().to_vec();
+        let hidden = *x_dims
+            .last()
+            .expect("x has at least one dim (checked by supports_kt)");
+        let rows: usize = x_dims.iter().take(x_dims.len() - 1).product();
+        // #1082: x/z arrive as transposed views (e.g. [1,7,2,16] strides
+        // [224,16,112,1] after the head transpose). candle's reshape silently
+        // copied; kt's reshape requires contiguous (and logs the copy), so
+        // contiguify explicitly first — same materialization candle did.
+        let x_flat = x
+            .contiguous()
+            .context("kt-adapter: gdn_gated_rms_norm contiguous x failed")?
+            .reshape((rows, hidden))
+            .context("kt-adapter: gdn_gated_rms_norm reshape x → [rows, hidden] failed")?;
+        let z_flat = z
+            .contiguous()
+            .context("kt-adapter: gdn_gated_rms_norm contiguous z failed")?
+            .reshape((rows, hidden))
+            .context("kt-adapter: gdn_gated_rms_norm reshape z → [rows, hidden] failed")?;
+        let out_kt = match weight.dtype() {
+            kiln_tensor::DType::BF16 => {
+                if !kiln_gdn_kernel::gdn_gated_rms_norm_supports_kt(&x_flat, &z_flat, weight) {
+                    return Ok(None);
+                }
+                kiln_gdn_kernel::gdn_gated_rms_norm_bf16_kt(&x_flat, &z_flat, weight, eps as f32)
+                    .map_err(|e| anyhow::anyhow!("kt gdn_gated_rms_norm_bf16: {e}"))?
+            }
+            kiln_tensor::DType::F32 => {
+                if !kiln_gdn_kernel::gdn_gated_rms_norm_f32_weight_supports_kt(
+                    &x_flat, &z_flat, weight,
+                ) {
+                    return Ok(None);
+                }
+                kiln_gdn_kernel::gdn_gated_rms_norm_bf16_f32_weight_kt(
+                    &x_flat, &z_flat, weight, eps as f32,
+                )
+                .map_err(|e| anyhow::anyhow!("kt gdn_gated_rms_norm_bf16_f32_weight: {e}"))?
+            }
+            _ => return Ok(None),
+        };
+        let out = out_kt
+            .reshape(x_dims)
+            .context("kt-adapter: gdn_gated_rms_norm reshape out → original failed")?;
+        Ok(Some(out))
+    }
+}
+
+impl BackendRuntime for RocmBackend {
+    fn training_capabilities(&self) -> TrainingCapabilities {
+        Self::training_capabilities_static()
+    }
+
+    fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
+        TrainingPrecisionPolicy::rocm()
+    }
+
+    fn supports_resident_activation(&self) -> bool {
+        true
+    }
+
+    fn register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
+        super::cuda_rocm_common::mark_resident_activation(
+            &ROCM_RESIDENT_TENSOR_IDS,
+            tensor,
+            ROCM_RESIDENT_TENSOR_IDS_POISONED,
+        );
+        Ok(())
+    }
+
+    fn evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
+        super::cuda_rocm_common::evict_resident_activation(
+            &ROCM_RESIDENT_TENSOR_IDS,
+            tensor,
+            ROCM_RESIDENT_TENSOR_IDS_POISONED,
+        );
+    }
+
+    fn update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
+        super::cuda_rocm_common::mark_resident_activation(
+            &ROCM_RESIDENT_TENSOR_IDS,
+            tensor,
+            ROCM_RESIDENT_TENSOR_IDS_POISONED,
+        );
+        Ok(())
+    }
+
+    fn has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
+        super::cuda_rocm_common::has_resident_activation(
+            &ROCM_RESIDENT_TENSOR_IDS,
+            tensor,
+            ROCM_RESIDENT_TENSOR_IDS_POISONED,
+        )
+    }
+
+    fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        block_table: &kiln_tensor::Tensor,
+        seqused_k: &kiln_tensor::Tensor,
+        graph_outputs: Option<(&kiln_tensor::Tensor, &kiln_tensor::Tensor)>,
+        max_seqlen_k: usize,
+        page_block_size: usize,
+        softmax_scale: f32,
+        causal: bool,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if q.track_op()
+            || k_pool.track_op()
+            || v_pool.track_op()
+            || block_table.track_op()
+            || seqused_k.track_op()
+            || q.dtype() != kiln_tensor::DType::BF16
+        {
+            return Ok(None);
+        }
+        // Phase 7 opt-in (#1082): route through the kt-typed surface
+        // only when there are no caller-owned graph outputs to write
+        // through to. The kt-typed
+        // `flash_attn_paged_decode_dyn_seqlen_kt` does not (yet)
+        // accept a caller-owned (out, lse) pair — it allocates them
+        // internally through the bridge — so the `graph_outputs ==
+        // Some` case must stay on the candle path. That path
+        // specifically exists to fix the dangling-pointer hazard
+        // documented in
+        // `bench-results/cuda-graph-bs2-secondary-audit.md` suspects
+        // 3+4; the ROCm HIP graph runner follows the same stable-output
+        // contract and re-uses caller-owned
+        // tensors across replays. When `graph_outputs == None` (the
+        // non-graph-capture path), the kt route is bit-exactly
+        // equivalent because both paths bottom out in the same
+        // `kiln_flash_attn_fwd_paged_decode_dyn_seqlen` FFI symbol.
+        // Phase 7 (#1082): kt-only on both branches now that the
+        // kt-typed `flash_attn_paged_decode_dyn_seqlen_kt_with_graph_
+        // outputs` sibling exists. Bit-exact: both bottom out in the
+        // same `kiln_flash_attn_fwd_paged_decode_dyn_seqlen` FFI
+        // symbol. The caller-owned-output path is the
+        // HIP-graph-capture contract (the kernel writes through the
+        // caller's pinned `(out, lse)` pair so graph replays don't
+        // dangle on freshly-allocated scratch).
+        // Phase 7 (#1082): args are already kt (#1082 DoD-101/102), so
+        // no candle↔kt bridge — the kernel runs directly on the
+        // caller's kt tensors.
+        kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_dyn_seqlen_kt");
+        if let Some((out, lse)) = graph_outputs {
+            // Caller owns `(out, lse)` (kt tensors). The kernel writes
+            // in place via the with_graph_outputs kt entry; the
+            // returned `out` is the caller's kt tensor whose ROCm
+            // buffer the kernel mutated.
+            kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs(
+                q,
+                k_pool,
+                v_pool,
+                block_table,
+                seqused_k,
+                out,
+                lse,
+                max_seqlen_k,
+                page_block_size,
+                softmax_scale,
+                causal,
+            )
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "flash_attn_paged_decode_dyn_seqlen (graph variant) kt with_graph_outputs: {e}"
+                )
+            })?;
+            return Ok(Some(out.clone()));
+        }
+        // No caller-owned outputs — allocate internally.
+        let out_kt = kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen_kt(
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            seqused_k,
+            max_seqlen_k,
+            page_block_size,
+            softmax_scale,
+            causal,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!("flash_attn_paged_decode_dyn_seqlen (graph variant) kt: {e}")
+        })?;
+        Ok(Some(out_kt))
     }
 
     fn lora_decode_add(
@@ -1826,77 +1902,6 @@ impl BackendRuntime for RocmBackend {
         });
 
         Ok(Some(delta))
-    }
-
-    fn gdn_gated_rms_norm(
-        &self,
-        x: &kiln_tensor::Tensor,
-        z: &kiln_tensor::Tensor,
-        weight: &kiln_tensor::Tensor,
-        eps: f64,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        if !self.gdn_gated_rms_norm_enabled {
-            return Ok(None);
-        }
-        // Phase 7 (#1082): kt-typed bf16 activation surface. Qwen3.5 GDN
-        // stores the learned RMSNorm scale as F32 in production, so support
-        // both BF16 and F32 weight while keeping BF16 activations.
-        if !(x.dtype() == kiln_tensor::DType::BF16
-            && z.dtype() == kiln_tensor::DType::BF16
-            && matches!(
-                weight.dtype(),
-                kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
-            ))
-        {
-            return Ok(None);
-        }
-        kiln_nvtx::range!(c"kiln/gdn_gated_rms_norm_kt");
-        // The kt variant expects rank-2 [rows, hidden]; flatten higher-rank
-        // x/z by folding all leading dims into rows. weight stays [hidden].
-        let x_dims = x.dims().to_vec();
-        let hidden = *x_dims
-            .last()
-            .expect("x has at least one dim (checked by supports_kt)");
-        let rows: usize = x_dims.iter().take(x_dims.len() - 1).product();
-        // #1082: x/z arrive as transposed views (e.g. [1,7,2,16] strides
-        // [224,16,112,1] after the head transpose). candle's reshape silently
-        // copied; kt's reshape requires contiguous (and logs the copy), so
-        // contiguify explicitly first — same materialization candle did.
-        let x_flat = x
-            .contiguous()
-            .context("kt-adapter: gdn_gated_rms_norm contiguous x failed")?
-            .reshape((rows, hidden))
-            .context("kt-adapter: gdn_gated_rms_norm reshape x → [rows, hidden] failed")?;
-        let z_flat = z
-            .contiguous()
-            .context("kt-adapter: gdn_gated_rms_norm contiguous z failed")?
-            .reshape((rows, hidden))
-            .context("kt-adapter: gdn_gated_rms_norm reshape z → [rows, hidden] failed")?;
-        let out_kt = match weight.dtype() {
-            kiln_tensor::DType::BF16 => {
-                if !kiln_gdn_kernel::gdn_gated_rms_norm_supports_kt(&x_flat, &z_flat, weight) {
-                    return Ok(None);
-                }
-                kiln_gdn_kernel::gdn_gated_rms_norm_bf16_kt(&x_flat, &z_flat, weight, eps as f32)
-                    .map_err(|e| anyhow::anyhow!("kt gdn_gated_rms_norm_bf16: {e}"))?
-            }
-            kiln_tensor::DType::F32 => {
-                if !kiln_gdn_kernel::gdn_gated_rms_norm_f32_weight_supports_kt(
-                    &x_flat, &z_flat, weight,
-                ) {
-                    return Ok(None);
-                }
-                kiln_gdn_kernel::gdn_gated_rms_norm_bf16_f32_weight_kt(
-                    &x_flat, &z_flat, weight, eps as f32,
-                )
-                .map_err(|e| anyhow::anyhow!("kt gdn_gated_rms_norm_bf16_f32_weight: {e}"))?
-            }
-            _ => return Ok(None),
-        };
-        let out = out_kt
-            .reshape(x_dims)
-            .context("kt-adapter: gdn_gated_rms_norm reshape out → original failed")?;
-        Ok(Some(out))
     }
 }
 
