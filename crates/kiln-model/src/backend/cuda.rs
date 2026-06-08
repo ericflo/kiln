@@ -48,6 +48,11 @@ pub fn reset_linear_prefill_success_counts() {
     CUDA_LINEAR_PREFILL_OFFSET_SUCCESSES.store(0, Ordering::Relaxed);
 }
 
+fn cuda_full_attn_qkv_in_proj_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ").is_err())
+}
+
 pub fn flash_attn_tracked_decline_count() -> u64 {
     CUDA_FLASH_ATTN_TRACKED_DECLINES.load(Ordering::Relaxed)
 }
@@ -1930,6 +1935,53 @@ impl LinearBackend for CudaBackend {
             CUDA_LINEAR_PREFILL_OFFSET_SUCCESSES.fetch_add(1, Ordering::Relaxed);
         }
         Ok(out)
+    }
+
+    fn runtime_full_attn_qkv_combined_decode(
+        &self,
+        x: &kiln_tensor::Tensor,
+        qkv_weight_t: Option<&kiln_tensor::Tensor>,
+        _qkv_w8: Option<&crate::rocm_w8_proj::RocmW8Proj>,
+        q_dim: usize,
+        k_dim: usize,
+        v_dim: usize,
+    ) -> Result<
+        Option<(
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+        )>,
+    > {
+        if !cuda_full_attn_qkv_in_proj_enabled()
+            || x.track_op()
+            || x.dtype() != kiln_tensor::DType::BF16
+        {
+            return Ok(None);
+        }
+        let Some(qkv_weight_t) = qkv_weight_t else {
+            return Ok(None);
+        };
+        let Ok((_, seq_len, hidden)) = x.dims3() else {
+            return Ok(None);
+        };
+        let qkv_dim = q_dim + k_dim + v_dim;
+        if seq_len != 1
+            || qkv_weight_t.dtype() != kiln_tensor::DType::BF16
+            || qkv_weight_t.track_op()
+            || !qkv_weight_t.is_contiguous()
+            || qkv_weight_t.dims() != [hidden, qkv_dim]
+            || !cuda_tensors_on_device(&[x, qkv_weight_t])
+        {
+            return Ok(None);
+        }
+
+        let Some(qkv) = self.runtime_linear_prefill_apply(x, qkv_weight_t)? else {
+            return Ok(None);
+        };
+        let q_raw = qkv.narrow(2, 0, q_dim)?;
+        let k_raw = qkv.narrow(2, q_dim, k_dim)?;
+        let v = qkv.narrow(2, q_dim + k_dim, v_dim)?;
+        Ok(Some((q_raw, k_raw, v)))
     }
 
     fn runtime_lora_delta_resident(

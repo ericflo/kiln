@@ -1326,6 +1326,24 @@ pub trait LinearBackend: Send + Sync + std::fmt::Debug {
         Ok(0)
     }
 
+    fn runtime_full_attn_qkv_combined_decode(
+        &self,
+        _x: &kiln_tensor::Tensor,
+        _qkv_weight_t: Option<&kiln_tensor::Tensor>,
+        _qkv_w8: Option<&crate::rocm_w8_proj::RocmW8Proj>,
+        _q_dim: usize,
+        _k_dim: usize,
+        _v_dim: usize,
+    ) -> Result<
+        Option<(
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+        )>,
+    > {
+        Ok(None)
+    }
+
     fn runtime_full_attn_qkv_decode(
         &self,
         _x: &kiln_tensor::Tensor,

@@ -48,6 +48,16 @@ pub fn reset_linear_prefill_success_counts() {
     ROCM_LINEAR_PREFILL_OFFSET_SUCCESSES.store(0, Ordering::Relaxed);
 }
 
+fn rocm_full_attn_qkv_in_proj_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !rocm_or_legacy_disable_env_set(
+            "KILN_DISABLE_ROCM_FULL_ATTN_QKV_IN_PROJ",
+            "KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ",
+        )
+    })
+}
+
 pub fn flash_attn_tracked_decline_count() -> u64 {
     ROCM_FLASH_ATTN_TRACKED_DECLINES.load(Ordering::Relaxed)
 }
@@ -1987,6 +1997,68 @@ impl LinearBackend for RocmBackend {
             ROCM_LINEAR_PREFILL_OFFSET_SUCCESSES.fetch_add(1, Ordering::Relaxed);
         }
         Ok(out)
+    }
+
+    fn runtime_full_attn_qkv_combined_decode(
+        &self,
+        x: &kiln_tensor::Tensor,
+        qkv_weight_t: Option<&kiln_tensor::Tensor>,
+        qkv_w8: Option<&crate::rocm_w8_proj::RocmW8Proj>,
+        q_dim: usize,
+        k_dim: usize,
+        v_dim: usize,
+    ) -> Result<
+        Option<(
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+        )>,
+    > {
+        if !rocm_full_attn_qkv_in_proj_enabled()
+            || x.track_op()
+            || x.dtype() != kiln_tensor::DType::BF16
+            || !rocm_tensors_on_device(&[x])
+        {
+            return Ok(None);
+        }
+        let Ok((_, seq_len, hidden)) = x.dims3() else {
+            return Ok(None);
+        };
+        let qkv_dim = q_dim + k_dim + v_dim;
+        if seq_len != 1 {
+            return Ok(None);
+        }
+
+        if let Some(qkv_w8) = qkv_w8 {
+            if hidden == qkv_w8.k && qkv_w8.n == qkv_dim {
+                let qkv = crate::rocm_w8_proj::matmul_bf16(x, qkv_w8)
+                    .context("rocm w8 full-attn Q/K/V projection")?;
+                let q_raw = qkv.narrow(2, 0, q_dim)?;
+                let k_raw = qkv.narrow(2, q_dim, k_dim)?;
+                let v = qkv.narrow(2, q_dim + k_dim, v_dim)?;
+                return Ok(Some((q_raw, k_raw, v)));
+            }
+        }
+
+        let Some(qkv_weight_t) = qkv_weight_t else {
+            return Ok(None);
+        };
+        if qkv_weight_t.dtype() != kiln_tensor::DType::BF16
+            || qkv_weight_t.track_op()
+            || !qkv_weight_t.is_contiguous()
+            || qkv_weight_t.dims() != [hidden, qkv_dim]
+            || !rocm_tensors_on_device(&[qkv_weight_t])
+        {
+            return Ok(None);
+        }
+
+        let Some(qkv) = self.runtime_linear_prefill_apply(x, qkv_weight_t)? else {
+            return Ok(None);
+        };
+        let q_raw = qkv.narrow(2, 0, q_dim)?;
+        let k_raw = qkv.narrow(2, q_dim, k_dim)?;
+        let v = qkv.narrow(2, q_dim + k_dim, v_dim)?;
+        Ok(Some((q_raw, k_raw, v)))
     }
 
     fn runtime_lora_delta_resident(

@@ -2418,10 +2418,6 @@ const DISABLE_ROCM_GDN_AB_IN_PROJ: &str = "KILN_DISABLE_ROCM_GDN_AB_IN_PROJ";
 const DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ: &str = "KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ";
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 const DISABLE_ROCM_GDN_PREFILL_AB_IN_PROJ: &str = "KILN_DISABLE_ROCM_GDN_PREFILL_AB_IN_PROJ";
-#[cfg(any(feature = "cuda", feature = "rocm"))]
-const DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ: &str = "KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ";
-#[cfg(any(feature = "cuda", feature = "rocm"))]
-const DISABLE_ROCM_FULL_ATTN_QKV_IN_PROJ: &str = "KILN_DISABLE_ROCM_FULL_ATTN_QKV_IN_PROJ";
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 fn cuda_rocm_disable_env_set_for_device(device: Device, cuda_name: &str, rocm_name: &str) -> bool {
@@ -2479,19 +2475,6 @@ fn cuda_rocm_gdn_prefill_ab_in_proj_enabled(device: Device) -> bool {
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 const CUDA_ROCM_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS: usize = 128;
-
-#[cfg(any(feature = "cuda", feature = "rocm"))]
-fn cuda_rocm_full_attn_qkv_in_proj_enabled(device: Device) -> bool {
-    static CUDA_ENABLED: OnceLock<bool> = OnceLock::new();
-    static ROCM_ENABLED: OnceLock<bool> = OnceLock::new();
-    cuda_rocm_enabled_flag_for_device(
-        device,
-        DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ,
-        DISABLE_ROCM_FULL_ATTN_QKV_IN_PROJ,
-        &CUDA_ENABLED,
-        &ROCM_ENABLED,
-    )
-}
 
 fn weighted_lm_head_prep_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
@@ -3110,55 +3093,20 @@ fn full_attn_qkv_proj_decode_if(
         && !crate::mtp_debug::is_mtp_fp32_head_armed()
         && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
     {
-        #[cfg(any(feature = "cuda", feature = "rocm"))]
-        {
-            if cuda_rocm_full_attn_qkv_in_proj_enabled(x.device())
-                && !x.track_op()
-                && x.dtype() == DType::BF16
-                && cuda_or_rocm_device(x.device())
-            {
-                #[cfg(feature = "rocm")]
-                if let Some(qkv_w8) = attn_weights.qkv_proj_w8.as_ref() {
-                    if let Ok((_, seq_len, hidden)) = x.dims3() {
-                        let q_dim = attn_weights.q_proj_t.dim(1)?;
-                        let k_dim = attn_weights.k_proj_t.dim(1)?;
-                        let v_dim = attn_weights.v_proj_t.dim(1)?;
-                        if seq_len == 1
-                            && hidden == qkv_w8.k
-                            && qkv_w8.n == q_dim + k_dim + v_dim
-                            && matches!(x.device(), Device::Rocm(_))
-                        {
-                            let qkv = crate::rocm_w8_proj::matmul_bf16(x, qkv_w8)
-                                .context("rocm w8 full-attn Q/K/V projection")?;
-                            let q_raw = qkv.narrow(2, 0, q_dim)?;
-                            let k_raw = qkv.narrow(2, q_dim, k_dim)?;
-                            let v = qkv.narrow(2, q_dim + k_dim, v_dim)?;
-                            return Ok((q_raw, k_raw, v));
-                        }
-                    }
-                }
-                if let Some(qkv_proj_t) = attn_weights.qkv_proj_t.as_ref() {
-                    if let Ok((_, seq_len, hidden)) = x.dims3() {
-                        let q_dim = attn_weights.q_proj_t.dim(1)?;
-                        let k_dim = attn_weights.k_proj_t.dim(1)?;
-                        let v_dim = attn_weights.v_proj_t.dim(1)?;
-                        if seq_len == 1
-                            && qkv_proj_t.dtype() == DType::BF16
-                            && !qkv_proj_t.track_op()
-                            && cuda_or_rocm_device(qkv_proj_t.device())
-                            && qkv_proj_t.is_contiguous()
-                            && qkv_proj_t.dims() == [hidden, q_dim + k_dim + v_dim]
-                        {
-                            let qkv = broadcast_matmul_cpu_compatible(x, qkv_proj_t)
-                                .context("gpu full-attn combined Q/K/V projection matmul")?;
-                            let q_raw = qkv.narrow(2, 0, q_dim)?;
-                            let k_raw = qkv.narrow(2, q_dim, k_dim)?;
-                            let v = qkv.narrow(2, q_dim + k_dim, v_dim)?;
-                            return Ok((q_raw, k_raw, v));
-                        }
-                    }
-                }
-            }
+        let q_dim = attn_weights.q_proj_t.dim(1)?;
+        let k_dim = attn_weights.k_proj_t.dim(1)?;
+        let v_dim = attn_weights.v_proj_t.dim(1)?;
+        if let Some(out) = LinearBackend::runtime_full_attn_qkv_combined_decode(
+            backend,
+            x,
+            attn_weights.qkv_proj_t.as_ref(),
+            attn_weights.qkv_proj_w8.as_ref(),
+            q_dim,
+            k_dim,
+            v_dim,
+        )? {
+            kiln_nvtx::range!(c"kiln/proj/qkv_fused");
+            return Ok(out);
         }
         if let Some(out) = LinearBackend::runtime_full_attn_qkv_decode(
             backend,

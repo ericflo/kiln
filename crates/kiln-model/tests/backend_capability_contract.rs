@@ -827,20 +827,36 @@ fn cuda_rocm_forward_in_projection_gates_use_rocm_names() {
         "cuda_rocm_gdn_ab_in_proj_enabled",
         "cuda_rocm_gdn_prefill_ab_in_proj_enabled",
         "CUDA_ROCM_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS",
-        "cuda_rocm_full_attn_qkv_in_proj_enabled",
         "KILN_DISABLE_ROCM_GDN_AB_IN_PROJ",
         "KILN_DISABLE_ROCM_GDN_PREFILL_AB_IN_PROJ",
-        "KILN_DISABLE_ROCM_FULL_ATTN_QKV_IN_PROJ",
     ] {
         assert!(
             source.contains(required),
             "forward.rs should use ROCm-native names for shared CUDA/ROCm in-projection gate `{required}`"
         );
     }
+    let cuda_source = fs::read_to_string(manifest_dir().join("src/backend/cuda.rs"))
+        .expect("cuda backend source should be readable");
+    assert!(
+        cuda_source.contains("cuda_full_attn_qkv_in_proj_enabled")
+            && cuda_source.contains("KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ"),
+        "CUDA full-attention QKV gate should live behind the LinearBackend implementation"
+    );
+    let rocm_source = fs::read_to_string(manifest_dir().join("src/backend/rocm.rs"))
+        .expect("rocm backend source should be readable");
+    for required in [
+        "rocm_full_attn_qkv_in_proj_enabled",
+        "KILN_DISABLE_ROCM_FULL_ATTN_QKV_IN_PROJ",
+        "KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ",
+    ] {
+        assert!(
+            rocm_source.contains(required),
+            "ROCm full-attention QKV gate should live behind the LinearBackend implementation and preserve legacy CUDA alias `{required}`"
+        );
+    }
     for stale_helper in [
         "fn cuda_gdn_ab_in_proj_enabled(",
         "fn cuda_gdn_prefill_ab_in_proj_enabled(",
-        "fn cuda_full_attn_qkv_in_proj_enabled(",
         "CUDA_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS",
     ] {
         assert!(
@@ -4967,6 +4983,7 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "LinearBackend::runtime_lora_delta_resident",
         "LinearBackend::runtime_linear_prefill_apply",
         "LinearBackend::runtime_linear_decode",
+        "LinearBackend::runtime_full_attn_qkv_combined_decode",
         "LinearBackend::runtime_full_attn_qkv_decode",
         "LinearBackend::runtime_mlp_decode",
         "LinearBackend::runtime_mlp_gate_up_decode",
@@ -5272,6 +5289,40 @@ fn forward_lm_head_matmul_routes_through_matmul_op_contract() {
         assert!(
             !lm_head_argmax.contains(forbidden),
             "fused LM-head argmax helper should not select the matmul path by CUDA identity: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn forward_full_attn_qkv_combined_routes_through_linear_backend_contract() {
+    let forward_source =
+        fs::read_to_string(workspace_root().join("crates/kiln-model/src/forward.rs"))
+            .expect("forward source should be readable");
+    let qkv_helper = source_between(
+        &forward_source,
+        "fn full_attn_qkv_proj_decode_if(",
+        "/// CUDA-compatible softmax on last dimension.",
+    );
+
+    assert!(
+        qkv_helper.contains("LinearBackend::runtime_full_attn_qkv_combined_decode"),
+        "combined full-attention QKV projection should route through LinearBackend"
+    );
+    assert!(
+        qkv_helper.contains("LinearBackend::runtime_full_attn_qkv_decode"),
+        "split full-attention QKV projection should continue to route through LinearBackend"
+    );
+    for forbidden in [
+        "cuda_rocm_full_attn_qkv_in_proj_enabled",
+        "cuda_or_rocm_device(x.device())",
+        "cuda_or_rocm_device(qkv_proj_t.device())",
+        "matches!(x.device(), Device::Rocm(_))",
+        "crate::rocm_w8_proj::matmul_bf16",
+        "broadcast_matmul_cpu_compatible(x, qkv_proj_t)",
+    ] {
+        assert!(
+            !qkv_helper.contains(forbidden),
+            "forward full-attention QKV helper should not select combined matmul by backend identity: {forbidden}"
         );
     }
 }
