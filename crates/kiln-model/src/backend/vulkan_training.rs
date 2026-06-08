@@ -10,7 +10,7 @@ use std::sync::{Arc, OnceLock};
 use super::vulkan::VulkanBackend;
 use super::vulkan_residency::with_resident_registry;
 use super::{
-    FinalRmsNormBackwardRoute, GrpoKlAuxiliaryRoute, GrpoLossRoute, LinearBackend, OpdLossRoute,
+    FinalRmsNormBackwardRoute, GrpoKlAuxiliaryRoute, GrpoLossRoute, OpdLossRoute,
     OpdPhaseBBackwardRoute, SftFlceLossRoute, TrainingCapabilities, TrainingPrecisionPolicy,
     TrainingTapeRoute,
 };
@@ -285,7 +285,7 @@ pub(super) fn dispatch_adamw_step(
 // `register_resident_activation` and friends above). There is no candle
 // bridge anymore, so a kt tensor handed to `register_*` and then to `has_*` /
 // `resolve_*` round-trips to the same registry key — which is what re-enables
-// these tests under the kt-typed `BackendRuntime` trait.
+// these tests through the kt-typed `ResidencyBackend` facet.
 //
 // id-stability across an in-place content change (formerly provided by candle
 // `Var::set`) is reproduced with kt `Tensor::slice_set` (dim-0 in-place
@@ -303,7 +303,7 @@ pub(super) fn dispatch_adamw_step(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{BackendRuntime, OptimizerBackend};
+    use crate::backend::{LinearBackend, OptimizerBackend, ResidencyBackend};
 
     /// dispatch_sgd_step against two registry-resident F32 tensors —
     /// param := param - lr * grad, computed on-device, must match the
@@ -329,8 +329,8 @@ mod tests {
         let grad = kiln_tensor::Tensor::from_vec(grad_data, (n,))?;
 
         // Both must be resident before dispatch_sgd_step succeeds.
-        backend.register_resident_activation(&param)?;
-        backend.register_resident_activation(&grad)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &param)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &grad)?;
 
         let dispatched = OptimizerBackend::runtime_dispatch_sgd_step(&backend, &param, &grad, lr)?;
         assert!(
@@ -361,8 +361,8 @@ mod tests {
             );
         }
 
-        backend.evict_resident_activation(&param);
-        backend.evict_resident_activation(&grad);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &param);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &grad);
         Ok(())
     }
 
@@ -379,15 +379,21 @@ mod tests {
         let p = kiln_tensor::Tensor::from_vec(vec![1.0f32; 4], (4,))?;
         let g = kiln_tensor::Tensor::from_vec(vec![0.5f32; 4], (4,))?;
         // Neither registered — fall back.
-        assert!(!OptimizerBackend::runtime_dispatch_sgd_step(&backend, &p, &g, 0.01)?);
+        assert!(!OptimizerBackend::runtime_dispatch_sgd_step(
+            &backend, &p, &g, 0.01
+        )?);
         // Only param registered — fall back (grad missing).
-        backend.register_resident_activation(&p)?;
-        assert!(!OptimizerBackend::runtime_dispatch_sgd_step(&backend, &p, &g, 0.01)?);
+        ResidencyBackend::runtime_register_resident_activation(&backend, &p)?;
+        assert!(!OptimizerBackend::runtime_dispatch_sgd_step(
+            &backend, &p, &g, 0.01
+        )?);
         // Only grad registered — fall back (param missing).
-        backend.evict_resident_activation(&p);
-        backend.register_resident_activation(&g)?;
-        assert!(!OptimizerBackend::runtime_dispatch_sgd_step(&backend, &p, &g, 0.01)?);
-        backend.evict_resident_activation(&g);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &p);
+        ResidencyBackend::runtime_register_resident_activation(&backend, &g)?;
+        assert!(!OptimizerBackend::runtime_dispatch_sgd_step(
+            &backend, &p, &g, 0.01
+        )?);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &g);
         Ok(())
     }
 
@@ -403,15 +409,15 @@ mod tests {
         }
         let p = kiln_tensor::Tensor::from_vec(vec![1.0f32; 4], (4,))?;
         let g = kiln_tensor::Tensor::from_vec(vec![0.5f32; 8], (8,))?;
-        backend.register_resident_activation(&p)?;
-        backend.register_resident_activation(&g)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &p)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &g)?;
         let err = OptimizerBackend::runtime_dispatch_sgd_step(&backend, &p, &g, 0.01).unwrap_err();
         assert!(
             err.to_string().contains("different element counts"),
             "unexpected error: {err}"
         );
-        backend.evict_resident_activation(&p);
-        backend.evict_resident_activation(&g);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &p);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &g);
         Ok(())
     }
 
@@ -457,8 +463,8 @@ mod tests {
 
         // Register A and B in the registry — residency must NOT trigger a
         // dispatch under the kt decline contract.
-        backend.register_resident_activation(&a_bf16)?;
-        backend.register_resident_activation(&b_bf16)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &a_bf16)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &b_bf16)?;
 
         assert!(
             LinearBackend::runtime_lora_delta_resident(
@@ -470,8 +476,8 @@ mod tests {
              the portable compute_lora_delta path)"
         );
 
-        backend.evict_resident_activation(&a_bf16);
-        backend.evict_resident_activation(&b_bf16);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &a_bf16);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &b_bf16);
         Ok(())
     }
 
@@ -493,13 +499,13 @@ mod tests {
         // Neither registered — fall back.
         assert!(LinearBackend::runtime_lora_delta_resident(&backend, &x, &a, &b, 0.5)?.is_none());
         // Only A registered — fall back.
-        backend.register_resident_activation(&a)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &a)?;
         assert!(LinearBackend::runtime_lora_delta_resident(&backend, &x, &a, &b, 0.5)?.is_none());
         // Only B registered — fall back.
-        backend.evict_resident_activation(&a);
-        backend.register_resident_activation(&b)?;
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &a);
+        ResidencyBackend::runtime_register_resident_activation(&backend, &b)?;
         assert!(LinearBackend::runtime_lora_delta_resident(&backend, &x, &a, &b, 0.5)?.is_none());
-        backend.evict_resident_activation(&b);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &b);
         Ok(())
     }
 
@@ -531,19 +537,24 @@ mod tests {
         let p_bf16 = p_f32.to_dtype(kiln_tensor::DType::BF16)?;
         let g_bf16 = g_f32.to_dtype(kiln_tensor::DType::BF16)?;
 
-        backend.register_resident_activation(&p_bf16)?;
-        backend.register_resident_activation(&g_bf16)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &p_bf16)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &g_bf16)?;
 
-        let dispatched = OptimizerBackend::runtime_dispatch_sgd_step(&backend, &p_bf16, &g_bf16, lr)?;
+        let dispatched =
+            OptimizerBackend::runtime_dispatch_sgd_step(&backend, &p_bf16, &g_bf16, lr)?;
         assert!(
             dispatched,
             "BF16 dispatch_sgd_step must succeed when both operands are resident"
         );
 
         // Read the updated param buffer back via resolve.
-        let resolved = backend
-            .resolve_resident_activation(&p_bf16, &[n], kiln_tensor::DType::BF16)?
-            .expect("must resolve");
+        let resolved = ResidencyBackend::runtime_resolve_resident_activation(
+            &backend,
+            &p_bf16,
+            &[n],
+            kiln_tensor::DType::BF16,
+        )?
+        .expect("must resolve");
         let updated_v: Vec<f32> = resolved
             .to_dtype(kiln_tensor::DType::F32)?
             .flatten_all()?
@@ -558,8 +569,8 @@ mod tests {
             );
         }
 
-        backend.evict_resident_activation(&p_bf16);
-        backend.evict_resident_activation(&g_bf16);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &p_bf16);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &g_bf16);
         Ok(())
     }
 
@@ -609,12 +620,13 @@ mod tests {
         let m = kiln_tensor::Tensor::from_vec(m_data, (n,))?;
         let v = kiln_tensor::Tensor::from_vec(v_data, (n,))?;
 
-        backend.register_resident_activation(&param)?;
-        backend.register_resident_activation(&grad)?;
-        backend.register_resident_activation(&m)?;
-        backend.register_resident_activation(&v)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &param)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &grad)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &m)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &v)?;
 
-        let dispatched = OptimizerBackend::runtime_dispatch_adamw_step(&backend,
+        let dispatched = OptimizerBackend::runtime_dispatch_adamw_step(
+            &backend,
             &param,
             &grad,
             &m,
@@ -631,18 +643,22 @@ mod tests {
             "adamw_step must succeed when all four buffers are resident"
         );
 
-        let resolved = backend
-            .resolve_resident_activation(&param, &[n], kiln_tensor::DType::F32)?
-            .expect("param must resolve after dispatch");
+        let resolved = ResidencyBackend::runtime_resolve_resident_activation(
+            &backend,
+            &param,
+            &[n],
+            kiln_tensor::DType::F32,
+        )?
+        .expect("param must resolve after dispatch");
         let got: Vec<f32> = resolved.flatten_all()?.to_vec1::<f32>()?;
         for (i, (g, w)) in got.iter().zip(expected.iter()).enumerate() {
             assert!((g - w).abs() < 1e-6, "idx {i}: got={g:.9} want={w:.9}");
         }
 
-        backend.evict_resident_activation(&param);
-        backend.evict_resident_activation(&grad);
-        backend.evict_resident_activation(&m);
-        backend.evict_resident_activation(&v);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &param);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &grad);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &m);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &v);
         Ok(())
     }
 
@@ -697,13 +713,14 @@ mod tests {
         let m_bf16 = m_f32.to_dtype(kiln_tensor::DType::BF16)?;
         let v_bf16 = v_f32.to_dtype(kiln_tensor::DType::BF16)?;
 
-        backend.register_resident_activation(&p_bf16)?;
-        backend.register_resident_activation(&g_bf16)?;
-        backend.register_resident_activation(&m_bf16)?;
-        backend.register_resident_activation(&v_bf16)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &p_bf16)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &g_bf16)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &m_bf16)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &v_bf16)?;
 
         for step in 1u32..=2 {
-            let dispatched = OptimizerBackend::runtime_dispatch_adamw_step(&backend,
+            let dispatched = OptimizerBackend::runtime_dispatch_adamw_step(
+                &backend,
                 &p_bf16,
                 &g_bf16,
                 &m_bf16,
@@ -718,9 +735,13 @@ mod tests {
             assert!(dispatched, "step {step}: adamw bf16 dispatch must succeed");
         }
 
-        let resolved = backend
-            .resolve_resident_activation(&p_bf16, &[n], kiln_tensor::DType::BF16)?
-            .expect("param must resolve");
+        let resolved = ResidencyBackend::runtime_resolve_resident_activation(
+            &backend,
+            &p_bf16,
+            &[n],
+            kiln_tensor::DType::BF16,
+        )?
+        .expect("param must resolve");
         let got: Vec<f32> = resolved
             .to_dtype(kiln_tensor::DType::F32)?
             .flatten_all()?
@@ -735,10 +756,10 @@ mod tests {
             );
         }
 
-        backend.evict_resident_activation(&p_bf16);
-        backend.evict_resident_activation(&g_bf16);
-        backend.evict_resident_activation(&m_bf16);
-        backend.evict_resident_activation(&v_bf16);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &p_bf16);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &g_bf16);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &m_bf16);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &v_bf16);
         Ok(())
     }
 
@@ -756,17 +777,19 @@ mod tests {
         let m = kiln_tensor::Tensor::from_vec(vec![0.0f32; 4], (4,))?;
         let v = kiln_tensor::Tensor::from_vec(vec![0.0f32; 4], (4,))?;
         // Nothing registered.
-        let dispatched =
-            OptimizerBackend::runtime_dispatch_adamw_step(&backend, &p, &g, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?;
+        let dispatched = OptimizerBackend::runtime_dispatch_adamw_step(
+            &backend, &p, &g, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1,
+        )?;
         assert!(!dispatched);
         // Only param + m registered — v missing → fall back.
-        backend.register_resident_activation(&p)?;
-        backend.register_resident_activation(&m)?;
-        let dispatched =
-            OptimizerBackend::runtime_dispatch_adamw_step(&backend, &p, &g, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &p)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &m)?;
+        let dispatched = OptimizerBackend::runtime_dispatch_adamw_step(
+            &backend, &p, &g, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1,
+        )?;
         assert!(!dispatched);
-        backend.evict_resident_activation(&p);
-        backend.evict_resident_activation(&m);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &p);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &m);
         Ok(())
     }
 
@@ -806,8 +829,8 @@ mod tests {
         let p = kiln_tensor::Tensor::from_vec(init.clone(), (n,))?;
         let g_tensor = kiln_tensor::Tensor::from_vec(grad, (n,))?;
 
-        backend.register_resident_activation(&p)?;
-        backend.register_resident_activation(&g_tensor)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &p)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &g_tensor)?;
         let dispatched = OptimizerBackend::runtime_dispatch_sgd_step(&backend, &p, &g_tensor, lr)?;
         assert!(dispatched);
 
@@ -821,9 +844,13 @@ mod tests {
         }
 
         // (2) Registry has post-step values.
-        let resolved = backend
-            .resolve_resident_activation(&p, &[n], kiln_tensor::DType::F32)?
-            .expect("must resolve after on-device dispatch");
+        let resolved = ResidencyBackend::runtime_resolve_resident_activation(
+            &backend,
+            &p,
+            &[n],
+            kiln_tensor::DType::F32,
+        )?
+        .expect("must resolve after on-device dispatch");
         let resolved_v: Vec<f32> = resolved.flatten_all()?.to_vec1::<f32>()?;
         for (i, (r, w)) in resolved_v.iter().zip(expected.iter()).enumerate() {
             assert!(
@@ -842,8 +869,8 @@ mod tests {
             );
         }
 
-        backend.evict_resident_activation(&p);
-        backend.evict_resident_activation(&g_tensor);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &p);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &g_tensor);
         Ok(())
     }
 
@@ -860,12 +887,12 @@ mod tests {
         let p = kiln_tensor::Tensor::from_vec(vec![1.0f32; 4], (4,))?
             .to_dtype(kiln_tensor::DType::BF16)?;
         let g = kiln_tensor::Tensor::from_vec(vec![0.5f32; 4], (4,))?; // F32
-        backend.register_resident_activation(&p)?;
-        backend.register_resident_activation(&g)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &p)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &g)?;
         let dispatched = OptimizerBackend::runtime_dispatch_sgd_step(&backend, &p, &g, 0.01)?;
         assert!(!dispatched, "dtype mismatch must fall back");
-        backend.evict_resident_activation(&p);
-        backend.evict_resident_activation(&g);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &p);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &g);
         Ok(())
     }
 }

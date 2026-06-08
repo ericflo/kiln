@@ -4,15 +4,15 @@
 //! `Ok(None)` responses route the caller to the portable candle path.
 
 use anyhow::{Context, Result};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
-    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, GdnBackend, OptimizerBackend,
-    LinearBackend, PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend,
+    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, GdnBackend, LinearBackend,
+    OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend,
     StartupBackend, TrainingCapabilities, TrainingLossBackend, TrainingPrecisionPolicy,
 };
-use crate::lora_loader::{compute_lora_delta, LoraProjectionWeights};
+use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 
 static CUDA_RESIDENT_TENSOR_IDS: super::cuda_rocm_common::ResidentTensorIdRegistry =
     OnceLock::new();
@@ -224,8 +224,7 @@ impl CudaBackend {
 
     pub fn training_capabilities_static() -> TrainingCapabilities {
         TrainingCapabilities {
-            projection_training:
-                "backend-routed kt cublasLt matmul (tape-recorded) with offset chunk hook",
+            projection_training: "backend-routed kt cublasLt matmul (tape-recorded) with offset chunk hook",
             flce_loss: "FLCE analytic backward on CUDA tensors; no full logits by default",
             tape_forward_backward_route: super::TrainingTapeRoute::KtTapeAuthoritative,
             sft_flce_loss_route: super::SftFlceLossRoute::KtTapeFlce,
@@ -236,8 +235,7 @@ impl CudaBackend {
             final_rmsnorm_backward_route: super::FinalRmsNormBackwardRoute::CudaRocmFusedTail,
             rmsnorm_training: "CUDA kt-tape rmsnorm behind 47 GiB autograd VRAM gate",
             resident_activation: "kt TensorId lifecycle registry; kt CUDA tensors are canonical",
-            lora_delta_training:
-                "kt tape-recorded LoRA delta; fused lora_decode_add declines tape-tracked tensors",
+            lora_delta_training: "kt tape-recorded LoRA delta; fused lora_decode_add declines tape-tracked tensors",
             sgd_step: "CUDA in-place optimizer kernel for resident contiguous F32/BF16 tensors",
             adamw_step: "CUDA in-place optimizer kernel for resident contiguous F32/BF16 tensors",
             native_training: "not implemented",
@@ -1952,17 +1950,27 @@ mod tests {
         let backend = test_backend();
         let tensor = KtTensor::zeros_cpu(vec![2, 3], KtDType::F32);
 
-        assert!(backend.supports_resident_activation());
-        assert!(!backend.has_resident_activation(&tensor));
+        assert!(ResidencyBackend::runtime_supports_resident_activation(
+            &backend
+        ));
+        assert!(!ResidencyBackend::runtime_has_resident_activation(
+            &backend, &tensor
+        ));
 
-        backend.register_resident_activation(&tensor)?;
-        assert!(backend.has_resident_activation(&tensor));
+        ResidencyBackend::runtime_register_resident_activation(&backend, &tensor)?;
+        assert!(ResidencyBackend::runtime_has_resident_activation(
+            &backend, &tensor
+        ));
 
-        backend.evict_resident_activation(&tensor);
-        assert!(!backend.has_resident_activation(&tensor));
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &tensor);
+        assert!(!ResidencyBackend::runtime_has_resident_activation(
+            &backend, &tensor
+        ));
 
-        backend.update_resident_activation(&tensor)?;
-        assert!(backend.has_resident_activation(&tensor));
+        ResidencyBackend::runtime_update_resident_activation(&backend, &tensor)?;
+        assert!(ResidencyBackend::runtime_has_resident_activation(
+            &backend, &tensor
+        ));
 
         Ok(())
     }
@@ -1983,21 +1991,25 @@ mod tests {
             "CUDA must not claim SGD dispatch for non-CUDA tensors"
         );
         assert!(
-            !OptimizerBackend::runtime_dispatch_adamw_step(&backend, &param, &grad, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?,
+            !OptimizerBackend::runtime_dispatch_adamw_step(
+                &backend, &param, &grad, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1
+            )?,
             "CUDA must not claim AdamW dispatch for non-CUDA tensors"
         );
 
-        backend.register_resident_activation(&param)?;
-        backend.register_resident_activation(&grad)?;
-        backend.register_resident_activation(&m)?;
-        backend.register_resident_activation(&v)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &param)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &grad)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &m)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &v)?;
 
         assert!(
             !OptimizerBackend::runtime_dispatch_sgd_step(&backend, &param, &grad, 0.01)?,
             "TensorId residency alone is not enough for CUDA to claim SGD ownership"
         );
         assert!(
-            !OptimizerBackend::runtime_dispatch_adamw_step(&backend, &param, &grad, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?,
+            !OptimizerBackend::runtime_dispatch_adamw_step(
+                &backend, &param, &grad, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1
+            )?,
             "TensorId residency alone is not enough for CUDA to claim AdamW ownership"
         );
 
@@ -2024,10 +2036,12 @@ mod tests {
             return Ok(());
         };
         let grad = kt_cuda_f32(&[0.1f32, -0.2, 0.5, 1.0])?.expect("cuda grad");
-        backend.register_resident_activation(&param)?;
-        backend.register_resident_activation(&grad)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &param)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &grad)?;
 
-        assert!(OptimizerBackend::runtime_dispatch_sgd_step(&backend, &param, &grad, 0.25)?);
+        assert!(OptimizerBackend::runtime_dispatch_sgd_step(
+            &backend, &param, &grad, 0.25
+        )?);
         let actual = param.to_device(KtDevice::Cpu)?.to_vec1::<f32>()?;
         let expected = [0.975f32, -1.95, 0.375, 2.75];
         for (a, e) in actual.iter().zip(expected.iter()) {
@@ -2050,17 +2064,18 @@ mod tests {
         let grad = kt_cuda_f32(&[0.5f32, -0.5, 0.25, -0.25])?.expect("cuda grad");
         let m = kt_cuda_f32(&[0.0f32, 0.0, 0.0, 0.0])?.expect("cuda m");
         let v = kt_cuda_f32(&[0.0f32, 0.0, 0.0, 0.0])?.expect("cuda v");
-        backend.register_resident_activation(&param)?;
-        backend.register_resident_activation(&grad)?;
-        backend.register_resident_activation(&m)?;
-        backend.register_resident_activation(&v)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &param)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &grad)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &m)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &v)?;
 
         let lr = 0.01;
         let beta1 = 0.9;
         let beta2 = 0.999;
         let eps = 1e-8;
         let weight_decay = 0.1;
-        assert!(OptimizerBackend::runtime_dispatch_adamw_step(&backend,
+        assert!(OptimizerBackend::runtime_dispatch_adamw_step(
+            &backend,
             &param,
             &grad,
             &m,
@@ -2110,9 +2125,11 @@ mod tests {
             return Ok(());
         };
         let grad = mk_bf16(&[0.25f32, -0.5, 0.5, -0.25])?.expect("cuda grad");
-        backend.register_resident_activation(&param)?;
-        backend.register_resident_activation(&grad)?;
-        assert!(OptimizerBackend::runtime_dispatch_sgd_step(&backend, &param, &grad, 0.5)?);
+        ResidencyBackend::runtime_register_resident_activation(&backend, &param)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &grad)?;
+        assert!(OptimizerBackend::runtime_dispatch_sgd_step(
+            &backend, &param, &grad, 0.5
+        )?);
         let sgd_actual = param
             .to_device(KtDevice::Cpu)?
             .to_dtype(KtDType::F32)?
@@ -2129,11 +2146,12 @@ mod tests {
         let adam_grad = mk_bf16(&[0.5f32, -0.5, 0.25, -0.25])?.expect("cuda adam_grad");
         let m = mk_bf16(&[0.0f32, 0.0, 0.0, 0.0])?.expect("cuda m");
         let v = mk_bf16(&[0.0f32, 0.0, 0.0, 0.0])?.expect("cuda v");
-        backend.register_resident_activation(&adam_param)?;
-        backend.register_resident_activation(&adam_grad)?;
-        backend.register_resident_activation(&m)?;
-        backend.register_resident_activation(&v)?;
-        assert!(OptimizerBackend::runtime_dispatch_adamw_step(&backend,
+        ResidencyBackend::runtime_register_resident_activation(&backend, &adam_param)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &adam_grad)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &m)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &v)?;
+        assert!(OptimizerBackend::runtime_dispatch_adamw_step(
+            &backend,
             &adam_param,
             &adam_grad,
             &m,
@@ -2282,8 +2300,7 @@ mod tests {
         )?
         .expect("cuda w");
 
-        let routed =
-            LinearBackend::runtime_linear_prefill_apply_offset(&backend, &x, &w, 1, 3)?
+        let routed = LinearBackend::runtime_linear_prefill_apply_offset(&backend, &x, &w, 1, 3)?
             .expect("CUDA linear_prefill_apply_offset should accept CUDA tensors");
         let expected_chunk = w.narrow(1, 1, 3)?.contiguous()?;
         let expected = x.broadcast_matmul(&expected_chunk)?;
@@ -2311,11 +2328,9 @@ mod tests {
             kt_cuda_2d(&[1.0f32, -0.25, 0.5, 0.75, -1.0, 0.25, 0.0, 1.5], [4, 2])?.expect("cuda b");
         let scale = 0.5;
 
-        assert!(
-            LinearBackend::runtime_lora_delta_resident(&backend, &x, &a, &b, scale)?.is_none()
-        );
-        backend.register_resident_activation(&a)?;
-        backend.register_resident_activation(&b)?;
+        assert!(LinearBackend::runtime_lora_delta_resident(&backend, &x, &a, &b, scale)?.is_none());
+        ResidencyBackend::runtime_register_resident_activation(&backend, &a)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &b)?;
 
         let routed = LinearBackend::runtime_lora_delta_resident(&backend, &x, &a, &b, scale)?
             .expect("registered CUDA LoRA delta should engage");

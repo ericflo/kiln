@@ -21,7 +21,7 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::{ChatMessage, KilnTokenizer};
 use kiln_memory::vram::{detect_used_vram_bytes, detect_vram};
 use kiln_model::PagedKvCacheKt;
-use kiln_model::backend::{self as runtime_backend, LinearBackend};
+use kiln_model::backend::{self as runtime_backend, LinearBackend, ResidencyBackend};
 use kiln_model::forward::{
     GpuWeights,
     LinearAttentionState,
@@ -191,7 +191,7 @@ struct BenchGdnRecurrentResidentStateScope<'a> {
 
 impl<'a> BenchGdnRecurrentResidentStateScope<'a> {
     fn new(backend: &'a dyn kiln_model::BackendRuntime) -> Self {
-        let active = backend.enter_gdn_recurrent_resident_state_scope();
+        let active = ResidencyBackend::runtime_enter_gdn_recurrent_resident_state_scope(backend);
         Self { backend, active }
     }
 }
@@ -199,7 +199,7 @@ impl<'a> BenchGdnRecurrentResidentStateScope<'a> {
 impl Drop for BenchGdnRecurrentResidentStateScope<'_> {
     fn drop(&mut self) {
         if self.active {
-            self.backend.exit_gdn_recurrent_resident_state_scope();
+            ResidencyBackend::runtime_exit_gdn_recurrent_resident_state_scope(self.backend);
         }
     }
 }

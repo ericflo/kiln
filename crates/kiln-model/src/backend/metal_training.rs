@@ -133,7 +133,7 @@ pub(super) fn dispatch_adamw_step(
 #[cfg(test)]
 mod adamw_kt_tests {
     use super::*;
-    use crate::backend::{BackendRuntime, OptimizerBackend, metal::MetalBackend};
+    use crate::backend::{OptimizerBackend, ResidencyBackend, metal::MetalBackend};
     use kiln_tensor::{DType, Device, Tensor};
 
     /// `Device::Metal(0)` if a Metal device is reachable, else `None`.
@@ -221,13 +221,21 @@ mod adamw_kt_tests {
         let met_v = Tensor::from_vec_on(dev, vec![0.0f32; n], vec![n])?;
 
         let backend = MetalBackend::new(dev);
-        assert!(backend.supports_resident_activation());
-        backend.register_resident_activation(&met_param)?;
-        backend.register_resident_activation(&met_m)?;
-        backend.register_resident_activation(&met_v)?;
-        assert!(backend.has_resident_activation(&met_param));
-        assert!(backend.has_resident_activation(&met_m));
-        assert!(backend.has_resident_activation(&met_v));
+        assert!(ResidencyBackend::runtime_supports_resident_activation(
+            &backend
+        ));
+        ResidencyBackend::runtime_register_resident_activation(&backend, &met_param)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &met_m)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &met_v)?;
+        assert!(ResidencyBackend::runtime_has_resident_activation(
+            &backend, &met_param
+        ));
+        assert!(ResidencyBackend::runtime_has_resident_activation(
+            &backend, &met_m
+        ));
+        assert!(ResidencyBackend::runtime_has_resident_activation(
+            &backend, &met_v
+        ));
 
         for s in 1..=steps {
             let g = &grads[(s - 1) as usize];
@@ -247,9 +255,10 @@ mod adamw_kt_tests {
             // Fresh grad tensor each step (distinct TensorId), mirroring the
             // trainer registering the grad on the fly.
             let met_grad = Tensor::from_vec_on(dev, g.clone(), vec![n])?;
-            backend.register_resident_activation(&met_grad)?;
+            ResidencyBackend::runtime_register_resident_activation(&backend, &met_grad)?;
 
-            let dispatched = OptimizerBackend::runtime_dispatch_adamw_step(&backend,
+            let dispatched = OptimizerBackend::runtime_dispatch_adamw_step(
+                &backend,
                 &met_param,
                 &met_grad,
                 &met_m,
@@ -265,7 +274,7 @@ mod adamw_kt_tests {
                 dispatched,
                 "dispatch_adamw_step must take the on-device path (step {s})"
             );
-            backend.evict_resident_activation(&met_grad);
+            ResidencyBackend::runtime_evict_resident_activation(&backend, &met_grad);
         }
 
         // Read the device results back to host.
@@ -286,19 +295,25 @@ mod adamw_kt_tests {
 
         // resolve_resident_activation must round-trip the in-place-updated
         // buffer (what `sync_to_master` relies on).
-        let resolved = backend
-            .resolve_resident_activation(&met_param, &[n], DType::F32)?
-            .expect("param is resident, resolve must return Some");
+        let resolved = ResidencyBackend::runtime_resolve_resident_activation(
+            &backend,
+            &met_param,
+            &[n],
+            DType::F32,
+        )?
+        .expect("param is resident, resolve must return Some");
         let r_param: Vec<f32> = resolved.to_device(Device::Cpu)?.to_vec::<f32>()?;
         assert!(
             max_abs_diff(&r_param, &g_param) < 1e-6,
             "resolve_resident_activation must reflect the in-place update"
         );
 
-        backend.evict_resident_activation(&met_param);
-        backend.evict_resident_activation(&met_m);
-        backend.evict_resident_activation(&met_v);
-        assert!(!backend.has_resident_activation(&met_param));
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &met_param);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &met_m);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &met_v);
+        assert!(!ResidencyBackend::runtime_has_resident_activation(
+            &backend, &met_param
+        ));
         Ok(())
     }
 
@@ -381,9 +396,9 @@ mod adamw_kt_tests {
         assert_eq!(met_param.dtype(), DType::BF16);
 
         let backend = MetalBackend::new(dev);
-        backend.register_resident_activation(&met_param)?;
-        backend.register_resident_activation(&met_m)?;
-        backend.register_resident_activation(&met_v)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &met_param)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &met_m)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &met_v)?;
 
         for s in 1..=steps {
             let g = &grads[(s - 1) as usize];
@@ -400,8 +415,9 @@ mod adamw_kt_tests {
                 s,
             );
             let met_grad = Tensor::from_vec_on(dev, g.clone(), vec![n])?;
-            backend.register_resident_activation(&met_grad)?;
-            let dispatched = OptimizerBackend::runtime_dispatch_adamw_step(&backend,
+            ResidencyBackend::runtime_register_resident_activation(&backend, &met_grad)?;
+            let dispatched = OptimizerBackend::runtime_dispatch_adamw_step(
+                &backend,
                 &met_param,
                 &met_grad,
                 &met_m,
@@ -417,7 +433,7 @@ mod adamw_kt_tests {
                 dispatched,
                 "BF16 dispatch_adamw_step must take the on-device path (step {s})"
             );
-            backend.evict_resident_activation(&met_grad);
+            ResidencyBackend::runtime_evict_resident_activation(&backend, &met_grad);
         }
 
         let g_param = met_param.to_device(Device::Cpu)?.to_vec::<half::bf16>()?;
@@ -452,8 +468,9 @@ mod adamw_kt_tests {
         let v = Tensor::from_vec_on(dev, vec![0.0f32; n], vec![n])?;
         let backend = MetalBackend::new(dev);
         // Nothing registered → decline.
-        let dispatched =
-            OptimizerBackend::runtime_dispatch_adamw_step(&backend, &p, &g, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?;
+        let dispatched = OptimizerBackend::runtime_dispatch_adamw_step(
+            &backend, &p, &g, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1,
+        )?;
         assert!(!dispatched, "must decline when operands aren't resident");
         Ok(())
     }

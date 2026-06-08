@@ -17,7 +17,7 @@
 #![cfg(feature = "metal")]
 
 use kiln_model::backend::metal::MetalBackend;
-use kiln_model::backend::{BackendRuntime, OptimizerBackend};
+use kiln_model::backend::{OptimizerBackend, ResidencyBackend};
 use kiln_model::lora_loader::LoraProjectionWeights;
 use kiln_model::tape_forward::{
     try_tape_cross_entropy_from_logits_kt, try_tape_lora_linear_kt, with_thread_local_tape,
@@ -47,15 +47,11 @@ fn read_host_f32(t: &Tensor) -> Vec<f32> {
 
 fn build_lora_fixtures() -> (Tensor, Tensor, LoraProjectionWeights) {
     let x_data: Vec<f32> = (0..SEQ * HIDDEN).map(|i| (i as f32) * 0.1 - 0.3).collect();
-    let w_data: Vec<f32> = (0..HIDDEN * OUT)
-        .map(|i| 0.05 * (i as f32) - 0.2)
-        .collect();
+    let w_data: Vec<f32> = (0..HIDDEN * OUT).map(|i| 0.05 * (i as f32) - 0.2).collect();
     let a_data: Vec<f32> = (0..RANK * HIDDEN)
         .map(|i| 0.07 * (i as f32) - 0.1)
         .collect();
-    let b_data: Vec<f32> = (0..OUT * RANK)
-        .map(|i| 0.03 * (i as f32) + 0.02)
-        .collect();
+    let b_data: Vec<f32> = (0..OUT * RANK).map(|i| 0.03 * (i as f32) + 0.02).collect();
     let x = Tensor::from_vec_on(Device::Metal(0), x_data, vec![SEQ, HIDDEN]).expect("x");
     let weight_t =
         Tensor::from_vec_on(Device::Metal(0), w_data, vec![HIDDEN, OUT]).expect("weight_t");
@@ -177,22 +173,21 @@ fn adamw_one_step_in_place(
     assert_eq!(grad.element_count(), n, "param/grad element-count mismatch");
     let m = Tensor::zeros_on(Device::Metal(0), param.dims().to_vec(), DType::F32).expect("m zeros");
     let v = Tensor::zeros_on(Device::Metal(0), param.dims().to_vec(), DType::F32).expect("v zeros");
-    backend
-        .register_resident_activation(param)
-        .expect("register param");
-    backend
-        .register_resident_activation(grad)
-        .expect("register grad");
-    backend.register_resident_activation(&m).expect("register m");
-    backend.register_resident_activation(&v).expect("register v");
+    ResidencyBackend::runtime_register_resident_activation(backend, param).expect("register param");
+    ResidencyBackend::runtime_register_resident_activation(backend, grad).expect("register grad");
+    ResidencyBackend::runtime_register_resident_activation(backend, &m).expect("register m");
+    ResidencyBackend::runtime_register_resident_activation(backend, &v).expect("register v");
     let dispatched = OptimizerBackend::runtime_dispatch_adamw_step(
         backend, param, grad, &m, &v, 1e-2, 0.9, 0.999, 1e-8, 0.0, 1,
     )
-        .expect("dispatch_adamw_step failed");
-    assert!(dispatched, "Metal AdamW should dispatch on resident tensors");
-    backend.evict_resident_activation(grad);
-    backend.evict_resident_activation(&m);
-    backend.evict_resident_activation(&v);
+    .expect("dispatch_adamw_step failed");
+    assert!(
+        dispatched,
+        "Metal AdamW should dispatch on resident tensors"
+    );
+    ResidencyBackend::runtime_evict_resident_activation(backend, grad);
+    ResidencyBackend::runtime_evict_resident_activation(backend, &m);
+    ResidencyBackend::runtime_evict_resident_activation(backend, &v);
 
     let after = read_host_f32(param);
     assert_eq!(after.len(), before.len(), "param len changed");

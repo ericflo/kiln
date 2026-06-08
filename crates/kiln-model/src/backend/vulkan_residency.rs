@@ -1,8 +1,8 @@
 //! Vulkan resident activation registry storage.
 //!
-//! The runtime methods still live on `VulkanBackend`; this module owns the
-//! process-global TensorId -> VulkanBuffer map they share with optimizer
-//! dispatch.
+//! `ResidencyBackend` methods on `VulkanBackend` use this module's
+//! process-global TensorId -> VulkanBuffer maps for optimizer dispatch and
+//! recurrent-state residency.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -125,7 +125,7 @@ pub(super) fn replace_recurrent_state_resident_buffer(
 mod tests {
     use anyhow::Result;
 
-    use crate::backend::BackendRuntime;
+    use crate::backend::ResidencyBackend;
     use crate::backend::vulkan::VulkanBackend;
 
     fn test_backend() -> VulkanBackend {
@@ -153,10 +153,14 @@ mod tests {
 
         let initial = kiln_tensor::Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2))?
             .to_dtype(kiln_tensor::DType::BF16)?;
-        backend.register_resident_activation(&initial)?;
-        let resolved = backend
-            .resolve_resident_activation(&initial, &[2, 2], kiln_tensor::DType::BF16)?
-            .expect("must resolve right after register");
+        ResidencyBackend::runtime_register_resident_activation(&backend, &initial)?;
+        let resolved = ResidencyBackend::runtime_resolve_resident_activation(
+            &backend,
+            &initial,
+            &[2, 2],
+            kiln_tensor::DType::BF16,
+        )?
+        .expect("must resolve right after register");
         let init_v: Vec<f32> = resolved
             .to_dtype(kiln_tensor::DType::F32)?
             .flatten_all()?
@@ -165,10 +169,14 @@ mod tests {
 
         let v = kiln_tensor::Tensor::from_vec(vec![10.0f32, 20.0, 30.0, 40.0], (2, 2))?
             .to_dtype(kiln_tensor::DType::BF16)?;
-        backend.register_resident_activation(&v)?;
-        let resolved_v = backend
-            .resolve_resident_activation(&v, &[2, 2], kiln_tensor::DType::BF16)?
-            .expect("v must resolve after register");
+        ResidencyBackend::runtime_register_resident_activation(&backend, &v)?;
+        let resolved_v = ResidencyBackend::runtime_resolve_resident_activation(
+            &backend,
+            &v,
+            &[2, 2],
+            kiln_tensor::DType::BF16,
+        )?
+        .expect("v must resolve after register");
         let v_init_v: Vec<f32> = resolved_v
             .to_dtype(kiln_tensor::DType::F32)?
             .flatten_all()?
@@ -179,18 +187,22 @@ mod tests {
             kiln_tensor::Tensor::from_vec(vec![100.0f32, 200.0, 300.0, 400.0], (2, 2))?
                 .to_dtype(kiln_tensor::DType::BF16)?;
         v.slice_set(&newer_data, 0, 0)?;
-        backend.update_resident_activation(&v)?;
-        let resolved_after = backend
-            .resolve_resident_activation(&v, &[2, 2], kiln_tensor::DType::BF16)?
-            .expect("v must resolve after update");
+        ResidencyBackend::runtime_update_resident_activation(&backend, &v)?;
+        let resolved_after = ResidencyBackend::runtime_resolve_resident_activation(
+            &backend,
+            &v,
+            &[2, 2],
+            kiln_tensor::DType::BF16,
+        )?
+        .expect("v must resolve after update");
         let after_v: Vec<f32> = resolved_after
             .to_dtype(kiln_tensor::DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
         assert_eq!(after_v, vec![100.0, 200.0, 300.0, 400.0]);
 
-        backend.evict_resident_activation(&initial);
-        backend.evict_resident_activation(&v);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &initial);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &v);
         Ok(())
     }
 
@@ -204,8 +216,10 @@ mod tests {
         }
         let t = kiln_tensor::Tensor::from_vec(vec![1.0f32; 4], (4,))?;
 
-        backend.update_resident_activation(&t)?;
-        assert!(!backend.has_resident_activation(&t));
+        ResidencyBackend::runtime_update_resident_activation(&backend, &t)?;
+        assert!(!ResidencyBackend::runtime_has_resident_activation(
+            &backend, &t
+        ));
         Ok(())
     }
 
@@ -218,22 +232,30 @@ mod tests {
             return Ok(());
         }
         let t = kiln_tensor::Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2))?;
-        backend.register_resident_activation(&t)?;
-        assert!(backend.has_resident_activation(&t));
-        backend.evict_resident_activation(&t);
-        assert!(!backend.has_resident_activation(&t));
+        ResidencyBackend::runtime_register_resident_activation(&backend, &t)?;
+        assert!(ResidencyBackend::runtime_has_resident_activation(
+            &backend, &t
+        ));
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &t);
+        assert!(!ResidencyBackend::runtime_has_resident_activation(
+            &backend, &t
+        ));
 
-        backend.register_resident_activation(&t)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &t)?;
         assert!(
-            backend.has_resident_activation(&t),
+            ResidencyBackend::runtime_has_resident_activation(&backend, &t),
             "tensor must be registered again after eviction"
         );
-        let resolved = backend
-            .resolve_resident_activation(&t, &[2, 2], kiln_tensor::DType::F32)?
-            .expect("must resolve after re-register");
+        let resolved = ResidencyBackend::runtime_resolve_resident_activation(
+            &backend,
+            &t,
+            &[2, 2],
+            kiln_tensor::DType::F32,
+        )?
+        .expect("must resolve after re-register");
         let data: Vec<f32> = resolved.flatten_all()?.to_vec1::<f32>()?;
         assert_eq!(data, vec![1.0, 2.0, 3.0, 4.0]);
-        backend.evict_resident_activation(&t);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &t);
         Ok(())
     }
 
@@ -246,9 +268,9 @@ mod tests {
             return Ok(());
         }
         let empty: kiln_tensor::Tensor = kiln_tensor::Tensor::from_vec(Vec::<f32>::new(), (0,))?;
-        backend.register_resident_activation(&empty)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &empty)?;
         assert!(
-            !backend.has_resident_activation(&empty),
+            !ResidencyBackend::runtime_has_resident_activation(&backend, &empty),
             "empty tensor must not be registered (zero-size driver issue)"
         );
         Ok(())
@@ -265,23 +287,35 @@ mod tests {
         let original_data = vec![1.5f32, -2.5, 3.25, -4.75];
         let t = kiln_tensor::Tensor::from_vec(original_data.clone(), (2, 2))?;
 
-        let unresolved =
-            backend.resolve_resident_activation(&t, &[2, 2], kiln_tensor::DType::F32)?;
+        let unresolved = ResidencyBackend::runtime_resolve_resident_activation(
+            &backend,
+            &t,
+            &[2, 2],
+            kiln_tensor::DType::F32,
+        )?;
         assert!(unresolved.is_none(), "unregistered tensor must not resolve");
 
-        backend.register_resident_activation(&t)?;
-        let resolved = backend
-            .resolve_resident_activation(&t, &[2, 2], kiln_tensor::DType::F32)?
-            .expect("must resolve once registered");
+        ResidencyBackend::runtime_register_resident_activation(&backend, &t)?;
+        let resolved = ResidencyBackend::runtime_resolve_resident_activation(
+            &backend,
+            &t,
+            &[2, 2],
+            kiln_tensor::DType::F32,
+        )?
+        .expect("must resolve once registered");
         assert_eq!(resolved.dims(), &[2, 2]);
         let resolved_data: Vec<f32> = resolved.flatten_all()?.to_vec1::<f32>()?;
         for (i, (got, want)) in resolved_data.iter().zip(original_data.iter()).enumerate() {
             assert!((got - want).abs() < 1e-9, "idx {i}: got {got} want {want}");
         }
 
-        backend.evict_resident_activation(&t);
-        let unresolved =
-            backend.resolve_resident_activation(&t, &[2, 2], kiln_tensor::DType::F32)?;
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &t);
+        let unresolved = ResidencyBackend::runtime_resolve_resident_activation(
+            &backend,
+            &t,
+            &[2, 2],
+            kiln_tensor::DType::F32,
+        )?;
         assert!(unresolved.is_none());
         Ok(())
     }
@@ -290,7 +324,7 @@ mod tests {
     fn resident_activation_register_evict_round_trip() -> Result<()> {
         let backend = test_backend();
         assert!(
-            backend.supports_resident_activation(),
+            ResidencyBackend::runtime_supports_resident_activation(&backend),
             "VulkanBackend must advertise resident-activation support"
         );
         if skip_without_vulkan(
@@ -302,22 +336,24 @@ mod tests {
 
         let t = kiln_tensor::Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2))?;
         assert!(
-            !backend.has_resident_activation(&t),
+            !ResidencyBackend::runtime_has_resident_activation(&backend, &t),
             "fresh tensor must not be registered"
         );
-        backend.register_resident_activation(&t)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &t)?;
         assert!(
-            backend.has_resident_activation(&t),
+            ResidencyBackend::runtime_has_resident_activation(&backend, &t),
             "tensor must be registered after register_resident_activation"
         );
-        backend.register_resident_activation(&t)?;
-        assert!(backend.has_resident_activation(&t));
-        backend.evict_resident_activation(&t);
+        ResidencyBackend::runtime_register_resident_activation(&backend, &t)?;
+        assert!(ResidencyBackend::runtime_has_resident_activation(
+            &backend, &t
+        ));
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &t);
         assert!(
-            !backend.has_resident_activation(&t),
+            !ResidencyBackend::runtime_has_resident_activation(&backend, &t),
             "tensor must be unregistered after evict_resident_activation"
         );
-        backend.evict_resident_activation(&t);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &t);
         Ok(())
     }
 }

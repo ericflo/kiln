@@ -707,158 +707,6 @@ pub trait BackendRuntime:
         GdnBackend::runtime_supports_gdn_recurrent_step(self)
     }
 
-    fn enter_gdn_recurrent_resident_state_scope(&self) -> bool {
-        ResidencyBackend::runtime_enter_gdn_recurrent_resident_state_scope(self)
-    }
-
-    fn exit_gdn_recurrent_resident_state_scope(&self) {
-        ResidencyBackend::runtime_exit_gdn_recurrent_resident_state_scope(self)
-    }
-
-    fn materialize_gdn_recurrent_resident_state(
-        &self,
-        state: &mut kiln_tensor::Tensor,
-    ) -> Result<()> {
-        ResidencyBackend::runtime_materialize_gdn_recurrent_resident_state(self, state)
-    }
-
-    fn evict_gdn_recurrent_resident_state(&self, state: &kiln_tensor::Tensor) {
-        ResidencyBackend::runtime_evict_gdn_recurrent_resident_state(self, state)
-    }
-
-    fn has_gdn_recurrent_resident_state(&self, state: &kiln_tensor::Tensor) -> bool {
-        ResidencyBackend::runtime_has_gdn_recurrent_resident_state(self, state)
-    }
-
-    /// True when the backend's resident activation registry is
-    /// non-trivially implemented — i.e. `register_resident_activation`
-    /// actually uploads the tensor and `has_resident_activation` will
-    /// return true after registration. False for the default no-op
-    /// implementations. Callers that want to opt OUT of the lifecycle
-    /// hook calls entirely (to avoid the per-call overhead of
-    /// `extract_tensor_bytes` + buffer alloc on Vulkan) can gate on
-    /// this. The default impls are cheap enough that it's safe to
-    /// always invoke them, so most callers should not bother.
-    fn supports_resident_activation(&self) -> bool {
-        ResidencyBackend::runtime_supports_resident_activation(self)
-    }
-
-    /// Register a non-weight tensor (e.g. a checkpoint-segment activation
-    /// boundary) as registry-resident on the device. The default
-    /// implementation is a no-op — backends that don't have a resident
-    /// activation registry can safely ignore the call.
-    ///
-    /// Phase 3.1 of the residency plan. Generalises the GDN-specific
-    /// `materialize_gdn_recurrent_resident_state` hook above. Once
-    /// Phase 3.2 lands, `checkpointed_forward_backward` calls this for
-    /// each segment-output tensor so the recompute pass can read the
-    /// boundary back from device memory instead of the candle CPU mirror.
-    fn register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
-        ResidencyBackend::runtime_register_resident_activation(self, tensor)
-    }
-
-    /// Evict a previously-registered activation from the residency
-    /// registry. Caller invokes this when the autograd pass no longer
-    /// needs the tensor (e.g. after a segment's backward completes).
-    /// No-op default.
-    fn evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
-        ResidencyBackend::runtime_evict_resident_activation(self, tensor)
-    }
-
-    /// Re-upload the tensor's current bytes into its registry buffer
-    /// (if registered). Caller invokes this when the kt master
-    /// storage has been mutated outside of the registry — e.g. after
-    /// the optimizer step writes a new value to a registered
-    /// LoRA parameter. Without this, `lora_delta_resident` and friends
-    /// would keep reading the original init bytes from the buffer.
-    ///
-    /// No-op default; backends without a registry have nothing to
-    /// keep in sync.
-    fn update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
-        ResidencyBackend::runtime_update_resident_activation(self, tensor)
-    }
-
-    /// True when the given tensor has been registered as
-    /// resident-on-device. Used by routing code to decide between the
-    /// resident fast path and the legacy CPU-roundtrip path. False by
-    /// default so callers without registry support continue to use the
-    /// legacy path.
-    fn has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
-        ResidencyBackend::runtime_has_resident_activation(self, tensor)
-    }
-
-    /// Read a previously-registered activation back from device into
-    /// a fresh CPU `kiln_tensor::Tensor` with the given shape and dtype. Returns
-    /// `Ok(None)` when the activation isn't resident — caller should
-    /// then use whatever CPU-side storage they retained originally.
-    ///
-    /// Phase 3.2 of the residency plan: pairs with
-    /// `register_resident_activation` to let `checkpointed_forward_backward`
-    /// drop the CPU mirror after registering, then re-materialise
-    /// only when the recompute pass actually needs the boundary.
-    /// Today's no-op default returns `Ok(None)` so callers without
-    /// registry support fall through to the legacy code path.
-    fn resolve_resident_activation(
-        &self,
-        tensor: &kiln_tensor::Tensor,
-        shape: &[usize],
-        dtype: kiln_tensor::DType,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        ResidencyBackend::runtime_resolve_resident_activation(self, tensor, shape, dtype)
-    }
-
-    fn assemble_gdn_recurrent_resident_batch_rows(
-        &self,
-        rows: &[&kiln_tensor::Tensor],
-        batch: &kiln_tensor::Tensor,
-    ) -> Result<bool> {
-        ResidencyBackend::runtime_assemble_gdn_recurrent_resident_batch_rows(self, rows, batch)
-    }
-
-    fn scatter_gdn_recurrent_resident_batch_rows(
-        &self,
-        batch: &kiln_tensor::Tensor,
-        destinations: &mut [&mut kiln_tensor::Tensor],
-    ) -> Result<bool> {
-        ResidencyBackend::runtime_scatter_gdn_recurrent_resident_batch_rows(
-            self,
-            batch,
-            destinations,
-        )
-    }
-
-    fn assemble_linear_attn_gdn_state_batch_kt(
-        &self,
-        row_keys: &[kiln_tensor::TensorId],
-        batch_key: kiln_tensor::TensorId,
-    ) -> Result<bool> {
-        ResidencyBackend::runtime_assemble_linear_attn_gdn_state_batch_kt(
-            self, row_keys, batch_key,
-        )
-    }
-
-    fn scatter_linear_attn_gdn_state_batch_kt(
-        &self,
-        batch_key: kiln_tensor::TensorId,
-        row_keys: &[kiln_tensor::TensorId],
-    ) -> Result<bool> {
-        ResidencyBackend::runtime_scatter_linear_attn_gdn_state_batch_kt(
-            self, batch_key, row_keys,
-        )
-    }
-
-    fn seed_linear_attn_gdn_state_kt(
-        &self,
-        recurrent: &kiln_tensor::Tensor,
-        conv: &kiln_tensor::Tensor,
-    ) -> Result<bool> {
-        ResidencyBackend::runtime_seed_linear_attn_gdn_state_kt(self, recurrent, conv)
-    }
-
-    fn has_linear_attn_gdn_state_kt(&self, key: kiln_tensor::TensorId) -> bool {
-        ResidencyBackend::runtime_has_linear_attn_gdn_state_kt(self, key)
-    }
-
     fn supports_gdn_chunk_prep(&self) -> bool {
         GdnBackend::runtime_supports_gdn_chunk_prep(self)
     }
@@ -1795,10 +1643,7 @@ pub trait LinearBackend: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
-    fn runtime_prewarm_decode_weights(
-        &self,
-        _weights: &crate::forward::GpuWeights,
-    ) -> Result<()> {
+    fn runtime_prewarm_decode_weights(&self, _weights: &crate::forward::GpuWeights) -> Result<()> {
         Ok(())
     }
 
@@ -1923,7 +1768,7 @@ pub trait SamplingBackend: Send + Sync + std::fmt::Debug {
     }
 }
 
-/// Focused `ResidencyBackend` facet delegated by the current `BackendRuntime` facade.
+/// Focused `ResidencyBackend` facet for resident activation/state storage.
 #[allow(clippy::too_many_arguments)]
 pub trait ResidencyBackend: BackendIdentity + Send + Sync + std::fmt::Debug {
     fn runtime_supports_resident_activation(&self) -> bool {
@@ -2108,7 +1953,9 @@ pub trait TrainingLossBackend: Send + Sync + std::fmt::Debug {
 
 /// Focused `ReplayBackend` facet delegated by the current `BackendRuntime` facade.
 #[allow(clippy::too_many_arguments)]
-pub trait ReplayBackend: BackendIdentity + AttentionBackend + Send + Sync + std::fmt::Debug {
+pub trait ReplayBackend:
+    BackendIdentity + AttentionBackend + Send + Sync + std::fmt::Debug
+{
     fn runtime_decode_resident_pool_ready(
         &self,
         _max_hidden: usize,
@@ -2420,9 +2267,11 @@ mod tests {
         assert_eq!(vulkan.exact_gdn_backward_tile_tokens, None);
         assert_eq!(vulkan.streaming_prefill_tile_tokens, 2048);
         assert_eq!(vulkan.tape_streaming_tile_tokens, 2048);
-        assert!(vulkan
-            .base_weight_dtypes
-            .contains(&kiln_tensor::DType::BF16));
+        assert!(
+            vulkan
+                .base_weight_dtypes
+                .contains(&kiln_tensor::DType::BF16)
+        );
         assert!(vulkan.mixed_precision);
     }
 
@@ -2906,7 +2755,9 @@ mod tests {
             resident: false,
         };
 
-        assert!(ResidencyBackend::runtime_resident_activation_resource(&backend, &tensor).is_none());
+        assert!(
+            ResidencyBackend::runtime_resident_activation_resource(&backend, &tensor).is_none()
+        );
 
         let backend = ResidentActivationProbeBackend {
             name: "vulkan",
@@ -2969,31 +2820,39 @@ mod tests {
             &tensor,
             residency::ResidentResourceFamily::Activation,
         ));
-        assert!(residency::ResidentRegistry::register_resource(
-            &backend,
-            &tensor,
-            residency::ResidentResourceFamily::Activation,
-        )?
-        .is_some());
-        assert!(residency::ResidentRegistry::update_resource(
-            &backend,
-            &tensor,
-            residency::ResidentResourceFamily::Activation,
-        )?
-        .is_some());
+        assert!(
+            residency::ResidentRegistry::register_resource(
+                &backend,
+                &tensor,
+                residency::ResidentResourceFamily::Activation,
+            )?
+            .is_some()
+        );
+        assert!(
+            residency::ResidentRegistry::update_resource(
+                &backend,
+                &tensor,
+                residency::ResidentResourceFamily::Activation,
+            )?
+            .is_some()
+        );
 
-        assert!(residency::ResidentRegistry::resident_resource(
-            &backend,
-            &tensor,
-            residency::ResidentResourceFamily::OptimizerParam,
-        )
-        .is_none());
-        assert!(residency::ResidentRegistry::register_resource(
-            &backend,
-            &tensor,
-            residency::ResidentResourceFamily::PagedKv,
-        )?
-        .is_none());
+        assert!(
+            residency::ResidentRegistry::resident_resource(
+                &backend,
+                &tensor,
+                residency::ResidentResourceFamily::OptimizerParam,
+            )
+            .is_none()
+        );
+        assert!(
+            residency::ResidentRegistry::register_resource(
+                &backend,
+                &tensor,
+                residency::ResidentResourceFamily::PagedKv,
+            )?
+            .is_none()
+        );
         residency::ResidentRegistry::evict_resource(
             &backend,
             &tensor,
@@ -3138,26 +2997,6 @@ mod tests {
             "supports_gdn_gated_rms_norm"
         );
 
-        assert_forwards!(
-            ResidencyBackend::runtime_supports_resident_activation(backend),
-            BackendRuntime::supports_resident_activation(backend),
-            "supports_resident_activation"
-        );
-        let focused_scope =
-            ResidencyBackend::runtime_enter_gdn_recurrent_resident_state_scope(backend);
-        if focused_scope {
-            ResidencyBackend::runtime_exit_gdn_recurrent_resident_state_scope(backend);
-        }
-        let runtime_scope = BackendRuntime::enter_gdn_recurrent_resident_state_scope(backend);
-        if runtime_scope {
-            BackendRuntime::exit_gdn_recurrent_resident_state_scope(backend);
-        }
-        assert_forwards!(
-            focused_scope,
-            runtime_scope,
-            "enter_gdn_recurrent_resident_state_scope"
-        );
-
         let replay_req = capability::ReplayRequest::paged_decode_graph_outputs(8, 16, 2)
             .with_dtype(kiln_tensor::DType::BF16);
         assert_forwards!(
@@ -3178,7 +3017,6 @@ mod tests {
             ),
             "replay_authority"
         );
-
     }
 
     #[test]
@@ -3270,9 +3108,10 @@ mod tests {
     fn cuda_training_capabilities_do_not_overclaim_native_training() {
         let caps = cuda::CudaBackend::training_capabilities_static();
         assert!(caps.projection_training.contains("offset chunk hook"));
-        assert!(caps
-            .lora_delta_training
-            .contains("declines tape-tracked tensors"));
+        assert!(
+            caps.lora_delta_training
+                .contains("declines tape-tracked tensors")
+        );
         assert_eq!(
             caps.resident_activation,
             "kt TensorId lifecycle registry; kt CUDA tensors are canonical"
