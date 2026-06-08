@@ -1049,7 +1049,7 @@
         "KILN_VULKAN_RESIDENT_DECODE",
         "KILN_VULKAN_SDPA"
       ],
-      "override_count": 50,
+      "override_count": 42,
       "overrides": [
         "assemble_linear_attn_gdn_state_batch_kt",
         "causal_conv1d_prefill",
@@ -1075,10 +1075,6 @@
         "gdn_recurrent_step",
         "has_linear_attn_gdn_state_kt",
         "linear_decode",
-        "linear_decode_argmax",
-        "linear_decode_argmax_batch",
-        "linear_decode_sample",
-        "linear_decode_sample_batch",
         "linear_prefill_apply",
         "linear_prefill_apply_offset",
         "mlp_decode",
@@ -1096,11 +1092,7 @@
         "supports_gdn_gates",
         "supports_gdn_recurrent_prefill_native_head_last",
         "supports_gdn_recurrent_qk_norm_prefill_native_head_last",
-        "supports_gdn_recurrent_step",
-        "supports_linear_decode_argmax",
-        "supports_linear_decode_argmax_batch",
-        "supports_linear_decode_sample",
-        "supports_linear_decode_sample_batch"
+        "supports_gdn_recurrent_step"
       ],
       "source": "crates/kiln-model/src/backend/vulkan.rs",
       "source_modules": [
@@ -3419,7 +3411,7 @@
           ],
           "expected": "<= 8",
           "name": "backend_runtime_method_count_below_gate",
-          "observed": 85,
+          "observed": 77,
           "passed": false
         }
       ],
@@ -4482,5 +4474,5 @@
       "tape_streaming_tile_tokens": 2048
     }
   },
-  "trait_method_count": 85
+  "trait_method_count": 77
 }
