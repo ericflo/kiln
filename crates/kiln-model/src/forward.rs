@@ -20,7 +20,7 @@ use crate::backend::capability::{
 };
 use crate::backend::{
     AttentionBackend, BackendRuntime, ConvBackend, GdnBackend, LinearBackend, PagedKvBackend,
-    ReplayBackend, ResidencyBackend, SamplingBackend, TrainingPrecisionPolicy,
+    ReplayBackend, ResidencyBackend, SamplingBackend,
 };
 #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
 use crate::backend::BackendIdentity;
@@ -5829,7 +5829,8 @@ pub fn streaming_tile_tokens() -> usize {
 /// smaller tile because it measured faster for long desktop TTFT.
 pub fn streaming_tile_tokens_for(device: &Device) -> usize {
     streaming_tile_tokens_env_override().unwrap_or_else(|| {
-        TrainingPrecisionPolicy::for_device_family(*device).streaming_prefill_tile_tokens
+        crate::backend::training_precision_policy_for_device_kt(*device)
+            .streaming_prefill_tile_tokens
     })
 }
 
@@ -5843,13 +5844,13 @@ pub fn streaming_tile_tokens_for(device: &Device) -> usize {
 /// overrides them.
 pub fn tape_streaming_tile_tokens_for(device: &Device) -> usize {
     tape_streaming_tile_tokens_env_override().unwrap_or_else(|| {
-        TrainingPrecisionPolicy::for_device_family(*device).tape_streaming_tile_tokens
+        crate::backend::training_precision_policy_for_device_kt(*device).tape_streaming_tile_tokens
     })
 }
 
 fn streaming_tile_tokens_for_paged_prefill(device: &Device, seq_len: usize) -> usize {
     streaming_tile_tokens_env_override().unwrap_or_else(|| {
-        TrainingPrecisionPolicy::for_device_family(*device)
+        crate::backend::training_precision_policy_for_device_kt(*device)
             .streaming_prefill_tile_tokens_for_seq_len(seq_len)
     })
 }
@@ -6957,7 +6958,7 @@ fn embedding_lookup_from_weights(token_ids: &[u32], weights: &GpuWeights) -> Res
 /// activation / BF16 base-weight envelope while leaving equal-dtype CUDA/Metal
 /// paths untouched.
 fn cast_embedding_output_to_policy_activation(hidden: Tensor) -> Result<Tensor> {
-    let precision_policy = TrainingPrecisionPolicy::for_device_family(hidden.device());
+    let precision_policy = crate::backend::training_precision_policy_for_device_kt(hidden.device());
     let target_dtype = if cfg!(feature = "vulkan") {
         precision_policy.activation_dtype_for_embedding_output(hidden.dtype())
     } else {
@@ -31935,27 +31936,14 @@ mod tests {
             // Guard against silent eager fallback: a graph MUST have been
             // captured by now, otherwise this "parity" test is comparing
             // eager-against-eager and proves nothing about capture/replay.
-            // #1082 FINDING (2026-05-31): on this synthetic 1-layer full-attn
-            // fixture, bs=1 graph CAPTURE fails and the runner disables itself
-            // (try_capture errors during begin_capture→forward→end_capture — likely
-            // a not-capture-safe op, the dangling-pointer/per-call-alloc KNOWN-BUG
-            // class, possibly extended to bs=1 by the candle→kt flip; the eager path
-            // does work — the C3 test passes). Root-causing this is a PREREQUISITE
-            // for converting cuda_graph.rs's candle buffers to kt (don't convert it
-            // blind). Until then this test SKIPS-with-diagnostic rather than failing
-            // the suite or being a vacuous eager-vs-eager comparison. When capture is
-            // fixed, it becomes a live graph-replay-vs-eager decode-parity gate.
-            if !runner.is_enabled() || runner.captured_graph_count() == 0 {
-                eprintln!(
-                    "[CUDA-GRAPH-PARITY] SKIP: bs=1 graph capture did not succeed on the \
-                     synthetic fixture (enabled={}, captured={}) — known #1082 finding; \
-                     root-cause before the cuda_graph candle->kt conversion. Eager decode \
-                     itself is validated by the C3 test.",
-                    runner.is_enabled(),
-                    runner.captured_graph_count()
-                );
-                return Ok(());
-            }
+            assert!(
+                runner.is_enabled(),
+                "CUDA graph runner disabled before replay parity; capture failure must be fixed"
+            );
+            assert!(
+                runner.captured_graph_count() > 0,
+                "CUDA graph replay parity requires a captured graph, not eager fallback"
+            );
             let replay = step(&mut runner, &mut linear_state)?; // call 3: graph REPLAY
 
             // --- Assertions: mirror the C3 token-parity + relative bound. ---

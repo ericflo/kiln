@@ -381,7 +381,7 @@ fn lora_param_zeros(shape: (usize, usize), dtype: DType, device: &Device) -> Res
 
 #[inline]
 fn training_precision_policy_for_device(device: &Device) -> TrainingPrecisionPolicy {
-    TrainingPrecisionPolicy::for_device_family(*device)
+    backend::training_precision_policy_for_device_kt(*device)
 }
 
 #[inline]

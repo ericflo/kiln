@@ -1414,6 +1414,25 @@ def phase5_remaining_from_signals(signals: list[dict[str, Any]]) -> list[str]:
     return remaining
 
 
+def phase6_remaining_from_signals(signals: list[dict[str, Any]]) -> list[str]:
+    remaining: list[str] = []
+    for signal in signals:
+        if signal["passed"]:
+            continue
+        name = signal["name"]
+        if name == "training_precision_for_device_family_removed_from_production":
+            remaining.append(
+                "production training paths still call TrainingPrecisionPolicy::for_device_family"
+            )
+        elif name == "training_precision_policy_delegates_to_backend_trait":
+            remaining.append(
+                "training precision policy is not selected through TrainingLossBackend"
+            )
+        else:
+            remaining.append(f"{name} migration signal is not yet satisfied")
+    return remaining
+
+
 def file_text(path: str) -> str:
     try:
         return (ROOT / path).read_text()
@@ -1840,6 +1859,28 @@ def replay_parity_w5_3_signal_count() -> tuple[int, int]:
     return sum(1 for check in checks if check), len(checks)
 
 
+def training_precision_for_device_family_production_count() -> int:
+    paths = [
+        "crates/kiln-model/src/forward.rs",
+        "crates/kiln-model/src/tape_forward.rs",
+        "crates/kiln-train/src/trainer.rs",
+    ]
+    return sum(
+        production_source_text(path).count("TrainingPrecisionPolicy::for_device_family")
+        for path in paths
+    )
+
+
+def training_precision_backend_trait_policy_signal_count() -> tuple[int, int]:
+    backend = production_source_text("crates/kiln-model/src/backend/mod.rs")
+    required = [
+        "pub fn training_precision_policy_for_device_kt",
+        "TrainingLossBackend::runtime_training_precision_policy(&backend)",
+    ]
+    observed = sum(1 for needle in required if needle in backend)
+    return observed, len(required)
+
+
 def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
     if phase == 1:
         shim_count = focused_trait_forwarding_shim_count()
@@ -2067,6 +2108,31 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
                 ],
             ),
         ]
+    if phase == 6:
+        device_family_count = training_precision_for_device_family_production_count()
+        trait_policy_count, trait_policy_expected = (
+            training_precision_backend_trait_policy_signal_count()
+        )
+        return [
+            phase_signal(
+                "training_precision_for_device_family_removed_from_production",
+                device_family_count == 0,
+                device_family_count,
+                0,
+                [
+                    "crates/kiln-model/src/forward.rs",
+                    "crates/kiln-model/src/tape_forward.rs",
+                    "crates/kiln-train/src/trainer.rs",
+                ],
+            ),
+            phase_signal(
+                "training_precision_policy_delegates_to_backend_trait",
+                trait_policy_count == trait_policy_expected,
+                trait_policy_count,
+                trait_policy_expected,
+                ["crates/kiln-model/src/backend/mod.rs"],
+            ),
+        ]
     return []
 
 
@@ -2088,14 +2154,13 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
     migration_by_phase = {
         0: "complete",
         2: "complete",
-        6: "complete",
         7: "complete",
         8: phase8_migration,
     }
     migration_signals_by_phase = {
-        phase: phase_migration_signals(phase) for phase in [1, 3, 4, 5]
+        phase: phase_migration_signals(phase) for phase in [1, 3, 4, 5, 6]
     }
-    for phase in [1, 3, 4, 5]:
+    for phase in [1, 3, 4, 5, 6]:
         migration_by_phase[phase] = migration_from_signals(
             migration_signals_by_phase[phase]
         )
@@ -2309,8 +2374,10 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
                 "Optimizer Dispatch",
                 "Conformance And Performance Gates",
             ],
-            "migration_signals": [],
-            "remaining": [],
+            "migration_signals": migration_signals_by_phase[6],
+            "remaining": []
+            if migration_by_phase[6] == "complete"
+            else phase6_remaining_from_signals(migration_signals_by_phase[6]),
         },
         {
             "phase": 7,

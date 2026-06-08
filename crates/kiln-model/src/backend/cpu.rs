@@ -6,8 +6,8 @@
 use super::{
     AttentionBackend, BackendIdentity, BackendMatmulLayout, BackendRuntime, ConvBackend,
     GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend,
-    SamplingBackend, StartupBackend, TrainingLossBackend, matmul_request_support_rank,
-    matmul_support_from_native, requested_matmul_layout,
+    SamplingBackend, StartupBackend, TrainingLossBackend, TrainingPrecisionPolicy,
+    matmul_request_support_rank, matmul_support_from_native, requested_matmul_layout,
 };
 
 #[derive(Debug)]
@@ -131,6 +131,17 @@ impl PagedKvBackend for CpuBackend {}
 
 impl ReplayBackend for CpuBackend {}
 
-impl TrainingLossBackend for CpuBackend {}
+impl TrainingLossBackend for CpuBackend {
+    fn runtime_training_precision_policy(&self) -> TrainingPrecisionPolicy {
+        match self.device_kt {
+            kiln_tensor::Device::Cuda(_) => TrainingPrecisionPolicy::cuda(),
+            kiln_tensor::Device::Rocm(_) => TrainingPrecisionPolicy::rocm(),
+            kiln_tensor::Device::Metal(_) => TrainingPrecisionPolicy::metal(),
+            kiln_tensor::Device::Vulkan(_) => TrainingPrecisionPolicy::vulkan(),
+            kiln_tensor::Device::Cpu => TrainingPrecisionPolicy::portable(),
+            _ => TrainingPrecisionPolicy::portable(),
+        }
+    }
+}
 
 impl BackendRuntime for CpuBackend {}

@@ -442,7 +442,7 @@ pub fn try_tape_rms_norm_kt(
     // Mixed-precision RMSNorm exceptions are backend precision policy, not a
     // local Vulkan special case. Today the policy allows F32 activations with
     // BF16 norm weights for Vulkan's mixed F32/BF16 training envelope.
-    let precision_policy = crate::backend::TrainingPrecisionPolicy::for_device_family(x.device());
+    let precision_policy = crate::backend::training_precision_policy_for_device_kt(x.device());
     if weight.rank() != 1
         || x.rank() == 0
         || *x.shape().last().unwrap() != weight.shape()[0]
@@ -1411,7 +1411,7 @@ pub fn try_tape_lora_linear_kt(
     // frozen BF16 base weight are a backend precision-policy exception, not a
     // local device-family check. Today the policy admits this for Vulkan's
     // mixed F32/BF16 envelope; other backends keep the strict equal-dtype gate.
-    let precision_policy = crate::backend::TrainingPrecisionPolicy::for_device_family(x.device());
+    let precision_policy = crate::backend::training_precision_policy_for_device_kt(x.device());
     let mixed_base_weight = cfg!(feature = "vulkan")
         && precision_policy
             .supports_mixed_base_weight_dtype_for_activation(x.dtype(), weight_t.dtype());

@@ -488,6 +488,7 @@ impl TrainingPrecisionPolicy {
         }
     }
 
+    #[cfg(test)]
     pub const fn for_device_family(device: kiln_tensor::Device) -> Self {
         match device {
             kiln_tensor::Device::Cuda(_) => Self::cuda(),
@@ -1804,6 +1805,43 @@ pub fn for_device_kt(device: &kiln_tensor::Device) -> Arc<dyn BackendRuntime> {
                 }
             }
             Arc::new(cpu::CpuBackend::new(kiln_tensor::Device::Cpu))
+        }
+    }
+}
+
+/// Training precision policy selected through the concrete backend facet.
+///
+/// `for_device_kt` intentionally treats CPU as a Vulkan runtime-detect sentinel
+/// in Vulkan-enabled binaries. Training policy callers need CPU tensors to keep
+/// the portable CPU policy, so this helper constructs the exact runtime family
+/// needed for the policy query and then delegates to `TrainingLossBackend`.
+pub fn training_precision_policy_for_device_kt(
+    device: kiln_tensor::Device,
+) -> TrainingPrecisionPolicy {
+    match device {
+        #[cfg(feature = "cuda")]
+        kiln_tensor::Device::Cuda(_) => {
+            let backend = cuda::CudaBackend::new(device);
+            TrainingLossBackend::runtime_training_precision_policy(&backend)
+        }
+        #[cfg(feature = "rocm")]
+        kiln_tensor::Device::Rocm(_) => {
+            let backend = rocm::RocmBackend::new(device);
+            TrainingLossBackend::runtime_training_precision_policy(&backend)
+        }
+        #[cfg(feature = "metal")]
+        kiln_tensor::Device::Metal(_) => {
+            let backend = metal::MetalBackend::new(device);
+            TrainingLossBackend::runtime_training_precision_policy(&backend)
+        }
+        #[cfg(feature = "vulkan")]
+        kiln_tensor::Device::Vulkan(_) => {
+            let backend = vulkan::VulkanBackend::new(kiln_tensor::Device::Cpu);
+            TrainingLossBackend::runtime_training_precision_policy(&backend)
+        }
+        _ => {
+            let backend = cpu::CpuBackend::new(device);
+            TrainingLossBackend::runtime_training_precision_policy(&backend)
         }
     }
 }

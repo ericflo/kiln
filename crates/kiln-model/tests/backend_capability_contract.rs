@@ -4649,6 +4649,30 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "trainer should import the backend-owned training precision policy"
     );
     assert!(
+        backend_source.contains("pub fn training_precision_policy_for_device_kt")
+            && backend_source.contains("TrainingLossBackend::runtime_training_precision_policy"),
+        "device precision-policy lookup should delegate through the focused TrainingLossBackend facet"
+    );
+    for (path, source) in [
+        (
+            "crates/kiln-model/src/forward.rs",
+            production_source_before_tests(&forward_source),
+        ),
+        (
+            "crates/kiln-model/src/tape_forward.rs",
+            production_source_before_tests(&tape_forward_source),
+        ),
+        (
+            "crates/kiln-train/src/trainer.rs",
+            production_source_before_tests(&trainer_source),
+        ),
+    ] {
+        assert!(
+            !source.contains("TrainingPrecisionPolicy::for_device_family"),
+            "{path} production code should not call the device-family compatibility helper"
+        );
+    }
+    assert!(
         trainer_source.contains("fn training_precision_policy_for_device("),
         "trainer should centralize device-family precision policy lookup"
     );
@@ -4720,8 +4744,12 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "fn trace_model_segment_timings()",
     );
     assert!(
-        streaming_tile_section.contains("TrainingPrecisionPolicy::for_device_family"),
+        streaming_tile_section.contains("training_precision_policy_for_device_kt"),
         "streaming prefill tile defaults should read backend-owned training policy"
+    );
+    assert!(
+        !streaming_tile_section.contains("TrainingPrecisionPolicy::for_device_family"),
+        "streaming prefill tile defaults should not call the device-family compatibility helper"
     );
     assert!(
         !streaming_tile_section.contains("match streaming_prefill_device_kind"),
@@ -4733,9 +4761,13 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "fn embedding_lookup_from_weights_with_index(",
     );
     assert!(
-        embedding_activation_cast_section.contains("TrainingPrecisionPolicy::for_device_family")
+        embedding_activation_cast_section.contains("training_precision_policy_for_device_kt")
             && embedding_activation_cast_section.contains("activation_dtype_for_embedding_output"),
         "embedding activation cast should consume TrainingPrecisionPolicy"
+    );
+    assert!(
+        !embedding_activation_cast_section.contains("TrainingPrecisionPolicy::for_device_family"),
+        "embedding activation cast should not call the device-family compatibility helper"
     );
     for forbidden in [
         "vulkan_cast_activation_to_f32",
@@ -4762,9 +4794,13 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "/// kt-native matmul tape recorder",
     );
     assert!(
-        tape_rms_norm_section.contains("TrainingPrecisionPolicy::for_device_family")
+        tape_rms_norm_section.contains("training_precision_policy_for_device_kt")
             && tape_rms_norm_section.contains("supports_rms_norm_weight_dtype_for_activation"),
         "RMSNorm tape dtype routing should consume TrainingPrecisionPolicy"
+    );
+    assert!(
+        !tape_rms_norm_section.contains("TrainingPrecisionPolicy::for_device_family"),
+        "RMSNorm tape dtype routing should not call the device-family compatibility helper"
     );
     for forbidden in [
         "vk_f32x_bf16w",
@@ -4783,9 +4819,13 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "let out_kt = out_kt.context(\"tape_forward::try_tape_lora_linear_kt",
     );
     assert!(
-        tape_lora_linear_section.contains("TrainingPrecisionPolicy::for_device_family")
+        tape_lora_linear_section.contains("training_precision_policy_for_device_kt")
             && tape_lora_linear_section.contains("supports_mixed_base_weight_dtype_for_activation"),
         "LoRA tape mixed-base routing should consume TrainingPrecisionPolicy"
+    );
+    assert!(
+        !tape_lora_linear_section.contains("TrainingPrecisionPolicy::for_device_family"),
+        "LoRA tape mixed-base routing should not call the device-family compatibility helper"
     );
     for forbidden in [
         "vk_bf16_base",
@@ -6619,12 +6659,12 @@ fn generated_capability_report_tracks_migration_phase_status() {
         .find(|phase| phase["phase"] == 5)
         .expect("Phase 5 should be present");
     assert_eq!(
-        phase5["status"], "partial",
-        "Phase 5 should show W5.0 replay contract progress without claiming production replay wiring"
+        phase5["status"], "covered",
+        "Phase 5 should report complete only after replay routing and parity guards pass"
     );
     assert_eq!(phase5["contract"], "landed");
-    assert_eq!(phase5["migration"], "partial");
-    assert_eq!(phase5["genuine"], false);
+    assert_eq!(phase5["migration"], "complete");
+    assert_eq!(phase5["genuine"], true);
     let phase5_signals = phase5["migration_signals"]
         .as_array()
         .expect("Phase 5 should list migration signals");
@@ -6641,12 +6681,12 @@ fn generated_capability_report_tracks_migration_phase_status() {
         .find(|signal| signal["name"] == "production_replay_paths_use_replay_plan")
         .expect("Phase 5 should include production replay wiring signal");
     assert_eq!(
-        production_replay_signal["passed"], false,
-        "Phase 5 production wiring signal should fail until all decode replay runner families use ReplayPlan"
+        production_replay_signal["passed"], true,
+        "Phase 5 production wiring signal should pass only when all decode replay runner families use ReplayPlan"
     );
     assert_eq!(
-        production_replay_signal["observed"], 3,
-        "Phase 5 should report the ROCm, Metal, and Vulkan production replay runner slices as wired"
+        production_replay_signal["observed"], 4,
+        "Phase 5 should report CUDA, ROCm, Metal, and Vulkan production replay runner slices as wired"
     );
     assert_eq!(
         production_replay_signal["expected"], 4,
@@ -6657,16 +6697,53 @@ fn generated_capability_report_tracks_migration_phase_status() {
         .find(|signal| signal["name"] == "replay_parity_w5_3_live_gate")
         .expect("Phase 5 should include W5.3 eager-vs-replay parity signal");
     assert_eq!(
-        replay_parity_signal["passed"], false,
+        replay_parity_signal["passed"], true,
         "Phase 5 must not become genuine until replay parity is live rather than a skip-only scaffold"
     );
     assert_eq!(
-        replay_parity_signal["observed"], 2,
-        "Phase 5 should count the local CPU/mock contract and Metal parity gate as present"
+        replay_parity_signal["observed"], 3,
+        "Phase 5 should count the local CPU/mock contract plus Metal and CUDA parity gates as present"
     );
     assert_eq!(
         replay_parity_signal["expected"], 3,
         "Phase 5 W5.3 should require local CPU/mock, Metal, and live CUDA replay parity gates"
+    );
+
+    let phase6 = phases
+        .iter()
+        .find(|phase| phase["phase"] == 6)
+        .expect("Phase 6 should be present");
+    assert_eq!(
+        phase6["status"], "covered",
+        "Phase 6 should report complete only after training precision routing leaves production device-family lookup"
+    );
+    assert_eq!(phase6["contract"], "landed");
+    assert_eq!(phase6["migration"], "complete");
+    assert_eq!(phase6["genuine"], true);
+    let phase6_signals = phase6["migration_signals"]
+        .as_array()
+        .expect("Phase 6 should list migration signals");
+    let device_family_signal = phase6_signals
+        .iter()
+        .find(|signal| {
+            signal["name"] == "training_precision_for_device_family_removed_from_production"
+        })
+        .expect("Phase 6 should include the production for_device_family removal signal");
+    assert_eq!(
+        device_family_signal["passed"], true,
+        "Phase 6 should not be genuine while production training paths call for_device_family"
+    );
+    assert_eq!(
+        device_family_signal["observed"], 0,
+        "Phase 6 should observe no production TrainingPrecisionPolicy::for_device_family call sites"
+    );
+    let backend_trait_signal = phase6_signals
+        .iter()
+        .find(|signal| signal["name"] == "training_precision_policy_delegates_to_backend_trait")
+        .expect("Phase 6 should include the backend trait precision-policy signal");
+    assert_eq!(
+        backend_trait_signal["passed"], true,
+        "Phase 6 should select precision policy through TrainingLossBackend"
     );
 
     let phase7 = phases
@@ -6743,6 +6820,42 @@ fn generated_capability_report_tracks_migration_phase_status() {
     assert!(
         report_md.contains("| Phase 8 | Conformance and performance gates | `covered` | `landed` | `complete` | yes |"),
         "Markdown report should mark Phase 8 covered after all latency fixtures lock"
+    );
+}
+
+#[test]
+fn cuda_graph_replay_hidden_routes_through_replay_plan_contract() {
+    let cuda_graph_source = fs::read_to_string(
+        workspace_root().join("crates/kiln-model/src/cuda_graph.rs"),
+    )
+    .expect("cuda_graph.rs should be readable");
+    let replay_section = source_between(
+        &cuda_graph_source,
+        "if let Some(captured) = self.captured.get(&requested_key)",
+        "if self.captured.len() >= Self::max_cached_graphs()",
+    );
+
+    assert!(
+        cuda_graph_source.contains("struct CudaDecodeReplayPlan")
+            && cuda_graph_source.contains("impl ReplayPlan for CudaDecodeReplayPlan"),
+        "CUDA graph runner should expose a production ReplayPlan adapter"
+    );
+    assert!(
+        cuda_graph_source.contains("fn replay_state_for_capture(")
+            && cuda_graph_source.contains("Backend::Cuda")
+            && cuda_graph_source.contains("ReplayState::new(replay_key, resources)")
+            && cuda_graph_source.contains("ReplayResourceStability::StableAcrossReplay"),
+        "CUDA graph capture should persist shared replay key/resource validation state"
+    );
+    assert!(
+        replay_section.contains("CudaDecodeReplayPlan::new(captured)")
+            && replay_section.contains("ReplayInputs::new")
+            && replay_section.contains("kiln_graph::ReplayPlan::replay(&mut plan"),
+        "CUDA graph replay should execute through ReplayPlan::replay"
+    );
+    assert!(
+        !replay_section.contains("captured.graph.launch()"),
+        "CUDA graph replay should not launch the native graph outside ReplayPlan::replay"
     );
 }
 

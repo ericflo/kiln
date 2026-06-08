@@ -3671,8 +3671,8 @@
         "crates/kiln-vulkan-kernel/src/cmd_batch.rs",
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
-      "genuine": false,
-      "migration": "partial",
+      "genuine": true,
+      "migration": "complete",
       "migration_signals": [
         {
           "evidence": [
@@ -3692,8 +3692,8 @@
           ],
           "expected": 4,
           "name": "production_replay_paths_use_replay_plan",
-          "observed": 3,
-          "passed": false
+          "observed": 4,
+          "passed": true
         },
         {
           "evidence": [
@@ -3702,21 +3702,18 @@
           ],
           "expected": 3,
           "name": "replay_parity_w5_3_live_gate",
-          "observed": 2,
-          "passed": false
+          "observed": 3,
+          "passed": true
         }
       ],
       "phase": 5,
-      "remaining": [
-        "production replay runners are not wired through ReplayPlan",
-        "eager-vs-replay parity gate is not live in both local ReplayPlan contract and hardware graph tests"
-      ],
+      "remaining": [],
       "report_sections": [
         "Focused Backend Facets",
         "Replay Authority",
         "Conformance And Performance Gates"
       ],
-      "status": "partial",
+      "status": "covered",
       "title": "Move replay into the authoritative graph layer"
     },
     {
@@ -3748,7 +3745,28 @@
       ],
       "genuine": true,
       "migration": "complete",
-      "migration_signals": [],
+      "migration_signals": [
+        {
+          "evidence": [
+            "crates/kiln-model/src/forward.rs",
+            "crates/kiln-model/src/tape_forward.rs",
+            "crates/kiln-train/src/trainer.rs"
+          ],
+          "expected": 0,
+          "name": "training_precision_for_device_family_removed_from_production",
+          "observed": 0,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs"
+          ],
+          "expected": 2,
+          "name": "training_precision_policy_delegates_to_backend_trait",
+          "observed": 2,
+          "passed": true
+        }
+      ],
       "phase": 6,
       "remaining": [],
       "report_sections": [
