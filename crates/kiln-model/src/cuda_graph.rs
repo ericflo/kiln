@@ -386,6 +386,17 @@ impl std::fmt::Debug for CudaDecodeReplayPlan<'_> {
     }
 }
 
+// SAFETY: `CudaDecodeReplayPlan` is a short-lived adapter created inside
+// `CudaGraphRunner::decode_step_paged`, whose runner is protected by the
+// `ModelRunner` mutex. It only borrows an already-captured graph and stable
+// device buffers. The raw CUDA graph handles are opaque driver objects, are not
+// dereferenced on the CPU, and replay requires `&mut self`, so launches through
+// this adapter remain serialized by the runner path.
+#[cfg(feature = "cuda")]
+unsafe impl Send for CudaDecodeReplayPlan<'_> {}
+#[cfg(feature = "cuda")]
+unsafe impl Sync for CudaDecodeReplayPlan<'_> {}
+
 #[cfg(feature = "cuda")]
 impl ReplayPlan for CudaDecodeReplayPlan<'_> {
     fn backend(&self) -> Backend {
