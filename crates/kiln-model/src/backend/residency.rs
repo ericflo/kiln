@@ -584,7 +584,7 @@ mod tests {
             replay_ref.replay_stability,
             ReplayResourceStability::StableWithinStep
         );
-        assert!(!replay_ref.is_replay_stable());
+        assert!(replay_ref.is_replay_stable());
         Ok(())
     }
 

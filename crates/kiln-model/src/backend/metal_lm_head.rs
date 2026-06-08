@@ -1031,23 +1031,23 @@ mod metal_lm_head_sample_tests {
         let weight_t = Tensor::from_vec_on(dev, weight_data.clone(), vec![hidden, vocab])?;
         let backend = MetalBackend::new(dev);
 
-        let tokens = backend
-            .linear_decode_sample_batch(
-                &x,
-                &weight_t,
-                &[1, 1, 1],
-                &[3, 7, 19],
-                &[2, 1, 4],
-                &[1.0, 1.15],
-                &[0.0, 0.35],
-                &[0.0, 0.08],
-                &[0.0, 0.9],
-                &[0, 6],
-                &[1.0, 0.74],
-                &[0.0, 0.02],
-                &[0xABCD, 0x1234_0000_5678_9999],
-            )?
-            .context("Metal backend declined batched sampled decode")?;
+        let tokens = crate::backend::SamplingBackend::runtime_linear_decode_sample_batch(
+            &backend,
+            &x,
+            &weight_t,
+            &[1, 1, 1],
+            &[3, 7, 19],
+            &[2, 1, 4],
+            &[1.0, 1.15],
+            &[0.0, 0.35],
+            &[0.0, 0.08],
+            &[0.0, 0.9],
+            &[0, 6],
+            &[1.0, 0.74],
+            &[0.0, 0.02],
+            &[0xABCD, 0x1234_0000_5678_9999],
+        )?
+        .context("Metal backend declined batched sampled decode")?;
         assert_eq!(tokens.len(), batch);
 
         let row0_logits = lm_head_logits_for_row(&x_data, &weight_data, 0, hidden, vocab);
@@ -1073,8 +1073,26 @@ mod metal_lm_head_sample_tests {
     #[test]
     fn sample_batch_support_does_not_claim_pure_greedy_batches() {
         let backend = MetalBackend::new(Device::Metal(0));
-        assert!(!backend.supports_linear_decode_sample_batch(&[20], &[0.0]));
-        assert!(!backend.supports_linear_decode_sample_batch(&[1, 1], &[0.7, 0.8]));
-        assert!(backend.supports_linear_decode_sample_batch(&[20, 1], &[0.8, 0.0]));
+        assert!(
+            !crate::backend::SamplingBackend::runtime_supports_linear_decode_sample_batch(
+                &backend,
+                &[20],
+                &[0.0]
+            )
+        );
+        assert!(
+            !crate::backend::SamplingBackend::runtime_supports_linear_decode_sample_batch(
+                &backend,
+                &[1, 1],
+                &[0.7, 0.8]
+            )
+        );
+        assert!(
+            crate::backend::SamplingBackend::runtime_supports_linear_decode_sample_batch(
+                &backend,
+                &[20, 1],
+                &[0.8, 0.0]
+            )
+        );
     }
 }

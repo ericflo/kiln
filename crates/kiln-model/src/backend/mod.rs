@@ -2721,7 +2721,10 @@ mod tests {
         );
 
         let backend = metal::MetalBackend::new(kiln_tensor::Device::Metal(0));
-        assert_eq!(backend.training_capabilities(), caps);
+        assert_eq!(
+            TrainingLossBackend::runtime_training_capabilities(&backend),
+            caps
+        );
     }
 
     #[cfg(feature = "vulkan")]
