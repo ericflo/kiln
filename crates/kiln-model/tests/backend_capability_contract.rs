@@ -5750,6 +5750,22 @@ fn generated_capability_report_tracks_one_step_training_proof_gate() {
         "crates/kiln-model/tests/vk_sft_step_proof.rs",
         "crates/kiln-model/tests/rocm_sft_step_proof.rs",
     ];
+    for path in [
+        "crates/kiln-model/tests/cuda_sft_step_proof.rs",
+        "crates/kiln-model/tests/rocm_sft_step_proof.rs",
+    ] {
+        let source =
+            fs::read_to_string(workspace_root().join(path)).expect("SFT proof should be readable");
+        assert!(
+            source.contains("OptimizerBackend::runtime_dispatch_adamw_step")
+                && source.contains("ResidencyBackend::runtime_register_resident_activation"),
+            "{path} should route its AdamW proof through the backend optimizer facet"
+        );
+        assert!(
+            !source.contains("kiln_rmsnorm_kernel::adamw_step_f32_kt"),
+            "{path} should not bypass OptimizerBackend with a direct AdamW kernel call"
+        );
+    }
     match training_gate["status"].as_str() {
         Some("covered") => {
             assert!(
@@ -6821,6 +6837,14 @@ fn generated_capability_report_tracks_migration_phase_status() {
     assert_eq!(
         tape_route_signal["passed"], true,
         "Phase 6 should select tape-forward support through TrainingLossBackend"
+    );
+    let sft_proof_signal = phase6_signals
+        .iter()
+        .find(|signal| signal["name"] == "sft_step_proofs_route_optimizer_backend")
+        .expect("Phase 6 should include the SFT proof optimizer routing signal");
+    assert_eq!(
+        sft_proof_signal["passed"], true,
+        "Phase 6 should require CUDA/ROCm SFT proofs to route AdamW through OptimizerBackend"
     );
 
     let phase7 = phases

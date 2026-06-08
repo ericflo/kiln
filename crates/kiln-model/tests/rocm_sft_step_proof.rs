@@ -8,8 +8,8 @@
 //!   TIER 2 — `try_tape_cross_entropy_from_logits_kt` as the scalar SFT loss head
 //!            over the LoRA-linear logits; backward from the CE scalar → finite
 //!            LoRA grads. The real SFT forward+loss+backward on ROCm.
-//!   TIER 3 — ONE `adamw_step_f32_kt` step on the LoRA A/B params using the
-//!            tier-2 grads; assert the param bytes CHANGED and stayed finite.
+//!   TIER 3 — ONE `OptimizerBackend` AdamW step on the LoRA A/B params using
+//!            the tier-2 grads; assert the param bytes CHANGED and stayed finite.
 //!
 //! Tiny tensors (seq=2, hidden=4, vocab=4, rank=2), single bounded step, no loop,
 //! no model load. Skips unless a ROCm device is present.
@@ -17,6 +17,8 @@
 //! Run: `cargo test -p kiln-model --no-default-features --features rocm --test rocm_sft_step_proof -- --nocapture --test-threads=1`
 #![cfg(feature = "rocm")]
 
+use kiln_model::backend::rocm::RocmBackend;
+use kiln_model::backend::{OptimizerBackend, ResidencyBackend};
 use kiln_model::lora_loader::LoraProjectionWeights;
 use kiln_model::tape_forward::{
     try_tape_cross_entropy_from_logits_kt, try_tape_lora_linear_kt, with_thread_local_tape,
@@ -146,16 +148,31 @@ fn rocm_sft_cross_entropy_backprops() {
 
 /// ONE AdamW step in place on a ROCm-resident param using its grad, with fresh
 /// zeroed m/v. Asserts the param bytes changed and stayed finite.
-fn adamw_one_step_in_place(param: &Tensor, grad: &Tensor, before: &[f32]) -> Vec<f32> {
+fn adamw_one_step_in_place(
+    backend: &RocmBackend,
+    param: &Tensor,
+    grad: &Tensor,
+    before: &[f32],
+) -> Vec<f32> {
     let n = param.element_count();
     assert_eq!(grad.element_count(), n, "param/grad element-count mismatch");
     let m = Tensor::zeros_on(Device::Rocm(0), param.dims().to_vec(), DType::F32).expect("m zeros");
     let v = Tensor::zeros_on(Device::Rocm(0), param.dims().to_vec(), DType::F32).expect("v zeros");
-    // step=1 bias corrections: bc1 = 1-beta1^1, bc2 = 1-beta2^1.
-    kiln_rmsnorm_kernel::adamw_step_f32_kt(
-        param, grad, &m, &v, 1e-2, 0.9, 0.999, 1e-8, 0.0, 0.1, 0.001,
+    ResidencyBackend::runtime_register_resident_activation(backend, param).expect("register param");
+    ResidencyBackend::runtime_register_resident_activation(backend, grad).expect("register grad");
+    ResidencyBackend::runtime_register_resident_activation(backend, &m).expect("register m");
+    ResidencyBackend::runtime_register_resident_activation(backend, &v).expect("register v");
+    let dispatched = OptimizerBackend::runtime_dispatch_adamw_step(
+        backend, param, grad, &m, &v, 1e-2, 0.9, 0.999, 1e-8, 0.0, 1,
     )
-    .expect("adamw_step_f32_kt failed");
+    .expect("dispatch_adamw_step failed");
+    assert!(
+        dispatched,
+        "ROCm AdamW should dispatch through OptimizerBackend on resident tensors"
+    );
+    ResidencyBackend::runtime_evict_resident_activation(backend, grad);
+    ResidencyBackend::runtime_evict_resident_activation(backend, &m);
+    ResidencyBackend::runtime_evict_resident_activation(backend, &v);
     let after = read_host_f32(param);
     assert_eq!(after.len(), before.len(), "param len changed");
     assert!(after.iter().all(|v| v.is_finite()), "non-finite param after AdamW: {after:?}");
@@ -174,8 +191,9 @@ fn rocm_sft_one_adamw_step_changes_params() {
 
     let a_before = read_host_f32(&lora.a);
     let b_before = read_host_f32(&lora.b);
-    let a_after = adamw_one_step_in_place(&lora.a, &da, &a_before);
-    let b_after = adamw_one_step_in_place(&lora.b, &db, &b_before);
+    let backend = RocmBackend::new(Device::Rocm(0));
+    let a_after = adamw_one_step_in_place(&backend, &lora.a, &da, &a_before);
+    let b_after = adamw_one_step_in_place(&backend, &lora.b, &db, &b_before);
 
     let max_abs_delta = |before: &[f32], after: &[f32]| {
         before.iter().zip(after).map(|(x, y)| (x - y).abs()).fold(0.0_f32, f32::max)

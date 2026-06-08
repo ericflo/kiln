@@ -3806,6 +3806,16 @@
           "name": "tape_forward_route_delegates_to_backend_trait",
           "observed": 4,
           "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/tests/cuda_sft_step_proof.rs",
+            "crates/kiln-model/tests/rocm_sft_step_proof.rs"
+          ],
+          "expected": 6,
+          "name": "sft_step_proofs_route_optimizer_backend",
+          "observed": 6,
+          "passed": true
         }
       ],
       "phase": 6,

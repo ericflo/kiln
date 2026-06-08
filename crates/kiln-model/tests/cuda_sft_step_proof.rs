@@ -6,7 +6,7 @@
 //!            backward yields finite, correctly-shaped LoRA A/B grads.
 //!   TIER 2 - `try_tape_cross_entropy_from_logits_kt` adds the scalar SFT loss
 //!            head and backward yields finite LoRA grads.
-//!   TIER 3 - one `adamw_step_f32_kt` step updates the LoRA params on device.
+//!   TIER 3 - one `OptimizerBackend` AdamW step updates the LoRA params on device.
 //!
 //! Tiny tensors (seq=2, hidden=4, vocab=4, rank=2), single bounded step, no
 //! training loop, no checkpoint load. Skips unless a CUDA device is present.
@@ -14,6 +14,8 @@
 //! Run: `cargo test -p kiln-model --features cuda --test cuda_sft_step_proof -- --nocapture --test-threads=1`
 #![cfg(feature = "cuda")]
 
+use kiln_model::backend::cuda::CudaBackend;
+use kiln_model::backend::{OptimizerBackend, ResidencyBackend};
 use kiln_model::lora_loader::LoraProjectionWeights;
 use kiln_model::tape_forward::{
     try_tape_cross_entropy_from_logits_kt, try_tape_lora_linear_kt, with_thread_local_tape,
@@ -163,15 +165,31 @@ fn cuda_sft_cross_entropy_backprops() {
     );
 }
 
-fn adamw_one_step_in_place(param: &Tensor, grad: &Tensor, before: &[f32]) -> Vec<f32> {
+fn adamw_one_step_in_place(
+    backend: &CudaBackend,
+    param: &Tensor,
+    grad: &Tensor,
+    before: &[f32],
+) -> Vec<f32> {
     let n = param.element_count();
     assert_eq!(grad.element_count(), n, "param/grad element-count mismatch");
     let m = Tensor::zeros_on(Device::Cuda(0), param.dims().to_vec(), DType::F32).expect("m zeros");
     let v = Tensor::zeros_on(Device::Cuda(0), param.dims().to_vec(), DType::F32).expect("v zeros");
-    kiln_rmsnorm_kernel::adamw_step_f32_kt(
-        param, grad, &m, &v, 1e-2, 0.9, 0.999, 1e-8, 0.0, 0.1, 0.001,
+    ResidencyBackend::runtime_register_resident_activation(backend, param).expect("register param");
+    ResidencyBackend::runtime_register_resident_activation(backend, grad).expect("register grad");
+    ResidencyBackend::runtime_register_resident_activation(backend, &m).expect("register m");
+    ResidencyBackend::runtime_register_resident_activation(backend, &v).expect("register v");
+    let dispatched = OptimizerBackend::runtime_dispatch_adamw_step(
+        backend, param, grad, &m, &v, 1e-2, 0.9, 0.999, 1e-8, 0.0, 1,
     )
-    .expect("adamw_step_f32_kt failed");
+    .expect("dispatch_adamw_step failed");
+    assert!(
+        dispatched,
+        "CUDA AdamW should dispatch through OptimizerBackend on resident tensors"
+    );
+    ResidencyBackend::runtime_evict_resident_activation(backend, grad);
+    ResidencyBackend::runtime_evict_resident_activation(backend, &m);
+    ResidencyBackend::runtime_evict_resident_activation(backend, &v);
     let after = read_host_f32(param);
     assert_eq!(after.len(), before.len(), "param len changed");
     assert!(
@@ -193,8 +211,9 @@ fn cuda_sft_one_adamw_step_changes_params() {
 
     let a_before = read_host_f32(&lora.a);
     let b_before = read_host_f32(&lora.b);
-    let a_after = adamw_one_step_in_place(&lora.a, &da, &a_before);
-    let b_after = adamw_one_step_in_place(&lora.b, &db, &b_before);
+    let backend = CudaBackend::new(Device::Cuda(0));
+    let a_after = adamw_one_step_in_place(&backend, &lora.a, &da, &a_before);
+    let b_after = adamw_one_step_in_place(&backend, &lora.b, &db, &b_before);
 
     let max_abs_delta = |before: &[f32], after: &[f32]| {
         before

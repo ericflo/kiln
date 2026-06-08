@@ -1455,6 +1455,10 @@ def phase6_remaining_from_signals(signals: list[dict[str, Any]]) -> list[str]:
             remaining.append(
                 "tape-forward device support is not selected through TrainingLossBackend"
             )
+        elif name == "sft_step_proofs_route_optimizer_backend":
+            remaining.append(
+                "CUDA/ROCm SFT step proofs still bypass OptimizerBackend for AdamW"
+            )
         else:
             remaining.append(f"{name} migration signal is not yet satisfied")
     return remaining
@@ -1968,6 +1972,23 @@ def tape_forward_backend_trait_route_signal_count() -> tuple[int, int]:
     return observed, len(required)
 
 
+def sft_step_proof_optimizer_backend_signal_count() -> tuple[int, int]:
+    checks: list[bool] = []
+    for path in [
+        "crates/kiln-model/tests/cuda_sft_step_proof.rs",
+        "crates/kiln-model/tests/rocm_sft_step_proof.rs",
+    ]:
+        source = production_source_text(path)
+        checks.extend(
+            [
+                "OptimizerBackend::runtime_dispatch_adamw_step" in source,
+                "ResidencyBackend::runtime_register_resident_activation" in source,
+                "kiln_rmsnorm_kernel::adamw_step_f32_kt" not in source,
+            ]
+        )
+    return sum(1 for check in checks if check), len(checks)
+
+
 def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
     if phase == 1:
         shim_count = focused_trait_forwarding_shim_count()
@@ -2230,6 +2251,9 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
         tape_route_count, tape_route_expected = (
             tape_forward_backend_trait_route_signal_count()
         )
+        sft_proof_count, sft_proof_expected = (
+            sft_step_proof_optimizer_backend_signal_count()
+        )
         return [
             phase_signal(
                 "training_precision_for_device_family_removed_from_production",
@@ -2264,6 +2288,16 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
                 [
                     "crates/kiln-model/src/backend/mod.rs",
                     "crates/kiln-model/src/tape_forward.rs",
+                ],
+            ),
+            phase_signal(
+                "sft_step_proofs_route_optimizer_backend",
+                sft_proof_count == sft_proof_expected,
+                sft_proof_count,
+                sft_proof_expected,
+                [
+                    "crates/kiln-model/tests/cuda_sft_step_proof.rs",
+                    "crates/kiln-model/tests/rocm_sft_step_proof.rs",
                 ],
             ),
         ]
