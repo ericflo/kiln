@@ -9,8 +9,8 @@ use std::sync::OnceLock;
 
 use super::{
     AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, GdnBackend, OptimizerBackend,
-    LinearBackend, PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend, StartupBackend,
-    TrainingCapabilities, TrainingPrecisionPolicy,
+    LinearBackend, PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend,
+    StartupBackend, TrainingCapabilities, TrainingLossBackend, TrainingPrecisionPolicy,
 };
 use crate::lora_loader::{compute_lora_delta, LoraProjectionWeights};
 
@@ -1546,15 +1546,17 @@ impl ResidencyBackend for CudaBackend {
     }
 }
 
-impl BackendRuntime for CudaBackend {
-    fn training_capabilities(&self) -> TrainingCapabilities {
+impl TrainingLossBackend for CudaBackend {
+    fn runtime_training_capabilities(&self) -> TrainingCapabilities {
         Self::training_capabilities_static()
     }
 
-    fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
+    fn runtime_training_precision_policy(&self) -> TrainingPrecisionPolicy {
         TrainingPrecisionPolicy::cuda()
     }
 }
+
+impl BackendRuntime for CudaBackend {}
 
 #[allow(clippy::too_many_arguments)]
 impl ReplayBackend for CudaBackend {

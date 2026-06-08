@@ -1309,6 +1309,29 @@ def migration_from_signals(signals: list[dict[str, Any]]) -> str:
     return "none"
 
 
+def phase1_remaining_from_signals(signals: list[dict[str, Any]]) -> list[str]:
+    remaining: list[str] = []
+    for signal in signals:
+        if signal["passed"]:
+            continue
+        name = signal["name"]
+        if name == "focused_trait_forwarding_shims_removed":
+            remaining.append(
+                "focused trait blanket forwarding shims remain in BackendRuntime"
+            )
+        elif name == "backend_runtime_method_count_below_gate":
+            remaining.append("BackendRuntime remains above the method-count gate")
+        elif name.endswith("_facet_authoritative"):
+            trait_slug = name.removesuffix("_facet_authoritative")
+            trait_name = "".join(part.capitalize() for part in trait_slug.split("_"))
+            remaining.append(
+                f"{trait_name} is not authoritative on all concrete backends"
+            )
+        else:
+            remaining.append(f"{name} migration signal is not yet satisfied")
+    return remaining
+
+
 def file_text(path: str) -> str:
     try:
         return (ROOT / path).read_text()
@@ -1466,6 +1489,10 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
                 "ReplayBackend",
                 "replay_backend_facet_authoritative",
             ),
+            focused_trait_authoritative_signal(
+                "TrainingLossBackend",
+                "training_loss_backend_facet_authoritative",
+            ),
             phase_signal(
                 "focused_trait_forwarding_shims_removed",
                 shim_count == 0,
@@ -1548,8 +1575,13 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
         7: "complete",
         8: phase8_migration,
     }
+    migration_signals_by_phase = {
+        phase: phase_migration_signals(phase) for phase in [1, 3, 4, 5]
+    }
     for phase in [1, 3, 4, 5]:
-        migration_by_phase[phase] = migration_from_signals(phase_migration_signals(phase))
+        migration_by_phase[phase] = migration_from_signals(
+            migration_signals_by_phase[phase]
+        )
     phases = [
         {
             "phase": 0,
@@ -1603,12 +1635,10 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
                 "Focused Backend Facets",
                 "Request Capability Queries",
             ],
-            "migration_signals": phase_migration_signals(1),
-            "remaining": []
-            if migration_by_phase[1] == "complete"
-            else [
-                "focused traits still forward through BackendRuntime and BackendRuntime remains above the method-count gate",
-            ],
+            "migration_signals": migration_signals_by_phase[1],
+            "remaining": phase1_remaining_from_signals(
+                migration_signals_by_phase[1]
+            ),
         },
         {
             "phase": 2,
@@ -1660,7 +1690,7 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
                 "Resident Resource Descriptors",
                 "Focused Backend Facets",
             ],
-            "migration_signals": phase_migration_signals(3),
+            "migration_signals": migration_signals_by_phase[3],
             "remaining": []
             if migration_by_phase[3] == "complete"
             else [
@@ -1693,7 +1723,7 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
                 "Request Capability Queries",
                 "Conformance And Performance Gates",
             ],
-            "migration_signals": phase_migration_signals(4),
+            "migration_signals": migration_signals_by_phase[4],
             "remaining": []
             if migration_by_phase[4] == "complete"
             else [
@@ -1729,7 +1759,7 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
                 "Replay Authority",
                 "Conformance And Performance Gates",
             ],
-            "migration_signals": phase_migration_signals(5),
+            "migration_signals": migration_signals_by_phase[5],
             "remaining": []
             if migration_by_phase[5] == "complete"
             else [

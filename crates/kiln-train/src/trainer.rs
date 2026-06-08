@@ -10545,6 +10545,8 @@ pub(crate) mod tests {
 
     impl kiln_model::backend::ReplayBackend for NamedTestBackend {}
 
+    impl kiln_model::backend::TrainingLossBackend for NamedTestBackend {}
+
     impl BackendRuntime for NamedTestBackend {}
 
     /// Create a tiny ModelConfig for testing (4 layers, small dims).

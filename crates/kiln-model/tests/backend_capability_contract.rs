@@ -2680,6 +2680,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
                 | "OptimizerBackend"
                 | "PagedKvBackend"
                 | "ReplayBackend"
+                | "TrainingLossBackend"
         ) {
             "concrete_authoritative"
         } else {
@@ -2718,6 +2719,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
         "OptimizerBackend",
         "PagedKvBackend",
         "ReplayBackend",
+        "TrainingLossBackend",
     ] {
         let info = facets
             .get(facet)
@@ -2788,6 +2790,10 @@ fn generated_capability_report_lists_focused_backend_facets() {
         !backend_source.contains("impl<T: BackendRuntime + ?Sized> ReplayBackend for T"),
         "ReplayBackend should not regress to a blanket BackendRuntime forwarding impl"
     );
+    assert!(
+        !backend_source.contains("impl<T: BackendRuntime + ?Sized> TrainingLossBackend for T"),
+        "TrainingLossBackend should not regress to a blanket BackendRuntime forwarding impl"
+    );
     let runtime_trait_source = source_between(
         &backend_source,
         "pub trait BackendRuntime",
@@ -2805,6 +2811,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
         "OptimizerBackend",
         "PagedKvBackend",
         "ReplayBackend",
+        "TrainingLossBackend",
     ] {
         assert!(
             runtime_trait_source.contains(supertrait),
@@ -2830,8 +2837,8 @@ fn resident_registry_consumes_focused_residency_facet() {
         .expect("ResidentRegistry blanket impl should be present");
     let registry_impl = &backend_source[registry_impl_start..];
     let registry_impl_end = registry_impl
-        .find("impl<T: BackendRuntime + ?Sized> TrainingLossBackend for T")
-        .expect("TrainingLossBackend blanket impl should follow ResidentRegistry adapter");
+        .find("// (#1082 candle removal) The candle-typed `for_device` shim was deleted")
+        .expect("backend construction section should follow ResidentRegistry adapter");
     let registry_impl = &registry_impl[..registry_impl_end];
 
     for required in [
@@ -5949,7 +5956,7 @@ fn generated_capability_report_tracks_migration_phase_status() {
         .expect("Phase 1 should be present");
     assert_eq!(
         phase1["status"], "partial",
-        "Phase 1 should expose partial progress while some W1 families remain blanket-forwarded"
+        "Phase 1 should expose partial progress while BackendRuntime remains above the method-count gate"
     );
     assert_eq!(phase1["contract"], "landed");
     assert_eq!(phase1["migration"], "partial");
@@ -6005,6 +6012,14 @@ fn generated_capability_report_tracks_migration_phase_status() {
         linear_signal["passed"], true,
         "LinearBackend should be a completed W1 family slice"
     );
+    let residency_signal = phase1_signals
+        .iter()
+        .find(|signal| signal["name"] == "residency_backend_facet_authoritative")
+        .expect("Phase 1 should include ResidencyBackend authoritative signal");
+    assert_eq!(
+        residency_signal["passed"], true,
+        "ResidencyBackend should be a completed W1 family slice"
+    );
     let sampling_signal = phase1_signals
         .iter()
         .find(|signal| signal["name"] == "sampling_backend_facet_authoritative")
@@ -6029,13 +6044,44 @@ fn generated_capability_report_tracks_migration_phase_status() {
         paged_kv_signal["passed"], true,
         "PagedKvBackend should be a completed W1 family slice"
     );
+    let replay_signal = phase1_signals
+        .iter()
+        .find(|signal| signal["name"] == "replay_backend_facet_authoritative")
+        .expect("Phase 1 should include ReplayBackend authoritative signal");
+    assert_eq!(
+        replay_signal["passed"], true,
+        "ReplayBackend should be a completed W1 family slice"
+    );
+    let training_loss_signal = phase1_signals
+        .iter()
+        .find(|signal| signal["name"] == "training_loss_backend_facet_authoritative")
+        .expect("Phase 1 should include TrainingLossBackend authoritative signal");
+    assert_eq!(
+        training_loss_signal["passed"], true,
+        "TrainingLossBackend should be a completed W1 family slice"
+    );
     let shim_signal = phase1_signals
         .iter()
         .find(|signal| signal["name"] == "focused_trait_forwarding_shims_removed")
         .expect("Phase 1 should include all-shims-removed signal");
     assert_eq!(
-        shim_signal["passed"], false,
-        "Phase 1 should stay incomplete while other focused traits still blanket-forward"
+        shim_signal["passed"], true,
+        "Focused trait blanket shims should stay removed once all W1 families are authoritative"
+    );
+    let method_count_signal = phase1_signals
+        .iter()
+        .find(|signal| signal["name"] == "backend_runtime_method_count_below_gate")
+        .expect("Phase 1 should include BackendRuntime method-count gate");
+    assert_eq!(
+        method_count_signal["passed"], false,
+        "Phase 1 should stay incomplete while BackendRuntime remains above the method-count gate"
+    );
+    assert!(
+        method_count_signal["observed"]
+            .as_u64()
+            .expect("BackendRuntime method count should be numeric")
+            > 8,
+        "BackendRuntime method count should exceed the W1 completion gate until compatibility methods are deleted"
     );
 
     for (phase_number, signal_name) in [

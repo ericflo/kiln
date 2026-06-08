@@ -15,7 +15,8 @@ use super::metal_paged::*;
 use super::{
     metal_residency, metal_training, AttentionBackend, BackendIdentity, BackendRuntime,
     ConvBackend, GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend,
-    ResidencyBackend, SamplingBackend, StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
+    ResidencyBackend, SamplingBackend, StartupBackend, TrainingCapabilities, TrainingLossBackend,
+    TrainingPrecisionPolicy,
 };
 
 impl BackendIdentity for MetalBackend {
@@ -853,15 +854,17 @@ impl ResidencyBackend for MetalBackend {
     }
 }
 
-impl BackendRuntime for MetalBackend {
-    fn training_capabilities(&self) -> TrainingCapabilities {
+impl TrainingLossBackend for MetalBackend {
+    fn runtime_training_capabilities(&self) -> TrainingCapabilities {
         Self::training_capabilities_static()
     }
 
-    fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
+    fn runtime_training_precision_policy(&self) -> TrainingPrecisionPolicy {
         metal_training::training_precision_policy()
     }
 }
+
+impl BackendRuntime for MetalBackend {}
 
 #[allow(clippy::too_many_arguments)]
 impl ReplayBackend for MetalBackend {

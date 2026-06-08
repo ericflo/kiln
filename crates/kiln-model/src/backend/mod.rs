@@ -664,6 +664,7 @@ pub trait BackendRuntime:
     + OptimizerBackend
     + PagedKvBackend
     + ReplayBackend
+    + TrainingLossBackend
     + Send
     + Sync
     + std::fmt::Debug
@@ -702,11 +703,11 @@ pub trait BackendRuntime:
     /// candle-on-device, or intentionally declined. This is telemetry only:
     /// dispatch methods remain the source of truth for actual behavior.
     fn training_capabilities(&self) -> TrainingCapabilities {
-        TrainingCapabilities::portable()
+        TrainingLossBackend::runtime_training_capabilities(self)
     }
 
     fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
-        TrainingPrecisionPolicy::portable()
+        TrainingLossBackend::runtime_training_precision_policy(self)
     }
 
     fn precompile_startup_kernels(&self) -> Result<()> {
@@ -2852,9 +2853,13 @@ pub trait OptimizerBackend: Send + Sync + std::fmt::Debug {
 /// Focused `TrainingLossBackend` facet delegated by the current `BackendRuntime` facade.
 #[allow(clippy::too_many_arguments)]
 pub trait TrainingLossBackend: Send + Sync + std::fmt::Debug {
-    fn runtime_training_capabilities(&self) -> TrainingCapabilities;
+    fn runtime_training_capabilities(&self) -> TrainingCapabilities {
+        TrainingCapabilities::portable()
+    }
 
-    fn runtime_training_precision_policy(&self) -> TrainingPrecisionPolicy;
+    fn runtime_training_precision_policy(&self) -> TrainingPrecisionPolicy {
+        TrainingPrecisionPolicy::portable()
+    }
 
     fn runtime_sft_flce_loss_route(&self) -> SftFlceLossRoute {
         self.runtime_training_capabilities().sft_flce_loss_route
@@ -3027,17 +3032,6 @@ where
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-impl<T: BackendRuntime + ?Sized> TrainingLossBackend for T {
-    fn runtime_training_capabilities(&self) -> TrainingCapabilities {
-        BackendRuntime::training_capabilities(self)
-    }
-
-    fn runtime_training_precision_policy(&self) -> TrainingPrecisionPolicy {
-        BackendRuntime::training_precision_policy(self)
-    }
-}
-
 // (#1082 candle removal) The candle-typed `for_device` shim was deleted along
 // with the candle-parity opt-in feature that gated it — the last candle
 // activator in the workspace. Production dispatch goes through the kt-native
@@ -3141,6 +3135,8 @@ mod tests {
     impl PagedKvBackend for ResidentActivationProbeBackend {}
 
     impl ReplayBackend for ResidentActivationProbeBackend {}
+
+    impl TrainingLossBackend for ResidentActivationProbeBackend {}
 
     impl BackendRuntime for ResidentActivationProbeBackend {}
 

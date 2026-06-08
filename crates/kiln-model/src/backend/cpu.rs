@@ -6,7 +6,7 @@
 use super::{
     AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, GdnBackend, OptimizerBackend,
     LinearBackend, PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend,
-    StartupBackend,
+    StartupBackend, TrainingLossBackend,
 };
 
 #[derive(Debug)]
@@ -65,5 +65,7 @@ impl OptimizerBackend for CpuBackend {}
 impl PagedKvBackend for CpuBackend {}
 
 impl ReplayBackend for CpuBackend {}
+
+impl TrainingLossBackend for CpuBackend {}
 
 impl BackendRuntime for CpuBackend {}

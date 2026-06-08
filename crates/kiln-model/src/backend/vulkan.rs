@@ -31,7 +31,8 @@ use super::{
     vulkan_attention, vulkan_conv1d, vulkan_dense, vulkan_device, vulkan_gdn, vulkan_linear,
     vulkan_training, vulkan_weights, AttentionBackend, BackendIdentity, BackendRuntime,
     ConvBackend, GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend,
-    ResidencyBackend, SamplingBackend, StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
+    ResidencyBackend, SamplingBackend, StartupBackend, TrainingCapabilities, TrainingLossBackend,
+    TrainingPrecisionPolicy,
 };
 use crate::forward::GpuWeights;
 
@@ -1299,15 +1300,17 @@ impl ResidencyBackend for VulkanBackend {
     }
 }
 
-impl BackendRuntime for VulkanBackend {
-    fn training_capabilities(&self) -> TrainingCapabilities {
+impl TrainingLossBackend for VulkanBackend {
+    fn runtime_training_capabilities(&self) -> TrainingCapabilities {
         Self::training_capabilities_static()
     }
 
-    fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
+    fn runtime_training_precision_policy(&self) -> TrainingPrecisionPolicy {
         vulkan_training::training_precision_policy()
     }
 }
+
+impl BackendRuntime for VulkanBackend {}
 
 impl ReplayBackend for VulkanBackend {
     fn runtime_decode_resident_pool_ready(

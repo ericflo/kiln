@@ -9,8 +9,8 @@ use std::sync::OnceLock;
 
 use super::{
     AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, GdnBackend, OptimizerBackend,
-    LinearBackend, PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend, StartupBackend,
-    TrainingCapabilities, TrainingPrecisionPolicy,
+    LinearBackend, PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend,
+    StartupBackend, TrainingCapabilities, TrainingLossBackend, TrainingPrecisionPolicy,
 };
 use crate::lora_loader::{compute_lora_delta, LoraProjectionWeights};
 
@@ -1602,15 +1602,17 @@ impl ResidencyBackend for RocmBackend {
     }
 }
 
-impl BackendRuntime for RocmBackend {
-    fn training_capabilities(&self) -> TrainingCapabilities {
+impl TrainingLossBackend for RocmBackend {
+    fn runtime_training_capabilities(&self) -> TrainingCapabilities {
         Self::training_capabilities_static()
     }
 
-    fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
+    fn runtime_training_precision_policy(&self) -> TrainingPrecisionPolicy {
         TrainingPrecisionPolicy::rocm()
     }
 }
+
+impl BackendRuntime for RocmBackend {}
 
 #[allow(clippy::too_many_arguments)]
 impl ReplayBackend for RocmBackend {

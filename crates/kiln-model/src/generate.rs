@@ -8581,6 +8581,8 @@ mod tests {
 
     impl crate::backend::ReplayBackend for NamedTestBackend {}
 
+    impl crate::backend::TrainingLossBackend for NamedTestBackend {}
+
     impl BackendRuntime for NamedTestBackend {}
 
     #[test]
