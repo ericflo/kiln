@@ -111,7 +111,6 @@ impl MatmulBatchPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MatmulRequestProjectionError {
     IncompatibleShape,
-    MixedDTypes,
     UnsupportedAccumulation,
     UnsupportedDType,
     InvalidConcurrentStreams,
@@ -127,7 +126,13 @@ pub struct MatmulBlasRequest {
     pub m: u64,
     pub n: u64,
     pub k: u64,
+    /// Legacy homogeneous dtype used by the current lower BLAS crates. New
+    /// request routing must read the explicit lhs/rhs/out dtype fields below.
     pub dtype: kiln_tensor::DType,
+    pub lhs_dtype: kiln_tensor::DType,
+    pub rhs_dtype: kiln_tensor::DType,
+    pub out_dtype: kiln_tensor::DType,
+    pub accumulation: MatmulAccumulation,
     pub lhs_layout: MatmulOperandLayout,
     pub rhs_layout: MatmulOperandLayout,
     pub out_layout: MatmulOperandLayout,
@@ -140,6 +145,22 @@ pub struct MatmulBlasRequest {
 impl MatmulBlasRequest {
     pub const fn dtype_name(&self) -> &'static str {
         self.dtype.short_name()
+    }
+
+    pub const fn lhs_dtype_name(&self) -> &'static str {
+        self.lhs_dtype.short_name()
+    }
+
+    pub const fn rhs_dtype_name(&self) -> &'static str {
+        self.rhs_dtype.short_name()
+    }
+
+    pub const fn out_dtype_name(&self) -> &'static str {
+        self.out_dtype.short_name()
+    }
+
+    pub fn is_mixed_dtype(&self) -> bool {
+        self.lhs_dtype != self.rhs_dtype || self.lhs_dtype != self.out_dtype
     }
 }
 
@@ -197,6 +218,30 @@ impl MatmulRequest {
         self
     }
 
+    pub fn with_layouts(
+        mut self,
+        lhs_layout: MatmulOperandLayout,
+        rhs_layout: MatmulOperandLayout,
+        out_layout: MatmulOperandLayout,
+    ) -> Self {
+        self.lhs_layout = lhs_layout;
+        self.rhs_layout = rhs_layout;
+        self.out_layout = out_layout;
+        self
+    }
+
+    pub fn with_dtypes(
+        mut self,
+        lhs_dtype: kiln_tensor::DType,
+        rhs_dtype: kiln_tensor::DType,
+        out_dtype: kiln_tensor::DType,
+    ) -> Self {
+        self.lhs_dtype = lhs_dtype;
+        self.rhs_dtype = rhs_dtype;
+        self.out_dtype = out_dtype;
+        self
+    }
+
     pub fn to_blas_request(
         &self,
         concurrent_streams: u8,
@@ -207,16 +252,13 @@ impl MatmulRequest {
         let (m, n, k) = self
             .logical_mnk()
             .ok_or(MatmulRequestProjectionError::IncompatibleShape)?;
-        if self.lhs_dtype != self.rhs_dtype || self.lhs_dtype != self.out_dtype {
-            return Err(MatmulRequestProjectionError::MixedDTypes);
-        }
         if self.accumulation != MatmulAccumulation::F32 {
             return Err(MatmulRequestProjectionError::UnsupportedAccumulation);
         }
-        if !matches!(
-            self.lhs_dtype,
-            kiln_tensor::DType::F32 | kiln_tensor::DType::BF16 | kiln_tensor::DType::F16
-        ) {
+        if !Self::is_supported_blas_dtype(self.lhs_dtype)
+            || !Self::is_supported_blas_dtype(self.rhs_dtype)
+            || !Self::is_supported_blas_dtype(self.out_dtype)
+        {
             return Err(MatmulRequestProjectionError::UnsupportedDType);
         }
 
@@ -225,6 +267,10 @@ impl MatmulRequest {
             n: n as u64,
             k: k as u64,
             dtype: self.lhs_dtype,
+            lhs_dtype: self.lhs_dtype,
+            rhs_dtype: self.rhs_dtype,
+            out_dtype: self.out_dtype,
+            accumulation: self.accumulation,
             lhs_layout: self.lhs_layout,
             rhs_layout: self.rhs_layout,
             out_layout: self.out_layout,
@@ -240,10 +286,67 @@ impl MatmulRequest {
             return None;
         }
         let rank = self.lhs_shape.len();
-        Some((
+        let (m, k) = Self::logical_operand_dims(
             self.lhs_shape[rank - 2],
-            self.rhs_shape[rank - 1],
             self.lhs_shape[rank - 1],
+            self.lhs_layout,
+        );
+        let (_rhs_k, n) = Self::logical_operand_dims(
+            self.rhs_shape[rank - 2],
+            self.rhs_shape[rank - 1],
+            self.rhs_layout,
+        );
+        Some((m, n, k))
+    }
+
+    fn logical_operand_dims(
+        physical_rows: usize,
+        physical_cols: usize,
+        layout: MatmulOperandLayout,
+    ) -> (usize, usize) {
+        match layout {
+            MatmulOperandLayout::RowMajor => (physical_rows, physical_cols),
+            MatmulOperandLayout::ColMajor => (physical_cols, physical_rows),
+        }
+    }
+
+    fn is_supported_blas_dtype(dtype: kiln_tensor::DType) -> bool {
+        matches!(
+            dtype,
+            kiln_tensor::DType::F32 | kiln_tensor::DType::BF16 | kiln_tensor::DType::F16
+        )
+    }
+
+    pub fn has_mixed_dtypes(&self) -> bool {
+        self.lhs_dtype != self.rhs_dtype || self.lhs_dtype != self.out_dtype
+    }
+
+    pub fn homogeneous_dtype(&self) -> Option<kiln_tensor::DType> {
+        if self.has_mixed_dtypes() {
+            None
+        } else {
+            Some(self.lhs_dtype)
+        }
+    }
+
+    pub fn logical_lhs_rhs_shapes(&self) -> Option<([usize; 2], [usize; 2])> {
+        if self.rank()? < 2 {
+            return None;
+        }
+        let rank = self.lhs_shape.len();
+        let lhs = Self::logical_operand_dims(
+            self.lhs_shape[rank - 2],
+            self.lhs_shape[rank - 1],
+            self.lhs_layout,
+        );
+        let rhs = Self::logical_operand_dims(
+            self.rhs_shape[rank - 2],
+            self.rhs_shape[rank - 1],
+            self.rhs_layout,
+        );
+        Some((
+            [lhs.0, lhs.1],
+            [rhs.0, rhs.1],
         ))
     }
 
@@ -265,7 +368,11 @@ impl MatmulRequest {
         if self.lhs_shape[..rank - 2] != self.rhs_shape[..rank - 2] {
             return false;
         }
-        if self.lhs_shape[rank - 1] != self.rhs_shape[rank - 2] {
+        let (lhs, rhs) = match self.logical_lhs_rhs_shapes() {
+            Some(shapes) => shapes,
+            None => return false,
+        };
+        if lhs[1] != rhs[0] {
             return false;
         }
         self.batch == MatmulBatchPolicy::from_leading_shape(&self.lhs_shape[..rank - 2])
@@ -275,10 +382,7 @@ impl MatmulRequest {
         self.lhs_dtype == self.rhs_dtype
             && self.lhs_dtype == self.out_dtype
             && self.accumulation == MatmulAccumulation::F32
-            && matches!(
-                self.lhs_dtype,
-                kiln_tensor::DType::F32 | kiln_tensor::DType::BF16 | kiln_tensor::DType::F16
-            )
+            && Self::is_supported_blas_dtype(self.lhs_dtype)
     }
 
     fn is_row_major_output(&self) -> bool {

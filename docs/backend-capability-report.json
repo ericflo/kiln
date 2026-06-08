@@ -3994,7 +3994,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "MatmulBlasRequest": {
-      "field_count": 11,
+      "field_count": 15,
       "fields": [
         {
           "name": "m",
@@ -4011,6 +4011,22 @@
         {
           "name": "dtype",
           "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "lhs_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "rhs_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "out_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "accumulation",
+          "type": "MatmulAccumulation"
         },
         {
           "name": "lhs_layout",

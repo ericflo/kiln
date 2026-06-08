@@ -2266,9 +2266,14 @@ mod tests {
         assert_eq!(blas.k, 3);
         assert_eq!(blas.dtype, kiln_tensor::DType::BF16);
         assert_eq!(blas.dtype_name(), "bf16");
+        assert_eq!(blas.lhs_dtype_name(), "bf16");
+        assert_eq!(blas.rhs_dtype_name(), "bf16");
+        assert_eq!(blas.out_dtype_name(), "bf16");
+        assert!(!blas.is_mixed_dtype());
         assert_eq!(blas.lhs_layout.blas_name(), "row");
         assert_eq!(blas.rhs_layout.blas_name(), "row");
         assert_eq!(blas.out_layout.blas_name(), "row");
+        assert_eq!(blas.accumulation, capability::MatmulAccumulation::F32);
         assert_eq!(blas.epilogue.blas_name(), "bias");
         assert_eq!(blas.batch, capability::MatmulBatchPolicy::Single);
         assert!(blas.replay_safe);
@@ -2292,6 +2297,51 @@ mod tests {
             capability::MatmulBatchPolicy::Batched { batches: 8 }
         );
 
+        let transposed_rhs = capability::MatmulRequest::plain(
+            vec![2, 3],
+            vec![4, 3],
+            kiln_tensor::DType::BF16,
+            true,
+        )
+        .with_layouts(
+            capability::MatmulOperandLayout::RowMajor,
+            capability::MatmulOperandLayout::ColMajor,
+            capability::MatmulOperandLayout::RowMajor,
+        );
+        assert_eq!(transposed_rhs.logical_mnk(), Some((2, 4, 3)));
+        let transposed_blas = transposed_rhs
+            .to_blas_request(2)
+            .expect("transposed rhs request projects losslessly");
+        assert_eq!(
+            (transposed_blas.m, transposed_blas.n, transposed_blas.k),
+            (2, 4, 3)
+        );
+        assert_eq!(
+            transposed_blas.rhs_layout,
+            capability::MatmulOperandLayout::ColMajor
+        );
+        assert_eq!(transposed_blas.concurrent_streams, 2);
+
+        let transposed_lhs = capability::MatmulRequest::plain(
+            vec![3, 2],
+            vec![3, 4],
+            kiln_tensor::DType::BF16,
+            false,
+        )
+        .with_layouts(
+            capability::MatmulOperandLayout::ColMajor,
+            capability::MatmulOperandLayout::RowMajor,
+            capability::MatmulOperandLayout::RowMajor,
+        );
+        assert_eq!(transposed_lhs.logical_mnk(), Some((2, 4, 3)));
+        assert_eq!(
+            transposed_lhs
+                .to_blas_request(1)
+                .expect("transposed lhs request projects")
+                .lhs_layout,
+            capability::MatmulOperandLayout::ColMajor
+        );
+
         let incompatible = capability::MatmulRequest::plain(
             vec![2, 3],
             vec![5, 4],
@@ -2307,10 +2357,15 @@ mod tests {
             rhs_dtype: kiln_tensor::DType::F32,
             ..bias
         };
-        assert_eq!(
-            mixed.to_blas_request(1),
-            Err(capability::MatmulRequestProjectionError::MixedDTypes)
-        );
+        assert!(mixed.has_mixed_dtypes());
+        assert_eq!(mixed.homogeneous_dtype(), None);
+        let mixed_blas = mixed
+            .to_blas_request(1)
+            .expect("mixed dtype request should project without dropping dtype metadata");
+        assert!(mixed_blas.is_mixed_dtype());
+        assert_eq!(mixed_blas.lhs_dtype, kiln_tensor::DType::BF16);
+        assert_eq!(mixed_blas.rhs_dtype, kiln_tensor::DType::F32);
+        assert_eq!(mixed_blas.out_dtype, kiln_tensor::DType::BF16);
         assert_eq!(
             mixed.to_blas_request(0),
             Err(capability::MatmulRequestProjectionError::InvalidConcurrentStreams)
