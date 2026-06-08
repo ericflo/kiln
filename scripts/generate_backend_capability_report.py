@@ -446,6 +446,26 @@ def body_without_comments(body: str) -> str:
     return body.strip()
 
 
+def production_source_text(path: str) -> str:
+    """Return source excluding cfg(test) modules while preserving later production code."""
+    source = file_text(path)
+    pattern = re.compile(
+        r"\n?\s*#\[cfg\(test\)\]\s*(?:\n\s*#\[[^\n]+\]\s*)*\n\s*mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{"
+    )
+    pieces: list[str] = []
+    cursor = 0
+    while True:
+        match = pattern.search(source, cursor)
+        if not match:
+            pieces.append(source[cursor:])
+            break
+        pieces.append(source[cursor : match.start()])
+        open_idx = source.rfind("{", match.start(), match.end())
+        end_idx = find_matching_brace(source, open_idx)
+        cursor = end_idx + 1
+    return "".join(pieces)
+
+
 def support_status(body: str) -> str:
     stripped = body_without_comments(body)
     compact = re.sub(r"\s+", "", stripped)
@@ -1571,7 +1591,7 @@ def matmul_identity_dispatch_count() -> int:
         "crates/kiln-model/src/backend/capability.rs",
     ]
     pattern = r"Device::(?:Cuda|Rocm|Metal|Vulkan)|match\s+self\.name\(\)"
-    return sum(regex_count(path, pattern) for path in paths)
+    return sum(len(re.findall(pattern, production_source_text(path))) for path in paths)
 
 
 def replay_production_replay_plan_mentions() -> int:

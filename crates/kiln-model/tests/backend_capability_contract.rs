@@ -48,6 +48,13 @@ fn source_between<'a>(source: &'a str, start_marker: &str, end_marker: &str) -> 
     &rest[..end]
 }
 
+fn production_source_before_tests(source: &str) -> &str {
+    source
+        .split_once("#[cfg(test)]\nmod tests")
+        .map(|(production, _)| production)
+        .unwrap_or(source)
+}
+
 fn find_matching_brace(source: &str, open_idx: usize) -> Option<usize> {
     let bytes = source.as_bytes();
     let mut depth = 0usize;
@@ -106,6 +113,41 @@ fn find_matching_brace(source: &str, open_idx: usize) -> Option<usize> {
         i += 1;
     }
     None
+}
+
+#[test]
+fn matmul_transposed_ops_route_through_deviceop_contract() {
+    let matmul_source =
+        fs::read_to_string(workspace_root().join("crates/kiln-tensor/src/ops/matmul.rs"))
+            .expect("matmul op source should be readable");
+    let production_source = production_source_before_tests(&matmul_source);
+
+    for required in [
+        "pub struct MatmulLhsTransposedOp",
+        "impl DeviceOp2 for MatmulLhsTransposedOp",
+        "dispatch2(&MatmulLhsTransposedOp, a, b)",
+        "pub struct MatmulRhsTransposedOp",
+        "impl DeviceOp2 for MatmulRhsTransposedOp",
+        "dispatch2(&MatmulRhsTransposedOp, a, b)",
+    ] {
+        assert!(
+            production_source.contains(required),
+            "transposed matmul should route through DeviceOp2 contract: missing {required}"
+        );
+    }
+
+    for forbidden in [
+        "Device::Cuda",
+        "Device::Rocm",
+        "Device::Metal",
+        "Device::Vulkan",
+        "match self.name()",
+    ] {
+        assert!(
+            !production_source.contains(forbidden),
+            "production matmul op source should not choose a backend by identity: {forbidden}"
+        );
+    }
 }
 
 fn parse_functions(path: &Path) -> HashMap<String, FunctionDef> {
