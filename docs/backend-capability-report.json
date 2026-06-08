@@ -30,10 +30,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 1928,
+          "line": 1924,
           "paired_method": "runtime_causal_conv1d_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 1958,
+          "paired_method_line": 1954,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -45,10 +45,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 1924,
+          "line": 1920,
           "paired_method": "runtime_causal_conv1d_update",
           "paired_method_always_declines": false,
-          "paired_method_line": 1932,
+          "paired_method_line": 1928,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -225,7 +225,7 @@
             "layout": false,
             "shape": false
           },
-          "line": 1604,
+          "line": 1600,
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
@@ -650,7 +650,7 @@
             "layout": false,
             "shape": false
           },
-          "line": 915,
+          "line": 891,
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
@@ -702,10 +702,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 1985,
+          "line": 1981,
           "paired_method": "runtime_causal_conv1d_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 2015,
+          "paired_method_line": 2011,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -717,10 +717,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 1981,
+          "line": 1977,
           "paired_method": "runtime_causal_conv1d_update",
           "paired_method_always_declines": false,
-          "paired_method_line": 1989,
+          "paired_method_line": 1985,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -914,7 +914,7 @@
             "layout": false,
             "shape": false
           },
-          "line": 1660,
+          "line": 1656,
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
@@ -1308,7 +1308,7 @@
             "layout": false,
             "shape": false
           },
-          "line": 1222,
+          "line": 1230,
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
@@ -1323,10 +1323,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 1444,
+          "line": 1452,
           "paired_method": "runtime_decode_resident_pool_ready",
           "paired_method_always_declines": false,
-          "paired_method_line": 1431,
+          "paired_method_line": 1439,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         }
@@ -3395,8 +3395,8 @@
         "crates/kiln-model/src/backend/vulkan_residency.rs",
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
-      "genuine": false,
-      "migration": "partial",
+      "genuine": true,
+      "migration": "complete",
       "migration_signals": [
         {
           "evidence": [
@@ -3457,21 +3457,19 @@
             "crates/kiln-model/src/backend/metal_residency.rs",
             "crates/kiln-model/src/backend/vulkan_residency.rs"
           ],
-          "expected": "> 0",
+          "expected": ">= 3",
           "name": "resident_registry_lifecycle_metadata_persisted",
-          "observed": 0,
-          "passed": false
+          "observed": 3,
+          "passed": true
         }
       ],
       "phase": 3,
-      "remaining": [
-        "production resident registries do not persist lifecycle metadata"
-      ],
+      "remaining": [],
       "report_sections": [
         "Resident Resource Descriptors",
         "Focused Backend Facets"
       ],
-      "status": "partial",
+      "status": "covered",
       "title": "Unify resident resource semantics"
     },
     {

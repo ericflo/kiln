@@ -817,19 +817,6 @@ impl GdnBackend for MetalBackend {
 
 impl LinearBackend for MetalBackend {}
 
-fn metal_resident_activation_resource(
-    tensor: &kiln_tensor::Tensor,
-    state: super::residency::ResidentResourceState,
-) -> super::residency::ResidentResource {
-    super::residency::ResidentResource::from_tensor_for_backend(
-        tensor,
-        super::residency::resident_backend_for_runtime("metal", tensor.device()),
-        super::residency::ResidentResourceFamily::Activation,
-        super::residency::ResidentOwnership::StorageOwned,
-    )
-    .with_state(state)
-}
-
 impl super::residency::ResidentRegistry for MetalBackend {
     fn register_resource(
         &self,
@@ -839,10 +826,7 @@ impl super::residency::ResidentRegistry for MetalBackend {
         if family != super::residency::ResidentResourceFamily::Activation {
             return Ok(None);
         }
-        metal_residency::register_resident_activation(&self.resident_activation_registry, tensor)?;
-        Ok(self.resident_resource(tensor, family).map(|resource| {
-            resource.with_state(super::residency::ResidentResourceState::RegisteredClean)
-        }))
+        metal_residency::register_resident_activation(&self.resident_activation_registry, tensor)
     }
 
     fn update_resource(
@@ -853,10 +837,7 @@ impl super::residency::ResidentRegistry for MetalBackend {
         if family != super::residency::ResidentResourceFamily::Activation {
             return Ok(None);
         }
-        metal_residency::update_resident_activation(&self.resident_activation_registry, tensor)?;
-        Ok(self.resident_resource(tensor, family).map(|resource| {
-            resource.with_state(super::residency::ResidentResourceState::DirtyDevice)
-        }))
+        metal_residency::update_resident_activation(&self.resident_activation_registry, tensor)
     }
 
     fn evict_resource(
@@ -874,15 +855,10 @@ impl super::residency::ResidentRegistry for MetalBackend {
         tensor: &kiln_tensor::Tensor,
         family: super::residency::ResidentResourceFamily,
     ) -> Option<super::residency::ResidentResource> {
-        if family != super::residency::ResidentResourceFamily::Activation
-            || !metal_residency::has_resident_activation(&self.resident_activation_registry, tensor)
-        {
+        if family != super::residency::ResidentResourceFamily::Activation {
             return None;
         }
-        Some(metal_resident_activation_resource(
-            tensor,
-            super::residency::ResidentResourceState::RegisteredClean,
-        ))
+        metal_residency::resident_activation_resource(&self.resident_activation_registry, tensor)
     }
 
     fn resolve_resource(

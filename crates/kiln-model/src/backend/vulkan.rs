@@ -21,7 +21,7 @@ use super::vulkan_residency::{
     insert_recurrent_state_resident_buffer, recurrent_state_resident_buffers_for,
     recurrent_state_resident_scope_active, remove_recurrent_state_resident_buffer,
     replace_recurrent_state_resident_buffer, take_recurrent_state_resident_buffer,
-    with_resident_registry,
+    with_resident_registry, ResidentActivationEntry,
 };
 use super::vulkan_tensor_bridge::{
     kt_tensor_from_f32_bytes, kt_tensor_to_f32_bytes_with_shape,
@@ -888,7 +888,13 @@ impl LinearBackend for VulkanBackend {
 fn vulkan_resident_activation_resource(
     tensor: &kiln_tensor::Tensor,
     state: super::residency::ResidentResourceState,
+    resident_byte_len: usize,
 ) -> super::residency::ResidentResource {
+    let resident_dtype = if tensor.dtype() == kiln_tensor::DType::BF16 {
+        kiln_tensor::DType::BF16
+    } else {
+        kiln_tensor::DType::F32
+    };
     super::residency::ResidentResource::from_tensor_for_backend(
         tensor,
         super::residency::resident_backend_for_runtime("vulkan", tensor.device()),
@@ -896,6 +902,8 @@ fn vulkan_resident_activation_resource(
         super::residency::ResidentOwnership::RegistryOwned,
     )
     .with_state(state)
+    .with_replay_stability(super::residency::ReplayStability::StableAcrossReplay)
+    .with_resident_allocation(resident_dtype, resident_byte_len, resident_byte_len)
 }
 
 impl super::residency::ResidentRegistry for VulkanBackend {
@@ -913,19 +921,17 @@ impl super::residency::ResidentRegistry for VulkanBackend {
         // (#1082) kt-native: the residency registry is keyed on the kt
         // `TensorId` directly; byte extraction reads straight from kt storage.
         let id = tensor.id();
-        let already_registered =
-            with_resident_registry(&self.resident_activation_registry, |cache| {
-                cache.contains_key(&id)
-            });
-        if already_registered {
-            return Ok(
-                super::residency::ResidentRegistry::resident_resource(self, tensor, family).map(
-                    |resource| {
-                        resource
-                            .with_state(super::residency::ResidentResourceState::RegisteredClean)
-                    },
-                ),
-            );
+        let existing = with_resident_registry(&self.resident_activation_registry, |cache| {
+            cache.get_mut(&id).map(|entry| {
+                entry.resource = entry
+                    .resource
+                    .clone()
+                    .with_state(super::residency::ResidentResourceState::RegisteredClean);
+                entry.resource.clone()
+            })
+        });
+        if existing.is_some() {
+            return Ok(existing);
         }
         // Encoding choice per dtype:
         //   - BF16 -> packed BF16 (2 bytes/elem), byte-compatible with
@@ -987,13 +993,15 @@ impl super::residency::ResidentRegistry for VulkanBackend {
                 "VulkanBackend::register_resident_activation first call"
             );
         });
-        with_resident_registry(&self.resident_activation_registry, |cache| {
-            cache.insert(id, buffer);
-        });
-        Ok(Some(vulkan_resident_activation_resource(
+        let resource = vulkan_resident_activation_resource(
             tensor,
             super::residency::ResidentResourceState::RegisteredClean,
-        )))
+            bytes.len(),
+        );
+        with_resident_registry(&self.resident_activation_registry, |cache| {
+            cache.insert(id, ResidentActivationEntry::new(buffer, resource.clone()));
+        });
+        Ok(Some(resource))
     }
 
     fn update_resource(
@@ -1010,7 +1018,7 @@ impl super::residency::ResidentRegistry for VulkanBackend {
         // (#1082) kt-native: registry keyed on the kt `TensorId` directly.
         let id = tensor.id();
         let buffer = with_resident_registry(&self.resident_activation_registry, |cache| {
-            cache.get(&id).cloned()
+            cache.get(&id).map(|entry| Arc::clone(&entry.buffer))
         });
         let Some(buffer) = buffer else {
             return Ok(None);
@@ -1039,10 +1047,17 @@ impl super::residency::ResidentRegistry for VulkanBackend {
             &bytes,
         )
         .context("update_resident_activation: re-upload bytes")?;
-        Ok(Some(vulkan_resident_activation_resource(
+        let resource = vulkan_resident_activation_resource(
             tensor,
             super::residency::ResidentResourceState::DirtyDevice,
-        )))
+            bytes.len(),
+        );
+        with_resident_registry(&self.resident_activation_registry, |cache| {
+            if let Some(entry) = cache.get_mut(&id) {
+                entry.resource = resource.clone();
+            }
+        });
+        Ok(Some(resource))
     }
 
     fn evict_resource(
@@ -1070,16 +1085,9 @@ impl super::residency::ResidentRegistry for VulkanBackend {
         }
         // (#1082) kt-native: registry keyed on the kt `TensorId` directly.
         let id = tensor.id();
-        if with_resident_registry(&self.resident_activation_registry, |cache| {
-            cache.contains_key(&id)
-        }) {
-            Some(vulkan_resident_activation_resource(
-                tensor,
-                super::residency::ResidentResourceState::RegisteredClean,
-            ))
-        } else {
-            None
-        }
+        with_resident_registry(&self.resident_activation_registry, |cache| {
+            cache.get(&id).map(|entry| entry.resource.clone())
+        })
     }
 
     fn resolve_resource(
@@ -1099,7 +1107,7 @@ impl super::residency::ResidentRegistry for VulkanBackend {
         // is reconstructed directly as a kt tensor of `dtype`.
         let id = tensor.id();
         let buffer = with_resident_registry(&self.resident_activation_registry, |cache| {
-            cache.get(&id).cloned()
+            cache.get(&id).map(|entry| Arc::clone(&entry.buffer))
         });
         let Some(buffer) = buffer else {
             return Ok(None);

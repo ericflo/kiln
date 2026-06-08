@@ -542,10 +542,13 @@ fn cuda_rocm_resident_membership_stays_in_shared_helper() {
         "mark_resident_activation",
         "evict_resident_activation",
         "has_resident_activation",
+        "resident_activation_resource",
+        "ResidentResource",
+        "HashMap<TensorId",
     ] {
         assert!(
             common_source.contains(required),
-            "cuda_rocm_common.rs should own shared resident membership helper `{required}`"
+            "cuda_rocm_common.rs should own shared resident metadata helper `{required}`"
         );
     }
 
@@ -579,8 +582,9 @@ fn cuda_rocm_resident_membership_stays_in_shared_helper() {
             "{backend_file} registry should evict residency through cuda_rocm_common"
         );
         assert!(
-            compact_body(&resident.body).contains("cuda_rocm_common::has_resident_activation("),
-            "{backend_file} registry should query residency through cuda_rocm_common"
+            compact_body(&resident.body)
+                .contains("cuda_rocm_common::resident_activation_resource("),
+            "{backend_file} registry should query resident metadata through cuda_rocm_common"
         );
 
         assert!(
@@ -590,6 +594,26 @@ fn cuda_rocm_resident_membership_stays_in_shared_helper() {
             "{backend_file} should not keep copied resident TensorId registry helpers"
         );
     }
+
+    let metal_source = fs::read_to_string(backend_dir.join("metal_residency.rs"))
+        .expect("metal_residency.rs should be readable");
+    assert!(
+        metal_source.contains("HashMap<TensorId, super::residency::ResidentResource>")
+            && metal_source.contains("ResidentResourceState")
+            && metal_source.contains("ReplayStability::StableWithinStep"),
+        "Metal resident registry should persist resource lifecycle and replay metadata"
+    );
+    let vulkan_residency_source = fs::read_to_string(backend_dir.join("vulkan_residency.rs"))
+        .expect("vulkan_residency.rs should be readable");
+    let vulkan_source =
+        fs::read_to_string(backend_dir.join("vulkan.rs")).expect("vulkan.rs should be readable");
+    assert!(
+        vulkan_residency_source.contains("ResidentActivationEntry")
+            && vulkan_residency_source.contains("resource: super::residency::ResidentResource")
+            && vulkan_source.contains("ReplayStability::StableAcrossReplay")
+            && vulkan_source.contains("with_resident_allocation"),
+        "Vulkan resident registry should persist actual allocation metadata with replay stability"
+    );
 }
 
 #[test]
@@ -6110,12 +6134,12 @@ fn generated_capability_report_tracks_migration_phase_status() {
         .find(|phase| phase["phase"] == 3)
         .expect("Phase 3 should be present");
     assert_eq!(
-        phase3["status"], "partial",
-        "Phase 3 should show W3.1 registry inversion progress without self-certifying covered"
+        phase3["status"], "covered",
+        "Phase 3 should be covered only when registry routing, ownership, and lifecycle metadata signals pass"
     );
     assert_eq!(phase3["contract"], "landed");
-    assert_eq!(phase3["migration"], "partial");
-    assert_eq!(phase3["genuine"], false);
+    assert_eq!(phase3["migration"], "complete");
+    assert_eq!(phase3["genuine"], true);
     let phase3_signals = phase3["migration_signals"]
         .as_array()
         .expect("Phase 3 should list registry migration signals");
@@ -6125,6 +6149,7 @@ fn generated_capability_report_tracks_migration_phase_status() {
         "residency_backend_facade_delegates_to_registry",
         "resident_registry_process_global_statics_removed",
         "resident_registry_drop_drains_test_present",
+        "resident_registry_lifecycle_metadata_persisted",
     ] {
         let signal = phase3_signals
             .iter()
@@ -6132,17 +6157,7 @@ fn generated_capability_report_tracks_migration_phase_status() {
             .unwrap_or_else(|| panic!("Phase 3 should include migration signal {signal_name}"));
         assert_eq!(
             signal["passed"], true,
-            "Phase 3 signal {signal_name} should pass after registry routing inversion"
-        );
-    }
-    for signal_name in ["resident_registry_lifecycle_metadata_persisted"] {
-        let signal = phase3_signals
-            .iter()
-            .find(|signal| signal["name"] == signal_name)
-            .unwrap_or_else(|| panic!("Phase 3 should include migration signal {signal_name}"));
-        assert_eq!(
-            signal["passed"], false,
-            "Phase 3 signal {signal_name} should fail until production registries persist lifecycle metadata"
+            "Phase 3 signal {signal_name} should pass before Phase 3 can be genuine"
         );
     }
 

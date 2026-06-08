@@ -121,9 +121,11 @@ pub(super) fn dispatch_sgd_step(
     let param_id = param.id();
     let grad_id = grad.id();
     let lookup = with_resident_registry(&backend.resident_activation_registry, |cache| {
-        cache
-            .get(&param_id)
-            .and_then(|p| cache.get(&grad_id).map(|g| (Arc::clone(p), Arc::clone(g))))
+        cache.get(&param_id).and_then(|p| {
+            cache
+                .get(&grad_id)
+                .map(|g| (Arc::clone(&p.buffer), Arc::clone(&g.buffer)))
+        })
     });
     let Some((param_buf, grad_buf)) = lookup else {
         return Ok(false);
@@ -213,10 +215,10 @@ pub(super) fn dispatch_adamw_step(
     let m_id = first_moment.id();
     let v_id = second_moment.id();
     let bufs = with_resident_registry(&backend.resident_activation_registry, |cache| {
-        let p = cache.get(&p_id).map(Arc::clone)?;
-        let g = cache.get(&g_id).map(Arc::clone)?;
-        let m = cache.get(&m_id).map(Arc::clone)?;
-        let v = cache.get(&v_id).map(Arc::clone)?;
+        let p = cache.get(&p_id).map(|entry| Arc::clone(&entry.buffer))?;
+        let g = cache.get(&g_id).map(|entry| Arc::clone(&entry.buffer))?;
+        let m = cache.get(&m_id).map(|entry| Arc::clone(&entry.buffer))?;
+        let v = cache.get(&v_id).map(|entry| Arc::clone(&entry.buffer))?;
         Some((p, g, m, v))
     });
     let Some((param_buf, grad_buf, m_buf, v_buf)) = bufs else {
@@ -341,7 +343,9 @@ mod tests {
         // Read back the updated param buffer from the registry.
         let param_buf =
             with_resident_registry(&backend.resident_activation_registry, |cache| {
-                cache.get(&param.id()).cloned()
+                cache
+                    .get(&param.id())
+                    .map(|entry| Arc::clone(&entry.buffer))
             })
             .expect("param must still be in registry");
         let device = backend.vulkan_device.as_ref().unwrap();

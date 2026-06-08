@@ -4,15 +4,16 @@
 //! Device ownership, kernel dispatch, graph capture, and dispatch logging stay
 //! in the concrete CUDA/ROCm modules.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use kiln_tensor_id::TensorId;
 
-pub(crate) type ResidentTensorIdRegistry = Mutex<HashSet<TensorId>>;
+pub(crate) type ResidentTensorIdRegistry =
+    Mutex<HashMap<TensorId, super::residency::ResidentResource>>;
 
 pub(crate) fn new_resident_tensor_id_registry() -> ResidentTensorIdRegistry {
-    Mutex::new(HashSet::new())
+    Mutex::new(HashMap::new())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -91,10 +92,10 @@ fn kt_tensor_id(tensor: &kiln_tensor::Tensor) -> TensorId {
     tensor.id()
 }
 
-fn with_resident_tensor_ids<R>(
+fn with_resident_tensor_registry<R>(
     registry: &ResidentTensorIdRegistry,
     poison_message: &'static str,
-    f: impl FnOnce(&mut HashSet<TensorId>) -> R,
+    f: impl FnOnce(&mut HashMap<TensorId, super::residency::ResidentResource>) -> R,
 ) -> R {
     let mut guard = registry.lock().expect(poison_message);
     f(&mut guard)
@@ -103,11 +104,13 @@ fn with_resident_tensor_ids<R>(
 pub(crate) fn mark_resident_activation(
     registry: &ResidentTensorIdRegistry,
     tensor: &kiln_tensor::Tensor,
+    resource: super::residency::ResidentResource,
     poison_message: &'static str,
-) {
-    with_resident_tensor_ids(registry, poison_message, |ids| {
-        ids.insert(kt_tensor_id(tensor));
+) -> super::residency::ResidentResource {
+    with_resident_tensor_registry(registry, poison_message, |resources| {
+        resources.insert(kt_tensor_id(tensor), resource.clone());
     });
+    resource
 }
 
 pub(crate) fn evict_resident_activation(
@@ -115,8 +118,8 @@ pub(crate) fn evict_resident_activation(
     tensor: &kiln_tensor::Tensor,
     poison_message: &'static str,
 ) {
-    with_resident_tensor_ids(registry, poison_message, |ids| {
-        ids.remove(&kt_tensor_id(tensor));
+    with_resident_tensor_registry(registry, poison_message, |resources| {
+        resources.remove(&kt_tensor_id(tensor));
     });
 }
 
@@ -125,8 +128,18 @@ pub(crate) fn has_resident_activation(
     tensor: &kiln_tensor::Tensor,
     poison_message: &'static str,
 ) -> bool {
-    with_resident_tensor_ids(registry, poison_message, |ids| {
-        ids.contains(&kt_tensor_id(tensor))
+    with_resident_tensor_registry(registry, poison_message, |resources| {
+        resources.contains_key(&kt_tensor_id(tensor))
+    })
+}
+
+pub(crate) fn resident_activation_resource(
+    registry: &ResidentTensorIdRegistry,
+    tensor: &kiln_tensor::Tensor,
+    poison_message: &'static str,
+) -> Option<super::residency::ResidentResource> {
+    with_resident_tensor_registry(registry, poison_message, |resources| {
+        resources.get(&kt_tensor_id(tensor)).cloned()
     })
 }
 

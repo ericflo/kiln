@@ -1526,13 +1526,24 @@ def resident_registry_drop_drains_test_count() -> int:
 
 
 def resident_registry_lifecycle_metadata_store_count() -> int:
-    return sum(
-        regex_count(path, r"ResidentResourceState|ReplayStability")
-        for path in [
+    specs = [
+        (
             "crates/kiln-model/src/backend/cuda_rocm_common.rs",
+            ["ResidentResource", "HashMap<TensorId"],
+        ),
+        (
             "crates/kiln-model/src/backend/metal_residency.rs",
+            ["ResidentResource", "ResidentResourceState", "ReplayStability"],
+        ),
+        (
             "crates/kiln-model/src/backend/vulkan_residency.rs",
-        ]
+            ["ResidentActivationEntry", "ResidentResource", "resource:"],
+        ),
+    ]
+    return sum(
+        1
+        for path, needles in specs
+        if all(needle in file_text(path) for needle in needles)
     )
 
 
@@ -1688,9 +1699,9 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
             ),
             phase_signal(
                 "resident_registry_lifecycle_metadata_persisted",
-                lifecycle_store_count > 0,
+                lifecycle_store_count >= 3,
                 lifecycle_store_count,
-                "> 0",
+                ">= 3",
                 [
                     "crates/kiln-model/src/backend/cuda_rocm_common.rs",
                     "crates/kiln-model/src/backend/metal_residency.rs",

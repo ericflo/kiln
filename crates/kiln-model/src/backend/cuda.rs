@@ -1521,6 +1521,7 @@ fn cuda_resident_activation_resource(
         super::residency::ResidentOwnership::StorageOwned,
     )
     .with_state(state)
+    .with_replay_stability(super::residency::ReplayStability::StableWithinStep)
 }
 
 impl super::residency::ResidentRegistry for CudaBackend {
@@ -1532,14 +1533,15 @@ impl super::residency::ResidentRegistry for CudaBackend {
         if family != super::residency::ResidentResourceFamily::Activation {
             return Ok(None);
         }
-        super::cuda_rocm_common::mark_resident_activation(
-            &self.resident_tensor_ids,
-            tensor,
-            CUDA_RESIDENT_TENSOR_IDS_POISONED,
-        );
-        Ok(Some(cuda_resident_activation_resource(
+        let resource = cuda_resident_activation_resource(
             tensor,
             super::residency::ResidentResourceState::RegisteredClean,
+        );
+        Ok(Some(super::cuda_rocm_common::mark_resident_activation(
+            &self.resident_tensor_ids,
+            tensor,
+            resource,
+            CUDA_RESIDENT_TENSOR_IDS_POISONED,
         )))
     }
 
@@ -1551,14 +1553,15 @@ impl super::residency::ResidentRegistry for CudaBackend {
         if family != super::residency::ResidentResourceFamily::Activation {
             return Ok(None);
         }
-        super::cuda_rocm_common::mark_resident_activation(
-            &self.resident_tensor_ids,
-            tensor,
-            CUDA_RESIDENT_TENSOR_IDS_POISONED,
-        );
-        Ok(Some(cuda_resident_activation_resource(
+        let resource = cuda_resident_activation_resource(
             tensor,
             super::residency::ResidentResourceState::DirtyDevice,
+        );
+        Ok(Some(super::cuda_rocm_common::mark_resident_activation(
+            &self.resident_tensor_ids,
+            tensor,
+            resource,
+            CUDA_RESIDENT_TENSOR_IDS_POISONED,
         )))
     }
 
@@ -1585,18 +1588,11 @@ impl super::residency::ResidentRegistry for CudaBackend {
         if family != super::residency::ResidentResourceFamily::Activation {
             return None;
         }
-        if super::cuda_rocm_common::has_resident_activation(
+        super::cuda_rocm_common::resident_activation_resource(
             &self.resident_tensor_ids,
             tensor,
             CUDA_RESIDENT_TENSOR_IDS_POISONED,
-        ) {
-            Some(cuda_resident_activation_resource(
-                tensor,
-                super::residency::ResidentResourceState::RegisteredClean,
-            ))
-        } else {
-            None
-        }
+        )
     }
 }
 

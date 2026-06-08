@@ -157,6 +157,18 @@ impl ResidentResource {
         self
     }
 
+    pub fn with_resident_allocation(
+        mut self,
+        dtype: DType,
+        byte_len: usize,
+        addressable_byte_len: usize,
+    ) -> Self {
+        self.dtype = dtype;
+        self.byte_len = byte_len;
+        self.addressable_byte_len = addressable_byte_len;
+        self
+    }
+
     pub fn to_replay_resource_ref(&self) -> ResidentResourceRef {
         self.to_replay_resource_ref_for_backend(self.backend)
     }
@@ -449,6 +461,12 @@ mod tests {
             resource.replay_stability,
             ReplayStability::StableAcrossReplay
         );
+        let resident_alloc = resource
+            .clone()
+            .with_resident_allocation(DType::F32, 12, 12);
+        assert_eq!(resident_alloc.dtype, DType::F32);
+        assert_eq!(resident_alloc.byte_len, 12);
+        assert_eq!(resident_alloc.addressable_byte_len, 12);
         let replay_ref = resource.to_replay_resource_ref();
         assert_eq!(replay_ref.tensor_id, Some(resource.tensor_id));
         assert_eq!(replay_ref.backend, Backend::Cpu);

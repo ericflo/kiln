@@ -7,8 +7,23 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+#[derive(Debug, Clone)]
+pub(super) struct ResidentActivationEntry {
+    pub(super) buffer: Arc<kiln_vulkan_kernel::VulkanBuffer>,
+    pub(super) resource: super::residency::ResidentResource,
+}
+
+impl ResidentActivationEntry {
+    pub(super) fn new(
+        buffer: Arc<kiln_vulkan_kernel::VulkanBuffer>,
+        resource: super::residency::ResidentResource,
+    ) -> Self {
+        Self { buffer, resource }
+    }
+}
+
 pub(super) type ResidentActivationRegistry =
-    Mutex<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>;
+    Mutex<HashMap<kiln_tensor::TensorId, ResidentActivationEntry>>;
 
 pub(super) fn new_resident_activation_registry() -> ResidentActivationRegistry {
     Mutex::new(HashMap::new())
@@ -27,7 +42,7 @@ thread_local! {
 /// inaccessible just because some panicking code touched it.
 pub(super) fn with_resident_registry<F, R>(registry: &ResidentActivationRegistry, f: F) -> R
 where
-    F: FnOnce(&mut HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>) -> R,
+    F: FnOnce(&mut HashMap<kiln_tensor::TensorId, ResidentActivationEntry>) -> R,
 {
     let mut guard = registry.lock().unwrap_or_else(|e| e.into_inner());
     f(&mut guard)
