@@ -6480,32 +6480,42 @@ fn generated_capability_report_tracks_migration_phase_status() {
         );
     }
 
-    for (phase_number, signal_name) in [(4, "matmul_linear_identity_dispatch_removed")] {
-        let phase = phases
-            .iter()
-            .find(|phase| phase["phase"] == phase_number)
-            .unwrap_or_else(|| panic!("Phase {phase_number} should be present"));
-        assert_eq!(
-            phase["status"], "gap",
-            "Phase {phase_number} should not self-certify covered while migration signals fail"
-        );
-        assert_eq!(phase["contract"], "landed");
-        assert_eq!(phase["migration"], "none");
-        assert_eq!(phase["genuine"], false);
-        let signals = phase["migration_signals"]
-            .as_array()
-            .expect("migration-bearing phases should list machine signals");
-        let signal = signals
+    let phase4 = phases
+        .iter()
+        .find(|phase| phase["phase"] == 4)
+        .expect("Phase 4 should be present");
+    assert_eq!(
+        phase4["status"], "partial",
+        "Phase 4 should report partial W4.1/W4.4 progress without self-certifying completion"
+    );
+    assert_eq!(phase4["contract"], "landed");
+    assert_eq!(phase4["migration"], "partial");
+    assert_eq!(phase4["genuine"], false);
+    let phase4_signals = phase4["migration_signals"]
+        .as_array()
+        .expect("Phase 4 should list machine signals");
+    for signal_name in [
+        "matmul_request_descriptor_w4_1_lossless",
+        "matmul_support_query_delegates_to_linear_backend",
+        "matmul_transposed_request_contract_present",
+    ] {
+        let signal = phase4_signals
             .iter()
             .find(|signal| signal["name"] == signal_name)
-            .unwrap_or_else(|| {
-                panic!("Phase {phase_number} should include migration signal {signal_name}")
-            });
+            .unwrap_or_else(|| panic!("Phase 4 should include migration signal {signal_name}"));
         assert_eq!(
-            signal["passed"], false,
-            "Phase {phase_number} signal {signal_name} should fail until the legacy scaffold is removed"
+            signal["passed"], true,
+            "Phase 4 signal {signal_name} should pass before W4 partial progress is advertised"
         );
     }
+    let identity_signal = phase4_signals
+        .iter()
+        .find(|signal| signal["name"] == "matmul_linear_identity_dispatch_removed")
+        .expect("Phase 4 should include the final identity-dispatch migration signal");
+    assert_eq!(
+        identity_signal["passed"], false,
+        "Phase 4 must stay non-genuine until legacy matmul/linear identity dispatch is removed"
+    );
 
     let phase5 = phases
         .iter()

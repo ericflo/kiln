@@ -1594,6 +1594,80 @@ def matmul_identity_dispatch_count() -> int:
     return sum(len(re.findall(pattern, production_source_text(path))) for path in paths)
 
 
+def matmul_request_descriptor_w4_1_signal_count() -> tuple[int, int]:
+    required = [
+        ("crates/kiln-model/src/backend/capability.rs", "pub enum MatmulOperandLayout"),
+        ("crates/kiln-model/src/backend/capability.rs", "ColMajor"),
+        ("crates/kiln-model/src/backend/capability.rs", "pub enum MatmulBatchPolicy"),
+        ("crates/kiln-model/src/backend/capability.rs", "Batched { batches: usize }"),
+        ("crates/kiln-model/src/backend/capability.rs", "pub lhs_dtype: kiln_tensor::DType"),
+        ("crates/kiln-model/src/backend/capability.rs", "pub rhs_dtype: kiln_tensor::DType"),
+        ("crates/kiln-model/src/backend/capability.rs", "pub out_dtype: kiln_tensor::DType"),
+        ("crates/kiln-model/src/backend/capability.rs", "pub fn with_dtypes"),
+        ("crates/kiln-model/src/backend/capability.rs", "fn logical_operand_dims"),
+        ("crates/kiln-model/src/backend/capability.rs", "pub fn to_blas_request"),
+        ("crates/kiln-model/src/backend/mod.rs", "transposed rhs request projects losslessly"),
+        ("crates/kiln-model/src/backend/mod.rs", "mixed dtype request should project without dropping dtype metadata"),
+        ("crates/kiln-model/src/backend/mod.rs", "batched request projects"),
+    ]
+    observed = sum(1 for path, needle in required if needle in file_text(path))
+    return observed, len(required)
+
+
+def matmul_support_query_authority_signal_count() -> tuple[int, int]:
+    required = [
+        (
+            "crates/kiln-model/src/backend/capability.rs",
+            "LinearBackend::runtime_supports_matmul_request(self, req)",
+        ),
+        (
+            "crates/kiln-model/src/backend/mod.rs",
+            "fn runtime_supports_matmul_request(",
+        ),
+        (
+            "crates/kiln-model/src/backend/cpu.rs",
+            "impl LinearBackend for CpuBackend",
+        ),
+        (
+            "crates/kiln-model/src/backend/cuda.rs",
+            "impl LinearBackend for CudaBackend",
+        ),
+        (
+            "crates/kiln-model/src/backend/rocm.rs",
+            "impl LinearBackend for RocmBackend",
+        ),
+        (
+            "crates/kiln-model/src/backend/metal_runtime.rs",
+            "impl LinearBackend for MetalBackend",
+        ),
+        (
+            "crates/kiln-model/src/backend/vulkan.rs",
+            "impl LinearBackend for VulkanBackend",
+        ),
+    ]
+    observed = sum(1 for path, needle in required if needle in file_text(path))
+    return observed, len(required)
+
+
+def matmul_transposed_request_contract_signal_count() -> tuple[int, int]:
+    required = [
+        (
+            "crates/kiln-model/src/backend/mod.rs",
+            "let cuda_transposed = capability::MatmulRequest::plain",
+        ),
+        (
+            "crates/kiln-model/src/backend/mod.rs",
+            "transposed_bias",
+        ),
+        (
+            "crates/kiln-model/src/backend/mod.rs",
+            "cpu backend should route rhs-transposed matmul request",
+        ),
+    ]
+    observed = sum(1 for path, needle in required if needle in file_text(path))
+    return observed, len(required)
+
+
 def replay_production_replay_plan_mentions() -> int:
     paths = [
         "crates/kiln-model/src/cuda_graph.rs",
@@ -1762,8 +1836,43 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
             ),
         ]
     if phase == 4:
+        descriptor_count, descriptor_expected = matmul_request_descriptor_w4_1_signal_count()
+        support_count, support_expected = matmul_support_query_authority_signal_count()
+        transposed_count, transposed_expected = matmul_transposed_request_contract_signal_count()
         dispatch_count = matmul_identity_dispatch_count()
         return [
+            phase_signal(
+                "matmul_request_descriptor_w4_1_lossless",
+                descriptor_count == descriptor_expected,
+                descriptor_count,
+                descriptor_expected,
+                [
+                    "crates/kiln-model/src/backend/capability.rs",
+                    "crates/kiln-model/src/backend/mod.rs",
+                ],
+            ),
+            phase_signal(
+                "matmul_support_query_delegates_to_linear_backend",
+                support_count == support_expected,
+                support_count,
+                support_expected,
+                [
+                    "crates/kiln-model/src/backend/capability.rs",
+                    "crates/kiln-model/src/backend/mod.rs",
+                    "crates/kiln-model/src/backend/cpu.rs",
+                    "crates/kiln-model/src/backend/cuda.rs",
+                    "crates/kiln-model/src/backend/rocm.rs",
+                    "crates/kiln-model/src/backend/metal_runtime.rs",
+                    "crates/kiln-model/src/backend/vulkan.rs",
+                ],
+            ),
+            phase_signal(
+                "matmul_transposed_request_contract_present",
+                transposed_count == transposed_expected,
+                transposed_count,
+                transposed_expected,
+                ["crates/kiln-model/src/backend/mod.rs"],
+            ),
             phase_signal(
                 "matmul_linear_identity_dispatch_removed",
                 dispatch_count == 0,

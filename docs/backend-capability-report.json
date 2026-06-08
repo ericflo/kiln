@@ -3580,8 +3580,42 @@
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
       "genuine": false,
-      "migration": "none",
+      "migration": "partial",
       "migration_signals": [
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/capability.rs",
+            "crates/kiln-model/src/backend/mod.rs"
+          ],
+          "expected": 13,
+          "name": "matmul_request_descriptor_w4_1_lossless",
+          "observed": 13,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/capability.rs",
+            "crates/kiln-model/src/backend/mod.rs",
+            "crates/kiln-model/src/backend/cpu.rs",
+            "crates/kiln-model/src/backend/cuda.rs",
+            "crates/kiln-model/src/backend/rocm.rs",
+            "crates/kiln-model/src/backend/metal_runtime.rs",
+            "crates/kiln-model/src/backend/vulkan.rs"
+          ],
+          "expected": 7,
+          "name": "matmul_support_query_delegates_to_linear_backend",
+          "observed": 7,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs"
+          ],
+          "expected": 3,
+          "name": "matmul_transposed_request_contract_present",
+          "observed": 3,
+          "passed": true
+        },
         {
           "evidence": [
             "crates/kiln-tensor/src/ops/matmul.rs",
@@ -3603,7 +3637,7 @@
         "Request Capability Queries",
         "Conformance And Performance Gates"
       ],
-      "status": "gap",
+      "status": "partial",
       "title": "Unify matmul and linear dispatch"
     },
     {

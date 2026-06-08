@@ -1234,16 +1234,18 @@ pub(crate) fn requested_matmul_layout(
 }
 
 pub(crate) fn matmul_request_support_rank(req: &capability::MatmulRequest) -> Option<usize> {
+    let row_major_request = req.lhs_layout == capability::MatmulOperandLayout::RowMajor
+        && req.rhs_layout == capability::MatmulOperandLayout::RowMajor
+        && req.out_layout == capability::MatmulOperandLayout::RowMajor;
     if req.to_blas_request(1).is_err()
         || req.homogeneous_dtype().is_none()
         || req.accumulation != capability::MatmulAccumulation::F32
-        || req.lhs_layout != capability::MatmulOperandLayout::RowMajor
-        || req.rhs_layout != capability::MatmulOperandLayout::RowMajor
         || req.out_layout != capability::MatmulOperandLayout::RowMajor
-        || !matches!(
-            req.epilogue,
-            capability::MatmulEpilogue::Identity | capability::MatmulEpilogue::Bias
-        )
+        || match req.epilogue {
+            capability::MatmulEpilogue::Identity => false,
+            capability::MatmulEpilogue::Bias => !row_major_request,
+            _ => true,
+        }
     {
         return None;
     }
@@ -2337,6 +2339,38 @@ mod tests {
             name: "cuda",
             resident: false,
         };
+        let cuda_transposed = capability::MatmulRequest::plain(
+            vec![2, 3],
+            vec![4, 3],
+            kiln_tensor::DType::BF16,
+            false,
+        )
+        .with_layouts(
+            capability::MatmulOperandLayout::RowMajor,
+            capability::MatmulOperandLayout::ColMajor,
+            capability::MatmulOperandLayout::RowMajor,
+        );
+        assert_eq!(
+            capability::BackendCapabilityQueries::supports_matmul_request(&cuda, &cuda_transposed),
+            capability::Support::NativeWithConstraints
+        );
+        let transposed_bias = cuda_transposed
+            .clone()
+            .with_epilogue(capability::MatmulEpilogue::Bias);
+        assert_eq!(
+            capability::BackendCapabilityQueries::supports_matmul_request(&cuda, &transposed_bias),
+            capability::Support::Unsupported
+        );
+        let mixed = plain.clone().with_dtypes(
+            kiln_tensor::DType::F32,
+            kiln_tensor::DType::BF16,
+            kiln_tensor::DType::F32,
+        );
+        assert_eq!(
+            capability::BackendCapabilityQueries::supports_matmul_request(&cuda, &mixed),
+            capability::Support::Unsupported
+        );
+
         let bias = capability::MatmulRequest::plain(
             vec![2, 3],
             vec![3, 4],
