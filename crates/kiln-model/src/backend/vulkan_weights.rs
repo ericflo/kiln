@@ -263,11 +263,11 @@ pub(super) fn prewarm_mlp_decode_weights_kt(
                 bf16_bytes,
             )?;
         }
-        for (suffix, weight) in weights {
+        if backend.mlp_bf16_gate_up_f32_down_enabled {
             prewarm_f32_weight_kt(
                 backend,
-                &format!("layers.{layer_idx}.mlp.{suffix}"),
-                weight,
+                &format!("layers.{layer_idx}.mlp.down_proj_t"),
+                down_weight_t,
                 f32_count,
                 f32_bytes,
             )?;

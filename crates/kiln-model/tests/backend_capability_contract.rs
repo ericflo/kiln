@@ -1191,6 +1191,35 @@ fn vulkan_gdn_runtime_methods_stay_in_gdn_module() {
 }
 
 #[test]
+fn vulkan_recurrent_scatter_stages_rows_before_mutating_destinations() {
+    let backend_dir = manifest_dir().join("src/backend");
+    let vulkan_rs = backend_dir.join("vulkan.rs");
+    let functions = parse_functions(&vulkan_rs);
+    let scatter = functions
+        .get("runtime_scatter_gdn_recurrent_resident_batch_rows")
+        .expect("VulkanBackend should expose recurrent resident scatter");
+    let body = compact_body(&scatter.body);
+
+    assert!(
+        body.contains("ifrow_buffers.len()!=destinations.len(){returnOk(false);}"),
+        "Vulkan recurrent scatter should reject short split results before mutating destinations"
+    );
+    let stage_pos = body
+        .find("staged_rows.push((old_id,new_id,placeholder,row_buffer));")
+        .expect("Vulkan recurrent scatter should stage destination replacements");
+    let assignment_pos = body
+        .find("**dst=placeholder;")
+        .expect("Vulkan recurrent scatter should assign staged placeholders");
+    let replacement_pos = body
+        .find("replace_recurrent_state_resident_buffer(old_id,new_id,row_buffer);")
+        .expect("Vulkan recurrent scatter should replace resident row buffers");
+    assert!(
+        stage_pos < assignment_pos && assignment_pos < replacement_pos,
+        "Vulkan recurrent scatter should validate/stage every row before destination mutation"
+    );
+}
+
+#[test]
 fn generated_capability_report_lists_request_descriptors() {
     let report_path = workspace_root().join("docs/backend-capability-report.json");
     let report: Value = serde_json::from_str(

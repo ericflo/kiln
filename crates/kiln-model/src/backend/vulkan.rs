@@ -1391,9 +1391,13 @@ impl ResidencyBackend for VulkanBackend {
             batch_rows,
         )
         .context("failed to scatter resident GDN recurrent batch rows")?;
+        if row_buffers.len() != destinations.len() {
+            return Ok(false);
+        }
 
+        let mut staged_rows = Vec::with_capacity(destinations.len());
         for (row_idx, (dst, row_buffer)) in destinations
-            .iter_mut()
+            .iter()
             .zip(row_buffers.into_iter())
             .enumerate()
         {
@@ -1406,10 +1410,16 @@ impl ResidencyBackend for VulkanBackend {
             {
                 return Ok(false);
             }
-            // Write the placeholder back into the kt destination.
-            **dst = placeholder;
             // kt id of the newly-written destination keys the insert.
-            let new_id = dst.id();
+            let new_id = placeholder.id();
+            staged_rows.push((old_id, new_id, placeholder, row_buffer));
+        }
+
+        for (dst, (old_id, new_id, placeholder, row_buffer)) in destinations
+            .iter_mut()
+            .zip(staged_rows.into_iter())
+        {
+            **dst = placeholder;
             replace_recurrent_state_resident_buffer(old_id, new_id, row_buffer);
         }
         remove_recurrent_state_resident_buffer(batch.id());

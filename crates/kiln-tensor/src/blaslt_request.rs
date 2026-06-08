@@ -3,7 +3,9 @@
 //! `kiln-blas` and `kiln-rocblas` expose separate concrete request types so the
 //! CUDA and ROCm crates can stay independently feature-gated. This module owns
 //! the pure tensor-side projection that is identical before each backend maps it
-//! into its concrete BLAS crate type.
+//! into its concrete BLAS crate type. Keep this shared request home in
+//! `kiln-tensor`, where CUDA and ROCm tensor matmul callers both depend on it,
+//! instead of moving it into the model-layer `cuda_rocm_common` helpers.
 
 use crate::{DType, Error, Result};
 

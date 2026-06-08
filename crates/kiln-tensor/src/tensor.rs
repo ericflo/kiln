@@ -419,9 +419,8 @@ impl Tensor {
     ///
     /// CPU: wraps the byte buffer directly (zero per-element work). CUDA:
     /// wraps on the host then H2D-uploads via the candle-free
-    /// [`crate::host_to_cuda_copy_ctx`]. Metal uploads through
-    /// [`crate::host_to_metal_copy`]. Vulkan is not yet implemented (#1082);
-    /// callers that use Vulkan-host staging should explicitly request CPU.
+    /// [`crate::host_to_cuda_copy_ctx`]. Metal, Vulkan, and ROCm upload through
+    /// their backend host-copy helpers when the corresponding feature is enabled.
     pub fn from_raw_bytes_on(
         device: Device,
         dtype: DType,
