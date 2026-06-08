@@ -1673,7 +1673,7 @@ def replay_production_replay_plan_signal_count() -> tuple[int, int]:
         "crates/kiln-model/src/cuda_graph.rs",
         "crates/kiln-model/src/rocm_graph.rs",
         "crates/kiln-model/src/metal_graph.rs",
-        "crates/kiln-vulkan-kernel/src/cmd_batch.rs",
+        "crates/kiln-model/src/vk_decode_resident.rs",
     ]
     observed = 0
     for path in paths:
@@ -1910,7 +1910,7 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
                     "crates/kiln-model/src/cuda_graph.rs",
                     "crates/kiln-model/src/rocm_graph.rs",
                     "crates/kiln-model/src/metal_graph.rs",
-                    "crates/kiln-vulkan-kernel/src/cmd_batch.rs",
+                    "crates/kiln-model/src/vk_decode_resident.rs",
                 ],
             ),
         ]
@@ -2113,6 +2113,7 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
                 "crates/kiln-model/src/cuda_graph.rs",
                 "crates/kiln-model/src/rocm_graph.rs",
                 "crates/kiln-model/src/metal_graph.rs",
+                "crates/kiln-model/src/vk_decode_resident.rs",
                 "crates/kiln-vulkan-kernel/src/cmd_batch.rs",
                 "crates/kiln-model/tests/backend_capability_contract.rs",
             ],

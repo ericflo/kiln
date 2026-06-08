@@ -3656,6 +3656,7 @@
         "crates/kiln-model/src/cuda_graph.rs",
         "crates/kiln-model/src/rocm_graph.rs",
         "crates/kiln-model/src/metal_graph.rs",
+        "crates/kiln-model/src/vk_decode_resident.rs",
         "crates/kiln-vulkan-kernel/src/cmd_batch.rs",
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
@@ -3668,6 +3669,7 @@
         "crates/kiln-model/src/cuda_graph.rs",
         "crates/kiln-model/src/rocm_graph.rs",
         "crates/kiln-model/src/metal_graph.rs",
+        "crates/kiln-model/src/vk_decode_resident.rs",
         "crates/kiln-vulkan-kernel/src/cmd_batch.rs",
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
@@ -3688,11 +3690,11 @@
             "crates/kiln-model/src/cuda_graph.rs",
             "crates/kiln-model/src/rocm_graph.rs",
             "crates/kiln-model/src/metal_graph.rs",
-            "crates/kiln-vulkan-kernel/src/cmd_batch.rs"
+            "crates/kiln-model/src/vk_decode_resident.rs"
           ],
           "expected": 4,
           "name": "production_replay_paths_use_replay_plan",
-          "observed": 2,
+          "observed": 3,
           "passed": false
         }
       ],

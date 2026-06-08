@@ -2595,7 +2595,7 @@ fn generated_capability_report_lists_replay_authority() {
         (
             "vulkan",
             "Vulkan CommandBatch",
-            "crates/kiln-vulkan-kernel/src/cmd_batch.rs",
+            "crates/kiln-model/src/vk_decode_resident.rs",
         ),
     ] {
         let info = replay_authority
@@ -6639,8 +6639,8 @@ fn generated_capability_report_tracks_migration_phase_status() {
         "Phase 5 production wiring signal should fail until all decode replay runner families use ReplayPlan"
     );
     assert_eq!(
-        production_replay_signal["observed"], 2,
-        "Phase 5 should report the ROCm and Metal production replay runner slices as wired"
+        production_replay_signal["observed"], 3,
+        "Phase 5 should report the ROCm, Metal, and Vulkan production replay runner slices as wired"
     );
     assert_eq!(
         production_replay_signal["expected"], 4,
@@ -6798,6 +6798,46 @@ fn metal_graph_icb_replay_routes_through_replay_plan_contract() {
     assert!(
         !icb_attention_section.contains(".replay(max_seqlen_k as u32, softmax_scale)"),
         "forward Metal ICB attention should not call the native ICB replay directly"
+    );
+}
+
+#[test]
+fn vulkan_resident_decode_routes_command_batch_through_replay_plan_contract() {
+    let vk_source = fs::read_to_string(
+        workspace_root().join("crates/kiln-model/src/vk_decode_resident.rs"),
+    )
+    .expect("vk_decode_resident.rs should be readable");
+    let production = production_source_before_tests(&vk_source);
+    let replay_plan_impl = source_between(
+        production,
+        "impl ReplayPlan for VulkanCommandBatchReplayPlan",
+        "fn replay_vulkan_command_batch(",
+    );
+    let production_outside_replay_plan = production.replacen(replay_plan_impl, "", 1);
+
+    assert!(
+        production.contains("struct VulkanCommandBatchReplayPlan")
+            && production.contains("impl ReplayPlan for VulkanCommandBatchReplayPlan"),
+        "Vulkan resident decode should expose a production ReplayPlan adapter"
+    );
+    assert!(
+        production.contains("ReplayState::new(replay_key.clone(), resources)")
+            && production.contains("ReplayResourceStability::StableWithinStep")
+            && production.contains("vk_replay_resource("),
+        "Vulkan resident decode should persist shared replay key/resource validation state"
+    );
+    assert!(
+        production.contains("ReplayInputs::new")
+            && production.contains("kiln_graph::ReplayPlan::replay(&mut plan"),
+        "Vulkan resident decode should execute command batches through ReplayPlan::replay"
+    );
+    assert!(
+        replay_plan_impl.contains(".submit_and_wait(self.label)"),
+        "Vulkan ReplayPlan adapter should own the native CommandBatch submit"
+    );
+    assert!(
+        !production_outside_replay_plan.contains(".submit_and_wait("),
+        "Vulkan resident decode production paths should not submit CommandBatch outside ReplayPlan::replay"
     );
 }
 
