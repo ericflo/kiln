@@ -5398,6 +5398,41 @@ fn forward_lm_head_matmul_routes_through_matmul_op_contract() {
 }
 
 #[test]
+fn forward_lm_head_argmax_fallbacks_keep_backend_linear_contract() {
+    let forward_source =
+        fs::read_to_string(workspace_root().join("crates/kiln-model/src/forward.rs"))
+            .expect("forward source should be readable");
+
+    let scalar_fallback = source_between(
+        &forward_source,
+        "fn lm_head_argmax_backend_decode_if(",
+        "/// Phase 7 (#1082) — kt-API sampler argmax migration helper",
+    );
+    assert!(
+        scalar_fallback.contains("lm_head_argmax_with_backend(backend, x, embed_tokens_t)"),
+        "scalar LM-head argmax fallback should keep logits on the backend-aware linear path"
+    );
+    assert!(
+        !scalar_fallback.contains("lm_head_argmax(x, embed_tokens_t)"),
+        "scalar LM-head argmax fallback should not bypass the backend-aware linear path"
+    );
+
+    let rows_fallback = source_between(
+        &forward_source,
+        "fn lm_head_argmax_rows_backend_decode_if(",
+        "fn lm_head_weighted_prep_argmax(",
+    );
+    assert!(
+        rows_fallback.contains("lm_head_argmax_rows_with_backend(backend, x, embed_tokens_t)"),
+        "batched LM-head argmax fallback should keep logits on the backend-aware linear path"
+    );
+    assert!(
+        !rows_fallback.contains("lm_head_argmax_rows(x, embed_tokens_t)"),
+        "batched LM-head argmax fallback should not bypass the backend-aware linear path"
+    );
+}
+
+#[test]
 fn forward_gqa_sdpa_matmuls_route_through_matmul_ops_contract() {
     let forward_source =
         fs::read_to_string(workspace_root().join("crates/kiln-model/src/forward.rs"))

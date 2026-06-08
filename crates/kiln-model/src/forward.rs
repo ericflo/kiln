@@ -11572,7 +11572,11 @@ fn lm_head_forward_backend_decode_if(
     lm_head_forward(x, embed_tokens_t)
 }
 
-fn lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<u32> {
+fn lm_head_argmax_with_backend(
+    backend: Option<&dyn BackendRuntime>,
+    x: &Tensor,
+    embed_tokens_t: &Tensor,
+) -> Result<u32> {
     #[cfg(feature = "metal")]
     {
         if crate::backend::metal::metal_lm_head_argmax_supports(x, embed_tokens_t) {
@@ -11589,7 +11593,11 @@ fn lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<u32> {
     if let Some(token) = try_kt_lm_head_argmax(x, embed_tokens_t)? {
         return Ok(token);
     }
-    let logits = lm_head_forward(x, embed_tokens_t)?;
+    let logits = if backend.is_some() {
+        lm_head_forward_backend_decode_if(backend, x, embed_tokens_t)?
+    } else {
+        lm_head_forward(x, embed_tokens_t)?
+    };
     let logits_1d = logits.flatten_all()?;
     #[cfg(feature = "cuda")]
     if cuda_use_kt_api_argmax()
@@ -11605,6 +11613,10 @@ fn lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<u32> {
     // narrow to the u32 token id. (The CUDA fast paths above return early; this
     // fallback runs on the no-CUDA / kt-API-off path.)
     Ok(logits_1d.argmax(0)?.flatten_all()?.to_vec1::<i64>()?[0] as u32)
+}
+
+fn lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<u32> {
+    lm_head_argmax_with_backend(None, x, embed_tokens_t)
 }
 
 /// Phase 7 (#1082) — fused kt-API LM head + argmax migration helper.
@@ -11726,7 +11738,7 @@ fn lm_head_argmax_backend_decode_if(
             return Ok(token);
         }
     }
-    lm_head_argmax(x, embed_tokens_t)
+    lm_head_argmax_with_backend(backend, x, embed_tokens_t)
 }
 
 /// Phase 7 (#1082) — kt-API sampler argmax migration helper for
@@ -11906,7 +11918,11 @@ pub fn lm_head_sample_backend_decode_if(
     )
 }
 
-fn lm_head_argmax_rows(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Vec<u32>> {
+fn lm_head_argmax_rows_with_backend(
+    backend: Option<&dyn BackendRuntime>,
+    x: &Tensor,
+    embed_tokens_t: &Tensor,
+) -> Result<Vec<u32>> {
     #[cfg(feature = "metal")]
     {
         if crate::backend::metal::metal_lm_head_argmax_rows_supports(x, embed_tokens_t) {
@@ -11914,7 +11930,11 @@ fn lm_head_argmax_rows(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Vec<u32>> 
                 .context("metal batch lm_head argmax kernel failed");
         }
     }
-    let logits = lm_head_forward(x, embed_tokens_t)?;
+    let logits = if backend.is_some() {
+        lm_head_forward_backend_decode_if(backend, x, embed_tokens_t)?
+    } else {
+        lm_head_forward(x, embed_tokens_t)?
+    };
     // #1082: `greedy_sample_rows` is a candle-typed host-sampler island; bridge
     // the kt logits to candle for it.
     // #1082: un-stubbed for no-CUDA — `kt_logits_to_candle` + `greedy_sample_rows`
@@ -11937,7 +11957,7 @@ fn lm_head_argmax_rows_backend_decode_if(
             }
         }
     }
-    lm_head_argmax_rows(x, embed_tokens_t)
+    lm_head_argmax_rows_with_backend(backend, x, embed_tokens_t)
 }
 
 fn lm_head_weighted_prep_argmax(
