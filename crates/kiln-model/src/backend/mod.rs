@@ -663,6 +663,7 @@ pub trait BackendRuntime:
     + SamplingBackend
     + OptimizerBackend
     + PagedKvBackend
+    + ReplayBackend
     + Send
     + Sync
     + std::fmt::Debug
@@ -728,7 +729,12 @@ pub trait BackendRuntime:
         max_intermediate: usize,
         max_batch: usize,
     ) -> bool {
-        false
+        ReplayBackend::runtime_decode_resident_pool_ready(
+            self,
+            max_hidden,
+            max_intermediate,
+            max_batch,
+        )
     }
 
     /// Whether the backend can run a full decode step "device-resident":
@@ -747,7 +753,7 @@ pub trait BackendRuntime:
     /// route into the resident decode path. Returning false routes to
     /// today's candle_core::Tensor-shaped path unchanged.
     fn supports_resident_decode(&self) -> bool {
-        false
+        ReplayBackend::runtime_supports_resident_decode(self)
     }
 
     fn supports_flash_attn_prefill(&self) -> bool {
@@ -900,19 +906,20 @@ pub trait BackendRuntime:
         v_pool: &kiln_tensor::Tensor,
         block_table: &kiln_tensor::Tensor,
         seqused_k: &kiln_tensor::Tensor,
-        _graph_outputs: Option<(&kiln_tensor::Tensor, &kiln_tensor::Tensor)>,
+        graph_outputs: Option<(&kiln_tensor::Tensor, &kiln_tensor::Tensor)>,
         max_seqlen_k: usize,
         page_block_size: usize,
         softmax_scale: f32,
         causal: bool,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        AttentionBackend::runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+        ReplayBackend::runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
             self,
             q,
             k_pool,
             v_pool,
             block_table,
             seqused_k,
+            graph_outputs,
             max_seqlen_k,
             page_block_size,
             softmax_scale,
@@ -2883,27 +2890,51 @@ pub trait TrainingLossBackend: Send + Sync + std::fmt::Debug {
 
 /// Focused `ReplayBackend` facet delegated by the current `BackendRuntime` facade.
 #[allow(clippy::too_many_arguments)]
-pub trait ReplayBackend: Send + Sync + std::fmt::Debug {
+pub trait ReplayBackend: BackendIdentity + AttentionBackend + Send + Sync + std::fmt::Debug {
     fn runtime_decode_resident_pool_ready(
         &self,
-        max_hidden: usize,
-        max_intermediate: usize,
-        max_batch: usize,
-    ) -> bool;
+        _max_hidden: usize,
+        _max_intermediate: usize,
+        _max_batch: usize,
+    ) -> bool {
+        false
+    }
 
-    fn runtime_supports_resident_decode(&self) -> bool;
+    fn runtime_supports_resident_decode(&self) -> bool {
+        false
+    }
 
     fn runtime_supports_replay_request(
         &self,
         req: &capability::ReplayRequest,
-    ) -> capability::Support;
+    ) -> capability::Support {
+        if !req.replay_safe || !req.has_valid_bounds() {
+            return capability::Support::Unsupported;
+        }
+
+        capability::Support::from_supports_predicate(match req.kind {
+            capability::ReplayRequestKind::ResidentDecode => {
+                self.runtime_supports_resident_decode()
+            }
+            capability::ReplayRequestKind::PagedDecodeGraphOutputs => {
+                AttentionBackend::runtime_supports_flash_attn_paged_decode(self)
+            }
+        })
+    }
 
     fn runtime_replay_key_for_request(
         &self,
         req: &capability::ReplayRequest,
-    ) -> kiln_graph::ReplayKey;
+    ) -> kiln_graph::ReplayKey {
+        req.replay_key(BackendIdentity::runtime_device(self).backend())
+    }
 
-    fn runtime_replay_authority(&self) -> capability::ReplayAuthority;
+    fn runtime_replay_authority(&self) -> capability::ReplayAuthority {
+        capability::ReplayAuthority::for_backend(
+            BackendIdentity::runtime_name(self),
+            BackendIdentity::runtime_device(self),
+        )
+    }
 
     fn runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
         &self,
@@ -2912,12 +2943,25 @@ pub trait ReplayBackend: Send + Sync + std::fmt::Debug {
         v_pool: &kiln_tensor::Tensor,
         block_table: &kiln_tensor::Tensor,
         seqused_k: &kiln_tensor::Tensor,
-        graph_outputs: Option<(&kiln_tensor::Tensor, &kiln_tensor::Tensor)>,
+        _graph_outputs: Option<(&kiln_tensor::Tensor, &kiln_tensor::Tensor)>,
         max_seqlen_k: usize,
         page_block_size: usize,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        AttentionBackend::runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+            self,
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            seqused_k,
+            max_seqlen_k,
+            page_block_size,
+            softmax_scale,
+            causal,
+        )
+    }
 }
 
 // Blanket forwarding impls keep the focused traits behavior-identical to the
@@ -2994,81 +3038,6 @@ impl<T: BackendRuntime + ?Sized> TrainingLossBackend for T {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-impl<T: BackendRuntime + ?Sized> ReplayBackend for T {
-    fn runtime_decode_resident_pool_ready(
-        &self,
-        max_hidden: usize,
-        max_intermediate: usize,
-        max_batch: usize,
-    ) -> bool {
-        BackendRuntime::decode_resident_pool_ready(self, max_hidden, max_intermediate, max_batch)
-    }
-
-    fn runtime_supports_resident_decode(&self) -> bool {
-        BackendRuntime::supports_resident_decode(self)
-    }
-
-    fn runtime_supports_replay_request(
-        &self,
-        req: &capability::ReplayRequest,
-    ) -> capability::Support {
-        if !req.replay_safe || !req.has_valid_bounds() {
-            return capability::Support::Unsupported;
-        }
-
-        capability::Support::from_supports_predicate(match req.kind {
-            capability::ReplayRequestKind::ResidentDecode => {
-                ReplayBackend::runtime_supports_resident_decode(self)
-            }
-            capability::ReplayRequestKind::PagedDecodeGraphOutputs => {
-                AttentionBackend::runtime_supports_flash_attn_paged_decode(self)
-            }
-        })
-    }
-
-    fn runtime_replay_key_for_request(
-        &self,
-        req: &capability::ReplayRequest,
-    ) -> kiln_graph::ReplayKey {
-        req.replay_key(BackendIdentity::runtime_device(self).backend())
-    }
-
-    fn runtime_replay_authority(&self) -> capability::ReplayAuthority {
-        capability::ReplayAuthority::for_backend(
-            BackendIdentity::runtime_name(self),
-            BackendIdentity::runtime_device(self),
-        )
-    }
-
-    fn runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        block_table: &kiln_tensor::Tensor,
-        seqused_k: &kiln_tensor::Tensor,
-        graph_outputs: Option<(&kiln_tensor::Tensor, &kiln_tensor::Tensor)>,
-        max_seqlen_k: usize,
-        page_block_size: usize,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
-            self,
-            q,
-            k_pool,
-            v_pool,
-            block_table,
-            seqused_k,
-            graph_outputs,
-            max_seqlen_k,
-            page_block_size,
-            softmax_scale,
-            causal,
-        )
-    }
-}
 // (#1082 candle removal) The candle-typed `for_device` shim was deleted along
 // with the candle-parity opt-in feature that gated it — the last candle
 // activator in the workspace. Production dispatch goes through the kt-native
@@ -3170,6 +3139,8 @@ mod tests {
     impl OptimizerBackend for ResidentActivationProbeBackend {}
 
     impl PagedKvBackend for ResidentActivationProbeBackend {}
+
+    impl ReplayBackend for ResidentActivationProbeBackend {}
 
     impl BackendRuntime for ResidentActivationProbeBackend {}
 

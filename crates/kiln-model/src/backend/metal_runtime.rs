@@ -14,8 +14,8 @@ use super::metal_lm_head::*;
 use super::metal_paged::*;
 use super::{
     metal_residency, metal_training, AttentionBackend, BackendIdentity, BackendRuntime,
-    ConvBackend, GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ResidencyBackend,
-    SamplingBackend, StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
+    ConvBackend, GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend,
+    ResidencyBackend, SamplingBackend, StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
 };
 
 impl BackendIdentity for MetalBackend {
@@ -861,8 +861,11 @@ impl BackendRuntime for MetalBackend {
     fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
         metal_training::training_precision_policy()
     }
+}
 
-    fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
+#[allow(clippy::too_many_arguments)]
+impl ReplayBackend for MetalBackend {
+    fn runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
         &self,
         q: &kiln_tensor::Tensor,
         k_pool: &kiln_tensor::Tensor,

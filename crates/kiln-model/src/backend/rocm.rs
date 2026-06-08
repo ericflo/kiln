@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 
 use super::{
     AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, GdnBackend, OptimizerBackend,
-    LinearBackend, PagedKvBackend, ResidencyBackend, SamplingBackend, StartupBackend,
+    LinearBackend, PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend, StartupBackend,
     TrainingCapabilities, TrainingPrecisionPolicy,
 };
 use crate::lora_loader::{compute_lora_delta, LoraProjectionWeights};
@@ -1610,8 +1610,11 @@ impl BackendRuntime for RocmBackend {
     fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
         TrainingPrecisionPolicy::rocm()
     }
+}
 
-    fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
+#[allow(clippy::too_many_arguments)]
+impl ReplayBackend for RocmBackend {
+    fn runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
         &self,
         q: &kiln_tensor::Tensor,
         k_pool: &kiln_tensor::Tensor,
@@ -1703,11 +1706,6 @@ impl BackendRuntime for RocmBackend {
         })?;
         Ok(Some(out_kt))
     }
-
-
-
-
-
 }
 
 #[allow(clippy::too_many_arguments)]

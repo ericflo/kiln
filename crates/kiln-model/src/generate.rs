@@ -8579,6 +8579,8 @@ mod tests {
 
     impl crate::backend::PagedKvBackend for NamedTestBackend {}
 
+    impl crate::backend::ReplayBackend for NamedTestBackend {}
+
     impl BackendRuntime for NamedTestBackend {}
 
     #[test]

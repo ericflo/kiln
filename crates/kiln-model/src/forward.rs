@@ -28780,6 +28780,8 @@ mod tests {
 
     impl crate::backend::PagedKvBackend for FixedLinearBackend {}
 
+    impl crate::backend::ReplayBackend for FixedLinearBackend {}
+
     impl BackendRuntime for FixedLinearBackend {}
 
     #[derive(Debug)]
@@ -28858,6 +28860,8 @@ mod tests {
     impl crate::backend::OptimizerBackend for FixedMlpBackend {}
 
     impl crate::backend::PagedKvBackend for FixedMlpBackend {}
+
+    impl crate::backend::ReplayBackend for FixedMlpBackend {}
 
     impl BackendRuntime for FixedMlpBackend {}
 

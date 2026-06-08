@@ -30,8 +30,8 @@ use super::vulkan_tensor_bridge::{
 use super::{
     vulkan_attention, vulkan_conv1d, vulkan_dense, vulkan_device, vulkan_gdn, vulkan_linear,
     vulkan_training, vulkan_weights, AttentionBackend, BackendIdentity, BackendRuntime,
-    ConvBackend, GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ResidencyBackend,
-    SamplingBackend, StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
+    ConvBackend, GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend,
+    ResidencyBackend, SamplingBackend, StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
 };
 use crate::forward::GpuWeights;
 
@@ -1307,8 +1307,10 @@ impl BackendRuntime for VulkanBackend {
     fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
         vulkan_training::training_precision_policy()
     }
+}
 
-    fn decode_resident_pool_ready(
+impl ReplayBackend for VulkanBackend {
+    fn runtime_decode_resident_pool_ready(
         &self,
         max_hidden: usize,
         max_intermediate: usize,
@@ -1321,7 +1323,7 @@ impl BackendRuntime for VulkanBackend {
             .is_some()
     }
 
-    fn supports_resident_decode(&self) -> bool {
+    fn runtime_supports_resident_decode(&self) -> bool {
         // The Vulkan-resident decode path (docs/vk_resident_decode_plan.md)
         // applies whenever the logical device is up. The runtime pool
         // feasibility check (the "fall back if the device can't fit even

@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 
 use super::{
     AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, GdnBackend, OptimizerBackend,
-    LinearBackend, PagedKvBackend, ResidencyBackend, SamplingBackend, StartupBackend,
+    LinearBackend, PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend, StartupBackend,
     TrainingCapabilities, TrainingPrecisionPolicy,
 };
 use crate::lora_loader::{compute_lora_delta, LoraProjectionWeights};
@@ -1554,8 +1554,11 @@ impl BackendRuntime for CudaBackend {
     fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
         TrainingPrecisionPolicy::cuda()
     }
+}
 
-    fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
+#[allow(clippy::too_many_arguments)]
+impl ReplayBackend for CudaBackend {
+    fn runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
         &self,
         q: &kiln_tensor::Tensor,
         k_pool: &kiln_tensor::Tensor,
@@ -1646,11 +1649,6 @@ impl BackendRuntime for CudaBackend {
         })?;
         Ok(Some(out_kt))
     }
-
-
-
-
-
 }
 
 #[allow(clippy::too_many_arguments)]
