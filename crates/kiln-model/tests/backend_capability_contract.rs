@@ -6568,7 +6568,15 @@ fn generated_capability_report_tracks_migration_phase_status() {
         .expect("Phase 5 should include production replay wiring signal");
     assert_eq!(
         production_replay_signal["passed"], false,
-        "Phase 5 production wiring signal should fail until decode paths use ReplayPlan"
+        "Phase 5 production wiring signal should fail until all decode replay runner families use ReplayPlan"
+    );
+    assert_eq!(
+        production_replay_signal["observed"], 1,
+        "Phase 5 should report the ROCm production replay runner slice as wired"
+    );
+    assert_eq!(
+        production_replay_signal["expected"], 4,
+        "Phase 5 production wiring should require CUDA, ROCm, Metal, and Vulkan runner families"
     );
 
     let phase7 = phases
@@ -6645,6 +6653,40 @@ fn generated_capability_report_tracks_migration_phase_status() {
     assert!(
         report_md.contains("| Phase 8 | Conformance and performance gates | `covered` | `landed` | `complete` | yes |"),
         "Markdown report should mark Phase 8 covered after all latency fixtures lock"
+    );
+}
+
+#[test]
+fn rocm_graph_replay_hidden_routes_through_replay_plan_contract() {
+    let rocm_graph_source = fs::read_to_string(
+        workspace_root().join("crates/kiln-model/src/rocm_graph.rs"),
+    )
+    .expect("rocm_graph.rs should be readable");
+    let replay_hidden_section = source_between(
+        &rocm_graph_source,
+        "fn replay_hidden(",
+        "// --- per-replay in-place buffer refresh",
+    );
+    assert!(
+        rocm_graph_source.contains("struct RocmDecodeReplayPlan")
+            && rocm_graph_source.contains("impl ReplayPlan for RocmDecodeReplayPlan"),
+        "ROCm graph runner should expose a production ReplayPlan adapter"
+    );
+    assert!(
+        rocm_graph_source.contains("fn replay_state_for_capture(")
+            && rocm_graph_source.contains("ReplayState::new(replay_key, resources)")
+            && rocm_graph_source.contains("ReplayResourceStability::StableAcrossReplay"),
+        "ROCm graph capture should persist shared replay key/resource validation state"
+    );
+    assert!(
+        replay_hidden_section.contains("RocmDecodeReplayPlan::new(captured)")
+            && replay_hidden_section.contains("ReplayInputs::new")
+            && replay_hidden_section.contains("kiln_graph::ReplayPlan::replay(&mut plan"),
+        "ROCm graph replay_hidden should execute through ReplayPlan::replay"
+    );
+    assert!(
+        !replay_hidden_section.contains(".exec\n            .launch("),
+        "ROCm graph replay_hidden should not launch the native graph outside ReplayPlan::replay"
     );
 }
 

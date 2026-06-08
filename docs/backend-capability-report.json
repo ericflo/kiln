@@ -3690,9 +3690,9 @@
             "crates/kiln-model/src/metal_graph.rs",
             "crates/kiln-vulkan-kernel/src/cmd_batch.rs"
           ],
-          "expected": "> 0",
+          "expected": 4,
           "name": "production_replay_paths_use_replay_plan",
-          "observed": 0,
+          "observed": 1,
           "passed": false
         }
       ],

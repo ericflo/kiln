@@ -1668,14 +1668,19 @@ def matmul_transposed_request_contract_signal_count() -> tuple[int, int]:
     return observed, len(required)
 
 
-def replay_production_replay_plan_mentions() -> int:
+def replay_production_replay_plan_signal_count() -> tuple[int, int]:
     paths = [
         "crates/kiln-model/src/cuda_graph.rs",
         "crates/kiln-model/src/rocm_graph.rs",
         "crates/kiln-model/src/metal_graph.rs",
         "crates/kiln-vulkan-kernel/src/cmd_batch.rs",
     ]
-    return sum(file_text(path).count("ReplayPlan") for path in paths)
+    observed = 0
+    for path in paths:
+        source = production_source_text(path)
+        if "ReplayPlan" in source and "ReplayPlan::replay(" in source:
+            observed += 1
+    return observed, len(paths)
 
 
 def replay_contract_w5_0_signal_count() -> int:
@@ -1886,7 +1891,7 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
             ),
         ]
     if phase == 5:
-        replay_plan_mentions = replay_production_replay_plan_mentions()
+        replay_plan_count, replay_plan_expected = replay_production_replay_plan_signal_count()
         replay_contract_count = replay_contract_w5_0_signal_count()
         return [
             phase_signal(
@@ -1898,9 +1903,9 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
             ),
             phase_signal(
                 "production_replay_paths_use_replay_plan",
-                replay_plan_mentions > 0,
-                replay_plan_mentions,
-                "> 0",
+                replay_plan_count == replay_plan_expected,
+                replay_plan_count,
+                replay_plan_expected,
                 [
                     "crates/kiln-model/src/cuda_graph.rs",
                     "crates/kiln-model/src/rocm_graph.rs",
