@@ -31,6 +31,7 @@
 #include <cuda_runtime.h>
 
 #include <cstdint>
+#include <type_traits>
 
 // Wave-size shim (Phase R.5). The two-level reductions below (per-thread
 // strided partial -> reduce across the block) hardcoded a 32-lane warp
@@ -173,7 +174,7 @@ __global__ void l2norm_apply_kernel(
         } else if constexpr (sizeof(T) == 2) {
             // BF16 / F16 path. Use the specialization shape that
             // matches softmax.cu's casts.
-            if constexpr (__is_same(T, __nv_bfloat16)) {
+            if constexpr (std::is_same_v<T, __nv_bfloat16>) {
                 row_out[c] = __float2bfloat16(scaled);
             } else {
                 row_out[c] = __float2half(scaled);
