@@ -7,6 +7,7 @@ name: Kiln server release
 # Platform matrix today:
 #   - macOS aarch64 (Apple Silicon) + Metal feature — signed + notarized
 #   - Linux x86_64 + CUDA 12.4 — unsigned prebuilt for NVIDIA GPUs
+#   - Linux x86_64 + ROCm 7.2.4 — unsigned prebuilt for AMD GPUs
 #   - Linux x86_64 + Vulkan — unsigned prebuilt for AMD/Intel GPUs
 #   - Windows x86_64 + CUDA 12.4 — unsigned prebuilt for NVIDIA GPUs
 #
@@ -39,9 +40,11 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin
+        run: |
+          rustup set profile minimal
+          rustup default stable
+          rustup target add aarch64-apple-darwin
+          rustc --version
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -150,7 +153,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --draft \
               --title "Kiln server $TAG" \
-              --notes "Prebuilt \`kiln\` server binaries for $TAG. See the repository README for supported platforms.\n\nsupported_sm: [80, 86, 89, 90]\nmin_cuda: 12.4"
+              --notes "Prebuilt \`kiln\` server binaries for $TAG. See the repository README for supported platforms.\n\nsupported_sm: [80, 86, 89, 90]\nmin_cuda: 12.4\nrocm: 7.2.4\nrocm_archs: [gfx90a, gfx942, gfx1100, gfx1151]\nvulkan: 1.2"
           fi
           gh release upload "$TAG" "$ARTIFACT" "$ARTIFACT.sha256" \
             --repo "$GITHUB_REPOSITORY" --clobber
@@ -201,9 +204,11 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-gnu
+        run: |
+          rustup set profile minimal
+          rustup default stable
+          rustup target add x86_64-unknown-linux-gnu
+          rustc --version
 
       - name: Install CUDA 12.4 toolkit
         # `method: network` downloads only the subpackages we ask for from
@@ -270,7 +275,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --draft \
               --title "Kiln server $TAG" \
-              --notes "Prebuilt \`kiln\` server binaries for $TAG. See the repository README for supported platforms.\n\nsupported_sm: [80, 86, 89, 90]\nmin_cuda: 12.4"
+              --notes "Prebuilt \`kiln\` server binaries for $TAG. See the repository README for supported platforms.\n\nsupported_sm: [80, 86, 89, 90]\nmin_cuda: 12.4\nrocm: 7.2.4\nrocm_archs: [gfx90a, gfx942, gfx1100, gfx1151]\nvulkan: 1.2"
           fi
           gh release upload "$TAG" "$ARTIFACT" "$ARTIFACT.sha256" \
             --repo "$GITHUB_REPOSITORY" --clobber
@@ -290,9 +295,11 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-gnu
+        run: |
+          rustup set profile minimal
+          rustup default stable
+          rustup target add x86_64-unknown-linux-gnu
+          rustc --version
 
       - name: Install Vulkan shader tools
         run: |
@@ -344,7 +351,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --draft \
               --title "Kiln server $TAG" \
-              --notes "Prebuilt \`kiln\` server binaries for $TAG. See the repository README for supported platforms.\n\nsupported_sm: [80, 86, 89, 90]\nmin_cuda: 12.4\nvulkan: 1.2"
+              --notes "Prebuilt \`kiln\` server binaries for $TAG. See the repository README for supported platforms.\n\nsupported_sm: [80, 86, 89, 90]\nmin_cuda: 12.4\nrocm: 7.2.4\nrocm_archs: [gfx90a, gfx942, gfx1100, gfx1151]\nvulkan: 1.2"
           fi
           gh release upload "$TAG" "$ARTIFACT" "$ARTIFACT.sha256" \
             --repo "$GITHUB_REPOSITORY" --clobber
@@ -354,6 +361,105 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: kiln-linux-x86_64-vulkan-unsigned
+          path: target/x86_64-unknown-linux-gnu/release/kiln
+          retention-days: 7
+
+  linux-rocm:
+    name: Linux / x86_64 / ROCm 7.2.4
+    runs-on: ubuntu-22.04
+    env:
+      ROCM_PATH: /opt/rocm
+      KILN_ROCM_ARCHS: 'gfx90a;gfx942;gfx1100;gfx1151'
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space for the ROCm toolchain
+        # GitHub-hosted runners ship ~14 GB free on /; the ROCm HIP SDK
+        # needs more, and the release build emits four gfx targets.
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL \
+            /usr/local/lib/node_modules || true
+          df -h /
+
+      - name: Install Rust stable
+        run: |
+          rustup set profile minimal
+          rustup default stable
+          rustup target add x86_64-unknown-linux-gnu
+          rustc --version
+
+      - name: Install ROCm 7.2.4 HIP SDK (compile toolchain, no GPU driver)
+        # `amdgpu-install` wires up AMD's apt repos; installing
+        # rocm-hip-sdk + hipblaslt-dev gives hipcc, HIP headers,
+        # libamdhip64, rocBLAS, and hipBLASLt without amdgpu-dkms.
+        run: |
+          set -euxo pipefail
+          DEB=amdgpu-install_7.2.4.70204-1_all.deb
+          wget -q "https://repo.radeon.com/amdgpu-install/7.2.4/ubuntu/jammy/${DEB}"
+          sudo apt-get update
+          sudo apt-get install -y "./${DEB}"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends rocm-hip-sdk hipblaslt-dev
+          echo "/opt/rocm/bin" >> "$GITHUB_PATH"
+          /opt/rocm/bin/hipcc --version
+          df -h /
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          key: kiln-server-linux-rocm
+
+      - name: Build kiln (ROCm)
+        run: cargo build --release --locked --bin kiln -p kiln-server --no-default-features --features rocm --target x86_64-unknown-linux-gnu
+
+      - name: Package tarball
+        if: startsWith(github.ref, 'refs/tags/kiln-v')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          BIN="target/x86_64-unknown-linux-gnu/release/kiln"
+          test -x "$BIN"
+          VERSION="${TAG#kiln-v}"
+          ARTIFACT="kiln-${VERSION}-x86_64-unknown-linux-gnu-rocm724.tar.gz"
+          STAGE="$RUNNER_TEMP/stage"
+          mkdir -p "$STAGE"
+          cp "$BIN" "$STAGE/kiln"
+          tar -czf "$ARTIFACT" -C "$STAGE" kiln
+          sha256sum "$ARTIFACT" | awk '{print $1}' > "$ARTIFACT.sha256"
+          echo "Produced $ARTIFACT ($(wc -c < "$ARTIFACT") bytes, sha256=$(cat "$ARTIFACT.sha256"))"
+          echo "ARTIFACT=$ARTIFACT" >> "$GITHUB_ENV"
+
+      - name: Attest build provenance (Linux ROCm tarball)
+        if: startsWith(github.ref, 'refs/tags/kiln-v')
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: ${{ env.ARTIFACT }}
+
+      - name: Upload to GitHub release
+        if: startsWith(github.ref, 'refs/tags/kiln-v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          ARTIFACT: ${{ env.ARTIFACT }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft \
+              --title "Kiln server $TAG" \
+              --notes "Prebuilt \`kiln\` server binaries for $TAG. See the repository README for supported platforms.\n\nsupported_sm: [80, 86, 89, 90]\nmin_cuda: 12.4\nrocm: 7.2.4\nrocm_archs: [gfx90a, gfx942, gfx1100, gfx1151]\nvulkan: 1.2"
+          fi
+          gh release upload "$TAG" "$ARTIFACT" "$ARTIFACT.sha256" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Upload artifact (non-tag)
+        if: "!startsWith(github.ref, 'refs/tags/kiln-v')"
+        uses: actions/upload-artifact@v7
+        with:
+          name: kiln-linux-x86_64-rocm724-unsigned
           path: target/x86_64-unknown-linux-gnu/release/kiln
           retention-days: 7
 
@@ -384,9 +490,11 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
+        run: |
+          rustup set profile minimal
+          rustup default stable
+          rustup target add x86_64-pc-windows-msvc
+          rustc --version
 
       - name: Install CUDA 12.4 toolkit
         # Install the full toolkit rather than filtering with
@@ -525,7 +633,7 @@ jobs:
               --repo "$env:GITHUB_REPOSITORY" `
               --draft `
               --title "Kiln server $env:TAG" `
-              --notes "Prebuilt ``kiln`` server binaries for $env:TAG. See the repository README for supported platforms.\n\nsupported_sm: [80, 86, 89, 90]\nmin_cuda: 12.4"
+              --notes "Prebuilt ``kiln`` server binaries for $env:TAG. See the repository README for supported platforms.\n\nsupported_sm: [80, 86, 89, 90]\nmin_cuda: 12.4\nrocm: 7.2.4\nrocm_archs: [gfx90a, gfx942, gfx1100, gfx1151]\nvulkan: 1.2"
           }
           gh release upload "$env:TAG" "$env:ARTIFACT" "$env:ARTIFACT.sha256" `
             --repo "$env:GITHUB_REPOSITORY" --clobber
@@ -540,7 +648,7 @@ jobs:
 
   publish:
     name: Publish release
-    needs: [macos-metal, linux-cuda, linux-vulkan, windows-cuda]
+    needs: [macos-metal, linux-cuda, linux-vulkan, linux-rocm, windows-cuda]
     if: startsWith(github.ref, 'refs/tags/kiln-v')
     runs-on: ubuntu-latest
     permissions:
@@ -559,7 +667,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" --clobber
 
       # Each platform job creates the release with `--draft` so the upload
-      # steps have somewhere to push artifacts. Once all three platforms
+      # steps have somewhere to push artifacts. Once all platform jobs
       # succeed, flip the draft flag off so users see the release without
       # someone manually clicking Publish.
       - name: Publish draft release

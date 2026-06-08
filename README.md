@@ -199,7 +199,7 @@ See [docs/EVAL_GUIDE.md](docs/EVAL_GUIDE.md) for the full scorer reference, data
 
 ## Quick Start
 
-**Supported hardware:** NVIDIA GPU with 24GB+ VRAM and CUDA 12+, AMD/Intel GPU with Vulkan 1.2+ on Linux, **or** Apple Silicon Mac with 16GB+ unified memory. Kiln targets `Qwen/Qwen3.5-4B` and needs about 20GB of free disk for the server, model weights, and adapters.
+**Supported hardware:** NVIDIA GPU with 24GB+ VRAM and CUDA 12+, AMD GPU with ROCm/HIP 7.2.4+ on Linux, AMD/Intel GPU with Vulkan 1.2+ on Linux, **or** Apple Silicon Mac with 16GB+ unified memory. Kiln targets `Qwen/Qwen3.5-4B` and needs about 20GB of free disk for the server, model weights, and adapters.
 
 **Path 1 — Desktop App (recommended):** Install [Kiln Desktop](#desktop-app) on Windows, Linux, or macOS. The app downloads and verifies the matching prebuilt `kiln` server binary on first launch, then walks you through choosing or downloading `Qwen/Qwen3.5-4B`. No Rust toolchain, CUDA toolkit, or source build is required for this path.
 
@@ -223,7 +223,7 @@ tar -xzf kiln-linux-cuda.tar.gz
 KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve
 ```
 
-For Linux Vulkan, macOS Metal, Windows CUDA, and SHA-256 sidecar checks, use the full release artifact matrix in [QUICKSTART.md](QUICKSTART.md#quick-path-server-binary-terminal-first-no-source-build).
+For Linux ROCm, Linux Vulkan, macOS Metal, Windows CUDA, and SHA-256 sidecar checks, use the full release artifact matrix in [QUICKSTART.md](QUICKSTART.md#quick-path-server-binary-terminal-first-no-source-build).
 
 **Path 3 — Container:** Run the prebuilt GHCR image when you prefer containerized deployment. This path requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). Make sure the weights step above has placed the model under `./Qwen3.5-4B` (or substitute your own absolute path), then mount that directory into the container:
 
@@ -250,6 +250,10 @@ cargo build --release --features cuda     # ~15-30 min first build (CUDA kernels
 # Requires Vulkan 1.2+ runtime plus glslc or glslangValidator for shader embedding.
 cargo build --release --features vulkan   # Vulkan compute kernels via ash + SPIR-V
 
+# Linux + AMD ROCm/HIP
+# Requires ROCm/HIP SDK plus hipBLASLt; the release build emits CDNA, RDNA3, and Strix Halo.
+ROCM_PATH=/opt/rocm KILN_ROCM_ARCHS='gfx90a;gfx942;gfx1100;gfx1151' cargo build --release --no-default-features --features rocm
+
 # macOS + Apple Silicon
 cargo build --release --features metal    # Metal backend via candle
 ```
@@ -260,7 +264,7 @@ Start the source-built server (using the weights downloaded above):
 KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve
 ```
 
-Vulkan builds auto-select a Vulkan physical device at startup. Use `KILN_VULKAN_DEVICE=0` to pin a zero-based Vulkan device index, or `GGML_VK_VISIBLE_DEVICES=0,1` to reuse llama.cpp-style visibility; invalid values are ignored with a warning and Kiln falls back to automatic selection or CPU if no Vulkan device is usable.
+Vulkan builds auto-select a Vulkan physical device at startup. Use `KILN_VULKAN_DEVICE=0` to pin a zero-based Vulkan device index, or `GGML_VK_VISIBLE_DEVICES=0,1` to reuse llama.cpp-style visibility; invalid values are ignored with a warning and Kiln falls back to automatic selection or CPU if no Vulkan device is usable. ROCm builds use the HIP backend compiled into the binary; set `KILN_ROCM_ARCHS` at build time to control emitted gfx targets.
 
 ```
   ┌─────────────────────────────────────┐
@@ -317,7 +321,7 @@ pi -p "Use the bash tool to run: pwd"
 
 Kiln accepts Qwen3.5's native XML tool-call generations internally, but OpenAI-compatible clients receive normal `tool_calls` in both streaming and non-streaming responses. pi should execute the tool call instead of printing raw `<tool_call>` XML.
 
-See [QUICKSTART.md](QUICKSTART.md) for the full walkthrough including Desktop App setup, source builds, GRPO, adapter management, Docker, and systemd setup. If setup stalls on binary downloads, CUDA/Metal, model paths, `/health`, mock mode, training endpoints, or adapter directories, start with the [Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html). For tools-bearing workloads on older pinned releases, see [QUICKSTART.md §9.2](QUICKSTART.md#92-troubleshooting-older-release-long-prefill-timeouts) for the legacy `workers=1` / request-timeout troubleshooting note ([#664](https://github.com/ericflo/kiln/issues/664)).
+See [QUICKSTART.md](QUICKSTART.md) for the full walkthrough including Desktop App setup, source builds, GRPO, adapter management, Docker, and systemd setup. If setup stalls on binary downloads, CUDA/ROCm/Vulkan/Metal, model paths, `/health`, mock mode, training endpoints, or adapter directories, start with the [Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html). For tools-bearing workloads on older pinned releases, see [QUICKSTART.md §9.2](QUICKSTART.md#92-troubleshooting-older-release-long-prefill-timeouts) for the legacy `workers=1` / request-timeout troubleshooting note ([#664](https://github.com/ericflo/kiln/issues/664)).
 
 ## See it in action
 
@@ -547,7 +551,7 @@ See **[desktop/CHANGELOG.md](desktop/CHANGELOG.md)** for the full version histor
 | Linux | [Kiln.Desktop_0.2.16_amd64.deb](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_amd64.deb) | 8.8 MB |
 | Linux | [Kiln.Desktop_0.2.16_amd64.AppImage](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_amd64.AppImage) | 85.7 MB |
 
-The installer bundles the desktop wrapper only. On first launch the app offers to auto-download the matching prebuilt `kiln` server binary for your platform (macOS aarch64 / Metal, Linux x86_64 / CUDA 12.4 or Vulkan, Windows x86_64 / CUDA 12.4) from the latest `kiln-v*` GitHub release and verify it against the published SHA-256. You can also point it at an existing `kiln` binary from Settings. Model weights still need to be downloaded separately — the Settings window has a HuggingFace downloader, or you can use the CLI path in [QUICKSTART.md](QUICKSTART.md).
+The installer bundles the desktop wrapper only. On first launch the app offers to auto-download the matching prebuilt `kiln` server binary for your platform (macOS aarch64 / Metal, Linux x86_64 / CUDA 12.4 or Vulkan, Windows x86_64 / CUDA 12.4) from the latest `kiln-v*` GitHub release and verify it against the published SHA-256. The terminal-first server release matrix also includes a Linux x86_64 ROCm 7.2.4 artifact; you can point the app at an existing `kiln` binary from Settings. Model weights still need to be downloaded separately — the Settings window has a HuggingFace downloader, or you can use the CLI path in [QUICKSTART.md](QUICKSTART.md).
 
 **Dashboard** — a toolbar across the top surfaces server state, model path, VRAM usage, active LoRA adapter, training status, and the OpenAI base URL as click-to-copy pills, alongside Start / Stop / Restart Server, View Logs, and Settings buttons. A first-run empty state walks you through setting a model path, and if the kiln server crashes while the dashboard is open an error screen surfaces it with a one-click recovery path. Keyboard shortcuts cover the common actions — <kbd>Ctrl/Cmd</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> to start, <kbd>Ctrl/Cmd</kbd>+<kbd>Shift</kbd>+<kbd>.</kbd> to stop, <kbd>Ctrl/Cmd</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> to restart, <kbd>Ctrl/Cmd</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> to copy the base URL, <kbd>Ctrl/Cmd</kbd>+<kbd>L</kbd> for logs, <kbd>Ctrl/Cmd</kbd>+<kbd>,</kbd> for settings, and <kbd>?</kbd> for the full cheatsheet modal. The toolbar wraps gracefully at narrow window widths, and the kiln server's `/ui` is embedded below.
 

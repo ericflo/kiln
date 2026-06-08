@@ -357,6 +357,14 @@ curl -L -o kiln-linux-cuda.tar.gz \
 tar -xzf kiln-linux-cuda.tar.gz</code></pre>
         </div>
         <div class="install-card">
+          <h3 class="font-semibold mb-2">Linux x86_64 &middot; ROCm 7.2.4</h3>
+<pre class="text-sm"><code>KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest | sed -n 's/.*&quot;tag_name&quot;: &quot;kiln-v\([^&quot;]*\)&quot;.*/\1/p')
+curl -L -o kiln-linux-rocm.tar.gz \
+  "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-rocm724.tar.gz"
+tar -xzf kiln-linux-rocm.tar.gz</code></pre>
+          <p class="text-sm mt-3" style="color: var(--fg-mute);">Use this on AMD Linux systems with ROCm/HIP. The binary includes CDNA, RDNA3, and Strix Halo gfx targets.</p>
+        </div>
+        <div class="install-card">
           <h3 class="font-semibold mb-2">Linux x86_64 &middot; Vulkan 1.2</h3>
 <pre class="text-sm"><code>KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest | sed -n 's/.*&quot;tag_name&quot;: &quot;kiln-v\([^&quot;]*\)&quot;.*/\1/p')
 curl -L -o kiln-linux-vulkan.tar.gz \
@@ -455,7 +463,7 @@ export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
         <figcaption class="px-5 py-3 text-sm" style="color: var(--fg-mute);">Use the dashboard as your status checkpoint before starting adapter or training workflows.</figcaption>
       </figure>
       <p class="text-sm mt-4" style="color: var(--fg-mute);">
-        If <code>/ui</code>, <code>/health</code>, or the chat request fails, use <a href="troubleshooting.html">Troubleshooting</a> to check the model path, binary download, CUDA/Vulkan/Metal setup, Docker, and health checks before retrying.
+        If <code>/ui</code>, <code>/health</code>, or the chat request fails, use <a href="troubleshooting.html">Troubleshooting</a> to check the model path, binary download, CUDA/ROCm/Vulkan/Metal setup, Docker, and health checks before retrying.
       </p>
       <p class="text-sm mt-6" style="color: var(--fg-mute);">
         Prefer terminal-first checks? See the <a href="cli.html">CLI Reference</a> for <code>kiln health</code>, training, and adapter commands.
@@ -533,7 +541,7 @@ pi -p "Use the bash tool to run: pwd"</code></pre>
         </a>
         <a class="card p-5 block" href="troubleshooting.html">
           <h3 class="font-semibold mb-2">Troubleshooting</h3>
-          <p style="color: var(--fg-dim);">Fix model paths, binary downloads, CUDA/Vulkan/Metal setup, Docker, and health checks.</p>
+          <p style="color: var(--fg-dim);">Fix model paths, binary downloads, CUDA/ROCm/Vulkan/Metal setup, Docker, and health checks.</p>
         </a>
         <a class="card p-5 block" href="demo/">
           <h3 class="font-semibold mb-2">Demo</h3>
