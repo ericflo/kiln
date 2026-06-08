@@ -8,9 +8,10 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
-    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, GdnBackend, LinearBackend,
-    OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend,
-    StartupBackend, TrainingCapabilities, TrainingLossBackend, TrainingPrecisionPolicy,
+    AttentionBackend, BackendIdentity, BackendMatmulLayout, BackendRuntime, ConvBackend,
+    GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend,
+    SamplingBackend, StartupBackend, TrainingCapabilities, TrainingLossBackend,
+    TrainingPrecisionPolicy, requested_matmul_layout,
 };
 use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 
@@ -1768,6 +1769,46 @@ impl ReplayBackend for RocmBackend {
 
 #[allow(clippy::too_many_arguments)]
 impl LinearBackend for RocmBackend {
+    fn runtime_matmul(
+        &self,
+        req: &super::capability::MatmulRequest,
+        lhs: &kiln_tensor::Tensor,
+        rhs: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if !rocm_tensors_on_device(&[lhs, rhs])
+            || !lhs.is_contiguous()
+            || !rhs.is_contiguous()
+            || req.out_dtype != lhs.dtype()
+            || req.lhs_dtype != req.rhs_dtype
+            || !matches!(
+                lhs.dtype(),
+                kiln_tensor::DType::BF16 | kiln_tensor::DType::F16 | kiln_tensor::DType::F32
+            )
+        {
+            return Ok(None);
+        }
+
+        let Some(layout) = requested_matmul_layout(req, lhs, rhs) else {
+            return Ok(None);
+        };
+        let out = match layout {
+            BackendMatmulLayout::Plain => kiln_tensor::rocm_matmul(lhs, rhs)?,
+            BackendMatmulLayout::LhsTransposed => {
+                kiln_tensor::rocm_matmul_lhs_transposed(lhs, rhs)?
+            }
+            BackendMatmulLayout::RhsTransposed => {
+                kiln_tensor::rocm_matmul_rhs_transposed(lhs, rhs)?
+            }
+            BackendMatmulLayout::BothTransposed => {
+                let rank = lhs.rank();
+                let lhs_t = lhs.transpose(rank - 2, rank - 1)?.contiguous()?;
+                let rhs_t = rhs.transpose(rank - 2, rank - 1)?.contiguous()?;
+                kiln_tensor::rocm_matmul(&lhs_t, &rhs_t)?
+            }
+        };
+        Ok(Some(out))
+    }
+
     fn runtime_lora_decode_add(
         &self,
         base: &kiln_tensor::Tensor,

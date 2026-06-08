@@ -13,10 +13,10 @@ use super::metal_gdn::*;
 use super::metal_lm_head::*;
 use super::metal_paged::*;
 use super::{
-    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, GdnBackend, LinearBackend,
-    OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend,
-    StartupBackend, TrainingCapabilities, TrainingLossBackend, TrainingPrecisionPolicy,
-    metal_residency, metal_training,
+    AttentionBackend, BackendIdentity, BackendMatmulLayout, BackendRuntime, ConvBackend,
+    GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend,
+    SamplingBackend, StartupBackend, TrainingCapabilities, TrainingLossBackend,
+    TrainingPrecisionPolicy, metal_residency, metal_training, requested_matmul_layout,
 };
 
 impl BackendIdentity for MetalBackend {
@@ -815,7 +815,45 @@ impl GdnBackend for MetalBackend {
     }
 }
 
-impl LinearBackend for MetalBackend {}
+impl LinearBackend for MetalBackend {
+    fn runtime_matmul(
+        &self,
+        req: &super::capability::MatmulRequest,
+        lhs: &kiln_tensor::Tensor,
+        rhs: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if !matches!(lhs.device(), kiln_tensor::Device::Metal(_))
+            || !matches!(rhs.device(), kiln_tensor::Device::Metal(_))
+            || !lhs.is_contiguous()
+            || !rhs.is_contiguous()
+            || lhs.dtype() != kiln_tensor::DType::BF16
+            || req.out_dtype != lhs.dtype()
+            || req.lhs_dtype != req.rhs_dtype
+        {
+            return Ok(None);
+        }
+
+        let Some(layout) = requested_matmul_layout(req, lhs, rhs) else {
+            return Ok(None);
+        };
+        let out = match layout {
+            BackendMatmulLayout::Plain => kiln_tensor::metal_matmul(lhs, rhs)?,
+            BackendMatmulLayout::LhsTransposed => {
+                kiln_tensor::metal_matmul_lhs_transposed(lhs, rhs)?
+            }
+            BackendMatmulLayout::RhsTransposed => {
+                kiln_tensor::metal_matmul_rhs_transposed(lhs, rhs)?
+            }
+            BackendMatmulLayout::BothTransposed => {
+                let rank = lhs.rank();
+                let lhs_t = lhs.transpose(rank - 2, rank - 1)?.contiguous()?;
+                let rhs_t = rhs.transpose(rank - 2, rank - 1)?.contiguous()?;
+                kiln_tensor::metal_matmul(&lhs_t, &rhs_t)?
+            }
+        };
+        Ok(Some(out))
+    }
+}
 
 impl super::residency::ResidentRegistry for MetalBackend {
     fn register_resource(

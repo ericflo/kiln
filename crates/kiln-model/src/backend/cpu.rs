@@ -4,9 +4,9 @@
 //! as a safe default for any future device.
 
 use super::{
-    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, GdnBackend, LinearBackend,
-    OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend,
-    StartupBackend, TrainingLossBackend,
+    AttentionBackend, BackendIdentity, BackendMatmulLayout, BackendRuntime, ConvBackend,
+    GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend,
+    SamplingBackend, StartupBackend, TrainingLossBackend, requested_matmul_layout,
 };
 
 #[derive(Debug)]
@@ -54,7 +54,42 @@ impl GdnBackend for CpuBackend {}
 
 impl ConvBackend for CpuBackend {}
 
-impl LinearBackend for CpuBackend {}
+impl LinearBackend for CpuBackend {
+    fn runtime_matmul(
+        &self,
+        req: &super::capability::MatmulRequest,
+        lhs: &kiln_tensor::Tensor,
+        rhs: &kiln_tensor::Tensor,
+    ) -> anyhow::Result<Option<kiln_tensor::Tensor>> {
+        if !matches!(lhs.device(), kiln_tensor::Device::Cpu)
+            || !matches!(rhs.device(), kiln_tensor::Device::Cpu)
+            || req.out_dtype != lhs.dtype()
+            || req.lhs_dtype != req.rhs_dtype
+        {
+            return Ok(None);
+        }
+
+        let Some(layout) = requested_matmul_layout(req, lhs, rhs) else {
+            return Ok(None);
+        };
+        let out = match layout {
+            BackendMatmulLayout::Plain => kiln_tensor::ops::matmul(lhs, rhs)?,
+            BackendMatmulLayout::LhsTransposed => {
+                kiln_tensor::ops::matmul_lhs_transposed(lhs, rhs)?
+            }
+            BackendMatmulLayout::RhsTransposed => {
+                kiln_tensor::ops::matmul_rhs_transposed(lhs, rhs)?
+            }
+            BackendMatmulLayout::BothTransposed => {
+                let rank = lhs.rank();
+                let lhs_t = lhs.transpose(rank - 2, rank - 1)?.contiguous()?;
+                let rhs_t = rhs.transpose(rank - 2, rank - 1)?.contiguous()?;
+                kiln_tensor::ops::matmul(&lhs_t, &rhs_t)?
+            }
+        };
+        Ok(Some(out))
+    }
+}
 
 impl super::residency::ResidentRegistry for CpuBackend {}
 

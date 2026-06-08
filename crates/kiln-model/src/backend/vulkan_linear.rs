@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 
 use super::vulkan::VulkanBackend;
 use super::vulkan_tensor_bridge::{kt_tensor_from_f32_bytes, kt_tensor_to_f32_bytes_with_shape};
+use super::{BackendMatmulLayout, requested_matmul_layout};
 
 /// (#1082) Per-dispatch FLOP ceiling for the Vulkan-routed matmul.
 ///
@@ -67,6 +68,114 @@ pub(super) fn max_chunk_dim_for_flop(other_dim_product: usize) -> usize {
     let denom = (other_dim_product as u64).saturating_mul(2).max(1);
     let chunk = (max_flop / denom) as usize;
     chunk.max(1)
+}
+
+pub(super) fn matmul(
+    backend: &VulkanBackend,
+    req: &super::capability::MatmulRequest,
+    lhs: &kiln_tensor::Tensor,
+    rhs: &kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    let Some(layout) = requested_matmul_layout(req, lhs, rhs) else {
+        return Ok(None);
+    };
+
+    if matches!(lhs.device(), kiln_tensor::Device::Vulkan(_))
+        && matches!(rhs.device(), kiln_tensor::Device::Vulkan(_))
+    {
+        return resident_matmul(req, lhs, rhs, layout);
+    }
+
+    if layout == BackendMatmulLayout::Plain
+        && matches!(lhs.device(), kiln_tensor::Device::Cpu)
+        && matches!(rhs.device(), kiln_tensor::Device::Cpu)
+        && lhs.is_contiguous()
+        && rhs.is_contiguous()
+        && lhs.dtype() == kiln_tensor::DType::F32
+        && matches!(rhs.dtype(), kiln_tensor::DType::F32 | kiln_tensor::DType::BF16)
+        && req.out_dtype == kiln_tensor::DType::F32
+    {
+        return cached_linear_matmul(backend, lhs, rhs);
+    }
+
+    Ok(None)
+}
+
+fn resident_matmul(
+    req: &super::capability::MatmulRequest,
+    lhs: &kiln_tensor::Tensor,
+    rhs: &kiln_tensor::Tensor,
+    layout: BackendMatmulLayout,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !lhs.is_contiguous()
+        || !rhs.is_contiguous()
+        || req.out_dtype != lhs.dtype()
+        || req.lhs_dtype != req.rhs_dtype
+        || !matches!(lhs.dtype(), kiln_tensor::DType::F32 | kiln_tensor::DType::BF16)
+    {
+        return Ok(None);
+    }
+
+    let out = match layout {
+        BackendMatmulLayout::Plain => {
+            if lhs.rank() == 2 {
+                if lhs.dtype() != kiln_tensor::DType::F32 {
+                    return Ok(None);
+                }
+                kiln_tensor::vulkan_matmul(lhs, rhs)?
+            } else {
+                kiln_tensor::vulkan_matmul_batched(lhs, rhs)?
+            }
+        }
+        BackendMatmulLayout::LhsTransposed => kiln_tensor::vulkan_matmul_lhs_transposed(lhs, rhs)?,
+        BackendMatmulLayout::RhsTransposed => kiln_tensor::vulkan_matmul_rhs_transposed(lhs, rhs)?,
+        BackendMatmulLayout::BothTransposed => {
+            let rank = lhs.rank();
+            let lhs_t = lhs.transpose(rank - 2, rank - 1)?.contiguous()?;
+            let rhs_t = rhs.transpose(rank - 2, rank - 1)?.contiguous()?;
+            if lhs_t.rank() == 2 {
+                if lhs_t.dtype() != kiln_tensor::DType::F32 {
+                    return Ok(None);
+                }
+                kiln_tensor::vulkan_matmul(&lhs_t, &rhs_t)?
+            } else {
+                kiln_tensor::vulkan_matmul_batched(&lhs_t, &rhs_t)?
+            }
+        }
+    };
+    Ok(Some(out))
+}
+
+fn cached_linear_matmul(
+    backend: &VulkanBackend,
+    lhs: &kiln_tensor::Tensor,
+    rhs: &kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if lhs.rank() < 2 || rhs.dims().len() != 2 {
+        return Ok(None);
+    }
+    let l_dims = lhs.dims().to_vec();
+    let hidden = *l_dims.last().unwrap();
+    let Ok((weight_hidden, out_dim)) = rhs.dims2() else {
+        return Ok(None);
+    };
+    if weight_hidden != hidden {
+        return Ok(None);
+    }
+
+    let lead = l_dims[..l_dims.len() - 1].iter().product::<usize>();
+    let dispatch_x = if l_dims.len() == 3 {
+        lhs.clone()
+    } else {
+        lhs.reshape((lead, 1usize, hidden))?
+    };
+    let Some(out) = linear_decode(backend, &dispatch_x, rhs)? else {
+        return Ok(None);
+    };
+
+    let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
+    out_shape.push(out_dim);
+    Ok(Some(out.reshape(out_shape.as_slice())?))
 }
 
 pub(super) fn linear_decode(

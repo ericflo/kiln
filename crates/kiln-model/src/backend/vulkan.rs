@@ -792,6 +792,15 @@ impl GdnBackend for VulkanBackend {
 
 #[allow(clippy::too_many_arguments)]
 impl LinearBackend for VulkanBackend {
+    fn runtime_matmul(
+        &self,
+        req: &super::capability::MatmulRequest,
+        lhs: &kiln_tensor::Tensor,
+        rhs: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        vulkan_linear::matmul(self, req, lhs, rhs)
+    }
+
     fn runtime_lora_delta_resident(
         &self,
         _x: &kiln_tensor::Tensor,

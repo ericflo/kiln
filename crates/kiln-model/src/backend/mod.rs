@@ -1179,9 +1179,62 @@ pub trait ConvBackend: Send + Sync + std::fmt::Debug {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackendMatmulLayout {
+    Plain,
+    LhsTransposed,
+    RhsTransposed,
+    BothTransposed,
+}
+
+pub(crate) fn requested_matmul_layout(
+    req: &capability::MatmulRequest,
+    lhs: &kiln_tensor::Tensor,
+    rhs: &kiln_tensor::Tensor,
+) -> Option<BackendMatmulLayout> {
+    if req.to_blas_request(1).is_err()
+        || req.epilogue != capability::MatmulEpilogue::Identity
+        || req.out_layout != capability::MatmulOperandLayout::RowMajor
+        || req.lhs_shape.as_slice() != lhs.dims()
+        || req.rhs_shape.as_slice() != rhs.dims()
+        || req.lhs_dtype != lhs.dtype()
+        || req.rhs_dtype != rhs.dtype()
+    {
+        return None;
+    }
+
+    match (req.lhs_layout, req.rhs_layout) {
+        (
+            capability::MatmulOperandLayout::RowMajor,
+            capability::MatmulOperandLayout::RowMajor,
+        ) => Some(BackendMatmulLayout::Plain),
+        (
+            capability::MatmulOperandLayout::ColMajor,
+            capability::MatmulOperandLayout::RowMajor,
+        ) => Some(BackendMatmulLayout::LhsTransposed),
+        (
+            capability::MatmulOperandLayout::RowMajor,
+            capability::MatmulOperandLayout::ColMajor,
+        ) => Some(BackendMatmulLayout::RhsTransposed),
+        (
+            capability::MatmulOperandLayout::ColMajor,
+            capability::MatmulOperandLayout::ColMajor,
+        ) => Some(BackendMatmulLayout::BothTransposed),
+    }
+}
+
 /// Focused `LinearBackend` facet delegated by the current `BackendRuntime` facade.
 #[allow(clippy::too_many_arguments)]
 pub trait LinearBackend: Send + Sync + std::fmt::Debug {
+    fn runtime_matmul(
+        &self,
+        _req: &capability::MatmulRequest,
+        _lhs: &kiln_tensor::Tensor,
+        _rhs: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
+
     fn runtime_linear_decode(
         &self,
         _x: &kiln_tensor::Tensor,
@@ -2370,6 +2423,62 @@ mod tests {
             mixed.to_blas_request(0),
             Err(capability::MatmulRequestProjectionError::InvalidConcurrentStreams)
         );
+    }
+
+    #[test]
+    fn linear_backend_runtime_matmul_routes_cpu_request() -> Result<()> {
+        let cpu = cpu::CpuBackend::new(kiln_tensor::Device::Cpu);
+        let lhs = kiln_tensor::Tensor::from_slice(
+            &[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            vec![2, 3],
+        )?;
+        let rhs = kiln_tensor::Tensor::from_slice(
+            &[7.0_f32, 8.0, 9.0, 10.0, 11.0, 12.0],
+            vec![3, 2],
+        )?;
+        let req = capability::MatmulRequest::plain(
+            lhs.dims().to_vec(),
+            rhs.dims().to_vec(),
+            kiln_tensor::DType::F32,
+            false,
+        );
+        let out = LinearBackend::runtime_matmul(&cpu, &req, &lhs, &rhs)?
+            .expect("cpu backend should route plain matmul request");
+        assert_eq!(out.dims(), &[2, 2]);
+        assert_eq!(out.to_vec::<f32>()?, vec![58.0, 64.0, 139.0, 154.0]);
+
+        let rhs_t = kiln_tensor::Tensor::from_slice(
+            &[7.0_f32, 9.0, 11.0, 8.0, 10.0, 12.0],
+            vec![2, 3],
+        )?;
+        let transposed_req = capability::MatmulRequest::plain(
+            lhs.dims().to_vec(),
+            rhs_t.dims().to_vec(),
+            kiln_tensor::DType::F32,
+            false,
+        )
+        .with_layouts(
+            capability::MatmulOperandLayout::RowMajor,
+            capability::MatmulOperandLayout::ColMajor,
+            capability::MatmulOperandLayout::RowMajor,
+        );
+        let transposed_out =
+            LinearBackend::runtime_matmul(&cpu, &transposed_req, &lhs, &rhs_t)?
+                .expect("cpu backend should route rhs-transposed matmul request");
+        assert_eq!(
+            transposed_out.to_vec::<f32>()?,
+            vec![58.0, 64.0, 139.0, 154.0]
+        );
+
+        let mixed_decline = req
+            .clone()
+            .with_dtypes(kiln_tensor::DType::F32, kiln_tensor::DType::F32, kiln_tensor::DType::BF16);
+        assert!(
+            LinearBackend::runtime_matmul(&cpu, &mixed_decline, &lhs, &rhs)?.is_none(),
+            "CPU runtime_matmul should decline request metadata it cannot honor"
+        );
+
+        Ok(())
     }
 
     #[test]
