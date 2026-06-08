@@ -1,5 +1,31 @@
 # Kiln Server Changelog
 
+## kiln-v0.3.1 — 2026-06-08 — structural GPU resource concurrency hardening
+
+Patch release for the 0.3 line focused on making the ROCm startup crash class
+and related cross-platform resource races structurally unavailable.
+
+- resource-concurrency: add the `kiln-resource` crate for process-shared,
+  lock-owned atomic file updates. Shared persistence now writes through one
+  API that uses sibling lock files, process-unique temp files, fsync, atomic
+  rename, and owner-liveness stale-lock recovery instead of uncoordinated
+  direct writes.
+- cuda/rocm: make cuBLASLt and hipBLASLt cache persistence merge under the
+  process-shared lock, so concurrent writers cannot truncate, interleave, or
+  lose each other's successful autotune entries.
+- cuda/rocm: change BLASLt workspaces from handle-global buffers to stream-owned
+  buffers keyed by the active typed stream. Matmul call sites now pass the
+  stream owner through the API, removing the default-stream aliasing hazard from
+  concurrent GPU work.
+- rocm: remove ROCm hipBLASLt disk cache restore/flush from the server runtime
+  and from the public tensor API. Legacy `~/.cache/kiln/autotune` files are no
+  longer read during startup or prewarm.
+- server: move teacher registry and agent trace index persistence onto locked
+  atomic writes.
+- tests: add invariant coverage that prevents ROCm disk cache call sites from
+  being reintroduced, enforces stream-owned BLASLt workspace shape, and checks
+  that shared persistence routes through `kiln-resource`.
+
 ## kiln-v0.3.0 — 2026-06-08 — backend runtime unification + ROCm release artifact
 
 Major server release for the backend-engine unification line.
