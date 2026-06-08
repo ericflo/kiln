@@ -17,7 +17,7 @@
 #![cfg(feature = "metal")]
 
 use kiln_model::backend::metal::MetalBackend;
-use kiln_model::backend::BackendRuntime;
+use kiln_model::backend::{BackendRuntime, OptimizerBackend};
 use kiln_model::lora_loader::LoraProjectionWeights;
 use kiln_model::tape_forward::{
     try_tape_cross_entropy_from_logits_kt, try_tape_lora_linear_kt, with_thread_local_tape,
@@ -185,8 +185,9 @@ fn adamw_one_step_in_place(
         .expect("register grad");
     backend.register_resident_activation(&m).expect("register m");
     backend.register_resident_activation(&v).expect("register v");
-    let dispatched = backend
-        .dispatch_adamw_step(param, grad, &m, &v, 1e-2, 0.9, 0.999, 1e-8, 0.0, 1)
+    let dispatched = OptimizerBackend::runtime_dispatch_adamw_step(
+        backend, param, grad, &m, &v, 1e-2, 0.9, 0.999, 1e-8, 0.0, 1,
+    )
         .expect("dispatch_adamw_step failed");
     assert!(dispatched, "Metal AdamW should dispatch on resident tensors");
     backend.evict_resident_activation(grad);

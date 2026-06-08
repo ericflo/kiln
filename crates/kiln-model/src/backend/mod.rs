@@ -1021,66 +1021,6 @@ pub trait BackendRuntime:
         ResidencyBackend::runtime_resolve_resident_activation(self, tensor, shape, dtype)
     }
 
-    /// Phase 4.2 hook: in-place SGD update `param -= lr * grad`
-    /// against device-resident parameter and gradient buffers.
-    /// Returns true when the dispatch succeeded; false when the
-    /// backend can't service the request and the caller should fall
-    /// back to the candle CPU path (`var.set(var - lr * grad)`).
-    ///
-    /// Callers must register both `param` and `grad` as resident
-    /// activations first (Phase 3.1 hooks). The default implementation
-    /// is a no-op returning false; the Vulkan backend's impl will land
-    /// alongside Phase 4.1's resident `TrainableLoraParams`.
-    fn dispatch_sgd_step(
-        &self,
-        param: &kiln_tensor::Tensor,
-        grad: &kiln_tensor::Tensor,
-        lr: f32,
-    ) -> Result<bool> {
-        OptimizerBackend::runtime_dispatch_sgd_step(self, param, grad, lr)
-    }
-
-    /// AdamW slot per the residency plan §4.2 ("AdamW slot for later
-    /// — leave the kernel name and signature in place; do not
-    /// implement the moving averages until requested").
-    ///
-    /// Inputs: param + grad + first-moment buffer + second-moment
-    /// buffer. All four must be registry-resident with matching
-    /// shape and dtype. Hyperparams: lr, beta1, beta2, eps,
-    /// weight_decay, step (1-indexed). Returns true on dispatch
-    /// success, false on decline.
-    ///
-    /// Default no-op so trait callers pick up the eventual Vulkan
-    /// impl without code changes. Trainer doesn't call this yet.
-    #[allow(clippy::too_many_arguments)]
-    fn dispatch_adamw_step(
-        &self,
-        param: &kiln_tensor::Tensor,
-        grad: &kiln_tensor::Tensor,
-        first_moment: &kiln_tensor::Tensor,
-        second_moment: &kiln_tensor::Tensor,
-        lr: f32,
-        beta1: f32,
-        beta2: f32,
-        eps: f32,
-        weight_decay: f32,
-        step: u32,
-    ) -> Result<bool> {
-        OptimizerBackend::runtime_dispatch_adamw_step(
-            self,
-            param,
-            grad,
-            first_moment,
-            second_moment,
-            lr,
-            beta1,
-            beta2,
-            eps,
-            weight_decay,
-            step,
-        )
-    }
-
     fn assemble_gdn_recurrent_resident_batch_rows(
         &self,
         rows: &[&kiln_tensor::Tensor],
@@ -3254,13 +3194,14 @@ mod tests {
             resident: false,
         };
 
-        assert!(backend.resident_activation_resource(&tensor).is_none());
+        assert!(ResidencyBackend::runtime_resident_activation_resource(&backend, &tensor).is_none());
 
         let backend = ResidentActivationProbeBackend {
             name: "vulkan",
             resident: true,
         };
-        let resource = backend.resident_activation_resource(&tensor).unwrap();
+        let resource =
+            ResidencyBackend::runtime_resident_activation_resource(&backend, &tensor).unwrap();
 
         assert_eq!(resource.tensor_id, tensor.id());
         assert_eq!(resource.backend, kiln_tensor::Backend::Vulkan);
@@ -3451,17 +3392,6 @@ mod tests {
         );
 
         assert_forwards!(
-            PagedKvBackend::runtime_supports_paged_kv_head_major_read(backend),
-            BackendRuntime::supports_paged_kv_head_major_read(backend),
-            "supports_paged_kv_head_major_read"
-        );
-        assert_forwards!(
-            PagedKvBackend::runtime_supports_paged_kv_head_major_read_append_token_major(backend),
-            BackendRuntime::supports_paged_kv_head_major_read_append_token_major(backend),
-            "supports_paged_kv_head_major_read_append_token_major"
-        );
-
-        assert_forwards!(
             GdnBackend::runtime_supports_gdn_forward_substitution(backend),
             BackendRuntime::supports_gdn_forward_substitution(backend),
             "supports_gdn_forward_substitution"
@@ -3485,16 +3415,6 @@ mod tests {
             GdnBackend::runtime_supports_gdn_full_chunk_forward(backend),
             BackendRuntime::supports_gdn_full_chunk_forward(backend),
             "supports_gdn_full_chunk_forward"
-        );
-        assert_forwards!(
-            GdnBackend::runtime_supports_gdn_full_chunk_forward_head_last(backend),
-            BackendRuntime::supports_gdn_full_chunk_forward_head_last(backend),
-            "supports_gdn_full_chunk_forward_head_last"
-        );
-        assert_forwards!(
-            GdnBackend::runtime_supports_gdn_recurrent_prefill_head_last(backend),
-            BackendRuntime::supports_gdn_recurrent_prefill_head_last(backend),
-            "supports_gdn_recurrent_prefill_head_last"
         );
         assert_forwards!(
             GdnBackend::runtime_supports_gdn_recurrent_prefill_native_head_last(backend),
@@ -3525,27 +3445,6 @@ mod tests {
             GdnBackend::runtime_supports_gdn_gated_rms_norm(backend),
             BackendRuntime::supports_gdn_gated_rms_norm(backend),
             "supports_gdn_gated_rms_norm"
-        );
-
-        assert_forwards!(
-            SamplingBackend::runtime_supports_linear_decode_argmax(backend),
-            BackendRuntime::supports_linear_decode_argmax(backend),
-            "supports_linear_decode_argmax"
-        );
-        assert_forwards!(
-            SamplingBackend::runtime_supports_linear_decode_argmax_batch(backend),
-            BackendRuntime::supports_linear_decode_argmax_batch(backend),
-            "supports_linear_decode_argmax_batch"
-        );
-        assert_forwards!(
-            SamplingBackend::runtime_supports_linear_decode_sample(backend, 8),
-            BackendRuntime::supports_linear_decode_sample(backend, 8),
-            "supports_linear_decode_sample"
-        );
-        assert_forwards!(
-            SamplingBackend::runtime_supports_linear_decode_sample_batch(backend, &[8], &[1.0]),
-            BackendRuntime::supports_linear_decode_sample_batch(backend, &[8], &[1.0]),
-            "supports_linear_decode_sample_batch"
         );
 
         assert_forwards!(
@@ -3599,31 +3498,6 @@ mod tests {
             "replay_authority"
         );
 
-        assert_forwards!(
-            TrainingLossBackend::runtime_training_capabilities(backend),
-            BackendRuntime::training_capabilities(backend),
-            "training_capabilities"
-        );
-        assert_forwards!(
-            TrainingLossBackend::runtime_sft_flce_loss_route(backend),
-            BackendRuntime::training_capabilities(backend).sft_flce_loss_route,
-            "sft_flce_loss_route"
-        );
-        assert_forwards!(
-            TrainingLossBackend::runtime_grpo_loss_route(backend),
-            BackendRuntime::training_capabilities(backend).grpo_loss_route,
-            "grpo_loss_route"
-        );
-        assert_forwards!(
-            TrainingLossBackend::runtime_opd_loss_route(backend),
-            BackendRuntime::training_capabilities(backend).opd_loss_route,
-            "opd_loss_route"
-        );
-        assert_forwards!(
-            TrainingLossBackend::runtime_training_precision_policy(backend),
-            BackendRuntime::training_precision_policy(backend),
-            "training_precision_policy"
-        );
     }
 
     #[test]
@@ -3632,22 +3506,7 @@ mod tests {
         assert_focused_facets_forward_advertised_capabilities(&cpu, "cpu");
 
         let t = kiln_tensor::Tensor::zeros_cpu(vec![1], kiln_tensor::DType::F32);
-        assert_eq!(
-            ResidencyBackend::runtime_resident_activation_resource(&cpu, &t),
-            BackendRuntime::resident_activation_resource(&cpu, &t)
-        );
-        assert_eq!(
-            OptimizerBackend::runtime_dispatch_sgd_step(&cpu, &t, &t, 0.1)?,
-            BackendRuntime::dispatch_sgd_step(&cpu, &t, &t, 0.1)?
-        );
-        assert_eq!(
-            OptimizerBackend::runtime_dispatch_adamw_step(
-                &cpu, &t, &t, &t, &t, 0.1, 0.9, 0.999, 1e-8, 0.0, 1
-            )?,
-            BackendRuntime::dispatch_adamw_step(
-                &cpu, &t, &t, &t, &t, 0.1, 0.9, 0.999, 1e-8, 0.0, 1
-            )?
-        );
+        assert!(ResidencyBackend::runtime_resident_activation_resource(&cpu, &t).is_none());
 
         Ok(())
     }

@@ -133,7 +133,7 @@ pub(super) fn dispatch_adamw_step(
 #[cfg(test)]
 mod adamw_kt_tests {
     use super::*;
-    use crate::backend::{BackendRuntime, metal::MetalBackend};
+    use crate::backend::{BackendRuntime, OptimizerBackend, metal::MetalBackend};
     use kiln_tensor::{DType, Device, Tensor};
 
     /// `Device::Metal(0)` if a Metal device is reachable, else `None`.
@@ -249,7 +249,7 @@ mod adamw_kt_tests {
             let met_grad = Tensor::from_vec_on(dev, g.clone(), vec![n])?;
             backend.register_resident_activation(&met_grad)?;
 
-            let dispatched = backend.dispatch_adamw_step(
+            let dispatched = OptimizerBackend::runtime_dispatch_adamw_step(&backend,
                 &met_param,
                 &met_grad,
                 &met_m,
@@ -401,7 +401,7 @@ mod adamw_kt_tests {
             );
             let met_grad = Tensor::from_vec_on(dev, g.clone(), vec![n])?;
             backend.register_resident_activation(&met_grad)?;
-            let dispatched = backend.dispatch_adamw_step(
+            let dispatched = OptimizerBackend::runtime_dispatch_adamw_step(&backend,
                 &met_param,
                 &met_grad,
                 &met_m,
@@ -453,7 +453,7 @@ mod adamw_kt_tests {
         let backend = MetalBackend::new(dev);
         // Nothing registered → decline.
         let dispatched =
-            backend.dispatch_adamw_step(&p, &g, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?;
+            OptimizerBackend::runtime_dispatch_adamw_step(&backend, &p, &g, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?;
         assert!(!dispatched, "must decline when operands aren't resident");
         Ok(())
     }

@@ -43,8 +43,8 @@ pub(super) fn training_precision_policy() -> TrainingPrecisionPolicy {
 /// device buffers.
 ///
 /// This is the single dispatch site for the on-device F32 AdamW step. The
-/// kt-`Tensor`-keyed `BackendRuntime::dispatch_adamw_step` (the CUDA/Metal-
-/// style resident-registry path) and any `VkTensor`-native caller holding
+/// kt-`Tensor`-keyed `OptimizerBackend::runtime_dispatch_adamw_step`
+/// (the CUDA/Metal-style resident-registry path) and any `VkTensor`-native caller holding
 /// `VulkanBuffer` handles for the param/grad and the persistent first/second-
 /// moment state both route through here. Because every caller funnels into the
 /// *same* SPIR-V `dispatch_adamw_step_f32` kernel with identical push
@@ -303,7 +303,7 @@ pub(super) fn dispatch_adamw_step(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::BackendRuntime;
+    use crate::backend::{BackendRuntime, OptimizerBackend};
 
     /// dispatch_sgd_step against two registry-resident F32 tensors —
     /// param := param - lr * grad, computed on-device, must match the
@@ -332,7 +332,7 @@ mod tests {
         backend.register_resident_activation(&param)?;
         backend.register_resident_activation(&grad)?;
 
-        let dispatched = backend.dispatch_sgd_step(&param, &grad, lr)?;
+        let dispatched = OptimizerBackend::runtime_dispatch_sgd_step(&backend, &param, &grad, lr)?;
         assert!(
             dispatched,
             "dispatch_sgd_step should succeed when both buffers are resident"
@@ -379,14 +379,14 @@ mod tests {
         let p = kiln_tensor::Tensor::from_vec(vec![1.0f32; 4], (4,))?;
         let g = kiln_tensor::Tensor::from_vec(vec![0.5f32; 4], (4,))?;
         // Neither registered — fall back.
-        assert!(!backend.dispatch_sgd_step(&p, &g, 0.01)?);
+        assert!(!OptimizerBackend::runtime_dispatch_sgd_step(&backend, &p, &g, 0.01)?);
         // Only param registered — fall back (grad missing).
         backend.register_resident_activation(&p)?;
-        assert!(!backend.dispatch_sgd_step(&p, &g, 0.01)?);
+        assert!(!OptimizerBackend::runtime_dispatch_sgd_step(&backend, &p, &g, 0.01)?);
         // Only grad registered — fall back (param missing).
         backend.evict_resident_activation(&p);
         backend.register_resident_activation(&g)?;
-        assert!(!backend.dispatch_sgd_step(&p, &g, 0.01)?);
+        assert!(!OptimizerBackend::runtime_dispatch_sgd_step(&backend, &p, &g, 0.01)?);
         backend.evict_resident_activation(&g);
         Ok(())
     }
@@ -405,7 +405,7 @@ mod tests {
         let g = kiln_tensor::Tensor::from_vec(vec![0.5f32; 8], (8,))?;
         backend.register_resident_activation(&p)?;
         backend.register_resident_activation(&g)?;
-        let err = backend.dispatch_sgd_step(&p, &g, 0.01).unwrap_err();
+        let err = OptimizerBackend::runtime_dispatch_sgd_step(&backend, &p, &g, 0.01).unwrap_err();
         assert!(
             err.to_string().contains("different element counts"),
             "unexpected error: {err}"
@@ -534,7 +534,7 @@ mod tests {
         backend.register_resident_activation(&p_bf16)?;
         backend.register_resident_activation(&g_bf16)?;
 
-        let dispatched = backend.dispatch_sgd_step(&p_bf16, &g_bf16, lr)?;
+        let dispatched = OptimizerBackend::runtime_dispatch_sgd_step(&backend, &p_bf16, &g_bf16, lr)?;
         assert!(
             dispatched,
             "BF16 dispatch_sgd_step must succeed when both operands are resident"
@@ -614,7 +614,7 @@ mod tests {
         backend.register_resident_activation(&m)?;
         backend.register_resident_activation(&v)?;
 
-        let dispatched = backend.dispatch_adamw_step(
+        let dispatched = OptimizerBackend::runtime_dispatch_adamw_step(&backend,
             &param,
             &grad,
             &m,
@@ -703,7 +703,7 @@ mod tests {
         backend.register_resident_activation(&v_bf16)?;
 
         for step in 1u32..=2 {
-            let dispatched = backend.dispatch_adamw_step(
+            let dispatched = OptimizerBackend::runtime_dispatch_adamw_step(&backend,
                 &p_bf16,
                 &g_bf16,
                 &m_bf16,
@@ -757,13 +757,13 @@ mod tests {
         let v = kiln_tensor::Tensor::from_vec(vec![0.0f32; 4], (4,))?;
         // Nothing registered.
         let dispatched =
-            backend.dispatch_adamw_step(&p, &g, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?;
+            OptimizerBackend::runtime_dispatch_adamw_step(&backend, &p, &g, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?;
         assert!(!dispatched);
         // Only param + m registered — v missing → fall back.
         backend.register_resident_activation(&p)?;
         backend.register_resident_activation(&m)?;
         let dispatched =
-            backend.dispatch_adamw_step(&p, &g, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?;
+            OptimizerBackend::runtime_dispatch_adamw_step(&backend, &p, &g, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?;
         assert!(!dispatched);
         backend.evict_resident_activation(&p);
         backend.evict_resident_activation(&m);
@@ -808,7 +808,7 @@ mod tests {
 
         backend.register_resident_activation(&p)?;
         backend.register_resident_activation(&g_tensor)?;
-        let dispatched = backend.dispatch_sgd_step(&p, &g_tensor, lr)?;
+        let dispatched = OptimizerBackend::runtime_dispatch_sgd_step(&backend, &p, &g_tensor, lr)?;
         assert!(dispatched);
 
         // (1) Host storage is still the initial values.
@@ -862,7 +862,7 @@ mod tests {
         let g = kiln_tensor::Tensor::from_vec(vec![0.5f32; 4], (4,))?; // F32
         backend.register_resident_activation(&p)?;
         backend.register_resident_activation(&g)?;
-        let dispatched = backend.dispatch_sgd_step(&p, &g, 0.01)?;
+        let dispatched = OptimizerBackend::runtime_dispatch_sgd_step(&backend, &p, &g, 0.01)?;
         assert!(!dispatched, "dtype mismatch must fall back");
         backend.evict_resident_activation(&p);
         backend.evict_resident_activation(&g);

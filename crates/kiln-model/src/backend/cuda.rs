@@ -1979,11 +1979,11 @@ mod tests {
         let v = KtTensor::zeros_cpu(vec![2, 3], KtDType::F32);
 
         assert!(
-            !backend.dispatch_sgd_step(&param, &grad, 0.01)?,
+            !OptimizerBackend::runtime_dispatch_sgd_step(&backend, &param, &grad, 0.01)?,
             "CUDA must not claim SGD dispatch for non-CUDA tensors"
         );
         assert!(
-            !backend.dispatch_adamw_step(&param, &grad, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?,
+            !OptimizerBackend::runtime_dispatch_adamw_step(&backend, &param, &grad, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?,
             "CUDA must not claim AdamW dispatch for non-CUDA tensors"
         );
 
@@ -1993,11 +1993,11 @@ mod tests {
         backend.register_resident_activation(&v)?;
 
         assert!(
-            !backend.dispatch_sgd_step(&param, &grad, 0.01)?,
+            !OptimizerBackend::runtime_dispatch_sgd_step(&backend, &param, &grad, 0.01)?,
             "TensorId residency alone is not enough for CUDA to claim SGD ownership"
         );
         assert!(
-            !backend.dispatch_adamw_step(&param, &grad, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?,
+            !OptimizerBackend::runtime_dispatch_adamw_step(&backend, &param, &grad, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?,
             "TensorId residency alone is not enough for CUDA to claim AdamW ownership"
         );
 
@@ -2027,7 +2027,7 @@ mod tests {
         backend.register_resident_activation(&param)?;
         backend.register_resident_activation(&grad)?;
 
-        assert!(backend.dispatch_sgd_step(&param, &grad, 0.25)?);
+        assert!(OptimizerBackend::runtime_dispatch_sgd_step(&backend, &param, &grad, 0.25)?);
         let actual = param.to_device(KtDevice::Cpu)?.to_vec1::<f32>()?;
         let expected = [0.975f32, -1.95, 0.375, 2.75];
         for (a, e) in actual.iter().zip(expected.iter()) {
@@ -2060,7 +2060,7 @@ mod tests {
         let beta2 = 0.999;
         let eps = 1e-8;
         let weight_decay = 0.1;
-        assert!(backend.dispatch_adamw_step(
+        assert!(OptimizerBackend::runtime_dispatch_adamw_step(&backend,
             &param,
             &grad,
             &m,
@@ -2112,7 +2112,7 @@ mod tests {
         let grad = mk_bf16(&[0.25f32, -0.5, 0.5, -0.25])?.expect("cuda grad");
         backend.register_resident_activation(&param)?;
         backend.register_resident_activation(&grad)?;
-        assert!(backend.dispatch_sgd_step(&param, &grad, 0.5)?);
+        assert!(OptimizerBackend::runtime_dispatch_sgd_step(&backend, &param, &grad, 0.5)?);
         let sgd_actual = param
             .to_device(KtDevice::Cpu)?
             .to_dtype(KtDType::F32)?
@@ -2133,7 +2133,7 @@ mod tests {
         backend.register_resident_activation(&adam_grad)?;
         backend.register_resident_activation(&m)?;
         backend.register_resident_activation(&v)?;
-        assert!(backend.dispatch_adamw_step(
+        assert!(OptimizerBackend::runtime_dispatch_adamw_step(&backend,
             &adam_param,
             &adam_grad,
             &m,
