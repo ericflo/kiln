@@ -15,8 +15,8 @@ use kiln_core::block::BlockManager;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 use kiln_model::{
-    CancelHandle, FinishReason, GenerationOutput, ModelRunner, PagedBatchedDecodeState,
-    PagedKvCacheKt, PagedPrefixReuse,
+    CancelHandle, DecodeBatcherPolicy, FinishReason, GenerationOutput, ModelRunner,
+    PagedBatchedDecodeState, PagedKvCacheKt, PagedPrefixReuse,
 };
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
@@ -29,7 +29,6 @@ use crate::state::{
 const DEFAULT_ENGINE_CHANNEL: usize = 1024;
 const DEFAULT_RESPONSE_CHANNEL: usize = 64;
 const DEFAULT_MAX_DECODE_BATCH: usize = 8;
-const VULKAN_MAX_DECODE_BATCH: usize = 64;
 const DEFAULT_PREFILL_ADMISSION_QUANTUM: usize = 4;
 const DEFAULT_PREFIX_AWARE_ADMISSION: bool = true;
 
@@ -37,22 +36,16 @@ fn blocks_needed_for_tokens(num_tokens: usize, block_size: usize) -> usize {
     num_tokens.div_ceil(block_size)
 }
 
-/// Resolve the actor's `max_decode_batch` from the environment, falling back
-/// to a backend-aware default when `KILN_MAX_DECODE_BATCH` is unset or cannot
-/// be parsed as a positive integer. The actor caps `active.len()` at this
-/// value, so it is the effective concurrent-decode width.
-pub(crate) fn env_max_decode_batch_for_backend(backend_name: Option<&str>) -> usize {
+/// Resolve the actor's `max_decode_batch` from the environment, falling back to
+/// the active backend's decode policy when `KILN_MAX_DECODE_BATCH` is unset or
+/// cannot be parsed as a positive integer. The actor caps `active.len()` at
+/// this value, so it is the effective concurrent-decode width.
+pub(crate) fn env_max_decode_batch_for_policy(policy: Option<DecodeBatcherPolicy>) -> usize {
     std::env::var("KILN_MAX_DECODE_BATCH")
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .filter(|&n| n > 0)
-        .unwrap_or_else(|| {
-            if matches!(backend_name, Some("vulkan")) {
-                VULKAN_MAX_DECODE_BATCH
-            } else {
-                DEFAULT_MAX_DECODE_BATCH
-            }
-        })
+        .unwrap_or_else(|| policy.map_or(DEFAULT_MAX_DECODE_BATCH, |policy| policy.max_batch))
 }
 
 fn env_prefix_aware_admission() -> bool {
@@ -68,9 +61,9 @@ fn env_prefix_aware_admission() -> bool {
 /// Cap how many queued requests the actor prefills before yielding to a decode
 /// step. Vulkan defaults to filling the resident decode width before the first
 /// decode step, while other backends keep a smaller latency-oriented default.
-pub(crate) fn env_prefill_admission_quantum_for_backend(
+pub(crate) fn env_prefill_admission_quantum_for_policy(
     max_decode_batch: usize,
-    backend_name: Option<&str>,
+    policy: Option<DecodeBatcherPolicy>,
 ) -> usize {
     let max_decode_batch = max_decode_batch.max(1);
     std::env::var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM")
@@ -91,7 +84,7 @@ pub(crate) fn env_prefill_admission_quantum_for_backend(
             // batches, so give CUDA the same full-width quantum as Vulkan; CPU
             // keeps the latency-oriented default. Per-deploy override:
             // KILN_BATCH_PREFILL_ADMISSION_QUANTUM.
-            if matches!(backend_name, Some("vulkan") | Some("cuda")) {
+            if policy.is_some_and(|policy| policy.use_decode_width_prefill_admission) {
                 max_decode_batch
             } else {
                 DEFAULT_PREFILL_ADMISSION_QUANTUM
@@ -104,8 +97,7 @@ pub(crate) fn env_prefill_admission_quantum_for_backend(
 /// instead of as a single batched forward. Backends now default to true batched
 /// decode; `KILN_BATCH_DECODE_ROWWISE` (0/1) remains as an operator override
 /// for focused comparisons and emergency fallback.
-fn default_rowwise_decode(backend_name: Option<&'static str>) -> bool {
-    let _ = backend_name;
+fn default_rowwise_decode() -> bool {
     if let Ok(raw) = std::env::var("KILN_BATCH_DECODE_ROWWISE") {
         return !matches!(
             raw.trim(),
@@ -295,7 +287,7 @@ impl RealDecodeForward {
         prefix_cache: Arc<Mutex<RealPrefixCache>>,
         gpu_lock: GpuCoordinationLock,
     ) -> Self {
-        let rowwise_decode = default_rowwise_decode(runner.read().ok().map(|g| g.backend_name()));
+        let rowwise_decode = default_rowwise_decode();
         Self {
             runner,
             block_manager,
@@ -751,7 +743,7 @@ pub struct BatchingEngineHandle {
 
 impl BatchingEngineHandle {
     pub fn start(forward: Arc<dyn DecodeForward>) -> Self {
-        Self::start_with_options(forward, env_max_decode_batch_for_backend(None))
+        Self::start_with_options(forward, env_max_decode_batch_for_policy(None))
     }
 
     pub fn start_with_options(forward: Arc<dyn DecodeForward>, max_decode_batch: usize) -> Self {
@@ -761,17 +753,15 @@ impl BatchingEngineHandle {
     pub fn start_with_backend_options(
         forward: Arc<dyn DecodeForward>,
         max_decode_batch: usize,
-        backend_name: Option<&str>,
+        policy: Option<DecodeBatcherPolicy>,
     ) -> Self {
         let max_decode_batch = max_decode_batch.max(1);
         Self::start_with_policy(
             forward,
             max_decode_batch,
             env_prefix_aware_admission(),
-            env_prefill_admission_quantum_for_backend(max_decode_batch, backend_name),
-            // #1082: CUDA restores the LKG burst-fill admission; Vulkan/Metal
-            // keep their tuned yield-to-ready-rows behavior.
-            matches!(backend_name, Some("cuda")),
+            env_prefill_admission_quantum_for_policy(max_decode_batch, policy),
+            policy.is_some_and(|policy| policy.burst_prefill_admission),
         )
     }
 
@@ -1593,21 +1583,15 @@ mod tests {
         unsafe {
             std::env::remove_var("KILN_BATCH_DECODE_ROWWISE");
         }
-        assert!(!default_rowwise_decode(Some("vulkan")));
-        assert!(!default_rowwise_decode(Some("cuda")));
-        assert!(!default_rowwise_decode(Some("metal")));
-        assert!(!default_rowwise_decode(None));
+        assert!(!default_rowwise_decode());
         unsafe {
             std::env::set_var("KILN_BATCH_DECODE_ROWWISE", "0");
         }
-        assert!(!default_rowwise_decode(Some("vulkan")));
-        assert!(!default_rowwise_decode(Some("cuda")));
+        assert!(!default_rowwise_decode());
         unsafe {
             std::env::set_var("KILN_BATCH_DECODE_ROWWISE", "1");
         }
-        assert!(default_rowwise_decode(Some("vulkan")));
-        assert!(default_rowwise_decode(Some("cuda")));
-        assert!(default_rowwise_decode(None));
+        assert!(default_rowwise_decode());
         match prior {
             Some(v) => unsafe { std::env::set_var("KILN_BATCH_DECODE_ROWWISE", v) },
             None => unsafe { std::env::remove_var("KILN_BATCH_DECODE_ROWWISE") },
@@ -1622,14 +1606,17 @@ mod tests {
         unsafe {
             std::env::remove_var("KILN_MAX_DECODE_BATCH");
         }
-        assert_eq!(env_max_decode_batch_for_backend(None), 8);
-        assert_eq!(env_max_decode_batch_for_backend(Some("vulkan")), 64);
-        assert_eq!(env_max_decode_batch_for_backend(Some("metal")), 8);
+        let vulkan_policy =
+            DecodeBatcherPolicy::for_backend("vulkan", kiln_tensor::Device::Vulkan(0));
+        let metal_policy = DecodeBatcherPolicy::for_backend("metal", kiln_tensor::Device::Metal(0));
+        assert_eq!(env_max_decode_batch_for_policy(None), 8);
+        assert_eq!(env_max_decode_batch_for_policy(Some(vulkan_policy)), 64);
+        assert_eq!(env_max_decode_batch_for_policy(Some(metal_policy)), 8);
         unsafe {
             std::env::set_var("KILN_MAX_DECODE_BATCH", "24");
         }
-        assert_eq!(env_max_decode_batch_for_backend(None), 24);
-        assert_eq!(env_max_decode_batch_for_backend(Some("vulkan")), 24);
+        assert_eq!(env_max_decode_batch_for_policy(None), 24);
+        assert_eq!(env_max_decode_batch_for_policy(Some(vulkan_policy)), 24);
         match prior {
             Some(v) => unsafe { std::env::set_var("KILN_MAX_DECODE_BATCH", v) },
             None => unsafe { std::env::remove_var("KILN_MAX_DECODE_BATCH") },
@@ -1644,58 +1631,62 @@ mod tests {
         unsafe {
             std::env::remove_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM");
         }
-        assert_eq!(env_prefill_admission_quantum_for_backend(64, None), 4);
+        let cuda_policy = DecodeBatcherPolicy::for_backend("cuda", kiln_tensor::Device::Cuda(0));
+        let vulkan_policy =
+            DecodeBatcherPolicy::for_backend("vulkan", kiln_tensor::Device::Vulkan(0));
+        let metal_policy = DecodeBatcherPolicy::for_backend("metal", kiln_tensor::Device::Metal(0));
+        assert_eq!(env_prefill_admission_quantum_for_policy(64, None), 4);
         assert_eq!(
-            env_prefill_admission_quantum_for_backend(64, Some("vulkan")),
+            env_prefill_admission_quantum_for_policy(64, Some(vulkan_policy)),
             64
         );
         // #1082: CUDA gets the same full-width quantum as Vulkan (regression fix).
         assert_eq!(
-            env_prefill_admission_quantum_for_backend(64, Some("cuda")),
+            env_prefill_admission_quantum_for_policy(64, Some(cuda_policy)),
             64
         );
         // Metal stays at the latency default (the Metal lane can opt in separately).
         assert_eq!(
-            env_prefill_admission_quantum_for_backend(64, Some("metal")),
+            env_prefill_admission_quantum_for_policy(64, Some(metal_policy)),
             4
         );
         // CUDA still clamps to demand when the decode width is small.
         assert_eq!(
-            env_prefill_admission_quantum_for_backend(2, Some("cuda")),
+            env_prefill_admission_quantum_for_policy(2, Some(cuda_policy)),
             2
         );
-        assert_eq!(env_prefill_admission_quantum_for_backend(2, None), 2);
+        assert_eq!(env_prefill_admission_quantum_for_policy(2, None), 2);
         assert_eq!(
-            env_prefill_admission_quantum_for_backend(2, Some("vulkan")),
+            env_prefill_admission_quantum_for_policy(2, Some(vulkan_policy)),
             2
         );
-        assert_eq!(env_prefill_admission_quantum_for_backend(0, None), 1);
+        assert_eq!(env_prefill_admission_quantum_for_policy(0, None), 1);
         unsafe {
             std::env::set_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM", "24");
         }
-        assert_eq!(env_prefill_admission_quantum_for_backend(64, None), 24);
+        assert_eq!(env_prefill_admission_quantum_for_policy(64, None), 24);
         assert_eq!(
-            env_prefill_admission_quantum_for_backend(64, Some("vulkan")),
+            env_prefill_admission_quantum_for_policy(64, Some(vulkan_policy)),
             24
         );
         unsafe {
             std::env::set_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM", "999");
         }
-        assert_eq!(env_prefill_admission_quantum_for_backend(64, None), 64);
+        assert_eq!(env_prefill_admission_quantum_for_policy(64, None), 64);
         unsafe {
             std::env::set_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM", "0");
         }
-        assert_eq!(env_prefill_admission_quantum_for_backend(64, None), 4);
+        assert_eq!(env_prefill_admission_quantum_for_policy(64, None), 4);
         assert_eq!(
-            env_prefill_admission_quantum_for_backend(64, Some("vulkan")),
+            env_prefill_admission_quantum_for_policy(64, Some(vulkan_policy)),
             64
         );
         unsafe {
             std::env::set_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM", "bad");
         }
-        assert_eq!(env_prefill_admission_quantum_for_backend(64, None), 4);
+        assert_eq!(env_prefill_admission_quantum_for_policy(64, None), 4);
         assert_eq!(
-            env_prefill_admission_quantum_for_backend(64, Some("vulkan")),
+            env_prefill_admission_quantum_for_policy(64, Some(vulkan_policy)),
             64
         );
         match prior {

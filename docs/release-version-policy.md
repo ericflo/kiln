@@ -4,6 +4,7 @@ Kiln has two release lines with different sources of truth:
 
 - **Server releases** use the root workspace version in `Cargo.toml` and publish GitHub releases named `kiln-vX.Y.Z` plus `ghcr.io/ericflo/kiln-server:{X.Y.Z}` / `latest`.
 - **Desktop releases** use `desktop/Cargo.toml` and publish GitHub releases named `desktop-vX.Y.Z`.
+- The server binary release matrix covers Linux x86_64 CUDA 12.4, Linux x86_64 ROCm 7.2.4, Linux x86_64 Vulkan 1.2, macOS Apple Silicon Metal, and Windows x86_64 CUDA 12.4. The GHCR image remains the CUDA 12.4 Linux image.
 
 User-facing server install snippets should avoid checked-in `kiln-vX.Y.Z`, `kiln-X.Y.Z-...`, or `ghcr.io/ericflo/kiln-server:X.Y.Z` literals. Prefer `/releases/latest`, `ghcr.io/ericflo/kiln-server:latest`, or a short `KILN_VERSION=$(curl ... /releases/latest ...)` lookup before constructing asset URLs. GitHub release asset filenames include the version, so binary download commands need the computed `KILN_VERSION` variable.
 

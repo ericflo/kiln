@@ -18,11 +18,10 @@
 //! tensors, and the host samplers (`greedy_sample`, `greedy_sample_rows`,
 //! `sample_with_params`) and `mtp_debug` helpers all consume kt tensors.
 //!
-//! `logits_to_probs` (used by the rejection-sampling resample path) takes a
-//! CUDA fast path that does temperature scaling and softmax on-device via
-//! `kiln_tensor::cuda_scalar_op` + `cuda_softmax_last_axis`, then a single
-//! D2H copy of the resulting probabilities. The kt host-side path below is
-//! preserved as a fallback for CPU tensors and any precondition failure.
+//! `logits_to_probs` (used by the rejection-sampling resample path) first tries
+//! the kt device-dispatched scalar + softmax ops, then copies the resulting
+//! probabilities to host. The kt host-side path below is preserved as a
+//! fallback for unsupported dtypes or any precondition failure.
 //!
 //! `speculative_decode_step` calls `model_forward_kt` (flat-`KvCache` path),
 //! which is fully kt-typed and returns kt logits directly — no candle bridge.
@@ -39,15 +38,15 @@ use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 
+use crate::PagedKvCacheKt;
 use crate::backend::BackendRuntime;
 use crate::c1_attr;
 use crate::forward::{
-    GpuWeights, LinearAttentionState, model_forward_embed, model_forward_head,
-    model_forward_kt, model_forward_paged, model_forward_paged_with_last_hidden,
-    model_forward_segment, mtp_forward_step,
+    GpuWeights, LinearAttentionState, model_forward_embed, model_forward_head, model_forward_kt,
+    model_forward_paged, model_forward_paged_with_last_hidden, model_forward_segment,
+    mtp_forward_step,
 };
 use crate::kv_cache::KvCache;
-use crate::PagedKvCacheKt;
 use crate::sampling::{greedy_sample, greedy_sample_rows, sample_with_params};
 
 /// Phase C35 H13 A/B — read `KILN_MTP_ARGMAX_FP32=1` once per process, cached
@@ -185,15 +184,13 @@ fn draft_forward(
 ///
 /// Returns a Vec of probabilities indexed by token ID.
 ///
-/// #1082: CUDA inputs take an on-device fast path that scales by
-/// temperature via `kiln_tensor::cuda_scalar_op` and computes the softmax
-/// via `kiln_tensor::cuda_softmax_last_axis` before a single D2H copy. The
-/// kt host-side path below is preserved for CPU tensors and any
-/// precondition failure (non-contiguous last-position slice, unsupported
-/// dtype, etc.).
+/// #1082: kt inputs first take the device-dispatched scalar + softmax path,
+/// which lets CUDA, ROCm, Metal, and Vulkan use their native `DeviceOp`
+/// forwards when available before a single host readback. The kt host-side path
+/// below is preserved for unsupported dtypes and any precondition failure
+/// (non-contiguous last-position slice, unsupported dtype, etc.).
 fn logits_to_probs(logits: &Tensor, temperature: f32) -> Result<Vec<f32>> {
-    #[cfg(feature = "cuda")]
-    if let Some(probs) = try_kt_logits_to_probs(logits, temperature)? {
+    if let Some(probs) = try_device_logits_to_probs(logits, temperature)? {
         return Ok(probs);
     }
 
@@ -232,16 +229,12 @@ fn logits_to_probs(logits: &Tensor, temperature: f32) -> Result<Vec<f32>> {
     Ok(probs)
 }
 
-/// #1082: CUDA fast path for `logits_to_probs`. Extracts the last-position
-/// slice as a 1-D contiguous kt tensor, runs the temperature scaling +
-/// softmax on-device, then issues a single D2H copy of the resulting F32
-/// probabilities. Returns `Ok(None)` on any precondition failure so the
-/// caller falls through to the kt host path.
-#[cfg(feature = "cuda")]
-fn try_kt_logits_to_probs(logits: &Tensor, temperature: f32) -> Result<Option<Vec<f32>>> {
-    if !matches!(logits.device(), kiln_tensor::Device::Cuda(_)) {
-        return Ok(None);
-    }
+/// #1082: Device-dispatched fast path for `logits_to_probs`. Extracts the
+/// last-position slice as a 1-D contiguous kt tensor, runs temperature scaling
+/// through `ScalarOp` and softmax through `SoftmaxLastDimOp`, then issues a
+/// single host readback of the resulting F32 probabilities. Returns `Ok(None)`
+/// on any precondition failure so the caller falls through to the kt host path.
+fn try_device_logits_to_probs(logits: &Tensor, temperature: f32) -> Result<Option<Vec<f32>>> {
     if !matches!(logits.dtype(), DType::F32 | DType::BF16 | DType::F16) {
         return Ok(None);
     }
@@ -255,25 +248,24 @@ fn try_kt_logits_to_probs(logits: &Tensor, temperature: f32) -> Result<Option<Ve
         logits.clone()
     };
     let flat = last_logits.flatten_all()?.contiguous()?;
-    // Always run the softmax in F32 — `kt::cuda_softmax_last_axis` supports
-    // BF16/F16, but the rejection-sample consumer takes a `Vec<f32>` so
-    // promoting up front is cheaper than promoting on D2H.
+    // Always run the softmax in F32. The rejection-sample consumer takes a
+    // `Vec<f32>`, so promoting up front is cheaper than widening on readback.
     let flat_f32 = if flat.dtype() != DType::F32 {
         flat.to_dtype(DType::F32)?
     } else {
         flat
     };
-    // Optional temperature scaling. `ScalarKind::DivScalar = 3`. Matches
-    // the host path's `*v /= temperature` for `temperature > 0.0 && != 1.0`.
+    // Optional temperature scaling. Matches the host path's `*v /= temperature`
+    // for `temperature > 0.0 && != 1.0`.
     let kt_scaled = if temperature > 0.0 && temperature != 1.0 {
-        match kiln_tensor::cuda_scalar_op(&flat_f32, 3, temperature) {
+        match kiln_tensor::ops::div_scalar(&flat_f32, temperature) {
             Ok(t) => t,
             Err(_) => return Ok(None),
         }
     } else {
         flat_f32
     };
-    let kt_probs = match kiln_tensor::cuda_softmax_last_axis(&kt_scaled) {
+    let kt_probs = match kt_scaled.softmax_last_dim() {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };

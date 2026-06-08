@@ -74,6 +74,87 @@ pub struct Tensor {
     version: Arc<AtomicU64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceTransferSupport {
+    SameDevice,
+    HostToDevice,
+    DeviceToHost,
+    UnsupportedCrossDevice,
+    UnsupportedFeatureDisabled,
+}
+
+impl DeviceTransferSupport {
+    pub const fn is_supported(self) -> bool {
+        matches!(
+            self,
+            Self::SameDevice | Self::HostToDevice | Self::DeviceToHost
+        )
+    }
+
+    pub const fn unsupported_reason(self) -> Option<&'static str> {
+        match self {
+            Self::SameDevice | Self::HostToDevice | Self::DeviceToHost => None,
+            Self::UnsupportedCrossDevice => Some("cross-device transfers are not implemented"),
+            Self::UnsupportedFeatureDisabled => Some("the target backend feature is not enabled"),
+        }
+    }
+}
+
+pub fn device_transfer_support(src: Device, target: Device) -> DeviceTransferSupport {
+    if src == target {
+        return DeviceTransferSupport::SameDevice;
+    }
+    if src.is_gpu() && target.is_gpu() {
+        return DeviceTransferSupport::UnsupportedCrossDevice;
+    }
+
+    match (src, target) {
+        (Device::Cpu, Device::Cuda(_)) if cfg!(feature = "cuda") => {
+            DeviceTransferSupport::HostToDevice
+        }
+        (Device::Cuda(_), Device::Cpu) if cfg!(feature = "cuda") => {
+            DeviceTransferSupport::DeviceToHost
+        }
+        (Device::Cpu, Device::Metal(_)) if cfg!(feature = "metal") => {
+            DeviceTransferSupport::HostToDevice
+        }
+        (Device::Metal(_), Device::Cpu) if cfg!(feature = "metal") => {
+            DeviceTransferSupport::DeviceToHost
+        }
+        (Device::Cpu, Device::Vulkan(_)) if cfg!(feature = "vulkan") => {
+            DeviceTransferSupport::HostToDevice
+        }
+        (Device::Vulkan(_), Device::Cpu) if cfg!(feature = "vulkan") => {
+            DeviceTransferSupport::DeviceToHost
+        }
+        (Device::Cpu, Device::Rocm(_)) if cfg!(feature = "rocm") => {
+            DeviceTransferSupport::HostToDevice
+        }
+        (Device::Rocm(_), Device::Cpu) if cfg!(feature = "rocm") => {
+            DeviceTransferSupport::DeviceToHost
+        }
+        (Device::Cpu, Device::Cuda(_))
+        | (Device::Cuda(_), Device::Cpu)
+        | (Device::Cpu, Device::Metal(_))
+        | (Device::Metal(_), Device::Cpu)
+        | (Device::Cpu, Device::Vulkan(_))
+        | (Device::Vulkan(_), Device::Cpu)
+        | (Device::Cpu, Device::Rocm(_))
+        | (Device::Rocm(_), Device::Cpu) => DeviceTransferSupport::UnsupportedFeatureDisabled,
+        _ => DeviceTransferSupport::UnsupportedCrossDevice,
+    }
+}
+
+fn unsupported_device_transfer_error(src: Device, target: Device) -> Error {
+    let support = device_transfer_support(src, target);
+    let reason = support
+        .unsupported_reason()
+        .unwrap_or("transition is unexpectedly unsupported");
+    Error::Msg(format!(
+        "Tensor::to_device: transition {src}->{target} is unsupported: {reason} (support={support:?})"
+    ))
+}
+
 /// `Tensor: AsRef<Tensor>` mirrors candle, which keys `Tensor::cat`
 /// (and friends) on `A: AsRef<Tensor>`. This single impl is what makes
 /// **both** `&[&Tensor]` and `&[Tensor]` slice arguments type-check at
@@ -338,9 +419,8 @@ impl Tensor {
     ///
     /// CPU: wraps the byte buffer directly (zero per-element work). CUDA:
     /// wraps on the host then H2D-uploads via the candle-free
-    /// [`crate::host_to_cuda_copy_ctx`]. Metal uploads through
-    /// [`crate::host_to_metal_copy`]. Vulkan is not yet implemented (#1082);
-    /// callers that use Vulkan-host staging should explicitly request CPU.
+    /// [`crate::host_to_cuda_copy_ctx`]. Metal, Vulkan, and ROCm upload through
+    /// their backend host-copy helpers when the corresponding feature is enabled.
     pub fn from_raw_bytes_on(
         device: Device,
         dtype: DType,
@@ -992,9 +1072,7 @@ impl Tensor {
             (Device::Cpu, Device::Rocm(i)) => crate::host_to_rocm_copy(self, i),
             #[cfg(feature = "rocm")]
             (Device::Rocm(_), Device::Cpu) => crate::rocm_to_host_copy(self),
-            _ => Err(Error::Msg(format!(
-                "Tensor::to_device: transition {src}→{target} is not yet implemented                  (issue #1082)"
-            ))),
+            _ => Err(unsupported_device_transfer_error(src, target)),
         }
     }
 
@@ -1025,9 +1103,7 @@ impl Tensor {
             (Device::Rocm(_), Device::Cpu) => return crate::rocm_to_host_copy(self),
             _ => {}
         }
-        Err(Error::Msg(format!(
-            "Tensor::to_device: transition {src}→{target} requires a GPU feature (cuda/metal/vulkan/rocm); none is enabled in this build"
-        )))
+        Err(unsupported_device_transfer_error(src, target))
     }
 
     /// Read the tensor back to a host `Vec<E>` in row-major logical
@@ -1586,6 +1662,60 @@ mod tests {
         let v = vec![1.0f32, 2.0, 3.0];
         let e = Tensor::from_vec_on(Device::Cpu, v, vec![2, 2]).unwrap_err();
         assert!(e.to_string().contains("has 4 elements"));
+    }
+
+    #[test]
+    fn device_transfer_support_classifies_explicit_transitions() {
+        assert_eq!(
+            device_transfer_support(Device::Cpu, Device::Cpu),
+            DeviceTransferSupport::SameDevice
+        );
+        assert!(device_transfer_support(Device::Cpu, Device::Cpu).is_supported());
+        assert_eq!(
+            device_transfer_support(Device::Cuda(0), Device::Metal(0)),
+            DeviceTransferSupport::UnsupportedCrossDevice
+        );
+        assert_eq!(
+            device_transfer_support(Device::Cuda(0), Device::Cuda(1)),
+            DeviceTransferSupport::UnsupportedCrossDevice
+        );
+
+        #[cfg(feature = "cuda")]
+        assert_eq!(
+            device_transfer_support(Device::Cpu, Device::Cuda(0)),
+            DeviceTransferSupport::HostToDevice
+        );
+        #[cfg(not(feature = "cuda"))]
+        assert_eq!(
+            device_transfer_support(Device::Cpu, Device::Cuda(0)),
+            DeviceTransferSupport::UnsupportedFeatureDisabled
+        );
+
+        #[cfg(feature = "rocm")]
+        assert_eq!(
+            device_transfer_support(Device::Rocm(0), Device::Cpu),
+            DeviceTransferSupport::DeviceToHost
+        );
+        #[cfg(not(feature = "rocm"))]
+        assert_eq!(
+            device_transfer_support(Device::Rocm(0), Device::Cpu),
+            DeviceTransferSupport::UnsupportedFeatureDisabled
+        );
+    }
+
+    #[cfg(not(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    )))]
+    #[test]
+    fn to_device_without_gpu_features_reports_explicit_unsupported_transition() {
+        let t = Tensor::from_vec(vec![1.0f32], vec![1]).unwrap();
+        let err = t.to_device(Device::Cuda(0)).unwrap_err().to_string();
+
+        assert!(err.contains("UnsupportedFeatureDisabled"));
+        assert!(err.contains("target backend feature is not enabled"));
     }
 
     #[test]

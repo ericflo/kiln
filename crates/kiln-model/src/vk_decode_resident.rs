@@ -32,6 +32,11 @@ use kiln_core::config::ModelConfig;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
+use kiln_graph::{
+    CaptureError, InvalidateReason, ReplayInputs, ReplayKey, ReplayOutputs, ReplayPlan,
+    ReplayResourceStability, ReplayState, ResidentResourceRef,
+};
+use kiln_tensor::{Backend, DType};
 use kiln_vulkan_kernel::kernels::paged_attn_decode_splitk_chunks as paged_attn_splitk_chunks;
 use kiln_vulkan_kernel::shaders as shaders;
 use kiln_vulkan_kernel::{CommandBatch, VkPagedKvCache, VulkanBuffer, VulkanDevice, Workgroups};
@@ -96,6 +101,218 @@ fn env_truthy(name: &str) -> bool {
     std::env::var(name)
         .map(|v| !matches!(v.trim(), "" | "0" | "false" | "off" | "no"))
         .unwrap_or(false)
+}
+
+struct VulkanCommandBatchReplayPlan<'a> {
+    batch: Option<CommandBatch<'a>>,
+    label: &'static str,
+    state: ReplayState,
+    replay_count: u64,
+}
+
+impl std::fmt::Debug for VulkanCommandBatchReplayPlan<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VulkanCommandBatchReplayPlan")
+            .field("label", &self.label)
+            .field("key", &self.state.key)
+            .field("replay_count", &self.replay_count)
+            .finish_non_exhaustive()
+    }
+}
+
+// SAFETY: this adapter is created and consumed stack-locally by
+// `replay_vulkan_command_batch`; the native `CommandBatch` is single-use and
+// taken during `ReplayPlan::replay`. We keep the unsafe bound here instead of
+// broadening `CommandBatch` because the shared contract requires ReplayPlan
+// implementors to be Send + Sync.
+unsafe impl Send for VulkanCommandBatchReplayPlan<'_> {}
+unsafe impl Sync for VulkanCommandBatchReplayPlan<'_> {}
+
+impl ReplayPlan for VulkanCommandBatchReplayPlan<'_> {
+    fn backend(&self) -> Backend {
+        Backend::Vulkan
+    }
+
+    fn key(&self) -> ReplayKey {
+        self.state.key.clone()
+    }
+
+    fn validate_inputs(&self, inputs: ReplayInputs<'_>) -> std::result::Result<(), CaptureError> {
+        self.state.validate(inputs.key, inputs.resources)
+    }
+
+    fn replay(
+        &mut self,
+        inputs: ReplayInputs<'_>,
+    ) -> std::result::Result<ReplayOutputs, CaptureError> {
+        self.validate_inputs(inputs)?;
+        let batch = self.batch.take().ok_or_else(|| {
+            CaptureError::Backend(format!(
+                "Vulkan CommandBatch {} was already replayed",
+                self.label
+            ))
+        })?;
+        batch
+            .submit_and_wait(self.label)
+            .map_err(|e| CaptureError::Backend(format!("Vulkan CommandBatch replay: {e}")))?;
+        self.replay_count += 1;
+        Ok(ReplayOutputs::new(
+            inputs.resources.to_vec(),
+            self.replay_count,
+        ))
+    }
+
+    fn invalidate_reason(&self, state: &ReplayState) -> Option<InvalidateReason> {
+        self.state.invalidate_reason(&state.key, &state.inputs)
+    }
+}
+
+fn replay_vulkan_command_batch(
+    batch: CommandBatch<'_>,
+    label: &'static str,
+    shape_key: Vec<usize>,
+    max_batch: usize,
+    resources: Vec<ResidentResourceRef>,
+) -> Result<()> {
+    let replay_key = ReplayKey::new(
+        Backend::Vulkan,
+        label,
+        shape_key,
+        Some(DType::F32),
+        max_batch,
+        true,
+    );
+    let mut plan = VulkanCommandBatchReplayPlan {
+        batch: Some(batch),
+        label,
+        state: ReplayState::new(replay_key.clone(), resources),
+        replay_count: 0,
+    };
+    let replay_resources = plan.state.inputs.clone();
+    let replay_inputs = ReplayInputs::new(&replay_key, &replay_resources);
+    kiln_graph::ReplayPlan::replay(&mut plan, replay_inputs)
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+fn vk_replay_resource(
+    buffer: &VulkanBuffer,
+    dtype: DType,
+    shape: Vec<usize>,
+) -> ResidentResourceRef {
+    let strides = contiguous_strides(&shape);
+    ResidentResourceRef {
+        tensor_id: None,
+        backend: Backend::Vulkan,
+        dtype,
+        shape,
+        strides,
+        start_offset: 0,
+        contiguous: true,
+        byte_len: buffer.size() as usize,
+        replay_stability: ReplayResourceStability::StableWithinStep,
+    }
+}
+
+fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
+    let mut strides = vec![1; shape.len()];
+    let mut stride = 1usize;
+    for (index, dim) in shape.iter().enumerate().rev() {
+        strides[index] = stride;
+        stride = stride.saturating_mul(*dim);
+    }
+    strides
+}
+
+#[allow(clippy::too_many_arguments)]
+fn batched_decode_replay_resources(
+    x_in_buf: &VulkanBuffer,
+    x_scratch_buf: &VulkanBuffer,
+    rope_cos_buf: &VulkanBuffer,
+    rope_sin_buf: &VulkanBuffer,
+    block_table_buf: &VulkanBuffer,
+    seq_lens_buf: &VulkanBuffer,
+    slots_buf: &VulkanBuffer,
+    out_buf: &VulkanBuffer,
+    out_dtype: DType,
+    out_shape: Vec<usize>,
+    batch_size: usize,
+    hidden: usize,
+    rotary_dim: usize,
+    max_blocks_per_seq: usize,
+) -> Vec<ResidentResourceRef> {
+    vec![
+        vk_replay_resource(x_in_buf, DType::F32, vec![batch_size, hidden]),
+        vk_replay_resource(x_scratch_buf, DType::F32, vec![batch_size, hidden]),
+        vk_replay_resource(rope_cos_buf, DType::F32, vec![batch_size, rotary_dim]),
+        vk_replay_resource(rope_sin_buf, DType::F32, vec![batch_size, rotary_dim]),
+        vk_replay_resource(
+            block_table_buf,
+            DType::U32,
+            vec![batch_size, max_blocks_per_seq],
+        ),
+        vk_replay_resource(seq_lens_buf, DType::U32, vec![batch_size]),
+        vk_replay_resource(slots_buf, DType::U32, vec![batch_size]),
+        vk_replay_resource(out_buf, out_dtype, out_shape),
+    ]
+}
+
+fn append_sample_replay_resources(
+    resources: &mut Vec<ResidentResourceRef>,
+    sample: &BatchedResidentSampleBuffers,
+) {
+    resources.extend([
+        vk_replay_resource(&sample.top_k, DType::U32, vec![sample.batch_size]),
+        vk_replay_resource(&sample.temperatures, DType::F32, vec![sample.batch_size]),
+        vk_replay_resource(&sample.top_p, DType::F32, vec![sample.batch_size]),
+        vk_replay_resource(&sample.min_p, DType::F32, vec![sample.batch_size]),
+        vk_replay_resource(&sample.seed_lo, DType::U32, vec![sample.batch_size]),
+        vk_replay_resource(&sample.seed_hi, DType::U32, vec![sample.batch_size]),
+    ]);
+    if sample.history_items > 0 {
+        if let Some(buffer) = sample.history_rows.as_ref() {
+            resources.push(vk_replay_resource(
+                buffer,
+                DType::U32,
+                vec![sample.history_items],
+            ));
+        }
+        if let Some(buffer) = sample.history_indices.as_ref() {
+            resources.push(vk_replay_resource(
+                buffer,
+                DType::U32,
+                vec![sample.history_items],
+            ));
+        }
+        if let Some(buffer) = sample.history_counts.as_ref() {
+            resources.push(vk_replay_resource(
+                buffer,
+                DType::U32,
+                vec![sample.history_items],
+            ));
+        }
+        if let Some(buffer) = sample.repetitions.as_ref() {
+            resources.push(vk_replay_resource(
+                buffer,
+                DType::F32,
+                vec![sample.batch_size],
+            ));
+        }
+        if let Some(buffer) = sample.presences.as_ref() {
+            resources.push(vk_replay_resource(
+                buffer,
+                DType::F32,
+                vec![sample.batch_size],
+            ));
+        }
+        if let Some(buffer) = sample.frequencies.as_ref() {
+            resources.push(vk_replay_resource(
+                buffer,
+                DType::F32,
+                vec![sample.batch_size],
+            ));
+        }
+    }
 }
 
 fn linear_bf16w_rows4_enabled() -> bool {
@@ -757,9 +974,23 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
         Workgroups::OneD(hidden.div_ceil(256) as u32),
     )?;
 
-    batch
-        .submit_and_wait("vk-resident full-attn block")
-        .context("submit resident full-attn CommandBatch")?;
+    replay_vulkan_command_batch(
+        batch,
+        "vk-resident full-attn block",
+        vec![1, hidden, max_blocks_per_seq, block_size],
+        1,
+        vec![
+            vk_replay_resource(&x_buf, DType::F32, vec![1, 1, hidden]),
+            vk_replay_resource(&final_out, DType::F32, vec![1, 1, hidden]),
+            vk_replay_resource(k_pool, DType::F32, vec![k_pool.size() as usize / 4]),
+            vk_replay_resource(v_pool, DType::F32, vec![v_pool.size() as usize / 4]),
+            vk_replay_resource(&block_table_buf, DType::U32, vec![max_blocks_per_seq]),
+            vk_replay_resource(&seq_lens_buf, DType::U32, vec![1]),
+            vk_replay_resource(&rope_cos_buf, DType::F32, vec![rope_cos_data.len()]),
+            vk_replay_resource(&rope_sin_buf, DType::F32, vec![rope_sin_data.len()]),
+        ],
+    )
+    .context("submit resident full-attn CommandBatch through ReplayPlan")?;
     if let Some(t) = submit_t0 {
         FA_SUBMIT_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
@@ -848,9 +1079,17 @@ pub fn transformer_block_paged_decode_gdn_resident_b1_kt(
     )? {
         return Ok(None);
     }
-    batch
-        .submit_and_wait("vk-resident GDN full-block kt")
-        .context("submit resident GDN full-block kt CommandBatch")?;
+    replay_vulkan_command_batch(
+        batch,
+        "vk-resident GDN full-block kt",
+        vec![1, hidden],
+        1,
+        vec![
+            vk_replay_resource(&x_buf, DType::F32, vec![1, 1, hidden]),
+            vk_replay_resource(&out_buf, DType::F32, vec![1, 1, hidden]),
+        ],
+    )
+    .context("submit resident GDN full-block kt CommandBatch through ReplayPlan")?;
     if let Some(t) = submit_t0 {
         GDNFB_SUBMIT_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
@@ -1277,9 +1516,19 @@ pub fn transformer_block_paged_decode_gdn_resident_b1(
         Workgroups::OneD(hidden.div_ceil(256) as u32),
     )?;
 
-    batch
-        .submit_and_wait("vk-resident GDN full-block")
-        .context("submit resident GDN full-block CommandBatch")?;
+    replay_vulkan_command_batch(
+        batch,
+        "vk-resident GDN full-block",
+        vec![1, hidden],
+        1,
+        vec![
+            vk_replay_resource(&x_buf, DType::F32, vec![1, 1, hidden]),
+            vk_replay_resource(&final_out, DType::F32, vec![1, 1, hidden]),
+            vk_replay_resource(&recurrent_buf, DType::F32, vec![recurrent_bytes as usize / 4]),
+            vk_replay_resource(&conv_buf, DType::F32, vec![conv_state_bytes as usize / 4]),
+        ],
+    )
+    .context("submit resident GDN full-block CommandBatch through ReplayPlan")?;
     if let Some(t) = submit_t0 {
         GDNFB_SUBMIT_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
@@ -1561,9 +1810,19 @@ pub fn gated_deltanet_forward_decode_resident_b1_kt(
         Workgroups::OneD(hidden.div_ceil(16) as u32),
     )?;
 
-    batch
-        .submit_and_wait("vk-resident GDN block")
-        .context("submit resident GDN CommandBatch")?;
+    replay_vulkan_command_batch(
+        batch,
+        "vk-resident GDN block",
+        vec![1, hidden],
+        1,
+        vec![
+            vk_replay_resource(&x_buf, DType::F32, vec![1, 1, hidden]),
+            vk_replay_resource(&out_buf, DType::F32, vec![1, 1, hidden]),
+            vk_replay_resource(&recurrent_buf, DType::F32, vec![recurrent_bytes as usize / 4]),
+            vk_replay_resource(&conv_buf, DType::F32, vec![conv_state_bytes as usize / 4]),
+        ],
+    )
+    .context("submit resident GDN CommandBatch through ReplayPlan")?;
     if let Some(t) = gdn_submit_t0 {
         GDN_SUBMIT_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
@@ -3486,9 +3745,34 @@ pub fn submit_transformer_stack_batched_argmax(
     if !ok {
         return Ok(None);
     }
-    batch
-        .submit_and_wait("vk-resident native batched decode")
-        .context("batched transformer submit: submit CommandBatch")?;
+    replay_vulkan_command_batch(
+        batch,
+        "vk-resident native batched decode",
+        vec![
+            batch_size,
+            config.hidden_size,
+            max_blocks_per_seq,
+            block_size,
+        ],
+        batch_size,
+        batched_decode_replay_resources(
+            x_in_buf,
+            x_scratch_buf,
+            rope_cos_buf,
+            rope_sin_buf,
+            block_table_buf,
+            seq_lens_buf,
+            slots_buf,
+            &out_staging,
+            DType::U32,
+            vec![batch_size],
+            batch_size,
+            config.hidden_size,
+            config.rotary_dim(),
+            max_blocks_per_seq,
+        ),
+    )
+    .context("batched transformer submit: submit CommandBatch through ReplayPlan")?;
 
     let bytes = out_staging
         .read_mapped(out_bytes as usize)
@@ -3557,9 +3841,36 @@ pub fn submit_transformer_stack_batched_sample(
     if !ok {
         return Ok(None);
     }
-    batch
-        .submit_and_wait("vk-resident native batched sample decode")
-        .context("batched transformer sample submit: submit CommandBatch")?;
+    let mut replay_resources = batched_decode_replay_resources(
+        x_in_buf,
+        x_scratch_buf,
+        rope_cos_buf,
+        rope_sin_buf,
+        block_table_buf,
+        seq_lens_buf,
+        slots_buf,
+        &out_staging,
+        DType::U32,
+        vec![batch_size],
+        batch_size,
+        config.hidden_size,
+        config.rotary_dim(),
+        max_blocks_per_seq,
+    );
+    append_sample_replay_resources(&mut replay_resources, sample);
+    replay_vulkan_command_batch(
+        batch,
+        "vk-resident native batched sample decode",
+        vec![
+            batch_size,
+            config.hidden_size,
+            max_blocks_per_seq,
+            block_size,
+        ],
+        batch_size,
+        replay_resources,
+    )
+    .context("batched transformer sample submit: submit CommandBatch through ReplayPlan")?;
 
     let bytes = out_staging
         .read_mapped(out_bytes as usize)
@@ -3628,9 +3939,34 @@ pub fn submit_transformer_stack_batched_hidden(
     batch
         .record_copy_buffer(hidden_src, &out_staging, hidden_bytes)
         .context("batched transformer hidden submit: record hidden readback")?;
-    batch
-        .submit_and_wait("vk-resident native batched hidden decode")
-        .context("batched transformer hidden submit: submit CommandBatch")?;
+    replay_vulkan_command_batch(
+        batch,
+        "vk-resident native batched hidden decode",
+        vec![
+            batch_size,
+            config.hidden_size,
+            max_blocks_per_seq,
+            block_size,
+        ],
+        batch_size,
+        batched_decode_replay_resources(
+            x_in_buf,
+            x_scratch_buf,
+            rope_cos_buf,
+            rope_sin_buf,
+            block_table_buf,
+            seq_lens_buf,
+            slots_buf,
+            &out_staging,
+            DType::F32,
+            vec![batch_size, config.hidden_size],
+            batch_size,
+            config.hidden_size,
+            config.rotary_dim(),
+            max_blocks_per_seq,
+        ),
+    )
+    .context("batched transformer hidden submit: submit CommandBatch through ReplayPlan")?;
 
     let bytes = out_staging
         .read_mapped(hidden_bytes as usize)
@@ -3728,9 +4064,40 @@ pub fn submit_transformer_stack_batched_argmax_from_tokens(
     if !ok {
         return Ok(None);
     }
-    batch
-        .submit_and_wait("vk-resident native token batched decode")
-        .context("batched transformer token argmax: submit CommandBatch")?;
+    let mut replay_resources = batched_decode_replay_resources(
+        &step.input,
+        &step.scratch,
+        &step.rope_cos,
+        &step.rope_sin,
+        &meta.block_table,
+        &meta.seq_lens,
+        &meta.slots,
+        &out_staging,
+        DType::U32,
+        vec![batch_size],
+        batch_size,
+        step.hidden,
+        step.rotary_dim,
+        meta.max_blocks_per_seq,
+    );
+    replay_resources.push(vk_replay_resource(
+        &step.token_ids,
+        DType::U32,
+        vec![batch_size],
+    ));
+    replay_vulkan_command_batch(
+        batch,
+        "vk-resident native token batched decode",
+        vec![
+            batch_size,
+            config.hidden_size,
+            meta.max_blocks_per_seq,
+            meta.block_size,
+        ],
+        batch_size,
+        replay_resources,
+    )
+    .context("batched transformer token argmax: submit CommandBatch through ReplayPlan")?;
 
     let bytes = out_staging
         .read_mapped(out_bytes as usize)
@@ -3854,9 +4221,41 @@ pub fn submit_transformer_stack_batched_sample_from_tokens(
     if !ok {
         return Ok(None);
     }
-    batch
-        .submit_and_wait("vk-resident native token batched sample decode")
-        .context("batched transformer token sample: submit CommandBatch")?;
+    let mut replay_resources = batched_decode_replay_resources(
+        &step.input,
+        &step.scratch,
+        &step.rope_cos,
+        &step.rope_sin,
+        &meta.block_table,
+        &meta.seq_lens,
+        &meta.slots,
+        &out_staging,
+        DType::U32,
+        vec![batch_size],
+        batch_size,
+        step.hidden,
+        step.rotary_dim,
+        meta.max_blocks_per_seq,
+    );
+    replay_resources.push(vk_replay_resource(
+        &step.token_ids,
+        DType::U32,
+        vec![batch_size],
+    ));
+    append_sample_replay_resources(&mut replay_resources, &sample);
+    replay_vulkan_command_batch(
+        batch,
+        "vk-resident native token batched sample decode",
+        vec![
+            batch_size,
+            config.hidden_size,
+            meta.max_blocks_per_seq,
+            meta.block_size,
+        ],
+        batch_size,
+        replay_resources,
+    )
+    .context("batched transformer token sample: submit CommandBatch through ReplayPlan")?;
 
     let bytes = out_staging
         .read_mapped(out_bytes as usize)
@@ -3959,9 +4358,40 @@ pub fn submit_transformer_stack_batched_hidden_from_tokens(
     batch
         .record_copy_buffer(hidden_src, &out_staging, hidden_bytes)
         .context("batched transformer token hidden: record hidden readback")?;
-    batch
-        .submit_and_wait("vk-resident native token batched hidden decode")
-        .context("batched transformer token hidden: submit CommandBatch")?;
+    let mut replay_resources = batched_decode_replay_resources(
+        &step.input,
+        &step.scratch,
+        &step.rope_cos,
+        &step.rope_sin,
+        &meta.block_table,
+        &meta.seq_lens,
+        &meta.slots,
+        &out_staging,
+        DType::F32,
+        vec![batch_size, config.hidden_size],
+        batch_size,
+        step.hidden,
+        step.rotary_dim,
+        meta.max_blocks_per_seq,
+    );
+    replay_resources.push(vk_replay_resource(
+        &step.token_ids,
+        DType::U32,
+        vec![batch_size],
+    ));
+    replay_vulkan_command_batch(
+        batch,
+        "vk-resident native token batched hidden decode",
+        vec![
+            batch_size,
+            config.hidden_size,
+            meta.max_blocks_per_seq,
+            meta.block_size,
+        ],
+        batch_size,
+        replay_resources,
+    )
+    .context("batched transformer token hidden: submit CommandBatch through ReplayPlan")?;
 
     let bytes = out_staging
         .read_mapped(hidden_bytes as usize)

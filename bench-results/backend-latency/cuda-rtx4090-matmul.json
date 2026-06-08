@@ -1,0 +1,24 @@
+{
+  "artifact_schema_version": 3,
+  "backend": "cuda",
+  "command": "CUDARC_CUDA_VERSION=12080 cargo test -p kiln-tensor --features cuda --test cuda_latency_bench -- --ignored --nocapture",
+  "created_at_utc": "2026-06-07T21:00:57Z",
+  "fixture_id": "cuda_rtx4090_matmul_qwen35_4b",
+  "fixture_spec_sha256": "951cfd4d439654be22328fe9e731bf42314263a7579c569fc8c39359ab2602e8",
+  "git_commit": "4c5870cb55d141cc80045824bbccae06ec37025a",
+  "git_tracked_dirty": false,
+  "hardware": "NVIDIA GeForce RTX 4090 24GB",
+  "manifest": "docs/backend-latency-fixtures.json",
+  "manifest_schema_version": 1,
+  "metrics": {
+    "decode_qkv_m1_2560x4096_ms": 0.067219,
+    "lm_head_m1_2560x152064_ms": 0.903662,
+    "prefill_gate_up_m256_2560x18432_ms": 0.19698,
+    "prefill_qkv_m256_2560x4096_ms": 0.080841
+  },
+  "raw_log": "bench-results/backend-latency/raw/cuda_rtx4090_matmul_qwen35_4b-20260607T210030Z.log",
+  "raw_log_sha256": "2e4c7bafb3e059765b66718f3392da14cd5112228bb83d4dfba328d0240b8621",
+  "source": "crates/kiln-tensor/tests/cuda_latency_bench.rs",
+  "source_sha256": "4763d658aad3f99ab2a79a41ab5e1e1cd1fedea9907e3e1b63f323f77231e821",
+  "status": "passed"
+}

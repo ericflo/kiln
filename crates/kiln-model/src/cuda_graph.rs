@@ -108,6 +108,13 @@ use crate::backend::BackendRuntime;
 use crate::forward::PagedDecodeGraphInputs;
 #[cfg(feature = "cuda")]
 use crate::forward::model_forward_paged_hidden_with_graph_inputs;
+#[cfg(feature = "cuda")]
+use kiln_graph::{
+    CaptureError, InvalidateReason, ReplayInputs, ReplayKey, ReplayOutputs, ReplayPlan,
+    ReplayResourceStability, ReplayState, ResidentResourceRef,
+};
+#[cfg(feature = "cuda")]
+use kiln_tensor::Backend;
 use crate::forward::{GpuWeights, LinearAttentionState, model_forward_paged};
 use crate::lora_loader::LoraWeights;
 use crate::PagedKvCacheKt;
@@ -118,7 +125,9 @@ use crate::PagedKvCacheKt;
 // from_vec_on}`) and refreshed in place before each replay via
 // `kiln_tensor::cuda_write_host_in_place` — both honor the captured
 // graph's baked device pointer.
-use kiln_tensor::{Device, Tensor};
+#[cfg(feature = "cuda")]
+use kiln_tensor::Device;
+use kiln_tensor::Tensor;
 
 use kiln_core::block::BlockTable;
 
@@ -351,6 +360,68 @@ struct CapturedDecodeGraph {
     /// structural fix for the `flash_fwd_splitkv_kernel` ILLEGAL_ADDRESS that
     /// compute-sanitizer pinned (freed Q/activation read on replay).
     _capture_arena_buffers: Vec<std::sync::Arc<kiln_tensor::CudaStorage>>,
+    /// Shared graph-layer replay contract state captured alongside the native
+    /// CUDA graph. The production replay path validates this before launching.
+    replay_state: ReplayState,
+}
+
+#[cfg(feature = "cuda")]
+struct CudaDecodeReplayPlan<'a> {
+    captured: &'a CapturedDecodeGraph,
+}
+
+#[cfg(feature = "cuda")]
+impl<'a> CudaDecodeReplayPlan<'a> {
+    fn new(captured: &'a CapturedDecodeGraph) -> Self {
+        Self { captured }
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl std::fmt::Debug for CudaDecodeReplayPlan<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CudaDecodeReplayPlan")
+            .field("key", &self.captured.replay_state.key)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl ReplayPlan for CudaDecodeReplayPlan<'_> {
+    fn backend(&self) -> Backend {
+        Backend::Cuda
+    }
+
+    fn key(&self) -> ReplayKey {
+        self.captured.replay_state.key.clone()
+    }
+
+    fn validate_inputs(&self, inputs: ReplayInputs<'_>) -> Result<(), CaptureError> {
+        self.captured
+            .replay_state
+            .validate(inputs.key, inputs.resources)
+    }
+
+    fn replay(&mut self, inputs: ReplayInputs<'_>) -> Result<ReplayOutputs, CaptureError> {
+        self.validate_inputs(inputs)?;
+        self.captured
+            .graph
+            .launch()
+            .map_err(|e| CaptureError::Backend(format!("CUDA graph launch: {e}")))?;
+        self.captured
+            .capture_stream
+            .synchronize()
+            .map_err(|e| {
+                CaptureError::Backend(format!("sync capture stream after replay launch: {e}"))
+            })?;
+        Ok(ReplayOutputs::new(inputs.resources.to_vec(), 1))
+    }
+
+    fn invalidate_reason(&self, state: &ReplayState) -> Option<InvalidateReason> {
+        self.captured
+            .replay_state
+            .invalidate_reason(&state.key, &state.inputs)
+    }
 }
 
 /// Captured graph + stable buffers for a batched (`bs > 1`) decode step.
@@ -1276,27 +1347,24 @@ impl CudaGraphRunner {
                         }
                     }
 
-                    match captured.graph.launch() {
-                        Ok(()) => {
+                    let mut plan = CudaDecodeReplayPlan::new(captured);
+                    let replay_key = kiln_graph::ReplayPlan::key(&plan);
+                    let replay_inputs = ReplayInputs::new(&replay_key, &captured.replay_state.inputs);
+                    match kiln_graph::ReplayPlan::replay(&mut plan, replay_inputs) {
+                        Ok(_) => {
                             tracing::debug!(
                                 max_seqlen_k = requested_key.max_seqlen_k,
                                 max_blocks_per_seq = requested_key.max_blocks_per_seq,
-                                "CUDA graph replay succeeded"
+                                "CUDA graph ReplayPlan replay succeeded"
                             );
-                            // #1082 box-102 FIX: the captured graph replayed the
-                            // transformer and wrote the PRE-final-norm hidden into
-                            // the graph-stable `output_hidden` on its capture
-                            // stream. Sync that stream so the write is visible,
-                            // then run final_norm + lm_head EAGERLY (off the graph)
+                            // #1082 box-102 FIX: the ReplayPlan has launched the
+                            // captured transformer and synchronized the capture
+                            // stream, making graph-stable `output_hidden` visible.
+                            // Now run final_norm + lm_head EAGERLY (off the graph)
                             // to produce this step's logits. The captured lm_head
                             // cublasLt GEMV was the BUG2 source (wrong logits on
                             // replay despite a bit-identical input hidden); the
                             // captured transformer win is preserved.
-                            captured.capture_stream.synchronize().map_err(|e| {
-                                anyhow::anyhow!(
-                                    "box-102 fix: sync capture stream after replay launch: {e}"
-                                )
-                            })?;
                             let replay_logits = crate::forward::lm_head_from_hidden_eager(
                                 backend,
                                 &captured.output_hidden,
@@ -1333,7 +1401,7 @@ impl CudaGraphRunner {
                             return Ok(replay_logits);
                         }
                         Err(e) => {
-                            tracing::warn!("CUDA graph replay failed: {e}, falling back to eager");
+                            tracing::warn!("CUDA graph ReplayPlan replay failed: {e}, falling back to eager");
                             self.captured.remove(&requested_key);
                             return Self::eager_forward(
                                 backend,
@@ -1514,6 +1582,71 @@ impl CudaGraphRunner {
         kiln_tensor::cuda_write_host_in_place(kv_slot_buffer, &slot)
             .context("update CUDA graph KV slot buffer")?;
         Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    fn replay_state_for_capture(
+        key: &CudaGraphKey,
+        output_hidden: &Tensor,
+        token_buffer: &Tensor,
+        position_buffer: &Tensor,
+        block_table_buffer: Option<&Tensor>,
+        seqused_k_buffer: Option<&Tensor>,
+        kv_slot_buffer: Option<&Tensor>,
+        rotary_cos_buffer: &Tensor,
+        rotary_sin_buffer: &Tensor,
+        paged_decode_outputs: &[Tensor],
+        paged_decode_lse: &[Tensor],
+        gdn_decode_outputs: &[Tensor],
+    ) -> ReplayState {
+        let replay_key = ReplayKey::new(
+            Backend::Cuda,
+            "paged_decode_graph_outputs",
+            vec![
+                key.seq_len,
+                key.block_table.len(),
+                key.max_seqlen_k,
+                key.max_blocks_per_seq,
+                usize::from(key.stable_metadata),
+            ],
+            Some(output_hidden.dtype()),
+            1,
+            true,
+        );
+        let mut resources = vec![
+            Self::stable_replay_resource(output_hidden),
+            Self::stable_replay_resource(token_buffer),
+            Self::stable_replay_resource(position_buffer),
+            Self::stable_replay_resource(rotary_cos_buffer),
+            Self::stable_replay_resource(rotary_sin_buffer),
+        ];
+        for tensor in [block_table_buffer, seqused_k_buffer, kv_slot_buffer]
+            .into_iter()
+            .flatten()
+        {
+            resources.push(Self::stable_replay_resource(tensor));
+        }
+        resources.extend(
+            paged_decode_outputs
+                .iter()
+                .map(Self::stable_replay_resource),
+        );
+        resources.extend(paged_decode_lse.iter().map(Self::stable_replay_resource));
+        resources.extend(
+            gdn_decode_outputs
+                .iter()
+                .map(Self::stable_replay_resource),
+        );
+        ReplayState::new(replay_key, resources)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn stable_replay_resource(tensor: &Tensor) -> ResidentResourceRef {
+        ResidentResourceRef::from_tensor(
+            tensor,
+            Backend::Cuda,
+            ReplayResourceStability::StableAcrossReplay,
+        )
     }
 
     /// Rewrite the contents of the batched token buffer in place so the
@@ -1970,6 +2103,20 @@ impl CudaGraphRunner {
                     eprintln!("BOX102DIFF FIRSTLAUNCH {n:?}");
                 }
                 let max_seqlen_k = key.max_seqlen_k;
+                let replay_state = Self::replay_state_for_capture(
+                    &key,
+                    &output_hidden,
+                    &token_buffer,
+                    &position_buffer,
+                    block_table_buffer.as_ref(),
+                    seqused_k_buffer.as_ref(),
+                    kv_slot_buffer.as_ref(),
+                    &rotary_cos_buffer,
+                    &rotary_sin_buffer,
+                    &paged_decode_outputs,
+                    &paged_decode_lse,
+                    &gdn_decode_outputs,
+                );
                 self.captured.insert(
                     key,
                     CapturedDecodeGraph {
@@ -1989,6 +2136,7 @@ impl CudaGraphRunner {
                         max_seqlen_k,
                         _gdn_decode_outputs: gdn_decode_outputs,
                         _capture_arena_buffers: arena.borrow_mut().take_retained(),
+                        replay_state,
                     },
                 );
                 Ok(logits)

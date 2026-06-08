@@ -20,9 +20,8 @@ use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::{ChatMessage, KilnTokenizer};
 use kiln_memory::vram::{detect_used_vram_bytes, detect_vram};
-use kiln_model::ModelRunner;
 use kiln_model::PagedKvCacheKt;
-use kiln_model::backend as runtime_backend;
+use kiln_model::backend::{self as runtime_backend, LinearBackend, ResidencyBackend};
 use kiln_model::forward::{
     GpuWeights,
     LinearAttentionState,
@@ -49,6 +48,10 @@ use kiln_model::sampling::{greedy_sample, sample_step};
 use kiln_model::speculative::{
     SpeculativeConfig, speculative_decode_step, speculative_decode_step_paged_greedy,
     speculative_mtp_decode_step,
+};
+use kiln_model::{
+    BackendCapabilityQueries, BackendIdentity, ModelRunner, ReplayBackend, ReplayNativePrimitive,
+    ReplayRequest, ServerTrainingDispatchPolicy, SpeculativeDecodePolicy, Support,
 };
 use kiln_server::config::SpecMethod;
 
@@ -125,8 +128,7 @@ fn runtime_backend_for_bench(
     weights: &GpuWeights,
 ) -> Result<std::sync::Arc<dyn kiln_model::BackendRuntime>> {
     let backend = runtime_backend::for_device_kt(device);
-    backend
-        .prewarm_decode_weights(weights)
+    LinearBackend::runtime_prewarm_decode_weights(backend.as_ref(), weights)
         .context("backend decode weight prewarm failed")?;
     Ok(backend)
 }
@@ -141,13 +143,6 @@ fn kiln_config_dtype_to_kt(dtype: kiln_core::config::DType) -> kiln_tensor::DTyp
         kiln_core::config::DType::FP16 => kiln_tensor::DType::F16,
         kiln_core::config::DType::FP32 => kiln_tensor::DType::F32,
     }
-}
-
-/// Returns true when the kt device is a Metal device. The bench code
-/// uses this to gate Metal-specific argmax paths without naming the
-/// candle Metal variant directly (issue #1082, candle removal).
-fn device_is_metal(device: &kiln_tensor::Device) -> bool {
-    device.backend() == kiln_tensor::Backend::Metal
 }
 
 /// Greedy-sample a single token from kt logits.
@@ -168,6 +163,23 @@ fn greedy_sample_kt(logits: &kiln_tensor::Tensor) -> Result<u32> {
     greedy_sample(logits)
 }
 
+fn native_replay_support_enabled(support: Support) -> bool {
+    matches!(support, Support::Native | Support::NativeWithConstraints)
+}
+
+fn bench_paged_decode_replay_primitive_enabled(
+    backend: &dyn kiln_model::BackendRuntime,
+    config: &ModelConfig,
+    primitive: ReplayNativePrimitive,
+) -> bool {
+    let request =
+        ReplayRequest::paged_decode_graph_outputs(config.hidden_size, config.intermediate_size, 1)
+            .with_dtype(kiln_config_dtype_to_kt(config.dtype));
+    let support = ReplayBackend::runtime_supports_replay_request(backend, &request);
+    let authority = ReplayBackend::runtime_replay_authority(backend);
+    native_replay_support_enabled(support) && authority.native_primitive == primitive
+}
+
 // (#1082) Deleted `bench_kt_tensor_to_candle`: the MTP bench arm's decode step
 // + host sampler are now kt-native, so the kt->candle copy-bridge it provided
 // has zero callers. rustc-confirmed dead.
@@ -179,7 +191,7 @@ struct BenchGdnRecurrentResidentStateScope<'a> {
 
 impl<'a> BenchGdnRecurrentResidentStateScope<'a> {
     fn new(backend: &'a dyn kiln_model::BackendRuntime) -> Self {
-        let active = backend.enter_gdn_recurrent_resident_state_scope();
+        let active = ResidencyBackend::runtime_enter_gdn_recurrent_resident_state_scope(backend);
         Self { backend, active }
     }
 }
@@ -187,7 +199,7 @@ impl<'a> BenchGdnRecurrentResidentStateScope<'a> {
 impl Drop for BenchGdnRecurrentResidentStateScope<'_> {
     fn drop(&mut self) {
         if self.active {
-            self.backend.exit_gdn_recurrent_resident_state_scope();
+            ResidencyBackend::runtime_exit_gdn_recurrent_resident_state_scope(self.backend);
         }
     }
 }
@@ -778,7 +790,7 @@ fn bench_latency(
         config,
         1,
         &device_kt,
-        Some(backend.name()),
+        Some(BackendIdentity::runtime_name(backend.as_ref())),
     )?;
 
     let eos_token_ids = tokenizer.eos_token_ids();
@@ -973,14 +985,22 @@ fn bench_latency_paged(
     }
 
     let backend = runtime_backend_for_bench(&device_kt, weights)?;
+    let backend_capabilities = BackendCapabilityQueries::backend_capabilities(backend.as_ref());
+    let greedy_token_decode_enabled = backend_capabilities.decode.linear_argmax.is_native()
+        || backend_capabilities.decode_batcher.use_greedy_token_decode;
     let mut rocm_graph = kiln_model::rocm_graph::RocmGraphRunner::new(&device_kt, true);
+    let hip_graph_decode_enabled = bench_paged_decode_replay_primitive_enabled(
+        backend.as_ref(),
+        config,
+        ReplayNativePrimitive::HipGraph,
+    ) && rocm_graph.is_enabled();
     // #1082 forward-flip: `LinearAttentionState::new_with_batch_for_inference_backend`
     // now takes a kt `&Device`, so pass `&device_kt` directly (no candle bridge).
     let mut linear_state = LinearAttentionState::new_with_batch_for_inference_backend(
         config,
         1,
         &device_kt,
-        Some(backend.name()),
+        Some(BackendIdentity::runtime_name(backend.as_ref())),
     )?;
 
     // Build a block table that maps logical block i -> physical block i (sequential).
@@ -1067,7 +1087,7 @@ fn bench_latency_paged(
         )
         .context("paged prefill forward pass (streaming) failed")?;
         greedy_sample_kt(&logits)?
-    } else if device_is_metal(&device_kt) || backend.supports_linear_decode_argmax() {
+    } else if greedy_token_decode_enabled {
         model_forward_paged_last_token_greedy(
             &*backend,
             &prompt_token_ids,
@@ -1126,37 +1146,36 @@ fn bench_latency_paged(
 
         let step_start = Instant::now();
         next_token = if sampled_decode {
-            let hidden =
-                if matches!(device_kt, kiln_tensor::Device::Rocm(_)) && rocm_graph.is_enabled() {
-                    rocm_graph
-                        .decode_step_paged_hidden(
-                            &*backend,
-                            next_token,
-                            weights,
-                            config,
-                            &paged_cache,
-                            &block_table,
-                            current_pos,
-                            &mut linear_state,
-                            None,
-                        )
-                        .context("paged sampled ROCm graph hidden pass failed")?
-                } else {
-                    let sequence_lengths = [current_pos];
-                    let mut linear_states: [&mut LinearAttentionState; 1] = [&mut linear_state];
-                    model_forward_paged_batched_decode_hidden(
+            let hidden = if hip_graph_decode_enabled {
+                rocm_graph
+                    .decode_step_paged_hidden(
                         &*backend,
-                        &[next_token],
+                        next_token,
                         weights,
                         config,
                         &paged_cache,
-                        std::slice::from_ref(&block_table),
-                        &sequence_lengths,
-                        &mut linear_states,
+                        &block_table,
+                        current_pos,
+                        &mut linear_state,
                         None,
                     )
-                    .context("paged sampled decode hidden pass failed")?
-                };
+                    .context("paged sampled ROCm graph hidden pass failed")?
+            } else {
+                let sequence_lengths = [current_pos];
+                let mut linear_states: [&mut LinearAttentionState; 1] = [&mut linear_state];
+                model_forward_paged_batched_decode_hidden(
+                    &*backend,
+                    &[next_token],
+                    weights,
+                    config,
+                    &paged_cache,
+                    std::slice::from_ref(&block_table),
+                    &sequence_lengths,
+                    &mut linear_states,
+                    None,
+                )
+                .context("paged sampled decode hidden pass failed")?
+            };
             let step_seed = seed.wrapping_add(num_tokens as u64);
             if let Some(token) = lm_head_sample_backend_decode_if(
                 Some(&*backend),
@@ -1182,7 +1201,7 @@ fn bench_latency_paged(
                 )
                 .context("paged sampled decode host sample failed")?
             }
-        } else if matches!(device_kt, kiln_tensor::Device::Rocm(_)) && rocm_graph.is_enabled() {
+        } else if hip_graph_decode_enabled {
             rocm_graph
                 .decode_step_paged_greedy(
                     &*backend,
@@ -1196,7 +1215,7 @@ fn bench_latency_paged(
                     None,
                 )
                 .context("paged ROCm graph greedy decode forward pass failed")?
-        } else if device_is_metal(&device_kt) || backend.supports_linear_decode_argmax() {
+        } else if greedy_token_decode_enabled {
             model_forward_paged_next_token_greedy(
                 &*backend,
                 next_token,
@@ -1365,30 +1384,6 @@ fn read_spec_method_from_env() -> SpecMethod {
     }
 }
 
-const BENCH_MTP_MAX_PROMPT_TOKENS: usize = 128;
-const BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT: usize = 1024;
-const BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL: usize = 4096;
-const BENCH_LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS: usize = 32;
-
-fn bench_long_prompt_skip_layer_min_prompt_tokens(backend_name: &str) -> usize {
-    if backend_name == "metal" {
-        BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL
-    } else {
-        BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT
-    }
-}
-
-fn bench_native_mtp_allowed(backend_name: &str) -> bool {
-    if backend_name == "metal" {
-        std::env::var("KILN_ENABLE_METAL_NATIVE_MTP")
-            .ok()
-            .as_deref()
-            .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-    } else {
-        true
-    }
-}
-
 fn bench_force_raw_mtp() -> bool {
     std::env::var("KILN_BENCH_FORCE_MTP")
         .ok()
@@ -1407,7 +1402,8 @@ fn resolve_bench_spec_method(
     max_output_tokens: usize,
     temperature: f32,
     mtp_supported: bool,
-    backend_name: &str,
+    native_mtp_allowed: bool,
+    speculative_policy: SpeculativeDecodePolicy,
 ) -> SpecMethod {
     resolve_bench_spec_method_with_force(
         configured,
@@ -1415,8 +1411,8 @@ fn resolve_bench_spec_method(
         max_output_tokens,
         temperature,
         mtp_supported,
-        bench_native_mtp_allowed(backend_name),
-        bench_long_prompt_skip_layer_min_prompt_tokens(backend_name),
+        native_mtp_allowed,
+        speculative_policy,
         bench_force_raw_mtp(),
     )
 }
@@ -1428,7 +1424,7 @@ fn resolve_bench_spec_method_with_force(
     temperature: f32,
     mtp_supported: bool,
     native_mtp_allowed: bool,
-    long_prompt_skip_layer_min_prompt_tokens: usize,
+    speculative_policy: SpeculativeDecodePolicy,
     force_raw_mtp: bool,
 ) -> SpecMethod {
     match configured {
@@ -1442,12 +1438,13 @@ fn resolve_bench_spec_method_with_force(
             if mtp_supported
                 && native_mtp_allowed
                 && greedy
-                && requested_prompt_tokens <= BENCH_MTP_MAX_PROMPT_TOKENS
+                && requested_prompt_tokens <= speculative_policy.mtp_max_prompt_tokens
             {
                 SpecMethod::Mtp
             } else if greedy
-                && requested_prompt_tokens >= long_prompt_skip_layer_min_prompt_tokens
-                && max_output_tokens >= BENCH_LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS
+                && requested_prompt_tokens
+                    >= speculative_policy.long_prompt_skip_layer_min_prompt_tokens
+                && max_output_tokens >= speculative_policy.long_prompt_skip_layer_min_output_tokens
             {
                 SpecMethod::SkipLayer
             } else {
@@ -1461,6 +1458,14 @@ fn resolve_bench_spec_method_with_force(
 mod tests {
     use super::*;
 
+    fn default_speculative_policy_for_test() -> SpeculativeDecodePolicy {
+        SpeculativeDecodePolicy::default()
+    }
+
+    fn metal_speculative_policy_for_test() -> SpeculativeDecodePolicy {
+        SpeculativeDecodePolicy::for_backend("metal", kiln_tensor::Device::Metal(0))
+    }
+
     #[test]
     fn bench_mtp_short_prompt_stays_mtp() {
         assert_eq!(
@@ -1471,7 +1476,7 @@ mod tests {
                 0.0,
                 true,
                 true,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                default_speculative_policy_for_test(),
                 false
             ),
             SpecMethod::Mtp
@@ -1483,12 +1488,12 @@ mod tests {
         assert_eq!(
             resolve_bench_spec_method_with_force(
                 SpecMethod::Mtp,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
                 64,
                 0.0,
                 true,
                 true,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                default_speculative_policy_for_test(),
                 false
             ),
             SpecMethod::SkipLayer
@@ -1500,12 +1505,12 @@ mod tests {
         assert_eq!(
             resolve_bench_spec_method_with_force(
                 SpecMethod::Mtp,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
                 31,
                 0.0,
                 true,
                 true,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                default_speculative_policy_for_test(),
                 false
             ),
             SpecMethod::Off
@@ -1513,12 +1518,12 @@ mod tests {
         assert_eq!(
             resolve_bench_spec_method_with_force(
                 SpecMethod::Mtp,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
                 64,
                 0.7,
                 true,
                 true,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                default_speculative_policy_for_test(),
                 false
             ),
             SpecMethod::Off
@@ -1535,7 +1540,7 @@ mod tests {
                 0.0,
                 true,
                 true,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                default_speculative_policy_for_test(),
                 false
             ),
             SpecMethod::Off
@@ -1552,7 +1557,7 @@ mod tests {
                 0.0,
                 true,
                 false,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                default_speculative_policy_for_test(),
                 false
             ),
             SpecMethod::Off
@@ -1569,7 +1574,7 @@ mod tests {
                 0.0,
                 true,
                 false,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                default_speculative_policy_for_test(),
                 true
             ),
             SpecMethod::Mtp
@@ -1586,7 +1591,7 @@ mod tests {
                 0.0,
                 true,
                 false,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
+                metal_speculative_policy_for_test(),
                 false
             ),
             SpecMethod::Off
@@ -1598,12 +1603,12 @@ mod tests {
         assert_eq!(
             resolve_bench_spec_method_with_force(
                 SpecMethod::Mtp,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
+                SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
                 64,
                 0.0,
                 true,
                 false,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
+                metal_speculative_policy_for_test(),
                 false
             ),
             SpecMethod::SkipLayer
@@ -1694,7 +1699,7 @@ fn bench_latency_skiplayer(
         config,
         1,
         &device_kt,
-        Some(backend.name()),
+        Some(BackendIdentity::runtime_name(backend.as_ref())),
     )?;
 
     let eos_token_ids = tokenizer.eos_token_ids();
@@ -1910,7 +1915,7 @@ fn bench_latency_paged_skiplayer(
         config,
         1,
         &device_kt,
-        Some(backend.name()),
+        Some(BackendIdentity::runtime_name(backend.as_ref())),
     )?;
 
     let mut block_table = BlockTable::new();
@@ -2194,7 +2199,7 @@ fn bench_latency_paged_mtp(
         config,
         1,
         &device_kt,
-        Some(backend.name()),
+        Some(BackendIdentity::runtime_name(backend.as_ref())),
     )?;
 
     let mut base_block_table = BlockTable::new();
@@ -2436,6 +2441,7 @@ fn bench_training(
     weights: &GpuWeights,
     tokenizer: &KilnTokenizer,
     num_steps: usize,
+    server_training_dispatch: ServerTrainingDispatchPolicy,
 ) -> Result<TrainingResult> {
     use kiln_train::{ChatMessage, SftConfig, SftExample};
 
@@ -2500,15 +2506,10 @@ fn bench_training(
     }) as kiln_train::trainer::ProgressCallback);
 
     let start = Instant::now();
-    #[cfg(feature = "cuda")]
-    let cuda_native = std::env::var("KILN_CUDA_NATIVE_TRAINING")
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false);
-    #[cfg(not(feature = "cuda"))]
-    let _cuda_native = false;
+    let native_route_enabled = server_training_dispatch.native_route_enabled();
 
     #[cfg(feature = "cuda")]
-    let result = if cuda_native {
+    let result = if native_route_enabled {
         kiln_train::cuda_train::cuda_native_sft_train(
             &examples,
             &config,
@@ -2533,17 +2534,28 @@ fn bench_training(
         )
     };
     #[cfg(not(feature = "cuda"))]
-    let result = kiln_train::trainer::sft_train(
-        &examples,
-        &config,
-        model_config,
-        weights,
-        tokenizer,
-        &adapter_dir,
-        "bench-adapter",
-        progress_cb,
-        None,
-    );
+    let result = {
+        if native_route_enabled {
+            let native_route_env = server_training_dispatch
+                .native_training_env
+                .unwrap_or("backend_native_training_policy");
+            eprintln!(
+                "    Native training route enabled via {native_route_env}, but kiln-bench was \
+                 built without --features cuda; falling back to kt-tape SFT"
+            );
+        }
+        kiln_train::trainer::sft_train(
+            &examples,
+            &config,
+            model_config,
+            weights,
+            tokenizer,
+            &adapter_dir,
+            "bench-adapter",
+            progress_cb,
+            None,
+        )
+    };
     let elapsed = start.elapsed();
 
     let peak_vram = current_vram_used_bytes() / (1024 * 1024);
@@ -2839,12 +2851,19 @@ fn main() -> Result<()> {
     // backend selector accept the kt device directly (issue #1082,
     // candle removal).
     let device_kt = kiln_server::device::select_device_kt()?;
-    let backend_name = runtime_backend::for_device_kt(&device_kt).name();
+    let backend = runtime_backend::for_device_kt(&device_kt);
+    let backend_name = BackendIdentity::runtime_name(backend.as_ref());
     if backend_name == "cpu" {
         anyhow::bail!(
             "No accelerated backend available — benchmarks require CUDA, Metal, or Vulkan"
         );
     }
+    let backend_capabilities = BackendCapabilityQueries::backend_capabilities(backend.as_ref());
+    let native_mtp_allowed = backend_capabilities
+        .decode
+        .mtp_speculative_generation
+        .is_native();
+    let speculative_policy = backend_capabilities.decode.speculative_policy;
 
     let gpu_weights = GpuWeights::from_model_weights_kt(&model_weights, &model_config, &device_kt)
         .context("failed to transfer weights to GPU")?;
@@ -2891,7 +2910,8 @@ fn main() -> Result<()> {
         args.max_output_tokens,
         args.temperature,
         gpu_weights.mtp.is_some(),
-        backend_name,
+        native_mtp_allowed,
+        speculative_policy,
     );
     if spec_method != requested_spec_method {
         let mut stderr = std::io::stderr();
@@ -2955,7 +2975,13 @@ fn main() -> Result<()> {
         None
     } else {
         section_header("Training benchmark");
-        match bench_training(&model_config, &gpu_weights, &tokenizer, args.training_steps) {
+        match bench_training(
+            &model_config,
+            &gpu_weights,
+            &tokenizer,
+            args.training_steps,
+            backend_capabilities.training.server_dispatch,
+        ) {
             Ok(result) => {
                 let mut stderr = std::io::stderr();
                 let _ = writeln!(

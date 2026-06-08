@@ -16,9 +16,9 @@ use kiln_core::config_hashes::{ConfigHashes, kiln_env_config_hash};
 use kiln_core::env_flag::env_tristate;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::tokenizer::KilnTokenizer;
-use kiln_model::ModelRunner;
 use kiln_model::engine::MockEngine;
 use kiln_model::forward::GpuWeights;
+use kiln_model::{ModelRunner, StartupCapabilities};
 use kiln_scheduler::{Scheduler, SchedulerConfig};
 use state::{AppState, ModelBackend};
 
@@ -693,18 +693,11 @@ fn spawn_backend_prewarm(state: AppState) {
         return;
     };
 
-    let (is_gpu, is_vulkan, device_kt) = {
+    let startup_policy = {
         let runner_guard = runner.read().unwrap();
-        // #1082 forward-flip: `GpuWeights::embed_tokens` is now a kt `Tensor`,
-        // so `.device()` already returns a kt `Device` — use it directly
-        // (no candle bridge needed).
-        let device_kt = runner_guard.weights.embed_tokens.device();
-        let is_metal = matches!(device_kt, kiln_tensor::Device::Metal(_));
-        let is_rocm = matches!(device_kt, kiln_tensor::Device::Rocm(_));
-        let is_vulkan = runner_guard.backend_name() == "vulkan";
-        (is_metal || is_rocm || is_vulkan, is_vulkan, device_kt)
+        runner_guard.backend_capabilities().startup
     };
-    if !is_gpu {
+    if !startup_policy.run_inference_prewarm {
         return;
     }
 
@@ -714,11 +707,13 @@ fn spawn_backend_prewarm(state: AppState) {
     let gpu_lock = state.gpu_lock.clone();
     let prewarm_complete = state.inference_prewarm_complete.clone();
 
-    if vk_native_training_enabled(is_vulkan) {
+    if startup_policy.decode_weight_prewarm_when_native_training
+        && native_training_enabled_for_startup(startup_policy)
+    {
         tracing::info!(
-            "skipping synthetic inference prewarm because Vulkan-native training is enabled"
+            "skipping synthetic inference prewarm because backend native training is enabled"
         );
-        spawn_vulkan_decode_weight_prewarm(runner, gpu_lock, device_kt, prewarm_complete);
+        spawn_vulkan_decode_weight_prewarm(runner, gpu_lock, prewarm_complete);
         return;
     }
 
@@ -726,14 +721,14 @@ fn spawn_backend_prewarm(state: AppState) {
         tracing::info!("starting background inference prewarm");
         let prewarm_start = std::time::Instant::now();
         let prewarm = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            // `device_kt` was read off `embed_tokens.device()` above (now a
-            // kt `Device` after the #1082 forward-flip); the closure receives
-            // the kt-typed binding directly.
             // Pipeline compilation does not allocate KV/model working buffers, so
             // keep it outside the opportunistic GPU lock. If the first live
             // request wins the lock, it should still benefit from compiled
             // custom kernels rather than paying lazy compile latency itself.
-            precompile_metal_custom_kernels(&device_kt);
+            {
+                let runner_guard = runner.read().unwrap();
+                runner_guard.precompile_backend_startup_kernels()?;
+            }
 
             // Prewarm is opportunistic. If a live request or training job has
             // the GPU first, skip prewarm rather than sitting in front of it.
@@ -742,8 +737,10 @@ fn spawn_backend_prewarm(state: AppState) {
                 return Ok(());
             };
 
-            precompile_metal_custom_kernels(&device_kt);
-            precompile_vulkan_custom_kernels(&device_kt);
+            {
+                let runner_guard = runner.read().unwrap();
+                runner_guard.precompile_backend_startup_kernels()?;
+            }
             // Write lock — `prewarm_backend_decode_weights` now mutates
             // `weights` to stub the pre-transposed bf16 caches after Vulkan
             // upload (frees ~6-7 GB of local CPU residency). Prewarm runs
@@ -831,7 +828,6 @@ fn spawn_backend_prewarm(state: AppState) {
 fn spawn_vulkan_decode_weight_prewarm(
     runner: Arc<std::sync::RwLock<ModelRunner>>,
     gpu_lock: Arc<std::sync::RwLock<()>>,
-    device_kt: kiln_tensor::Device,
     prewarm_complete: Arc<std::sync::atomic::AtomicBool>,
 ) {
     tokio::spawn(async move {
@@ -840,14 +836,20 @@ fn spawn_vulkan_decode_weight_prewarm(
         let prewarm = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
             // Pipeline compilation is cheap and independent of model working
             // buffers, so do it even if a request wins the GPU lock.
-            precompile_vulkan_custom_kernels(&device_kt);
+            {
+                let runner_guard = runner.read().unwrap();
+                runner_guard.precompile_backend_startup_kernels()?;
+            }
 
             let Ok(_gpu_guard) = gpu_lock.try_write() else {
                 tracing::info!("skipping Vulkan decode weight prewarm because GPU is already busy");
                 return Ok(false);
             };
 
-            precompile_vulkan_custom_kernels(&device_kt);
+            {
+                let runner_guard = runner.read().unwrap();
+                runner_guard.precompile_backend_startup_kernels()?;
+            }
             let mut runner_guard = runner.write().unwrap();
             runner_guard
                 .prewarm_backend_decode_weights()
@@ -872,18 +874,11 @@ fn spawn_vulkan_decode_weight_prewarm(
     });
 }
 
-fn vk_native_training_enabled(is_vulkan: bool) -> bool {
-    env_tristate("KILN_VK_NATIVE_TRAINING").unwrap_or_else(|| {
-        #[cfg(feature = "vulkan")]
-        {
-            is_vulkan
-        }
-        #[cfg(not(feature = "vulkan"))]
-        {
-            let _ = is_vulkan;
-            false
-        }
-    })
+fn native_training_enabled_for_startup(policy: StartupCapabilities) -> bool {
+    policy
+        .native_training_env
+        .and_then(env_tristate)
+        .unwrap_or(policy.native_training_default_enabled)
 }
 
 fn spawn_tokenizer_warmup(tokenizer: Arc<KilnTokenizer>) {
@@ -910,53 +905,6 @@ fn warm_tokenizer(tokenizer: &KilnTokenizer) {
         Err(err) => tracing::warn!(error = %err, "tokenizer encode warmup failed"),
     }
 }
-
-// Helpers below take `&kiln_tensor::Device` (kt) on the public surface so
-// main.rs no longer pattern-matches against `candle_core::Device` at the
-// call site. The metal helper still bridges to candle internally for
-// `kiln_model::backend::metal::precompile_custom_kernels`, which remains
-// candle-typed (TODO(#1082): migrate that API to kt and drop the bridge
-// here). The Vulkan helper never used its device parameter, so the kt
-// retyping is purely a surface-area shift. (#1082)
-#[cfg(feature = "metal")]
-fn precompile_metal_custom_kernels(device: &kiln_tensor::Device) {
-    if !matches!(device, kiln_tensor::Device::Metal(_)) {
-        return;
-    }
-    // #1082: precompile is kt-native now — pass the kt device directly.
-    let start = std::time::Instant::now();
-    match kiln_model::backend::metal::precompile_custom_kernels(device) {
-        Ok(()) => tracing::info!(
-            elapsed_ms = start.elapsed().as_millis() as u64,
-            "Metal custom kernels precompiled during background prewarm"
-        ),
-        Err(err) => tracing::warn!(
-            error = %err,
-            "Metal custom kernel precompile failed; falling back to lazy compilation"
-        ),
-    }
-}
-
-#[cfg(not(feature = "metal"))]
-fn precompile_metal_custom_kernels(_device: &kiln_tensor::Device) {}
-
-#[cfg(feature = "vulkan")]
-fn precompile_vulkan_custom_kernels(_device: &kiln_tensor::Device) {
-    let start = std::time::Instant::now();
-    match kiln_model::backend::vulkan::precompile_custom_kernels() {
-        Ok(()) => tracing::info!(
-            elapsed_ms = start.elapsed().as_millis() as u64,
-            "Vulkan custom kernels precompiled during background prewarm"
-        ),
-        Err(err) => tracing::warn!(
-            error = %err,
-            "Vulkan custom kernel precompile failed; falling back to lazy compilation"
-        ),
-    }
-}
-
-#[cfg(not(feature = "vulkan"))]
-fn precompile_vulkan_custom_kernels(_device: &kiln_tensor::Device) {}
 
 /// Wait for SIGTERM or SIGINT, then signal shutdown. Receiving a *second*
 /// signal while still draining short-circuits straight to process exit so

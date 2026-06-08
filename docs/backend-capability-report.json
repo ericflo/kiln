@@ -1,0 +1,4666 @@
+{
+  "backends": {
+    "cuda": {
+      "env_gates": [
+        "KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ",
+        "KILN_DISABLE_CUDA_GDN_AB_IN_PROJ",
+        "KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT",
+        "KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM",
+        "KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ",
+        "KILN_DISABLE_CUDA_GDN_PREFILL_GATES",
+        "KILN_DISABLE_CUDA_LORA_DECODE_ADD"
+      ],
+      "legacy_env_aliases": [],
+      "native_env_gates": [
+        "KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ",
+        "KILN_DISABLE_CUDA_GDN_AB_IN_PROJ",
+        "KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT",
+        "KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM",
+        "KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ",
+        "KILN_DISABLE_CUDA_GDN_PREFILL_GATES",
+        "KILN_DISABLE_CUDA_LORA_DECODE_ADD"
+      ],
+      "override_count": 0,
+      "overrides": [],
+      "source": "crates/kiln-model/src/backend/cuda.rs",
+      "source_modules": [
+        "crates/kiln-model/src/backend/cuda.rs",
+        "crates/kiln-model/src/backend/cuda_rocm_common.rs"
+      ],
+      "support_methods": {
+        "runtime_supports_causal_conv1d_prefill": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 2085,
+          "paired_method": "runtime_causal_conv1d_prefill",
+          "paired_method_always_declines": false,
+          "paired_method_line": 2115,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_causal_conv1d_update": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 2081,
+          "paired_method": "runtime_causal_conv1d_update",
+          "paired_method_always_declines": false,
+          "paired_method_line": 2089,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_flash_attn_paged_decode": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 308,
+          "paired_method": "runtime_flash_attn_paged_decode",
+          "paired_method_always_declines": false,
+          "paired_method_line": 367,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_flash_attn_prefill": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 304,
+          "paired_method": "runtime_flash_attn_prefill",
+          "paired_method_always_declines": false,
+          "paired_method_line": 325,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_chunk_prep": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 576,
+          "paired_method": "runtime_gdn_chunk_prep",
+          "paired_method_always_declines": false,
+          "paired_method_line": 640,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_chunk_scan": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 580,
+          "paired_method": "runtime_gdn_chunk_scan",
+          "paired_method_always_declines": false,
+          "paired_method_line": 673,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_decode_gates_recurrent_unexpanded_qk": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 588,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_decode_qk_norm_gates_recurrent": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 593,
+          "paired_method": "runtime_gdn_decode_qk_norm_gates_recurrent",
+          "paired_method_always_declines": false,
+          "paired_method_line": 981,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_forward_substitution": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 567,
+          "paired_method": "runtime_gdn_forward_substitution",
+          "paired_method_always_declines": false,
+          "paired_method_line": 598,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_full_chunk_forward": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 584,
+          "paired_method": "runtime_gdn_full_chunk_forward",
+          "paired_method_always_declines": false,
+          "paired_method_line": 707,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_gated_rms_norm": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1497,
+          "paired_method": "runtime_gdn_gated_rms_norm",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1501,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_gates": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1433,
+          "paired_method": "runtime_gdn_gates",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1437,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_recurrent_step": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 572,
+          "paired_method": "runtime_gdn_recurrent_step",
+          "paired_method_always_declines": false,
+          "paired_method_line": 618,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_matmul_request": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1774,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_resident_activation": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1660,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "literal_true",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_strict_paged_decode_contiguous_batch": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": true,
+            "shape": false
+          },
+          "line": 320,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        }
+      }
+    },
+    "metal": {
+      "env_gates": [
+        "KILN_DISABLE_METAL_ATTN_GATE_FUSION",
+        "KILN_DISABLE_METAL_CONV1D_PREFILL",
+        "KILN_DISABLE_METAL_FUSED_CONV1D",
+        "KILN_DISABLE_METAL_FUSED_QKV_PROJ",
+        "KILN_DISABLE_METAL_GATED_RMSNORM",
+        "KILN_DISABLE_METAL_GDN_DECODE_GATES_RECURRENT",
+        "KILN_DISABLE_METAL_GDN_DECODE_GATES_RECURRENT_RMSNORM",
+        "KILN_DISABLE_METAL_GDN_FORWARD_SUBSTITUTION",
+        "KILN_DISABLE_METAL_GDN_GATES",
+        "KILN_DISABLE_METAL_GDN_IN_PROJ_FUSION",
+        "KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR",
+        "KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD",
+        "KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_TRIPLE",
+        "KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_VECTOR_LOAD",
+        "KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_X2_LOAD",
+        "KILN_DISABLE_METAL_GDN_PREFILL_AB_IN_PROJ",
+        "KILN_DISABLE_METAL_GDN_PREFILL_DECAY_RECURRENT",
+        "KILN_DISABLE_METAL_GDN_PREFILL_QKV_CONV_SPLIT",
+        "KILN_DISABLE_METAL_GDN_QKV_CONV_NORM",
+        "KILN_DISABLE_METAL_GDN_QK_NORM",
+        "KILN_DISABLE_METAL_GDN_RECURRENT",
+        "KILN_DISABLE_METAL_LM_HEAD_ARGMAX",
+        "KILN_DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE",
+        "KILN_DISABLE_METAL_LM_HEAD_ARGMAX_ROWS",
+        "KILN_DISABLE_METAL_LM_HEAD_SAMPLE",
+        "KILN_DISABLE_METAL_LORA_DELTA_DECODE",
+        "KILN_DISABLE_METAL_MLP_GATE_UP_FUSION",
+        "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_PAIR",
+        "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD",
+        "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD",
+        "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE",
+        "KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_DEDICATED",
+        "KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_VECTOR_LOAD",
+        "KILN_DISABLE_METAL_MLP_SILU_MUL",
+        "KILN_DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS",
+        "KILN_DISABLE_METAL_PAGED_KV_WRITE_TOKEN_MAJOR",
+        "KILN_DISABLE_METAL_RMSNORM",
+        "KILN_DISABLE_METAL_SDPA",
+        "KILN_DISABLE_METAL_SDPA_FULL",
+        "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV",
+        "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR",
+        "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD",
+        "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD_TILE8",
+        "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_TRIPLE_TILE8",
+        "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE16",
+        "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8",
+        "KILN_ENABLE_METAL_LM_HEAD_ARGMAX"
+      ],
+      "legacy_env_aliases": [],
+      "native_env_gates": [
+        "KILN_DISABLE_METAL_ATTN_GATE_FUSION",
+        "KILN_DISABLE_METAL_CONV1D_PREFILL",
+        "KILN_DISABLE_METAL_FUSED_CONV1D",
+        "KILN_DISABLE_METAL_FUSED_QKV_PROJ",
+        "KILN_DISABLE_METAL_GATED_RMSNORM",
+        "KILN_DISABLE_METAL_GDN_DECODE_GATES_RECURRENT",
+        "KILN_DISABLE_METAL_GDN_DECODE_GATES_RECURRENT_RMSNORM",
+        "KILN_DISABLE_METAL_GDN_FORWARD_SUBSTITUTION",
+        "KILN_DISABLE_METAL_GDN_GATES",
+        "KILN_DISABLE_METAL_GDN_IN_PROJ_FUSION",
+        "KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR",
+        "KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD",
+        "KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_TRIPLE",
+        "KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_VECTOR_LOAD",
+        "KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_X2_LOAD",
+        "KILN_DISABLE_METAL_GDN_PREFILL_AB_IN_PROJ",
+        "KILN_DISABLE_METAL_GDN_PREFILL_DECAY_RECURRENT",
+        "KILN_DISABLE_METAL_GDN_PREFILL_QKV_CONV_SPLIT",
+        "KILN_DISABLE_METAL_GDN_QKV_CONV_NORM",
+        "KILN_DISABLE_METAL_GDN_QK_NORM",
+        "KILN_DISABLE_METAL_GDN_RECURRENT",
+        "KILN_DISABLE_METAL_LM_HEAD_ARGMAX",
+        "KILN_DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE",
+        "KILN_DISABLE_METAL_LM_HEAD_ARGMAX_ROWS",
+        "KILN_DISABLE_METAL_LM_HEAD_SAMPLE",
+        "KILN_DISABLE_METAL_LORA_DELTA_DECODE",
+        "KILN_DISABLE_METAL_MLP_GATE_UP_FUSION",
+        "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_PAIR",
+        "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD",
+        "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD",
+        "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE",
+        "KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_DEDICATED",
+        "KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_VECTOR_LOAD",
+        "KILN_DISABLE_METAL_MLP_SILU_MUL",
+        "KILN_DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS",
+        "KILN_DISABLE_METAL_PAGED_KV_WRITE_TOKEN_MAJOR",
+        "KILN_DISABLE_METAL_RMSNORM",
+        "KILN_DISABLE_METAL_SDPA",
+        "KILN_DISABLE_METAL_SDPA_FULL",
+        "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV",
+        "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR",
+        "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD",
+        "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD_TILE8",
+        "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_TRIPLE_TILE8",
+        "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE16",
+        "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8",
+        "KILN_ENABLE_METAL_LM_HEAD_ARGMAX"
+      ],
+      "override_count": 0,
+      "overrides": [],
+      "source": "crates/kiln-model/src/backend/metal.rs",
+      "source_modules": [
+        "crates/kiln-model/src/backend/metal.rs",
+        "crates/kiln-model/src/backend/metal_attention.rs",
+        "crates/kiln-model/src/backend/metal_config.rs",
+        "crates/kiln-model/src/backend/metal_conv1d.rs",
+        "crates/kiln-model/src/backend/metal_core.rs",
+        "crates/kiln-model/src/backend/metal_dense.rs",
+        "crates/kiln-model/src/backend/metal_gdn.rs",
+        "crates/kiln-model/src/backend/metal_icb.rs",
+        "crates/kiln-model/src/backend/metal_lm_head.rs",
+        "crates/kiln-model/src/backend/metal_msl.rs",
+        "crates/kiln-model/src/backend/metal_norm.rs",
+        "crates/kiln-model/src/backend/metal_paged.rs",
+        "crates/kiln-model/src/backend/metal_pipeline.rs",
+        "crates/kiln-model/src/backend/metal_precompile.rs",
+        "crates/kiln-model/src/backend/metal_residency.rs",
+        "crates/kiln-model/src/backend/metal_runtime.rs",
+        "crates/kiln-model/src/backend/metal_training.rs"
+      ],
+      "support_methods": {
+        "runtime_supports_causal_conv1d_prefill": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 41,
+          "paired_method": "runtime_causal_conv1d_prefill",
+          "paired_method_always_declines": false,
+          "paired_method_line": 49,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_causal_conv1d_update": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 45,
+          "paired_method": "runtime_causal_conv1d_update",
+          "paired_method_always_declines": false,
+          "paired_method_line": 68,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_flash_attn_paged_decode": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 385,
+          "paired_method": "runtime_flash_attn_paged_decode",
+          "paired_method_always_declines": false,
+          "paired_method_line": 517,
+          "status": "literal_true",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_flash_attn_prefill": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 373,
+          "paired_method": "runtime_flash_attn_prefill",
+          "paired_method_always_declines": false,
+          "paired_method_line": 491,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_flash_attn_prefill_head_major": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 377,
+          "paired_method": "runtime_flash_attn_prefill_head_major",
+          "paired_method_always_declines": false,
+          "paired_method_line": 502,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_chunk_prep": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 553,
+          "paired_method": "runtime_gdn_chunk_prep",
+          "paired_method_always_declines": false,
+          "paired_method_line": 622,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_forward_substitution": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 545,
+          "paired_method": "runtime_gdn_forward_substitution",
+          "paired_method_always_declines": false,
+          "paired_method_line": 581,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_full_chunk_forward": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 557,
+          "paired_method": "runtime_gdn_full_chunk_forward",
+          "paired_method_always_declines": false,
+          "paired_method_line": 651,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_full_chunk_forward_head_last": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 561,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_gated_rms_norm": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 577,
+          "paired_method": "runtime_gdn_gated_rms_norm",
+          "paired_method_always_declines": false,
+          "paired_method_line": 818,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_gates": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 573,
+          "paired_method": "runtime_gdn_gates",
+          "paired_method_always_declines": false,
+          "paired_method_line": 802,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_recurrent_prefill_head_last": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 565,
+          "paired_method": "runtime_gdn_recurrent_prefill_head_last",
+          "paired_method_always_declines": false,
+          "paired_method_line": 711,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_recurrent_prefill_native_head_last": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 569,
+          "paired_method": "runtime_gdn_recurrent_prefill_native_head_last",
+          "paired_method_always_declines": false,
+          "paired_method_line": 731,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_recurrent_step": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 549,
+          "paired_method": "runtime_gdn_recurrent_step",
+          "paired_method_always_declines": false,
+          "paired_method_line": 604,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_linear_decode_sample": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 90,
+          "paired_method": "runtime_linear_decode_sample",
+          "paired_method_always_declines": false,
+          "paired_method_line": 94,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_linear_decode_sample_batch": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 152,
+          "paired_method": "runtime_linear_decode_sample_batch",
+          "paired_method_always_declines": false,
+          "paired_method_line": 175,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_matmul_request": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": true,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 836,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_paged_kv_head_major_read": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 325,
+          "paired_method": "runtime_paged_kv_head_major_read",
+          "paired_method_always_declines": false,
+          "paired_method_line": 333,
+          "status": "literal_true",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_paged_kv_head_major_read_append_token_major": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 329,
+          "paired_method": "runtime_paged_kv_head_major_read_append_token_major",
+          "paired_method_always_declines": false,
+          "paired_method_line": 349,
+          "status": "literal_true",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_resident_activation": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 959,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "literal_true",
+          "support_state": "NativeWithConstraints"
+        }
+      }
+    },
+    "rocm": {
+      "env_gates": [
+        "KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ",
+        "KILN_DISABLE_CUDA_GDN_AB_IN_PROJ",
+        "KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT",
+        "KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM",
+        "KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ",
+        "KILN_DISABLE_CUDA_GDN_PREFILL_GATES",
+        "KILN_DISABLE_CUDA_LORA_DECODE_ADD",
+        "KILN_DISABLE_ROCM_FULL_ATTN_QKV_IN_PROJ",
+        "KILN_DISABLE_ROCM_GDN_AB_IN_PROJ",
+        "KILN_DISABLE_ROCM_GDN_DECODE_QK_NORM_RECURRENT",
+        "KILN_DISABLE_ROCM_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM",
+        "KILN_DISABLE_ROCM_GDN_PREFILL_AB_IN_PROJ",
+        "KILN_DISABLE_ROCM_GDN_PREFILL_GATES",
+        "KILN_DISABLE_ROCM_LORA_DECODE_ADD",
+        "KILN_ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK",
+        "KILN_ROCM_HEAD_MAJOR_PREFILL"
+      ],
+      "legacy_env_aliases": [
+        "KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ",
+        "KILN_DISABLE_CUDA_GDN_AB_IN_PROJ",
+        "KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT",
+        "KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM",
+        "KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ",
+        "KILN_DISABLE_CUDA_GDN_PREFILL_GATES",
+        "KILN_DISABLE_CUDA_LORA_DECODE_ADD"
+      ],
+      "native_env_gates": [
+        "KILN_DISABLE_ROCM_FULL_ATTN_QKV_IN_PROJ",
+        "KILN_DISABLE_ROCM_GDN_AB_IN_PROJ",
+        "KILN_DISABLE_ROCM_GDN_DECODE_QK_NORM_RECURRENT",
+        "KILN_DISABLE_ROCM_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM",
+        "KILN_DISABLE_ROCM_GDN_PREFILL_AB_IN_PROJ",
+        "KILN_DISABLE_ROCM_GDN_PREFILL_GATES",
+        "KILN_DISABLE_ROCM_LORA_DECODE_ADD",
+        "KILN_ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK",
+        "KILN_ROCM_HEAD_MAJOR_PREFILL"
+      ],
+      "override_count": 0,
+      "overrides": [],
+      "source": "crates/kiln-model/src/backend/rocm.rs",
+      "source_modules": [
+        "crates/kiln-model/src/backend/rocm.rs",
+        "crates/kiln-model/src/backend/cuda_rocm_common.rs"
+      ],
+      "support_methods": {
+        "runtime_supports_causal_conv1d_prefill": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 2172,
+          "paired_method": "runtime_causal_conv1d_prefill",
+          "paired_method_always_declines": false,
+          "paired_method_line": 2202,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_causal_conv1d_update": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 2168,
+          "paired_method": "runtime_causal_conv1d_update",
+          "paired_method_always_declines": false,
+          "paired_method_line": 2176,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_flash_attn_paged_decode": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 339,
+          "paired_method": "runtime_flash_attn_paged_decode",
+          "paired_method_always_declines": false,
+          "paired_method_line": 433,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_flash_attn_prefill": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 331,
+          "paired_method": "runtime_flash_attn_prefill",
+          "paired_method_always_declines": false,
+          "paired_method_line": 355,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_flash_attn_prefill_head_major": {
+          "env_gates": [
+            "KILN_ROCM_HEAD_MAJOR_PREFILL"
+          ],
+          "gate_hints": {
+            "dtype": false,
+            "env": true,
+            "layout": false,
+            "shape": false
+          },
+          "line": 335,
+          "paired_method": "runtime_flash_attn_prefill_head_major",
+          "paired_method_always_declines": false,
+          "paired_method_line": 397,
+          "status": "env_gated",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_chunk_prep": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 642,
+          "paired_method": "runtime_gdn_chunk_prep",
+          "paired_method_always_declines": false,
+          "paired_method_line": 706,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_chunk_scan": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 646,
+          "paired_method": "runtime_gdn_chunk_scan",
+          "paired_method_always_declines": false,
+          "paired_method_line": 739,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_decode_gates_recurrent_unexpanded_qk": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 654,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_decode_qk_norm_gates_recurrent": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 659,
+          "paired_method": "runtime_gdn_decode_qk_norm_gates_recurrent",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1047,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_forward_substitution": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 633,
+          "paired_method": "runtime_gdn_forward_substitution",
+          "paired_method_always_declines": false,
+          "paired_method_line": 664,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_full_chunk_forward": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 650,
+          "paired_method": "runtime_gdn_full_chunk_forward",
+          "paired_method_always_declines": false,
+          "paired_method_line": 773,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_gated_rms_norm": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1568,
+          "paired_method": "runtime_gdn_gated_rms_norm",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1572,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_gates": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1499,
+          "paired_method": "runtime_gdn_gates",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1503,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_recurrent_step": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 638,
+          "paired_method": "runtime_gdn_recurrent_step",
+          "paired_method_always_declines": false,
+          "paired_method_line": 684,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_matmul_request": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1846,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_resident_activation": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1731,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "literal_true",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_strict_paged_decode_contiguous_batch": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": true,
+            "shape": false
+          },
+          "line": 350,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        }
+      }
+    },
+    "vulkan": {
+      "env_gates": [
+        "KILN_DISABLE_VULKAN_BF16_PACKED_FULL_ATTN_QKV_WEIGHTS",
+        "KILN_DISABLE_VULKAN_BF16_PACKED_GDN_IN_PROJ_WEIGHTS",
+        "KILN_DISABLE_VULKAN_BF16_PACKED_LINEAR_WEIGHTS",
+        "KILN_DISABLE_VULKAN_BF16_PACKED_MLP_DECODE_WEIGHTS",
+        "KILN_DISABLE_VULKAN_CONV1D_PREFILL_SINGLE_SUBMIT",
+        "KILN_DISABLE_VULKAN_FULL_ATTN_QKV",
+        "KILN_DISABLE_VULKAN_FUSED_CONV1D_PREFILL",
+        "KILN_DISABLE_VULKAN_GDN_CHUNKWISE_FORWARD",
+        "KILN_DISABLE_VULKAN_GDN_CHUNKWISE_SINGLE_SUBMIT",
+        "KILN_DISABLE_VULKAN_GDN_DECODE_FUSED_RESIDENT_STATE",
+        "KILN_DISABLE_VULKAN_GDN_PREFILL_IN_PROJ",
+        "KILN_DISABLE_VULKAN_GDN_RECURRENT_QK_NORM",
+        "KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE",
+        "KILN_DISABLE_VULKAN_GDN_RECURRENT_UNEXPANDED_QK",
+        "KILN_DISABLE_VULKAN_LINEAR_ARGMAX_BATCH",
+        "KILN_DISABLE_VULKAN_LINEAR_DECODE",
+        "KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_F32_DOWN",
+        "KILN_DISABLE_VULKAN_MLP_DECODE",
+        "KILN_DISABLE_VULKAN_PAGED_ATTN_DECODE_BATCH",
+        "KILN_DISABLE_VULKAN_PAGED_DECODE_GPU_GATHER",
+        "KILN_DISABLE_VULKAN_WEIGHT_PREWARM",
+        "KILN_ENABLE_VULKAN_FUSED_CONV1D",
+        "KILN_ENABLE_VULKAN_FUSED_CONV1D_UPDATE",
+        "KILN_ENABLE_VULKAN_GDN_DECODE_FUSED",
+        "KILN_ENABLE_VULKAN_GDN_FORWARD_SUB",
+        "KILN_ENABLE_VULKAN_GDN_FULL_CHUNK_FORWARD",
+        "KILN_ENABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE",
+        "KILN_ENABLE_VULKAN_MLP_GATE_UP",
+        "KILN_VULKAN_GDN_CHUNKWISE_FALLBACK",
+        "KILN_VULKAN_LINEAR_MAX_GFLOP",
+        "KILN_VULKAN_RESIDENT_DECODE",
+        "KILN_VULKAN_SDPA"
+      ],
+      "legacy_env_aliases": [],
+      "native_env_gates": [
+        "KILN_DISABLE_VULKAN_BF16_PACKED_FULL_ATTN_QKV_WEIGHTS",
+        "KILN_DISABLE_VULKAN_BF16_PACKED_GDN_IN_PROJ_WEIGHTS",
+        "KILN_DISABLE_VULKAN_BF16_PACKED_LINEAR_WEIGHTS",
+        "KILN_DISABLE_VULKAN_BF16_PACKED_MLP_DECODE_WEIGHTS",
+        "KILN_DISABLE_VULKAN_CONV1D_PREFILL_SINGLE_SUBMIT",
+        "KILN_DISABLE_VULKAN_FULL_ATTN_QKV",
+        "KILN_DISABLE_VULKAN_FUSED_CONV1D_PREFILL",
+        "KILN_DISABLE_VULKAN_GDN_CHUNKWISE_FORWARD",
+        "KILN_DISABLE_VULKAN_GDN_CHUNKWISE_SINGLE_SUBMIT",
+        "KILN_DISABLE_VULKAN_GDN_DECODE_FUSED_RESIDENT_STATE",
+        "KILN_DISABLE_VULKAN_GDN_PREFILL_IN_PROJ",
+        "KILN_DISABLE_VULKAN_GDN_RECURRENT_QK_NORM",
+        "KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE",
+        "KILN_DISABLE_VULKAN_GDN_RECURRENT_UNEXPANDED_QK",
+        "KILN_DISABLE_VULKAN_LINEAR_ARGMAX_BATCH",
+        "KILN_DISABLE_VULKAN_LINEAR_DECODE",
+        "KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_F32_DOWN",
+        "KILN_DISABLE_VULKAN_MLP_DECODE",
+        "KILN_DISABLE_VULKAN_PAGED_ATTN_DECODE_BATCH",
+        "KILN_DISABLE_VULKAN_PAGED_DECODE_GPU_GATHER",
+        "KILN_DISABLE_VULKAN_WEIGHT_PREWARM",
+        "KILN_ENABLE_VULKAN_FUSED_CONV1D",
+        "KILN_ENABLE_VULKAN_FUSED_CONV1D_UPDATE",
+        "KILN_ENABLE_VULKAN_GDN_DECODE_FUSED",
+        "KILN_ENABLE_VULKAN_GDN_FORWARD_SUB",
+        "KILN_ENABLE_VULKAN_GDN_FULL_CHUNK_FORWARD",
+        "KILN_ENABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE",
+        "KILN_ENABLE_VULKAN_MLP_GATE_UP",
+        "KILN_VULKAN_GDN_CHUNKWISE_FALLBACK",
+        "KILN_VULKAN_LINEAR_MAX_GFLOP",
+        "KILN_VULKAN_RESIDENT_DECODE",
+        "KILN_VULKAN_SDPA"
+      ],
+      "override_count": 0,
+      "overrides": [],
+      "source": "crates/kiln-model/src/backend/vulkan.rs",
+      "source_modules": [
+        "crates/kiln-model/src/backend/vulkan.rs",
+        "crates/kiln-model/src/backend/vulkan_attention.rs",
+        "crates/kiln-model/src/backend/vulkan_config.rs",
+        "crates/kiln-model/src/backend/vulkan_conv1d.rs",
+        "crates/kiln-model/src/backend/vulkan_decode_state.rs",
+        "crates/kiln-model/src/backend/vulkan_dense.rs",
+        "crates/kiln-model/src/backend/vulkan_device.rs",
+        "crates/kiln-model/src/backend/vulkan_gdn.rs",
+        "crates/kiln-model/src/backend/vulkan_linear.rs",
+        "crates/kiln-model/src/backend/vulkan_residency.rs",
+        "crates/kiln-model/src/backend/vulkan_resources.rs",
+        "crates/kiln-model/src/backend/vulkan_tensor_bridge.rs",
+        "crates/kiln-model/src/backend/vulkan_training.rs",
+        "crates/kiln-model/src/backend/vulkan_weights.rs"
+      ],
+      "support_methods": {
+        "runtime_supports_causal_conv1d_prefill": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 312,
+          "paired_method": "runtime_causal_conv1d_prefill",
+          "paired_method_always_declines": false,
+          "paired_method_line": 326,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_causal_conv1d_update": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 308,
+          "paired_method": "runtime_causal_conv1d_update",
+          "paired_method_always_declines": false,
+          "paired_method_line": 316,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_flash_attn_paged_decode": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 505,
+          "paired_method": "runtime_flash_attn_paged_decode",
+          "paired_method_always_declines": false,
+          "paired_method_line": 520,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_flash_attn_prefill": {
+          "env_gates": [
+            "KILN_VULKAN_SDPA"
+          ],
+          "gate_hints": {
+            "dtype": false,
+            "env": true,
+            "layout": false,
+            "shape": false
+          },
+          "line": 486,
+          "paired_method": "runtime_flash_attn_prefill",
+          "paired_method_always_declines": false,
+          "paired_method_line": 509,
+          "status": "env_gated",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_flash_attn_prefill_head_major": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 500,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "literal_false",
+          "support_state": "Declined"
+        },
+        "runtime_supports_gdn_chunk_prep": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 590,
+          "paired_method": "runtime_gdn_chunk_prep",
+          "paired_method_always_declines": false,
+          "paired_method_line": 716,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_chunk_scan": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 594,
+          "paired_method": "runtime_gdn_chunk_scan",
+          "paired_method_always_declines": false,
+          "paired_method_line": 737,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_forward_substitution": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 574,
+          "paired_method": "runtime_gdn_forward_substitution",
+          "paired_method_always_declines": false,
+          "paired_method_line": 654,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_full_chunk_forward": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 598,
+          "paired_method": "runtime_gdn_full_chunk_forward",
+          "paired_method_always_declines": false,
+          "paired_method_line": 757,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_gated_rms_norm": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 606,
+          "paired_method": "runtime_gdn_gated_rms_norm",
+          "paired_method_always_declines": false,
+          "paired_method_line": 782,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_gates": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 602,
+          "paired_method": "runtime_gdn_gates",
+          "paired_method_always_declines": false,
+          "paired_method_line": 772,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_recurrent_prefill_native_head_last": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 582,
+          "paired_method": "runtime_gdn_recurrent_prefill_native_head_last",
+          "paired_method_always_declines": false,
+          "paired_method_line": 663,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_recurrent_qk_norm_prefill_native_head_last": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 586,
+          "paired_method": "runtime_gdn_recurrent_qk_norm_prefill_native_head_last",
+          "paired_method_always_declines": false,
+          "paired_method_line": 675,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_gdn_recurrent_step": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 578,
+          "paired_method": "runtime_gdn_recurrent_step",
+          "paired_method_always_declines": false,
+          "paired_method_line": 691,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_linear_decode_argmax": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 339,
+          "paired_method": "runtime_linear_decode_argmax",
+          "paired_method_always_declines": false,
+          "paired_method_line": 343,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_linear_decode_argmax_batch": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 351,
+          "paired_method": "runtime_linear_decode_argmax_batch",
+          "paired_method_always_declines": false,
+          "paired_method_line": 433,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_linear_decode_sample": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 355,
+          "paired_method": "runtime_linear_decode_sample",
+          "paired_method_always_declines": false,
+          "paired_method_line": 359,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_linear_decode_sample_batch": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 391,
+          "paired_method": "runtime_linear_decode_sample_batch",
+          "paired_method_always_declines": false,
+          "paired_method_line": 399,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_matmul_request": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": true,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 795,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_resident_activation": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1253,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "literal_true",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_resident_decode": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1485,
+          "paired_method": "runtime_decode_resident_pool_ready",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1472,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        }
+      }
+    }
+  },
+  "capability_descriptors": {
+    "AttentionCapabilities": {
+      "field_count": 5,
+      "fields": [
+        {
+          "name": "flash_prefill",
+          "type": "Support"
+        },
+        {
+          "name": "flash_prefill_head_major",
+          "type": "Support"
+        },
+        {
+          "name": "flash_paged_decode",
+          "type": "Support"
+        },
+        {
+          "name": "flash_prefill_consumes_grouped_kv",
+          "type": "bool"
+        },
+        {
+          "name": "detached_chunked_prefill",
+          "type": "Support"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "BackendCapabilities": {
+      "field_count": 12,
+      "fields": [
+        {
+          "name": "backend",
+          "type": "&'static str"
+        },
+        {
+          "name": "device",
+          "type": "kiln_tensor::Device"
+        },
+        {
+          "name": "storage",
+          "type": "StorageCapabilities"
+        },
+        {
+          "name": "startup",
+          "type": "StartupCapabilities"
+        },
+        {
+          "name": "matmul",
+          "type": "MatmulCapabilities"
+        },
+        {
+          "name": "attention",
+          "type": "AttentionCapabilities"
+        },
+        {
+          "name": "gdn",
+          "type": "GdnCapabilities"
+        },
+        {
+          "name": "decode",
+          "type": "DecodeCapabilities"
+        },
+        {
+          "name": "decode_batcher",
+          "type": "DecodeBatcherPolicy"
+        },
+        {
+          "name": "training",
+          "type": "BackendTrainingCapabilities"
+        },
+        {
+          "name": "graph_replay",
+          "type": "ReplayCapabilities"
+        },
+        {
+          "name": "fallback",
+          "type": "BackendFallbackCapabilities"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "BackendFallbackCapabilities": {
+      "field_count": 5,
+      "fields": [
+        {
+          "name": "generic_device_op",
+          "type": "FallbackPolicy"
+        },
+        {
+          "name": "decode_hot_path",
+          "type": "FallbackPolicy"
+        },
+        {
+          "name": "decode_hot_path_debug_env",
+          "type": "Option<&'static str>"
+        },
+        {
+          "name": "training_optimizer",
+          "type": "FallbackPolicy"
+        },
+        {
+          "name": "training_optimizer_debug_env",
+          "type": "Option<&'static str>"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "BackendTrainingCapabilities": {
+      "field_count": 4,
+      "fields": [
+        {
+          "name": "hooks",
+          "type": "TrainingCapabilities"
+        },
+        {
+          "name": "precision",
+          "type": "TrainingPrecisionPolicy"
+        },
+        {
+          "name": "server_dispatch",
+          "type": "ServerTrainingDispatchPolicy"
+        },
+        {
+          "name": "acceleration_profile",
+          "type": "TrainingAccelerationProfilePolicy"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "DecodeBatcherPolicy": {
+      "field_count": 17,
+      "fields": [
+        {
+          "name": "max_batch",
+          "type": "usize"
+        },
+        {
+          "name": "wait_micros",
+          "type": "u64"
+        },
+        {
+          "name": "allow_mixed_seq_lens",
+          "type": "bool"
+        },
+        {
+          "name": "rowwise_retry_env",
+          "type": "Option<&'static str>"
+        },
+        {
+          "name": "require_native_decode_attention",
+          "type": "bool"
+        },
+        {
+          "name": "prefer_direct_paged_decode_attention",
+          "type": "bool"
+        },
+        {
+          "name": "direct_paged_decode_attention_env_gate",
+          "type": "DecodeAttentionEnvGate"
+        },
+        {
+          "name": "allow_prefix_cache_split_snapshot",
+          "type": "bool"
+        },
+        {
+          "name": "paged_decode_requires_contiguous_kv_chunks",
+          "type": "bool"
+        },
+        {
+          "name": "use_greedy_token_decode",
+          "type": "bool"
+        },
+        {
+          "name": "use_native_sampled_contiguous_decode",
+          "type": "bool"
+        },
+        {
+          "name": "sampled_contiguous_decode_requires_resident_decode",
+          "type": "bool"
+        },
+        {
+          "name": "partition_noncontiguous_gdn_kv_tiles",
+          "type": "bool"
+        },
+        {
+          "name": "use_decode_width_prefill_admission",
+          "type": "bool"
+        },
+        {
+          "name": "burst_prefill_admission",
+          "type": "bool"
+        },
+        {
+          "name": "batching_engine_default_enabled",
+          "type": "bool"
+        },
+        {
+          "name": "warm_resident_decode_pool_on_startup",
+          "type": "bool"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "DecodeCapabilities": {
+      "field_count": 8,
+      "fields": [
+        {
+          "name": "resident_decode",
+          "type": "Support"
+        },
+        {
+          "name": "paged_decode_graph_outputs",
+          "type": "Support"
+        },
+        {
+          "name": "mtp_speculative_generation",
+          "type": "Support"
+        },
+        {
+          "name": "speculative_policy",
+          "type": "SpeculativeDecodePolicy"
+        },
+        {
+          "name": "linear_argmax",
+          "type": "Support"
+        },
+        {
+          "name": "linear_argmax_batch",
+          "type": "Support"
+        },
+        {
+          "name": "linear_sample",
+          "type": "Support"
+        },
+        {
+          "name": "linear_sample_batch",
+          "type": "Support"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "GdnCapabilities": {
+      "field_count": 10,
+      "fields": [
+        {
+          "name": "recurrent_step",
+          "type": "Support"
+        },
+        {
+          "name": "recurrent_step_f32",
+          "type": "Support"
+        },
+        {
+          "name": "inference_recurrent_state",
+          "type": "InferenceRecurrentStatePolicy"
+        },
+        {
+          "name": "chunk_pre_permute_bf16",
+          "type": "Support"
+        },
+        {
+          "name": "chunk_prep",
+          "type": "Support"
+        },
+        {
+          "name": "chunk_scan",
+          "type": "Support"
+        },
+        {
+          "name": "full_chunk_forward",
+          "type": "Support"
+        },
+        {
+          "name": "gates",
+          "type": "Support"
+        },
+        {
+          "name": "gated_rms_norm",
+          "type": "Support"
+        },
+        {
+          "name": "gated_rms_norm_preserves_tape_residency",
+          "type": "bool"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "GpuAllocatorMemoryProbePolicy": {
+      "field_count": 1,
+      "fields": [
+        {
+          "name": "probe",
+          "type": "GpuAllocatorMemoryProbe"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "GpuMemoryBudgetPolicy": {
+      "field_count": 3,
+      "fields": [
+        {
+          "name": "use_live_memory_snapshot",
+          "type": "bool"
+        },
+        {
+          "name": "cap_kv_blocks_by_live_budget",
+          "type": "bool"
+        },
+        {
+          "name": "retry_kv_allocation_after_reclaim",
+          "type": "bool"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "GpuMemoryDetectionPolicy": {
+      "field_count": 3,
+      "fields": [
+        {
+          "name": "detected_total_log_message",
+          "type": "Option<&'static str>"
+        },
+        {
+          "name": "missing_total_warning",
+          "type": "Option<&'static str>"
+        },
+        {
+          "name": "missing_total_fallback_bytes",
+          "type": "Option<u64>"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "GpuMemoryReclaimPolicy": {
+      "field_count": 1,
+      "fields": [
+        {
+          "name": "reclaimer",
+          "type": "GpuMemoryReclaimer"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "InferenceRecurrentStatePolicy": {
+      "field_count": 2,
+      "fields": [
+        {
+          "name": "bf16",
+          "type": "Support"
+        },
+        {
+          "name": "f16",
+          "type": "Support"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "KvCacheAutoBlockPolicy": {
+      "field_count": 4,
+      "fields": [
+        {
+          "name": "context_window_cap",
+          "type": "bool"
+        },
+        {
+          "name": "static_max_blocks",
+          "type": "Option<usize>"
+        },
+        {
+          "name": "memory_tier_cap",
+          "type": "Option<KvCacheMemoryTierBlockCap>"
+        },
+        {
+          "name": "allow_min_blocks_below_live_budget",
+          "type": "bool"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "KvCacheFp8Policy": {
+      "field_count": 3,
+      "fields": [
+        {
+          "name": "allow_when_requested_by_default",
+          "type": "bool"
+        },
+        {
+          "name": "explicit_enable_env",
+          "type": "Option<&'static str>"
+        },
+        {
+          "name": "disabled_reason",
+          "type": "Option<&'static str>"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "KvCacheMemoryTierBlockCap": {
+      "field_count": 5,
+      "fields": [
+        {
+          "name": "low_memory_bytes_exclusive",
+          "type": "u64"
+        },
+        {
+          "name": "low_max_blocks",
+          "type": "usize"
+        },
+        {
+          "name": "mid_memory_bytes_exclusive",
+          "type": "u64"
+        },
+        {
+          "name": "mid_max_blocks",
+          "type": "usize"
+        },
+        {
+          "name": "high_max_blocks",
+          "type": "usize"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "MatmulCapabilities": {
+      "field_count": 3,
+      "fields": [
+        {
+          "name": "rank2_f32",
+          "type": "Support"
+        },
+        {
+          "name": "batched_bf16",
+          "type": "Support"
+        },
+        {
+          "name": "bias_epilogue",
+          "type": "Support"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "ProjectionLoadPolicy": {
+      "field_count": 18,
+      "fields": [
+        {
+          "name": "backend",
+          "type": "kiln_tensor::Backend"
+        },
+        {
+          "name": "direct_transposed_upload_for_cached_weights",
+          "type": "bool"
+        },
+        {
+          "name": "parallel_transposed_projection_upload",
+          "type": "bool"
+        },
+        {
+          "name": "parallel_transposed_projection_upload_disable_env",
+          "type": "Option<&'static str>"
+        },
+        {
+          "name": "parallel_auxiliary_weight_upload",
+          "type": "bool"
+        },
+        {
+          "name": "parallel_auxiliary_weight_upload_disable_env",
+          "type": "Option<&'static str>"
+        },
+        {
+          "name": "cache_full_attention_qkv_transpose_concat",
+          "type": "bool"
+        },
+        {
+          "name": "cache_linear_attention_ab_transpose_concat",
+          "type": "bool"
+        },
+        {
+          "name": "cache_mlp_gate_up_transpose_concat",
+          "type": "bool"
+        },
+        {
+          "name": "pack_w8a16_projection_rows",
+          "type": "bool"
+        },
+        {
+          "name": "stub_embedding_table_after_transposed_upload",
+          "type": "bool"
+        },
+        {
+          "name": "drop_projection_originals",
+          "type": "bool"
+        },
+        {
+          "name": "drop_projection_transposes",
+          "type": "bool"
+        },
+        {
+          "name": "synchronize_after_dropping_originals",
+          "type": "bool"
+        },
+        {
+          "name": "keep_projection_originals_env",
+          "type": "Option<&'static str>"
+        },
+        {
+          "name": "drop_projection_originals_env",
+          "type": "Option<&'static str>"
+        },
+        {
+          "name": "native_training_env",
+          "type": "Option<&'static str>"
+        },
+        {
+          "name": "keep_projection_transposes_env",
+          "type": "Option<&'static str>"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "ReplayAuthority": {
+      "field_count": 4,
+      "fields": [
+        {
+          "name": "backend",
+          "type": "kiln_tensor::Backend"
+        },
+        {
+          "name": "production_authority",
+          "type": "ReplayProductionAuthority"
+        },
+        {
+          "name": "native_primitive",
+          "type": "ReplayNativePrimitive"
+        },
+        {
+          "name": "graph_crate_role",
+          "type": "ReplayGraphCrateRole"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "ReplayCapabilities": {
+      "field_count": 3,
+      "fields": [
+        {
+          "name": "resident_decode",
+          "type": "Support"
+        },
+        {
+          "name": "paged_decode_graph_outputs",
+          "type": "Support"
+        },
+        {
+          "name": "authority",
+          "type": "ReplayAuthority"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "ServerTrainingDispatchPolicy": {
+      "field_count": 3,
+      "fields": [
+        {
+          "name": "native_route",
+          "type": "ServerTrainingNativeRoute"
+        },
+        {
+          "name": "native_training_env",
+          "type": "Option<&'static str>"
+        },
+        {
+          "name": "native_training_default_enabled",
+          "type": "bool"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "SpeculativeDecodePolicy": {
+      "field_count": 3,
+      "fields": [
+        {
+          "name": "mtp_max_prompt_tokens",
+          "type": "usize"
+        },
+        {
+          "name": "long_prompt_skip_layer_min_prompt_tokens",
+          "type": "usize"
+        },
+        {
+          "name": "long_prompt_skip_layer_min_output_tokens",
+          "type": "usize"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "StartupCapabilities": {
+      "field_count": 6,
+      "fields": [
+        {
+          "name": "run_inference_prewarm",
+          "type": "bool"
+        },
+        {
+          "name": "require_inference_prewarm_for_health",
+          "type": "bool"
+        },
+        {
+          "name": "precompile_custom_kernels",
+          "type": "bool"
+        },
+        {
+          "name": "native_training_default_enabled",
+          "type": "bool"
+        },
+        {
+          "name": "native_training_env",
+          "type": "Option<&'static str>"
+        },
+        {
+          "name": "decode_weight_prewarm_when_native_training",
+          "type": "bool"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "StorageCapabilities": {
+      "field_count": 13,
+      "fields": [
+        {
+          "name": "backend",
+          "type": "kiln_tensor::Backend"
+        },
+        {
+          "name": "device",
+          "type": "kiln_tensor::Device"
+        },
+        {
+          "name": "resident_activation",
+          "type": "Support"
+        },
+        {
+          "name": "resident_decode",
+          "type": "Support"
+        },
+        {
+          "name": "projection_load_policy",
+          "type": "ProjectionLoadPolicy"
+        },
+        {
+          "name": "kv_cache_device_memory_pressure",
+          "type": "bool"
+        },
+        {
+          "name": "gpu_memory_detection_policy",
+          "type": "GpuMemoryDetectionPolicy"
+        },
+        {
+          "name": "gpu_memory_budget_policy",
+          "type": "GpuMemoryBudgetPolicy"
+        },
+        {
+          "name": "gpu_allocator_memory_probe_policy",
+          "type": "GpuAllocatorMemoryProbePolicy"
+        },
+        {
+          "name": "gpu_memory_reclaim_policy",
+          "type": "GpuMemoryReclaimPolicy"
+        },
+        {
+          "name": "kv_sizing_residency_model_multiplier",
+          "type": "u64"
+        },
+        {
+          "name": "kv_auto_block_policy",
+          "type": "KvCacheAutoBlockPolicy"
+        },
+        {
+          "name": "kv_cache_fp8_policy",
+          "type": "KvCacheFp8Policy"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "TrainingAccelerationEnvFlagPolicy": {
+      "field_count": 2,
+      "fields": [
+        {
+          "name": "env",
+          "type": "&'static str"
+        },
+        {
+          "name": "default_on",
+          "type": "bool"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "TrainingAccelerationProfilePolicy": {
+      "field_count": 8,
+      "fields": [
+        {
+          "name": "log_message",
+          "type": "TrainingAccelerationProfileLogMessage"
+        },
+        {
+          "name": "linear",
+          "type": "Option<TrainingAccelerationEnvFlagPolicy>"
+        },
+        {
+          "name": "sdpa",
+          "type": "Option<TrainingAccelerationEnvFlagPolicy>"
+        },
+        {
+          "name": "rmsnorm_inference",
+          "type": "Option<TrainingAccelerationEnvFlagPolicy>"
+        },
+        {
+          "name": "rmsnorm_training",
+          "type": "&'static str"
+        },
+        {
+          "name": "flce_provider",
+          "type": "&'static str"
+        },
+        {
+          "name": "resident_activation",
+          "type": "&'static str"
+        },
+        {
+          "name": "sgd_step_on_device",
+          "type": "&'static str"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    }
+  },
+  "conformance_gates": [
+    {
+      "command": "cargo test -p kiln-tensor --features rocm --test rocm_storage_smoke && cargo test -p kiln-vulkan-kernel --test vk_tensor_parity",
+      "coverage_blockers": [],
+      "evidence": [
+        "crates/kiln-tensor/tests/rocm_storage_smoke.rs",
+        "crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-tensor/tests/rocm_storage_smoke.rs",
+        "crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs"
+      ],
+      "gate": "storage_round_trip",
+      "phase8_requirement": "storage round trip",
+      "status": "covered",
+      "supplemental_commands": [
+        {
+          "command": "cargo test -p kiln-tensor --features rocm --test rocm_storage_smoke",
+          "scope": "ROCm feature lane"
+        },
+        {
+          "command": "cargo test -p kiln-vulkan-kernel --test vk_tensor_parity",
+          "scope": "Vulkan kernel lane"
+        }
+      ]
+    },
+    {
+      "command": "cargo test -p kiln-tensor device_transfer_support_classifies_explicit_transitions && cargo test -p kiln-tensor to_device_without_gpu_features_reports_explicit_unsupported_transition",
+      "coverage_blockers": [],
+      "evidence": [
+        "crates/kiln-tensor/src/tensor.rs",
+        "crates/kiln-tensor/tests/cuda_resize_copy_primitives.rs",
+        "crates/kiln-tensor/tests/metal_ops_parity.rs",
+        "crates/kiln-tensor/tests/rocm_compare_parity.rs",
+        "crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-tensor/src/tensor.rs",
+        "crates/kiln-tensor/tests/cuda_resize_copy_primitives.rs",
+        "crates/kiln-tensor/tests/metal_ops_parity.rs",
+        "crates/kiln-tensor/tests/rocm_compare_parity.rs",
+        "crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs"
+      ],
+      "gate": "host_transfer_to_device_parity",
+      "phase8_requirement": "host transfer / to_device parity with explicit unsupported errors",
+      "status": "covered",
+      "supplemental_commands": [
+        {
+          "command": "CUDARC_CUDA_VERSION=12080 cargo test -p kiln-tensor --no-default-features --features cuda --test cuda_resize_copy_primitives",
+          "scope": "CUDA hardware lane"
+        },
+        {
+          "command": "cargo test -p kiln-tensor --features rocm --test rocm_compare_parity",
+          "scope": "ROCm feature lane"
+        },
+        {
+          "command": "cargo test -p kiln-tensor --features metal --test metal_ops_parity",
+          "scope": "macOS Metal feature lane"
+        },
+        {
+          "command": "cargo test -p kiln-vulkan-kernel --test vk_tensor_parity",
+          "scope": "Vulkan kernel lane"
+        }
+      ]
+    },
+    {
+      "command": "cargo test -p kiln-tensor device_op::tests",
+      "coverage_blockers": [],
+      "evidence": [
+        "crates/kiln-tensor/src/device_op.rs",
+        "crates/kiln-tensor/tests/rocm_scalar_op_parity.rs",
+        "crates/kiln-tensor/tests/metal_ops_parity.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-tensor/src/device_op.rs",
+        "crates/kiln-tensor/tests/rocm_scalar_op_parity.rs",
+        "crates/kiln-tensor/tests/metal_ops_parity.rs"
+      ],
+      "gate": "device_op_parity",
+      "phase8_requirement": "DeviceOp parity",
+      "status": "covered",
+      "supplemental_commands": [
+        {
+          "command": "cargo test -p kiln-tensor --features rocm --test rocm_scalar_op_parity",
+          "scope": "ROCm feature lane"
+        },
+        {
+          "command": "cargo test -p kiln-tensor --features metal --test metal_ops_parity",
+          "scope": "macOS Metal feature lane"
+        }
+      ]
+    },
+    {
+      "command": "cargo test -p kiln-model matmul_request_projects_to_blas_shape_contract && cargo test -p kiln-tensor --features rocm --test rocm_matmul_parity && cargo test -p kiln-tensor matmul_matrix_core && cargo test -p kiln-vulkan-kernel --test vk_matmul_parity && cargo test -p kiln-vulkan-kernel --test linear_decode_argmax && cargo test -p kiln-vulkan-kernel --test linear_decode_sample && cargo test -p kiln-model tape_forward_matmul_bit_exact_parity_with_baseline && CUDARC_CUDA_VERSION=12080 cargo check -p kiln-blas --features cublaslt --tests && cargo test -p kiln-model --test backend_capability_contract",
+      "coverage_blockers": [],
+      "evidence": [
+        "crates/kiln-model/src/backend/capability.rs",
+        "crates/kiln-model/src/backend/mod.rs",
+        "crates/kiln-blas/tests/cublaslt_handle_smoke.rs",
+        "crates/kiln-tensor/tests/rocm_matmul_parity.rs",
+        "crates/kiln-tensor/tests/metal_ops_parity.rs",
+        "crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs",
+        "crates/kiln-vulkan-kernel/tests/linear_decode_argmax.rs",
+        "crates/kiln-vulkan-kernel/tests/linear_decode_sample.rs",
+        "crates/kiln-model/tests/tape_forward_parity.rs",
+        "crates/kiln-model/tests/marlin_qproj_parity.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-model/src/backend/capability.rs",
+        "crates/kiln-model/src/backend/mod.rs",
+        "crates/kiln-blas/tests/cublaslt_handle_smoke.rs",
+        "crates/kiln-tensor/tests/rocm_matmul_parity.rs",
+        "crates/kiln-tensor/tests/metal_ops_parity.rs",
+        "crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs",
+        "crates/kiln-vulkan-kernel/tests/linear_decode_argmax.rs",
+        "crates/kiln-vulkan-kernel/tests/linear_decode_sample.rs",
+        "crates/kiln-model/tests/tape_forward_parity.rs",
+        "crates/kiln-model/tests/marlin_qproj_parity.rs"
+      ],
+      "gate": "matmul_linear_parity",
+      "phase8_requirement": "matmul/linear parity",
+      "status": "covered",
+      "supplemental_commands": [
+        {
+          "command": "CUDARC_CUDA_VERSION=12080 cargo test -p kiln-blas --features cublaslt --test cublaslt_handle_smoke",
+          "scope": "CUDA cublasLt hardware lane"
+        },
+        {
+          "command": "cargo test -p kiln-tensor --features metal --test metal_ops_parity",
+          "scope": "macOS Metal feature lane"
+        }
+      ]
+    },
+    {
+      "command": "cargo test -p kiln-model --no-default-features --features rocm --test rocm_flash_attn_bwd_gradcheck && cargo test -p kiln-flash-attn --no-default-features --features rocm --test rocm_flash_attn_parity && cargo test -p kiln-gdn-kernel --no-default-features --features rocm --test rocm_gdn_parity && cargo test -p kiln-conv1d-kernel --no-default-features --features rocm --test rocm_conv1d_parity && cargo test -p kiln-vulkan-kernel --test vk_attention_parity && cargo test -p kiln-vulkan-kernel --test vk_sdpa_prefill_kernel_parity && cargo test -p kiln-vulkan-kernel --test vk_gdn_foundation_parity && cargo test -p kiln-vulkan-kernel --test vk_gdn_backward_parity && cargo test -p kiln-vulkan-kernel --test gdn_parity",
+      "coverage_blockers": [],
+      "evidence": [
+        "crates/kiln-model/tests/rocm_flash_attn_bwd_gradcheck.rs",
+        "crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs",
+        "crates/kiln-gdn-kernel/tests/rocm_gdn_parity.rs",
+        "crates/kiln-conv1d-kernel/tests/rocm_conv1d_parity.rs",
+        "crates/kiln-vulkan-kernel/tests/vk_attention_parity.rs",
+        "crates/kiln-vulkan-kernel/tests/vk_sdpa_prefill_kernel_parity.rs",
+        "crates/kiln-vulkan-kernel/tests/vk_gdn_foundation_parity.rs",
+        "crates/kiln-vulkan-kernel/tests/vk_gdn_backward_parity.rs",
+        "crates/kiln-vulkan-kernel/tests/gdn_parity.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-model/tests/rocm_flash_attn_bwd_gradcheck.rs",
+        "crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs",
+        "crates/kiln-gdn-kernel/tests/rocm_gdn_parity.rs",
+        "crates/kiln-conv1d-kernel/tests/rocm_conv1d_parity.rs",
+        "crates/kiln-vulkan-kernel/tests/vk_attention_parity.rs",
+        "crates/kiln-vulkan-kernel/tests/vk_sdpa_prefill_kernel_parity.rs",
+        "crates/kiln-vulkan-kernel/tests/vk_gdn_foundation_parity.rs",
+        "crates/kiln-vulkan-kernel/tests/vk_gdn_backward_parity.rs",
+        "crates/kiln-vulkan-kernel/tests/gdn_parity.rs"
+      ],
+      "gate": "attention_gdn_conv_parity",
+      "phase8_requirement": "attention/GDN/conv parity",
+      "status": "covered",
+      "supplemental_commands": []
+    },
+    {
+      "command": "cargo test -p kiln-optim --test integration && cargo test -p kiln-train training_optimizer && cargo test -p kiln-model --test backend_capability_contract",
+      "coverage_blockers": [],
+      "evidence": [
+        "crates/kiln-optim/tests/integration.rs",
+        "crates/kiln-model/src/backend/cuda.rs",
+        "crates/kiln-model/src/backend/rocm.rs",
+        "crates/kiln-model/src/backend/metal_training.rs",
+        "crates/kiln-model/src/backend/vulkan.rs",
+        "crates/kiln-model/src/backend/vulkan_training.rs",
+        "crates/kiln-model/src/backend/mod.rs",
+        "crates/kiln-train/src/trainer.rs",
+        "crates/kiln-train/tests/vk_cuda_opd_parity.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-optim/tests/integration.rs",
+        "crates/kiln-model/src/backend/cuda.rs",
+        "crates/kiln-model/src/backend/rocm.rs",
+        "crates/kiln-model/src/backend/metal_training.rs",
+        "crates/kiln-model/src/backend/vulkan.rs",
+        "crates/kiln-model/src/backend/vulkan_training.rs",
+        "crates/kiln-model/src/backend/mod.rs",
+        "crates/kiln-train/src/trainer.rs",
+        "crates/kiln-train/tests/vk_cuda_opd_parity.rs"
+      ],
+      "gate": "optimizer_parity",
+      "phase8_requirement": "optimizer parity",
+      "status": "covered",
+      "supplemental_commands": [
+        {
+          "command": "CUDARC_CUDA_VERSION=12080 cargo test -p kiln-train --features cuda,vulkan --test vk_cuda_opd_parity",
+          "scope": "CUDA plus Vulkan OPD hardware lane"
+        }
+      ]
+    },
+    {
+      "command": "cargo test -p kiln-graph replay && cargo test -p kiln-graph --test capture_lifetime && cargo test -p kiln-graph-cuda replay && cargo test -p kiln-graph-metal replay && cargo test -p kiln-graph-vulkan replay && cargo test -p kiln-model --features vulkan --test vk_resident_decode_parity && cargo test -p kiln-tensor --features rocm --test rocm_capture_arena && cargo test -p kiln-model --test backend_capability_contract",
+      "coverage_blockers": [],
+      "evidence": [
+        "crates/kiln-graph/src/replay_plan.rs",
+        "crates/kiln-graph/src/captured_graph.rs",
+        "crates/kiln-graph/tests/capture_lifetime.rs",
+        "crates/kiln-graph-cuda/src/lib.rs",
+        "crates/kiln-graph-metal/src/lib.rs",
+        "crates/kiln-graph-vulkan/src/lib.rs",
+        "crates/kiln-model/src/backend/capability.rs",
+        "crates/kiln-model/src/backend/residency.rs",
+        "crates/kiln-model/tests/vk_resident_decode_parity.rs",
+        "crates/kiln-tensor/tests/rocm_capture_arena.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-graph/src/replay_plan.rs",
+        "crates/kiln-graph/src/captured_graph.rs",
+        "crates/kiln-graph/tests/capture_lifetime.rs",
+        "crates/kiln-graph-cuda/src/lib.rs",
+        "crates/kiln-graph-metal/src/lib.rs",
+        "crates/kiln-graph-vulkan/src/lib.rs",
+        "crates/kiln-model/src/backend/capability.rs",
+        "crates/kiln-model/src/backend/residency.rs",
+        "crates/kiln-model/tests/vk_resident_decode_parity.rs",
+        "crates/kiln-tensor/tests/rocm_capture_arena.rs"
+      ],
+      "gate": "replay_parity",
+      "phase8_requirement": "replay parity",
+      "status": "covered",
+      "supplemental_commands": []
+    },
+    {
+      "command": "cargo test -p kiln-optim --test end_to_end_training && cargo test -p kiln-model --test backend_capability_contract",
+      "coverage_blockers": [],
+      "evidence": [
+        "crates/kiln-model/tests/cuda_sft_step_proof.rs",
+        "crates/kiln-model/tests/metal_sft_step_proof.rs",
+        "crates/kiln-model/tests/vk_sft_step_proof.rs",
+        "crates/kiln-model/tests/rocm_sft_step_proof.rs",
+        "crates/kiln-optim/tests/end_to_end_training.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-model/tests/cuda_sft_step_proof.rs",
+        "crates/kiln-model/tests/metal_sft_step_proof.rs",
+        "crates/kiln-model/tests/vk_sft_step_proof.rs",
+        "crates/kiln-model/tests/rocm_sft_step_proof.rs",
+        "crates/kiln-optim/tests/end_to_end_training.rs"
+      ],
+      "gate": "one_step_training_proof",
+      "phase8_requirement": "one-step training proof",
+      "status": "covered",
+      "supplemental_commands": [
+        {
+          "command": "CUDARC_CUDA_VERSION=12080 cargo test -p kiln-model --features cuda --test cuda_sft_step_proof",
+          "scope": "CUDA hardware lane"
+        },
+        {
+          "command": "cargo test -p kiln-model --features rocm --test rocm_sft_step_proof",
+          "scope": "ROCm feature lane"
+        },
+        {
+          "command": "cargo test -p kiln-model --features metal --test metal_sft_step_proof",
+          "scope": "macOS Metal feature lane"
+        },
+        {
+          "command": "KILN_TENSOR_VULKAN_TEST=1 KILN_USE_TAPE_FORWARD=1 KILN_USE_TAPE_LORA_ADD=1 cargo test -p kiln-model --features vulkan --test vk_sft_step_proof",
+          "scope": "Vulkan hardware opt-in lane"
+        }
+      ]
+    },
+    {
+      "command": "cargo test -p kiln-tensor device_op_host_fallback_counts_are_backend_and_arity_specific",
+      "coverage_blockers": [],
+      "evidence": [
+        "crates/kiln-tensor/src/device_op.rs",
+        "crates/kiln-model/src/generate.rs",
+        "crates/kiln-train/src/trainer.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-tensor/src/device_op.rs",
+        "crates/kiln-model/src/generate.rs",
+        "crates/kiln-train/src/trainer.rs"
+      ],
+      "gate": "no_unexpected_host_fallback",
+      "phase8_requirement": "no unexpected host fallback in decode/training hot paths",
+      "status": "covered",
+      "supplemental_commands": []
+    },
+    {
+      "command": "cargo test -p kiln-model decode_batcher_stats_report_runner_calls_per_token && cargo test -p kiln-server test_metrics_render && cargo test -p kiln-graph replay",
+      "coverage_blockers": [],
+      "evidence": [
+        "crates/kiln-model/src/generate.rs",
+        "crates/kiln-server/src/metrics.rs",
+        "crates/kiln-server/src/api/health.rs",
+        "crates/kiln-server/src/api/debug_model_state.rs",
+        "crates/kiln-graph/src/captured_graph.rs",
+        "crates/kiln-graph/src/replay_plan.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-model/src/generate.rs",
+        "crates/kiln-server/src/metrics.rs",
+        "crates/kiln-server/src/api/health.rs",
+        "crates/kiln-server/src/api/debug_model_state.rs",
+        "crates/kiln-graph/src/captured_graph.rs",
+        "crates/kiln-graph/src/replay_plan.rs"
+      ],
+      "gate": "decode_submit_or_replay_count",
+      "phase8_requirement": "max submit count or replay count per decode token",
+      "status": "covered",
+      "supplemental_commands": []
+    },
+    {
+      "command": "cargo test -p kiln-blas cache_stats_reports_entries_and_hit_rate && cargo test -p kiln-rocblas cache_stats_reports_entries_and_hit_rate && CUDARC_CUDA_VERSION=12080 cargo check -p kiln-blas --features cublaslt --tests && cargo check -p kiln-rocblas --features hipblaslt --tests",
+      "coverage_blockers": [],
+      "evidence": [
+        "crates/kiln-blas/src/algo_cache.rs",
+        "crates/kiln-blas/src/cublaslt_handle.rs",
+        "crates/kiln-blas/tests/cublaslt_handle_smoke.rs",
+        "crates/kiln-rocblas/src/algo_cache.rs",
+        "crates/kiln-rocblas/src/hipblaslt_handle.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-blas/src/algo_cache.rs",
+        "crates/kiln-blas/src/cublaslt_handle.rs",
+        "crates/kiln-blas/tests/cublaslt_handle_smoke.rs",
+        "crates/kiln-rocblas/src/algo_cache.rs",
+        "crates/kiln-rocblas/src/hipblaslt_handle.rs"
+      ],
+      "gate": "matmul_algorithm_cache_reporting",
+      "phase8_requirement": "matmul algorithm/cache hit reporting",
+      "status": "covered",
+      "supplemental_commands": []
+    },
+    {
+      "command": "python3 scripts/run_backend_latency_fixture.py --self-test && python3 scripts/write_backend_latency_result_artifact.py --self-test && python3 scripts/import_backend_latency_artifact.py --self-test && python3 scripts/lock_backend_latency_thresholds.py --self-test && python3 scripts/check_backend_latency_fixtures.py --self-test && python3 scripts/plan_backend_latency_fixture_dispatch.py --self-test && python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered",
+      "coverage_blockers": [],
+      "evidence": [
+        "docs/backend-latency-fixtures.json",
+        "docs/backend-latency-result-schema.md",
+        "scripts/check_unification_gates.sh",
+        "scripts/run_backend_latency_fixture.py",
+        "scripts/write_backend_latency_result_artifact.py",
+        "scripts/import_backend_latency_artifact.py",
+        "scripts/lock_backend_latency_thresholds.py",
+        "scripts/check_backend_latency_fixtures.py",
+        "scripts/plan_backend_latency_fixture_dispatch.py",
+        "crates/kiln-tensor/tests/cuda_latency_bench.rs",
+        "crates/kiln-server/examples/flce_preflight_bench.rs",
+        "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
+        "crates/kiln-tensor/tests/metal_matmul_bench.rs",
+        "crates/kiln-tensor/tests/metal_sdpa_bench.rs",
+        "crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs",
+        "crates/kiln-tensor/tests/rocm_latency_bench.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "docs/backend-latency-fixtures.json",
+        "docs/backend-latency-result-schema.md",
+        "scripts/check_unification_gates.sh",
+        "scripts/run_backend_latency_fixture.py",
+        "scripts/write_backend_latency_result_artifact.py",
+        "scripts/import_backend_latency_artifact.py",
+        "scripts/lock_backend_latency_thresholds.py",
+        "scripts/check_backend_latency_fixtures.py",
+        "scripts/plan_backend_latency_fixture_dispatch.py",
+        "crates/kiln-tensor/tests/cuda_latency_bench.rs",
+        "crates/kiln-server/examples/flce_preflight_bench.rs",
+        "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
+        "crates/kiln-tensor/tests/metal_matmul_bench.rs",
+        "crates/kiln-tensor/tests/metal_sdpa_bench.rs",
+        "crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs",
+        "crates/kiln-tensor/tests/rocm_latency_bench.rs"
+      ],
+      "gate": "hardware_latency_thresholds",
+      "phase8_requirement": "backend-specific latency thresholds on known hardware fixtures",
+      "status": "covered",
+      "supplemental_commands": []
+    },
+    {
+      "command": "python3 scripts/generate_backend_capability_report.py --self-test && python3 scripts/generate_backend_capability_report.py --check",
+      "coverage_blockers": [],
+      "evidence": [
+        "docs/backend-capability-report.md",
+        "docs/backend-capability-report.json",
+        "scripts/generate_backend_capability_report.py",
+        "scripts/check_unification_gates.sh"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "docs/backend-capability-report.md",
+        "docs/backend-capability-report.json",
+        "scripts/generate_backend_capability_report.py",
+        "scripts/check_unification_gates.sh"
+      ],
+      "gate": "generated_capability_dashboard",
+      "phase8_requirement": "generated capability dashboard checked into docs or build artifacts",
+      "status": "covered",
+      "supplemental_commands": []
+    }
+  ],
+  "decode_hot_path_policy": {
+    "cpu": {
+      "debug_opt_in": "not required",
+      "default_policy": "CorrectnessAllowed",
+      "enforcement": "CPU is the reference path"
+    },
+    "cuda": {
+      "debug_opt_in": "not required",
+      "default_policy": "CorrectnessAllowed",
+      "enforcement": "CUDA native misses remain device-visible/errors rather than silent host staging"
+    },
+    "metal": {
+      "debug_opt_in": "KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 or KILN_METAL_DECODE_BATCH_GENERIC_FALLBACK=1",
+      "default_policy": "NativeRequired",
+      "enforcement": "batched/sample decode errors before generic fallback when no Metal native path produced tokens"
+    },
+    "rocm": {
+      "debug_opt_in": "KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 or KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK=1",
+      "default_policy": "NativeRequired",
+      "enforcement": "batched decode errors before generic fallback when no ROCm native path produced tokens"
+    },
+    "vulkan": {
+      "debug_opt_in": "KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 or KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1",
+      "default_policy": "NativeRequired",
+      "enforcement": "keeps the existing Vulkan no-generic-fallback default and routes it through FallbackPolicy"
+    }
+  },
+  "fallback_policy": {
+    "cuda": {
+      "counter": "none",
+      "evidence": "crates/kiln-tensor/src/device_op.rs CUDA native miss falls through on CUDA storage and fails loudly",
+      "generic_device_op_fallback": "strict_native_miss_errors"
+    },
+    "metal": {
+      "counter": "kiln_tensor::profile::device_op_host_fallback_counts().metal_op{1,2,3}",
+      "evidence": "crates/kiln-tensor/src/device_op.rs Metal missing native forward stages through CPU",
+      "generic_device_op_fallback": "host_round_trip_correctness_fallback"
+    },
+    "rocm": {
+      "counter": "kiln_tensor::profile::device_op_host_fallback_counts().rocm_op{1,2,3}",
+      "evidence": "crates/kiln-tensor/src/device_op.rs ROCm missing native forward stages through CPU",
+      "generic_device_op_fallback": "host_round_trip_correctness_fallback"
+    },
+    "vulkan": {
+      "counter": "kiln_tensor::profile::device_op_host_fallback_counts().vulkan_op{1,2,3}",
+      "evidence": "crates/kiln-tensor/src/device_op.rs Vulkan missing native forward stages through CPU",
+      "generic_device_op_fallback": "host_round_trip_correctness_fallback"
+    }
+  },
+  "features": {
+    "kiln-model": {
+      "cuda": [
+        "dep:cudarc",
+        "kiln-conv1d-kernel/cuda",
+        "kiln-flash-attn/cuda",
+        "kiln-gdn-kernel/cuda",
+        "kiln-marlin-gemm/cuda",
+        "kiln-rmsnorm-kernel/cuda",
+        "dep:kiln-tensor-id",
+        "kiln-kt-bridge/cuda",
+        "kiln-tensor/cuda",
+        "dep:half",
+        "dep:bytemuck",
+        "dep:kiln-autograd"
+      ],
+      "metal": [
+        "kiln-kt-bridge/metal",
+        "dep:objc2",
+        "dep:objc2-metal",
+        "kiln-tensor/metal",
+        "dep:kiln-autograd",
+        "dep:half",
+        "dep:kiln-graph-metal",
+        "kiln-graph-metal/metal"
+      ],
+      "rocm": [
+        "dep:kiln-hip",
+        "kiln-conv1d-kernel/rocm",
+        "kiln-flash-attn/rocm",
+        "kiln-gdn-kernel/rocm",
+        "kiln-marlin-gemm/rocm",
+        "kiln-rmsnorm-kernel/rocm",
+        "dep:kiln-tensor-id",
+        "kiln-kt-bridge/rocm",
+        "kiln-tensor/rocm",
+        "dep:half",
+        "dep:bytemuck",
+        "dep:kiln-autograd"
+      ],
+      "vulkan": [
+        "dep:kiln-vulkan-kernel",
+        "dep:kiln-tensor-id",
+        "kiln-core/vulkan",
+        "dep:half",
+        "dep:bytemuck",
+        "dep:kiln-autograd",
+        "kiln-tensor/vulkan",
+        "kiln-kt-bridge/vulkan"
+      ]
+    },
+    "kiln-server": {
+      "cuda": [
+        "kiln-model/cuda",
+        "kiln-tensor/cuda",
+        "kiln-train/cuda",
+        "kiln-kt-bridge/cuda"
+      ],
+      "metal": [
+        "kiln-model/metal",
+        "kiln-tensor/metal",
+        "kiln-kt-bridge/metal",
+        "kiln-train/metal"
+      ],
+      "rocm": [
+        "kiln-model/rocm",
+        "kiln-tensor/rocm",
+        "kiln-train/rocm",
+        "kiln-kt-bridge/rocm"
+      ],
+      "vulkan": [
+        "kiln-model/vulkan",
+        "kiln-tensor/vulkan",
+        "kiln-train/vulkan",
+        "kiln-kt-bridge/vulkan"
+      ]
+    },
+    "kiln-tensor": {
+      "cuda": [
+        "dep:cudarc",
+        "dep:kiln-blas"
+      ],
+      "metal": [
+        "dep:objc2",
+        "dep:objc2-metal",
+        "dep:objc2-foundation"
+      ],
+      "rocm": [
+        "dep:kiln-hip",
+        "dep:kiln-rocblas"
+      ],
+      "vulkan": [
+        "dep:kiln-vulkan-kernel"
+      ]
+    },
+    "kiln-train": {
+      "cuda": [
+        "kiln-model/cuda",
+        "kiln-flce-kernel/cuda",
+        "kiln-rmsnorm-kernel/cuda",
+        "kiln-opd-loss-kernel/cuda",
+        "kiln-kt-bridge/cuda"
+      ],
+      "metal": [
+        "kiln-model/metal",
+        "kiln-kt-bridge/metal",
+        "kiln-opd-loss-kernel/metal"
+      ],
+      "rocm": [
+        "kiln-model/rocm",
+        "kiln-flce-kernel/rocm",
+        "kiln-rmsnorm-kernel/rocm",
+        "kiln-opd-loss-kernel/rocm",
+        "kiln-kt-bridge/rocm"
+      ],
+      "vulkan": [
+        "kiln-model/vulkan",
+        "dep:kiln-vulkan-kernel",
+        "kiln-opd-loss-kernel/vulkan",
+        "kiln-kt-bridge/vulkan"
+      ]
+    }
+  },
+  "focused_backend_facets": {
+    "AttentionBackend": {
+      "concrete_impl_count": 5,
+      "concrete_impls": [
+        "CpuBackend",
+        "CudaBackend",
+        "MetalBackend",
+        "RocmBackend",
+        "VulkanBackend"
+      ],
+      "forwarding_impl": "concrete_authoritative",
+      "method_count": 10,
+      "methods": [
+        "runtime_flash_attn_paged_decode",
+        "runtime_flash_attn_paged_decode_contiguous",
+        "runtime_flash_attn_paged_decode_contiguous_batch",
+        "runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen",
+        "runtime_flash_attn_prefill",
+        "runtime_flash_attn_prefill_head_major",
+        "runtime_supports_flash_attn_paged_decode",
+        "runtime_supports_flash_attn_prefill",
+        "runtime_supports_flash_attn_prefill_head_major",
+        "runtime_supports_strict_paged_decode_contiguous_batch"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    },
+    "BackendIdentity": {
+      "concrete_impl_count": 5,
+      "concrete_impls": [
+        "CpuBackend",
+        "CudaBackend",
+        "MetalBackend",
+        "RocmBackend",
+        "VulkanBackend"
+      ],
+      "forwarding_impl": "concrete_authoritative",
+      "method_count": 3,
+      "methods": [
+        "runtime_as_any",
+        "runtime_device",
+        "runtime_name"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    },
+    "ConvBackend": {
+      "concrete_impl_count": 5,
+      "concrete_impls": [
+        "CpuBackend",
+        "CudaBackend",
+        "MetalBackend",
+        "RocmBackend",
+        "VulkanBackend"
+      ],
+      "forwarding_impl": "concrete_authoritative",
+      "method_count": 4,
+      "methods": [
+        "runtime_causal_conv1d_prefill",
+        "runtime_causal_conv1d_update",
+        "runtime_supports_causal_conv1d_prefill",
+        "runtime_supports_causal_conv1d_update"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    },
+    "GdnBackend": {
+      "concrete_impl_count": 5,
+      "concrete_impls": [
+        "CpuBackend",
+        "CudaBackend",
+        "MetalBackend",
+        "RocmBackend",
+        "VulkanBackend"
+      ],
+      "forwarding_impl": "concrete_authoritative",
+      "method_count": 31,
+      "methods": [
+        "runtime_gdn_ab_in_proj_prefill",
+        "runtime_gdn_chunk_prep",
+        "runtime_gdn_chunk_scan",
+        "runtime_gdn_chunkwise_forward",
+        "runtime_gdn_decode_gates_recurrent",
+        "runtime_gdn_decode_gates_recurrent_rmsnorm",
+        "runtime_gdn_decode_qk_norm_gates_recurrent",
+        "runtime_gdn_decode_qk_norm_gates_recurrent_rmsnorm",
+        "runtime_gdn_forward_substitution",
+        "runtime_gdn_full_chunk_forward",
+        "runtime_gdn_full_chunk_forward_head_last_into",
+        "runtime_gdn_gated_rms_norm",
+        "runtime_gdn_gates",
+        "runtime_gdn_in_proj_decode",
+        "runtime_gdn_recurrent_prefill_head_last",
+        "runtime_gdn_recurrent_prefill_native_head_last",
+        "runtime_gdn_recurrent_qk_norm_prefill_native_head_last",
+        "runtime_gdn_recurrent_step",
+        "runtime_supports_gdn_chunk_prep",
+        "runtime_supports_gdn_chunk_scan",
+        "runtime_supports_gdn_decode_gates_recurrent_unexpanded_qk",
+        "runtime_supports_gdn_decode_qk_norm_gates_recurrent",
+        "runtime_supports_gdn_forward_substitution",
+        "runtime_supports_gdn_full_chunk_forward",
+        "runtime_supports_gdn_full_chunk_forward_head_last",
+        "runtime_supports_gdn_gated_rms_norm",
+        "runtime_supports_gdn_gates",
+        "runtime_supports_gdn_recurrent_prefill_head_last",
+        "runtime_supports_gdn_recurrent_prefill_native_head_last",
+        "runtime_supports_gdn_recurrent_qk_norm_prefill_native_head_last",
+        "runtime_supports_gdn_recurrent_step"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    },
+    "LinearBackend": {
+      "concrete_impl_count": 5,
+      "concrete_impls": [
+        "CpuBackend",
+        "CudaBackend",
+        "MetalBackend",
+        "RocmBackend",
+        "VulkanBackend"
+      ],
+      "forwarding_impl": "concrete_authoritative",
+      "method_count": 13,
+      "methods": [
+        "runtime_drop_uploaded_bf16_weights",
+        "runtime_full_attn_qkv_combined_decode",
+        "runtime_full_attn_qkv_decode",
+        "runtime_linear_decode",
+        "runtime_linear_prefill_apply",
+        "runtime_linear_prefill_apply_offset",
+        "runtime_lora_decode_add",
+        "runtime_lora_delta_resident",
+        "runtime_matmul",
+        "runtime_mlp_decode",
+        "runtime_mlp_gate_up_decode",
+        "runtime_prewarm_decode_weights",
+        "runtime_supports_matmul_request"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    },
+    "OptimizerBackend": {
+      "concrete_impl_count": 5,
+      "concrete_impls": [
+        "CpuBackend",
+        "CudaBackend",
+        "MetalBackend",
+        "RocmBackend",
+        "VulkanBackend"
+      ],
+      "forwarding_impl": "concrete_authoritative",
+      "method_count": 2,
+      "methods": [
+        "runtime_dispatch_adamw_step",
+        "runtime_dispatch_sgd_step"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    },
+    "PagedKvBackend": {
+      "concrete_impl_count": 5,
+      "concrete_impls": [
+        "CpuBackend",
+        "CudaBackend",
+        "MetalBackend",
+        "RocmBackend",
+        "VulkanBackend"
+      ],
+      "forwarding_impl": "concrete_authoritative",
+      "method_count": 4,
+      "methods": [
+        "runtime_paged_kv_head_major_read",
+        "runtime_paged_kv_head_major_read_append_token_major",
+        "runtime_supports_paged_kv_head_major_read",
+        "runtime_supports_paged_kv_head_major_read_append_token_major"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    },
+    "ReplayBackend": {
+      "concrete_impl_count": 5,
+      "concrete_impls": [
+        "CpuBackend",
+        "CudaBackend",
+        "MetalBackend",
+        "RocmBackend",
+        "VulkanBackend"
+      ],
+      "forwarding_impl": "concrete_authoritative",
+      "method_count": 6,
+      "methods": [
+        "runtime_decode_resident_pool_ready",
+        "runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs",
+        "runtime_replay_authority",
+        "runtime_replay_key_for_request",
+        "runtime_supports_replay_request",
+        "runtime_supports_resident_decode"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    },
+    "ResidencyBackend": {
+      "concrete_impl_count": 5,
+      "concrete_impls": [
+        "CpuBackend",
+        "CudaBackend",
+        "MetalBackend",
+        "RocmBackend",
+        "VulkanBackend"
+      ],
+      "forwarding_impl": "concrete_authoritative",
+      "method_count": 18,
+      "methods": [
+        "runtime_assemble_gdn_recurrent_resident_batch_rows",
+        "runtime_assemble_linear_attn_gdn_state_batch_kt",
+        "runtime_enter_gdn_recurrent_resident_state_scope",
+        "runtime_evict_gdn_recurrent_resident_state",
+        "runtime_evict_resident_activation",
+        "runtime_exit_gdn_recurrent_resident_state_scope",
+        "runtime_has_gdn_recurrent_resident_state",
+        "runtime_has_linear_attn_gdn_state_kt",
+        "runtime_has_resident_activation",
+        "runtime_materialize_gdn_recurrent_resident_state",
+        "runtime_register_resident_activation",
+        "runtime_resident_activation_resource",
+        "runtime_resolve_resident_activation",
+        "runtime_scatter_gdn_recurrent_resident_batch_rows",
+        "runtime_scatter_linear_attn_gdn_state_batch_kt",
+        "runtime_seed_linear_attn_gdn_state_kt",
+        "runtime_supports_resident_activation",
+        "runtime_update_resident_activation"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    },
+    "SamplingBackend": {
+      "concrete_impl_count": 5,
+      "concrete_impls": [
+        "CpuBackend",
+        "CudaBackend",
+        "MetalBackend",
+        "RocmBackend",
+        "VulkanBackend"
+      ],
+      "forwarding_impl": "concrete_authoritative",
+      "method_count": 8,
+      "methods": [
+        "runtime_linear_decode_argmax",
+        "runtime_linear_decode_argmax_batch",
+        "runtime_linear_decode_sample",
+        "runtime_linear_decode_sample_batch",
+        "runtime_supports_linear_decode_argmax",
+        "runtime_supports_linear_decode_argmax_batch",
+        "runtime_supports_linear_decode_sample",
+        "runtime_supports_linear_decode_sample_batch"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    },
+    "StartupBackend": {
+      "concrete_impl_count": 5,
+      "concrete_impls": [
+        "CpuBackend",
+        "CudaBackend",
+        "MetalBackend",
+        "RocmBackend",
+        "VulkanBackend"
+      ],
+      "forwarding_impl": "concrete_authoritative",
+      "method_count": 1,
+      "methods": [
+        "runtime_precompile_startup_kernels"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    },
+    "TrainingLossBackend": {
+      "concrete_impl_count": 5,
+      "concrete_impls": [
+        "CpuBackend",
+        "CudaBackend",
+        "MetalBackend",
+        "RocmBackend",
+        "VulkanBackend"
+      ],
+      "forwarding_impl": "concrete_authoritative",
+      "method_count": 9,
+      "methods": [
+        "runtime_final_rmsnorm_backward_route",
+        "runtime_grpo_kl_auxiliary_route",
+        "runtime_grpo_loss_route",
+        "runtime_opd_loss_route",
+        "runtime_opd_phase_b_backward_route",
+        "runtime_sft_flce_loss_route",
+        "runtime_tape_forward_backward_route",
+        "runtime_training_capabilities",
+        "runtime_training_precision_policy"
+      ],
+      "source": "crates/kiln-model/src/backend/mod.rs"
+    }
+  },
+  "migration_phase_status": [
+    {
+      "contract": "landed",
+      "deliverables": [
+        "generated Markdown and JSON capability report",
+        "feature fanout, override, support predicate, env gate, and fallback audit",
+        "literal-true support predicate mismatch guard",
+        "stale naming and graph authority clarification evidence"
+      ],
+      "evidence": [
+        "docs/backend-engine-unification-plan.md",
+        "scripts/generate_backend_capability_report.py",
+        "docs/backend-capability-report.md",
+        "docs/backend-capability-report.json",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "docs/backend-engine-unification-plan.md",
+        "scripts/generate_backend_capability_report.py",
+        "docs/backend-capability-report.md",
+        "docs/backend-capability-report.json",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "genuine": true,
+      "migration": "complete",
+      "migration_signals": [],
+      "phase": 0,
+      "remaining": [],
+      "report_sections": [
+        "Feature Fanout",
+        "BackendRuntime Overrides",
+        "Support Predicates",
+        "Replay Authority",
+        "Mismatch Audit"
+      ],
+      "status": "covered",
+      "title": "Audit and stabilize capability reporting"
+    },
+    {
+      "contract": "landed",
+      "deliverables": [
+        "focused backend trait family",
+        "BackendRuntime compatibility facade",
+        "focused facet forwarding evidence",
+        "call-site contracts against broad facade regressions"
+      ],
+      "evidence": [
+        "crates/kiln-model/src/backend/mod.rs",
+        "scripts/generate_backend_capability_report.py",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-model/src/backend/mod.rs",
+        "scripts/generate_backend_capability_report.py",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "genuine": true,
+      "migration": "complete",
+      "migration_signals": [
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs",
+            "crates/kiln-model/src/backend/cpu.rs",
+            "crates/kiln-model/src/backend/cuda.rs",
+            "crates/kiln-model/src/backend/rocm.rs",
+            "crates/kiln-model/src/backend/metal_runtime.rs",
+            "crates/kiln-model/src/backend/vulkan.rs"
+          ],
+          "expected": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "name": "backend_identity_facet_authoritative",
+          "observed": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs",
+            "crates/kiln-model/src/backend/cpu.rs",
+            "crates/kiln-model/src/backend/cuda.rs",
+            "crates/kiln-model/src/backend/rocm.rs",
+            "crates/kiln-model/src/backend/metal_runtime.rs",
+            "crates/kiln-model/src/backend/vulkan.rs"
+          ],
+          "expected": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "name": "startup_backend_facet_authoritative",
+          "observed": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs",
+            "crates/kiln-model/src/backend/cpu.rs",
+            "crates/kiln-model/src/backend/cuda.rs",
+            "crates/kiln-model/src/backend/rocm.rs",
+            "crates/kiln-model/src/backend/metal_runtime.rs",
+            "crates/kiln-model/src/backend/vulkan.rs"
+          ],
+          "expected": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "name": "attention_backend_facet_authoritative",
+          "observed": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs",
+            "crates/kiln-model/src/backend/cpu.rs",
+            "crates/kiln-model/src/backend/cuda.rs",
+            "crates/kiln-model/src/backend/rocm.rs",
+            "crates/kiln-model/src/backend/metal_runtime.rs",
+            "crates/kiln-model/src/backend/vulkan.rs"
+          ],
+          "expected": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "name": "gdn_backend_facet_authoritative",
+          "observed": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs",
+            "crates/kiln-model/src/backend/cpu.rs",
+            "crates/kiln-model/src/backend/cuda.rs",
+            "crates/kiln-model/src/backend/rocm.rs",
+            "crates/kiln-model/src/backend/metal_runtime.rs",
+            "crates/kiln-model/src/backend/vulkan.rs"
+          ],
+          "expected": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "name": "conv_backend_facet_authoritative",
+          "observed": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs",
+            "crates/kiln-model/src/backend/cpu.rs",
+            "crates/kiln-model/src/backend/cuda.rs",
+            "crates/kiln-model/src/backend/rocm.rs",
+            "crates/kiln-model/src/backend/metal_runtime.rs",
+            "crates/kiln-model/src/backend/vulkan.rs"
+          ],
+          "expected": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "name": "linear_backend_facet_authoritative",
+          "observed": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs",
+            "crates/kiln-model/src/backend/cpu.rs",
+            "crates/kiln-model/src/backend/cuda.rs",
+            "crates/kiln-model/src/backend/rocm.rs",
+            "crates/kiln-model/src/backend/metal_runtime.rs",
+            "crates/kiln-model/src/backend/vulkan.rs"
+          ],
+          "expected": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "name": "residency_backend_facet_authoritative",
+          "observed": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs",
+            "crates/kiln-model/src/backend/cpu.rs",
+            "crates/kiln-model/src/backend/cuda.rs",
+            "crates/kiln-model/src/backend/rocm.rs",
+            "crates/kiln-model/src/backend/metal_runtime.rs",
+            "crates/kiln-model/src/backend/vulkan.rs"
+          ],
+          "expected": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "name": "sampling_backend_facet_authoritative",
+          "observed": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs",
+            "crates/kiln-model/src/backend/cpu.rs",
+            "crates/kiln-model/src/backend/cuda.rs",
+            "crates/kiln-model/src/backend/rocm.rs",
+            "crates/kiln-model/src/backend/metal_runtime.rs",
+            "crates/kiln-model/src/backend/vulkan.rs"
+          ],
+          "expected": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "name": "optimizer_backend_facet_authoritative",
+          "observed": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs",
+            "crates/kiln-model/src/backend/cpu.rs",
+            "crates/kiln-model/src/backend/cuda.rs",
+            "crates/kiln-model/src/backend/rocm.rs",
+            "crates/kiln-model/src/backend/metal_runtime.rs",
+            "crates/kiln-model/src/backend/vulkan.rs"
+          ],
+          "expected": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "name": "paged_kv_backend_facet_authoritative",
+          "observed": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs",
+            "crates/kiln-model/src/backend/cpu.rs",
+            "crates/kiln-model/src/backend/cuda.rs",
+            "crates/kiln-model/src/backend/rocm.rs",
+            "crates/kiln-model/src/backend/metal_runtime.rs",
+            "crates/kiln-model/src/backend/vulkan.rs"
+          ],
+          "expected": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "name": "replay_backend_facet_authoritative",
+          "observed": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs",
+            "crates/kiln-model/src/backend/cpu.rs",
+            "crates/kiln-model/src/backend/cuda.rs",
+            "crates/kiln-model/src/backend/rocm.rs",
+            "crates/kiln-model/src/backend/metal_runtime.rs",
+            "crates/kiln-model/src/backend/vulkan.rs"
+          ],
+          "expected": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "name": "training_loss_backend_facet_authoritative",
+          "observed": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs"
+          ],
+          "expected": 0,
+          "name": "focused_trait_forwarding_shims_removed",
+          "observed": 0,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs"
+          ],
+          "expected": "<= 8",
+          "name": "backend_runtime_method_count_below_gate",
+          "observed": 3,
+          "passed": true
+        }
+      ],
+      "phase": 1,
+      "remaining": [],
+      "report_sections": [
+        "Focused Backend Facets",
+        "Request Capability Queries"
+      ],
+      "status": "covered",
+      "title": "Introduce focused backend traits"
+    },
+    {
+      "contract": "landed",
+      "deliverables": [
+        "typed fallback policy per backend and mode",
+        "host fallback counters for non-CUDA bring-up paths",
+        "decode and training hot-path native-required guards",
+        "CPU/correctness fallback observability"
+      ],
+      "evidence": [
+        "crates/kiln-tensor/src/device_op.rs",
+        "crates/kiln-model/src/generate.rs",
+        "crates/kiln-train/src/trainer.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-tensor/src/device_op.rs",
+        "crates/kiln-model/src/generate.rs",
+        "crates/kiln-train/src/trainer.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "genuine": true,
+      "migration": "complete",
+      "migration_signals": [
+        {
+          "evidence": [
+            "crates/kiln-model/src/forward.rs",
+            "crates/kiln-model/src/generate.rs"
+          ],
+          "expected": 0,
+          "name": "decode_hot_path_duplicate_helpers_removed",
+          "observed": 0,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/capability.rs",
+            "crates/kiln-model/src/forward.rs",
+            "crates/kiln-model/src/generate.rs"
+          ],
+          "expected": 6,
+          "name": "decode_hot_path_fallback_delegates_to_backend_capability",
+          "observed": 6,
+          "passed": true
+        }
+      ],
+      "phase": 2,
+      "remaining": [],
+      "report_sections": [
+        "Generic DeviceOp Fallback",
+        "Decode Hot-Path Fallback",
+        "Training Optimizer Fallback"
+      ],
+      "status": "covered",
+      "title": "Normalize fallback policy"
+    },
+    {
+      "contract": "landed",
+      "deliverables": [
+        "ResidentResource and ResidentRegistry descriptors",
+        "backend-specific resident resource wrappers",
+        "shared lifecycle state and replay-stability metadata",
+        "focused residency call-site contracts"
+      ],
+      "evidence": [
+        "crates/kiln-model/src/backend/residency.rs",
+        "crates/kiln-model/src/backend/metal_residency.rs",
+        "crates/kiln-model/src/backend/vulkan_residency.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-model/src/backend/residency.rs",
+        "crates/kiln-model/src/backend/metal_residency.rs",
+        "crates/kiln-model/src/backend/vulkan_residency.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "genuine": true,
+      "migration": "complete",
+      "migration_signals": [
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs"
+          ],
+          "expected": 0,
+          "name": "resident_registry_blanket_adapter_removed",
+          "observed": 0,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/cpu.rs",
+            "crates/kiln-model/src/backend/cuda.rs",
+            "crates/kiln-model/src/backend/rocm.rs",
+            "crates/kiln-model/src/backend/metal_runtime.rs",
+            "crates/kiln-model/src/backend/vulkan.rs"
+          ],
+          "expected": ">= 5",
+          "name": "production_backends_implement_resident_registry",
+          "observed": 5,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs"
+          ],
+          "expected": 7,
+          "name": "residency_backend_facade_delegates_to_registry",
+          "observed": 7,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/cuda.rs",
+            "crates/kiln-model/src/backend/rocm.rs",
+            "crates/kiln-model/src/backend/metal_residency.rs",
+            "crates/kiln-model/src/backend/vulkan_residency.rs"
+          ],
+          "expected": 0,
+          "name": "resident_registry_process_global_statics_removed",
+          "observed": 0,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs",
+            "crates/kiln-model/src/backend/residency.rs"
+          ],
+          "expected": "> 0",
+          "name": "resident_registry_drop_drains_test_present",
+          "observed": 1,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/cuda_rocm_common.rs",
+            "crates/kiln-model/src/backend/metal_residency.rs",
+            "crates/kiln-model/src/backend/vulkan_residency.rs"
+          ],
+          "expected": ">= 3",
+          "name": "resident_registry_lifecycle_metadata_persisted",
+          "observed": 3,
+          "passed": true
+        }
+      ],
+      "phase": 3,
+      "remaining": [],
+      "report_sections": [
+        "Resident Resource Descriptors",
+        "Focused Backend Facets"
+      ],
+      "status": "covered",
+      "title": "Unify resident resource semantics"
+    },
+    {
+      "contract": "landed",
+      "deliverables": [
+        "MatmulRequest and LinearRequest descriptors",
+        "BLASLt request projection shared by CUDA and ROCm",
+        "Metal and Vulkan request/capability evidence",
+        "matmul/linear parity and algorithm-cache gates"
+      ],
+      "evidence": [
+        "crates/kiln-model/src/backend/capability.rs",
+        "crates/kiln-model/src/backend/mod.rs",
+        "crates/kiln-blas/src/cublaslt_handle.rs",
+        "crates/kiln-rocblas/src/hipblaslt_handle.rs",
+        "crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-model/src/backend/capability.rs",
+        "crates/kiln-model/src/backend/mod.rs",
+        "crates/kiln-blas/src/cublaslt_handle.rs",
+        "crates/kiln-rocblas/src/hipblaslt_handle.rs",
+        "crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "genuine": true,
+      "migration": "complete",
+      "migration_signals": [
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/capability.rs",
+            "crates/kiln-model/src/backend/mod.rs"
+          ],
+          "expected": 13,
+          "name": "matmul_request_descriptor_w4_1_lossless",
+          "observed": 13,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/capability.rs",
+            "crates/kiln-model/src/backend/mod.rs",
+            "crates/kiln-model/src/backend/cpu.rs",
+            "crates/kiln-model/src/backend/cuda.rs",
+            "crates/kiln-model/src/backend/rocm.rs",
+            "crates/kiln-model/src/backend/metal_runtime.rs",
+            "crates/kiln-model/src/backend/vulkan.rs"
+          ],
+          "expected": 7,
+          "name": "matmul_support_query_delegates_to_linear_backend",
+          "observed": 7,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs"
+          ],
+          "expected": 5,
+          "name": "matmul_transposed_request_contract_present",
+          "observed": 5,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-tensor/src/ops/matmul.rs",
+            "crates/kiln-model/src/forward.rs",
+            "crates/kiln-model/src/backend/capability.rs"
+          ],
+          "expected": 0,
+          "name": "matmul_linear_identity_dispatch_removed",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "phase": 4,
+      "remaining": [],
+      "report_sections": [
+        "Typed Request Descriptors",
+        "Request Capability Queries",
+        "Conformance And Performance Gates"
+      ],
+      "status": "covered",
+      "title": "Unify matmul and linear dispatch"
+    },
+    {
+      "contract": "landed",
+      "deliverables": [
+        "ReplayBackend focused facet",
+        "shared replay key and replay authority descriptor",
+        "CUDA/HIP graph, Metal ICB, and Vulkan CommandBatch authority evidence",
+        "eager-vs-replay parity gates"
+      ],
+      "evidence": [
+        "crates/kiln-graph/src/replay_plan.rs",
+        "crates/kiln-graph-cuda/src/lib.rs",
+        "crates/kiln-graph-metal/src/lib.rs",
+        "crates/kiln-graph-vulkan/src/lib.rs",
+        "crates/kiln-model/src/cuda_graph.rs",
+        "crates/kiln-model/src/rocm_graph.rs",
+        "crates/kiln-model/src/metal_graph.rs",
+        "crates/kiln-model/src/vk_decode_resident.rs",
+        "crates/kiln-vulkan-kernel/src/cmd_batch.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-graph/src/replay_plan.rs",
+        "crates/kiln-graph-cuda/src/lib.rs",
+        "crates/kiln-graph-metal/src/lib.rs",
+        "crates/kiln-graph-vulkan/src/lib.rs",
+        "crates/kiln-model/src/cuda_graph.rs",
+        "crates/kiln-model/src/rocm_graph.rs",
+        "crates/kiln-model/src/metal_graph.rs",
+        "crates/kiln-model/src/vk_decode_resident.rs",
+        "crates/kiln-vulkan-kernel/src/cmd_batch.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "genuine": true,
+      "migration": "complete",
+      "migration_signals": [
+        {
+          "evidence": [
+            "crates/kiln-graph/src/replay_plan.rs"
+          ],
+          "expected": 8,
+          "name": "replay_contract_w5_0_fixed",
+          "observed": 8,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/cuda_graph.rs",
+            "crates/kiln-model/src/rocm_graph.rs",
+            "crates/kiln-model/src/metal_graph.rs",
+            "crates/kiln-model/src/vk_decode_resident.rs"
+          ],
+          "expected": 4,
+          "name": "production_replay_paths_use_replay_plan",
+          "observed": 4,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/tests/backend_capability_contract.rs",
+            "crates/kiln-model/src/forward.rs"
+          ],
+          "expected": 3,
+          "name": "replay_parity_w5_3_live_gate",
+          "observed": 3,
+          "passed": true
+        }
+      ],
+      "phase": 5,
+      "remaining": [],
+      "report_sections": [
+        "Focused Backend Facets",
+        "Replay Authority",
+        "Conformance And Performance Gates"
+      ],
+      "status": "covered",
+      "title": "Move replay into the authoritative graph layer"
+    },
+    {
+      "contract": "landed",
+      "deliverables": [
+        "SFT/GRPO/OPD policy routed through focused capability surfaces",
+        "TrainingLossBackend and OptimizerBackend evidence",
+        "explicit backend training precision policy",
+        "per-backend one-step training proof gates"
+      ],
+      "evidence": [
+        "crates/kiln-train/src/trainer.rs",
+        "crates/kiln-train/src/sft_tape_shim.rs",
+        "crates/kiln-train/src/grpo_tape_shim.rs",
+        "crates/kiln-train/src/opd_tape_shim.rs",
+        "crates/kiln-model/src/backend/metal_training.rs",
+        "crates/kiln-model/src/backend/vulkan_training.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-train/src/trainer.rs",
+        "crates/kiln-train/src/sft_tape_shim.rs",
+        "crates/kiln-train/src/grpo_tape_shim.rs",
+        "crates/kiln-train/src/opd_tape_shim.rs",
+        "crates/kiln-model/src/backend/metal_training.rs",
+        "crates/kiln-model/src/backend/vulkan_training.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "genuine": true,
+      "migration": "complete",
+      "migration_signals": [
+        {
+          "evidence": [
+            "crates/kiln-model/src/forward.rs",
+            "crates/kiln-model/src/tape_forward.rs",
+            "crates/kiln-train/src/trainer.rs"
+          ],
+          "expected": 0,
+          "name": "training_precision_for_device_family_removed_from_production",
+          "observed": 0,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs"
+          ],
+          "expected": 2,
+          "name": "training_precision_policy_delegates_to_backend_trait",
+          "observed": 2,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/tape_forward.rs"
+          ],
+          "expected": 0,
+          "name": "tape_forward_gpu_family_guards_removed",
+          "observed": 0,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs",
+            "crates/kiln-model/src/tape_forward.rs"
+          ],
+          "expected": 4,
+          "name": "tape_forward_route_delegates_to_backend_trait",
+          "observed": 4,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/tests/cuda_sft_step_proof.rs",
+            "crates/kiln-model/tests/rocm_sft_step_proof.rs"
+          ],
+          "expected": 6,
+          "name": "sft_step_proofs_route_optimizer_backend",
+          "observed": 6,
+          "passed": true
+        }
+      ],
+      "phase": 6,
+      "remaining": [],
+      "report_sections": [
+        "Training Optimizer Fallback",
+        "Training Loss Routing",
+        "Training Precision Policy",
+        "Optimizer Dispatch",
+        "Conformance And Performance Gates"
+      ],
+      "status": "covered",
+      "title": "Finish shared training integration"
+    },
+    {
+      "contract": "landed",
+      "deliverables": [
+        "Metal split by operation family and runtime concern",
+        "Vulkan split around explicit-resource boundaries",
+        "CUDA/ROCm common helper factoring",
+        "backend-native platform differences preserved"
+      ],
+      "evidence": [
+        "crates/kiln-model/src/backend/metal.rs",
+        "crates/kiln-model/src/backend/metal_attention.rs",
+        "crates/kiln-model/src/backend/metal_gdn.rs",
+        "crates/kiln-model/src/backend/metal_residency.rs",
+        "crates/kiln-model/src/backend/metal_training.rs",
+        "crates/kiln-model/src/backend/vulkan.rs",
+        "crates/kiln-model/src/backend/vulkan_residency.rs",
+        "crates/kiln-model/src/backend/vulkan_tensor_bridge.rs",
+        "crates/kiln-model/src/backend/cuda_rocm_common.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-model/src/backend/metal.rs",
+        "crates/kiln-model/src/backend/metal_attention.rs",
+        "crates/kiln-model/src/backend/metal_gdn.rs",
+        "crates/kiln-model/src/backend/metal_residency.rs",
+        "crates/kiln-model/src/backend/metal_training.rs",
+        "crates/kiln-model/src/backend/vulkan.rs",
+        "crates/kiln-model/src/backend/vulkan_residency.rs",
+        "crates/kiln-model/src/backend/vulkan_tensor_bridge.rs",
+        "crates/kiln-model/src/backend/cuda_rocm_common.rs",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "genuine": true,
+      "migration": "complete",
+      "migration_signals": [],
+      "phase": 7,
+      "remaining": [],
+      "report_sections": [
+        "BackendRuntime Overrides",
+        "Focused Backend Facets"
+      ],
+      "status": "covered",
+      "title": "Decompose backend modules"
+    },
+    {
+      "contract": "landed",
+      "deliverables": [
+        "backend conformance suite",
+        "performance sentinel suite",
+        "checked-in generated capability dashboard",
+        "hardware latency fixture manifest and result schema"
+      ],
+      "evidence": [
+        "docs/backend-capability-report.md",
+        "docs/backend-capability-report.json",
+        "docs/backend-latency-fixtures.json",
+        "docs/backend-latency-result-schema.md",
+        "scripts/check_unification_gates.sh",
+        "scripts/run_backend_latency_fixture.py",
+        "scripts/write_backend_latency_result_artifact.py",
+        "scripts/import_backend_latency_artifact.py",
+        "scripts/lock_backend_latency_thresholds.py",
+        "scripts/check_backend_latency_fixtures.py",
+        "scripts/plan_backend_latency_fixture_dispatch.py",
+        "scripts/generate_backend_capability_report.py",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "docs/backend-capability-report.md",
+        "docs/backend-capability-report.json",
+        "docs/backend-latency-fixtures.json",
+        "docs/backend-latency-result-schema.md",
+        "scripts/check_unification_gates.sh",
+        "scripts/run_backend_latency_fixture.py",
+        "scripts/write_backend_latency_result_artifact.py",
+        "scripts/import_backend_latency_artifact.py",
+        "scripts/lock_backend_latency_thresholds.py",
+        "scripts/check_backend_latency_fixtures.py",
+        "scripts/plan_backend_latency_fixture_dispatch.py",
+        "scripts/generate_backend_capability_report.py",
+        "crates/kiln-model/tests/backend_capability_contract.rs"
+      ],
+      "genuine": true,
+      "migration": "complete",
+      "migration_signals": [],
+      "phase": 8,
+      "remaining": [],
+      "report_sections": [
+        "Conformance And Performance Gates"
+      ],
+      "status": "covered",
+      "title": "Conformance and performance gates"
+    }
+  ],
+  "mismatches": [],
+  "optimizer_dispatch": {
+    "cuda": {
+      "adamw_step": "overridden",
+      "sgd_step": "overridden"
+    },
+    "metal": {
+      "adamw_step": "overridden",
+      "sgd_step": "default_decline"
+    },
+    "rocm": {
+      "adamw_step": "overridden",
+      "sgd_step": "overridden"
+    },
+    "vulkan": {
+      "adamw_step": "overridden",
+      "sgd_step": "overridden"
+    }
+  },
+  "replay_authority": {
+    "cuda": {
+      "contract_paths": [
+        "crates/kiln-graph/src/replay_plan.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-model/src/cuda_graph.rs",
+        "crates/kiln-graph-cuda/src/lib.rs",
+        "crates/kiln-graph/src/replay_plan.rs",
+        "crates/kiln-model/src/forward.rs"
+      ],
+      "graph_crate_paths": [
+        "crates/kiln-graph-cuda/src/lib.rs"
+      ],
+      "native_primitive": "CUDA graph",
+      "parity_sources": [
+        "crates/kiln-model/src/forward.rs"
+      ],
+      "parity_tests": [
+        "test_cuda_graph_bs1_decode_matches_eager"
+      ],
+      "production_authority": "model_level_runner",
+      "runner_paths": [
+        "crates/kiln-model/src/cuda_graph.rs"
+      ]
+    },
+    "metal": {
+      "contract_paths": [
+        "crates/kiln-graph/src/replay_plan.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-model/src/metal_graph.rs",
+        "crates/kiln-model/src/backend/metal_paged.rs",
+        "crates/kiln-graph-metal/src/lib.rs",
+        "crates/kiln-graph/src/replay_plan.rs",
+        "crates/kiln-model/src/forward.rs"
+      ],
+      "graph_crate_paths": [
+        "crates/kiln-graph-metal/src/lib.rs"
+      ],
+      "native_primitive": "Metal ICB",
+      "parity_sources": [
+        "crates/kiln-model/src/forward.rs",
+        "crates/kiln-model/src/backend/metal_paged.rs"
+      ],
+      "parity_tests": [
+        "test_metal_graph_bs1_decode_matches_eager_across_boundaries_and_buckets",
+        "test_metal_graph_batched_decode_matches_eager_and_replays_bucket",
+        "single_token_paged_decode_icb_matches_eager_and_updates_slot",
+        "batched_paged_decode_icb_matches_eager_and_updates_slots"
+      ],
+      "production_authority": "model_level_runner_with_graph_crate_replay_object",
+      "runner_paths": [
+        "crates/kiln-model/src/metal_graph.rs",
+        "crates/kiln-model/src/backend/metal_paged.rs"
+      ]
+    },
+    "rocm": {
+      "contract_paths": [
+        "crates/kiln-graph/src/replay_plan.rs",
+        "crates/kiln-tensor/tests/rocm_capture_arena.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-model/src/rocm_graph.rs",
+        "crates/kiln-graph/src/replay_plan.rs",
+        "crates/kiln-tensor/tests/rocm_capture_arena.rs"
+      ],
+      "graph_crate_paths": [],
+      "native_primitive": "HIP graph",
+      "parity_sources": [
+        "crates/kiln-model/src/rocm_graph.rs"
+      ],
+      "parity_tests": [
+        "ROCm graph runner byte-identical eager/replay source contract"
+      ],
+      "production_authority": "model_level_runner",
+      "runner_paths": [
+        "crates/kiln-model/src/rocm_graph.rs"
+      ]
+    },
+    "vulkan": {
+      "contract_paths": [
+        "crates/kiln-graph/src/replay_plan.rs"
+      ],
+      "evidence_missing": [],
+      "evidence_present": [
+        "crates/kiln-model/src/vk_decode_resident.rs",
+        "crates/kiln-vulkan-kernel/src/cmd_batch.rs",
+        "crates/kiln-graph-vulkan/src/lib.rs",
+        "crates/kiln-graph/src/replay_plan.rs",
+        "crates/kiln-model/tests/vk_resident_decode_parity.rs"
+      ],
+      "graph_crate_paths": [
+        "crates/kiln-graph-vulkan/src/lib.rs"
+      ],
+      "native_primitive": "Vulkan CommandBatch",
+      "parity_sources": [
+        "crates/kiln-model/tests/vk_resident_decode_parity.rs"
+      ],
+      "parity_tests": [
+        "vk_resident_decode_matches_nonresident_on_qwen35_4b"
+      ],
+      "production_authority": "resident_decode_command_batch",
+      "runner_paths": [
+        "crates/kiln-model/src/vk_decode_resident.rs",
+        "crates/kiln-vulkan-kernel/src/cmd_batch.rs"
+      ]
+    }
+  },
+  "request_capability_queries": [
+    "backend_capabilities",
+    "capability_snapshot",
+    "replay_key_for_request",
+    "supports_attention_request",
+    "supports_linear_request",
+    "supports_matmul_request",
+    "supports_replay_request"
+  ],
+  "request_descriptors": {
+    "AttentionRequest": {
+      "field_count": 13,
+      "fields": [
+        {
+          "name": "kind",
+          "type": "AttentionRequestKind"
+        },
+        {
+          "name": "q_shape",
+          "type": "Vec<usize>"
+        },
+        {
+          "name": "k_shape",
+          "type": "Vec<usize>"
+        },
+        {
+          "name": "v_shape",
+          "type": "Vec<usize>"
+        },
+        {
+          "name": "output_shape",
+          "type": "Vec<usize>"
+        },
+        {
+          "name": "layout",
+          "type": "AttentionLayout"
+        },
+        {
+          "name": "q_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "k_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "v_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "batch",
+          "type": "usize"
+        },
+        {
+          "name": "seq_len",
+          "type": "usize"
+        },
+        {
+          "name": "head_dim",
+          "type": "usize"
+        },
+        {
+          "name": "replay_safe",
+          "type": "bool"
+        }
+      ],
+      "has_batch": true,
+      "has_dtype": true,
+      "has_layout": true,
+      "has_replay_safe": true,
+      "has_shape": true,
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "LinearRequest": {
+      "field_count": 12,
+      "fields": [
+        {
+          "name": "kind",
+          "type": "LinearRequestKind"
+        },
+        {
+          "name": "input_shape",
+          "type": "Vec<usize>"
+        },
+        {
+          "name": "weight_shape",
+          "type": "Vec<usize>"
+        },
+        {
+          "name": "output_shape",
+          "type": "Vec<usize>"
+        },
+        {
+          "name": "layout",
+          "type": "LinearLayouts"
+        },
+        {
+          "name": "input_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "weight_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "output_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "batch",
+          "type": "usize"
+        },
+        {
+          "name": "top_k",
+          "type": "Vec<u32>"
+        },
+        {
+          "name": "temperatures",
+          "type": "Vec<f32>"
+        },
+        {
+          "name": "replay_safe",
+          "type": "bool"
+        }
+      ],
+      "has_batch": true,
+      "has_dtype": true,
+      "has_layout": true,
+      "has_replay_safe": true,
+      "has_shape": true,
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "MatmulBlasRequest": {
+      "field_count": 15,
+      "fields": [
+        {
+          "name": "m",
+          "type": "u64"
+        },
+        {
+          "name": "n",
+          "type": "u64"
+        },
+        {
+          "name": "k",
+          "type": "u64"
+        },
+        {
+          "name": "dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "lhs_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "rhs_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "out_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "accumulation",
+          "type": "MatmulAccumulation"
+        },
+        {
+          "name": "lhs_layout",
+          "type": "MatmulOperandLayout"
+        },
+        {
+          "name": "rhs_layout",
+          "type": "MatmulOperandLayout"
+        },
+        {
+          "name": "out_layout",
+          "type": "MatmulOperandLayout"
+        },
+        {
+          "name": "epilogue",
+          "type": "MatmulEpilogue"
+        },
+        {
+          "name": "batch",
+          "type": "MatmulBatchPolicy"
+        },
+        {
+          "name": "replay_safe",
+          "type": "bool"
+        },
+        {
+          "name": "concurrent_streams",
+          "type": "u8"
+        }
+      ],
+      "has_batch": true,
+      "has_dtype": true,
+      "has_layout": true,
+      "has_replay_safe": true,
+      "has_shape": true,
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "MatmulRequest": {
+      "field_count": 12,
+      "fields": [
+        {
+          "name": "lhs_shape",
+          "type": "Vec<usize>"
+        },
+        {
+          "name": "rhs_shape",
+          "type": "Vec<usize>"
+        },
+        {
+          "name": "lhs_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "rhs_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "out_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "accumulation",
+          "type": "MatmulAccumulation"
+        },
+        {
+          "name": "lhs_layout",
+          "type": "MatmulOperandLayout"
+        },
+        {
+          "name": "rhs_layout",
+          "type": "MatmulOperandLayout"
+        },
+        {
+          "name": "out_layout",
+          "type": "MatmulOperandLayout"
+        },
+        {
+          "name": "batch",
+          "type": "MatmulBatchPolicy"
+        },
+        {
+          "name": "epilogue",
+          "type": "MatmulEpilogue"
+        },
+        {
+          "name": "replay_safe",
+          "type": "bool"
+        }
+      ],
+      "has_batch": true,
+      "has_dtype": true,
+      "has_layout": true,
+      "has_replay_safe": true,
+      "has_shape": true,
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "ReplayRequest": {
+      "field_count": 8,
+      "fields": [
+        {
+          "name": "kind",
+          "type": "ReplayRequestKind"
+        },
+        {
+          "name": "replay_shape",
+          "type": "Vec<usize>"
+        },
+        {
+          "name": "layout",
+          "type": "ReplayLayout"
+        },
+        {
+          "name": "max_hidden",
+          "type": "usize"
+        },
+        {
+          "name": "max_intermediate",
+          "type": "usize"
+        },
+        {
+          "name": "max_batch",
+          "type": "usize"
+        },
+        {
+          "name": "dtype",
+          "type": "Option<kiln_tensor::DType>"
+        },
+        {
+          "name": "replay_safe",
+          "type": "bool"
+        }
+      ],
+      "has_batch": true,
+      "has_dtype": true,
+      "has_layout": true,
+      "has_replay_safe": true,
+      "has_shape": true,
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    }
+  },
+  "resident_resource_descriptors": {
+    "ResidentResource": {
+      "field_count": 13,
+      "fields": [
+        {
+          "name": "tensor_id",
+          "type": "TensorId"
+        },
+        {
+          "name": "backend",
+          "type": "Backend"
+        },
+        {
+          "name": "device",
+          "type": "Device"
+        },
+        {
+          "name": "dtype",
+          "type": "DType"
+        },
+        {
+          "name": "shape",
+          "type": "Vec<usize>"
+        },
+        {
+          "name": "layout",
+          "type": "ResidentResourceLayout"
+        },
+        {
+          "name": "element_count",
+          "type": "usize"
+        },
+        {
+          "name": "byte_len",
+          "type": "usize"
+        },
+        {
+          "name": "addressable_byte_len",
+          "type": "usize"
+        },
+        {
+          "name": "family",
+          "type": "ResidentResourceFamily"
+        },
+        {
+          "name": "ownership",
+          "type": "ResidentOwnership"
+        },
+        {
+          "name": "state",
+          "type": "ResidentResourceState"
+        },
+        {
+          "name": "replay_stability",
+          "type": "ReplayStability"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/residency.rs"
+    },
+    "ResidentResourceLayout": {
+      "field_count": 3,
+      "fields": [
+        {
+          "name": "strides",
+          "type": "Vec<usize>"
+        },
+        {
+          "name": "start_offset",
+          "type": "usize"
+        },
+        {
+          "name": "contiguous",
+          "type": "bool"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/residency.rs"
+    }
+  },
+  "source": {
+    "branch": "unify-engines",
+    "script": "scripts/generate_backend_capability_report.py"
+  },
+  "training_loss_policy": {
+    "cpu": {
+      "evidence": "TrainingCapabilities::portable keeps tape forward/backward unsupported, SFT on the portable full-logits loss path, GRPO on the shared kt composite loss root, GRPO KL auxiliaries on the host-composite route, OPD unsupported on the portable backend surface, and final RMSNorm backward on the kt-composite route",
+      "final_rmsnorm_backward_route": "kt_composite",
+      "grpo_kl_auxiliary_route": "host_composite",
+      "grpo_loss_route": "kt_composite",
+      "opd_loss_route": "unsupported",
+      "opd_phase_b_backward_route": "unsupported",
+      "sft_flce_loss_route": "full_logits",
+      "tape_forward_backward_route": "unsupported"
+    },
+    "cuda": {
+      "evidence": "CudaBackend::training_capabilities_static advertises kt tape-authoritative forward/backward, kt-tape FLCE over CUDA tensors, the shared kt GRPO composite route, CUDA/ROCm device fast paths for GRPO KL auxiliaries, the shared kt-tape OPD Phase-B route, the fused CUDA/ROCm Phase-B hidden-gradient leaf, and the fused final-RMSNorm tail route",
+      "final_rmsnorm_backward_route": "cuda_rocm_fused_tail",
+      "grpo_kl_auxiliary_route": "cuda_rocm_device_fast_path",
+      "grpo_loss_route": "kt_composite",
+      "opd_loss_route": "kt_tape_phase_b",
+      "opd_phase_b_backward_route": "cuda_rocm_fused_unit_grad",
+      "sft_flce_loss_route": "kt_tape_flce",
+      "tape_forward_backward_route": "kt_tape_authoritative"
+    },
+    "metal": {
+      "evidence": "Metal training capabilities advertise kt tape-authoritative forward/backward, inherit the portable full-logits SFT loss route, shared kt GRPO composite route, host-composite GRPO KL auxiliaries, shared kt-tape OPD Phase-B route, device-agnostic kt composite Phase-B backward, and kt-composite final RMSNorm backward",
+      "final_rmsnorm_backward_route": "kt_composite",
+      "grpo_kl_auxiliary_route": "host_composite",
+      "grpo_loss_route": "kt_composite",
+      "opd_loss_route": "kt_tape_phase_b",
+      "opd_phase_b_backward_route": "kt_composite",
+      "sft_flce_loss_route": "full_logits",
+      "tape_forward_backward_route": "kt_tape_authoritative"
+    },
+    "rocm": {
+      "evidence": "RocmBackend::training_capabilities_static advertises kt tape-authoritative forward/backward, the shared kt-tape FLCE route over ROCm tensors, the shared kt GRPO composite route, CUDA/ROCm device fast paths for GRPO KL auxiliaries, the shared kt-tape OPD Phase-B route, the fused CUDA/ROCm Phase-B hidden-gradient leaf, and the fused final-RMSNorm tail route",
+      "final_rmsnorm_backward_route": "cuda_rocm_fused_tail",
+      "grpo_kl_auxiliary_route": "cuda_rocm_device_fast_path",
+      "grpo_loss_route": "kt_composite",
+      "opd_loss_route": "kt_tape_phase_b",
+      "opd_phase_b_backward_route": "cuda_rocm_fused_unit_grad",
+      "sft_flce_loss_route": "kt_tape_flce",
+      "tape_forward_backward_route": "kt_tape_authoritative"
+    },
+    "vulkan": {
+      "evidence": "Vulkan training capabilities advertise kt tape-authoritative forward/backward, active-row fused SFT/GRPO shader routes, host-composite GRPO KL auxiliaries, the active-hidden fused OPD loss/backward shader route, and kt-composite final RMSNorm backward",
+      "final_rmsnorm_backward_route": "kt_composite",
+      "grpo_kl_auxiliary_route": "host_composite",
+      "grpo_loss_route": "vulkan_active_rows",
+      "opd_loss_route": "vulkan_active_hidden",
+      "opd_phase_b_backward_route": "vulkan_active_hidden",
+      "sft_flce_loss_route": "vulkan_active_rows",
+      "tape_forward_backward_route": "kt_tape_authoritative"
+    }
+  },
+  "training_optimizer_fallback_policy": {
+    "cpu": {
+      "debug_opt_in": "not required",
+      "default_policy": "CorrectnessAllowed",
+      "enforcement": "CPU is the reference optimizer path"
+    },
+    "cuda": {
+      "debug_opt_in": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_CUDA_TRAINING_OPTIMIZER_FALLBACK=1",
+      "default_policy": "NativeRequired",
+      "enforcement": "SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines"
+    },
+    "metal": {
+      "debug_opt_in": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_METAL_TRAINING_OPTIMIZER_FALLBACK=1",
+      "default_policy": "NativeRequired",
+      "enforcement": "SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines"
+    },
+    "rocm": {
+      "debug_opt_in": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK=1",
+      "default_policy": "NativeRequired",
+      "enforcement": "SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines"
+    },
+    "vulkan": {
+      "debug_opt_in": "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK=1",
+      "default_policy": "NativeRequired",
+      "enforcement": "SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines"
+    }
+  },
+  "training_precision_policy": {
+    "cpu": {
+      "activation_dtypes": [
+        "F32"
+      ],
+      "base_weight_dtypes": [
+        "F32"
+      ],
+      "exact_gdn_backward_tile_tokens": null,
+      "lora_parameter_dtypes": [
+        "F32"
+      ],
+      "loss_accumulation_dtype": "F32",
+      "mixed_precision": false,
+      "mixed_rms_norm_weight_dtype": null,
+      "name": "cpu_f32_reference",
+      "notes": "CPU reference training uses F32 tensors and portable optimizer math.",
+      "optimizer_parameter_dtypes": [
+        "F32"
+      ],
+      "paged_prefill_medium_tile_max_tokens": null,
+      "paged_prefill_medium_tile_tokens": null,
+      "streaming_prefill_tile_tokens": 8192,
+      "tape_streaming_tile_tokens": 8192
+    },
+    "cuda": {
+      "activation_dtypes": [
+        "F32",
+        "BF16",
+        "F16"
+      ],
+      "base_weight_dtypes": [
+        "F32",
+        "BF16",
+        "F16"
+      ],
+      "exact_gdn_backward_tile_tokens": 1024,
+      "lora_parameter_dtypes": [
+        "F32",
+        "BF16"
+      ],
+      "loss_accumulation_dtype": "F32",
+      "mixed_precision": true,
+      "mixed_rms_norm_weight_dtype": null,
+      "name": "cuda_native_float",
+      "notes": "CUDA keeps kt tape authoritative and routes BF16/F16/F32 leaves through CUDA-native kernels where available.",
+      "optimizer_parameter_dtypes": [
+        "F32",
+        "BF16"
+      ],
+      "paged_prefill_medium_tile_max_tokens": null,
+      "paged_prefill_medium_tile_tokens": null,
+      "streaming_prefill_tile_tokens": 1024,
+      "tape_streaming_tile_tokens": 1024
+    },
+    "metal": {
+      "activation_dtypes": [
+        "BF16"
+      ],
+      "base_weight_dtypes": [
+        "BF16"
+      ],
+      "exact_gdn_backward_tile_tokens": null,
+      "lora_parameter_dtypes": [
+        "F32",
+        "BF16"
+      ],
+      "loss_accumulation_dtype": "F32",
+      "mixed_precision": true,
+      "mixed_rms_norm_weight_dtype": null,
+      "name": "metal_bf16_uma",
+      "notes": "Metal training is BF16-focused on UMA buffers, with F32 loss accumulation and F32/BF16 AdamW residency.",
+      "optimizer_parameter_dtypes": [
+        "F32",
+        "BF16"
+      ],
+      "paged_prefill_medium_tile_max_tokens": null,
+      "paged_prefill_medium_tile_tokens": null,
+      "streaming_prefill_tile_tokens": 2048,
+      "tape_streaming_tile_tokens": 2048
+    },
+    "rocm": {
+      "activation_dtypes": [
+        "F32",
+        "BF16",
+        "F16"
+      ],
+      "base_weight_dtypes": [
+        "F32",
+        "BF16",
+        "F16"
+      ],
+      "exact_gdn_backward_tile_tokens": null,
+      "lora_parameter_dtypes": [
+        "F32",
+        "BF16"
+      ],
+      "loss_accumulation_dtype": "F32",
+      "mixed_precision": true,
+      "mixed_rms_norm_weight_dtype": null,
+      "name": "rocm_native_float",
+      "notes": "ROCm mirrors CUDA's kt-tape dtype envelope while dispatching through HIP/hipBLASLt-native leaves where available.",
+      "optimizer_parameter_dtypes": [
+        "F32",
+        "BF16"
+      ],
+      "paged_prefill_medium_tile_max_tokens": 20000,
+      "paged_prefill_medium_tile_tokens": 1024,
+      "streaming_prefill_tile_tokens": 1024,
+      "tape_streaming_tile_tokens": 1024
+    },
+    "vulkan": {
+      "activation_dtypes": [
+        "F32"
+      ],
+      "base_weight_dtypes": [
+        "F32",
+        "BF16"
+      ],
+      "exact_gdn_backward_tile_tokens": null,
+      "lora_parameter_dtypes": [
+        "F32"
+      ],
+      "loss_accumulation_dtype": "F32",
+      "mixed_precision": true,
+      "mixed_rms_norm_weight_dtype": "BF16",
+      "name": "vulkan_mixed_f32_bf16",
+      "notes": "Vulkan keeps training activations and LoRA parameters F32 while allowing BF16 base weights through explicit VkTensor buffer bridges.",
+      "optimizer_parameter_dtypes": [
+        "F32",
+        "BF16"
+      ],
+      "paged_prefill_medium_tile_max_tokens": null,
+      "paged_prefill_medium_tile_tokens": null,
+      "streaming_prefill_tile_tokens": 2048,
+      "tape_streaming_tile_tokens": 2048
+    }
+  },
+  "trait_method_count": 3
+}

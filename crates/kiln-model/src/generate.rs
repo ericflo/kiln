@@ -18,7 +18,15 @@ use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 
-use crate::backend::{self, BackendRuntime};
+use crate::backend::{
+    self, BackendIdentity, BackendRuntime, LinearBackend, ReplayBackend,
+    ResidencyBackend, SamplingBackend, StartupBackend, TrainingLossBackend,
+    capability::{
+        BackendCapabilities, BackendCapabilityQueries, DecodeBatcherPolicy, ReplayNativePrimitive,
+        ReplayRequest, Support, decode_hot_path_fallback_policy_for_backend,
+        decode_hot_path_generic_fallback_enabled_for_backend,
+    },
+};
 use crate::cancel::CancelHandle;
 use crate::cuda_graph::CudaGraphRunner;
 use crate::decode_buffers::{DecodeBufferConfig, DecodeBuffers, DecodeElementType};
@@ -84,13 +92,20 @@ fn paged_cache_kt_dtype(dtype: kiln_core::config::DType) -> kiln_tensor::DType {
 /// (#1082) Validate + return the device the kt paged cache allocates its
 /// pools on. The cache now allocates per-arm on the model's *runtime* device
 /// (`PagedKvCacheKt::new_with_fp8` matches on the `Device`), so we hand it the
-/// `Device` directly instead of a bare index. This native MTP generation path
-/// is only kept open on CUDA for now; ROCm MTP currently benchmarks slower than
-/// normal batching.
-fn paged_cache_device(device: &kiln_tensor::Device) -> Result<kiln_tensor::Device> {
-    match device {
-        kiln_tensor::Device::Cuda(idx) => Ok(kiln_tensor::Device::Cuda(*idx)),
-        other => anyhow::bail!("paged kv cache requires a CUDA device, got {other:?}"),
+/// `Device` directly instead of a bare index. Native MTP generation support is
+/// backend-owned capability data; unsupported backends fail before allocating
+/// speculative caches.
+fn paged_cache_device(
+    backend: &dyn BackendRuntime,
+    device: &kiln_tensor::Device,
+) -> Result<kiln_tensor::Device> {
+    let support = BackendCapabilityQueries::backend_capabilities(backend)
+        .decode
+        .mtp_speculative_generation;
+    if matches!(support, Support::Native | Support::NativeWithConstraints) {
+        Ok(*device)
+    } else {
+        anyhow::bail!("native MTP speculative generation requires backend support; got {support:?}")
     }
 }
 
@@ -113,7 +128,7 @@ struct GdnRecurrentResidentStateScope<'a> {
 
 impl<'a> GdnRecurrentResidentStateScope<'a> {
     fn new(backend: &'a dyn BackendRuntime) -> Self {
-        let active = backend.enter_gdn_recurrent_resident_state_scope();
+        let active = ResidencyBackend::runtime_enter_gdn_recurrent_resident_state_scope(backend);
         Self { backend, active }
     }
 }
@@ -121,7 +136,7 @@ impl<'a> GdnRecurrentResidentStateScope<'a> {
 impl Drop for GdnRecurrentResidentStateScope<'_> {
     fn drop(&mut self) {
         if self.active {
-            self.backend.exit_gdn_recurrent_resident_state_scope();
+            ResidencyBackend::runtime_exit_gdn_recurrent_resident_state_scope(self.backend);
         }
     }
 }
@@ -210,7 +225,7 @@ pub(crate) fn row_has_noncontiguous_kv_tiles(
     false
 }
 
-fn cuda_gdn_batched_decode_row_loop_enabled() -> bool {
+fn gdn_batched_decode_row_loop_debug_enabled() -> bool {
     // Flipped to false-by-default after the matmul broadcast-copy fix made
     // the true-batched contiguous-batch path strictly faster than the
     // row-loop at every bs > 1. nsys profile (May 2026) showed candle's
@@ -508,10 +523,7 @@ fn env_positive_usize(name: &str) -> Option<usize> {
         .filter(|&value| value > 0)
 }
 
-const DEFAULT_DECODE_BUFFER_MAX_BATCH: usize = 8;
-const VULKAN_DECODE_BUFFER_MAX_BATCH: usize = 64;
-
-fn decode_buffer_max_batch(backend_name: &str) -> usize {
+fn decode_buffer_max_batch(backend: &dyn BackendRuntime) -> usize {
     let explicit = env_positive_usize("KILN_DECODE_BUFFER_MAX_BATCH");
     if let Some(value) = explicit {
         return value;
@@ -522,11 +534,9 @@ fn decode_buffer_max_batch(backend_name: &str) -> usize {
     // because its resident path keeps scaling past b16 on this target.
     let actor_max = env_positive_usize("KILN_MAX_DECODE_BATCH").unwrap_or(0);
     let live_batcher_max = env_positive_usize("KILN_DECODE_BATCH_MAX").unwrap_or(0);
-    let backend_default = if backend_name == "vulkan" {
-        VULKAN_DECODE_BUFFER_MAX_BATCH
-    } else {
-        DEFAULT_DECODE_BUFFER_MAX_BATCH
-    };
+    let backend_default = BackendCapabilityQueries::backend_capabilities(backend)
+        .decode_batcher
+        .max_batch;
     actor_max.max(live_batcher_max).max(backend_default)
 }
 
@@ -672,21 +682,26 @@ impl DecodeBatcherConfig {
     // `Device`.
 
     /// Builds the decode-batcher config from env, applying backend-aware
-    /// defaults derived from the kt `Device`.
-    pub fn from_env_for_backend_kt(device: &kiln_tensor::Device, backend_name: &str) -> Self {
+    /// defaults derived from the backend policy.
+    pub fn from_env_for_policy(policy: DecodeBatcherPolicy) -> Self {
         let mut config = Self::from_env();
         if env_positive_usize("KILN_DECODE_BATCH_MAX").is_none() {
-            config.max_batch = env_positive_usize("KILN_MAX_DECODE_BATCH")
-                .unwrap_or_else(|| default_decode_batcher_max_batch_kt(device, backend_name));
+            config.max_batch =
+                env_positive_usize("KILN_MAX_DECODE_BATCH").unwrap_or(policy.max_batch);
         }
         if std::env::var_os("KILN_DECODE_BATCH_WAIT_US").is_none() {
-            config.wait = default_decode_batcher_wait_kt(device, backend_name);
+            config.wait = std::time::Duration::from_micros(policy.wait_micros);
         }
         if env_flag_value("KILN_DECODE_BATCH_MIXED_SEQ").is_none() {
-            config.allow_mixed_seq_lens =
-                default_decode_batcher_allow_mixed_seq_lens_kt(device, backend_name);
+            config.allow_mixed_seq_lens = policy.allow_mixed_seq_lens;
         }
         config
+    }
+
+    /// Builds the decode-batcher config from env, applying backend-aware
+    /// defaults derived from the kt `Device`.
+    pub fn from_env_for_backend_kt(device: &kiln_tensor::Device, backend_name: &str) -> Self {
+        Self::from_env_for_policy(DecodeBatcherPolicy::for_backend(backend_name, *device))
     }
 
     /// kt-typed parallel of [`Self::from_env_for_device`].
@@ -701,38 +716,8 @@ impl DecodeBatcherConfig {
     }
 }
 
-fn default_decode_batcher_max_batch_kt(device: &kiln_tensor::Device, backend_name: &str) -> usize {
-    if matches!(device, kiln_tensor::Device::Cuda(_)) || backend_name == "cuda" {
-        1
-    } else if matches!(device, kiln_tensor::Device::Vulkan(_)) || backend_name == "vulkan" {
-        VULKAN_DECODE_BUFFER_MAX_BATCH
-    } else {
-        DecodeBatcherConfig::default().max_batch
-    }
-}
-
-fn default_decode_batcher_allow_mixed_seq_lens_kt(
-    device: &kiln_tensor::Device,
-    backend_name: &str,
-) -> bool {
-    matches!(device, kiln_tensor::Device::Metal(_)) || backend_name == "vulkan"
-}
-
-fn default_decode_batcher_wait_kt(
-    device: &kiln_tensor::Device,
-    backend_name: &str,
-) -> std::time::Duration {
-    if matches!(device, kiln_tensor::Device::Metal(_)) || backend_name == "metal" {
-        std::time::Duration::from_micros(100)
-    } else if backend_name == "vulkan" {
-        std::time::Duration::from_micros(5_000)
-    } else {
-        std::time::Duration::ZERO
-    }
-}
-
-// (#1082) candle-typed `default_decode_batcher_*` helpers deleted — the kt
-// twins above (`*_kt`) are the sole implementations now.
+// (#1082) candle-typed `default_decode_batcher_*` helpers deleted. Backend
+// defaults now come from `DecodeBatcherPolicy`; env overrides stay here.
 
 fn env_flag_value(name: &str) -> Option<bool> {
     let value = std::env::var(name).ok()?;
@@ -748,19 +733,62 @@ fn env_flag_enabled(name: &str, default: bool) -> bool {
 }
 
 fn decode_batcher_rowwise_retry_enabled(backend: &dyn BackendRuntime) -> bool {
-    if backend.name() == "vulkan" {
-        env_flag_enabled("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY", false)
-    } else {
-        true
+    let policy = BackendCapabilityQueries::backend_capabilities(backend).decode_batcher;
+    if let Some(env_var) = policy.rowwise_retry_env
+        && env_flag_enabled(env_var, false)
+    {
+        return true;
     }
+    decode_hot_path_fallback_policy_for_backend(backend).allows_fallback()
 }
 
-fn decode_batch_generic_fallback_enabled(backend: &dyn BackendRuntime) -> bool {
-    if backend.name() == "vulkan" {
-        env_flag_enabled("KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK", false)
-    } else {
-        true
-    }
+fn greedy_token_decode_enabled(backend: &dyn BackendRuntime) -> bool {
+    BackendCapabilityQueries::backend_capabilities(backend)
+        .decode_batcher
+        .use_greedy_token_decode
+}
+
+fn prefix_cache_split_snapshot_allowed(backend: &dyn BackendRuntime) -> bool {
+    BackendCapabilityQueries::backend_capabilities(backend)
+        .decode_batcher
+        .allow_prefix_cache_split_snapshot
+}
+
+fn native_support_enabled(support: Support) -> bool {
+    matches!(support, Support::Native | Support::NativeWithConstraints)
+}
+
+fn paged_decode_graph_replay_request(config: &ModelConfig, max_batch: usize) -> ReplayRequest {
+    ReplayRequest::paged_decode_graph_outputs(
+        config.hidden_size,
+        config.intermediate_size,
+        max_batch.max(1),
+    )
+    .with_dtype(paged_cache_kt_dtype(config.dtype))
+}
+
+fn paged_decode_replay_primitive_enabled(
+    backend: &dyn BackendRuntime,
+    config: &ModelConfig,
+    max_batch: usize,
+    primitive: ReplayNativePrimitive,
+) -> bool {
+    let req = paged_decode_graph_replay_request(config, max_batch);
+    let support = ReplayBackend::runtime_supports_replay_request(backend, &req);
+    let authority = ReplayBackend::runtime_replay_authority(backend);
+    native_support_enabled(support) && authority.native_primitive == primitive
+}
+
+fn decode_hot_path_fallback_disabled_context(
+    backend: &dyn BackendRuntime,
+    operation: &'static str,
+) -> String {
+    format!(
+        "{operation}; fallback policy {:?} for {} decode hot path \
+         (set KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 to opt in)",
+        decode_hot_path_fallback_policy_for_backend(backend),
+        BackendIdentity::runtime_name(backend)
+    )
 }
 
 /// Shared live decode rendezvous for greedy streaming requests.
@@ -779,15 +807,42 @@ pub struct DecodeBatcherStats {
     pub submitted_jobs: usize,
     pub executed_batches: usize,
     pub executed_rows: usize,
+    pub runner_calls: usize,
+    pub max_runner_calls_per_token: usize,
     pub max_observed_batch: usize,
     pub runner_busy_jobs: usize,
     pub failed_jobs: usize,
+}
+
+impl DecodeBatcherStats {
+    /// Phase 8 sentinel budget: a live greedy decode row should normally cost
+    /// one runner call, with one extra call allowed for the explicit rowwise
+    /// retry path after a failed batched attempt.
+    pub const MAX_RUNNER_CALLS_PER_TOKEN_BUDGET: usize = 2;
+
+    pub fn runner_calls_per_token(&self) -> Option<f64> {
+        if self.executed_rows == 0 {
+            None
+        } else {
+            Some(self.runner_calls as f64 / self.executed_rows as f64)
+        }
+    }
+
+    pub const fn runner_call_budget_per_token(&self) -> usize {
+        Self::MAX_RUNNER_CALLS_PER_TOKEN_BUDGET
+    }
+
+    pub const fn runner_call_budget_exceeded(&self) -> bool {
+        self.max_runner_calls_per_token > Self::MAX_RUNNER_CALLS_PER_TOKEN_BUDGET
+    }
 }
 
 struct DecodeBatcherCounters {
     submitted_jobs: AtomicUsize,
     executed_batches: AtomicUsize,
     executed_rows: AtomicUsize,
+    runner_calls: AtomicUsize,
+    max_runner_calls_per_token: AtomicUsize,
     max_observed_batch: AtomicUsize,
     runner_busy_jobs: AtomicUsize,
     failed_jobs: AtomicUsize,
@@ -837,6 +892,8 @@ impl DecodeBatcher {
             submitted_jobs: AtomicUsize::new(0),
             executed_batches: AtomicUsize::new(0),
             executed_rows: AtomicUsize::new(0),
+            runner_calls: AtomicUsize::new(0),
+            max_runner_calls_per_token: AtomicUsize::new(0),
             max_observed_batch: AtomicUsize::new(0),
             runner_busy_jobs: AtomicUsize::new(0),
             failed_jobs: AtomicUsize::new(0),
@@ -868,6 +925,11 @@ impl DecodeBatcher {
             submitted_jobs: self.counters.submitted_jobs.load(Ordering::Relaxed),
             executed_batches: self.counters.executed_batches.load(Ordering::Relaxed),
             executed_rows: self.counters.executed_rows.load(Ordering::Relaxed),
+            runner_calls: self.counters.runner_calls.load(Ordering::Relaxed),
+            max_runner_calls_per_token: self
+                .counters
+                .max_runner_calls_per_token
+                .load(Ordering::Relaxed),
             max_observed_batch: self.counters.max_observed_batch.load(Ordering::Relaxed),
             runner_busy_jobs: self.counters.runner_busy_jobs.load(Ordering::Relaxed),
             failed_jobs: self.counters.failed_jobs.load(Ordering::Relaxed),
@@ -1076,45 +1138,58 @@ fn process_decode_batch_jobs(
     };
 
     let backend = &*runner_guard.backend;
+    let job_count = jobs.len();
+    let mut runner_calls_for_jobs = 1usize;
     let rowwise_retry_enabled = decode_batcher_rowwise_retry_enabled(backend);
-    let tokens = match decode_batch_jobs_with_runner(&runner_guard, paged_cache, &mut jobs) {
-        Ok(tokens) => Ok(tokens),
-        Err(err) if jobs.len() > 1 && rowwise_retry_enabled => {
-            tracing::debug!(
-                batch = jobs.len(),
-                error = %err,
-                "batched greedy decode failed; falling back to rowwise decode jobs"
-            );
-            let mut tokens = Vec::with_capacity(jobs.len());
-            let mut fallback_error = None;
-            for idx in 0..jobs.len() {
-                match decode_batch_jobs_with_runner(
-                    &runner_guard,
-                    paged_cache,
-                    &mut jobs[idx..idx + 1],
-                ) {
-                    Ok(mut row_tokens) => tokens.push(row_tokens.remove(0)),
-                    Err(row_err) => {
-                        fallback_error = Some(row_err);
-                        break;
+    let tokens =
+        match decode_batch_jobs_with_runner(&runner_guard, paged_cache, &mut jobs, counters) {
+            Ok(tokens) => Ok(tokens),
+            Err(err) if jobs.len() > 1 && rowwise_retry_enabled => {
+                tracing::debug!(
+                    batch = jobs.len(),
+                    error = %err,
+                    "batched greedy decode failed; falling back to rowwise decode jobs"
+                );
+                let mut tokens = Vec::with_capacity(jobs.len());
+                let mut fallback_error = None;
+                for idx in 0..jobs.len() {
+                    runner_calls_for_jobs += 1;
+                    match decode_batch_jobs_with_runner(
+                        &runner_guard,
+                        paged_cache,
+                        &mut jobs[idx..idx + 1],
+                        counters,
+                    ) {
+                        Ok(mut row_tokens) => tokens.push(row_tokens.remove(0)),
+                        Err(row_err) => {
+                            fallback_error = Some(row_err);
+                            break;
+                        }
                     }
                 }
+                match fallback_error {
+                    Some(err) => Err(err),
+                    None => Ok(tokens),
+                }
             }
-            match fallback_error {
-                Some(err) => Err(err),
-                None => Ok(tokens),
+            Err(err) if jobs.len() > 1 => {
+                tracing::debug!(
+                    batch = jobs.len(),
+                    error = %err,
+                    "batched greedy decode failed; rowwise retry disabled"
+                );
+                Err(err)
             }
-        }
-        Err(err) if jobs.len() > 1 => {
-            tracing::debug!(
-                batch = jobs.len(),
-                error = %err,
-                "batched greedy decode failed; rowwise retry disabled"
-            );
-            Err(err)
-        }
-        Err(err) => Err(err),
-    };
+            Err(err) => Err(err),
+        };
+    counters.max_runner_calls_per_token.fetch_max(
+        if job_count > 0 && runner_calls_for_jobs > 1 {
+            2
+        } else {
+            usize::from(job_count > 0)
+        },
+        Ordering::Relaxed,
+    );
 
     match tokens {
         Ok(tokens) => {
@@ -1155,7 +1230,9 @@ fn decode_batch_jobs_with_runner(
     runner: &ModelRunner,
     paged_cache: &PagedKvCache,
     jobs: &mut [DecodeBatchJob],
+    counters: &DecodeBatcherCounters,
 ) -> Result<Vec<TokenId>> {
+    counters.runner_calls.fetch_add(1, Ordering::Relaxed);
     let profile_stages = profile_decode_batcher_stages_enabled();
     let total_start = profile_stages.then(std::time::Instant::now);
     let stage_start = profile_stages.then(std::time::Instant::now);
@@ -1320,7 +1397,11 @@ fn run_lm_head_sample_batch_with_contexts(
     );
     let top_k_values: Vec<u32> = params.iter().map(|param| param.top_k).collect();
     let temperature_values: Vec<f32> = params.iter().map(|param| param.temperature).collect();
-    if backend.supports_linear_decode_sample_batch(&top_k_values, &temperature_values) {
+    if SamplingBackend::runtime_supports_linear_decode_sample_batch(
+        backend,
+        &top_k_values,
+        &temperature_values,
+    ) {
         let normed = crate::forward::model_forward_final_norm(hidden, weights, config)
             .context("batched decode final norm for fused sampling")?;
         let repetition_values: Vec<f32> = params
@@ -1354,23 +1435,23 @@ fn run_lm_head_sample_batch_with_contexts(
                 history_counts.push(count);
             }
         }
-        if let Some(tokens) = backend
-            .linear_decode_sample_batch(
-                &normed,
-                &weights.embed_tokens_t,
-                &history_rows,
-                &history_indices,
-                &history_counts,
-                &repetition_values,
-                &presence_values,
-                &frequency_values,
-                &temperature_values,
-                &top_k_values,
-                &top_p_values,
-                &min_p_values,
-                &seed_values,
-            )
-            .context("fused batched linear_decode_sample failed")?
+        if let Some(tokens) = SamplingBackend::runtime_linear_decode_sample_batch(
+            backend,
+            &normed,
+            &weights.embed_tokens_t,
+            &history_rows,
+            &history_indices,
+            &history_counts,
+            &repetition_values,
+            &presence_values,
+            &frequency_values,
+            &temperature_values,
+            &top_k_values,
+            &top_p_values,
+            &min_p_values,
+            &seed_values,
+        )
+        .context("fused batched linear_decode_sample failed")?
         {
             return Ok(tokens);
         }
@@ -1515,9 +1596,9 @@ impl ModelRunner {
         // every other backend.
         let rocm_graph = RocmGraphRunner::new(&kt_device, true);
         let metal_graph = MetalGraphRunner::new(&kt_device, true);
-        let training_caps = backend.training_capabilities();
+        let training_caps = TrainingLossBackend::runtime_training_capabilities(backend.as_ref());
         tracing::info!(
-            backend = backend.name(),
+            backend = BackendIdentity::runtime_name(backend.as_ref()),
             projection_training = training_caps.projection_training,
             flce_loss = training_caps.flce_loss,
             rmsnorm_training = training_caps.rmsnorm_training,
@@ -1550,18 +1631,27 @@ impl ModelRunner {
     }
 
     pub fn backend_name(&self) -> &'static str {
-        self.backend.name()
+        BackendIdentity::runtime_name(self.backend.as_ref())
+    }
+
+    pub fn backend_capabilities(&self) -> BackendCapabilities {
+        BackendCapabilityQueries::backend_capabilities(self.backend.as_ref())
     }
 
     /// Eagerly allocate the backend-resident decode scratch ring when the
     /// backend supports it. This keeps the first live decode request from
     /// paying the pool feasibility/allocation cost on the request path.
     pub fn warm_resident_decode_pool(&self, max_batch: usize) -> bool {
-        self.backend.decode_resident_pool_ready(
+        ReplayBackend::runtime_decode_resident_pool_ready(
+            self.backend.as_ref(),
             self.config.hidden_size,
             self.config.intermediate_size,
             max_batch,
         )
+    }
+
+    pub fn precompile_backend_startup_kernels(&self) -> Result<()> {
+        StartupBackend::runtime_precompile_startup_kernels(self.backend.as_ref())
     }
 
     /// Preload backend-specific decode weights into any persistent device cache.
@@ -1572,11 +1662,14 @@ impl ModelRunner {
     /// ~6-7 GB peak RSS on Qwen3.5-4B at T=918 training shape — see
     /// `docs/audits/candle_cpu_residency_2026-05-11.md`.
     pub fn prewarm_backend_decode_weights(&mut self) -> Result<()> {
-        self.backend.prewarm_decode_weights(&self.weights)?;
+        LinearBackend::runtime_prewarm_decode_weights(self.backend.as_ref(), &self.weights)?;
         // (#1082) `drop_uploaded_bf16_weights` is kt-native — pass kt device.
         let kt_device = self.weights.embed_tokens.device();
-        self.backend
-            .drop_uploaded_bf16_weights(&mut self.weights, &kt_device)?;
+        LinearBackend::runtime_drop_uploaded_bf16_weights(
+            self.backend.as_ref(),
+            &mut self.weights,
+            &kt_device,
+        )?;
         Ok(())
     }
 
@@ -1674,7 +1767,7 @@ impl ModelRunner {
             .decode_buffer_config
             .get_or_init(|| {
                 DecodeBufferConfig::graph_bucket(
-                    decode_buffer_max_batch(self.backend.name()),
+                    decode_buffer_max_batch(self.backend.as_ref()),
                     self.config.max_position_embeddings,
                     1,
                     16,
@@ -1783,11 +1876,11 @@ impl ModelRunner {
     fn new_linear_state(&self) -> Result<LinearAttentionState> {
         // #1082: kt `Device` by value -> pass by reference.
         let device = self.weights.embed_tokens.device();
-        LinearAttentionState::new_with_batch_for_inference_backend(
+        LinearAttentionState::new_with_batch_for_inference_runtime(
             &self.config,
             1,
             &device,
-            Some(self.backend.name()),
+            self.backend.as_ref(),
         )
     }
 
@@ -2569,7 +2662,7 @@ impl ModelRunner {
         );
 
         let use_greedy_prefill_token = params.is_effectively_greedy()
-            && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+            && greedy_token_decode_enabled(self.backend.as_ref())
             && !streaming_prefill_enabled_for(
                 &self.weights.embed_tokens.device(),
                 prefill_tokens.len(),
@@ -2803,11 +2896,8 @@ impl ModelRunner {
         // every subsequent turn's prompt does NOT contain — without this
         // snapshot, multi-turn lookups miss because the cached entry's
         // last block contains generation-prompt-only tokens.
-        let capture_prefix_split = capture_prefix_split
-            && !matches!(
-                self.weights.embed_tokens.device(),
-                kiln_tensor::Device::Rocm(_)
-            );
+        let capture_prefix_split =
+            capture_prefix_split && prefix_cache_split_snapshot_allowed(self.backend.as_ref());
         let split_pos = capture_prefix_split
             .then(|| strict_prompt_prefix_split_pos(prompt_tokens.len(), cached_tokens, block_size))
             .flatten();
@@ -3072,9 +3162,18 @@ impl ModelRunner {
         let positions_uniform = sequence_lengths.iter().all(|&n| n == common_seq_len);
         let cache_is_fp8 = lock_paged_cache(paged_cache)?.is_fp8();
         let has_linear_layers = self.has_linear_attention_layers();
-        let cuda_gdn_row_loop_candidate = self.backend.name() == "cuda"
-            && has_linear_layers
-            && cuda_gdn_batched_decode_row_loop_enabled();
+        #[cfg(any(feature = "vulkan", feature = "metal"))]
+        let decode_batcher_policy =
+            BackendCapabilityQueries::backend_capabilities(self.backend.as_ref()).decode_batcher;
+        #[cfg(feature = "vulkan")]
+        let sampled_contiguous_resident_decode_ready = decode_batcher_policy
+            .use_native_sampled_contiguous_decode
+            && decode_batcher_policy.sampled_contiguous_decode_requires_resident_decode
+            && ReplayBackend::runtime_supports_resident_decode(self.backend.as_ref());
+        #[cfg(feature = "metal")]
+        let sampled_contiguous_nonresident_decode_ready = decode_batcher_policy
+            .use_native_sampled_contiguous_decode
+            && !decode_batcher_policy.sampled_contiguous_decode_requires_resident_decode;
         // `model_forward_paged_decode_contiguous_batch_hidden` already handles
         // per-row positions via dyn-seqlen flash attention for full-attn
         // layers, and the GDN layers operate on the batched
@@ -3085,7 +3184,6 @@ impl ModelRunner {
         // launch instead of `run_legacy_lm_head_sample_batch`'s per-row
         // narrow + argmax loop).
         let _ = positions_uniform;
-        let _ = cuda_gdn_row_loop_candidate;
         let try_contiguous_batched = all_greedy && !cache_is_fp8;
 
         let mut sampled: Option<Vec<TokenId>> = None;
@@ -3155,10 +3253,11 @@ impl ModelRunner {
             };
             match result {
                 Ok(tokens) => sampled = Some(tokens),
-                Err(err) if !decode_batch_generic_fallback_enabled(&*self.backend) => {
-                    return Err(err).context(
-                        "contiguous-batched decode declined and generic fallback is disabled",
-                    );
+                Err(err) if !decode_hot_path_generic_fallback_enabled_for_backend(&*self.backend) => {
+                    return Err(err).context(decode_hot_path_fallback_disabled_context(
+                        &*self.backend,
+                        "contiguous-batched decode declined",
+                    ));
                 }
                 Err(err) => {
                     tracing::debug!(
@@ -3182,7 +3281,10 @@ impl ModelRunner {
         // Skipped when the contiguous-batched path above already produced tokens
         // (row > 1).
         #[cfg(feature = "vulkan")]
-        if sampled.is_none() && row_count == 1 && self.backend.supports_resident_decode() {
+        if sampled.is_none()
+            && row_count == 1
+            && ReplayBackend::runtime_supports_resident_decode(self.backend.as_ref())
+        {
             let token = if params[0].temperature == 0.0 {
                 let linear_state = if has_linear_layers {
                     Some(&mut *linear_states[0])
@@ -3207,7 +3309,7 @@ impl ModelRunner {
                     .as_ref()
                     .expect("vk_row0_sampling captured for row_count == 1");
                 let sample_result = if !cache_is_fp8
-                    && self.backend.name() == "vulkan"
+                    && sampled_contiguous_resident_decode_ready
                     && self.active_lora.is_none()
                 {
                     let block_table_refs = [&block_tables[0]];
@@ -3279,8 +3381,7 @@ impl ModelRunner {
             && row_count > 1
             && !all_greedy
             && !cache_is_fp8
-            && self.backend.name() == "vulkan"
-            && self.backend.supports_resident_decode()
+            && sampled_contiguous_resident_decode_ready
             && self.active_lora.is_none()
         {
             let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
@@ -3361,10 +3462,11 @@ impl ModelRunner {
                         .context("sample Vulkan resident multi-row hidden batch")?;
                         sampled = Some(tokens);
                     }
-                    Err(err) if !decode_batch_generic_fallback_enabled(&*self.backend) => {
-                        return Err(err).context(
-                            "resident batched hidden decode declined and generic fallback is disabled",
-                        );
+                    Err(err) if !decode_hot_path_generic_fallback_enabled_for_backend(&*self.backend) => {
+                        return Err(err).context(decode_hot_path_fallback_disabled_context(
+                            &*self.backend,
+                            "resident batched hidden decode declined",
+                        ));
                     }
                     Err(err) => {
                         tracing::debug!(
@@ -3381,7 +3483,7 @@ impl ModelRunner {
         if sampled.is_none()
             && !all_greedy
             && !cache_is_fp8
-            && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+            && sampled_contiguous_nonresident_decode_ready
             && self.active_lora.is_none()
         {
             let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
@@ -3419,6 +3521,12 @@ impl ModelRunner {
             match sample_result {
                 Ok(Some(tokens)) => sampled = Some(tokens),
                 Ok(None) => {}
+                Err(err) if !decode_hot_path_generic_fallback_enabled_for_backend(&*self.backend) => {
+                    return Err(err).context(decode_hot_path_fallback_disabled_context(
+                        &*self.backend,
+                        "Metal sampled decode declined",
+                    ));
+                }
                 Err(err) => {
                     tracing::warn!(
                         batch = row_count,
@@ -3426,6 +3534,15 @@ impl ModelRunner {
                         "Metal sampled decode declined; falling back to eager hidden sample path"
                     );
                 }
+            }
+            if sampled.is_none() && !decode_hot_path_generic_fallback_enabled_for_backend(&*self.backend) {
+                anyhow::bail!(
+                    "{}",
+                    decode_hot_path_fallback_disabled_context(
+                        &*self.backend,
+                        "Metal sampled decode did not produce tokens"
+                    )
+                );
             }
         }
 
@@ -3436,7 +3553,12 @@ impl ModelRunner {
         // outside the captured graph.
         if sampled.is_none()
             && row_count == 1
-            && matches!(self.backend.device(), kiln_tensor::Device::Rocm(_))
+            && paged_decode_replay_primitive_enabled(
+                self.backend.as_ref(),
+                &self.config,
+                1,
+                ReplayNativePrimitive::HipGraph,
+            )
             && self
                 .rocm_graph
                 .lock()
@@ -3512,6 +3634,15 @@ impl ModelRunner {
         let sampled = if let Some(tokens) = sampled {
             tokens
         } else {
+            if !decode_hot_path_generic_fallback_enabled_for_backend(&*self.backend) {
+                anyhow::bail!(
+                    "{}",
+                    decode_hot_path_fallback_disabled_context(
+                        &*self.backend,
+                        "no native batched decode path produced tokens"
+                    )
+                );
+            }
             let pc_guard = lock_paged_cache(paged_cache)?;
             let mut graph_runner = self
                 .cuda_graph
@@ -3908,49 +4039,57 @@ impl ModelRunner {
         if batch == 1 {
             let stage_start = profile_stages.then(std::time::Instant::now);
             let pc_guard = lock_paged_cache(paged_cache)?;
-            let mut token = None;
             #[cfg(feature = "metal")]
-            if matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
-                && self.active_lora.is_none()
-            {
-                let graph_tokens = {
-                    let one_tokens = [input_tokens[0]];
-                    let one_block_tables = [block_tables[0]];
-                    let one_seq_lens = [seq_lens[0]];
-                    let linear_state_for_graph = if has_linear_layers {
-                        Some(&mut *linear_states[0])
-                    } else {
-                        None
+            let token = {
+                let mut token = None;
+                if paged_decode_replay_primitive_enabled(
+                    self.backend.as_ref(),
+                    &self.config,
+                    1,
+                    ReplayNativePrimitive::MetalIcb,
+                ) && self.active_lora.is_none()
+                {
+                    let graph_tokens = {
+                        let one_tokens = [input_tokens[0]];
+                        let one_block_tables = [block_tables[0]];
+                        let one_seq_lens = [seq_lens[0]];
+                        let linear_state_for_graph = if has_linear_layers {
+                            Some(&mut *linear_states[0])
+                        } else {
+                            None
+                        };
+                        let mut runner = self.metal_graph.lock().map_err(|e| {
+                            anyhow::anyhow!("failed to lock Metal graph runner: {e}")
+                        })?;
+                        if runner.is_enabled() {
+                            runner.decode_step_paged_greedy_batch(
+                                &*self.backend,
+                                &one_tokens,
+                                &self.weights,
+                                &self.config,
+                                pc_guard,
+                                &one_block_tables,
+                                &one_seq_lens,
+                                linear_state_for_graph,
+                                self.active_lora.as_ref(),
+                            )?
+                        } else {
+                            None
+                        }
                     };
-                    let mut runner = self
-                        .metal_graph
-                        .lock()
-                        .map_err(|e| anyhow::anyhow!("failed to lock Metal graph runner: {e}"))?;
-                    if runner.is_enabled() {
-                        runner.decode_step_paged_greedy_batch(
-                            &*self.backend,
-                            &one_tokens,
-                            &self.weights,
-                            &self.config,
-                            pc_guard,
-                            &one_block_tables,
-                            &one_seq_lens,
-                            linear_state_for_graph,
-                            self.active_lora.as_ref(),
-                        )?
-                    } else {
-                        None
+                    if let Some(graph_tokens) = graph_tokens {
+                        anyhow::ensure!(
+                            graph_tokens.len() == 1,
+                            "Metal graph single-row greedy returned {} tokens",
+                            graph_tokens.len()
+                        );
+                        token = graph_tokens.first().copied();
                     }
-                };
-                if let Some(graph_tokens) = graph_tokens {
-                    anyhow::ensure!(
-                        graph_tokens.len() == 1,
-                        "Metal graph single-row greedy returned {} tokens",
-                        graph_tokens.len()
-                    );
-                    token = graph_tokens.first().copied();
                 }
-            }
+                token
+            };
+            #[cfg(not(feature = "metal"))]
+            let token = None;
             let token = (match token {
                 Some(token) => Ok(token),
                 None => {
@@ -3993,8 +4132,10 @@ impl ModelRunner {
         // row-loop ONLY the genuinely-fragmented rows and batch the contiguous
         // majority through the fast path. Crash-safe (no non-adjacent pages ever
         // reach the kernel) and a strict superset of #1445's correctness.
-        if self.backend.name() == "cuda" && has_linear_layers {
-            let row_loop_all = cuda_gdn_batched_decode_row_loop_enabled();
+        let decode_policy =
+            BackendCapabilityQueries::backend_capabilities(self.backend.as_ref()).decode_batcher;
+        if decode_policy.partition_noncontiguous_gdn_kv_tiles && has_linear_layers {
+            let row_loop_all = gdn_batched_decode_row_loop_debug_enabled();
             let block_size = paged_cache.block_size();
             let noncontig: Vec<bool> = (0..batch)
                 .map(|row| {
@@ -4126,8 +4267,9 @@ impl ModelRunner {
 
         let stage_start = profile_stages.then(std::time::Instant::now);
         if has_linear_layers {
-            if self.backend.supports_resident_decode()
-                && self.backend.decode_resident_pool_ready(
+            if ReplayBackend::runtime_supports_resident_decode(self.backend.as_ref())
+                && ReplayBackend::runtime_decode_resident_pool_ready(
+                    self.backend.as_ref(),
                     self.config.hidden_size,
                     self.config.intermediate_size,
                     64,
@@ -4215,7 +4357,12 @@ impl ModelRunner {
         let stage_start = profile_stages.then(std::time::Instant::now);
         let tokens = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            let graph_tokens = if matches!(self.backend.device(), kiln_tensor::Device::Metal(_)) {
+            let graph_tokens = if paged_decode_replay_primitive_enabled(
+                self.backend.as_ref(),
+                &self.config,
+                batch,
+                ReplayNativePrimitive::MetalIcb,
+            ) {
                 let mut runner = self
                     .metal_graph
                     .lock()
@@ -4316,10 +4463,11 @@ impl ModelRunner {
     ) -> Result<Option<Vec<TokenId>>> {
         let top_k_values: Vec<u32> = params.iter().map(|param| param.top_k).collect();
         let temperature_values: Vec<f32> = params.iter().map(|param| param.temperature).collect();
-        if !self
-            .backend
-            .supports_linear_decode_sample_batch(&top_k_values, &temperature_values)
-        {
+        if !SamplingBackend::runtime_supports_linear_decode_sample_batch(
+            self.backend.as_ref(),
+            &top_k_values,
+            &temperature_values,
+        ) {
             return Ok(None);
         }
 
@@ -4387,8 +4535,9 @@ impl ModelRunner {
 
         let stage_start = profile_stages.then(std::time::Instant::now);
         if has_linear_layers {
-            if self.backend.supports_resident_decode()
-                && self.backend.decode_resident_pool_ready(
+            if ReplayBackend::runtime_supports_resident_decode(self.backend.as_ref())
+                && ReplayBackend::runtime_decode_resident_pool_ready(
+                    self.backend.as_ref(),
                     self.config.hidden_size,
                     self.config.intermediate_size,
                     64,
@@ -4472,8 +4621,12 @@ impl ModelRunner {
         let stage_start = profile_stages.then(std::time::Instant::now);
         let mut tokens = None;
         #[cfg(feature = "metal")]
-        if matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
-            && self.active_lora.is_none()
+        if paged_decode_replay_primitive_enabled(
+            self.backend.as_ref(),
+            &self.config,
+            batch,
+            ReplayNativePrimitive::MetalIcb,
+        ) && self.active_lora.is_none()
         {
             let pc_guard = lock_paged_cache(paged_cache)?;
             let linear_state_for_graph = if has_linear_layers {
@@ -4636,8 +4789,9 @@ impl ModelRunner {
 
         let stage_start = profile_stages.then(std::time::Instant::now);
         if has_linear_layers {
-            if self.backend.supports_resident_decode()
-                && self.backend.decode_resident_pool_ready(
+            if ReplayBackend::runtime_supports_resident_decode(self.backend.as_ref())
+                && ReplayBackend::runtime_decode_resident_pool_ready(
+                    self.backend.as_ref(),
                     self.config.hidden_size,
                     self.config.intermediate_size,
                     64,
@@ -4786,8 +4940,12 @@ impl ModelRunner {
     ) -> Result<Option<TokenId>> {
         #[cfg(feature = "metal")]
         {
-            if !matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
-                || self.active_lora.is_some()
+            if !paged_decode_replay_primitive_enabled(
+                self.backend.as_ref(),
+                &self.config,
+                1,
+                ReplayNativePrimitive::MetalIcb,
+            ) || self.active_lora.is_some()
             {
                 return Ok(None);
             }
@@ -4849,17 +5007,23 @@ impl ModelRunner {
         #[cfg(feature = "metal")]
         {
             if params.is_effectively_greedy()
-                || !matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+                || !paged_decode_replay_primitive_enabled(
+                    self.backend.as_ref(),
+                    &self.config,
+                    1,
+                    ReplayNativePrimitive::MetalIcb,
+                )
                 || self.active_lora.is_some()
             {
                 return Ok(None);
             }
             let top_k = [params.top_k];
             let temperatures = [params.temperature];
-            if !self
-                .backend
-                .supports_linear_decode_sample_batch(&top_k, &temperatures)
-            {
+            if !SamplingBackend::runtime_supports_linear_decode_sample_batch(
+                self.backend.as_ref(),
+                &top_k,
+                &temperatures,
+            ) {
                 return Ok(None);
             }
 
@@ -4959,9 +5123,7 @@ impl ModelRunner {
         let _resident_scope = GdnRecurrentResidentStateScope::new(&*self.backend);
         let _skip_scope =
             crate::forward::VulkanSkipGdnStateReadbackScope::new(skip_gdn_state_readback);
-        if params.is_effectively_greedy()
-            && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
-        {
+        if params.is_effectively_greedy() && greedy_token_decode_enabled(self.backend.as_ref()) {
             let linear_state_for_graph = if self.has_linear_attention_layers() {
                 Some(&mut *linear_state)
             } else {
@@ -5023,7 +5185,12 @@ impl ModelRunner {
         }
 
         if !params.is_effectively_greedy()
-            && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+            && paged_decode_replay_primitive_enabled(
+                self.backend.as_ref(),
+                &self.config,
+                1,
+                ReplayNativePrimitive::MetalIcb,
+            )
         {
             let linear_state_for_graph = if self.has_linear_attention_layers() {
                 Some(&mut *linear_state)
@@ -5054,7 +5221,12 @@ impl ModelRunner {
         // the graph runner (capture/replay, with eager fallback). When the
         // runner is disabled via `KILN_ROCM_GRAPHS=0`, this is skipped entirely
         // and the eager path below runs unchanged.
-        if matches!(self.backend.device(), kiln_tensor::Device::Rocm(_)) {
+        if paged_decode_replay_primitive_enabled(
+            self.backend.as_ref(),
+            &self.config,
+            1,
+            ReplayNativePrimitive::HipGraph,
+        ) {
             let maybe_logits = {
                 let mut runner = self
                     .rocm_graph
@@ -5398,7 +5570,7 @@ impl ModelRunner {
                 // (#1082) kt-native logits — sampler is kt now; no candle bridge.
                 PrefillSampleSource::Logits(logits)
             } else if params.is_effectively_greedy()
-                && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+                && greedy_token_decode_enabled(self.backend.as_ref())
             {
                 PrefillSampleSource::GreedyToken(
                     model_forward_paged_last_token_greedy(
@@ -5492,7 +5664,7 @@ impl ModelRunner {
             }
 
             next_token = if params.is_effectively_greedy()
-                && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+                && greedy_token_decode_enabled(self.backend.as_ref())
             {
                 let linear_state_for_graph = if self.has_linear_attention_layers() {
                     Some(&mut linear_state)
@@ -5783,7 +5955,7 @@ impl ModelRunner {
             // (#1082) kt-native logits — sampler is kt now; no candle bridge.
             PrefillSampleSource::Logits(logits)
         } else if params.is_effectively_greedy()
-            && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+            && greedy_token_decode_enabled(self.backend.as_ref())
         {
             PrefillSampleSource::GreedyToken(
                 model_forward_paged_last_token_greedy(
@@ -5881,7 +6053,7 @@ impl ModelRunner {
             }
 
             next_token = if params.is_effectively_greedy()
-                && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+                && greedy_token_decode_enabled(self.backend.as_ref())
             {
                 let linear_state_for_graph = if self.has_linear_attention_layers() {
                     Some(&mut linear_state)
@@ -6241,7 +6413,8 @@ impl ModelRunner {
         let max_total = prompt_tokens.len() + params.max_tokens;
         // (#1082) kt-native paged cache — `PagedKvCacheKt::new` allocates pools
         // on the model's runtime `Device` (kiln is single-GPU).
-        let cache_device = paged_cache_device(&self.weights.embed_tokens.device())?;
+        let cache_device =
+            paged_cache_device(self.backend.as_ref(), &self.weights.embed_tokens.device())?;
         let dtype = paged_cache_kt_dtype(self.config.dtype);
 
         // Two independent paged caches:
@@ -6697,7 +6870,8 @@ impl ModelRunner {
 
         let max_total = prompt_tokens.len() + params.max_tokens;
         // (#1082) kt-native paged cache — kt `DType` + runtime `Device`.
-        let cache_device = paged_cache_device(&self.weights.embed_tokens.device())?;
+        let cache_device =
+            paged_cache_device(self.backend.as_ref(), &self.weights.embed_tokens.device())?;
         let dtype = paged_cache_kt_dtype(self.config.dtype);
 
         let num_blocks = Self::blocks_needed(max_total, BLOCK_SIZE);
@@ -8221,7 +8395,7 @@ impl ModelRunner {
             }
 
             next_token = if params.is_effectively_greedy()
-                && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+                && greedy_token_decode_enabled(self.backend.as_ref())
             {
                 let linear_state_for_graph = if self.has_linear_attention_layers() {
                     Some(&mut linear_state)
@@ -8308,32 +8482,238 @@ impl ModelRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::FallbackPolicy;
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    const DECODE_FALLBACK_ENV: &[&str] = &[
+        "KILN_DECODE_HOT_PATH_DEBUG_FALLBACK",
+        "KILN_METAL_DECODE_BATCH_GENERIC_FALLBACK",
+        "KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK",
+        "KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK",
+    ];
+    const DECODE_BATCHER_ROWWISE_ENV: &[&str] = &["KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY"];
+
+    struct EnvRestore(Vec<(&'static str, Option<String>)>);
+
+    impl EnvRestore {
+        fn clear(keys: &[&'static str]) -> Self {
+            let prior = keys
+                .iter()
+                .map(|&key| (key, std::env::var(key).ok()))
+                .collect::<Vec<_>>();
+            unsafe {
+                for &key in keys {
+                    std::env::remove_var(key);
+                }
+            }
+            Self(prior)
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            unsafe {
+                for (key, value) in &self.0 {
+                    if let Some(value) = value {
+                        std::env::set_var(key, value);
+                    } else {
+                        std::env::remove_var(key);
+                    }
+                }
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct NamedTestBackend {
+        name: &'static str,
+        device: kiln_tensor::Device,
+    }
+
+    impl BackendIdentity for NamedTestBackend {
+        fn runtime_name(&self) -> &'static str {
+            self.name
+        }
+
+        fn runtime_device(&self) -> kiln_tensor::Device {
+            self.device
+        }
+
+        fn runtime_as_any(&self) -> &dyn std::any::Any {
+            &()
+        }
+    }
+
+    impl StartupBackend for NamedTestBackend {}
+
+    impl crate::backend::AttentionBackend for NamedTestBackend {}
+
+    impl crate::backend::GdnBackend for NamedTestBackend {}
+
+    impl crate::backend::ConvBackend for NamedTestBackend {}
+
+    impl crate::backend::LinearBackend for NamedTestBackend {}
+
+    impl crate::backend::residency::ResidentRegistry for NamedTestBackend {}
+
+    impl crate::backend::ResidencyBackend for NamedTestBackend {}
+
+    impl crate::backend::SamplingBackend for NamedTestBackend {}
+
+    impl crate::backend::OptimizerBackend for NamedTestBackend {}
+
+    impl crate::backend::PagedKvBackend for NamedTestBackend {}
+
+    impl crate::backend::ReplayBackend for NamedTestBackend {}
+
+    impl crate::backend::TrainingLossBackend for NamedTestBackend {}
+
+    impl BackendRuntime for NamedTestBackend {}
 
     #[test]
-    fn test_decode_batcher_default_mixed_seq_lens_backend_policy() {
-        // (#1082) kt Device; candle-typed helper deleted.
-        let device = kiln_tensor::Device::Cpu;
+    fn decode_batcher_stats_report_runner_calls_per_token() {
+        let stats = DecodeBatcherStats {
+            executed_rows: 4,
+            runner_calls: 5,
+            max_runner_calls_per_token: 2,
+            ..DecodeBatcherStats::default()
+        };
 
-        assert!(!default_decode_batcher_allow_mixed_seq_lens_kt(
-            &device, "cpu"
-        ));
-        assert!(!default_decode_batcher_allow_mixed_seq_lens_kt(
-            &device, "cuda"
-        ));
-        assert!(default_decode_batcher_allow_mixed_seq_lens_kt(
-            &device, "vulkan"
-        ));
+        assert_eq!(stats.runner_calls_per_token(), Some(1.25));
+        assert_eq!(stats.max_runner_calls_per_token, 2);
+        assert_eq!(stats.runner_call_budget_per_token(), 2);
+        assert!(!stats.runner_call_budget_exceeded());
+        assert_eq!(DecodeBatcherStats::default().runner_calls_per_token(), None);
+
+        let exceeded = DecodeBatcherStats {
+            max_runner_calls_per_token: 3,
+            ..DecodeBatcherStats::default()
+        };
+        assert!(exceeded.runner_call_budget_exceeded());
     }
 
     #[test]
-    fn test_decode_batcher_default_max_batch_backend_policy() {
-        // (#1082) kt Device; candle-typed helper deleted.
-        let device = kiln_tensor::Device::Cpu;
-
-        assert_eq!(default_decode_batcher_max_batch_kt(&device, "cpu"), 8);
-        assert_eq!(default_decode_batcher_max_batch_kt(&device, "cuda"), 1);
-        assert_eq!(default_decode_batcher_max_batch_kt(&device, "vulkan"), 64);
-        assert_eq!(default_decode_batcher_max_batch_kt(&device, "metal"), 8);
+    fn test_decode_batcher_default_backend_policy() {
+        for (
+            backend_name,
+            device,
+            max_batch,
+            wait_micros,
+            allow_mixed_seq_lens,
+            rowwise_retry_env,
+            use_native_sampled_contiguous_decode,
+            sampled_contiguous_decode_requires_resident_decode,
+            partition_noncontiguous_gdn_kv_tiles,
+        ) in [
+            (
+                "cpu",
+                kiln_tensor::Device::Cpu,
+                8,
+                0,
+                false,
+                None,
+                false,
+                false,
+                false,
+            ),
+            (
+                "cuda",
+                kiln_tensor::Device::Cpu,
+                1,
+                0,
+                false,
+                None,
+                false,
+                false,
+                true,
+            ),
+            (
+                "cuda",
+                kiln_tensor::Device::Cuda(0),
+                1,
+                0,
+                false,
+                None,
+                false,
+                false,
+                true,
+            ),
+            (
+                "metal",
+                kiln_tensor::Device::Metal(0),
+                8,
+                100,
+                true,
+                None,
+                true,
+                false,
+                false,
+            ),
+            (
+                "vulkan",
+                kiln_tensor::Device::Cpu,
+                64,
+                5_000,
+                true,
+                Some("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY"),
+                true,
+                true,
+                false,
+            ),
+            (
+                "vulkan",
+                kiln_tensor::Device::Vulkan(0),
+                64,
+                5_000,
+                true,
+                Some("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY"),
+                true,
+                true,
+                false,
+            ),
+            (
+                "rocm",
+                kiln_tensor::Device::Rocm(0),
+                8,
+                0,
+                false,
+                None,
+                false,
+                false,
+                false,
+            ),
+        ] {
+            let policy = DecodeBatcherPolicy::for_backend(backend_name, device);
+            assert_eq!(
+                policy.max_batch, max_batch,
+                "{backend_name} max batch policy drifted"
+            );
+            assert_eq!(
+                policy.wait_micros, wait_micros,
+                "{backend_name} wait policy drifted"
+            );
+            assert_eq!(
+                policy.allow_mixed_seq_lens, allow_mixed_seq_lens,
+                "{backend_name} mixed-seq policy drifted"
+            );
+            assert_eq!(
+                policy.rowwise_retry_env, rowwise_retry_env,
+                "{backend_name} rowwise retry policy drifted"
+            );
+            assert_eq!(
+                policy.use_native_sampled_contiguous_decode, use_native_sampled_contiguous_decode,
+                "{backend_name} sampled contiguous decode policy drifted"
+            );
+            assert_eq!(
+                policy.sampled_contiguous_decode_requires_resident_decode,
+                sampled_contiguous_decode_requires_resident_decode,
+                "{backend_name} sampled contiguous resident requirement policy drifted"
+            );
+            assert_eq!(
+                policy.partition_noncontiguous_gdn_kv_tiles, partition_noncontiguous_gdn_kv_tiles,
+                "{backend_name} GDN KV contiguity partition policy drifted"
+            );
+        }
     }
 
     #[test]
@@ -8378,25 +8758,161 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_batcher_default_wait_backend_policy() {
-        // (#1082) kt Device; candle-typed helper deleted.
-        let device = kiln_tensor::Device::Cpu;
+    fn test_decode_batcher_rowwise_retry_uses_backend_policy() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _fallback_env = EnvRestore::clear(DECODE_FALLBACK_ENV);
+        let _rowwise_env = EnvRestore::clear(DECODE_BATCHER_ROWWISE_ENV);
+
+        let vulkan_cpu_sentinel = NamedTestBackend {
+            name: "vulkan",
+            device: kiln_tensor::Device::Cpu,
+        };
+        let metal = NamedTestBackend {
+            name: "metal",
+            device: kiln_tensor::Device::Metal(0),
+        };
+
+        assert!(!decode_batcher_rowwise_retry_enabled(&vulkan_cpu_sentinel));
+        assert!(!decode_batcher_rowwise_retry_enabled(&metal));
+
+        unsafe {
+            std::env::set_var("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY", "1");
+        }
+        assert!(decode_batcher_rowwise_retry_enabled(&vulkan_cpu_sentinel));
+        assert!(
+            !decode_batcher_rowwise_retry_enabled(&metal),
+            "Vulkan rowwise retry env should not apply to Metal policy"
+        );
+    }
+
+    #[test]
+    fn test_decode_hot_path_fallback_policy_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvRestore::clear(DECODE_FALLBACK_ENV);
+        for (backend_name, device, expected, debug_env) in [
+            (
+                "cpu",
+                kiln_tensor::Device::Cpu,
+                FallbackPolicy::CorrectnessAllowed,
+                None,
+            ),
+            (
+                "cuda",
+                kiln_tensor::Device::Cuda(0),
+                FallbackPolicy::CorrectnessAllowed,
+                None,
+            ),
+            (
+                "metal",
+                kiln_tensor::Device::Metal(0),
+                FallbackPolicy::NativeRequired,
+                Some("KILN_METAL_DECODE_BATCH_GENERIC_FALLBACK"),
+            ),
+            (
+                "vulkan",
+                kiln_tensor::Device::Vulkan(0),
+                FallbackPolicy::NativeRequired,
+                Some("KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK"),
+            ),
+            (
+                "rocm",
+                kiln_tensor::Device::Rocm(0),
+                FallbackPolicy::NativeRequired,
+                Some("KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK"),
+            ),
+        ] {
+            let fallback =
+                backend::capability::BackendFallbackCapabilities::for_backend(backend_name, device);
+            assert_eq!(fallback.decode_hot_path, expected);
+            assert_eq!(
+                fallback.decode_hot_path_debug_env, debug_env,
+                "{backend_name} decode debug fallback env drifted"
+            );
+            let backend = NamedTestBackend {
+                name: backend_name,
+                device,
+            };
+            assert_eq!(decode_hot_path_fallback_policy_for_backend(&backend), expected);
+        }
+
+        let vulkan_cpu_sentinel = NamedTestBackend {
+            name: "vulkan",
+            device: kiln_tensor::Device::Cpu,
+        };
+        assert_eq!(
+            decode_hot_path_fallback_policy_for_backend(&vulkan_cpu_sentinel),
+            FallbackPolicy::NativeRequired
+        );
+        assert_eq!(
+            backend::capability::BackendFallbackCapabilities::for_backend(
+                "vulkan",
+                kiln_tensor::Device::Cpu,
+            )
+            .decode_hot_path_debug_env,
+            Some("KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK")
+        );
+    }
+
+    #[test]
+    fn test_decode_hot_path_debug_fallback_opt_in_warns_and_counts() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvRestore::clear(DECODE_FALLBACK_ENV);
+        unsafe {
+            std::env::set_var("KILN_DECODE_HOT_PATH_DEBUG_FALLBACK", "1");
+        }
+        for (backend_name, device) in [
+            ("metal", kiln_tensor::Device::Metal(0)),
+            ("vulkan", kiln_tensor::Device::Vulkan(0)),
+            ("rocm", kiln_tensor::Device::Rocm(0)),
+        ] {
+            let backend = NamedTestBackend {
+                name: backend_name,
+                device,
+            };
+            let policy = decode_hot_path_fallback_policy_for_backend(&backend);
+            assert_eq!(policy, FallbackPolicy::WarnAndCount);
+            assert!(policy.allows_fallback());
+        }
+    }
+
+    #[test]
+    fn test_decode_hot_path_backend_debug_fallback_uses_policy_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvRestore::clear(DECODE_FALLBACK_ENV);
+
+        let metal = NamedTestBackend {
+            name: "metal",
+            device: kiln_tensor::Device::Metal(0),
+        };
+        let vulkan = NamedTestBackend {
+            name: "vulkan",
+            device: kiln_tensor::Device::Cpu,
+        };
+        let rocm = NamedTestBackend {
+            name: "rocm",
+            device: kiln_tensor::Device::Rocm(0),
+        };
 
         assert_eq!(
-            default_decode_batcher_wait_kt(&device, "cpu"),
-            std::time::Duration::ZERO
+            decode_hot_path_fallback_policy_for_backend(&metal),
+            FallbackPolicy::NativeRequired
+        );
+        unsafe {
+            std::env::set_var("KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK", "1");
+        }
+        assert_eq!(
+            decode_hot_path_fallback_policy_for_backend(&vulkan),
+            FallbackPolicy::WarnAndCount
         );
         assert_eq!(
-            default_decode_batcher_wait_kt(&device, "cuda"),
-            std::time::Duration::ZERO
+            decode_hot_path_fallback_policy_for_backend(&metal),
+            FallbackPolicy::NativeRequired,
+            "Vulkan decode fallback env should not apply to Metal policy"
         );
         assert_eq!(
-            default_decode_batcher_wait_kt(&device, "vulkan"),
-            std::time::Duration::from_micros(5_000)
-        );
-        assert_eq!(
-            default_decode_batcher_wait_kt(&device, "metal"),
-            std::time::Duration::from_micros(100)
+            decode_hot_path_fallback_policy_for_backend(&rocm),
+            FallbackPolicy::NativeRequired,
+            "Vulkan decode fallback env should not apply to ROCm policy"
         );
     }
 

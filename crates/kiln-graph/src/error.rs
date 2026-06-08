@@ -12,10 +12,7 @@ pub enum CaptureError {
          requested {requested_bytes} bytes). Pre-warm the allocator pool before \
          capture_session.begin()."
     )]
-    AllocationDuringFreeze {
-        op: String,
-        requested_bytes: usize,
-    },
+    AllocationDuringFreeze { op: String, requested_bytes: usize },
 
     /// A pinned pointer referenced by the captured graph no longer
     /// resolves to a live allocation (anti-pattern: dangling pointer
@@ -30,6 +27,14 @@ pub enum CaptureError {
     /// Replay called on a graph that wasn't successfully captured.
     #[error("CaptureError: replay called on an uncaptured graph")]
     NotCaptured,
+
+    /// Replay inputs do not satisfy the plan's input contract.
+    #[error("CaptureError: invalid replay input: {reason}")]
+    InvalidReplayInput { reason: String },
+
+    /// A previously valid replay plan can no longer be reused.
+    #[error("CaptureError: replay invalidated: {reason}")]
+    ReplayInvalidated { reason: String },
 
     /// Per-backend driver error (CUDA / Metal / Vulkan returned an
     /// error during `cuGraphLaunch` / `executeCommandBuffer` etc.).

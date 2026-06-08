@@ -3,7 +3,12 @@
 //! device. Used on CPU, on Metal until Phase 2 adds a real backend, and
 //! as a safe default for any future device.
 
-use super::BackendRuntime;
+use super::{
+    AttentionBackend, BackendIdentity, BackendMatmulLayout, BackendRuntime, ConvBackend,
+    GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend,
+    SamplingBackend, StartupBackend, TrainingLossBackend, TrainingPrecisionPolicy,
+    matmul_request_support_rank, matmul_support_from_native, requested_matmul_layout,
+};
 
 #[derive(Debug)]
 pub struct CpuBackend {
@@ -20,8 +25,8 @@ impl CpuBackend {
     }
 }
 
-impl BackendRuntime for CpuBackend {
-    fn name(&self) -> &'static str {
+impl BackendIdentity for CpuBackend {
+    fn runtime_name(&self) -> &'static str {
         match self.device_kt {
             kiln_tensor::Device::Cpu => "cpu",
             kiln_tensor::Device::Metal(_) => "metal-portable",
@@ -33,7 +38,110 @@ impl BackendRuntime for CpuBackend {
         }
     }
 
-    fn device(&self) -> kiln_tensor::Device {
+    fn runtime_device(&self) -> kiln_tensor::Device {
         self.device_kt
     }
+
+    fn runtime_as_any(&self) -> &dyn std::any::Any {
+        &()
+    }
 }
+
+impl StartupBackend for CpuBackend {}
+
+impl AttentionBackend for CpuBackend {}
+
+impl GdnBackend for CpuBackend {}
+
+impl ConvBackend for CpuBackend {}
+
+impl LinearBackend for CpuBackend {
+    fn runtime_supports_matmul_request(
+        &self,
+        req: &super::capability::MatmulRequest,
+    ) -> super::capability::Support {
+        let homogeneous_native = matmul_request_support_rank(req).is_some();
+        let cpu_oracle_native = req.to_blas_request(1).is_ok()
+            && req.accumulation == super::capability::MatmulAccumulation::F32
+            && req.out_layout == super::capability::MatmulOperandLayout::RowMajor
+            && req.epilogue == super::capability::MatmulEpilogue::Identity;
+        if !homogeneous_native && !cpu_oracle_native {
+            return super::capability::Support::Unsupported;
+        }
+        matmul_support_from_native(true)
+    }
+
+    fn runtime_matmul(
+        &self,
+        req: &super::capability::MatmulRequest,
+        lhs: &kiln_tensor::Tensor,
+        rhs: &kiln_tensor::Tensor,
+    ) -> anyhow::Result<Option<kiln_tensor::Tensor>> {
+        if !matches!(lhs.device(), kiln_tensor::Device::Cpu)
+            || !matches!(rhs.device(), kiln_tensor::Device::Cpu)
+        {
+            return Ok(None);
+        }
+
+        let Some(layout) = requested_matmul_layout(req, lhs, rhs) else {
+            return Ok(None);
+        };
+        let lhs_f32;
+        let rhs_f32;
+        let (lhs, rhs) = if req.lhs_dtype != req.rhs_dtype || req.out_dtype != lhs.dtype() {
+            lhs_f32 = lhs.to_dtype(kiln_tensor::DType::F32)?;
+            rhs_f32 = rhs.to_dtype(kiln_tensor::DType::F32)?;
+            (&lhs_f32, &rhs_f32)
+        } else {
+            (lhs, rhs)
+        };
+
+        let out = match layout {
+            BackendMatmulLayout::Plain => kiln_tensor::ops::matmul(lhs, rhs)?,
+            BackendMatmulLayout::LhsTransposed => {
+                kiln_tensor::ops::matmul_lhs_transposed(lhs, rhs)?
+            }
+            BackendMatmulLayout::RhsTransposed => {
+                kiln_tensor::ops::matmul_rhs_transposed(lhs, rhs)?
+            }
+            BackendMatmulLayout::BothTransposed => {
+                let rank = lhs.rank();
+                let lhs_t = lhs.transpose(rank - 2, rank - 1)?.contiguous()?;
+                let rhs_t = rhs.transpose(rank - 2, rank - 1)?.contiguous()?;
+                kiln_tensor::ops::matmul(&lhs_t, &rhs_t)?
+            }
+        };
+        if out.dtype() == req.out_dtype {
+            Ok(Some(out))
+        } else {
+            Ok(Some(out.to_dtype(req.out_dtype)?))
+        }
+    }
+}
+
+impl super::residency::ResidentRegistry for CpuBackend {}
+
+impl ResidencyBackend for CpuBackend {}
+
+impl SamplingBackend for CpuBackend {}
+
+impl OptimizerBackend for CpuBackend {}
+
+impl PagedKvBackend for CpuBackend {}
+
+impl ReplayBackend for CpuBackend {}
+
+impl TrainingLossBackend for CpuBackend {
+    fn runtime_training_precision_policy(&self) -> TrainingPrecisionPolicy {
+        match self.device_kt {
+            kiln_tensor::Device::Cuda(_) => TrainingPrecisionPolicy::cuda(),
+            kiln_tensor::Device::Rocm(_) => TrainingPrecisionPolicy::rocm(),
+            kiln_tensor::Device::Metal(_) => TrainingPrecisionPolicy::metal(),
+            kiln_tensor::Device::Vulkan(_) => TrainingPrecisionPolicy::vulkan(),
+            kiln_tensor::Device::Cpu => TrainingPrecisionPolicy::portable(),
+            _ => TrainingPrecisionPolicy::portable(),
+        }
+    }
+}
+
+impl BackendRuntime for CpuBackend {}

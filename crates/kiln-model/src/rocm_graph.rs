@@ -37,8 +37,15 @@ use crate::lora_loader::LoraWeights;
 #[cfg(feature = "rocm")]
 use crate::forward::{PagedDecodeGraphInputs, model_forward_paged_hidden_with_graph_inputs};
 #[cfg(feature = "rocm")]
+use kiln_graph::{
+    CaptureError, InvalidateReason, ReplayInputs, ReplayKey, ReplayOutputs, ReplayPlan,
+    ReplayResourceStability, ReplayState, ResidentResourceRef,
+};
+#[cfg(feature = "rocm")]
 use std::collections::HashMap;
 
+#[cfg(feature = "rocm")]
+use kiln_tensor::Backend;
 use kiln_tensor::{Device, Tensor};
 
 /// Whether ROCm HIP-graph decode is requested via `KILN_ROCM_GRAPHS` (default
@@ -158,6 +165,68 @@ struct CapturedDecodeGraphRocm {
     /// The freeze-pointer arena buffers (Q/K/V/activations); retained so their
     /// device pointers stay mapped for every replay.
     _capture_arena_buffers: Vec<std::sync::Arc<kiln_tensor::RocmStorage>>,
+    /// Shared graph-layer replay contract state captured alongside the native
+    /// HIP graph. The production replay path validates this before launching.
+    replay_state: ReplayState,
+}
+
+#[cfg(feature = "rocm")]
+struct RocmDecodeReplayPlan<'a> {
+    captured: &'a CapturedDecodeGraphRocm,
+}
+
+#[cfg(feature = "rocm")]
+impl<'a> RocmDecodeReplayPlan<'a> {
+    fn new(captured: &'a CapturedDecodeGraphRocm) -> Self {
+        Self { captured }
+    }
+}
+
+#[cfg(feature = "rocm")]
+impl std::fmt::Debug for RocmDecodeReplayPlan<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RocmDecodeReplayPlan")
+            .field("key", &self.captured.replay_state.key)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "rocm")]
+impl ReplayPlan for RocmDecodeReplayPlan<'_> {
+    fn backend(&self) -> Backend {
+        Backend::Rocm
+    }
+
+    fn key(&self) -> ReplayKey {
+        self.captured.replay_state.key.clone()
+    }
+
+    fn validate_inputs(&self, inputs: ReplayInputs<'_>) -> Result<(), CaptureError> {
+        self.captured
+            .replay_state
+            .validate(inputs.key, inputs.resources)
+    }
+
+    fn replay(&mut self, inputs: ReplayInputs<'_>) -> Result<ReplayOutputs, CaptureError> {
+        self.validate_inputs(inputs)?;
+        self.captured
+            .exec
+            .launch(&self.captured.capture_stream)
+            .map_err(|e| CaptureError::Backend(format!("ROCm graph launch: {e}")))?;
+        self.captured
+            .capture_stream
+            .synchronize()
+            .map_err(|e| {
+                CaptureError::Backend(format!("sync capture stream after replay launch: {e}"))
+            })?;
+        Ok(ReplayOutputs::new(inputs.resources.to_vec(), 1))
+    }
+
+    fn invalidate_reason(&self, state: &ReplayState) -> Option<InvalidateReason> {
+        self.captured
+            .replay_state
+            .invalidate_reason(&state.key, &state.inputs)
+    }
 }
 
 #[cfg(feature = "rocm")]
@@ -1305,16 +1374,76 @@ impl RocmGraphRunner {
                 .context("sync per-replay input writes before ROCm graph launch")?;
         }
 
-        captured
-            .exec
-            .launch(&captured.capture_stream)
-            .map_err(|e| anyhow::anyhow!("ROCm graph launch: {e}"))?;
-        captured
-            .capture_stream
-            .synchronize()
-            .map_err(|e| anyhow::anyhow!("sync capture stream after replay launch: {e}"))?;
+        let mut plan = RocmDecodeReplayPlan::new(captured);
+        let replay_key = kiln_graph::ReplayPlan::key(&plan);
+        let replay_inputs = ReplayInputs::new(&replay_key, &captured.replay_state.inputs);
+        kiln_graph::ReplayPlan::replay(&mut plan, replay_inputs)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         Ok(captured.output_hidden.clone())
+    }
+
+    fn replay_state_for_capture(
+        key: &RocmGraphKey,
+        output_hidden: &Tensor,
+        token_buffer: &Tensor,
+        position_buffer: &Tensor,
+        block_table_buffer: Option<&Tensor>,
+        seqused_k_buffer: Option<&Tensor>,
+        kv_slot_buffer: Option<&Tensor>,
+        rotary_cos_buffer: &Tensor,
+        rotary_sin_buffer: &Tensor,
+        paged_decode_outputs: &[Tensor],
+        paged_decode_lse: &[Tensor],
+        gdn_decode_outputs: &[Tensor],
+    ) -> ReplayState {
+        let replay_key = ReplayKey::new(
+            Backend::Rocm,
+            "paged_decode_graph_outputs",
+            vec![
+                key.seq_len,
+                key.block_table.len(),
+                key.max_seqlen_k,
+                key.max_blocks_per_seq,
+                usize::from(key.stable_metadata),
+            ],
+            Some(output_hidden.dtype()),
+            1,
+            true,
+        );
+        let mut resources = vec![
+            Self::stable_replay_resource(output_hidden),
+            Self::stable_replay_resource(token_buffer),
+            Self::stable_replay_resource(position_buffer),
+            Self::stable_replay_resource(rotary_cos_buffer),
+            Self::stable_replay_resource(rotary_sin_buffer),
+        ];
+        for tensor in [block_table_buffer, seqused_k_buffer, kv_slot_buffer]
+            .into_iter()
+            .flatten()
+        {
+            resources.push(Self::stable_replay_resource(tensor));
+        }
+        resources.extend(
+            paged_decode_outputs
+                .iter()
+                .map(Self::stable_replay_resource),
+        );
+        resources.extend(paged_decode_lse.iter().map(Self::stable_replay_resource));
+        resources.extend(
+            gdn_decode_outputs
+                .iter()
+                .map(Self::stable_replay_resource),
+        );
+        ReplayState::new(replay_key, resources)
+    }
+
+    fn stable_replay_resource(tensor: &Tensor) -> ResidentResourceRef {
+        ResidentResourceRef::from_tensor(
+            tensor,
+            Backend::Rocm,
+            ReplayResourceStability::StableAcrossReplay,
+        )
     }
 
     // --- per-replay in-place buffer refresh (frozen device pointers) ---
@@ -1852,6 +1981,20 @@ impl RocmGraphRunner {
         let captured_hidden = output_hidden.clone();
         let max_seqlen_k = key.max_seqlen_k;
         let arena_buffers = arena.borrow_mut().take_retained();
+        let replay_state = Self::replay_state_for_capture(
+            &key,
+            &output_hidden,
+            &token_buffer,
+            &position_buffer,
+            block_table_buffer.as_ref(),
+            seqused_k_buffer.as_ref(),
+            kv_slot_buffer.as_ref(),
+            &rotary_cos_buffer,
+            &rotary_sin_buffer,
+            &paged_decode_outputs,
+            &paged_decode_lse,
+            &gdn_decode_outputs,
+        );
         self.captured.insert(
             key,
             CapturedDecodeGraphRocm {
@@ -1872,6 +2015,7 @@ impl RocmGraphRunner {
                 max_seqlen_k,
                 _gdn_decode_outputs: gdn_decode_outputs,
                 _capture_arena_buffers: arena_buffers,
+                replay_state,
             },
         );
         Ok(RocmCaptureStep::CapturedHidden(captured_hidden))

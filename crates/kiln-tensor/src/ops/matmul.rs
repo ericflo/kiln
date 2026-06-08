@@ -235,6 +235,126 @@ impl DeviceOp2 for MatmulOp {
     }
 }
 
+/// Matmul with the left operand interpreted as transposed over the
+/// trailing matrix axes: `[..., K, M]^T @ [..., K, N]`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MatmulLhsTransposedOp;
+
+impl DeviceOp2 for MatmulLhsTransposedOp {
+    fn name(&self) -> &'static str {
+        "matmul_lhs_transposed"
+    }
+
+    fn determinism(&self) -> Determinism {
+        Determinism::Constructive
+    }
+
+    fn cpu_fwd(&self, a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+        Ok(Some(matmul_lhs_transposed_fallback(a, b)?))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(&self, a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+        if a.is_contiguous()
+            && b.is_contiguous()
+            && matches!(a.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        {
+            return Ok(Some(crate::cuda_matmul_lhs_transposed(a, b)?));
+        }
+        Ok(Some(matmul_lhs_transposed_fallback(a, b)?))
+    }
+
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+        if a.is_contiguous()
+            && b.is_contiguous()
+            && matches!(a.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        {
+            return Ok(Some(crate::rocm_matmul_lhs_transposed(a, b)?));
+        }
+        Ok(Some(matmul_lhs_transposed_fallback(a, b)?))
+    }
+
+    #[cfg(feature = "metal")]
+    fn metal_fwd(&self, a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+        if a.is_contiguous() && b.is_contiguous() && a.dtype() == DType::BF16 {
+            return Ok(Some(crate::metal_matmul_lhs_transposed(a, b)?));
+        }
+        Ok(Some(matmul_lhs_transposed_fallback(a, b)?))
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+        if a.is_contiguous()
+            && b.is_contiguous()
+            && matches!(a.dtype(), DType::F32 | DType::BF16)
+        {
+            return Ok(Some(crate::vulkan_matmul_lhs_transposed(a, b)?));
+        }
+        Ok(Some(matmul_lhs_transposed_fallback(a, b)?))
+    }
+}
+
+/// Matmul with the right operand interpreted as transposed over the
+/// trailing matrix axes: `[..., M, K] @ [..., N, K]^T`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MatmulRhsTransposedOp;
+
+impl DeviceOp2 for MatmulRhsTransposedOp {
+    fn name(&self) -> &'static str {
+        "matmul_rhs_transposed"
+    }
+
+    fn determinism(&self) -> Determinism {
+        Determinism::Constructive
+    }
+
+    fn cpu_fwd(&self, a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+        Ok(Some(matmul_rhs_transposed_fallback(a, b)?))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(&self, a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+        if a.is_contiguous()
+            && b.is_contiguous()
+            && matches!(a.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        {
+            return Ok(Some(crate::cuda_matmul_rhs_transposed(a, b)?));
+        }
+        Ok(Some(matmul_rhs_transposed_fallback(a, b)?))
+    }
+
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+        if a.is_contiguous()
+            && b.is_contiguous()
+            && matches!(a.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        {
+            return Ok(Some(crate::rocm_matmul_rhs_transposed(a, b)?));
+        }
+        Ok(Some(matmul_rhs_transposed_fallback(a, b)?))
+    }
+
+    #[cfg(feature = "metal")]
+    fn metal_fwd(&self, a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+        if a.is_contiguous() && b.is_contiguous() && a.dtype() == DType::BF16 {
+            return Ok(Some(crate::metal_matmul_rhs_transposed(a, b)?));
+        }
+        Ok(Some(matmul_rhs_transposed_fallback(a, b)?))
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+        if a.is_contiguous()
+            && b.is_contiguous()
+            && matches!(a.dtype(), DType::F32 | DType::BF16)
+        {
+            return Ok(Some(crate::vulkan_matmul_rhs_transposed(a, b)?));
+        }
+        Ok(Some(matmul_rhs_transposed_fallback(a, b)?))
+    }
+}
+
 /// Dispatch `MatmulOp`. Mirrors candle's `Tensor::matmul`.
 ///
 /// Shapes:
@@ -253,6 +373,26 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
 /// The generic fallback materialises `a.transpose(-2, -1).contiguous()` and
 /// then calls [`matmul`].
 pub fn matmul_lhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    validate_lhs_transposed(a, b)?;
+    dispatch2(&MatmulLhsTransposedOp, a, b)
+}
+
+/// Compute `a @ b^T` over the trailing matrix axes.
+///
+/// Input shapes are `[..., M, K]` and `[..., N, K]`; the output shape is
+/// `[..., M, N]`. Backends may consume the transposed right operand directly.
+/// The generic fallback materialises `b.transpose(-2, -1).contiguous()` and
+/// then calls [`matmul`].
+pub fn matmul_rhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    validate_rhs_transposed(a, b)?;
+    dispatch2(&MatmulRhsTransposedOp, a, b)
+}
+
+// ----------------------------------------------------------------------
+// Helpers
+// ----------------------------------------------------------------------
+
+fn validate_lhs_transposed(a: &Tensor, b: &Tensor) -> Result<()> {
     let ar = a.rank();
     let br = b.rank();
     if ar < 2 || br < 2 {
@@ -288,73 +428,10 @@ pub fn matmul_lhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
             b.dtype()
         );
     }
-
-    #[cfg(feature = "cuda")]
-    {
-        if matches!(a.device(), crate::Device::Cuda(_))
-            && matches!(b.device(), crate::Device::Cuda(_))
-            && a.is_contiguous()
-            && b.is_contiguous()
-            && matches!(a.dtype(), DType::F32 | DType::BF16 | DType::F16)
-        {
-            return crate::cuda_matmul_lhs_transposed(a, b);
-        }
-    }
-
-    #[cfg(feature = "rocm")]
-    {
-        if matches!(a.device(), crate::Device::Rocm(_))
-            && matches!(b.device(), crate::Device::Rocm(_))
-            && a.is_contiguous()
-            && b.is_contiguous()
-            && matches!(a.dtype(), DType::F32 | DType::BF16 | DType::F16)
-        {
-            return crate::rocm_matmul_lhs_transposed(a, b);
-        }
-    }
-
-    #[cfg(feature = "metal")]
-    {
-        if matches!(a.device(), crate::Device::Metal(_))
-            && matches!(b.device(), crate::Device::Metal(_))
-            && a.is_contiguous()
-            && b.is_contiguous()
-            && a.dtype() == DType::BF16
-        {
-            return crate::metal_matmul_lhs_transposed(a, b);
-        }
-    }
-
-    #[cfg(feature = "vulkan")]
-    {
-        if matches!(a.device(), crate::Device::Vulkan(_))
-            && matches!(b.device(), crate::Device::Vulkan(_))
-            && a.is_contiguous()
-            && b.is_contiguous()
-            && matches!(a.dtype(), DType::F32 | DType::BF16)
-        {
-            return crate::vulkan_matmul_lhs_transposed(a, b);
-        }
-    }
-
-    let a_t = a.transpose(ar - 2, ar - 1)?.contiguous()?;
-    let b_contig;
-    let b = if b.is_contiguous() {
-        b
-    } else {
-        b_contig = b.contiguous()?;
-        &b_contig
-    };
-    matmul(&a_t, b)
+    Ok(())
 }
 
-/// Compute `a @ b^T` over the trailing matrix axes.
-///
-/// Input shapes are `[..., M, K]` and `[..., N, K]`; the output shape is
-/// `[..., M, N]`. Backends may consume the transposed right operand directly.
-/// The generic fallback materialises `b.transpose(-2, -1).contiguous()` and
-/// then calls [`matmul`].
-pub fn matmul_rhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+fn validate_rhs_transposed(a: &Tensor, b: &Tensor) -> Result<()> {
     let ar = a.rank();
     let br = b.rank();
     if ar < 2 || br < 2 {
@@ -390,55 +467,26 @@ pub fn matmul_rhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
             b.dtype()
         );
     }
+    Ok(())
+}
 
-    #[cfg(feature = "cuda")]
-    {
-        if matches!(a.device(), crate::Device::Cuda(_))
-            && matches!(b.device(), crate::Device::Cuda(_))
-            && a.is_contiguous()
-            && b.is_contiguous()
-            && matches!(a.dtype(), DType::F32 | DType::BF16 | DType::F16)
-        {
-            return crate::cuda_matmul_rhs_transposed(a, b);
-        }
-    }
+fn matmul_lhs_transposed_fallback(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    validate_lhs_transposed(a, b)?;
+    let ar = a.rank();
+    let a_t = a.transpose(ar - 2, ar - 1)?.contiguous()?;
+    let b_contig;
+    let b = if b.is_contiguous() {
+        b
+    } else {
+        b_contig = b.contiguous()?;
+        &b_contig
+    };
+    matmul(&a_t, b)
+}
 
-    #[cfg(feature = "rocm")]
-    {
-        if matches!(a.device(), crate::Device::Rocm(_))
-            && matches!(b.device(), crate::Device::Rocm(_))
-            && a.is_contiguous()
-            && b.is_contiguous()
-            && matches!(a.dtype(), DType::F32 | DType::BF16 | DType::F16)
-        {
-            return crate::rocm_matmul_rhs_transposed(a, b);
-        }
-    }
-
-    #[cfg(feature = "metal")]
-    {
-        if matches!(a.device(), crate::Device::Metal(_))
-            && matches!(b.device(), crate::Device::Metal(_))
-            && a.is_contiguous()
-            && b.is_contiguous()
-            && a.dtype() == DType::BF16
-        {
-            return crate::metal_matmul_rhs_transposed(a, b);
-        }
-    }
-
-    #[cfg(feature = "vulkan")]
-    {
-        if matches!(a.device(), crate::Device::Vulkan(_))
-            && matches!(b.device(), crate::Device::Vulkan(_))
-            && a.is_contiguous()
-            && b.is_contiguous()
-            && matches!(a.dtype(), DType::F32 | DType::BF16)
-        {
-            return crate::vulkan_matmul_rhs_transposed(a, b);
-        }
-    }
-
+fn matmul_rhs_transposed_fallback(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    validate_rhs_transposed(a, b)?;
+    let br = b.rank();
     let a_contig;
     let a = if a.is_contiguous() {
         a
@@ -449,10 +497,6 @@ pub fn matmul_rhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     let b_t = b.transpose(br - 2, br - 1)?.contiguous()?;
     matmul(a, &b_t)
 }
-
-// ----------------------------------------------------------------------
-// Helpers
-// ----------------------------------------------------------------------
 
 fn validate(a: &Tensor, b: &Tensor) -> Result<()> {
     let (ar, br) = (a.rank(), b.rank());

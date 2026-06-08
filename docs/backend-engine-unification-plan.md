@@ -2,6 +2,17 @@
 
 Date: 2026-06-05
 
+> **Status update (2026-06-07).** This original plan has been largely executed on
+> branch `unify-engines` (PR #1465). An outcome + code review found that the
+> contracts, module decomposition, and observability landed genuinely, but the
+> **behavioral migration** for Phases 1, 3, 4, and 5 did not — those shared
+> surfaces are additive scaffolds that coexist with the original `Device::`-keyed
+> dispatch, even though the generated report marks them `covered`. Do not treat
+> "covered" in `docs/backend-capability-report.md` as "migrated".
+>
+> - What actually landed, with evidence: **[`backend-engine-unification-review-2026-06-07.md`](backend-engine-unification-review-2026-06-07.md)**
+> - How to finish (drive every phase to genuine unification): **[`backend-engine-unification-completion-plan.md`](backend-engine-unification-completion-plan.md)** ← active plan; agents should work from this.
+
 This document maps the current backend and engine implementations across the
 workspace and proposes a unification plan for CUDA, ROCm, Metal, and Vulkan. It
 is intentionally based on the current source layout, not on the older
@@ -226,20 +237,52 @@ backend-gated fast paths for fused loss roots and optimizer dispatch.
 The relevant shims are:
 
 - `sft_tape_shim.rs`: Vulkan-specific SFT FLCE bridges (kt tensor <->
-  `VkTensor`, fused active-row FLCE loss/backward). The CUDA FLCE fast path is
-  not in this shim; it lives in `trainer.rs` (gated on `is_cuda_device`, which
-  matches `Device::Cuda(_)` only) via `kiln-flce-kernel`'s kt FLCE API. ROCm has
-  no native fused FLCE: the kt composite has no `rocm_fwd`, so ROCm FLCE
-  host-stages down to CPU and back, unlike the OPD path below where ROCm joins
-  CUDA's fused FFI kernel.
-- `grpo_tape_shim.rs`: GRPO scalar loss roots and analytic kt backward, with
-  CUDA/ROCm fused fast paths and Vulkan-specific loss/grad paths.
+  `VkTensor`, fused active-row FLCE loss/backward). The trainer chooses the SFT
+  FLCE loss root through `TrainingLossBackend::runtime_sft_flce_loss_route`:
+  CUDA and ROCm advertise the shared kt-tape FLCE route, Vulkan advertises the
+  active-row fused shader route, and CPU/Metal keep the portable full-logits
+  route.
+- `grpo_tape_shim.rs`: GRPO scalar loss roots and analytic kt backward. The
+  trainer chooses GRPO loss roots through
+  `TrainingLossBackend::runtime_grpo_loss_route`: CPU/CUDA/ROCm/Metal use the
+  shared kt-composite route and Vulkan uses the active-row fused shader route.
+  GRPO KL auxiliary reductions and gradient-coefficient fast paths are also
+  backend-owned through
+  `TrainingLossBackend::runtime_grpo_kl_auxiliary_route`: CUDA/ROCm advertise
+  device fast paths for the entropy-aware threshold and coefficient/chunk
+  helpers, while CPU/Metal/Vulkan keep the host-composite route.
 - `opd_tape_shim.rs`: records the OPD top-K/reverse-KL scalar-mean loss root and
   owns the Vulkan-specific active-hidden fused-shader loss/grad paths. The
-  CUDA/ROCm fused-FFI kernel dispatch and the Metal/CPU/Vulkan device-agnostic
-  analytic kt-composite backward live in the `kiln-opd-loss-kernel` crate (the
-  `kt_tape.rs` `BackwardOp::apply` dispatcher over `kt_api.rs`), which this shim
-  calls.
+  trainer chooses OPD loss roots through
+  `TrainingLossBackend::runtime_opd_loss_route`: CUDA, ROCm, and Metal use the
+  shared kt-tape Phase-B route, Vulkan uses the active-hidden fused shader
+  route, and CPU/portable reports OPD as unsupported. Checkpointed OPD chooses
+  the Phase-B hidden-gradient path through
+  `TrainingLossBackend::runtime_opd_phase_b_backward_route`: CUDA/ROCm use the
+  fused unit-gradient leaf, Metal uses the device-agnostic kt-composite
+  backward, Vulkan uses its active-hidden fused loss/grad path, and CPU/portable
+  remains unsupported. The CUDA/ROCm fused-FFI kernel dispatch and the
+  Metal/CPU/Vulkan device-agnostic analytic kt-composite backward live in the
+  `kiln-opd-loss-kernel` crate (the `kt_tape.rs` `BackwardOp::apply` dispatcher
+  over `kt_api.rs`), which this shim calls.
+- Training precision policy is also backend-owned in production setup:
+  SFT/GRPO/OPD read `TrainingLossBackend::runtime_training_precision_policy`
+  from the active backend before choosing LoRA parameter dtype, checkpoint
+  activation sizing, and tape dtype eligibility. The older device-family helper
+  remains only as a compatibility wrapper for tests and call sites that do not
+  hold a backend runtime.
+- kt tape-forward/backward eligibility is backend-owned:
+  SFT/GRPO ask `TrainingLossBackend::runtime_tape_forward_backward_route`
+  before entering their tape-authoritative paths, then apply the precision
+  policy for dtype eligibility. CPU/portable reports the tape route as
+  unsupported, while CUDA, ROCm, Metal, and Vulkan advertise the shared kt
+  tape-authoritative route with their backend-specific precision constraints.
+- Final RMSNorm backward routing is backend-owned:
+  SFT/GRPO/OPD ask
+  `TrainingLossBackend::runtime_final_rmsnorm_backward_route` before seeding the
+  checkpoint tail. CUDA/ROCm advertise the fused final-tail leaf and fall back to
+  the kt-composite math outside the fused envelope; CPU, Metal, and Vulkan
+  advertise the kt-composite route.
 
 Vulkan still has a stronger separate low-level identity than CUDA/ROCm/Metal
 because the SPIR-V leaf layer exposes `VkTensor`, explicit buffer operations,
@@ -300,9 +343,10 @@ Capability profile:
   kernel crates.
 - ROCm has head-major prefill support gated by `KILN_ROCM_HEAD_MAJOR_PREFILL`.
 - Some code still carries CUDA names, comments, and telemetry strings.
-- At least one support method should be audited: `supports_linear_decode_argmax`
-  returns true while the current `linear_decode_argmax` override returns
-  `Ok(None)`.
+- The earlier `supports_linear_decode_argmax` mismatch is resolved: ROCm now
+  reports `Declined` for that support predicate until a native argmax path
+  lands, so the capability report does not claim native support for an
+  always-declining method body.
 
 ROCm should be unified with CUDA where the abstraction is genuinely shared:
 device pointer extraction, stream/capture lifecycle, BLASLt request descriptors,
@@ -333,8 +377,8 @@ Capability profile:
   graph-output forms.
 - Native GDN recurrent/chunk/gates/gated-RMSNorm and conv1d paths.
 - Native sampled lm-head paths, including batch mixed greedy/sampling forms.
-- AdamW dispatch exists; SGD is not currently overridden in the backend trait
-  list.
+- AdamW dispatch exists; SGD intentionally default-declines in the optimizer
+  dispatch report rather than claiming native Metal coverage.
 - The implementation is large and monolithic, especially `backend/metal.rs`,
   which mixes runtime trait implementation, MSL strings, pipeline setup,
   residency, decode helpers, and tests.
@@ -905,6 +949,18 @@ These are the first concrete PRs, ordered by readiness. Items 1-4 are Phase 0
 (no refactor, do these first); item 6 begins Phase 1; items 5 and 8 begin Phase
 2; item 7 begins Phase 7 and must wait for item 6. Item 9 is a small audit that
 pairs with the unified optimizer contract (Phase 6).
+
+Status note (revised 2026-06-07): this section records the initial migration
+order. The generated capability report (`docs/backend-capability-report.md` /
+`.json`) now marks all eight phases `covered`, but the 2026-06-07 review found
+that `covered` is computed mostly from hardcoded literals gated on file existence
+and certifies "a contract + test exist", not "call sites migrated". Phases 0, 2,
+6, and 7 are genuinely landed; Phases 1, 3, 4, and 5 are additive scaffolds that
+still sit on top of `Device::`-keyed dispatch. The remaining work — driving every
+phase to genuine unification (type A) and making the report derive its status
+instead of declaring it — is tracked in
+`docs/backend-engine-unification-completion-plan.md`, with the full evidence base
+in `docs/backend-engine-unification-review-2026-06-07.md`.
 
 1. Generate a capability report from the live tree.
    Start with override presence plus explicit support methods for

@@ -68,17 +68,66 @@ fn bench_sdpa_qwen_shapes() {
     // Qwen3.5-4B-ish attention: Hq=32, Hkv=8 (GQA 4:1), head_dim=128.
     let (hq, hkv, d) = (32usize, 8usize, 128usize);
     println!("\n=== Metal SDPA microbench (metal_sdpa_last_axis, BF16, Hq={hq} Hkv={hkv} D={d}) ===");
-    // (label, bs, sq, sk, causal, iters)
+    // (metric, label, bs, sq, sk, causal, iters)
     let cases = [
-        ("decode  Sq=1   Sk=128 ", 1usize, 1usize, 128usize, false, 100usize),
-        ("decode  Sq=1   Sk=512 ", 1, 1, 512, false, 100),
-        ("decode  Sq=1   Sk=2048", 1, 1, 2048, false, 50),
-        ("decode  Sq=1   Sk=4096", 1, 1, 4096, false, 50),
-        ("prefill Sq=128 Sk=128 ", 1, 128, 128, true, 50),
-        ("prefill Sq=512 Sk=512 ", 1, 512, 512, true, 20),
+        (
+            "decode_sq1_sk128_ms",
+            "decode  Sq=1   Sk=128 ",
+            1usize,
+            1usize,
+            128usize,
+            false,
+            100usize,
+        ),
+        (
+            "decode_sq1_sk512_ms",
+            "decode  Sq=1   Sk=512 ",
+            1,
+            1,
+            512,
+            false,
+            100,
+        ),
+        (
+            "decode_sq1_sk2048_ms",
+            "decode  Sq=1   Sk=2048",
+            1,
+            1,
+            2048,
+            false,
+            50,
+        ),
+        (
+            "decode_sq1_sk4096_ms",
+            "decode  Sq=1   Sk=4096",
+            1,
+            1,
+            4096,
+            false,
+            50,
+        ),
+        (
+            "prefill_sq128_sk128_ms",
+            "prefill Sq=128 Sk=128 ",
+            1,
+            128,
+            128,
+            true,
+            50,
+        ),
+        (
+            "prefill_sq512_sk512_ms",
+            "prefill Sq=512 Sk=512 ",
+            1,
+            512,
+            512,
+            true,
+            20,
+        ),
     ];
-    for (label, bs, sq, sk, causal, iters) in cases {
+    for (metric, label, bs, sq, sk, causal, iters) in cases {
         let ms = time_sdpa(bs, hq, hkv, sq, sk, d, causal, iters, dev);
+        println!("KILN_LATENCY_METRIC {metric} {ms:.6} ms");
         println!("  {label}   {ms:9.3} ms/iter");
     }
 }

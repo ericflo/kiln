@@ -97,6 +97,38 @@ pub struct AlgoCacheValue {
     pub algo_blob: Vec<u8>,
 }
 
+/// Runtime visibility for algorithm-cache behavior. `entries` describes the
+/// persistent cache contents; hit/miss/insert counters are owned by runtime
+/// handles and are intentionally not serialized to disk.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AlgoCacheStats {
+    /// Number of entries currently present in the cache snapshot.
+    pub entries: usize,
+    /// Runtime cache lookups that reused a non-empty cached algo blob.
+    pub hits: u64,
+    /// Runtime cache lookups that had to run the backend heuristic path.
+    pub misses: u64,
+    /// Runtime heuristic results inserted into the cache.
+    pub inserts: u64,
+}
+
+impl AlgoCacheStats {
+    /// Total runtime cache lookups observed by the owning handle.
+    pub fn lookups(&self) -> u64 {
+        self.hits + self.misses
+    }
+
+    /// Fraction of runtime lookups served from a cached algo blob.
+    pub fn hit_rate(&self) -> Option<f64> {
+        let lookups = self.lookups();
+        if lookups == 0 {
+            None
+        } else {
+            Some(self.hits as f64 / lookups as f64)
+        }
+    }
+}
+
 /// In-memory autotune cache. Disk persistence is the caller's
 /// responsibility; this struct exposes load_from + save_to helpers
 /// for JSON round-trip.
@@ -140,6 +172,15 @@ impl AlgoCache {
     /// Iterate `(key, value)` pairs.
     pub fn iter(&self) -> impl Iterator<Item = (&AlgoCacheKey, &AlgoCacheValue)> {
         self.entries.iter()
+    }
+
+    /// Snapshot cache contents as stats. Runtime hit/miss/insert counters are
+    /// supplied by the backend handle that owns lookups.
+    pub fn stats(&self) -> AlgoCacheStats {
+        AlgoCacheStats {
+            entries: self.entries.len(),
+            ..AlgoCacheStats::default()
+        }
     }
 
     /// Compute the standard cache file path for a backend + device
@@ -398,6 +439,41 @@ mod tests {
         c.insert(key.clone(), val.clone());
         assert_eq!(c.len(), 1);
         assert_eq!(c.get(&key).unwrap().algo_id, 42);
+    }
+
+    #[test]
+    fn cache_stats_reports_entries_and_hit_rate() {
+        let mut c = AlgoCache::new();
+        assert_eq!(c.stats(), AlgoCacheStats::default());
+        assert_eq!(c.stats().hit_rate(), None);
+
+        c.insert(
+            AlgoCacheKey::new(64, 64, 32, "bf16"),
+            AlgoCacheValue {
+                algo_id: 42,
+                workspace_bytes: 1024,
+                recorded_ms: 0.42,
+                algo_blob: vec![1, 2, 3, 4],
+            },
+        );
+        assert_eq!(
+            c.stats(),
+            AlgoCacheStats {
+                entries: 1,
+                hits: 0,
+                misses: 0,
+                inserts: 0,
+            }
+        );
+
+        let runtime = AlgoCacheStats {
+            entries: 1,
+            hits: 3,
+            misses: 1,
+            inserts: 1,
+        };
+        assert_eq!(runtime.lookups(), 4);
+        assert_eq!(runtime.hit_rate(), Some(0.75));
     }
 
     #[test]

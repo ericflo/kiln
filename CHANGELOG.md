@@ -1,5 +1,27 @@
 # Kiln Server Changelog
 
+## kiln-v0.3.0 — 2026-06-08 — backend runtime unification + ROCm release artifact
+
+Major server release for the backend-engine unification line.
+
+- backend-runtime: complete the A-migration from `BackendRuntime` as a
+  monolithic dispatch surface to focused per-backend authority traits. The
+  unification report now derives every "genuine" result from concrete signals
+  instead of hardcoded coverage, and `scripts/check_unification_gates.sh` is the
+  runner-agnostic gate for the report, contract test, grep guards, CPU
+  conformance, and latency-fixture coverage.
+- cuda/rocm/metal/vulkan: finish the residency, matmul/linear, replay,
+  fallback, training, decomposition, and conformance gates so the release
+  scoreboard is 9/9 genuine. The remaining compatibility shims were deleted
+  rather than relabeled, and call sites now route through backend-owned traits.
+- rocm: promote the HIP/ROCm backend into the server release matrix with a
+  Linux x86_64 ROCm 7.2.4 tarball. The tagged artifact builds CDNA, RDNA3, and
+  Strix Halo targets (`gfx90a`, `gfx942`, `gfx1100`, `gfx1151`) instead of the
+  cheaper single-arch CI probe.
+- release: harden the server release workflow by requiring the ROCm artifact
+  before publishing the draft release and using the runner-provided Rust toolchain
+  setup in release jobs, matching the macOS CI fix.
+
 ## Unreleased — perf-regression CI ladder for SFT/GRPO/OPD (#1077)
 
 Three-tier coverage ladder protects step-time + workload-shape auto-tune

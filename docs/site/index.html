@@ -95,7 +95,7 @@
           </div>
           <div class="hero-meta">
             <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" width="14" height="14"><path d="M5 13l4 4L19 7"/></svg> Pure Rust, single binary</span>
-            <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" width="14" height="14"><path d="M5 13l4 4L19 7"/></svg> CUDA, Metal, Vulkan</span>
+            <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" width="14" height="14"><path d="M5 13l4 4L19 7"/></svg> CUDA, ROCm, Metal, Vulkan</span>
             <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" width="14" height="14"><path d="M5 13l4 4L19 7"/></svg> MIT license</span>
           </div>
         </div>
@@ -188,7 +188,7 @@
             </div>
             <h3>Single-GPU, single binary</h3>
             <p>
-              Pure-Rust workspace, no Python runtime, no Docker required. CUDA on Linux,
+              Pure-Rust workspace, no Python runtime, no Docker required. CUDA or ROCm on Linux,
               Metal on Apple Silicon, Vulkan elsewhere. Boots in seconds and stays under
               ~10&nbsp;GB on A6000.
             </p>
@@ -349,8 +349,8 @@ requests.post("http://localhost:8420/v1/train/grpo", json={
             <p><code>KILN_KV_CACHE_FP8=1</code> doubles effective context with no measurable quality loss on Qwen3.5-4B.</p>
           </div>
           <div class="feature feature--compact">
-            <h3>Three GPU backends</h3>
-            <p>CUDA on Ampere/Ada/Hopper. Metal on Apple Silicon (M-series). Vulkan elsewhere. One source tree.</p>
+            <h3>Four GPU backends</h3>
+            <p>CUDA on Ampere/Ada/Hopper. ROCm on AMD CDNA/RDNA/Strix Halo. Metal on Apple Silicon (M-series). Vulkan elsewhere. One source tree.</p>
           </div>
           <div class="feature feature--compact">
             <h3>Pure Rust</h3>
@@ -374,7 +374,7 @@ requests.post("http://localhost:8420/v1/train/grpo", json={
           <span class="eyebrow">Install</span>
           <h2>Pick a binary. Run it.</h2>
           <p class="section-lede">
-            Pre-built releases for Linux+CUDA, Linux+Vulkan, and Apple Silicon.
+            Pre-built releases for Linux+CUDA, Linux+ROCm, Linux+Vulkan, Apple Silicon, and Windows CUDA.
             <a href="quickstart.html">Full quickstart →</a>
           </p>
         </header>
@@ -382,6 +382,7 @@ requests.post("http://localhost:8420/v1/train/grpo", json={
         <div class="tabs">
           <div class="tabs-bar" role="tablist" aria-label="Install instructions">
             <button class="tab-btn" role="tab" aria-selected="true" aria-controls="tab-cuda" id="t-cuda" data-tab="cuda">Linux · CUDA 12.4</button>
+            <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-rocm" id="t-rocm" data-tab="rocm">Linux · ROCm 7.2.4</button>
             <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-vulkan" id="t-vulkan" data-tab="vulkan">Linux · Vulkan</button>
             <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-mac" id="t-mac" data-tab="mac">macOS · Metal</button>
             <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-source" id="t-source" data-tab="source">From source</button>
@@ -398,7 +399,22 @@ requests.post("http://localhost:8420/v1/train/grpo", json={
   | sed -n 's/.*"tag_name": "kiln-v\([^"]*\)".*/\1/p')
 curl -fsSLO "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-cuda124.tar.gz"
 tar xf "kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-cuda124.tar.gz"
-./kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-cuda124/kiln serve --model Qwen/Qwen3.5-4B</code></pre>
+KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve</code></pre>
+            </div>
+          </div>
+
+          <div class="tab-panel" role="tabpanel" id="tab-rocm" aria-labelledby="t-rocm" aria-hidden="true" hidden>
+          <div class="code-shell">
+            <div class="code-shell-bar">
+              <span class="code-tag">bash</span>
+              <span class="code-title">install · linux · rocm 7.2.4</span>
+              <button class="copy-btn" type="button" data-target="snip-rocm">copy</button>
+            </div>
+<pre id="snip-rocm"><code>KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest \
+  | sed -n 's/.*"tag_name": "kiln-v\([^"]*\)".*/\1/p')
+curl -fsSLO "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-rocm724.tar.gz"
+tar xf "kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-rocm724.tar.gz"
+KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve</code></pre>
             </div>
           </div>
 
@@ -413,7 +429,7 @@ tar xf "kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-cuda124.tar.gz"
   | sed -n 's/.*"tag_name": "kiln-v\([^"]*\)".*/\1/p')
 curl -fsSLO "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-vulkan.tar.gz"
 tar xf "kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-vulkan.tar.gz"
-./kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-vulkan/kiln serve --model Qwen/Qwen3.5-4B</code></pre>
+KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve</code></pre>
             </div>
           </div>
 
@@ -428,7 +444,7 @@ tar xf "kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-vulkan.tar.gz"
   | sed -n 's/.*"tag_name": "kiln-v\([^"]*\)".*/\1/p')
 curl -fsSLO "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-aarch64-apple-darwin-metal.tar.gz"
 tar xf "kiln-${KILN_VERSION}-aarch64-apple-darwin-metal.tar.gz"
-./kiln-${KILN_VERSION}-aarch64-apple-darwin-metal/kiln serve --model Qwen/Qwen3.5-4B</code></pre>
+KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve</code></pre>
             </div>
           </div>
 
@@ -442,6 +458,8 @@ tar xf "kiln-${KILN_VERSION}-aarch64-apple-darwin-metal.tar.gz"
 <pre id="snip-source"><code>git clone https://github.com/ericflo/kiln.git
 cd kiln
 KILN_CUDA_ARCHS=86 cargo build --release --features cuda
+# For AMD ROCm/HIP:
+# ROCM_PATH=/opt/rocm KILN_ROCM_ARCHS='gfx90a;gfx942;gfx1100;gfx1151' cargo build --release --no-default-features --features rocm
 KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve</code></pre>
             </div>
           </div>

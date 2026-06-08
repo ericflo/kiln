@@ -4,61 +4,95 @@
 //! `Ok(None)` responses route the caller to the portable candle path.
 
 use anyhow::{Context, Result};
-use kiln_tensor_id::TensorId;
-use std::collections::HashSet;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
 
-use super::{BackendRuntime, TrainingCapabilities};
+use super::{
+    AttentionBackend, BackendIdentity, BackendMatmulLayout, BackendRuntime, ConvBackend,
+    GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend,
+    SamplingBackend, StartupBackend, TrainingCapabilities, TrainingLossBackend,
+    TrainingPrecisionPolicy, matmul_request_support_rank, matmul_support_from_native,
+    requested_matmul_layout,
+};
 use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 
-/// kt-native `kiln_tensor_id::TensorId` for the resident-activation
-/// registry. (#1082) Candle removal: the BackendRuntime trait surface is
-/// fully kt-typed, so the registry keys directly off the kt tensor id.
-#[inline]
-fn kt_id(tensor: &kiln_tensor::Tensor) -> TensorId {
-    tensor.id()
-}
-
-static CUDA_RESIDENT_TENSOR_IDS: OnceLock<Mutex<HashSet<TensorId>>> = OnceLock::new();
-static CUDA_SGD_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
-static CUDA_ADAMW_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
-static CUDA_LINEAR_PREFILL_SUCCESSES: AtomicU64 = AtomicU64::new(0);
-static CUDA_LINEAR_PREFILL_OFFSET_SUCCESSES: AtomicU64 = AtomicU64::new(0);
-static CUDA_FLASH_ATTN_TRACKED_DECLINES: AtomicU64 = AtomicU64::new(0);
-static CUDA_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES: AtomicU64 = AtomicU64::new(0);
-static CUDA_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static ROCM_SGD_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static ROCM_ADAMW_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static ROCM_LINEAR_PREFILL_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static ROCM_LINEAR_PREFILL_OFFSET_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static ROCM_FLASH_ATTN_TRACKED_DECLINES: AtomicU64 = AtomicU64::new(0);
+static ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static ROCM_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 
 pub fn optimizer_dispatch_success_counts() -> (u64, u64) {
     (
-        CUDA_SGD_DISPATCH_SUCCESSES.load(Ordering::Relaxed),
-        CUDA_ADAMW_DISPATCH_SUCCESSES.load(Ordering::Relaxed),
+        ROCM_SGD_DISPATCH_SUCCESSES.load(Ordering::Relaxed),
+        ROCM_ADAMW_DISPATCH_SUCCESSES.load(Ordering::Relaxed),
     )
 }
 
 pub fn reset_optimizer_dispatch_success_counts() {
-    CUDA_SGD_DISPATCH_SUCCESSES.store(0, Ordering::Relaxed);
-    CUDA_ADAMW_DISPATCH_SUCCESSES.store(0, Ordering::Relaxed);
+    ROCM_SGD_DISPATCH_SUCCESSES.store(0, Ordering::Relaxed);
+    ROCM_ADAMW_DISPATCH_SUCCESSES.store(0, Ordering::Relaxed);
 }
 
 pub fn linear_prefill_success_counts() -> (u64, u64) {
     (
-        CUDA_LINEAR_PREFILL_SUCCESSES.load(Ordering::Relaxed),
-        CUDA_LINEAR_PREFILL_OFFSET_SUCCESSES.load(Ordering::Relaxed),
+        ROCM_LINEAR_PREFILL_SUCCESSES.load(Ordering::Relaxed),
+        ROCM_LINEAR_PREFILL_OFFSET_SUCCESSES.load(Ordering::Relaxed),
     )
 }
 
 pub fn reset_linear_prefill_success_counts() {
-    CUDA_LINEAR_PREFILL_SUCCESSES.store(0, Ordering::Relaxed);
-    CUDA_LINEAR_PREFILL_OFFSET_SUCCESSES.store(0, Ordering::Relaxed);
+    ROCM_LINEAR_PREFILL_SUCCESSES.store(0, Ordering::Relaxed);
+    ROCM_LINEAR_PREFILL_OFFSET_SUCCESSES.store(0, Ordering::Relaxed);
+}
+
+fn rocm_full_attn_qkv_in_proj_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !rocm_or_legacy_disable_env_set(
+            "KILN_DISABLE_ROCM_FULL_ATTN_QKV_IN_PROJ",
+            "KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ",
+        )
+    })
+}
+
+const ROCM_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS: usize = 128;
+
+fn rocm_gdn_ab_in_proj_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !rocm_or_legacy_disable_env_set(
+            "KILN_DISABLE_ROCM_GDN_AB_IN_PROJ",
+            "KILN_DISABLE_CUDA_GDN_AB_IN_PROJ",
+        )
+    })
+}
+
+fn rocm_gdn_prefill_ab_in_proj_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !rocm_or_legacy_disable_env_set(
+            "KILN_DISABLE_ROCM_GDN_PREFILL_AB_IN_PROJ",
+            "KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ",
+        )
+    })
+}
+
+fn rocm_gdn_ab_in_proj_seq_enabled(seq_len: usize) -> bool {
+    rocm_gdn_ab_in_proj_enabled()
+        && (seq_len == 1
+            || (seq_len <= ROCM_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS
+                && rocm_gdn_prefill_ab_in_proj_enabled()))
 }
 
 pub fn flash_attn_tracked_decline_count() -> u64 {
-    CUDA_FLASH_ATTN_TRACKED_DECLINES.load(Ordering::Relaxed)
+    ROCM_FLASH_ATTN_TRACKED_DECLINES.load(Ordering::Relaxed)
 }
 
 pub fn reset_flash_attn_tracked_decline_count() {
-    CUDA_FLASH_ATTN_TRACKED_DECLINES.store(0, Ordering::Relaxed);
+    ROCM_FLASH_ATTN_TRACKED_DECLINES.store(0, Ordering::Relaxed);
 }
 
 /// `(multiblock_path_successes, single_block_path_successes)` for
@@ -66,45 +100,47 @@ pub fn reset_flash_attn_tracked_decline_count() {
 /// kernel actually ran under a given env-var configuration.
 pub fn gdn_full_chunk_forward_dispatch_counts() -> (u64, u64) {
     (
-        CUDA_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.load(Ordering::Relaxed),
-        CUDA_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.load(Ordering::Relaxed),
+        ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.load(Ordering::Relaxed),
+        ROCM_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.load(Ordering::Relaxed),
     )
 }
 
 pub fn reset_gdn_full_chunk_forward_dispatch_counts() {
-    CUDA_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.store(0, Ordering::Relaxed);
-    CUDA_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.store(0, Ordering::Relaxed);
+    ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.store(0, Ordering::Relaxed);
+    ROCM_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.store(0, Ordering::Relaxed);
 }
 
-fn with_cuda_resident_ids<R>(f: impl FnOnce(&mut HashSet<TensorId>) -> R) -> R {
-    let registry = CUDA_RESIDENT_TENSOR_IDS.get_or_init(|| Mutex::new(HashSet::new()));
-    let mut guard = registry
-        .lock()
-        .expect("CUDA resident TensorId registry mutex poisoned");
-    f(&mut guard)
+const ROCM_RESIDENT_TENSOR_IDS_POISONED: &str = "ROCm resident TensorId registry mutex poisoned";
+
+fn rocm_or_legacy_disable_env_set(rocm_name: &str, legacy_cuda_name: &str) -> bool {
+    std::env::var(rocm_name).is_ok() || std::env::var(legacy_cuda_name).is_ok()
 }
 
-fn cuda_optimizer_tensors_supported_for_kt(tensors: &[&kiln_tensor::Tensor]) -> bool {
-    let Some(first) = tensors.first() else {
-        return false;
-    };
-    matches!(first.device(), kiln_tensor::Device::Rocm(_))
-        && matches!(first.dtype(), kiln_tensor::DType::F32 | kiln_tensor::DType::BF16)
-        && first.is_contiguous()
-        && tensors.iter().all(|tensor| {
-            matches!(tensor.device(), kiln_tensor::Device::Rocm(_))
-                && tensor.dtype() == first.dtype()
-                && tensor.element_count() == first.element_count()
-                && tensor.is_contiguous()
-        })
+fn rocm_optimizer_args_ready_for_kt(
+    registry: &super::cuda_rocm_common::ResidentTensorIdRegistry,
+    tensors: &[&kiln_tensor::Tensor],
+) -> bool {
+    super::cuda_rocm_common::optimizer_args_ready_for_kt(
+        registry,
+        tensors,
+        ROCM_RESIDENT_TENSOR_IDS_POISONED,
+        |device| matches!(device, kiln_tensor::Device::Rocm(_)),
+    )
+}
+
+fn rocm_tensors_on_device(tensors: &[&kiln_tensor::Tensor]) -> bool {
+    super::cuda_rocm_common::tensors_on_backend_device(tensors, |device| {
+        matches!(device, kiln_tensor::Device::Rocm(_))
+    })
 }
 
 #[derive(Debug)]
 pub struct RocmBackend {
-    /// The kt CUDA device this backend was constructed for. (#1082 DoD-100
+    /// The kt ROCm device this backend was constructed for. (#1082 DoD-100
     /// step 4: the formerly-cached candle `device` field was dropped — it had
     /// zero reads; `new` now takes a `kiln_tensor::Device` directly.)
     device_kt: kiln_tensor::Device,
+    resident_tensor_ids: super::cuda_rocm_common::ResidentTensorIdRegistry,
     /// Cached at construction: reading env vars per decode step × 24 GDN layers
     /// shows up in decode NVTX captures. Env vars don't change at runtime.
     gdn_enabled: bool,
@@ -117,27 +153,27 @@ pub struct RocmBackend {
     /// Experimental fused native-MTP decode GDN gates + recurrent update.
     /// Opt-in only until output parity is proven.
     gdn_decode_fused_enabled: bool,
-    /// CUDA fused decode supports native GQA Q/K heads; this avoids expanding
+    /// ROCm fused decode supports native GQA Q/K heads; this avoids expanding
     /// Q/K to value_heads before the fused recurrent decode kernel.
     gdn_decode_unexpanded_qk_enabled: bool,
     /// Fuses GDN decode Q/K L2-normalization into the gates+recurrent kernel,
     /// avoiding the separate tiny qk_norm launch in the single-token path.
     gdn_decode_qk_norm_recurrent_enabled: bool,
     /// Fuses GDN decode Q/K L2-normalization, gates, recurrent update, and
-    /// gated RMSNorm into one single-token CUDA launch.
+    /// gated RMSNorm into one single-token ROCm launch.
     gdn_decode_qk_norm_recurrent_rmsnorm_enabled: bool,
     /// Kill switch for the fused causal_conv1d_update kernel (decode
     /// kiln/gdn/conv region). When off, forward.rs falls back to the
     /// candle to_f32/cat/sum/narrow chain.
     fused_conv1d_enabled: bool,
-    // Phase 7 (#1082): the cuda_use_kt_api_conv1d gate was removed once
+    // Phase 7 (#1082): the rocm_use_kt_api_conv1d gate was removed once
     // the kt-typed surface (causal_conv1d_{update,prefill}_kt +
     // supports{,_prefill}_kt) became the only path. The escape hatch
     // for the conv kernel as a whole is still `fused_conv1d_enabled`
     // (KILN_DISABLE_FUSED_CONV1D), which falls back to forward.rs's
     // candle to_f32/cat/sum/narrow chain — the kt-typed path is bit-
     // exact with the previous kt-API code (same FFI symbol).
-    // Phase 7 (#1082): the cuda_use_kt_api_gdn gate was removed once
+    // Phase 7 (#1082): the rocm_use_kt_api_gdn gate was removed once
     // all 10 GDN dispatch wires (forward_substitution, recurrent_step,
     // chunk_prep, chunk_scan, full_chunk_forward[_multiblock],
     // gates, gated_rms_norm, plus the 4 decode_* wires:
@@ -145,7 +181,7 @@ pub struct RocmBackend {
     // qk_norm_gates_recurrent_rmsnorm) became kt-only. The whole-
     // kernel kill switch `KILN_DISABLE_GDN_KERNEL=1` plus the per-
     // wire decode-fused kill switches (KILN_DISABLE_FUSED_GDN_DECODE,
-    // KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT[_RMSNORM]) still
+    // KILN_DISABLE_ROCM_GDN_DECODE_QK_NORM_RECURRENT[_RMSNORM]) still
     // fall back to forward.rs's candle reference paths. The kt-typed
     // path is bit-exact with the previous kt-API code (same FFI
     // symbol). All 11 GDN dispatch wires (including the formerly
@@ -155,16 +191,16 @@ pub struct RocmBackend {
     // Phase 7 (#1082): all 4 flash-attn dispatch sites in this
     // backend are now kt-only after `aab07fa7` landed the
     // `flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs`
-    // sibling. The `cuda_use_kt_api_flash_attn` gate is gone. The
+    // sibling. The `rocm_use_kt_api_flash_attn` gate is gone. The
     // `_with_graph_outputs` site dispatches both branches through
     // kt: `Some((out, lse))` borrows the caller's candle tensors
     // into kt and writes through them via the new with_graph_outputs
     // entry; `None` calls the existing internally-allocating
     // `flash_attn_paged_decode_dyn_seqlen_kt`.
-    /// Forward-only CUDA LoRA delta/add for decode. Training declines because
+    /// Forward-only ROCm LoRA delta/add for decode. Training declines because
     /// tracked LoRA tensors need autograd.
     lora_decode_add_enabled: bool,
-    /// Multi-block dv-tiled `gdn_full_chunk_forward`. The CUDA-oriented
+    /// Multi-block dv-tiled `gdn_full_chunk_forward`. The CUDA/HIP-oriented
     /// multiblock variant is bit-exact, but is slower on the gfx1151 ROCm
     /// long-context prefill path. Keep it opt-in for retuning on other GPUs.
     /// `KILN_DISABLE_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK=1` remains a hard off.
@@ -175,7 +211,7 @@ impl RocmBackend {
     pub fn new(device: kiln_tensor::Device) -> Self {
         debug_assert!(
             matches!(device, kiln_tensor::Device::Rocm(_)),
-            "RocmBackend created on non-CUDA device"
+            "RocmBackend created on non-ROCm device"
         );
         let gdn_enabled = std::env::var("KILN_DISABLE_GDN_KERNEL").is_err();
         let gdn_gates_enabled =
@@ -209,19 +245,26 @@ impl RocmBackend {
         let gdn_decode_unexpanded_qk_enabled = gdn_decode_fused_enabled
             && std::env::var("KILN_DISABLE_GDN_DECODE_UNEXPANDED_QK").is_err();
         let gdn_decode_qk_norm_recurrent_enabled = gdn_decode_unexpanded_qk_enabled
-            && std::env::var("KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT").is_err();
+            && !rocm_or_legacy_disable_env_set(
+                "KILN_DISABLE_ROCM_GDN_DECODE_QK_NORM_RECURRENT",
+                "KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT",
+            );
         let gdn_decode_qk_norm_recurrent_rmsnorm_enabled = gdn_decode_qk_norm_recurrent_enabled
-            && std::env::var("KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM").is_err();
-        let lora_decode_add_enabled = std::env::var("KILN_DISABLE_CUDA_LORA_DECODE_ADD").is_err();
+            && !rocm_or_legacy_disable_env_set(
+                "KILN_DISABLE_ROCM_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM",
+                "KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM",
+            );
+        let lora_decode_add_enabled = !rocm_or_legacy_disable_env_set(
+            "KILN_DISABLE_ROCM_LORA_DECODE_ADD",
+            "KILN_DISABLE_CUDA_LORA_DECODE_ADD",
+        );
         let gdn_full_chunk_forward_multiblock_enabled = gdn_enabled
-            && kiln_core::env_flag::env_flag(
-                "KILN_ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK",
-                false,
-            )
+            && kiln_core::env_flag::env_flag("KILN_ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK", false)
             && std::env::var("KILN_DISABLE_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK").is_err();
         let device_kt = device;
         Self {
             device_kt,
+            resident_tensor_ids: super::cuda_rocm_common::new_resident_tensor_id_registry(),
             gdn_enabled,
             gdn_gates_enabled,
             gdn_gated_rms_norm_enabled,
@@ -237,73 +280,250 @@ impl RocmBackend {
 
     pub fn training_capabilities_static() -> TrainingCapabilities {
         TrainingCapabilities {
-            projection_training: "backend-routed kt cublasLt matmul (tape-recorded) with offset chunk hook",
-            flce_loss: "FLCE analytic backward on CUDA tensors; no full logits by default",
-            rmsnorm_training: "CUDA kt-tape rmsnorm behind 47 GiB autograd VRAM gate",
-            resident_activation: "kt TensorId lifecycle registry; kt CUDA tensors are canonical",
+            projection_training: "backend-routed kt hipBLASLt matmul (tape-recorded) with offset chunk hook",
+            flce_loss: "FLCE analytic backward on ROCm tensors; no full logits by default",
+            tape_forward_backward_route: super::TrainingTapeRoute::KtTapeAuthoritative,
+            sft_flce_loss_route: super::SftFlceLossRoute::KtTapeFlce,
+            grpo_loss_route: super::GrpoLossRoute::KtComposite,
+            grpo_kl_auxiliary_route: super::GrpoKlAuxiliaryRoute::CudaRocmDeviceFastPath,
+            opd_loss_route: super::OpdLossRoute::KtTapePhaseB,
+            opd_phase_b_backward_route: super::OpdPhaseBBackwardRoute::CudaRocmFusedUnitGrad,
+            final_rmsnorm_backward_route: super::FinalRmsNormBackwardRoute::CudaRocmFusedTail,
+            rmsnorm_training: "ROCm kt-tape rmsnorm behind 47 GiB autograd VRAM gate",
+            resident_activation: "kt TensorId lifecycle registry; kt ROCm tensors are canonical",
             lora_delta_training: "kt tape-recorded LoRA delta; fused lora_decode_add declines tape-tracked tensors",
-            sgd_step: "CUDA in-place optimizer kernel for resident contiguous F32/BF16 tensors",
-            adamw_step: "CUDA in-place optimizer kernel for resident contiguous F32/BF16 tensors",
+            sgd_step: "ROCm in-place optimizer kernel for resident contiguous F32/BF16 tensors",
+            adamw_step: "ROCm in-place optimizer kernel for resident contiguous F32/BF16 tensors",
             native_training: "not implemented",
+        }
+    }
+
+    fn support_predicates(&self) -> super::cuda_rocm_common::CudaRocmSupportPredicates {
+        super::cuda_rocm_common::CudaRocmSupportPredicates {
+            gdn_enabled: self.gdn_enabled,
+            gdn_gates_enabled: self.gdn_gates_enabled,
+            gdn_gated_rms_norm_enabled: self.gdn_gated_rms_norm_enabled,
+            gdn_decode_unexpanded_qk_enabled: self.gdn_decode_unexpanded_qk_enabled,
+            gdn_decode_qk_norm_recurrent_enabled: self.gdn_decode_qk_norm_recurrent_enabled,
+            fused_conv1d_enabled: self.fused_conv1d_enabled,
         }
     }
 }
 
-impl BackendRuntime for RocmBackend {
-    fn name(&self) -> &'static str {
+impl BackendIdentity for RocmBackend {
+    fn runtime_name(&self) -> &'static str {
         "rocm"
     }
 
-    fn device(&self) -> kiln_tensor::Device {
+    fn runtime_device(&self) -> kiln_tensor::Device {
         self.device_kt
     }
 
-    fn training_capabilities(&self) -> TrainingCapabilities {
-        Self::training_capabilities_static()
+    fn runtime_as_any(&self) -> &dyn std::any::Any {
+        &()
+    }
+}
+
+impl StartupBackend for RocmBackend {}
+
+#[allow(clippy::too_many_arguments)]
+impl AttentionBackend for RocmBackend {
+    fn runtime_supports_flash_attn_prefill(&self) -> bool {
+        self.support_predicates().supports_flash_attn_prefill()
     }
 
-    fn supports_resident_activation(&self) -> bool {
-        true
+    fn runtime_supports_flash_attn_prefill_head_major(&self) -> bool {
+        kiln_core::env_flag::env_flag("KILN_ROCM_HEAD_MAJOR_PREFILL", true)
     }
 
-    fn register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
-        with_cuda_resident_ids(|ids| {
-            ids.insert(kt_id(tensor));
-        });
-        Ok(())
+    fn runtime_supports_flash_attn_paged_decode(&self) -> bool {
+        self.support_predicates().supports_flash_attn_paged_decode()
     }
 
-    fn evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
-        with_cuda_resident_ids(|ids| {
-            ids.remove(&kt_id(tensor));
-        });
+    /// ROCm has no impl for the strict `flash_attn_paged_decode_contiguous_batch`
+    /// kernel (the bs>1 head-major uniform-`start_pos` path), so the trait
+    /// default `Ok(None)` always declines. Returning `false` here lets the
+    /// `try_strict` probe in `gqa_attention_paged_decode_contiguous_batch`
+    /// skip the `start_slots = Tensor::from_slice(...)` allocation that
+    /// would otherwise emit a captured host-to-device copy to a recycled
+    /// allocation under graph capture.
+    fn runtime_supports_strict_paged_decode_contiguous_batch(&self) -> bool {
+        self.support_predicates()
+            .supports_strict_paged_decode_contiguous_batch()
     }
 
-    fn update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
-        with_cuda_resident_ids(|ids| {
-            ids.insert(kt_id(tensor));
-        });
-        Ok(())
-    }
-
-    fn has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
-        with_cuda_resident_ids(|ids| ids.contains(&kt_id(tensor)))
-    }
-
-    fn dispatch_sgd_step(&self, param: &kiln_tensor::Tensor, grad: &kiln_tensor::Tensor, lr: f32) -> Result<bool> {
-        if !self.has_resident_activation(param) || !self.has_resident_activation(grad) {
-            return Ok(false);
+    fn runtime_flash_attn_prefill(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        softmax_scale: f32,
+        causal: bool,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // The vendored CUDA/HIP kernel hard-errors on non-BF16. Decline here so
+        // the caller falls back to the portable path instead of bubbling a
+        // hard error up for non-BF16 test configs.
+        if q.track_op() || k.track_op() || v.track_op() {
+            ROCM_FLASH_ATTN_TRACKED_DECLINES.fetch_add(1, Ordering::Relaxed);
+            return Ok(None);
         }
-        if !cuda_optimizer_tensors_supported_for_kt(&[param, grad]) {
+        if q.dtype() != kiln_tensor::DType::BF16 {
+            return Ok(None);
+        }
+        // The vendored FA-2 kernel only supports head_dim 128/256 and
+        // hard-errors otherwise. Decline (mirroring the BF16 decline above)
+        // so non-{128,256} configs — e.g. the head_dim=16 tiny test model on
+        // the detached CP-4 tape-authoritative path, which clears the
+        // track_op + BF16 gates above — fall back to the portable SDPA path
+        // instead of bubbling a hard error. (#1082)
+        if !matches!(q.dims().last(), Some(&128) | Some(&256)) {
+            return Ok(None);
+        }
+        // Phase 7 (#1082): kt-typed surface is now the only path. Args
+        // are already kt (#1082 DoD-101/102), so the candle↔kt bridges
+        // are gone — the kernel runs directly on the caller's kt
+        // tensors. candle wrapper discards softmax_lse, kt path does
+        // the same here.
+        kiln_nvtx::range!(c"kiln/flash_attn_kt");
+        let q_c = q.contiguous().context("flash_attn kt: q contiguous")?;
+        let k_c = k.contiguous().context("flash_attn kt: k contiguous")?;
+        let v_c = v.contiguous().context("flash_attn kt: v contiguous")?;
+        let (out_kt, _lse_kt) =
+            kiln_flash_attn::flash_attn_fwd_kt(&q_c, &k_c, &v_c, softmax_scale, causal)
+                .map_err(|e| anyhow::anyhow!("flash_attn kt: flash_attn_fwd_kt: {e}"))?;
+        Ok(Some(out_kt))
+    }
+
+    fn runtime_flash_attn_prefill_head_major(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        softmax_scale: f32,
+        causal: bool,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if q.track_op() || k.track_op() || v.track_op() {
+            ROCM_FLASH_ATTN_TRACKED_DECLINES.fetch_add(1, Ordering::Relaxed);
+            return Ok(None);
+        }
+        if q.dtype() != kiln_tensor::DType::BF16 {
+            return Ok(None);
+        }
+        if !matches!(q.dims().last(), Some(&128) | Some(&256)) {
+            return Ok(None);
+        }
+        kiln_nvtx::range!(c"kiln/flash_attn_head_major_kt");
+        let q_c = q
+            .contiguous()
+            .context("flash_attn head-major kt: q contiguous")?;
+        let k_c = k
+            .contiguous()
+            .context("flash_attn head-major kt: k contiguous")?;
+        let v_c = v
+            .contiguous()
+            .context("flash_attn head-major kt: v contiguous")?;
+        let (out_kt, _lse_kt) =
+            kiln_flash_attn::flash_attn_fwd_head_major_kt(&q_c, &k_c, &v_c, softmax_scale, causal)
+                .map_err(|e| {
+                    anyhow::anyhow!("flash_attn head-major kt: flash_attn_fwd_head_major_kt: {e}")
+                })?;
+        Ok(Some(out_kt))
+    }
+
+    fn runtime_flash_attn_paged_decode(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        block_table: &kiln_tensor::Tensor,
+        total_seqlen_k: usize,
+        page_block_size: usize,
+        softmax_scale: f32,
+        causal: bool,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if q.track_op()
+            || k_pool.track_op()
+            || v_pool.track_op()
+            || block_table.track_op()
+            || q.dtype() != kiln_tensor::DType::BF16
+        {
+            return Ok(None);
+        }
+        // Phase 7 (#1082): kt-only. Args are already kt (#1082
+        // DoD-101/102), so no candle↔kt bridge — the kernel runs
+        // directly on the caller's kt tensors.
+        kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_kt");
+        let out_kt = kiln_flash_attn::flash_attn_paged_decode_kt(
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            total_seqlen_k,
+            page_block_size,
+            softmax_scale,
+            causal,
+        )
+        .map_err(|e| anyhow::anyhow!("flash_attn_paged_decode kt: {e}"))?;
+        Ok(Some(out_kt))
+    }
+
+    fn runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        block_table: &kiln_tensor::Tensor,
+        seqused_k: &kiln_tensor::Tensor,
+        max_seqlen_k: usize,
+        page_block_size: usize,
+        softmax_scale: f32,
+        causal: bool,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if q.track_op()
+            || k_pool.track_op()
+            || v_pool.track_op()
+            || block_table.track_op()
+            || seqused_k.track_op()
+            || q.dtype() != kiln_tensor::DType::BF16
+        {
+            return Ok(None);
+        }
+        // Phase 7 (#1082): kt-only. Args are already kt (#1082
+        // DoD-101/102), so no candle↔kt bridge. This entry always
+        // passed `graph_outputs = None`; the caller-owned-output
+        // variant lives in `_with_graph_outputs` below.
+        kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_dyn_seqlen_kt");
+        let out_kt = kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen_kt(
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            seqused_k,
+            max_seqlen_k,
+            page_block_size,
+            softmax_scale,
+            causal,
+        )
+        .map_err(|e| anyhow::anyhow!("flash_attn_paged_decode_dyn_seqlen kt: {e}"))?;
+        Ok(Some(out_kt))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+impl OptimizerBackend for RocmBackend {
+    fn runtime_dispatch_sgd_step(
+        &self,
+        param: &kiln_tensor::Tensor,
+        grad: &kiln_tensor::Tensor,
+        lr: f32,
+    ) -> Result<bool> {
+        if !rocm_optimizer_args_ready_for_kt(&self.resident_tensor_ids, &[param, grad]) {
             return Ok(false);
         }
         // #1082: args are already kt (BackendRuntime trait flipped to kt),
-        // so there is no candle↔kt borrow — the kernel runs directly on the
+        // so there is no candle<->kt borrow - the kernel runs directly on the
         // caller's kt tensors. Bit-exact with the prior candle shim (same
         // FFI symbol).
-        if !kiln_rmsnorm_kernel::supports_optimizer_step_kt(&[param, grad]) {
-            return Ok(false);
-        }
         kiln_nvtx::range!(c"kiln/sgd_step_kt");
         match param.dtype() {
             kiln_tensor::DType::F32 => kiln_rmsnorm_kernel::sgd_step_f32_kt(param, grad, lr)
@@ -312,9 +532,9 @@ impl BackendRuntime for RocmBackend {
                 .map_err(|e| anyhow::anyhow!("sgd_step kt: sgd_step_bf16_kt: {e}"))?,
             other => anyhow::bail!("sgd_step kt: unsupported dtype {other:?}"),
         }
-        CUDA_SGD_DISPATCH_SUCCESSES.fetch_add(1, Ordering::Relaxed);
-        static FIRST_CUDA_SGD_LOGGED: OnceLock<()> = OnceLock::new();
-        FIRST_CUDA_SGD_LOGGED.get_or_init(|| {
+        ROCM_SGD_DISPATCH_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+        static FIRST_ROCM_SGD_LOGGED: OnceLock<()> = OnceLock::new();
+        FIRST_ROCM_SGD_LOGGED.get_or_init(|| {
             tracing::info!(
                 param_shape = ?param.dims(),
                 grad_shape = ?grad.dims(),
@@ -326,8 +546,7 @@ impl BackendRuntime for RocmBackend {
         Ok(true)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn dispatch_adamw_step(
+    fn runtime_dispatch_adamw_step(
         &self,
         param: &kiln_tensor::Tensor,
         grad: &kiln_tensor::Tensor,
@@ -340,25 +559,16 @@ impl BackendRuntime for RocmBackend {
         weight_decay: f32,
         step: u32,
     ) -> Result<bool> {
-        if !self.has_resident_activation(param)
-            || !self.has_resident_activation(grad)
-            || !self.has_resident_activation(first_moment)
-            || !self.has_resident_activation(second_moment)
-        {
-            return Ok(false);
-        }
-        if !cuda_optimizer_tensors_supported_for_kt(&[param, grad, first_moment, second_moment]) {
+        if !rocm_optimizer_args_ready_for_kt(
+            &self.resident_tensor_ids,
+            &[param, grad, first_moment, second_moment],
+        ) {
             return Ok(false);
         }
         // #1082: args are already kt (BackendRuntime trait flipped to kt),
-        // so there is no candle↔kt borrow — the kernel runs directly on the
+        // so there is no candle<->kt borrow - the kernel runs directly on the
         // caller's kt tensors. Bit-exact with the prior candle shim (same
         // FFI symbol).
-        if !kiln_rmsnorm_kernel::supports_optimizer_step_kt(&[
-            param, grad, first_moment, second_moment,
-        ]) {
-            return Ok(false);
-        }
         if step == 0 {
             anyhow::bail!("adamw_step kt: step must be >= 1");
         }
@@ -396,9 +606,9 @@ impl BackendRuntime for RocmBackend {
             .map_err(|e| anyhow::anyhow!("adamw_step kt: adamw_step_bf16_kt: {e}"))?,
             other => anyhow::bail!("adamw_step kt: unsupported dtype {other:?}"),
         }
-        CUDA_ADAMW_DISPATCH_SUCCESSES.fetch_add(1, Ordering::Relaxed);
-        static FIRST_CUDA_ADAMW_LOGGED: OnceLock<()> = OnceLock::new();
-        FIRST_CUDA_ADAMW_LOGGED.get_or_init(|| {
+        ROCM_ADAMW_DISPATCH_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+        static FIRST_ROCM_ADAMW_LOGGED: OnceLock<()> = OnceLock::new();
+        FIRST_ROCM_ADAMW_LOGGED.get_or_init(|| {
             tracing::info!(
                 param_shape = ?param.dims(),
                 grad_shape = ?grad.dims(),
@@ -416,296 +626,42 @@ impl BackendRuntime for RocmBackend {
         });
         Ok(true)
     }
+}
 
-    fn supports_flash_attn_prefill(&self) -> bool {
-        true
+#[allow(clippy::too_many_arguments)]
+impl GdnBackend for RocmBackend {
+    fn runtime_supports_gdn_forward_substitution(&self) -> bool {
+        self.support_predicates()
+            .supports_gdn_forward_substitution()
     }
 
-    fn supports_flash_attn_prefill_head_major(&self) -> bool {
-        kiln_core::env_flag::env_flag("KILN_ROCM_HEAD_MAJOR_PREFILL", true)
+    fn runtime_supports_gdn_recurrent_step(&self) -> bool {
+        self.support_predicates().supports_gdn_recurrent_step()
     }
 
-    fn supports_flash_attn_paged_decode(&self) -> bool {
-        true
+    fn runtime_supports_gdn_chunk_prep(&self) -> bool {
+        self.support_predicates().supports_gdn_chunk_prep()
     }
 
-    /// CUDA has no impl for the strict `flash_attn_paged_decode_contiguous_batch`
-    /// kernel (the bs>1 head-major uniform-`start_pos` path), so the trait
-    /// default `Ok(None)` always declines. Returning `false` here lets the
-    /// `try_strict` probe in `gqa_attention_paged_decode_contiguous_batch`
-    /// skip the `start_slots = Tensor::from_slice(...)` allocation that
-    /// would otherwise emit a captured `cudaMemcpyHtoDAsync` to a recycled
-    /// VA under CUDA graph capture (suspect 6 in
-    /// `bench-results/cuda-graph-bs2-secondary-audit.md`, #1082).
-    fn supports_strict_paged_decode_contiguous_batch(&self) -> bool {
-        false
+    fn runtime_supports_gdn_chunk_scan(&self) -> bool {
+        self.support_predicates().supports_gdn_chunk_scan()
     }
 
-    fn supports_gdn_forward_substitution(&self) -> bool {
-        self.gdn_enabled
+    fn runtime_supports_gdn_full_chunk_forward(&self) -> bool {
+        self.support_predicates().supports_gdn_full_chunk_forward()
     }
 
-    fn supports_gdn_recurrent_step(&self) -> bool {
-        self.gdn_enabled
+    fn runtime_supports_gdn_decode_gates_recurrent_unexpanded_qk(&self) -> bool {
+        self.support_predicates()
+            .supports_gdn_decode_gates_recurrent_unexpanded_qk()
     }
 
-    fn supports_gdn_chunk_prep(&self) -> bool {
-        self.gdn_enabled
+    fn runtime_supports_gdn_decode_qk_norm_gates_recurrent(&self) -> bool {
+        self.support_predicates()
+            .supports_gdn_decode_qk_norm_gates_recurrent()
     }
 
-    fn supports_gdn_chunk_scan(&self) -> bool {
-        self.gdn_enabled
-    }
-
-    fn supports_gdn_full_chunk_forward(&self) -> bool {
-        self.gdn_enabled
-    }
-
-    fn supports_gdn_decode_gates_recurrent_unexpanded_qk(&self) -> bool {
-        self.gdn_decode_unexpanded_qk_enabled
-    }
-
-    fn supports_gdn_decode_qk_norm_gates_recurrent(&self) -> bool {
-        self.gdn_decode_qk_norm_recurrent_enabled
-    }
-
-    fn flash_attn_prefill(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        // The vendored CUDA kernel hard-errors on non-BF16. Decline here so
-        // the caller falls back to the portable path instead of bubbling a
-        // hard error up for non-BF16 test configs.
-        if q.track_op() || k.track_op() || v.track_op() {
-            CUDA_FLASH_ATTN_TRACKED_DECLINES.fetch_add(1, Ordering::Relaxed);
-            return Ok(None);
-        }
-        if q.dtype() != kiln_tensor::DType::BF16 {
-            return Ok(None);
-        }
-        // The vendored FA-2 kernel only supports head_dim 128/256 and
-        // hard-errors otherwise. Decline (mirroring the BF16 decline above)
-        // so non-{128,256} configs — e.g. the head_dim=16 tiny test model on
-        // the detached CP-4 tape-authoritative path, which clears the
-        // track_op + BF16 gates above — fall back to the portable SDPA path
-        // instead of bubbling a hard error. (#1082)
-        if !matches!(q.dims().last(), Some(&128) | Some(&256)) {
-            return Ok(None);
-        }
-        // Phase 7 (#1082): kt-typed surface is now the only path. Args
-        // are already kt (#1082 DoD-101/102), so the candle↔kt bridges
-        // are gone — the kernel runs directly on the caller's kt
-        // tensors. candle wrapper discards softmax_lse, kt path does
-        // the same here.
-        kiln_nvtx::range!(c"kiln/flash_attn_kt");
-        let q_c = q.contiguous().context("flash_attn kt: q contiguous")?;
-        let k_c = k.contiguous().context("flash_attn kt: k contiguous")?;
-        let v_c = v.contiguous().context("flash_attn kt: v contiguous")?;
-        let (out_kt, _lse_kt) =
-            kiln_flash_attn::flash_attn_fwd_kt(&q_c, &k_c, &v_c, softmax_scale, causal)
-                .map_err(|e| anyhow::anyhow!("flash_attn kt: flash_attn_fwd_kt: {e}"))?;
-        Ok(Some(out_kt))
-    }
-
-    fn flash_attn_prefill_head_major(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k: &kiln_tensor::Tensor,
-        v: &kiln_tensor::Tensor,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        if q.track_op() || k.track_op() || v.track_op() {
-            CUDA_FLASH_ATTN_TRACKED_DECLINES.fetch_add(1, Ordering::Relaxed);
-            return Ok(None);
-        }
-        if q.dtype() != kiln_tensor::DType::BF16 {
-            return Ok(None);
-        }
-        if !matches!(q.dims().last(), Some(&128) | Some(&256)) {
-            return Ok(None);
-        }
-        kiln_nvtx::range!(c"kiln/flash_attn_head_major_kt");
-        let q_c = q.contiguous().context("flash_attn head-major kt: q contiguous")?;
-        let k_c = k.contiguous().context("flash_attn head-major kt: k contiguous")?;
-        let v_c = v.contiguous().context("flash_attn head-major kt: v contiguous")?;
-        let (out_kt, _lse_kt) = kiln_flash_attn::flash_attn_fwd_head_major_kt(
-            &q_c,
-            &k_c,
-            &v_c,
-            softmax_scale,
-            causal,
-        )
-        .map_err(|e| {
-            anyhow::anyhow!("flash_attn head-major kt: flash_attn_fwd_head_major_kt: {e}")
-        })?;
-        Ok(Some(out_kt))
-    }
-
-    fn flash_attn_paged_decode(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        block_table: &kiln_tensor::Tensor,
-        total_seqlen_k: usize,
-        page_block_size: usize,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        if q.track_op() || k_pool.track_op() || v_pool.track_op() || block_table.track_op()
-            || q.dtype() != kiln_tensor::DType::BF16
-        {
-            return Ok(None);
-        }
-        // Phase 7 (#1082): kt-only. Args are already kt (#1082
-        // DoD-101/102), so no candle↔kt bridge — the kernel runs
-        // directly on the caller's kt tensors.
-        kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_kt");
-        let out_kt = kiln_flash_attn::flash_attn_paged_decode_kt(
-            q,
-            k_pool,
-            v_pool,
-            block_table,
-            total_seqlen_k,
-            page_block_size,
-            softmax_scale,
-            causal,
-        )
-        .map_err(|e| anyhow::anyhow!("flash_attn_paged_decode kt: {e}"))?;
-        Ok(Some(out_kt))
-    }
-
-    fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        block_table: &kiln_tensor::Tensor,
-        seqused_k: &kiln_tensor::Tensor,
-        max_seqlen_k: usize,
-        page_block_size: usize,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        if q.track_op() || k_pool.track_op() || v_pool.track_op() || block_table.track_op()
-            || seqused_k.track_op() || q.dtype() != kiln_tensor::DType::BF16
-        {
-            return Ok(None);
-        }
-        // Phase 7 (#1082): kt-only. Args are already kt (#1082
-        // DoD-101/102), so no candle↔kt bridge. This entry always
-        // passed `graph_outputs = None`; the caller-owned-output
-        // variant lives in `_with_graph_outputs` below.
-        kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_dyn_seqlen_kt");
-        let out_kt = kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen_kt(
-            q,
-            k_pool,
-            v_pool,
-            block_table,
-            seqused_k,
-            max_seqlen_k,
-            page_block_size,
-            softmax_scale,
-            causal,
-        )
-        .map_err(|e| anyhow::anyhow!("flash_attn_paged_decode_dyn_seqlen kt: {e}"))?;
-        Ok(Some(out_kt))
-    }
-
-    fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        block_table: &kiln_tensor::Tensor,
-        seqused_k: &kiln_tensor::Tensor,
-        graph_outputs: Option<(&kiln_tensor::Tensor, &kiln_tensor::Tensor)>,
-        max_seqlen_k: usize,
-        page_block_size: usize,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        if q.track_op() || k_pool.track_op() || v_pool.track_op() || block_table.track_op()
-            || seqused_k.track_op() || q.dtype() != kiln_tensor::DType::BF16
-        {
-            return Ok(None);
-        }
-        // Phase 7 opt-in (#1082): route through the kt-typed surface
-        // only when there are no caller-owned graph outputs to write
-        // through to. The kt-typed
-        // `flash_attn_paged_decode_dyn_seqlen_kt` does not (yet)
-        // accept a caller-owned (out, lse) pair — it allocates them
-        // internally through the bridge — so the `graph_outputs ==
-        // Some` case must stay on the candle path. That path
-        // specifically exists to fix the dangling-pointer hazard
-        // documented in
-        // `bench-results/cuda-graph-bs2-secondary-audit.md` suspects
-        // 3+4, where the CUDA graph runner re-uses caller-owned
-        // tensors across replays. When `graph_outputs == None` (the
-        // non-graph-capture path), the kt route is bit-exactly
-        // equivalent because both paths bottom out in the same
-        // `kiln_flash_attn_fwd_paged_decode_dyn_seqlen` FFI symbol.
-        // Phase 7 (#1082): kt-only on both branches now that the
-        // kt-typed `flash_attn_paged_decode_dyn_seqlen_kt_with_graph_
-        // outputs` sibling exists. Bit-exact: both bottom out in the
-        // same `kiln_flash_attn_fwd_paged_decode_dyn_seqlen` FFI
-        // symbol. The caller-owned-output path is the
-        // CUDA-graph-capture contract (the kernel writes through the
-        // caller's pinned `(out, lse)` pair so graph replays don't
-        // dangle on freshly-allocated scratch).
-        // Phase 7 (#1082): args are already kt (#1082 DoD-101/102), so
-        // no candle↔kt bridge — the kernel runs directly on the
-        // caller's kt tensors.
-        kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_dyn_seqlen_kt");
-        if let Some((out, lse)) = graph_outputs {
-            // Caller owns `(out, lse)` (kt tensors). The kernel writes
-            // in place via the with_graph_outputs kt entry; the
-            // returned `out` is the caller's kt tensor whose CUDA
-            // buffer the kernel mutated.
-            kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs(
-                q,
-                k_pool,
-                v_pool,
-                block_table,
-                seqused_k,
-                out,
-                lse,
-                max_seqlen_k,
-                page_block_size,
-                softmax_scale,
-                causal,
-            )
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "flash_attn_paged_decode_dyn_seqlen (graph variant) kt with_graph_outputs: {e}"
-                )
-            })?;
-            return Ok(Some(out.clone()));
-        }
-        // No caller-owned outputs — allocate internally.
-        let out_kt = kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen_kt(
-            q,
-            k_pool,
-            v_pool,
-            block_table,
-            seqused_k,
-            max_seqlen_k,
-            page_block_size,
-            softmax_scale,
-            causal,
-        )
-        .map_err(|e| {
-            anyhow::anyhow!("flash_attn_paged_decode_dyn_seqlen (graph variant) kt: {e}")
-        })?;
-        Ok(Some(out_kt))
-    }
-
-    fn gdn_forward_substitution(
+    fn runtime_gdn_forward_substitution(
         &self,
         a_strict: &kiln_tensor::Tensor,
         v_prime: &kiln_tensor::Tensor,
@@ -725,7 +681,7 @@ impl BackendRuntime for RocmBackend {
         Ok(Some(out_kt))
     }
 
-    fn gdn_recurrent_step(
+    fn runtime_gdn_recurrent_step(
         &self,
         q: &kiln_tensor::Tensor,
         k: &kiln_tensor::Tensor,
@@ -747,7 +703,7 @@ impl BackendRuntime for RocmBackend {
         Ok(Some(out_kt))
     }
 
-    fn gdn_chunk_prep(
+    fn runtime_gdn_chunk_prep(
         &self,
         g: &kiln_tensor::Tensor,
         v: &kiln_tensor::Tensor,
@@ -755,7 +711,16 @@ impl BackendRuntime for RocmBackend {
         qkt: &kiln_tensor::Tensor,
         ks_entry: &kiln_tensor::Tensor,
         q_s: &kiln_tensor::Tensor,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+    ) -> Result<
+        Option<(
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+        )>,
+    > {
         // Phase 7 (#1082): kt-typed surface is now the only path. Args
         // are already kt (#1082 DoD-101/102), so no candle↔kt bridge —
         // the predicate + `gdn_chunk_prep_kt` 6-tuple kernel run
@@ -771,7 +736,7 @@ impl BackendRuntime for RocmBackend {
         Ok(Some((o0, o1, o2, o3, o4, o5)))
     }
 
-    fn gdn_chunk_scan(
+    fn runtime_gdn_chunk_scan(
         &self,
         a_strict: &kiln_tensor::Tensor,
         b_mask: &kiln_tensor::Tensor,
@@ -784,18 +749,28 @@ impl BackendRuntime for RocmBackend {
         // are already kt (#1082 DoD-101/102), so no candle↔kt bridge.
         kiln_nvtx::range!(c"kiln/gdn_chunk_scan_kt");
         if !kiln_gdn_kernel::gdn_chunk_scan_supports_kt(
-            a_strict, b_mask, v_prime, q_s_scaled, beta, decay_last_col,
+            a_strict,
+            b_mask,
+            v_prime,
+            q_s_scaled,
+            beta,
+            decay_last_col,
         ) {
             return Ok(None);
         }
         let (o0, o1) = kiln_gdn_kernel::gdn_chunk_scan_kt(
-            a_strict, b_mask, v_prime, q_s_scaled, beta, decay_last_col,
+            a_strict,
+            b_mask,
+            v_prime,
+            q_s_scaled,
+            beta,
+            decay_last_col,
         )
         .map_err(|e| anyhow::anyhow!("kt gdn_chunk_scan: {e}"))?;
         Ok(Some((o0, o1)))
     }
 
-    fn gdn_full_chunk_forward(
+    fn runtime_gdn_full_chunk_forward(
         &self,
         g: &kiln_tensor::Tensor,
         v: &kiln_tensor::Tensor,
@@ -828,7 +803,7 @@ impl BackendRuntime for RocmBackend {
                 g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, dv_tile,
             )
             .map_err(|e| anyhow::anyhow!("kt gdn_full_chunk_forward_multiblock: {e}"))?;
-            CUDA_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+            ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.fetch_add(1, Ordering::Relaxed);
             return Ok(Some(out_kt));
         }
         // Single-block fall-through. The `gdn_full_chunk_forward_kt`
@@ -839,12 +814,12 @@ impl BackendRuntime for RocmBackend {
             g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
         )
         .map_err(|e| anyhow::anyhow!("kt gdn_full_chunk_forward: {e}"))?;
-        CUDA_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+        ROCM_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.fetch_add(1, Ordering::Relaxed);
         Ok(Some(out_kt))
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn gdn_decode_gates_recurrent(
+    fn runtime_gdn_decode_gates_recurrent(
         &self,
         q: &kiln_tensor::Tensor,
         k: &kiln_tensor::Tensor,
@@ -891,7 +866,7 @@ impl BackendRuntime for RocmBackend {
                 state_shape = ?state.shape(), state_dtype = ?state.dtype(), state_contiguous = state.is_contiguous(),
                 z_shape = ?z.shape(), z_dtype = ?z.dtype(),
                 weight_shape = ?weight.shape(), weight_dtype = ?weight.dtype(),
-                "CUDA gdn_decode_gates_recurrent declined (non-bf16 envelope); will retry with cast"
+                "ROCm gdn_decode_gates_recurrent declined (non-bf16 envelope); will retry with cast"
             );
             // Phase 5 fix (#1082): same dtype-tolerance pattern as
             // `gdn_decode_qk_norm_gates_recurrent` above. Cast small
@@ -901,20 +876,29 @@ impl BackendRuntime for RocmBackend {
             let a_log_bf16 = if a_log.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(a_log.to_dtype(kiln_tensor::DType::BF16)
-                    .with_context(|| "gdn_decode_gates: cast a_log -> bf16")?)
+                Some(
+                    a_log
+                        .to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_gates: cast a_log -> bf16")?,
+                )
             };
             let dt_bias_bf16 = if dt_bias.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(dt_bias.to_dtype(kiln_tensor::DType::BF16)
-                    .with_context(|| "gdn_decode_gates: cast dt_bias -> bf16")?)
+                Some(
+                    dt_bias
+                        .to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_gates: cast dt_bias -> bf16")?,
+                )
             };
             let weight_f32 = if weight.dtype() == kiln_tensor::DType::F32 {
                 None
             } else {
-                Some(weight.to_dtype(kiln_tensor::DType::F32)
-                    .with_context(|| "gdn_decode_gates: cast weight -> f32")?)
+                Some(
+                    weight
+                        .to_dtype(kiln_tensor::DType::F32)
+                        .with_context(|| "gdn_decode_gates: cast weight -> f32")?,
+                )
             };
             // Cast heavy tensors too. q/k/v often arrive F32 from
             // the conv1d kernel epilogue (kernel returns F32 by
@@ -927,25 +911,55 @@ impl BackendRuntime for RocmBackend {
             if state.dtype() != kiln_tensor::DType::BF16 {
                 return Ok(None);
             }
-            let q_bf16 = if q.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(q.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast q -> bf16")?)
+            let q_bf16 = if q.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    q.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_gates: cast q -> bf16")?,
+                )
             };
-            let k_bf16 = if k.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(k.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast k -> bf16")?)
+            let k_bf16 = if k.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    k.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_gates: cast k -> bf16")?,
+                )
             };
-            let v_bf16 = if v.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(v.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast v -> bf16")?)
+            let v_bf16 = if v.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    v.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_gates: cast v -> bf16")?,
+                )
             };
-            let a_bf16 = if a.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(a.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast a -> bf16")?)
+            let a_bf16 = if a.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    a.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_gates: cast a -> bf16")?,
+                )
             };
-            let b_bf16 = if b.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(b.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast b -> bf16")?)
+            let b_bf16 = if b.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    b.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_gates: cast b -> bf16")?,
+                )
             };
-            let z_bf16 = if z.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(z.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast z -> bf16")?)
+            let z_bf16 = if z.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    z.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_gates: cast z -> bf16")?,
+                )
             };
-            return self.gdn_decode_gates_recurrent(
+            return self.runtime_gdn_decode_gates_recurrent(
                 q_bf16.as_ref().unwrap_or(q),
                 k_bf16.as_ref().unwrap_or(k),
                 v_bf16.as_ref().unwrap_or(v),
@@ -1004,15 +1018,17 @@ impl BackendRuntime for RocmBackend {
         }
         // Squeeze for the kernel call (3D-expecting). Metadata-only
         // reshape on contiguous inputs; no copy.
-        let q_3d = q.squeeze(1)
+        let q_3d = q
+            .squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_gates q squeeze(1) failed")?;
-        let k_3d = k.squeeze(1)
+        let k_3d = k
+            .squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_gates k squeeze(1) failed")?;
-        let v_3d = v.squeeze(1)
+        let v_3d = v
+            .squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_gates v squeeze(1) failed")?;
         let out_kt = kiln_gdn_kernel::gdn_decode_gates_recurrent_bf16_kt(
-            &q_3d, &k_3d, &v_3d, &a_c, &b_c, &alog_c, &dtb_c, &state_c, &z_c, &weight_c,
-            eps as f32,
+            &q_3d, &k_3d, &v_3d, &a_c, &b_c, &alog_c, &dtb_c, &state_c, &z_c, &weight_c, eps as f32,
         )
         .map_err(|e| anyhow::anyhow!("kt gdn_decode_gates_recurrent: {e}"))?;
         // kt_api allocates a 3D `[B, value_heads, dv]` output (see
@@ -1028,7 +1044,7 @@ impl BackendRuntime for RocmBackend {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn gdn_decode_qk_norm_gates_recurrent(
+    fn runtime_gdn_decode_qk_norm_gates_recurrent(
         &self,
         q: &kiln_tensor::Tensor,
         k: &kiln_tensor::Tensor,
@@ -1068,7 +1084,7 @@ impl BackendRuntime for RocmBackend {
                 a_log_shape = ?a_log.shape(), a_log_dtype = ?a_log.dtype(),
                 dt_bias_shape = ?dt_bias.shape(), dt_bias_dtype = ?dt_bias.dtype(),
                 state_shape = ?state.shape(), state_dtype = ?state.dtype(), state_contiguous = state.is_contiguous(),
-                "CUDA gdn_decode_qk_norm_gates_recurrent declined (non-bf16 envelope); will retry with cast"
+                "ROCm gdn_decode_qk_norm_gates_recurrent declined (non-bf16 envelope); will retry with cast"
             );
             // Phase 5 fix (#1082): Qwen3.5-4B safetensors store
             // `A_log` and `dt_bias` in F32 by default (loader keeps
@@ -1080,14 +1096,20 @@ impl BackendRuntime for RocmBackend {
             let a_log_bf16 = if a_log.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(a_log.to_dtype(kiln_tensor::DType::BF16)
-                    .with_context(|| "gdn_decode_qk_norm: cast a_log -> bf16")?)
+                Some(
+                    a_log
+                        .to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_qk_norm: cast a_log -> bf16")?,
+                )
             };
             let dt_bias_bf16 = if dt_bias.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(dt_bias.to_dtype(kiln_tensor::DType::BF16)
-                    .with_context(|| "gdn_decode_qk_norm: cast dt_bias -> bf16")?)
+                Some(
+                    dt_bias
+                        .to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_qk_norm: cast dt_bias -> bf16")?,
+                )
             };
             // Same heavy-tensor cast as gdn_decode_gates_recurrent
             // above — required because conv1d kernel emits F32
@@ -1095,22 +1117,47 @@ impl BackendRuntime for RocmBackend {
             if state.dtype() != kiln_tensor::DType::BF16 {
                 return Ok(None);
             }
-            let q_bf16 = if q.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(q.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast q -> bf16")?)
+            let q_bf16 = if q.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    q.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_qk_norm: cast q -> bf16")?,
+                )
             };
-            let k_bf16 = if k.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(k.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast k -> bf16")?)
+            let k_bf16 = if k.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    k.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_qk_norm: cast k -> bf16")?,
+                )
             };
-            let v_bf16 = if v.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(v.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast v -> bf16")?)
+            let v_bf16 = if v.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    v.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_qk_norm: cast v -> bf16")?,
+                )
             };
-            let a_bf16 = if a.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(a.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast a -> bf16")?)
+            let a_bf16 = if a.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    a.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_qk_norm: cast a -> bf16")?,
+                )
             };
-            let b_bf16 = if b.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(b.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast b -> bf16")?)
+            let b_bf16 = if b.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    b.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_qk_norm: cast b -> bf16")?,
+                )
             };
-            return self.gdn_decode_qk_norm_gates_recurrent(
+            return self.runtime_gdn_decode_qk_norm_gates_recurrent(
                 q_bf16.as_ref().unwrap_or(q),
                 k_bf16.as_ref().unwrap_or(k),
                 v_bf16.as_ref().unwrap_or(v),
@@ -1153,15 +1200,26 @@ impl BackendRuntime for RocmBackend {
             return Ok(None);
         }
         // Squeeze for the kernel call (3D-expecting).
-        let q_3d = q.squeeze(1)
+        let q_3d = q
+            .squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_qk_norm q squeeze(1) failed")?;
-        let k_3d = k.squeeze(1)
+        let k_3d = k
+            .squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_qk_norm k squeeze(1) failed")?;
-        let v_3d = v.squeeze(1)
+        let v_3d = v
+            .squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_qk_norm v squeeze(1) failed")?;
         let out_kt = kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_bf16_kt(
-            &q_3d, &k_3d, &v_3d, &a_c, &b_c, &alog_c, &dtb_c, &state_c,
-            q_scale as f32, qk_eps as f32,
+            &q_3d,
+            &k_3d,
+            &v_3d,
+            &a_c,
+            &b_c,
+            &alog_c,
+            &dtb_c,
+            &state_c,
+            q_scale as f32,
+            qk_eps as f32,
         )
         .map_err(|e| anyhow::anyhow!("kt gdn_decode_qk_norm_gates_recurrent: {e}"))?;
         // Same 3D->4D unsqueeze fix as gdn_decode_gates_recurrent
@@ -1175,7 +1233,7 @@ impl BackendRuntime for RocmBackend {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn gdn_decode_qk_norm_gates_recurrent_rmsnorm(
+    fn runtime_gdn_decode_qk_norm_gates_recurrent_rmsnorm(
         &self,
         q: &kiln_tensor::Tensor,
         k: &kiln_tensor::Tensor,
@@ -1223,7 +1281,7 @@ impl BackendRuntime for RocmBackend {
                 state_shape = ?state.shape(), state_dtype = ?state.dtype(), state_contiguous = state.is_contiguous(),
                 z_shape = ?z.shape(), z_dtype = ?z.dtype(),
                 weight_shape = ?weight.shape(), weight_dtype = ?weight.dtype(),
-                "CUDA gdn_decode_qk_norm_gates_recurrent_rmsnorm declined (non-bf16 envelope); will retry with cast"
+                "ROCm gdn_decode_qk_norm_gates_recurrent_rmsnorm declined (non-bf16 envelope); will retry with cast"
             );
             // Phase 5 fix (#1082): cast small 1-D weight tensors
             // (a_log, dt_bias) to BF16 + group-norm weight to F32
@@ -1234,45 +1292,84 @@ impl BackendRuntime for RocmBackend {
             let a_log_bf16 = if a_log.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(a_log.to_dtype(kiln_tensor::DType::BF16)
-                    .with_context(|| "gdn_decode_rmsnorm: cast a_log -> bf16")?)
+                Some(
+                    a_log
+                        .to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_rmsnorm: cast a_log -> bf16")?,
+                )
             };
             let dt_bias_bf16 = if dt_bias.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(dt_bias.to_dtype(kiln_tensor::DType::BF16)
-                    .with_context(|| "gdn_decode_rmsnorm: cast dt_bias -> bf16")?)
+                Some(
+                    dt_bias
+                        .to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_rmsnorm: cast dt_bias -> bf16")?,
+                )
             };
             let weight_f32 = if weight.dtype() == kiln_tensor::DType::F32 {
                 None
             } else {
-                Some(weight.to_dtype(kiln_tensor::DType::F32)
-                    .with_context(|| "gdn_decode_rmsnorm: cast weight -> f32")?)
+                Some(
+                    weight
+                        .to_dtype(kiln_tensor::DType::F32)
+                        .with_context(|| "gdn_decode_rmsnorm: cast weight -> f32")?,
+                )
             };
             // Same heavy-tensor cast as the sibling functions
             // above — required because conv1d emits F32 q/k/v.
             if state.dtype() != kiln_tensor::DType::BF16 {
                 return Ok(None);
             }
-            let q_bf16 = if q.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(q.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast q -> bf16")?)
+            let q_bf16 = if q.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    q.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_rmsnorm: cast q -> bf16")?,
+                )
             };
-            let k_bf16 = if k.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(k.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast k -> bf16")?)
+            let k_bf16 = if k.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    k.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_rmsnorm: cast k -> bf16")?,
+                )
             };
-            let v_bf16 = if v.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(v.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast v -> bf16")?)
+            let v_bf16 = if v.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    v.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_rmsnorm: cast v -> bf16")?,
+                )
             };
-            let a_bf16 = if a.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(a.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast a -> bf16")?)
+            let a_bf16 = if a.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    a.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_rmsnorm: cast a -> bf16")?,
+                )
             };
-            let b_bf16 = if b.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(b.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast b -> bf16")?)
+            let b_bf16 = if b.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    b.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_rmsnorm: cast b -> bf16")?,
+                )
             };
-            let z_bf16 = if z.dtype() == kiln_tensor::DType::BF16 { None } else {
-                Some(z.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast z -> bf16")?)
+            let z_bf16 = if z.dtype() == kiln_tensor::DType::BF16 {
+                None
+            } else {
+                Some(
+                    z.to_dtype(kiln_tensor::DType::BF16)
+                        .with_context(|| "gdn_decode_rmsnorm: cast z -> bf16")?,
+                )
             };
-            return self.gdn_decode_qk_norm_gates_recurrent_rmsnorm(
+            return self.runtime_gdn_decode_qk_norm_gates_recurrent_rmsnorm(
                 q_bf16.as_ref().unwrap_or(q),
                 k_bf16.as_ref().unwrap_or(k),
                 v_bf16.as_ref().unwrap_or(v),
@@ -1300,7 +1397,7 @@ impl BackendRuntime for RocmBackend {
         // already handles it via unconditional `.contiguous()`.
         // Without these calls every concurrent request ≥2 returned
         // HTTP 500 with "tensor must be contiguous" from
-        // `kt_tensor_from_candle_cuda_borrow`. `.contiguous()` is a
+        // the kt backend borrow path. `.contiguous()` is a
         // no-op when the upstream tensor is already contiguous (the
         // rowwise bs=1 path).
         let a_c = a
@@ -1330,15 +1427,29 @@ impl BackendRuntime for RocmBackend {
             return Ok(None);
         }
         // Squeeze for the kernel call (3D-expecting).
-        let q_3d = q.squeeze(1)
+        let q_3d = q
+            .squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm q squeeze(1) failed")?;
-        let k_3d = k.squeeze(1)
+        let k_3d = k
+            .squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm k squeeze(1) failed")?;
-        let v_3d = v.squeeze(1)
+        let v_3d = v
+            .squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm v squeeze(1) failed")?;
         let out_kt = kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt(
-            &q_3d, &k_3d, &v_3d, &a_c, &b_c, &alog_c, &dtb_c, &state_c, &z_c, &weight_c,
-            q_scale as f32, qk_eps as f32, rms_eps as f32,
+            &q_3d,
+            &k_3d,
+            &v_3d,
+            &a_c,
+            &b_c,
+            &alog_c,
+            &dtb_c,
+            &state_c,
+            &z_c,
+            &weight_c,
+            q_scale as f32,
+            qk_eps as f32,
+            rms_eps as f32,
         )
         .map_err(|e| anyhow::anyhow!("kt gdn_decode_qk_norm_gates_recurrent_rmsnorm: {e}"))?;
         // Same 3D->4D unsqueeze fix as the gdn_decode_gates_recurrent
@@ -1351,11 +1462,45 @@ impl BackendRuntime for RocmBackend {
         Ok(Some(out))
     }
 
-    fn supports_gdn_gates(&self) -> bool {
-        self.gdn_gates_enabled
+    fn runtime_gdn_ab_in_proj_prefill(
+        &self,
+        x: &kiln_tensor::Tensor,
+        in_proj_ab_t: &kiln_tensor::Tensor,
+        nv: usize,
+        seq_len: usize,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        let Ok((_, actual_seq_len, hidden)) = x.dims3() else {
+            return Ok(None);
+        };
+        let Some(ab_dim) = nv.checked_mul(2) else {
+            return Ok(None);
+        };
+        if !rocm_gdn_ab_in_proj_seq_enabled(seq_len)
+            || actual_seq_len != seq_len
+            || seq_len == 0
+            || x.dtype() != kiln_tensor::DType::BF16
+            || in_proj_ab_t.dtype() != kiln_tensor::DType::BF16
+            || in_proj_ab_t.track_op()
+            || !in_proj_ab_t.is_contiguous()
+            || in_proj_ab_t.dims() != [hidden, ab_dim]
+            || !rocm_tensors_on_device(&[x, in_proj_ab_t])
+        {
+            return Ok(None);
+        }
+
+        let Some(ab) = LinearBackend::runtime_linear_prefill_apply(self, x, in_proj_ab_t)? else {
+            return Ok(None);
+        };
+        let a = ab.narrow(2, 0, nv)?;
+        let b = ab.narrow(2, nv, nv)?;
+        Ok(Some((ab, a, b)))
     }
 
-    fn gdn_gates(
+    fn runtime_supports_gdn_gates(&self) -> bool {
+        self.support_predicates().supports_gdn_gates()
+    }
+
+    fn runtime_gdn_gates(
         &self,
         a: &kiln_tensor::Tensor,
         b: &kiln_tensor::Tensor,
@@ -1364,12 +1509,17 @@ impl BackendRuntime for RocmBackend {
     ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
         let dims = a.dims();
         let is_t1_decode = dims.len() >= 2 && dims[dims.len() - 2] == 1;
-        if !is_t1_decode && std::env::var("KILN_DISABLE_CUDA_GDN_PREFILL_GATES").is_ok() {
+        if !is_t1_decode
+            && rocm_or_legacy_disable_env_set(
+                "KILN_DISABLE_ROCM_GDN_PREFILL_GATES",
+                "KILN_DISABLE_CUDA_GDN_PREFILL_GATES",
+            )
+        {
             tracing::debug!(
                 a_shape = ?a.shape(),
                 a_log_dtype = ?a_log.dtype(),
                 dt_bias_dtype = ?dt_bias.dtype(),
-                "CUDA prefill gdn_gates disabled; using Candle fallback"
+                "ROCm prefill gdn_gates disabled; using Candle fallback"
             );
             return Ok(None);
         }
@@ -1410,226 +1560,16 @@ impl BackendRuntime for RocmBackend {
         if !kiln_gdn_kernel::gdn_gates_supports_kt(&a_c, &b_c, &alog_c, &dtb_c) {
             return Ok(None);
         }
-        let (beta_kt, g_kt) =
-            kiln_gdn_kernel::gdn_gates_bf16_kt(&a_c, &b_c, &alog_c, &dtb_c)
-                .map_err(|e| anyhow::anyhow!("kt gdn_gates_bf16: {e}"))?;
+        let (beta_kt, g_kt) = kiln_gdn_kernel::gdn_gates_bf16_kt(&a_c, &b_c, &alog_c, &dtb_c)
+            .map_err(|e| anyhow::anyhow!("kt gdn_gates_bf16: {e}"))?;
         Ok(Some((beta_kt, g_kt)))
     }
 
-    fn supports_gdn_gated_rms_norm(&self) -> bool {
-        self.gdn_gated_rms_norm_enabled
+    fn runtime_supports_gdn_gated_rms_norm(&self) -> bool {
+        self.support_predicates().supports_gdn_gated_rms_norm()
     }
 
-    fn lora_decode_add(
-        &self,
-        base: &kiln_tensor::Tensor,
-        x: &kiln_tensor::Tensor,
-        a: &kiln_tensor::Tensor,
-        b: &kiln_tensor::Tensor,
-        scale: f32,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        if !self.lora_decode_add_enabled
-            || base.track_op()
-            || x.track_op()
-            || a.track_op()
-            || b.track_op()
-        {
-            return Ok(None);
-        }
-        // #1082: args are already kt (BackendRuntime trait flipped to kt),
-        // so there is no candle↔kt bridge — the kernel runs directly on the
-        // caller's kt tensors and returns a kt result (zero candle roundtrip).
-        if !kiln_rmsnorm_kernel::supports_lora_decode_add_kt(base, x, a, b) {
-            return Ok(None);
-        }
-        let out_kt = kiln_rmsnorm_kernel::lora_decode_add_full_kt(base, x, a, b, scale)
-            .map_err(|e| anyhow::anyhow!("kt lora_decode_add: {e}"))?;
-        Ok(Some(out_kt))
-    }
-
-    fn supports_linear_decode_argmax(&self) -> bool {
-        true
-    }
-
-    fn linear_decode_argmax(
-        &self,
-        _x: &kiln_tensor::Tensor,
-        _weight_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<u32>> {
-        Ok(None)
-    }
-
-    fn linear_prefill_apply(&self, x: &kiln_tensor::Tensor, weight_t: &kiln_tensor::Tensor) -> Result<Option<kiln_tensor::Tensor>> {
-        if !matches!(x.device(), kiln_tensor::Device::Rocm(_))
-            || !matches!(weight_t.device(), kiln_tensor::Device::Rocm(_))
-            || x.dims().is_empty()
-            || weight_t.dims().len() != 2
-            || *x.dims().last().unwrap() != weight_t.dims()[0]
-        {
-            return Ok(None);
-        }
-
-        static FIRST_CUDA_LINEAR_PREFILL_LOGGED: OnceLock<()> = OnceLock::new();
-        FIRST_CUDA_LINEAR_PREFILL_LOGGED.get_or_init(|| {
-            tracing::info!(
-                x_shape = ?x.dims(),
-                weight_t_shape = ?weight_t.dims(),
-                tracked = x.track_op() || weight_t.track_op(),
-                "RocmBackend::linear_prefill_apply first call (kt cublasLt; tape records bwd)"
-            );
-        });
-
-        // #1082: args are already kt. The kt matmul records onto the
-        // autograd tape so `Tape::backward()` produces the projection
-        // gradient — there is no candle autograd / CustomOp1 anymore.
-        //
-        // candle's `broadcast_matmul` for `[B, T, K] @ [K, N]` materializes
-        // the broadcasted RHS via `.broadcast_as(...).contiguous()`, which on
-        // CUDA copies the entire (B × K × N) weight tensor across the batch
-        // dim before every matmul. nsys showed that copy at 78 % of total
-        // GPU time on the bs > 1 GDN-decode path because GDN runs four
-        // in-proj matmuls per layer × 24 layers per step and each pays a
-        // ~168 MB BF16 copy at bs=4. Flatten leading dims, do a plain 2D
-        // matmul, and reshape — same compute, no implicit contiguous copy.
-        let l_dims = x.dims().to_vec();
-        let k = l_dims[l_dims.len() - 1];
-        let out_n = weight_t.dims()[1];
-        let lead: usize = l_dims[..l_dims.len() - 1].iter().product();
-        let out = if x.is_contiguous() {
-            let x2d = x.reshape((lead, k))?;
-
-            // Phase 7 opt-in: route through the kt cublasLt handle
-            // when KILN_USE_KT_API_MATMUL=1 and the dtype is supported.
-            // NVTX range from try_kt_matmul brackets the call as
-            // kiln/matmul_kt in nsys.
-            if crate::forward::cuda_use_kt_api_matmul()
-                && matches!(x2d.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F16 | kiln_tensor::DType::F32)
-                && x2d.dtype() == weight_t.dtype()
-                && x2d.is_contiguous()
-                && weight_t.is_contiguous()
-            {
-                if let Some(kt_out2d) = crate::forward::try_kt_matmul(&x2d, weight_t)? {
-                    let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
-                    out_shape.push(out_n);
-                    CUDA_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
-                    return Ok(Some(kt_out2d.reshape(out_shape)?));
-                }
-            }
-
-            let out2d = x2d.matmul(weight_t)?;
-            let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
-            out_shape.push(out_n);
-            out2d.reshape(out_shape)?
-        } else {
-            // Non-contiguous x fallback. broadcast_matmul materializes a
-            // broadcasted-RHS copy internally (78 % GPU time at bs=4 due to
-            // the per-step RHS copy). When the kt-API matmul gate is on and
-            // dtypes line up, force x contiguous and route through cublasLt —
-            // same 2D kt path as the is_contiguous() branch above, paying one
-            // extra dtod for the x.contiguous() up front. That copy is bounded
-            // by (B × T × K), whereas broadcast_matmul's implicit copy scales
-            // as (B × K × N), typically larger by an order of magnitude on
-            // Qwen3.5-4B GDN in-proj shapes. (#1082)
-            if crate::forward::cuda_use_kt_api_matmul()
-                && matches!(x.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F16 | kiln_tensor::DType::F32)
-                && x.dtype() == weight_t.dtype()
-                && weight_t.is_contiguous()
-            {
-                let x_c = x
-                    .contiguous()
-                    .context("linear_prefill_apply non-contig x: contiguous failed")?;
-                let x2d = x_c.reshape((lead, k))?;
-                if x2d.is_contiguous() {
-                    if let Some(kt_out2d) = crate::forward::try_kt_matmul(&x2d, weight_t)? {
-                        let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
-                        out_shape.push(out_n);
-                        CUDA_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
-                        return Ok(Some(kt_out2d.reshape(out_shape)?));
-                    }
-                }
-            }
-            x.broadcast_matmul(weight_t)?
-        };
-        CUDA_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
-        Ok(Some(out))
-    }
-
-    fn linear_prefill_apply_offset(
-        &self,
-        x: &kiln_tensor::Tensor,
-        full_weight_t: &kiln_tensor::Tensor,
-        chunk_start: usize,
-        chunk_len: usize,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        if !matches!(x.device(), kiln_tensor::Device::Rocm(_))
-            || !matches!(full_weight_t.device(), kiln_tensor::Device::Rocm(_))
-            || full_weight_t.dims().len() != 2
-            || chunk_len == 0
-            || chunk_start >= full_weight_t.dims()[1]
-            || chunk_start + chunk_len > full_weight_t.dims()[1]
-        {
-            return Ok(None);
-        }
-        let chunk = full_weight_t
-            .narrow(1, chunk_start, chunk_len)
-            .context("cuda linear_prefill_apply_offset narrow weight chunk")?
-            .contiguous()
-            .context("cuda linear_prefill_apply_offset contiguous weight chunk")?;
-        let chunk = if chunk.dtype() == x.dtype() {
-            chunk
-        } else {
-            chunk
-                .to_dtype(x.dtype())
-                .context("cuda linear_prefill_apply_offset cast weight chunk")?
-        };
-        let out = self.linear_prefill_apply(x, &chunk)?;
-        if out.is_some() {
-            CUDA_LINEAR_PREFILL_OFFSET_SUCCESSES.fetch_add(1, Ordering::Relaxed);
-        }
-        Ok(out)
-    }
-
-    fn lora_delta_resident(
-        &self,
-        x: &kiln_tensor::Tensor,
-        a: &kiln_tensor::Tensor,
-        b: &kiln_tensor::Tensor,
-        scale: f32,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        if !matches!(x.device(), kiln_tensor::Device::Rocm(_))
-            || !matches!(a.device(), kiln_tensor::Device::Rocm(_))
-            || !matches!(b.device(), kiln_tensor::Device::Rocm(_))
-            || !self.has_resident_activation(a)
-            || !self.has_resident_activation(b)
-        {
-            return Ok(None);
-        }
-
-        // #1082: args are already kt. `compute_lora_delta` is kt-native and
-        // records the delta matmul chain onto the autograd tape, so
-        // `Tape::backward()` produces grad_A / grad_B — no candle autograd.
-        let proj = LoraProjectionWeights {
-            a: a.clone(),
-            b: b.clone(),
-        };
-        let delta = compute_lora_delta(x, &proj, scale)
-            .context("cuda registered LoRA delta (kt tape-recorded) failed")?;
-
-        static FIRST_CUDA_LORA_DELTA_LOGGED: OnceLock<()> = OnceLock::new();
-        FIRST_CUDA_LORA_DELTA_LOGGED.get_or_init(|| {
-            tracing::info!(
-                x_shape = ?x.dims(),
-                a_shape = ?a.dims(),
-                b_shape = ?b.dims(),
-                scale,
-                "RocmBackend::lora_delta_resident first call (kt tape-recorded)"
-            );
-        });
-
-        Ok(Some(delta))
-    }
-
-    fn gdn_gated_rms_norm(
+    fn runtime_gdn_gated_rms_norm(
         &self,
         x: &kiln_tensor::Tensor,
         z: &kiln_tensor::Tensor,
@@ -1655,7 +1595,9 @@ impl BackendRuntime for RocmBackend {
         // The kt variant expects rank-2 [rows, hidden]; flatten higher-rank
         // x/z by folding all leading dims into rows. weight stays [hidden].
         let x_dims = x.dims().to_vec();
-        let hidden = *x_dims.last().expect("x has at least one dim (checked by supports_kt)");
+        let hidden = *x_dims
+            .last()
+            .expect("x has at least one dim (checked by supports_kt)");
         let rows: usize = x_dims.iter().take(x_dims.len() - 1).product();
         // #1082: x/z arrive as transposed views (e.g. [1,7,2,16] strides
         // [224,16,112,1] after the head transpose). candle's reshape silently
@@ -1697,16 +1639,541 @@ impl BackendRuntime for RocmBackend {
             .context("kt-adapter: gdn_gated_rms_norm reshape out → original failed")?;
         Ok(Some(out))
     }
+}
 
-    fn supports_causal_conv1d_update(&self) -> bool {
-        self.fused_conv1d_enabled
+fn rocm_resident_activation_resource(
+    tensor: &kiln_tensor::Tensor,
+    state: super::residency::ResidentResourceState,
+) -> super::residency::ResidentResource {
+    super::residency::ResidentResource::from_tensor_for_backend(
+        tensor,
+        super::residency::resident_backend_for_runtime("rocm", tensor.device()),
+        super::residency::ResidentResourceFamily::Activation,
+        super::residency::ResidentOwnership::StorageOwned,
+    )
+    .with_state(state)
+    .with_replay_stability(super::residency::ReplayStability::StableWithinStep)
+}
+
+impl super::residency::ResidentRegistry for RocmBackend {
+    fn register_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        family: super::residency::ResidentResourceFamily,
+    ) -> Result<Option<super::residency::ResidentResource>> {
+        if family != super::residency::ResidentResourceFamily::Activation {
+            return Ok(None);
+        }
+        let resource = rocm_resident_activation_resource(
+            tensor,
+            super::residency::ResidentResourceState::RegisteredClean,
+        );
+        Ok(Some(super::cuda_rocm_common::mark_resident_activation(
+            &self.resident_tensor_ids,
+            tensor,
+            resource,
+            ROCM_RESIDENT_TENSOR_IDS_POISONED,
+        )))
     }
 
-    fn supports_causal_conv1d_prefill(&self) -> bool {
-        self.fused_conv1d_enabled
+    fn update_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        family: super::residency::ResidentResourceFamily,
+    ) -> Result<Option<super::residency::ResidentResource>> {
+        if family != super::residency::ResidentResourceFamily::Activation {
+            return Ok(None);
+        }
+        let resource = rocm_resident_activation_resource(
+            tensor,
+            super::residency::ResidentResourceState::DirtyDevice,
+        );
+        Ok(Some(super::cuda_rocm_common::mark_resident_activation(
+            &self.resident_tensor_ids,
+            tensor,
+            resource,
+            ROCM_RESIDENT_TENSOR_IDS_POISONED,
+        )))
     }
 
-    fn causal_conv1d_update(
+    fn evict_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        family: super::residency::ResidentResourceFamily,
+    ) {
+        if family != super::residency::ResidentResourceFamily::Activation {
+            return;
+        }
+        super::cuda_rocm_common::evict_resident_activation(
+            &self.resident_tensor_ids,
+            tensor,
+            ROCM_RESIDENT_TENSOR_IDS_POISONED,
+        );
+    }
+
+    fn resident_resource(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        family: super::residency::ResidentResourceFamily,
+    ) -> Option<super::residency::ResidentResource> {
+        if family != super::residency::ResidentResourceFamily::Activation {
+            return None;
+        }
+        super::cuda_rocm_common::resident_activation_resource(
+            &self.resident_tensor_ids,
+            tensor,
+            ROCM_RESIDENT_TENSOR_IDS_POISONED,
+        )
+    }
+}
+
+impl ResidencyBackend for RocmBackend {
+    fn runtime_supports_resident_activation(&self) -> bool {
+        true
+    }
+}
+
+impl TrainingLossBackend for RocmBackend {
+    fn runtime_training_capabilities(&self) -> TrainingCapabilities {
+        Self::training_capabilities_static()
+    }
+
+    fn runtime_training_precision_policy(&self) -> TrainingPrecisionPolicy {
+        TrainingPrecisionPolicy::rocm()
+    }
+}
+
+impl BackendRuntime for RocmBackend {}
+
+#[allow(clippy::too_many_arguments)]
+impl ReplayBackend for RocmBackend {
+    fn runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        block_table: &kiln_tensor::Tensor,
+        seqused_k: &kiln_tensor::Tensor,
+        graph_outputs: Option<(&kiln_tensor::Tensor, &kiln_tensor::Tensor)>,
+        max_seqlen_k: usize,
+        page_block_size: usize,
+        softmax_scale: f32,
+        causal: bool,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if q.track_op()
+            || k_pool.track_op()
+            || v_pool.track_op()
+            || block_table.track_op()
+            || seqused_k.track_op()
+            || q.dtype() != kiln_tensor::DType::BF16
+        {
+            return Ok(None);
+        }
+        // Phase 7 opt-in (#1082): route through the kt-typed surface
+        // only when there are no caller-owned graph outputs to write
+        // through to. The kt-typed
+        // `flash_attn_paged_decode_dyn_seqlen_kt` does not (yet)
+        // accept a caller-owned (out, lse) pair — it allocates them
+        // internally through the bridge — so the `graph_outputs ==
+        // Some` case must stay on the candle path. That path
+        // specifically exists to fix the dangling-pointer hazard
+        // documented in
+        // `bench-results/cuda-graph-bs2-secondary-audit.md` suspects
+        // 3+4; the ROCm HIP graph runner follows the same stable-output
+        // contract and re-uses caller-owned
+        // tensors across replays. When `graph_outputs == None` (the
+        // non-graph-capture path), the kt route is bit-exactly
+        // equivalent because both paths bottom out in the same
+        // `kiln_flash_attn_fwd_paged_decode_dyn_seqlen` FFI symbol.
+        // Phase 7 (#1082): kt-only on both branches now that the
+        // kt-typed `flash_attn_paged_decode_dyn_seqlen_kt_with_graph_
+        // outputs` sibling exists. Bit-exact: both bottom out in the
+        // same `kiln_flash_attn_fwd_paged_decode_dyn_seqlen` FFI
+        // symbol. The caller-owned-output path is the
+        // HIP-graph-capture contract (the kernel writes through the
+        // caller's pinned `(out, lse)` pair so graph replays don't
+        // dangle on freshly-allocated scratch).
+        // Phase 7 (#1082): args are already kt (#1082 DoD-101/102), so
+        // no candle↔kt bridge — the kernel runs directly on the
+        // caller's kt tensors.
+        kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_dyn_seqlen_kt");
+        if let Some((out, lse)) = graph_outputs {
+            // Caller owns `(out, lse)` (kt tensors). The kernel writes
+            // in place via the with_graph_outputs kt entry; the
+            // returned `out` is the caller's kt tensor whose ROCm
+            // buffer the kernel mutated.
+            kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs(
+                q,
+                k_pool,
+                v_pool,
+                block_table,
+                seqused_k,
+                out,
+                lse,
+                max_seqlen_k,
+                page_block_size,
+                softmax_scale,
+                causal,
+            )
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "flash_attn_paged_decode_dyn_seqlen (graph variant) kt with_graph_outputs: {e}"
+                )
+            })?;
+            return Ok(Some(out.clone()));
+        }
+        // No caller-owned outputs — allocate internally.
+        let out_kt = kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen_kt(
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            seqused_k,
+            max_seqlen_k,
+            page_block_size,
+            softmax_scale,
+            causal,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!("flash_attn_paged_decode_dyn_seqlen (graph variant) kt: {e}")
+        })?;
+        Ok(Some(out_kt))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+impl LinearBackend for RocmBackend {
+    fn runtime_supports_matmul_request(
+        &self,
+        req: &super::capability::MatmulRequest,
+    ) -> super::capability::Support {
+        let Some(rank) = matmul_request_support_rank(req) else {
+            return super::capability::Support::Unsupported;
+        };
+        matmul_support_from_native(match req.epilogue {
+            super::capability::MatmulEpilogue::Identity => true,
+            super::capability::MatmulEpilogue::Bias => rank == 2,
+            _ => false,
+        })
+    }
+
+    fn runtime_matmul(
+        &self,
+        req: &super::capability::MatmulRequest,
+        lhs: &kiln_tensor::Tensor,
+        rhs: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if !rocm_tensors_on_device(&[lhs, rhs])
+            || !lhs.is_contiguous()
+            || !rhs.is_contiguous()
+            || req.out_dtype != lhs.dtype()
+            || req.lhs_dtype != req.rhs_dtype
+            || !matches!(
+                lhs.dtype(),
+                kiln_tensor::DType::BF16 | kiln_tensor::DType::F16 | kiln_tensor::DType::F32
+            )
+        {
+            return Ok(None);
+        }
+
+        let Some(layout) = requested_matmul_layout(req, lhs, rhs) else {
+            return Ok(None);
+        };
+        let out = match layout {
+            BackendMatmulLayout::Plain => kiln_tensor::rocm_matmul(lhs, rhs)?,
+            BackendMatmulLayout::LhsTransposed => {
+                kiln_tensor::rocm_matmul_lhs_transposed(lhs, rhs)?
+            }
+            BackendMatmulLayout::RhsTransposed => {
+                kiln_tensor::rocm_matmul_rhs_transposed(lhs, rhs)?
+            }
+            BackendMatmulLayout::BothTransposed => {
+                let rank = lhs.rank();
+                let lhs_t = lhs.transpose(rank - 2, rank - 1)?.contiguous()?;
+                let rhs_t = rhs.transpose(rank - 2, rank - 1)?.contiguous()?;
+                kiln_tensor::rocm_matmul(&lhs_t, &rhs_t)?
+            }
+        };
+        Ok(Some(out))
+    }
+
+    fn runtime_lora_decode_add(
+        &self,
+        base: &kiln_tensor::Tensor,
+        x: &kiln_tensor::Tensor,
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
+        scale: f32,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if !self.lora_decode_add_enabled
+            || base.track_op()
+            || x.track_op()
+            || a.track_op()
+            || b.track_op()
+        {
+            return Ok(None);
+        }
+        // #1082: args are already kt (BackendRuntime trait flipped to kt),
+        // so there is no candle↔kt bridge — the kernel runs directly on the
+        // caller's kt tensors and returns a kt result (zero candle roundtrip).
+        if !kiln_rmsnorm_kernel::supports_lora_decode_add_kt(base, x, a, b) {
+            return Ok(None);
+        }
+        let out_kt = kiln_rmsnorm_kernel::lora_decode_add_full_kt(base, x, a, b, scale)
+            .map_err(|e| anyhow::anyhow!("kt lora_decode_add: {e}"))?;
+        Ok(Some(out_kt))
+    }
+
+    fn runtime_linear_prefill_apply(
+        &self,
+        x: &kiln_tensor::Tensor,
+        weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if !rocm_tensors_on_device(&[x, weight_t])
+            || x.dims().is_empty()
+            || weight_t.dims().len() != 2
+            || *x.dims().last().unwrap() != weight_t.dims()[0]
+        {
+            return Ok(None);
+        }
+
+        static FIRST_ROCM_LINEAR_PREFILL_LOGGED: OnceLock<()> = OnceLock::new();
+        FIRST_ROCM_LINEAR_PREFILL_LOGGED.get_or_init(|| {
+            tracing::info!(
+                x_shape = ?x.dims(),
+                weight_t_shape = ?weight_t.dims(),
+                tracked = x.track_op() || weight_t.track_op(),
+                "RocmBackend::linear_prefill_apply first call (kt hipBLASLt; tape records bwd)"
+            );
+        });
+
+        // #1082: args are already kt. The kt matmul records onto the
+        // autograd tape so `Tape::backward()` produces the projection
+        // gradient — there is no candle autograd / CustomOp1 anymore.
+        //
+        // candle's `broadcast_matmul` for `[B, T, K] @ [K, N]` materializes
+        // the broadcasted RHS via `.broadcast_as(...).contiguous()`, copying
+        // the entire (B × K × N) weight tensor across the batch dim before
+        // every matmul. nsys showed that copy at 78 % of total
+        // GPU time on the bs > 1 GDN-decode path because GDN runs four
+        // in-proj matmuls per layer × 24 layers per step and each pays a
+        // ~168 MB BF16 copy at bs=4. Flatten leading dims, do a plain 2D
+        // matmul, and reshape — same compute, no implicit contiguous copy.
+        let l_dims = x.dims().to_vec();
+        let k = l_dims[l_dims.len() - 1];
+        let out_n = weight_t.dims()[1];
+        let lead: usize = l_dims[..l_dims.len() - 1].iter().product();
+        let out = if x.is_contiguous() {
+            let x2d = x.reshape((lead, k))?;
+
+            // Phase 7 opt-in: route through the kt hipBLASLt handle
+            // when KILN_USE_KT_API_MATMUL=1 and the dtype is supported.
+            // NVTX range from try_kt_matmul brackets the call as
+            // kiln/matmul_kt in nsys.
+            if crate::forward::rocm_use_kt_api_matmul()
+                && matches!(
+                    x2d.dtype(),
+                    kiln_tensor::DType::BF16 | kiln_tensor::DType::F16 | kiln_tensor::DType::F32
+                )
+                && x2d.dtype() == weight_t.dtype()
+                && x2d.is_contiguous()
+                && weight_t.is_contiguous()
+            {
+                if let Some(kt_out2d) = crate::forward::try_kt_matmul(&x2d, weight_t)? {
+                    let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
+                    out_shape.push(out_n);
+                    ROCM_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+                    return Ok(Some(kt_out2d.reshape(out_shape)?));
+                }
+            }
+
+            let out2d = x2d.matmul(weight_t)?;
+            let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
+            out_shape.push(out_n);
+            out2d.reshape(out_shape)?
+        } else {
+            // Non-contiguous x fallback. broadcast_matmul materializes a
+            // broadcasted-RHS copy internally (78 % GPU time at bs=4 due to
+            // the per-step RHS copy). When the kt-API matmul gate is on and
+            // dtypes line up, force x contiguous and route through hipBLASLt —
+            // same 2D kt path as the is_contiguous() branch above, paying one
+            // extra dtod for the x.contiguous() up front. That copy is bounded
+            // by (B × T × K), whereas broadcast_matmul's implicit copy scales
+            // as (B × K × N), typically larger by an order of magnitude on
+            // Qwen3.5-4B GDN in-proj shapes. (#1082)
+            if crate::forward::rocm_use_kt_api_matmul()
+                && matches!(
+                    x.dtype(),
+                    kiln_tensor::DType::BF16 | kiln_tensor::DType::F16 | kiln_tensor::DType::F32
+                )
+                && x.dtype() == weight_t.dtype()
+                && weight_t.is_contiguous()
+            {
+                let x_c = x
+                    .contiguous()
+                    .context("linear_prefill_apply non-contig x: contiguous failed")?;
+                let x2d = x_c.reshape((lead, k))?;
+                if x2d.is_contiguous() {
+                    if let Some(kt_out2d) = crate::forward::try_kt_matmul(&x2d, weight_t)? {
+                        let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
+                        out_shape.push(out_n);
+                        ROCM_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+                        return Ok(Some(kt_out2d.reshape(out_shape)?));
+                    }
+                }
+            }
+            x.broadcast_matmul(weight_t)?
+        };
+        ROCM_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+        Ok(Some(out))
+    }
+
+    fn runtime_linear_prefill_apply_offset(
+        &self,
+        x: &kiln_tensor::Tensor,
+        full_weight_t: &kiln_tensor::Tensor,
+        chunk_start: usize,
+        chunk_len: usize,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if !rocm_tensors_on_device(&[x, full_weight_t])
+            || full_weight_t.dims().len() != 2
+            || chunk_len == 0
+            || chunk_start >= full_weight_t.dims()[1]
+            || chunk_start + chunk_len > full_weight_t.dims()[1]
+        {
+            return Ok(None);
+        }
+        let chunk = full_weight_t
+            .narrow(1, chunk_start, chunk_len)
+            .context("rocm linear_prefill_apply_offset narrow weight chunk")?
+            .contiguous()
+            .context("rocm linear_prefill_apply_offset contiguous weight chunk")?;
+        let chunk = if chunk.dtype() == x.dtype() {
+            chunk
+        } else {
+            chunk
+                .to_dtype(x.dtype())
+                .context("rocm linear_prefill_apply_offset cast weight chunk")?
+        };
+        let out = self.runtime_linear_prefill_apply(x, &chunk)?;
+        if out.is_some() {
+            ROCM_LINEAR_PREFILL_OFFSET_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(out)
+    }
+
+    fn runtime_full_attn_qkv_combined_decode(
+        &self,
+        x: &kiln_tensor::Tensor,
+        qkv_weight_t: Option<&kiln_tensor::Tensor>,
+        qkv_w8: Option<&crate::rocm_w8_proj::RocmW8Proj>,
+        q_dim: usize,
+        k_dim: usize,
+        v_dim: usize,
+    ) -> Result<
+        Option<(
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+        )>,
+    > {
+        if !rocm_full_attn_qkv_in_proj_enabled()
+            || x.track_op()
+            || x.dtype() != kiln_tensor::DType::BF16
+            || !rocm_tensors_on_device(&[x])
+        {
+            return Ok(None);
+        }
+        let Ok((_, seq_len, hidden)) = x.dims3() else {
+            return Ok(None);
+        };
+        let qkv_dim = q_dim + k_dim + v_dim;
+        if seq_len != 1 {
+            return Ok(None);
+        }
+
+        if let Some(qkv_w8) = qkv_w8 {
+            if hidden == qkv_w8.k && qkv_w8.n == qkv_dim {
+                let qkv = crate::rocm_w8_proj::matmul_bf16(x, qkv_w8)
+                    .context("rocm w8 full-attn Q/K/V projection")?;
+                let q_raw = qkv.narrow(2, 0, q_dim)?;
+                let k_raw = qkv.narrow(2, q_dim, k_dim)?;
+                let v = qkv.narrow(2, q_dim + k_dim, v_dim)?;
+                return Ok(Some((q_raw, k_raw, v)));
+            }
+        }
+
+        let Some(qkv_weight_t) = qkv_weight_t else {
+            return Ok(None);
+        };
+        if qkv_weight_t.dtype() != kiln_tensor::DType::BF16
+            || qkv_weight_t.track_op()
+            || !qkv_weight_t.is_contiguous()
+            || qkv_weight_t.dims() != [hidden, qkv_dim]
+            || !rocm_tensors_on_device(&[qkv_weight_t])
+        {
+            return Ok(None);
+        }
+
+        let Some(qkv) = self.runtime_linear_prefill_apply(x, qkv_weight_t)? else {
+            return Ok(None);
+        };
+        let q_raw = qkv.narrow(2, 0, q_dim)?;
+        let k_raw = qkv.narrow(2, q_dim, k_dim)?;
+        let v = qkv.narrow(2, q_dim + k_dim, v_dim)?;
+        Ok(Some((q_raw, k_raw, v)))
+    }
+
+    fn runtime_lora_delta_resident(
+        &self,
+        x: &kiln_tensor::Tensor,
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
+        scale: f32,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if !rocm_tensors_on_device(&[x, a, b])
+            || !ResidencyBackend::runtime_has_resident_activation(self, a)
+            || !ResidencyBackend::runtime_has_resident_activation(self, b)
+        {
+            return Ok(None);
+        }
+
+        // #1082: args are already kt. `compute_lora_delta` is kt-native and
+        // records the delta matmul chain onto the autograd tape, so
+        // `Tape::backward()` produces grad_A / grad_B — no candle autograd.
+        let proj = LoraProjectionWeights {
+            a: a.clone(),
+            b: b.clone(),
+        };
+        let delta = compute_lora_delta(x, &proj, scale)
+            .context("rocm registered LoRA delta (kt tape-recorded) failed")?;
+
+        static FIRST_ROCM_LORA_DELTA_LOGGED: OnceLock<()> = OnceLock::new();
+        FIRST_ROCM_LORA_DELTA_LOGGED.get_or_init(|| {
+            tracing::info!(
+                x_shape = ?x.dims(),
+                a_shape = ?a.dims(),
+                b_shape = ?b.dims(),
+                scale,
+                "RocmBackend::lora_delta_resident first call (kt tape-recorded)"
+            );
+        });
+
+        Ok(Some(delta))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+impl ConvBackend for RocmBackend {
+    fn runtime_supports_causal_conv1d_update(&self) -> bool {
+        self.support_predicates().supports_causal_conv1d_update()
+    }
+
+    fn runtime_supports_causal_conv1d_prefill(&self) -> bool {
+        self.support_predicates().supports_causal_conv1d_prefill()
+    }
+
+    fn runtime_causal_conv1d_update(
         &self,
         x: &kiln_tensor::Tensor,
         weight: &kiln_tensor::Tensor,
@@ -1726,12 +2193,13 @@ impl BackendRuntime for RocmBackend {
         if !kiln_conv1d_kernel::supports_kt(x, weight, conv_state, kernel_size) {
             return Ok(None);
         }
-        let out_kt = kiln_conv1d_kernel::causal_conv1d_update_kt(x, weight, conv_state, kernel_size)
-            .map_err(|e| anyhow::anyhow!("kt causal_conv1d_update: {e}"))?;
+        let out_kt =
+            kiln_conv1d_kernel::causal_conv1d_update_kt(x, weight, conv_state, kernel_size)
+                .map_err(|e| anyhow::anyhow!("kt causal_conv1d_update: {e}"))?;
         Ok(Some(out_kt))
     }
 
-    fn causal_conv1d_prefill(
+    fn runtime_causal_conv1d_prefill(
         &self,
         x: &kiln_tensor::Tensor,
         weight: &kiln_tensor::Tensor,
@@ -1746,11 +2214,16 @@ impl BackendRuntime for RocmBackend {
         if !kiln_conv1d_kernel::supports_prefill_kt(x, weight, conv_state, kernel_size) {
             return Ok(None);
         }
-        let out_kt = kiln_conv1d_kernel::causal_conv1d_prefill_kt(x, weight, conv_state, kernel_size)
-            .map_err(|e| anyhow::anyhow!("kt causal_conv1d_prefill: {e}"))?;
+        let out_kt =
+            kiln_conv1d_kernel::causal_conv1d_prefill_kt(x, weight, conv_state, kernel_size)
+                .map_err(|e| anyhow::anyhow!("kt causal_conv1d_prefill: {e}"))?;
         Ok(Some(out_kt))
     }
 }
+
+impl SamplingBackend for RocmBackend {}
+
+impl PagedKvBackend for RocmBackend {}
 
 #[cfg(test)]
 mod tests {
@@ -1776,32 +2249,42 @@ mod tests {
     }
 
     #[test]
-    fn cuda_resident_activation_registry_lifecycle() -> Result<()> {
+    fn rocm_resident_activation_registry_lifecycle() -> Result<()> {
         // #1082: BackendRuntime residency hooks are kt-typed; the registry
         // keys on the kt TensorId directly.
         use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
         let backend = test_backend();
         let tensor = KtTensor::zeros_cpu(vec![2, 3], KtDType::F32);
 
-        assert!(backend.supports_resident_activation());
-        assert!(!backend.has_resident_activation(&tensor));
+        assert!(ResidencyBackend::runtime_supports_resident_activation(
+            &backend
+        ));
+        assert!(!ResidencyBackend::runtime_has_resident_activation(
+            &backend, &tensor
+        ));
 
-        backend.register_resident_activation(&tensor)?;
-        assert!(backend.has_resident_activation(&tensor));
+        ResidencyBackend::runtime_register_resident_activation(&backend, &tensor)?;
+        assert!(ResidencyBackend::runtime_has_resident_activation(
+            &backend, &tensor
+        ));
 
-        backend.evict_resident_activation(&tensor);
-        assert!(!backend.has_resident_activation(&tensor));
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &tensor);
+        assert!(!ResidencyBackend::runtime_has_resident_activation(
+            &backend, &tensor
+        ));
 
-        backend.update_resident_activation(&tensor)?;
-        assert!(backend.has_resident_activation(&tensor));
+        ResidencyBackend::runtime_update_resident_activation(&backend, &tensor)?;
+        assert!(ResidencyBackend::runtime_has_resident_activation(
+            &backend, &tensor
+        ));
 
         Ok(())
     }
 
     #[test]
-    fn cuda_optimizer_dispatch_declines_without_cuda_tensors() -> Result<()> {
+    fn rocm_optimizer_dispatch_declines_without_rocm_tensors() -> Result<()> {
         // #1082: dispatch_{sgd,adamw}_step are kt-typed. CPU kt tensors must
-        // be declined (the kernels only service CUDA-resident tensors).
+        // be declined (the kernels only service ROCm-resident tensors).
         use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
         let backend = test_backend();
         let param = KtTensor::zeros_cpu(vec![2, 3], KtDType::F32);
@@ -1810,35 +2293,39 @@ mod tests {
         let v = KtTensor::zeros_cpu(vec![2, 3], KtDType::F32);
 
         assert!(
-            !backend.dispatch_sgd_step(&param, &grad, 0.01)?,
-            "CUDA must not claim SGD dispatch for non-CUDA tensors"
+            !OptimizerBackend::runtime_dispatch_sgd_step(&backend, &param, &grad, 0.01)?,
+            "ROCm must not claim SGD dispatch for non-ROCm tensors"
         );
         assert!(
-            !backend.dispatch_adamw_step(&param, &grad, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?,
-            "CUDA must not claim AdamW dispatch for non-CUDA tensors"
+            !OptimizerBackend::runtime_dispatch_adamw_step(
+                &backend, &param, &grad, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1
+            )?,
+            "ROCm must not claim AdamW dispatch for non-ROCm tensors"
         );
 
-        backend.register_resident_activation(&param)?;
-        backend.register_resident_activation(&grad)?;
-        backend.register_resident_activation(&m)?;
-        backend.register_resident_activation(&v)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &param)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &grad)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &m)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &v)?;
 
         assert!(
-            !backend.dispatch_sgd_step(&param, &grad, 0.01)?,
-            "TensorId residency alone is not enough for CUDA to claim SGD ownership"
+            !OptimizerBackend::runtime_dispatch_sgd_step(&backend, &param, &grad, 0.01)?,
+            "TensorId residency alone is not enough for ROCm to claim SGD ownership"
         );
         assert!(
-            !backend.dispatch_adamw_step(&param, &grad, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?,
-            "TensorId residency alone is not enough for CUDA to claim AdamW ownership"
+            !OptimizerBackend::runtime_dispatch_adamw_step(
+                &backend, &param, &grad, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1
+            )?,
+            "TensorId residency alone is not enough for ROCm to claim AdamW ownership"
         );
 
         Ok(())
     }
 
-    /// #1082: build a CUDA-resident kt tensor from host data, or skip the
-    /// test when no CUDA device is available. Returns `Ok(None)` to signal
-    /// skip (mirrors the historical `candle_core::Device::new_cuda` match).
-    fn kt_cuda_f32(values: &[f32]) -> Result<Option<kiln_tensor::Tensor>> {
+    /// #1082: build a ROCm-resident kt tensor from host data, or skip the
+    /// test when no ROCm device is available. Returns `Ok(None)` to signal
+    /// skip (mirrors the historical CUDA helper shape).
+    fn kt_rocm_f32(values: &[f32]) -> Result<Option<kiln_tensor::Tensor>> {
         let host = kiln_tensor::Tensor::from_slice(values, vec![values.len()])?;
         match host.to_device(kiln_tensor::Device::Rocm(0)) {
             Ok(t) => Ok(Some(t)),
@@ -1847,18 +2334,20 @@ mod tests {
     }
 
     #[test]
-    fn cuda_sgd_step_resident_round_trip_f32() -> Result<()> {
+    fn rocm_sgd_step_resident_round_trip_f32() -> Result<()> {
         use kiln_tensor::Device as KtDevice;
-        let backend = RocmBackend::new(kiln_tensor::Device::Cpu);
-        let Some(param) = kt_cuda_f32(&[1.0f32, -2.0, 0.5, 3.0])? else {
-            eprintln!("CUDA unavailable, skipping cuda_sgd_step_resident_round_trip_f32");
+        let backend = RocmBackend::new(kiln_tensor::Device::Rocm(0));
+        let Some(param) = kt_rocm_f32(&[1.0f32, -2.0, 0.5, 3.0])? else {
+            eprintln!("ROCm unavailable, skipping rocm_sgd_step_resident_round_trip_f32");
             return Ok(());
         };
-        let grad = kt_cuda_f32(&[0.1f32, -0.2, 0.5, 1.0])?.expect("cuda grad");
-        backend.register_resident_activation(&param)?;
-        backend.register_resident_activation(&grad)?;
+        let grad = kt_rocm_f32(&[0.1f32, -0.2, 0.5, 1.0])?.expect("rocm grad");
+        ResidencyBackend::runtime_register_resident_activation(&backend, &param)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &grad)?;
 
-        assert!(backend.dispatch_sgd_step(&param, &grad, 0.25)?);
+        assert!(OptimizerBackend::runtime_dispatch_sgd_step(
+            &backend, &param, &grad, 0.25
+        )?);
         let actual = param.to_device(KtDevice::Cpu)?.to_vec1::<f32>()?;
         let expected = [0.975f32, -1.95, 0.375, 2.75];
         for (a, e) in actual.iter().zip(expected.iter()) {
@@ -1871,27 +2360,28 @@ mod tests {
     }
 
     #[test]
-    fn cuda_adamw_step_resident_round_trip_f32() -> Result<()> {
+    fn rocm_adamw_step_resident_round_trip_f32() -> Result<()> {
         use kiln_tensor::Device as KtDevice;
-        let backend = RocmBackend::new(kiln_tensor::Device::Cpu);
-        let Some(param) = kt_cuda_f32(&[1.0f32, -2.0, 0.5, 3.0])? else {
-            eprintln!("CUDA unavailable, skipping cuda_adamw_step_resident_round_trip_f32");
+        let backend = RocmBackend::new(kiln_tensor::Device::Rocm(0));
+        let Some(param) = kt_rocm_f32(&[1.0f32, -2.0, 0.5, 3.0])? else {
+            eprintln!("ROCm unavailable, skipping rocm_adamw_step_resident_round_trip_f32");
             return Ok(());
         };
-        let grad = kt_cuda_f32(&[0.5f32, -0.5, 0.25, -0.25])?.expect("cuda grad");
-        let m = kt_cuda_f32(&[0.0f32, 0.0, 0.0, 0.0])?.expect("cuda m");
-        let v = kt_cuda_f32(&[0.0f32, 0.0, 0.0, 0.0])?.expect("cuda v");
-        backend.register_resident_activation(&param)?;
-        backend.register_resident_activation(&grad)?;
-        backend.register_resident_activation(&m)?;
-        backend.register_resident_activation(&v)?;
+        let grad = kt_rocm_f32(&[0.5f32, -0.5, 0.25, -0.25])?.expect("rocm grad");
+        let m = kt_rocm_f32(&[0.0f32, 0.0, 0.0, 0.0])?.expect("rocm m");
+        let v = kt_rocm_f32(&[0.0f32, 0.0, 0.0, 0.0])?.expect("rocm v");
+        ResidencyBackend::runtime_register_resident_activation(&backend, &param)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &grad)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &m)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &v)?;
 
         let lr = 0.01;
         let beta1 = 0.9;
         let beta2 = 0.999;
         let eps = 1e-8;
         let weight_decay = 0.1;
-        assert!(backend.dispatch_adamw_step(
+        assert!(OptimizerBackend::runtime_dispatch_adamw_step(
+            &backend,
             &param,
             &grad,
             &m,
@@ -1922,14 +2412,14 @@ mod tests {
     }
 
     #[test]
-    fn cuda_sgd_and_adamw_resident_round_trip_bf16() -> Result<()> {
+    fn rocm_sgd_and_adamw_resident_round_trip_bf16() -> Result<()> {
         use kiln_tensor::{DType as KtDType, Device as KtDevice};
-        let backend = RocmBackend::new(kiln_tensor::Device::Cpu);
+        let backend = RocmBackend::new(kiln_tensor::Device::Rocm(0));
 
-        // Build host BF16 then move to CUDA; skip when no device.
+        // Build host BF16 then move to ROCm; skip when no device.
         let mk_bf16 = |vals: &[f32]| -> Result<Option<kiln_tensor::Tensor>> {
-            let host = kiln_tensor::Tensor::from_slice(vals, vec![vals.len()])?
-                .to_dtype(KtDType::BF16)?;
+            let host =
+                kiln_tensor::Tensor::from_slice(vals, vec![vals.len()])?.to_dtype(KtDType::BF16)?;
             match host.to_device(KtDevice::Rocm(0)) {
                 Ok(t) => Ok(Some(t)),
                 Err(_) => Ok(None),
@@ -1937,14 +2427,19 @@ mod tests {
         };
 
         let Some(param) = mk_bf16(&[1.0f32, -2.0, 0.5, 3.0])? else {
-            eprintln!("CUDA unavailable, skipping cuda_sgd_and_adamw_resident_round_trip_bf16");
+            eprintln!("ROCm unavailable, skipping rocm_sgd_and_adamw_resident_round_trip_bf16");
             return Ok(());
         };
-        let grad = mk_bf16(&[0.25f32, -0.5, 0.5, -0.25])?.expect("cuda grad");
-        backend.register_resident_activation(&param)?;
-        backend.register_resident_activation(&grad)?;
-        assert!(backend.dispatch_sgd_step(&param, &grad, 0.5)?);
-        let sgd_actual = param.to_device(KtDevice::Cpu)?.to_dtype(KtDType::F32)?.to_vec1::<f32>()?;
+        let grad = mk_bf16(&[0.25f32, -0.5, 0.5, -0.25])?.expect("rocm grad");
+        ResidencyBackend::runtime_register_resident_activation(&backend, &param)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &grad)?;
+        assert!(OptimizerBackend::runtime_dispatch_sgd_step(
+            &backend, &param, &grad, 0.5
+        )?);
+        let sgd_actual = param
+            .to_device(KtDevice::Cpu)?
+            .to_dtype(KtDType::F32)?
+            .to_vec1::<f32>()?;
         let sgd_expected = [0.875f32, -1.75, 0.25, 3.125];
         for (a, e) in sgd_actual.iter().zip(sgd_expected.iter()) {
             assert!(
@@ -1953,15 +2448,16 @@ mod tests {
             );
         }
 
-        let adam_param = mk_bf16(&[1.0f32, -2.0, 0.5, 3.0])?.expect("cuda adam_param");
-        let adam_grad = mk_bf16(&[0.5f32, -0.5, 0.25, -0.25])?.expect("cuda adam_grad");
-        let m = mk_bf16(&[0.0f32, 0.0, 0.0, 0.0])?.expect("cuda m");
-        let v = mk_bf16(&[0.0f32, 0.0, 0.0, 0.0])?.expect("cuda v");
-        backend.register_resident_activation(&adam_param)?;
-        backend.register_resident_activation(&adam_grad)?;
-        backend.register_resident_activation(&m)?;
-        backend.register_resident_activation(&v)?;
-        assert!(backend.dispatch_adamw_step(
+        let adam_param = mk_bf16(&[1.0f32, -2.0, 0.5, 3.0])?.expect("rocm adam_param");
+        let adam_grad = mk_bf16(&[0.5f32, -0.5, 0.25, -0.25])?.expect("rocm adam_grad");
+        let m = mk_bf16(&[0.0f32, 0.0, 0.0, 0.0])?.expect("rocm m");
+        let v = mk_bf16(&[0.0f32, 0.0, 0.0, 0.0])?.expect("rocm v");
+        ResidencyBackend::runtime_register_resident_activation(&backend, &adam_param)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &adam_grad)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &m)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &v)?;
+        assert!(OptimizerBackend::runtime_dispatch_adamw_step(
+            &backend,
             &adam_param,
             &adam_grad,
             &m,
@@ -1973,7 +2469,10 @@ mod tests {
             0.1,
             1,
         )?);
-        let adam_actual = adam_param.to_device(KtDevice::Cpu)?.to_dtype(KtDType::F32)?.to_vec1::<f32>()?;
+        let adam_actual = adam_param
+            .to_device(KtDevice::Cpu)?
+            .to_dtype(KtDType::F32)?
+            .to_vec1::<f32>()?;
         let before = [1.0f32, -2.0, 0.5, 3.0];
         let grad_vals = [0.5f32, -0.5, 0.25, -0.25];
         for ((a, p0), g) in adam_actual.iter().zip(before.iter()).zip(grad_vals.iter()) {
@@ -1984,7 +2483,7 @@ mod tests {
     }
 
     #[test]
-    fn cuda_flash_attention_declines_unsupported_dtype() -> Result<()> {
+    fn rocm_flash_attention_declines_unsupported_dtype() -> Result<()> {
         // #1082 DoD-101/102: the FlashAttention BackendRuntime methods
         // are now kt-typed. The kt forward path is detached
         // (track_op() is always false), so the historical
@@ -1993,7 +2492,7 @@ mod tests {
         // the dtype gate: non-BF16 inputs return Ok(None) so the
         // caller falls back to the portable SDPA path. We exercise
         // that with F32 kt tensors here (the CPU test backend can't
-        // dispatch the real CUDA kernel anyway).
+        // dispatch the real ROCm kernel anyway).
         use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
         let backend = test_backend();
 
@@ -2002,7 +2501,7 @@ mod tests {
         let v = KtTensor::zeros_cpu(vec![1, 2, 1, 128], KtDType::F32);
         assert!(
             backend.flash_attn_prefill(&q, &k, &v, 1.0, true)?.is_none(),
-            "CUDA FlashAttention prefill must decline non-BF16 inputs"
+            "ROCm FlashAttention prefill must decline non-BF16 inputs"
         );
 
         let q_decode = KtTensor::zeros_cpu(vec![1, 1, 1, 128], KtDType::F32);
@@ -2024,7 +2523,7 @@ mod tests {
                     true
                 )?
                 .is_none(),
-            "CUDA paged decode attention must decline non-BF16 inputs"
+            "ROCm paged decode attention must decline non-BF16 inputs"
         );
         assert!(
             backend
@@ -2040,15 +2539,15 @@ mod tests {
                     true,
                 )?
                 .is_none(),
-            "CUDA dynamic paged decode attention must decline non-BF16 inputs"
+            "ROCm dynamic paged decode attention must decline non-BF16 inputs"
         );
 
         Ok(())
     }
 
-    /// #1082: build a CUDA-resident 2-D kt tensor from host data, or
-    /// `Ok(None)` to skip when no CUDA device is present.
-    fn kt_cuda_2d(values: &[f32], shape: [usize; 2]) -> Result<Option<kiln_tensor::Tensor>> {
+    /// #1082: build a ROCm-resident 2-D kt tensor from host data, or
+    /// `Ok(None)` to skip when no ROCm device is present.
+    fn kt_rocm_2d(values: &[f32], shape: [usize; 2]) -> Result<Option<kiln_tensor::Tensor>> {
         let host = kiln_tensor::Tensor::from_slice(values, vec![shape[0], shape[1]])?;
         match host.to_device(kiln_tensor::Device::Rocm(0)) {
             Ok(t) => Ok(Some(t)),
@@ -2057,82 +2556,90 @@ mod tests {
     }
 
     #[test]
-    fn cuda_linear_prefill_apply_matches_reference_matmul() -> Result<()> {
-        let backend = RocmBackend::new(kiln_tensor::Device::Cpu);
+    fn rocm_linear_prefill_apply_matches_reference_matmul() -> Result<()> {
+        let backend = RocmBackend::new(kiln_tensor::Device::Rocm(0));
 
-        let Some(x) = kt_cuda_2d(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], [2, 3])? else {
-            eprintln!("CUDA unavailable, skipping cuda_linear_prefill_apply_matches_reference_matmul");
+        let Some(x) = kt_rocm_2d(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], [2, 3])? else {
+            eprintln!(
+                "ROCm unavailable, skipping rocm_linear_prefill_apply_matches_reference_matmul"
+            );
             return Ok(());
         };
-        let w = kt_cuda_2d(
-            &[0.5f32, 1.0, -1.5, 2.0, -0.25, 0.75, 1.25, -0.5, 2.0, -1.0, 0.0, 0.5],
+        let w = kt_rocm_2d(
+            &[
+                0.5f32, 1.0, -1.5, 2.0, -0.25, 0.75, 1.25, -0.5, 2.0, -1.0, 0.0, 0.5,
+            ],
             [3, 4],
         )?
-        .expect("cuda w");
+        .expect("rocm w");
 
-        let routed = backend
-            .linear_prefill_apply(&x, &w)?
-            .expect("CUDA linear_prefill_apply should accept CUDA tensors");
+        let routed = LinearBackend::runtime_linear_prefill_apply(&backend, &x, &w)?
+            .expect("ROCm linear_prefill_apply should accept ROCm tensors");
         let expected = x.broadcast_matmul(&w)?;
         assert_eq!(
-            routed.to_device(kiln_tensor::Device::Cpu)?.to_vec2::<f32>()?,
-            expected.to_device(kiln_tensor::Device::Cpu)?.to_vec2::<f32>()?
+            routed
+                .to_device(kiln_tensor::Device::Cpu)?
+                .to_vec2::<f32>()?,
+            expected
+                .to_device(kiln_tensor::Device::Cpu)?
+                .to_vec2::<f32>()?
         );
         Ok(())
     }
 
     #[test]
-    fn cuda_linear_prefill_apply_offset_matches_reference_chunk() -> Result<()> {
-        let backend = RocmBackend::new(kiln_tensor::Device::Cpu);
+    fn rocm_linear_prefill_apply_offset_matches_reference_chunk() -> Result<()> {
+        let backend = RocmBackend::new(kiln_tensor::Device::Rocm(0));
 
-        let Some(x) = kt_cuda_2d(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], [2, 3])? else {
-            eprintln!("CUDA unavailable, skipping cuda_linear_prefill_apply_offset_matches_reference_chunk");
+        let Some(x) = kt_rocm_2d(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], [2, 3])? else {
+            eprintln!(
+                "ROCm unavailable, skipping rocm_linear_prefill_apply_offset_matches_reference_chunk"
+            );
             return Ok(());
         };
-        let w = kt_cuda_2d(
+        let w = kt_rocm_2d(
             &[
                 0.5f32, 1.0, -1.5, 2.0, 3.0, -0.25, 0.75, 1.25, -0.5, 0.25, 2.0, -1.0, 0.0, 0.5,
                 -2.0,
             ],
             [3, 5],
         )?
-        .expect("cuda w");
+        .expect("rocm w");
 
-        let routed = backend
-            .linear_prefill_apply_offset(&x, &w, 1, 3)?
-            .expect("CUDA linear_prefill_apply_offset should accept CUDA tensors");
+        let routed = LinearBackend::runtime_linear_prefill_apply_offset(&backend, &x, &w, 1, 3)?
+            .expect("ROCm linear_prefill_apply_offset should accept ROCm tensors");
         let expected_chunk = w.narrow(1, 1, 3)?.contiguous()?;
         let expected = x.broadcast_matmul(&expected_chunk)?;
         assert_eq!(
-            routed.to_device(kiln_tensor::Device::Cpu)?.to_vec2::<f32>()?,
-            expected.to_device(kiln_tensor::Device::Cpu)?.to_vec2::<f32>()?
+            routed
+                .to_device(kiln_tensor::Device::Cpu)?
+                .to_vec2::<f32>()?,
+            expected
+                .to_device(kiln_tensor::Device::Cpu)?
+                .to_vec2::<f32>()?
         );
         Ok(())
     }
 
     #[test]
-    fn cuda_registered_lora_delta_matches_reference() -> Result<()> {
-        let backend = RocmBackend::new(kiln_tensor::Device::Cpu);
+    fn rocm_registered_lora_delta_matches_reference() -> Result<()> {
+        let backend = RocmBackend::new(kiln_tensor::Device::Rocm(0));
 
-        let Some(x) = kt_cuda_2d(&[0.5f32, -1.0, 2.0, 1.5, 0.25, -0.75], [2, 3])? else {
-            eprintln!("CUDA unavailable, skipping cuda_registered_lora_delta_matches_reference");
+        let Some(x) = kt_rocm_2d(&[0.5f32, -1.0, 2.0, 1.5, 0.25, -0.75], [2, 3])? else {
+            eprintln!("ROCm unavailable, skipping rocm_registered_lora_delta_matches_reference");
             return Ok(());
         };
-        let a = kt_cuda_2d(&[0.25f32, -0.5, 1.0, 1.5, 0.0, -1.0], [2, 3])?.expect("cuda a");
-        let b = kt_cuda_2d(
-            &[1.0f32, -0.25, 0.5, 0.75, -1.0, 0.25, 0.0, 1.5],
-            [4, 2],
-        )?
-        .expect("cuda b");
+        let a = kt_rocm_2d(&[0.25f32, -0.5, 1.0, 1.5, 0.0, -1.0], [2, 3])?.expect("rocm a");
+        let b =
+            kt_rocm_2d(&[1.0f32, -0.25, 0.5, 0.75, -1.0, 0.25, 0.0, 1.5], [4, 2])?.expect("rocm b");
         let scale = 0.5;
 
-        assert!(backend.lora_delta_resident(&x, &a, &b, scale)?.is_none());
-        backend.register_resident_activation(&a)?;
-        backend.register_resident_activation(&b)?;
+        assert!(LinearBackend::runtime_lora_delta_resident(&backend, &x, &a, &b, scale)?.is_none());
+        ResidencyBackend::runtime_register_resident_activation(&backend, &a)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &b)?;
 
-        let routed = backend
-            .lora_delta_resident(&x, &a, &b, scale)?
-            .expect("registered CUDA LoRA delta should engage");
+        let routed = LinearBackend::runtime_lora_delta_resident(&backend, &x, &a, &b, scale)?
+            .expect("registered ROCm LoRA delta should engage");
         let expected = compute_lora_delta(
             &x,
             &LoraProjectionWeights {
@@ -2143,8 +2650,12 @@ mod tests {
         )?;
 
         assert_eq!(
-            routed.to_device(kiln_tensor::Device::Cpu)?.to_vec2::<f32>()?,
-            expected.to_device(kiln_tensor::Device::Cpu)?.to_vec2::<f32>()?
+            routed
+                .to_device(kiln_tensor::Device::Cpu)?
+                .to_vec2::<f32>()?,
+            expected
+                .to_device(kiln_tensor::Device::Cpu)?
+                .to_vec2::<f32>()?
         );
         Ok(())
     }

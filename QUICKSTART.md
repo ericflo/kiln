@@ -17,18 +17,18 @@ After first inference, continue to [SFT training](#6-submit-sft-training), the [
 
 All paths share these requirements:
 
-- **GPU + memory**: NVIDIA with 24GB+ VRAM and CUDA 12.4+ driver/runtime (RTX 3090, 4090, A6000, etc.), AMD/Intel Linux GPU with Vulkan 1.2+ runtime, or Apple Silicon Mac with 16GB+ unified memory. Intel Macs are not supported.
+- **GPU + memory**: NVIDIA with 24GB+ VRAM and CUDA 12.4+ driver/runtime (RTX 3090, 4090, A6000, etc.), AMD Linux GPU with ROCm/HIP 7.2.4+ runtime, AMD/Intel Linux GPU with Vulkan 1.2+ runtime, or Apple Silicon Mac with 16GB+ unified memory. Intel Macs are not supported.
 - **Disk**: ~20GB free for the server binary, model weights, and adapters (Source / CLI builds also share this with build artifacts).
 - **Model**: `Qwen/Qwen3.5-4B` weights — downloaded by the Desktop App, by `huggingface-cli` for the Server binary path, or mounted into the container.
 
 Build-tooling deltas by path:
 
 - **Desktop App path** (Windows / Linux / Apple Silicon macOS): No Rust toolchain, CUDA toolkit, or Xcode install. The app downloads and SHA-256-verifies the matching prebuilt `kiln` server binary on first launch.
-- **Server binary path** (Linux x86_64 / Windows x86_64 / Apple Silicon macOS): No Rust toolchain. Download a prebuilt `kiln-v*` release artifact, then continue at [Download Model Weights](#2-download-model-weights).
+- **Server binary path** (Linux x86_64 / Windows x86_64 / Apple Silicon macOS): No Rust toolchain. Download a prebuilt `kiln-v*` release artifact for CUDA, ROCm, Vulkan, Metal, or Windows CUDA, then continue at [Download Model Weights](#2-download-model-weights).
 - **Container path** (Docker/GHCR, Linux x86_64 + Docker + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)): No Rust toolchain or source checkout — uses the prebuilt `ghcr.io/ericflo/kiln-server:latest` image. Continue at [Running with Docker](#running-with-docker).
-- **Source / CLI path** (contributors): stable Rust (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`). NVIDIA builds need `nvcc` (CUDA 12.4+); AMD/Intel builds need `glslc` or `glslangValidator` for shader embedding (`vulkaninfo --summary` should list your GPU); Apple Silicon builds need Xcode Command Line Tools (`xcode-select --install`). Full Xcode is **not** required — `candle-metal-kernels` JIT-compiles MSL shaders at runtime.
+- **Source / CLI path** (contributors): stable Rust (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`). NVIDIA builds need `nvcc` (CUDA 12.4+); AMD ROCm builds need the ROCm/HIP SDK plus hipBLASLt; AMD/Intel Vulkan builds need `glslc` or `glslangValidator` for shader embedding (`vulkaninfo --summary` should list your GPU); Apple Silicon builds need Xcode Command Line Tools (`xcode-select --install`). Full Xcode is **not** required — `candle-metal-kernels` JIT-compiles MSL shaders at runtime.
 
-If setup stalls on binary downloads, CUDA/Vulkan/Metal, model paths, `/health`, mock mode, training endpoints, or adapter directories, see the website [Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html) first.
+If setup stalls on binary downloads, CUDA/ROCm/Vulkan/Metal, model paths, `/health`, mock mode, training endpoints, or adapter directories, see the website [Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html) first.
 
 ## Quick path: Desktop App (recommended for most users)
 
@@ -50,6 +50,17 @@ curl -L -o kiln-linux-cuda.tar.gz \
   "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-cuda124.tar.gz"
 tar -xzf kiln-linux-cuda.tar.gz
 ```
+
+**Linux x86_64 + AMD ROCm 7.2.4:**
+
+```bash
+KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest | sed -n 's/.*"tag_name": "kiln-v\([^"]*\)".*/\1/p')
+curl -L -o kiln-linux-rocm.tar.gz \
+  "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-rocm724.tar.gz"
+tar -xzf kiln-linux-rocm.tar.gz
+```
+
+Use this on AMD Linux systems with ROCm/HIP installed. The release binary is built for `gfx90a`, `gfx942`, `gfx1100`, and `gfx1151` targets, covering CDNA, RDNA3, and Strix Halo.
 
 **Linux x86_64 + AMD / Intel Vulkan 1.2:**
 
@@ -106,6 +117,15 @@ cargo build --release --features vulkan
 ```
 
 Kiln auto-detects Vulkan at startup and logs `Vulkan available — using Vulkan GPU (AMD/Intel)`. `KILN_VULKAN_DEVICE=0` pins a zero-based Vulkan physical device; `GGML_VK_VISIBLE_DEVICES=0,1` is also honored for llama.cpp compatibility. Invalid values produce a warning and Kiln falls back to automatic discrete-GPU selection, then CPU if Vulkan is not usable.
+
+**Linux + AMD ROCm/HIP:**
+
+```bash
+ROCM_PATH=/opt/rocm KILN_ROCM_ARCHS='gfx90a;gfx942;gfx1100;gfx1151' \
+  cargo build --release --no-default-features --features rocm
+```
+
+Set `KILN_ROCM_ARCHS` to the semicolon-separated gfx targets you want to emit. The release build includes `gfx1151` for Strix Halo; local debug builds can use one target to shorten HIP compile time.
 
 **macOS + Apple Silicon:**
 
@@ -183,7 +203,7 @@ Kiln binds to loopback (`127.0.0.1`) by default so a fresh install isn't reachab
 
 **Training endpoints are privileged.** `/v1/train/sft` and `/v1/train/grpo` apply a faithful gradient update to whatever structurally-valid examples you POST — kiln does not validate the *content* of training data. A poisoned example will permanently influence the active adapter until you unload it. Do not expose training endpoints to untrusted inputs, and treat your training corpus as security-sensitive. See the README's [Security model](README.md#security-model) section for the full picture.
 
-On Apple Silicon, Kiln auto-detects Metal and logs `Metal available — using Apple Silicon GPU` at startup instead of the CUDA availability line. On Linux AMD/Intel builds, the equivalent Vulkan log line is `Vulkan available — using Vulkan GPU (AMD/Intel)`. No config changes needed — the binary selects the backend that was compiled in.
+On Apple Silicon, Kiln auto-detects Metal and logs `Metal available — using Apple Silicon GPU` at startup instead of the CUDA availability line. On Linux AMD/Intel Vulkan builds, the equivalent log line is `Vulkan available — using Vulkan GPU (AMD/Intel)`. ROCm builds use the HIP backend compiled into the binary. No config changes needed — the binary selects the backend that was compiled in.
 
 ### Verify the server is up
 

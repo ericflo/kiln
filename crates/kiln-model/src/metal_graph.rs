@@ -19,6 +19,8 @@ use kiln_core::token::TokenId;
 use crate::PagedKvCacheKt;
 use crate::backend::BackendRuntime;
 #[cfg(feature = "metal")]
+use crate::backend::SamplingBackend;
+#[cfg(feature = "metal")]
 use crate::forward::MetalPagedDecodeIcbInputs;
 use crate::forward::{
     GpuAttentionWeights, GpuWeights, LinearAttentionState,
@@ -50,6 +52,20 @@ fn finish_metal_graph_stage_profile(stage: &str, batch: usize, start: Option<std
         "kiln_profile_metal_graph_stage stage={stage} batch={batch} elapsed_ms={:.3}",
         start.elapsed().as_secs_f64() * 1000.0
     );
+}
+
+#[cfg(feature = "metal")]
+pub(crate) fn replay_paged_decode_icb_graph_through_replay_plan(
+    graph: &crate::backend::metal::MetalPagedDecodeIcbGraph,
+    max_seqlen_k: u32,
+    softmax_scale: f32,
+) -> Result<()> {
+    let mut plan = graph.replay_plan(max_seqlen_k, softmax_scale);
+    let replay_key = kiln_graph::ReplayPlan::key(&plan);
+    let replay_inputs = kiln_graph::ReplayInputs::new(&replay_key, graph.replay_resources());
+    kiln_graph::ReplayPlan::replay(&mut plan, replay_inputs)
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 #[cfg(feature = "metal")]
@@ -658,7 +674,10 @@ impl MetalGraphRunner {
         }
         buffers.refresh_batch(token_ids, config, paged_cache, block_tables, seq_lens)?;
 
-        if batch == 1 && lora.is_none() && backend.supports_linear_decode_sample(1) {
+        if batch == 1
+            && lora.is_none()
+            && SamplingBackend::runtime_supports_linear_decode_sample(backend, 1)
+        {
             let metal_icb_inputs = MetalPagedDecodeIcbInputs {
                 q: buffers.stable_q.as_slice(),
                 k: buffers.stable_k.as_slice(),
@@ -695,22 +714,22 @@ impl MetalGraphRunner {
                 let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
                 finish_metal_graph_stage_profile("greedy_final_norm", batch, stage_start);
                 let stage_start = profile_stages.then(std::time::Instant::now);
-                let token = backend
-                    .linear_decode_sample(
-                        &normed,
-                        &weights.embed_tokens_t,
-                        &[],
-                        &[],
-                        1.0,
-                        0.0,
-                        0.0,
-                        1.0,
-                        1,
-                        1.0,
-                        0.0,
-                        0,
-                    )?
-                    .context("Metal graph greedy sampler tail declined top-k=1")?;
+                let token = SamplingBackend::runtime_linear_decode_sample(
+                    backend,
+                    &normed,
+                    &weights.embed_tokens_t,
+                    &[],
+                    &[],
+                    1.0,
+                    0.0,
+                    0.0,
+                    1.0,
+                    1,
+                    1.0,
+                    0.0,
+                    0,
+                )?
+                .context("Metal graph greedy sampler tail declined top-k=1")?;
                 finish_metal_graph_stage_profile("greedy_sample_tail", batch, stage_start);
                 Ok(vec![token])
             })();
@@ -832,7 +851,13 @@ impl MetalGraphRunner {
         {
             return Ok(None);
         }
-        if lora.is_some() || !backend.supports_linear_decode_sample_batch(top_k, temperatures) {
+        if lora.is_some()
+            || !SamplingBackend::runtime_supports_linear_decode_sample_batch(
+                backend,
+                top_k,
+                temperatures,
+            )
+        {
             return Ok(None);
         }
 
@@ -906,7 +931,8 @@ impl MetalGraphRunner {
             let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
             finish_metal_graph_stage_profile("sample_final_norm", batch, stage_start);
             let stage_start = profile_stages.then(std::time::Instant::now);
-            let tokens = backend.linear_decode_sample_batch(
+            let tokens = SamplingBackend::runtime_linear_decode_sample_batch(
+                backend,
                 &normed,
                 &weights.embed_tokens_t,
                 history_rows,

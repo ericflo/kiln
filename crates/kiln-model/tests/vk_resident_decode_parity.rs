@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use kiln_core::block::BlockTable;
 use kiln_core::config::ModelConfig;
-use kiln_model::backend;
+use kiln_model::backend::{self, LinearBackend, ReplayBackend};
 use kiln_model::forward::{
     GpuWeights, model_forward_paged_last_token, model_forward_paged_last_token_resident,
 };
@@ -54,14 +54,19 @@ fn run(model_dir: &std::path::Path) -> Result<()> {
     let device = Device::Cpu;
     let runtime = backend::for_device_kt(&device);
 
-    if !runtime.supports_resident_decode() {
+    if !ReplayBackend::runtime_supports_resident_decode(runtime.as_ref()) {
         eprintln!(
-            "[vk_resident_decode_parity] skipped — Backend::supports_resident_decode() is false; \
+            "[vk_resident_decode_parity] skipped — ReplayBackend::runtime_supports_resident_decode() is false; \
              this build doesn't include the Vulkan backend"
         );
         return Ok(());
     }
-    if !runtime.decode_resident_pool_ready(config.hidden_size, config.intermediate_size, 64) {
+    if !ReplayBackend::runtime_decode_resident_pool_ready(
+        runtime.as_ref(),
+        config.hidden_size,
+        config.intermediate_size,
+        64,
+    ) {
         eprintln!(
             "[vk_resident_decode_parity] skipped — decode_resident_pool_ready returned false; \
              not enough device-local memory for the resident ring"
@@ -72,7 +77,7 @@ fn run(model_dir: &std::path::Path) -> Result<()> {
     let weights = GpuWeights::from_model_weights(&model_weights, &config, &device)
         .context("transfer weights to backend")?;
     drop(model_weights);
-    runtime.prewarm_decode_weights(&weights)?;
+    LinearBackend::runtime_prewarm_decode_weights(runtime.as_ref(), &weights)?;
 
     // Small prompt + a single decode step. The cache is sized for one short
     // sequence: 8 tokens of prompt + 1 decode token + headroom = 4 blocks of

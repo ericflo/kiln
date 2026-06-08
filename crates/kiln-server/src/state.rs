@@ -12,8 +12,12 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::Engine;
 use kiln_model::{
-    DecodeBatcher, DecodeBatcherConfig, LinearAttentionState, ModelRunner, PagedKvCacheKt,
-    PagedPrefixNextToken, PagedPrefixRegistration,
+    DecodeBatcher, DecodeBatcherConfig, GpuAllocatorMemoryProbePolicy, GpuMemoryBudgetPolicy,
+    GpuMemoryDetectionPolicy, GpuMemoryReclaimPolicy, GpuMemoryReclaimer,
+    InferenceRecurrentStatePolicy, KvCacheAutoBlockPolicy, LinearAttentionState, ModelRunner,
+    PagedKvCacheKt, PagedPrefixNextToken, PagedPrefixRegistration,
+    TrainingAccelerationEnvFlagPolicy, TrainingAccelerationProfileLogMessage,
+    TrainingAccelerationProfilePolicy,
 };
 use kiln_scheduler::{PrefixCacheStats, Scheduler};
 use kiln_tensor::DType;
@@ -33,10 +37,6 @@ use crate::training_queue::{SharedTrainingQueue, ShutdownFlag};
 // loop (the n=64 cliff). 64 >= max kBlockN and divides cleanly everywhere.
 const DEFAULT_BLOCK_SIZE: usize = 64;
 const MIN_AUTO_KV_BLOCKS: usize = 64;
-const METAL_AUTO_MAX_KV_BLOCKS_LOW_MEM: usize = 512; // 8K tokens at block_size=16.
-const METAL_AUTO_MAX_KV_BLOCKS_MID_MEM: usize = 1024; // 16K tokens at block_size=16.
-const METAL_AUTO_MAX_KV_BLOCKS_HIGH_MEM: usize = 2048; // 32K tokens at block_size=16.
-const ROCM_AUTO_MAX_KV_BLOCKS: usize = 4096; // 262K tokens at block_size=64.
 const DETERMINISTIC_COMPLETION_CACHE_CAPACITY: usize = 128;
 const DETERMINISTIC_CHAT_REQUEST_CACHE_CAPACITY: usize = 128;
 const DETERMINISTIC_CHAT_CHOICES_CACHE_CAPACITY: usize = 64;
@@ -1643,8 +1643,13 @@ impl AppState {
         // Detect VRAM once and reuse it for both auto-sizing and reporting so
         // startup doesn't repeat the same probe/logging path.
         let vram_info = kiln_memory::vram::detect_vram();
-        let is_metal = is_metal_device(&device_kt);
-        let is_rocm = matches!(device_kt, kiln_tensor::Device::Rocm(_));
+        let storage_capabilities = runner.backend_capabilities().storage;
+        let kv_auto_block_policy = storage_capabilities.kv_auto_block_policy;
+        let gpu_memory_detection_policy = storage_capabilities.gpu_memory_detection_policy;
+        let gpu_memory_budget_policy = storage_capabilities.gpu_memory_budget_policy;
+        let gpu_allocator_memory_probe_policy =
+            storage_capabilities.gpu_allocator_memory_probe_policy;
+        let gpu_memory_reclaim_policy = storage_capabilities.gpu_memory_reclaim_policy;
 
         // Total AND used come from the SAME live, all-process driver snapshot
         // (VRAM+GTT on AMD, nvidia-smi on NVIDIA) so they're mutually consistent
@@ -1653,7 +1658,7 @@ impl AppState {
         // when the driver snapshot is unavailable (e.g. Apple Metal). Without
         // this, total came from the carveout heuristic while used came from the
         // snapshot — and `used` could exceed `total`.
-        let snap = if device_kt.backend() != kiln_tensor::Backend::Cpu {
+        let snap = if gpu_memory_budget_policy.use_live_memory_snapshot {
             let s = kiln_memory::vram::current_memory_snapshot();
             (s.total_bytes > 0).then_some(s)
         } else {
@@ -1661,8 +1666,11 @@ impl AppState {
         };
         let total_vram = snap
             .map(|s| s.total_bytes)
-            .unwrap_or_else(|| detected_gpu_total_memory(&device_kt, &vram_info));
-        let allocator_memory_snapshot = crate::device_memory::allocator_memory_snapshot(&device_kt);
+            .unwrap_or_else(|| detected_gpu_total_memory(gpu_memory_detection_policy, &vram_info));
+        let allocator_memory_snapshot = crate::device_memory::allocator_memory_snapshot(
+            gpu_allocator_memory_probe_policy,
+            &device_kt,
+        );
         if let Some(allocator) = allocator_memory_snapshot {
             tracing::info!(
                 allocator_free_gb = allocator.free_bytes as f64 / 1e9,
@@ -1688,76 +1696,12 @@ impl AppState {
         {
             static GOVERNOR_WIRED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
             GOVERNOR_WIRED.get_or_init(|| {
-                #[cfg(feature = "rocm")]
-                if let kiln_tensor::Device::Rocm(idx) = device_kt {
-                    kiln_memory::MemoryGovernor::global().register_reclaimer(move |_target| {
-                        // Best-effort: return all pooled-but-unused VRAM (keep 0).
-                        // Device-synced inside, so it's race-free; HIP doesn't
-                        // surface bytes freed, so report 0.
-                        let _ = kiln_tensor::rocm_trim_pool(idx, 0);
-                        0
-                    });
-                }
-                // CUDA mirror: on a DISCRETE card cuMemPoolTrimTo actually returns
-                // VRAM to the OS, so a coexisting process / training reservation
-                // gets headroom under pressure. Device-synced inside (race-free).
-                #[cfg(feature = "cuda")]
-                if let kiln_tensor::Device::Cuda(idx) = device_kt {
-                    // (#32) cudarc allocates from the stream-ordered mempool
-                    // (cuMemAllocAsync). Its RELEASE_THRESHOLD defaults to 0, so
-                    // the pool returns every freed page to the OS at each sync —
-                    // perf-churny AND it leaves cuda_trim_pool nothing to reclaim
-                    // (the governor's CUDA reclaimer was a redundant no-op). Raise
-                    // the threshold so the pool HOARDS freed pages for fast reuse,
-                    // turning the reclaimer below into the real release valve that
-                    // trims the hoard back to the OS under memory pressure.
-                    let _ = kiln_tensor::cuda_set_pool_release_threshold(idx, u64::MAX);
-                    kiln_memory::MemoryGovernor::global().register_reclaimer(move |_target| {
-                        // Measure bytes actually returned to the OS via the live
-                        // free-VRAM delta (the driver doesn't report trim yield).
-                        let before = kiln_tensor::cuda_mem_get_info(idx)
-                            .map(|(f, _)| f)
-                            .unwrap_or(0);
-                        let _ = kiln_tensor::cuda_trim_pool(idx, 0);
-                        let after = kiln_tensor::cuda_mem_get_info(idx)
-                            .map(|(f, _)| f)
-                            .unwrap_or(0);
-                        after.saturating_sub(before) as u64
-                    });
-                }
-                // Metal: UMA — shared-mode buffers are CPU-addressable, there is no
-                // discrete pool to hand back. Register a logged no-op so the
-                // registry is uniform across backends.
-                #[cfg(feature = "metal")]
-                if matches!(device_kt, kiln_tensor::Device::Metal(_)) {
-                    kiln_memory::MemoryGovernor::global().register_reclaimer(|_target| {
-                        static LOGGED: std::sync::Once = std::sync::Once::new();
-                        LOGGED.call_once(|| {
-                            tracing::info!("metal reclaimer: UMA, no pool to trim (no-op)")
-                        });
-                        0
-                    });
-                }
-                // Vulkan: the kt allocator's VkDeviceMemory cache has no
-                // free-to-OS trim wired yet. Logged no-op for now (a cache-drain
-                // reclaimer is a follow-up — see kv-memory notes).
-                #[cfg(feature = "vulkan")]
-                if matches!(device_kt, kiln_tensor::Device::Vulkan(_)) {
-                    kiln_memory::MemoryGovernor::global().register_reclaimer(|_target| {
-                        static LOGGED: std::sync::Once = std::sync::Once::new();
-                        LOGGED.call_once(|| {
-                            tracing::info!(
-                                "vulkan reclaimer: cache-drain not yet implemented (no-op)"
-                            )
-                        });
-                        0
-                    });
-                }
+                register_backend_memory_reclaimer(gpu_memory_reclaim_policy, device_kt);
                 kiln_memory::MemoryGovernor::global().start_monitor();
             });
         }
 
-        let post_load_used_vram_info = runtime_used_vram_for_device(&device_kt);
+        let post_load_used_vram_info = runtime_used_vram_for_policy(gpu_memory_budget_policy);
         let post_load_used_vram = snap
             .map(|s| s.used_bytes)
             .or_else(|| post_load_used_vram_info.map(|info| info.used_bytes))
@@ -1769,9 +1713,10 @@ impl AppState {
         // allocates, so without reserving for it the KV auto-sizer over-budgets
         // and the prewarm OOMs (KV pool + model + prewarm > VRAM). Reserve ~2x
         // the model here so the KV sizer leaves headroom for the prewarm.
-        if matches!(device_kt, kiln_tensor::Device::Vulkan(_)) {
-            sizing_residency_bytes =
-                sizing_residency_bytes.saturating_add(estimated_model_bytes.saturating_mul(2));
+        let reserve_multiplier = storage_capabilities.kv_sizing_residency_model_multiplier;
+        if reserve_multiplier > 0 {
+            sizing_residency_bytes = sizing_residency_bytes
+                .saturating_add(estimated_model_bytes.saturating_mul(reserve_multiplier));
         }
         if post_load_used_vram > 0 {
             let used_source = snap
@@ -1794,7 +1739,6 @@ impl AppState {
 
         // Compute num_blocks for a given fraction. Used both for the explicit
         // `memory_cfg.num_blocks` path and the auto-sizer retry loop below.
-        let governor_backend = device_kt.backend();
         let compute_blocks_for_fraction = |fraction: f64| -> usize {
             let n = auto_num_blocks_for_fraction(
                 total_vram,
@@ -1803,8 +1747,7 @@ impl AppState {
                 fraction,
                 model_config.max_position_embeddings,
                 block_size,
-                is_metal,
-                is_rocm,
+                kv_auto_block_policy,
             );
             // Additionally clamp so the KV pool fits within the live budget.
             // The governor provides the OS/driver-wide pressure view; CUDA/ROCm
@@ -1812,19 +1755,22 @@ impl AppState {
             // allocate from. Use the stricter cap when both are available so an
             // optimistic DRM/nvidia-smi snapshot cannot drive a fatal backend
             // allocation.
-            if governor_backend != kiln_tensor::Backend::Cpu && bytes_per_block > 0 {
+            if gpu_memory_budget_policy.cap_kv_blocks_by_live_budget && bytes_per_block > 0 {
                 let governor = kiln_memory::MemoryGovernor::global();
                 let governor_avail = governor.available_bytes();
                 let allocator_budget =
                     crate::device_memory::allocator_kv_budget_bytes_for_fraction(
-                        governor, &device_kt, fraction,
+                        gpu_allocator_memory_probe_policy,
+                        governor,
+                        &device_kt,
+                        fraction,
                     )
                     .unwrap_or(u64::MAX);
                 let budget = governor_avail.min(allocator_budget);
                 let max_blocks = (budget / bytes_per_block) as usize;
                 let capped = if max_blocks >= MIN_AUTO_KV_BLOCKS {
                     n.min(max_blocks)
-                } else if matches!(device_kt, kiln_tensor::Device::Rocm(_))
+                } else if kv_auto_block_policy.allow_min_blocks_below_live_budget
                     && allocator_budget != u64::MAX
                 {
                     MIN_AUTO_KV_BLOCKS.min(n)
@@ -1843,7 +1789,7 @@ impl AppState {
                         } else {
                             Some(allocator_budget as f64 / 1e9)
                         },
-                        "KV cache auto-sizer live budget is below the minimum cache size; using conservative ROCm floor when applicable"
+                        "KV cache auto-sizer live budget is below the minimum cache size; using conservative backend policy floor when applicable"
                     );
                 } else if capped < n {
                     tracing::warn!(
@@ -1866,34 +1812,21 @@ impl AppState {
             }
         };
 
-        // FP8 (E4M3FN) packing currently uses a CPU round-trip on every
-        // write — fine on CUDA where bf16→fp8 packing is amortized over the
-        // kernel work, but on Metal the round-trip dominates decode. Gate it
-        // off on Metal with a warning rather than silently shipping a slow
-        // path; users who know what they're doing can re-enable via
-        // KILN_ALLOW_FP8_ON_METAL=1.
+        // Backend storage policy owns whether requested FP8 KV cache storage is
+        // allowed by default. Some backends can still expose an explicit env
+        // opt-in when the default is disabled for performance reasons.
         let fp8_enabled = {
             let requested = memory_cfg.kv_cache_fp8;
-            // Require an explicit opt-in value (`1`/`true`) so the common
-            // misreading `KILN_ALLOW_FP8_ON_METAL=0` disables FP8 as intended
-            // instead of flipping the gate because the variable happens to
-            // be set.
-            let metal_override = matches!(
-                std::env::var("KILN_ALLOW_FP8_ON_METAL").as_deref(),
-                Ok("1") | Ok("true") | Ok("TRUE")
-            );
-            // `is_metal_device` takes `&kt::Device` after the Phase 7+
-            // migration, so this site uses the bridged `device_kt` from
-            // above instead of calling kt-bridge again here. (#1082)
-            if requested && is_metal_device(&device_kt) && !metal_override {
+            let policy = storage_capabilities.kv_cache_fp8_policy;
+            let enabled = policy.enabled(requested);
+            if requested && !enabled {
                 tracing::warn!(
-                    "FP8 cache disabled on Metal (CPU round-trip cost); \
-                     set KILN_ALLOW_FP8_ON_METAL=1 to override"
+                    override_env = policy.explicit_enable_env,
+                    reason = policy.disabled_reason,
+                    "FP8 KV cache disabled by backend storage policy"
                 );
-                false
-            } else {
-                requested
             }
+            enabled
         };
         // Allocation closure: try to build the paged KV cache for `n` blocks.
         // Used by the auto-sizer retry loop below. CUDA OOM bubbles up here as
@@ -1913,6 +1846,9 @@ impl AppState {
                 &device_kt,
                 n,
                 bytes_per_block,
+                gpu_memory_budget_policy,
+                gpu_allocator_memory_probe_policy,
+                kv_auto_block_policy,
                 kiln_memory::MemoryGovernor::global(),
             )?;
             let attempt = || {
@@ -1935,7 +1871,7 @@ impl AppState {
                 // have failed only because freed blocks were still pooled (or a
                 // coexisting job briefly spiked). Cheaper than shrinking the KV
                 // cache if the memory is genuinely reclaimable.
-                Err(first) if governor_backend != kiln_tensor::Backend::Cpu => {
+                Err(first) if gpu_memory_budget_policy.retry_kv_allocation_after_reclaim => {
                     let freed = kiln_memory::MemoryGovernor::global().reclaim(u64::MAX);
                     tracing::warn!(
                         num_blocks = n,
@@ -2018,8 +1954,7 @@ impl AppState {
                         bytes_per_block,
                         block_size,
                         model_config.max_position_embeddings,
-                        is_metal,
-                        is_rocm,
+                        kv_auto_block_policy,
                     );
                     let msg = format_oom_remediation_message(
                         &failure,
@@ -2050,6 +1985,8 @@ impl AppState {
             inference_fraction,
             memory_cfg.training_memory_gb,
         );
+        let backend_name = runner.backend_name();
+        let backend_capabilities = runner.backend_capabilities();
 
         tracing::info!(
             total_vram_gb = memory_budget.total_vram_bytes as f64 / 1e9,
@@ -2063,41 +2000,10 @@ impl AppState {
             "GPU memory budget"
         );
 
-        // Surface which Vulkan training acceleration paths are
-        // active so the operator can confirm the runtime profile
-        // at-a-glance instead of diff'ing env vars against the docs.
-        // Only logged when there's an actual Vulkan device — on CPU
-        // or non-Vulkan backends these flags are irrelevant.
-        if vram_info.source == kiln_memory::vram::VramSource::LinuxDrmSysfs
-            || vram_info.source == kiln_memory::vram::VramSource::LinuxDrmSysfsUnified
-        {
-            // Same truthy/falsy semantics as kiln_core::env_flag::env_flag,
-            // but we want to surface whether the value came from the env
-            // or the default — env_flag collapses both to a bool.
-            let env_flag = |name: &str, default_on: bool| -> &'static str {
-                let raw = std::env::var(name).ok();
-                let lower = raw.as_deref().map(str::trim).map(str::to_ascii_lowercase);
-                let truthy = matches!(lower.as_deref(), Some("1") | Some("true") | Some("yes"));
-                let falsy = matches!(lower.as_deref(), Some("0") | Some("false") | Some("no"));
-                match (truthy, falsy, default_on) {
-                    (true, _, _) => "on (env)",
-                    (_, true, _) => "off (env)",
-                    (_, _, true) => "on (default)",
-                    (_, _, false) => "off (default)",
-                }
-            };
-            tracing::info!(
-                linear = env_flag("KILN_VULKAN_LINEAR", true),
-                sdpa = env_flag("KILN_VULKAN_SDPA", true),
-                rmsnorm_inference = env_flag("KILN_VULKAN_RMSNORM", true),
-                rmsnorm_training = "auto (row_count >= 1024)",
-                flce_provider = "auto (active_count >= 16)",
-                resident_activation = "always (Phase 3.1 hooks)",
-                sgd_step_on_device = "auto (Phase 4.2: gated on registry residency)",
-                "Vulkan training acceleration profile"
-            );
-        }
-
+        log_backend_training_acceleration_profile(
+            backend_capabilities.training.acceleration_profile,
+        );
+        let inference_recurrent_state_policy = backend_capabilities.gdn.inference_recurrent_state;
         let prefix_cache_max_blocks = if prefix_cache_cfg.enabled {
             prefix_cache_cfg
                 .max_blocks
@@ -2106,7 +2012,7 @@ impl AppState {
             0
         };
         let prefix_cache_state_bytes_per_entry =
-            linear_attention_state_bytes(&model_config, &device_kt);
+            linear_attention_state_bytes(&model_config, inference_recurrent_state_policy);
         let prefix_cache_max_entries = if prefix_cache_cfg.enabled {
             prefix_cache_cfg.max_entries.unwrap_or_else(|| {
                 default_prefix_cache_max_entries(total_vram, prefix_cache_state_bytes_per_entry)
@@ -2137,12 +2043,14 @@ impl AppState {
         let paged_cache = Arc::new(paged_cache);
         let prefix_cache = Arc::new(std::sync::Mutex::new(prefix_cache));
         let gpu_lock = Arc::new(std::sync::RwLock::new(()));
-        let backend_name = runner.read().unwrap().backend_name();
+        let decode_batcher_policy = backend_capabilities.decode_batcher;
         let max_decode_batch =
-            crate::batching_engine::env_max_decode_batch_for_backend(Some(backend_name));
+            crate::batching_engine::env_max_decode_batch_for_policy(Some(decode_batcher_policy));
         let decode_batcher_config = DecodeBatcherConfig::enabled_for_device_kt(&device_kt)
-            .then(|| DecodeBatcherConfig::from_env_for_backend_kt(&device_kt, backend_name));
-        if backend_name == "vulkan" {
+            .then(|| DecodeBatcherConfig::from_env_for_policy(decode_batcher_policy));
+        if decode_batcher_policy.warm_resident_decode_pool_on_startup
+            && backend_capabilities.decode.resident_decode.is_native()
+        {
             let resident_max_batch = max_decode_batch.max(
                 decode_batcher_config
                     .map(|config| config.max_batch)
@@ -2155,24 +2063,20 @@ impl AppState {
             tracing::info!(
                 max_batch = resident_max_batch,
                 ready,
-                "Vulkan resident decode pool startup allocation"
+                "resident decode pool startup allocation"
             );
         }
-        // Batching engine is on by default for backends where the batching
-        // actor is the fast path. Metal currently regresses bs=1 Qwen decode
-        // by paying the GDN state-copy path on every generated token, while the
-        // direct loop can stay on the graph-backed Metal sampler. Keep Metal
-        // direct by default until its batching path has resident/in-place GDN
-        // state parity; operators can still opt in with KILN_BATCHING_ENGINE=1.
+        // Batching engine defaults are owned by the backend decode policy.
+        // Operators can still override with KILN_BATCHING_ENGINE.
         let batching_engine_env = std::env::var("KILN_BATCHING_ENGINE").ok();
         let batching_engine_disabled = match batching_engine_env.as_deref() {
             Some("0" | "false" | "FALSE" | "off" | "OFF") => true,
             Some("1" | "true" | "TRUE" | "on" | "ON") => false,
-            _ => backend_name == "metal",
+            _ => !decode_batcher_policy.batching_engine_default_enabled,
         };
-        if batching_engine_disabled && backend_name == "metal" {
+        if batching_engine_disabled && !decode_batcher_policy.batching_engine_default_enabled {
             tracing::info!(
-                "batching engine disabled by default for Metal; set KILN_BATCHING_ENGINE=1 to opt in"
+                "batching engine disabled by backend policy; set KILN_BATCHING_ENGINE=1 to opt in"
             );
         }
         let batching_engine = (!batching_engine_disabled).then(|| {
@@ -2190,7 +2094,7 @@ impl AppState {
                     gpu_lock.clone(),
                 )),
                 max_decode_batch,
-                Some(backend_name),
+                Some(decode_batcher_policy),
             )
         });
         // #24/#26: drive dynamic KV resize from live memory pressure on GPU
@@ -2201,12 +2105,12 @@ impl AppState {
         // back when headroom returns; the resize itself runs on the engine actor
         // at its barrier under exclusive GPU access.
         if let Some(engine) = batching_engine.clone() {
-            let device_resident = matches!(
-                paged_cache.device(),
-                Some(kiln_tensor::Device::Rocm(_)) | Some(kiln_tensor::Device::Cuda(_))
-            );
-            if device_resident {
-                crate::kv_autoscaler::spawn(engine, paged_cache.clone());
+            if backend_capabilities.storage.kv_cache_device_memory_pressure {
+                crate::kv_autoscaler::spawn(
+                    engine,
+                    paged_cache.clone(),
+                    gpu_allocator_memory_probe_policy,
+                );
             }
         }
         let decode_batcher = if let Some(config) = decode_batcher_config {
@@ -2267,9 +2171,11 @@ impl AppState {
             slow_request_warn_threshold: None,
             metrics: Arc::new(Metrics::new()),
             started_at: std::time::Instant::now(),
-            inference_prewarm_complete: Arc::new(AtomicBool::new(!device_needs_inference_prewarm(
-                &device_kt,
-            ))),
+            inference_prewarm_complete: Arc::new(AtomicBool::new(
+                !backend_capabilities
+                    .startup
+                    .require_inference_prewarm_for_health,
+            )),
             checkpoint_interval: None,
             training_webhook_url: None,
             max_queued_training_jobs: 32,
@@ -2312,34 +2218,63 @@ impl AppState {
     }
 }
 
-fn linear_attention_state_bytes(config: &ModelConfig, device: &kiln_tensor::Device) -> u64 {
+fn training_acceleration_env_flag_status(
+    policy: Option<TrainingAccelerationEnvFlagPolicy>,
+) -> &'static str {
+    let Some(policy) = policy else {
+        return "n/a";
+    };
+    let raw = std::env::var(policy.env).ok();
+    let lower = raw.as_deref().map(str::trim).map(str::to_ascii_lowercase);
+    let truthy = matches!(lower.as_deref(), Some("1") | Some("true") | Some("yes"));
+    let falsy = matches!(lower.as_deref(), Some("0") | Some("false") | Some("no"));
+    match (truthy, falsy, policy.default_on) {
+        (true, _, _) => "on (env)",
+        (_, true, _) => "off (env)",
+        (_, _, true) => "on (default)",
+        (_, _, false) => "off (default)",
+    }
+}
+
+fn log_backend_training_acceleration_profile(policy: TrainingAccelerationProfilePolicy) {
+    let linear = training_acceleration_env_flag_status(policy.linear);
+    let sdpa = training_acceleration_env_flag_status(policy.sdpa);
+    let rmsnorm_inference = training_acceleration_env_flag_status(policy.rmsnorm_inference);
+    match policy.log_message {
+        TrainingAccelerationProfileLogMessage::None => {}
+        TrainingAccelerationProfileLogMessage::Vulkan => {
+            tracing::info!(
+                linear,
+                sdpa,
+                rmsnorm_inference,
+                rmsnorm_training = policy.rmsnorm_training,
+                flce_provider = policy.flce_provider,
+                resident_activation = policy.resident_activation,
+                sgd_step_on_device = policy.sgd_step_on_device,
+                "Vulkan training acceleration profile"
+            );
+        }
+    }
+}
+
+fn linear_attention_state_bytes(
+    config: &ModelConfig,
+    policy: InferenceRecurrentStatePolicy,
+) -> u64 {
     let num_linear_layers = config
         .num_layers
         .saturating_sub(config.num_full_attention_layers) as u64;
-    // Inference recurrent state mirrors `LinearAttentionState`'s compact
-    // backend policy: CUDA/ROCm/Metal/Vulkan use model dtype for bf16/fp16
-    // unless the backend-specific inference-state escape hatch is set.
-    let compact_recurrent_state = match device.backend() {
-        kiln_tensor::Backend::Cuda => {
-            std::env::var("KILN_DISABLE_CUDA_BF16_INFERENCE_STATE").is_err()
-        }
-        kiln_tensor::Backend::Rocm => {
-            std::env::var("KILN_DISABLE_ROCM_BF16_INFERENCE_STATE").is_err()
-        }
-        kiln_tensor::Backend::Metal => true,
-        kiln_tensor::Backend::Vulkan => {
-            std::env::var("KILN_DISABLE_VULKAN_BF16_INFERENCE_STATE").is_err()
-        }
-        _ => false,
+    // Mirrors `LinearAttentionState` inference recurrent-state allocation
+    // through the backend-owned capability policy, so prefix-cache sizing does
+    // not keep a separate server-side backend/env table.
+    let recurrent_dtype = match config.dtype {
+        kiln_core::config::DType::BF16 if policy.supports_dtype(DType::BF16) => DType::BF16,
+        kiln_core::config::DType::FP16 if policy.supports_dtype(DType::F16) => DType::F16,
+        _ => DType::F32,
     };
-    let recurrent_dtype_bytes = if compact_recurrent_state
-        && matches!(
-            config.dtype,
-            kiln_core::config::DType::BF16 | kiln_core::config::DType::FP16
-        ) {
-        2
-    } else {
-        4
+    let recurrent_dtype_bytes = match recurrent_dtype {
+        DType::BF16 | DType::F16 => 2,
+        _ => 4,
     };
     let recurrent_elems = (config.linear_num_value_heads
         * config.linear_key_head_dim
@@ -2395,8 +2330,7 @@ fn auto_num_blocks_for_fraction(
     fraction: f64,
     max_position_embeddings: usize,
     block_size: usize,
-    is_metal: bool,
-    is_rocm: bool,
+    kv_auto_block_policy: KvCacheAutoBlockPolicy,
 ) -> usize {
     if total_vram > 0 && bytes_per_block > 0 {
         let available_for_kv =
@@ -2406,8 +2340,7 @@ fn auto_num_blocks_for_fraction(
             raw_auto_blocks,
             max_position_embeddings,
             block_size,
-            is_metal,
-            is_rocm,
+            kv_auto_block_policy,
             total_vram,
         )
     } else {
@@ -2416,8 +2349,7 @@ fn auto_num_blocks_for_fraction(
             raw_auto_blocks,
             max_position_embeddings,
             block_size,
-            is_metal,
-            is_rocm,
+            kv_auto_block_policy,
             total_vram,
         )
     }
@@ -2427,20 +2359,20 @@ fn cap_auto_num_blocks(
     raw_blocks: usize,
     max_position_embeddings: usize,
     block_size: usize,
-    is_metal: bool,
-    is_rocm: bool,
+    kv_auto_block_policy: KvCacheAutoBlockPolicy,
     total_vram_bytes: u64,
 ) -> usize {
-    // On Metal (unified memory), an eagerly-zeroed KV cache larger than the
+    // On UMA backends, an eagerly-zeroed KV cache larger than the
     // model context can dominate memory pressure on the rest of the system,
-    // so we keep the historical "≤ one full context, further capped by
-    // detected memory tier" behavior.
+    // so the backend-owned policy keeps the historical "≤ one full context,
+    // further capped by detected memory tier" behavior where applicable.
     //
     // ROCm's HIP allocator can abort the process on later long-prefill scratch
-    // OOMs instead of returning a catchable allocation error. Keep the default
-    // KV pool to one Qwen3.5-class full-context pool so long prefill has
-    // workspace headroom; explicit `memory.num_blocks` / `KILN_NUM_BLOCKS`
-    // still opts into larger pools for operators who want them.
+    // OOMs instead of returning a catchable allocation error. Its capability
+    // policy keeps the default KV pool to one Qwen3.5-class full-context pool
+    // so long prefill has workspace headroom; explicit `memory.num_blocks` /
+    // `KILN_NUM_BLOCKS` still opts into larger pools for operators who want
+    // them.
     //
     // On CUDA / CPU, memory-aware sizing already drove `raw_blocks` from the
     // available VRAM × `inference_memory_fraction` budget. Capping again at
@@ -2450,46 +2382,33 @@ fn cap_auto_num_blocks(
     // routinely OOM-borderline under realistic load even on a 48 GiB A40.
     // Trust the memory-aware ceiling here; users who want a stricter cap can
     // still set `KILN_NUM_BLOCKS` or `memory.num_blocks` explicitly.
-    let runtime_cap_blocks = if is_metal {
-        let model_cap_blocks = max_position_embeddings
-            .div_ceil(block_size)
-            .max(MIN_AUTO_KV_BLOCKS);
-        model_cap_blocks.min(metal_auto_max_kv_blocks(total_vram_bytes))
-    } else if is_rocm {
-        let model_cap_blocks = max_position_embeddings
-            .div_ceil(block_size)
-            .max(MIN_AUTO_KV_BLOCKS);
-        model_cap_blocks.min(ROCM_AUTO_MAX_KV_BLOCKS)
-    } else {
-        usize::MAX
-    };
+    let runtime_cap_blocks = kv_auto_block_policy.runtime_cap_blocks(
+        max_position_embeddings,
+        block_size,
+        MIN_AUTO_KV_BLOCKS,
+        total_vram_bytes,
+    );
 
     raw_blocks.max(MIN_AUTO_KV_BLOCKS).min(runtime_cap_blocks)
-}
-
-fn metal_auto_max_kv_blocks(total_vram_bytes: u64) -> usize {
-    let gib = total_vram_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-    if gib < 14.0 {
-        METAL_AUTO_MAX_KV_BLOCKS_LOW_MEM
-    } else if gib < 24.0 {
-        METAL_AUTO_MAX_KV_BLOCKS_MID_MEM
-    } else {
-        METAL_AUTO_MAX_KV_BLOCKS_HIGH_MEM
-    }
 }
 
 fn validate_kv_allocation_against_live_allocator(
     device: &kiln_tensor::Device,
     num_blocks: usize,
     bytes_per_block: u64,
+    gpu_memory_budget_policy: GpuMemoryBudgetPolicy,
+    gpu_allocator_memory_probe_policy: GpuAllocatorMemoryProbePolicy,
+    kv_auto_block_policy: KvCacheAutoBlockPolicy,
     governor: &kiln_memory::MemoryGovernor,
 ) -> anyhow::Result<()> {
-    if device.backend() == kiln_tensor::Backend::Cpu || bytes_per_block == 0 {
+    if !gpu_memory_budget_policy.cap_kv_blocks_by_live_budget || bytes_per_block == 0 {
         return Ok(());
     }
-    let Some(allocator_budget) =
-        crate::device_memory::allocator_safe_available_bytes(governor, device)
-    else {
+    let Some(allocator_budget) = crate::device_memory::allocator_safe_available_bytes(
+        gpu_allocator_memory_probe_policy,
+        governor,
+        device,
+    ) else {
         return Ok(());
     };
     let requested = (num_blocks as u64).saturating_mul(bytes_per_block);
@@ -2497,7 +2416,7 @@ fn validate_kv_allocation_against_live_allocator(
         return Ok(());
     }
     let max_blocks = (allocator_budget / bytes_per_block) as usize;
-    if matches!(device, kiln_tensor::Device::Rocm(_))
+    if kv_auto_block_policy.allow_min_blocks_below_live_budget
         && max_blocks < MIN_AUTO_KV_BLOCKS
         && num_blocks <= MIN_AUTO_KV_BLOCKS
     {
@@ -2505,7 +2424,7 @@ fn validate_kv_allocation_against_live_allocator(
             num_blocks,
             max_live_budget_blocks = max_blocks,
             min_auto_blocks = MIN_AUTO_KV_BLOCKS,
-            "ROCm allocator probe reports less than the minimum KV cache budget; allowing conservative allocation attempt"
+            "backend allocator probe reports less than the minimum KV cache budget; allowing conservative policy floor allocation attempt"
         );
         return Ok(());
     }
@@ -2519,42 +2438,13 @@ fn validate_kv_allocation_against_live_allocator(
     )
 }
 
-fn is_metal_device(device: &kiln_tensor::Device) -> bool {
-    // Migrated to take `&kt::Device` directly so this helper no longer
-    // names the candle Metal variant or the kt-bridge converter. The
-    // kt-bridge `metal` feature is forwarded under `kiln-server/metal`,
-    // so callers in non-metal builds will never construct a
-    // `kt::Device::Metal(_)` and the cfg-gated behavior is preserved.
-    // (#1082)
-    device.backend() == kiln_tensor::Backend::Metal
-}
-
-fn device_needs_inference_prewarm(device: &kiln_tensor::Device) -> bool {
-    let is_metal = is_metal_device(device);
-    // The vulkan path carries a `kt::Device::Cpu` by convention (see
-    // `kiln-model::backend::mod::for_device` and
-    // `select_device_with_options_kt` which overrides to Vulkan only when
-    // the feature is active). On vulkan builds we still need the
-    // `vulkan_is_available()` probe to distinguish "CPU because no GPU"
-    // from "CPU as Vulkan placeholder". (#1082)
-    #[cfg(feature = "vulkan")]
-    let is_vulkan = device.backend() == kiln_tensor::Backend::Cpu
-        && kiln_model::backend::vulkan::vulkan_is_available();
-    #[cfg(not(feature = "vulkan"))]
-    let is_vulkan = {
-        let _ = device;
-        false
-    };
-    is_metal || is_vulkan
-}
-
 /// Query total GPU memory in bytes. Returns 0 for CPU devices.
 ///
 /// Uses the shared VRAM detection from kiln-core (nvidia-smi + sysctl
 /// hw.memsize on Apple Silicon + env override).
 
-fn runtime_used_vram_for_device(
-    device: &kiln_tensor::Device,
+fn runtime_used_vram_for_policy(
+    policy: GpuMemoryBudgetPolicy,
 ) -> Option<kiln_memory::vram::GpuMemoryUsedInfo> {
     // The live used-memory probe is OS-level (nvidia-smi / AMD+Intel DRM sysfs /
     // unified-APU MemAvailable, see `kiln_memory::vram::current_memory_snapshot`),
@@ -2564,7 +2454,7 @@ fn runtime_used_vram_for_device(
     // estimate that is blind to live residency and to coexisting GPU workloads.
     // Wiring it for all GPU backends makes the sizer mindful of the actual VRAM
     // on whatever device the user is running. CPU has no device memory to probe.
-    if device.backend() == kiln_tensor::Backend::Cpu {
+    if !policy.use_live_memory_snapshot {
         return None;
     }
     let snap = kiln_memory::vram::current_memory_snapshot();
@@ -2575,46 +2465,30 @@ fn runtime_used_vram_for_device(
 }
 
 fn detected_gpu_total_memory(
-    device: &kiln_tensor::Device,
+    policy: GpuMemoryDetectionPolicy,
     vram: &kiln_memory::vram::GpuVramInfo,
 ) -> u64 {
-    // Migrated to take `&kt::Device` directly. The cuda and metal arms
-    // remain feature-gated to preserve the previous cfg-gated behavior
-    // (a `kt::Device::Cuda` / `kt::Device::Metal` can only be
-    // constructed when the corresponding feature is built in). (#1082)
-    let backend = device.backend();
-    #[cfg(feature = "cuda")]
-    if backend == kiln_tensor::Backend::Cuda {
-        return if vram.total_bytes > 0 {
+    if vram.total_bytes > 0 {
+        if let Some(message) = policy.detected_total_log_message {
             tracing::info!(
                 total_gb = vram.total_bytes as f64 / 1e9,
                 source = %vram.source,
-                "GPU VRAM detected"
+                memory_detection_policy = message,
+                "backend total memory detected"
             );
-            vram.total_bytes
-        } else {
-            tracing::warn!("CUDA device present but VRAM detection failed; assuming 24GB");
-            24 * 1024 * 1024 * 1024
-        };
+        }
+        return policy.total_memory_bytes(vram.total_bytes);
     }
-    #[cfg(feature = "metal")]
-    if backend == kiln_tensor::Backend::Metal {
-        return if vram.total_bytes > 0 {
-            tracing::info!(
-                total_gb = vram.total_bytes as f64 / 1e9,
-                source = %vram.source,
-                "unified memory detected (Apple Silicon)"
-            );
-            vram.total_bytes
-        } else {
-            tracing::warn!(
-                "Metal device present but unified memory detection failed; assuming 16GB"
-            );
-            16 * 1024 * 1024 * 1024
-        };
+    if let Some(warning) = policy.missing_total_warning {
+        tracing::warn!(
+            memory_detection_policy = warning,
+            fallback_total_gb = policy
+                .missing_total_fallback_bytes
+                .map(|bytes| bytes as f64 / 1e9),
+            "backend total memory detection failed; using policy fallback"
+        );
     }
-    let _ = backend;
-    vram.total_bytes
+    policy.total_memory_bytes(vram.total_bytes)
 }
 
 /// Successful auto-sizer outcome. Carries the live cache plus the metadata
@@ -2632,6 +2506,56 @@ struct AutoSizeSuccess {
 struct AutoSizeFailure {
     /// `(fraction, num_blocks, error)` for every attempt in order.
     attempts: Vec<(f64, usize, String)>,
+}
+
+fn register_backend_memory_reclaimer(policy: GpuMemoryReclaimPolicy, device: kiln_tensor::Device) {
+    let _ = device;
+    match policy.reclaimer {
+        GpuMemoryReclaimer::None => {}
+        GpuMemoryReclaimer::RocmTrimPool => {
+            #[cfg(feature = "rocm")]
+            if let kiln_tensor::Device::Rocm(idx) = device {
+                kiln_memory::MemoryGovernor::global().register_reclaimer(move |_target| {
+                    // Best-effort: return all pooled-but-unused VRAM (keep 0).
+                    // Device-synced inside, so it's race-free; HIP doesn't
+                    // surface bytes freed, so report 0.
+                    let _ = kiln_tensor::rocm_trim_pool(idx, 0);
+                    0
+                });
+            }
+        }
+        GpuMemoryReclaimer::CudaTrimPool => {
+            #[cfg(feature = "cuda")]
+            if let kiln_tensor::Device::Cuda(idx) = device {
+                // (#32) cudarc allocates from the stream-ordered mempool
+                // (cuMemAllocAsync). Its RELEASE_THRESHOLD defaults to 0, so
+                // the pool returns every freed page to the OS at each sync:
+                // perf-churny and it leaves cuda_trim_pool nothing to reclaim.
+                // Raise the threshold so the pool hoards freed pages for fast
+                // reuse, turning this reclaimer into the pressure release valve.
+                let _ = kiln_tensor::cuda_set_pool_release_threshold(idx, u64::MAX);
+                kiln_memory::MemoryGovernor::global().register_reclaimer(move |_target| {
+                    // Measure bytes actually returned to the OS via the live
+                    // free-VRAM delta (the driver doesn't report trim yield).
+                    let before = kiln_tensor::cuda_mem_get_info(idx)
+                        .map(|(f, _)| f)
+                        .unwrap_or(0);
+                    let _ = kiln_tensor::cuda_trim_pool(idx, 0);
+                    let after = kiln_tensor::cuda_mem_get_info(idx)
+                        .map(|(f, _)| f)
+                        .unwrap_or(0);
+                    after.saturating_sub(before) as u64
+                });
+            }
+        }
+        GpuMemoryReclaimer::LoggedNoop { log_message } => {
+            kiln_memory::MemoryGovernor::global().register_reclaimer(move |_target| {
+                static LOGGED: std::sync::Once = std::sync::Once::new();
+                LOGGED.call_once(|| tracing::info!("{}", log_message));
+                0
+            });
+        }
+    }
 }
 
 /// Auto-size the KV cache by trying `configured_fraction` first and then each
@@ -2699,8 +2623,7 @@ fn suggested_emergency_num_blocks(
     bytes_per_block: u64,
     block_size: usize,
     max_position_embeddings: usize,
-    is_metal: bool,
-    is_rocm: bool,
+    kv_auto_block_policy: KvCacheAutoBlockPolicy,
 ) -> usize {
     if total_vram == 0 || bytes_per_block == 0 {
         // No VRAM signal — fall back to one model context worth of blocks.
@@ -2716,8 +2639,7 @@ fn suggested_emergency_num_blocks(
         raw,
         max_position_embeddings,
         block_size,
-        is_metal,
-        is_rocm,
+        kv_auto_block_policy,
         total_vram,
     )
 }
@@ -3594,8 +3516,7 @@ mod tests {
             0.7,
             262_144,
             DEFAULT_BLOCK_SIZE,
-            false,
-            false,
+            KvCacheAutoBlockPolicy::MEMORY_BUDGET_ONLY,
         );
         let post_load_blocks = auto_num_blocks_for_fraction(
             total,
@@ -3604,8 +3525,7 @@ mod tests {
             0.7,
             262_144,
             DEFAULT_BLOCK_SIZE,
-            false,
-            false,
+            KvCacheAutoBlockPolicy::MEMORY_BUDGET_ONLY,
         );
 
         assert_eq!(old_estimate_blocks, 56570);
@@ -3613,6 +3533,56 @@ mod tests {
             post_load_blocks < old_estimate_blocks,
             "post-load residency must reduce the default A6000 KV budget: old={old_estimate_blocks} post_load={post_load_blocks}"
         );
+    }
+
+    #[test]
+    fn test_detected_gpu_total_memory_uses_backend_policy_fallbacks() {
+        let missing = kiln_memory::vram::GpuVramInfo {
+            total_bytes: 0,
+            source: kiln_memory::vram::VramSource::None,
+        };
+
+        assert_eq!(
+            detected_gpu_total_memory(
+                GpuMemoryDetectionPolicy::for_backend("cuda", kiln_tensor::Device::Cuda(0)),
+                &missing,
+            ),
+            GpuMemoryDetectionPolicy::CUDA_MISSING_TOTAL_FALLBACK_BYTES
+        );
+        assert_eq!(
+            detected_gpu_total_memory(
+                GpuMemoryDetectionPolicy::for_backend("metal", kiln_tensor::Device::Metal(0)),
+                &missing,
+            ),
+            GpuMemoryDetectionPolicy::METAL_MISSING_TOTAL_FALLBACK_BYTES
+        );
+        assert_eq!(
+            detected_gpu_total_memory(
+                GpuMemoryDetectionPolicy::for_backend("vulkan", kiln_tensor::Device::Vulkan(0)),
+                &missing,
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn test_detected_gpu_total_memory_preserves_detected_total() {
+        let detected = kiln_memory::vram::GpuVramInfo {
+            total_bytes: 40 * 1024 * 1024 * 1024,
+            source: kiln_memory::vram::VramSource::EnvOverride,
+        };
+
+        for policy in [
+            GpuMemoryDetectionPolicy::for_backend("cuda", kiln_tensor::Device::Cuda(0)),
+            GpuMemoryDetectionPolicy::for_backend("metal", kiln_tensor::Device::Metal(0)),
+            GpuMemoryDetectionPolicy::for_backend("rocm", kiln_tensor::Device::Rocm(0)),
+            GpuMemoryDetectionPolicy::for_backend("vulkan", kiln_tensor::Device::Vulkan(0)),
+        ] {
+            assert_eq!(
+                detected_gpu_total_memory(policy, &detected),
+                detected.total_bytes
+            );
+        }
     }
 
     #[test]
@@ -3630,8 +3600,7 @@ mod tests {
                 50_000,
                 262_144,
                 DEFAULT_BLOCK_SIZE,
-                false, // is_metal
-                false, // is_rocm
+                KvCacheAutoBlockPolicy::MEMORY_BUDGET_ONLY,
                 48 * 1024 * 1024 * 1024,
             ),
             50_000
@@ -3643,8 +3612,7 @@ mod tests {
                 4_096,
                 262_144,
                 DEFAULT_BLOCK_SIZE,
-                false,
-                false,
+                KvCacheAutoBlockPolicy::MEMORY_BUDGET_ONLY,
                 10 * 1024 * 1024 * 1024,
             ),
             4_096
@@ -3656,8 +3624,7 @@ mod tests {
                 65_000,
                 262_144,
                 DEFAULT_BLOCK_SIZE,
-                false,
-                false,
+                KvCacheAutoBlockPolicy::MEMORY_BUDGET_ONLY,
                 80 * 1024 * 1024 * 1024,
             ),
             65_000
@@ -3671,11 +3638,10 @@ mod tests {
                 50_000,
                 262_144,
                 DEFAULT_BLOCK_SIZE,
-                false,
-                true,
+                KvCacheAutoBlockPolicy::for_backend("rocm", kiln_tensor::Device::Rocm(0)),
                 120 * 1024 * 1024 * 1024,
             ),
-            ROCM_AUTO_MAX_KV_BLOCKS
+            4096
         );
     }
 
@@ -3690,33 +3656,30 @@ mod tests {
                 50_000,
                 262_144,
                 DEFAULT_BLOCK_SIZE,
-                true,
-                false,
+                KvCacheAutoBlockPolicy::for_backend("metal", kiln_tensor::Device::Metal(0)),
                 10 * 1024 * 1024 * 1024,
             ),
-            METAL_AUTO_MAX_KV_BLOCKS_LOW_MEM
+            512
         );
         assert_eq!(
             cap_auto_num_blocks(
                 50_000,
                 262_144,
                 DEFAULT_BLOCK_SIZE,
-                true,
-                false,
+                KvCacheAutoBlockPolicy::for_backend("metal", kiln_tensor::Device::Metal(0)),
                 16 * 1024 * 1024 * 1024,
             ),
-            METAL_AUTO_MAX_KV_BLOCKS_MID_MEM
+            1024
         );
         assert_eq!(
             cap_auto_num_blocks(
                 50_000,
                 262_144,
                 DEFAULT_BLOCK_SIZE,
-                true,
-                false,
+                KvCacheAutoBlockPolicy::for_backend("metal", kiln_tensor::Device::Metal(0)),
                 32 * 1024 * 1024 * 1024,
             ),
-            METAL_AUTO_MAX_KV_BLOCKS_HIGH_MEM
+            2048
         );
     }
 
@@ -3727,8 +3690,7 @@ mod tests {
                 512,
                 262_144,
                 DEFAULT_BLOCK_SIZE,
-                true,
-                false,
+                KvCacheAutoBlockPolicy::for_backend("metal", kiln_tensor::Device::Metal(0)),
                 10 * 1024 * 1024 * 1024,
             ),
             512
@@ -3738,8 +3700,7 @@ mod tests {
                 1,
                 262_144,
                 DEFAULT_BLOCK_SIZE,
-                true,
-                false,
+                KvCacheAutoBlockPolicy::for_backend("metal", kiln_tensor::Device::Metal(0)),
                 10 * 1024 * 1024 * 1024,
             ),
             MIN_AUTO_KV_BLOCKS
@@ -3928,8 +3889,7 @@ mod tests {
             bytes_per_block,
             DEFAULT_BLOCK_SIZE,
             262_144,
-            false, // CUDA path (Metal cap doesn't apply)
-            false,
+            KvCacheAutoBlockPolicy::MEMORY_BUDGET_ONLY,
         );
         let expected_kv_bytes = ((total - model) as f64 * 0.30) as u64;
         let expected_blocks = (expected_kv_bytes / bytes_per_block) as usize;
@@ -3948,8 +3908,7 @@ mod tests {
             0,
             DEFAULT_BLOCK_SIZE,
             262_144,
-            false,
-            false,
+            KvCacheAutoBlockPolicy::MEMORY_BUDGET_ONLY,
         );
         let expected = (262_144_usize).div_ceil(DEFAULT_BLOCK_SIZE);
         assert_eq!(suggested, expected.max(MIN_AUTO_KV_BLOCKS));

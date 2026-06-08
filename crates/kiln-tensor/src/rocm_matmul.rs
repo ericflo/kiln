@@ -11,6 +11,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use kiln_hip::RocmContext;
 use kiln_rocblas::{AlgoCache, Epilogue, HipblasLtMatmulHandle, MatmulLayout, MatmulRequest};
 
+use crate::blaslt_request::{
+    blaslt_dtype_name, BlasLtEpilogue, BlasLtMatmulLayout, BlasLtMatmulRequest,
+};
 use crate::rocm_storage::RocmStorage;
 use crate::{DType, Layout, Result, Storage, Tensor, TensorId};
 
@@ -120,19 +123,6 @@ pub fn rocm_load_algo_cache_from_disk(device_index: usize) -> usize {
     n
 }
 
-// ----------------------------------------------------------------------
-// Shared helpers
-// ----------------------------------------------------------------------
-
-fn dtype_str(dtype: DType, op: &str) -> Result<&'static str> {
-    match dtype {
-        DType::F32 => Ok("f32"),
-        DType::BF16 => Ok("bf16"),
-        DType::F16 => Ok("f16"),
-        other => Err(crate::Error::Msg(format!("{op}: unsupported dtype {other}"))),
-    }
-}
-
 fn rocm_storage<'a>(t: &'a Tensor, op: &str, which: &str) -> Result<&'a RocmStorage> {
     t.storage()
         .as_any()
@@ -144,7 +134,37 @@ fn rocm_device_index(t: &RocmStorage, op: &str) -> Result<usize> {
     use crate::StorageBackend;
     match t.device() {
         crate::Device::Rocm(i) => Ok(i),
-        other => Err(crate::Error::Msg(format!("{op}: expected ROCm device, got {other}"))),
+        other => Err(crate::Error::Msg(format!(
+            "{op}: expected ROCm device, got {other}"
+        ))),
+    }
+}
+
+fn rocm_blaslt_layout(layout: BlasLtMatmulLayout) -> MatmulLayout {
+    match layout {
+        BlasLtMatmulLayout::RowMajor => MatmulLayout::RowMajor,
+        BlasLtMatmulLayout::ColMajor => MatmulLayout::ColMajor,
+    }
+}
+
+fn rocm_blaslt_epilogue(epilogue: BlasLtEpilogue) -> Epilogue {
+    match epilogue {
+        BlasLtEpilogue::Identity => Epilogue::Identity,
+        BlasLtEpilogue::Bias => Epilogue::Bias,
+    }
+}
+
+fn rocm_blaslt_request(request: BlasLtMatmulRequest) -> MatmulRequest {
+    MatmulRequest {
+        m: request.m,
+        n: request.n,
+        k: request.k,
+        dtype: request.dtype_name().to_string(),
+        a_layout: rocm_blaslt_layout(request.a_layout),
+        b_layout: rocm_blaslt_layout(request.b_layout),
+        c_layout: rocm_blaslt_layout(request.c_layout),
+        epilogue: rocm_blaslt_epilogue(request.epilogue),
+        concurrent_streams: request.concurrent_streams,
     }
 }
 
@@ -159,10 +179,14 @@ pub fn rocm_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     let a_rank = a.rank();
     let b_rank = b.rank();
     if a_rank < 2 || b_rank < 2 {
-        return Err(crate::Error::Msg(format!("{OP}: rank must be >= 2, got a={a_rank} b={b_rank}")));
+        return Err(crate::Error::Msg(format!(
+            "{OP}: rank must be >= 2, got a={a_rank} b={b_rank}"
+        )));
     }
     if a_rank != b_rank {
-        return Err(crate::Error::Msg(format!("{OP}: rank mismatch a={a_rank} b={b_rank}")));
+        return Err(crate::Error::Msg(format!(
+            "{OP}: rank mismatch a={a_rank} b={b_rank}"
+        )));
     }
     let a_shape = a.shape();
     let b_shape = b.shape();
@@ -179,15 +203,23 @@ pub fn rocm_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     let k_b = b_shape[b_rank - 2];
     let n = b_shape[b_rank - 1];
     if k_a != k_b {
-        return Err(crate::Error::Msg(format!("{OP}: contraction dim mismatch a.K={k_a} b.K={k_b}")));
+        return Err(crate::Error::Msg(format!(
+            "{OP}: contraction dim mismatch a.K={k_a} b.K={k_b}"
+        )));
     }
     if a.dtype() != b.dtype() {
-        return Err(crate::Error::Msg(format!("{OP}: dtype mismatch a={} b={}", a.dtype(), b.dtype())));
+        return Err(crate::Error::Msg(format!(
+            "{OP}: dtype mismatch a={} b={}",
+            a.dtype(),
+            b.dtype()
+        )));
     }
     let dtype = a.dtype();
-    let ds = dtype_str(dtype, OP)?;
+    blaslt_dtype_name(dtype, OP)?;
     if !a.is_contiguous() || !b.is_contiguous() {
-        return Err(crate::Error::Msg(format!("{OP}: contiguous inputs required")));
+        return Err(crate::Error::Msg(format!(
+            "{OP}: contiguous inputs required"
+        )));
     }
 
     let mut out_shape = a_shape[..a_rank - 2].to_vec();
@@ -200,10 +232,9 @@ pub fn rocm_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         n,
         k_a,
         dtype,
-        ds,
         out_shape,
-        MatmulLayout::RowMajor,
-        MatmulLayout::RowMajor,
+        BlasLtMatmulLayout::RowMajor,
+        BlasLtMatmulLayout::RowMajor,
         OP,
     )
 }
@@ -256,9 +287,11 @@ pub fn rocm_matmul_lhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         )));
     }
     let dtype = a.dtype();
-    let ds = dtype_str(dtype, OP)?;
+    blaslt_dtype_name(dtype, OP)?;
     if !a.is_contiguous() || !b.is_contiguous() {
-        return Err(crate::Error::Msg(format!("{OP}: contiguous inputs required")));
+        return Err(crate::Error::Msg(format!(
+            "{OP}: contiguous inputs required"
+        )));
     }
 
     let mut out_shape = a_shape[..a_rank - 2].to_vec();
@@ -271,10 +304,9 @@ pub fn rocm_matmul_lhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         n,
         k_a,
         dtype,
-        ds,
         out_shape,
-        MatmulLayout::ColMajor,
-        MatmulLayout::RowMajor,
+        BlasLtMatmulLayout::ColMajor,
+        BlasLtMatmulLayout::RowMajor,
         OP,
     )
 }
@@ -324,7 +356,7 @@ pub fn rocm_matmul_rhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         )));
     }
     let dtype = a.dtype();
-    let ds = dtype_str(dtype, OP)?;
+    blaslt_dtype_name(dtype, OP)?;
     if !a.is_contiguous() || !b.is_contiguous() {
         return Err(crate::Error::Msg(format!(
             "{OP}: contiguous inputs required"
@@ -341,10 +373,9 @@ pub fn rocm_matmul_rhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         n,
         k_a,
         dtype,
-        ds,
         out_shape,
-        MatmulLayout::RowMajor,
-        MatmulLayout::ColMajor,
+        BlasLtMatmulLayout::RowMajor,
+        BlasLtMatmulLayout::ColMajor,
         OP,
     )
 }
@@ -357,10 +388,9 @@ fn rocm_matmul_dispatch(
     n: usize,
     k: usize,
     dtype: DType,
-    dtype_str: &'static str,
     out_shape: Vec<usize>,
-    a_layout: MatmulLayout,
-    b_layout: MatmulLayout,
+    a_layout: BlasLtMatmulLayout,
+    b_layout: BlasLtMatmulLayout,
     op: &str,
 ) -> Result<Tensor> {
     let a_storage = rocm_storage(a, op, "a")?;
@@ -397,17 +427,18 @@ fn rocm_matmul_dispatch(
     let a_off_root = (a.layout().start_offset() * bpe) as u64;
     let b_off_root = (b.layout().start_offset() * bpe) as u64;
 
-    let request = MatmulRequest {
-        m: m as u64,
-        n: n as u64,
-        k: k as u64,
-        dtype: dtype_str.to_string(),
+    let request = rocm_blaslt_request(BlasLtMatmulRequest::new(
+        m,
+        n,
+        k,
+        dtype,
         a_layout,
         b_layout,
-        c_layout: MatmulLayout::RowMajor,
-        epilogue: Epilogue::Identity,
-        concurrent_streams: 1,
-    };
+        BlasLtMatmulLayout::RowMajor,
+        BlasLtEpilogue::Identity,
+        1,
+        op,
+    )?);
 
     for batch_i in 0..batch {
         let a_off = a_off_root + (batch_i as u64) * a_batch_stride;
@@ -434,13 +465,17 @@ pub fn rocm_matmul_into(a: &Tensor, b: &Tensor, dst: &Tensor) -> Result<()> {
     let a_rank = a.rank();
     let b_rank = b.rank();
     if a_rank < 2 || b_rank < 2 || a_rank != b_rank {
-        return Err(crate::Error::Msg(format!("{OP}: rank must be >= 2 and equal, got a={a_rank} b={b_rank}")));
+        return Err(crate::Error::Msg(format!(
+            "{OP}: rank must be >= 2 and equal, got a={a_rank} b={b_rank}"
+        )));
     }
     let a_shape = a.shape();
     let b_shape = b.shape();
     for axis in 0..a_rank - 2 {
         if a_shape[axis] != b_shape[axis] {
-            return Err(crate::Error::Msg(format!("{OP}: batch axis {axis} mismatch")));
+            return Err(crate::Error::Msg(format!(
+                "{OP}: batch axis {axis} mismatch"
+            )));
         }
     }
     let m = a_shape[a_rank - 2];
@@ -448,24 +483,34 @@ pub fn rocm_matmul_into(a: &Tensor, b: &Tensor, dst: &Tensor) -> Result<()> {
     let k_b = b_shape[b_rank - 2];
     let n = b_shape[b_rank - 1];
     if k_a != k_b {
-        return Err(crate::Error::Msg(format!("{OP}: contraction dim mismatch a.K={k_a} b.K={k_b}")));
+        return Err(crate::Error::Msg(format!(
+            "{OP}: contraction dim mismatch a.K={k_a} b.K={k_b}"
+        )));
     }
     if a.dtype() != b.dtype() {
         return Err(crate::Error::Msg(format!("{OP}: dtype mismatch")));
     }
     let dtype = a.dtype();
-    let ds = dtype_str(dtype, OP)?;
+    blaslt_dtype_name(dtype, OP)?;
     if !a.is_contiguous() || !b.is_contiguous() {
-        return Err(crate::Error::Msg(format!("{OP}: contiguous inputs required")));
+        return Err(crate::Error::Msg(format!(
+            "{OP}: contiguous inputs required"
+        )));
     }
     let mut expected = a_shape[..a_rank - 2].to_vec();
     expected.push(m);
     expected.push(n);
     if dst.shape() != expected.as_slice() {
-        return Err(crate::Error::Msg(format!("{OP}: dst shape {:?} != expected {:?}", dst.shape(), expected)));
+        return Err(crate::Error::Msg(format!(
+            "{OP}: dst shape {:?} != expected {:?}",
+            dst.shape(),
+            expected
+        )));
     }
     if dst.dtype() != dtype || !dst.is_contiguous() {
-        return Err(crate::Error::Msg(format!("{OP}: dst must match dtype and be contiguous")));
+        return Err(crate::Error::Msg(format!(
+            "{OP}: dst must match dtype and be contiguous"
+        )));
     }
 
     let a_storage = rocm_storage(a, OP, "a")?;
@@ -493,17 +538,18 @@ pub fn rocm_matmul_into(a: &Tensor, b: &Tensor, dst: &Tensor) -> Result<()> {
     let b_off_root = (b.layout().start_offset() * bpe) as u64;
     let dst_off_root = (dst.layout().start_offset() * bpe) as u64;
 
-    let request = MatmulRequest {
-        m: m as u64,
-        n: n as u64,
-        k: k_a as u64,
-        dtype: ds.to_string(),
-        a_layout: MatmulLayout::RowMajor,
-        b_layout: MatmulLayout::RowMajor,
-        c_layout: MatmulLayout::RowMajor,
-        epilogue: Epilogue::Identity,
-        concurrent_streams: 1,
-    };
+    let request = rocm_blaslt_request(BlasLtMatmulRequest::new(
+        m,
+        n,
+        k_a,
+        dtype,
+        BlasLtMatmulLayout::RowMajor,
+        BlasLtMatmulLayout::RowMajor,
+        BlasLtMatmulLayout::RowMajor,
+        BlasLtEpilogue::Identity,
+        1,
+        OP,
+    )?);
 
     for batch_i in 0..batch {
         let a_off = a_off_root + (batch_i as u64) * a_batch_stride;
@@ -527,13 +573,21 @@ pub fn rocm_matmul_with_bias(a: &Tensor, b: &Tensor, bias: &Tensor) -> Result<Te
     const OP: &str = "rocm_matmul_with_bias";
     let a_rank = a.rank();
     if a_rank < 2 {
-        return Err(crate::Error::Msg(format!("{OP}: a must have rank >= 2, got {a_rank}")));
+        return Err(crate::Error::Msg(format!(
+            "{OP}: a must have rank >= 2, got {a_rank}"
+        )));
     }
     if b.rank() != 2 {
-        return Err(crate::Error::Msg(format!("{OP}: b must be 2-D, got rank {}", b.rank())));
+        return Err(crate::Error::Msg(format!(
+            "{OP}: b must be 2-D, got rank {}",
+            b.rank()
+        )));
     }
     if bias.rank() != 1 {
-        return Err(crate::Error::Msg(format!("{OP}: bias must be 1-D, got rank {}", bias.rank())));
+        return Err(crate::Error::Msg(format!(
+            "{OP}: bias must be 1-D, got rank {}",
+            bias.rank()
+        )));
     }
     let a_shape = a.shape();
     let m = a_shape[a_rank - 2];
@@ -541,18 +595,25 @@ pub fn rocm_matmul_with_bias(a: &Tensor, b: &Tensor, bias: &Tensor) -> Result<Te
     let k_b = b.shape()[0];
     let n = b.shape()[1];
     if k_a != k_b {
-        return Err(crate::Error::Msg(format!("{OP}: contraction dim mismatch a.K={k_a} b.K={k_b}")));
+        return Err(crate::Error::Msg(format!(
+            "{OP}: contraction dim mismatch a.K={k_a} b.K={k_b}"
+        )));
     }
     if bias.shape()[0] != n {
-        return Err(crate::Error::Msg(format!("{OP}: bias len {} must equal N={n}", bias.shape()[0])));
+        return Err(crate::Error::Msg(format!(
+            "{OP}: bias len {} must equal N={n}",
+            bias.shape()[0]
+        )));
     }
     let dtype = a.dtype();
     if dtype != b.dtype() || dtype != bias.dtype() {
         return Err(crate::Error::Msg(format!("{OP}: dtype mismatch")));
     }
-    let ds = dtype_str(dtype, OP)?;
+    blaslt_dtype_name(dtype, OP)?;
     if !a.is_contiguous() || !b.is_contiguous() || !bias.is_contiguous() {
-        return Err(crate::Error::Msg(format!("{OP}: inputs must be contiguous")));
+        return Err(crate::Error::Msg(format!(
+            "{OP}: inputs must be contiguous"
+        )));
     }
 
     let a_storage = rocm_storage(a, OP, "a")?;
@@ -560,7 +621,9 @@ pub fn rocm_matmul_with_bias(a: &Tensor, b: &Tensor, bias: &Tensor) -> Result<Te
     let bias_storage = rocm_storage(bias, OP, "bias")?;
     use crate::StorageBackend;
     if a_storage.device() != b_storage.device() || a_storage.device() != bias_storage.device() {
-        return Err(crate::Error::Msg(format!("{OP}: all inputs must be on the same ROCm device")));
+        return Err(crate::Error::Msg(format!(
+            "{OP}: all inputs must be on the same ROCm device"
+        )));
     }
     let device_index = rocm_device_index(a_storage, OP)?;
     let ctx = a_storage.context();
@@ -586,17 +649,18 @@ pub fn rocm_matmul_with_bias(a: &Tensor, b: &Tensor, bias: &Tensor) -> Result<Te
     let b_off_root = (b.layout().start_offset() * bpe) as u64;
     let bias_off_root = (bias.layout().start_offset() * bpe) as u64;
 
-    let request = MatmulRequest {
-        m: m as u64,
-        n: n as u64,
-        k: k_a as u64,
-        dtype: ds.to_string(),
-        a_layout: MatmulLayout::RowMajor,
-        b_layout: MatmulLayout::RowMajor,
-        c_layout: MatmulLayout::RowMajor,
-        epilogue: Epilogue::Bias,
-        concurrent_streams: 1,
-    };
+    let request = rocm_blaslt_request(BlasLtMatmulRequest::new(
+        m,
+        n,
+        k_a,
+        dtype,
+        BlasLtMatmulLayout::RowMajor,
+        BlasLtMatmulLayout::RowMajor,
+        BlasLtMatmulLayout::RowMajor,
+        BlasLtEpilogue::Bias,
+        1,
+        OP,
+    )?);
 
     let b_ptr = (b_base + b_off_root) as *const core::ffi::c_void;
     let bias_ptr = (bias_base + bias_off_root) as *const core::ffi::c_void;

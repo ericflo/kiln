@@ -62,7 +62,29 @@ use kiln_core::tokenizer::KilnTokenizer;
 // `FlceProvider`/`fused_linear_cross_entropy*` opt-in (KILN_CUDA_FLCE) is gone —
 // FLCE is kt-native via `kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_kt`.
 use kiln_flce_kernel::DEFAULT_CHUNK_SIZE;
-use kiln_model::backend::{self, BackendRuntime};
+use kiln_model::BackendCapabilityQueries;
+use kiln_model::PagedKvCacheKt;
+#[cfg(feature = "vulkan")]
+use kiln_model::backend::GrpoLossRoute;
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+use kiln_model::backend::SftFlceLossRoute;
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+use kiln_model::backend::TrainingTapeRoute;
+use kiln_model::backend::{
+    self, BackendIdentity, BackendRuntime, FallbackPolicy, FinalRmsNormBackwardRoute,
+    GrpoKlAuxiliaryRoute, OptimizerBackend, ResidencyBackend, TrainingLossBackend,
+    TrainingPrecisionPolicy,
+};
 use kiln_model::forward::{
     GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, GqaAttentionPrepared, LinearAttentionState,
     gdn_attention_in_projections, gdn_attention_input_norm, gdn_attention_residual_block,
@@ -70,15 +92,14 @@ use kiln_model::forward::{
     gdn_qkv_from_mixed_training, gdn_recurrent_backward_no_grad, gdn_recurrent_forward_from_parts,
     gqa_attention_apply_output_gate, gqa_attention_core_prefill, gqa_attention_kv_prefill,
     gqa_attention_output_projection, gqa_attention_pre_o, gqa_attention_pre_o_chunked_prefill,
-    gqa_attention_prepare_prefill, gqa_attention_q_gate_prefill, model_forward_kt,
-    model_forward_embed, model_forward_final_norm, model_forward_head, model_forward_no_head,
+    gqa_attention_prepare_prefill, gqa_attention_q_gate_prefill, model_forward_embed,
+    model_forward_final_norm, model_forward_head, model_forward_kt, model_forward_no_head,
     model_forward_paged_normed_hidden, model_forward_segment, rms_norm,
     streaming_prefill_enabled_for, streaming_tile_tokens_for, swiglu_ffn,
     transformer_mlp_down_from_gated, transformer_mlp_gated_hidden,
 };
 use kiln_model::lora_loader::{LoraLayerWeights, LoraProjectionWeights, LoraWeights};
-use kiln_model::PagedKvCacheKt;
-use kiln_model::sampling::greedy_sample;
+use kiln_model::sampling::{greedy_sample, try_topk_on_device};
 
 use crate::replay::{
     self, BaseModel, Lineage, OutcomeRecord, OutcomeStatus, ParentLora, ReplayKind, ReplayLog,
@@ -275,10 +296,7 @@ impl TensorCastExt for Tensor {
 /// `Tensor::zeros(shape, DType::F32, device)`
 /// constructor.
 #[inline]
-fn zeros_f32_on<S: Into<Shape>>(
-    shape: S,
-    device: &Device,
-) -> Result<Tensor> {
+fn zeros_f32_on<S: Into<Shape>>(shape: S, device: &Device) -> Result<Tensor> {
     Ok(Tensor::zeros(shape, DType::F32, device)?)
 }
 
@@ -324,7 +342,6 @@ const LAST_DIM: D = D::Minus1;
 /// accumulation.
 type GradMap = std::collections::HashMap<KtTensorId, KtTensor>;
 
-
 /// Concatenate a slice of `&Tensor` refs along `dim`. Consolidates the
 /// Tensor::cat call site (~7 sites in the segment-level gradient +
 /// activation stitching paths).
@@ -337,11 +354,7 @@ fn cat_tensors(refs: &[&Tensor], dim: usize) -> Result<Tensor> {
 /// Consolidates the Tensor::zeros constructor (~8 sites in segment / tile /
 /// boundary-state init paths where the dtype is not statically F32).
 #[inline]
-fn zeros_dtype_on<S: Into<Shape>>(
-    shape: S,
-    dtype: DType,
-    device: &Device,
-) -> Result<Tensor> {
+fn zeros_dtype_on<S: Into<Shape>>(shape: S, dtype: DType, device: &Device) -> Result<Tensor> {
     Ok(Tensor::zeros(shape, dtype, device)?)
 }
 
@@ -349,11 +362,7 @@ fn zeros_dtype_on<S: Into<Shape>>(
 /// Consolidates the Tensor::ones constructor (~5 sites in q_norm/k_norm
 /// init + gradient-test fixtures).
 #[inline]
-fn ones_dtype_on<S: Into<Shape>>(
-    shape: S,
-    dtype: DType,
-    device: &Device,
-) -> Result<Tensor> {
+fn ones_dtype_on<S: Into<Shape>>(shape: S, dtype: DType, device: &Device) -> Result<Tensor> {
     Ok(Tensor::ones(shape, dtype, device)?)
 }
 
@@ -362,11 +371,7 @@ fn ones_dtype_on<S: Into<Shape>>(
 /// `Var::zeros` constructor. The AdamW moment allocation that also used
 /// `Var::zeros` is gone (`kiln_optim::AdamW` owns its own moments keyed by
 /// `Parameter::tensor_id()`).
-fn lora_param_zeros(
-    shape: (usize, usize),
-    dtype: DType,
-    device: &Device,
-) -> Result<Parameter> {
+fn lora_param_zeros(shape: (usize, usize), dtype: DType, device: &Device) -> Result<Parameter> {
     let n = shape.0 * shape.1;
     let data = vec![0.0f32; n];
     let master = build_lora_master_kt(&data, &[shape.0, shape.1], dtype, device)
@@ -374,36 +379,27 @@ fn lora_param_zeros(
     Ok(lora_parameter_from_kt(master))
 }
 
-/// Check whether `device` is a candle Metal device. Consolidates the
-/// `matches!(device, Device::Metal(_))` pattern (~6 sites in
-/// the GDN training tile / streaming-prefill / Metal-specific code paths).
 #[inline]
-fn is_metal_device(device: &Device) -> bool {
-    matches!(device, Device::Metal(_))
+fn training_precision_policy_for_device(device: &Device) -> TrainingPrecisionPolicy {
+    backend::training_precision_policy_for_device_kt(*device)
 }
 
-/// Check whether `device` is a candle CUDA device. Consolidates the
-/// `matches!(device, Device::Cuda(_))` pattern (~2 sites in
-/// the spool-checkpoint / exact-GDN-backward-tile path).
 #[inline]
-fn is_cuda_device(device: &Device) -> bool {
-    matches!(device, Device::Cuda(_))
+pub(crate) fn training_precision_policy_for_backend(
+    backend: &dyn BackendRuntime,
+) -> TrainingPrecisionPolicy {
+    TrainingLossBackend::runtime_training_precision_policy(backend)
 }
 
-/// Check whether `device` is a kt Vulkan device. Mirrors [`is_metal_device`].
-/// (#1082) Used to gate F32-base tape training to the Vulkan backend only:
-/// Vulkan's kt tape adapters accept `BF16 | F32` activations, whereas CUDA/Metal
-/// record genuinely BF16-only fused kernels (FFI / MSL).
-#[inline]
-fn is_vulkan_device(device: &Device) -> bool {
-    matches!(device, Device::Vulkan(_))
-}
-
-pub(crate) fn training_activation_bytes_per_elem(weights: &GpuWeights, device: &Device) -> usize {
+fn training_activation_bytes_per_elem_for_policy(
+    weights: &GpuWeights,
+    policy: TrainingPrecisionPolicy,
+) -> usize {
     const GDN_TAPE_EFFECTIVE_BYTES_PER_ELEM: usize = 10;
 
-    if is_vulkan_device(device) {
-        // Vulkan BF16 training explicitly promotes hidden activations to F32.
+    if policy.uses_f32_activations_for_mixed_base_weights() {
+        // Backends with mixed BF16 base weights and F32 training activations
+        // keep hidden activations in F32 for the tape path.
         return 4;
     }
     let base = match weights.embed_tokens.dtype() {
@@ -428,14 +424,46 @@ pub(crate) fn training_activation_bytes_per_elem(weights: &GpuWeights, device: &
     }
 }
 
-#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub(crate) fn training_activation_bytes_per_elem_for_backend(
+    weights: &GpuWeights,
+    backend: &dyn BackendRuntime,
+) -> usize {
+    training_activation_bytes_per_elem_for_policy(
+        weights,
+        training_precision_policy_for_backend(backend),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn training_activation_bytes_per_elem(weights: &GpuWeights, device: &Device) -> usize {
+    training_activation_bytes_per_elem_for_policy(
+        weights,
+        training_precision_policy_for_device(device),
+    )
+}
+
 #[inline]
-fn fused_rms_norm_tail_backend_enabled(device: &Device) -> bool {
-    match device {
-        Device::Cuda(_) => cfg!(feature = "cuda"),
-        Device::Rocm(_) => cfg!(feature = "rocm"),
-        _ => false,
-    }
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+fn final_rmsnorm_backward_route_for_backend(
+    backend: &dyn BackendRuntime,
+) -> FinalRmsNormBackwardRoute {
+    TrainingLossBackend::runtime_final_rmsnorm_backward_route(backend)
+}
+
+#[inline]
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+fn grpo_kl_auxiliary_route_for_backend(backend: &dyn BackendRuntime) -> GrpoKlAuxiliaryRoute {
+    TrainingLossBackend::runtime_grpo_kl_auxiliary_route(backend)
 }
 // ---------------------------------------------------------------------------
 // (#1082) The candle facade — type aliases, generic constructor helpers,
@@ -680,6 +708,26 @@ impl TrainableLoraParams {
         device: &Device,
         seed: Option<u64>,
     ) -> Result<Self> {
+        Self::initialize_seeded_with_precision_policy(
+            config,
+            weights,
+            rank,
+            alpha,
+            device,
+            seed,
+            training_precision_policy_for_device(device),
+        )
+    }
+
+    pub fn initialize_seeded_with_precision_policy(
+        config: &ModelConfig,
+        weights: &GpuWeights,
+        rank: usize,
+        alpha: f32,
+        device: &Device,
+        seed: Option<u64>,
+        precision_policy: TrainingPrecisionPolicy,
+    ) -> Result<Self> {
         // (#1082) kt `Device` has no `set_seed` (candle's was a no-op on CPU
         // anyway); the seeded `StdRng` below is what actually delivers
         // byte-for-byte determinism for LoRA-A. LoRA-B is plain zeros and
@@ -691,11 +739,9 @@ impl TrainableLoraParams {
         let hidden = config.hidden_size;
         let intermediate = config.intermediate_size;
 
-        // (#1082) LoRA-param dtype FOLLOWS the base/activation dtype on
-        // CUDA/Metal: BF16 base ⇒ BF16 LoRA (byte-for-byte no-op vs. the old
-        // hardcoded `DType::BF16`). On an F32 Vulkan base the LoRA A/B match the
-        // F32 activations so `try_tape_lora_linear_kt` fires instead of
-        // declining on a dtype mismatch (`proj.a.dtype() != x.dtype()`).
+        // (#1082) LoRA-param dtype follows the backend-owned training precision
+        // policy. CUDA/ROCm/Metal track the base dtype, while Vulkan keeps LoRA
+        // parameters F32 to match its F32 activation policy.
         //
         // (#1443 step 2) On Vulkan the ACTIVATION dtype is F32 regardless of the
         // base WEIGHT dtype — the mixed-precision design keeps base projection
@@ -706,11 +752,8 @@ impl TrainableLoraParams {
         // BF16 base; otherwise a BF16 LoRA on a BF16 base would mismatch the F32
         // `x2d` in `try_tape_lora_linear_kt`'s LoRA branch and decline. CUDA/Metal
         // keep `embed_tokens.dtype()` (BF16 activations end-to-end) unchanged.
-        let lora_dtype = if is_vulkan_device(device) {
-            kiln_tensor::DType::F32
-        } else {
-            weights.embed_tokens.dtype()
-        };
+        let lora_dtype =
+            precision_policy.lora_parameter_dtype_for_base_weight(weights.embed_tokens.dtype());
 
         // Kaiming uniform bound: sqrt(1 / in_features) for A
         let bound_hidden = (1.0 / hidden as f64).sqrt();
@@ -795,14 +838,9 @@ impl TrainableLoraParams {
                 // dtype now follows the base (`lora_dtype`): BF16 base ⇒ BF16
                 // (unchanged); F32 base (Vulkan-only) ⇒ F32 so the tape recorder
                 // matches the F32 activations.
-                let a = kaiming_uniform_a(
-                    rng.as_mut(),
-                    bound,
-                    (rank, in_features),
-                    lora_dtype,
-                    device,
-                )
-                .with_context(|| format!("init LoRA A for layer {layer_idx} {module}"))?;
+                let a =
+                    kaiming_uniform_a(rng.as_mut(), bound, (rank, in_features), lora_dtype, device)
+                        .with_context(|| format!("init LoRA A for layer {layer_idx} {module}"))?;
 
                 // B: [out_features, rank] — zeros
                 let b = lora_param_zeros((out_features, rank), lora_dtype, device)
@@ -862,11 +900,14 @@ impl TrainableLoraParams {
     /// completion to release registry entries before the trainer
     /// returns.
     pub fn register_with_backend(&self, backend: &dyn BackendRuntime) -> Result<()> {
-        if !backend.supports_resident_activation() {
+        if !ResidencyBackend::runtime_supports_resident_activation(backend) {
             return Ok(());
         }
         for param in self.all_params() {
-            backend.register_resident_activation(param.forward_storage().primary_tensor())?;
+            ResidencyBackend::runtime_register_resident_activation(
+                backend,
+                param.forward_storage().primary_tensor(),
+            )?;
         }
         Ok(())
     }
@@ -877,11 +918,14 @@ impl TrainableLoraParams {
     /// step 2 makes the registry the data-of-record and the trainer
     /// re-registers per step).
     pub fn evict_from_backend(&self, backend: &dyn BackendRuntime) {
-        if !backend.supports_resident_activation() {
+        if !ResidencyBackend::runtime_supports_resident_activation(backend) {
             return;
         }
         for param in self.all_params() {
-            backend.evict_resident_activation(param.forward_storage().primary_tensor());
+            ResidencyBackend::runtime_evict_resident_activation(
+                backend,
+                param.forward_storage().primary_tensor(),
+            );
         }
     }
 
@@ -898,18 +942,20 @@ impl TrainableLoraParams {
     /// No-op on backends without resident-activation support. Returns
     /// the number of params synced for telemetry.
     pub fn sync_to_master(&mut self, backend: &dyn BackendRuntime) -> Result<usize> {
-        if !backend.supports_resident_activation() {
+        if !ResidencyBackend::runtime_supports_resident_activation(backend) {
             return Ok(0);
         }
         let mut synced = 0;
         for param in self.all_params_mut() {
             let primary = param.forward_storage().primary_tensor().clone();
-            if !backend.has_resident_activation(&primary) {
+            if !ResidencyBackend::runtime_has_resident_activation(backend, &primary) {
                 continue;
             }
             let dims: Vec<usize> = primary.dims().to_vec();
             let dtype = primary.dtype();
-            if let Some(resolved) = backend.resolve_resident_activation(&primary, &dims, dtype)? {
+            if let Some(resolved) = ResidencyBackend::runtime_resolve_resident_activation(
+                backend, &primary, &dims, dtype,
+            )? {
                 param.replace_forward_storage(KtForwardStorage::Plain(resolved.clone()));
                 param.replace_backward_storage(Some(resolved));
                 synced += 1;
@@ -1031,12 +1077,12 @@ impl OptimizerState {
     /// No-op on backends without resident-activation support (the host
     /// `kiln_optim::AdamW` fallback handles those).
     pub fn register_with_backend(&self, backend: &dyn BackendRuntime) -> Result<()> {
-        if !backend.supports_resident_activation() {
+        if !ResidencyBackend::runtime_supports_resident_activation(backend) {
             return Ok(());
         }
         for moments in self.moments.values() {
-            backend.register_resident_activation(&moments.m)?;
-            backend.register_resident_activation(&moments.v)?;
+            ResidencyBackend::runtime_register_resident_activation(backend, &moments.m)?;
+            ResidencyBackend::runtime_register_resident_activation(backend, &moments.v)?;
         }
         Ok(())
     }
@@ -1044,12 +1090,12 @@ impl OptimizerState {
     /// Inverse of [`Self::register_with_backend`]: release every moment
     /// tensor from the resident registry at training completion.
     pub fn evict_from_backend(&self, backend: &dyn BackendRuntime) {
-        if !backend.supports_resident_activation() {
+        if !ResidencyBackend::runtime_supports_resident_activation(backend) {
             return;
         }
         for moments in self.moments.values() {
-            backend.evict_resident_activation(&moments.m);
-            backend.evict_resident_activation(&moments.v);
+            ResidencyBackend::runtime_evict_resident_activation(backend, &moments.m);
+            ResidencyBackend::runtime_evict_resident_activation(backend, &moments.v);
         }
     }
 }
@@ -1204,11 +1250,7 @@ impl TrainableLoraParams {
     // (the `safetensors_load_file` shim is candle); the loaded candle
     // tensor is bridged to kt and installed.
     // // (#1082) bridge — safetensors I/O is still a candle island.
-    pub fn load_from_safetensors(
-        &mut self,
-        adapter_dir: &Path,
-        device: &Device,
-    ) -> Result<usize> {
+    pub fn load_from_safetensors(&mut self, adapter_dir: &Path, device: &Device) -> Result<usize> {
         let st_path = adapter_dir.join("adapter_model.safetensors");
         // (#1082) kt-native safetensors load — `kiln_tensor::safetensors::load_cpu`
         // returns CPU kt tensors; each is moved to the training device and
@@ -1228,25 +1270,26 @@ impl TrainableLoraParams {
 
         let mut loaded = 0usize;
         for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
-            let mut load_proj =
-                |name: &str, pair: &mut Option<(Parameter, Parameter)>, is_attn: bool| -> Result<()> {
-                    if let Some((a, b)) = pair.as_mut() {
-                        let sub = if is_attn { "self_attn" } else { "mlp" };
-                        let prefix =
-                            format!("base_model.model.model.layers.{layer_idx}.{sub}.{name}");
-                        let a_key = format!("{prefix}.lora_A.weight");
-                        let b_key = format!("{prefix}.lora_B.weight");
-                        if let Some(a_t) = tensors.get(&a_key) {
-                            install(a, a_t, &a_key)?;
-                            loaded += 1;
-                        }
-                        if let Some(b_t) = tensors.get(&b_key) {
-                            install(b, b_t, &b_key)?;
-                            loaded += 1;
-                        }
+            let mut load_proj = |name: &str,
+                                 pair: &mut Option<(Parameter, Parameter)>,
+                                 is_attn: bool|
+             -> Result<()> {
+                if let Some((a, b)) = pair.as_mut() {
+                    let sub = if is_attn { "self_attn" } else { "mlp" };
+                    let prefix = format!("base_model.model.model.layers.{layer_idx}.{sub}.{name}");
+                    let a_key = format!("{prefix}.lora_A.weight");
+                    let b_key = format!("{prefix}.lora_B.weight");
+                    if let Some(a_t) = tensors.get(&a_key) {
+                        install(a, a_t, &a_key)?;
+                        loaded += 1;
                     }
-                    Ok(())
-                };
+                    if let Some(b_t) = tensors.get(&b_key) {
+                        install(b, b_t, &b_key)?;
+                        loaded += 1;
+                    }
+                }
+                Ok(())
+            };
 
             load_proj("q_proj", &mut layer.q_proj, true)?;
             load_proj("k_proj", &mut layer.k_proj, true)?;
@@ -1962,12 +2005,7 @@ fn adapter_smoke_linear_state(
     // (#1082) `Tensor::device()` returns an owned kt `Device` (Copy); the
     // constructor wants `&Device`, so bind to a local and borrow.
     let kt_device = weights.embed_tokens.device();
-    LinearAttentionState::new_with_batch_for_inference_backend(
-        model_config,
-        1,
-        &kt_device,
-        Some(backend.name()),
-    )
+    LinearAttentionState::new_with_batch_for_inference_runtime(model_config, 1, &kt_device, backend)
 }
 
 fn adapter_smoke_forward_logits(
@@ -2316,6 +2354,7 @@ pub fn sft_train(
     // to candle locally inside `load_from_safetensors`/`save_peft`.
     let device = weights.embed_tokens.device();
     let backend = backend::for_device_kt(&device);
+    let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
 
     tracing::info!(
         num_examples = examples.len(),
@@ -2410,13 +2449,14 @@ pub fn sft_train(
     };
 
     // Initialize trainable LoRA parameters
-    let mut params = TrainableLoraParams::initialize_seeded(
+    let mut params = TrainableLoraParams::initialize_seeded_with_precision_policy(
         model_config,
         weights,
         config.lora_rank,
         config.lora_alpha,
         &device,
         effective_seed,
+        training_precision_policy,
     )?;
 
     tracing::info!(
@@ -2497,7 +2537,8 @@ pub fn sft_train(
         // Auto-tune gradient checkpointing for this workload's actual
         // sequence length, not just VRAM. On a big GPU with short prompts
         // this typically disables checkpointing entirely (~10-30% faster).
-        let activation_bytes_per_elem = training_activation_bytes_per_elem(weights, &device);
+        let activation_bytes_per_elem =
+            training_activation_bytes_per_elem_for_policy(weights, training_precision_policy);
         let ckpt_config = CheckpointConfig::auto_for_workload_with_activation_bytes(
             model_config.num_layers,
             max_seq_len_tokens,
@@ -2549,7 +2590,12 @@ pub fn sft_train(
                 // `checkpointed_forward_backward_tape_authoritative_kt` both return
                 // `GradSource::Kt`, consumed kt-native by the dispatchers.
                 let grads: GradSource = if let Some(ref segs) = segments {
-                    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+                    #[cfg(any(
+                        feature = "cuda",
+                        feature = "metal",
+                        feature = "vulkan",
+                        feature = "rocm"
+                    ))]
                     {
                         let (lv, kt_grads) = checkpointed_forward_backward_tape_authoritative_kt(
                             &*backend,
@@ -2564,7 +2610,12 @@ pub fn sft_train(
                         loss_val = lv;
                         GradSource::Kt(kt_grads)
                     }
-                    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
+                    #[cfg(not(any(
+                        feature = "cuda",
+                        feature = "metal",
+                        feature = "vulkan",
+                        feature = "rocm"
+                    )))]
                     {
                         // Non-GPU build: the kt tape adapters don't record on a
                         // CPU candle device, so checkpointed kt-tape backward is a
@@ -2771,6 +2822,7 @@ pub fn grpo_train(
     // adapter I/O, which bridges kt->candle locally inside save/load.
     let device = weights.embed_tokens.device();
     let backend = backend::for_device_kt(&device);
+    let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
 
     let total_completions: usize = groups.iter().map(|g| g.completions.len()).sum();
     let mut data_stats = crate::train_receipt::DataStatsReceipt {
@@ -2901,13 +2953,14 @@ pub fn grpo_train(
     };
 
     // Initialize trainable LoRA parameters
-    let mut params = TrainableLoraParams::initialize_seeded(
+    let mut params = TrainableLoraParams::initialize_seeded_with_precision_policy(
         model_config,
         weights,
         config.lora_rank,
         config.lora_alpha,
         &device,
         effective_seed,
+        training_precision_policy,
     )?;
 
     tracing::info!(
@@ -3089,7 +3142,8 @@ pub fn grpo_train(
         // Auto-tune gradient checkpointing for this workload's actual
         // sequence length. Same pattern as `sft_train`: skip checkpointing
         // when activation tape comfortably fits in available VRAM.
-        let activation_bytes_per_elem = training_activation_bytes_per_elem(weights, &device);
+        let activation_bytes_per_elem =
+            training_activation_bytes_per_elem_for_policy(weights, training_precision_policy);
         let ckpt_config = CheckpointConfig::auto_for_workload_with_activation_bytes(
             model_config.num_layers,
             max_seq_len_tokens,
@@ -3615,6 +3669,7 @@ pub fn grpo_train_jsonl(
     // I/O, which bridges kt->candle locally inside save/load.
     let device = weights.embed_tokens.device();
     let backend = backend::for_device_kt(&device);
+    let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
 
     tracing::info!(
         dataset = %dataset_path.display(),
@@ -3714,13 +3769,14 @@ pub fn grpo_train_jsonl(
         }
     };
 
-    let mut params = TrainableLoraParams::initialize_seeded(
+    let mut params = TrainableLoraParams::initialize_seeded_with_precision_policy(
         model_config,
         weights,
         config.lora_rank,
         config.lora_alpha,
         &device,
         effective_seed,
+        training_precision_policy,
     )?;
 
     tracing::info!(
@@ -4788,7 +4844,7 @@ fn chunked_log_probs_for_completion(
                 None => chunk_correct.detach(),
             });
         }
-        synchronize_metal_tail_chunk(device, "synchronize chunked_log_probs_for_completion")?;
+        synchronize_tail_chunk("synchronize chunked_log_probs_for_completion")?;
         chunk_start = chunk_end;
     }
 
@@ -4798,7 +4854,6 @@ fn chunked_log_probs_for_completion(
     let log_sum_exp = (running_max + running_sumexp.log()?)?;
     Ok((correct_logits - log_sum_exp)?.squeeze(1)?)
 }
-
 
 #[allow(clippy::too_many_arguments)]
 fn train_tokenized_grpo_group_with_grad_norms(
@@ -4935,37 +4990,31 @@ fn train_tokenized_grpo_group_with_grad_norms(
         // eligible, the kt `Tape` records the FULL forward, so gradient
         // checkpointing (the candle reverse-segment loop) is unnecessary — we
         // route to the non-checkpointed tape branch below even when `segments`
-        // is `Some`. Gated to CUDA/Metal (tape adapters), no ACTIVE ECHO
-        // env-CE (no tape root — carved out), and not the `no_policy_loss`
-        // constant-zero-without-ECHO config. Mirrors how OPD's tape path REPLACES
-        // its candle gradient-checkpointing loop. This is the SINGLE source of
-        // truth for the tape-authoritative gate — both the checkpointing-bypass
-        // (`active_segments` below) and the non-checkpointed-branch dispatch read
-        // it. Kept local + cfg-split so the non-cuda build doesn't reference the
-        // cuda-only gate fn.
-        //
-        // (#1082) Vulkan was MISSING from the runtime device match (PR6 missed
-        // this gate), so GRPO silently never tape-authored on Vulkan. Add
-        // `Vulkan(_)`, and add `base_dtype_supports_tape(weights, device)` so the
-        // gate stays consistent with SFT: BF16 base on any GPU, F32 base on
-        // Vulkan only. For a BF16 base this is a no-op; it newly-permits F32 on
-        // Vulkan and explicitly bails F32 on CUDA/Metal (silently-empty before).
-        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+        // is `Some`. Backend eligibility is advertised through
+        // `TrainingLossBackend`; dtype eligibility comes from
+        // `TrainingPrecisionPolicy`. Per-completion loss-shape exclusions stay
+        // local because they depend on ECHO/no-policy-loss semantics rather than
+        // backend identity.
+        #[cfg(any(
+            feature = "cuda",
+            feature = "metal",
+            feature = "vulkan",
+            feature = "rocm"
+        ))]
         let tape_auth_eligible = tape_authoritative_enabled()
-            && matches!(
-                device,
-                kiln_tensor::Device::Cuda(_)
-                    | kiln_tensor::Device::Metal(_)
-                    | kiln_tensor::Device::Vulkan(_)
-                    | kiln_tensor::Device::Rocm(_)
-            )
-            && base_dtype_supports_tape(weights, device)
+            && backend_supports_tape_forward_backward(backend)
+            && base_dtype_supports_tape_for_backend(weights, backend)
             && !(config.loss.echo.is_some()
                 && config.loss.echo_enabled()
                 && comp_env_count > 0
                 && comp.total_obs_len > 0)
             && !config.loss.no_policy_loss;
-        #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
+        #[cfg(not(any(
+            feature = "cuda",
+            feature = "metal",
+            feature = "vulkan",
+            feature = "rocm"
+        )))]
         let tape_auth_eligible = false;
 
         let ref_log_probs = if skip_reference {
@@ -5076,13 +5125,18 @@ fn train_tokenized_grpo_group_with_grad_norms(
         let loss_val: f64;
         anyhow::ensure!(
             tape_auth_eligible,
-            "GRPO requires the kt tape-authoritative path (CUDA + BF16 base, no \
-             ECHO env-CE, no no_policy_loss) post candle-drop. The candle \
-             `loss.backward()` / ECHO / candle-checkpointed GRPO producers were \
-             removed in #1082."
+            "GRPO requires the kt tape-authoritative path (backend tape support, \
+             compatible base dtype, no ECHO env-CE, no no_policy_loss) post \
+             candle-drop. The candle `loss.backward()` / ECHO / candle-checkpointed \
+             GRPO producers were removed in #1082."
         );
         let grads: GradSource = {
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+            #[cfg(any(
+                feature = "cuda",
+                feature = "metal",
+                feature = "vulkan",
+                feature = "rocm"
+            ))]
             {
                 let (lv, kt_grads) = if let Some(segs) = segments {
                     let step_started = Instant::now();
@@ -5108,7 +5162,8 @@ fn train_tokenized_grpo_group_with_grad_norms(
                         action_tokens = num_active,
                         env_tokens = comp_env_count,
                         checkpoint_segments,
-                        streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
+                        streaming_prefill =
+                            streaming_prefill_enabled_for(device, comp.input_ids.len()),
                         streaming_tile_tokens,
                         elapsed_ms = step_elapsed.as_millis() as u64,
                         "GRPO step end (checkpointed tape-authoritative kt)"
@@ -5137,13 +5192,18 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 comp_echo_env_ce = None;
                 GradSource::Kt(kt_grads)
             }
-            #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
+            #[cfg(not(any(
+                feature = "cuda",
+                feature = "metal",
+                feature = "vulkan",
+                feature = "rocm"
+            )))]
             {
-                // `tape_auth_eligible` is a const `false` without the cuda or
-                // metal feature, so the ensure! above already bailed; this arm
-                // is unreachable but keeps `loss_val` definitely-assigned.
+                // `tape_auth_eligible` is a const `false` without a GPU backend
+                // feature, so the ensure! above already bailed; this arm is
+                // unreachable but keeps `loss_val` definitely-assigned.
                 let _ = (&ref_log_probs, num_active, comp_env_count, comp_idx);
-                unreachable!("GRPO kt path requires the cuda or metal feature");
+                unreachable!("GRPO kt path requires a GPU backend feature");
             }
         };
         if token_level {
@@ -5302,7 +5362,10 @@ pub(crate) fn observe_lora_grad_norms_from_kt_grad_store(
             if norm.is_finite() {
                 *sum_sq_by_module.entry(entry.module).or_insert(0.0) += norm * norm;
             } else {
-                tracing::warn!(module = entry.module, "skipping non-finite LoRA grad norm sample (kt)");
+                tracing::warn!(
+                    module = entry.module,
+                    "skipping non-finite LoRA grad norm sample (kt)"
+                );
             }
         }
     }
@@ -5556,9 +5619,7 @@ fn deepcopy_tensor_for_snapshot(t: &Tensor) -> Result<Tensor> {
 fn ema_blend_tensor(old: &Tensor, current: &Tensor, decay: f32) -> Result<Tensor> {
     let dtype = old.dtype();
     let a = old.to_f32_dtype()?.affine(decay as f64, 0.0)?;
-    let b = current
-        .to_f32_dtype()?
-        .affine((1.0 - decay) as f64, 0.0)?;
+    let b = current.to_f32_dtype()?.affine((1.0 - decay) as f64, 0.0)?;
     let blended = (a + b)?;
     let out = if dtype == DType::F32 {
         blended
@@ -5805,15 +5866,15 @@ pub(crate) fn selected_logits_from_chunk_sparse(
             let flat = row_idx
                 .checked_mul(chunk_len)
                 .and_then(|base| base.checked_add(rel))
-                .ok_or_else(|| {
-                    anyhow::anyhow!("{caller}: flat selected-logit index overflow")
-                })?;
-            row_indices.push(u32::try_from(row_idx).with_context(|| {
-                format!("{caller}: row index {row_idx} exceeds u32 range")
-            })?);
-            flat_indices.push(u32::try_from(flat).with_context(|| {
-                format!("{caller}: flat index {flat} exceeds u32 range")
-            })?);
+                .ok_or_else(|| anyhow::anyhow!("{caller}: flat selected-logit index overflow"))?;
+            row_indices.push(
+                u32::try_from(row_idx)
+                    .with_context(|| format!("{caller}: row index {row_idx} exceeds u32 range"))?,
+            );
+            flat_indices.push(
+                u32::try_from(flat)
+                    .with_context(|| format!("{caller}: flat index {flat} exceeds u32 range"))?,
+            );
         }
     }
 
@@ -5945,7 +6006,7 @@ fn selected_log_probs_from_normed_hidden_chunked(
                 None => chunk_correct.detach(),
             });
         }
-        synchronize_metal_tail_chunk(&device, "synchronize selected log-prob chunk")?;
+        synchronize_tail_chunk("synchronize selected log-prob chunk")?;
         chunk_start = chunk_end;
     }
 
@@ -6150,7 +6211,7 @@ fn has_supervised_shifted_labels(label_mask: &[bool]) -> bool {
 /// `input_ids`: token IDs (used as labels, shifted by 1)
 /// `label_mask`: which positions to include in the loss
 ///
-/// SFT next-token cross-entropy loss VALUE (scalar `f64`), kt-native, CUDA-only.
+/// SFT next-token cross-entropy loss VALUE (scalar `f64`), kt-native.
 ///
 /// (#1082 candle-drop) This is a value-only reader: it returns the scalar loss
 /// for logging / the gradient-checkpoint final-boundary readback. The
@@ -6158,11 +6219,17 @@ fn has_supervised_shifted_labels(label_mask: &[bool]) -> bool {
 /// DIRECTLY by the SFT/GRPO/OPD `with_tape_authoritative_scope_kt` closures — it
 /// does NOT go through here. The old candle `[1, T, V]` bridge + candle
 /// log-sum-exp/gather composite + the candle `try_tape_cross_entropy_cuda`
-/// adapter are deleted; F32/CPU CE is dropped (kt CE is CUDA BF16 only). The kt
-/// CE math itself is covered by `tape_forward_parity`
+/// adapter are deleted; unsupported backend/dtype combinations are rejected by
+/// the backend tape route plus `TrainingPrecisionPolicy`. The kt CE math itself
+/// is covered by `tape_forward_parity`
 /// (`tape_forward_cross_entropy_matches_reference`,
 /// `tape_backward_cross_entropy_matches_analytic_gradient`).
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
 fn cross_entropy_loss(
     logits: &KtTensor,
     input_ids: &[u32],
@@ -6170,9 +6237,7 @@ fn cross_entropy_loss(
     _device: &Device,
 ) -> Result<f64> {
     let loss_kt = kiln_model::tape_forward::try_tape_cross_entropy_from_logits_kt(
-        logits,
-        input_ids,
-        label_mask,
+        logits, input_ids, label_mask,
     )?
     .ok_or_else(|| {
         anyhow::anyhow!(
@@ -6190,16 +6255,15 @@ fn cross_entropy_loss(
 /// chunking over vocab so the full `[T, V]` logits tensor is never
 /// materialized. The returned tensor is F32 with shape `[1, T, H]`; inactive
 /// shifted-label rows and the final sequence row are zero.
-fn synchronize_metal_tail_chunk(device: &Device, _context: &'static str) -> Result<()> {
+fn synchronize_tail_chunk(_context: &'static str) -> Result<()> {
     // (#1082) kt `Device` has no per-device `synchronize()` (candle-only API);
-    // the candle-drop training path is CUDA-only (the kt tape adapters are
-    // BF16/CUDA), so the Metal chunk-tail sync that candle needed is a no-op
-    // here. If kt Metal training is ever wired up it gets its own sync hook.
-    let _ = is_metal_device(device);
+    // the old chunk-tail sync point is retained as a named no-op for caller
+    // structure without branching on backend identity here.
     Ok(())
 }
 
 fn analytic_sft_tail_grad_pre_final_norm(
+    final_rmsnorm_backward_route: FinalRmsNormBackwardRoute,
     hidden: &Tensor,
     final_norm_weight: &Tensor,
     head_t: &Tensor,
@@ -6220,6 +6284,7 @@ fn analytic_sft_tail_grad_pre_final_norm(
     let normed = rms_norm(hidden, final_norm_weight, rms_norm_eps)
         .context("analytic SFT tail final RMSNorm")?;
     analytic_sft_tail_grad_from_validated_normed_pre_final_norm(
+        final_rmsnorm_backward_route,
         hidden,
         &normed,
         final_norm_weight,
@@ -6233,6 +6298,7 @@ fn analytic_sft_tail_grad_pre_final_norm(
 }
 
 fn analytic_sft_tail_grad_from_normed_pre_final_norm(
+    final_rmsnorm_backward_route: FinalRmsNormBackwardRoute,
     hidden: &Tensor,
     normed: &Tensor,
     final_norm_weight: &Tensor,
@@ -6252,6 +6318,7 @@ fn analytic_sft_tail_grad_from_normed_pre_final_norm(
         chunk_size,
     )?;
     analytic_sft_tail_grad_from_validated_normed_pre_final_norm(
+        final_rmsnorm_backward_route,
         hidden,
         normed,
         final_norm_weight,
@@ -6265,6 +6332,7 @@ fn analytic_sft_tail_grad_from_normed_pre_final_norm(
 }
 
 fn analytic_sft_tail_grad_from_normed_pre_final_norm_with_flce_metadata(
+    final_rmsnorm_backward_route: FinalRmsNormBackwardRoute,
     hidden: &Tensor,
     normed: &Tensor,
     final_norm_weight: &Tensor,
@@ -6285,6 +6353,7 @@ fn analytic_sft_tail_grad_from_normed_pre_final_norm_with_flce_metadata(
         chunk_size,
     )?;
     analytic_sft_tail_grad_from_validated_normed_pre_final_norm(
+        final_rmsnorm_backward_route,
         hidden,
         normed,
         final_norm_weight,
@@ -6298,6 +6367,7 @@ fn analytic_sft_tail_grad_from_normed_pre_final_norm_with_flce_metadata(
 }
 
 fn analytic_sft_tail_grad_from_validated_normed_pre_final_norm(
+    final_rmsnorm_backward_route: FinalRmsNormBackwardRoute,
     hidden: &Tensor,
     normed: &Tensor,
     final_norm_weight: &Tensor,
@@ -6318,8 +6388,14 @@ fn analytic_sft_tail_grad_from_validated_normed_pre_final_norm(
         )
     }
     .map_err(|e| anyhow::anyhow!("analytic SFT tail FLCE hidden gradient: {e}"))?;
-    rms_norm_backward_pre_final_norm(hidden, final_norm_weight, &grad_normed, rms_norm_eps)
-        .context("analytic SFT tail final RMSNorm backward")
+    rms_norm_backward_pre_final_norm(
+        final_rmsnorm_backward_route,
+        hidden,
+        final_norm_weight,
+        &grad_normed,
+        rms_norm_eps,
+    )
+    .context("analytic SFT tail final RMSNorm backward")
 }
 
 fn validate_analytic_sft_tail_grad_inputs(
@@ -6382,6 +6458,7 @@ fn validate_analytic_sft_tail_grad_inputs(
 }
 
 pub(crate) fn rms_norm_backward_pre_final_norm(
+    _final_rmsnorm_backward_route: FinalRmsNormBackwardRoute,
     hidden: &Tensor,
     final_norm_weight: &Tensor,
     grad_normed: &Tensor,
@@ -6407,13 +6484,13 @@ pub(crate) fn rms_norm_backward_pre_final_norm(
 
     #[cfg(any(feature = "cuda", feature = "rocm"))]
     {
-        let device = hidden.device();
-        let fused_backend = fused_rms_norm_tail_backend_enabled(&device);
-        let same_device =
-            final_norm_weight.device() == device && grad_normed.device() == device;
+        let same_device = final_norm_weight.device() == hidden.device()
+            && grad_normed.device() == hidden.device();
         let non_empty_rows = dims[0] > 0 && dims[1] > 0;
-        let fused_envelope = fused_backend
-            && same_device
+        let fused_envelope = matches!(
+            _final_rmsnorm_backward_route,
+            FinalRmsNormBackwardRoute::CudaRocmFusedTail
+        ) && same_device
             && non_empty_rows
             && kiln_rmsnorm_kernel::supports_rmsnorm_kt(hidden, final_norm_weight)
             && grad_normed.dtype() == KtDType::BF16
@@ -6450,8 +6527,6 @@ pub(crate) fn rms_norm_backward_pre_final_norm(
     let correction = hidden_f32.broadcast_mul(&dot.broadcast_mul(&correction_scale)?)?;
     Ok((u.broadcast_mul(&rms_inv)? - correction)?.detach())
 }
-
-
 
 /// Read `KILN_USE_FLCE` env var. When enabled, SFT training takes the
 /// Fused Linear Cross-Entropy path: the LM head matmul is fused into a
@@ -6500,9 +6575,6 @@ fn recompute_checkpoint_boundaries(seq_len: usize) -> bool {
         .unwrap_or(8192);
     seq_len >= threshold
 }
-
-
-
 
 struct SpooledCheckpointBoundaries {
     _dir: tempfile::TempDir,
@@ -6561,7 +6633,6 @@ impl SpooledCheckpointBoundaries {
     }
 }
 
-
 /// (#1082) SGD update (param = param - lr*grad) from a kt-native
 /// [`kiln_autograd::GradStore`] (keyed by `Parameter::tensor_id()`).
 fn sgd_step(
@@ -6570,7 +6641,7 @@ fn sgd_step(
     grads: &kiln_autograd::GradStore,
     lr: f64,
 ) -> Result<()> {
-    let resident_activation = backend.supports_resident_activation();
+    let resident_activation = ResidencyBackend::runtime_supports_resident_activation(backend);
     for param in params.all_params_mut() {
         if let Some(grad) = grads.get(param.tensor_id()) {
             apply_sgd_update_kt(backend, param, grad, lr, resident_activation)?;
@@ -6600,11 +6671,9 @@ fn sgd_step(
 /// candle on demand for the `Kt` variant); sites that need the raw
 /// candle store use [`GradSource::candle`].
 ///
-/// CUDA-gating: the `Kt` variant exists ONLY under `feature = "cuda"`
-/// (its producer + the per-Var kt -> candle bridge are CUDA-only). On a
-/// non-cuda build `GradSource` is a single-variant `Candle` wrapper and
-/// `standard_forward_backward` always returns `Candle`, so the CPU smoke
-/// test (`perf_regression_sft_train_cpu_smoke`) is unaffected.
+/// Feature-gating: the `Kt` variant exists when a GPU backend feature is
+/// enabled. The producer is selected through backend training capabilities, and
+/// CPU-only builds keep the candle wrapper variant for legacy tests.
 pub enum GradSource {
     /// kt-native gradients (the SOLE grad producer post-#1082). Keyed by
     /// `Parameter::tensor_id()`; values are `kiln_tensor::Tensor`. The
@@ -6653,6 +6722,50 @@ pub fn optimizer_step_dispatch(
     }
 }
 
+fn training_optimizer_debug_fallback_enabled(debug_env: Option<&'static str>) -> bool {
+    kiln_core::env_flag::env_flag("KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK", false)
+        || debug_env
+            .map(|env_var| kiln_core::env_flag::env_flag(env_var, false))
+            .unwrap_or(false)
+}
+
+fn training_optimizer_fallback_policy(
+    backend: &dyn BackendRuntime,
+    _device: kiln_tensor::Device,
+) -> FallbackPolicy {
+    let fallback = BackendCapabilityQueries::backend_capabilities(backend).fallback;
+    if training_optimizer_debug_fallback_enabled(fallback.training_optimizer_debug_env) {
+        return FallbackPolicy::WarnAndCount;
+    }
+    fallback.training_optimizer
+}
+
+fn ensure_training_optimizer_fallback_allowed(
+    backend: &dyn BackendRuntime,
+    device: kiln_tensor::Device,
+    optimizer_name: &'static str,
+) -> Result<()> {
+    let policy = training_optimizer_fallback_policy(backend, device);
+    if policy.allows_fallback() {
+        if matches!(policy, FallbackPolicy::WarnAndCount) {
+            tracing::warn!(
+                backend = BackendIdentity::runtime_name(backend),
+                device = %device.short_name(),
+                optimizer = optimizer_name,
+                "training optimizer using explicit debug fallback"
+            );
+        }
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{optimizer_name} optimizer fallback policy {:?} for {} training hot path on {}; \
+         native optimizer dispatch required (set KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 to opt in)",
+        policy,
+        BackendIdentity::runtime_name(backend),
+        device.short_name()
+    )
+}
+
 /// (#1082) LoRA grad-norm observer dispatcher — kt-native only.
 pub fn observe_lora_grad_norms_dispatch(
     accumulator: &mut crate::train_receipt::LoraGradNormAccumulator,
@@ -6672,8 +6785,8 @@ pub fn observe_lora_grad_norms_dispatch(
 /// single LoRA `Parameter`, preferring the on-device registry path when
 /// param + grad are both resident (the backend trait takes kt tensors).
 ///
-/// On-device path: register the kt grad → `dispatch_sgd_step` writes the
-/// param buffer in place → evict the grad. The `Parameter`'s master is
+/// On-device path: register the kt grad → `OptimizerBackend` writes the param
+/// buffer in place → evict the grad. The `Parameter`'s master is
 /// left stale; `sync_to_master` pulls the registry back before save.
 ///
 /// CPU fallback: compute `param - lr*grad` kt-natively and install it via
@@ -6687,21 +6800,23 @@ fn apply_sgd_update_kt(
     resident_activation: bool,
 ) -> Result<()> {
     let primary = param.forward_storage().primary_tensor().clone();
-    if resident_activation && backend.has_resident_activation(&primary) {
-        backend.register_resident_activation(grad)?;
-        let dispatched = match backend.dispatch_sgd_step(&primary, grad, lr as f32) {
-            Ok(b) => b,
-            Err(e) => {
-                backend.evict_resident_activation(grad);
-                return Err(e);
-            }
-        };
+    if resident_activation && ResidencyBackend::runtime_has_resident_activation(backend, &primary) {
+        ResidencyBackend::runtime_register_resident_activation(backend, grad)?;
+        let dispatched =
+            match OptimizerBackend::runtime_dispatch_sgd_step(backend, &primary, grad, lr as f32) {
+                Ok(b) => b,
+                Err(e) => {
+                    ResidencyBackend::runtime_evict_resident_activation(backend, grad);
+                    return Err(e);
+                }
+            };
         if dispatched {
-            backend.evict_resident_activation(grad);
+            ResidencyBackend::runtime_evict_resident_activation(backend, grad);
             return Ok(());
         }
-        backend.evict_resident_activation(grad);
+        ResidencyBackend::runtime_evict_resident_activation(backend, grad);
     }
+    ensure_training_optimizer_fallback_allowed(backend, primary.device(), "SGD")?;
     // CPU/host fallback: master = master - lr*grad, kt-native (F32
     // accumulate then back to param dtype, mirroring the old candle math).
     let dtype = primary.dtype();
@@ -6721,7 +6836,10 @@ fn apply_sgd_update_kt(
     param.replace_backward_storage(Some(updated.clone()));
     param.replace_forward_storage(KtForwardStorage::Plain(updated));
     if resident_activation {
-        backend.update_resident_activation(param.forward_storage().primary_tensor())?;
+        ResidencyBackend::runtime_update_resident_activation(
+            backend,
+            param.forward_storage().primary_tensor(),
+        )?;
     }
     Ok(())
 }
@@ -6773,12 +6891,13 @@ fn apply_adamw_update_kt(
     // all be resident, then the CUDA kernel updates param/m/v in place.
     if let Some(moments) = moments {
         if resident_activation
-            && backend.has_resident_activation(&primary)
-            && backend.has_resident_activation(&moments.m)
-            && backend.has_resident_activation(&moments.v)
+            && ResidencyBackend::runtime_has_resident_activation(backend, &primary)
+            && ResidencyBackend::runtime_has_resident_activation(backend, &moments.m)
+            && ResidencyBackend::runtime_has_resident_activation(backend, &moments.v)
         {
-            backend.register_resident_activation(grad)?;
-            let dispatched = match backend.dispatch_adamw_step(
+            ResidencyBackend::runtime_register_resident_activation(backend, grad)?;
+            let dispatched = match OptimizerBackend::runtime_dispatch_adamw_step(
+                backend,
                 &primary,
                 grad,
                 &moments.m,
@@ -6792,7 +6911,7 @@ fn apply_adamw_update_kt(
             ) {
                 Ok(b) => b,
                 Err(e) => {
-                    backend.evict_resident_activation(grad);
+                    ResidencyBackend::runtime_evict_resident_activation(backend, grad);
                     return Err(e);
                 }
             };
@@ -6800,14 +6919,15 @@ fn apply_adamw_update_kt(
                 // The kernel updated param/m/v in place. Forward primary IS
                 // the master for LoRA params, so the update is already live;
                 // re-assert residency of the param buffer for the next fwd.
-                backend.evict_resident_activation(grad);
-                backend.update_resident_activation(&primary)?;
+                ResidencyBackend::runtime_evict_resident_activation(backend, grad);
+                ResidencyBackend::runtime_update_resident_activation(backend, &primary)?;
                 return Ok(());
             }
-            backend.evict_resident_activation(grad);
+            ResidencyBackend::runtime_evict_resident_activation(backend, grad);
         }
     }
 
+    ensure_training_optimizer_fallback_allowed(backend, primary.device(), "AdamW")?;
     // Host fallback: drive the CPU reference `kiln_optim::AdamW`. It reads
     // `param.amp_policy().backward_compute_dtype` for the grad dtype check
     // (BF16 in production) and `master_dtype` for the master update; cast
@@ -6830,7 +6950,10 @@ fn apply_adamw_update_kt(
         param.replace_forward_storage(KtForwardStorage::Plain(new_master));
     }
     if resident_activation {
-        backend.update_resident_activation(param.forward_storage().primary_tensor())?;
+        ResidencyBackend::runtime_update_resident_activation(
+            backend,
+            param.forward_storage().primary_tensor(),
+        )?;
     }
     Ok(())
 }
@@ -6874,10 +6997,6 @@ fn accumulate_grads_dispatch(
     }
 }
 
-
-
-
-
 /// (#1082) SGD update from an accumulated kt gradient map (keyed by
 /// `Parameter::tensor_id()`).
 fn sgd_step_from_map(
@@ -6886,7 +7005,7 @@ fn sgd_step_from_map(
     grads: &GradMap,
     lr: f64,
 ) -> Result<()> {
-    let resident_activation = backend.supports_resident_activation();
+    let resident_activation = ResidencyBackend::runtime_supports_resident_activation(backend);
     for param in params.all_params_mut() {
         if let Some(grad) = grads.get(&param.tensor_id()) {
             apply_sgd_update_kt(backend, param, grad, lr, resident_activation)?;
@@ -6928,7 +7047,8 @@ pub(crate) fn optimizer_step_from_map(
                 step,
             } = state;
             let step = *step;
-            let resident_activation = backend.supports_resident_activation();
+            let resident_activation =
+                ResidencyBackend::runtime_supports_resident_activation(backend);
             for param in params.all_params_mut() {
                 if let Some(grad) = grads.get(&param.tensor_id()) {
                     let m = moments.get(&param.tensor_id());
@@ -6976,7 +7096,8 @@ pub(crate) fn optimizer_step_from_kt_grad_store(
 ) -> Result<()> {
     match optimizer {
         Optimizer::Sgd => {
-            let resident_activation = backend.supports_resident_activation();
+            let resident_activation =
+                ResidencyBackend::runtime_supports_resident_activation(backend);
             for param in params.all_params_mut() {
                 if let Some(kt_grad) = grads.get(param.tensor_id()) {
                     apply_sgd_update_kt(backend, param, kt_grad, lr, resident_activation)?;
@@ -7004,7 +7125,8 @@ pub(crate) fn optimizer_step_from_kt_grad_store(
                 step,
             } = state;
             let step = *step;
-            let resident_activation = backend.supports_resident_activation();
+            let resident_activation =
+                ResidencyBackend::runtime_supports_resident_activation(backend);
             for param in params.all_params_mut() {
                 if let Some(kt_grad) = grads.get(param.tensor_id()) {
                     let m = moments.get(&param.tensor_id());
@@ -7421,11 +7543,8 @@ fn exact_gdn_reverse_tile_size(
 
 fn exact_gdn_backward_tile_tokens_for(device: &Device) -> usize {
     fn fallback_tile(device: &Device) -> usize {
-        if is_cuda_device(device) {
-            1024
-        } else {
-            streaming_tile_tokens_for(device)
-        }
+        training_precision_policy_for_device(device)
+            .exact_gdn_backward_tile_tokens_or(streaming_tile_tokens_for(device))
     }
 
     match std::env::var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS") {
@@ -7451,7 +7570,6 @@ fn exact_gdn_backward_tile_tokens_for(device: &Device) -> usize {
 //   * `finish_exact_gdn_reverse_tile_stage` (its only call was to the already
 //     deleted `synchronize_checkpoint_boundary`)
 
-
 // `InjectTensorGradient` (struct + impl candle_core::CustomOp1) was
 // deleted as part of the #1082 CP-4 step 2-3 caller flip. All 6 call
 // sites in `full_attention_single_layer_tiled_mlp_reverse` now use
@@ -7464,12 +7582,6 @@ fn exact_gdn_backward_tile_tokens_for(device: &Device) -> usize {
 // e2f8723c (substrate revision), 07afd64a (IO mapping removal),
 // a6531830 (shim hoist), and the InjectTensorGradient flip
 // commit itself. (#1082)
-
-
-
-
-
-
 
 /// Run one training step WITHOUT gradient checkpointing (original behavior).
 ///
@@ -7503,17 +7615,22 @@ fn exact_gdn_backward_tile_tokens_for(device: &Device) -> usize {
 /// True unless `KILN_USE_TAPE_AUTHORITATIVE` is set to a disable value —
 /// **DEFAULTS ON** (CP-4 is the production training path). Read FRESH each call
 /// (not cached) so tests can toggle it; checked once per training step, off the
-/// hot path. When on, the SFT step drives backward through the kt `Tape`
-/// (tape-authoritative) instead of candle's `loss.backward()`. Set the env to
-/// `0`/`false`/`no`/off/empty to opt out and fall back to candle's
-/// `loss.backward()` (for debugging / comparison). Note that the dispatch site
-/// additionally device-gates this to CUDA devices only (tape-authoritative
-/// adapters require a CUDA device); CPU always uses the candle path regardless
-/// of this flag. (#1082 CP-4.)
+/// hot path. When on, the SFT/GRPO/OPD steps drive backward through the kt
+/// `Tape` (tape-authoritative) instead of candle's `loss.backward()`. Set the
+/// env to `0`/`false`/`no`/off/empty to opt out for debugging/comparison. The
+/// dispatch sites pair this env gate with
+/// `TrainingLossBackend::runtime_tape_forward_backward_route` and
+/// `TrainingPrecisionPolicy`, so backend and dtype eligibility stay
+/// backend-owned. (#1082 CP-4.)
 // `pub(crate)` so the OPD trainer (`opd.rs`) can reuse the EXACT same gate
 // for its tape-authoritative dispatch — single source of truth for the
 // `KILN_USE_TAPE_AUTHORITATIVE` env semantics (#1082 CP-4 endgame).
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
 pub(crate) fn tape_authoritative_enabled() -> bool {
     std::env::var("KILN_USE_TAPE_AUTHORITATIVE")
         .map(|v| !matches!(v.trim(), "" | "0" | "false" | "no" | "off"))
@@ -7535,16 +7652,49 @@ pub(crate) fn tape_authoritative_enabled() -> bool {
 ///   genuinely BF16-only, so F32 falls through to the candle path (or bails),
 ///   exactly as before — this gate NEVER newly-permits F32 on CUDA/Metal.
 /// - anything else ⇒ unsupported.
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
-fn base_dtype_supports_tape(weights: &GpuWeights, device: &Device) -> bool {
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+fn base_dtype_supports_tape_for_policy(
+    weights: &GpuWeights,
+    policy: TrainingPrecisionPolicy,
+) -> bool {
     // (#1082) `embed_tokens.dtype()` is now kt `DType`.
     match weights.embed_tokens.dtype() {
         kiln_tensor::DType::BF16 => true,
-        kiln_tensor::DType::F32 => is_vulkan_device(device),
+        kiln_tensor::DType::F32 => policy.uses_f32_activations_for_mixed_base_weights(),
         _ => false,
     }
 }
 
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+fn base_dtype_supports_tape_for_backend(
+    weights: &GpuWeights,
+    backend: &dyn BackendRuntime,
+) -> bool {
+    base_dtype_supports_tape_for_policy(weights, training_precision_policy_for_backend(backend))
+}
+
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+fn backend_supports_tape_forward_backward(backend: &dyn BackendRuntime) -> bool {
+    matches!(
+        TrainingLossBackend::runtime_tape_forward_backward_route(backend),
+        TrainingTapeRoute::KtTapeAuthoritative
+    )
+}
 
 /// (#1082 Increment-0 PR2) kt-native sibling of
 /// [`standard_forward_backward_tape_authoritative`]: delivers the
@@ -7569,7 +7719,12 @@ fn base_dtype_supports_tape(weights: &GpuWeights, device: &Device) -> bool {
 /// same key. (#1082 Inc-0 PR4) NOW WIRED IN: `standard_forward_backward`'s
 /// tape-authoritative CUDA branch calls this and returns `GradSource::Kt`, so
 /// the SFT loop + the CP-4 gates exercise this kt-native path.
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
 fn standard_forward_backward_tape_authoritative_kt(
     backend: &dyn BackendRuntime,
     input_ids: &[u32],
@@ -7584,55 +7739,13 @@ fn standard_forward_backward_tape_authoritative_kt(
 
     let (loss_val, _loss_kt, grads_by_candle_raw) =
         kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(|| {
-            let use_sft_flce = use_flce();
-            let use_vulkan_flce = {
-                #[cfg(feature = "vulkan")]
-                {
-                    use_sft_flce && is_vulkan_device(device)
-                }
-                #[cfg(not(feature = "vulkan"))]
-                {
-                    false
-                }
+            let sft_flce_loss_route = if use_flce() {
+                TrainingLossBackend::runtime_sft_flce_loss_route(backend)
+            } else {
+                SftFlceLossRoute::FullLogits
             };
-            let loss_kt = if use_sft_flce && is_cuda_device(device) {
-                let normed = model_forward_no_head(
-                    backend,
-                    input_ids,
-                    weights,
-                    model_config,
-                    Some(&mut linear_state),
-                    Some(&lora_weights),
-                )
-                .context("tape-authoritative(kt) no-head forward")
-                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
-                // Default SFT records the kt FLCE loss root against final normed hidden
-                // instead of materializing `[1, T, V]` logits. The frozen tied head
-                // receives no gradient; the FLCE tape node returns `dhidden`, keeping
-                // the LoRA path connected through `model_forward_no_head`.
-                kiln_autograd::with_active_tape(|tape| {
-                    kiln_flce_kernel::fused_linear_cross_entropy_phase_b_unit_grad_via_kt_tape(
-                        &normed,
-                        &weights.embed_tokens_t,
-                        input_ids,
-                        label_mask,
-                        DEFAULT_CHUNK_SIZE,
-                        tape,
-                    )
-                })
-                .ok_or_else(|| {
-                    kiln_kt_bridge::BridgeError::new(
-                        "tape-authoritative(kt) SFT FLCE: no active kt tape".to_string(),
-                    )
-                })?
-                .map_err(|e| {
-                    kiln_kt_bridge::BridgeError::new(format!(
-                        "tape-authoritative(kt) SFT FLCE kt-tape: {e}"
-                    ))
-                })?
-            } else if use_vulkan_flce {
-                #[cfg(feature = "vulkan")]
-                {
+            let loss_kt = match sft_flce_loss_route {
+                SftFlceLossRoute::KtTapeFlce => {
                     let normed = model_forward_no_head(
                         backend,
                         input_ids,
@@ -7641,55 +7754,98 @@ fn standard_forward_backward_tape_authoritative_kt(
                         Some(&mut linear_state),
                         Some(&lora_weights),
                     )
-                    .context("tape-authoritative(kt) no-head Vulkan forward")
+                    .context("tape-authoritative(kt) no-head forward")
                     .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
-                    // Vulkan has its own fused FLCE shaders over active rows
-                    // and canonical tied weight [V, H], so route the SFT root
-                    // there instead of materializing [1, T, V] logits.
-                    crate::sft_tape_shim::try_tape_sft_flce_vulkan_kt(
-                        &normed,
-                        &weights.embed_tokens,
+                    // Default SFT records the kt FLCE loss root against final normed hidden
+                    // instead of materializing `[1, T, V]` logits. The frozen tied head
+                    // receives no gradient; the FLCE tape node returns `dhidden`, keeping
+                    // the LoRA path connected through `model_forward_no_head`.
+                    kiln_autograd::with_active_tape(|tape| {
+                        kiln_flce_kernel::fused_linear_cross_entropy_phase_b_unit_grad_via_kt_tape(
+                            &normed,
+                            &weights.embed_tokens_t,
+                            input_ids,
+                            label_mask,
+                            DEFAULT_CHUNK_SIZE,
+                            tape,
+                        )
+                    })
+                    .ok_or_else(|| {
+                        kiln_kt_bridge::BridgeError::new(
+                            "tape-authoritative(kt) SFT FLCE: no active kt tape".to_string(),
+                        )
+                    })?
+                    .map_err(|e| {
+                        kiln_kt_bridge::BridgeError::new(format!(
+                            "tape-authoritative(kt) SFT FLCE kt-tape: {e}"
+                        ))
+                    })?
+                }
+                SftFlceLossRoute::VulkanActiveRows => {
+                    #[cfg(feature = "vulkan")]
+                    {
+                        let normed = model_forward_no_head(
+                            backend,
+                            input_ids,
+                            weights,
+                            model_config,
+                            Some(&mut linear_state),
+                            Some(&lora_weights),
+                        )
+                        .context("tape-authoritative(kt) no-head Vulkan forward")
+                        .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+                        // Vulkan has its own fused FLCE shaders over active rows
+                        // and canonical tied weight [V, H], so route the SFT root
+                        // there instead of materializing [1, T, V] logits.
+                        crate::sft_tape_shim::try_tape_sft_flce_vulkan_kt(
+                            &normed,
+                            &weights.embed_tokens,
+                            input_ids,
+                            label_mask,
+                        )
+                        .context("tape-authoritative(kt) Vulkan SFT FLCE")
+                        .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
+                        .ok_or_else(|| {
+                            kiln_kt_bridge::BridgeError::new(
+                                "tape-authoritative(kt) Vulkan SFT FLCE returned None".to_string(),
+                            )
+                        })?
+                    }
+                    #[cfg(not(feature = "vulkan"))]
+                    {
+                        return Err(kiln_kt_bridge::BridgeError::new(
+                            "backend requested Vulkan SFT FLCE without the vulkan feature"
+                                .to_string(),
+                        ));
+                    }
+                }
+                SftFlceLossRoute::FullLogits => {
+                    let logits = model_forward_kt(
+                        backend,
+                        input_ids,
+                        weights,
+                        model_config,
+                        None,
+                        Some(&mut linear_state),
+                        Some(&lora_weights),
+                    )
+                    .context("tape-authoritative(kt) fallback full forward")
+                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+                    kiln_model::tape_forward::try_tape_cross_entropy_from_logits_kt(
+                        &logits,
                         input_ids,
                         label_mask,
                     )
-                    .context("tape-authoritative(kt) Vulkan SFT FLCE")
+                    .context("tape-authoritative(kt) cross_entropy_from_logits_kt")
                     .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
                     .ok_or_else(|| {
                         kiln_kt_bridge::BridgeError::new(
-                            "tape-authoritative(kt) Vulkan SFT FLCE returned None".to_string(),
+                            "tape-authoritative(kt) SFT: cross_entropy_from_logits_kt returned None \
+                             (kt CE envelope declined — expected [1, T, V] CUDA logits)"
+                                .to_string(),
                         )
                     })?
                 }
-                #[cfg(not(feature = "vulkan"))]
-                {
-                    unreachable!("use_vulkan_flce is false without the vulkan feature")
-                }
-            } else {
-                let logits = model_forward_kt(
-                    backend,
-                    input_ids,
-                    weights,
-                    model_config,
-                    None,
-                    Some(&mut linear_state),
-                    Some(&lora_weights),
-                )
-                .context("tape-authoritative(kt) fallback full forward")
-                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
-                kiln_model::tape_forward::try_tape_cross_entropy_from_logits_kt(
-                    &logits,
-                    input_ids,
-                    label_mask,
-                )
-                .context("tape-authoritative(kt) cross_entropy_from_logits_kt")
-                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
-                .ok_or_else(|| {
-                    kiln_kt_bridge::BridgeError::new(
-                        "tape-authoritative(kt) SFT: cross_entropy_from_logits_kt returned None \
-                         (kt CE envelope declined — expected [1, T, V] CUDA logits)"
-                            .to_string(),
-                    )
-                })?
             };
             let loss_val = loss_kt
                 .to_scalar::<f32>()
@@ -7717,8 +7873,7 @@ fn standard_forward_backward_tape_authoritative_kt(
         .collect();
     let mut grads = kiln_autograd::GradStore::new();
     for (key_raw, kt_grad) in grads_by_candle_raw {
-        let Some(param_raw) =
-            kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(key_raw as u64)
+        let Some(param_raw) = kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(key_raw as u64)
         else {
             continue;
         };
@@ -7757,11 +7912,14 @@ fn standard_forward_backward_tape_authoritative_kt(
 /// `KtTensorId`), consumed directly by `optimizer_step_from_kt_grad_store` — no
 /// candle `loss.backward()` and no kt→candle grad copy.
 ///
-/// CUDA-only: the kt tape adapters (`crate::tape_forward`, `#![cfg(cuda)]`)
-/// record only on CUDA, so a CPU checkpointing-tape path would need them
-/// un-gated first (the deeper #1082 endgame). The dispatch below keeps the
-/// candle path for F32/CPU/ECHO.
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+/// The dispatch below uses backend training capabilities plus precision policy
+/// for tape eligibility, then keeps local loss-shape exclusions such as ECHO.
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
 #[allow(clippy::too_many_arguments)]
 fn checkpointed_forward_backward_tape_authoritative_kt(
     backend: &dyn BackendRuntime,
@@ -7909,9 +8067,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
             )
             .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))
         })
-        .map_err(|e| {
-            anyhow::anyhow!("ckpt-kt debug reverse segment {debug_seg_idx}: {e}")
-        })?;
+        .map_err(|e| anyhow::anyhow!("ckpt-kt debug reverse segment {debug_seg_idx}: {e}"))?;
         if trace_timings {
             eprintln!(
                 "kiln_sft_timing phase=debug_reverse_segment seg_idx={debug_seg_idx} layer_start={start} layer_end={end} seq_len={} segments={} elapsed_ms={:.3}",
@@ -7937,76 +8093,77 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     let mut normed_for_tail = None;
     let mut flce_active_metadata_for_tail = None;
     let tail_grad_override: Option<Tensor>;
-    let use_sft_flce = use_flce();
-    let use_vulkan_flce = {
-        #[cfg(feature = "vulkan")]
-        {
-            use_sft_flce && is_vulkan_device(device)
-        }
-        #[cfg(not(feature = "vulkan"))]
-        {
-            false
-        }
+    let sft_flce_loss_route = if use_flce() {
+        TrainingLossBackend::runtime_sft_flce_loss_route(backend)
+    } else {
+        SftFlceLossRoute::FullLogits
     };
     let tail_loss_start = Instant::now();
-    let loss_val = if use_sft_flce && is_cuda_device(device) {
-        tail_grad_override = None;
-        // (#1082 H-FLCE / candle-drop) FLCE loss-VALUE via the kt-native forward
-        // `fused_linear_cross_entropy_phase_b_kt` — taking the kt `normed` hidden
-        // and the kt `embed_tokens_t` head DIRECTLY (no candle `cd_out` copy, no
-        // ~780MB/step `embed_tokens_t` kt->candle copy, no candle device bridge).
-        // Only the resulting scalar crosses back to host. The same `normed`
-        // tensor is retained for the FLCE/RMSNorm tail seed below.
-        // The candle FLCE provider opt-in (`KILN_CUDA_FLCE`) was removed in the
-        // candle drop — this is now the sole FLCE path.
-        let normed = model_forward_final_norm(&final_hidden_kt, weights, model_config)?;
-        let (loss_kt, active_metadata) =
-            kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_with_metadata_kt(
-            &normed,
-            &weights.embed_tokens_t,
-            input_ids,
-            label_mask,
-            DEFAULT_CHUNK_SIZE,
-        )
-        .map_err(|e| {
-            anyhow::anyhow!("ckpt-kt kt-native fused linear cross-entropy (final boundary): {e}")
-        })?;
-        let loss_val = loss_kt.to_scalar::<f32>()? as f64;
-        flce_active_metadata_for_tail = active_metadata;
-        normed_for_tail = Some(normed);
-        loss_val
-    } else if use_vulkan_flce {
-        #[cfg(feature = "vulkan")]
-        {
+    let loss_val = match sft_flce_loss_route {
+        SftFlceLossRoute::KtTapeFlce => {
+            tail_grad_override = None;
+            // (#1082 H-FLCE / candle-drop) FLCE loss-VALUE via the kt-native forward
+            // `fused_linear_cross_entropy_phase_b_kt` — taking the kt `normed` hidden
+            // and the kt `embed_tokens_t` head DIRECTLY (no candle `cd_out` copy, no
+            // ~780MB/step `embed_tokens_t` kt->candle copy, no candle device bridge).
+            // Only the resulting scalar crosses back to host. The same `normed`
+            // tensor is retained for the FLCE/RMSNorm tail seed below.
+            // The candle FLCE provider opt-in (`KILN_CUDA_FLCE`) was removed in the
+            // candle drop — this is now the sole FLCE path.
             let normed = model_forward_final_norm(&final_hidden_kt, weights, model_config)?;
-            let (loss_kt, grad_normed) =
-                crate::sft_tape_shim::vulkan_sft_flce_loss_and_grad_kt(
+            let (loss_kt, active_metadata) =
+                kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_with_metadata_kt(
                     &normed,
-                    &weights.embed_tokens,
+                    &weights.embed_tokens_t,
                     input_ids,
                     label_mask,
+                    DEFAULT_CHUNK_SIZE,
                 )
-                .map_err(|e| anyhow::anyhow!("ckpt-kt Vulkan fused SFT FLCE tail: {e}"))?;
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "ckpt-kt kt-native fused linear cross-entropy (final boundary): {e}"
+                    )
+                })?;
             let loss_val = loss_kt.to_scalar::<f32>()? as f64;
-            tail_grad_override = Some(
-                rms_norm_backward_pre_final_norm(
-                    &final_hidden_kt,
-                    &weights.final_norm,
-                    &grad_normed,
-                    model_config.rms_norm_eps,
-                )
-                .context("ckpt-kt Vulkan final RMSNorm backward")?,
-            );
+            flce_active_metadata_for_tail = active_metadata;
+            normed_for_tail = Some(normed);
             loss_val
         }
-        #[cfg(not(feature = "vulkan"))]
-        {
-            unreachable!("use_vulkan_flce is false without the vulkan feature")
+        SftFlceLossRoute::VulkanActiveRows => {
+            #[cfg(feature = "vulkan")]
+            {
+                let normed = model_forward_final_norm(&final_hidden_kt, weights, model_config)?;
+                let (loss_kt, grad_normed) =
+                    crate::sft_tape_shim::vulkan_sft_flce_loss_and_grad_kt(
+                        &normed,
+                        &weights.embed_tokens,
+                        input_ids,
+                        label_mask,
+                    )
+                    .map_err(|e| anyhow::anyhow!("ckpt-kt Vulkan fused SFT FLCE tail: {e}"))?;
+                let loss_val = loss_kt.to_scalar::<f32>()? as f64;
+                tail_grad_override = Some(
+                    rms_norm_backward_pre_final_norm(
+                        final_rmsnorm_backward_route_for_backend(backend),
+                        &final_hidden_kt,
+                        &weights.final_norm,
+                        &grad_normed,
+                        model_config.rms_norm_eps,
+                    )
+                    .context("ckpt-kt Vulkan final RMSNorm backward")?,
+                );
+                loss_val
+            }
+            #[cfg(not(feature = "vulkan"))]
+            {
+                anyhow::bail!("backend requested Vulkan SFT FLCE without the vulkan feature");
+            }
         }
-    } else {
-        tail_grad_override = None;
-        let logits = model_forward_head(&final_hidden_kt, weights, model_config)?;
-        cross_entropy_loss(&logits, input_ids, label_mask, device)?
+        SftFlceLossRoute::FullLogits => {
+            tail_grad_override = None;
+            let logits = model_forward_head(&final_hidden_kt, weights, model_config)?;
+            cross_entropy_loss(&logits, input_ids, label_mask, device)?
+        }
     };
     log_sft_timing(
         trace_timings,
@@ -8021,6 +8178,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     } else {
         match normed_for_tail.as_ref() {
             Some(normed) => analytic_sft_tail_grad_from_normed_pre_final_norm_with_flce_metadata(
+                final_rmsnorm_backward_route_for_backend(backend),
                 &final_hidden_kt,
                 normed,
                 &weights.final_norm,
@@ -8032,6 +8190,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
                 flce_active_metadata_for_tail.as_ref(),
             ),
             None => analytic_sft_tail_grad_pre_final_norm(
+                final_rmsnorm_backward_route_for_backend(backend),
                 &final_hidden_kt,
                 &weights.final_norm,
                 &weights.embed_tokens_t,
@@ -8086,13 +8245,12 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
             .map_err(|e| anyhow::anyhow!("ckpt-kt: seed dtype cast (segment {seg_idx}): {e}"))?;
         let positions_ref = &positions;
         let lora_ref = &lora_weights;
-        let (kt_grads, candle_grads) = kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(
-            seed,
-            || {
+        let (kt_grads, candle_grads) =
+            kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(seed, || {
                 // Fresh recurrence state per segment (GDN recurrence is internal
                 // to each layer's full-sequence pass — see Step 1 note).
                 let mut seg_ls = LinearAttentionState::new(model_config, device)
-                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
                 model_forward_segment(
                     backend,
                     seg_input,
@@ -8105,9 +8263,8 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
                     Some(lora_ref),
                 )
                 .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))
-            },
-        )
-        .map_err(|e| anyhow::anyhow!("ckpt-kt: segment {seg_idx} tape backward: {e}"))?;
+            })
+            .map_err(|e| anyhow::anyhow!("ckpt-kt: segment {seg_idx} tape backward: {e}"))?;
 
         // Accumulate this segment's LoRA param grads (disjoint across segments —
         // each layer is in exactly one segment — but sum defensively). Decode
@@ -8172,28 +8329,27 @@ pub fn standard_forward_backward(
     device: &Device,
 ) -> Result<(f64, GradSource)> {
     // (#1082 candle-drop) The SFT forward/backward is now UNCONDITIONALLY
-    // kt tape-authoritative on CUDA + BF16 base. The candle producers
+    // kt tape-authoritative when the backend capability and precision policy
+    // allow it. The candle producers
     // (`standard_forward_backward_tape_authoritative` F32-hack,
     // `standard_forward_backward_via_tape_bridge`, the inline candle
-    // `loss.backward()` path) are all DELETED. F32/CPU training is dropped
-    // (the kt fused tape adapters are BF16-only; see
-    // `base_dtype_supports_tape` + note `kiln-cp4-tape-adapters-bf16-only`).
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+    // `loss.backward()` path) are all DELETED. Unsupported backend/dtype
+    // combinations fail before the kt step is attempted.
+    #[cfg(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    ))]
     {
         anyhow::ensure!(
-            matches!(
-                device,
-                kiln_tensor::Device::Cuda(_)
-                    | kiln_tensor::Device::Metal(_)
-                    | kiln_tensor::Device::Vulkan(_)
-                    | kiln_tensor::Device::Rocm(_)
-            ),
-            "standard_forward_backward: kt tape-authoritative SFT requires a GPU \
-             device (CUDA/Metal/Vulkan/ROCm) post candle-drop (the candle CPU \
-             `loss.backward()` path was removed in #1082)."
+            backend_supports_tape_forward_backward(backend),
+            "standard_forward_backward: kt tape-authoritative SFT requires a backend \
+             that advertises kt tape-authoritative forward/backward support \
+             (the candle CPU `loss.backward()` path was removed in #1082)."
         );
         anyhow::ensure!(
-            base_dtype_supports_tape(weights, device),
+            base_dtype_supports_tape_for_backend(weights, backend),
             "standard_forward_backward: kt tape-authoritative SFT requires a BF16 \
              base model on CUDA/Metal, or a BF16/F32 base on Vulkan (the kt fused \
              tape adapters are BF16-only on CUDA/Metal; F32 base trains on Vulkan \
@@ -8210,7 +8366,12 @@ pub fn standard_forward_backward(
         )?;
         Ok((loss_val, GradSource::Kt(kt_grads)))
     }
-    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
+    #[cfg(not(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    )))]
     {
         let _ = (
             backend,
@@ -8222,14 +8383,11 @@ pub fn standard_forward_backward(
             device,
         );
         anyhow::bail!(
-            "standard_forward_backward: SFT training requires the `cuda` feature \
-             post candle-drop (kt tape-authoritative backward is CUDA-only)."
+            "standard_forward_backward: SFT training requires a GPU backend feature \
+             post candle-drop because the candle `loss.backward()` path was removed."
         )
     }
 }
-
-
-
 
 /// kt-native sibling of [`grpo_step_forward_backward_tape_authoritative`]
 /// (#1082 Inc-0 PR5). Identical GRPO policy-gradient tape-authoritative
@@ -8258,7 +8416,12 @@ pub fn standard_forward_backward(
 ///
 /// ECHO is NOT handled here (same as the candle-hack producer): the dispatch
 /// keeps any ECHO-active step on the candle path, so this is non-ECHO GRPO only.
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
 #[allow(clippy::too_many_arguments)]
 fn grpo_step_forward_backward_tape_authoritative_kt(
     backend: &dyn BackendRuntime,
@@ -8298,19 +8461,20 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
             .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
 
             #[cfg(feature = "vulkan")]
-            let mut loss_opt = if is_vulkan_device(device) {
-                crate::grpo_tape_shim::try_tape_grpo_pg_loss_from_normed_hidden_vulkan_kt(
-                    &policy_hidden,
-                    &weights.embed_tokens,
-                    input_ids,
-                    action_mask,
-                    &ref_log_probs,
-                    loss_params,
-                )
-                .context("GRPO tape-authoritative(kt) Vulkan fused scalar loss")
-                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
-            } else {
-                None
+            let mut loss_opt = match TrainingLossBackend::runtime_grpo_loss_route(backend) {
+                GrpoLossRoute::VulkanActiveRows => {
+                    crate::grpo_tape_shim::try_tape_grpo_pg_loss_from_normed_hidden_vulkan_kt(
+                        &policy_hidden,
+                        &weights.embed_tokens,
+                        input_ids,
+                        action_mask,
+                        &ref_log_probs,
+                        loss_params,
+                    )
+                    .context("GRPO tape-authoritative(kt) Vulkan fused scalar loss")
+                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
+                }
+                GrpoLossRoute::KtComposite => None,
             };
             #[cfg(not(feature = "vulkan"))]
             let mut loss_opt = None;
@@ -8323,6 +8487,7 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
                         action_mask,
                         &ref_log_probs,
                         loss_params,
+                        grpo_kl_auxiliary_route_for_backend(backend),
                         device,
                         DEFAULT_CHUNK_SIZE,
                     )
@@ -8385,8 +8550,7 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
 
     let mut grads = kiln_autograd::GradStore::new();
     for (key_raw, kt_grad) in grads_by_candle_raw {
-        let Some(param_raw) =
-            kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(key_raw as u64)
+        let Some(param_raw) = kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(key_raw as u64)
         else {
             continue;
         };
@@ -8418,7 +8582,12 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
     Ok((loss_val, grads))
 }
 
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
 #[allow(clippy::too_many_arguments)]
 fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
     backend: &dyn BackendRuntime,
@@ -8482,18 +8651,19 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
     let normed = model_forward_final_norm(&final_hidden, weights, model_config)
         .context("checkpointed GRPO final norm")?;
     #[cfg(feature = "vulkan")]
-    let fused_vulkan_tail = if is_vulkan_device(device) {
-        crate::grpo_tape_shim::vulkan_grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
-            &normed,
-            &weights.embed_tokens,
-            input_ids,
-            action_mask,
-            ref_log_probs,
-            loss_params,
-        )
-        .context("checkpointed GRPO Vulkan fused tail loss/gradient")?
-    } else {
-        None
+    let fused_vulkan_tail = match TrainingLossBackend::runtime_grpo_loss_route(backend) {
+        GrpoLossRoute::VulkanActiveRows => {
+            crate::grpo_tape_shim::vulkan_grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
+                &normed,
+                &weights.embed_tokens,
+                input_ids,
+                action_mask,
+                ref_log_probs,
+                loss_params,
+            )
+            .context("checkpointed GRPO Vulkan fused tail loss/gradient")?
+        }
+        GrpoLossRoute::KtComposite => None,
     };
     #[cfg(not(feature = "vulkan"))]
     let fused_vulkan_tail = None;
@@ -8506,6 +8676,7 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
             action_mask,
             ref_log_probs,
             loss_params,
+            grpo_kl_auxiliary_route_for_backend(backend),
             1.0,
             device,
             DEFAULT_CHUNK_SIZE,
@@ -8514,6 +8685,7 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
     };
     let loss_val = loss_kt.to_scalar::<f32>()? as f64;
     let mut upstream_grad = rms_norm_backward_pre_final_norm(
+        final_rmsnorm_backward_route_for_backend(backend),
         &final_hidden,
         &weights.final_norm,
         &grad_normed,
@@ -8555,7 +8727,9 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
                 )
                 .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))
             })
-            .map_err(|e| anyhow::anyhow!("checkpointed GRPO: segment {seg_idx} tape backward: {e}"))?;
+            .map_err(|e| {
+                anyhow::anyhow!("checkpointed GRPO: segment {seg_idx} tape backward: {e}")
+            })?;
 
         for (candle_raw, g) in candle_grads {
             let Some(param_raw) =
@@ -8659,6 +8833,7 @@ impl GrpoLossParams {
 }
 
 fn entropy_aware_kl_threshold_from_policy_log_probs(
+    grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute,
     policy_log_probs: &Tensor,
     q: f32,
     num_active: usize,
@@ -8670,24 +8845,34 @@ fn entropy_aware_kl_threshold_from_policy_log_probs(
     let idx = ((q as f64) * (num_active.saturating_sub(1)) as f64).round() as usize;
     let idx = idx.min(num_active.saturating_sub(1));
 
-    // Reuse the inference CUDA top-k kernel when the requested quantile rank is
-    // small. The kernel is intentionally k-pass, so for large ranks a single
-    // host threshold read + CPU sort is less work than asking it for most of the
-    // active-token vector.
-    #[cfg(feature = "cuda")]
-    if matches!(policy_log_probs.device(), Device::Cuda(_)) && idx < 1024 {
+    // Reuse backend top-k kernels when the requested quantile rank is small.
+    // The kernels are intentionally k-pass, so for large ranks a single host
+    // threshold read + CPU sort is less work than asking for most of the vector.
+    if idx < 1024
+        && matches!(
+            grpo_kl_auxiliary_route,
+            GrpoKlAuxiliaryRoute::CudaRocmDeviceFastPath
+        )
+    {
         let flat = policy_log_probs
             .to_f32_dtype()?
             .flatten_all()?
             .reshape(vec![num_active])?
             .contiguous()?;
-        let (values, _indices) = kiln_tensor::cuda_topk_last_axis(&flat, idx + 1)
-            .map_err(|e| anyhow::anyhow!("entropy-aware KL CUDA top-k threshold: {e}"))?;
-        let threshold = values
-            .get(idx)
-            .copied()
-            .ok_or_else(|| anyhow::anyhow!("entropy-aware KL top-k returned too few values"))?;
-        return Ok(threshold);
+        match try_topk_on_device(&flat, idx + 1) {
+            Ok(pairs) => {
+                let threshold = pairs.get(idx).map(|(_, value)| *value).ok_or_else(|| {
+                    anyhow::anyhow!("entropy-aware KL top-k returned too few values")
+                })?;
+                return Ok(threshold);
+            }
+            Err(err) => {
+                tracing::debug!(
+                    error = %err,
+                    "entropy-aware KL device top-k declined; falling back to host threshold sort"
+                );
+            }
+        }
     }
 
     let plp_host: Vec<f32> = policy_log_probs
@@ -8699,16 +8884,14 @@ fn entropy_aware_kl_threshold_from_policy_log_probs(
         "entropy-aware KL threshold plp len {} != num_active {num_active}",
         plp_host.len()
     );
-    let mut neg = plp_host
-        .iter()
-        .map(|p| -(*p as f64))
-        .collect::<Vec<_>>();
+    let mut neg = plp_host.iter().map(|p| -(*p as f64)).collect::<Vec<_>>();
     neg.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let thr = neg[idx];
     Ok((-thr) as f32)
 }
 
 pub(crate) fn entropy_aware_kl_mask_kt(
+    grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute,
     policy_log_probs: &Tensor,
     params: GrpoLossParams,
     device: &Device,
@@ -8725,8 +8908,12 @@ pub(crate) fn entropy_aware_kl_mask_kt(
         return Ok(Some(zeros_f32_on(policy_log_probs.shape(), device)?));
     }
 
-    let threshold =
-        entropy_aware_kl_threshold_from_policy_log_probs(policy_log_probs, q, num_active)?;
+    let threshold = entropy_aware_kl_threshold_from_policy_log_probs(
+        grpo_kl_auxiliary_route,
+        policy_log_probs,
+        q,
+        num_active,
+    )?;
     let policy_f32 = policy_log_probs
         .to_f32_dtype()?
         .flatten_all()?
@@ -8760,6 +8947,22 @@ pub(crate) fn entropy_aware_kl_mask_kt(
 // (`crate::grpo_tape_shim`) can recompute the EXACT same scalar PG (+ KL)
 // loss inside its candle-autograd backward composite (#1082 CP-4).
 pub(crate) fn grpo_loss(
+    policy_log_probs: &Tensor,
+    ref_log_probs: &Tensor,
+    params: GrpoLossParams,
+    device: &Device,
+) -> Result<Tensor> {
+    grpo_loss_with_kl_auxiliary_route(
+        GrpoKlAuxiliaryRoute::HostComposite,
+        policy_log_probs,
+        ref_log_probs,
+        params,
+        device,
+    )
+}
+
+pub(crate) fn grpo_loss_with_kl_auxiliary_route(
+    grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute,
     policy_log_probs: &Tensor,
     ref_log_probs: &Tensor,
     params: GrpoLossParams,
@@ -8815,8 +9018,13 @@ pub(crate) fn grpo_loss(
     // Phase 3c — selective KL gating: zero KL on tokens below the proxy-entropy threshold.
     let kl_penalty = if let Some(q) = params.entropy_aware_kl_quantile {
         if q.is_finite() && (0.0..1.0).contains(&q) {
-            let mask = entropy_aware_kl_mask_kt(policy_log_probs, params, device)?
-                .ok_or_else(|| anyhow::anyhow!("entropy-aware KL mask unexpectedly absent"))?;
+            let mask = entropy_aware_kl_mask_kt(
+                grpo_kl_auxiliary_route,
+                policy_log_probs,
+                params,
+                device,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("entropy-aware KL mask unexpectedly absent"))?;
             (&kl_penalty_raw * &mask)?
         } else {
             kl_penalty_raw
@@ -8879,8 +9087,6 @@ pub(crate) fn grpo_loss(
         .map_err(Into::into)
 }
 
-
-
 /// Run one GRPO training step with exact reverse-mode checkpointing.
 ///
 /// Reference log-probs are pre-computed and passed in. The policy path mirrors
@@ -8919,6 +9125,116 @@ pub(crate) mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     #[cfg(feature = "cuda")]
     pub(crate) static CUDA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn training_optimizer_fallback_policy_defaults_to_native_required_on_gpus() {
+        assert_eq!(
+            kiln_model::BackendFallbackCapabilities::for_backend("cpu", kiln_tensor::Device::Cpu)
+                .training_optimizer,
+            FallbackPolicy::CorrectnessAllowed
+        );
+        assert_eq!(
+            kiln_model::BackendFallbackCapabilities::for_backend("cpu", kiln_tensor::Device::Cpu)
+                .training_optimizer_debug_env,
+            None
+        );
+        for (backend_name, device, debug_env) in [
+            (
+                "cuda",
+                kiln_tensor::Device::Cuda(0),
+                "KILN_CUDA_TRAINING_OPTIMIZER_FALLBACK",
+            ),
+            (
+                "metal",
+                kiln_tensor::Device::Metal(0),
+                "KILN_METAL_TRAINING_OPTIMIZER_FALLBACK",
+            ),
+            (
+                "vulkan",
+                kiln_tensor::Device::Vulkan(0),
+                "KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK",
+            ),
+            (
+                "rocm",
+                kiln_tensor::Device::Rocm(0),
+                "KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK",
+            ),
+        ] {
+            let fallback =
+                kiln_model::BackendFallbackCapabilities::for_backend(backend_name, device);
+            assert_eq!(fallback.training_optimizer, FallbackPolicy::NativeRequired);
+            assert_eq!(
+                fallback.training_optimizer_debug_env,
+                Some(debug_env),
+                "{backend_name} training optimizer debug fallback env drifted"
+            );
+        }
+    }
+
+    #[test]
+    fn training_optimizer_debug_fallback_opt_in_warns_and_counts() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prior = std::env::var("KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK").ok();
+        unsafe {
+            std::env::set_var("KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK", "1");
+        }
+        for (backend_name, device) in [
+            ("cuda", kiln_tensor::Device::Cuda(0)),
+            ("metal", kiln_tensor::Device::Metal(0)),
+            ("vulkan", kiln_tensor::Device::Vulkan(0)),
+            ("rocm", kiln_tensor::Device::Rocm(0)),
+        ] {
+            let backend = NamedTestBackend::runtime(backend_name);
+            let policy = training_optimizer_fallback_policy(backend.as_ref(), device);
+            assert_eq!(policy, FallbackPolicy::WarnAndCount);
+            assert!(policy.allows_fallback());
+        }
+        restore_env("KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK", prior);
+    }
+
+    #[test]
+    fn training_optimizer_backend_debug_fallback_uses_policy_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let keys = [
+            "KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK",
+            "KILN_CUDA_TRAINING_OPTIMIZER_FALLBACK",
+            "KILN_METAL_TRAINING_OPTIMIZER_FALLBACK",
+            "KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK",
+            "KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK",
+        ];
+        let prior = keys
+            .iter()
+            .map(|&key| (key, std::env::var(key).ok()))
+            .collect::<Vec<_>>();
+        unsafe {
+            for &key in &keys {
+                std::env::remove_var(key);
+            }
+        }
+
+        let cuda = NamedTestBackend::runtime("cuda");
+        let metal = NamedTestBackend::runtime("metal");
+        assert_eq!(
+            training_optimizer_fallback_policy(cuda.as_ref(), kiln_tensor::Device::Cuda(0)),
+            FallbackPolicy::NativeRequired
+        );
+        unsafe {
+            std::env::set_var("KILN_METAL_TRAINING_OPTIMIZER_FALLBACK", "1");
+        }
+        assert_eq!(
+            training_optimizer_fallback_policy(metal.as_ref(), kiln_tensor::Device::Metal(0)),
+            FallbackPolicy::WarnAndCount
+        );
+        assert_eq!(
+            training_optimizer_fallback_policy(cuda.as_ref(), kiln_tensor::Device::Cuda(0)),
+            FallbackPolicy::NativeRequired,
+            "Metal optimizer fallback env should not apply to CUDA policy"
+        );
+
+        for (key, value) in prior {
+            restore_env(key, value);
+        }
+    }
 
     fn restore_env(key: &str, prior: Option<String>) {
         unsafe {
@@ -9783,7 +10099,6 @@ pub(crate) mod tests {
     // Phase 3b — EMA reference snapshot unit tests
     // ---------------------------------------------------------------------
 
-
     #[test]
     fn ema_blend_tensor_matches_manual_formula() -> Result<()> {
         let old = t1d(&[1.0_f32, 2.0, 4.0])?;
@@ -9820,8 +10135,6 @@ pub(crate) mod tests {
         assert!((got[1] - 11.0).abs() < 1e-5);
         Ok(())
     }
-
-
 
     // ---------------------------------------------------------------------
     // Phase 2 GRPO IS-level / reference-policy unit tests
@@ -9965,8 +10278,6 @@ pub(crate) mod tests {
         assert!(matches!(p.kl_estimator, KlEstimator::None));
     }
 
-
-
     #[test]
     fn test_exact_gdn_backward_tile_override_is_independent_of_streaming_tile() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -9975,14 +10286,32 @@ pub(crate) mod tests {
 
         unsafe {
             std::env::set_var("KILN_STREAMING_TILE_TOKENS", "256");
+            std::env::remove_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS");
+        }
+        assert_eq!(
+            super::exact_gdn_backward_tile_tokens_for(&cpu_device()),
+            256
+        );
+        assert_eq!(
+            super::exact_gdn_backward_tile_tokens_for(&Device::Cuda(0)),
+            1024
+        );
+
+        unsafe {
             std::env::set_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS", "128");
         }
-        assert_eq!(super::exact_gdn_backward_tile_tokens_for(&cpu_device()), 128);
+        assert_eq!(
+            super::exact_gdn_backward_tile_tokens_for(&cpu_device()),
+            128
+        );
 
         unsafe {
             std::env::set_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS", "130");
         }
-        assert_eq!(super::exact_gdn_backward_tile_tokens_for(&cpu_device()), 256);
+        assert_eq!(
+            super::exact_gdn_backward_tile_tokens_for(&cpu_device()),
+            256
+        );
 
         restore_env("KILN_STREAMING_TILE_TOKENS", prior_streaming_tile);
         restore_env("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS", prior_backward_tile);
@@ -10042,7 +10371,6 @@ pub(crate) mod tests {
         );
         Ok(())
     }
-
 
     #[test]
     fn chunked_selected_log_probs_match_full_logits() -> Result<()> {
@@ -10174,12 +10502,12 @@ pub(crate) mod tests {
         }
     }
 
-    impl BackendRuntime for NamedTestBackend {
-        fn name(&self) -> &'static str {
+    impl BackendIdentity for NamedTestBackend {
+        fn runtime_name(&self) -> &'static str {
             self.name
         }
 
-        fn device(&self) -> kiln_tensor::Device {
+        fn runtime_device(&self) -> kiln_tensor::Device {
             // Test mock always constructs with `Device::Cpu` via
             // `NamedTestBackend::runtime`, so the kt identity is the
             // CPU variant. Avoiding the `kiln_kt_bridge` crate keeps
@@ -10191,14 +10519,37 @@ pub(crate) mod tests {
             );
             kiln_tensor::Device::Cpu
         }
+
+        fn runtime_as_any(&self) -> &dyn std::any::Any {
+            &()
+        }
     }
 
+    impl kiln_model::backend::StartupBackend for NamedTestBackend {}
 
+    impl kiln_model::backend::AttentionBackend for NamedTestBackend {}
 
+    impl kiln_model::backend::GdnBackend for NamedTestBackend {}
 
+    impl kiln_model::backend::ConvBackend for NamedTestBackend {}
 
+    impl kiln_model::backend::LinearBackend for NamedTestBackend {}
 
+    impl kiln_model::backend::residency::ResidentRegistry for NamedTestBackend {}
 
+    impl kiln_model::backend::ResidencyBackend for NamedTestBackend {}
+
+    impl kiln_model::backend::SamplingBackend for NamedTestBackend {}
+
+    impl kiln_model::backend::OptimizerBackend for NamedTestBackend {}
+
+    impl kiln_model::backend::PagedKvBackend for NamedTestBackend {}
+
+    impl kiln_model::backend::ReplayBackend for NamedTestBackend {}
+
+    impl kiln_model::backend::TrainingLossBackend for NamedTestBackend {}
+
+    impl BackendRuntime for NamedTestBackend {}
 
     /// Create a tiny ModelConfig for testing (4 layers, small dims).
     // (#1082) `pub(crate)` so `opd.rs`'s F32-on-Vulkan OPD test can reuse this
@@ -10495,24 +10846,22 @@ pub(crate) mod tests {
     /// to BF16. Marlin fields stay `None`.
     fn attention_to_bf16(attn: &GpuAttentionWeights) -> Result<GpuAttentionWeights> {
         Ok(match attn {
-            GpuAttentionWeights::Full(full) => {
-                GpuAttentionWeights::Full(GpuFullAttentionWeights {
-                    q_proj: to_bf16_contig(&full.q_proj)?,
-                    k_proj: to_bf16_contig(&full.k_proj)?,
-                    v_proj: to_bf16_contig(&full.v_proj)?,
-                    o_proj: to_bf16_contig(&full.o_proj)?,
-                    q_norm: to_bf16_contig(&full.q_norm)?,
-                    k_norm: to_bf16_contig(&full.k_norm)?,
-                    q_proj_t: to_bf16_contig(&full.q_proj_t)?,
-                    k_proj_t: to_bf16_contig(&full.k_proj_t)?,
-                    v_proj_t: to_bf16_contig(&full.v_proj_t)?,
-                    qkv_proj_t: full.qkv_proj_t.as_ref().map(to_bf16_contig).transpose()?,
-                    qkv_proj_w8: None,
-                    o_proj_t: to_bf16_contig(&full.o_proj_t)?,
-                    o_proj_w8: None,
-                    q_proj_marlin: None,
-                })
-            }
+            GpuAttentionWeights::Full(full) => GpuAttentionWeights::Full(GpuFullAttentionWeights {
+                q_proj: to_bf16_contig(&full.q_proj)?,
+                k_proj: to_bf16_contig(&full.k_proj)?,
+                v_proj: to_bf16_contig(&full.v_proj)?,
+                o_proj: to_bf16_contig(&full.o_proj)?,
+                q_norm: to_bf16_contig(&full.q_norm)?,
+                k_norm: to_bf16_contig(&full.k_norm)?,
+                q_proj_t: to_bf16_contig(&full.q_proj_t)?,
+                k_proj_t: to_bf16_contig(&full.k_proj_t)?,
+                v_proj_t: to_bf16_contig(&full.v_proj_t)?,
+                qkv_proj_t: full.qkv_proj_t.as_ref().map(to_bf16_contig).transpose()?,
+                qkv_proj_w8: None,
+                o_proj_t: to_bf16_contig(&full.o_proj_t)?,
+                o_proj_w8: None,
+                q_proj_marlin: None,
+            }),
             GpuAttentionWeights::Linear(lin) => {
                 GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
                     in_proj_qkv: to_bf16_contig(&lin.in_proj_qkv)?,
@@ -10750,9 +11099,8 @@ pub(crate) mod tests {
             }
             labels
         };
-        let label_of = |vi: usize| -> &str {
-            var_labels.get(vi).map(String::as_str).unwrap_or("?")
-        };
+        let label_of =
+            |vi: usize| -> &str { var_labels.get(vi).map(String::as_str).unwrap_or("?") };
 
         // Σ grad[P] · r in F32 (grad cast to F32 first; `r` is F32).
         let dot_grad = |g: &KtTensor, r: &[f32]| -> f64 {
@@ -10856,12 +11204,8 @@ pub(crate) mod tests {
                     let ps = params.all_params();
                     ps[vi].forward_storage().primary_tensor().clone()
                 };
-                let pf32 = original
-                    .to_dtype(KtDType::F32)
-                    .expect("P to f32");
-                let delta = r_tensor
-                    .affine((sign * eps) as f64, 0.0)
-                    .expect("eps*r");
+                let pf32 = original.to_dtype(KtDType::F32).expect("P to f32");
+                let delta = r_tensor.affine((sign * eps) as f64, 0.0).expect("eps*r");
                 let perturbed = pf32
                     .add(&delta)
                     .expect("P + eps*r")
@@ -11489,8 +11833,14 @@ pub(crate) mod tests {
                            out_features: usize|
          -> Result<()> {
             let (a, b) = pair.as_ref().context("missing LoRA pair")?;
-            assert_eq!(a.forward_storage().primary_tensor().dims(), &[4, in_features]);
-            assert_eq!(b.forward_storage().primary_tensor().dims(), &[out_features, 4]);
+            assert_eq!(
+                a.forward_storage().primary_tensor().dims(),
+                &[4, in_features]
+            );
+            assert_eq!(
+                b.forward_storage().primary_tensor().dims(),
+                &[out_features, 4]
+            );
             Ok(())
         };
 
@@ -11741,13 +12091,6 @@ pub(crate) mod tests {
 
         Ok(())
     }
-
-
-
-
-
-
-
 
     #[test]
     fn test_partition_segment_layers_by_attn_type() -> Result<()> {
@@ -12032,9 +12375,6 @@ pub(crate) mod tests {
             .sum()
     }
 
-
-
-
     /// Build a tokenizer with a Qwen-shaped chat template for the ECHO
     /// end-to-end test. Mirrors the qwen_shaped_tokenizer in trajectory_mask
     /// but uses the trainer's tiny_config vocab size so input_ids fit.
@@ -12115,11 +12455,7 @@ pub(crate) mod tests {
             Tensor::from_vec_on(device, hidden_data.to_vec(), vec![1, seq_len, hidden_size])?;
         let normed = rms_norm(&hidden, final_norm_weight, eps)?;
         let loss = kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_kt(
-            &normed,
-            head_t,
-            input_ids,
-            label_mask,
-            chunk_size,
+            &normed, head_t, input_ids, label_mask, chunk_size,
         )
         .map_err(|e| anyhow::anyhow!("test FLCE loss: {e}"))?;
         Ok(loss.to_scalar::<f32>()?)
@@ -12150,6 +12486,7 @@ pub(crate) mod tests {
         let normed = rms_norm(&hidden, &final_norm_weight, eps)?;
 
         let wrapper = analytic_sft_tail_grad_pre_final_norm(
+            FinalRmsNormBackwardRoute::KtComposite,
             &hidden,
             &final_norm_weight,
             &head_t,
@@ -12159,6 +12496,7 @@ pub(crate) mod tests {
             chunk_size,
         )?;
         let from_normed = analytic_sft_tail_grad_from_normed_pre_final_norm(
+            FinalRmsNormBackwardRoute::KtComposite,
             &hidden,
             &normed,
             &final_norm_weight,
@@ -12212,6 +12550,7 @@ pub(crate) mod tests {
         let head_t = Tensor::from_vec_on(device, head_data, vec![hidden_size, vocab_size])?;
 
         let grad = analytic_sft_tail_grad_pre_final_norm(
+            FinalRmsNormBackwardRoute::KtComposite,
             &hidden,
             &final_norm_weight,
             &head_t,
@@ -12293,12 +12632,12 @@ pub(crate) mod tests {
         let hidden_cpu =
             Tensor::from_vec_on(cpu, hidden_data.clone(), vec![1, seq_len, hidden_size])?
                 .to_dtype(KtDType::BF16)?;
-        let grad_cpu =
-            Tensor::from_vec_on(cpu, grad_data.clone(), vec![1, seq_len, hidden_size])?
-                .to_dtype(KtDType::BF16)?;
+        let grad_cpu = Tensor::from_vec_on(cpu, grad_data.clone(), vec![1, seq_len, hidden_size])?
+            .to_dtype(KtDType::BF16)?;
         let weight_cpu = Tensor::from_vec_on(cpu, weight_data.clone(), vec![hidden_size])?
             .to_dtype(KtDType::BF16)?;
         let expected = rms_norm_backward_pre_final_norm(
+            FinalRmsNormBackwardRoute::KtComposite,
             &hidden_cpu,
             &weight_cpu,
             &grad_cpu,
@@ -12307,20 +12646,12 @@ pub(crate) mod tests {
         .to_vec::<f32>()?;
 
         let cuda = Device::Cuda(0);
-        let hidden_cuda = Tensor::from_vec_on(
-            cuda,
-            hidden_data,
-            vec![1, seq_len, hidden_size],
-        )?
-        .to_dtype(KtDType::BF16)?
-        .contiguous()?;
-        let grad_cuda = Tensor::from_vec_on(
-            cuda,
-            grad_data,
-            vec![1, seq_len, hidden_size],
-        )?
-        .to_dtype(KtDType::BF16)?
-        .contiguous()?;
+        let hidden_cuda = Tensor::from_vec_on(cuda, hidden_data, vec![1, seq_len, hidden_size])?
+            .to_dtype(KtDType::BF16)?
+            .contiguous()?;
+        let grad_cuda = Tensor::from_vec_on(cuda, grad_data, vec![1, seq_len, hidden_size])?
+            .to_dtype(KtDType::BF16)?
+            .contiguous()?;
         let weight_cuda = Tensor::from_vec_on(cuda, weight_data, vec![hidden_size])?
             .to_dtype(KtDType::BF16)?
             .contiguous()?;
@@ -12330,6 +12661,7 @@ pub(crate) mod tests {
         ));
 
         let got = rms_norm_backward_pre_final_norm(
+            FinalRmsNormBackwardRoute::CudaRocmFusedTail,
             &hidden_cuda,
             &weight_cuda,
             &grad_cuda,
@@ -12354,7 +12686,6 @@ pub(crate) mod tests {
 
         Ok(())
     }
-
 
     /// Regression: the FLCE auto-heuristic must engage for the original
     /// `/tmp/sft-data.jsonl` repro shape (T~918, vocab=152064). Pre-fix
@@ -12395,8 +12726,12 @@ pub(crate) mod tests {
     /// training dropped), so gate it to match and avoid a dead-code warning on
     /// the no-backend default build.
     #[cfg(any(feature = "cuda", feature = "vulkan"))]
-    fn build_perf_regression_cpu_fixture()
-    -> Result<(ModelConfig, GpuWeights, KilnTokenizer, Vec<crate::SftExample>)> {
+    fn build_perf_regression_cpu_fixture() -> Result<(
+        ModelConfig,
+        GpuWeights,
+        KilnTokenizer,
+        Vec<crate::SftExample>,
+    )> {
         let config = tiny_config();
         let weights = tiny_weights(&config, &cpu_device())?;
         let tokenizer = minimal_training_tokenizer(
@@ -12733,7 +13068,10 @@ pub(crate) mod tests {
         .expect("checkpointed GRPO tape-authoritative step");
 
         assert!(loss_val.is_finite(), "GRPO loss not finite: {loss_val}");
-        assert!(!grads.is_empty(), "checkpointed GRPO produced no LoRA grads");
+        assert!(
+            !grads.is_empty(),
+            "checkpointed GRPO produced no LoRA grads"
+        );
         let var_kt_ids: std::collections::HashSet<KtTensorId> =
             params.all_params().iter().map(|p| p.tensor_id()).collect();
         let mut nonzero_lora_grads = 0usize;
@@ -12836,10 +13174,10 @@ pub(crate) mod tests {
                 ("up_proj", &layer.up_proj),
             ];
             // down_proj handled separately (the array above caps at 9; add it).
-            for (name, slot) in modules.into_iter().chain(std::iter::once((
-                "down_proj",
-                &layer.down_proj,
-            ))) {
+            for (name, slot) in modules
+                .into_iter()
+                .chain(std::iter::once(("down_proj", &layer.down_proj)))
+            {
                 if let Some((a, b)) = slot {
                     for (tag, p) in [("A", a), ("B", b)] {
                         match grads.get(p.tensor_id()) {
@@ -12904,9 +13242,9 @@ pub(crate) mod tests {
         let label_mask = vec![false, false, true, true, true, true, false];
         let backend = backend::for_device_kt(device);
 
-        // The real public SFT entry point. The device-aware
-        // `base_dtype_supports_tape(weights, device)` gate now admits F32 on
-        // Vulkan, so this routes through the kt tape producer.
+        // The real public SFT entry point. The backend-aware training precision
+        // policy now admits F32 activations on Vulkan, so this routes through
+        // the kt tape producer.
         let (loss_val, grad_src) = standard_forward_backward(
             &*backend,
             &input_ids,
@@ -13018,12 +13356,12 @@ pub(crate) mod tests {
             &ref_log_probs,
             loss_params,
             &device,
-            0,           // comp_idx
-            num_active,  // num_active
-            0,           // comp_env_count
-            0,           // streaming_tile_tokens (no streaming)
-            0,           // checkpoint_segments (no checkpointing)
-            None,        // timings
+            0,          // comp_idx
+            num_active, // num_active
+            0,          // comp_env_count
+            0,          // streaming_tile_tokens (no streaming)
+            0,          // checkpoint_segments (no checkpointing)
+            None,       // timings
         )
         .expect("grpo_step_forward_backward_tape_authoritative_kt (F32 Vulkan GRPO)");
 
@@ -13090,7 +13428,10 @@ pub(crate) mod tests {
                 }
             }
         }
-        assert!(checked_a_projection, "no projection weight found to verify BF16");
+        assert!(
+            checked_a_projection,
+            "no projection weight found to verify BF16"
+        );
     }
 
     /// Run ONE SFT forward+backward through `standard_forward_backward` on a
@@ -13275,6 +13616,8 @@ pub(crate) mod tests {
              root did not connect through the BF16 model to any LoRA leaf"
         );
         assert_base_weights_bf16(&weights);
-        eprintln!("[GRPO BF16 Vulkan] loss={loss_val:.6} grad_leaves={present} (base BF16, LoRA F32)");
+        eprintln!(
+            "[GRPO BF16 Vulkan] loss={loss_val:.6} grad_leaves={present} (base BF16, LoRA F32)"
+        );
     }
 }

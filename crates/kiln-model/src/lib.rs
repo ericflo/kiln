@@ -47,7 +47,32 @@ pub mod vk_bwd_adapter;
 pub mod vk_decode_resident;
 pub mod weights;
 
-pub use backend::BackendRuntime;
+pub use backend::capability::{
+    AttentionCapabilities, AttentionRequest, AttentionRequestKind, BackendCapabilities,
+    BackendCapabilityQueries, BackendCapabilitySnapshot, BackendFallbackCapabilities,
+    BackendTrainingCapabilities, DecodeBatcherPolicy, DecodeCapabilities, GdnCapabilities,
+    GpuAllocatorMemoryProbe, GpuAllocatorMemoryProbePolicy, GpuMemoryBudgetPolicy,
+    GpuMemoryDetectionPolicy, GpuMemoryReclaimPolicy, GpuMemoryReclaimer,
+    InferenceRecurrentStatePolicy, KvCacheAutoBlockPolicy, KvCacheFp8Policy,
+    KvCacheMemoryTierBlockCap, LinearRequest, LinearRequestKind, MatmulAccumulation,
+    MatmulBatchPolicy, MatmulBlasRequest, MatmulCapabilities, MatmulEpilogue, MatmulOperandLayout,
+    MatmulRequest, MatmulRequestProjectionError, ReplayAuthority, ReplayCapabilities,
+    ReplayGraphCrateRole, ReplayNativePrimitive, ReplayProductionAuthority, ReplayRequest,
+    ReplayRequestKind, ServerTrainingDispatchPolicy, ServerTrainingNativeRoute,
+    SpeculativeDecodePolicy, StartupCapabilities, StorageCapabilities, Support,
+    TrainingAccelerationEnvFlagPolicy, TrainingAccelerationProfileLogMessage,
+    TrainingAccelerationProfilePolicy,
+};
+pub use backend::residency::{
+    ReplayStability, ResidentOwnership, ResidentRegistry, ResidentResource, ResidentResourceFamily,
+    ResidentResourceLayout, ResidentResourceState, resident_backend_for_runtime,
+    resident_ownership_for_backend,
+};
+pub use backend::{
+    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, FallbackPolicy, GdnBackend,
+    LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend,
+    SamplingBackend, StartupBackend, TrainingLossBackend, TrainingPrecisionPolicy,
+};
 // (#1082 candle removal) `backend::for_device` (candle-typed shim) was deleted
 // with the candle-parity opt-in feature; production uses `for_device_kt`.
 pub use cancel::CancelHandle;

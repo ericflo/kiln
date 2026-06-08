@@ -19,7 +19,8 @@ use kiln_eval::qwen3::ParsedToolCall;
 use kiln_model::adapter_merge::{PeftLora, merge_concat};
 use kiln_model::lora_loader::LoraWeights;
 use kiln_model::{
-    CancelHandle, GenerationOutput, ModelRunner, PagedPrefixReuse, SpeculativeConfig, StreamEvent,
+    CancelHandle, GenerationOutput, ModelRunner, PagedPrefixReuse, SpeculativeConfig,
+    SpeculativeDecodePolicy, StreamEvent,
 };
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -3252,40 +3253,16 @@ enum ResolvedSpeculativeMode {
     Mtp,
 }
 
-const MTP_MAX_PROMPT_TOKENS_DEFAULT: usize = 128;
-const LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT: usize = 1024;
-const LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL: usize = 4096;
-const LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS_DEFAULT: usize = 32;
-
-fn native_mtp_enabled_for_metal() -> bool {
-    std::env::var("KILN_ENABLE_METAL_NATIVE_MTP")
-        .ok()
-        .as_deref()
-        .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-}
-
-fn native_mtp_allowed_for_state(state: &AppState) -> bool {
+fn speculative_decode_policy_for_state(state: &AppState) -> (bool, SpeculativeDecodePolicy) {
     let ModelBackend::Real { runner, .. } = state.backend.as_ref() else {
-        return true;
+        return (true, SpeculativeDecodePolicy::default());
     };
     let runner_guard = runner.read().unwrap();
-    // Migrated to kt::Device via GpuWeights::device_kt() (#1082).
-    match runner_guard.weights.device_kt() {
-        kiln_tensor::Device::Metal(_) => native_mtp_enabled_for_metal(),
-        _ => true,
-    }
-}
-
-fn long_prompt_skip_layer_min_prompt_tokens_for_state(state: &AppState) -> usize {
-    let ModelBackend::Real { runner, .. } = state.backend.as_ref() else {
-        return LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT;
-    };
-    let runner_guard = runner.read().unwrap();
-    // Migrated to kt::Device via GpuWeights::device_kt() (#1082).
-    match runner_guard.weights.device_kt() {
-        kiln_tensor::Device::Metal(_) => LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
-        _ => LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
-    }
+    let decode = runner_guard.backend_capabilities().decode;
+    (
+        decode.mtp_speculative_generation.is_native(),
+        decode.speculative_policy,
+    )
 }
 
 fn resolve_skip_layer_config(
@@ -3308,7 +3285,7 @@ fn resolve_speculative_mode_from_config(
     mtp_supported: bool,
     has_active_lora: bool,
     native_mtp_allowed: bool,
-    long_prompt_skip_layer_min_prompt_tokens: usize,
+    speculative_policy: SpeculativeDecodePolicy,
 ) -> ResolvedSpeculativeMode {
     let skip_layer = resolve_skip_layer_config(model_config, speculative);
 
@@ -3322,12 +3299,13 @@ fn resolve_speculative_mode_from_config(
             if mtp_supported
                 && native_mtp_allowed
                 && greedy_without_lora
-                && prompt_tokens <= MTP_MAX_PROMPT_TOKENS_DEFAULT
+                && prompt_tokens <= speculative_policy.mtp_max_prompt_tokens
             {
                 ResolvedSpeculativeMode::Mtp
             } else if greedy_without_lora
-                && prompt_tokens >= long_prompt_skip_layer_min_prompt_tokens
-                && sampling.max_tokens >= LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS_DEFAULT
+                && prompt_tokens >= speculative_policy.long_prompt_skip_layer_min_prompt_tokens
+                && sampling.max_tokens
+                    >= speculative_policy.long_prompt_skip_layer_min_output_tokens
             {
                 skip_layer
                     .map(ResolvedSpeculativeMode::SkipLayer)
@@ -3347,6 +3325,7 @@ fn resolve_speculative_mode(
     has_active_lora: bool,
 ) -> ResolvedSpeculativeMode {
     let speculative = SpeculativeDecodingConfig::from_env();
+    let (native_mtp_allowed, speculative_policy) = speculative_decode_policy_for_state(state);
     resolve_speculative_mode_from_config(
         &state.model_config,
         &speculative,
@@ -3354,8 +3333,8 @@ fn resolve_speculative_mode(
         prompt_tokens,
         mtp_supported,
         has_active_lora,
-        native_mtp_allowed_for_state(state),
-        long_prompt_skip_layer_min_prompt_tokens_for_state(state),
+        native_mtp_allowed,
+        speculative_policy,
     )
 }
 
@@ -3624,10 +3603,8 @@ async fn real_prompt_logprobs(
         // whole path is kt.
         let device_kt = runner_guard.weights.device_kt();
         let backend = kiln_model::backend::for_device_kt(&device_kt);
-        let mut linear_state = kiln_model::forward::LinearAttentionState::new(
-            &runner_guard.config,
-            &device_kt,
-        )?;
+        let mut linear_state =
+            kiln_model::forward::LinearAttentionState::new(&runner_guard.config, &device_kt)?;
         let logits = kiln_model::forward::model_forward_kt(
             &*backend,
             &prompt_tokens_owned,
@@ -4623,8 +4600,7 @@ async fn ensure_composed_adapter_swap(
 
     tokio::task::spawn_blocking(move || {
         // #1082: LoraWeights::load is kt-native — pass the kt device directly.
-        let lora =
-            LoraWeights::load(&cache_dir, num_layers, device).map_err(|e| format!("{e}"))?;
+        let lora = LoraWeights::load(&cache_dir, num_layers, device).map_err(|e| format!("{e}"))?;
         let mut guard = runner.write().unwrap();
         guard.swap_lora(Some(lora));
         *active_name.write().unwrap() = Some(composed_active);
@@ -8447,6 +8423,14 @@ mod tests {
         }
     }
 
+    fn default_speculative_policy_for_test() -> SpeculativeDecodePolicy {
+        SpeculativeDecodePolicy::default()
+    }
+
+    fn metal_speculative_policy_for_test() -> SpeculativeDecodePolicy {
+        SpeculativeDecodePolicy::for_backend("metal", kiln_tensor::Device::Metal(0))
+    }
+
     #[test]
     fn completion_usage_counts_terminal_eos_token() {
         assert_eq!(
@@ -9848,7 +9832,7 @@ mod tests {
             false,
             false,
             true,
-            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+            default_speculative_policy_for_test(),
         );
 
         match mode {
@@ -9877,7 +9861,7 @@ mod tests {
             true,
             false,
             true,
-            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+            default_speculative_policy_for_test(),
         );
         assert!(matches!(greedy, ResolvedSpeculativeMode::Mtp));
 
@@ -9889,7 +9873,7 @@ mod tests {
             true,
             false,
             true,
-            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+            default_speculative_policy_for_test(),
         );
         assert!(matches!(sampled, ResolvedSpeculativeMode::Off));
 
@@ -9901,7 +9885,7 @@ mod tests {
             true,
             true,
             true,
-            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+            default_speculative_policy_for_test(),
         );
         assert!(matches!(with_lora, ResolvedSpeculativeMode::Off));
 
@@ -9909,11 +9893,11 @@ mod tests {
             &ModelConfig::qwen3_5_4b(),
             &cfg,
             &make_sampling(0.0),
-            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+            SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
             true,
             false,
             true,
-            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+            default_speculative_policy_for_test(),
         );
         assert!(matches!(long_prompt, ResolvedSpeculativeMode::SkipLayer(_)));
 
@@ -9925,21 +9909,22 @@ mod tests {
             true,
             false,
             true,
-            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+            default_speculative_policy_for_test(),
         );
         assert!(matches!(medium_prompt, ResolvedSpeculativeMode::Off));
 
         let mut short_output_sampling = make_sampling(0.0);
-        short_output_sampling.max_tokens = LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS_DEFAULT - 1;
+        short_output_sampling.max_tokens =
+            SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS_DEFAULT - 1;
         let long_prompt_short_output = resolve_speculative_mode_from_config(
             &ModelConfig::qwen3_5_4b(),
             &cfg,
             &short_output_sampling,
-            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+            SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
             true,
             false,
             true,
-            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+            default_speculative_policy_for_test(),
         );
         assert!(matches!(
             long_prompt_short_output,
@@ -9964,7 +9949,7 @@ mod tests {
             true,
             false,
             false,
-            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+            default_speculative_policy_for_test(),
         );
         assert!(matches!(mode, ResolvedSpeculativeMode::Off));
     }
@@ -9985,7 +9970,7 @@ mod tests {
             false,
             false,
             true,
-            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+            default_speculative_policy_for_test(),
         );
 
         assert!(matches!(mode, ResolvedSpeculativeMode::Off));
@@ -10008,7 +9993,7 @@ mod tests {
             true,
             false,
             false,
-            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
+            metal_speculative_policy_for_test(),
         );
         assert!(matches!(mode, ResolvedSpeculativeMode::Off));
     }
@@ -10026,11 +10011,11 @@ mod tests {
             &ModelConfig::qwen3_5_4b(),
             &cfg,
             &make_sampling(0.0),
-            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
+            SpeculativeDecodePolicy::LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
             true,
             false,
             false,
-            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
+            metal_speculative_policy_for_test(),
         );
         assert!(matches!(mode, ResolvedSpeculativeMode::SkipLayer(_)));
     }

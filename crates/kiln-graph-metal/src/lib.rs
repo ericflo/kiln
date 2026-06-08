@@ -1,12 +1,15 @@
 //! kiln-graph-metal — Metal `CapturedGraph` impl.
 //!
-//! Phase 5.1 of #1082: scaffold.
+//! Phase 5.1 of #1082: scaffold plus a reusable ICB replay object.
+//! The production Metal replay orchestration still lives in
+//! `crates/kiln-model/src/metal_graph.rs`; this crate is not yet the
+//! authoritative replay layer.
 //!
-//! Phase 5.x wraps `metal::IndirectCommandBuffer` (ICB) for the
-//! production replay path. ICBs are Metal's "graph" equivalent —
-//! pre-encoded compute pipeline state + buffer-binding records that
-//! can be replayed on a `MTLComputeCommandEncoder` with low CPU
-//! overhead.
+//! Phase 5.x should move or wrap the model-level runner behind this
+//! crate's ICB object or its successor. ICBs are Metal's "graph"
+//! equivalent: pre-encoded compute pipeline state plus buffer-binding
+//! records that can be replayed on a `MTLComputeCommandEncoder` with
+//! low CPU overhead.
 
 #![deny(missing_debug_implementations)]
 #![warn(rust_2018_idioms)]
@@ -182,6 +185,36 @@ impl CapturedGraph for MetalCapturedGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kiln_graph::{
+        CapturedGraphReplayPlan, ReplayInputs, ReplayKey, ReplayPlan, ReplayResourceStability,
+        ResidentResourceRef,
+    };
+    use kiln_tensor::{DType, TensorId};
+
+    fn replay_key() -> ReplayKey {
+        ReplayKey::new(
+            Backend::Metal,
+            "decode",
+            vec![1, 128],
+            Some(DType::F32),
+            1,
+            true,
+        )
+    }
+
+    fn stable_resource() -> ResidentResourceRef {
+        ResidentResourceRef {
+            tensor_id: Some(TensorId::next()),
+            backend: Backend::Metal,
+            dtype: DType::F32,
+            shape: vec![1, 128],
+            strides: vec![128, 1],
+            start_offset: 0,
+            contiguous: true,
+            byte_len: 128 * DType::F32.size_in_bytes(),
+            replay_stability: ReplayResourceStability::StableAcrossReplay,
+        }
+    }
 
     #[test]
     fn scaffold_reports_backend() {
@@ -197,5 +230,22 @@ mod tests {
             g.replay().unwrap();
         }
         assert_eq!(g.replay_count(), 5);
+    }
+
+    #[test]
+    fn scaffold_wraps_shared_replay_plan_contract() {
+        let key = replay_key();
+        let input = stable_resource();
+        let graph = MetalCapturedGraph::new(2048);
+        let mut plan = CapturedGraphReplayPlan::new(graph, key.clone(), vec![input.clone()])
+            .expect("Metal graph backend should match replay key");
+
+        assert_eq!(ReplayPlan::backend(&plan), Backend::Metal);
+        ReplayPlan::validate_inputs(&plan, ReplayInputs::new(&key, &[input.clone()])).unwrap();
+        let outputs = ReplayPlan::replay(&mut plan, ReplayInputs::new(&key, &[input.clone()]))
+            .expect("shared replay plan should replay scaffold graph");
+
+        assert_eq!(outputs.replay_count, 1);
+        assert_eq!(outputs.resources, vec![input]);
     }
 }

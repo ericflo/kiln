@@ -144,6 +144,13 @@ pub fn tape_scope_active() -> bool {
     with_active_tape(|_| ()).is_some()
 }
 
+fn tape_forward_device_supported(device: kiln_tensor::Device) -> bool {
+    matches!(
+        crate::backend::training_tape_route_for_device_kt(device),
+        crate::backend::TrainingTapeRoute::KtTapeAuthoritative
+    )
+}
+
 /// kt-native SiLU tape recorder (#1082 seam flip) — the kt-native SiLU tape recorder. Takes the kt activation directly and records a
 /// `SiluBackward` onto the active tape with **no candle round-trip** (no
 /// `kt_logits_to_candle` in, no `kt_tensor_to_candle_cuda_copy` out, no IO-map
@@ -202,13 +209,7 @@ pub fn try_tape_concat_kt(
     if !tape_forward_enabled() || inputs.is_empty() || axis >= out.rank() {
         return Ok(None);
     }
-    if !matches!(
-        out.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(out.device()) {
         return Ok(None);
     }
 
@@ -221,13 +222,8 @@ pub fn try_tape_concat_kt(
     let mut input_axis_sizes = Vec::with_capacity(inputs.len());
     let mut input_shapes = Vec::with_capacity(inputs.len());
     for input in inputs {
-        if !matches!(
-            input.device(),
-            kiln_tensor::Device::Cuda(_)
-                | kiln_tensor::Device::Metal(_)
-                | kiln_tensor::Device::Vulkan(_)
-                | kiln_tensor::Device::Rocm(_)
-        ) || input.dtype() != dtype
+        if !tape_forward_device_supported(input.device())
+            || input.dtype() != dtype
             || input.rank() != rank
         {
             return Ok(None);
@@ -424,35 +420,15 @@ pub fn try_tape_rms_norm_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(
-        x.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        weight.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(x.device())
+        || !tape_forward_device_supported(weight.device())
+    {
         return Ok(None);
     }
-    // (#1443 step 3) Mixed-precision RMSNorm on Vulkan: F32 ACTIVATION `x` × a
-    // BF16 NORM WEIGHT (production BF16 checkpoints store BF16 norms). The forward
-    // already casts `weight` to `x.dtype()` (F32) internally, and
-    // `RmsNormKtBackward::apply` casts x/weight/grad to F32 throughout, so the
-    // composite handles F32-x/BF16-weight cleanly. The norm weight is FROZEN in
-    // LoRA training (only `dL/dx` matters), so the dw-dtype is irrelevant. Relax
-    // the strict `x.dtype() == weight.dtype()` gate for this Vulkan case ONLY —
-    // CUDA/Metal run x==weight==BF16 end-to-end and keep the strict equality.
-    #[cfg(feature = "vulkan")]
-    let vk_f32x_bf16w = matches!(x.device(), kiln_tensor::Device::Vulkan(_))
-        && x.dtype() == kiln_tensor::DType::F32
-        && weight.dtype() == kiln_tensor::DType::BF16;
-    #[cfg(not(feature = "vulkan"))]
-    let vk_f32x_bf16w = false;
+    // Mixed-precision RMSNorm exceptions are backend precision policy, not a
+    // local Vulkan special case. Today the policy allows F32 activations with
+    // BF16 norm weights for Vulkan's mixed F32/BF16 training envelope.
+    let precision_policy = crate::backend::training_precision_policy_for_device_kt(x.device());
     if weight.rank() != 1
         || x.rank() == 0
         || *x.shape().last().unwrap() != weight.shape()[0]
@@ -460,7 +436,8 @@ pub fn try_tape_rms_norm_kt(
             x.dtype(),
             kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
         )
-        || (x.dtype() != weight.dtype() && !vk_f32x_bf16w)
+        || !precision_policy
+            .supports_rms_norm_weight_dtype_for_activation(x.dtype(), weight.dtype())
         || !x.is_contiguous()
         || !weight.is_contiguous()
     {
@@ -734,13 +711,7 @@ pub fn try_tape_transpose_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(
-        x.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(x.device()) {
         return Ok(None);
     }
     let rank = x.rank();
@@ -775,13 +746,7 @@ pub fn try_tape_reshape_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(
-        x.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(x.device()) {
         return Ok(None);
     }
     let input_shape = x.shape().to_vec();
@@ -986,13 +951,7 @@ pub fn try_tape_cross_entropy_from_logits_kt(
         || dims[0] != 1
         || dims[1] != input_ids.len()
         || label_mask.len() != input_ids.len()
-        || !matches!(
-            logits.device(),
-            kiln_tensor::Device::Cuda(_)
-                | kiln_tensor::Device::Metal(_)
-                | kiln_tensor::Device::Vulkan(_)
-                | kiln_tensor::Device::Rocm(_)
-        )
+        || !tape_forward_device_supported(logits.device())
     {
         return Ok(None);
     }
@@ -1174,31 +1133,11 @@ pub fn try_tape_lora_add_kt(
     if !tape_forward_enabled() || !tape_lora_add_enabled() {
         return Ok(None);
     }
-    if !matches!(
-        base.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        x.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        proj.a.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        proj.b.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(base.device())
+        || !tape_forward_device_supported(x.device())
+        || !tape_forward_device_supported(proj.a.device())
+        || !tape_forward_device_supported(proj.b.device())
+    {
         return Ok(None);
     }
     if base.dtype() != x.dtype() {
@@ -1395,19 +1334,9 @@ pub fn try_tape_lora_linear_kt(
     if !tape_forward_enabled() || !tape_lora_add_enabled() {
         return Ok(None);
     }
-    if !matches!(
-        x.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        weight_t.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(x.device())
+        || !tape_forward_device_supported(weight_t.device())
+    {
         return Ok(None);
     }
     if !matches!(
@@ -1416,21 +1345,15 @@ pub fn try_tape_lora_linear_kt(
     ) {
         return Ok(None);
     }
-    // (#1443 step 2) Mixed-precision base projection on Vulkan: F32 activations ×
-    // a frozen BF16 base weight. The base linear runs through the dedicated
-    // `vk_matmul_bf16w` kernel (recorded with a `MatmulBf16wBackward` dx-only
-    // adjoint) instead of the equal-dtype `MatmulBackward`. Keeping the base
-    // weight BF16 is the VRAM win #1443 buys; the LoRA delta + activations stay
-    // F32 (so the F32-only Vulkan rmsnorm/softmax kernels are untouched). This
-    // branch is Vulkan-only — CUDA/Metal carry their own BF16-base paths and run
-    // BF16 activations end-to-end, so they keep the strict `weight_t == x` gate.
-    #[cfg(feature = "vulkan")]
-    let vk_bf16_base = matches!(x.device(), kiln_tensor::Device::Vulkan(_))
-        && x.dtype() == kiln_tensor::DType::F32
-        && weight_t.dtype() == kiln_tensor::DType::BF16;
-    #[cfg(not(feature = "vulkan"))]
-    let vk_bf16_base = false;
-    if weight_t.dtype() != x.dtype() && !vk_bf16_base {
+    // (#1443 step 2) Mixed-precision base projection: F32 activations × a
+    // frozen BF16 base weight are a backend precision-policy exception, not a
+    // local device-family check. Today the policy admits this for Vulkan's
+    // mixed F32/BF16 envelope; other backends keep the strict equal-dtype gate.
+    let precision_policy = crate::backend::training_precision_policy_for_device_kt(x.device());
+    let mixed_base_weight = cfg!(feature = "vulkan")
+        && precision_policy
+            .supports_mixed_base_weight_dtype_for_activation(x.dtype(), weight_t.dtype());
+    if weight_t.dtype() != x.dtype() && !mixed_base_weight {
         return Ok(None);
     }
     let Ok((wk, n)) = weight_t.dims2() else {
@@ -1483,14 +1406,13 @@ pub fn try_tape_lora_linear_kt(
                 input_shape: x.shape().to_vec(),
             }),
         );
-        // (#1443 step 2) Base projection. On the Vulkan mixed-precision path
-        // (`vk_bf16_base`) the frozen base weight is BF16 while `x2d` is F32 — the
-        // equal-dtype kt `matmul` can't run, so route the base linear through the
-        // dedicated `vk_matmul_bf16w` kernel and record a `MatmulBf16wBackward`
-        // (dx only; the weight is frozen, no `dW` edge). Output `base2d` is F32,
-        // so the LoRA delta / residual adds below stay F32-vs-F32. Every other
-        // backend (CUDA/Metal, and the equal-dtype F32/BF16 Vulkan path) keeps
-        // the device-agnostic `MatmulBackward` exactly as before.
+        // (#1443 step 2) Base projection. On the policy-approved mixed-base path
+        // the frozen base weight is BF16 while `x2d` is F32 — the equal-dtype kt
+        // `matmul` can't run, so route the base linear through the dedicated
+        // Vulkan `vk_matmul_bf16w` leaf and record a `MatmulBf16wBackward` (dx
+        // only; the weight is frozen, no `dW` edge). Output `base2d` is F32, so
+        // the LoRA delta / residual adds below stay F32-vs-F32. Every equal-dtype
+        // path keeps the device-agnostic `MatmulBackward` exactly as before.
         //
         // LAYOUT: the production base `weight_t` reaching this recorder is
         // `[K, N]` = `[in, out]` (the pre-transposed layout `matmul(x2d, weight_t)`
@@ -1503,7 +1425,7 @@ pub fn try_tape_lora_linear_kt(
         // the activations, which are F32 on Vulkan by design). The same `[N,K]`
         // weight is stored in the backward op so `dx = grad_out @ W` is computed
         // against the matching layout.
-        let base2d = if vk_bf16_base {
+        let base2d = if mixed_base_weight {
             #[cfg(feature = "vulkan")]
             {
                 let w_nk = weight_t
@@ -1521,7 +1443,7 @@ pub fn try_tape_lora_linear_kt(
                 y
             }
             #[cfg(not(feature = "vulkan"))]
-            unreachable!("vk_bf16_base is false without the vulkan feature")
+            unreachable!("mixed_base_weight is false without the vulkan feature")
         } else {
             let base2d = kiln_tensor::ops::matmul(&x2d, weight_t)
                 .map_err(|e| anyhow::anyhow!("kt matmul x2d@w: {e}"))?;
@@ -2243,13 +2165,7 @@ pub fn try_tape_gdn_recurrent_kt(
     // production recurrence `gdn_recurrent_forward_from_parts`) and the record
     // adapter (`tape_record_gdn_recurrent_kt`) is now kt-native — no kt->candle
     // bridge on the saved inputs.
-    if !matches!(
-        q.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(q.device()) {
         return Ok(None);
     }
 
@@ -2318,13 +2234,7 @@ pub fn tape_record_gdn_recurrent_kt(
     if !tape_forward_enabled() || !tape_gdn_enabled() {
         return Ok(false);
     }
-    if !matches!(
-        device,
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(*device) {
         return Ok(false);
     }
 
@@ -2847,28 +2757,10 @@ pub fn try_tape_causal_conv1d_prefill_kt(
         feature = "rocm"
     ))]
     {
-        // The recorded backward is device-agnostic (CUDA FFI / kt composite), so the
-        // recorder admits CUDA, Metal, and Vulkan. CPU is excluded here only because
-        // the production GDN forward this hooks runs on an accelerator device.
-        if !matches!(
-            input.device(),
-            kiln_tensor::Device::Cuda(_)
-                | kiln_tensor::Device::Metal(_)
-                | kiln_tensor::Device::Vulkan(_)
-                | kiln_tensor::Device::Rocm(_)
-        ) || !matches!(
-            out.device(),
-            kiln_tensor::Device::Cuda(_)
-                | kiln_tensor::Device::Metal(_)
-                | kiln_tensor::Device::Vulkan(_)
-                | kiln_tensor::Device::Rocm(_)
-        ) || !matches!(
-            weight.device(),
-            kiln_tensor::Device::Cuda(_)
-                | kiln_tensor::Device::Metal(_)
-                | kiln_tensor::Device::Vulkan(_)
-                | kiln_tensor::Device::Rocm(_)
-        ) {
+        if !tape_forward_device_supported(input.device())
+            || !tape_forward_device_supported(out.device())
+            || !tape_forward_device_supported(weight.device())
+        {
             return Ok(None);
         }
         if kernel < 2 {
@@ -2961,31 +2853,11 @@ pub fn try_tape_causal_conv1d_prefill_silu_kt(
         feature = "rocm"
     ))]
     {
-        if !matches!(
-            input.device(),
-            kiln_tensor::Device::Cuda(_)
-                | kiln_tensor::Device::Metal(_)
-                | kiln_tensor::Device::Vulkan(_)
-                | kiln_tensor::Device::Rocm(_)
-        ) || !matches!(
-            out.device(),
-            kiln_tensor::Device::Cuda(_)
-                | kiln_tensor::Device::Metal(_)
-                | kiln_tensor::Device::Vulkan(_)
-                | kiln_tensor::Device::Rocm(_)
-        ) || !matches!(
-            weight.device(),
-            kiln_tensor::Device::Cuda(_)
-                | kiln_tensor::Device::Metal(_)
-                | kiln_tensor::Device::Vulkan(_)
-                | kiln_tensor::Device::Rocm(_)
-        ) || !matches!(
-            entry_state.device(),
-            kiln_tensor::Device::Cuda(_)
-                | kiln_tensor::Device::Metal(_)
-                | kiln_tensor::Device::Vulkan(_)
-                | kiln_tensor::Device::Rocm(_)
-        ) {
+        if !tape_forward_device_supported(input.device())
+            || !tape_forward_device_supported(out.device())
+            || !tape_forward_device_supported(weight.device())
+            || !tape_forward_device_supported(entry_state.device())
+        {
             return Ok(None);
         }
         if kernel < 2 {
@@ -3192,13 +3064,7 @@ pub fn try_tape_gdn_l2_norm_scale_kt(
     if !tape_forward_enabled() || !tape_gdn_qk_norm_enabled() {
         return Ok(None);
     }
-    if !matches!(
-        x.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(x.device()) {
         return Ok(None);
     }
     if x.dims() != out.dims() {
@@ -3395,13 +3261,7 @@ pub fn try_tape_gdn_gated_rms_norm_kt(
     if !tape_forward_enabled() || !tape_gdn_gated_norm_enabled() {
         return Ok(None);
     }
-    if !matches!(
-        x.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(x.device()) {
         return Ok(None);
     }
     if x.dims() != z.dims() || x.dims() != out.dims() {
@@ -3521,19 +3381,9 @@ pub fn try_tape_cast_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(
-        x.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        out.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(x.device())
+        || !tape_forward_device_supported(out.device())
+    {
         return Ok(None);
     }
     if x.dims() != out.dims() {
@@ -3651,19 +3501,9 @@ pub fn try_tape_narrow_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(
-        x.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        out.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(x.device())
+        || !tape_forward_device_supported(out.device())
+    {
         return Ok(None);
     }
     let x_dims = x.dims().to_vec();
@@ -3771,19 +3611,9 @@ pub fn try_tape_gqa_expand_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(
-        x.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        out.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(x.device())
+        || !tape_forward_device_supported(out.device())
+    {
         return Ok(None);
     }
     if gqa_ratio <= 1 {
@@ -3965,31 +3795,11 @@ pub fn try_tape_sdpa_fallback_kt(
     if !tape_forward_enabled() || !tape_sdpa_enabled() {
         return Ok(None);
     }
-    if !matches!(
-        q.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        k.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        v.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        out.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(q.device())
+        || !tape_forward_device_supported(k.device())
+        || !tape_forward_device_supported(v.device())
+        || !tape_forward_device_supported(out.device())
+    {
         return Ok(None);
     }
     let (bq, nq, tq, dq_) = match q.dims4() {

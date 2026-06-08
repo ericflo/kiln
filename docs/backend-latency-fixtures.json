@@ -1,0 +1,197 @@
+{
+  "schema_version": 1,
+  "status": "covered",
+  "policy": {
+    "covered_gate_requires": [
+      "Every required backend has at least one known hardware fixture.",
+      "Every fixture has locked numeric thresholds for its required measurements.",
+      "Every locked threshold has a checked hardware-result artifact from the named fixture.",
+      "Default-feature local tests must not mark the hardware latency gate covered."
+    ]
+  },
+  "required_backends": [
+    "cuda",
+    "rocm",
+    "metal",
+    "vulkan"
+  ],
+  "fixtures": [
+    {
+      "id": "cuda_rtx4090_matmul_qwen35_4b",
+      "backend": "cuda",
+      "hardware": "NVIDIA GeForce RTX 4090 24GB",
+      "runner_labels": [
+        "self-hosted",
+        "linux",
+        "cuda-rtx4090"
+      ],
+      "source": "crates/kiln-tensor/tests/cuda_latency_bench.rs",
+      "command": "CUDARC_CUDA_VERSION=12080 cargo test -p kiln-tensor --features cuda --test cuda_latency_bench -- --ignored --nocapture",
+      "result_artifact": "bench-results/backend-latency/cuda-rtx4090-matmul.json",
+      "threshold_state": "locked_threshold",
+      "metrics": [
+        {
+          "name": "decode_qkv_m1_2560x4096_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": 0.073941
+        },
+        {
+          "name": "prefill_qkv_m256_2560x4096_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": 0.088925
+        },
+        {
+          "name": "prefill_gate_up_m256_2560x18432_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": 0.216678
+        },
+        {
+          "name": "lm_head_m1_2560x152064_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": 0.994028
+        }
+      ]
+    },
+    {
+      "id": "metal_apple_silicon_matmul_qwen35_4b",
+      "backend": "metal",
+      "hardware": "Apple Silicon Metal fixture",
+      "source": "crates/kiln-tensor/tests/metal_matmul_bench.rs",
+      "command": "cargo test -p kiln-tensor --features metal --test metal_matmul_bench -- --ignored --nocapture",
+      "result_artifact": "bench-results/backend-latency/metal-apple-silicon-matmul.json",
+      "threshold_state": "locked_threshold",
+      "metrics": [
+        {
+          "name": "decode_qkv_m1_2560x4096_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": 1.416912
+        },
+        {
+          "name": "prefill_qkv_m256_2560x4096_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": 4.284225
+        },
+        {
+          "name": "prefill_gate_up_m256_2560x18432_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": 19.164885
+        },
+        {
+          "name": "lm_head_m1_2560x152064_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": 42.799126
+        }
+      ]
+    },
+    {
+      "id": "metal_apple_silicon_sdpa_qwen35_4b",
+      "backend": "metal",
+      "hardware": "Apple Silicon Metal fixture",
+      "source": "crates/kiln-tensor/tests/metal_sdpa_bench.rs",
+      "command": "cargo test -p kiln-tensor --features metal --test metal_sdpa_bench -- --ignored --nocapture",
+      "result_artifact": "bench-results/backend-latency/metal-apple-silicon-sdpa.json",
+      "threshold_state": "locked_threshold",
+      "metrics": [
+        {
+          "name": "decode_sq1_sk512_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": 0.143847
+        },
+        {
+          "name": "decode_sq1_sk4096_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": 0.617131
+        },
+        {
+          "name": "prefill_sq512_sk512_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": 4.511978
+        }
+      ]
+    },
+    {
+      "id": "rocm_gfx1151_matmul_qwen35_4b",
+      "backend": "rocm",
+      "hardware": "AMD ROCm gfx1151 or configured ROCm fixture",
+      "runner_labels": [
+        "self-hosted",
+        "linux",
+        "rocm-gfx1151"
+      ],
+      "source": "crates/kiln-tensor/tests/rocm_latency_bench.rs",
+      "command": "cargo test -p kiln-tensor --features rocm --test rocm_latency_bench -- --ignored --nocapture",
+      "result_artifact": "bench-results/backend-latency/rocm-gfx1151-matmul.json",
+      "threshold_state": "locked_threshold",
+      "metrics": [
+        {
+          "name": "decode_qkv_m1_2560x4096_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": 0.08737
+        },
+        {
+          "name": "prefill_qkv_m256_2560x4096_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": 0.189971
+        },
+        {
+          "name": "prefill_gate_up_m256_2560x18432_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": 1.004594
+        },
+        {
+          "name": "lm_head_m1_2560x152064_ms",
+          "unit": "ms",
+          "comparison": "<=",
+          "max": 3.779206
+        }
+      ]
+    },
+    {
+      "id": "vulkan_strix_halo_decode_microbench",
+      "backend": "vulkan",
+      "hardware": "AMD Ryzen AI MAX+ 395 / Radeon 8060S Graphics (RADV STRIX_HALO, gfx1151)",
+      "runner_labels": [
+        "self-hosted",
+        "linux",
+        "vulkan-strix-halo"
+      ],
+      "source": "crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs",
+      "command": "KILN_VK_MICROBENCH_ONLY=full_step_resident,full_token_resident_paged KILN_VK_MICROBENCH_BATCHES=1 cargo run --release -p kiln-vulkan-kernel --bin vulkan_decode_microbench",
+      "result_artifact": "bench-results/backend-latency/vulkan-strix-halo-decode.json",
+      "threshold_state": "locked_threshold",
+      "selected_cases": [
+        "full_step_resident",
+        "full_token_resident_paged"
+      ],
+      "metrics": [
+        {
+          "name": "full_step_resident_us",
+          "unit": "us",
+          "comparison": "<=",
+          "max": 1724.157784
+        },
+        {
+          "name": "full_token_resident_paged_us",
+          "unit": "us",
+          "comparison": "<=",
+          "max": 55889.454756
+        }
+      ]
+    }
+  ],
+  "missing_fixture_slots": []
+}
