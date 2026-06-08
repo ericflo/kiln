@@ -11777,28 +11777,28 @@ fn try_kt_lora_delta(
 /// Operates entirely on `KtTensor` storage: given the flattened
 /// `[lead, K]` hidden state and the `[K, vocab]` transposed embedding,
 /// both already borrowed as kt tensors, performs the final projection
-/// via `kiln_tensor::cuda_matmul` (cublasLt) and returns the
-/// `[lead, vocab]` logits as a `KtTensor`. This is the consolidated
-/// kt-internal computation for the lm_head region; the candle↔kt
+/// via `kiln_tensor::ops::matmul` and returns the `[lead, vocab]`
+/// logits as a `KtTensor`. This is the consolidated kt-internal
+/// computation for the lm_head region; the candle↔kt
 /// bridging (and the captured-graph output-buffer fast path) lives in
 /// the [`try_kt_lm_head`] wrapper.
 ///
 /// The matmul is bit-exact to the candle baseline for the LM head
-/// (cublasLt BF16-input + FP32-accumulate, the same intrinsic candle's
-/// matmul dispatches to). The `kiln/lm_head_kt` NVTX range is opened by
+/// while letting the kt `MatmulOp` contract choose the active backend's
+/// native implementation. The `kiln/lm_head_kt` NVTX range is opened by
 /// the [`try_kt_lm_head`] wrapper (covering both this core and the
 /// captured-graph `cuda_matmul_into` branch), so this core does not open
 /// its own range to avoid a nested duplicate.
 #[cfg(feature = "cuda")]
 fn kt_lm_head_native(lhs_kt: &KtTensor, rhs_kt: &KtTensor) -> Result<KtTensor> {
-    kiln_tensor::cuda_matmul(lhs_kt, rhs_kt)
+    kiln_tensor::ops::matmul(lhs_kt, rhs_kt)
         .map_err(|e| anyhow::anyhow!("kt_lm_head_native: matmul failed: {e}"))
 }
 
 /// Phase 7 (#1082) — kt-API LM head migration helper. Routes the
 /// `[B*T, hidden] @ [hidden, vocab] -> [B*T, vocab]` final projection
-/// through `kiln_tensor::cuda_matmul` (cublasLt) directly. The LM
-/// head is the single highest-impact production matmul site: the
+/// through `kiln_tensor::ops::matmul` directly. The LM head is the
+/// single highest-impact production matmul site: the
 /// `embed_tokens_t` weight has shape `[hidden=2560, vocab=151_936]`,
 /// and at prefill `x` has `[B*T, hidden]` with sequence lengths in
 /// the hundreds or thousands.
@@ -11811,9 +11811,9 @@ fn kt_lm_head_native(lhs_kt: &KtTensor, rhs_kt: &KtTensor) -> Result<KtTensor> {
 /// which writes the matmul result directly into a pre-allocated,
 /// graph-stable candle output buffer via `cuda_matmul_into`.
 ///
-/// Returns `Ok(None)` on any incompatibility (gate off, non-CUDA,
-/// non-{BF16,F16,F32}, dtype mismatch, non-contiguous,
-/// non-rank-2 weight, K-dim mismatch) so the caller falls through to
+/// Returns `Ok(None)` on any incompatibility (gate off,
+/// non-{BF16,F16,F32}, dtype mismatch, non-contiguous, non-rank-2
+/// weight, K-dim mismatch) so the caller falls through to
 /// [`broadcast_matmul_cpu_compatible`]. NVTX range `kiln/lm_head_kt`
 /// brackets the migrated call so nsys traces separate the path from
 /// the candle baseline.
@@ -11848,9 +11848,7 @@ fn try_kt_lm_head(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Option<Tensor>>
     if r_dims[0] != k {
         return Ok(None);
     }
-    if !matches!(x.device(), Device::Cuda(_))
-        || !matches!(embed_tokens_t.device(), Device::Cuda(_))
-        || !matches!(x.dtype(), DType::BF16 | DType::F16 | DType::F32)
+    if !matches!(x.dtype(), DType::BF16 | DType::F16 | DType::F32)
         || x.dtype() != embed_tokens_t.dtype()
         || !x.is_contiguous()
         || !embed_tokens_t.is_contiguous()
@@ -11984,8 +11982,8 @@ fn lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<u32> {
     }
     // Fused matmul + argmax path: when both kt LM head and argmax
     // gates are on (or KILN_USE_KT_API_ALL=1), chain
-    // `cuda_matmul` -> `cuda_argmax_last_axis` directly in
-    // kt-storage, skipping the intermediate candle copy-back the
+    // `MatmulOp` -> `cuda_argmax_last_axis` directly in kt-storage,
+    // skipping the intermediate candle copy-back the
     // unfused composition would pay between the two stages.
     #[cfg(feature = "cuda")]
     if let Some(token) = try_kt_lm_head_argmax(x, embed_tokens_t)? {
@@ -12011,7 +12009,7 @@ fn lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<u32> {
 
 /// Phase 7 (#1082) — fused kt-API LM head + argmax migration helper.
 /// Routes the `[1, 1, hidden] @ [hidden, vocab] -> argmax` pipeline
-/// through `kiln_tensor::cuda_matmul` followed directly by
+/// through `kiln_tensor::ops::matmul` followed directly by
 /// `kiln_tensor::cuda_argmax_last_axis` in kt-storage, skipping the
 /// intermediate candle copy-back that the unfused
 /// `try_kt_lm_head` -> `try_kt_argmax_1d` composition would pay.
@@ -12049,9 +12047,7 @@ fn try_kt_lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Option<u
     if lead != 1 {
         return Ok(None);
     }
-    if !matches!(x.device(), Device::Cuda(_))
-        || !matches!(embed_tokens_t.device(), Device::Cuda(_))
-        || !matches!(x.dtype(), DType::BF16 | DType::F16 | DType::F32)
+    if !matches!(x.dtype(), DType::BF16 | DType::F16 | DType::F32)
         || x.dtype() != embed_tokens_t.dtype()
         || !x.is_contiguous()
         || !embed_tokens_t.is_contiguous()
@@ -12069,7 +12065,7 @@ fn try_kt_lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Option<u
     // #1082 forward-flip: `x2d` / `embed_tokens_t` are already kt; run the
     // kt matmul + argmax directly and read the scalar back (no candle
     // round-trip).
-    let logits_kt = match kiln_tensor::cuda_matmul(&x2d, embed_tokens_t) {
+    let logits_kt = match kiln_tensor::ops::matmul(&x2d, embed_tokens_t) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };

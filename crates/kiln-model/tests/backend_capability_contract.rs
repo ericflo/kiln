@@ -5220,6 +5220,63 @@ fn generated_capability_report_gates_matmul_linear_contract() {
 }
 
 #[test]
+fn forward_lm_head_matmul_routes_through_matmul_op_contract() {
+    let forward_source =
+        fs::read_to_string(workspace_root().join("crates/kiln-model/src/forward.rs"))
+            .expect("forward source should be readable");
+
+    let lm_head_core = source_between(
+        &forward_source,
+        "fn kt_lm_head_native(",
+        "/// Phase 7 (#1082) — kt-API LM head migration helper.",
+    );
+    assert!(
+        lm_head_core.contains("kiln_tensor::ops::matmul"),
+        "LM-head kt core should route matmul through the MatmulOp contract"
+    );
+    assert!(
+        !lm_head_core.contains("kiln_tensor::cuda_matmul("),
+        "LM-head kt core should not bind directly to CUDA matmul"
+    );
+
+    let lm_head_helper = source_between(
+        &forward_source,
+        "fn try_kt_lm_head(",
+        "fn lm_head_forward_backend_decode_if(",
+    );
+    for forbidden in [
+        "matches!(x.device(), Device::Cuda(_))",
+        "matches!(embed_tokens_t.device(), Device::Cuda(_))",
+        "kiln_tensor::cuda_matmul(",
+    ] {
+        assert!(
+            !lm_head_helper.contains(forbidden),
+            "LM-head kt helper should not select the matmul path by CUDA identity: {forbidden}"
+        );
+    }
+
+    let lm_head_argmax = source_between(
+        &forward_source,
+        "fn try_kt_lm_head_argmax(",
+        "/// Phase 7 (#1082) — kt-API argmax migration helper.",
+    );
+    assert!(
+        lm_head_argmax.contains("kiln_tensor::ops::matmul"),
+        "fused LM-head argmax helper should route its matmul through MatmulOp"
+    );
+    for forbidden in [
+        "matches!(x.device(), Device::Cuda(_))",
+        "matches!(embed_tokens_t.device(), Device::Cuda(_))",
+        "kiln_tensor::cuda_matmul(",
+    ] {
+        assert!(
+            !lm_head_argmax.contains(forbidden),
+            "fused LM-head argmax helper should not select the matmul path by CUDA identity: {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn generated_capability_report_tracks_one_step_training_proof_gate() {
     let report_path = workspace_root().join("docs/backend-capability-report.json");
     let report: Value = serde_json::from_str(
