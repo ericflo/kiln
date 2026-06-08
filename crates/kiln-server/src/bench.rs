@@ -1158,6 +1158,7 @@ fn bench_latency_paged(
                         current_pos,
                         &mut linear_state,
                         None,
+                        None,
                     )
                     .context("paged sampled ROCm graph hidden pass failed")?
             } else {
@@ -1212,6 +1213,7 @@ fn bench_latency_paged(
                     &block_table,
                     current_pos,
                     &mut linear_state,
+                    None,
                     None,
                 )
                 .context("paged ROCm graph greedy decode forward pass failed")?

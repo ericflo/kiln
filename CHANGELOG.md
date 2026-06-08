@@ -1,5 +1,26 @@
 # Kiln Server Changelog
 
+## kiln-v0.3.2 — 2026-06-08 — decode graph ownership and ROCm sampled batch hardening
+
+Patch release for the 0.3 line after live ROCm streaming stress exposed a
+batched hidden-decode failure in sampled generation.
+
+- cuda/rocm: make single-row decode graph caches owner-keyed by batching row,
+  so captured graph state and decode-contiguity timelines cannot be reused
+  across concurrent request rows.
+- rocm: add a native sampled hidden-decode batch path for multi-row batches,
+  preventing `NativeRequired` fallback failures when sampled streams coalesce
+  under the batching engine.
+- rocm: turn graph replay failure into a runner-local circuit breaker that
+  disables further graph replay/capture for that runner and continues through
+  eager decode instead of repeatedly recapturing invalid driver state.
+- rocm: restore linear graph capture state on hidden-graph capture failure and
+  clear sticky HIP runtime errors at the wrapper boundary so stale driver errors
+  cannot contaminate later kernel checks.
+- tests: extend resource/concurrency invariants to lock in owner-keyed graph
+  state, ROCm sampled native batching, replay circuit-breaker behavior, and HIP
+  error-slot clearing.
+
 ## kiln-v0.3.1 — 2026-06-08 — structural GPU resource concurrency hardening
 
 Patch release for the 0.3 line focused on making the ROCm startup crash class

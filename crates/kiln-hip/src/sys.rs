@@ -50,6 +50,7 @@ unsafe extern "C" {
     pub fn hipSetDevice(device_id: c_int) -> hipError_t;
     pub fn hipDeviceSynchronize() -> hipError_t;
     pub fn hipRuntimeGetVersion(version: *mut c_int) -> hipError_t;
+    pub fn hipGetLastError() -> hipError_t;
     pub fn hipDeviceGetStreamPriorityRange(
         least_priority: *mut c_int,
         greatest_priority: *mut c_int,

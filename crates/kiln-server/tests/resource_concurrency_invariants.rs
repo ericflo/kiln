@@ -112,3 +112,151 @@ fn process_shared_persistence_uses_resource_layer() {
         );
     }
 }
+
+#[test]
+fn rocm_graph_state_is_decode_row_owned() {
+    let rocm_graph = read("crates/kiln-model/src/rocm_graph.rs");
+    let generate = read("crates/kiln-model/src/generate.rs");
+
+    for required in [
+        "enum RocmGraphOwner",
+        "DecodeRow(u64)",
+        "struct RocmGraphCacheKey",
+        "owner: RocmGraphOwner",
+        "captured: HashMap<RocmGraphCacheKey, CapturedDecodeGraphRocm>",
+        "decode_timelines: HashMap<RocmGraphOwner, RocmGraphOwnerTimeline>",
+        "fn prepare_owner_decode",
+        "self.captured.retain(|key, _| key.owner != owner)",
+        "RocmGraphCacheKey::new(owner, requested_key.clone())",
+        "RocmGraphCacheKey::new(owner, key)",
+    ] {
+        assert!(
+            rocm_graph.contains(required),
+            "ROCm HIP graph decode state must be keyed by decode-row owner: {required}"
+        );
+    }
+
+    for forbidden in [
+        "captured: HashMap<RocmGraphKey, CapturedDecodeGraphRocm>",
+        "last_decode_seq_len: None",
+        "last_decode_block0: None",
+    ] {
+        assert!(
+            !rocm_graph.contains(forbidden),
+            "ROCm HIP graph runner must not keep a runner-wide decode timeline: {forbidden}"
+        );
+    }
+
+    assert!(
+        generate.contains("Some(row_ids[0])"),
+        "batched serving decode must pass the stable row id into the ROCm graph owner key"
+    );
+}
+
+#[test]
+fn cuda_graph_state_is_decode_row_owned() {
+    let cuda_graph = read("crates/kiln-model/src/cuda_graph.rs");
+    let generate = read("crates/kiln-model/src/generate.rs");
+
+    for required in [
+        "enum CudaGraphOwner",
+        "DecodeRow(u64)",
+        "struct CudaGraphCacheKey",
+        "owner: CudaGraphOwner",
+        "captured: HashMap<CudaGraphCacheKey, CapturedDecodeGraph>",
+        "decode_timelines: HashMap<CudaGraphOwner, CudaGraphOwnerTimeline>",
+        "fn prepare_owner_decode",
+        "self.captured.retain(|key, _| key.owner != owner)",
+        "CudaGraphCacheKey::new(owner, requested_key.clone())",
+        "CudaGraphCacheKey::new(owner, key)",
+    ] {
+        assert!(
+            cuda_graph.contains(required),
+            "CUDA graph decode state must be keyed by decode-row owner: {required}"
+        );
+    }
+
+    for forbidden in [
+        "captured: HashMap<CudaGraphKey, CapturedDecodeGraph>",
+        "last_decode_seq_len: None",
+        "last_decode_block0: None",
+    ] {
+        assert!(
+            !cuda_graph.contains(forbidden),
+            "CUDA graph runner must not keep a runner-wide bs=1 decode timeline: {forbidden}"
+        );
+    }
+
+    assert!(
+        generate.contains("Some(row_ids[0])"),
+        "batched serving decode must pass the stable row id into graph owner keys"
+    );
+}
+
+#[test]
+fn rocm_sampled_batches_have_native_hidden_decode_path() {
+    let generate = read("crates/kiln-model/src/generate.rs");
+    for required in [
+        "ROCm sampled serving batches need a native decode path",
+        "kiln_tensor::Device::Rocm(_)",
+        "decode_hidden_paged_contiguous_batch_with_ids",
+        "sample ROCm hidden batch",
+        "row_count > 1",
+    ] {
+        assert!(
+            generate.contains(required),
+            "ROCm sampled continuous batches must not fall through to generic fallback: {required}"
+        );
+    }
+}
+
+#[test]
+fn rocm_graph_replay_failure_is_a_circuit_breaker() {
+    let rocm_graph = read("crates/kiln-model/src/rocm_graph.rs");
+    assert!(
+        rocm_graph.contains("disabling ROCm HIP graphs for this runner"),
+        "ROCm graph replay failures must disable the runner instead of recapturing forever"
+    );
+    assert!(
+        rocm_graph.matches("self.enabled = false;").count() >= 3,
+        "ROCm graph replay/capture failure paths must set a runner-local circuit breaker"
+    );
+    assert!(
+        rocm_graph.matches("self.captured.clear();").count() >= 4,
+        "ROCm graph replay failures must clear captured graph state before eager fallback"
+    );
+}
+
+#[test]
+fn hip_runtime_errors_are_cleared_at_wrapper_boundary() {
+    let hip = read("crates/kiln-hip/src/lib.rs");
+    let sys = read("crates/kiln-hip/src/sys.rs");
+    let rocm_graph = read("crates/kiln-model/src/rocm_graph.rs");
+
+    assert!(
+        sys.contains("pub fn hipGetLastError()"),
+        "kiln-hip must bind hipGetLastError so failed runtime calls can clear sticky error state"
+    );
+    assert!(
+        hip.contains("let _ = unsafe { sys::hipGetLastError() };"),
+        "kiln-hip::check must clear sticky HIP runtime errors after surfacing direct API failures"
+    );
+    assert!(
+        hip.contains("sticky per host thread"),
+        "the sticky-error boundary is a concurrency/resource invariant and should stay documented"
+    );
+
+    for required in [
+        "*linear_state = gdn_snapshot;",
+        "*linear_state = capture_snapshot;",
+        "freeze-pointers warm (Record) pass failed",
+        "forward pass failed during graph capture",
+        "end_capture failed",
+        "execute captured decode graph (first run)",
+    ] {
+        assert!(
+            rocm_graph.contains(required),
+            "ROCm graph capture failures must restore decode state before eager fallback: {required}"
+        );
+    }
+}

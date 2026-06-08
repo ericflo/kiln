@@ -183,6 +183,41 @@ impl CudaGraphKey {
     }
 }
 
+#[cfg(feature = "cuda")]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum CudaGraphOwner {
+    Anonymous,
+    DecodeRow(u64),
+}
+
+#[cfg(feature = "cuda")]
+impl CudaGraphOwner {
+    fn from_row_id(row_id: Option<u64>) -> Self {
+        row_id.map_or(Self::Anonymous, Self::DecodeRow)
+    }
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct CudaGraphCacheKey {
+    owner: CudaGraphOwner,
+    graph: CudaGraphKey,
+}
+
+#[cfg(feature = "cuda")]
+impl CudaGraphCacheKey {
+    fn new(owner: CudaGraphOwner, graph: CudaGraphKey) -> Self {
+        Self { owner, graph }
+    }
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Default)]
+struct CudaGraphOwnerTimeline {
+    last_decode_seq_len: Option<usize>,
+    last_decode_block0: Option<u32>,
+}
+
 /// Read the `KILN_CUDA_GRAPHS_BATCHED` env var.
 ///
 /// Two-stage gating: `KILN_CUDA_GRAPHS=true` enables the (existing,
@@ -513,9 +548,11 @@ struct CapturedBatchedDecodeGraph {
 pub struct CudaGraphRunner {
     /// Whether CUDA graphs are enabled.
     enabled: bool,
-    /// Captured graphs keyed by graph-unsafe paged metadata.
+    /// Captured bs=1 graphs keyed by both decode-row owner and graph geometry.
+    /// The graph carries the row's recurrent state through graph-owned buffers,
+    /// so geometry alone is not a valid sharing key under interleaved serving.
     #[cfg(feature = "cuda")]
-    captured: HashMap<CudaGraphKey, CapturedDecodeGraph>,
+    captured: HashMap<CudaGraphCacheKey, CapturedDecodeGraph>,
     /// Captured batched graphs keyed on `(batch_size, max_seqlen_k, …)`.
     /// Empty today; populated by the planned multi-batch capture path.
     #[cfg(feature = "cuda")]
@@ -547,22 +584,11 @@ pub struct CudaGraphRunner {
     /// Whether we already warned that the paged metadata graph cache is full.
     #[cfg(feature = "cuda")]
     cache_full_warned: bool,
-    /// #1082 box-102 BUG-B fix: request-boundary detection for the captured
-    /// bs=1 decode graph, which carries GDN recurrent/conv state in its own
-    /// buffers (evolved in-place across a request's replays). The captured
-    /// graph MUST be re-captured per request — a new request reusing the prior
-    /// request's graph runs on its leftover recurrent state -> deterministic
-    /// garbage. Within a bs=1 greedy request, `seq_len` increases by exactly 1
-    /// each step and the first KV block (`block_table.blocks[0]`, allocated at
-    /// prefill) is fixed; a new request breaks BOTH (seq_len resets to its
-    /// prompt length; KV blocks are reallocated). We evict when either differs.
-    /// (The recurrent-state TensorId is NOT usable here: the capture/eager path
-    /// rewrites `linear_state`'s recurrent tensors every step, so it would
-    /// thrash — evict every step, never replaying.)
+    /// Per-owner request-boundary detection for captured bs=1 decode graphs.
+    /// A graph is only replayable for the decode row whose recurrent/conv state
+    /// it captured; interleaved serving rows must not share one global timeline.
     #[cfg(feature = "cuda")]
-    last_decode_seq_len: Option<usize>,
-    #[cfg(feature = "cuda")]
-    last_decode_block0: Option<u32>,
+    decode_timelines: HashMap<CudaGraphOwner, CudaGraphOwnerTimeline>,
 }
 
 impl CudaGraphRunner {
@@ -590,9 +616,7 @@ impl CudaGraphRunner {
             #[cfg(feature = "cuda")]
             cache_full_warned: false,
             #[cfg(feature = "cuda")]
-            last_decode_seq_len: None,
-            #[cfg(feature = "cuda")]
-            last_decode_block0: None,
+            decode_timelines: HashMap::new(),
         }
     }
 
@@ -618,6 +642,7 @@ impl CudaGraphRunner {
             // a bucket primes the allocator under the new weights.
             self.batched_bucket_warmup_done.clear();
             self.cache_full_warned = false;
+            self.decode_timelines.clear();
         }
     }
 
@@ -667,6 +692,33 @@ impl CudaGraphRunner {
             self.batched_state_pool.insert(batch_size, state);
         }
         Ok(self.batched_state_pool.get_mut(&batch_size))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn prepare_owner_decode(
+        &mut self,
+        owner: CudaGraphOwner,
+        block_table: &BlockTable,
+        seq_len: usize,
+    ) {
+        let block0 = block_table.blocks.first().copied();
+        let timeline = self.decode_timelines.entry(owner).or_default();
+        let continues = block0.is_some()
+            && timeline.last_decode_seq_len == Some(seq_len.wrapping_sub(1))
+            && timeline.last_decode_block0 == block0;
+        if !continues {
+            let before = self.captured.len();
+            self.captured.retain(|key, _| key.owner != owner);
+            if before != self.captured.len() {
+                tracing::debug!(
+                    seq_len,
+                    ?owner,
+                    "CUDA graph: owner boundary - evicting captured bs=1 graph"
+                );
+            }
+        }
+        timeline.last_decode_seq_len = Some(seq_len);
+        timeline.last_decode_block0 = block0;
     }
 
     /// Whether graphs are enabled.
@@ -1087,6 +1139,7 @@ impl CudaGraphRunner {
         seq_len: usize,
         linear_state: &mut LinearAttentionState,
         lora: Option<&LoraWeights>,
+        graph_row_id: Option<u64>,
     ) -> Result<Tensor> {
         // #1082 box-102 diagnostic: KILN_FORCE_EAGER_DECODE=1 forces the bs=1
         // EAGER decode forward every step (never captures/replays the graph).
@@ -1111,42 +1164,10 @@ impl CudaGraphRunner {
             );
         }
 
-        // #1082 box-102 BUG-B fix: evict the captured bs=1 decode graph when
-        // the request changes. The captured graph carries GDN recurrent/conv
-        // state in its own buffers (evolved in-place across a request's
-        // replays); a NEW request reuses the same graph (the stable-metadata
-        // key zeros block_table/seq_len) but the replay path never re-injects
-        // the new request's post-prefill state, so request #2+ ran on request
-        // #1's leftover state -> deterministic garbage. A fresh
-        // `LinearAttentionState` per request gives a new recurrent-state
-        // TensorId (stable within a request); on change, evict so the new
-        // request re-captures with its own state. Re-capture cost is ~one
-        // warm+capture per request; the within-request replays are preserved.
         #[cfg(feature = "cuda")]
         {
-            // Detect a request boundary. Within a bs=1 greedy request, seq_len
-            // increases by exactly 1 each decode step and the first KV block
-            // (allocated at prefill) is fixed; a NEW request breaks both
-            // (seq_len resets to its prompt length; KV blocks are reallocated).
-            // On a boundary, evict the captured graph so the new request
-            // re-captures with its own recurrent state instead of replaying on
-            // the prior request's leftover state. Within a request `continues`
-            // is true -> the graph is preserved and genuinely replays.
-            let block0 = block_table.blocks.first().copied();
-            let continues = block0.is_some()
-                && self.last_decode_seq_len == Some(seq_len.wrapping_sub(1))
-                && self.last_decode_block0 == block0;
-            if !continues && !self.captured.is_empty() {
-                tracing::debug!(
-                    seq_len,
-                    last_seq_len = ?self.last_decode_seq_len,
-                    "CUDA graph: request boundary (seq_len not contiguous or KV block0 changed) \
-                     — evicting captured bs=1 graph to re-capture with the new request's GDN state"
-                );
-                self.captured.clear();
-            }
-            self.last_decode_seq_len = Some(seq_len);
-            self.last_decode_block0 = block0;
+            let owner = CudaGraphOwner::from_row_id(graph_row_id);
+            self.prepare_owner_decode(owner, block_table, seq_len);
         }
 
         // Phase 1: warmup — run eagerly to prime GPU memory pools
@@ -1189,17 +1210,19 @@ impl CudaGraphRunner {
 
         #[cfg(feature = "cuda")]
         {
+            let owner = CudaGraphOwner::from_row_id(graph_row_id);
             let requested_key = CudaGraphKey::new(block_table, paged_cache, seq_len);
+            let cache_key = CudaGraphCacheKey::new(owner, requested_key.clone());
 
             // Phase 3: replay if we have a valid captured graph
-            if let Some(captured) = self.captured.get(&requested_key) {
+            if let Some(captured) = self.captured.get(&cache_key) {
                 if captured.adapter_gen == self.adapter_generation {
                     // Update position buffer BEFORE graph replay.
                     // The graph's RoPE kernels read from the same GPU pointer,
                     // so updating the data here gives them the correct position.
                     if let Err(e) = Self::update_token_buffer(&captured.token_buffer, token_id) {
                         tracing::warn!("Failed to update token buffer: {e}, falling back to eager");
-                        self.captured.remove(&requested_key);
+                        self.captured.remove(&cache_key);
                         return Self::eager_forward(
                             backend,
                             token_id,
@@ -1217,7 +1240,7 @@ impl CudaGraphRunner {
                         tracing::warn!(
                             "Failed to update position buffer: {e}, falling back to eager"
                         );
-                        self.captured.remove(&requested_key);
+                        self.captured.remove(&cache_key);
                         return Self::eager_forward(
                             backend,
                             token_id,
@@ -1239,7 +1262,7 @@ impl CudaGraphRunner {
                         tracing::warn!(
                             "Failed to update rotary graph buffers: {e}, falling back to eager"
                         );
-                        self.captured.remove(&requested_key);
+                        self.captured.remove(&cache_key);
                         return Self::eager_forward(
                             backend,
                             token_id,
@@ -1273,7 +1296,7 @@ impl CudaGraphRunner {
                             tracing::warn!(
                                 "Failed to update paged graph metadata buffers: {e}, falling back to eager"
                             );
-                            self.captured.remove(&requested_key);
+                            self.captured.remove(&cache_key);
                             return Self::eager_forward(
                                 backend,
                                 token_id,
@@ -1413,7 +1436,7 @@ impl CudaGraphRunner {
                         }
                         Err(e) => {
                             tracing::warn!("CUDA graph ReplayPlan replay failed: {e}, falling back to eager");
-                            self.captured.remove(&requested_key);
+                            self.captured.remove(&cache_key);
                             return Self::eager_forward(
                                 backend,
                                 token_id,
@@ -1473,6 +1496,7 @@ impl CudaGraphRunner {
             // Phase 2: capture
             match self.try_capture(
                 backend,
+                owner,
                 token_id,
                 weights,
                 config,
@@ -1502,17 +1526,20 @@ impl CudaGraphRunner {
         }
 
         #[cfg(not(feature = "cuda"))]
-        Self::eager_forward(
-            backend,
-            token_id,
-            weights,
-            config,
-            paged_cache,
-            block_table,
-            seq_len,
-            linear_state,
-            lora,
-        )
+        {
+            let _ = graph_row_id;
+            Self::eager_forward(
+                backend,
+                token_id,
+                weights,
+                config,
+                paged_cache,
+                block_table,
+                seq_len,
+                linear_state,
+                lora,
+            )
+        }
     }
 
     /// Update the position buffer tensor with a new position value.
@@ -1808,6 +1835,7 @@ impl CudaGraphRunner {
     fn try_capture(
         &mut self,
         backend: &dyn BackendRuntime,
+        owner: CudaGraphOwner,
         token_id: u32,
         weights: &GpuWeights,
         config: &ModelConfig,
@@ -2129,7 +2157,7 @@ impl CudaGraphRunner {
                     &gdn_decode_outputs,
                 );
                 self.captured.insert(
-                    key,
+                    CudaGraphCacheKey::new(owner, key),
                     CapturedDecodeGraph {
                         graph,
                         output_hidden,

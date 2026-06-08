@@ -63,6 +63,12 @@ fn check(code: sys::hipError_t, api: &'static str) -> Result<()> {
     if code == sys::HIP_SUCCESS {
         return Ok(());
     }
+    // HIP runtime errors are sticky per host thread. If a graph/runtime API
+    // returns an error and leaves it pending, the next kt kernel wrapper's
+    // post-launch hipGetLastError/cudaGetLastError can incorrectly report that
+    // stale graph error as the kernel's launch failure. Preserve this call's
+    // direct return code for the caller, but clear the sticky slot here.
+    let _ = unsafe { sys::hipGetLastError() };
     // SAFETY: hipGetErrorString returns a static NUL-terminated string for any
     // code (an "unknown error" string for unrecognized codes). Returns a valid
     // pointer; never null in practice.

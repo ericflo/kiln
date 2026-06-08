@@ -31893,6 +31893,7 @@ mod tests {
                     start_pos,
                     linear_state,
                     None,
+                    None,
                 )?;
                 synchronize_for_profile(device)?;
                 assert_eq!(logits_kt.dims(), &[1usize, 1usize, vocab]);

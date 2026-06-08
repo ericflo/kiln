@@ -3546,6 +3546,72 @@ impl ModelRunner {
             }
         }
 
+        // ROCm sampled serving batches need a native decode path even when the
+        // HIP-graph bs=1 optimization is disabled or inapplicable. Decode the
+        // hidden rows through the contiguous batched ROCm path, then sample from
+        // those rows outside the transformer hot path. This keeps
+        // NativeRequired from silently depending on the generic fallback when
+        // concurrent sampled streams coalesce into row_count > 1.
+        if sampled.is_none()
+            && !all_greedy
+            && matches!(
+                BackendIdentity::runtime_device(self.backend.as_ref()),
+                kiln_tensor::Device::Rocm(_)
+            )
+            && (row_count > 1
+                || !paged_decode_replay_primitive_enabled(
+                    self.backend.as_ref(),
+                    &self.config,
+                    1,
+                    ReplayNativePrimitive::HipGraph,
+                )
+                || !self
+                    .rocm_graph
+                    .lock()
+                    .map(|g| g.is_enabled())
+                    .unwrap_or(false))
+        {
+            let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
+            let (step_seeds, generated_tokens) = batch_sampling_contexts
+                .as_ref()
+                .context("missing sampling contexts for ROCm sampled batched decode")?;
+            let hidden_result = if has_linear_layers {
+                let mut linear_state_refs: Vec<&mut LinearAttentionState> =
+                    linear_states.iter_mut().map(|s| &mut **s).collect();
+                self.decode_hidden_paged_contiguous_batch_with_ids(
+                    &input_tokens,
+                    paged_cache,
+                    &block_table_refs,
+                    &sequence_lengths,
+                    &mut linear_state_refs,
+                    Some(&row_ids),
+                )
+            } else {
+                let mut no_linear_states: [&mut LinearAttentionState; 0] = [];
+                self.decode_hidden_paged_contiguous_batch_with_ids(
+                    &input_tokens,
+                    paged_cache,
+                    &block_table_refs,
+                    &sequence_lengths,
+                    &mut no_linear_states,
+                    Some(&row_ids),
+                )
+            };
+            let hidden = hidden_result.context("ROCm sampled batched hidden decode failed")?;
+            sampled = Some(
+                run_lm_head_sample_batch_with_contexts(
+                    &*self.backend,
+                    &hidden,
+                    &self.weights,
+                    &self.config,
+                    params,
+                    step_seeds,
+                    generated_tokens,
+                )
+                .context("sample ROCm hidden batch")?,
+            );
+        }
+
         // R.9: ROCm HIP-graph single-row decode for the batched/batching-engine
         // path. Gated by the ROCm runner, so when disabled `sampled` stays as
         // set above and the cuda/eager block below runs unchanged. Sampled rows
@@ -3581,6 +3647,7 @@ impl ModelRunner {
                         sequence_lengths[0],
                         &mut *linear_states[0],
                         self.active_lora.as_ref(),
+                        Some(row_ids[0]),
                     )
                     .context("batched decode ROCm graph greedy row failed")?;
                 sampled = Some(vec![token]);
@@ -3602,6 +3669,7 @@ impl ModelRunner {
                         sequence_lengths[0],
                         &mut *linear_states[0],
                         self.active_lora.as_ref(),
+                        Some(row_ids[0]),
                     )
                     .context("batched decode ROCm graph hidden row failed")?;
                 let token = if let Some(token) = lm_head_sample_backend_decode_if(
@@ -3660,6 +3728,7 @@ impl ModelRunner {
                         sequence_lengths[0],
                         &mut *linear_states[0],
                         self.active_lora.as_ref(),
+                        Some(row_ids[0]),
                     )
                     .context("batched decode CUDA graph row failed")?;
                 // #1082: `decode_step_paged` now returns a kt `Tensor` — feed it
@@ -5246,6 +5315,7 @@ impl ModelRunner {
                                 seq_len,
                                 linear_state,
                                 self.active_lora.as_ref(),
+                                None,
                             )
                             .context("ROCm graph decode step failed")?,
                     )
@@ -5720,6 +5790,7 @@ impl ModelRunner {
                         seq_len,
                         &mut linear_state,
                         self.active_lora.as_ref(),
+                        None,
                     )?
                 };
                 seq_len += 1;
@@ -6100,6 +6171,7 @@ impl ModelRunner {
                     seq_len,
                     &mut linear_state,
                     self.active_lora.as_ref(),
+                    None,
                 )?;
                 seq_len += 1;
                 // #1082: `decode_step_paged` now returns kt — feed `sample_step`
@@ -8454,6 +8526,7 @@ impl ModelRunner {
                     seq_len,
                     &mut linear_state,
                     self.active_lora.as_ref(),
+                    None,
                 ) {
                     Ok(l) => l,
                     Err(e) => {
