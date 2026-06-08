@@ -9,8 +9,8 @@ use std::sync::OnceLock;
 
 use super::{
     AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, GdnBackend, OptimizerBackend,
-    LinearBackend, PagedKvBackend, SamplingBackend, StartupBackend, TrainingCapabilities,
-    TrainingPrecisionPolicy,
+    LinearBackend, PagedKvBackend, ResidencyBackend, SamplingBackend, StartupBackend,
+    TrainingCapabilities, TrainingPrecisionPolicy,
 };
 use crate::lora_loader::{compute_lora_delta, LoraProjectionWeights};
 
@@ -1506,20 +1506,12 @@ impl GdnBackend for CudaBackend {
     }
 }
 
-impl BackendRuntime for CudaBackend {
-    fn training_capabilities(&self) -> TrainingCapabilities {
-        Self::training_capabilities_static()
-    }
-
-    fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
-        TrainingPrecisionPolicy::cuda()
-    }
-
-    fn supports_resident_activation(&self) -> bool {
+impl ResidencyBackend for CudaBackend {
+    fn runtime_supports_resident_activation(&self) -> bool {
         true
     }
 
-    fn register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
+    fn runtime_register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
         super::cuda_rocm_common::mark_resident_activation(
             &CUDA_RESIDENT_TENSOR_IDS,
             tensor,
@@ -1528,7 +1520,7 @@ impl BackendRuntime for CudaBackend {
         Ok(())
     }
 
-    fn evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
+    fn runtime_evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
         super::cuda_rocm_common::evict_resident_activation(
             &CUDA_RESIDENT_TENSOR_IDS,
             tensor,
@@ -1536,7 +1528,7 @@ impl BackendRuntime for CudaBackend {
         );
     }
 
-    fn update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
+    fn runtime_update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
         super::cuda_rocm_common::mark_resident_activation(
             &CUDA_RESIDENT_TENSOR_IDS,
             tensor,
@@ -1545,12 +1537,22 @@ impl BackendRuntime for CudaBackend {
         Ok(())
     }
 
-    fn has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
+    fn runtime_has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
         super::cuda_rocm_common::has_resident_activation(
             &CUDA_RESIDENT_TENSOR_IDS,
             tensor,
             CUDA_RESIDENT_TENSOR_IDS_POISONED,
         )
+    }
+}
+
+impl BackendRuntime for CudaBackend {
+    fn training_capabilities(&self) -> TrainingCapabilities {
+        Self::training_capabilities_static()
+    }
+
+    fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
+        TrainingPrecisionPolicy::cuda()
     }
 
     fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
@@ -1826,8 +1828,8 @@ impl LinearBackend for CudaBackend {
         scale: f32,
     ) -> Result<Option<kiln_tensor::Tensor>> {
         if !cuda_tensors_on_device(&[x, a, b])
-            || !self.has_resident_activation(a)
-            || !self.has_resident_activation(b)
+            || !ResidencyBackend::runtime_has_resident_activation(self, a)
+            || !ResidencyBackend::runtime_has_resident_activation(self, b)
         {
             return Ok(None);
         }

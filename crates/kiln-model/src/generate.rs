@@ -8571,6 +8571,8 @@ mod tests {
 
     impl crate::backend::LinearBackend for NamedTestBackend {}
 
+    impl crate::backend::ResidencyBackend for NamedTestBackend {}
+
     impl crate::backend::SamplingBackend for NamedTestBackend {}
 
     impl crate::backend::OptimizerBackend for NamedTestBackend {}

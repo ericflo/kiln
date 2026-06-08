@@ -30,8 +30,8 @@ use super::vulkan_tensor_bridge::{
 use super::{
     vulkan_attention, vulkan_conv1d, vulkan_dense, vulkan_device, vulkan_gdn, vulkan_linear,
     vulkan_training, vulkan_weights, AttentionBackend, BackendIdentity, BackendRuntime,
-    ConvBackend, GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, SamplingBackend,
-    StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
+    ConvBackend, GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ResidencyBackend,
+    SamplingBackend, StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
 };
 use crate::forward::GpuWeights;
 
@@ -882,38 +882,9 @@ impl LinearBackend for VulkanBackend {
     }
 }
 
-impl BackendRuntime for VulkanBackend {
-    fn training_capabilities(&self) -> TrainingCapabilities {
-        Self::training_capabilities_static()
-    }
-
-    fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
-        vulkan_training::training_precision_policy()
-    }
-
-    fn decode_resident_pool_ready(
-        &self,
-        max_hidden: usize,
-        max_intermediate: usize,
-        max_batch: usize,
-    ) -> bool {
-        if !self.has_vulkan() || !self.resident_decode_enabled {
-            return false;
-        }
-        self.decode_resident_pool(max_hidden, max_intermediate, max_batch)
-            .is_some()
-    }
-
-    fn supports_resident_decode(&self) -> bool {
-        // The Vulkan-resident decode path (docs/vk_resident_decode_plan.md)
-        // applies whenever the logical device is up. The runtime pool
-        // feasibility check (the "fall back if the device can't fit even
-        // the minimum pool" rule in gate (b)) is enforced later, the
-        // first time a resident decode actually requests a buffer.
-        self.has_vulkan() && self.resident_decode_enabled
-    }
-
-    fn enter_gdn_recurrent_resident_state_scope(&self) -> bool {
+#[allow(clippy::too_many_arguments)]
+impl ResidencyBackend for VulkanBackend {
+    fn runtime_enter_gdn_recurrent_resident_state_scope(&self) -> bool {
         if !self.recurrent_state_residency_enabled || !self.has_vulkan() || !self.gdn_enabled {
             return false;
         }
@@ -921,13 +892,13 @@ impl BackendRuntime for VulkanBackend {
         true
     }
 
-    fn exit_gdn_recurrent_resident_state_scope(&self) {
+    fn runtime_exit_gdn_recurrent_resident_state_scope(&self) {
         if self.recurrent_state_residency_enabled {
             exit_recurrent_state_resident_scope();
         }
     }
 
-    fn materialize_gdn_recurrent_resident_state(
+    fn runtime_materialize_gdn_recurrent_resident_state(
         &self,
         state_kt: &mut kiln_tensor::Tensor,
     ) -> Result<()> {
@@ -961,7 +932,7 @@ impl BackendRuntime for VulkanBackend {
         Ok(())
     }
 
-    fn evict_gdn_recurrent_resident_state(&self, state: &kiln_tensor::Tensor) {
+    fn runtime_evict_gdn_recurrent_resident_state(&self, state: &kiln_tensor::Tensor) {
         if !self.recurrent_state_residency_enabled {
             return;
         }
@@ -970,7 +941,7 @@ impl BackendRuntime for VulkanBackend {
         remove_recurrent_state_resident_buffer(state_id);
     }
 
-    fn has_gdn_recurrent_resident_state(&self, state: &kiln_tensor::Tensor) -> bool {
+    fn runtime_has_gdn_recurrent_resident_state(&self, state: &kiln_tensor::Tensor) -> bool {
         if !self.recurrent_state_residency_enabled {
             return false;
         }
@@ -979,7 +950,7 @@ impl BackendRuntime for VulkanBackend {
         contains_recurrent_state_resident_buffer(state_id)
     }
 
-    fn supports_resident_activation(&self) -> bool {
+    fn runtime_supports_resident_activation(&self) -> bool {
         // Vulkan implements all three Phase 3.1 hooks against
         // RESIDENT_ACTIVATION_REGISTRY. Returns true even when the
         // process has no Vulkan device — `register_resident_activation`
@@ -996,7 +967,7 @@ impl BackendRuntime for VulkanBackend {
     /// matching evict at the appropriate autograd boundary. Until then
     /// any caller using this hook must clean up explicitly to avoid
     /// leaking VRAM.
-    fn register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
+    fn runtime_register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
         let Some(vk_device) = self.vulkan_device.as_ref() else {
             return Ok(());
         };
@@ -1073,7 +1044,7 @@ impl BackendRuntime for VulkanBackend {
         Ok(())
     }
 
-    fn evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
+    fn runtime_evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
         // (#1082) kt-native: registry keyed on the kt `TensorId` directly.
         let id = tensor.id();
         with_resident_registry(|cache| {
@@ -1081,7 +1052,7 @@ impl BackendRuntime for VulkanBackend {
         });
     }
 
-    fn update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
+    fn runtime_update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
         let Some(vk_device) = self.vulkan_device.as_ref() else {
             return Ok(());
         };
@@ -1120,13 +1091,13 @@ impl BackendRuntime for VulkanBackend {
         Ok(())
     }
 
-    fn has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
+    fn runtime_has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
         // (#1082) kt-native: registry keyed on the kt `TensorId` directly.
         let id = tensor.id();
         with_resident_registry(|cache| cache.contains_key(&id))
     }
 
-    fn resolve_resident_activation(
+    fn runtime_resolve_resident_activation(
         &self,
         tensor: &kiln_tensor::Tensor,
         shape: &[usize],
@@ -1188,8 +1159,7 @@ impl BackendRuntime for VulkanBackend {
         Ok(Some(resolved))
     }
 
-
-    fn assemble_gdn_recurrent_resident_batch_rows(
+    fn runtime_assemble_gdn_recurrent_resident_batch_rows(
         &self,
         rows: &[&kiln_tensor::Tensor],
         batch: &kiln_tensor::Tensor,
@@ -1239,7 +1209,7 @@ impl BackendRuntime for VulkanBackend {
         Ok(true)
     }
 
-    fn scatter_gdn_recurrent_resident_batch_rows(
+    fn runtime_scatter_gdn_recurrent_resident_batch_rows(
         &self,
         batch: &kiln_tensor::Tensor,
         destinations: &mut [&mut kiln_tensor::Tensor],
@@ -1300,7 +1270,7 @@ impl BackendRuntime for VulkanBackend {
         Ok(true)
     }
 
-    fn assemble_linear_attn_gdn_state_batch_kt(
+    fn runtime_assemble_linear_attn_gdn_state_batch_kt(
         &self,
         row_keys: &[kiln_tensor::TensorId],
         batch_key: kiln_tensor::TensorId,
@@ -1308,7 +1278,7 @@ impl BackendRuntime for VulkanBackend {
         VulkanBackend::assemble_linear_attn_gdn_state_batch_kt(self, row_keys, batch_key)
     }
 
-    fn scatter_linear_attn_gdn_state_batch_kt(
+    fn runtime_scatter_linear_attn_gdn_state_batch_kt(
         &self,
         batch_key: kiln_tensor::TensorId,
         row_keys: &[kiln_tensor::TensorId],
@@ -1316,7 +1286,7 @@ impl BackendRuntime for VulkanBackend {
         VulkanBackend::scatter_linear_attn_gdn_state_batch_kt(self, batch_key, row_keys)
     }
 
-    fn seed_linear_attn_gdn_state_kt(
+    fn runtime_seed_linear_attn_gdn_state_kt(
         &self,
         recurrent: &kiln_tensor::Tensor,
         conv: &kiln_tensor::Tensor,
@@ -1324,16 +1294,39 @@ impl BackendRuntime for VulkanBackend {
         VulkanBackend::seed_linear_attn_gdn_state_kt(self, recurrent, conv)
     }
 
-    fn has_linear_attn_gdn_state_kt(&self, key: kiln_tensor::TensorId) -> bool {
+    fn runtime_has_linear_attn_gdn_state_kt(&self, key: kiln_tensor::TensorId) -> bool {
         VulkanBackend::has_linear_attn_gdn_state_kt(self, key)
     }
+}
 
+impl BackendRuntime for VulkanBackend {
+    fn training_capabilities(&self) -> TrainingCapabilities {
+        Self::training_capabilities_static()
+    }
 
+    fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
+        vulkan_training::training_precision_policy()
+    }
 
+    fn decode_resident_pool_ready(
+        &self,
+        max_hidden: usize,
+        max_intermediate: usize,
+        max_batch: usize,
+    ) -> bool {
+        if !self.has_vulkan() || !self.resident_decode_enabled {
+            return false;
+        }
+        self.decode_resident_pool(max_hidden, max_intermediate, max_batch)
+            .is_some()
+    }
 
-
-
-
-
-
+    fn supports_resident_decode(&self) -> bool {
+        // The Vulkan-resident decode path (docs/vk_resident_decode_plan.md)
+        // applies whenever the logical device is up. The runtime pool
+        // feasibility check (the "fall back if the device can't fit even
+        // the minimum pool" rule in gate (b)) is enforced later, the
+        // first time a resident decode actually requests a buffer.
+        self.has_vulkan() && self.resident_decode_enabled
+    }
 }

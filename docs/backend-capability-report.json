@@ -14,12 +14,11 @@
         "KILN_DISABLE_CUDA_GDN_PREFILL_GATES",
         "KILN_DISABLE_CUDA_LORA_DECODE_ADD"
       ],
-      "override_count": 22,
+      "override_count": 19,
       "overrides": [
         "evict_resident_activation",
         "flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs",
         "has_resident_activation",
-        "register_resident_activation",
         "supports_causal_conv1d_prefill",
         "supports_causal_conv1d_update",
         "supports_flash_attn_paged_decode",
@@ -33,11 +32,9 @@
         "supports_gdn_gated_rms_norm",
         "supports_gdn_gates",
         "supports_gdn_recurrent_step",
-        "supports_resident_activation",
         "supports_strict_paged_decode_contiguous_batch",
         "training_capabilities",
-        "training_precision_policy",
-        "update_resident_activation"
+        "training_precision_policy"
       ],
       "source": "crates/kiln-model/src/backend/cuda.rs",
       "source_modules": [
@@ -53,10 +50,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 1866,
+          "line": 1868,
           "paired_method": "runtime_causal_conv1d_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 1896,
+          "paired_method_line": 1898,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -68,10 +65,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 1862,
+          "line": 1864,
           "paired_method": "runtime_causal_conv1d_update",
           "paired_method_always_declines": false,
-          "paired_method_line": 1870,
+          "paired_method_line": 1872,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -240,6 +237,21 @@
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
+        "runtime_supports_resident_activation": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1510,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "literal_true",
+          "support_state": "NativeWithConstraints"
+        },
         "runtime_supports_strict_paged_decode_contiguous_batch": {
           "env_gates": [],
           "gate_hints": {
@@ -253,21 +265,6 @@
           "paired_method_always_declines": false,
           "paired_method_line": null,
           "status": "dynamic",
-          "support_state": "NativeWithConstraints"
-        },
-        "supports_resident_activation": {
-          "env_gates": [],
-          "gate_hints": {
-            "dtype": false,
-            "env": false,
-            "layout": false,
-            "shape": false
-          },
-          "line": 1518,
-          "paired_method": null,
-          "paired_method_always_declines": false,
-          "paired_method_line": null,
-          "status": "literal_true",
           "support_state": "NativeWithConstraints"
         }
       }
@@ -372,7 +369,7 @@
         "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8",
         "KILN_ENABLE_METAL_LM_HEAD_ARGMAX"
       ],
-      "override_count": 10,
+      "override_count": 9,
       "overrides": [
         "dispatch_adamw_step",
         "evict_resident_activation",
@@ -380,7 +377,6 @@
         "has_resident_activation",
         "register_resident_activation",
         "resolve_resident_activation",
-        "supports_resident_activation",
         "training_capabilities",
         "training_precision_policy",
         "update_resident_activation"
@@ -676,7 +672,7 @@
           "status": "literal_true",
           "support_state": "NativeWithConstraints"
         },
-        "supports_resident_activation": {
+        "runtime_supports_resident_activation": {
           "env_gates": [],
           "gate_hints": {
             "dtype": false,
@@ -684,7 +680,7 @@
             "layout": false,
             "shape": false
           },
-          "line": 834,
+          "line": 826,
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
@@ -720,12 +716,11 @@
         "KILN_ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK",
         "KILN_ROCM_HEAD_MAJOR_PREFILL"
       ],
-      "override_count": 22,
+      "override_count": 19,
       "overrides": [
         "evict_resident_activation",
         "flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs",
         "has_resident_activation",
-        "register_resident_activation",
         "supports_causal_conv1d_prefill",
         "supports_causal_conv1d_update",
         "supports_flash_attn_paged_decode",
@@ -739,11 +734,9 @@
         "supports_gdn_gated_rms_norm",
         "supports_gdn_gates",
         "supports_gdn_recurrent_step",
-        "supports_resident_activation",
         "supports_strict_paged_decode_contiguous_batch",
         "training_capabilities",
-        "training_precision_policy",
-        "update_resident_activation"
+        "training_precision_policy"
       ],
       "source": "crates/kiln-model/src/backend/rocm.rs",
       "source_modules": [
@@ -759,10 +752,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 1923,
+          "line": 1925,
           "paired_method": "runtime_causal_conv1d_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 1953,
+          "paired_method_line": 1955,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -774,10 +767,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 1919,
+          "line": 1921,
           "paired_method": "runtime_causal_conv1d_update",
           "paired_method_always_declines": false,
-          "paired_method_line": 1927,
+          "paired_method_line": 1929,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -963,6 +956,21 @@
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
+        "runtime_supports_resident_activation": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1566,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "literal_true",
+          "support_state": "NativeWithConstraints"
+        },
         "runtime_supports_strict_paged_decode_contiguous_batch": {
           "env_gates": [],
           "gate_hints": {
@@ -976,21 +984,6 @@
           "paired_method_always_declines": false,
           "paired_method_line": null,
           "status": "dynamic",
-          "support_state": "NativeWithConstraints"
-        },
-        "supports_resident_activation": {
-          "env_gates": [],
-          "gate_hints": {
-            "dtype": false,
-            "env": false,
-            "layout": false,
-            "shape": false
-          },
-          "line": 1574,
-          "paired_method": null,
-          "paired_method_always_declines": false,
-          "paired_method_line": null,
-          "status": "literal_true",
           "support_state": "NativeWithConstraints"
         }
       }
@@ -1065,9 +1058,8 @@
         "KILN_VULKAN_RESIDENT_DECODE",
         "KILN_VULKAN_SDPA"
       ],
-      "override_count": 67,
+      "override_count": 54,
       "overrides": [
-        "assemble_gdn_recurrent_resident_batch_rows",
         "assemble_linear_attn_gdn_state_batch_kt",
         "causal_conv1d_prefill",
         "causal_conv1d_update",
@@ -1075,10 +1067,6 @@
         "dispatch_adamw_step",
         "dispatch_sgd_step",
         "drop_uploaded_bf16_weights",
-        "enter_gdn_recurrent_resident_state_scope",
-        "evict_gdn_recurrent_resident_state",
-        "evict_resident_activation",
-        "exit_gdn_recurrent_resident_state_scope",
         "flash_attn_paged_decode",
         "flash_attn_paged_decode_contiguous_batch_dyn_seqlen",
         "flash_attn_prefill",
@@ -1095,9 +1083,7 @@
         "gdn_recurrent_prefill_native_head_last",
         "gdn_recurrent_qk_norm_prefill_native_head_last",
         "gdn_recurrent_step",
-        "has_gdn_recurrent_resident_state",
         "has_linear_attn_gdn_state_kt",
-        "has_resident_activation",
         "linear_decode",
         "linear_decode_argmax",
         "linear_decode_argmax_batch",
@@ -1105,13 +1091,9 @@
         "linear_decode_sample_batch",
         "linear_prefill_apply",
         "linear_prefill_apply_offset",
-        "materialize_gdn_recurrent_resident_state",
         "mlp_decode",
         "mlp_gate_up_decode",
         "prewarm_decode_weights",
-        "register_resident_activation",
-        "resolve_resident_activation",
-        "scatter_gdn_recurrent_resident_batch_rows",
         "scatter_linear_attn_gdn_state_batch_kt",
         "seed_linear_attn_gdn_state_kt",
         "supports_causal_conv1d_prefill",
@@ -1129,11 +1111,9 @@
         "supports_linear_decode_argmax_batch",
         "supports_linear_decode_sample",
         "supports_linear_decode_sample_batch",
-        "supports_resident_activation",
         "supports_resident_decode",
         "training_capabilities",
-        "training_precision_policy",
-        "update_resident_activation"
+        "training_precision_policy"
       ],
       "source": "crates/kiln-model/src/backend/vulkan.rs",
       "source_modules": [
@@ -1425,7 +1405,7 @@
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
-        "supports_resident_activation": {
+        "runtime_supports_resident_activation": {
           "env_gates": [],
           "gate_hints": {
             "dtype": false,
@@ -1433,7 +1413,7 @@
             "layout": false,
             "shape": false
           },
-          "line": 982,
+          "line": 953,
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
@@ -1448,10 +1428,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 907,
+          "line": 1325,
           "paired_method": "decode_resident_pool_ready",
           "paired_method_always_declines": false,
-          "paired_method_line": 894,
+          "paired_method_line": 1312,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         }
@@ -2962,9 +2942,15 @@
       "source": "crates/kiln-model/src/backend/mod.rs"
     },
     "ResidencyBackend": {
-      "concrete_impl_count": 0,
-      "concrete_impls": [],
-      "forwarding_impl": "blanket_backend_runtime",
+      "concrete_impl_count": 5,
+      "concrete_impls": [
+        "CpuBackend",
+        "CudaBackend",
+        "MetalBackend",
+        "RocmBackend",
+        "VulkanBackend"
+      ],
+      "forwarding_impl": "concrete_authoritative",
       "method_count": 18,
       "methods": [
         "runtime_assemble_gdn_recurrent_resident_batch_rows",
@@ -3279,6 +3265,32 @@
             "RocmBackend",
             "VulkanBackend"
           ],
+          "name": "residency_backend_facet_authoritative",
+          "observed": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs",
+            "crates/kiln-model/src/backend/cpu.rs",
+            "crates/kiln-model/src/backend/cuda.rs",
+            "crates/kiln-model/src/backend/rocm.rs",
+            "crates/kiln-model/src/backend/metal_runtime.rs",
+            "crates/kiln-model/src/backend/vulkan.rs"
+          ],
+          "expected": [
+            "CpuBackend",
+            "CudaBackend",
+            "MetalBackend",
+            "RocmBackend",
+            "VulkanBackend"
+          ],
           "name": "sampling_backend_facet_authoritative",
           "observed": [
             "CpuBackend",
@@ -3347,7 +3359,7 @@
           ],
           "expected": 0,
           "name": "focused_trait_forwarding_shims_removed",
-          "observed": 3,
+          "observed": 2,
           "passed": false
         },
         {

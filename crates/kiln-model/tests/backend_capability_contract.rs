@@ -554,17 +554,17 @@ fn cuda_rocm_resident_membership_stays_in_shared_helper() {
         let source = fs::read_to_string(&path).expect("backend source should be readable");
         let functions = parse_functions(&path);
         let register = functions
-            .get("register_resident_activation")
-            .unwrap_or_else(|| panic!("{backend_file} missing register_resident_activation"));
+            .get("runtime_register_resident_activation")
+            .unwrap_or_else(|| panic!("{backend_file} missing runtime_register_resident_activation"));
         let update = functions
-            .get("update_resident_activation")
-            .unwrap_or_else(|| panic!("{backend_file} missing update_resident_activation"));
+            .get("runtime_update_resident_activation")
+            .unwrap_or_else(|| panic!("{backend_file} missing runtime_update_resident_activation"));
         let evict = functions
-            .get("evict_resident_activation")
-            .unwrap_or_else(|| panic!("{backend_file} missing evict_resident_activation"));
+            .get("runtime_evict_resident_activation")
+            .unwrap_or_else(|| panic!("{backend_file} missing runtime_evict_resident_activation"));
         let has = functions
-            .get("has_resident_activation")
-            .unwrap_or_else(|| panic!("{backend_file} missing has_resident_activation"));
+            .get("runtime_has_resident_activation")
+            .unwrap_or_else(|| panic!("{backend_file} missing runtime_has_resident_activation"));
 
         assert!(
             compact_body(&register.body).contains("cuda_rocm_common::mark_resident_activation("),
@@ -2674,6 +2674,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
                 | "GdnBackend"
                 | "ConvBackend"
                 | "LinearBackend"
+                | "ResidencyBackend"
                 | "SamplingBackend"
                 | "OptimizerBackend"
                 | "PagedKvBackend"
@@ -2710,6 +2711,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
         "GdnBackend",
         "ConvBackend",
         "LinearBackend",
+        "ResidencyBackend",
         "SamplingBackend",
         "OptimizerBackend",
         "PagedKvBackend",
@@ -2764,6 +2766,10 @@ fn generated_capability_report_lists_focused_backend_facets() {
         "LinearBackend should not regress to a blanket BackendRuntime forwarding impl"
     );
     assert!(
+        !backend_source.contains("impl<T: BackendRuntime + ?Sized> ResidencyBackend for T"),
+        "ResidencyBackend should not regress to a blanket BackendRuntime forwarding impl"
+    );
+    assert!(
         !backend_source.contains("impl<T: BackendRuntime + ?Sized> SamplingBackend for T"),
         "SamplingBackend should not regress to a blanket BackendRuntime forwarding impl"
     );
@@ -2787,6 +2793,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
         "GdnBackend",
         "ConvBackend",
         "LinearBackend",
+        "ResidencyBackend",
         "SamplingBackend",
         "OptimizerBackend",
         "PagedKvBackend",

@@ -659,6 +659,7 @@ pub trait BackendRuntime:
     + GdnBackend
     + ConvBackend
     + LinearBackend
+    + ResidencyBackend
     + SamplingBackend
     + OptimizerBackend
     + PagedKvBackend
@@ -936,22 +937,26 @@ pub trait BackendRuntime:
     }
 
     fn enter_gdn_recurrent_resident_state_scope(&self) -> bool {
-        false
+        ResidencyBackend::runtime_enter_gdn_recurrent_resident_state_scope(self)
     }
 
-    fn exit_gdn_recurrent_resident_state_scope(&self) {}
+    fn exit_gdn_recurrent_resident_state_scope(&self) {
+        ResidencyBackend::runtime_exit_gdn_recurrent_resident_state_scope(self)
+    }
 
     fn materialize_gdn_recurrent_resident_state(
         &self,
-        _state: &mut kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
     ) -> Result<()> {
-        Ok(())
+        ResidencyBackend::runtime_materialize_gdn_recurrent_resident_state(self, state)
     }
 
-    fn evict_gdn_recurrent_resident_state(&self, _state: &kiln_tensor::Tensor) {}
+    fn evict_gdn_recurrent_resident_state(&self, state: &kiln_tensor::Tensor) {
+        ResidencyBackend::runtime_evict_gdn_recurrent_resident_state(self, state)
+    }
 
-    fn has_gdn_recurrent_resident_state(&self, _state: &kiln_tensor::Tensor) -> bool {
-        false
+    fn has_gdn_recurrent_resident_state(&self, state: &kiln_tensor::Tensor) -> bool {
+        ResidencyBackend::runtime_has_gdn_recurrent_resident_state(self, state)
     }
 
     /// True when the backend's resident activation registry is
@@ -964,7 +969,7 @@ pub trait BackendRuntime:
     /// this. The default impls are cheap enough that it's safe to
     /// always invoke them, so most callers should not bother.
     fn supports_resident_activation(&self) -> bool {
-        false
+        ResidencyBackend::runtime_supports_resident_activation(self)
     }
 
     /// Register a non-weight tensor (e.g. a checkpoint-segment activation
@@ -977,15 +982,17 @@ pub trait BackendRuntime:
     /// Phase 3.2 lands, `checkpointed_forward_backward` calls this for
     /// each segment-output tensor so the recompute pass can read the
     /// boundary back from device memory instead of the candle CPU mirror.
-    fn register_resident_activation(&self, _tensor: &kiln_tensor::Tensor) -> Result<()> {
-        Ok(())
+    fn register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
+        ResidencyBackend::runtime_register_resident_activation(self, tensor)
     }
 
     /// Evict a previously-registered activation from the residency
     /// registry. Caller invokes this when the autograd pass no longer
     /// needs the tensor (e.g. after a segment's backward completes).
     /// No-op default.
-    fn evict_resident_activation(&self, _tensor: &kiln_tensor::Tensor) {}
+    fn evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
+        ResidencyBackend::runtime_evict_resident_activation(self, tensor)
+    }
 
     /// Re-upload the tensor's current bytes into its registry buffer
     /// (if registered). Caller invokes this when the kt master
@@ -996,8 +1003,8 @@ pub trait BackendRuntime:
     ///
     /// No-op default; backends without a registry have nothing to
     /// keep in sync.
-    fn update_resident_activation(&self, _tensor: &kiln_tensor::Tensor) -> Result<()> {
-        Ok(())
+    fn update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
+        ResidencyBackend::runtime_update_resident_activation(self, tensor)
     }
 
     /// True when the given tensor has been registered as
@@ -1005,8 +1012,8 @@ pub trait BackendRuntime:
     /// resident fast path and the legacy CPU-roundtrip path. False by
     /// default so callers without registry support continue to use the
     /// legacy path.
-    fn has_resident_activation(&self, _tensor: &kiln_tensor::Tensor) -> bool {
-        false
+    fn has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
+        ResidencyBackend::runtime_has_resident_activation(self, tensor)
     }
 
     /// Metadata-only descriptor for an activation that the backend already
@@ -1017,16 +1024,7 @@ pub trait BackendRuntime:
         &self,
         tensor: &kiln_tensor::Tensor,
     ) -> Option<residency::ResidentResource> {
-        if self.has_resident_activation(tensor) {
-            Some(residency::ResidentResource::from_tensor_for_backend(
-                tensor,
-                residency::resident_backend_for_runtime(self.name(), tensor.device()),
-                residency::ResidentResourceFamily::Activation,
-                residency::resident_ownership_for_backend(self.name()),
-            ))
-        } else {
-            None
-        }
+        ResidencyBackend::runtime_resident_activation_resource(self, tensor)
     }
 
     /// Read a previously-registered activation back from device into
@@ -1042,11 +1040,11 @@ pub trait BackendRuntime:
     /// registry support fall through to the legacy code path.
     fn resolve_resident_activation(
         &self,
-        _tensor: &kiln_tensor::Tensor,
-        _shape: &[usize],
-        _dtype: kiln_tensor::DType,
+        tensor: &kiln_tensor::Tensor,
+        shape: &[usize],
+        dtype: kiln_tensor::DType,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        ResidencyBackend::runtime_resolve_resident_activation(self, tensor, shape, dtype)
     }
 
     /// Phase 4.2 hook: in-place SGD update `param -= lr * grad`
@@ -1135,46 +1133,54 @@ pub trait BackendRuntime:
 
     fn assemble_gdn_recurrent_resident_batch_rows(
         &self,
-        _rows: &[&kiln_tensor::Tensor],
-        _batch: &kiln_tensor::Tensor,
+        rows: &[&kiln_tensor::Tensor],
+        batch: &kiln_tensor::Tensor,
     ) -> Result<bool> {
-        Ok(false)
+        ResidencyBackend::runtime_assemble_gdn_recurrent_resident_batch_rows(self, rows, batch)
     }
 
     fn scatter_gdn_recurrent_resident_batch_rows(
         &self,
-        _batch: &kiln_tensor::Tensor,
-        _destinations: &mut [&mut kiln_tensor::Tensor],
+        batch: &kiln_tensor::Tensor,
+        destinations: &mut [&mut kiln_tensor::Tensor],
     ) -> Result<bool> {
-        Ok(false)
+        ResidencyBackend::runtime_scatter_gdn_recurrent_resident_batch_rows(
+            self,
+            batch,
+            destinations,
+        )
     }
 
     fn assemble_linear_attn_gdn_state_batch_kt(
         &self,
-        _row_keys: &[kiln_tensor::TensorId],
-        _batch_key: kiln_tensor::TensorId,
+        row_keys: &[kiln_tensor::TensorId],
+        batch_key: kiln_tensor::TensorId,
     ) -> Result<bool> {
-        Ok(false)
+        ResidencyBackend::runtime_assemble_linear_attn_gdn_state_batch_kt(
+            self, row_keys, batch_key,
+        )
     }
 
     fn scatter_linear_attn_gdn_state_batch_kt(
         &self,
-        _batch_key: kiln_tensor::TensorId,
-        _row_keys: &[kiln_tensor::TensorId],
+        batch_key: kiln_tensor::TensorId,
+        row_keys: &[kiln_tensor::TensorId],
     ) -> Result<bool> {
-        Ok(false)
+        ResidencyBackend::runtime_scatter_linear_attn_gdn_state_batch_kt(
+            self, batch_key, row_keys,
+        )
     }
 
     fn seed_linear_attn_gdn_state_kt(
         &self,
-        _recurrent: &kiln_tensor::Tensor,
-        _conv: &kiln_tensor::Tensor,
+        recurrent: &kiln_tensor::Tensor,
+        conv: &kiln_tensor::Tensor,
     ) -> Result<bool> {
-        Ok(false)
+        ResidencyBackend::runtime_seed_linear_attn_gdn_state_kt(self, recurrent, conv)
     }
 
-    fn has_linear_attn_gdn_state_kt(&self, _key: kiln_tensor::TensorId) -> bool {
-        false
+    fn has_linear_attn_gdn_state_kt(&self, key: kiln_tensor::TensorId) -> bool {
+        ResidencyBackend::runtime_has_linear_attn_gdn_state_kt(self, key)
     }
 
     fn supports_gdn_chunk_prep(&self) -> bool {
@@ -2698,73 +2704,113 @@ pub trait SamplingBackend: Send + Sync + std::fmt::Debug {
 
 /// Focused `ResidencyBackend` facet delegated by the current `BackendRuntime` facade.
 #[allow(clippy::too_many_arguments)]
-pub trait ResidencyBackend: Send + Sync + std::fmt::Debug {
-    fn runtime_supports_resident_activation(&self) -> bool;
+pub trait ResidencyBackend: BackendIdentity + Send + Sync + std::fmt::Debug {
+    fn runtime_supports_resident_activation(&self) -> bool {
+        false
+    }
 
-    fn runtime_register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()>;
+    fn runtime_register_resident_activation(&self, _tensor: &kiln_tensor::Tensor) -> Result<()> {
+        Ok(())
+    }
 
-    fn runtime_evict_resident_activation(&self, tensor: &kiln_tensor::Tensor);
+    fn runtime_evict_resident_activation(&self, _tensor: &kiln_tensor::Tensor) {}
 
-    fn runtime_update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()>;
+    fn runtime_update_resident_activation(&self, _tensor: &kiln_tensor::Tensor) -> Result<()> {
+        Ok(())
+    }
 
-    fn runtime_has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool;
+    fn runtime_has_resident_activation(&self, _tensor: &kiln_tensor::Tensor) -> bool {
+        false
+    }
 
     fn runtime_resident_activation_resource(
         &self,
         tensor: &kiln_tensor::Tensor,
-    ) -> Option<residency::ResidentResource>;
+    ) -> Option<residency::ResidentResource> {
+        if self.runtime_has_resident_activation(tensor) {
+            let name = BackendIdentity::runtime_name(self);
+            Some(residency::ResidentResource::from_tensor_for_backend(
+                tensor,
+                residency::resident_backend_for_runtime(name, tensor.device()),
+                residency::ResidentResourceFamily::Activation,
+                residency::resident_ownership_for_backend(name),
+            ))
+        } else {
+            None
+        }
+    }
 
     fn runtime_resolve_resident_activation(
         &self,
-        tensor: &kiln_tensor::Tensor,
-        shape: &[usize],
-        dtype: kiln_tensor::DType,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _tensor: &kiln_tensor::Tensor,
+        _shape: &[usize],
+        _dtype: kiln_tensor::DType,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
-    fn runtime_enter_gdn_recurrent_resident_state_scope(&self) -> bool;
+    fn runtime_enter_gdn_recurrent_resident_state_scope(&self) -> bool {
+        false
+    }
 
-    fn runtime_exit_gdn_recurrent_resident_state_scope(&self);
+    fn runtime_exit_gdn_recurrent_resident_state_scope(&self) {}
 
     fn runtime_materialize_gdn_recurrent_resident_state(
         &self,
-        state: &mut kiln_tensor::Tensor,
-    ) -> Result<()>;
+        _state: &mut kiln_tensor::Tensor,
+    ) -> Result<()> {
+        Ok(())
+    }
 
-    fn runtime_evict_gdn_recurrent_resident_state(&self, state: &kiln_tensor::Tensor);
+    fn runtime_evict_gdn_recurrent_resident_state(&self, _state: &kiln_tensor::Tensor) {}
 
-    fn runtime_has_gdn_recurrent_resident_state(&self, state: &kiln_tensor::Tensor) -> bool;
+    fn runtime_has_gdn_recurrent_resident_state(&self, _state: &kiln_tensor::Tensor) -> bool {
+        false
+    }
 
     fn runtime_assemble_gdn_recurrent_resident_batch_rows(
         &self,
-        rows: &[&kiln_tensor::Tensor],
-        batch: &kiln_tensor::Tensor,
-    ) -> Result<bool>;
+        _rows: &[&kiln_tensor::Tensor],
+        _batch: &kiln_tensor::Tensor,
+    ) -> Result<bool> {
+        Ok(false)
+    }
 
     fn runtime_scatter_gdn_recurrent_resident_batch_rows(
         &self,
-        batch: &kiln_tensor::Tensor,
-        destinations: &mut [&mut kiln_tensor::Tensor],
-    ) -> Result<bool>;
+        _batch: &kiln_tensor::Tensor,
+        _destinations: &mut [&mut kiln_tensor::Tensor],
+    ) -> Result<bool> {
+        Ok(false)
+    }
 
     fn runtime_assemble_linear_attn_gdn_state_batch_kt(
         &self,
-        row_keys: &[kiln_tensor::TensorId],
-        batch_key: kiln_tensor::TensorId,
-    ) -> Result<bool>;
+        _row_keys: &[kiln_tensor::TensorId],
+        _batch_key: kiln_tensor::TensorId,
+    ) -> Result<bool> {
+        Ok(false)
+    }
 
     fn runtime_scatter_linear_attn_gdn_state_batch_kt(
         &self,
-        batch_key: kiln_tensor::TensorId,
-        row_keys: &[kiln_tensor::TensorId],
-    ) -> Result<bool>;
+        _batch_key: kiln_tensor::TensorId,
+        _row_keys: &[kiln_tensor::TensorId],
+    ) -> Result<bool> {
+        Ok(false)
+    }
 
     fn runtime_seed_linear_attn_gdn_state_kt(
         &self,
-        recurrent: &kiln_tensor::Tensor,
-        conv: &kiln_tensor::Tensor,
-    ) -> Result<bool>;
+        _recurrent: &kiln_tensor::Tensor,
+        _conv: &kiln_tensor::Tensor,
+    ) -> Result<bool> {
+        Ok(false)
+    }
 
-    fn runtime_has_linear_attn_gdn_state_kt(&self, key: kiln_tensor::TensorId) -> bool;
+    fn runtime_has_linear_attn_gdn_state_kt(&self, _key: kiln_tensor::TensorId) -> bool {
+        false
+    }
 }
 
 /// Focused `OptimizerBackend` facet for on-device optimizer updates.
@@ -2876,112 +2922,6 @@ pub trait ReplayBackend: Send + Sync + std::fmt::Debug {
 
 // Blanket forwarding impls keep the focused traits behavior-identical to the
 // compatibility facade while later PRs move call sites to one facet at a time.
-
-#[allow(clippy::too_many_arguments)]
-impl<T: BackendRuntime + ?Sized> ResidencyBackend for T {
-    fn runtime_supports_resident_activation(&self) -> bool {
-        BackendRuntime::supports_resident_activation(self)
-    }
-
-    fn runtime_register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
-        BackendRuntime::register_resident_activation(self, tensor)
-    }
-
-    fn runtime_evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
-        BackendRuntime::evict_resident_activation(self, tensor)
-    }
-
-    fn runtime_update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
-        BackendRuntime::update_resident_activation(self, tensor)
-    }
-
-    fn runtime_has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
-        BackendRuntime::has_resident_activation(self, tensor)
-    }
-
-    fn runtime_resident_activation_resource(
-        &self,
-        tensor: &kiln_tensor::Tensor,
-    ) -> Option<residency::ResidentResource> {
-        BackendRuntime::resident_activation_resource(self, tensor)
-    }
-
-    fn runtime_resolve_resident_activation(
-        &self,
-        tensor: &kiln_tensor::Tensor,
-        shape: &[usize],
-        dtype: kiln_tensor::DType,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::resolve_resident_activation(self, tensor, shape, dtype)
-    }
-
-    fn runtime_enter_gdn_recurrent_resident_state_scope(&self) -> bool {
-        BackendRuntime::enter_gdn_recurrent_resident_state_scope(self)
-    }
-
-    fn runtime_exit_gdn_recurrent_resident_state_scope(&self) {
-        BackendRuntime::exit_gdn_recurrent_resident_state_scope(self)
-    }
-
-    fn runtime_materialize_gdn_recurrent_resident_state(
-        &self,
-        state: &mut kiln_tensor::Tensor,
-    ) -> Result<()> {
-        BackendRuntime::materialize_gdn_recurrent_resident_state(self, state)
-    }
-
-    fn runtime_evict_gdn_recurrent_resident_state(&self, state: &kiln_tensor::Tensor) {
-        BackendRuntime::evict_gdn_recurrent_resident_state(self, state)
-    }
-
-    fn runtime_has_gdn_recurrent_resident_state(&self, state: &kiln_tensor::Tensor) -> bool {
-        BackendRuntime::has_gdn_recurrent_resident_state(self, state)
-    }
-
-    fn runtime_assemble_gdn_recurrent_resident_batch_rows(
-        &self,
-        rows: &[&kiln_tensor::Tensor],
-        batch: &kiln_tensor::Tensor,
-    ) -> Result<bool> {
-        BackendRuntime::assemble_gdn_recurrent_resident_batch_rows(self, rows, batch)
-    }
-
-    fn runtime_scatter_gdn_recurrent_resident_batch_rows(
-        &self,
-        batch: &kiln_tensor::Tensor,
-        destinations: &mut [&mut kiln_tensor::Tensor],
-    ) -> Result<bool> {
-        BackendRuntime::scatter_gdn_recurrent_resident_batch_rows(self, batch, destinations)
-    }
-
-    fn runtime_assemble_linear_attn_gdn_state_batch_kt(
-        &self,
-        row_keys: &[kiln_tensor::TensorId],
-        batch_key: kiln_tensor::TensorId,
-    ) -> Result<bool> {
-        BackendRuntime::assemble_linear_attn_gdn_state_batch_kt(self, row_keys, batch_key)
-    }
-
-    fn runtime_scatter_linear_attn_gdn_state_batch_kt(
-        &self,
-        batch_key: kiln_tensor::TensorId,
-        row_keys: &[kiln_tensor::TensorId],
-    ) -> Result<bool> {
-        BackendRuntime::scatter_linear_attn_gdn_state_batch_kt(self, batch_key, row_keys)
-    }
-
-    fn runtime_seed_linear_attn_gdn_state_kt(
-        &self,
-        recurrent: &kiln_tensor::Tensor,
-        conv: &kiln_tensor::Tensor,
-    ) -> Result<bool> {
-        BackendRuntime::seed_linear_attn_gdn_state_kt(self, recurrent, conv)
-    }
-
-    fn runtime_has_linear_attn_gdn_state_kt(&self, key: kiln_tensor::TensorId) -> bool {
-        BackendRuntime::has_linear_attn_gdn_state_kt(self, key)
-    }
-}
 
 impl<T> residency::ResidentRegistry for T
 where
@@ -3219,17 +3159,19 @@ mod tests {
 
     impl LinearBackend for ResidentActivationProbeBackend {}
 
+    impl ResidencyBackend for ResidentActivationProbeBackend {
+        fn runtime_has_resident_activation(&self, _tensor: &kiln_tensor::Tensor) -> bool {
+            self.resident
+        }
+    }
+
     impl SamplingBackend for ResidentActivationProbeBackend {}
 
     impl OptimizerBackend for ResidentActivationProbeBackend {}
 
     impl PagedKvBackend for ResidentActivationProbeBackend {}
 
-    impl BackendRuntime for ResidentActivationProbeBackend {
-        fn has_resident_activation(&self, _tensor: &kiln_tensor::Tensor) -> bool {
-            self.resident
-        }
-    }
+    impl BackendRuntime for ResidentActivationProbeBackend {}
 
     #[test]
     fn portable_training_capabilities_are_conservative() {

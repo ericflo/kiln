@@ -14,8 +14,8 @@ use super::metal_lm_head::*;
 use super::metal_paged::*;
 use super::{
     metal_residency, metal_training, AttentionBackend, BackendIdentity, BackendRuntime,
-    ConvBackend, GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, SamplingBackend,
-    StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
+    ConvBackend, GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ResidencyBackend,
+    SamplingBackend, StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
 };
 
 impl BackendIdentity for MetalBackend {
@@ -814,15 +814,7 @@ impl GdnBackend for MetalBackend {
 
 impl LinearBackend for MetalBackend {}
 
-impl BackendRuntime for MetalBackend {
-    fn training_capabilities(&self) -> TrainingCapabilities {
-        Self::training_capabilities_static()
-    }
-
-    fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
-        metal_training::training_precision_policy()
-    }
-
+impl ResidencyBackend for MetalBackend {
     // ------------------------------------------------------------------
     // Resident-activation hooks (#1082) — Metal analog of the Vulkan
     // registry. The registry tracks membership only (the kt tensor already
@@ -831,33 +823,43 @@ impl BackendRuntime for MetalBackend {
     // register/has/update/evict/resolve semantics as Vulkan.
     // ------------------------------------------------------------------
 
-    fn supports_resident_activation(&self) -> bool {
+    fn runtime_supports_resident_activation(&self) -> bool {
         true
     }
 
-    fn register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
+    fn runtime_register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
         metal_residency::register_resident_activation(tensor)
     }
 
-    fn has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
+    fn runtime_has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
         metal_residency::has_resident_activation(tensor)
     }
 
-    fn update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
+    fn runtime_update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
         metal_residency::update_resident_activation(tensor)
     }
 
-    fn evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
+    fn runtime_evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
         metal_residency::evict_resident_activation(tensor);
     }
 
-    fn resolve_resident_activation(
+    fn runtime_resolve_resident_activation(
         &self,
         tensor: &kiln_tensor::Tensor,
         shape: &[usize],
         dtype: kiln_tensor::DType,
     ) -> Result<Option<kiln_tensor::Tensor>> {
         metal_residency::resolve_resident_activation(tensor, shape, dtype)
+    }
+}
+
+impl BackendRuntime for MetalBackend {
+    fn training_capabilities(&self) -> TrainingCapabilities {
+        Self::training_capabilities_static()
+    }
+
+    fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
+        metal_training::training_precision_policy()
     }
 
     fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(

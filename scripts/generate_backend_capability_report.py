@@ -1447,6 +1447,10 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
                 "linear_backend_facet_authoritative",
             ),
             focused_trait_authoritative_signal(
+                "ResidencyBackend",
+                "residency_backend_facet_authoritative",
+            ),
+            focused_trait_authoritative_signal(
                 "SamplingBackend",
                 "sampling_backend_facet_authoritative",
             ),
