@@ -5255,6 +5255,36 @@ fn generated_capability_report_gates_matmul_linear_contract() {
 }
 
 #[test]
+fn forward_lora_delta_routes_through_device_ops_contract() {
+    let forward_source =
+        fs::read_to_string(workspace_root().join("crates/kiln-model/src/forward.rs"))
+            .expect("forward source should be readable");
+    let lora_delta_helper = source_between(
+        &forward_source,
+        "fn try_kt_lora_delta(",
+        "/// Phase 7 (#1082) — **kt-native** LM head matmul core.",
+    );
+
+    assert!(
+        lora_delta_helper.contains("kiln_tensor::ops::matmul_rhs_transposed"),
+        "LoRA delta helper should route both transposed matmuls through DeviceOp dispatch"
+    );
+    assert!(
+        lora_delta_helper.contains("kiln_tensor::ops::mul_scalar"),
+        "LoRA delta helper should route scale multiplication through DeviceOp dispatch"
+    );
+    for forbidden in [
+        "kiln_tensor::cuda_matmul_rhs_transposed",
+        "kiln_tensor::cuda_scalar_op",
+    ] {
+        assert!(
+            !lora_delta_helper.contains(forbidden),
+            "LoRA delta helper should not bind directly to CUDA primitives: {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn forward_lm_head_matmul_routes_through_matmul_op_contract() {
     let forward_source =
         fs::read_to_string(workspace_root().join("crates/kiln-model/src/forward.rs"))

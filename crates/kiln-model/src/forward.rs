@@ -545,9 +545,8 @@ fn cuda_use_kt_api_gqa_sdpa() -> bool {
 /// to enable; default off. Routes the
 /// [`crate::lora_loader::compute_lora_delta`] three-step composite
 /// (`hidden = x @ A^T`, `delta_pre = hidden @ B^T`,
-/// `delta = delta_pre * scale`) through `kiln_tensor::cuda_matmul`
-/// + `kiln_tensor::cuda_matmul` + `kiln_tensor::cuda_scalar_op`
-/// (kind 2 = MulScalar) directly, ahead of the candle composite.
+/// `delta = delta_pre * scale`) through the request-routed kt
+/// matmul/scalar ops ahead of the candle composite.
 ///
 /// LoRA delta is a hot inference + training path: every layer
 /// with a LoRA-targeted projection (q/k/v/o + gate/up/down) runs
@@ -11546,9 +11545,9 @@ pub(crate) fn try_kt_broadcast_div(a: &Tensor, b: &Tensor) -> Result<Option<Tens
 /// Phase 7 (#1082) — kt-API LoRA delta migration helper. Routes
 /// the `(x @ A^T) @ B^T * scale` three-step composite from
 /// [`crate::lora_loader::compute_lora_delta`] through
-/// `kiln_tensor::cuda_matmul_rhs_transposed` +
-/// `kiln_tensor::cuda_matmul_rhs_transposed` + `kiln_tensor::cuda_scalar_op`
-/// (kind 2 = MulScalar) directly, ahead of the candle composite.
+/// `kiln_tensor::ops::matmul_rhs_transposed` +
+/// `kiln_tensor::ops::matmul_rhs_transposed` +
+/// `kiln_tensor::ops::mul_scalar` directly, ahead of the candle composite.
 ///
 /// Flattens any leading dims to a 2D `[lead, in_features]` view
 /// before dispatching to keep the cublasLt entry shape canonical;
@@ -11626,7 +11625,7 @@ fn try_kt_lora_delta(
     // #1082: everything is kt now (x2d, a, b) — keep the whole
     // matmul→matmul→scale chain in kt, no candle round-trips (perf mandate).
     // Step 1: hidden = x @ A^T -> shape [lead, rank]
-    let hidden_kt = match kiln_tensor::cuda_matmul_rhs_transposed(&x2d, &a) {
+    let hidden_kt = match kiln_tensor::ops::matmul_rhs_transposed(&x2d, &a) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
@@ -11635,7 +11634,7 @@ fn try_kt_lora_delta(
     }
 
     // Step 2: delta_pre = hidden @ B^T -> shape [lead, out_features]
-    let delta_pre_kt = match kiln_tensor::cuda_matmul_rhs_transposed(&hidden_kt, &b) {
+    let delta_pre_kt = match kiln_tensor::ops::matmul_rhs_transposed(&hidden_kt, &b) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
@@ -11643,8 +11642,8 @@ fn try_kt_lora_delta(
         return Ok(None);
     }
 
-    // Step 3: delta = delta_pre * scale (kind tag 2 = MulScalar)
-    let delta_kt = match kiln_tensor::cuda_scalar_op(&delta_pre_kt, 2, scale) {
+    // Step 3: delta = delta_pre * scale.
+    let delta_kt = match kiln_tensor::ops::mul_scalar(&delta_pre_kt, scale) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
