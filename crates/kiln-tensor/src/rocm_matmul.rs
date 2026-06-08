@@ -2,8 +2,9 @@
 //! (Phase R.6) — the ROCm analog of [`crate::cuda_matmul`].
 //!
 //! A process-global per-device handle registry cold-starts one hipBLASLt handle
-//! per device and shares it; the autotune algo cache is process-shared and
-//! persists to disk under a `hipblaslt-` prefix (never mixed with a CUDA cache).
+//! per device and shares it; the autotune algo cache is process-shared only.
+//! ROCm intentionally avoids disk persistence because restored hipBLASLt algo
+//! blobs can crash a later process.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -83,44 +84,33 @@ pub fn rocm_restore_into_shared_cache(loaded: AlgoCache) {
     }
 }
 
-/// Standard on-disk path for the hipBLASLt autotune cache on `device_index`:
-/// `~/.cache/kiln/autotune/hipblaslt-dev{index}.json`. The `hipblaslt-` prefix
-/// guarantees a CUDA cublasLt cache is never deserialized into a HIP handle.
+/// Legacy on-disk path for the hipBLASLt autotune cache on `device_index`.
 ///
-/// R.6 uses a device-index fingerprint; an arch-precise (`gfx*`) fingerprint
-/// lands with the gfx-name accessor in a later phase so a gfx942 cache and a
-/// gfx1100 cache on the same ordinal don't collide.
+/// ROCm load/flush are disabled below, but this helper is retained for callers
+/// that inspect or clean historical `hipblaslt-` cache files.
 pub fn hipblaslt_cache_path(device_index: usize) -> Option<std::path::PathBuf> {
     let fingerprint = format!("dev{device_index}");
     Some(AlgoCache::standard_path("hipblaslt", &fingerprint))
 }
 
-/// Flush the live shared autotune cache to disk. ROCm analog of
-/// `flush_algo_cache_to_disk`.
+/// Flush the live shared autotune cache to disk.
+///
+/// Disabled for ROCm: hipBLASLt algo blobs are process/runtime-local in
+/// practice. Restoring a freshly generated blob in a new kiln process has
+/// produced native segfaults inside `hipblasLtMatmul`, so ROCm keeps autotune
+/// only in the in-process cache.
 pub fn rocm_flush_algo_cache_to_disk(device_index: usize) -> std::io::Result<usize> {
-    let Some(path) = hipblaslt_cache_path(device_index) else {
-        return Ok(0);
-    };
-    let snapshot = rocm_snapshot_algo_cache();
-    if snapshot.is_empty() {
-        return Ok(0);
-    }
-    kiln_rocblas::save_to_path(&snapshot, &path)?;
-    Ok(snapshot.len())
+    let _ = device_index;
+    Ok(0)
 }
 
-/// Load the on-disk autotune cache for `device_index` and merge it into the live
-/// shared cache. ROCm analog of `load_algo_cache_from_disk`.
+/// Load the on-disk autotune cache for `device_index`.
+///
+/// See [`rocm_flush_algo_cache_to_disk`]: ROCm disk cache restore is disabled
+/// because persisted hipBLASLt algo blobs can crash in a later process.
 pub fn rocm_load_algo_cache_from_disk(device_index: usize) -> usize {
-    let Some(path) = hipblaslt_cache_path(device_index) else {
-        return 0;
-    };
-    let loaded = kiln_rocblas::load_from_path(&path);
-    let n = loaded.len();
-    if n > 0 {
-        rocm_restore_into_shared_cache(loaded);
-    }
-    n
+    let _ = device_index;
+    0
 }
 
 fn rocm_storage<'a>(t: &'a Tensor, op: &str, which: &str) -> Result<&'a RocmStorage> {
@@ -679,4 +669,15 @@ pub fn rocm_matmul_with_bias(a: &Tensor, b: &Tensor, bias: &Tensor) -> Result<Te
 
     let storage_arc: Storage = Arc::new(out_storage);
     Tensor::from_parts(storage_arc, Layout::contiguous(out_shape), TensorId::next())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rocm_disk_cache_persistence_is_disabled() {
+        assert_eq!(rocm_load_algo_cache_from_disk(0), 0);
+        assert_eq!(rocm_flush_algo_cache_to_disk(0).unwrap(), 0);
+    }
 }
