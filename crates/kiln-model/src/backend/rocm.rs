@@ -58,6 +58,35 @@ fn rocm_full_attn_qkv_in_proj_enabled() -> bool {
     })
 }
 
+const ROCM_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS: usize = 128;
+
+fn rocm_gdn_ab_in_proj_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !rocm_or_legacy_disable_env_set(
+            "KILN_DISABLE_ROCM_GDN_AB_IN_PROJ",
+            "KILN_DISABLE_CUDA_GDN_AB_IN_PROJ",
+        )
+    })
+}
+
+fn rocm_gdn_prefill_ab_in_proj_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !rocm_or_legacy_disable_env_set(
+            "KILN_DISABLE_ROCM_GDN_PREFILL_AB_IN_PROJ",
+            "KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ",
+        )
+    })
+}
+
+fn rocm_gdn_ab_in_proj_seq_enabled(seq_len: usize) -> bool {
+    rocm_gdn_ab_in_proj_enabled()
+        && (seq_len == 1
+            || (seq_len <= ROCM_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS
+                && rocm_gdn_prefill_ab_in_proj_enabled()))
+}
+
 pub fn flash_attn_tracked_decline_count() -> u64 {
     ROCM_FLASH_ATTN_TRACKED_DECLINES.load(Ordering::Relaxed)
 }
@@ -1431,6 +1460,40 @@ impl GdnBackend for RocmBackend {
             .unsqueeze(1)
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm out 3D->4D unsqueeze failed")?;
         Ok(Some(out))
+    }
+
+    fn runtime_gdn_ab_in_proj_prefill(
+        &self,
+        x: &kiln_tensor::Tensor,
+        in_proj_ab_t: &kiln_tensor::Tensor,
+        nv: usize,
+        seq_len: usize,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        let Ok((_, actual_seq_len, hidden)) = x.dims3() else {
+            return Ok(None);
+        };
+        let Some(ab_dim) = nv.checked_mul(2) else {
+            return Ok(None);
+        };
+        if !rocm_gdn_ab_in_proj_seq_enabled(seq_len)
+            || actual_seq_len != seq_len
+            || seq_len == 0
+            || x.dtype() != kiln_tensor::DType::BF16
+            || in_proj_ab_t.dtype() != kiln_tensor::DType::BF16
+            || in_proj_ab_t.track_op()
+            || !in_proj_ab_t.is_contiguous()
+            || in_proj_ab_t.dims() != [hidden, ab_dim]
+            || !rocm_tensors_on_device(&[x, in_proj_ab_t])
+        {
+            return Ok(None);
+        }
+
+        let Some(ab) = LinearBackend::runtime_linear_prefill_apply(self, x, in_proj_ab_t)? else {
+            return Ok(None);
+        };
+        let a = ab.narrow(2, 0, nv)?;
+        let b = ab.narrow(2, nv, nv)?;
+        Ok(Some((ab, a, b)))
     }
 
     fn runtime_supports_gdn_gates(&self) -> bool {

@@ -1126,6 +1126,16 @@ pub trait GdnBackend: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
+    fn runtime_gdn_ab_in_proj_prefill(
+        &self,
+        _x: &kiln_tensor::Tensor,
+        _in_proj_ab_t: &kiln_tensor::Tensor,
+        _nv: usize,
+        _seq_len: usize,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        Ok(None)
+    }
+
     fn runtime_gdn_gates(
         &self,
         _a: &kiln_tensor::Tensor,

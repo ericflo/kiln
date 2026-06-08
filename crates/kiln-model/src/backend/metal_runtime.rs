@@ -783,6 +783,22 @@ impl GdnBackend for MetalBackend {
         Ok(Some((o0, o1, o2, o3)))
     }
 
+    fn runtime_gdn_ab_in_proj_prefill(
+        &self,
+        x: &kiln_tensor::Tensor,
+        in_proj_ab_t: &kiln_tensor::Tensor,
+        nv: usize,
+        _seq_len: usize,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        // #1082: kt-native — helpers take kt directly, no candle bridge.
+        if !metal_gdn_prefill_ab_in_proj_supports(x, in_proj_ab_t, nv) {
+            return Ok(None);
+        }
+        let out = metal_gdn_prefill_ab_in_proj_bf16(x, in_proj_ab_t, nv)
+            .context("metal gdn prefill A/B in-proj")?;
+        Ok(Some(out))
+    }
+
     fn runtime_gdn_gates(
         &self,
         a: &kiln_tensor::Tensor,

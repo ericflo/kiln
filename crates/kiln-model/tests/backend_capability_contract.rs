@@ -822,19 +822,6 @@ fn cuda_rocm_blaslt_request_conversion_stays_shared() {
 fn cuda_rocm_forward_in_projection_gates_use_rocm_names() {
     let forward_path = manifest_dir().join("src/forward.rs");
     let source = fs::read_to_string(&forward_path).expect("forward.rs should be readable");
-    for required in [
-        "cuda_rocm_disable_env_set_for_device",
-        "cuda_rocm_gdn_ab_in_proj_enabled",
-        "cuda_rocm_gdn_prefill_ab_in_proj_enabled",
-        "CUDA_ROCM_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS",
-        "KILN_DISABLE_ROCM_GDN_AB_IN_PROJ",
-        "KILN_DISABLE_ROCM_GDN_PREFILL_AB_IN_PROJ",
-    ] {
-        assert!(
-            source.contains(required),
-            "forward.rs should use ROCm-native names for shared CUDA/ROCm in-projection gate `{required}`"
-        );
-    }
     let cuda_source = fs::read_to_string(manifest_dir().join("src/backend/cuda.rs"))
         .expect("cuda backend source should be readable");
     assert!(
@@ -842,6 +829,18 @@ fn cuda_rocm_forward_in_projection_gates_use_rocm_names() {
             && cuda_source.contains("KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ"),
         "CUDA full-attention QKV gate should live behind the LinearBackend implementation"
     );
+    for required in [
+        "cuda_gdn_ab_in_proj_enabled",
+        "cuda_gdn_prefill_ab_in_proj_enabled",
+        "CUDA_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS",
+        "KILN_DISABLE_CUDA_GDN_AB_IN_PROJ",
+        "KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ",
+    ] {
+        assert!(
+            cuda_source.contains(required),
+            "CUDA GDN A/B in-projection gate should live behind the GdnBackend implementation `{required}`"
+        );
+    }
     let rocm_source = fs::read_to_string(manifest_dir().join("src/backend/rocm.rs"))
         .expect("rocm backend source should be readable");
     for required in [
@@ -854,10 +853,28 @@ fn cuda_rocm_forward_in_projection_gates_use_rocm_names() {
             "ROCm full-attention QKV gate should live behind the LinearBackend implementation and preserve legacy CUDA alias `{required}`"
         );
     }
+    for required in [
+        "rocm_gdn_ab_in_proj_enabled",
+        "rocm_gdn_prefill_ab_in_proj_enabled",
+        "ROCM_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS",
+        "KILN_DISABLE_ROCM_GDN_AB_IN_PROJ",
+        "KILN_DISABLE_ROCM_GDN_PREFILL_AB_IN_PROJ",
+        "KILN_DISABLE_CUDA_GDN_AB_IN_PROJ",
+        "KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ",
+    ] {
+        assert!(
+            rocm_source.contains(required),
+            "ROCm GDN A/B in-projection gate should live behind the GdnBackend implementation and preserve legacy CUDA aliases `{required}`"
+        );
+    }
     for stale_helper in [
         "fn cuda_gdn_ab_in_proj_enabled(",
         "fn cuda_gdn_prefill_ab_in_proj_enabled(",
+        "fn cuda_rocm_disable_env_set_for_device(",
+        "fn cuda_rocm_gdn_ab_in_proj_enabled(",
+        "fn cuda_rocm_gdn_prefill_ab_in_proj_enabled(",
         "CUDA_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS",
+        "CUDA_ROCM_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS",
     ] {
         assert!(
             !source.contains(stale_helper),
@@ -5089,6 +5106,7 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "GdnBackend::runtime_supports_gdn_full_chunk_forward_head_last",
         "GdnBackend::runtime_gdn_full_chunk_forward_head_last_into",
         "GdnBackend::runtime_gdn_in_proj_decode",
+        "GdnBackend::runtime_gdn_ab_in_proj_prefill",
         "GdnBackend::runtime_supports_gdn_decode_gates_recurrent_unexpanded_qk",
         "GdnBackend::runtime_supports_gdn_decode_qk_norm_gates_recurrent",
         "GdnBackend::runtime_supports_gdn_recurrent_qk_norm_prefill_native_head_last",
@@ -5323,6 +5341,37 @@ fn forward_full_attn_qkv_combined_routes_through_linear_backend_contract() {
         assert!(
             !qkv_helper.contains(forbidden),
             "forward full-attention QKV helper should not select combined matmul by backend identity: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn forward_gdn_ab_in_proj_routes_through_gdn_backend_contract() {
+    let forward_source =
+        fs::read_to_string(workspace_root().join("crates/kiln-model/src/forward.rs"))
+            .expect("forward source should be readable");
+    let gdn_helper = source_between(
+        &forward_source,
+        "fn gated_deltanet_forward_decode_if_inner(",
+        "// Phase B11b tap: `gdn_in_proj`.",
+    );
+
+    assert!(
+        gdn_helper.contains("GdnBackend::runtime_gdn_ab_in_proj_prefill"),
+        "GDN A/B in-projection should route through GdnBackend"
+    );
+    for forbidden in [
+        "cuda_rocm_gdn_ab_in_proj_enabled",
+        "cuda_rocm_gdn_prefill_ab_in_proj_enabled",
+        "CUDA_ROCM_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS",
+        "crate::backend::metal::metal_gdn_prefill_ab_in_proj_supports",
+        "crate::backend::metal::metal_gdn_prefill_ab_in_proj_bf16",
+        "cuda_or_rocm_device(in_proj_ab_t.device())",
+        "broadcast_matmul_cpu_compatible(x, in_proj_ab_t)",
+    ] {
+        assert!(
+            !gdn_helper.contains(forbidden),
+            "forward GDN A/B in-projection should not select combined matmul by backend identity: {forbidden}"
         );
     }
 }
