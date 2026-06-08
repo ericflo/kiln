@@ -1579,59 +1579,6 @@ pub trait BackendRuntime:
         GdnBackend::runtime_supports_gdn_gated_rms_norm(self)
     }
 
-    fn supports_causal_conv1d_update(&self) -> bool {
-        ConvBackend::runtime_supports_causal_conv1d_update(self)
-    }
-
-    fn supports_causal_conv1d_prefill(&self) -> bool {
-        ConvBackend::runtime_supports_causal_conv1d_prefill(self)
-    }
-
-    /// Fused single-step causal depthwise conv1d + state update + silu.
-    ///
-    /// Replaces the candle `to_f32 -> cat(state, x) -> sum(window * weight) ->
-    /// narrow/contiguous -> silu` chain inside `kiln/gdn/conv` with one CUDA
-    /// launch per (batch, channel).
-    ///
-    /// `x`: `[B, C, 1]` bf16 contiguous. `weight`: `[C, 1, K]` bf16 contiguous
-    /// (or `[C, K]` equivalently — width stride = 1). `conv_state`:
-    /// `[B, C, K-1]` F32, mutated in place to drop oldest col and append
-    /// newest `x`. `kernel_size`: must be 4 for the current CUDA
-    /// specialisation.
-    ///
-    /// Returns `Ok(Some(out))` with `out: [B, C, 1]` F32 (silu-fused), or
-    /// `Ok(None)` when the backend declines (wrong dtype, wrong K, envelope
-    /// violation, disabled via env kill switch). When `Some`, the caller must
-    /// NOT apply `silu` again — it is fused into the kernel epilogue.
-    fn causal_conv1d_update(
-        &self,
-        x: &kiln_tensor::Tensor,
-        weight: &kiln_tensor::Tensor,
-        conv_state: &mut kiln_tensor::Tensor,
-        kernel_size: usize,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        ConvBackend::runtime_causal_conv1d_update(self, x, weight, conv_state, kernel_size)
-    }
-
-    /// Fused prefill causal depthwise conv1d + state update + silu.
-    ///
-    /// `x`: `[B, C, T]` bf16 contiguous with `T > 1`. `weight`: `[C, 1, K]`
-    /// bf16 contiguous (or `[C, K]`). `conv_state`: `[B, C, K-1]` F32,
-    /// mutated in place after all outputs have consumed the entry state.
-    ///
-    /// Returns `Ok(Some(out))` with `out: [B, C, T]` F32 (silu-fused), or
-    /// `Ok(None)` when the backend declines. When `Some`, the caller must not
-    /// apply `silu` again.
-    fn causal_conv1d_prefill(
-        &self,
-        x: &kiln_tensor::Tensor,
-        weight: &kiln_tensor::Tensor,
-        conv_state: &mut kiln_tensor::Tensor,
-        kernel_size: usize,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        ConvBackend::runtime_causal_conv1d_prefill(self, x, weight, conv_state, kernel_size)
-    }
-
     /// Fused GDN gate computation.
     ///
     /// Collapses the Step-6 `sigmoid(b)` + `-exp(A_log) * softplus(a + dt_bias)`
@@ -3578,17 +3525,6 @@ mod tests {
             GdnBackend::runtime_supports_gdn_gated_rms_norm(backend),
             BackendRuntime::supports_gdn_gated_rms_norm(backend),
             "supports_gdn_gated_rms_norm"
-        );
-
-        assert_forwards!(
-            ConvBackend::runtime_supports_causal_conv1d_update(backend),
-            BackendRuntime::supports_causal_conv1d_update(backend),
-            "supports_causal_conv1d_update"
-        );
-        assert_forwards!(
-            ConvBackend::runtime_supports_causal_conv1d_prefill(backend),
-            BackendRuntime::supports_causal_conv1d_prefill(backend),
-            "supports_causal_conv1d_prefill"
         );
 
         assert_forwards!(

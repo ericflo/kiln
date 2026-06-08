@@ -14,12 +14,10 @@
         "KILN_DISABLE_CUDA_GDN_PREFILL_GATES",
         "KILN_DISABLE_CUDA_LORA_DECODE_ADD"
       ],
-      "override_count": 16,
+      "override_count": 14,
       "overrides": [
         "evict_resident_activation",
         "has_resident_activation",
-        "supports_causal_conv1d_prefill",
-        "supports_causal_conv1d_update",
         "supports_flash_attn_paged_decode",
         "supports_flash_attn_prefill",
         "supports_gdn_chunk_prep",
@@ -710,12 +708,10 @@
         "KILN_ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK",
         "KILN_ROCM_HEAD_MAJOR_PREFILL"
       ],
-      "override_count": 16,
+      "override_count": 14,
       "overrides": [
         "evict_resident_activation",
         "has_resident_activation",
-        "supports_causal_conv1d_prefill",
-        "supports_causal_conv1d_update",
         "supports_flash_attn_paged_decode",
         "supports_flash_attn_prefill",
         "supports_gdn_chunk_prep",
@@ -1049,11 +1045,9 @@
         "KILN_VULKAN_RESIDENT_DECODE",
         "KILN_VULKAN_SDPA"
       ],
-      "override_count": 34,
+      "override_count": 30,
       "overrides": [
         "assemble_linear_attn_gdn_state_batch_kt",
-        "causal_conv1d_prefill",
-        "causal_conv1d_update",
         "dispatch_adamw_step",
         "dispatch_sgd_step",
         "flash_attn_paged_decode",
@@ -1074,8 +1068,6 @@
         "has_linear_attn_gdn_state_kt",
         "scatter_linear_attn_gdn_state_batch_kt",
         "seed_linear_attn_gdn_state_kt",
-        "supports_causal_conv1d_prefill",
-        "supports_causal_conv1d_update",
         "supports_gdn_chunk_prep",
         "supports_gdn_chunk_scan",
         "supports_gdn_forward_substitution",
@@ -3403,7 +3395,7 @@
           ],
           "expected": "<= 8",
           "name": "backend_runtime_method_count_below_gate",
-          "observed": 67,
+          "observed": 63,
           "passed": false
         }
       ],
@@ -4466,5 +4458,5 @@
       "tape_streaming_tile_tokens": 2048
     }
   },
-  "trait_method_count": 67
+  "trait_method_count": 63
 }
