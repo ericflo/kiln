@@ -1049,18 +1049,16 @@
         "KILN_VULKAN_RESIDENT_DECODE",
         "KILN_VULKAN_SDPA"
       ],
-      "override_count": 42,
+      "override_count": 34,
       "overrides": [
         "assemble_linear_attn_gdn_state_batch_kt",
         "causal_conv1d_prefill",
         "causal_conv1d_update",
         "dispatch_adamw_step",
         "dispatch_sgd_step",
-        "drop_uploaded_bf16_weights",
         "flash_attn_paged_decode",
         "flash_attn_paged_decode_contiguous_batch_dyn_seqlen",
         "flash_attn_prefill",
-        "full_attn_qkv_decode",
         "gdn_chunk_prep",
         "gdn_chunk_scan",
         "gdn_chunkwise_forward",
@@ -1074,12 +1072,6 @@
         "gdn_recurrent_qk_norm_prefill_native_head_last",
         "gdn_recurrent_step",
         "has_linear_attn_gdn_state_kt",
-        "linear_decode",
-        "linear_prefill_apply",
-        "linear_prefill_apply_offset",
-        "mlp_decode",
-        "mlp_gate_up_decode",
-        "prewarm_decode_weights",
         "scatter_linear_attn_gdn_state_batch_kt",
         "seed_linear_attn_gdn_state_kt",
         "supports_causal_conv1d_prefill",
@@ -3411,7 +3403,7 @@
           ],
           "expected": "<= 8",
           "name": "backend_runtime_method_count_below_gate",
-          "observed": 77,
+          "observed": 67,
           "passed": false
         }
       ],
@@ -4474,5 +4466,5 @@
       "tape_streaming_tile_tokens": 2048
     }
   },
-  "trait_method_count": 77
+  "trait_method_count": 67
 }

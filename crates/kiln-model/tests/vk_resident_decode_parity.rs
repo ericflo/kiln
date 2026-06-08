@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use kiln_core::block::BlockTable;
 use kiln_core::config::ModelConfig;
-use kiln_model::backend;
+use kiln_model::backend::{self, LinearBackend};
 use kiln_model::forward::{
     GpuWeights, model_forward_paged_last_token, model_forward_paged_last_token_resident,
 };
@@ -72,7 +72,7 @@ fn run(model_dir: &std::path::Path) -> Result<()> {
     let weights = GpuWeights::from_model_weights(&model_weights, &config, &device)
         .context("transfer weights to backend")?;
     drop(model_weights);
-    runtime.prewarm_decode_weights(&weights)?;
+    LinearBackend::runtime_prewarm_decode_weights(runtime.as_ref(), &weights)?;
 
     // Small prompt + a single decode step. The cache is sized for one short
     // sequence: 8 tokens of prompt + 1 decode token + headroom = 4 blocks of

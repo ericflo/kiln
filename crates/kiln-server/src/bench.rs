@@ -21,7 +21,7 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::{ChatMessage, KilnTokenizer};
 use kiln_memory::vram::{detect_used_vram_bytes, detect_vram};
 use kiln_model::PagedKvCacheKt;
-use kiln_model::backend as runtime_backend;
+use kiln_model::backend::{self as runtime_backend, LinearBackend};
 use kiln_model::forward::{
     GpuWeights,
     LinearAttentionState,
@@ -128,8 +128,7 @@ fn runtime_backend_for_bench(
     weights: &GpuWeights,
 ) -> Result<std::sync::Arc<dyn kiln_model::BackendRuntime>> {
     let backend = runtime_backend::for_device_kt(device);
-    backend
-        .prewarm_decode_weights(weights)
+    LinearBackend::runtime_prewarm_decode_weights(backend.as_ref(), weights)
         .context("backend decode weight prewarm failed")?;
     Ok(backend)
 }
