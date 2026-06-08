@@ -5428,6 +5428,29 @@ fn forward_gqa_sdpa_matmuls_route_through_matmul_ops_contract() {
 }
 
 #[test]
+fn forward_packed_mlp_prefill_routes_gate_up_through_matmul_request_contract() {
+    let forward_source =
+        fs::read_to_string(workspace_root().join("crates/kiln-model/src/forward.rs"))
+            .expect("forward source should be readable");
+    let gate_up_prefill = source_between(
+        &forward_source,
+        "kiln/mlp/gate_up_fused_prefill",
+        "gate_silu_hidden_mul_packed",
+    );
+
+    let request_idx = gate_up_prefill
+        .find("runtime_matmul_no_broadcast_copy(backend, x, gate_up_proj_t)")
+        .expect("packed MLP gate+up prefill should try the LinearBackend matmul request first");
+    let fallback_idx = gate_up_prefill
+        .find("broadcast_matmul_cpu_compatible(x, gate_up_proj_t)")
+        .expect("packed MLP gate+up prefill should retain the portable broadcast fallback");
+    assert!(
+        request_idx < fallback_idx,
+        "packed MLP gate+up prefill should try request routing before broadcast fallback"
+    );
+}
+
+#[test]
 fn forward_full_attn_qkv_combined_routes_through_linear_backend_contract() {
     let forward_source =
         fs::read_to_string(workspace_root().join("crates/kiln-model/src/forward.rs"))

@@ -10406,9 +10406,22 @@ fn swiglu_ffn_impl_no_chunk(
                                 start_mlp_stage_profile(profile_device, profile_context)?;
                             let gate_up = {
                                 kiln_nvtx::range!(c"kiln/mlp/gate_up_fused_prefill");
-                                broadcast_matmul_cpu_compatible(x, gate_up_proj_t).context(
-                                    "cuda fused MLP gate+up prefill matmul",
-                                )?
+                                if let Some(backend) = backend {
+                                    if let Some(out) =
+                                        runtime_matmul_no_broadcast_copy(backend, x, gate_up_proj_t)
+                                            .context("fused MLP gate+up runtime matmul request")?
+                                    {
+                                        out
+                                    } else {
+                                        broadcast_matmul_cpu_compatible(x, gate_up_proj_t).context(
+                                            "cuda fused MLP gate+up prefill matmul",
+                                        )?
+                                    }
+                                } else {
+                                    broadcast_matmul_cpu_compatible(x, gate_up_proj_t).context(
+                                        "cuda fused MLP gate+up prefill matmul",
+                                    )?
+                                }
                             };
                             finish_mlp_stage_profile(
                                 profile_device,
