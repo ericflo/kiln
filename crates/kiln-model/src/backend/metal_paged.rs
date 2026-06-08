@@ -12,6 +12,7 @@ use super::metal_config::{
 };
 use super::metal_core::{kt_metal, kt_metal_alloc};
 use super::metal_icb::{
+    metal_paged_decode_replay_state,
     MetalGraphResourceRef, MetalPagedAttnDecodeDynSeqlenIcbArgs,
     MetalPagedAttnDecodeDynSeqlenScalars, MetalPagedDecodeIcbGraph,
     MetalPagedKvWriteTokenMajorBatchIcbArgs, MetalPagedKvWriteTokenMajorIcbArgs,
@@ -125,6 +126,19 @@ pub(crate) fn metal_record_paged_decode_icb_graph(
     Ok(MetalPagedDecodeIcbGraph {
         captured,
         attn_args,
+        replay_state: metal_paged_decode_replay_state(
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            seqused_k,
+            out,
+            k,
+            v,
+            slots,
+            max_seqlen_k,
+            page_block_size,
+        )?,
     })
 }
 

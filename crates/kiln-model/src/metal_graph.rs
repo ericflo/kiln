@@ -55,6 +55,20 @@ fn finish_metal_graph_stage_profile(stage: &str, batch: usize, start: Option<std
 }
 
 #[cfg(feature = "metal")]
+pub(crate) fn replay_paged_decode_icb_graph_through_replay_plan(
+    graph: &crate::backend::metal::MetalPagedDecodeIcbGraph,
+    max_seqlen_k: u32,
+    softmax_scale: f32,
+) -> Result<()> {
+    let mut plan = graph.replay_plan(max_seqlen_k, softmax_scale);
+    let replay_key = kiln_graph::ReplayPlan::key(&plan);
+    let replay_inputs = kiln_graph::ReplayInputs::new(&replay_key, graph.replay_resources());
+    kiln_graph::ReplayPlan::replay(&mut plan, replay_inputs)
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+#[cfg(feature = "metal")]
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct MetalGraphKey {
     stable_metadata: bool,

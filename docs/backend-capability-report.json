@@ -3692,7 +3692,7 @@
           ],
           "expected": 4,
           "name": "production_replay_paths_use_replay_plan",
-          "observed": 1,
+          "observed": 2,
           "passed": false
         }
       ],

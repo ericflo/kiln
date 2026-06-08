@@ -6,6 +6,11 @@
 
 use anyhow::Result;
 
+use kiln_graph::{
+    CaptureError, InvalidateReason, ReplayInputs, ReplayKey, ReplayOutputs, ReplayPlan,
+    ReplayResourceStability, ReplayState, ResidentResourceRef,
+};
+use kiln_tensor::Backend;
 use kiln_tensor::metal_types::{
     Buffer, MTLResourceOptions, MTLResourceUsage, MetalCompanion, MetalRawDevice,
 };
@@ -274,11 +279,37 @@ impl MetalSingleTokenPagedDecodeIcbGraph {
 pub(crate) struct MetalPagedDecodeIcbGraph {
     pub(crate) captured: kiln_graph_metal::MetalCapturedGraph,
     pub(crate) attn_args: MetalPagedAttnDecodeDynSeqlenIcbArgs,
+    pub(crate) replay_state: ReplayState,
 }
 
 #[allow(dead_code)]
 impl MetalPagedDecodeIcbGraph {
     pub(crate) fn replay(&self, max_seqlen_k: u32, softmax_scale: f32) -> Result<()> {
+        let mut plan = self.replay_plan(max_seqlen_k, softmax_scale);
+        let replay_key = ReplayPlan::key(&plan);
+        let replay_inputs = ReplayInputs::new(&replay_key, self.replay_resources());
+        ReplayPlan::replay(&mut plan, replay_inputs)
+            .map_err(|e| anyhow::anyhow!("Metal ICB paged decode replay: {e}"))?;
+        Ok(())
+    }
+
+    pub(crate) fn replay_plan(
+        &self,
+        max_seqlen_k: u32,
+        softmax_scale: f32,
+    ) -> MetalPagedDecodeReplayPlan<'_> {
+        MetalPagedDecodeReplayPlan {
+            graph: self,
+            max_seqlen_k,
+            softmax_scale,
+        }
+    }
+
+    pub(crate) fn replay_resources(&self) -> &[ResidentResourceRef] {
+        &self.replay_state.inputs
+    }
+
+    fn replay_native(&self, max_seqlen_k: u32, softmax_scale: f32) -> Result<()> {
         self.attn_args.update_max_seqlen_k(max_seqlen_k)?;
         self.attn_args.update_softmax_scale(softmax_scale)?;
         self.captured
@@ -293,6 +324,101 @@ impl MetalPagedDecodeIcbGraph {
     pub(crate) fn replay_count(&self) -> u64 {
         self.captured.replay_count()
     }
+}
+
+pub(crate) struct MetalPagedDecodeReplayPlan<'a> {
+    graph: &'a MetalPagedDecodeIcbGraph,
+    max_seqlen_k: u32,
+    softmax_scale: f32,
+}
+
+impl std::fmt::Debug for MetalPagedDecodeReplayPlan<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetalPagedDecodeReplayPlan")
+            .field("key", &self.graph.replay_state.key)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReplayPlan for MetalPagedDecodeReplayPlan<'_> {
+    fn backend(&self) -> Backend {
+        Backend::Metal
+    }
+
+    fn key(&self) -> ReplayKey {
+        self.graph.replay_state.key.clone()
+    }
+
+    fn validate_inputs(&self, inputs: ReplayInputs<'_>) -> Result<(), CaptureError> {
+        self.graph
+            .replay_state
+            .validate(inputs.key, inputs.resources)
+    }
+
+    fn replay(&mut self, inputs: ReplayInputs<'_>) -> Result<ReplayOutputs, CaptureError> {
+        self.validate_inputs(inputs)?;
+        self.graph
+            .replay_native(self.max_seqlen_k, self.softmax_scale)
+            .map_err(|e| CaptureError::Backend(format!("Metal ICB graph replay: {e}")))?;
+        Ok(ReplayOutputs::new(
+            inputs.resources.to_vec(),
+            self.graph.captured.replay_count(),
+        ))
+    }
+
+    fn invalidate_reason(&self, state: &ReplayState) -> Option<InvalidateReason> {
+        self.graph
+            .replay_state
+            .invalidate_reason(&state.key, &state.inputs)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn metal_paged_decode_replay_state(
+    q: &kiln_tensor::Tensor,
+    k_pool: &kiln_tensor::Tensor,
+    v_pool: &kiln_tensor::Tensor,
+    block_table: &kiln_tensor::Tensor,
+    seqused_k: &kiln_tensor::Tensor,
+    out: &kiln_tensor::Tensor,
+    k: &kiln_tensor::Tensor,
+    v: &kiln_tensor::Tensor,
+    slots: &kiln_tensor::Tensor,
+    max_seqlen_k: usize,
+    page_block_size: usize,
+) -> Result<ReplayState> {
+    let (batch, _, q_heads, head_dim) = q.dims4()?;
+    let replay_key = ReplayKey::new(
+        Backend::Metal,
+        "paged_decode_icb",
+        vec![batch, max_seqlen_k, page_block_size, q_heads, head_dim],
+        Some(q.dtype()),
+        batch,
+        true,
+    );
+    let resources = [
+        q,
+        k_pool,
+        v_pool,
+        block_table,
+        seqused_k,
+        out,
+        k,
+        v,
+        slots,
+    ]
+    .into_iter()
+    .map(metal_stable_replay_ref)
+    .collect();
+    Ok(ReplayState::new(replay_key, resources))
+}
+
+fn metal_stable_replay_ref(tensor: &kiln_tensor::Tensor) -> ResidentResourceRef {
+    ResidentResourceRef::from_tensor(
+        tensor,
+        Backend::Metal,
+        ReplayResourceStability::StableAcrossReplay,
+    )
 }
 
 pub(crate) fn merge_metal_graph_resources(

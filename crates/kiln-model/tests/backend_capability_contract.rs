@@ -6639,8 +6639,8 @@ fn generated_capability_report_tracks_migration_phase_status() {
         "Phase 5 production wiring signal should fail until all decode replay runner families use ReplayPlan"
     );
     assert_eq!(
-        production_replay_signal["observed"], 1,
-        "Phase 5 should report the ROCm production replay runner slice as wired"
+        production_replay_signal["observed"], 2,
+        "Phase 5 should report the ROCm and Metal production replay runner slices as wired"
     );
     assert_eq!(
         production_replay_signal["expected"], 4,
@@ -6755,6 +6755,49 @@ fn rocm_graph_replay_hidden_routes_through_replay_plan_contract() {
     assert!(
         !replay_hidden_section.contains(".exec\n            .launch("),
         "ROCm graph replay_hidden should not launch the native graph outside ReplayPlan::replay"
+    );
+}
+
+#[test]
+fn metal_graph_icb_replay_routes_through_replay_plan_contract() {
+    let root = workspace_root();
+    let metal_graph_source = fs::read_to_string(root.join("crates/kiln-model/src/metal_graph.rs"))
+        .expect("metal_graph.rs should be readable");
+    let metal_icb_source =
+        fs::read_to_string(root.join("crates/kiln-model/src/backend/metal_icb.rs"))
+            .expect("metal_icb.rs should be readable");
+    let forward_source = fs::read_to_string(root.join("crates/kiln-model/src/forward.rs"))
+        .expect("forward.rs should be readable");
+    let icb_attention_section = source_between(
+        &forward_source,
+        "fn try_metal_paged_decode_icb_attention(",
+        "/// Grouped-query attention using a paged KV cache.",
+    );
+
+    assert!(
+        metal_icb_source.contains("struct MetalPagedDecodeReplayPlan")
+            && metal_icb_source.contains("impl ReplayPlan for MetalPagedDecodeReplayPlan"),
+        "Metal ICB graph should expose a production ReplayPlan adapter"
+    );
+    assert!(
+        metal_icb_source.contains("metal_paged_decode_replay_state(")
+            && metal_icb_source.contains("ReplayState::new(replay_key, resources)")
+            && metal_icb_source.contains("ReplayResourceStability::StableAcrossReplay"),
+        "Metal ICB graph capture should persist shared replay key/resource validation state"
+    );
+    assert!(
+        metal_graph_source.contains("fn replay_paged_decode_icb_graph_through_replay_plan(")
+            && metal_graph_source.contains("ReplayInputs::new")
+            && metal_graph_source.contains("kiln_graph::ReplayPlan::replay(&mut plan"),
+        "Metal graph runner should execute ICB replay through ReplayPlan::replay"
+    );
+    assert!(
+        icb_attention_section.contains("replay_paged_decode_icb_graph_through_replay_plan("),
+        "forward Metal ICB attention should route through the model-level replay-plan helper"
+    );
+    assert!(
+        !icb_attention_section.contains(".replay(max_seqlen_k as u32, softmax_scale)"),
+        "forward Metal ICB attention should not call the native ICB replay directly"
     );
 }
 

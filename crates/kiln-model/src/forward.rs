@@ -20841,8 +20841,11 @@ fn try_metal_paged_decode_icb_attention(
         .graph
         .as_ref()
         .context("Metal ICB graph missing after record")?;
-    graph
-        .replay(max_seqlen_k as u32, softmax_scale)
+    crate::metal_graph::replay_paged_decode_icb_graph_through_replay_plan(
+        graph,
+        max_seqlen_k as u32,
+        softmax_scale,
+    )
         .context("replay Metal paged decode ICB graph")?;
     Ok(Some(attn_out.clone()))
 }
