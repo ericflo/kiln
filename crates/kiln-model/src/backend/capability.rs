@@ -2168,6 +2168,39 @@ impl BackendFallbackCapabilities {
     }
 }
 
+pub(crate) fn decode_hot_path_debug_fallback_enabled_for_backend(
+    backend: &dyn BackendRuntime,
+) -> bool {
+    BackendCapabilities::from_backend(backend)
+        .fallback
+        .decode_hot_path_debug_fallback_enabled()
+}
+
+pub(crate) fn decode_hot_path_debug_fallback_env_for_backend(
+    backend: &dyn BackendRuntime,
+) -> &'static str {
+    BackendCapabilities::from_backend(backend)
+        .fallback
+        .decode_hot_path_debug_env
+        .unwrap_or("KILN_DECODE_HOT_PATH_DEBUG_FALLBACK")
+}
+
+pub(crate) fn decode_hot_path_fallback_policy_for_backend(
+    backend: &dyn BackendRuntime,
+) -> FallbackPolicy {
+    let fallback = BackendCapabilities::from_backend(backend).fallback;
+    if fallback.decode_hot_path_debug_fallback_enabled() {
+        return FallbackPolicy::WarnAndCount;
+    }
+    fallback.decode_hot_path
+}
+
+pub(crate) fn decode_hot_path_generic_fallback_enabled_for_backend(
+    backend: &dyn BackendRuntime,
+) -> bool {
+    decode_hot_path_fallback_policy_for_backend(backend).allows_fallback()
+}
+
 fn generic_device_op_fallback_policy(name: &str, _device: kiln_tensor::Device) -> FallbackPolicy {
     match name {
         "cpu" => FallbackPolicy::CorrectnessAllowed,

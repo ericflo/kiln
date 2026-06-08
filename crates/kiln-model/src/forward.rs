@@ -16,7 +16,8 @@ use std::time::Duration;
 
 use crate::backend::capability::{
     BackendCapabilityQueries, InferenceRecurrentStatePolicy, MatmulRequest, ProjectionLoadPolicy,
-    Support,
+    Support, decode_hot_path_debug_fallback_enabled_for_backend,
+    decode_hot_path_debug_fallback_env_for_backend,
 };
 use crate::backend::{
     AttentionBackend, BackendRuntime, ConvBackend, GdnBackend, LinearBackend, PagedKvBackend,
@@ -245,19 +246,6 @@ fn native_decode_attention_required(backend: &dyn BackendRuntime) -> bool {
     BackendCapabilityQueries::backend_capabilities(backend)
         .decode_batcher
         .require_native_decode_attention
-}
-
-fn decode_batch_generic_fallback_enabled(backend: &dyn BackendRuntime) -> bool {
-    BackendCapabilityQueries::backend_capabilities(backend)
-        .fallback
-        .decode_hot_path_debug_fallback_enabled()
-}
-
-fn decode_batch_generic_fallback_env(backend: &dyn BackendRuntime) -> &'static str {
-    BackendCapabilityQueries::backend_capabilities(backend)
-        .fallback
-        .decode_hot_path_debug_env
-        .unwrap_or("KILN_DECODE_HOT_PATH_DEBUG_FALLBACK")
 }
 
 fn paged_decode_requires_contiguous_kv_chunks(backend: &dyn BackendRuntime) -> bool {
@@ -21634,9 +21622,9 @@ fn gqa_attention_paged_with_rope_tables(
             return Ok(out);
         }
         if native_decode_attention_required(backend)
-            && !decode_batch_generic_fallback_enabled(backend)
+            && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
         {
-            let fallback_env = decode_batch_generic_fallback_env(backend);
+            let fallback_env = decode_hot_path_debug_fallback_env_for_backend(backend);
             anyhow::bail!(
                 "native paged decode declined native paged-attention path; \
                  generic fallback disabled (set {fallback_env}=1 to opt in)"
@@ -23083,9 +23071,9 @@ pub fn model_forward_paged_decode_contiguous_batch_hidden_with_ids(
             start_positions,
             config,
             lora,
-        ) && !decode_batch_generic_fallback_enabled(backend)
+        ) && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
         {
-            let fallback_env = decode_batch_generic_fallback_env(backend);
+            let fallback_env = decode_hot_path_debug_fallback_env_for_backend(backend);
             anyhow::bail!(
                 "batched hidden decode declined native resident path; \
                  generic fallback disabled (set {fallback_env}=1 to opt in)"
@@ -24190,9 +24178,9 @@ pub fn model_forward_paged_decode_contiguous_batch_greedy_with_ids(
             start_positions,
             config,
             lora,
-        ) && !decode_batch_generic_fallback_enabled(backend)
+        ) && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
         {
-            let fallback_env = decode_batch_generic_fallback_env(backend);
+            let fallback_env = decode_hot_path_debug_fallback_env_for_backend(backend);
             anyhow::bail!(
                 "greedy decode declined native resident path; \
                  generic fallback disabled (set {fallback_env}=1 to opt in)"
@@ -24885,9 +24873,9 @@ pub fn model_forward_paged(
             &[start_pos],
             config,
             lora,
-        ) && !decode_batch_generic_fallback_enabled(backend)
+        ) && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
         {
-            let fallback_env = decode_batch_generic_fallback_env(backend);
+            let fallback_env = decode_hot_path_debug_fallback_env_for_backend(backend);
             anyhow::bail!(
                 "decode declined native resident path; \
                  generic fallback disabled (set {fallback_env}=1 to opt in)"
@@ -25141,9 +25129,9 @@ pub fn model_forward_paged_last_token(
             &[start_pos],
             config,
             lora,
-        ) && !decode_batch_generic_fallback_enabled(backend)
+        ) && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
         {
-            let fallback_env = decode_batch_generic_fallback_env(backend);
+            let fallback_env = decode_hot_path_debug_fallback_env_for_backend(backend);
             anyhow::bail!(
                 "last-token decode declined native resident path; \
                  generic fallback disabled (set {fallback_env}=1 to opt in)"
@@ -25741,9 +25729,9 @@ pub fn model_forward_paged_last_token_greedy(
             &start_positions,
             config,
             lora,
-        ) && !decode_batch_generic_fallback_enabled(backend)
+        ) && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
         {
-            let fallback_env = decode_batch_generic_fallback_env(backend);
+            let fallback_env = decode_hot_path_debug_fallback_env_for_backend(backend);
             anyhow::bail!(
                 "greedy decode declined native resident path; \
                  generic fallback disabled (set {fallback_env}=1 to opt in)"
@@ -26356,9 +26344,9 @@ pub fn model_forward_paged_batched_decode_hidden(
                     Ok(out) => hidden = out,
                     Err(err) => {
                         if native_decode_attention_required(backend)
-                            && !decode_batch_generic_fallback_enabled(backend)
+                            && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
                         {
-                            let fallback_env = decode_batch_generic_fallback_env(backend);
+                            let fallback_env = decode_hot_path_debug_fallback_env_for_backend(backend);
                             return Err(err).with_context(|| {
                                 format!(
                                     "batched full-attention decode layer {layer_idx} declined; \

@@ -1414,6 +1414,25 @@ def phase5_remaining_from_signals(signals: list[dict[str, Any]]) -> list[str]:
     return remaining
 
 
+def phase2_remaining_from_signals(signals: list[dict[str, Any]]) -> list[str]:
+    remaining: list[str] = []
+    for signal in signals:
+        if signal["passed"]:
+            continue
+        name = signal["name"]
+        if name == "decode_hot_path_duplicate_helpers_removed":
+            remaining.append(
+                "forward/generate still keep duplicate decode hot-path fallback helpers"
+            )
+        elif name == "decode_hot_path_fallback_delegates_to_backend_capability":
+            remaining.append(
+                "decode hot-path fallback decisions are not centralized in BackendFallbackCapabilities"
+            )
+        else:
+            remaining.append(f"{name} migration signal is not yet satisfied")
+    return remaining
+
+
 def phase6_remaining_from_signals(signals: list[dict[str, Any]]) -> list[str]:
     remaining: list[str] = []
     for signal in signals:
@@ -1427,6 +1446,14 @@ def phase6_remaining_from_signals(signals: list[dict[str, Any]]) -> list[str]:
         elif name == "training_precision_policy_delegates_to_backend_trait":
             remaining.append(
                 "training precision policy is not selected through TrainingLossBackend"
+            )
+        elif name == "tape_forward_gpu_family_guards_removed":
+            remaining.append(
+                "tape-forward production adapters still gate support with a hard-coded GPU family allowlist"
+            )
+        elif name == "tape_forward_route_delegates_to_backend_trait":
+            remaining.append(
+                "tape-forward device support is not selected through TrainingLossBackend"
             )
         else:
             remaining.append(f"{name} migration signal is not yet satisfied")
@@ -1881,6 +1908,66 @@ def training_precision_backend_trait_policy_signal_count() -> tuple[int, int]:
     return observed, len(required)
 
 
+def decode_hot_path_duplicate_helper_count() -> int:
+    paths = [
+        "crates/kiln-model/src/forward.rs",
+        "crates/kiln-model/src/generate.rs",
+    ]
+    forbidden = [
+        "fn decode_batch_generic_fallback_enabled(",
+        "fn decode_hot_path_fallback_policy(",
+        "fn decode_hot_path_debug_fallback_enabled(",
+    ]
+    return sum(
+        production_source_text(path).count(needle)
+        for path in paths
+        for needle in forbidden
+    )
+
+
+def decode_hot_path_shared_fallback_signal_count() -> tuple[int, int]:
+    capability = production_source_text("crates/kiln-model/src/backend/capability.rs")
+    forward = production_source_text("crates/kiln-model/src/forward.rs")
+    generate = production_source_text("crates/kiln-model/src/generate.rs")
+    required = [
+        "pub(crate) fn decode_hot_path_fallback_policy_for_backend",
+        "pub(crate) fn decode_hot_path_debug_fallback_enabled_for_backend",
+        "pub(crate) fn decode_hot_path_generic_fallback_enabled_for_backend",
+        "decode_hot_path_debug_fallback_enabled_for_backend(backend)",
+        "decode_hot_path_generic_fallback_enabled_for_backend(&*self.backend)",
+        "decode_hot_path_fallback_policy_for_backend(backend)",
+    ]
+    sources = [capability, capability, capability, forward, generate, generate]
+    observed = sum(1 for needle, source in zip(required, sources) if needle in source)
+    return observed, len(required)
+
+
+def tape_forward_gpu_family_guard_count() -> int:
+    tape_forward = production_source_text("crates/kiln-model/src/tape_forward.rs")
+    return len(
+        re.findall(
+            r"matches!\s*\([^;]*Device::Cuda\(_\)[^;]*Device::Metal\(_\)"
+            r"[^;]*Device::Vulkan\(_\)[^;]*Device::Rocm\(_\)",
+            tape_forward,
+            re.DOTALL,
+        )
+    )
+
+
+def tape_forward_backend_trait_route_signal_count() -> tuple[int, int]:
+    backend = production_source_text("crates/kiln-model/src/backend/mod.rs")
+    tape_forward = production_source_text("crates/kiln-model/src/tape_forward.rs")
+    required = [
+        "pub fn training_tape_route_for_device_kt",
+        "TrainingLossBackend::runtime_tape_forward_backward_route(&backend)",
+        "fn tape_forward_device_supported",
+        "training_tape_route_for_device_kt(device)",
+    ]
+    sources = [backend, backend, tape_forward, tape_forward]
+    observed = sum(1 for needle, source in zip(required, sources) if needle in source)
+    return observed, len(required)
+
+
 def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
     if phase == 1:
         shim_count = focused_trait_forwarding_shim_count()
@@ -1952,6 +2039,32 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
                 method_count,
                 "<= 8",
                 ["crates/kiln-model/src/backend/mod.rs"],
+            ),
+        ]
+    if phase == 2:
+        duplicate_count = decode_hot_path_duplicate_helper_count()
+        shared_count, shared_expected = decode_hot_path_shared_fallback_signal_count()
+        return [
+            phase_signal(
+                "decode_hot_path_duplicate_helpers_removed",
+                duplicate_count == 0,
+                duplicate_count,
+                0,
+                [
+                    "crates/kiln-model/src/forward.rs",
+                    "crates/kiln-model/src/generate.rs",
+                ],
+            ),
+            phase_signal(
+                "decode_hot_path_fallback_delegates_to_backend_capability",
+                shared_count == shared_expected,
+                shared_count,
+                shared_expected,
+                [
+                    "crates/kiln-model/src/backend/capability.rs",
+                    "crates/kiln-model/src/forward.rs",
+                    "crates/kiln-model/src/generate.rs",
+                ],
             ),
         ]
     if phase == 3:
@@ -2113,6 +2226,10 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
         trait_policy_count, trait_policy_expected = (
             training_precision_backend_trait_policy_signal_count()
         )
+        tape_guard_count = tape_forward_gpu_family_guard_count()
+        tape_route_count, tape_route_expected = (
+            tape_forward_backend_trait_route_signal_count()
+        )
         return [
             phase_signal(
                 "training_precision_for_device_family_removed_from_production",
@@ -2131,6 +2248,23 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
                 trait_policy_count,
                 trait_policy_expected,
                 ["crates/kiln-model/src/backend/mod.rs"],
+            ),
+            phase_signal(
+                "tape_forward_gpu_family_guards_removed",
+                tape_guard_count == 0,
+                tape_guard_count,
+                0,
+                ["crates/kiln-model/src/tape_forward.rs"],
+            ),
+            phase_signal(
+                "tape_forward_route_delegates_to_backend_trait",
+                tape_route_count == tape_route_expected,
+                tape_route_count,
+                tape_route_expected,
+                [
+                    "crates/kiln-model/src/backend/mod.rs",
+                    "crates/kiln-model/src/tape_forward.rs",
+                ],
             ),
         ]
     return []
@@ -2153,14 +2287,13 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
     phase8_migration = "complete" if phase8_status == "covered" else "partial"
     migration_by_phase = {
         0: "complete",
-        2: "complete",
         7: "complete",
         8: phase8_migration,
     }
     migration_signals_by_phase = {
-        phase: phase_migration_signals(phase) for phase in [1, 3, 4, 5, 6]
+        phase: phase_migration_signals(phase) for phase in [1, 2, 3, 4, 5, 6]
     }
-    for phase in [1, 3, 4, 5, 6]:
+    for phase in [1, 2, 3, 4, 5, 6]:
         migration_by_phase[phase] = migration_from_signals(
             migration_signals_by_phase[phase]
         )
@@ -2246,8 +2379,10 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
                 "Decode Hot-Path Fallback",
                 "Training Optimizer Fallback",
             ],
-            "migration_signals": [],
-            "remaining": [],
+            "migration_signals": migration_signals_by_phase[2],
+            "remaining": phase2_remaining_from_signals(
+                migration_signals_by_phase[2]
+            ),
         },
         {
             "phase": 3,

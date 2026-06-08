@@ -144,6 +144,13 @@ pub fn tape_scope_active() -> bool {
     with_active_tape(|_| ()).is_some()
 }
 
+fn tape_forward_device_supported(device: kiln_tensor::Device) -> bool {
+    matches!(
+        crate::backend::training_tape_route_for_device_kt(device),
+        crate::backend::TrainingTapeRoute::KtTapeAuthoritative
+    )
+}
+
 /// kt-native SiLU tape recorder (#1082 seam flip) — the kt-native SiLU tape recorder. Takes the kt activation directly and records a
 /// `SiluBackward` onto the active tape with **no candle round-trip** (no
 /// `kt_logits_to_candle` in, no `kt_tensor_to_candle_cuda_copy` out, no IO-map
@@ -202,13 +209,7 @@ pub fn try_tape_concat_kt(
     if !tape_forward_enabled() || inputs.is_empty() || axis >= out.rank() {
         return Ok(None);
     }
-    if !matches!(
-        out.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(out.device()) {
         return Ok(None);
     }
 
@@ -221,13 +222,8 @@ pub fn try_tape_concat_kt(
     let mut input_axis_sizes = Vec::with_capacity(inputs.len());
     let mut input_shapes = Vec::with_capacity(inputs.len());
     for input in inputs {
-        if !matches!(
-            input.device(),
-            kiln_tensor::Device::Cuda(_)
-                | kiln_tensor::Device::Metal(_)
-                | kiln_tensor::Device::Vulkan(_)
-                | kiln_tensor::Device::Rocm(_)
-        ) || input.dtype() != dtype
+        if !tape_forward_device_supported(input.device())
+            || input.dtype() != dtype
             || input.rank() != rank
         {
             return Ok(None);
@@ -424,19 +420,9 @@ pub fn try_tape_rms_norm_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(
-        x.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        weight.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(x.device())
+        || !tape_forward_device_supported(weight.device())
+    {
         return Ok(None);
     }
     // Mixed-precision RMSNorm exceptions are backend precision policy, not a
@@ -725,13 +711,7 @@ pub fn try_tape_transpose_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(
-        x.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(x.device()) {
         return Ok(None);
     }
     let rank = x.rank();
@@ -766,13 +746,7 @@ pub fn try_tape_reshape_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(
-        x.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(x.device()) {
         return Ok(None);
     }
     let input_shape = x.shape().to_vec();
@@ -977,13 +951,7 @@ pub fn try_tape_cross_entropy_from_logits_kt(
         || dims[0] != 1
         || dims[1] != input_ids.len()
         || label_mask.len() != input_ids.len()
-        || !matches!(
-            logits.device(),
-            kiln_tensor::Device::Cuda(_)
-                | kiln_tensor::Device::Metal(_)
-                | kiln_tensor::Device::Vulkan(_)
-                | kiln_tensor::Device::Rocm(_)
-        )
+        || !tape_forward_device_supported(logits.device())
     {
         return Ok(None);
     }
@@ -1165,31 +1133,11 @@ pub fn try_tape_lora_add_kt(
     if !tape_forward_enabled() || !tape_lora_add_enabled() {
         return Ok(None);
     }
-    if !matches!(
-        base.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        x.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        proj.a.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        proj.b.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(base.device())
+        || !tape_forward_device_supported(x.device())
+        || !tape_forward_device_supported(proj.a.device())
+        || !tape_forward_device_supported(proj.b.device())
+    {
         return Ok(None);
     }
     if base.dtype() != x.dtype() {
@@ -1386,19 +1334,9 @@ pub fn try_tape_lora_linear_kt(
     if !tape_forward_enabled() || !tape_lora_add_enabled() {
         return Ok(None);
     }
-    if !matches!(
-        x.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        weight_t.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(x.device())
+        || !tape_forward_device_supported(weight_t.device())
+    {
         return Ok(None);
     }
     if !matches!(
@@ -2227,13 +2165,7 @@ pub fn try_tape_gdn_recurrent_kt(
     // production recurrence `gdn_recurrent_forward_from_parts`) and the record
     // adapter (`tape_record_gdn_recurrent_kt`) is now kt-native — no kt->candle
     // bridge on the saved inputs.
-    if !matches!(
-        q.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(q.device()) {
         return Ok(None);
     }
 
@@ -2302,13 +2234,7 @@ pub fn tape_record_gdn_recurrent_kt(
     if !tape_forward_enabled() || !tape_gdn_enabled() {
         return Ok(false);
     }
-    if !matches!(
-        device,
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(*device) {
         return Ok(false);
     }
 
@@ -2831,28 +2757,10 @@ pub fn try_tape_causal_conv1d_prefill_kt(
         feature = "rocm"
     ))]
     {
-        // The recorded backward is device-agnostic (CUDA FFI / kt composite), so the
-        // recorder admits CUDA, Metal, and Vulkan. CPU is excluded here only because
-        // the production GDN forward this hooks runs on an accelerator device.
-        if !matches!(
-            input.device(),
-            kiln_tensor::Device::Cuda(_)
-                | kiln_tensor::Device::Metal(_)
-                | kiln_tensor::Device::Vulkan(_)
-                | kiln_tensor::Device::Rocm(_)
-        ) || !matches!(
-            out.device(),
-            kiln_tensor::Device::Cuda(_)
-                | kiln_tensor::Device::Metal(_)
-                | kiln_tensor::Device::Vulkan(_)
-                | kiln_tensor::Device::Rocm(_)
-        ) || !matches!(
-            weight.device(),
-            kiln_tensor::Device::Cuda(_)
-                | kiln_tensor::Device::Metal(_)
-                | kiln_tensor::Device::Vulkan(_)
-                | kiln_tensor::Device::Rocm(_)
-        ) {
+        if !tape_forward_device_supported(input.device())
+            || !tape_forward_device_supported(out.device())
+            || !tape_forward_device_supported(weight.device())
+        {
             return Ok(None);
         }
         if kernel < 2 {
@@ -2945,31 +2853,11 @@ pub fn try_tape_causal_conv1d_prefill_silu_kt(
         feature = "rocm"
     ))]
     {
-        if !matches!(
-            input.device(),
-            kiln_tensor::Device::Cuda(_)
-                | kiln_tensor::Device::Metal(_)
-                | kiln_tensor::Device::Vulkan(_)
-                | kiln_tensor::Device::Rocm(_)
-        ) || !matches!(
-            out.device(),
-            kiln_tensor::Device::Cuda(_)
-                | kiln_tensor::Device::Metal(_)
-                | kiln_tensor::Device::Vulkan(_)
-                | kiln_tensor::Device::Rocm(_)
-        ) || !matches!(
-            weight.device(),
-            kiln_tensor::Device::Cuda(_)
-                | kiln_tensor::Device::Metal(_)
-                | kiln_tensor::Device::Vulkan(_)
-                | kiln_tensor::Device::Rocm(_)
-        ) || !matches!(
-            entry_state.device(),
-            kiln_tensor::Device::Cuda(_)
-                | kiln_tensor::Device::Metal(_)
-                | kiln_tensor::Device::Vulkan(_)
-                | kiln_tensor::Device::Rocm(_)
-        ) {
+        if !tape_forward_device_supported(input.device())
+            || !tape_forward_device_supported(out.device())
+            || !tape_forward_device_supported(weight.device())
+            || !tape_forward_device_supported(entry_state.device())
+        {
             return Ok(None);
         }
         if kernel < 2 {
@@ -3176,13 +3064,7 @@ pub fn try_tape_gdn_l2_norm_scale_kt(
     if !tape_forward_enabled() || !tape_gdn_qk_norm_enabled() {
         return Ok(None);
     }
-    if !matches!(
-        x.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(x.device()) {
         return Ok(None);
     }
     if x.dims() != out.dims() {
@@ -3379,13 +3261,7 @@ pub fn try_tape_gdn_gated_rms_norm_kt(
     if !tape_forward_enabled() || !tape_gdn_gated_norm_enabled() {
         return Ok(None);
     }
-    if !matches!(
-        x.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(x.device()) {
         return Ok(None);
     }
     if x.dims() != z.dims() || x.dims() != out.dims() {
@@ -3505,19 +3381,9 @@ pub fn try_tape_cast_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(
-        x.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        out.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(x.device())
+        || !tape_forward_device_supported(out.device())
+    {
         return Ok(None);
     }
     if x.dims() != out.dims() {
@@ -3635,19 +3501,9 @@ pub fn try_tape_narrow_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(
-        x.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        out.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(x.device())
+        || !tape_forward_device_supported(out.device())
+    {
         return Ok(None);
     }
     let x_dims = x.dims().to_vec();
@@ -3755,19 +3611,9 @@ pub fn try_tape_gqa_expand_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(
-        x.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        out.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(x.device())
+        || !tape_forward_device_supported(out.device())
+    {
         return Ok(None);
     }
     if gqa_ratio <= 1 {
@@ -3949,31 +3795,11 @@ pub fn try_tape_sdpa_fallback_kt(
     if !tape_forward_enabled() || !tape_sdpa_enabled() {
         return Ok(None);
     }
-    if !matches!(
-        q.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        k.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        v.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        out.device(),
-        kiln_tensor::Device::Cuda(_)
-            | kiln_tensor::Device::Metal(_)
-            | kiln_tensor::Device::Vulkan(_)
-            | kiln_tensor::Device::Rocm(_)
-    ) {
+    if !tape_forward_device_supported(q.device())
+        || !tape_forward_device_supported(k.device())
+        || !tape_forward_device_supported(v.device())
+        || !tape_forward_device_supported(out.device())
+    {
         return Ok(None);
     }
     let (bq, nq, tq, dq_) = match q.dims4() {

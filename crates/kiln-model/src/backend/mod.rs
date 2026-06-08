@@ -1846,6 +1846,41 @@ pub fn training_precision_policy_for_device_kt(
     }
 }
 
+/// Training tape route selected through the concrete backend facet.
+///
+/// Like [`training_precision_policy_for_device_kt`], this avoids the
+/// `for_device_kt` CPU-as-Vulkan runtime-detect behavior so CPU tensors keep the
+/// portable unsupported route while accelerator tensors use their advertised
+/// `TrainingLossBackend` contract.
+pub fn training_tape_route_for_device_kt(device: kiln_tensor::Device) -> TrainingTapeRoute {
+    match device {
+        #[cfg(feature = "cuda")]
+        kiln_tensor::Device::Cuda(_) => {
+            let backend = cuda::CudaBackend::new(device);
+            TrainingLossBackend::runtime_tape_forward_backward_route(&backend)
+        }
+        #[cfg(feature = "rocm")]
+        kiln_tensor::Device::Rocm(_) => {
+            let backend = rocm::RocmBackend::new(device);
+            TrainingLossBackend::runtime_tape_forward_backward_route(&backend)
+        }
+        #[cfg(feature = "metal")]
+        kiln_tensor::Device::Metal(_) => {
+            let backend = metal::MetalBackend::new(device);
+            TrainingLossBackend::runtime_tape_forward_backward_route(&backend)
+        }
+        #[cfg(feature = "vulkan")]
+        kiln_tensor::Device::Vulkan(_) => {
+            let backend = vulkan::VulkanBackend::new(kiln_tensor::Device::Cpu);
+            TrainingLossBackend::runtime_tape_forward_backward_route(&backend)
+        }
+        _ => {
+            let backend = cpu::CpuBackend::new(device);
+            TrainingLossBackend::runtime_tape_forward_backward_route(&backend)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

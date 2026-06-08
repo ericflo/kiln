@@ -3445,7 +3445,29 @@
       ],
       "genuine": true,
       "migration": "complete",
-      "migration_signals": [],
+      "migration_signals": [
+        {
+          "evidence": [
+            "crates/kiln-model/src/forward.rs",
+            "crates/kiln-model/src/generate.rs"
+          ],
+          "expected": 0,
+          "name": "decode_hot_path_duplicate_helpers_removed",
+          "observed": 0,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/capability.rs",
+            "crates/kiln-model/src/forward.rs",
+            "crates/kiln-model/src/generate.rs"
+          ],
+          "expected": 6,
+          "name": "decode_hot_path_fallback_delegates_to_backend_capability",
+          "observed": 6,
+          "passed": true
+        }
+      ],
       "phase": 2,
       "remaining": [],
       "report_sections": [
@@ -3764,6 +3786,25 @@
           "expected": 2,
           "name": "training_precision_policy_delegates_to_backend_trait",
           "observed": 2,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/tape_forward.rs"
+          ],
+          "expected": 0,
+          "name": "tape_forward_gpu_family_guards_removed",
+          "observed": 0,
+          "passed": true
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/src/backend/mod.rs",
+            "crates/kiln-model/src/tape_forward.rs"
+          ],
+          "expected": 4,
+          "name": "tape_forward_route_delegates_to_backend_trait",
+          "observed": 4,
           "passed": true
         }
       ],

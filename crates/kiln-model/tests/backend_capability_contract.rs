@@ -3606,25 +3606,27 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     );
 
     let decode_policy_section = source_between(
-        &generate_source,
-        "fn decode_hot_path_fallback_policy(",
-        "fn decode_hot_path_debug_fallback_enabled(",
+        &capability_source,
+        "pub(crate) fn decode_hot_path_fallback_policy_for_backend(",
+        "pub(crate) fn decode_hot_path_generic_fallback_enabled_for_backend(",
     );
     assert!(
-        decode_policy_section.contains("BackendCapabilityQueries::backend_capabilities"),
+        decode_policy_section.contains("BackendCapabilities::from_backend(backend)"),
         "decode fallback policy should come from the shared backend capability aggregate"
     );
     assert!(
-        !generate_source.contains("fn decode_hot_path_fallback_policy_for"),
-        "generate should not keep a duplicate backend-name/device decode fallback policy table"
+        !generate_source.contains("fn decode_hot_path_fallback_policy(")
+            && !generate_source.contains("fn decode_batch_generic_fallback_enabled(")
+            && !forward_source.contains("fn decode_batch_generic_fallback_enabled("),
+        "forward/generate should not keep duplicate decode hot-path fallback helpers"
     );
     assert!(
         !decode_policy_section.contains("match device"),
         "decode fallback policy should not branch directly on device kind"
     );
     assert!(
-        decode_policy_section.contains("decode_hot_path_debug_env"),
-        "decode debug fallback opt-in should be read from BackendFallbackCapabilities"
+        decode_policy_section.contains("decode_hot_path_debug_fallback_enabled()"),
+        "decode fallback policy should use the shared BackendFallbackCapabilities debug opt-in"
     );
     let decode_buffer_max_batch_section = source_between(
         &generate_source,
@@ -3648,9 +3650,9 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "decode buffer config should pass the active backend to max-batch policy"
     );
     let decode_debug_policy_section = source_between(
-        &generate_source,
-        "fn decode_hot_path_debug_fallback_enabled(",
-        "fn decode_hot_path_fallback_disabled_context(",
+        &capability_source,
+        "pub(crate) fn decode_hot_path_debug_fallback_enabled_for_backend(",
+        "pub(crate) fn decode_hot_path_debug_fallback_env_for_backend(",
     );
     assert!(
         !decode_debug_policy_section.contains("\"metal\"")
@@ -3658,6 +3660,15 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             && !decode_debug_policy_section.contains("\"rocm\"")
             && !decode_debug_policy_section.contains("match backend_name"),
         "decode debug fallback opt-in should not keep a local backend-name env table"
+    );
+    let decode_debug_env_section = source_between(
+        &capability_source,
+        "pub(crate) fn decode_hot_path_debug_fallback_env_for_backend(",
+        "pub(crate) fn decode_hot_path_fallback_policy_for_backend(",
+    );
+    assert!(
+        decode_debug_env_section.contains("decode_hot_path_debug_env"),
+        "decode debug fallback env name should be read from BackendFallbackCapabilities"
     );
 
     let decode_batcher_config_section = source_between(
@@ -4142,10 +4153,12 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     let decode_batcher_retry_section = source_between(
         &generate_source,
         "fn decode_batcher_rowwise_retry_enabled(",
-        "fn decode_batch_generic_fallback_enabled(",
+        "fn greedy_token_decode_enabled(",
     );
     assert!(
-        decode_batcher_retry_section.contains("BackendCapabilityQueries::backend_capabilities"),
+        decode_batcher_retry_section.contains("BackendCapabilityQueries::backend_capabilities")
+            && decode_batcher_retry_section
+                .contains("decode_hot_path_fallback_policy_for_backend(backend)"),
         "decode batcher rowwise retry should come from the shared backend capability aggregate"
     );
     assert!(
@@ -4183,10 +4196,8 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     assert!(
         direct_paged_decode_attention_helper.contains("fn native_decode_attention_required(")
             && direct_paged_decode_attention_helper.contains("require_native_decode_attention")
-            && direct_paged_decode_attention_helper
-                .contains("fn decode_batch_generic_fallback_enabled(")
-            && direct_paged_decode_attention_helper
-                .contains("decode_hot_path_debug_fallback_enabled()"),
+            && forward_source.contains("decode_hot_path_debug_fallback_enabled_for_backend(backend)")
+            && forward_source.contains("decode_hot_path_debug_fallback_env_for_backend(backend)"),
         "decode attention native-required routing should combine DecodeBatcherPolicy with BackendFallbackCapabilities"
     );
     let direct_paged_decode_attention_section = source_between(
@@ -4220,7 +4231,7 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         native_decode_attention_decline_section
             .contains("native_decode_attention_required(backend)")
             && native_decode_attention_decline_section
-                .contains("decode_batch_generic_fallback_enabled(backend)"),
+                .contains("decode_hot_path_debug_fallback_enabled_for_backend(backend)"),
         "paged decode attention decline handling should read backend-owned native/fallback policy"
     );
     for forbidden in [
@@ -4320,7 +4331,7 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         batched_full_attention_decline_section
             .contains("native_decode_attention_required(backend)")
             && batched_full_attention_decline_section
-                .contains("decode_batch_generic_fallback_enabled(backend)"),
+                .contains("decode_hot_path_debug_fallback_enabled_for_backend(backend)"),
         "batched full-attention decode decline should read backend-owned native/fallback policy"
     );
     assert!(
@@ -4653,6 +4664,11 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             && backend_source.contains("TrainingLossBackend::runtime_training_precision_policy"),
         "device precision-policy lookup should delegate through the focused TrainingLossBackend facet"
     );
+    assert!(
+        backend_source.contains("pub fn training_tape_route_for_device_kt")
+            && backend_source.contains("TrainingLossBackend::runtime_tape_forward_backward_route"),
+        "device tape-forward route lookup should delegate through the focused TrainingLossBackend facet"
+    );
     for (path, source) in [
         (
             "crates/kiln-model/src/forward.rs",
@@ -4672,6 +4688,19 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
             "{path} production code should not call the device-family compatibility helper"
         );
     }
+    let tape_forward_production = production_source_before_tests(&tape_forward_source);
+    let tape_forward_compact = compact_body(tape_forward_production);
+    assert!(
+        tape_forward_production.contains("fn tape_forward_device_supported")
+            && tape_forward_production.contains("training_tape_route_for_device_kt(device)"),
+        "tape-forward device support should use the backend-owned tape route helper"
+    );
+    assert!(
+        !tape_forward_compact.contains(
+            "kiln_tensor::Device::Cuda(_)|kiln_tensor::Device::Metal(_)|kiln_tensor::Device::Vulkan(_)|kiln_tensor::Device::Rocm(_)"
+        ),
+        "tape-forward production adapters should not hard-code accelerator device families"
+    );
     assert!(
         trainer_source.contains("fn training_precision_policy_for_device("),
         "trainer should centralize device-family precision policy lookup"
@@ -6581,6 +6610,34 @@ fn generated_capability_report_tracks_migration_phase_status() {
         "BackendRuntime should stay identity-only after W1 deletes compatibility methods"
     );
 
+    let phase2 = phases
+        .iter()
+        .find(|phase| phase["phase"] == 2)
+        .expect("Phase 2 should be present");
+    assert_eq!(
+        phase2["status"], "covered",
+        "Phase 2 should report complete only after fallback policy helpers are centralized"
+    );
+    assert_eq!(phase2["contract"], "landed");
+    assert_eq!(phase2["migration"], "complete");
+    assert_eq!(phase2["genuine"], true);
+    let phase2_signals = phase2["migration_signals"]
+        .as_array()
+        .expect("Phase 2 should list fallback-policy migration signals");
+    for signal_name in [
+        "decode_hot_path_duplicate_helpers_removed",
+        "decode_hot_path_fallback_delegates_to_backend_capability",
+    ] {
+        let signal = phase2_signals
+            .iter()
+            .find(|signal| signal["name"] == signal_name)
+            .unwrap_or_else(|| panic!("Phase 2 should include migration signal {signal_name}"));
+        assert_eq!(
+            signal["passed"], true,
+            "Phase 2 signal {signal_name} should pass before Phase 2 can be genuine"
+        );
+    }
+
     let phase3 = phases
         .iter()
         .find(|phase| phase["phase"] == 3)
@@ -6744,6 +6801,26 @@ fn generated_capability_report_tracks_migration_phase_status() {
     assert_eq!(
         backend_trait_signal["passed"], true,
         "Phase 6 should select precision policy through TrainingLossBackend"
+    );
+    let tape_guard_signal = phase6_signals
+        .iter()
+        .find(|signal| signal["name"] == "tape_forward_gpu_family_guards_removed")
+        .expect("Phase 6 should include the tape-forward device-family guard removal signal");
+    assert_eq!(
+        tape_guard_signal["passed"], true,
+        "Phase 6 should not be genuine while tape-forward adapters hard-code accelerator device families"
+    );
+    assert_eq!(
+        tape_guard_signal["observed"], 0,
+        "Phase 6 should observe no tape-forward accelerator-family allowlist guards"
+    );
+    let tape_route_signal = phase6_signals
+        .iter()
+        .find(|signal| signal["name"] == "tape_forward_route_delegates_to_backend_trait")
+        .expect("Phase 6 should include the tape-forward backend trait routing signal");
+    assert_eq!(
+        tape_route_signal["passed"], true,
+        "Phase 6 should select tape-forward support through TrainingLossBackend"
     );
 
     let phase7 = phases
