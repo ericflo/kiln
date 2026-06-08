@@ -3694,11 +3694,22 @@
           "name": "production_replay_paths_use_replay_plan",
           "observed": 3,
           "passed": false
+        },
+        {
+          "evidence": [
+            "crates/kiln-model/tests/backend_capability_contract.rs",
+            "crates/kiln-model/src/forward.rs"
+          ],
+          "expected": 3,
+          "name": "replay_parity_w5_3_live_gate",
+          "observed": 2,
+          "passed": false
         }
       ],
       "phase": 5,
       "remaining": [
-        "production replay runners are not wired through ReplayPlan"
+        "production replay runners are not wired through ReplayPlan",
+        "eager-vs-replay parity gate is not live in both local ReplayPlan contract and hardware graph tests"
       ],
       "report_sections": [
         "Focused Backend Facets",

@@ -1405,6 +1405,10 @@ def phase5_remaining_from_signals(signals: list[dict[str, Any]]) -> list[str]:
             )
         elif name == "production_replay_paths_use_replay_plan":
             remaining.append("production replay runners are not wired through ReplayPlan")
+        elif name == "replay_parity_w5_3_live_gate":
+            remaining.append(
+                "eager-vs-replay parity gate is not live in both local ReplayPlan contract and hardware graph tests"
+            )
         else:
             remaining.append(f"{name} migration signal is not yet satisfied")
     return remaining
@@ -1786,6 +1790,56 @@ def replay_contract_w5_0_signal_count() -> int:
     return sum(1 for needle in required if needle in source)
 
 
+def replay_parity_w5_3_signal_count() -> tuple[int, int]:
+    contract = file_text("crates/kiln-model/tests/backend_capability_contract.rs")
+    forward = file_text("crates/kiln-model/src/forward.rs")
+    local_contract = source_between(
+        contract,
+        "fn replay_plan_cpu_mock_parity_gate_runs_in_unification_contract",
+        "#[test]\nfn backend_engine_unification_plan_matches_current_training_status",
+    )
+    metal_parity = source_between(
+        forward,
+        "fn test_metal_graph_batched_decode_matches_eager_and_replays_bucket",
+        "/// bs=1 CUDA-graph-capture+replay vs. eager decode parity.",
+    )
+    cuda_parity = source_between(
+        forward,
+        "fn test_cuda_graph_bs1_decode_matches_eager",
+        "#[cfg(feature = \"metal\")]\n    #[test]\n    fn test_model_forward_paged_decode_contiguous_batch_hybrid_matches_rowwise_metal",
+    )
+    checks = [
+        all(
+            needle in local_contract
+            for needle in [
+                "MockCpuDecodeReplayPlan",
+                "ReplayPlan::replay(",
+                "assert_eq!(\n        replayed, &eager",
+                "CPU/mock ReplayPlan parity gate should compare replayed output to eager output",
+            ]
+        ),
+        all(
+            needle in metal_parity
+            for needle in [
+                "assert_eq!(\n                    graph, eager",
+                "captured_graph_replay_count_sum()",
+                "same-bucket batched step should replay the captured Metal ICB graph",
+            ]
+        ),
+        all(
+            needle in cuda_parity
+            for needle in [
+                "let replay = step(&mut runner",
+                "assert_eq!(\n                ea, ra",
+                "CUDA-graph replay and eager decode picked DIFFERENT tokens",
+            ]
+        )
+        and "SKIP: bs=1 graph capture did not succeed" not in cuda_parity
+        and "it becomes a live graph-replay-vs-eager decode-parity gate" not in cuda_parity,
+    ]
+    return sum(1 for check in checks if check), len(checks)
+
+
 def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
     if phase == 1:
         shim_count = focused_trait_forwarding_shim_count()
@@ -1981,6 +2035,7 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
     if phase == 5:
         replay_plan_count, replay_plan_expected = replay_production_replay_plan_signal_count()
         replay_contract_count = replay_contract_w5_0_signal_count()
+        replay_parity_count, replay_parity_expected = replay_parity_w5_3_signal_count()
         return [
             phase_signal(
                 "replay_contract_w5_0_fixed",
@@ -1999,6 +2054,16 @@ def phase_migration_signals(phase: int) -> list[dict[str, Any]]:
                     "crates/kiln-model/src/rocm_graph.rs",
                     "crates/kiln-model/src/metal_graph.rs",
                     "crates/kiln-model/src/vk_decode_resident.rs",
+                ],
+            ),
+            phase_signal(
+                "replay_parity_w5_3_live_gate",
+                replay_parity_count == replay_parity_expected,
+                replay_parity_count,
+                replay_parity_expected,
+                [
+                    "crates/kiln-model/tests/backend_capability_contract.rs",
+                    "crates/kiln-model/src/forward.rs",
                 ],
             ),
         ]

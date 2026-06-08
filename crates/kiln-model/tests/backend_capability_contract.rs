@@ -11,6 +11,8 @@ struct FunctionDef {
     line: usize,
 }
 
+type GraphContractResult = Result<(), kiln_graph::CaptureError>;
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -6650,6 +6652,22 @@ fn generated_capability_report_tracks_migration_phase_status() {
         production_replay_signal["expected"], 4,
         "Phase 5 production wiring should require CUDA, ROCm, Metal, and Vulkan runner families"
     );
+    let replay_parity_signal = phase5_signals
+        .iter()
+        .find(|signal| signal["name"] == "replay_parity_w5_3_live_gate")
+        .expect("Phase 5 should include W5.3 eager-vs-replay parity signal");
+    assert_eq!(
+        replay_parity_signal["passed"], false,
+        "Phase 5 must not become genuine until replay parity is live rather than a skip-only scaffold"
+    );
+    assert_eq!(
+        replay_parity_signal["observed"], 2,
+        "Phase 5 should count the local CPU/mock contract and Metal parity gate as present"
+    );
+    assert_eq!(
+        replay_parity_signal["expected"], 3,
+        "Phase 5 W5.3 should require local CPU/mock, Metal, and live CUDA replay parity gates"
+    );
 
     let phase7 = phases
         .iter()
@@ -6843,6 +6861,126 @@ fn vulkan_resident_decode_routes_command_batch_through_replay_plan_contract() {
         !production_outside_replay_plan.contains(".submit_and_wait("),
         "Vulkan resident decode production paths should not submit CommandBatch outside ReplayPlan::replay"
     );
+}
+
+#[test]
+fn replay_plan_cpu_mock_parity_gate_runs_in_unification_contract() -> GraphContractResult {
+    use kiln_graph::{
+        CaptureError, InvalidateReason, ReplayInputs, ReplayKey, ReplayOutputs, ReplayPlan,
+        ReplayResourceStability, ReplayState, ResidentResourceRef,
+    };
+    use kiln_tensor::{Backend, DType, Tensor};
+
+    fn cpu_mock_decode_eager(lhs: &[f32], rhs: &[f32]) -> Vec<f32> {
+        let mut out = vec![0.0_f32; 4];
+        for row in 0..2 {
+            for col in 0..2 {
+                let mut acc = 0.0_f32;
+                for k in 0..3 {
+                    acc += lhs[row * 3 + k] * rhs[k * 2 + col];
+                }
+                out[row * 2 + col] = acc;
+            }
+        }
+        out
+    }
+
+    struct MockCpuDecodeReplayPlan {
+        key: ReplayKey,
+        state: ReplayState,
+        replay_count: u64,
+        lhs: Vec<f32>,
+        rhs: Vec<f32>,
+        last_output: Option<Vec<f32>>,
+    }
+
+    impl std::fmt::Debug for MockCpuDecodeReplayPlan {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("MockCpuDecodeReplayPlan")
+                .field("key", &self.key)
+                .field("replay_count", &self.replay_count)
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl ReplayPlan for MockCpuDecodeReplayPlan {
+        fn backend(&self) -> Backend {
+            self.key.backend
+        }
+
+        fn key(&self) -> ReplayKey {
+            self.key.clone()
+        }
+
+        fn validate_inputs(&self, inputs: ReplayInputs<'_>) -> Result<(), CaptureError> {
+            self.state.validate(inputs.key, inputs.resources)
+        }
+
+        fn replay(&mut self, inputs: ReplayInputs<'_>) -> Result<ReplayOutputs, CaptureError> {
+            self.state.validate(inputs.key, inputs.resources)?;
+            self.replay_count += 1;
+            self.last_output = Some(cpu_mock_decode_eager(&self.lhs, &self.rhs));
+            Ok(ReplayOutputs::new(
+                inputs.resources.to_vec(),
+                self.replay_count,
+            ))
+        }
+
+        fn invalidate_reason(&self, state: &ReplayState) -> Option<InvalidateReason> {
+            self.state.invalidate_reason(&state.key, &state.inputs)
+        }
+    }
+
+    let lhs = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let rhs = vec![7.0_f32, 8.0, 9.0, 10.0, 11.0, 12.0];
+    let eager = cpu_mock_decode_eager(&lhs, &rhs);
+    let lhs_tensor = Tensor::from_slice(&lhs, vec![2, 3])?;
+    let rhs_tensor = Tensor::from_slice(&rhs, vec![3, 2])?;
+    let key = ReplayKey::new(
+        Backend::Cpu,
+        "mock_decode_matmul",
+        vec![2, 3, 2],
+        Some(DType::F32),
+        1,
+        true,
+    );
+    let resources = vec![
+        ResidentResourceRef::from_tensor(
+            &lhs_tensor,
+            Backend::Cpu,
+            ReplayResourceStability::StableAcrossReplay,
+        ),
+        ResidentResourceRef::from_tensor(
+            &rhs_tensor,
+            Backend::Cpu,
+            ReplayResourceStability::StableAcrossReplay,
+        ),
+    ];
+    let mut plan = MockCpuDecodeReplayPlan {
+        key: key.clone(),
+        state: ReplayState::new(key.clone(), resources.clone()),
+        replay_count: 0,
+        lhs,
+        rhs,
+        last_output: None,
+    };
+
+    plan.validate_inputs(ReplayInputs::new(&key, &resources))?;
+    let outputs = kiln_graph::ReplayPlan::replay(
+        &mut plan,
+        ReplayInputs::new(&key, &resources),
+    )?;
+    assert_eq!(outputs.replay_count, 1);
+    assert_eq!(outputs.resources, resources);
+    let replayed = plan
+        .last_output
+        .as_ref()
+        .expect("mock replay should record its CPU output");
+    assert_eq!(
+        replayed, &eager,
+        "CPU/mock ReplayPlan parity gate should compare replayed output to eager output"
+    );
+    Ok(())
 }
 
 #[test]
