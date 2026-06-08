@@ -2,8 +2,6 @@
 
 Generated from the live source tree by `scripts/generate_backend_capability_report.py`.
 
-- Branch: `unify-engines`
-
 ## Feature Fanout
 
 | Crate | CUDA | ROCm | Metal | Vulkan |

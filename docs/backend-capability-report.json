@@ -4442,7 +4442,6 @@
     }
   },
   "source": {
-    "branch": "unify-engines",
     "script": "scripts/generate_backend_capability_report.py"
   },
   "training_loss_policy": {

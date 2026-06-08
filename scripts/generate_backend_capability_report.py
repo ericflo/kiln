@@ -5,9 +5,7 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -232,22 +230,6 @@ class FunctionDef:
     name: str
     body: str
     line: int
-
-
-def run_git(args: list[str]) -> str:
-    try:
-        return subprocess.check_output(["git", *args], cwd=ROOT, text=True).strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return "unknown"
-
-
-def source_branch() -> str:
-    return (
-        os.environ.get("GITHUB_HEAD_REF")
-        or os.environ.get("GITHUB_REF_NAME")
-        or run_git(["branch", "--show-current"])
-        or "unknown"
-    )
 
 
 def load_toml(path: Path) -> dict[str, Any]:
@@ -2656,8 +2638,6 @@ def markdown(data: dict[str, Any]) -> str:
     lines.append("")
     lines.append("Generated from the live source tree by `scripts/generate_backend_capability_report.py`.")
     lines.append("")
-    lines.append(f"- Branch: `{data['source']['branch']}`")
-    lines.append("")
     lines.append("## Feature Fanout")
     lines.append("")
     lines.append("| Crate | CUDA | ROCm | Metal | Vulkan |")
@@ -3049,7 +3029,6 @@ def build_report_data() -> tuple[dict[str, Any], list[dict[str, Any]]]:
     conformance_gates = conformance_gate_report()
     data = {
         "source": {
-            "branch": source_branch(),
             "script": str(Path(__file__).relative_to(ROOT)),
         },
         "features": feature_report(),
