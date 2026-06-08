@@ -699,49 +699,6 @@ pub trait BackendRuntime:
         BackendIdentity::runtime_as_any(self)
     }
 
-    /// First-use feasibility check for the Vulkan-resident decode pool:
-    /// returns true when a 3-4 slot ring sized to `max(hidden, intermediate)
-    /// × max_batch × 4` bytes can be allocated within 1 % of the device-local
-    /// heap. CPU / CUDA / Metal return false by default; the Vulkan backend
-    /// constructs (and caches) the pool here.
-    ///
-    /// Gate (b) of docs/vk_resident_decode_plan.md. The cached `None`
-    /// outcome means subsequent decode steps see the same `false` answer
-    /// without re-probing the device.
-    #[allow(unused_variables)]
-    fn decode_resident_pool_ready(
-        &self,
-        max_hidden: usize,
-        max_intermediate: usize,
-        max_batch: usize,
-    ) -> bool {
-        ReplayBackend::runtime_decode_resident_pool_ready(
-            self,
-            max_hidden,
-            max_intermediate,
-            max_batch,
-        )
-    }
-
-    /// Whether the backend can run a full decode step "device-resident":
-    /// pay one host→device upload (input token / hidden) and one device→host
-    /// readback (sampled token / last-row logits) per decode step, instead
-    /// of `N kernel calls × (extract + upload + readback)` per layer.
-    ///
-    /// CUDA and Metal already keep activations resident through candle and
-    /// MPS respectively, so for those backends the resident-decode plan is
-    /// a no-op and they keep returning false here. The Vulkan backend
-    /// returns true when feature-gated `KILN_VULKAN_RESIDENT_DECODE`
-    /// is on (default on when the kernel ring fits in the device's memory
-    /// budget) AND the device has actually been brought up.
-    ///
-    /// Callers in `model_forward_paged_last_token*` use this predicate to
-    /// route into the resident decode path. Returning false routes to
-    /// today's candle_core::Tensor-shaped path unchanged.
-    fn supports_resident_decode(&self) -> bool {
-        ReplayBackend::runtime_supports_resident_decode(self)
-    }
-
     fn supports_flash_attn_prefill(&self) -> bool {
         AttentionBackend::runtime_supports_flash_attn_prefill(self)
     }
@@ -856,56 +813,6 @@ pub trait BackendRuntime:
             v_pool,
             block_table,
             seqused_k,
-            max_seqlen_k,
-            page_block_size,
-            softmax_scale,
-            causal,
-        )
-    }
-
-    /// CUDA-graph-aware variant of
-    /// [`Self::flash_attn_paged_decode_contiguous_batch_dyn_seqlen`] that
-    /// accepts caller-owned `(out, softmax_lse)` device tensors so the
-    /// captured graph reads/writes its paged-decode scratch from stable
-    /// runner-owned storage instead of from transient `candle_core::Tensor::zeros`
-    /// allocations inside the kernel wrapper.
-    ///
-    /// `graph_outputs = Some((out, softmax_lse))` skips the per-call
-    /// `candle_core::Tensor::zeros` inside the captured region; the runner pre-allocates
-    /// these tensors and re-uses them across replays (see
-    /// `BatchedPagedDecodeGraphInputs::{attn_out, softmax_lse}`).
-    /// `graph_outputs = None` matches the non-graph behavior of
-    /// [`Self::flash_attn_paged_decode_contiguous_batch_dyn_seqlen`] and is
-    /// the default for backends that don't support stable graph buffers.
-    ///
-    /// The default impl routes through
-    /// [`Self::flash_attn_paged_decode_contiguous_batch_dyn_seqlen`] (i.e.
-    /// ignores `graph_outputs`), so non-CUDA backends don't need to override.
-    /// CUDA overrides this and threads `graph_outputs` into
-    /// `kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen`. Part of #1082
-    /// — see `bench-results/cuda-graph-bs2-secondary-audit.md` suspects 3+4.
-    #[allow(clippy::too_many_arguments)]
-    fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
-        &self,
-        q: &kiln_tensor::Tensor,
-        k_pool: &kiln_tensor::Tensor,
-        v_pool: &kiln_tensor::Tensor,
-        block_table: &kiln_tensor::Tensor,
-        seqused_k: &kiln_tensor::Tensor,
-        graph_outputs: Option<(&kiln_tensor::Tensor, &kiln_tensor::Tensor)>,
-        max_seqlen_k: usize,
-        page_block_size: usize,
-        softmax_scale: f32,
-        causal: bool,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        ReplayBackend::runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
-            self,
-            q,
-            k_pool,
-            v_pool,
-            block_table,
-            seqused_k,
-            graph_outputs,
             max_seqlen_k,
             page_block_size,
             softmax_scale,
@@ -3180,7 +3087,7 @@ mod tests {
         // contract pinned by gate (c) of docs/vk_resident_decode_plan.md.
         let cpu = cpu::CpuBackend::new(kiln_tensor::Device::Cpu);
         assert!(
-            !cpu.supports_resident_decode(),
+            !ReplayBackend::runtime_supports_resident_decode(&cpu),
             "CPU backend must decline resident decode so non-Vulkan call sites \
              continue to use the existing per-call kt-tensor path"
         );
@@ -3301,7 +3208,7 @@ mod tests {
         }
         let cuda = cuda::CudaBackend::new(kiln_tensor::Device::Cuda(0));
         assert!(
-            !cuda.supports_resident_decode(),
+            !ReplayBackend::runtime_supports_resident_decode(&cuda),
             "CUDA backend must decline resident decode; gate (c) requires CUDA path unchanged"
         );
     }
@@ -3467,16 +3374,6 @@ mod tests {
             "enter_gdn_recurrent_resident_state_scope"
         );
 
-        assert_forwards!(
-            ReplayBackend::runtime_decode_resident_pool_ready(backend, 8, 16, 2),
-            BackendRuntime::decode_resident_pool_ready(backend, 8, 16, 2),
-            "decode_resident_pool_ready"
-        );
-        assert_forwards!(
-            ReplayBackend::runtime_supports_resident_decode(backend),
-            BackendRuntime::supports_resident_decode(backend),
-            "supports_resident_decode"
-        );
         let replay_req = capability::ReplayRequest::paged_decode_graph_outputs(8, 16, 2)
             .with_dtype(kiln_tensor::DType::BF16);
         assert_forwards!(
@@ -3578,7 +3475,7 @@ mod tests {
         }
         let backend = vulkan::VulkanBackend::new(kiln_tensor::Device::Cpu);
         assert!(
-            backend.supports_resident_decode(),
+            ReplayBackend::runtime_supports_resident_decode(&backend),
             "Vulkan backend must support resident decode by default when the \
              logical device is up"
         );
