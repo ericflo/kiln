@@ -28760,25 +28760,25 @@ mod tests {
 
     impl crate::backend::ConvBackend for FixedLinearBackend {}
 
+    impl crate::backend::LinearBackend for FixedLinearBackend {
+        fn runtime_linear_decode(
+            &self,
+            _x: &Tensor,
+            _weight_t: &Tensor,
+        ) -> Result<Option<Tensor>> {
+            Ok(Some(
+                Tensor::from_vec(self.values.clone(), self.dims)?.to_device(self.device)?,
+            ))
+        }
+    }
+
     impl crate::backend::SamplingBackend for FixedLinearBackend {}
 
     impl crate::backend::OptimizerBackend for FixedLinearBackend {}
 
     impl crate::backend::PagedKvBackend for FixedLinearBackend {}
 
-    impl BackendRuntime for FixedLinearBackend {
-        fn linear_decode(
-            &self,
-            _x: &Tensor,
-            _weight_t: &Tensor,
-        ) -> Result<Option<Tensor>> {
-            // #1082: `BackendRuntime::linear_decode` is kt-typed — build the
-            // fixed kt output (`from_vec` is CPU; move to the kt device).
-            Ok(Some(
-                Tensor::from_vec(self.values.clone(), self.dims)?.to_device(self.device)?,
-            ))
-        }
-    }
+    impl BackendRuntime for FixedLinearBackend {}
 
     #[derive(Debug)]
     struct FixedMlpBackend {
@@ -28814,51 +28814,48 @@ mod tests {
 
     impl crate::backend::ConvBackend for FixedMlpBackend {}
 
-    impl crate::backend::SamplingBackend for FixedMlpBackend {}
-
-    impl crate::backend::OptimizerBackend for FixedMlpBackend {}
-
-    impl crate::backend::PagedKvBackend for FixedMlpBackend {}
-
-    impl BackendRuntime for FixedMlpBackend {
-        fn mlp_decode(
+    impl crate::backend::LinearBackend for FixedMlpBackend {
+        fn runtime_mlp_decode(
             &self,
             _x: &Tensor,
             _gate_weight_t: &Tensor,
             _up_weight_t: &Tensor,
             _down_weight_t: &Tensor,
         ) -> Result<Option<Tensor>> {
-            // #1082: the `mlp_decode` trait method is kt-typed — build the
-            // fixed kt output (`from_vec` is CPU; move to the kt device).
             self.fused_calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(match self.fused_values.as_ref() {
                 Some(values) => Some(
-                    Tensor::from_vec(values.clone(), self.fused_dims)?
-                        .to_device(self.device)?,
+                    Tensor::from_vec(values.clone(), self.fused_dims)?.to_device(self.device)?,
                 ),
                 None => None,
             })
         }
 
-        fn mlp_gate_up_decode(
+        fn runtime_mlp_gate_up_decode(
             &self,
             _x: &Tensor,
             _gate_weight_t: &Tensor,
             _up_weight_t: &Tensor,
         ) -> Result<Option<Tensor>> {
-            // #1082: kt-typed trait method.
             self.gate_up_calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(match self.gate_up_values.as_ref() {
                 Some(values) => Some(
-                    Tensor::from_vec(values.clone(), self.gate_up_dims)?
-                        .to_device(self.device)?,
+                    Tensor::from_vec(values.clone(), self.gate_up_dims)?.to_device(self.device)?,
                 ),
                 None => None,
             })
         }
     }
+
+    impl crate::backend::SamplingBackend for FixedMlpBackend {}
+
+    impl crate::backend::OptimizerBackend for FixedMlpBackend {}
+
+    impl crate::backend::PagedKvBackend for FixedMlpBackend {}
+
+    impl BackendRuntime for FixedMlpBackend {}
 
     #[test]
     fn test_backend_linear_decode_adds_lora_delta() -> Result<()> {

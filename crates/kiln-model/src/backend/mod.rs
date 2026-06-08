@@ -658,6 +658,7 @@ pub trait BackendRuntime:
     + AttentionBackend
     + GdnBackend
     + ConvBackend
+    + LinearBackend
     + SamplingBackend
     + OptimizerBackend
     + PagedKvBackend
@@ -1124,12 +1125,12 @@ pub trait BackendRuntime:
     /// buffers in place without a sync-back to host storage.
     fn lora_delta_resident(
         &self,
-        _x: &kiln_tensor::Tensor,
-        _a: &kiln_tensor::Tensor,
-        _b: &kiln_tensor::Tensor,
-        _scale: f32,
+        x: &kiln_tensor::Tensor,
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
+        scale: f32,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        LinearBackend::runtime_lora_delta_resident(self, x, a, b, scale)
     }
 
     fn assemble_gdn_recurrent_resident_batch_rows(
@@ -1667,10 +1668,10 @@ pub trait BackendRuntime:
     /// modes.
     fn linear_decode(
         &self,
-        _x: &kiln_tensor::Tensor,
-        _weight_t: &kiln_tensor::Tensor,
+        x: &kiln_tensor::Tensor,
+        weight_t: &kiln_tensor::Tensor,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        LinearBackend::runtime_linear_decode(self, x, weight_t)
     }
 
     /// Tape-recorded transposed linear projection for prefill / training.
@@ -1682,10 +1683,10 @@ pub trait BackendRuntime:
     /// caller falls back to the portable kt matmul (which the tape records).
     fn linear_prefill_apply(
         &self,
-        _x: &kiln_tensor::Tensor,
-        _weight_t: &kiln_tensor::Tensor,
+        x: &kiln_tensor::Tensor,
+        weight_t: &kiln_tensor::Tensor,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        LinearBackend::runtime_linear_prefill_apply(self, x, weight_t)
     }
 
     /// Same as `linear_prefill_apply` but operates on a column slice of a
@@ -1701,12 +1702,18 @@ pub trait BackendRuntime:
     /// is consumed inside the FLCE analytic-backward path.
     fn linear_prefill_apply_offset(
         &self,
-        _x: &kiln_tensor::Tensor,
-        _full_weight_t: &kiln_tensor::Tensor,
-        _chunk_start: usize,
-        _chunk_len: usize,
+        x: &kiln_tensor::Tensor,
+        full_weight_t: &kiln_tensor::Tensor,
+        chunk_start: usize,
+        chunk_len: usize,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        LinearBackend::runtime_linear_prefill_apply_offset(
+            self,
+            x,
+            full_weight_t,
+            chunk_start,
+            chunk_len,
+        )
     }
 
     fn supports_linear_decode_argmax(&self) -> bool {
@@ -1845,13 +1852,13 @@ pub trait BackendRuntime:
     /// kt-tape-recorded differentiable path.
     fn lora_decode_add(
         &self,
-        _base: &kiln_tensor::Tensor,
-        _x: &kiln_tensor::Tensor,
-        _a: &kiln_tensor::Tensor,
-        _b: &kiln_tensor::Tensor,
-        _scale: f32,
+        base: &kiln_tensor::Tensor,
+        x: &kiln_tensor::Tensor,
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
+        scale: f32,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        LinearBackend::runtime_lora_decode_add(self, base, x, a, b, scale)
     }
 
     /// Warm backend-resident decode weights after model load.
@@ -1860,8 +1867,8 @@ pub trait BackendRuntime:
     /// have their own upload path. Vulkan's current Candle-CPU integration
     /// maintains a side cache of immutable projection buffers, so it can move
     /// the first-token upload cost out of the measured decode path.
-    fn prewarm_decode_weights(&self, _weights: &crate::forward::GpuWeights) -> Result<()> {
-        Ok(())
+    fn prewarm_decode_weights(&self, weights: &crate::forward::GpuWeights) -> Result<()> {
+        LinearBackend::runtime_prewarm_decode_weights(self, weights)
     }
 
     /// Drop the candle CPU storage of pre-transposed weight caches
@@ -1882,10 +1889,10 @@ pub trait BackendRuntime:
     /// Returns the number of tensors actually stubbed (for telemetry).
     fn drop_uploaded_bf16_weights(
         &self,
-        _weights: &mut crate::forward::GpuWeights,
-        _device: &kiln_tensor::Device,
+        weights: &mut crate::forward::GpuWeights,
+        device: &kiln_tensor::Device,
     ) -> Result<usize> {
-        Ok(0)
+        LinearBackend::runtime_drop_uploaded_bf16_weights(self, weights, device)
     }
 
     /// Fused single-token full-attention Q/K/V projections.
@@ -1895,10 +1902,10 @@ pub trait BackendRuntime:
     /// `[1, 1, k_dim]`, and `[1, 1, v_dim]`.
     fn full_attn_qkv_decode(
         &self,
-        _x: &kiln_tensor::Tensor,
-        _q_weight_t: &kiln_tensor::Tensor,
-        _k_weight_t: &kiln_tensor::Tensor,
-        _v_weight_t: &kiln_tensor::Tensor,
+        x: &kiln_tensor::Tensor,
+        q_weight_t: &kiln_tensor::Tensor,
+        k_weight_t: &kiln_tensor::Tensor,
+        v_weight_t: &kiln_tensor::Tensor,
     ) -> Result<
         Option<(
             kiln_tensor::Tensor,
@@ -1906,7 +1913,7 @@ pub trait BackendRuntime:
             kiln_tensor::Tensor,
         )>,
     > {
-        Ok(None)
+        LinearBackend::runtime_full_attn_qkv_decode(self, x, q_weight_t, k_weight_t, v_weight_t)
     }
 
     /// Fused single-token MLP gate/up projection.
@@ -1915,11 +1922,11 @@ pub trait BackendRuntime:
     /// Returns `[1, 1, intermediate]` containing `silu(x @ gate_t) * (x @ up_t)`.
     fn mlp_gate_up_decode(
         &self,
-        _x: &kiln_tensor::Tensor,
-        _gate_weight_t: &kiln_tensor::Tensor,
-        _up_weight_t: &kiln_tensor::Tensor,
+        x: &kiln_tensor::Tensor,
+        gate_weight_t: &kiln_tensor::Tensor,
+        up_weight_t: &kiln_tensor::Tensor,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        LinearBackend::runtime_mlp_gate_up_decode(self, x, gate_weight_t, up_weight_t)
     }
 
     /// Fused single-token MLP that keeps the SwiGLU hidden activation on backend device.
@@ -1928,12 +1935,12 @@ pub trait BackendRuntime:
     /// `[hidden, intermediate]`; `down_weight_t` is `[intermediate, out_dim]`.
     fn mlp_decode(
         &self,
-        _x: &kiln_tensor::Tensor,
-        _gate_weight_t: &kiln_tensor::Tensor,
-        _up_weight_t: &kiln_tensor::Tensor,
-        _down_weight_t: &kiln_tensor::Tensor,
+        x: &kiln_tensor::Tensor,
+        gate_weight_t: &kiln_tensor::Tensor,
+        up_weight_t: &kiln_tensor::Tensor,
+        down_weight_t: &kiln_tensor::Tensor,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        Ok(None)
+        LinearBackend::runtime_mlp_decode(self, x, gate_weight_t, up_weight_t, down_weight_t)
     }
 
     fn supports_gdn_gates(&self) -> bool {
@@ -2516,77 +2523,100 @@ pub trait ConvBackend: Send + Sync + std::fmt::Debug {
 pub trait LinearBackend: Send + Sync + std::fmt::Debug {
     fn runtime_linear_decode(
         &self,
-        x: &kiln_tensor::Tensor,
-        weight_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _x: &kiln_tensor::Tensor,
+        _weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
     fn runtime_linear_prefill_apply(
         &self,
-        x: &kiln_tensor::Tensor,
-        weight_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _x: &kiln_tensor::Tensor,
+        _weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
     fn runtime_linear_prefill_apply_offset(
         &self,
-        x: &kiln_tensor::Tensor,
-        full_weight_t: &kiln_tensor::Tensor,
-        chunk_start: usize,
-        chunk_len: usize,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _x: &kiln_tensor::Tensor,
+        _full_weight_t: &kiln_tensor::Tensor,
+        _chunk_start: usize,
+        _chunk_len: usize,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
     fn runtime_lora_delta_resident(
         &self,
-        x: &kiln_tensor::Tensor,
-        a: &kiln_tensor::Tensor,
-        b: &kiln_tensor::Tensor,
-        scale: f32,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _x: &kiln_tensor::Tensor,
+        _a: &kiln_tensor::Tensor,
+        _b: &kiln_tensor::Tensor,
+        _scale: f32,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
     fn runtime_lora_decode_add(
         &self,
-        base: &kiln_tensor::Tensor,
-        x: &kiln_tensor::Tensor,
-        a: &kiln_tensor::Tensor,
-        b: &kiln_tensor::Tensor,
-        scale: f32,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _base: &kiln_tensor::Tensor,
+        _x: &kiln_tensor::Tensor,
+        _a: &kiln_tensor::Tensor,
+        _b: &kiln_tensor::Tensor,
+        _scale: f32,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
-    fn runtime_prewarm_decode_weights(&self, weights: &crate::forward::GpuWeights) -> Result<()>;
+    fn runtime_prewarm_decode_weights(
+        &self,
+        _weights: &crate::forward::GpuWeights,
+    ) -> Result<()> {
+        Ok(())
+    }
 
     fn runtime_drop_uploaded_bf16_weights(
         &self,
-        weights: &mut crate::forward::GpuWeights,
-        device: &kiln_tensor::Device,
-    ) -> Result<usize>;
+        _weights: &mut crate::forward::GpuWeights,
+        _device: &kiln_tensor::Device,
+    ) -> Result<usize> {
+        Ok(0)
+    }
 
     fn runtime_full_attn_qkv_decode(
         &self,
-        x: &kiln_tensor::Tensor,
-        q_weight_t: &kiln_tensor::Tensor,
-        k_weight_t: &kiln_tensor::Tensor,
-        v_weight_t: &kiln_tensor::Tensor,
+        _x: &kiln_tensor::Tensor,
+        _q_weight_t: &kiln_tensor::Tensor,
+        _k_weight_t: &kiln_tensor::Tensor,
+        _v_weight_t: &kiln_tensor::Tensor,
     ) -> Result<
         Option<(
             kiln_tensor::Tensor,
             kiln_tensor::Tensor,
             kiln_tensor::Tensor,
         )>,
-    >;
+    > {
+        Ok(None)
+    }
 
     fn runtime_mlp_gate_up_decode(
         &self,
-        x: &kiln_tensor::Tensor,
-        gate_weight_t: &kiln_tensor::Tensor,
-        up_weight_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _x: &kiln_tensor::Tensor,
+        _gate_weight_t: &kiln_tensor::Tensor,
+        _up_weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 
     fn runtime_mlp_decode(
         &self,
-        x: &kiln_tensor::Tensor,
-        gate_weight_t: &kiln_tensor::Tensor,
-        up_weight_t: &kiln_tensor::Tensor,
-        down_weight_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>>;
+        _x: &kiln_tensor::Tensor,
+        _gate_weight_t: &kiln_tensor::Tensor,
+        _up_weight_t: &kiln_tensor::Tensor,
+        _down_weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
 }
 
 /// Focused `SamplingBackend` facet for fused LM-head token selection.
@@ -2846,103 +2876,6 @@ pub trait ReplayBackend: Send + Sync + std::fmt::Debug {
 
 // Blanket forwarding impls keep the focused traits behavior-identical to the
 // compatibility facade while later PRs move call sites to one facet at a time.
-
-#[allow(clippy::too_many_arguments)]
-impl<T: BackendRuntime + ?Sized> LinearBackend for T {
-    fn runtime_linear_decode(
-        &self,
-        x: &kiln_tensor::Tensor,
-        weight_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::linear_decode(self, x, weight_t)
-    }
-
-    fn runtime_linear_prefill_apply(
-        &self,
-        x: &kiln_tensor::Tensor,
-        weight_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::linear_prefill_apply(self, x, weight_t)
-    }
-
-    fn runtime_linear_prefill_apply_offset(
-        &self,
-        x: &kiln_tensor::Tensor,
-        full_weight_t: &kiln_tensor::Tensor,
-        chunk_start: usize,
-        chunk_len: usize,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::linear_prefill_apply_offset(self, x, full_weight_t, chunk_start, chunk_len)
-    }
-
-    fn runtime_lora_delta_resident(
-        &self,
-        x: &kiln_tensor::Tensor,
-        a: &kiln_tensor::Tensor,
-        b: &kiln_tensor::Tensor,
-        scale: f32,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::lora_delta_resident(self, x, a, b, scale)
-    }
-
-    fn runtime_lora_decode_add(
-        &self,
-        base: &kiln_tensor::Tensor,
-        x: &kiln_tensor::Tensor,
-        a: &kiln_tensor::Tensor,
-        b: &kiln_tensor::Tensor,
-        scale: f32,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::lora_decode_add(self, base, x, a, b, scale)
-    }
-
-    fn runtime_prewarm_decode_weights(&self, weights: &crate::forward::GpuWeights) -> Result<()> {
-        BackendRuntime::prewarm_decode_weights(self, weights)
-    }
-
-    fn runtime_drop_uploaded_bf16_weights(
-        &self,
-        weights: &mut crate::forward::GpuWeights,
-        device: &kiln_tensor::Device,
-    ) -> Result<usize> {
-        BackendRuntime::drop_uploaded_bf16_weights(self, weights, device)
-    }
-
-    fn runtime_full_attn_qkv_decode(
-        &self,
-        x: &kiln_tensor::Tensor,
-        q_weight_t: &kiln_tensor::Tensor,
-        k_weight_t: &kiln_tensor::Tensor,
-        v_weight_t: &kiln_tensor::Tensor,
-    ) -> Result<
-        Option<(
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-        )>,
-    > {
-        BackendRuntime::full_attn_qkv_decode(self, x, q_weight_t, k_weight_t, v_weight_t)
-    }
-
-    fn runtime_mlp_gate_up_decode(
-        &self,
-        x: &kiln_tensor::Tensor,
-        gate_weight_t: &kiln_tensor::Tensor,
-        up_weight_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::mlp_gate_up_decode(self, x, gate_weight_t, up_weight_t)
-    }
-
-    fn runtime_mlp_decode(
-        &self,
-        x: &kiln_tensor::Tensor,
-        gate_weight_t: &kiln_tensor::Tensor,
-        up_weight_t: &kiln_tensor::Tensor,
-        down_weight_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        BackendRuntime::mlp_decode(self, x, gate_weight_t, up_weight_t, down_weight_t)
-    }
-}
 
 #[allow(clippy::too_many_arguments)]
 impl<T: BackendRuntime + ?Sized> ResidencyBackend for T {
@@ -3283,6 +3216,8 @@ mod tests {
     impl GdnBackend for ResidentActivationProbeBackend {}
 
     impl ConvBackend for ResidentActivationProbeBackend {}
+
+    impl LinearBackend for ResidentActivationProbeBackend {}
 
     impl SamplingBackend for ResidentActivationProbeBackend {}
 

@@ -661,26 +661,26 @@ fn cuda_rocm_kt_bridge_device_checks_stay_in_shared_helper() {
         let compact_source = compact_body(&source);
         let functions = parse_functions(&path);
         let linear = functions
-            .get("linear_prefill_apply")
-            .unwrap_or_else(|| panic!("{backend_file} missing linear_prefill_apply"));
+            .get("runtime_linear_prefill_apply")
+            .unwrap_or_else(|| panic!("{backend_file} missing runtime_linear_prefill_apply"));
         let offset = functions
-            .get("linear_prefill_apply_offset")
-            .unwrap_or_else(|| panic!("{backend_file} missing linear_prefill_apply_offset"));
+            .get("runtime_linear_prefill_apply_offset")
+            .unwrap_or_else(|| panic!("{backend_file} missing runtime_linear_prefill_apply_offset"));
         let lora = functions
-            .get("lora_delta_resident")
-            .unwrap_or_else(|| panic!("{backend_file} missing lora_delta_resident"));
+            .get("runtime_lora_delta_resident")
+            .unwrap_or_else(|| panic!("{backend_file} missing runtime_lora_delta_resident"));
 
         assert!(
             compact_body(&linear.body).contains(&format!("{helper}(&[x,weight_t])")),
-            "{backend_file} linear_prefill_apply should use shared kt device validation"
+            "{backend_file} runtime_linear_prefill_apply should use shared kt device validation"
         );
         assert!(
             compact_body(&offset.body).contains(&format!("{helper}(&[x,full_weight_t])")),
-            "{backend_file} linear_prefill_apply_offset should use shared kt device validation"
+            "{backend_file} runtime_linear_prefill_apply_offset should use shared kt device validation"
         );
         assert!(
             compact_body(&lora.body).contains(&format!("{helper}(&[x,a,b])")),
-            "{backend_file} lora_delta_resident should use shared kt device validation"
+            "{backend_file} runtime_lora_delta_resident should use shared kt device validation"
         );
 
         for copied_check in [
@@ -2673,6 +2673,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
                 | "AttentionBackend"
                 | "GdnBackend"
                 | "ConvBackend"
+                | "LinearBackend"
                 | "SamplingBackend"
                 | "OptimizerBackend"
                 | "PagedKvBackend"
@@ -2708,6 +2709,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
         "AttentionBackend",
         "GdnBackend",
         "ConvBackend",
+        "LinearBackend",
         "SamplingBackend",
         "OptimizerBackend",
         "PagedKvBackend",
@@ -2758,6 +2760,10 @@ fn generated_capability_report_lists_focused_backend_facets() {
         "ConvBackend should not regress to a blanket BackendRuntime forwarding impl"
     );
     assert!(
+        !backend_source.contains("impl<T: BackendRuntime + ?Sized> LinearBackend for T"),
+        "LinearBackend should not regress to a blanket BackendRuntime forwarding impl"
+    );
+    assert!(
         !backend_source.contains("impl<T: BackendRuntime + ?Sized> SamplingBackend for T"),
         "SamplingBackend should not regress to a blanket BackendRuntime forwarding impl"
     );
@@ -2780,6 +2786,7 @@ fn generated_capability_report_lists_focused_backend_facets() {
         "AttentionBackend",
         "GdnBackend",
         "ConvBackend",
+        "LinearBackend",
         "SamplingBackend",
         "OptimizerBackend",
         "PagedKvBackend",
@@ -5974,6 +5981,14 @@ fn generated_capability_report_tracks_migration_phase_status() {
     assert_eq!(
         gdn_signal["passed"], true,
         "GdnBackend should be a completed W1 family slice"
+    );
+    let linear_signal = phase1_signals
+        .iter()
+        .find(|signal| signal["name"] == "linear_backend_facet_authoritative")
+        .expect("Phase 1 should include LinearBackend authoritative signal");
+    assert_eq!(
+        linear_signal["passed"], true,
+        "LinearBackend should be a completed W1 family slice"
     );
     let sampling_signal = phase1_signals
         .iter()

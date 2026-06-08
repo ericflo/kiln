@@ -30,8 +30,8 @@ use super::vulkan_tensor_bridge::{
 use super::{
     vulkan_attention, vulkan_conv1d, vulkan_dense, vulkan_device, vulkan_gdn, vulkan_linear,
     vulkan_training, vulkan_weights, AttentionBackend, BackendIdentity, BackendRuntime,
-    ConvBackend, GdnBackend, OptimizerBackend, PagedKvBackend, SamplingBackend, StartupBackend,
-    TrainingCapabilities, TrainingPrecisionPolicy,
+    ConvBackend, GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, SamplingBackend,
+    StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
 };
 use crate::forward::GpuWeights;
 
@@ -787,6 +787,101 @@ impl GdnBackend for VulkanBackend {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+impl LinearBackend for VulkanBackend {
+    fn runtime_lora_delta_resident(
+        &self,
+        _x: &kiln_tensor::Tensor,
+        _a: &kiln_tensor::Tensor,
+        _b: &kiln_tensor::Tensor,
+        _scale: f32,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // (#1082) Decline. This hook previously dispatched the on-device
+        // LoRA delta through `VulkanLoraOp` (a `candle_core::CustomOp3`)
+        // purely so candle's `loss.backward()` could recover grad_A /
+        // grad_B. With the kt autograd tape (`kiln_autograd`) as the sole
+        // grad producer, that candle autograd island is gone — the forward
+        // LoRA delta is recorded onto the tape by the portable kt
+        // `compute_lora_delta` path in forward.rs, and `Tape::backward()`
+        // produces the gradients. Returning `Ok(None)` routes the caller to
+        // that kt-recorded path.
+        Ok(None)
+    }
+
+    fn runtime_linear_decode(
+        &self,
+        x: &kiln_tensor::Tensor,
+        weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        vulkan_linear::linear_decode(self, x, weight_t)
+    }
+
+    fn runtime_linear_prefill_apply(
+        &self,
+        x: &kiln_tensor::Tensor,
+        weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        vulkan_linear::linear_prefill_apply(self, x, weight_t)
+    }
+
+    fn runtime_linear_prefill_apply_offset(
+        &self,
+        x: &kiln_tensor::Tensor,
+        full_weight_t: &kiln_tensor::Tensor,
+        chunk_start: usize,
+        chunk_len: usize,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        vulkan_linear::linear_prefill_apply_offset(self, x, full_weight_t, chunk_start, chunk_len)
+    }
+
+    fn runtime_prewarm_decode_weights(&self, weights: &GpuWeights) -> Result<()> {
+        vulkan_weights::prewarm_decode_weights(self, weights)
+    }
+
+    fn runtime_drop_uploaded_bf16_weights(
+        &self,
+        weights: &mut crate::forward::GpuWeights,
+        device: &kiln_tensor::Device,
+    ) -> Result<usize> {
+        vulkan_weights::drop_uploaded_bf16_weights(self, weights, device)
+    }
+
+    fn runtime_full_attn_qkv_decode(
+        &self,
+        x: &kiln_tensor::Tensor,
+        q_weight_t: &kiln_tensor::Tensor,
+        k_weight_t: &kiln_tensor::Tensor,
+        v_weight_t: &kiln_tensor::Tensor,
+    ) -> Result<
+        Option<(
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+        )>,
+    > {
+        vulkan_dense::full_attn_qkv_decode(self, x, q_weight_t, k_weight_t, v_weight_t)
+    }
+
+    fn runtime_mlp_gate_up_decode(
+        &self,
+        x: &kiln_tensor::Tensor,
+        gate_weight_t: &kiln_tensor::Tensor,
+        up_weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        vulkan_dense::mlp_gate_up_decode(self, x, gate_weight_t, up_weight_t)
+    }
+
+    fn runtime_mlp_decode(
+        &self,
+        x: &kiln_tensor::Tensor,
+        gate_weight_t: &kiln_tensor::Tensor,
+        up_weight_t: &kiln_tensor::Tensor,
+        down_weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        vulkan_dense::mlp_decode(self, x, gate_weight_t, up_weight_t, down_weight_t)
+    }
+}
+
 impl BackendRuntime for VulkanBackend {
     fn training_capabilities(&self) -> TrainingCapabilities {
         Self::training_capabilities_static()
@@ -1093,24 +1188,6 @@ impl BackendRuntime for VulkanBackend {
         Ok(Some(resolved))
     }
 
-    fn lora_delta_resident(
-        &self,
-        _x: &kiln_tensor::Tensor,
-        _a: &kiln_tensor::Tensor,
-        _b: &kiln_tensor::Tensor,
-        _scale: f32,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        // (#1082) Decline. This hook previously dispatched the on-device
-        // LoRA delta through `VulkanLoraOp` (a `candle_core::CustomOp3`)
-        // purely so candle's `loss.backward()` could recover grad_A /
-        // grad_B. With the kt autograd tape (`kiln_autograd`) as the sole
-        // grad producer, that candle autograd island is gone — the forward
-        // LoRA delta is recorded onto the tape by the portable kt
-        // `compute_lora_delta` path in forward.rs, and `Tape::backward()`
-        // produces the gradients. Returning `Ok(None)` routes the caller to
-        // that kt-recorded path.
-        Ok(None)
-    }
 
     fn assemble_gdn_recurrent_resident_batch_rows(
         &self,
@@ -1251,76 +1328,12 @@ impl BackendRuntime for VulkanBackend {
         VulkanBackend::has_linear_attn_gdn_state_kt(self, key)
     }
 
-    fn linear_decode(
-        &self,
-        x: &kiln_tensor::Tensor,
-        weight_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        vulkan_linear::linear_decode(self, x, weight_t)
-    }
 
-    fn linear_prefill_apply(
-        &self,
-        x: &kiln_tensor::Tensor,
-        weight_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        vulkan_linear::linear_prefill_apply(self, x, weight_t)
-    }
 
-    fn linear_prefill_apply_offset(
-        &self,
-        x: &kiln_tensor::Tensor,
-        full_weight_t: &kiln_tensor::Tensor,
-        chunk_start: usize,
-        chunk_len: usize,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        vulkan_linear::linear_prefill_apply_offset(self, x, full_weight_t, chunk_start, chunk_len)
-    }
 
-    fn prewarm_decode_weights(&self, weights: &GpuWeights) -> Result<()> {
-        vulkan_weights::prewarm_decode_weights(self, weights)
-    }
 
-    fn drop_uploaded_bf16_weights(
-        &self,
-        weights: &mut crate::forward::GpuWeights,
-        device: &kiln_tensor::Device,
-    ) -> Result<usize> {
-        vulkan_weights::drop_uploaded_bf16_weights(self, weights, device)
-    }
 
-    fn full_attn_qkv_decode(
-        &self,
-        x: &kiln_tensor::Tensor,
-        q_weight_t: &kiln_tensor::Tensor,
-        k_weight_t: &kiln_tensor::Tensor,
-        v_weight_t: &kiln_tensor::Tensor,
-    ) -> Result<
-        Option<(
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-            kiln_tensor::Tensor,
-        )>,
-    > {
-        vulkan_dense::full_attn_qkv_decode(self, x, q_weight_t, k_weight_t, v_weight_t)
-    }
 
-    fn mlp_gate_up_decode(
-        &self,
-        x: &kiln_tensor::Tensor,
-        gate_weight_t: &kiln_tensor::Tensor,
-        up_weight_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        vulkan_dense::mlp_gate_up_decode(self, x, gate_weight_t, up_weight_t)
-    }
 
-    fn mlp_decode(
-        &self,
-        x: &kiln_tensor::Tensor,
-        gate_weight_t: &kiln_tensor::Tensor,
-        up_weight_t: &kiln_tensor::Tensor,
-        down_weight_t: &kiln_tensor::Tensor,
-    ) -> Result<Option<kiln_tensor::Tensor>> {
-        vulkan_dense::mlp_decode(self, x, gate_weight_t, up_weight_t, down_weight_t)
-    }
+
 }

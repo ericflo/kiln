@@ -9,7 +9,8 @@ use std::sync::OnceLock;
 
 use super::{
     AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, GdnBackend, OptimizerBackend,
-    PagedKvBackend, SamplingBackend, StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
+    LinearBackend, PagedKvBackend, SamplingBackend, StartupBackend, TrainingCapabilities,
+    TrainingPrecisionPolicy,
 };
 use crate::lora_loader::{compute_lora_delta, LoraProjectionWeights};
 
@@ -1644,7 +1645,15 @@ impl BackendRuntime for CudaBackend {
         Ok(Some(out_kt))
     }
 
-    fn lora_decode_add(
+
+
+
+
+}
+
+#[allow(clippy::too_many_arguments)]
+impl LinearBackend for CudaBackend {
+    fn runtime_lora_decode_add(
         &self,
         base: &kiln_tensor::Tensor,
         x: &kiln_tensor::Tensor,
@@ -1671,7 +1680,7 @@ impl BackendRuntime for CudaBackend {
         Ok(Some(out_kt))
     }
 
-    fn linear_prefill_apply(
+    fn runtime_linear_prefill_apply(
         &self,
         x: &kiln_tensor::Tensor,
         weight_t: &kiln_tensor::Tensor,
@@ -1775,7 +1784,7 @@ impl BackendRuntime for CudaBackend {
         Ok(Some(out))
     }
 
-    fn linear_prefill_apply_offset(
+    fn runtime_linear_prefill_apply_offset(
         &self,
         x: &kiln_tensor::Tensor,
         full_weight_t: &kiln_tensor::Tensor,
@@ -1802,14 +1811,14 @@ impl BackendRuntime for CudaBackend {
                 .to_dtype(x.dtype())
                 .context("cuda linear_prefill_apply_offset cast weight chunk")?
         };
-        let out = self.linear_prefill_apply(x, &chunk)?;
+        let out = self.runtime_linear_prefill_apply(x, &chunk)?;
         if out.is_some() {
             CUDA_LINEAR_PREFILL_OFFSET_SUCCESSES.fetch_add(1, Ordering::Relaxed);
         }
         Ok(out)
     }
 
-    fn lora_delta_resident(
+    fn runtime_lora_delta_resident(
         &self,
         x: &kiln_tensor::Tensor,
         a: &kiln_tensor::Tensor,
@@ -2238,8 +2247,7 @@ mod tests {
         )?
         .expect("cuda w");
 
-        let routed = backend
-            .linear_prefill_apply(&x, &w)?
+        let routed = LinearBackend::runtime_linear_prefill_apply(&backend, &x, &w)?
             .expect("CUDA linear_prefill_apply should accept CUDA tensors");
         let expected = x.broadcast_matmul(&w)?;
         assert_eq!(
@@ -2272,8 +2280,8 @@ mod tests {
         )?
         .expect("cuda w");
 
-        let routed = backend
-            .linear_prefill_apply_offset(&x, &w, 1, 3)?
+        let routed =
+            LinearBackend::runtime_linear_prefill_apply_offset(&backend, &x, &w, 1, 3)?
             .expect("CUDA linear_prefill_apply_offset should accept CUDA tensors");
         let expected_chunk = w.narrow(1, 1, 3)?.contiguous()?;
         let expected = x.broadcast_matmul(&expected_chunk)?;
@@ -2301,12 +2309,13 @@ mod tests {
             kt_cuda_2d(&[1.0f32, -0.25, 0.5, 0.75, -1.0, 0.25, 0.0, 1.5], [4, 2])?.expect("cuda b");
         let scale = 0.5;
 
-        assert!(backend.lora_delta_resident(&x, &a, &b, scale)?.is_none());
+        assert!(
+            LinearBackend::runtime_lora_delta_resident(&backend, &x, &a, &b, scale)?.is_none()
+        );
         backend.register_resident_activation(&a)?;
         backend.register_resident_activation(&b)?;
 
-        let routed = backend
-            .lora_delta_resident(&x, &a, &b, scale)?
+        let routed = LinearBackend::runtime_lora_delta_resident(&backend, &x, &a, &b, scale)?
             .expect("registered CUDA LoRA delta should engage");
         let expected = compute_lora_delta(
             &x,

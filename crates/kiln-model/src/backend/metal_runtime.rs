@@ -14,8 +14,8 @@ use super::metal_lm_head::*;
 use super::metal_paged::*;
 use super::{
     metal_residency, metal_training, AttentionBackend, BackendIdentity, BackendRuntime,
-    ConvBackend, GdnBackend, OptimizerBackend, PagedKvBackend, SamplingBackend, StartupBackend,
-    TrainingCapabilities, TrainingPrecisionPolicy,
+    ConvBackend, GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, SamplingBackend,
+    StartupBackend, TrainingCapabilities, TrainingPrecisionPolicy,
 };
 
 impl BackendIdentity for MetalBackend {
@@ -811,6 +811,8 @@ impl GdnBackend for MetalBackend {
         Ok(Some(out))
     }
 }
+
+impl LinearBackend for MetalBackend {}
 
 impl BackendRuntime for MetalBackend {
     fn training_capabilities(&self) -> TrainingCapabilities {

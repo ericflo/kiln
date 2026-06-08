@@ -10,7 +10,7 @@ use std::sync::{Arc, OnceLock};
 use super::vulkan::VulkanBackend;
 use super::vulkan_residency::with_resident_registry;
 use super::{
-    FinalRmsNormBackwardRoute, GrpoKlAuxiliaryRoute, GrpoLossRoute, OpdLossRoute,
+    FinalRmsNormBackwardRoute, GrpoKlAuxiliaryRoute, GrpoLossRoute, LinearBackend, OpdLossRoute,
     OpdPhaseBBackwardRoute, SftFlceLossRoute, TrainingCapabilities, TrainingPrecisionPolicy,
     TrainingTapeRoute,
 };
@@ -461,8 +461,9 @@ mod tests {
         backend.register_resident_activation(&b_bf16)?;
 
         assert!(
-            backend
-                .lora_delta_resident(&x_bf16, &a_bf16, &b_bf16, scale)?
+            LinearBackend::runtime_lora_delta_resident(
+                &backend, &x_bf16, &a_bf16, &b_bf16, scale,
+            )?
                 .is_none(),
             "lora_delta_resident must decline even when A and B are resident \
              (kt tape is the sole grad producer; forward delta is recorded by \
@@ -490,14 +491,14 @@ mod tests {
         let b = kiln_tensor::Tensor::from_vec(vec![0.0f32; 24], (6, 4))?
             .to_dtype(kiln_tensor::DType::BF16)?;
         // Neither registered — fall back.
-        assert!(backend.lora_delta_resident(&x, &a, &b, 0.5)?.is_none());
+        assert!(LinearBackend::runtime_lora_delta_resident(&backend, &x, &a, &b, 0.5)?.is_none());
         // Only A registered — fall back.
         backend.register_resident_activation(&a)?;
-        assert!(backend.lora_delta_resident(&x, &a, &b, 0.5)?.is_none());
+        assert!(LinearBackend::runtime_lora_delta_resident(&backend, &x, &a, &b, 0.5)?.is_none());
         // Only B registered — fall back.
         backend.evict_resident_activation(&a);
         backend.register_resident_activation(&b)?;
-        assert!(backend.lora_delta_resident(&x, &a, &b, 0.5)?.is_none());
+        assert!(LinearBackend::runtime_lora_delta_resident(&backend, &x, &a, &b, 0.5)?.is_none());
         backend.evict_resident_activation(&b);
         Ok(())
     }

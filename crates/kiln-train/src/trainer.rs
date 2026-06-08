@@ -10533,6 +10533,8 @@ pub(crate) mod tests {
 
     impl kiln_model::backend::ConvBackend for NamedTestBackend {}
 
+    impl kiln_model::backend::LinearBackend for NamedTestBackend {}
+
     impl kiln_model::backend::SamplingBackend for NamedTestBackend {}
 
     impl kiln_model::backend::OptimizerBackend for NamedTestBackend {}
