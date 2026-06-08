@@ -5255,6 +5255,62 @@ fn generated_capability_report_gates_matmul_linear_contract() {
 }
 
 #[test]
+fn forward_weight_kt_accessors_are_device_agnostic_contract() {
+    let forward_source =
+        fs::read_to_string(workspace_root().join("crates/kiln-model/src/forward.rs"))
+            .expect("forward source should be readable");
+    let full_attn_accessors = source_between(
+        &forward_source,
+        "impl GpuFullAttentionWeights {",
+        "#[derive(Clone)]\npub struct GpuLinearAttentionWeights",
+    );
+    let gdn_accessors = source_between(
+        &forward_source,
+        "impl GpuLinearAttentionWeights {",
+        "#[derive(Clone)]\npub struct GpuFfnWeights",
+    );
+    let ffn_accessors = source_between(
+        &forward_source,
+        "impl GpuFfnWeights {",
+        "/// State for Gated DeltaNet linear attention layers.",
+    );
+    let embed_tokens_accessor = source_between(
+        &forward_source,
+        "pub fn embed_tokens_kt(&self) -> Result<KtTensor> {",
+        "/// kt-native view of the pre-transposed token-embedding table",
+    );
+    let embed_tokens_t_accessor = source_between(
+        &forward_source,
+        "pub fn embed_tokens_t_kt(&self) -> Result<KtTensor> {",
+        "/// Convert `ModelWeights`",
+    );
+
+    for (name, section) in [
+        ("full-attention kt accessors", full_attn_accessors),
+        ("GDN kt accessors", gdn_accessors),
+        ("FFN kt accessors", ffn_accessors),
+        ("embedding kt accessor", embed_tokens_accessor),
+        ("LM-head kt accessor", embed_tokens_t_accessor),
+    ] {
+        assert!(
+            section.contains("kt_contiguous("),
+            "{name} should use the shared native kt contiguous accessor"
+        );
+        for forbidden in [
+            "Device::Cuda",
+            "cuda_or_rocm_device",
+            "must be on CUDA",
+            "zero-copy CUDA bridge",
+        ] {
+            assert!(
+                !section.contains(forbidden),
+                "{name} should not decide backend identity locally: {forbidden}"
+            );
+        }
+    }
+}
+
+#[test]
 fn forward_lora_delta_routes_through_device_ops_contract() {
     let forward_source =
         fs::read_to_string(workspace_root().join("crates/kiln-model/src/forward.rs"))

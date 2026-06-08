@@ -54,6 +54,11 @@ use kiln_core::block::{contiguous_slot_run_start, BlockTable};
 #[allow(unused_imports)]
 use kiln_tensor::Tensor as KtTensor;
 
+fn kt_contiguous(t: &Tensor, context: &'static str) -> Result<KtTensor> {
+    t.contiguous()
+        .with_context(|| format!("{context}: contiguous"))
+}
+
 /// The reduction-axis marker for "the last dimension" — passed to
 /// `Tensor::sum_keepdim` / `max_keepdim` / `mean_keepdim` / `cumsum` /
 /// `narrow` / `Tensor::cat` / `unsqueeze` in this file. Consolidates
@@ -3878,119 +3883,53 @@ impl GpuFullAttentionWeights {
     /// kt-native view of the pre-transposed full-attention q projection
     /// (#1082, GQA full-attention region migration — region 3).
     ///
-    /// Borrows `q_proj_t` (`[hidden, num_heads * head_dim (+gate)]`,
-    /// contiguous since load) as a `KtTensor` via the zero-copy CUDA bridge,
-    /// mirroring [`GpuFfnWeights::gate_proj_t_kt`] and
-    /// [`GpuWeights::embed_tokens_t_kt`]. Provided for parity with the other
-    /// migrated regions + future consolidation of the q/k/v projections; the
-    /// region-3 SDPA-matmul helper ([`try_kt_gqa_sdpa_matmuls`]) currently
-    /// borrows the activation q/k/v tensors (post-projection, post-RoPE) and
-    /// does not need the weight accessors, but they are kept here so the
-    /// region's candle→kt weight boundary lives in one place. CUDA-only;
-    /// returns a typed error on non-CUDA (the caller falls through to candle).
-    #[cfg(feature = "cuda")]
+    /// Returns `q_proj_t` (`[hidden, num_heads * head_dim (+gate)]`,
+    /// contiguous since load) as a contiguous `KtTensor`. The tensor is already
+    /// kt-native, so backend eligibility belongs to the call site's request
+    /// dispatch instead of this accessor.
     pub fn q_proj_t_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.q_proj_t.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "q_proj_t_kt: q_proj_t must be on CUDA for the kt borrow (got {:?})",
-                self.q_proj_t.device().location()
-            );
-        }
-        let contig = self
-            .q_proj_t
-            .contiguous()
-            .context("q_proj_t_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.q_proj_t, "q_proj_t_kt")
     }
 
     /// kt-native view of the pre-transposed full-attention k projection
-    /// (#1082, region 3). Same contiguity / CUDA-only contract as
+    /// (#1082, region 3). Same kt-native contiguity contract as
     /// [`GpuFullAttentionWeights::q_proj_t_kt`].
-    #[cfg(feature = "cuda")]
     pub fn k_proj_t_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.k_proj_t.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "k_proj_t_kt: k_proj_t must be on CUDA for the kt borrow (got {:?})",
-                self.k_proj_t.device().location()
-            );
-        }
-        let contig = self
-            .k_proj_t
-            .contiguous()
-            .context("k_proj_t_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.k_proj_t, "k_proj_t_kt")
     }
 
     /// kt-native view of the pre-transposed full-attention v projection
-    /// (#1082, region 3). Same contiguity / CUDA-only contract as
+    /// (#1082, region 3). Same kt-native contiguity contract as
     /// [`GpuFullAttentionWeights::q_proj_t_kt`].
-    #[cfg(feature = "cuda")]
     pub fn v_proj_t_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.v_proj_t.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "v_proj_t_kt: v_proj_t must be on CUDA for the kt borrow (got {:?})",
-                self.v_proj_t.device().location()
-            );
-        }
-        let contig = self
-            .v_proj_t
-            .contiguous()
-            .context("v_proj_t_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.v_proj_t, "v_proj_t_kt")
     }
 
     /// kt-native view of the pre-transposed full-attention output
     /// projection (#1082, region 3). Shape `[num_heads * head_dim, hidden]`.
-    /// Same contiguity / CUDA-only contract as
+    /// Same kt-native contiguity contract as
     /// [`GpuFullAttentionWeights::q_proj_t_kt`]; provided for parity with the
     /// region-1/2 accessors and future consolidation of the o_proj matmul.
-    #[cfg(feature = "cuda")]
     pub fn o_proj_t_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.o_proj_t.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "o_proj_t_kt: o_proj_t must be on CUDA for the kt borrow (got {:?})",
-                self.o_proj_t.device().location()
-            );
-        }
-        let contig = self
-            .o_proj_t
-            .contiguous()
-            .context("o_proj_t_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.o_proj_t, "o_proj_t_kt")
     }
 
     /// kt-native view of the q_norm RMSNorm weight (#1082, region 3).
-    /// Shape `[head_dim]`. Same contiguity / CUDA-only contract as
+    /// Shape `[head_dim]`. Same kt-native contiguity contract as
     /// [`GpuFullAttentionWeights::q_proj_t_kt`]; provided for parity with the
     /// region-1/2 accessors (the q/k norm already routes through the
     /// default-on `rms_norm` kt gate inside the prepare step, so the SDPA
     /// matmul helper does not need this — it is kept for the future
     /// consolidation of the prepare region).
-    #[cfg(feature = "cuda")]
     pub fn q_norm_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.q_norm.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "q_norm_kt: q_norm must be on CUDA for the kt borrow (got {:?})",
-                self.q_norm.device().location()
-            );
-        }
-        let contig = self.q_norm.contiguous().context("q_norm_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.q_norm, "q_norm_kt")
     }
 
     /// kt-native view of the k_norm RMSNorm weight (#1082, region 3).
     /// Shape `[head_dim]`. Same contract as
     /// [`GpuFullAttentionWeights::q_norm_kt`].
-    #[cfg(feature = "cuda")]
     pub fn k_norm_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.k_norm.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "k_norm_kt: k_norm must be on CUDA for the kt borrow (got {:?})",
-                self.k_norm.device().location()
-            );
-        }
-        let contig = self.k_norm.contiguous().context("k_norm_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.k_norm, "k_norm_kt")
     }
 }
 
@@ -4042,298 +3981,131 @@ impl GpuLinearAttentionWeights {
     /// the row-major `[out, hidden]` load-time weight) (#1082, GDN
     /// linear-attention region migration).
     ///
-    /// Borrows the contiguous candle field as a `KtTensor` via the
-    /// zero-copy CUDA bridge, mirroring
+    /// Returns the contiguous kt field as a `KtTensor`, mirroring
     /// [`GpuFullAttentionWeights::q_proj_t_kt`] and
     /// [`GpuFfnWeights::gate_proj_t_kt`]. Provided so the GDN region's
-    /// candle→kt weight boundary lives in one place ahead of the forward
-    /// type-flip; the hot path uses the pre-transposed `*_t` variants.
-    /// CUDA-only; returns a typed error on non-CUDA (the caller falls
-    /// through to candle).
-    #[cfg(feature = "cuda")]
+    /// kt weight boundary lives in one place. The tensor is already kt-native;
+    /// backend eligibility belongs to the request-dispatch call site. The hot
+    /// path uses the pre-transposed `*_t` variants.
     pub fn in_proj_qkv_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.in_proj_qkv.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "in_proj_qkv_kt: in_proj_qkv must be on CUDA for the kt borrow (got {:?})",
-                self.in_proj_qkv.device().location()
-            );
-        }
-        let contig = self
-            .in_proj_qkv
-            .contiguous()
-            .context("in_proj_qkv_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.in_proj_qkv, "in_proj_qkv_kt")
     }
 
     /// kt-native view of the GDN `in_proj_z` (gate) projection weight
-    /// (#1082, GDN region). Same contiguity / CUDA-only contract as
+    /// (#1082, GDN region). Same kt-native contiguity contract as
     /// [`GpuLinearAttentionWeights::in_proj_qkv_kt`].
-    #[cfg(feature = "cuda")]
     pub fn in_proj_z_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.in_proj_z.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "in_proj_z_kt: in_proj_z must be on CUDA for the kt borrow (got {:?})",
-                self.in_proj_z.device().location()
-            );
-        }
-        let contig = self
-            .in_proj_z
-            .contiguous()
-            .context("in_proj_z_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.in_proj_z, "in_proj_z_kt")
     }
 
     /// kt-native view of the GDN output projection weight (`out_proj`,
     /// the row-major `[hidden, value_dim]` load-time weight) (#1082, GDN
-    /// region). Same contiguity / CUDA-only contract as
+    /// region). Same kt-native contiguity contract as
     /// [`GpuLinearAttentionWeights::in_proj_qkv_kt`].
-    #[cfg(feature = "cuda")]
     pub fn out_proj_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.out_proj.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "out_proj_kt: out_proj must be on CUDA for the kt borrow (got {:?})",
-                self.out_proj.device().location()
-            );
-        }
-        let contig = self
-            .out_proj
-            .contiguous()
-            .context("out_proj_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.out_proj, "out_proj_kt")
     }
 
     /// kt-native view of the GDN `in_proj_a` projection weight (#1082,
-    /// GDN region). Same contiguity / CUDA-only contract as
+    /// GDN region). Same kt-native contiguity contract as
     /// [`GpuLinearAttentionWeights::in_proj_qkv_kt`].
-    #[cfg(feature = "cuda")]
     pub fn in_proj_a_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.in_proj_a.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "in_proj_a_kt: in_proj_a must be on CUDA for the kt borrow (got {:?})",
-                self.in_proj_a.device().location()
-            );
-        }
-        let contig = self
-            .in_proj_a
-            .contiguous()
-            .context("in_proj_a_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.in_proj_a, "in_proj_a_kt")
     }
 
     /// kt-native view of the GDN `in_proj_b` projection weight (#1082,
-    /// GDN region). Same contiguity / CUDA-only contract as
+    /// GDN region). Same kt-native contiguity contract as
     /// [`GpuLinearAttentionWeights::in_proj_qkv_kt`].
-    #[cfg(feature = "cuda")]
     pub fn in_proj_b_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.in_proj_b.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "in_proj_b_kt: in_proj_b must be on CUDA for the kt borrow (got {:?})",
-                self.in_proj_b.device().location()
-            );
-        }
-        let contig = self
-            .in_proj_b
-            .contiguous()
-            .context("in_proj_b_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.in_proj_b, "in_proj_b_kt")
     }
 
     /// kt-native view of the GDN depthwise `conv1d` weight (#1082, GDN
-    /// region). Same contiguity / CUDA-only contract as
+    /// region). Same kt-native contiguity contract as
     /// [`GpuLinearAttentionWeights::in_proj_qkv_kt`].
-    #[cfg(feature = "cuda")]
     pub fn conv1d_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.conv1d.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "conv1d_kt: conv1d must be on CUDA for the kt borrow (got {:?})",
-                self.conv1d.device().location()
-            );
-        }
-        let contig = self.conv1d.contiguous().context("conv1d_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.conv1d, "conv1d_kt")
     }
 
     /// kt-native view of the GDN gated-RMSNorm `norm` weight (#1082, GDN
-    /// region). Same contiguity / CUDA-only contract as
+    /// region). Same kt-native contiguity contract as
     /// [`GpuLinearAttentionWeights::in_proj_qkv_kt`].
-    #[cfg(feature = "cuda")]
     pub fn norm_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.norm.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "norm_kt: norm must be on CUDA for the kt borrow (got {:?})",
-                self.norm.device().location()
-            );
-        }
-        let contig = self.norm.contiguous().context("norm_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.norm, "norm_kt")
     }
 
     /// kt-native view of the GDN `a_log` decay parameter (#1082, GDN
-    /// region). Same contiguity / CUDA-only contract as
+    /// region). Same kt-native contiguity contract as
     /// [`GpuLinearAttentionWeights::in_proj_qkv_kt`].
-    #[cfg(feature = "cuda")]
     pub fn a_log_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.a_log.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "a_log_kt: a_log must be on CUDA for the kt borrow (got {:?})",
-                self.a_log.device().location()
-            );
-        }
-        let contig = self.a_log.contiguous().context("a_log_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.a_log, "a_log_kt")
     }
 
     /// kt-native view of the GDN `a_log_gates` decay parameter (#1082,
-    /// GDN region). Same contiguity / CUDA-only contract as
+    /// GDN region). Same kt-native contiguity contract as
     /// [`GpuLinearAttentionWeights::in_proj_qkv_kt`].
-    #[cfg(feature = "cuda")]
     pub fn a_log_gates_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.a_log_gates.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "a_log_gates_kt: a_log_gates must be on CUDA for the kt borrow (got {:?})",
-                self.a_log_gates.device().location()
-            );
-        }
-        let contig = self
-            .a_log_gates
-            .contiguous()
-            .context("a_log_gates_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.a_log_gates, "a_log_gates_kt")
     }
 
     /// kt-native view of the GDN `dt_bias` parameter (#1082, GDN region).
-    /// Same contiguity / CUDA-only contract as
+    /// Same kt-native contiguity contract as
     /// [`GpuLinearAttentionWeights::in_proj_qkv_kt`].
-    #[cfg(feature = "cuda")]
     pub fn dt_bias_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.dt_bias.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "dt_bias_kt: dt_bias must be on CUDA for the kt borrow (got {:?})",
-                self.dt_bias.device().location()
-            );
-        }
-        let contig = self
-            .dt_bias
-            .contiguous()
-            .context("dt_bias_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.dt_bias, "dt_bias_kt")
     }
 
     /// kt-native view of the pre-transposed GDN fused input projection
     /// (`in_proj_qkv_t`, `[hidden, out]`, contiguous since load) (#1082,
     /// GDN region). This is the hot-path transpose used for the decode
-    /// `x @ in_proj_qkv_t` matmul; same contiguity / CUDA-only contract as
+    /// `x @ in_proj_qkv_t` matmul; same kt-native contiguity contract as
     /// [`GpuLinearAttentionWeights::in_proj_qkv_kt`].
-    #[cfg(feature = "cuda")]
     pub fn in_proj_qkv_t_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.in_proj_qkv_t.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "in_proj_qkv_t_kt: in_proj_qkv_t must be on CUDA for the kt borrow (got {:?})",
-                self.in_proj_qkv_t.device().location()
-            );
-        }
-        let contig = self
-            .in_proj_qkv_t
-            .contiguous()
-            .context("in_proj_qkv_t_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.in_proj_qkv_t, "in_proj_qkv_t_kt")
     }
 
     /// kt-native view of the pre-transposed GDN gate projection
     /// (`in_proj_z_t`, `[hidden, nv]`) (#1082, GDN region). Same
-    /// contiguity / CUDA-only contract as
+    /// kt-native contiguity contract as
     /// [`GpuLinearAttentionWeights::in_proj_qkv_t_kt`].
-    #[cfg(feature = "cuda")]
     pub fn in_proj_z_t_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.in_proj_z_t.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "in_proj_z_t_kt: in_proj_z_t must be on CUDA for the kt borrow (got {:?})",
-                self.in_proj_z_t.device().location()
-            );
-        }
-        let contig = self
-            .in_proj_z_t
-            .contiguous()
-            .context("in_proj_z_t_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.in_proj_z_t, "in_proj_z_t_kt")
     }
 
     /// kt-native view of the pre-transposed GDN `in_proj_a` projection
-    /// (`in_proj_a_t`) (#1082, GDN region). Same contiguity / CUDA-only
+    /// (`in_proj_a_t`) (#1082, GDN region). Same kt-native contiguity
     /// contract as [`GpuLinearAttentionWeights::in_proj_qkv_t_kt`].
-    #[cfg(feature = "cuda")]
     pub fn in_proj_a_t_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.in_proj_a_t.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "in_proj_a_t_kt: in_proj_a_t must be on CUDA for the kt borrow (got {:?})",
-                self.in_proj_a_t.device().location()
-            );
-        }
-        let contig = self
-            .in_proj_a_t
-            .contiguous()
-            .context("in_proj_a_t_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.in_proj_a_t, "in_proj_a_t_kt")
     }
 
     /// kt-native view of the pre-transposed GDN `in_proj_b` projection
-    /// (`in_proj_b_t`) (#1082, GDN region). Same contiguity / CUDA-only
+    /// (`in_proj_b_t`) (#1082, GDN region). Same kt-native contiguity
     /// contract as [`GpuLinearAttentionWeights::in_proj_qkv_t_kt`].
-    #[cfg(feature = "cuda")]
     pub fn in_proj_b_t_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.in_proj_b_t.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "in_proj_b_t_kt: in_proj_b_t must be on CUDA for the kt borrow (got {:?})",
-                self.in_proj_b_t.device().location()
-            );
-        }
-        let contig = self
-            .in_proj_b_t
-            .contiguous()
-            .context("in_proj_b_t_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.in_proj_b_t, "in_proj_b_t_kt")
     }
 
     /// kt-native view of the optional pre-transposed combined A/B
     /// projection (`in_proj_ab_t`, `[hidden, 2 * nv]`) (#1082, GDN
     /// region). Returns `Ok(None)` when the fused A/B transpose was not
-    /// materialized at load time. When present, same contiguity /
-    /// CUDA-only contract as
+    /// materialized at load time. When present, same kt-native contiguity
+    /// contract as
     /// [`GpuLinearAttentionWeights::in_proj_qkv_t_kt`].
-    #[cfg(feature = "cuda")]
     pub fn in_proj_ab_t_kt(&self) -> Result<Option<KtTensor>> {
         let Some(ab_t) = self.in_proj_ab_t.as_ref() else {
             return Ok(None);
         };
-        if !matches!(ab_t.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "in_proj_ab_t_kt: in_proj_ab_t must be on CUDA for the kt borrow (got {:?})",
-                ab_t.device().location()
-            );
-        }
-        let contig = ab_t.contiguous().context("in_proj_ab_t_kt: contiguous")?;
-        let kt = contig;
-        Ok(Some(kt))
+        Ok(Some(kt_contiguous(ab_t, "in_proj_ab_t_kt")?))
     }
 
     /// kt-native view of the pre-transposed GDN output projection
     /// (`out_proj_t`, `[value_dim, hidden]`, contiguous since load)
     /// (#1082, GDN region). This is the hot-path transpose used for the
-    /// `hidden @ out_proj_t` matmul; same contiguity / CUDA-only contract
+    /// `hidden @ out_proj_t` matmul; same kt-native contiguity contract
     /// as [`GpuLinearAttentionWeights::in_proj_qkv_t_kt`].
-    #[cfg(feature = "cuda")]
     pub fn out_proj_t_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.out_proj_t.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "out_proj_t_kt: out_proj_t must be on CUDA for the kt borrow (got {:?})",
-                self.out_proj_t.device().location()
-            );
-        }
-        let contig = self
-            .out_proj_t
-            .contiguous()
-            .context("out_proj_t_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.out_proj_t, "out_proj_t_kt")
     }
 }
 
@@ -4382,70 +4154,31 @@ impl GpuFfnWeights {
     /// kt-native view of the pre-transposed SwiGLU gate projection
     /// (#1082, MLP/FFN region migration — region 2).
     ///
-    /// Borrows `gate_proj_t` (`[hidden, intermediate]`, contiguous since
-    /// load) as a `KtTensor` via the zero-copy CUDA bridge so the
-    /// consolidated kt-native SwiGLU helper ([`kt_swiglu_ffn_native`])
-    /// can dispatch `x @ gate_proj_t` through `kiln_tensor::cuda_matmul`
-    /// without re-borrowing the candle field each call. `gate_proj_t` is
-    /// uploaded contiguous at load (`from_model_weights`), so the
-    /// `contiguous()` here is a cheap Arc clone in the common case; it is
-    /// kept defensively because the bridge borrow requires contiguity.
-    ///
-    /// CUDA-only and the weight-side candle→kt boundary, mirroring
-    /// [`GpuWeights::embed_tokens_t_kt`]. Returns a typed error on
-    /// non-CUDA (the caller falls through to the candle MLP path).
+    /// Returns `gate_proj_t` (`[hidden, intermediate]`, contiguous since
+    /// load) as a contiguous `KtTensor`. The tensor is already kt-native, so
+    /// backend eligibility stays with the caller's request dispatch.
     #[cfg(any(feature = "cuda", feature = "rocm"))]
     pub fn gate_proj_t_kt(&self) -> Result<KtTensor> {
-        if !cuda_or_rocm_device(self.gate_proj_t.device()) {
-            anyhow::bail!(
-                "gate_proj_t_kt: gate_proj_t must be on CUDA/ROCm for the kt borrow (got {:?})",
-                self.gate_proj_t.device().location()
-            );
-        }
-        let contig = self
-            .gate_proj_t
-            .contiguous()
-            .context("gate_proj_t_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.gate_proj_t, "gate_proj_t_kt")
     }
 
     /// kt-native view of the pre-transposed SwiGLU up projection
-    /// (#1082, MLP/FFN region migration — region 2). Same contiguity /
-    /// CUDA-only contract as [`GpuFfnWeights::gate_proj_t_kt`]; used for
+    /// (#1082, MLP/FFN region migration — region 2). Same kt-native
+    /// contiguity contract as [`GpuFfnWeights::gate_proj_t_kt`]; used for
     /// the `x @ up_proj_t` matmul in [`kt_swiglu_ffn_native`].
     #[cfg(any(feature = "cuda", feature = "rocm"))]
     pub fn up_proj_t_kt(&self) -> Result<KtTensor> {
-        if !cuda_or_rocm_device(self.up_proj_t.device()) {
-            anyhow::bail!(
-                "up_proj_t_kt: up_proj_t must be on CUDA/ROCm for the kt borrow (got {:?})",
-                self.up_proj_t.device().location()
-            );
-        }
-        let contig = self
-            .up_proj_t
-            .contiguous()
-            .context("up_proj_t_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.up_proj_t, "up_proj_t_kt")
     }
 
     /// kt-native view of the pre-transposed SwiGLU down projection
     /// (#1082, MLP/FFN region migration — region 2). Shape
-    /// `[intermediate, hidden]`. Same contiguity / CUDA-only contract as
+    /// `[intermediate, hidden]`. Same kt-native contiguity contract as
     /// [`GpuFfnWeights::gate_proj_t_kt`]; used for the final
     /// `hidden @ down_proj_t` matmul in [`kt_swiglu_ffn_native`].
     #[cfg(any(feature = "cuda", feature = "rocm"))]
     pub fn down_proj_t_kt(&self) -> Result<KtTensor> {
-        if !cuda_or_rocm_device(self.down_proj_t.device()) {
-            anyhow::bail!(
-                "down_proj_t_kt: down_proj_t must be on CUDA/ROCm for the kt borrow (got {:?})",
-                self.down_proj_t.device().location()
-            );
-        }
-        let contig = self
-            .down_proj_t
-            .contiguous()
-            .context("down_proj_t_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.down_proj_t, "down_proj_t_kt")
     }
 }
 
@@ -6385,60 +6118,22 @@ impl GpuWeights {
     /// kt-native view of the token-embedding table (#1082, embedding
     /// region migration).
     ///
-    /// Borrows `embed_tokens` ([vocab, hidden]) as a `KtTensor` via the
-    /// zero-copy CUDA bridge so the embedding region can run its gather
-    /// (`kiln_tensor::cuda_index_select_dim0`) on kt storage without the
-    /// caller re-borrowing the candle field each call. `embed_tokens` is
-    /// uploaded contiguous at load (`from_model_weights`), so the
-    /// `contiguous()` here is a cheap Arc clone in the common case; it is
-    /// kept defensively because the bridge borrow requires contiguity.
-    ///
-    /// CUDA-only: the borrow adapter requires a CUDA device. Returns a
-    /// typed error on non-CUDA (callers fall through to the candle
-    /// `index_select` path). Public signatures of the embedding
-    /// functions stay candle-typed — this accessor is the explicit
-    /// candle→kt boundary at the weight side.
-    #[cfg(feature = "cuda")]
+    /// Returns `embed_tokens` ([vocab, hidden]) as a contiguous `KtTensor`.
+    /// The tensor is already kt-native, so backend eligibility belongs to the
+    /// caller's request dispatch rather than this accessor.
     pub fn embed_tokens_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.embed_tokens.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "embed_tokens_kt: embed_tokens must be on CUDA for the kt borrow \
-                 (got {:?})",
-                self.embed_tokens.device().location()
-            );
-        }
-        let contig = self
-            .embed_tokens
-            .contiguous()
-            .context("embed_tokens_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.embed_tokens, "embed_tokens_kt")
     }
 
     /// kt-native view of the pre-transposed token-embedding table
     /// (#1082, lm_head region migration).
     ///
-    /// Borrows `embed_tokens_t` ([hidden, vocab], contiguous since load)
-    /// as a `KtTensor` so the lm_head region's final projection
-    /// (`hidden @ embed_tokens_t`) can dispatch through
-    /// `kiln_tensor::cuda_matmul` on kt storage. Same contiguity /
-    /// CUDA-only contract as [`GpuWeights::embed_tokens_kt`].
-    ///
-    /// This is the weight-side candle→kt boundary for the lm_head
-    /// region; the hidden-state side bridges in the lm_head helper.
-    #[cfg(feature = "cuda")]
+    /// Returns `embed_tokens_t` ([hidden, vocab], contiguous since load) as a
+    /// contiguous `KtTensor`. This is the weight-side kt accessor for the
+    /// lm-head region; backend-specific routing is owned by the matmul request
+    /// dispatch at the call site.
     pub fn embed_tokens_t_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.embed_tokens_t.device(), Device::Cuda(_)) {
-            anyhow::bail!(
-                "embed_tokens_t_kt: embed_tokens_t must be on CUDA for the kt borrow \
-                 (got {:?})",
-                self.embed_tokens_t.device().location()
-            );
-        }
-        let contig = self
-            .embed_tokens_t
-            .contiguous()
-            .context("embed_tokens_t_kt: contiguous")?;
-        Ok(contig)
+        kt_contiguous(&self.embed_tokens_t, "embed_tokens_t_kt")
     }
 
     /// Convert `ModelWeights` (CPU bytes) into candle tensors on the given device.
