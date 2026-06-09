@@ -21,17 +21,23 @@
   <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/og-image.png">
 
   <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="css/fonts.css">
+  <link rel="stylesheet" href="css/kiln.css">
   <style>
+    /* Page-local tokens warmed to the canonical Kiln ink ramp (matches the
+       server dashboard + css/kiln.css). Inline rules below win over kiln.css
+       for this page's pre-existing Tailwind-era classes (.card/.pill/etc.);
+       kiln.css supplies the shared connect-band / flywheel / icon components. */
     :root {
       color-scheme: dark;
-      --bg: #0b0d10;
-      --bg-soft: #11141a;
-      --bg-soft-2: #161a22;
-      --line: #1f2530;
-      --line-2: #2a3140;
-      --fg: #e6e9ef;
-      --fg-dim: #a4adbb;
-      --fg-mute: #6f7888;
+      --bg: #0a0908;
+      --bg-soft: #181613;
+      --bg-soft-2: #1d1b17;
+      --line: #2b2720;
+      --line-2: #443c31;
+      --fg: #f7f4ef;
+      --fg-dim: #b0a895;
+      --fg-mute: #938b79;
       --accent: #f97316;
       --accent-soft: rgba(249, 115, 22, 0.12);
     }
@@ -39,8 +45,8 @@
     body {
       background: var(--bg);
       color: var(--fg);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-      font-feature-settings: "ss01", "cv02", "cv11";
+      font-family: 'Inter', 'Inter Fallback', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-feature-settings: "cv02", "cv03", "cv04", "cv11";
       -webkit-font-smoothing: antialiased;
     }
     .skip-link {
@@ -79,7 +85,7 @@
     .hero-glow {
       background:
         radial-gradient(60% 50% at 50% 0%, rgba(249,115,22,0.10), transparent 70%),
-        radial-gradient(40% 35% at 80% 20%, rgba(56,189,248,0.06), transparent 70%);
+        radial-gradient(40% 35% at 80% 20%, rgba(249,115,22,0.05), transparent 70%);
     }
     .card {
       background: var(--bg-soft);
@@ -155,11 +161,9 @@
       letter-spacing: 0.04em;
       text-transform: uppercase;
     }
-    .installer-table th:last-child,
-    .installer-table td:last-child {
-      width: 5.5rem;
-      text-align: right;
-      white-space: nowrap;
+    .installer-table th:first-child,
+    .installer-table td:first-child {
+      width: 11rem;
     }
     a { color: #f3c891; }
     a:hover { color: var(--accent); }
@@ -229,11 +233,28 @@
 </head>
 <body class="min-h-screen">
   <a class="skip-link" href="#content">Skip to content</a>
+
+  <!-- Inline icon sprite — mirrors the server dashboard #i-* symbols. -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+    <symbol id="i-stack" viewBox="0 0 24 24"><path d="M4 8.5l8 4 8-4"/><path d="M6 12.6l6 3 6-3"/><path d="M8 16.7l4 2 4-2"/></symbol>
+    <symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 4.5 13.5H11l-1 8.5L19.5 10H13l0-8Z"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="M9.5 14.5 14.5 9.5"/><path d="M11 6.5 12.2 5.3a4 4 0 0 1 5.7 5.7l-1.2 1.2"/><path d="M13 17.5l-1.2 1.2a4 4 0 0 1-5.7-5.7l1.2-1.2"/></symbol>
+    <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l3 8 4-16 3 8h4"/></symbol>
+    <symbol id="i-flask" viewBox="0 0 24 24"><path d="M9 3h6"/><path d="M10 3v6.5L5.2 18A1.6 1.6 0 0 0 6.6 21h10.8a1.6 1.6 0 0 0 1.4-3L14 9.5V3"/><path d="M7.6 14.5h8.8"/></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 20V4"/><path d="M4 20h16"/><path d="M8 20v-6"/><path d="M13 20V9"/><path d="M18 20v-4"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3"/><path d="M13 15h4"/></symbol>
+    <symbol id="i-merge" viewBox="0 0 24 24"><path d="M7 21V8"/><path d="M17 21v-6a4 4 0 0 0-4-4H7"/><path d="m4 11 3-3 3 3"/><path d="M14 18l3 3 3-3"/></symbol>
+  </defs></svg>
+
   <!-- nav -->
   <header class="border-b" style="border-color: var(--line);">
     <div class="site-nav-bar max-w-5xl mx-auto px-6 py-4">
-      <a href="./" class="flex items-center gap-2.5">
-        <img src="assets/logo.png" alt="" width="28" height="28" class="rounded">
+      <a href="./" class="flex items-center gap-2.5" style="color: var(--fg);">
+        <span class="brand-mark" aria-hidden="true"><svg class="brand-flame" viewBox="0 0 24 24"><use href="#i-stack"></use></svg></span>
         <span class="text-lg font-semibold tracking-tight">Kiln</span>
       </a>
       <nav class="site-nav text-sm">
@@ -257,15 +278,15 @@
     <div class="max-w-4xl mx-auto px-6 pt-16 pb-10">
       <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">Quickstart &middot; 5-minute path &middot; Qwen3.5-4B</span>
       <h1 class="text-4xl sm:text-5xl font-bold tracking-tight mb-5 leading-tight">
-        Run Kiln, open the UI, and send one chat request.
+        Install Kiln, start the server, point your agent at it.
       </h1>
       <p class="text-lg leading-relaxed max-w-3xl" style="color: var(--fg-dim);">
-        Start with the Desktop App if you want the shortest path. Use a server binary or Docker when you want a terminal-first setup. Every path serves the same single target model: <code>Qwen/Qwen3.5-4B</code>.
+        Three steps to a coding agent backed by your own GPU: install Kiln, start the server, then connect <strong style="color: var(--fg);">pi</strong> or <strong style="color: var(--fg);">opencode</strong> to one local endpoint. Every request your agent makes becomes training data. Every path serves the same target model: <code>Qwen/Qwen3.5-4B</code>.
       </p>
       <div class="mt-8 flex flex-wrap gap-3">
-        <a href="#install" class="btn-primary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Choose an install path</a>
+        <a href="#install" class="btn-primary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Install Kiln</a>
+        <a href="#pi-agent" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Connect your agent</a>
         <a href="#verify" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Verify the server</a>
-        <a href="#pi-agent" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Configure pi</a>
       </div>
     </div>
   </section>
@@ -309,45 +330,31 @@
         <div class="install-card">
           <h3 class="font-semibold mb-2">Desktop App &middot; recommended</h3>
           <p class="mb-3" style="color: var(--fg-dim);">
-            Download <a href="https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.16">Kiln Desktop v0.2.16</a>, then choose or download the Qwen3.5-4B model in the app and start the server from the GUI.
+            Download <a href="https://github.com/ericflo/kiln/releases/latest">the latest Kiln Desktop build</a>, then choose or download the Qwen3.5-4B model in the app and start the server from the GUI.
           </p>
           <table class="installer-table mb-3" aria-label="Kiln Desktop installer downloads">
             <thead>
               <tr>
                 <th scope="col">Platform</th>
                 <th scope="col">Installer</th>
-                <th scope="col">Size</th>
               </tr>
             </thead>
             <tbody>
               <tr>
                 <td>macOS Apple Silicon</td>
-                <td><a href="https://github.com/ericflo/kiln/releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_aarch64.dmg">Kiln.Desktop_0.2.16_aarch64.dmg</a></td>
-                <td>8.5 MB</td>
+                <td><a href="https://github.com/ericflo/kiln/releases/latest">.dmg &middot; latest release</a></td>
               </tr>
               <tr>
                 <td>Windows</td>
-                <td><a href="https://github.com/ericflo/kiln/releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_x64-setup.exe">Kiln.Desktop_0.2.16_x64-setup.exe</a> (NSIS)</td>
-                <td>4.5 MB</td>
-              </tr>
-              <tr>
-                <td>Windows</td>
-                <td><a href="https://github.com/ericflo/kiln/releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_x64_en-US.msi">Kiln.Desktop_0.2.16_x64_en-US.msi</a> (MSI)</td>
-                <td>6.8 MB</td>
+                <td><a href="https://github.com/ericflo/kiln/releases/latest">.exe (NSIS) / .msi &middot; latest release</a></td>
               </tr>
               <tr>
                 <td>Linux</td>
-                <td><a href="https://github.com/ericflo/kiln/releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_amd64.deb">Kiln.Desktop_0.2.16_amd64.deb</a></td>
-                <td>8.8 MB</td>
-              </tr>
-              <tr>
-                <td>Linux</td>
-                <td><a href="https://github.com/ericflo/kiln/releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_amd64.AppImage">Kiln.Desktop_0.2.16_amd64.AppImage</a></td>
-                <td>85.7 MB</td>
+                <td><a href="https://github.com/ericflo/kiln/releases/latest">.deb / .AppImage &middot; latest release</a></td>
               </tr>
             </tbody>
           </table>
-          <p class="text-sm" style="color: var(--fg-mute);">Desktop and server release lines intentionally differ: <code>desktop-v0.2.16</code> is the latest Desktop app release, and the app downloads and verifies the latest <code>kiln-v*</code> server binary for you.</p>
+          <p class="text-sm" style="color: var(--fg-mute);">Desktop and server release lines intentionally differ: the Desktop app ships under <code>desktop-v*</code> tags, downloads and verifies the latest <code>kiln-v*</code> server binary for you, and the links above always resolve to the newest release.</p>
         </div>
         <div class="install-card">
           <h3 class="font-semibold mb-2">Linux x86_64 &middot; CUDA 12.4</h3>
@@ -391,37 +398,131 @@ Expand-Archive .\kiln-windows.zip -DestinationPath .\kiln</code></pre>
   </section>
 
   <!-- model and serve -->
-  <section class="divider">
-    <div class="max-w-5xl mx-auto px-6 py-12 grid lg:grid-cols-2 gap-6">
-      <div class="card p-6">
-        <div class="flex items-start gap-3 mb-4">
-          <span class="step">2</span>
-          <div>
-            <p class="label mb-2">Model path</p>
-            <h2 class="text-2xl font-semibold tracking-tight">Download Qwen3.5-4B</h2>
-          </div>
+  <section id="serve" class="divider">
+    <div class="max-w-5xl mx-auto px-6 py-12">
+      <div class="flex items-start gap-3 mb-6">
+        <span class="step">2</span>
+        <div>
+          <p class="label mb-2">Model path + start</p>
+          <h2 class="text-2xl font-semibold tracking-tight">Start the server</h2>
         </div>
-        <p class="mb-4" style="color: var(--fg-dim);">Point <code>KILN_MODEL_PATH</code> at a local checkout of <code>Qwen/Qwen3.5-4B</code>.</p>
+      </div>
+      <div class="grid lg:grid-cols-2 gap-6">
+        <div class="card p-6">
+          <h3 class="font-semibold mb-2">a. Download Qwen3.5-4B</h3>
+          <p class="mb-4" style="color: var(--fg-dim);">Point <code>KILN_MODEL_PATH</code> at a local checkout of <code>Qwen/Qwen3.5-4B</code>.</p>
 <pre class="text-sm"><code>pip install huggingface-hub
 huggingface-cli download Qwen/Qwen3.5-4B --local-dir ./Qwen3.5-4B
 export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
-      </div>
-      <div class="card p-6">
-        <div class="flex items-start gap-3 mb-4">
-          <span class="step">3</span>
-          <div>
-            <p class="label mb-2">Start</p>
-            <h2 class="text-2xl font-semibold tracking-tight">Run the server</h2>
-          </div>
         </div>
-        <p class="mb-4" style="color: var(--fg-dim);">Server binaries bind to <code>127.0.0.1:8420</code> by default.</p>
+        <div class="card p-6">
+          <h3 class="font-semibold mb-2">b. Run <code>kiln serve</code></h3>
+          <p class="mb-4" style="color: var(--fg-dim);">Server binaries bind to <code>127.0.0.1:8420</code> by default. No API key required.</p>
 <pre class="text-sm"><code>KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve</code></pre>
-        <h3 class="font-semibold mt-6 mb-2">Docker (Linux + NVIDIA Container Toolkit)</h3>
+          <h3 class="font-semibold mt-6 mb-2">Docker (Linux + NVIDIA Container Toolkit)</h3>
 <pre class="text-sm"><code>docker run --gpus all -p 8420:8420 \
   -e KILN_MODEL_PATH=/models/Qwen3.5-4B \
   -v "$PWD/Qwen3.5-4B:/models/Qwen3.5-4B:ro" \
   ghcr.io/ericflo/kiln-server:latest serve</code></pre>
+        </div>
       </div>
+    </div>
+  </section>
+
+  <!-- ===============================================================
+       Step 3 — Connect your agent. The centerpiece: pi + opencode side
+       by side. Anchor #pi-agent preserved (legacy deep links + hero CTA).
+       =============================================================== -->
+  <section id="pi-agent" class="divider">
+    <div class="max-w-5xl mx-auto px-6 py-14">
+      <div class="flex items-start gap-3 mb-6">
+        <span class="step">3</span>
+        <div>
+          <p class="label mb-2">The #1 thing to do with Kiln</p>
+          <h2 class="text-3xl font-bold tracking-tight">Connect your agent</h2>
+        </div>
+      </div>
+      <p class="max-w-3xl mb-8 text-lg leading-relaxed" style="color: var(--fg-dim);">
+        Point <strong style="color: var(--fg);">pi</strong> or <strong style="color: var(--fg);">opencode</strong> at the server you just started. There is no SDK to swap and no key to generate — change the base URL and keep your agent. Every request it makes streams into <code>/ui</code> as training data you can later turn into a better adapter.
+      </p>
+
+      <!-- dashboard-style fact block -->
+      <div class="grid sm:grid-cols-3 gap-4 mb-8">
+        <div class="card p-4">
+          <p class="label mb-2" style="font-size:0.66rem;">Base URL</p>
+          <div class="copy-field">
+            <code id="qs-base-url">http://localhost:8420/v1</code>
+            <button class="copy-btn" type="button" data-target="qs-base-url" aria-label="Copy base URL"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg>Copy</button>
+          </div>
+        </div>
+        <div class="card p-4">
+          <p class="label mb-2" style="font-size:0.66rem;">Model id</p>
+          <div class="copy-field">
+            <code id="qs-model">Qwen3.5-4B</code>
+            <button class="copy-btn" type="button" data-target="qs-model" aria-label="Copy model id"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg>Copy</button>
+          </div>
+        </div>
+        <div class="card p-4">
+          <p class="label mb-2" style="font-size:0.66rem;">API key</p>
+          <span class="connect-keychip" style="width:100%;">
+            <svg class="icn icn-sm" aria-hidden="true"><use href="#i-check"></use></svg>
+            Not required — any value works
+          </span>
+        </div>
+      </div>
+
+      <!-- pi + opencode side by side -->
+      <div class="grid lg:grid-cols-2 gap-6">
+        <div class="card p-6">
+          <h3 class="font-semibold mb-1 text-lg">pi</h3>
+          <p class="mb-3" style="color: var(--fg-dim);">
+            <code>kiln pi-setup</code> adds Kiln as pi's <code>kiln-local</code> provider and sets <code>Qwen3.5-4B</code> as the default model. It backs up existing <code>models.json</code> and <code>settings.json</code>, then merges the Kiln entries while preserving your other providers.
+          </p>
+<pre class="text-sm"><code>kiln pi-setup
+pi -p "Use the bash tool to run: pwd"
+
+# Remote server? /v1 is appended for you:
+kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
+          <p class="text-sm mt-3" style="color: var(--fg-mute);">Backups are written beside the originals as <code>models.json.bak-&lt;timestamp&gt;</code> and <code>settings.json.bak-&lt;timestamp&gt;</code>.</p>
+        </div>
+        <div class="card p-6">
+          <h3 class="font-semibold mb-1 text-lg">opencode</h3>
+          <p class="mb-3" style="color: var(--fg-dim);">
+            Add a Kiln provider to <code>~/.config/opencode/opencode.json</code>, then run <code>opencode</code> and pick <strong style="color: var(--fg);">Kiln · Qwen3.5-4B</strong> with <code>/models</code>. Uses the OpenAI-compatible AI SDK adapter — no API key needed.
+          </p>
+<pre class="text-sm"><code>{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "kiln": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Kiln (local)",
+      "options": {
+        "baseURL": "http://localhost:8420/v1",
+        "apiKey": "unused"
+      },
+      "models": {
+        "Qwen3.5-4B": { "name": "Kiln · Qwen3.5-4B" }
+      }
+    }
+  }
+}</code></pre>
+        </div>
+      </div>
+
+      <!-- success cue -->
+      <div class="card p-5 mt-6" style="border-color: rgba(74,222,128,0.30); background: rgba(74,222,128,0.06);">
+        <h3 class="font-semibold mb-1 flex items-center gap-2" style="color: #4ade80;">
+          <svg class="icn icn-sm" aria-hidden="true" style="color:#4ade80;"><use href="#i-check"></use></svg>
+          You should now see this request in /ui
+        </h3>
+        <p style="color: var(--fg-dim);">
+          Open <a href="http://127.0.0.1:8420/ui">http://127.0.0.1:8420/ui</a> and watch <strong style="color: var(--fg);">Recent requests</strong>. The first call from pi or opencode appears within seconds, tagged with its client — proof your agent is wired in and its traffic is being captured.
+        </p>
+      </div>
+
+      <p class="text-sm mt-4" style="color: var(--fg-mute);">
+        Qwen3.5 can emit native XML tool calls, but Kiln returns OpenAI-shaped <code>tool_calls</code> to your agent in both streaming and non-streaming responses, so pi and opencode execute tools instead of printing raw XML.
+      </p>
     </div>
   </section>
 
@@ -451,6 +552,7 @@ export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
 <pre class="text-sm"><code>curl -s http://127.0.0.1:8420/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
+    "model": "Qwen3.5-4B",
     "messages": [{"role": "user", "content": "What is 2+2?"}],
     "max_tokens": 64,
     "temperature": 0.7
@@ -471,40 +573,17 @@ export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
     </div>
   </section>
 
-  <section id="pi-agent" class="divider">
+  <!-- next / train -->
+  <section id="train" class="divider">
     <div class="max-w-5xl mx-auto px-6 py-12">
-      <p class="label mb-2">Agent setup</p>
-      <h2 class="text-2xl font-semibold tracking-tight mb-4">Point pi at Kiln without clobbering pi config</h2>
-      <p class="max-w-3xl mb-6" style="color: var(--fg-dim);">
-        After the server is healthy, <code>kiln pi-setup</code> adds Kiln as pi's <code>kiln-local</code> provider and sets <code>Qwen3.5-4B</code> as the default model. It backs up existing <code>models.json</code> and <code>settings.json</code>, then merges the Kiln entries while preserving other providers and settings.
-      </p>
-      <div class="grid lg:grid-cols-3 gap-4">
-        <div class="card p-5">
-          <h3 class="font-semibold mb-2">Local server</h3>
-<pre class="text-sm"><code>kiln pi-setup
-pi -p "Use the bash tool to run: pwd"</code></pre>
-        </div>
-        <div class="card p-5">
-          <h3 class="font-semibold mb-2">Remote server</h3>
-<pre class="text-sm"><code>kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
-          <p class="text-sm mt-3" style="color: var(--fg-mute);">The helper appends <code>/v1</code> when the URL does not already include it.</p>
-        </div>
-        <div class="card p-5">
-          <h3 class="font-semibold mb-2">Tool calls</h3>
-          <p style="color: var(--fg-dim);">Qwen3.5 can generate native XML tool calls, but Kiln returns OpenAI-shaped <code>tool_calls</code> to pi in both streaming and non-streaming responses.</p>
+      <div class="flex items-start gap-3 mb-6">
+        <span class="step">5</span>
+        <div>
+          <p class="label mb-2">Turn traffic into a better model</p>
+          <h2 class="text-2xl font-semibold tracking-tight">Train &amp; evaluate</h2>
         </div>
       </div>
-      <p class="text-sm mt-4" style="color: var(--fg-mute);">
-        Backup files are written beside the originals as <code>models.json.bak-&lt;timestamp&gt;</code> and <code>settings.json.bak-&lt;timestamp&gt;</code>.
-      </p>
-    </div>
-  </section>
-
-  <!-- next -->
-  <section class="divider">
-    <div class="max-w-5xl mx-auto px-6 py-12">
-      <h2 class="text-2xl font-semibold tracking-tight mb-4">Where to go next</h2>
-      <div class="card p-5 mb-4" style="background: rgba(168, 85, 247, 0.08); border-color: rgba(168, 85, 247, 0.22);">
+      <div class="card p-5 mb-4" style="background: var(--bg-soft-2); border-color: var(--line-2);">
         <h3 class="font-semibold mb-2">Training file shapes at a glance</h3>
         <p style="color: var(--fg-dim);">
           <code>kiln train sft</code> reads <strong>SFT JSONL</strong>: one chat correction per line, each with a <code>messages</code> array.
@@ -552,6 +631,43 @@ pi -p "Use the bash tool to run: pwd"</code></pre>
           <p style="color: var(--fg-dim);">Understand the scheduler, block manager, GDN model path, and hot-swap design.</p>
         </a>
       </div>
+
+      <!-- The loop — flywheel ribbon echoing the dashboard. Each node links
+           to its guide: Agents → Traffic → Train → Eval → Hot-swap. -->
+      <div class="flywheel-wrap mt-10">
+        <div class="flywheel-title"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-refresh"></use></svg> The loop <span class="flywheel-tagline">— your model gets better every time you use it</span></div>
+        <div class="flywheel" role="group" aria-label="The improvement loop">
+          <a class="flywheel-node hot" href="#pi-agent">
+            <span class="fw-eyebrow"><svg class="icn" aria-hidden="true"><use href="#i-link"></use></svg> Agents</span>
+            <span class="fw-value">pi · opencode</span>
+            <span class="fw-sub">connect your agent</span>
+          </a>
+          <span class="flywheel-arrow" aria-hidden="true"><svg class="icn"><use href="#i-arrow-right"></use></svg></span>
+          <a class="flywheel-node" href="#verify">
+            <span class="fw-eyebrow"><svg class="icn" aria-hidden="true"><use href="#i-activity"></use></svg> Traffic</span>
+            <span class="fw-value">/ui</span>
+            <span class="fw-sub">captured requests</span>
+          </a>
+          <span class="flywheel-arrow" aria-hidden="true"><svg class="icn"><use href="#i-arrow-right"></use></svg></span>
+          <a class="flywheel-node" href="grpo.html">
+            <span class="fw-eyebrow"><svg class="icn" aria-hidden="true"><use href="#i-flask"></use></svg> Train</span>
+            <span class="fw-value">SFT · GRPO</span>
+            <span class="fw-sub">over HTTP</span>
+          </a>
+          <span class="flywheel-arrow" aria-hidden="true"><svg class="icn"><use href="#i-arrow-right"></use></svg></span>
+          <a class="flywheel-node" href="evals.html">
+            <span class="fw-eyebrow"><svg class="icn" aria-hidden="true"><use href="#i-chart"></use></svg> Eval</span>
+            <span class="fw-value">Prove it</span>
+            <span class="fw-sub">suites &amp; A/B</span>
+          </a>
+          <span class="flywheel-arrow" aria-hidden="true"><svg class="icn"><use href="#i-arrow-right"></use></svg></span>
+          <a class="flywheel-node" href="api.html#adapters">
+            <span class="fw-eyebrow"><svg class="icn" aria-hidden="true"><use href="#i-merge"></use></svg> Hot-swap</span>
+            <span class="fw-value">No restart</span>
+            <span class="fw-sub">live adapter</span>
+          </a>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -561,7 +677,7 @@ pi -p "Use the bash tool to run: pwd"</code></pre>
   <footer class="divider">
     <div class="max-w-5xl mx-auto px-6 py-10 flex flex-wrap gap-x-6 gap-y-2 items-center justify-between text-sm" style="color: var(--fg-mute);">
       <div class="flex items-center gap-2.5">
-        <img src="assets/logo.png" alt="" width="20" height="20" class="rounded">
+        <span class="brand-mark" aria-hidden="true" style="width:20px;height:20px;"><svg class="brand-flame" viewBox="0 0 24 24" style="width:13px;height:13px;"><use href="#i-stack"></use></svg></span>
         <span>Kiln &middot; MIT licensed</span>
       </div>
       <nav class="flex flex-wrap gap-x-5 gap-y-1">
@@ -643,6 +759,37 @@ pi -p "Use the bash tool to run: pwd"</code></pre>
             button.classList.remove("is-copied");
           }, resetDelay);
         });
+      });
+
+      // Copy buttons that target a specific element by id (connect fact block:
+      // Base URL / Model id). These are not inside <pre>, so handle them here.
+      document.addEventListener("click", (e) => {
+        const btn = e.target.closest(".copy-btn[data-target]");
+        if (!btn) return;
+        const target = document.getElementById(btn.dataset.target);
+        if (!target) return;
+        const text = target.textContent.replace(/ /g, " ").trim();
+        const label = btn.querySelector("svg") ? null : btn;
+        const restore = btn.innerHTML;
+        const done = () => {
+          btn.dataset.copied = "1";
+          btn.classList.add("is-copied");
+          if (label) btn.textContent = "Copied"; else btn.lastChild.textContent = "Copied";
+          window.setTimeout(() => {
+            delete btn.dataset.copied;
+            btn.classList.remove("is-copied");
+            btn.innerHTML = restore;
+          }, resetDelay);
+        };
+        if (navigator.clipboard && window.isSecureContext) {
+          navigator.clipboard.writeText(text).then(done).catch(done);
+        } else {
+          const ta = document.createElement("textarea");
+          ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+          document.body.appendChild(ta); ta.select();
+          try { document.execCommand("copy"); } catch (_) {}
+          document.body.removeChild(ta); done();
+        }
       });
     })();
   </script>

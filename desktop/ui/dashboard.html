@@ -5,621 +5,211 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Kiln Dashboard</title>
     <style>
-      html, body {
-        margin: 0;
-        padding: 0;
-        height: 100%;
-        width: 100%;
-        background: #0f1115;
-        color: #e6e6e6;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-        overflow: hidden;
-      }
-      #frame {
-        display: block;
-        width: 100vw;
-        height: 100vh;
-        border: 0;
-        background: #0f1115;
-      }
-      #status {
-        position: absolute;
-        inset: 0;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        padding: 32px;
-        box-sizing: border-box;
-        text-align: center;
-        background: #0f1115;
-      }
-      #status h1 {
-        font-size: 18px;
-        margin: 0 0 8px 0;
-        font-weight: 600;
-      }
-      #status p {
-        margin: 4px 0;
-        color: #a8aeb8;
-        font-size: 14px;
-        max-width: 440px;
-      }
-      #status p.help-links {
-        margin-top: 14px;
-        font-size: 12px;
-      }
-      #status a.doc-link {
-        color: #5f9bff;
-        text-decoration: none;
-      }
-      #status a.doc-link:hover { text-decoration: underline; }
-      #status code {
-        background: #1b1e24;
-        padding: 2px 6px;
-        border-radius: 4px;
-        font-size: 13px;
-      }
-      button {
-        margin-top: 16px;
-        background: #2a6df4;
-        color: #fff;
-        border: 0;
-        border-radius: 6px;
-        padding: 8px 14px;
-        font-size: 13px;
-        cursor: pointer;
-      }
-      button:hover { background: #3b7af5; }
-      button:disabled { background: #2a2f3a; cursor: default; }
-      .hidden { display: none !important; }
-      #status-actions {
-        display: flex;
-        gap: 8px;
-        justify-content: center;
-      }
-      #install {
-        position: absolute;
-        inset: 0;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        padding: 32px;
-        box-sizing: border-box;
-        text-align: center;
-        background: #0f1115;
-      }
-      #install h1 {
-        font-size: 20px;
-        margin: 0 0 8px 0;
-        font-weight: 600;
-      }
-      #install p {
-        margin: 4px 0 12px 0;
-        color: #a8aeb8;
-        font-size: 14px;
-        max-width: 560px;
-        line-height: 1.5;
-      }
-      #install code {
-        background: #1b1e24;
-        padding: 2px 6px;
-        border-radius: 4px;
-        font-size: 12px;
-        font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", "Courier New", monospace;
-      }
-      #install-progress-wrap {
-        width: 420px;
-        max-width: 80vw;
-        height: 10px;
-        background: #1b1e24;
-        border: 1px solid #2a2f3a;
-        border-radius: 5px;
-        overflow: hidden;
-        margin: 14px 0 6px 0;
-      }
-      #install-progress-bar {
-        height: 100%;
-        width: 0;
-        background: #2a6df4;
-        transition: width 120ms ease;
-      }
-      #install-progress-label {
-        color: #a8aeb8;
-        font-size: 12px;
-        font-variant-numeric: tabular-nums;
-        min-height: 16px;
-      }
-      #install-actions {
-        display: flex;
-        gap: 10px;
-        justify-content: center;
-        margin-top: 18px;
-      }
-      #install-actions button {
-        margin-top: 0;
-      }
-      #install-actions button.secondary {
-        background: #232733;
-        color: #e6e6e6;
-      }
-      #install-actions button.secondary:hover { background: #2c313f; }
-      #install a.doc-link {
-        color: #5f9bff;
-        font-size: 12px;
-        text-decoration: none;
-      }
-      #install a.doc-link:hover { text-decoration: underline; }
-      #install.phase-ready #install-progress-wrap,
-      #install.phase-ready #install-progress-label { visibility: hidden; }
-      #install.phase-active #install-download-btn,
-      #install.phase-active #install-browse-btn { display: none; }
-      #install.phase-ready #install-cancel-btn,
-      #install.phase-done #install-cancel-btn,
-      #install.phase-failed #install-cancel-btn { display: none; }
-      #toolbar {
-        position: absolute;
-        top: 8px;
-        right: 12px;
-        left: 12px;
-        max-width: calc(100vw - 24px);
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: flex-end;
-        gap: 8px;
-        z-index: 10;
-        background: rgba(15, 17, 21, 0.85);
-        backdrop-filter: blur(4px);
-        padding: 6px 8px;
-        border-radius: 8px;
-      }
-      #toolbar button {
-        margin-top: 0;
-        background: #1b1e24;
-        color: #d8dbe2;
-        border: 1px solid #2a2f3a;
-        padding: 6px 10px;
-        font-size: 12px;
-      }
-      #toolbar button:hover { background: #232831; }
-      #update-banner {
-        position: absolute;
-        top: 58px;
-        left: 12px;
-        right: 12px;
-        max-width: calc(100vw - 24px);
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        z-index: 9;
-        background: rgba(90, 51, 36, 0.95);
-        border: 1px solid #7a432f;
-        color: #f2ddd6;
-        padding: 8px 12px;
-        border-radius: 8px;
-        font-size: 13px;
-      }
-      #update-banner-text { flex: 1; }
-      #update-banner button {
-        margin-top: 0;
-        background: #7a432f;
-        color: #f2ddd6;
-        border: 1px solid #a05a3f;
-        padding: 4px 10px;
-        font-size: 12px;
-      }
-      #update-banner button:hover { background: #a05a3f; }
-      #update-banner button.secondary {
-        background: transparent;
-        color: #f2ddd6;
-        border: 1px solid transparent;
-        padding: 2px 8px;
-        font-size: 16px;
-        line-height: 1;
-      }
-      #update-banner button.secondary:hover { background: rgba(255, 255, 255, 0.08); }
-      #toolbar button#stop-server:hover { background: #5a2424; border-color: #7a3232; color: #f2d6d6; }
-      #toolbar button#stop-server:disabled { background: #2a2f3a; color: #6c7280; cursor: default; }
-      #toolbar button#restart-server:hover { background: #3a4a6a; border-color: #4a5a7a; color: #d6e0f2; }
-      #toolbar button#restart-server:disabled { background: #2a2f3a; color: #6c7280; cursor: default; }
-      #toolbar .toolbar-divider {
-        width: 1px;
-        align-self: stretch;
-        background: #2a2f3a;
-        margin: 2px 4px;
-      }
-      #stop-server.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
-      #restart-server.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
-      #copy-url.flash { background: #245a32; border-color: #2f7a43; color: #d6f2dd; }
-      #copy-url.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
-      #check-updates-btn.flash { background: #245a32; border-color: #2f7a43; color: #d6f2dd; }
-      #check-updates-btn.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
-      #check-updates-btn:disabled { background: #2a2f3a; color: #6c7280; cursor: default; }
-      #model-path-pill.copyable { cursor: pointer; }
-      #model-path-pill.flash { background: #245a32; border-color: #2f7a43; color: #d6f2dd; }
-      #model-path-pill.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
-      #model-path-pill.flash #model-path,
-      #model-path-pill.flash-warn #model-path { color: inherit; }
-      #adapter-pill.copyable { cursor: pointer; }
-      #adapter-pill.flash { background: #245a32; border-color: #2f7a43; color: #d6f2dd; }
-      #adapter-pill.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
-      #adapter-pill.flash #adapter-name,
-      #adapter-pill.flash-warn #adapter-name { color: inherit; }
-      #vram-pill.copyable { cursor: pointer; }
-      #vram-pill.flash { background: #245a32; border-color: #2f7a43; color: #d6f2dd; }
-      #vram-pill.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
-      #vram-pill.flash #vram-value,
-      #vram-pill.flash-warn #vram-value { color: inherit; }
-      #base-url.copyable { cursor: pointer; }
-      #base-url.flash { background: #245a32; border-color: #2f7a43; color: #d6f2dd; }
-      #base-url.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
-      #status-badge {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        padding: 6px 10px;
-        font-size: 12px;
-        background: #1b1e24;
-        color: #a8aeb8;
-        border: 1px solid #2a2f3a;
-        border-radius: 6px;
-        user-select: none;
-      }
-      #status-badge .dot {
-        display: inline-block;
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        background: #6c7280;
-        flex-shrink: 0;
-      }
-      #status-badge.state-stopped .dot { background: #6c7280; }
-      #status-badge.state-starting .dot { background: #d4a64a; }
-      #status-badge.state-running .dot { background: #2f9e44; }
-      #status-badge.state-training .dot { background: #2a6df4; }
-      #status-badge.state-error .dot { background: #e03131; }
-      #status-badge.state-unknown .dot { background: #6c7280; }
-      #base-url {
-        display: inline-flex;
-        align-items: center;
-        padding: 6px 10px;
-        font-size: 12px;
-        font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", "Courier New", monospace;
-        background: #1b1e24;
-        color: #a8aeb8;
-        border: 1px solid #2a2f3a;
-        border-radius: 6px;
-        user-select: text;
-        cursor: text;
-        max-width: 280px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      #base-url.empty {
-        color: #6c7280;
-        font-family: inherit;
-        user-select: none;
-        cursor: default;
-      }
-      #model-path-pill {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        padding: 6px 10px;
-        font-size: 12px;
-        background: #1b1e24;
-        color: #a8aeb8;
-        border: 1px solid #2a2f3a;
-        border-radius: 6px;
-        max-width: 280px;
-        overflow: hidden;
-      }
-      #model-path-pill .model-label {
-        color: #6c7280;
-        font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 0.3px;
-        flex-shrink: 0;
-      }
-      #model-path {
-        font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", "Courier New", monospace;
-        background: transparent;
-        padding: 0;
-        font-size: 12px;
-        color: inherit;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        user-select: text;
-        min-width: 0;
-      }
-      #model-path.empty {
-        color: #6c7280;
-        font-family: inherit;
-        user-select: none;
-      }
-      #vram-pill {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        padding: 6px 10px;
-        font-size: 12px;
-        background: #1b1e24;
-        color: #a8aeb8;
-        border: 1px solid #2a2f3a;
-        border-radius: 6px;
-        overflow: hidden;
-      }
-      #vram-pill .vram-label {
-        color: #6c7280;
-        font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 0.3px;
-        flex-shrink: 0;
-      }
-      #vram-value {
-        font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", "Courier New", monospace;
-        background: transparent;
-        padding: 0;
-        font-size: 12px;
-        color: inherit;
-        white-space: nowrap;
-        user-select: text;
-      }
-      #vram-value.empty {
-        color: #6c7280;
-        font-family: inherit;
-        user-select: none;
-      }
-      #adapter-pill {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        padding: 6px 10px;
-        font-size: 12px;
-        background: #1b1e24;
-        color: #a8aeb8;
-        border: 1px solid #2a2f3a;
-        border-radius: 6px;
-        max-width: 220px;
-        overflow: hidden;
-      }
-      #adapter-pill .adapter-label {
-        color: #6c7280;
-        font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 0.3px;
-        flex-shrink: 0;
-      }
-      #adapter-name {
-        font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", "Courier New", monospace;
-        background: transparent;
-        padding: 0;
-        font-size: 12px;
-        color: inherit;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        user-select: text;
-        min-width: 0;
-      }
-      #adapter-name.empty {
-        color: #6c7280;
-        font-family: inherit;
-        user-select: none;
-      }
-      #training-pill {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        padding: 6px 10px;
-        font-size: 12px;
-        background: #1b1e24;
-        color: #a8aeb8;
-        border: 1px solid #2a2f3a;
-        border-radius: 6px;
-        max-width: 260px;
-        overflow: hidden;
-      }
-      #training-pill .training-label {
-        color: #6c7280;
-        font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 0.3px;
-        flex-shrink: 0;
-      }
-      #training-value {
-        font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", "Courier New", monospace;
-        background: transparent;
-        padding: 0;
-        font-size: 12px;
-        color: inherit;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        user-select: text;
-        min-width: 0;
-      }
-      #training-value.empty {
-        color: #6c7280;
-        font-family: inherit;
-        user-select: none;
-      }
-      .modal-overlay {
-        position: fixed;
-        inset: 0;
-        background: rgba(0, 0, 0, 0.55);
-        backdrop-filter: blur(4px);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        z-index: 1000;
-      }
-      .modal-overlay.hidden {
-        display: none !important;
-      }
-      .modal-card {
-        background: #1b1e24;
-        border: 1px solid #2a2f3a;
-        border-radius: 8px;
-        padding: 20px 24px;
-        max-width: 420px;
-        width: 90%;
-        max-height: 80vh;
-        overflow-y: auto;
-        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
-      }
-      .modal-card header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        margin: 0 0 14px 0;
-      }
-      .modal-card header h2 {
-        margin: 0;
-        font-size: 15px;
-        font-weight: 600;
-        color: #e6e6e6;
-      }
-      .modal-card header button#shortcuts-close {
-        margin: 0;
-        background: transparent;
-        color: #a8aeb8;
-        border: 0;
-        padding: 0 4px;
-        font-size: 22px;
-        line-height: 1;
-        cursor: pointer;
-      }
-      .modal-card header button#shortcuts-close:hover {
-        color: #e6e6e6;
-        background: transparent;
-      }
-      .modal-card dl {
-        display: grid;
-        grid-template-columns: 1fr auto;
-        column-gap: 16px;
-        row-gap: 10px;
-        margin: 0;
-        align-items: center;
-      }
-      .modal-card dt {
-        color: #d8dbe2;
-        font-size: 13px;
-      }
-      .modal-card dd {
-        margin: 0;
-        display: flex;
-        gap: 4px;
-        align-items: center;
-        justify-content: flex-end;
-        flex-wrap: wrap;
-      }
-      .modal-card kbd {
-        display: inline-block;
-        background: #0f1115;
-        border: 1px solid #2a2f3a;
-        border-radius: 4px;
-        padding: 2px 6px;
-        font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", "Courier New", monospace;
-        font-size: 11px;
-        color: #e6e6e6;
-        line-height: 1;
-      }
-      .modal-card p.hint {
-        margin: 14px 0 0 0;
-        color: #6c7280;
-        font-size: 11px;
-      }
+      html, body { margin: 0; padding: 0; height: 100%; width: 100%; overflow: hidden; }
+      #frame { display: block; width: 100vw; height: 100vh; border: 0; background: var(--bg); }
+      #frame.hidden { display: none !important; }
+      /* Pull the framed UI / landing states below the fixed app bar + strip. */
+      body.is-running #frame { height: calc(100vh - 54px); margin-top: 54px; }
     </style>
     <link rel="stylesheet" href="_kiln-tokens.css" />
   </head>
   <body>
-    <div id="toolbar">
-      <span id="status-badge" class="state-unknown" title="Kiln server state">
-        <span class="dot"></span>
-        <span class="label">Unknown</span>
-      </span>
-      <span id="model-path-pill" title="Configured model path — not set">
-        <span class="model-label">Model:</span>
+    <!-- Icon sprite — monochrome inline SVG (Lucide-style, 24px grid,
+         currentColor), shared with the server dashboard design system. -->
+    <svg width="0" height="0" style="position:absolute;width:0;height:0;overflow:hidden" aria-hidden="true" focusable="false"><defs>
+      <symbol id="i-stack" viewBox="0 0 24 24"><path d="M4 8.5l8 4 8-4"/><path d="M6 12.6l6 3 6-3"/><path d="M8 16.7l4 2 4-2"/></symbol>
+      <symbol id="i-flame" viewBox="0 0 24 24"><path d="M12 3c.6 2.4 2 3.7 3.2 5C16.6 9.6 18 11.3 18 14a6 6 0 0 1-12 0c0-1.6.7-3 1.8-4 .3 1.2 1.2 2 2.2 2 1.3 0 1.7-1.4 1-3-.5-1.1-1-2.3-1-3.4C10 5.3 11 4 12 3Z"/></symbol>
+      <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.2v13.6L19 12 8 5.2Z" fill="currentColor" stroke="none"/></symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.2"/></symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></symbol>
+      <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3"/><path d="M13 15h4"/></symbol>
+      <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M19.5 14a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 0 1-4 0v-.1a1.6 1.6 0 0 0-2.7-1.1l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0-1.1-2.7H3a2 2 0 0 1 0-4h.1a1.6 1.6 0 0 0 1.1-2.7l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V10a1.6 1.6 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.6 1.6 0 0 0-1.4 1z"/></symbol>
+      <symbol id="i-link" viewBox="0 0 24 24"><path d="M9.5 14.5 14.5 9.5"/><path d="M11 6.5 12.2 5.3a4 4 0 0 1 5.7 5.7l-1.2 1.2"/><path d="M13 17.5l-1.2 1.2a4 4 0 0 1-5.7-5.7l1.2-1.2"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+      <symbol id="i-warning" viewBox="0 0 24 24"><path d="M10.3 3.9 1.9 18a2 2 0 0 0 1.7 3h16.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9.5v4.5"/><path d="M12 17.5h.01"/></symbol>
+      <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11"/><path d="m7.5 10.5 4.5 4.5 4.5-4.5"/><path d="M5 20h14"/></symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24"><path d="M4 7a2 2 0 0 1 2-2h3l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7Z"/></symbol>
+      <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l3 8 4-16 3 8h4"/></symbol>
+      <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/></symbol>
+      <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></symbol>
+      <symbol id="i-flask" viewBox="0 0 24 24"><path d="M9 3h6"/><path d="M10 3v6.5L5.2 18A1.6 1.6 0 0 0 6.6 21h10.8a1.6 1.6 0 0 0 1.4-3L14 9.5V3"/><path d="M7.6 14.5h8.8"/></symbol>
+      <symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></symbol>
+      <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+    </defs></svg>
+
+    <!-- Top app bar: brand + state chip · click-to-copy base URL · lifecycle CTA + tools -->
+    <header id="toolbar" class="appbar">
+      <div class="appbar-left">
+        <span class="brand">
+          <span class="brand-mark" aria-hidden="true"><svg class="brand-flame" viewBox="0 0 24 24"><use href="#i-stack"></use></svg></span>
+          <span class="brand-name">Kiln</span>
+        </span>
+        <span id="status-badge" class="state-chip state-unknown" title="Kiln server state">
+          <span class="dot"></span>
+          <span class="label">Unknown</span>
+        </span>
+      </div>
+
+      <div class="appbar-center">
+        <div class="copy-field appbar-baseurl empty" title="OpenAI base URL — server not running">
+          <span class="copy-val empty" id="base-url">Server not running</span>
+          <button class="copy-btn" id="copy-url" type="button" title="Copy the OpenAI-compatible base URL for this server (Ctrl/Cmd+Shift+C)">
+            <svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg><span class="copy-btn-label">Copy</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="appbar-right">
+        <button id="start-toolbar" class="btn btn-primary hidden" type="button" title="Start the kiln server (Ctrl/Cmd+Shift+S)">
+          <svg class="icn icn-sm" aria-hidden="true"><use href="#i-play"></use></svg> <span class="btn-label">Start server</span>
+        </button>
+        <button id="stop-server" class="btn btn-danger hidden" type="button" title="Stop the running kiln server (Ctrl/Cmd+Shift+.)">
+          <svg class="icn icn-sm" aria-hidden="true"><use href="#i-stop"></use></svg> <span class="btn-label">Stop</span>
+        </button>
+        <button id="restart-server" class="btn btn-warm hidden" type="button" title="Restart the kiln server (Ctrl/Cmd+Shift+R)">
+          <svg class="icn icn-sm" aria-hidden="true"><use href="#i-refresh"></use></svg> <span class="btn-label">Restart</span>
+        </button>
+        <button id="open-logs" class="icon-btn" type="button" title="Open the log viewer window (Ctrl/Cmd+L)" aria-label="View logs">
+          <svg class="icn" aria-hidden="true"><use href="#i-terminal"></use></svg>
+        </button>
+        <button id="open-settings" class="icon-btn" type="button" title="Open the settings window (Ctrl/Cmd+,)" aria-label="Settings">
+          <svg class="icn" aria-hidden="true"><use href="#i-gear"></use></svg>
+        </button>
+        <button id="check-updates-btn" class="icon-btn" type="button" title="Check for an updated version of Kiln Desktop" aria-label="Check for updates">
+          <svg class="icn" aria-hidden="true"><use href="#i-refresh"></use></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Secondary status strip — visible only while running -->
+    <div class="status-strip" aria-live="polite">
+      <span id="model-path-pill" class="strip-item" title="Configured model path — not set">
+        <svg class="icn" aria-hidden="true"><use href="#i-layers"></use></svg>
+        <span class="strip-label">Model</span>
         <code id="model-path" class="empty">—</code>
       </span>
-      <code id="base-url" class="empty" title="OpenAI base URL — server not running">—</code>
-      <span id="vram-pill" title="Model / Total VRAM — server not running">
-        <span class="vram-label">VRAM:</span>
+      <span id="vram-pill" class="strip-item" title="Model / Total VRAM — server not running">
+        <svg class="icn" aria-hidden="true"><use href="#i-cpu"></use></svg>
+        <span class="strip-label">VRAM</span>
         <code id="vram-value" class="empty">—</code>
       </span>
-      <span id="adapter-pill" title="Active LoRA adapter — none">
-        <span class="adapter-label">Adapter:</span>
+      <span id="adapter-pill" class="strip-item" title="Active LoRA adapter — none">
+        <svg class="icn" aria-hidden="true"><use href="#i-activity"></use></svg>
+        <span class="strip-label">Adapter</span>
         <code id="adapter-name" class="empty">—</code>
       </span>
-      <span id="training-pill" title="Training status — server not running">
-        <span class="training-label">Training:</span>
+      <span id="training-pill" class="strip-item" title="Training status — server not running">
+        <svg class="icn" aria-hidden="true"><use href="#i-flask"></use></svg>
+        <span class="strip-label">Training</span>
         <code id="training-value" class="empty">—</code>
       </span>
-      <span class="toolbar-divider" aria-hidden="true"></span>
-      <button id="copy-url" title="Copy the OpenAI-compatible base URL for this server (Ctrl/Cmd+Shift+C)">Copy OpenAI base URL</button>
-      <button id="stop-server" class="hidden" title="Stop the running kiln server (Ctrl/Cmd+Shift+.)">Stop Server</button>
-      <button id="restart-server" class="hidden" title="Restart the kiln server (Ctrl/Cmd+Shift+R)">Restart Server</button>
-      <button id="open-logs" title="Open the log viewer window (Ctrl/Cmd+L)">View Logs</button>
-      <button id="open-settings" title="Open the settings window (Ctrl/Cmd+,)">Settings</button>
-      <button id="check-updates-btn" title="Check for an updated version of Kiln Desktop">Check for Updates</button>
     </div>
-    <div id="update-banner" class="hidden" role="status" aria-live="polite">
-      <span id="update-banner-text">A newer kiln server is available.</span>
-      <button id="update-banner-open-settings" title="Open settings to review and install">Open Settings</button>
-      <button id="update-banner-dismiss" class="secondary" title="Dismiss this banner for this session" aria-label="Dismiss">×</button>
+
+    <!-- Banners stack in normal flow below the app bar (no magic offset) -->
+    <div class="banner-stack">
+      <div id="update-banner" class="banner hidden" role="status" aria-live="polite">
+        <svg class="icn" aria-hidden="true"><use href="#i-download"></use></svg>
+        <span id="update-banner-text" class="banner-text">A newer kiln server is available.</span>
+        <button id="update-banner-open-settings" class="btn btn-sm" type="button" title="Open settings to review and install">Open Settings</button>
+        <button id="update-banner-dismiss" class="btn btn-sm btn-icon banner-dismiss" type="button" title="Dismiss this banner for this session" aria-label="Dismiss"><svg class="icn icn-sm"><use href="#i-close"></use></svg></button>
+      </div>
     </div>
+
     <iframe id="frame" class="hidden" title="Kiln UI"></iframe>
-    <div id="status">
-      <h1 id="status-title">Connecting to Kiln server…</h1>
-      <p id="status-detail">Looking up the server URL from your settings.</p>
-      <div id="status-actions">
-        <button id="start-server" class="hidden" title="Start the kiln server (Ctrl/Cmd+Shift+S)">Start Server</button>
-        <button id="retry" class="hidden">Retry</button>
-        <button id="open-settings-btn" class="hidden">Open Settings</button>
+
+    <!-- Status landing — connect-your-agent onboarding for non-running states -->
+    <div id="status" class="landing">
+      <div class="landing-inner">
+        <span class="brand-mark brand-mark-lg" aria-hidden="true"><svg class="brand-flame" viewBox="0 0 24 24"><use href="#i-stack"></use></svg></span>
+        <h1 id="status-title">Connecting to Kiln server…</h1>
+        <p id="status-detail">Looking up the server URL from your settings.</p>
+        <div id="status-actions" class="landing-actions">
+          <button id="start-server" class="btn btn-primary btn-lg hidden" type="button" title="Start the kiln server (Ctrl/Cmd+Shift+S)">
+            <svg class="icn icn-sm" aria-hidden="true"><use href="#i-play"></use></svg> <span class="btn-label">Start server</span>
+          </button>
+          <button id="retry" class="btn hidden" type="button"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-refresh"></use></svg> Retry</button>
+          <button id="open-settings-btn" class="btn hidden" type="button"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-gear"></use></svg> Open Settings</button>
+        </div>
+
+        <section class="card connect-card">
+          <div class="card-head">
+            <h2>Connect your agent</h2>
+            <span class="eyebrow">Point pi, opencode, or any OpenAI client at Kiln</span>
+          </div>
+          <div class="card-body">
+            <ol class="connect-steps">
+              <li class="connect-step" id="connect-step-model">
+                <span class="step-num"><span class="step-num-text">1</span></span>
+                <span class="step-body">
+                  <span class="step-title">Set or download a model <span class="step-ok hidden" id="connect-model-ok"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-check"></use></svg> Configured</span></span>
+                  <span class="step-sub">Browse to local weights or pull from HuggingFace in Settings.</span>
+                </span>
+              </li>
+              <li class="connect-step" id="connect-step-start">
+                <span class="step-num"><span class="step-num-text">2</span></span>
+                <span class="step-body">
+                  <span class="step-title">Start the server</span>
+                  <span class="step-sub">Click <strong>Start server</strong> above — it serves an OpenAI-compatible API.</span>
+                </span>
+              </li>
+              <li class="connect-step" id="connect-step-point">
+                <span class="step-num"><span class="step-num-text">3</span></span>
+                <span class="step-body">
+                  <span class="step-title">Point your agent</span>
+                  <span class="step-sub">Run one of these against <code id="connect-base">http://127.0.0.1:8000/v1</code>:</span>
+                  <div class="tabs connect-tabs" role="tablist" aria-label="Client setup" style="margin-top:var(--space-2);">
+                    <button class="tab active" type="button" role="tab" data-connect-tab="pi" aria-selected="true">pi</button>
+                    <button class="tab" type="button" role="tab" data-connect-tab="opencode" aria-selected="false">opencode</button>
+                    <button class="tab" type="button" role="tab" data-connect-tab="curl" aria-selected="false">curl</button>
+                  </div>
+                  <div id="connect-snippets" style="margin-top:var(--space-2);"></div>
+                </span>
+              </li>
+            </ol>
+          </div>
+        </section>
+
+        <p class="help-links">
+          First run? Follow the
+          <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a>
+          or
+          <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting</a>
+          guide.
+        </p>
       </div>
-      <p class="help-links">
-        First run? Set your model path and kiln server binary in Settings, then follow the
-        <a class="doc-link" href="https://ericflo.github.io/kiln/quickstart.html"
-           target="_blank" rel="noopener noreferrer">Quickstart</a>
-        or
-        <a class="doc-link" href="https://ericflo.github.io/kiln/troubleshooting.html"
-           target="_blank" rel="noopener noreferrer">Troubleshooting</a>
-        guide.
-      </p>
     </div>
-    <div id="install" class="phase-ready hidden">
-      <h1 id="install-title">Kiln server isn't installed yet</h1>
-      <p id="install-detail">
-        Kiln Desktop ships as a thin wrapper. Download the signed
-        <code>kiln</code> server binary to finish setup, or point to an
-        existing local build.
-      </p>
-      <div id="install-progress-wrap"><div id="install-progress-bar"></div></div>
-      <div id="install-progress-label">&nbsp;</div>
-      <div id="install-actions">
-        <button id="install-download-btn">Download Kiln Server</button>
-        <button id="install-cancel-btn" class="secondary">Cancel</button>
-        <button id="install-browse-btn" class="secondary">Use a local build…</button>
+
+    <!-- Install landing — branded, with the same progress primitives -->
+    <div id="install" class="landing phase-ready hidden">
+      <div class="landing-inner">
+        <span class="brand-mark brand-mark-lg" aria-hidden="true"><svg class="brand-flame" viewBox="0 0 24 24"><use href="#i-download"></use></svg></span>
+        <h1 id="install-title">Kiln server isn't installed yet</h1>
+        <p id="install-detail">
+          Kiln Desktop ships as a thin wrapper. Download the signed
+          <code>kiln</code> server binary to finish setup, or point to an
+          existing local build.
+        </p>
+        <div id="install-progress-wrap" class="progress-track"><div id="install-progress-bar" class="progress-fill"></div></div>
+        <div id="install-progress-label" class="progress-label">&nbsp;</div>
+        <div id="install-actions" class="landing-actions">
+          <button id="install-download-btn" class="btn btn-primary btn-lg"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-download"></use></svg> Download Kiln server</button>
+          <button id="install-cancel-btn" class="btn">Cancel</button>
+          <button id="install-browse-btn" class="btn"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-folder"></use></svg> Use a local build…</button>
+        </div>
+        <p class="help-links" id="install-footnote">
+          Need setup help? Read the
+          <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a>, check
+          <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting</a>, or
+          <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md" target="_blank" rel="noopener noreferrer">build from source</a>.
+        </p>
       </div>
-      <p id="install-footnote">
-        Need setup help? Read the
-        <a class="doc-link" href="https://ericflo.github.io/kiln/quickstart.html"
-           target="_blank" rel="noopener noreferrer">Quickstart</a>, check
-        <a class="doc-link" href="https://ericflo.github.io/kiln/troubleshooting.html"
-           target="_blank" rel="noopener noreferrer">Troubleshooting</a>, or
-        <a class="doc-link" href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md"
-           target="_blank" rel="noopener noreferrer">build from source</a>.
-      </p>
     </div>
     <div id="shortcuts-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
       <div class="modal-card">
         <header>
           <h2 id="shortcuts-title">Keyboard Shortcuts</h2>
-          <button id="shortcuts-close" aria-label="Close">×</button>
+          <button id="shortcuts-close" class="modal-close" aria-label="Close"><svg class="icn"><use href="#i-close"></use></svg></button>
         </header>
         <dl>
           <dt>Start Server</dt>
@@ -678,8 +268,25 @@
       const detail = document.getElementById("status-detail");
       const retry = document.getElementById("retry");
       const startBtn = document.getElementById("start-server");
+      const startToolbarBtn = document.getElementById("start-toolbar");
       const settingsNeededBtn = document.getElementById("open-settings-btn");
-      const START_LABEL = "Start Server";
+      const START_LABEL = "Start server";
+
+      // Buttons carry a leading icon + a .btn-label span; write text into the
+      // span so the icon survives "Starting…"/reset transitions. Falls back to
+      // textContent for label-less elements.
+      function setBtnLabel(btn, text) {
+        if (!btn) return;
+        const span = btn.querySelector(".btn-label");
+        if (span) span.textContent = text;
+        else btn.textContent = text;
+      }
+
+      // Toggle body chrome state. The secondary status strip + framed-UI offset
+      // appear only while the server is actually running/training.
+      function setBodyRunning(on) {
+        document.body.classList.toggle("is-running", !!on);
+      }
 
       const installPane = document.getElementById("install");
       const installTitle = document.getElementById("install-title");
@@ -697,12 +304,13 @@
         frame.src = "about:blank";
         status.classList.remove("hidden");
         installPane.classList.add("hidden");
+        setBodyRunning(false);
         title.textContent = titleText;
         detail.textContent = detailText;
         retry.classList.toggle("hidden", !showRetry);
         startBtn.classList.toggle("hidden", !showStart);
         startBtn.disabled = false;
-        startBtn.textContent = START_LABEL;
+        setBtnLabel(startBtn, START_LABEL);
         settingsNeededBtn.classList.add("hidden");
       }
 
@@ -711,13 +319,14 @@
         frame.src = "about:blank";
         status.classList.remove("hidden");
         installPane.classList.add("hidden");
+        setBodyRunning(false);
         title.textContent = "Kiln is not configured yet";
         detail.textContent =
-          "Set your model path in Settings to get started. Kiln needs to know which model to load.";
+          "Set or download a model in Settings to get started — Kiln needs to know which weights to load.";
         retry.classList.add("hidden");
         startBtn.classList.add("hidden");
         startBtn.disabled = false;
-        startBtn.textContent = START_LABEL;
+        setBtnLabel(startBtn, START_LABEL);
         settingsNeededBtn.classList.remove("hidden");
       }
 
@@ -726,6 +335,7 @@
         frame.classList.remove("hidden");
         status.classList.add("hidden");
         installPane.classList.add("hidden");
+        setBodyRunning(true);
       }
 
       function hideInstallPane() {
@@ -755,6 +365,7 @@
         frame.src = "about:blank";
         status.classList.add("hidden");
         installPane.classList.remove("hidden");
+        setBodyRunning(false);
         installPlatformSupported = !!(bstatus && bstatus.platform_supported);
         if (installPlatformSupported) {
           installTitle.textContent = "Kiln server isn't installed yet";
@@ -981,14 +592,18 @@
           return;
         }
         startBtn.disabled = true;
-        startBtn.textContent = "Starting…";
+        startToolbarBtn.disabled = true;
+        setBtnLabel(startBtn, "Starting…");
+        setBtnLabel(startToolbarBtn, "Starting…");
         retry.classList.add("hidden");
         try {
           await invoke("start_server");
         } catch (err) {
           detail.textContent = String(err || "Failed to start server.");
           startBtn.disabled = false;
-          startBtn.textContent = START_LABEL;
+          startToolbarBtn.disabled = false;
+          setBtnLabel(startBtn, START_LABEL);
+          setBtnLabel(startToolbarBtn, START_LABEL);
           retry.classList.remove("hidden");
           return;
         }
@@ -1007,14 +622,19 @@
         }
         detail.textContent = "Server did not come up in time. Check the log viewer.";
         startBtn.disabled = false;
-        startBtn.textContent = START_LABEL;
+        startToolbarBtn.disabled = false;
+        setBtnLabel(startBtn, START_LABEL);
+        setBtnLabel(startToolbarBtn, START_LABEL);
         retry.classList.remove("hidden");
       }
 
       startBtn.addEventListener("click", startServerInline);
+      startToolbarBtn.addEventListener("click", startServerInline);
 
       const copyBtn = document.getElementById("copy-url");
-      const COPY_LABEL = "Copy OpenAI base URL";
+      const copyBtnLabel = copyBtn.querySelector(".copy-btn-label");
+      const copyField = copyBtn.closest(".copy-field");
+      const COPY_LABEL = "Copy";
       let copyResetTimer = null;
 
       function flashCopyBtn(label, cls) {
@@ -1022,12 +642,15 @@
           clearTimeout(copyResetTimer);
           copyResetTimer = null;
         }
-        copyBtn.textContent = label;
-        copyBtn.classList.remove("flash", "flash-warn");
-        if (cls) copyBtn.classList.add(cls);
+        if (copyBtnLabel) copyBtnLabel.textContent = label;
+        copyBtn.classList.remove("copied");
+        if (copyField) copyField.classList.remove("flash", "flash-warn");
+        if (cls === "flash") copyBtn.classList.add("copied");
+        if (cls && copyField) copyField.classList.add(cls);
         copyResetTimer = setTimeout(() => {
-          copyBtn.textContent = COPY_LABEL;
-          copyBtn.classList.remove("flash", "flash-warn");
+          if (copyBtnLabel) copyBtnLabel.textContent = COPY_LABEL;
+          copyBtn.classList.remove("copied");
+          if (copyField) copyField.classList.remove("flash", "flash-warn");
           copyResetTimer = null;
         }, 1500);
       }
@@ -1088,7 +711,7 @@
       });
 
       const stopBtn = document.getElementById("stop-server");
-      const STOP_LABEL = "Stop Server";
+      const STOP_LABEL = "Stop";
       const STOP_ACTIVE_STATES = ["Starting", "Running", "TrainingActive"];
       let stopResetTimer = null;
 
@@ -1097,11 +720,11 @@
           clearTimeout(stopResetTimer);
           stopResetTimer = null;
         }
-        stopBtn.textContent = label;
+        setBtnLabel(stopBtn, label);
         stopBtn.classList.remove("flash-warn");
         if (cls) stopBtn.classList.add(cls);
         stopResetTimer = setTimeout(() => {
-          stopBtn.textContent = STOP_LABEL;
+          setBtnLabel(stopBtn, STOP_LABEL);
           stopBtn.classList.remove("flash-warn");
           stopBtn.disabled = false;
           stopResetTimer = null;
@@ -1114,7 +737,7 @@
           return;
         }
         stopBtn.disabled = true;
-        stopBtn.textContent = "Stopping…";
+        setBtnLabel(stopBtn, "Stopping…");
         try {
           await invoke("stop_server");
         } catch (err) {
@@ -1127,7 +750,7 @@
       stopBtn.addEventListener("click", stopServer);
 
       const restartBtn = document.getElementById("restart-server");
-      const RESTART_LABEL = "Restart Server";
+      const RESTART_LABEL = "Restart";
       const RESTART_ACTIVE_STATES = ["Running", "TrainingActive", "Error"];
       let restartResetTimer = null;
 
@@ -1136,11 +759,11 @@
           clearTimeout(restartResetTimer);
           restartResetTimer = null;
         }
-        restartBtn.textContent = label;
+        setBtnLabel(restartBtn, label);
         restartBtn.classList.remove("flash-warn");
         if (cls) restartBtn.classList.add(cls);
         restartResetTimer = setTimeout(() => {
-          restartBtn.textContent = RESTART_LABEL;
+          setBtnLabel(restartBtn, RESTART_LABEL);
           restartBtn.classList.remove("flash-warn");
           restartBtn.disabled = false;
           restartResetTimer = null;
@@ -1153,7 +776,7 @@
           return;
         }
         restartBtn.disabled = true;
-        restartBtn.textContent = "Restarting…";
+        setBtnLabel(restartBtn, "Restarting…");
         try {
           await invoke("restart_server");
         } catch (err) {
@@ -1320,21 +943,22 @@
       }
 
       const baseUrlEl = document.getElementById("base-url");
-      const BASE_URL_EMPTY_LABEL = "—";
+      const baseUrlField = baseUrlEl.closest(".copy-field");
+      const BASE_URL_EMPTY_LABEL = "Server not running";
       const BASE_URL_EMPTY_TITLE = "OpenAI base URL — server not running";
       let cachedBaseUrl = null;
 
       function setBaseUrl(url) {
         if (url) {
           baseUrlEl.textContent = url;
-          baseUrlEl.title = `${url} (click to copy)`;
           baseUrlEl.classList.remove("empty");
           baseUrlEl.classList.add("copyable");
+          if (baseUrlField) { baseUrlField.classList.remove("empty"); baseUrlField.title = `${url} (click to copy)`; }
         } else {
           baseUrlEl.textContent = BASE_URL_EMPTY_LABEL;
-          baseUrlEl.title = BASE_URL_EMPTY_TITLE;
           baseUrlEl.classList.add("empty");
           baseUrlEl.classList.remove("copyable");
+          if (baseUrlField) { baseUrlField.classList.add("empty"); baseUrlField.title = BASE_URL_EMPTY_TITLE; }
         }
       }
 
@@ -1344,10 +968,12 @@
           clearTimeout(baseUrlResetTimer);
           baseUrlResetTimer = null;
         }
-        baseUrlEl.classList.remove("flash", "flash-warn");
-        if (cls) baseUrlEl.classList.add(cls);
+        if (baseUrlField) {
+          baseUrlField.classList.remove("flash", "flash-warn");
+          if (cls) baseUrlField.classList.add(cls);
+        }
         baseUrlResetTimer = setTimeout(() => {
-          baseUrlEl.classList.remove("flash", "flash-warn");
+          if (baseUrlField) baseUrlField.classList.remove("flash", "flash-warn");
           baseUrlResetTimer = null;
         }, 1200);
       }
@@ -1378,6 +1004,103 @@
       }
 
       baseUrlEl.addEventListener("click", copyBaseUrl);
+
+      // -----------------------------------------------------------------
+      // Connect-your-agent onboarding card (shown in non-running states).
+      // Mirrors the server dashboard's Connect panel: a 3-step checklist
+      // with copy-ready pi / opencode / curl snippets built from the
+      // configured host:port. Step 1 turns green once a model is set.
+      // -----------------------------------------------------------------
+      const connectBaseEl = document.getElementById("connect-base");
+      const connectSnippetsEl = document.getElementById("connect-snippets");
+      const connectStepModel = document.getElementById("connect-step-model");
+      const connectModelOk = document.getElementById("connect-model-ok");
+      let connectBaseUrl = "http://127.0.0.1:8000/v1";
+      const CONNECT_MODEL = "kiln";
+
+      function connectSnippetData(base) {
+        return {
+          pi: { note: "One command points pi at this Kiln server and makes it the default model.",
+            code: "# Point pi at this Kiln server\nkiln pi-setup" },
+          opencode: { note: "Add this provider, then run opencode and pick the model with /models.",
+            code: '{\n  "provider": {\n    "kiln": {\n      "npm": "@ai-sdk/openai-compatible",\n      "name": "Kiln (local)",\n      "options": { "baseURL": "' + base + '", "apiKey": "unused" },\n      "models": { "' + CONNECT_MODEL + '": { "name": "Kiln" } }\n    }\n  }\n}' },
+          curl: { note: "Raw HTTP — drop into any shell or script. No API key needed.",
+            code: "curl -s " + base + "/chat/completions \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"model\": \"" + CONNECT_MODEL + "\", \"messages\": [{\"role\": \"user\", \"content\": \"Hello\"}]}'" },
+        };
+      }
+
+      function escapeForHtml(s) {
+        return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+      }
+
+      function renderConnectSnippets(active) {
+        if (!connectSnippetsEl) return;
+        const data = connectSnippetData(connectBaseUrl);
+        connectSnippetsEl.innerHTML = Object.entries(data).map(([key, s]) => {
+          return '<div class="connect-snippet' + (key === active ? " active" : "") + '" data-connect-pane="' + key + '"' + (key === active ? "" : ' hidden') + '>' +
+            '<div class="step-sub" style="margin-bottom:6px;">' + escapeForHtml(s.note) + '</div>' +
+            '<div class="code-block"><button class="copy-btn" type="button" data-copy-code aria-label="Copy code"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg>Copy</button><pre>' + escapeForHtml(s.code) + '</pre></div>' +
+          '</div>';
+        }).join("");
+      }
+
+      function selectConnectTab(key) {
+        document.querySelectorAll(".connect-tabs .tab").forEach((t) => {
+          const on = t.dataset.connectTab === key;
+          t.classList.toggle("active", on);
+          t.setAttribute("aria-selected", String(on));
+        });
+        document.querySelectorAll(".connect-snippet").forEach((p) => {
+          const on = p.dataset.connectPane === key;
+          p.classList.toggle("active", on);
+          p.hidden = !on;
+        });
+      }
+
+      document.querySelectorAll(".connect-tabs .tab").forEach((t) => {
+        t.addEventListener("click", () => selectConnectTab(t.dataset.connectTab));
+      });
+      if (connectSnippetsEl) {
+        connectSnippetsEl.addEventListener("click", async (e) => {
+          const btn = e.target.closest("[data-copy-code]");
+          if (!btn) return;
+          const code = btn.parentElement.querySelector("pre");
+          if (!code) return;
+          try {
+            await navigator.clipboard.writeText(code.textContent);
+            const orig = btn.innerHTML;
+            btn.classList.add("copied");
+            btn.innerHTML = '<svg class="icn icn-sm" aria-hidden="true"><use href="#i-check"></use></svg>Copied';
+            setTimeout(() => { btn.classList.remove("copied"); btn.innerHTML = orig; }, 1500);
+          } catch (_) { /* clipboard unavailable */ }
+        });
+      }
+
+      function setConnectModelDone(done) {
+        if (!connectStepModel) return;
+        connectStepModel.classList.toggle("done", done);
+        if (connectModelOk) connectModelOk.classList.toggle("hidden", !done);
+        const num = connectStepModel.querySelector(".step-num");
+        if (num) num.innerHTML = done
+          ? '<svg class="icn icn-sm" aria-hidden="true"><use href="#i-check"></use></svg>'
+          : '<span class="step-num-text">1</span>';
+      }
+
+      async function refreshConnect() {
+        if (!invoke) { renderConnectSnippets("pi"); return; }
+        try {
+          const s = await invoke("get_settings");
+          const host = (s && s.host) || "127.0.0.1";
+          const port = (s && s.port) || 8000;
+          connectBaseUrl = "http://" + host + ":" + port + "/v1";
+          setConnectModelDone(!!(s && s.model_path && String(s.model_path).trim()));
+        } catch (_) { /* keep defaults */ }
+        if (connectBaseEl) connectBaseEl.textContent = connectBaseUrl;
+        const active = document.querySelector(".connect-snippet.active")?.dataset.connectPane
+          || document.querySelector(".connect-tabs .tab.active")?.dataset.connectTab || "pi";
+        renderConnectSnippets(active);
+      }
+      renderConnectSnippets("pi");
 
       async function refreshBaseUrl(kind) {
         if (!invoke || kind !== "Running") {
@@ -1613,7 +1336,7 @@
         stopBtn.classList.toggle("hidden", !shouldShow);
         if (!shouldShow && !stopResetTimer) {
           stopBtn.disabled = false;
-          stopBtn.textContent = STOP_LABEL;
+          setBtnLabel(stopBtn, STOP_LABEL);
         }
       }
 
@@ -1622,8 +1345,18 @@
         restartBtn.classList.toggle("hidden", !shouldShow);
         if (!shouldShow && !restartResetTimer) {
           restartBtn.disabled = false;
-          restartBtn.textContent = RESTART_LABEL;
+          setBtnLabel(restartBtn, RESTART_LABEL);
         }
+      }
+
+      // App-bar Start CTA — shown only when the server can be started right
+      // now (stopped / errored). Hidden while running/starting/training, and
+      // while a binary is missing (the install pane owns that flow).
+      const START_VISIBLE_STATES = ["Stopped", "Error"];
+      function updateStartBtnVisibility(kind) {
+        const shouldShow = START_VISIBLE_STATES.includes(kind);
+        startToolbarBtn.classList.toggle("hidden", !shouldShow);
+        if (shouldShow && !startToolbarBtn.disabled) setBtnLabel(startToolbarBtn, START_LABEL);
       }
 
       let stateFailureLogged = false;
@@ -1636,6 +1369,7 @@
           await refreshTrainingInfo("Unknown");
           updateStopBtnVisibility("Unknown");
           updateRestartBtnVisibility("Unknown");
+          updateStartBtnVisibility("Unknown");
           return;
         }
         try {
@@ -1690,6 +1424,7 @@
           await refreshTrainingInfo(kind);
           updateStopBtnVisibility(kind);
           updateRestartBtnVisibility(kind);
+          updateStartBtnVisibility(kind);
           stateFailureLogged = false;
         } catch (err) {
           applyStatusBadge("Unknown", "Could not read server state");
@@ -1699,6 +1434,7 @@
           await refreshTrainingInfo("Unknown");
           updateStopBtnVisibility("Unknown");
           updateRestartBtnVisibility("Unknown");
+          updateStartBtnVisibility("Unknown");
           if (!stateFailureLogged) {
             console.error("server_state poll failed", err);
             stateFailureLogged = true;
@@ -1732,6 +1468,7 @@
       }
 
       window.addEventListener("focus", refreshModelPath);
+      window.addEventListener("focus", refreshConnect);
 
       let modelPathPillResetTimer = null;
       function flashModelPathPill(cls) {
@@ -1929,6 +1666,7 @@
         load();
         pollServerState();
         refreshModelPath();
+        refreshConnect();
         setInterval(pollServerState, 2000);
         setInterval(tickUptime, 1000);
       });

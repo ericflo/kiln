@@ -1,6 +1,6 @@
 use anyhow::Context;
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::{HeaderName, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -478,8 +478,20 @@ fn request_record_from_req(
         max_tokens: Some(chat_request_max_tokens(req).min(u32::MAX as usize) as u32),
         thinking_mode: Some(thinking_mode_for_request(req).to_string()),
         prefix_cache: Some("unknown".to_string()),
+        user_agent: req.user_agent.clone(),
         ..RequestRecord::default()
     }
+}
+
+/// Extract the calling client's `User-Agent` for per-agent attribution on the
+/// /ui dashboard. Bounded so a hostile header can't bloat the ring.
+fn extract_user_agent(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(200).collect())
 }
 
 const REASONING_OPEN_TAG: &str = "<think>\n";
@@ -2876,6 +2888,10 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub model: Option<String>,
     pub messages: Vec<Message>,
+    /// Calling client's `User-Agent`, injected by the handler (never from the
+    /// JSON body) so the /ui dashboard can attribute traffic per agent.
+    #[serde(skip)]
+    pub user_agent: Option<String>,
     /// Number of completions to generate for this prompt. Defaults to 1.
     /// Non-streaming `n>1` reuses the same single-output fast paths below.
     #[serde(default)]
@@ -3340,10 +3356,15 @@ fn resolve_speculative_mode(
 
 async fn chat_completions(
     State(state): State<AppState>,
-    Json(req): Json<ChatCompletionRequest>,
+    headers: HeaderMap,
+    Json(mut req): Json<ChatCompletionRequest>,
 ) -> Result<Response, ApiError> {
     let start = std::time::Instant::now();
     let streaming = req.stream;
+    // Attribute this request to the calling agent (pi / opencode / SDK / curl)
+    // so the dashboard can show per-client traffic. Header-only, never trusted
+    // from the body.
+    req.user_agent = extract_user_agent(&headers);
     state.metrics.inc_active();
 
     let result = chat_completions_inner(&state, req).await;
@@ -7605,6 +7626,7 @@ async fn batch_completions_inner(
                     let synth_req = ChatCompletionRequest {
                         model: model.clone(),
                         messages: messages.clone(),
+                        user_agent: None,
                         n: None,
                         temperature,
                         top_p,
@@ -7853,6 +7875,7 @@ async fn generate_multi_chat_response(
         let synth_req = ChatCompletionRequest {
             model: req.model.clone(),
             messages: req.messages.clone(),
+            user_agent: req.user_agent.clone(),
             n: None,
             temperature: req.temperature,
             top_p: req.top_p,
