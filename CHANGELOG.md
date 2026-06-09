@@ -1,5 +1,47 @@
 # Kiln Server Changelog
 
+## kiln-v0.3.5 — 2026-06-09 — task-first dashboard interactions + embedded pi terminal
+
+UX release that rebuilds the dashboard's interactions around the pi-user's
+actual tasks — every core flow now completes where it starts, with the UI
+narrating what happens next — and embeds a real pi session in the browser.
+
+- training: drop a `.jsonl`/`.json` straight onto the SFT/GRPO forms — parsed
+  and validated in place (per-row skip reasons), adapter auto-named from the
+  file, hyperparameters collapsed behind an honest "Advanced" summary, and an
+  epochs-vs-dataset-size overfit nudge.
+- training: train an uploaded dataset by NAME — `/v1/train/{sft,grpo}` accept
+  a `dataset` field resolved from the dataset store server-side (GRPO streams
+  via the existing `dataset_path` path), so rows never round-trip through the
+  browser and nothing is truncated. Dataset rows gain "Train SFT/GRPO →"
+  actions; uploads offer training as the next step; an empty queue lands on
+  the training form.
+- training: "Prove it after training" wires `post_eval` (suite +
+  include_baseline) so train → eval-vs-base → verdict is one submission.
+- evals: "Run eval…" on an adapter card now evals THAT adapter via a scoped
+  compare-vs-base modal; suite Run/A/B buttons name the adapter they target
+  and disable with directions when none is active.
+- notifications: training and eval completions raise persistent action-toasts
+  ("finished — Prove it vs base", "+N pts vs base — View result"); completed
+  job cards keep a "Prove it vs base" button; failed cards show the error.
+- corrections: one-click capture on every recent-request row, preview-only
+  captures flagged, and the training receipt gains "Verify the fix" with a
+  pending-selection handoff that picks the adapter in Playground compare the
+  moment it finishes training.
+- terminal: new "pi Terminal" page — the server spawns `pi` in a PTY
+  (portable-pty) over a WebSocket after running the same non-destructive
+  config merge as `kiln pi-setup` against its own URL, so the embedded pi is
+  the user's pi, already connected. Vendored xterm.js compiled into the
+  binary; enabled for loopback binds (KILN_TERMINAL=1 opts in elsewhere,
+  KILN_TERMINAL=0 disables).
+- cold start: a prominent "Can't reach Kiln" banner with retry; a first-run
+  journey strip (server → agent → adapter) that offers "try pi right here";
+  toasts moved top-right so they never cover the button they name.
+- fixes: dataset-picker format filter matched a value the server never emits
+  (`sft_chat` is the serde name); adapter swaps sync `/health` so the header
+  and flywheel agree; failed swaps repaint; the demo's load/unload actually
+  moves the active adapter.
+
 ## kiln-v0.3.4 — 2026-06-09 — agent-backend dashboard overhaul
 
 UI release that bends the built-in server dashboard (served at `/ui`) toward the
