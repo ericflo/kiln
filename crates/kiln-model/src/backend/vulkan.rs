@@ -477,6 +477,30 @@ impl OptimizerBackend for VulkanBackend {
             step,
         )
     }
+
+    fn runtime_dispatch_muon_step(
+        &self,
+        param: &kiln_tensor::Tensor,
+        grad: &kiln_tensor::Tensor,
+        momentum: &kiln_tensor::Tensor,
+        lr: f32,
+        momentum_coef: f32,
+        nesterov: bool,
+        ns_iters: u32,
+        weight_decay: f32,
+    ) -> Result<bool> {
+        vulkan_training::dispatch_muon_step(
+            self,
+            param,
+            grad,
+            momentum,
+            lr,
+            momentum_coef,
+            nesterov,
+            ns_iters,
+            weight_decay,
+        )
+    }
 }
 
 impl PagedKvBackend for VulkanBackend {}

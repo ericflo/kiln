@@ -86,6 +86,44 @@ pub fn dispatch_adamw_step_buffers(
     )
 }
 
+/// (#1082) Shared, storage-decoupled fused Muon optimizer seam over raw
+/// Vulkan device buffers (F32). Counterpart to
+/// [`dispatch_adamw_step_buffers`] for the `Optimizer::Muon` path; updates
+/// `param` AND `momentum` in place via the fused SPIR-V
+/// `dispatch_muon_step_f32` kernel (one launch per matrix). `rows`/`cols`
+/// describe the row-major param shape (`cols == 1` for a non-2D param);
+/// `n_elements == rows * cols`.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_muon_step_buffers(
+    vk_device: &kiln_vulkan_kernel::VulkanDevice,
+    param_buffer: &kiln_vulkan_kernel::VulkanBuffer,
+    grad_buffer: &kiln_vulkan_kernel::VulkanBuffer,
+    momentum_buffer: &kiln_vulkan_kernel::VulkanBuffer,
+    n_elements: usize,
+    rows: usize,
+    cols: usize,
+    lr: f32,
+    momentum_coef: f32,
+    nesterov: bool,
+    ns_iters: u32,
+    weight_decay: f32,
+) -> Result<()> {
+    kiln_vulkan_kernel::kernels::dispatch_muon_step_f32(
+        vk_device,
+        param_buffer,
+        grad_buffer,
+        momentum_buffer,
+        n_elements,
+        rows,
+        cols,
+        lr,
+        momentum_coef,
+        nesterov,
+        ns_iters,
+        weight_decay,
+    )
+}
+
 /// (#1082) Shared, storage-decoupled SGD optimizer seam over raw Vulkan
 /// device buffers. Counterpart to [`dispatch_adamw_step_buffers`] for the
 /// `Optimizer::Sgd` path; updates `param` in place via the shared SPIR-V
@@ -270,6 +308,117 @@ pub(super) fn dispatch_adamw_step(
                 eps,
                 weight_decay,
                 step,
+            )?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn dispatch_muon_step(
+    backend: &VulkanBackend,
+    param: &kiln_tensor::Tensor,
+    grad: &kiln_tensor::Tensor,
+    momentum: &kiln_tensor::Tensor,
+    lr: f32,
+    momentum_coef: f32,
+    nesterov: bool,
+    ns_iters: u32,
+    weight_decay: f32,
+) -> Result<bool> {
+    let Some(vk_device) = backend.vulkan_device.as_ref() else {
+        return Ok(false);
+    };
+    // Mirror the AdamW gate: param, grad, and the per-param momentum must
+    // share dtype + element count, and all three must be registry-resident
+    // for the in-place fused step to run on-device.
+    if param.dtype() != grad.dtype() || param.dtype() != momentum.dtype() {
+        anyhow::bail!(
+            "dispatch_muon_step: dtype mismatch (param={:?}, grad={:?}, momentum={:?})",
+            param.dtype(),
+            grad.dtype(),
+            momentum.dtype(),
+        );
+    }
+    let n_elements = param.element_count();
+    if n_elements != grad.element_count() || n_elements != momentum.element_count() {
+        anyhow::bail!(
+            "dispatch_muon_step: element count mismatch (param={}, grad={}, momentum={})",
+            n_elements,
+            grad.element_count(),
+            momentum.element_count(),
+        );
+    }
+    // Row-major shape for the fused kernel: rank-2 params pass (rows, cols);
+    // anything else collapses to (n, 1) and the kernel falls back to plain
+    // (Nesterov) momentum SGD (do_ortho is false) — matching the host
+    // reference which only orthogonalizes rank-2 weights.
+    let dims = param.dims();
+    let (rows, cols) = if dims.len() == 2 {
+        (dims[0], dims[1])
+    } else {
+        (n_elements, 1)
+    };
+    let p_id = param.id();
+    let g_id = grad.id();
+    let m_id = momentum.id();
+    let bufs = with_resident_registry(&backend.resident_activation_registry, |cache| {
+        let p = cache.get(&p_id).map(|entry| Arc::clone(&entry.buffer))?;
+        let g = cache.get(&g_id).map(|entry| Arc::clone(&entry.buffer))?;
+        let m = cache.get(&m_id).map(|entry| Arc::clone(&entry.buffer))?;
+        Some((p, g, m))
+    });
+    let Some((param_buf, grad_buf, mom_buf)) = bufs else {
+        return Ok(false);
+    };
+    static FIRST_MUON_LOGGED: OnceLock<()> = OnceLock::new();
+    FIRST_MUON_LOGGED.get_or_init(|| {
+        tracing::info!(
+            n_elements,
+            rows,
+            cols,
+            lr,
+            momentum_coef,
+            nesterov,
+            ns_iters,
+            weight_decay,
+            dtype = ?param.dtype(),
+            "VulkanBackend::dispatch_muon_step first call"
+        );
+    });
+    match param.dtype() {
+        kiln_tensor::DType::F32 => {
+            dispatch_muon_step_buffers(
+                vk_device,
+                &param_buf,
+                &grad_buf,
+                &mom_buf,
+                n_elements,
+                rows,
+                cols,
+                lr,
+                momentum_coef,
+                nesterov,
+                ns_iters,
+                weight_decay,
+            )?;
+            Ok(true)
+        }
+        kiln_tensor::DType::BF16 => {
+            kiln_vulkan_kernel::kernels::dispatch_muon_step_bf16(
+                vk_device,
+                &param_buf,
+                &grad_buf,
+                &mom_buf,
+                n_elements,
+                rows,
+                cols,
+                lr,
+                momentum_coef,
+                nesterov,
+                ns_iters,
+                weight_decay,
             )?;
             Ok(true)
         }
@@ -666,6 +815,99 @@ mod tests {
         ResidencyBackend::runtime_evict_resident_activation(&backend, &grad);
         ResidencyBackend::runtime_evict_resident_activation(&backend, &m);
         ResidencyBackend::runtime_evict_resident_activation(&backend, &v);
+        Ok(())
+    }
+
+    /// Muon round-trip through the full backend dispatch path
+    /// (`runtime_dispatch_muon_step` -> residency resolve ->
+    /// `dispatch_muon_step` -> kernel). Uses a 1-D buffer so the kernel
+    /// takes the plain (Nesterov) momentum-SGD branch (no
+    /// orthogonalization), which has a closed-form reference; the
+    /// Newton-Schulz orthogonalization branch is numerically validated
+    /// on-device by `kiln-vulkan-kernel`'s `vk_muon_parity` suite.
+    /// Verifies BOTH the in-place param and momentum buffer updates.
+    #[test]
+    fn dispatch_muon_step_resident_round_trip_momentum_sgd() -> Result<()> {
+        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
+        if !backend.has_vulkan() {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        }
+        let n = 16usize;
+        let lr = 0.02f32;
+        let mom = 0.95f32;
+        let wd = 0.01f32;
+        let nesterov = true;
+        let ns_iters = 5u32;
+
+        let p_data: Vec<f32> = (0..n).map(|i| (i as f32) * 0.1 - 0.5).collect();
+        let g_data: Vec<f32> = (0..n).map(|i| ((i as i32 - 8) as f32) * 0.04).collect();
+        let m_data: Vec<f32> = vec![0.0; n];
+
+        // Closed-form reference: 1-D => do_ortho=false => plain Nesterov SGD.
+        // momentum = mom*0 + g = g;  b = g + mom*momentum = g*(1+mom);
+        // param = param*(1 - lr*wd) - lr*b.
+        let exp_mom: Vec<f32> = g_data.clone();
+        let exp_param: Vec<f32> = p_data
+            .iter()
+            .zip(g_data.iter())
+            .map(|(&p, &g)| {
+                let b = g + mom * g;
+                p * (1.0 - lr * wd) - lr * b
+            })
+            .collect();
+
+        let param = kiln_tensor::Tensor::from_vec(p_data, (n,))?;
+        let grad = kiln_tensor::Tensor::from_vec(g_data, (n,))?;
+        let momentum = kiln_tensor::Tensor::from_vec(m_data, (n,))?;
+
+        ResidencyBackend::runtime_register_resident_activation(&backend, &param)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &grad)?;
+        ResidencyBackend::runtime_register_resident_activation(&backend, &momentum)?;
+
+        let dispatched = OptimizerBackend::runtime_dispatch_muon_step(
+            &backend, &param, &grad, &momentum, lr, mom, nesterov, ns_iters, wd,
+        )?;
+        assert!(
+            dispatched,
+            "muon_step must succeed when all three buffers are resident"
+        );
+
+        let got_param: Vec<f32> = ResidencyBackend::runtime_resolve_resident_activation(
+            &backend,
+            &param,
+            &[n],
+            kiln_tensor::DType::F32,
+        )?
+        .expect("param must resolve after dispatch")
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+        let got_mom: Vec<f32> = ResidencyBackend::runtime_resolve_resident_activation(
+            &backend,
+            &momentum,
+            &[n],
+            kiln_tensor::DType::F32,
+        )?
+        .expect("momentum must resolve after dispatch")
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+
+        for (i, (g, w)) in got_param.iter().zip(exp_param.iter()).enumerate() {
+            assert!(
+                (g - w).abs() < 1e-6,
+                "param idx {i}: got={g:.9} want={w:.9}"
+            );
+        }
+        for (i, (g, w)) in got_mom.iter().zip(exp_mom.iter()).enumerate() {
+            assert!(
+                (g - w).abs() < 1e-6,
+                "momentum idx {i}: got={g:.9} want={w:.9}"
+            );
+        }
+
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &param);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &grad);
+        ResidencyBackend::runtime_evict_resident_activation(&backend, &momentum);
         Ok(())
     }
 

@@ -1,0 +1,372 @@
+// Fused Muon parameter update for BF16 buffers (momentum-orthogonalized SGD).
+//
+// Muon (Bernstein-Newhouse 2024 / Jordan et al. 2024). One workgroup
+// per matrix: heavy-ball momentum update in place, then (for rank-2
+// weights small enough to fit the gram in shared memory) a Newton-Schulz
+// quintic orthogonalization of the (Nesterov) look-ahead direction with
+// the RMS-matching `sqrt(max(rows, cols))` scale, then a decoupled-weight-
+// decay descent step. Non-matrix params and ranks beyond K_MAX fall back
+// to plain (Nesterov) momentum SGD inside the kernel.
+//
+// This mirrors EXACTLY the production CPU reference / oracle
+// `kiln_optim::lion_muon::Muon::step` + `newton_schulz` (the gram-space
+// P-accumulator factoring): `O = (P @ B) / ‖B‖_F` when rows ≤ cols, or
+// `(B @ P) / ‖B‖_F` when rows > cols, with the per-iteration k×k matrix
+// `M = a·I + b·A + c·A²` and coefficients `(a, b, c) = (3.4445, -4.7750,
+// 2.0315)`.
+//
+// param, grad, momentum are all BF16-packed (2 lanes per u32 word, same
+// `(hi << 16) | lo` encoding as `adamw_step_bf16.comp` /
+// `extract_tensor_packed_bf16_bytes`). They share the same row-major
+// [rows, cols] layout (cols == 1 for a non-2D param) and the same element
+// count `n = rows*cols`. param AND momentum are updated in place; grad is
+// read-only. All gram / apply math runs in f32 (bf16↔f32 bit-expansion);
+// the in-place writes are WORD-indexed (one thread per u32 word updates
+// both lanes) so adjacent elements sharing a word never race, while the
+// read-only element-addressable reads unpack the single bf16 lane for an
+// arbitrary element index. The last u32 may have only its lo lane valid
+// when n is odd, in which case the hi lane is preserved on write.
+//
+// ONE workgroup of 256 threads; ALL barriers are full workgroup barriers
+// (single block). Used by `dispatch_muon_step_bf16` against registry-
+// resident LoRA param + grad + momentum buffers. Dispatched (1,1,1) —
+// one launch per matrix.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// K_MAX: gram side bound. 4 shared k×k float scratch matrices at K_MAX=32
+// are 4*32*32*4 = 16 KiB, safe across Vulkan GPUs (incl. RTX 6000 Ada).
+const uint K_MAX = 32u;
+const uint BLK = 256u;
+
+layout(push_constant) uniform Parameters {
+    uint n;            // total bf16 element count = rows*cols
+    uint rows;
+    uint cols;
+    uint ns_iters;     // Newton-Schulz iterations (paper: 5)
+    float lr;
+    float mom;         // heavy-ball momentum coefficient
+    uint nesterov;     // 0 | 1
+    float wd;          // decoupled weight decay
+};
+
+layout(binding = 0) buffer ParamBuf { uint data_param[]; };
+layout(binding = 1) readonly buffer GradBuf { uint data_grad[]; };
+layout(binding = 2) buffer MomentumBuf { uint data_mom[]; };
+
+// Shared k×k scratch. All float. Total = 4 * 32*32 * 4 = 16 KiB, the
+// Vulkan spec minimum for maxComputeSharedMemorySize — safe across all
+// Vulkan GPUs (incl. the RTX 6000 Ada target). The STEP 2 Frobenius
+// block reduction reuses `Tm` (BLK=256 <= K_MAX*K_MAX=1024 floats) since
+// it runs before any of A/M/P/Tm hold gram state.
+shared float A[K_MAX * K_MAX];
+shared float M[K_MAX * K_MAX];
+shared float P[K_MAX * K_MAX];
+shared float Tm[K_MAX * K_MAX];
+
+float bf16_to_f32(uint bits16) {
+    return uintBitsToFloat(bits16 << 16);
+}
+
+uint f32_to_bf16(float v) {
+    uint b = floatBitsToUint(v);
+    // Round-to-nearest-even truncation (matches adamw_step_bf16.comp).
+    uint rounded = b + ((b >> 16) & 1u) + 0x7fffu;
+    return rounded >> 16;
+}
+
+// Element-addressable single-lane bf16 read for an arbitrary element
+// index, returning f32. (Same lane layout as the packed word: even
+// element -> lo 16 bits, odd element -> hi 16 bits.)
+float load_bf16(uint elem, uint base) {
+    // `base` selects the buffer: 0 = param, 1 = grad, 2 = momentum.
+    uint word_idx = elem >> 1;
+    uint w;
+    if (base == 1u) {
+        w = data_grad[word_idx];
+    } else if (base == 2u) {
+        w = data_mom[word_idx];
+    } else {
+        w = data_param[word_idx];
+    }
+    uint lane16 = ((elem & 1u) == 0u) ? (w & 0xffffu) : (w >> 16);
+    return bf16_to_f32(lane16);
+}
+
+// bval(idx) = nesterov ? (grad + mom*momentum) : momentum, reading the
+// already-updated momentum buffer (STEP 1 must run first).
+float bval(uint elem) {
+    float m = load_bf16(elem, 2u);
+    if (nesterov != 0u) {
+        return load_bf16(elem, 1u) + mom * m;
+    }
+    return m;
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint num_words = (n + 1u) >> 1;
+
+    // Derived shape quantities (same on every thread).
+    uint k = min(rows, cols);
+    bool transpose = (rows > cols);      // false => gram in row space (k=rows)
+    float scale = sqrt(float(max(rows, cols)));
+    bool do_ortho = (rows >= 2u) && (cols >= 2u) && (k <= K_MAX);
+
+    // STEP 1 — heavy-ball momentum update, in place:
+    //   momentum = mom*momentum + grad
+    // WORD-indexed so both lanes are updated by one thread (no race);
+    // odd-length last word preserves its hi lane.
+    for (uint w = tid; w < num_words; w += BLK) {
+        uint base = w * 2u;
+        uint m_word = data_mom[w];
+        uint g_word = data_grad[w];
+        float m0 = mom * bf16_to_f32(m_word & 0xffffu) + bf16_to_f32(g_word & 0xffffu);
+        float m1 = mom * bf16_to_f32(m_word >> 16) + bf16_to_f32(g_word >> 16);
+        uint m0_b = f32_to_bf16(m0);
+        uint m1_b = f32_to_bf16(m1);
+        if (base + 1u < n) {
+            data_mom[w] = m0_b | (m1_b << 16);
+        } else if (base < n) {
+            data_mom[w] = (m_word & 0xffff0000u) | (m0_b & 0xffffu);
+        }
+    }
+    // momentum[] is an SSBO written above by THIS thread (word-indexed) and read
+    // CROSS-THREAD in STEP 2/3/5 (load_bf16 reads lanes owned by other
+    // invocations). `memoryBarrierShared()` only orders shared memory, so the
+    // buffer write must be released with workgroup-scope buffer ordering BEFORE
+    // the control barrier publishes it. `groupMemoryBarrier()` covers buffer +
+    // shared at workgroup scope.
+    groupMemoryBarrier();
+    barrier();
+    // momentum[] is now updated and visible workgroup-wide; bval reads it below.
+
+    // STEP 1b — if NOT do_ortho: plain (Nesterov) momentum SGD, then return.
+    // WORD-indexed in-place param write.
+    if (!do_ortho) {
+        for (uint w = tid; w < num_words; w += BLK) {
+            uint base = w * 2u;
+            uint p_word = data_param[w];
+            float b0 = bval(base);
+            float b1 = bval(base + 1u);
+            float p0 = bf16_to_f32(p_word & 0xffffu);
+            float p1 = bf16_to_f32(p_word >> 16);
+            p0 = p0 * (1.0 - lr * wd) - lr * b0;
+            p1 = p1 * (1.0 - lr * wd) - lr * b1;
+            uint p0_b = f32_to_bf16(p0);
+            uint p1_b = f32_to_bf16(p1);
+            if (base + 1u < n) {
+                data_param[w] = p0_b | (p1_b << 16);
+            } else if (base < n) {
+                data_param[w] = (p_word & 0xffff0000u) | (p0_b & 0xffffu);
+            }
+        }
+        return;
+    }
+
+    // STEP 2 — Frobenius norm of b: frob2 = sum_idx bval(idx)^2.
+    float partial = 0.0;
+    for (uint idx = tid; idx < n; idx += BLK) {
+        float b = bval(idx);
+        partial += b * b;
+    }
+    Tm[tid] = partial;
+    barrier();
+    memoryBarrierShared();
+    // Tree reduction over the 256-wide block (scratch in Tm[0..BLK)).
+    [[unroll]] for (uint stride = BLK >> 1; stride > 0u; stride >>= 1) {
+        if (tid < stride) {
+            Tm[tid] += Tm[tid + stride];
+        }
+        barrier();
+        memoryBarrierShared();
+    }
+    float frob2 = Tm[0];
+    barrier();
+    memoryBarrierShared();
+
+    if (frob2 == 0.0) {
+        // Only weight decay acts. WORD-indexed in-place write.
+        for (uint w = tid; w < num_words; w += BLK) {
+            uint base = w * 2u;
+            uint p_word = data_param[w];
+            float p0 = bf16_to_f32(p_word & 0xffffu) * (1.0 - lr * wd);
+            float p1 = bf16_to_f32(p_word >> 16) * (1.0 - lr * wd);
+            uint p0_b = f32_to_bf16(p0);
+            uint p1_b = f32_to_bf16(p1);
+            if (base + 1u < n) {
+                data_param[w] = p0_b | (p1_b << 16);
+            } else if (base < n) {
+                data_param[w] = (p_word & 0xffff0000u) | (p0_b & 0xffffu);
+            }
+        }
+        return;
+    }
+    float inv_frob = 1.0 / sqrt(frob2);
+    float inv_frob2 = 1.0 / frob2;
+
+    // STEP 3 — gram A (k x k), normalized by inv_frob2.
+    for (uint pair = tid; pair < k * k; pair += BLK) {
+        uint i = pair / k;
+        uint j = pair % k;
+        float s = 0.0;
+        if (!transpose) {
+            // A = B Bt : rows of B (length cols).
+            for (uint c = 0u; c < cols; ++c) {
+                s += bval(i * cols + c) * bval(j * cols + c);
+            }
+        } else {
+            // A = Bt B : columns of B (length rows).
+            for (uint r = 0u; r < rows; ++r) {
+                s += bval(r * cols + i) * bval(r * cols + j);
+            }
+        }
+        A[pair] = s * inv_frob2;
+    }
+    barrier();
+    memoryBarrierShared();
+
+    // STEP 4 — P-accumulator Newton-Schulz.
+    // P starts = I_k.
+    for (uint idx = tid; idx < k * k; idx += BLK) {
+        P[idx] = (idx / k == idx % k) ? 1.0 : 0.0;
+    }
+    barrier();
+    memoryBarrierShared();
+
+    const float ca = 3.4445;
+    const float cb = -4.7750;
+    const float cc = 2.0315;
+
+    for (uint iter = 0u; iter < ns_iters; ++iter) {
+        // Tm = A @ A.
+        for (uint pair = tid; pair < k * k; pair += BLK) {
+            uint i = pair / k;
+            uint j = pair % k;
+            float s = 0.0;
+            for (uint t = 0u; t < k; ++t) {
+                s += A[i * k + t] * A[t * k + j];
+            }
+            Tm[pair] = s;
+        }
+        barrier();
+        memoryBarrierShared();
+
+        // M = a*I + b*A + c*Tm.
+        for (uint pair = tid; pair < k * k; pair += BLK) {
+            uint i = pair / k;
+            uint j = pair % k;
+            float id = (i == j) ? 1.0 : 0.0;
+            M[pair] = ca * id + cb * A[pair] + cc * Tm[pair];
+        }
+        barrier();
+        memoryBarrierShared();
+
+        // P <- (NOT transpose ? M @ P : P @ M).
+        for (uint pair = tid; pair < k * k; pair += BLK) {
+            uint i = pair / k;
+            uint j = pair % k;
+            float s = 0.0;
+            if (!transpose) {
+                for (uint t = 0u; t < k; ++t) {
+                    s += M[i * k + t] * P[t * k + j];
+                }
+            } else {
+                for (uint t = 0u; t < k; ++t) {
+                    s += P[i * k + t] * M[t * k + j];
+                }
+            }
+            Tm[pair] = s;
+        }
+        barrier();
+        memoryBarrierShared();
+        for (uint idx = tid; idx < k * k; idx += BLK) {
+            P[idx] = Tm[idx];
+        }
+        barrier();
+        memoryBarrierShared();
+
+        // A <- M @ A @ M  (M symmetric): Tm = M@A ; A = Tm@M.
+        for (uint pair = tid; pair < k * k; pair += BLK) {
+            uint i = pair / k;
+            uint j = pair % k;
+            float s = 0.0;
+            for (uint t = 0u; t < k; ++t) {
+                s += M[i * k + t] * A[t * k + j];
+            }
+            Tm[pair] = s;
+        }
+        barrier();
+        memoryBarrierShared();
+        for (uint pair = tid; pair < k * k; pair += BLK) {
+            uint i = pair / k;
+            uint j = pair % k;
+            float s = 0.0;
+            for (uint t = 0u; t < k; ++t) {
+                s += Tm[i * k + t] * M[t * k + j];
+            }
+            A[pair] = s;
+        }
+        barrier();
+        memoryBarrierShared();
+    }
+
+    // STEP 5 — apply: O = (P@B or B@P) * inv_frob, RMS-scaled; descent
+    // with decoupled WD. WORD-indexed in-place param write: each thread
+    // owns one u32 word (two elements), computing O for each lane via the
+    // element-addressable bval reads against P in shared memory.
+    for (uint w = tid; w < num_words; w += BLK) {
+        uint base = w * 2u;
+        uint p_word = data_param[w];
+
+        // lane 0 = element `base`, lane 1 = element `base + 1`.
+        float o0 = 0.0;
+        float o1 = 0.0;
+
+        {
+            uint idx = base;
+            uint r = idx / cols;
+            uint c = idx % cols;
+            if (!transpose) {
+                for (uint t = 0u; t < k; ++t) {
+                    o0 += P[r * k + t] * bval(t * cols + c);
+                }
+            } else {
+                for (uint t = 0u; t < k; ++t) {
+                    o0 += bval(r * cols + t) * P[t * k + c];
+                }
+            }
+            o0 *= scale * inv_frob;
+        }
+        if (base + 1u < n) {
+            uint idx = base + 1u;
+            uint r = idx / cols;
+            uint c = idx % cols;
+            if (!transpose) {
+                for (uint t = 0u; t < k; ++t) {
+                    o1 += P[r * k + t] * bval(t * cols + c);
+                }
+            } else {
+                for (uint t = 0u; t < k; ++t) {
+                    o1 += bval(r * cols + t) * P[t * k + c];
+                }
+            }
+            o1 *= scale * inv_frob;
+        }
+
+        float p0 = bf16_to_f32(p_word & 0xffffu);
+        float p1 = bf16_to_f32(p_word >> 16);
+        p0 = p0 * (1.0 - lr * wd) - lr * o0;
+        p1 = p1 * (1.0 - lr * wd) - lr * o1;
+        uint p0_b = f32_to_bf16(p0);
+        uint p1_b = f32_to_bf16(p1);
+        if (base + 1u < n) {
+            data_param[w] = p0_b | (p1_b << 16);
+        } else if (base < n) {
+            data_param[w] = (p_word & 0xffff0000u) | (p0_b & 0xffffu);
+        }
+    }
+}

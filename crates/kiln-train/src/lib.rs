@@ -164,16 +164,29 @@ pub struct SftRequest {
 
 /// Optimizer selection for training.
 ///
-/// `Sgd` is plain stochastic gradient descent (`param -= lr * grad`) — the
-/// historical default; dispatched on-device via `dispatch_sgd_step` when the
-/// backend supports residency, otherwise via candle CPU autograd.
+/// `Muon` (Bernstein-Newhouse 2024 / Jordan et al. 2024) is the
+/// **default**: momentum-orthogonalized SGD. It keeps a single per-param
+/// heavy-ball momentum buffer, takes a (Nesterov) look-ahead, and — for
+/// the rank-2 LoRA A/B weight matrices — projects it onto the nearest
+/// semi-orthogonal matrix via a Newton-Schulz iteration before stepping,
+/// then rescales by `sqrt(max(rows, cols))` so the update magnitude is
+/// shape-independent. Dispatched on-device via `dispatch_muon_step`
+/// (fused per-matrix Newton-Schulz kernels — CUDA / ROCm / Vulkan /
+/// Metal) when operands are resident; otherwise the `kiln_optim::Muon`
+/// CPU reference. Muon converges LoRA fine-tunes in fewer steps than
+/// AdamW at roughly half the optimizer state (one momentum buffer vs
+/// Adam's m+v).
 ///
 /// `AdamW` is decoupled-weight-decay Adam (Loshchilov & Hutter 2019);
-/// dispatched on-device via `dispatch_adamw_step` when the backend supports
-/// residency. The trainer allocates per-parameter first/second moment Vars at
-/// init, registers them in the resident-activation registry alongside the
-/// param/grad, and updates all three in-place per step. The CPU fallback runs
-/// the same update via candle ops.
+/// dispatched on-device via `dispatch_adamw_step` when the backend
+/// supports residency. The trainer allocates per-parameter first/second
+/// moment tensors at init, registers them in the resident-activation
+/// registry alongside the param/grad, and updates all three in-place per
+/// step. Select with `{"optimizer": {"kind": "adam_w"}}`.
+///
+/// `Sgd` is plain stochastic gradient descent (`param -= lr * grad`);
+/// dispatched on-device via `dispatch_sgd_step` when the backend
+/// supports residency. Select with `{"optimizer": {"kind": "sgd"}}`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum Optimizer {
@@ -188,15 +201,29 @@ pub enum Optimizer {
         #[serde(default = "default_weight_decay")]
         weight_decay: f32,
     },
+    /// Momentum-orthogonalized SGD (the default). `momentum` is the
+    /// heavy-ball coefficient; `nesterov` toggles the look-ahead;
+    /// `ns_iters` is the Newton-Schulz iteration count (paper uses 5);
+    /// `weight_decay` is decoupled.
+    Muon {
+        #[serde(default = "default_muon_momentum")]
+        momentum: f32,
+        #[serde(default = "default_muon_nesterov")]
+        nesterov: bool,
+        #[serde(default = "default_muon_ns_iters")]
+        ns_iters: u32,
+        #[serde(default = "default_muon_weight_decay")]
+        weight_decay: f32,
+    },
 }
 
 impl Default for Optimizer {
     fn default() -> Self {
-        Optimizer::AdamW {
-            beta1: default_beta1(),
-            beta2: default_beta2(),
-            eps: default_eps(),
-            weight_decay: default_weight_decay(),
+        Optimizer::Muon {
+            momentum: default_muon_momentum(),
+            nesterov: default_muon_nesterov(),
+            ns_iters: default_muon_ns_iters(),
+            weight_decay: default_muon_weight_decay(),
         }
     }
 }
@@ -211,6 +238,18 @@ fn default_eps() -> f32 {
     1e-8
 }
 fn default_weight_decay() -> f32 {
+    0.0
+}
+fn default_muon_momentum() -> f32 {
+    0.95
+}
+fn default_muon_nesterov() -> bool {
+    true
+}
+fn default_muon_ns_iters() -> u32 {
+    5
+}
+fn default_muon_weight_decay() -> f32 {
     0.0
 }
 
@@ -997,6 +1036,79 @@ mod tests {
         let config: GrpoConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.checkpoint_interval, Some(10));
         assert_eq!(config.kl_coeff, 0.1); // default preserved
+    }
+
+    #[test]
+    fn optimizer_default_is_muon() {
+        match Optimizer::default() {
+            Optimizer::Muon {
+                momentum,
+                nesterov,
+                ns_iters,
+                weight_decay,
+            } => {
+                assert_eq!(momentum, 0.95);
+                assert!(nesterov);
+                assert_eq!(ns_iters, 5);
+                assert_eq!(weight_decay, 0.0);
+            }
+            other => panic!("default optimizer should be Muon, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn optimizer_muon_serializes_with_kind_muon() {
+        let opt = Optimizer::default();
+        let v: serde_json::Value = serde_json::to_value(opt).unwrap();
+        assert_eq!(v["kind"], "muon");
+        // momentum is an f32 widened to f64 in JSON — compare with tolerance.
+        assert!((v["momentum"].as_f64().unwrap() - 0.95).abs() < 1e-6);
+        assert_eq!(v["nesterov"], true);
+        assert_eq!(v["ns_iters"], 5);
+    }
+
+    #[test]
+    fn optimizer_muon_round_trips() {
+        let opt = Optimizer::Muon {
+            momentum: 0.9,
+            nesterov: false,
+            ns_iters: 7,
+            weight_decay: 0.01,
+        };
+        let json = serde_json::to_string(&opt).unwrap();
+        let back: Optimizer = serde_json::from_str(&json).unwrap();
+        assert_eq!(opt, back);
+    }
+
+    #[test]
+    fn optimizer_muon_minimal_json_fills_defaults() {
+        // Bare `{"kind": "muon"}` must fill every Muon field from defaults.
+        let opt: Optimizer = serde_json::from_str(r#"{"kind": "muon"}"#).unwrap();
+        assert_eq!(opt, Optimizer::default());
+    }
+
+    #[test]
+    fn optimizer_adamw_and_sgd_still_deserialize() {
+        // Back-compat: the old optimizer kinds remain selectable.
+        let adamw: Optimizer = serde_json::from_str(r#"{"kind": "adam_w"}"#).unwrap();
+        assert!(matches!(adamw, Optimizer::AdamW { .. }));
+        let sgd: Optimizer = serde_json::from_str(r#"{"kind": "sgd"}"#).unwrap();
+        assert_eq!(sgd, Optimizer::Sgd);
+    }
+
+    #[test]
+    fn configs_default_to_muon_optimizer() {
+        // Every training-mode config defaults to Muon when no optimizer is given.
+        assert!(matches!(
+            SftConfig::default().optimizer,
+            Optimizer::Muon { .. }
+        ));
+        assert!(matches!(
+            GrpoConfig::default().optimizer,
+            Optimizer::Muon { .. }
+        ));
+        let sft: SftConfig = serde_json::from_str(r#"{"epochs": 2}"#).unwrap();
+        assert!(matches!(sft.optimizer, Optimizer::Muon { .. }));
     }
 
     #[test]

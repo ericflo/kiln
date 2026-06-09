@@ -1,31 +1,25 @@
-//! `Lion` + `Muon` — Phase 6.5 issue-menu variants, today as stubs
-//! that demonstrate the trait shape generalizes.
+//! `Lion` + `Muon` — two non-AdamW optimizer variants.
 //!
 //! Per the Phase 6.5 issue bullet:
 //!
 //! > `kiln-optim` crate with `OptimStep` trait: AdamW, SGD, Lion, Muon
 //!
-//! `AdamW` (Phase 6.5) and `Sgd` (Phase 6.5.1) are the two concrete
-//! impls. `Lion` (Chen et al. 2023, "Symbolic Discovery of Optimization
-//! Algorithms") and `Muon` (Bernstein-Newhouse 2024, "Old optimizer,
-//! new norm") are scaffolds — they impl `OptimStep` but `step` returns
-//! `Err(StepError::Tensor(_))` with a "not yet implemented" message.
+//! [`Lion`] (Chen et al. 2023, "Symbolic Discovery of Optimization
+//! Algorithms") is a compact-state sign-momentum optimizer.
 //!
-//! These stubs exist so:
-//!
-//! 1. The OptimStep trait API surface is validated against three
-//!    + one optimizers (AdamW state-rich, SGD light, Lion compact-state,
-//!    Muon momentum-orthogonalized) rather than just two.
-//! 2. Downstream callers can write `match opt_kind { OptimKind::Lion => ... }`
-//!    today and not have to revisit the dispatch site when Phase 6.5.x
-//!    lands the real implementations.
+//! [`Muon`] (Bernstein-Newhouse 2024, "Old optimizer, new norm"; Jordan
+//! et al. 2024 nanoGPT speedrun) is momentum-orthogonalized SGD: it
+//! projects the (Nesterov) momentum onto the closest semi-orthogonal
+//! matrix via a Newton-Schulz iteration before each step. This is the
+//! production CPU reference — the oracle the per-backend GPU Muon
+//! kernels (CUDA / ROCm / Vulkan / Metal) are validated against.
 
 use std::collections::HashMap;
 
 use kiln_param::Parameter;
 use kiln_tensor::{CpuStorage, DType, Layout, Storage, Tensor, TensorId};
 
-use crate::{OptimStep, StepError};
+use crate::{OptimStep, StepError, StochasticRoundingPolicy};
 
 /// Lion (Chen et al. 2023). Compact-state alternative to AdamW —
 /// stores only the EMA of grads (no second moment).
@@ -71,7 +65,9 @@ impl Lion {
     pub fn default_hp() -> Self {
         // Defaults match the Chen et al. paper's recommended HP for
         // language models.
-        Lion::new(/*lr=*/ 1e-4, /*β1=*/ 0.9, /*β2=*/ 0.99, /*λ=*/ 0.0)
+        Lion::new(
+            /*lr=*/ 1e-4, /*β1=*/ 0.9, /*β2=*/ 0.99, /*λ=*/ 0.0,
+        )
     }
 
     pub fn ema_for(&self, id: TensorId) -> Option<&LionEma> {
@@ -150,8 +146,17 @@ impl OptimStep for Lion {
             entry.m[i] = self.beta2 * entry.m[i] + (1.0 - self.beta2) * g;
         }
 
-        // Write updated master back to the Parameter.
-        let new_master = build_master_tensor(policy.master_dtype, master.shape(), &master_f32)?;
+        // Write updated master back to the Parameter. Lion keeps
+        // round-to-nearest (no stochastic-rounding state); the master
+        // write moves back to the param's device.
+        let new_master = build_master_tensor(
+            policy.master_dtype,
+            master.shape(),
+            &master_f32,
+            StochasticRoundingPolicy::RoundToNearest,
+            entry.step,
+            master.device(),
+        )?;
         param.replace_backward_storage(Some(new_master));
         // #1082 Phase 2.7: end-of-optimizer-step epoch bump (see AdamW).
         param.bump_epoch();
@@ -163,14 +168,24 @@ impl OptimStep for Lion {
     }
 }
 
+/// Read a tensor (any device) into a host `Vec<f32>`, promoting from
+/// BF16/F16/F32. Device-resident tensors are D2H-copied first — the
+/// on-device GPU kernels handle the resident fast path; this is the
+/// portable host reference / fallback.
 fn read_master_to_f32(t: &Tensor) -> Result<Vec<f32>, StepError> {
-    let cpu = t
+    let host = if matches!(t.device(), kiln_tensor::Device::Cpu) {
+        t.clone()
+    } else {
+        t.to_device(kiln_tensor::Device::Cpu)
+            .map_err(StepError::Tensor)?
+    };
+    let cpu = host
         .storage()
         .as_any()
         .downcast_ref::<CpuStorage>()
         .ok_or_else(|| {
             StepError::Tensor(kiln_tensor::Error::from_str(
-                "Lion CPU: tensor storage must be CpuStorage",
+                "lion_muon: tensor storage must be CpuStorage on CPU",
             ))
         })?;
     let bytes = cpu.as_bytes();
@@ -187,32 +202,64 @@ fn read_master_to_f32(t: &Tensor) -> Result<Vec<f32>, StepError> {
         DType::BF16 => {
             for i in 0..n {
                 out.push(
-                    half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32(),
+                    half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32(),
                 );
             }
         }
         DType::F16 => {
             for i in 0..n {
                 out.push(
-                    half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32(),
+                    half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32(),
                 );
             }
         }
         other => {
             return Err(StepError::Tensor(kiln_tensor::Error::Msg(format!(
-                "Lion CPU: unsupported dtype {other}"
-            ))))
+                "lion_muon: unsupported dtype {other}"
+            ))));
         }
     }
     Ok(out)
 }
 
+/// Stochastically round an `f32` to a `bf16` bit pattern (mirrors
+/// `adamw.rs`). Adds a uniform 16-bit value before truncating so the
+/// carry into bit 16 fires with probability proportional to the
+/// dropped mantissa — unbiased in expectation. NaN passes through
+/// round-to-nearest.
+#[inline]
+fn f32_to_bf16_stochastic_bits(v: f32, r: u16) -> u16 {
+    let bits = v.to_bits();
+    if (bits & 0x7fff_ffff) > 0x7f80_0000 {
+        return half::bf16::from_f32(v).to_bits();
+    }
+    let rounded = bits.wrapping_add(r as u32);
+    (rounded >> 16) as u16
+}
+
+/// Deterministic per-element uniform 16-bit draw from `(seed, step,
+/// idx)` via a splitmix64 finalizer (mirrors `adamw.rs`).
+#[inline]
+fn stochastic_round_rng16(seed: u64, step: u64, idx: usize) -> u16 {
+    let mut z = seed
+        ^ step.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ (idx as u64).wrapping_mul(0xd1b5_4a32_d192_ed03);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^= z >> 31;
+    (z >> 32) as u16
+}
+
+/// Build a master `Tensor` from f32 values, in `dtype`, then move it to
+/// `device`. BF16 honours `rounding` (stochastic rounding under
+/// `KILN_BF16_STOCHASTIC_ROUND=1`, varied by `step`).
 fn build_master_tensor(
     dtype: DType,
     shape: &[usize],
     values: &[f32],
+    rounding: StochasticRoundingPolicy,
+    step: u64,
+    device: kiln_tensor::Device,
 ) -> Result<Tensor, StepError> {
     use std::sync::Arc;
     let per = dtype.size_in_bytes();
@@ -223,58 +270,98 @@ fn build_master_tensor(
                 bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
             }
         }
-        DType::BF16 => {
-            for (i, &v) in values.iter().enumerate() {
-                bytes[i * 2..i * 2 + 2]
-                    .copy_from_slice(&half::bf16::from_f32(v).to_le_bytes());
+        DType::BF16 => match rounding {
+            StochasticRoundingPolicy::Stochastic { seed } => {
+                for (i, &v) in values.iter().enumerate() {
+                    let r = stochastic_round_rng16(seed, step, i);
+                    let b = f32_to_bf16_stochastic_bits(v, r);
+                    bytes[i * 2..i * 2 + 2].copy_from_slice(&b.to_le_bytes());
+                }
             }
-        }
+            StochasticRoundingPolicy::RoundToNearest => {
+                for (i, &v) in values.iter().enumerate() {
+                    bytes[i * 2..i * 2 + 2].copy_from_slice(&half::bf16::from_f32(v).to_le_bytes());
+                }
+            }
+        },
         DType::F16 => {
             for (i, &v) in values.iter().enumerate() {
-                bytes[i * 2..i * 2 + 2]
-                    .copy_from_slice(&half::f16::from_f32(v).to_le_bytes());
+                bytes[i * 2..i * 2 + 2].copy_from_slice(&half::f16::from_f32(v).to_le_bytes());
             }
         }
         other => {
             return Err(StepError::Tensor(kiln_tensor::Error::Msg(format!(
-                "Lion CPU: unsupported master dtype {other}"
-            ))))
+                "lion_muon: unsupported master dtype {other}"
+            ))));
         }
     }
     let cpu = CpuStorage::from_bytes(dtype, bytes).map_err(StepError::Tensor)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(shape.to_vec()), TensorId::next())
-        .map_err(StepError::Tensor)
+    let host = Tensor::from_parts(
+        storage,
+        Layout::contiguous(shape.to_vec()),
+        TensorId::next(),
+    )
+    .map_err(StepError::Tensor)?;
+    if matches!(device, kiln_tensor::Device::Cpu) {
+        Ok(host)
+    } else {
+        host.to_device(device).map_err(StepError::Tensor)
+    }
 }
 
-/// Muon (Bernstein-Newhouse 2024). Momentum-orthogonalized SGD —
-/// projects the momentum onto the closest orthogonal matrix via
-/// Newton-Schulz iteration before each step.
+// ----------------------------------------------------------------------
+// Muon — momentum-orthogonalized SGD (production CPU reference)
+// ----------------------------------------------------------------------
+
+/// Muon (Bernstein-Newhouse 2024 / Jordan et al. 2024). Heavy-ball
+/// (optionally Nesterov) momentum-orthogonalized SGD: it projects the
+/// momentum matrix onto the nearest semi-orthogonal matrix via a
+/// Newton-Schulz quintic iteration before each step, then rescales the
+/// update so its per-element RMS is shape-independent.
 ///
-/// # Algorithm (rank-2 weights)
+/// # Algorithm (per parameter, master in f32 working precision)
 ///
 /// ```text
-/// m_t = momentum * m_{t-1} + g_t            # heavy-ball momentum
-/// U_t = newton_schulz(m_t, iters)           # ≈ polar U factor of m_t
-/// p_t = p_{t-1} - lr * U_t
+/// m_t   = momentum * m_{t-1} + g_t                  # heavy-ball state
+/// b_t   = if nesterov { g_t + momentum * m_t } else { m_t }
+/// if rank-2 (matrix):
+///     O = newton_schulz(b_t, ns_iters)              # ≈ polar factor U Vᵀ
+///     O *= sqrt(max(rows, cols))                    # RMS-matching scale
+/// else:
+///     O = b_t                                       # plain momentum SGD
+/// p_t   = p_{t-1} * (1 - lr * weight_decay) - lr * O
 /// ```
 ///
-/// Newton-Schulz iteration (paper coefficients a=3.4445, b=-4.7750,
-/// c=2.0315) approximates the polar decomposition for 5 iterations.
+/// The Newton-Schulz uses the paper coefficients `(a, b, c) =
+/// (3.4445, -4.7750, 2.0315)` for `ns_iters` (default 5) iterations,
+/// computed via the gram-space P-accumulator (see [`newton_schulz`]) so
+/// the per-step cost is dominated by two skinny GEMMs over the large
+/// matrix dimension — the rest is `k×k` work where `k = min(rows, cols)`
+/// (the LoRA rank, ≈16).
 ///
 /// # Non-matrix parameters
 ///
-/// Muon is defined only for **matrix-shaped weights** (rank-2).
-/// Bias vectors / embeddings / scalar weights fall back to plain
-/// SGD-with-momentum (skip the orthogonalization).
-#[derive(Debug, Default)]
+/// Muon's orthogonalization is defined only for **rank-2** weights.
+/// Vectors / scalars fall back to plain SGD-with-(Nesterov-)momentum.
+#[derive(Debug)]
 pub struct Muon {
     pub lr: f32,
     pub momentum: f32,
+    pub nesterov: bool,
     /// Number of Newton-Schulz iterations. Paper uses 5.
     pub ns_iters: u32,
+    /// Decoupled weight decay coefficient.
+    pub weight_decay: f32,
+    rounding: StochasticRoundingPolicy,
     /// Per-parameter momentum buffer keyed on TensorId.
     momenta: HashMap<TensorId, MuonState>,
+}
+
+impl Default for Muon {
+    fn default() -> Self {
+        Muon::default_hp()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -284,17 +371,27 @@ pub struct MuonState {
 }
 
 impl Muon {
-    pub fn new(lr: f32, momentum: f32, ns_iters: u32) -> Self {
+    pub fn new(lr: f32, momentum: f32, nesterov: bool, ns_iters: u32, weight_decay: f32) -> Self {
         Muon {
             lr,
             momentum,
+            nesterov,
             ns_iters,
+            weight_decay,
+            rounding: StochasticRoundingPolicy::from_env(),
             momenta: HashMap::new(),
         }
     }
 
+    /// Recommended Muon defaults: momentum 0.95, Nesterov on, 5
+    /// Newton-Schulz iterations, no weight decay, lr 2e-2 (Muon's
+    /// orthogonalized + RMS-scaled update tolerates a larger lr than
+    /// AdamW's 1e-3).
     pub fn default_hp() -> Self {
-        Muon::new(/*lr=*/ 2e-2, /*momentum=*/ 0.95, /*ns_iters=*/ 5)
+        Muon::new(
+            /*lr=*/ 2e-2, /*momentum=*/ 0.95, /*nesterov=*/ true,
+            /*ns_iters=*/ 5, /*weight_decay=*/ 0.0,
+        )
     }
 
     pub fn momentum_for(&self, id: TensorId) -> Option<&MuonState> {
@@ -356,24 +453,48 @@ impl OptimStep for Muon {
             ))));
         }
         entry.step += 1;
-        // Heavy-ball momentum: m = β m + g.
+
+        // 1. Heavy-ball momentum: m = momentum*m + g (state update).
         for i in 0..n {
             entry.m[i] = self.momentum * entry.m[i] + grad_f32[i];
         }
-
-        // Orthogonalize for rank-2 weights; otherwise plain SGD with
-        // the heavy-ball momentum.
-        let update = if shape.len() == 2 {
-            newton_schulz(&entry.m, shape[0], shape[1], self.ns_iters)
+        // 2. Look-ahead direction b = nesterov ? g + momentum*m : m.
+        let mut b = vec![0.0f32; n];
+        if self.nesterov {
+            for i in 0..n {
+                b[i] = grad_f32[i] + self.momentum * entry.m[i];
+            }
         } else {
-            entry.m.clone()
+            b.copy_from_slice(&entry.m);
+        }
+
+        // 3. Orthogonalize for rank-2 weights; otherwise plain momentum.
+        let update = if shape.len() == 2 {
+            let (rows, cols) = (shape[0], shape[1]);
+            let mut o = newton_schulz(&b, rows, cols, self.ns_iters);
+            let scale = (rows.max(cols) as f32).sqrt();
+            for v in o.iter_mut() {
+                *v *= scale;
+            }
+            o
+        } else {
+            b
         };
 
+        // 4. Decoupled weight decay + descent step.
         for i in 0..n {
+            master_f32[i] -= self.lr * self.weight_decay * master_f32[i];
             master_f32[i] -= self.lr * update[i];
         }
 
-        let new_master = build_master_tensor(policy.master_dtype, &shape, &master_f32)?;
+        let new_master = build_master_tensor(
+            policy.master_dtype,
+            &shape,
+            &master_f32,
+            self.rounding,
+            entry.step,
+            master.device(),
+        )?;
         param.replace_backward_storage(Some(new_master));
         // #1082 Phase 2.7: end-of-optimizer-step epoch bump (see AdamW).
         param.bump_epoch();
@@ -385,123 +506,135 @@ impl OptimStep for Muon {
     }
 }
 
-/// Newton-Schulz orthogonalization for a row-major `[rows, cols]`
-/// matrix flattened into `data`. Paper coefficients
-/// `(a, b, c) = (3.4445, -4.7750, 2.0315)`. Returns the orthogonalized
-/// matrix flattened back in row-major.
-fn newton_schulz(data: &[f32], rows: usize, cols: usize, iters: u32) -> Vec<f32> {
-    debug_assert_eq!(data.len(), rows * cols);
-    // 1. Frobenius-normalize.
-    let frob: f32 = data.iter().map(|&v| v * v).sum::<f32>().sqrt();
+// ----------------------------------------------------------------------
+// Newton-Schulz orthogonalization (gram-space P-accumulator)
+// ----------------------------------------------------------------------
+
+/// Newton-Schulz orthogonalization of a row-major `[rows, cols]` matrix
+/// `w`. Returns `O ≈ U Vᵀ` (the orthogonal polar factor) flattened
+/// row-major, with `‖O‖_F ≈ sqrt(min(rows, cols))`.
+///
+/// Coefficients `(a, b, c) = (3.4445, -4.7750, 2.0315)`. The iteration
+/// `X ← a·X + (b·A + c·A²)·X` (with `A` the gram of the Frobenius-
+/// normalized `X`) is reorganized so that each iteration is a `k×k`
+/// matrix `M_i = a·I + b·A_i + c·A_i²` (`k = min(rows, cols)`), and the
+/// whole product collapses to a single `k×k` accumulator `P`:
+/// `O = (P @ W) / ‖W‖_F` when `rows ≤ cols`, or `(W @ P) / ‖W‖_F` when
+/// `rows > cols`. Only the initial gram and the final apply touch the
+/// large dimension; everything else is `k×k`.
+pub fn newton_schulz(w: &[f32], rows: usize, cols: usize, iters: u32) -> Vec<f32> {
+    debug_assert_eq!(w.len(), rows * cols);
+    let n = rows * cols;
+    let frob = w.iter().map(|&v| v * v).sum::<f32>().sqrt();
     if frob == 0.0 {
-        return data.to_vec();
+        return vec![0.0; n];
     }
-    let mut x: Vec<f32> = data.iter().map(|&v| v / frob).collect();
+    let inv_frob = 1.0 / frob;
+    // Gram in the smaller dimension. `transpose=false` → rows ≤ cols →
+    // gram = W Wᵀ (rows×rows), accumulate P on the left, O = P W.
+    // `transpose=true`  → rows >  cols → gram = Wᵀ W (cols×cols),
+    // accumulate P on the right, O = W P.
+    let transpose = rows > cols;
+    let k = rows.min(cols);
 
-    let (a, b, c) = (3.4445_f32, -4.7750_f32, 2.0315_f32);
-    let mut a_buf = vec![0.0f32; rows.min(cols) * rows.min(cols)];
-    let mut aa = a_buf.clone();
-    let mut aa_x = vec![0.0f32; rows * cols];
-
-    // Convention: if rows >= cols, use X^T X (cols x cols); else X X^T.
-    // This is the paper's recipe — operate on the smaller of the two
-    // gram matrices.
-    let transpose = rows >= cols;
-    let k = if transpose { cols } else { rows };
-
-    for _ in 0..iters {
-        // A = X^T X (when transpose=true, shape [cols, cols])
-        //     or X X^T (when transpose=false, shape [rows, rows])
-        gram(&x, rows, cols, transpose, &mut a_buf);
-        // AA = A @ A
-        matmul_square(&a_buf, k, &mut aa);
-        // Q = b * A + c * AA  (k x k)
-        for i in 0..k * k {
-            aa[i] = b * a_buf[i] + c * aa[i];
-        }
-        // X_new = a * X + Q @ X (when transpose=true)  OR  a * X + X @ Q
-        // Depending on which side the gram was computed.
-        if transpose {
-            // Q is cols x cols → multiply on the right: X = a*X + X @ Q
-            matmul_rhs(&x, &aa, rows, cols, &mut aa_x);
-        } else {
-            // Q is rows x rows → multiply on the left: X = a*X + Q @ X
-            matmul_lhs(&aa, &x, rows, cols, &mut aa_x);
-        }
-        for i in 0..rows * cols {
-            x[i] = a * x[i] + aa_x[i];
-        }
-    }
-    x
-}
-
-/// `A = X^T X` (when transpose) or `X X^T` (otherwise).
-fn gram(x: &[f32], rows: usize, cols: usize, transpose: bool, out: &mut [f32]) {
-    if transpose {
-        // out [cols, cols] = X^T [cols, rows] @ X [rows, cols]
-        debug_assert_eq!(out.len(), cols * cols);
-        for i in 0..cols {
-            for j in 0..cols {
-                let mut s = 0.0_f32;
-                for r in 0..rows {
-                    s += x[r * cols + i] * x[r * cols + j];
+    // A0 = gram(W_normalized) = (W Wᵀ or Wᵀ W) * inv_frob².
+    let inv_frob2 = inv_frob * inv_frob;
+    let mut a = vec![0.0f32; k * k];
+    if !transpose {
+        for i in 0..k {
+            for j in 0..k {
+                let mut s = 0.0f32;
+                for c in 0..cols {
+                    s += w[i * cols + c] * w[j * cols + c];
                 }
-                out[i * cols + j] = s;
+                a[i * k + j] = s * inv_frob2;
             }
         }
     } else {
-        // out [rows, rows] = X [rows, cols] @ X^T [cols, rows]
-        debug_assert_eq!(out.len(), rows * rows);
-        for i in 0..rows {
-            for j in 0..rows {
-                let mut s = 0.0_f32;
-                for c in 0..cols {
-                    s += x[i * cols + c] * x[j * cols + c];
+        for i in 0..k {
+            for j in 0..k {
+                let mut s = 0.0f32;
+                for r in 0..rows {
+                    s += w[r * cols + i] * w[r * cols + j];
                 }
-                out[i * rows + j] = s;
+                a[i * k + j] = s * inv_frob2;
             }
         }
     }
-}
 
-fn matmul_square(a: &[f32], n: usize, out: &mut [f32]) {
-    debug_assert_eq!(a.len(), n * n);
-    debug_assert_eq!(out.len(), n * n);
-    for i in 0..n {
-        for j in 0..n {
-            let mut s = 0.0_f32;
-            for k in 0..n {
-                s += a[i * n + k] * a[k * n + j];
+    // P = I_k.
+    let mut p = vec![0.0f32; k * k];
+    for i in 0..k {
+        p[i * k + i] = 1.0;
+    }
+
+    let (ca, cb, cc) = (3.4445f32, -4.7750f32, 2.0315f32);
+    let mut a2 = vec![0.0f32; k * k];
+    let mut m = vec![0.0f32; k * k];
+    let mut tmp = vec![0.0f32; k * k];
+    for _ in 0..iters {
+        // A2 = A @ A.
+        matmul_kk(&a, &a, &mut a2, k);
+        // M = a*I + b*A + c*A2.
+        for i in 0..k {
+            for j in 0..k {
+                let id = if i == j { 1.0 } else { 0.0 };
+                m[i * k + j] = ca * id + cb * a[i * k + j] + cc * a2[i * k + j];
             }
-            out[i * n + j] = s;
+        }
+        // Accumulate P: left-multiply (P = M P) when rows ≤ cols,
+        // right-multiply (P = P M) when rows > cols.
+        if !transpose {
+            matmul_kk(&m, &p, &mut tmp, k);
+        } else {
+            matmul_kk(&p, &m, &mut tmp, k);
+        }
+        p.copy_from_slice(&tmp);
+        // A = M A M  (M symmetric, so M Aᵀ Mᵀ = M A M keeps A symmetric).
+        matmul_kk(&m, &a, &mut tmp, k);
+        matmul_kk(&tmp, &m, &mut a, k);
+    }
+
+    // O = (P @ W) * inv_frob  (rows ≤ cols)  or  (W @ P) * inv_frob.
+    let mut o = vec![0.0f32; n];
+    if !transpose {
+        // O[i,c] = inv_frob * Σ_j P[i,j] W[j,c];  i ∈ [0,rows)=k rows.
+        for i in 0..rows {
+            for c in 0..cols {
+                let mut s = 0.0f32;
+                for j in 0..k {
+                    s += p[i * k + j] * w[j * cols + c];
+                }
+                o[i * cols + c] = s * inv_frob;
+            }
+        }
+    } else {
+        // O[r,c] = inv_frob * Σ_j W[r,j] P[j,c];  c ∈ [0,cols)=k cols.
+        for r in 0..rows {
+            for c in 0..cols {
+                let mut s = 0.0f32;
+                for j in 0..k {
+                    s += w[r * cols + j] * p[j * k + c];
+                }
+                o[r * cols + c] = s * inv_frob;
+            }
         }
     }
+    o
 }
 
-/// `out = x @ q` where x is `[rows, cols]`, q is `[cols, cols]`.
-fn matmul_rhs(x: &[f32], q: &[f32], rows: usize, cols: usize, out: &mut [f32]) {
-    debug_assert_eq!(out.len(), rows * cols);
-    for r in 0..rows {
-        for c in 0..cols {
-            let mut s = 0.0_f32;
-            for k in 0..cols {
-                s += x[r * cols + k] * q[k * cols + c];
+/// `out = a @ b` for row-major `k×k` matrices.
+fn matmul_kk(a: &[f32], b: &[f32], out: &mut [f32], k: usize) {
+    debug_assert_eq!(a.len(), k * k);
+    debug_assert_eq!(b.len(), k * k);
+    debug_assert_eq!(out.len(), k * k);
+    for i in 0..k {
+        for j in 0..k {
+            let mut s = 0.0f32;
+            for t in 0..k {
+                s += a[i * k + t] * b[t * k + j];
             }
-            out[r * cols + c] = s;
-        }
-    }
-}
-
-/// `out = q @ x` where q is `[rows, rows]`, x is `[rows, cols]`.
-fn matmul_lhs(q: &[f32], x: &[f32], rows: usize, cols: usize, out: &mut [f32]) {
-    debug_assert_eq!(out.len(), rows * cols);
-    for r in 0..rows {
-        for c in 0..cols {
-            let mut s = 0.0_f32;
-            for k in 0..rows {
-                s += q[r * rows + k] * x[k * cols + c];
-            }
-            out[r * cols + c] = s;
+            out[i * k + j] = s;
         }
     }
 }
@@ -515,7 +648,11 @@ mod tests {
     fn fresh_param() -> Parameter {
         let fwd = Tensor::from_slice(&[1.0f32, 2.0], vec![2]).unwrap();
         let master = Tensor::from_slice(&[1.0f32, 2.0], vec![2]).unwrap();
-        Parameter::trainable(ForwardStorage::Plain(fwd), master, AmpPolicy::fp32_reference())
+        Parameter::trainable(
+            ForwardStorage::Plain(fwd),
+            master,
+            AmpPolicy::fp32_reference(),
+        )
     }
 
     #[test]
@@ -626,17 +763,32 @@ mod tests {
 
     #[test]
     fn muon_name_and_construction() {
-        let m = Muon::new(1e-3, 0.95, 5);
+        let m = Muon::new(1e-3, 0.95, true, 5, 0.0);
         assert_eq!(m.name(), "muon");
         assert_eq!(m.momentum, 0.95);
+        assert!(m.nesterov);
         assert_eq!(m.ns_iters, 5);
+    }
+
+    #[test]
+    fn muon_default_hp() {
+        let m = Muon::default_hp();
+        assert_eq!(m.lr, 2e-2);
+        assert_eq!(m.momentum, 0.95);
+        assert!(m.nesterov);
+        assert_eq!(m.ns_iters, 5);
+        assert_eq!(m.weight_decay, 0.0);
     }
 
     fn fresh_matrix_param() -> Parameter {
         // 2x2 identity-ish matrix.
         let fwd = Tensor::from_slice(&[1.0f32, 0.0, 0.0, 1.0], vec![2, 2]).unwrap();
         let master = Tensor::from_slice(&[1.0f32, 0.0, 0.0, 1.0], vec![2, 2]).unwrap();
-        Parameter::trainable(ForwardStorage::Plain(fwd), master, AmpPolicy::fp32_reference())
+        Parameter::trainable(
+            ForwardStorage::Plain(fwd),
+            master,
+            AmpPolicy::fp32_reference(),
+        )
     }
 
     fn read_master(p: &Parameter) -> Vec<f32> {
@@ -654,11 +806,24 @@ mod tests {
     }
 
     #[test]
-    fn muon_step_rank1_falls_back_to_sgd_momentum() {
-        // For non-matrix shapes Muon = SGD with heavy-ball momentum.
-        // m_0 = 0; step 1 with grad=ones → m = ones → master -= lr * ones.
-        let mut opt = Muon::new(0.1, 0.9, 5);
+    fn muon_step_rank1_falls_back_to_momentum() {
+        // For non-matrix shapes Muon = SGD with (Nesterov) momentum.
+        // m_0 = 0; step 1 with grad=ones → m = ones.
+        // nesterov b = g + momentum*m = 1 + 0.9*1 = 1.9 → master -= lr*1.9.
+        let mut opt = Muon::new(0.1, 0.9, true, 5, 0.0);
         let mut p = fresh_param(); // shape [2]
+        let g = Tensor::from_slice(&[1.0f32, 1.0], vec![2]).unwrap();
+        opt.step(&mut p, &g).unwrap();
+        let v = read_master(&p);
+        assert!((v[0] - (1.0 - 0.1 * 1.9)).abs() < 1e-6, "got {}", v[0]);
+        assert!((v[1] - (2.0 - 0.1 * 1.9)).abs() < 1e-6, "got {}", v[1]);
+    }
+
+    #[test]
+    fn muon_step_rank1_heavy_ball_when_not_nesterov() {
+        // Without Nesterov, b = m = ones → master -= lr*1.
+        let mut opt = Muon::new(0.1, 0.9, false, 5, 0.0);
+        let mut p = fresh_param();
         let g = Tensor::from_slice(&[1.0f32, 1.0], vec![2]).unwrap();
         opt.step(&mut p, &g).unwrap();
         let v = read_master(&p);
@@ -669,8 +834,8 @@ mod tests {
     #[test]
     fn muon_step_rank2_runs_newton_schulz() {
         // For a matrix grad, the orthogonalization changes the update
-        // direction. We just verify the step runs without error,
-        // produces finite outputs, and that the step counter advances.
+        // direction. Verify the step runs, produces finite outputs, and
+        // advances the step counter.
         let mut opt = Muon::default_hp();
         let mut p = fresh_matrix_param();
         let g = Tensor::from_slice(&[1.0f32, 0.5, 0.5, 1.0], vec![2, 2]).unwrap();
@@ -706,36 +871,79 @@ mod tests {
         assert_eq!(state.step, 3);
     }
 
-    #[test]
-    fn newton_schulz_pulls_singular_values_toward_unity() {
-        // NS is an *orthogonalizer*: it takes a matrix whose singular
-        // values are arbitrary and pulls them toward 1. Testing it on
-        // the identity matrix is a misleading check — the Muon-paper
-        // quintic `p(σ) = 3.4445σ - 4.7750σ³ + 2.0315σ⁵` is tuned for
-        // fast convergence from σ ∈ [~0.3, σ_max] toward σ ≈ 1, NOT
-        // to fix-point σ = 1 (p(1) ≈ 0.701, so it would *move away*
-        // from already-orthogonal). The right test starts from a
-        // clearly non-orthogonal input.
-        //
-        // Input: diag(0.3, 0.5). Frobenius norm = √0.34 ≈ 0.583, far
-        // from the √2 ≈ 1.414 of a 2×2 orthogonal matrix.
-        let m = vec![0.3f32, 0.0, 0.0, 0.5];
-        let input_frob = m.iter().map(|&v| v * v).sum::<f32>().sqrt();
-        let out = newton_schulz(&m, 2, 2, 5);
-        let output_frob = out.iter().map(|&v| v * v).sum::<f32>().sqrt();
-        let target = 2.0_f32.sqrt();
-        // Output should land strictly closer to √2 than the input was.
-        assert!(
-            (output_frob - target).abs() < (input_frob - target).abs(),
-            "NS didn't pull frob toward √2: input={input_frob}, output={output_frob}"
-        );
-        // And the output should land in the orthogonal ballpark — well
-        // within 0.5 of √2. (Hand-traced expectation: ~1.21 after 5
-        // iters of the diagonal recurrence.)
-        assert!(
-            (output_frob - target).abs() < 0.5,
-            "NS output frob {output_frob} too far from √2 ≈ {target}"
-        );
+    // ---- Newton-Schulz P-accumulator correctness ----
+
+    /// Singular values of a row-major `[rows, cols]` matrix via the
+    /// eigenvalues of its (small) gram, by symmetric Jacobi.
+    fn singular_values(m: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+        let k = rows.min(cols);
+        // gram = the smaller of M Mᵀ / Mᵀ M (k×k, symmetric PSD).
+        let mut g = vec![0.0f64; k * k];
+        if rows <= cols {
+            for i in 0..k {
+                for j in 0..k {
+                    let mut s = 0.0f64;
+                    for c in 0..cols {
+                        s += m[i * cols + c] as f64 * m[j * cols + c] as f64;
+                    }
+                    g[i * k + j] = s;
+                }
+            }
+        } else {
+            for i in 0..k {
+                for j in 0..k {
+                    let mut s = 0.0f64;
+                    for r in 0..rows {
+                        s += m[r * cols + i] as f64 * m[r * cols + j] as f64;
+                    }
+                    g[i * k + j] = s;
+                }
+            }
+        }
+        // Jacobi eigenvalue iteration on the symmetric k×k gram.
+        for _ in 0..100 {
+            // find largest off-diagonal
+            let (mut p, mut q, mut max) = (0, 1, 0.0f64);
+            for i in 0..k {
+                for j in (i + 1)..k {
+                    if g[i * k + j].abs() > max {
+                        max = g[i * k + j].abs();
+                        p = i;
+                        q = j;
+                    }
+                }
+            }
+            if max < 1e-12 {
+                break;
+            }
+            let app = g[p * k + p];
+            let aqq = g[q * k + q];
+            let apq = g[p * k + q];
+            let theta = 0.5 * (aqq - app).atan2(2.0 * apq);
+            // standard rotation; recompute via theta = 0.5*atan2(2apq, app-aqq)
+            let phi = 0.5 * (2.0 * apq).atan2(app - aqq);
+            let (c, s) = (phi.cos(), phi.sin());
+            let _ = theta;
+            let mut gn = g.clone();
+            for i in 0..k {
+                let gip = g[i * k + p];
+                let giq = g[i * k + q];
+                gn[i * k + p] = c * gip + s * giq;
+                gn[i * k + q] = -s * gip + c * giq;
+            }
+            g.copy_from_slice(&gn);
+            let mut gn2 = g.clone();
+            for j in 0..k {
+                let gpj = g[p * k + j];
+                let gqj = g[q * k + j];
+                gn2[p * k + j] = c * gpj + s * gqj;
+                gn2[q * k + j] = -s * gpj + c * gqj;
+            }
+            g.copy_from_slice(&gn2);
+        }
+        (0..k)
+            .map(|i| (g[i * k + i].max(0.0)).sqrt() as f32)
+            .collect()
     }
 
     #[test]
@@ -745,6 +953,200 @@ mod tests {
         for v in out {
             assert_eq!(v, 0.0);
         }
+    }
+
+    /// Naive *direct* Newton-Schulz (the un-factored `X ← a·X + (b·A +
+    /// c·A²)·X` iteration), matching the orientation choice of the
+    /// production [`newton_schulz`]. The production version factors this
+    /// into a `k×k` P-accumulator; this reference recomputes it the slow
+    /// way so the two can be cross-checked.
+    fn newton_schulz_direct(w: &[f32], rows: usize, cols: usize, iters: u32) -> Vec<f32> {
+        let frob = w.iter().map(|&v| v * v).sum::<f32>().sqrt();
+        if frob == 0.0 {
+            return vec![0.0; rows * cols];
+        }
+        let transpose = rows > cols; // match newton_schulz orientation
+        let k = rows.min(cols);
+        let mut x: Vec<f32> = w.iter().map(|&v| v / frob).collect();
+        let (ca, cb, cc) = (3.4445f32, -4.7750f32, 2.0315f32);
+        for _ in 0..iters {
+            // A = gram (k×k): X Xᵀ (rows≤cols) or Xᵀ X (rows>cols).
+            let mut a = vec![0.0f32; k * k];
+            if !transpose {
+                for i in 0..k {
+                    for j in 0..k {
+                        let mut s = 0.0;
+                        for c in 0..cols {
+                            s += x[i * cols + c] * x[j * cols + c];
+                        }
+                        a[i * k + j] = s;
+                    }
+                }
+            } else {
+                for i in 0..k {
+                    for j in 0..k {
+                        let mut s = 0.0;
+                        for r in 0..rows {
+                            s += x[r * cols + i] * x[r * cols + j];
+                        }
+                        a[i * k + j] = s;
+                    }
+                }
+            }
+            // AA = A@A; Q = b*A + c*AA (k×k).
+            let mut q = vec![0.0f32; k * k];
+            for i in 0..k {
+                for j in 0..k {
+                    let mut s = 0.0;
+                    for t in 0..k {
+                        s += a[i * k + t] * a[t * k + j];
+                    }
+                    q[i * k + j] = cb * a[i * k + j] + cc * s;
+                }
+            }
+            // X ← a*X + (Q@X if rows≤cols else X@Q).
+            let mut xn = vec![0.0f32; rows * cols];
+            if !transpose {
+                for i in 0..rows {
+                    for c in 0..cols {
+                        let mut s = 0.0;
+                        for t in 0..k {
+                            s += q[i * k + t] * x[t * cols + c];
+                        }
+                        xn[i * cols + c] = ca * x[i * cols + c] + s;
+                    }
+                }
+            } else {
+                for r in 0..rows {
+                    for c in 0..cols {
+                        let mut s = 0.0;
+                        for t in 0..k {
+                            s += x[r * cols + t] * q[t * k + c];
+                        }
+                        xn[r * cols + c] = ca * x[r * cols + c] + s;
+                    }
+                }
+            }
+            x = xn;
+        }
+        x
+    }
+
+    #[test]
+    fn newton_schulz_matches_direct_iteration() {
+        // The P-accumulator factoring must reproduce the naive direct
+        // iteration bit-closely across square / wide / tall shapes.
+        let cases: &[(usize, usize)] = &[(2, 2), (3, 3), (2, 5), (5, 2), (4, 6), (6, 4)];
+        for &(rows, cols) in cases {
+            let w: Vec<f32> = (0..rows * cols)
+                .map(|i| ((i as f32 * 0.37).sin() - 0.2 * (i as f32 * 0.11).cos()))
+                .collect();
+            let got = newton_schulz(&w, rows, cols, 5);
+            let want = newton_schulz_direct(&w, rows, cols, 5);
+            for i in 0..rows * cols {
+                assert!(
+                    (got[i] - want[i]).abs() < 1e-3,
+                    "P-accumulator != direct at {i} for {rows}x{cols}: {} vs {}",
+                    got[i],
+                    want[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn newton_schulz_improves_conditioning() {
+        // The polar-factor iteration pulls the singular values into a
+        // tight unit band (these Keller-Jordan coefficients land them in
+        // ~[0.7, 1.0] after 5 iters — NOT exactly 1) and reduces the
+        // condition number vs the input.
+        let m = vec![0.3f32, 0.0, 0.0, 0.5];
+        let in_sv = singular_values(&m, 2, 2);
+        let out = newton_schulz(&m, 2, 2, 5);
+        let out_sv = singular_values(&out, 2, 2);
+        for &s in &out_sv {
+            assert!(
+                (0.6..=1.1).contains(&s),
+                "singular value {s} outside unit band"
+            );
+        }
+        let cond = |sv: &[f32]| {
+            sv.iter().cloned().fold(0.0f32, f32::max)
+                / sv.iter().cloned().fold(f32::INFINITY, f32::min)
+        };
+        assert!(
+            cond(&out_sv) < cond(&in_sv),
+            "conditioning not improved: in {} out {}",
+            cond(&in_sv),
+            cond(&out_sv)
+        );
+    }
+
+    #[test]
+    fn newton_schulz_short_fat_and_tall_skinny_are_transposes() {
+        // NS(Wᵀ) == NS(W)ᵀ : the orthogonalizer commutes with transpose.
+        // W is [2,3]; Wt is [3,2].
+        let w = vec![0.6f32, 0.1, -0.2, 0.3, 0.5, 0.4];
+        let wt = vec![0.6f32, 0.3, 0.1, 0.5, -0.2, 0.4];
+        let o = newton_schulz(&w, 2, 3, 5);
+        let ot = newton_schulz(&wt, 3, 2, 5);
+        // o is [2,3], ot is [3,2]; compare o[i,j] == ot[j,i].
+        for i in 0..2 {
+            for j in 0..3 {
+                assert!(
+                    (o[i * 3 + j] - ot[j * 2 + i]).abs() < 1e-4,
+                    "transpose mismatch at ({i},{j}): {} vs {}",
+                    o[i * 3 + j],
+                    ot[j * 2 + i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn muon_rms_scale_normalizes_update_magnitude() {
+        // With Nesterov off and momentum 0 the update direction for a
+        // rank-2 weight is NS(g)*sqrt(max(rows,cols)). Its RMS per
+        // element should be ≈ 1 (the RMS-matching scale), independent of
+        // shape. Check that the master moved by ≈ lr in RMS.
+        let mut opt = Muon::new(1.0, 0.0, false, 6, 0.0);
+        // wide 2x8 matrix of ones-ish.
+        let (rows, cols) = (2usize, 8usize);
+        let init: Vec<f32> = (0..rows * cols).map(|i| (i as f32 * 0.13).sin()).collect();
+        let fwd = Tensor::from_slice(&init, vec![rows, cols]).unwrap();
+        let master = Tensor::from_slice(&init, vec![rows, cols]).unwrap();
+        let mut p = Parameter::trainable(
+            ForwardStorage::Plain(fwd),
+            master,
+            AmpPolicy::fp32_reference(),
+        );
+        let g: Vec<f32> = (0..rows * cols).map(|i| (i as f32 * 0.27).cos()).collect();
+        let gt = Tensor::from_slice(&g, vec![rows, cols]).unwrap();
+        opt.step(&mut p, &gt).unwrap();
+        let after = read_master(&p);
+        let mut ss = 0.0f32;
+        for i in 0..rows * cols {
+            let d = (after[i] - init[i]).abs();
+            ss += d * d;
+        }
+        let rms = (ss / (rows * cols) as f32).sqrt();
+        // lr=1, update RMS ≈ 1, so move RMS ≈ 1 within tolerance.
+        assert!((rms - 1.0).abs() < 0.25, "update RMS {rms} not ≈ 1");
+    }
+
+    #[test]
+    fn muon_weight_decay_shrinks_master() {
+        // grad=zeros so momentum stays 0, b=0, update=0; only decoupled
+        // WD acts: master *= (1 - lr*wd).
+        let mut opt = Muon::new(0.1, 0.9, true, 5, 0.5);
+        let mut p = fresh_matrix_param();
+        let g = Tensor::from_slice(&[0.0f32; 4], vec![2, 2]).unwrap();
+        opt.step(&mut p, &g).unwrap();
+        let v = read_master(&p);
+        // master was [1,0,0,1]; (1 - 0.1*0.5) = 0.95.
+        assert!((v[0] - 0.95).abs() < 1e-6);
+        assert!((v[3] - 0.95).abs() < 1e-6);
+        assert!(v[1].abs() < 1e-6);
     }
 
     #[test]

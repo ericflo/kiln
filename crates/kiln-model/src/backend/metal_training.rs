@@ -130,6 +130,103 @@ pub(super) fn dispatch_adamw_step(
     Ok(true)
 }
 
+/// Fused on-device Muon step. Mirrors [`dispatch_adamw_step`]'s residency /
+/// dtype / element-count / contiguity gating, then delegates to
+/// [`kiln_tensor::metal_muon_step`], which updates `param` and `momentum` in
+/// place. Returns `Ok(true)` when handled on-device, `Ok(false)` to defer to
+/// the host `kiln_optim::Muon` reference.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn dispatch_muon_step(
+    param: &kiln_tensor::Tensor,
+    grad: &kiln_tensor::Tensor,
+    momentum: &kiln_tensor::Tensor,
+    all_operands_resident: bool,
+    lr: f32,
+    momentum_coef: f32,
+    nesterov: bool,
+    ns_iters: u32,
+    weight_decay: f32,
+) -> Result<bool> {
+    if !all_operands_resident {
+        return Ok(false);
+    }
+
+    if param.dtype() != grad.dtype() || param.dtype() != momentum.dtype() {
+        anyhow::bail!(
+            "dispatch_muon_step: dtype mismatch (param={:?}, grad={:?}, momentum={:?})",
+            param.dtype(),
+            grad.dtype(),
+            momentum.dtype(),
+        );
+    }
+
+    let n_elements = param.element_count();
+    if n_elements != grad.element_count() || n_elements != momentum.element_count() {
+        anyhow::bail!(
+            "dispatch_muon_step: element count mismatch (param={}, grad={}, momentum={})",
+            n_elements,
+            grad.element_count(),
+            momentum.element_count(),
+        );
+    }
+
+    if !param.is_contiguous() || !grad.is_contiguous() || !momentum.is_contiguous() {
+        return Ok(false);
+    }
+
+    // F32 + BF16 run on-device (BF16 with round-to-nearest, matching the AdamW
+    // arm and the default round-to-nearest host policy). F16 declines, as does
+    // BF16 when stochastic rounding is explicitly requested, preserving the
+    // host's stochastic-rounding master update.
+    let dt = param.dtype();
+    if dt == kiln_tensor::DType::F16 {
+        return Ok(false);
+    }
+    if dt == kiln_tensor::DType::BF16 && bf16_stochastic_rounding_enabled() {
+        return Ok(false);
+    }
+
+    // Rank-2 weights orthogonalize; non-2D params fall back (inside the
+    // kernel) to plain (Nesterov) momentum SGD via the `(n, 1)` shape.
+    let shape = param.shape();
+    let (rows, cols) = if shape.len() == 2 {
+        (shape[0], shape[1])
+    } else {
+        (n_elements, 1)
+    };
+
+    static FIRST_MUON_LOGGED: OnceLock<()> = OnceLock::new();
+    FIRST_MUON_LOGGED.get_or_init(|| {
+        tracing::info!(
+            n_elements,
+            rows,
+            cols,
+            lr,
+            momentum_coef,
+            nesterov,
+            ns_iters,
+            weight_decay,
+            dtype = ?param.dtype(),
+            "MetalBackend::dispatch_muon_step first call"
+        );
+    });
+
+    kiln_tensor::metal_muon_step(
+        param,
+        grad,
+        momentum,
+        rows,
+        cols,
+        lr,
+        momentum_coef,
+        nesterov,
+        ns_iters,
+        weight_decay,
+    )
+    .context("dispatch_muon_step: metal_muon_step")?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod adamw_kt_tests {
     use super::*;

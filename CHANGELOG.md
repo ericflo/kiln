@@ -1,5 +1,31 @@
 # Kiln Server Changelog
 
+## Unreleased
+
+- training: **Muon is now the default optimizer** for every training mode
+  (SFT, GRPO, on-policy distillation / OPD, and the judge-LoRA flywheel that
+  rides the OPD path). Muon is momentum-orthogonalized SGD — it keeps one
+  per-parameter heavy-ball momentum buffer (vs AdamW's two moments), takes a
+  Nesterov look-ahead, and projects the LoRA A/B weight-matrix updates onto
+  the nearest semi-orthogonal matrix via a Newton-Schulz iteration before
+  stepping, rescaling by `sqrt(max(rows, cols))` so the update magnitude is
+  shape-independent. It converges LoRA fine-tunes in fewer steps than AdamW at
+  roughly half the optimizer state.
+- training: fused on-device Muon kernels for **every backend** — CUDA, ROCm,
+  Vulkan, and Metal — implementing the whole step (heavy-ball momentum +
+  Newton-Schulz orthogonalization + decoupled-weight-decay descent) in a
+  single fused per-matrix launch. Newton-Schulz is computed in gram space via
+  a `k×k` P-accumulator (`k` = LoRA rank), so the cost is dominated by two
+  skinny GEMMs over the large matrix dimension. The portable CPU reference in
+  `kiln-optim` is the parity oracle the GPU kernels are validated against.
+- API: the optimizer is still selected per training request. Omit the
+  `optimizer` field to get Muon; opt back into the old behaviour with
+  `{"optimizer": {"kind": "adam_w"}}` or `{"optimizer": {"kind": "sgd"}}`.
+  Muon accepts `momentum` (0.95), `nesterov` (true), `ns_iters` (5), and
+  `weight_decay` (0.0). Note Muon wants a larger learning rate than AdamW
+  (~2e-2 vs ~1e-4 for LoRA), since its update is orthogonalized and
+  RMS-matched to unit scale.
+
 ## kiln-v0.3.5 — 2026-06-09 — task-first dashboard interactions + embedded pi terminal
 
 UX release that rebuilds the dashboard's interactions around the pi-user's

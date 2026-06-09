@@ -2492,6 +2492,23 @@ pub fn opd_train(
             state.register_with_backend(&*backend_rt)?;
             Some(state)
         }
+        Optimizer::Muon {
+            momentum,
+            nesterov,
+            ns_iters,
+            weight_decay,
+        } => {
+            let state = params.allocate_muon_state(
+                config.learning_rate,
+                momentum,
+                nesterov,
+                ns_iters,
+                weight_decay,
+                &device_kt,
+            )?;
+            state.register_with_backend(&*backend_rt)?;
+            Some(state)
+        }
     };
 
     // Tokenize every prompt up-front (cheap relative to the forward

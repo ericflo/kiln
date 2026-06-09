@@ -611,6 +611,319 @@ kernel void {entry}(
         param[gid] = ({ty})p;
     }}
 }}
+
+// ----------------------------------------------------------------------
+// muon_step — kiln-owned fused on-device Muon (momentum-orthogonalized SGD;
+// mirrors kiln_optim::Muon::step + newton_schulz — the CPU oracle)
+// ----------------------------------------------------------------------
+
+/// The kernel's Newton-Schulz shared-memory rank bound. `k = min(rows, cols)`
+/// must satisfy `k <= K_MAX` for the on-device orthogonalization to run;
+/// larger ranks fall back (in the kernel) to plain (Nesterov) momentum SGD.
+///
+/// At `K_MAX = 32` the four `K_MAX*K_MAX` float scratch tiles cost
+/// `4 * 32 * 32 * 4 = 16 KiB`, comfortably under Metal's 32 KiB threadgroup
+/// limit (the `red[256]` reduction scratch adds another 1 KiB).
+pub(crate) const MUON_K_MAX: usize = 32;
+
+/// Fused in-place Muon step over one `rows x cols` matrix (`n = rows*cols`
+/// contiguous, row-major). Updates `param` and `momentum` IN PLACE; reads
+/// `grad` (read-only). Dispatched as ONE threadgroup of 256 threads with
+/// threadgroup-memory Newton-Schulz — NOT one thread per element.
+///
+/// Each lane is promoted to `float`; the heavy-ball momentum update, the
+/// Newton-Schulz orthogonalization (gram-space P-accumulator), and the
+/// RMS-scaled decoupled-weight-decay descent are all computed in `float`,
+/// then written back as `dtype`. Bit-faithful to `kiln_optim::Muon::step` +
+/// `kiln_optim::newton_schulz`.
+///
+/// `param`/`grad`/`momentum` share `dtype` (the float triple; F32 identity
+/// promotion, BF16/F16 native `(float)`/`(dtype)` casts as in `adamw_step`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn muon_step(
+    companion: &MetalCompanion,
+    param: &MetalBuffer,
+    grad: &MetalBuffer,
+    momentum: &MetalBuffer,
+    dtype: DType,
+    rows: usize,
+    cols: usize,
+    lr: f32,
+    momentum_coef: f32,
+    nesterov: bool,
+    ns_iters: u32,
+    weight_decay: f32,
+) -> Result<()> {
+    let ty = msl_ty(dtype)?;
+    let entry = format!("kt_muon_step_{ty}");
+    let k_max = MUON_K_MAX;
+    // BLK threads per (single) threadgroup; matches the launch below.
+    let blk = 256usize;
+    let src = format!(
+        r#"
+#include <metal_stdlib>
+using namespace metal;
+
+// Newton-Schulz quintic coefficients (Keller-Jordan), matching the oracle.
+constant float NS_A = 3.4445f;
+constant float NS_B = -4.7750f;
+constant float NS_C = 2.0315f;
+
+kernel void {entry}(
+    device {ty}* param          [[buffer(0)]],
+    device const {ty}* grad     [[buffer(1)]],
+    device {ty}* momentum       [[buffer(2)]],
+    constant uint& n            [[buffer(3)]],
+    constant uint& rows         [[buffer(4)]],
+    constant uint& cols         [[buffer(5)]],
+    constant uint& ns_iters     [[buffer(6)]],
+    constant float& lr          [[buffer(7)]],
+    constant float& mom         [[buffer(8)]],
+    constant uint& nesterov     [[buffer(9)]],
+    constant float& wd          [[buffer(10)]],
+    uint tid       [[thread_index_in_threadgroup]],
+    uint block_dim [[threads_per_threadgroup]])
+{{
+    // Shared scratch: four k_max*k_max float tiles + a BLK-float reduction.
+    threadgroup float A[{k_max} * {k_max}];
+    threadgroup float M[{k_max} * {k_max}];
+    threadgroup float P[{k_max} * {k_max}];
+    threadgroup float Tm[{k_max} * {k_max}];
+    threadgroup float red[{blk}];
+
+    const uint k = (rows < cols) ? rows : cols;
+    const bool transpose = (rows > cols);
+    const float scale = sqrt((float)((rows > cols) ? rows : cols));
+    const bool do_ortho = (rows >= 2u) && (cols >= 2u) && (k <= {k_max}u);
+
+    // STEP 1 — heavy-ball momentum update, in place:
+    //   momentum = mom*momentum + grad.
+    for (uint idx = tid; idx < n; idx += block_dim) {{
+        float mv = mom * (float)momentum[idx] + (float)grad[idx];
+        momentum[idx] = ({ty})mv;
+    }}
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // bval(idx): nesterov ? grad + mom*momentum : momentum. momentum[] is
+    // already updated (step 1); grad[] stays read-only throughout.
+    // (Inlined at each use as MSL has no closures.)
+
+    // STEP 1b — non-matrix / oversized rank: plain (Nesterov) momentum SGD.
+    if (!do_ortho) {{
+        for (uint idx = tid; idx < n; idx += block_dim) {{
+            float b = (nesterov != 0u)
+                ? ((float)grad[idx] + mom * (float)momentum[idx])
+                : (float)momentum[idx];
+            float p = (float)param[idx];
+            p = p * (1.0f - lr * wd) - lr * b;
+            param[idx] = ({ty})p;
+        }}
+        return;
+    }}
+
+    // STEP 2 — Frobenius norm of b: frob2 = sum_idx bval(idx)^2.
+    {{
+        float local = 0.0f;
+        for (uint idx = tid; idx < n; idx += block_dim) {{
+            float b = (nesterov != 0u)
+                ? ((float)grad[idx] + mom * (float)momentum[idx])
+                : (float)momentum[idx];
+            local += b * b;
+        }}
+        red[tid] = local;
+    }}
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // Tree reduction over the BLK reduction scratch.
+    for (uint stride = block_dim >> 1u; stride > 0u; stride >>= 1u) {{
+        if (tid < stride) {{
+            red[tid] += red[tid + stride];
+        }}
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }}
+    float frob2 = red[0];
+
+    if (frob2 == 0.0f) {{
+        // b is identically zero — only decoupled weight decay acts.
+        for (uint idx = tid; idx < n; idx += block_dim) {{
+            float p = (float)param[idx];
+            param[idx] = ({ty})(p * (1.0f - lr * wd));
+        }}
+        return;
+    }}
+    float inv_frob = 1.0f / sqrt(frob2);
+    float inv_frob2 = 1.0f / frob2;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // STEP 3 — gram A (k x k), normalized by inv_frob2.
+    for (uint pair = tid; pair < k * k; pair += block_dim) {{
+        uint i = pair / k;
+        uint j = pair % k;
+        float s = 0.0f;
+        if (!transpose) {{
+            // A = B Bt: sum over columns.
+            for (uint c = 0u; c < cols; ++c) {{
+                float bi = (nesterov != 0u)
+                    ? ((float)grad[i * cols + c] + mom * (float)momentum[i * cols + c])
+                    : (float)momentum[i * cols + c];
+                float bj = (nesterov != 0u)
+                    ? ((float)grad[j * cols + c] + mom * (float)momentum[j * cols + c])
+                    : (float)momentum[j * cols + c];
+                s += bi * bj;
+            }}
+        }} else {{
+            // A = Bt B: sum over rows.
+            for (uint r = 0u; r < rows; ++r) {{
+                float bi = (nesterov != 0u)
+                    ? ((float)grad[r * cols + i] + mom * (float)momentum[r * cols + i])
+                    : (float)momentum[r * cols + i];
+                float bj = (nesterov != 0u)
+                    ? ((float)grad[r * cols + j] + mom * (float)momentum[r * cols + j])
+                    : (float)momentum[r * cols + j];
+                s += bi * bj;
+            }}
+        }}
+        A[i * k + j] = s * inv_frob2;
+    }}
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // STEP 4 — P starts = I_k, Newton-Schulz over ns_iters.
+    for (uint idx = tid; idx < k * k; idx += block_dim) {{
+        P[idx] = (idx / k == idx % k) ? 1.0f : 0.0f;
+    }}
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint iter = 0u; iter < ns_iters; ++iter) {{
+        // Tm = A @ A.
+        for (uint pair = tid; pair < k * k; pair += block_dim) {{
+            uint i = pair / k;
+            uint j = pair % k;
+            float s = 0.0f;
+            for (uint t = 0u; t < k; ++t) {{
+                s += A[i * k + t] * A[t * k + j];
+            }}
+            Tm[pair] = s;
+        }}
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        // M = a*I + b*A + c*Tm.
+        for (uint pair = tid; pair < k * k; pair += block_dim) {{
+            uint i = pair / k;
+            uint j = pair % k;
+            float id = (i == j) ? 1.0f : 0.0f;
+            M[pair] = NS_A * id + NS_B * A[pair] + NS_C * Tm[pair];
+        }}
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        // P <- (!transpose ? M @ P : P @ M); stage into Tm, then copy back.
+        for (uint pair = tid; pair < k * k; pair += block_dim) {{
+            uint i = pair / k;
+            uint j = pair % k;
+            float s = 0.0f;
+            if (!transpose) {{
+                for (uint t = 0u; t < k; ++t) {{
+                    s += M[i * k + t] * P[t * k + j];
+                }}
+            }} else {{
+                for (uint t = 0u; t < k; ++t) {{
+                    s += P[i * k + t] * M[t * k + j];
+                }}
+            }}
+            Tm[pair] = s;
+        }}
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint idx = tid; idx < k * k; idx += block_dim) {{
+            P[idx] = Tm[idx];
+        }}
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        // A <- M @ A @ M  (M symmetric): Tm = M@A ; A = Tm@M.
+        for (uint pair = tid; pair < k * k; pair += block_dim) {{
+            uint i = pair / k;
+            uint j = pair % k;
+            float s = 0.0f;
+            for (uint t = 0u; t < k; ++t) {{
+                s += M[i * k + t] * A[t * k + j];
+            }}
+            Tm[pair] = s;
+        }}
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint pair = tid; pair < k * k; pair += block_dim) {{
+            uint i = pair / k;
+            uint j = pair % k;
+            float s = 0.0f;
+            for (uint t = 0u; t < k; ++t) {{
+                s += Tm[i * k + t] * M[t * k + j];
+            }}
+            A[pair] = s;
+        }}
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }}
+
+    // STEP 5 — apply: O = (P@B or B@P) * scale * inv_frob; decoupled-WD descent.
+    for (uint idx = tid; idx < n; idx += block_dim) {{
+        uint r = idx / cols;
+        uint c = idx % cols;
+        float o = 0.0f;
+        if (!transpose) {{
+            // P is rows x rows (k=rows): O[r,c] = sum_t P[r,t] * b[t,c].
+            for (uint t = 0u; t < k; ++t) {{
+                float bt = (nesterov != 0u)
+                    ? ((float)grad[t * cols + c] + mom * (float)momentum[t * cols + c])
+                    : (float)momentum[t * cols + c];
+                o += P[r * k + t] * bt;
+            }}
+        }} else {{
+            // P is cols x cols (k=cols): O[r,c] = sum_t b[r,t] * P[t,c].
+            for (uint t = 0u; t < k; ++t) {{
+                float bt = (nesterov != 0u)
+                    ? ((float)grad[r * cols + t] + mom * (float)momentum[r * cols + t])
+                    : (float)momentum[r * cols + t];
+                o += bt * P[t * k + c];
+            }}
+        }}
+        o *= scale * inv_frob;
+        float p = (float)param[idx];
+        p = p * (1.0f - lr * wd) - lr * o;
+        param[idx] = ({ty})p;
+    }}
+}}
+"#
+    );
+    let pipeline = op_pipeline(companion, &src, &entry)?;
+    let encoder = companion
+        .command_encoder()
+        .map_err(|e| Error::Msg(format!("metal_kernels::muon_step: encoder: {e:?}")))?;
+    encoder.set_label("kt_muon_step");
+    encoder.set_compute_pipeline_state(&pipeline);
+    encoder.set_buffer(0, Some(param), 0);
+    encoder.set_buffer(1, Some(grad), 0);
+    encoder.set_buffer(2, Some(momentum), 0);
+    let n_u = (rows * cols) as u32;
+    let rows_u = rows as u32;
+    let cols_u = cols as u32;
+    let ns_u = ns_iters;
+    let nesterov_u: u32 = if nesterov { 1 } else { 0 };
+    encoder.set_bytes(3, &n_u);
+    encoder.set_bytes(4, &rows_u);
+    encoder.set_bytes(5, &cols_u);
+    encoder.set_bytes(6, &ns_u);
+    encoder.set_bytes(7, &lr);
+    encoder.set_bytes(8, &momentum_coef);
+    encoder.set_bytes(9, &nesterov_u);
+    encoder.set_bytes(10, &weight_decay);
+    // ONE threadgroup of BLK threads (threadgroup-memory Newton-Schulz needs
+    // full barriers, so all work lives in a single threadgroup per matrix).
+    let groups = objc2_metal::MTLSize {
+        width: 1,
+        height: 1,
+        depth: 1,
+    };
+    let threads = objc2_metal::MTLSize {
+        width: blk,
+        height: 1,
+        depth: 1,
+    };
+    encoder.dispatch_thread_groups(groups, threads);
+    drop(encoder);
+    Ok(())
+}
 "#
     );
     let pipeline = op_pipeline(companion, &src, &entry)?;

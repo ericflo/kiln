@@ -497,7 +497,9 @@ use crate::cd_types::*;
 // forward storage) and the optimizer is `kiln_optim::AdamW` (`OptimStep`
 // keyed by `Parameter::tensor_id()`). These REPLACE the candle `Var` +
 // `AdamWMoments{m,v:Var}` + `OptimizerState` machinery.
-use kiln_optim::{AdamW as KtAdamW, AdamWHyperparameters as KtAdamWHyperparameters, OptimStep};
+use kiln_optim::{
+    AdamW as KtAdamW, AdamWHyperparameters as KtAdamWHyperparameters, Muon as KtMuon, OptimStep,
+};
 use kiln_param::{AmpPolicy as KtAmpPolicy, ForwardStorage as KtForwardStorage, Parameter};
 // kt tensor types used directly for LoRA param construction + grads.
 use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
@@ -1017,9 +1019,39 @@ impl TrainableLoraParams {
                 .with_context(|| "allocating AdamW second-moment tensor")?;
             moments.insert(param.tensor_id(), KtAdamWMoments { m, v });
         }
-        Ok(OptimizerState {
+        Ok(OptimizerState::AdamW {
             adamw: KtAdamW::new(hp),
             moments,
+            step: 0,
+        })
+    }
+
+    /// (#1082) Allocate kt-native Muon optimizer state: one zero-init
+    /// device momentum tensor per LoRA `Parameter` (same shape+dtype as
+    /// the param master, on the param's own device so the on-device
+    /// Newton-Schulz kernel's same-device/same-dtype/contiguous gate
+    /// passes), plus the CPU reference `kiln_optim::Muon` host fallback.
+    pub fn allocate_muon_state(
+        &self,
+        lr: f64,
+        momentum: f32,
+        nesterov: bool,
+        ns_iters: u32,
+        weight_decay: f32,
+        _device: &Device,
+    ) -> Result<OptimizerState> {
+        let mut momenta: HashMap<KtTensorId, KtMuonMomentum> = HashMap::new();
+        for param in self.all_params() {
+            let primary = param.forward_storage().primary_tensor();
+            let dims: Vec<usize> = primary.dims().to_vec();
+            let dtype = primary.dtype();
+            let m = KtTensor::zeros_on(primary.device(), dims, dtype)
+                .with_context(|| "allocating Muon momentum tensor")?;
+            momenta.insert(param.tensor_id(), KtMuonMomentum { m });
+        }
+        Ok(OptimizerState::Muon {
+            muon: KtMuon::new(lr as f32, momentum, nesterov, ns_iters, weight_decay),
+            momenta,
             step: 0,
         })
     }
@@ -1045,57 +1077,119 @@ pub struct KtAdamWMoments {
     pub v: KtTensor,
 }
 
-/// (#1082) kt-native optimizer state.
+/// (#1082) Muon per-parameter momentum device tensor.
 ///
-/// - `moments`: per-param device `m`/`v` (keyed by `Parameter::tensor_id()`)
-///   that the on-device CUDA AdamW kernel updates in place. This is the
-///   real Adam state on the resident/device path.
-/// - `adamw`: the CPU reference `kiln_optim::AdamW` — the genuine host
-///   fallback for the non-resident path (owns its own host-side moments).
-/// - `step`: global 1-indexed step counter, bumped once per optimizer step
-///   (all params share it — standard AdamW bias correction). Restores the
-///   pre-flip `OptimizerState.step`. Used as the `step` argument the CUDA
-///   kernel turns into the bias-correction terms.
+/// `m` is a zero-init kt tensor of the same shape+dtype as the LoRA
+/// param master, allocated on the param's device. The on-device Muon
+/// kernel (`runtime_dispatch_muon_step`) reads+writes it in place each
+/// step (heavy-ball momentum), then orthogonalizes the look-ahead and
+/// updates the param. Unlike AdamW there is no second moment — Muon's
+/// state is a single momentum buffer per parameter.
+pub struct KtMuonMomentum {
+    pub m: KtTensor,
+}
+
+/// (#1082) kt-native optimizer state. One variant per stateful
+/// optimizer; SGD is stateless and passes `None`.
+///
+/// - [`OptimizerState::AdamW`]: per-param device `m`/`v` (the real Adam
+///   state on the resident/device path) + the CPU reference
+///   `kiln_optim::AdamW` host fallback + a global 1-indexed `step`
+///   counter (standard AdamW bias correction).
+/// - [`OptimizerState::Muon`]: per-param device momentum `m` (the
+///   heavy-ball state the on-device Newton-Schulz kernel updates) + the
+///   CPU reference `kiln_optim::Muon` host fallback + a global `step`
+///   counter (used only as a stochastic-rounding decorrelator on the
+///   host path; Muon needs no bias correction).
 ///
 /// The wrapper keeps the trainer's `opt_state: Option<&mut OptimizerState>`
-/// signatures unchanged; SGD passes `None`, AdamW passes `Some(&mut state)`.
-pub struct OptimizerState {
-    pub adamw: KtAdamW,
-    pub moments: HashMap<KtTensorId, KtAdamWMoments>,
-    pub step: u32,
+/// signatures unchanged across all dispatch sites.
+pub enum OptimizerState {
+    AdamW {
+        adamw: KtAdamW,
+        moments: HashMap<KtTensorId, KtAdamWMoments>,
+        step: u32,
+    },
+    Muon {
+        muon: KtMuon,
+        momenta: HashMap<KtTensorId, KtMuonMomentum>,
+        step: u32,
+    },
 }
 
 impl OptimizerState {
-    /// Register every per-param `m`/`v` device tensor as a resident
-    /// activation so `dispatch_adamw_step`'s `has_resident_activation(m/v)`
-    /// gate passes and the on-device kernel fires (otherwise it returns
-    /// `false` → host fallback). Restores the pre-flip
-    /// `OptimizerState::register_with_backend`, which the candle-drop interim
-    /// had turned into a no-op (leaving the on-device kernel running with
-    /// garbage m/v).
+    /// Register every per-param device state tensor as a resident
+    /// activation so the on-device kernel's `has_resident_activation`
+    /// gate passes (otherwise it returns `false` → host fallback). For
+    /// AdamW that is `m`+`v`; for Muon the single momentum `m`.
     ///
     /// No-op on backends without resident-activation support (the host
-    /// `kiln_optim::AdamW` fallback handles those).
+    /// `kiln_optim` references handle those).
     pub fn register_with_backend(&self, backend: &dyn BackendRuntime) -> Result<()> {
         if !ResidencyBackend::runtime_supports_resident_activation(backend) {
             return Ok(());
         }
-        for moments in self.moments.values() {
-            ResidencyBackend::runtime_register_resident_activation(backend, &moments.m)?;
-            ResidencyBackend::runtime_register_resident_activation(backend, &moments.v)?;
+        match self {
+            OptimizerState::AdamW { moments, .. } => {
+                for m in moments.values() {
+                    ResidencyBackend::runtime_register_resident_activation(backend, &m.m)?;
+                    ResidencyBackend::runtime_register_resident_activation(backend, &m.v)?;
+                }
+            }
+            OptimizerState::Muon { momenta, .. } => {
+                for mom in momenta.values() {
+                    ResidencyBackend::runtime_register_resident_activation(backend, &mom.m)?;
+                }
+            }
         }
         Ok(())
     }
 
-    /// Inverse of [`Self::register_with_backend`]: release every moment
+    /// Inverse of [`Self::register_with_backend`]: release every state
     /// tensor from the resident registry at training completion.
     pub fn evict_from_backend(&self, backend: &dyn BackendRuntime) {
         if !ResidencyBackend::runtime_supports_resident_activation(backend) {
             return;
         }
-        for moments in self.moments.values() {
-            ResidencyBackend::runtime_evict_resident_activation(backend, &moments.m);
-            ResidencyBackend::runtime_evict_resident_activation(backend, &moments.v);
+        match self {
+            OptimizerState::AdamW { moments, .. } => {
+                for m in moments.values() {
+                    ResidencyBackend::runtime_evict_resident_activation(backend, &m.m);
+                    ResidencyBackend::runtime_evict_resident_activation(backend, &m.v);
+                }
+            }
+            OptimizerState::Muon { momenta, .. } => {
+                for mom in momenta.values() {
+                    ResidencyBackend::runtime_evict_resident_activation(backend, &mom.m);
+                }
+            }
+        }
+    }
+
+    /// The global 1-indexed optimizer step counter (shared by both
+    /// stateful variants).
+    pub fn step_count(&self) -> u32 {
+        match self {
+            OptimizerState::AdamW { step, .. } => *step,
+            OptimizerState::Muon { step, .. } => *step,
+        }
+    }
+
+    /// AdamW per-param moment map, if this is AdamW state (diagnostic /
+    /// test accessor).
+    pub fn adamw_moments(&self) -> Option<&HashMap<KtTensorId, KtAdamWMoments>> {
+        match self {
+            OptimizerState::AdamW { moments, .. } => Some(moments),
+            OptimizerState::Muon { .. } => None,
+        }
+    }
+
+    /// Muon per-param momentum map, if this is Muon state (diagnostic /
+    /// test accessor).
+    pub fn muon_momenta(&self) -> Option<&HashMap<KtTensorId, KtMuonMomentum>> {
+        match self {
+            OptimizerState::Muon { momenta, .. } => Some(momenta),
+            OptimizerState::AdamW { .. } => None,
         }
     }
 }
@@ -1122,6 +1216,19 @@ fn make_opt_state(
             beta1,
             beta2,
             eps,
+            weight_decay,
+            device,
+        )?)),
+        Optimizer::Muon {
+            momentum,
+            nesterov,
+            ns_iters,
+            weight_decay,
+        } => Ok(Some(params.allocate_muon_state(
+            lr,
+            momentum,
+            nesterov,
+            ns_iters,
             weight_decay,
             device,
         )?)),
@@ -6958,6 +7065,114 @@ fn apply_adamw_update_kt(
     Ok(())
 }
 
+/// (#1082) Apply one Muon step to a single LoRA `Parameter`.
+///
+/// On-device path (resident): when the param **and** its per-param
+/// momentum device tensor are both resident, dispatch the fused Muon
+/// kernel (`runtime_dispatch_muon_step`) which updates **param and
+/// momentum in place** in one launch — heavy-ball momentum, then (for
+/// rank-2 matrices) Newton-Schulz orthogonalization of the (Nesterov)
+/// look-ahead with the RMS-matching scale, then the decoupled-weight-
+/// decay descent step. The forward storage shares the master tensor
+/// (LoRA A/B are plain dense BF16, forward primary == master), so the
+/// in-place update is immediately visible to the next forward.
+///
+/// Host fallback (non-resident): drive the CPU reference
+/// `kiln_optim::Muon` (`OptimStep::step`), which owns its own host-side
+/// momentum keyed by `Parameter::tensor_id()` and installs the new
+/// master via `replace_backward_storage` (preserving `tensor_id`). The
+/// forward storage is refreshed from the new master.
+///
+/// `lr` and the Muon hyperparameters are threaded directly from the
+/// optimizer config each step (honouring the LR schedule).
+#[allow(clippy::too_many_arguments)]
+fn apply_muon_update_kt(
+    backend: &dyn BackendRuntime,
+    param: &mut Parameter,
+    muon: &mut KtMuon,
+    momentum_state: Option<&KtMuonMomentum>,
+    grad: &KtTensor,
+    lr: f64,
+    momentum: f32,
+    nesterov: bool,
+    ns_iters: u32,
+    weight_decay: f32,
+    resident_activation: bool,
+) -> Result<()> {
+    let primary = param.forward_storage().primary_tensor().clone();
+    // On-device registry path: param + grad + the per-param momentum
+    // must all be resident, then the kernel updates param/momentum in
+    // place.
+    if let Some(momentum_state) = momentum_state {
+        if resident_activation
+            && ResidencyBackend::runtime_has_resident_activation(backend, &primary)
+            && ResidencyBackend::runtime_has_resident_activation(backend, &momentum_state.m)
+        {
+            ResidencyBackend::runtime_register_resident_activation(backend, grad)?;
+            let dispatched = match OptimizerBackend::runtime_dispatch_muon_step(
+                backend,
+                &primary,
+                grad,
+                &momentum_state.m,
+                lr as f32,
+                momentum,
+                nesterov,
+                ns_iters,
+                weight_decay,
+            ) {
+                Ok(b) => b,
+                Err(e) => {
+                    ResidencyBackend::runtime_evict_resident_activation(backend, grad);
+                    return Err(e);
+                }
+            };
+            if dispatched {
+                // The kernel updated param/momentum in place. Forward
+                // primary IS the master for LoRA params, so the update
+                // is already live; re-assert residency for the next fwd.
+                ResidencyBackend::runtime_evict_resident_activation(backend, grad);
+                ResidencyBackend::runtime_update_resident_activation(backend, &primary)?;
+                return Ok(());
+            }
+            ResidencyBackend::runtime_evict_resident_activation(backend, grad);
+        }
+    }
+
+    ensure_training_optimizer_fallback_allowed(backend, primary.device(), "Muon")?;
+    // Host fallback: drive the CPU reference `kiln_optim::Muon`. Thread
+    // the scheduled lr + config hyperparameters in so the host path
+    // honours the LR schedule and keeps the optimizer config the single
+    // source of truth. The host Muon owns its own host-side momentum +
+    // step counter keyed by `tensor_id`.
+    muon.lr = lr as f32;
+    muon.momentum = momentum;
+    muon.nesterov = nesterov;
+    muon.ns_iters = ns_iters;
+    muon.weight_decay = weight_decay;
+    let want = param.amp_policy().backward_compute_dtype;
+    let grad_cast = if grad.dtype() == want {
+        grad.clone()
+    } else {
+        grad.to_dtype(want)
+            .map_err(|e| anyhow::anyhow!("apply_muon_update_kt: grad to {want:?}: {e}"))?
+    };
+    muon.step(param, &grad_cast)
+        .map_err(|e| anyhow::anyhow!("apply_muon_update_kt: kiln_optim Muon step: {e}"))?;
+    // `Muon::step` swaps the master via `replace_backward_storage`
+    // (preserving tensor_id). Refresh the forward storage from the new
+    // master so the next forward reads the updated weights.
+    if let Some(new_master) = param.backward_storage().cloned() {
+        param.replace_forward_storage(KtForwardStorage::Plain(new_master));
+    }
+    if resident_activation {
+        ResidencyBackend::runtime_update_resident_activation(
+            backend,
+            param.forward_storage().primary_tensor(),
+        )?;
+    }
+    Ok(())
+}
+
 /// (#1082) Accumulate kt gradients from a kt-native [`kiln_autograd::GradStore`]
 /// (keyed by `Parameter::tensor_id()`) into `dst` (a kt `GradMap`).
 /// Creates entries for any LoRA param with a grad in `src` but not yet in
@@ -7036,39 +7251,88 @@ pub(crate) fn optimizer_step_from_map(
             let state = opt_state.ok_or_else(|| {
                 anyhow::anyhow!("optimizer_step_from_map: AdamW requires OptimizerState")
             })?;
+            let resident_activation =
+                ResidencyBackend::runtime_supports_resident_activation(backend);
             // Global 1-indexed step counter (shared by all params), bumped
             // once per optimizer step for AdamW bias correction. Disjoint
             // borrows of `adamw` (mut, host fallback) vs `moments` (shared,
-            // device m/v) via destructuring.
-            state.step = state.step.saturating_add(1);
-            let OptimizerState {
-                adamw,
-                moments,
-                step,
-            } = state;
-            let step = *step;
+            // device m/v) via the match binding.
+            match state {
+                OptimizerState::AdamW {
+                    adamw,
+                    moments,
+                    step,
+                } => {
+                    *step = step.saturating_add(1);
+                    let step = *step;
+                    for param in params.all_params_mut() {
+                        if let Some(grad) = grads.get(&param.tensor_id()) {
+                            let m = moments.get(&param.tensor_id());
+                            apply_adamw_update_kt(
+                                backend,
+                                param,
+                                adamw,
+                                m,
+                                grad,
+                                lr,
+                                beta1,
+                                beta2,
+                                eps,
+                                weight_decay,
+                                step,
+                                resident_activation,
+                            )?;
+                        }
+                    }
+                    Ok(())
+                }
+                _ => anyhow::bail!(
+                    "optimizer_step_from_map: AdamW optimizer requires AdamW OptimizerState"
+                ),
+            }
+        }
+        Optimizer::Muon {
+            momentum,
+            nesterov,
+            ns_iters,
+            weight_decay,
+        } => {
+            let state = opt_state.ok_or_else(|| {
+                anyhow::anyhow!("optimizer_step_from_map: Muon requires OptimizerState")
+            })?;
             let resident_activation =
                 ResidencyBackend::runtime_supports_resident_activation(backend);
-            for param in params.all_params_mut() {
-                if let Some(grad) = grads.get(&param.tensor_id()) {
-                    let m = moments.get(&param.tensor_id());
-                    apply_adamw_update_kt(
-                        backend,
-                        param,
-                        adamw,
-                        m,
-                        grad,
-                        lr,
-                        beta1,
-                        beta2,
-                        eps,
-                        weight_decay,
-                        step,
-                        resident_activation,
-                    )?;
+            match state {
+                OptimizerState::Muon {
+                    muon,
+                    momenta,
+                    step,
+                } => {
+                    *step = step.saturating_add(1);
+                    for param in params.all_params_mut() {
+                        if let Some(grad) = grads.get(&param.tensor_id()) {
+                            let mom = momenta.get(&param.tensor_id());
+                            apply_muon_update_kt(
+                                backend,
+                                param,
+                                muon,
+                                mom,
+                                grad,
+                                lr,
+                                momentum,
+                                nesterov,
+                                ns_iters,
+                                weight_decay,
+                                resident_activation,
+                            )?;
+                        }
+                    }
+                    Ok(())
                 }
+                _ => anyhow::bail!(
+                    "optimizer_step_from_map: Muon optimizer requires Muon OptimizerState"
+                ),
             }
-            Ok(())
         }
     }
 }
@@ -7114,39 +7378,88 @@ pub(crate) fn optimizer_step_from_kt_grad_store(
             let state = opt_state.ok_or_else(|| {
                 anyhow::anyhow!("optimizer_step_from_kt_grad_store: AdamW requires OptimizerState")
             })?;
+            let resident_activation =
+                ResidencyBackend::runtime_supports_resident_activation(backend);
             // Global 1-indexed step counter (shared by all params), bumped
             // once per optimizer step for AdamW bias correction. Disjoint
             // borrows of `adamw` (mut, host fallback) vs `moments` (shared,
-            // device m/v) via destructuring.
-            state.step = state.step.saturating_add(1);
-            let OptimizerState {
-                adamw,
-                moments,
-                step,
-            } = state;
-            let step = *step;
+            // device m/v) via the match binding.
+            match state {
+                OptimizerState::AdamW {
+                    adamw,
+                    moments,
+                    step,
+                } => {
+                    *step = step.saturating_add(1);
+                    let step = *step;
+                    for param in params.all_params_mut() {
+                        if let Some(kt_grad) = grads.get(param.tensor_id()) {
+                            let m = moments.get(&param.tensor_id());
+                            apply_adamw_update_kt(
+                                backend,
+                                param,
+                                adamw,
+                                m,
+                                kt_grad,
+                                lr,
+                                beta1,
+                                beta2,
+                                eps,
+                                weight_decay,
+                                step,
+                                resident_activation,
+                            )?;
+                        }
+                    }
+                    Ok(())
+                }
+                _ => anyhow::bail!(
+                    "optimizer_step_from_kt_grad_store: AdamW optimizer requires AdamW OptimizerState"
+                ),
+            }
+        }
+        Optimizer::Muon {
+            momentum,
+            nesterov,
+            ns_iters,
+            weight_decay,
+        } => {
+            let state = opt_state.ok_or_else(|| {
+                anyhow::anyhow!("optimizer_step_from_kt_grad_store: Muon requires OptimizerState")
+            })?;
             let resident_activation =
                 ResidencyBackend::runtime_supports_resident_activation(backend);
-            for param in params.all_params_mut() {
-                if let Some(kt_grad) = grads.get(param.tensor_id()) {
-                    let m = moments.get(&param.tensor_id());
-                    apply_adamw_update_kt(
-                        backend,
-                        param,
-                        adamw,
-                        m,
-                        kt_grad,
-                        lr,
-                        beta1,
-                        beta2,
-                        eps,
-                        weight_decay,
-                        step,
-                        resident_activation,
-                    )?;
+            match state {
+                OptimizerState::Muon {
+                    muon,
+                    momenta,
+                    step,
+                } => {
+                    *step = step.saturating_add(1);
+                    for param in params.all_params_mut() {
+                        if let Some(kt_grad) = grads.get(param.tensor_id()) {
+                            let mom = momenta.get(&param.tensor_id());
+                            apply_muon_update_kt(
+                                backend,
+                                param,
+                                muon,
+                                mom,
+                                kt_grad,
+                                lr,
+                                momentum,
+                                nesterov,
+                                ns_iters,
+                                weight_decay,
+                                resident_activation,
+                            )?;
+                        }
+                    }
+                    Ok(())
                 }
+                _ => anyhow::bail!(
+                    "optimizer_step_from_kt_grad_store: Muon optimizer requires Muon OptimizerState"
+                ),
             }
-            Ok(())
         }
     }
 }
@@ -11695,10 +12008,11 @@ pub(crate) mod tests {
         // `m`/`v`), so we read `OptimizerState.step` (the C1-restored global
         // counter) and validate the DEVICE moment tensors directly.
         assert_eq!(
-            opt_state.step as usize, finite_steps,
+            opt_state.step_count() as usize,
+            finite_steps,
             "CP-4 convergence: global AdamW step counter should equal finite steps taken \
              ({finite_steps}), got {}",
-            opt_state.step
+            opt_state.step_count()
         );
         // Every LoRA param must have a real per-param device `m`/`v` moment
         // tensor, and after the on-device updates both must stay finite (no
@@ -11709,7 +12023,7 @@ pub(crate) mod tests {
         let mut stepped = 0usize;
         let mut any_v_nonzero = false;
         for id in params.all_params().iter().map(|p| p.tensor_id()) {
-            if let Some(moments) = opt_state.moments.get(&id) {
+            if let Some(moments) = opt_state.adamw_moments().and_then(|m| m.get(&id)) {
                 stepped += 1;
                 for (name, t) in [("m", &moments.m), ("v", &moments.v)] {
                     let vals = t

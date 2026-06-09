@@ -488,6 +488,176 @@ pub fn adamw_step_f32_kt(
     Ok(())
 }
 
+/// `(rows, cols)` for a Muon step over `param`. Rank-2 params keep their
+/// `[rows, cols]` layout (the only shape the kernel orthogonalizes);
+/// every other shape collapses to `(element_count, 1)` so the kernel's
+/// non-matrix plain-momentum fallback runs over the flat buffer. The
+/// kernel takes `i32` dims (`<<<1, BLK>>>`, one block per matrix), so we
+/// reject anything past `i32::MAX`.
+fn muon_rows_cols(param: &KtTensor) -> Result<(i32, i32), RmsNormError> {
+    let shape = param.shape();
+    let (rows, cols) = if shape.len() == 2 {
+        (shape[0], shape[1])
+    } else {
+        (param.element_count(), 1)
+    };
+    if rows > i32::MAX as usize || cols > i32::MAX as usize {
+        return Err(RmsNormError::Msg(format!(
+            "kt-muon-step: dims ({rows}, {cols}) exceed i32 kernel envelope"
+        )));
+    }
+    Ok((rows as i32, cols as i32))
+}
+
+/// `muon_step_f32` over `kiln_tensor::Tensor` operands.
+///
+/// In-place fused Muon step: heavy-ball momentum update, then (for
+/// rank-2 weights within the kernel's shared-memory bound) Newton-Schulz
+/// orthogonalization of the (Nesterov) look-ahead with the RMS-matching
+/// `sqrt(max(rows, cols))` scale, then the decoupled-weight-decay descent
+/// step. `param` and `momentum` are mutated in place; `grad` is
+/// read-only. F32 only. Mirrors `kiln_optim::Muon::step`.
+#[allow(clippy::too_many_arguments)]
+pub fn muon_step_f32_kt(
+    param: &KtTensor,
+    grad: &KtTensor,
+    momentum: &KtTensor,
+    lr: f32,
+    momentum_coef: f32,
+    nesterov: bool,
+    ns_iters: u32,
+    weight_decay: f32,
+) -> Result<(), RmsNormError> {
+    if param.shape() != grad.shape() || param.shape() != momentum.shape() {
+        return Err(RmsNormError::Msg(format!(
+            "kt-muon-step: shape mismatch — param {:?}, grad {:?}, momentum {:?}",
+            param.shape(),
+            grad.shape(),
+            momentum.shape()
+        )));
+    }
+    if param.dtype() != KtDType::F32
+        || grad.dtype() != KtDType::F32
+        || momentum.dtype() != KtDType::F32
+    {
+        return Err(RmsNormError::Msg(format!(
+            "kt-muon-step: dtype mismatch — param {:?}, grad {:?}, momentum {:?} (want F32)",
+            param.dtype(),
+            grad.dtype(),
+            momentum.dtype()
+        )));
+    }
+    if !param.is_contiguous() || !grad.is_contiguous() || !momentum.is_contiguous() {
+        return Err(RmsNormError::Msg(
+            "kt-muon-step: param/grad/momentum must be contiguous".to_string(),
+        ));
+    }
+    let (rows, cols) = muon_rows_cols(param)?;
+
+    // In-place op: `param` and `momentum` are mutated through their
+    // device storage. Caller convention: pass Owned for both.
+    let p_ptr = kiln_kt_bridge::device_input_ptr(param, KtDType::F32, "param")?;
+    let g_ptr = kiln_kt_bridge::device_input_ptr(grad, KtDType::F32, "grad")?;
+    let m_ptr = kiln_kt_bridge::device_input_ptr(momentum, KtDType::F32, "momentum")?;
+    let p_st = param;
+
+    let raw_stream = device_stream_raw(p_st, "p_st")?;
+
+    let status = unsafe {
+        kiln_muon_step_f32(
+            p_ptr as *mut f32,
+            g_ptr as *const f32,
+            m_ptr as *mut f32,
+            lr,
+            momentum_coef,
+            if nesterov { 1 } else { 0 },
+            ns_iters as i32,
+            weight_decay,
+            rows,
+            cols,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-muon-step: FFI returned {status}"
+        )));
+    }
+    Ok(())
+}
+
+/// `muon_step_bf16` over `kiln_tensor::Tensor` operands.
+///
+/// BF16-master fused Muon step. `param`, `grad`, `momentum` all BF16;
+/// `param` and `momentum` are mutated in place. See [`muon_step_f32_kt`]
+/// for the F32-master variant and the full algorithm description.
+#[allow(clippy::too_many_arguments)]
+pub fn muon_step_bf16_kt(
+    param: &KtTensor,
+    grad: &KtTensor,
+    momentum: &KtTensor,
+    lr: f32,
+    momentum_coef: f32,
+    nesterov: bool,
+    ns_iters: u32,
+    weight_decay: f32,
+) -> Result<(), RmsNormError> {
+    if param.shape() != grad.shape() || param.shape() != momentum.shape() {
+        return Err(RmsNormError::Msg(format!(
+            "kt-muon-step-bf16: shape mismatch — param {:?}, grad {:?}, momentum {:?}",
+            param.shape(),
+            grad.shape(),
+            momentum.shape()
+        )));
+    }
+    if param.dtype() != KtDType::BF16
+        || grad.dtype() != KtDType::BF16
+        || momentum.dtype() != KtDType::BF16
+    {
+        return Err(RmsNormError::Msg(format!(
+            "kt-muon-step-bf16: dtype mismatch — param {:?}, grad {:?}, momentum {:?} (want BF16)",
+            param.dtype(),
+            grad.dtype(),
+            momentum.dtype()
+        )));
+    }
+    if !param.is_contiguous() || !grad.is_contiguous() || !momentum.is_contiguous() {
+        return Err(RmsNormError::Msg(
+            "kt-muon-step-bf16: param/grad/momentum must be contiguous".to_string(),
+        ));
+    }
+    let (rows, cols) = muon_rows_cols(param)?;
+
+    let p_ptr = kiln_kt_bridge::device_input_ptr(param, KtDType::BF16, "param")?;
+    let g_ptr = kiln_kt_bridge::device_input_ptr(grad, KtDType::BF16, "grad")?;
+    let m_ptr = kiln_kt_bridge::device_input_ptr(momentum, KtDType::BF16, "momentum")?;
+    let p_st = param;
+
+    let raw_stream = device_stream_raw(p_st, "p_st")?;
+
+    let status = unsafe {
+        kiln_muon_step_bf16(
+            p_ptr as *mut _,
+            g_ptr as *const _,
+            m_ptr as *mut _,
+            lr,
+            momentum_coef,
+            if nesterov { 1 } else { 0 },
+            ns_iters as i32,
+            weight_decay,
+            rows,
+            cols,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-muon-step-bf16: FFI returned {status}"
+        )));
+    }
+    Ok(())
+}
+
 /// `lora_decode_hidden_bf16` over `kiln_tensor::Tensor` operands.
 ///
 /// Computes the LoRA-A projection at decode time: `hidden = x @ A`,

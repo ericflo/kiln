@@ -433,6 +433,19 @@ fn run_cuda_record(
             weight_decay,
             &state.device,
         )?),
+        Optimizer::Muon {
+            momentum,
+            nesterov,
+            ns_iters,
+            weight_decay,
+        } => Some(params.allocate_muon_state(
+            config.learning_rate,
+            momentum,
+            nesterov,
+            ns_iters,
+            weight_decay,
+            &state.device,
+        )?),
         Optimizer::Sgd => None,
     };
     if let Some(state_opt) = opt_state.as_ref() {
