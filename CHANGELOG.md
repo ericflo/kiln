@@ -1,5 +1,32 @@
 # Kiln Server Changelog
 
+## kiln-v0.3.4 — 2026-06-09 — agent-backend dashboard overhaul
+
+UI release that bends the built-in server dashboard (served at `/ui`) toward the
+pi/opencode use case and makes the live-training flywheel legible end to end:
+watch agent traffic → spot what the model got wrong → correct it → train an
+adapter → verify it beat base → hot-swap → repeat.
+
+- dashboard: a Corrections basket captures a bad request, lets you write the
+  ideal answer, and trains one SFT adapter in a click — only edited corrections
+  train, so the model is never fine-tuned on its own mistake — with a persistent
+  "training started" receipt instead of a silent page jump.
+- dashboard: a "Needs attention" filter narrows Recent requests to the errored,
+  truncated, and base-served rows, each with a one-click "Correct" capture button.
+- dashboard: the request inspect modal gains a "Latency pi felt" time-to-first-
+  token vs decode breakdown, prev/next triage navigation, and a Verify A/B action
+  that re-runs the prompt against the serving adapter vs the active one.
+- dashboard: the "did it win?" verdict ("beats base by +N pts") is surfaced
+  consistently on the flywheel ribbon, the active adapter card, and eval job cards
+  from one shared computation; the adapters list shows per-adapter eval scores;
+  running, queued, and failed eval jobs show a state figure instead of a
+  misleading 0 score.
+- server: capture the per-request `User-Agent` so recent traffic is attributable
+  to pi / opencode / curl / OpenAI clients.
+- desktop + docs: replace hardcoded blue accents and cool greys with the warm
+  design-system tokens (amber reserved for live/active state); no blue or
+  cool-grey leakage remains across the dashboard, desktop app, or docs site.
+
 ## kiln-v0.3.3 — 2026-06-09 — paged KV row-scatter contiguity hardening
 
 Patch release for the 0.3 line after live ROCm streaming prefill exposed a
