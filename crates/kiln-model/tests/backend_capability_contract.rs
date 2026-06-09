@@ -6968,7 +6968,7 @@ fn cuda_graph_replay_hidden_routes_through_replay_plan_contract() {
     .expect("cuda_graph.rs should be readable");
     let replay_section = source_between(
         &cuda_graph_source,
-        "if let Some(captured) = self.captured.get(&requested_key)",
+        "if let Some(captured) = self.captured.get(&cache_key)",
         "if self.captured.len() >= Self::max_cached_graphs()",
     );
 
@@ -6983,6 +6983,14 @@ fn cuda_graph_replay_hidden_routes_through_replay_plan_contract() {
             && cuda_graph_source.contains("ReplayState::new(replay_key, resources)")
             && cuda_graph_source.contains("ReplayResourceStability::StableAcrossReplay"),
         "CUDA graph capture should persist shared replay key/resource validation state"
+    );
+    assert!(
+        cuda_graph_source.contains("let owner = CudaGraphOwner::from_row_id(graph_row_id)")
+            && cuda_graph_source
+                .contains("let cache_key = CudaGraphCacheKey::new(owner, requested_key.clone())")
+            && replay_section.contains("self.captured.get(&cache_key)")
+            && replay_section.contains("self.captured.remove(&cache_key)"),
+        "CUDA graph replay should be keyed by decode-row owner, not only graph shape"
     );
     assert!(
         replay_section.contains("CudaDecodeReplayPlan::new(captured)")
