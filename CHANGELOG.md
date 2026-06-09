@@ -1,5 +1,20 @@
 # Kiln Server Changelog
 
+## kiln-v0.3.3 — 2026-06-09 — paged KV row-scatter contiguity hardening
+
+Patch release for the 0.3 line after live ROCm streaming prefill exposed a
+non-contiguous paged-KV row-scatter write into the shared kt cache.
+
+- paged-kv: make every multi-token row-scatter fallback materialize a
+  zero-offset contiguous row before calling `Tensor::slice_set`, covering the
+  token-major BF16, head-major native BF16, and FP8 write paths.
+- paged-kv: add a CPU regression with a non-contiguous block table so the
+  row-scatter fallback is exercised directly instead of silently taking the
+  contiguous physical-slot run path.
+- tests: extend the resource/concurrency invariant suite to require the shared
+  row materialization helper at all paged-KV row-scatter call sites, so the
+  `slice_set` contiguity contract cannot be edited away accidentally.
+
 ## kiln-v0.3.2 — 2026-06-08 — decode graph ownership and ROCm sampled batch hardening
 
 Patch release for the 0.3 line after live ROCm streaming stress exposed a

@@ -1196,12 +1196,8 @@ impl PagedKvCacheKt {
             let slot = block_table
                 .slot_for(pos, self.block_size)
                 .ok_or_else(|| anyhow::anyhow!("no slot for position {pos} in block table"))?;
-            let k_row = k_flat
-                .narrow(0, i, 1)
-                .map_err(|e| anyhow::anyhow!("kt pkv token_major: narrow k row {i}: {e}"))?;
-            let v_row = v_flat
-                .narrow(0, i, 1)
-                .map_err(|e| anyhow::anyhow!("kt pkv token_major: narrow v row {i}: {e}"))?;
+            let k_row = Self::row_for_slice_set(&k_flat, i, "token_major k")?;
+            let v_row = Self::row_for_slice_set(&v_flat, i, "token_major v")?;
             k_pool
                 .slice_set(&k_row, 0, slot)
                 .map_err(|e| anyhow::anyhow!("kt pkv token_major: slice_set k row {i}: {e}"))?;
@@ -1659,12 +1655,8 @@ impl PagedKvCacheKt {
             let slot = block_table
                 .slot_for(pos, self.block_size)
                 .ok_or_else(|| anyhow::anyhow!("no slot for position {pos} in block table"))?;
-            let k_row = k_flat
-                .narrow(0, i, 1)
-                .map_err(|e| anyhow::anyhow!("kt pkv write_native: narrow k row {i}: {e}"))?;
-            let v_row = v_flat
-                .narrow(0, i, 1)
-                .map_err(|e| anyhow::anyhow!("kt pkv write_native: narrow v row {i}: {e}"))?;
+            let k_row = Self::row_for_slice_set(&k_flat, i, "write_native k")?;
+            let v_row = Self::row_for_slice_set(&v_flat, i, "write_native v")?;
             k_pool
                 .slice_set(&k_row, 0, slot)
                 .map_err(|e| anyhow::anyhow!("kt pkv write_native: slice_set k row {i}: {e}"))?;
@@ -1751,12 +1743,8 @@ impl PagedKvCacheKt {
             let slot = block_table
                 .slot_for(pos, self.block_size)
                 .ok_or_else(|| anyhow::anyhow!("no slot for position {pos} in block table"))?;
-            let k_row = k_q
-                .narrow(0, i, 1)
-                .map_err(|e| anyhow::anyhow!("kt pkv write_fp8: narrow k row {i}: {e}"))?;
-            let v_row = v_q
-                .narrow(0, i, 1)
-                .map_err(|e| anyhow::anyhow!("kt pkv write_fp8: narrow v row {i}: {e}"))?;
+            let k_row = Self::row_for_slice_set(&k_q, i, "write_fp8 k")?;
+            let v_row = Self::row_for_slice_set(&v_q, i, "write_fp8 v")?;
             k_pool
                 .slice_set(&k_row, 0, slot)
                 .map_err(|e| anyhow::anyhow!("kt pkv write_fp8: slice_set k row {i}: {e}"))?;
@@ -1766,6 +1754,17 @@ impl PagedKvCacheKt {
         }
 
         Ok(())
+    }
+
+    /// `Tensor::slice_set` requires a zero-offset contiguous source. A
+    /// `narrow(0, i, 1)` row view for `i > 0` has a non-zero storage offset, so
+    /// every paged-KV row-scatter fallback must materialize the row before
+    /// writing it into the physical KV pool.
+    fn row_for_slice_set(src: &KtTensor, row_idx: usize, ctx: &str) -> Result<KtTensor> {
+        src.narrow(0, row_idx, 1)
+            .map_err(|e| anyhow::anyhow!("kt pkv {ctx}: narrow row {row_idx}: {e}"))?
+            .contiguous()
+            .map_err(|e| anyhow::anyhow!("kt pkv {ctx}: contiguous row {row_idx}: {e}"))
     }
 
     /// `[1, num_kv_heads, new_len, head_dim]` -> contiguous
@@ -1839,7 +1838,7 @@ mod tests {
         let dev = kiln_tensor::Device::Cpu;
 
         // 4 blocks * 2 = 8 slots; 1 full-attn layer; F32 so values round-trip exact.
-        let mut cache = PagedKvCacheKt::new(1, 4, block_size, kv_heads, head_dim, KtDType::F32, dev)
+        let cache = PagedKvCacheKt::new(1, 4, block_size, kv_heads, head_dim, KtDType::F32, dev)
             .expect("construct cpu cache");
         assert_eq!(cache.num_blocks(), 4);
 
@@ -1891,6 +1890,82 @@ mod tests {
         // No-op resize returns Ok and changes nothing.
         cache.physical_resize_to(5, dev).expect("noop");
         assert_eq!(cache.num_blocks(), 5);
+    }
+
+    #[test]
+    fn write_native_prefill_scatter_materializes_rows_for_noncontiguous_blocks() {
+        let block_size = 2usize;
+        let kv_heads = 2usize;
+        let head_dim = 2usize;
+        let new_len = 4usize;
+        let per_slot = kv_heads * head_dim;
+        let dev = kiln_tensor::Device::Cpu;
+        let cache = PagedKvCacheKt::new(1, 3, block_size, kv_heads, head_dim, KtDType::F32, dev)
+            .expect("construct cpu cache");
+
+        let mut block_table = BlockTable::new();
+        block_table.push(0);
+        block_table.push(2);
+        assert!(
+            contiguous_slot_run_start(&block_table, block_size, 0, new_len).is_none(),
+            "test must exercise row-scatter, not contiguous-run write"
+        );
+
+        let row = |base: usize, pos: usize| -> Vec<f32> {
+            let mut out = Vec::with_capacity(per_slot);
+            for head in 0..kv_heads {
+                for dim in 0..head_dim {
+                    out.push((base + head * 100 + pos * 10 + dim) as f32);
+                }
+            }
+            out
+        };
+        let head_major_values = |base: usize| -> Vec<f32> {
+            let mut out = Vec::with_capacity(kv_heads * new_len * head_dim);
+            for head in 0..kv_heads {
+                for pos in 0..new_len {
+                    for dim in 0..head_dim {
+                        out.push((base + head * 100 + pos * 10 + dim) as f32);
+                    }
+                }
+            }
+            out
+        };
+
+        let k = KtTensor::from_vec(head_major_values(0), vec![1, kv_heads, new_len, head_dim])
+            .expect("k tensor");
+        let v = KtTensor::from_vec(
+            head_major_values(1000),
+            vec![1, kv_heads, new_len, head_dim],
+        )
+        .expect("v tensor");
+
+        cache
+            .write_native(0, &block_table, 0, &k, &v)
+            .expect("non-contiguous row-scatter prefill write");
+
+        let (k_pool, v_pool) = cache.pool_tensors(0).expect("layer 0 pools");
+        assert_eq!(k_pool.dims(), &[6, kv_heads, head_dim]);
+        assert_eq!(v_pool.dims(), &[6, kv_heads, head_dim]);
+        let k_after: Vec<f32> = k_pool.to_vec().expect("k pool host copy");
+        let v_after: Vec<f32> = v_pool.to_vec().expect("v pool host copy");
+
+        for (pos, slot) in [(0usize, 0usize), (1, 1), (2, 4), (3, 5)] {
+            let start = slot * per_slot;
+            assert_eq!(&k_after[start..start + per_slot], row(0, pos).as_slice());
+            assert_eq!(&v_after[start..start + per_slot], row(1000, pos).as_slice());
+        }
+        for slot in [2usize, 3usize] {
+            let start = slot * per_slot;
+            assert!(
+                k_after[start..start + per_slot].iter().all(|&x| x == 0.0),
+                "unreferenced K slot {slot} should remain zero"
+            );
+            assert!(
+                v_after[start..start + per_slot].iter().all(|&x| x == 0.0),
+                "unreferenced V slot {slot} should remain zero"
+            );
+        }
     }
 
     #[cfg(feature = "metal")]

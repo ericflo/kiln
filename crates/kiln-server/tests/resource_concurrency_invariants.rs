@@ -79,6 +79,33 @@ fn blaslt_workspace_is_stream_owned_not_handle_global() {
 }
 
 #[test]
+fn paged_kv_row_scatter_materializes_rows_before_slice_set() {
+    let src = read("crates/kiln-model/src/paged_kv_cache_kt.rs");
+    assert!(
+        src.contains("fn row_for_slice_set("),
+        "paged-KV row-scatter must keep a single helper for slice_set-ready row materialization"
+    );
+    assert!(
+        src.contains("contiguous row {row_idx}"),
+        "paged-KV row-scatter helper must materialize zero-offset contiguous rows before slice_set"
+    );
+
+    for required in [
+        "Self::row_for_slice_set(&k_flat, i, \"token_major k\")",
+        "Self::row_for_slice_set(&v_flat, i, \"token_major v\")",
+        "Self::row_for_slice_set(&k_flat, i, \"write_native k\")",
+        "Self::row_for_slice_set(&v_flat, i, \"write_native v\")",
+        "Self::row_for_slice_set(&k_q, i, \"write_fp8 k\")",
+        "Self::row_for_slice_set(&v_q, i, \"write_fp8 v\")",
+    ] {
+        assert!(
+            src.contains(required),
+            "paged-KV row-scatter fallback must route through contiguous row materialization: {required}"
+        );
+    }
+}
+
+#[test]
 fn process_shared_persistence_uses_resource_layer() {
     let resource = read("crates/kiln-resource/src/lib.rs");
     for required in [
