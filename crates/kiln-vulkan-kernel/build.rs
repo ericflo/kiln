@@ -317,6 +317,8 @@ const SHADERS: &[(&str, &str)] = &[
     ("sgd_step_bf16", "SPIR_V_SGD_STEP_BF16"),
     ("adamw_step_f32", "SPIR_V_ADAMW_STEP_F32"),
     ("adamw_step_bf16", "SPIR_V_ADAMW_STEP_BF16"),
+    ("muon_step_f32", "SPIR_V_MUON_STEP_F32"),
+    ("muon_step_bf16", "SPIR_V_MUON_STEP_BF16"),
     // vk-native training shaders (Phase A)
     (
         "vk_elementwise_binary_f32",

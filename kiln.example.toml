@@ -66,6 +66,19 @@ inference_memory_fraction = 0.7       # Fraction of VRAM for inference (rest for
 # grad_checkpoint_segments = 4       # Segments for gradient checkpointing
 no_grad_checkpoint = false
 # checkpoint_interval = 50           # Save adapter every N training steps
+#
+# Optimizer: the default is Muon (momentum-orthogonalized SGD) — it
+# converges LoRA fine-tunes in fewer steps than AdamW at roughly half the
+# optimizer state (one momentum buffer vs Adam's two moments), and ships
+# fused on-device Newton-Schulz kernels for every backend (CUDA, ROCm,
+# Vulkan, Metal). The optimizer is chosen per-request in the SFT/GRPO/OPD
+# JSON body, e.g.:
+#   "optimizer": {"kind": "muon", "momentum": 0.95, "nesterov": true, "ns_iters": 5, "weight_decay": 0.0}
+#   "optimizer": {"kind": "adam_w", "beta1": 0.9, "beta2": 0.999, "eps": 1e-8, "weight_decay": 0.0}
+#   "optimizer": {"kind": "sgd"}
+# Omit the field entirely to use the Muon default. Muon uses a larger
+# learning rate than AdamW (its orthogonalized, RMS-matched update is
+# ~unit scale): ~2e-2 vs AdamW's ~1e-4 for LoRA.
 # webhook_url = "https://example.com/hook"  # POST training completion JSON to this URL.
                                               # Fields: job_id, job_type (sft|grpo),
                                               # status (completed|failed), adapter_name,

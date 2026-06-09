@@ -2350,6 +2350,99 @@ pub fn metal_adamw_step(
 }
 
 // ----------------------------------------------------------------------
+// metal_muon_step — fused on-device Muon (momentum-orthogonalized SGD)
+// ----------------------------------------------------------------------
+
+/// Fused in-place Muon step on Metal. Updates `param` and the per-param
+/// heavy-ball `momentum` buffer IN PLACE in their `MetalStorage` buffers;
+/// reads `grad` (read-only). No host round-trip — the `StorageModeShared` UMA
+/// buffers are mutated directly by a single threadgroup running the
+/// Newton-Schulz orthogonalization in threadgroup memory. The math is a
+/// bit-faithful port of [`kiln_optim::Muon::step`] + `kiln_optim::newton_schulz`.
+///
+/// All three tensors must be Metal-backed, contiguous, share `dtype` (the
+/// float triple), and have the same element count. `rows`/`cols` come from the
+/// param shape (a rank-2 weight orthogonalizes; otherwise the kernel falls back
+/// to plain (Nesterov) momentum SGD — callers pass `(n, 1)` for non-2D params).
+#[allow(clippy::too_many_arguments)]
+pub fn metal_muon_step(
+    param: &crate::Tensor,
+    grad: &crate::Tensor,
+    momentum: &crate::Tensor,
+    rows: usize,
+    cols: usize,
+    lr: f32,
+    momentum_coef: f32,
+    nesterov: bool,
+    ns_iters: u32,
+    weight_decay: f32,
+) -> Result<()> {
+    let dtype = param.dtype();
+    // F32/BF16/F16 master+momentum — the kernel reads each as its dtype,
+    // computes in float, and writes back as the dtype (round-to-nearest for
+    // BF16/F16). BF16 momentum follows the on-device master-dtype convention,
+    // as on CUDA/Vulkan.
+    if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
+        return Err(Error::Msg(format!(
+            "metal_muon_step: unsupported dtype {dtype} (expected F32/BF16/F16)"
+        )));
+    }
+    if grad.dtype() != dtype || momentum.dtype() != dtype {
+        return Err(Error::Msg(format!(
+            "metal_muon_step: dtype mismatch (param={dtype}, grad={}, momentum={})",
+            grad.dtype(),
+            momentum.dtype()
+        )));
+    }
+    let n = param.element_count();
+    if rows * cols != n {
+        return Err(Error::Msg(format!(
+            "metal_muon_step: rows*cols ({rows}*{cols}) != param element count ({n})"
+        )));
+    }
+    if grad.element_count() != n || momentum.element_count() != n {
+        return Err(Error::Msg(format!(
+            "metal_muon_step: element count mismatch (param={n}, grad={}, momentum={})",
+            grad.element_count(),
+            momentum.element_count()
+        )));
+    }
+    if !param.is_contiguous() || !grad.is_contiguous() || !momentum.is_contiguous() {
+        return Err(Error::Msg(
+            "metal_muon_step: all operands must be contiguous".to_string(),
+        ));
+    }
+
+    fn downcast<'a>(t: &'a crate::Tensor, name: &str) -> Result<&'a MetalStorage> {
+        t.storage()
+            .as_any()
+            .downcast_ref::<MetalStorage>()
+            .ok_or_else(|| Error::Msg(format!("metal_muon_step: {name} must be Metal-backed")))
+    }
+    let kt_param = downcast(param, "param")?;
+    let kt_grad = downcast(grad, "grad")?;
+    let kt_momentum = downcast(momentum, "momentum")?;
+
+    let companion = kt_param.companion()?;
+
+    crate::metal_kernels::muon_step(
+        &companion,
+        kt_param.buffer().as_ref(),
+        kt_grad.buffer().as_ref(),
+        kt_momentum.buffer().as_ref(),
+        dtype,
+        rows,
+        cols,
+        lr,
+        momentum_coef,
+        nesterov,
+        ns_iters,
+        weight_decay,
+    )?;
+    Ok(())
+}
+
+// ----------------------------------------------------------------------
 // metal_activation_unary — Phase 4 Metal substrate op (#1082)
 // ----------------------------------------------------------------------
 

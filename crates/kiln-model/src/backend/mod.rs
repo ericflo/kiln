@@ -1630,6 +1630,32 @@ pub trait OptimizerBackend: Send + Sync + std::fmt::Debug {
     ) -> Result<bool> {
         Ok(false)
     }
+
+    /// Fused on-device Muon step (momentum-orthogonalized SGD).
+    ///
+    /// Updates `param` and the per-param heavy-ball `momentum` buffer in
+    /// place: `momentum = momentum_coef * momentum + grad`; the
+    /// (Nesterov) look-ahead is orthogonalized via Newton-Schulz for
+    /// rank-2 weights (the LoRA A/B matrices) with the RMS-matching
+    /// `sqrt(max(rows, cols))` scale, then `param = param * (1 - lr *
+    /// weight_decay) - lr * update`. Non-matrix params and ranks beyond
+    /// the kernel's shared-memory bound fall back to plain momentum SGD
+    /// inside the kernel. Returns `Ok(true)` when handled on-device,
+    /// `Ok(false)` to defer to the host `kiln_optim::Muon` reference.
+    #[allow(clippy::too_many_arguments)]
+    fn runtime_dispatch_muon_step(
+        &self,
+        _param: &kiln_tensor::Tensor,
+        _grad: &kiln_tensor::Tensor,
+        _momentum: &kiln_tensor::Tensor,
+        _lr: f32,
+        _momentum_coef: f32,
+        _nesterov: bool,
+        _ns_iters: u32,
+        _weight_decay: f32,
+    ) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 /// Focused `TrainingLossBackend` facet delegated by the current `BackendRuntime` facade.

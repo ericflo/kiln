@@ -1,0 +1,289 @@
+// Fused Muon parameter update for F32 buffers (momentum-orthogonalized SGD).
+//
+// Muon (Bernstein-Newhouse 2024 / Jordan et al. 2024). One workgroup
+// per matrix: heavy-ball momentum update in place, then (for rank-2
+// weights small enough to fit the gram in shared memory) a Newton-Schulz
+// quintic orthogonalization of the (Nesterov) look-ahead direction with
+// the RMS-matching `sqrt(max(rows, cols))` scale, then a decoupled-weight-
+// decay descent step. Non-matrix params and ranks beyond K_MAX fall back
+// to plain (Nesterov) momentum SGD inside the kernel.
+//
+// This mirrors EXACTLY the production CPU reference / oracle
+// `kiln_optim::lion_muon::Muon::step` + `newton_schulz` (the gram-space
+// P-accumulator factoring): `O = (P @ B) / ‖B‖_F` when rows ≤ cols, or
+// `(B @ P) / ‖B‖_F` when rows > cols, with the per-iteration k×k matrix
+// `M = a·I + b·A + c·A²` and coefficients `(a, b, c) = (3.4445, -4.7750,
+// 2.0315)`.
+//
+// param, grad, momentum are all F32, share the same row-major [rows, cols]
+// layout (cols == 1 for a non-2D param) and the same element count
+// `n = rows*cols`. param AND momentum are updated in place; grad is
+// read-only. ONE workgroup of 256 threads; ALL barriers are full
+// workgroup barriers (single block).
+//
+// Used by `dispatch_muon_step_f32` against registry-resident LoRA
+// param + grad + momentum buffers. Dispatched (1,1,1) — one launch per
+// matrix.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// K_MAX: gram side bound. 4 shared k×k float scratch matrices at K_MAX=32
+// are 4*32*32*4 = 16 KiB, safe across Vulkan GPUs (incl. RTX 6000 Ada).
+const uint K_MAX = 32u;
+const uint BLK = 256u;
+
+layout(push_constant) uniform Parameters {
+    uint n;            // total element count = rows*cols
+    uint rows;
+    uint cols;
+    uint ns_iters;     // Newton-Schulz iterations (paper: 5)
+    float lr;
+    float mom;         // heavy-ball momentum coefficient
+    uint nesterov;     // 0 | 1
+    float wd;          // decoupled weight decay
+};
+
+layout(binding = 0) buffer ParamBuf { float data_param[]; };
+layout(binding = 1) readonly buffer GradBuf { float data_grad[]; };
+layout(binding = 2) buffer MomentumBuf { float data_mom[]; };
+
+// Shared k×k scratch. All float. Total = 4 * 32*32 * 4 = 16 KiB, the
+// Vulkan spec minimum for maxComputeSharedMemorySize — safe across all
+// Vulkan GPUs (incl. the RTX 6000 Ada target). The STEP 2 Frobenius
+// block reduction reuses `Tm` (BLK=256 <= K_MAX*K_MAX=1024 floats) since
+// it runs before any of A/M/P/Tm hold gram state.
+shared float A[K_MAX * K_MAX];
+shared float M[K_MAX * K_MAX];
+shared float P[K_MAX * K_MAX];
+shared float Tm[K_MAX * K_MAX];
+
+// F32 to_f / from_f are identity (BF16 variant overrides these).
+float to_f(float x) { return x; }
+float from_f(float x) { return x; }
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+
+    // Derived shape quantities (same on every thread).
+    uint k = min(rows, cols);
+    bool transpose = (rows > cols);      // false => gram in row space (k=rows)
+    float scale = sqrt(float(max(rows, cols)));
+    bool do_ortho = (rows >= 2u) && (cols >= 2u) && (k <= K_MAX);
+
+    // STEP 1 — heavy-ball momentum update, in place:
+    //   momentum = mom*momentum + grad
+    for (uint idx = tid; idx < n; idx += BLK) {
+        float new_m = mom * to_f(data_mom[idx]) + to_f(data_grad[idx]);
+        data_mom[idx] = from_f(new_m);
+    }
+    // momentum[] is an SSBO written above by THIS thread and read CROSS-THREAD
+    // in STEP 2/3/5 (bval reads data_mom[i*cols+c] for indices owned by other
+    // invocations). `memoryBarrierShared()` only orders shared memory, so the
+    // buffer write must be released with workgroup-scope buffer ordering BEFORE
+    // the control barrier publishes it. `groupMemoryBarrier()` covers buffer +
+    // shared at workgroup scope.
+    groupMemoryBarrier();
+    barrier();
+    // momentum[] is now updated and visible workgroup-wide; bval reads it below.
+
+    // bval(idx) = nesterov ? (grad + mom*momentum) : momentum.
+    // (inlined where needed since GLSL can't index buffers from a helper
+    //  cleanly across both paths — recompute per use.)
+
+    // STEP 1b — if NOT do_ortho: plain (Nesterov) momentum SGD, then return.
+    if (!do_ortho) {
+        for (uint idx = tid; idx < n; idx += BLK) {
+            float b = (nesterov != 0u)
+                ? (to_f(data_grad[idx]) + mom * to_f(data_mom[idx]))
+                : to_f(data_mom[idx]);
+            float p = to_f(data_param[idx]);
+            p = p * (1.0 - lr * wd) - lr * b;
+            data_param[idx] = from_f(p);
+        }
+        return;
+    }
+
+    // STEP 2 — Frobenius norm of b: frob2 = sum_idx bval(idx)^2.
+    float partial = 0.0;
+    for (uint idx = tid; idx < n; idx += BLK) {
+        float b = (nesterov != 0u)
+            ? (to_f(data_grad[idx]) + mom * to_f(data_mom[idx]))
+            : to_f(data_mom[idx]);
+        partial += b * b;
+    }
+    Tm[tid] = partial;
+    barrier();
+    memoryBarrierShared();
+    // Tree reduction over the 256-wide block (scratch in Tm[0..BLK)).
+    [[unroll]] for (uint stride = BLK >> 1; stride > 0u; stride >>= 1) {
+        if (tid < stride) {
+            Tm[tid] += Tm[tid + stride];
+        }
+        barrier();
+        memoryBarrierShared();
+    }
+    float frob2 = Tm[0];
+    barrier();
+    memoryBarrierShared();
+
+    if (frob2 == 0.0) {
+        // Only weight decay acts.
+        for (uint idx = tid; idx < n; idx += BLK) {
+            float p = to_f(data_param[idx]);
+            data_param[idx] = from_f(p * (1.0 - lr * wd));
+        }
+        return;
+    }
+    float inv_frob = 1.0 / sqrt(frob2);
+    float inv_frob2 = 1.0 / frob2;
+
+    // STEP 3 — gram A (k x k), normalized by inv_frob2.
+    for (uint pair = tid; pair < k * k; pair += BLK) {
+        uint i = pair / k;
+        uint j = pair % k;
+        float s = 0.0;
+        if (!transpose) {
+            // A = B Bt : rows of B (length cols).
+            for (uint c = 0u; c < cols; ++c) {
+                float bi = (nesterov != 0u)
+                    ? (to_f(data_grad[i * cols + c]) + mom * to_f(data_mom[i * cols + c]))
+                    : to_f(data_mom[i * cols + c]);
+                float bj = (nesterov != 0u)
+                    ? (to_f(data_grad[j * cols + c]) + mom * to_f(data_mom[j * cols + c]))
+                    : to_f(data_mom[j * cols + c]);
+                s += bi * bj;
+            }
+        } else {
+            // A = Bt B : columns of B (length rows).
+            for (uint r = 0u; r < rows; ++r) {
+                float bi = (nesterov != 0u)
+                    ? (to_f(data_grad[r * cols + i]) + mom * to_f(data_mom[r * cols + i]))
+                    : to_f(data_mom[r * cols + i]);
+                float bj = (nesterov != 0u)
+                    ? (to_f(data_grad[r * cols + j]) + mom * to_f(data_mom[r * cols + j]))
+                    : to_f(data_mom[r * cols + j]);
+                s += bi * bj;
+            }
+        }
+        A[pair] = s * inv_frob2;
+    }
+    barrier();
+    memoryBarrierShared();
+
+    // STEP 4 — P-accumulator Newton-Schulz.
+    // P starts = I_k.
+    for (uint idx = tid; idx < k * k; idx += BLK) {
+        P[idx] = (idx / k == idx % k) ? 1.0 : 0.0;
+    }
+    barrier();
+    memoryBarrierShared();
+
+    const float ca = 3.4445;
+    const float cb = -4.7750;
+    const float cc = 2.0315;
+
+    for (uint iter = 0u; iter < ns_iters; ++iter) {
+        // Tm = A @ A.
+        for (uint pair = tid; pair < k * k; pair += BLK) {
+            uint i = pair / k;
+            uint j = pair % k;
+            float s = 0.0;
+            for (uint t = 0u; t < k; ++t) {
+                s += A[i * k + t] * A[t * k + j];
+            }
+            Tm[pair] = s;
+        }
+        barrier();
+        memoryBarrierShared();
+
+        // M = a*I + b*A + c*Tm.
+        for (uint pair = tid; pair < k * k; pair += BLK) {
+            uint i = pair / k;
+            uint j = pair % k;
+            float id = (i == j) ? 1.0 : 0.0;
+            M[pair] = ca * id + cb * A[pair] + cc * Tm[pair];
+        }
+        barrier();
+        memoryBarrierShared();
+
+        // P <- (NOT transpose ? M @ P : P @ M).
+        for (uint pair = tid; pair < k * k; pair += BLK) {
+            uint i = pair / k;
+            uint j = pair % k;
+            float s = 0.0;
+            if (!transpose) {
+                for (uint t = 0u; t < k; ++t) {
+                    s += M[i * k + t] * P[t * k + j];
+                }
+            } else {
+                for (uint t = 0u; t < k; ++t) {
+                    s += P[i * k + t] * M[t * k + j];
+                }
+            }
+            Tm[pair] = s;
+        }
+        barrier();
+        memoryBarrierShared();
+        for (uint idx = tid; idx < k * k; idx += BLK) {
+            P[idx] = Tm[idx];
+        }
+        barrier();
+        memoryBarrierShared();
+
+        // A <- M @ A @ M  (M symmetric): Tm = M@A ; A = Tm@M.
+        for (uint pair = tid; pair < k * k; pair += BLK) {
+            uint i = pair / k;
+            uint j = pair % k;
+            float s = 0.0;
+            for (uint t = 0u; t < k; ++t) {
+                s += M[i * k + t] * A[t * k + j];
+            }
+            Tm[pair] = s;
+        }
+        barrier();
+        memoryBarrierShared();
+        for (uint pair = tid; pair < k * k; pair += BLK) {
+            uint i = pair / k;
+            uint j = pair % k;
+            float s = 0.0;
+            for (uint t = 0u; t < k; ++t) {
+                s += Tm[i * k + t] * M[t * k + j];
+            }
+            A[pair] = s;
+        }
+        barrier();
+        memoryBarrierShared();
+    }
+
+    // STEP 5 — apply: O = (P@B or B@P) * inv_frob, RMS-scaled; descent
+    // with decoupled WD.
+    for (uint idx = tid; idx < n; idx += BLK) {
+        uint r = idx / cols;
+        uint c = idx % cols;
+        float o = 0.0;
+        if (!transpose) {
+            // P is rows x rows (k = rows). O[r,c] = Σ_t P[r,t] B[t,c].
+            for (uint t = 0u; t < k; ++t) {
+                float bt = (nesterov != 0u)
+                    ? (to_f(data_grad[t * cols + c]) + mom * to_f(data_mom[t * cols + c]))
+                    : to_f(data_mom[t * cols + c]);
+                o += P[r * k + t] * bt;
+            }
+        } else {
+            // P is cols x cols (k = cols). O[r,c] = Σ_t B[r,t] P[t,c].
+            for (uint t = 0u; t < k; ++t) {
+                float bt = (nesterov != 0u)
+                    ? (to_f(data_grad[r * cols + t]) + mom * to_f(data_mom[r * cols + t]))
+                    : to_f(data_mom[r * cols + t]);
+                o += bt * P[t * k + c];
+            }
+        }
+        o *= scale * inv_frob;
+        float p = to_f(data_param[idx]);
+        p = p * (1.0 - lr * wd) - lr * o;
+        data_param[idx] = from_f(p);
+    }
+}

@@ -11165,3 +11165,137 @@ pub fn dispatch_adamw_step_f32(
     )
     .context("adamw_step_f32: kernel dispatch")
 }
+
+/// Fused Muon (momentum-orthogonalized SGD) for registry-resident F32
+/// buffers.
+///
+/// Updates `param` and the per-param heavy-ball `momentum` buffer in
+/// place — one launch per matrix. All three buffers (param, grad,
+/// momentum) hold F32 in the same row-major `[rows, cols]` layout
+/// (`cols == 1` for a non-2D param) and share the same element count
+/// `n_elements == rows * cols`. The fused kernel runs the heavy-ball
+/// momentum update, then (for rank-2 weights with `min(rows,cols)`
+/// fitting the kernel's shared gram bound) a Newton-Schulz quintic
+/// orthogonalization of the (Nesterov) look-ahead with the RMS-matching
+/// `sqrt(max(rows,cols))` scale, then the decoupled-weight-decay descent
+/// step. Non-matrix params / over-bound ranks fall back to plain
+/// (Nesterov) momentum SGD inside the kernel.
+///
+/// Dispatched ONE workgroup of 256 threads (`(1, 1, 1)`): the whole step
+/// for one matrix is a single threadblock using full workgroup barriers
+/// between every shared phase.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_muon_step_f32(
+    vk_device: &VulkanDevice,
+    param_buffer: &VulkanBuffer,
+    grad_buffer: &VulkanBuffer,
+    momentum_buffer: &VulkanBuffer,
+    n_elements: usize,
+    rows: usize,
+    cols: usize,
+    lr: f32,
+    momentum_coef: f32,
+    nesterov: bool,
+    ns_iters: u32,
+    weight_decay: f32,
+) -> Result<()> {
+    anyhow::ensure!(n_elements > 0, "muon_step_f32: n_elements must be > 0");
+    anyhow::ensure!(
+        rows.saturating_mul(cols) == n_elements,
+        "muon_step_f32: rows*cols ({}) != n_elements ({n_elements})",
+        rows.saturating_mul(cols),
+    );
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/muon_step_f32.comp"
+    );
+    let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)
+        .context("muon_step_f32: shader compile/load")?;
+    let push_constants: [u32; 8] = [
+        n_elements as u32,
+        rows as u32,
+        cols as u32,
+        ns_iters,
+        lr.to_bits(),
+        momentum_coef.to_bits(),
+        if nesterov { 1u32 } else { 0u32 },
+        weight_decay.to_bits(),
+    ];
+    let all_handles = vec![
+        param_buffer.handle(),
+        grad_buffer.handle(),
+        momentum_buffer.handle(),
+    ];
+    // One workgroup per matrix.
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &all_handles,
+        all_handles.len(),
+        &push_constants,
+        1,
+    )
+    .context("muon_step_f32: kernel dispatch")
+}
+
+/// Fused Muon (momentum-orthogonalized SGD) for registry-resident BF16
+/// buffers. BF16 variant of [`dispatch_muon_step_f32`].
+///
+/// All three buffers (param, grad, momentum) hold packed BF16 (2 bf16 per
+/// u32 word) in the `extract_tensor_packed_bf16_bytes` encoding, share the
+/// same row-major `[rows, cols]` layout and element count
+/// `n_elements == rows * cols`. `param` and `momentum` are updated in
+/// place. Dispatched ONE workgroup of 256 threads (`(1, 1, 1)`).
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_muon_step_bf16(
+    vk_device: &VulkanDevice,
+    param_buffer: &VulkanBuffer,
+    grad_buffer: &VulkanBuffer,
+    momentum_buffer: &VulkanBuffer,
+    n_elements: usize,
+    rows: usize,
+    cols: usize,
+    lr: f32,
+    momentum_coef: f32,
+    nesterov: bool,
+    ns_iters: u32,
+    weight_decay: f32,
+) -> Result<()> {
+    anyhow::ensure!(n_elements > 0, "muon_step_bf16: n_elements must be > 0");
+    anyhow::ensure!(
+        rows.saturating_mul(cols) == n_elements,
+        "muon_step_bf16: rows*cols ({}) != n_elements ({n_elements})",
+        rows.saturating_mul(cols),
+    );
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/muon_step_bf16.comp"
+    );
+    let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)
+        .context("muon_step_bf16: shader compile/load")?;
+    let push_constants: [u32; 8] = [
+        n_elements as u32,
+        rows as u32,
+        cols as u32,
+        ns_iters,
+        lr.to_bits(),
+        momentum_coef.to_bits(),
+        if nesterov { 1u32 } else { 0u32 },
+        weight_decay.to_bits(),
+    ];
+    let all_handles = vec![
+        param_buffer.handle(),
+        grad_buffer.handle(),
+        momentum_buffer.handle(),
+    ];
+    // One workgroup per matrix.
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &all_handles,
+        all_handles.len(),
+        &push_constants,
+        1,
+    )
+    .context("muon_step_bf16: kernel dispatch")
+}

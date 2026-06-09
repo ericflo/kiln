@@ -18,6 +18,7 @@ use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 
 static CUDA_SGD_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static CUDA_ADAMW_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static CUDA_MUON_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static CUDA_LINEAR_PREFILL_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static CUDA_LINEAR_PREFILL_OFFSET_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static CUDA_FLASH_ATTN_TRACKED_DECLINES: AtomicU64 = AtomicU64::new(0);
@@ -556,6 +557,68 @@ impl OptimizerBackend for CudaBackend {
                 weight_decay,
                 step,
                 "CudaBackend::dispatch_adamw_step first call"
+            );
+        });
+        Ok(true)
+    }
+
+    fn runtime_dispatch_muon_step(
+        &self,
+        param: &kiln_tensor::Tensor,
+        grad: &kiln_tensor::Tensor,
+        momentum: &kiln_tensor::Tensor,
+        lr: f32,
+        momentum_coef: f32,
+        nesterov: bool,
+        ns_iters: u32,
+        weight_decay: f32,
+    ) -> Result<bool> {
+        if !cuda_optimizer_args_ready_for_kt(&self.resident_tensor_ids, &[param, grad, momentum]) {
+            return Ok(false);
+        }
+        // #1082: args are already kt (BackendRuntime trait flipped to kt),
+        // so there is no candle<->kt borrow - the kernel runs directly on the
+        // caller's kt tensors. Updates param + momentum in place in one launch.
+        kiln_nvtx::range!(c"kiln/muon_step_kt");
+        match param.dtype() {
+            kiln_tensor::DType::F32 => kiln_rmsnorm_kernel::muon_step_f32_kt(
+                param,
+                grad,
+                momentum,
+                lr,
+                momentum_coef,
+                nesterov,
+                ns_iters,
+                weight_decay,
+            )
+            .map_err(|e| anyhow::anyhow!("muon_step kt: muon_step_f32_kt: {e}"))?,
+            kiln_tensor::DType::BF16 => kiln_rmsnorm_kernel::muon_step_bf16_kt(
+                param,
+                grad,
+                momentum,
+                lr,
+                momentum_coef,
+                nesterov,
+                ns_iters,
+                weight_decay,
+            )
+            .map_err(|e| anyhow::anyhow!("muon_step kt: muon_step_bf16_kt: {e}"))?,
+            other => anyhow::bail!("muon_step kt: unsupported dtype {other:?}"),
+        }
+        CUDA_MUON_DISPATCH_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+        static FIRST_CUDA_MUON_LOGGED: OnceLock<()> = OnceLock::new();
+        FIRST_CUDA_MUON_LOGGED.get_or_init(|| {
+            tracing::info!(
+                param_shape = ?param.dims(),
+                grad_shape = ?grad.dims(),
+                momentum_shape = ?momentum.dims(),
+                dtype = ?param.dtype(),
+                lr,
+                momentum_coef,
+                nesterov,
+                ns_iters,
+                weight_decay,
+                "CudaBackend::dispatch_muon_step first call"
             );
         });
         Ok(true)

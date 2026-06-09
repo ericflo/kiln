@@ -170,7 +170,7 @@ pub use metal_storage::{
     MetalStorage, host_to_metal_copy, metal_activation_unary, metal_adamw_step, metal_cast,
     metal_compare, metal_copy_in_place, metal_cumsum_axis, metal_deep_copy,
     metal_elementwise_binary, metal_index_select_dim0, metal_layernorm_last_axis,
-    metal_log_softmax_last_axis, metal_rmsnorm_last_axis, metal_sdpa_last_axis,
+    metal_log_softmax_last_axis, metal_muon_step, metal_rmsnorm_last_axis, metal_sdpa_last_axis,
     metal_softmax_last_axis, metal_to_host_copy, metal_where_select, metal_write_host_in_place,
     primary_metal_companion,
 };

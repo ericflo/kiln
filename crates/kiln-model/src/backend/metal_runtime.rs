@@ -318,6 +318,37 @@ impl OptimizerBackend for MetalBackend {
             step,
         )
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn runtime_dispatch_muon_step(
+        &self,
+        param: &kiln_tensor::Tensor,
+        grad: &kiln_tensor::Tensor,
+        momentum: &kiln_tensor::Tensor,
+        lr: f32,
+        momentum_coef: f32,
+        nesterov: bool,
+        ns_iters: u32,
+        weight_decay: f32,
+    ) -> Result<bool> {
+        // All three operands must be resident: no mixed resident/host update,
+        // since that would need a per-call upload and defeat on-device Muon.
+        let all_resident = metal_residency::all_registered(
+            &self.resident_activation_registry,
+            &[param, grad, momentum],
+        );
+        metal_training::dispatch_muon_step(
+            param,
+            grad,
+            momentum,
+            all_resident,
+            lr,
+            momentum_coef,
+            nesterov,
+            ns_iters,
+            weight_decay,
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
