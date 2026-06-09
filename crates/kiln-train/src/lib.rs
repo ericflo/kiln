@@ -144,7 +144,15 @@ pub struct SftExample {
 /// Request to run SFT training on submitted examples.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SftRequest {
+    #[serde(default)]
     pub examples: Vec<SftExample>,
+    /// Optional name of an uploaded dataset (the eval dataset store) to train
+    /// on instead of inline `examples`. The server resolves the name and reads
+    /// every row — callers never round-trip rows through the client, so large
+    /// datasets train whole (no preview-endpoint truncation) and the request
+    /// stays a few bytes. Mutually exclusive with `examples`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset: Option<String>,
     #[serde(default)]
     pub config: SftConfig,
     /// Optional auto-eval hook: when set, the training queue worker enqueues
@@ -315,6 +323,12 @@ pub struct GrpoRequest {
     /// retaining every group in memory.
     #[serde(default)]
     pub dataset_path: Option<String>,
+    /// Optional name of an uploaded dataset (the eval dataset store) to train
+    /// on instead of inline `groups` / a raw path. The server resolves the
+    /// name to its on-disk JSONL and streams it like `dataset_path`. Mutually
+    /// exclusive with both `groups` and `dataset_path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset: Option<String>,
     #[serde(default)]
     pub config: GrpoConfig,
     /// Optional auto-eval hook (see `SftRequest::post_eval`).

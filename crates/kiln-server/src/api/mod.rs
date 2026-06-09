@@ -21,6 +21,7 @@ pub(crate) mod recipes;
 pub(crate) mod self_improve;
 mod stats;
 pub(crate) mod teachers;
+pub mod terminal;
 mod training;
 mod ui;
 
@@ -78,6 +79,7 @@ pub fn router(state: AppState) -> Router {
         .merge(config::routes())
         .merge(debug_model_state::routes())
         .merge(stats::routes())
+        .merge(terminal::routes())
         .merge(ui::routes())
         .with_state(state)
         .layer(CorsLayer::permissive())

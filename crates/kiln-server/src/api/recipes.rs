@@ -360,6 +360,7 @@ fn step_to_queued_job(
             Ok((
                 name.clone(),
                 QueuedJob::Sft(SftRequest {
+                    dataset: None,
                     examples,
                     config: sft_config,
                     post_eval: None,

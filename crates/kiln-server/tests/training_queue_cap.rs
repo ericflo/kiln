@@ -75,6 +75,7 @@ fn fill_queue(state: &AppState, n: usize) {
             job_id: format!("placeholder-{i}"),
             reserved_bytes: 0,
             job: QueuedJob::Sft(SftRequest {
+                dataset: None,
                 examples: Vec::new(),
                 config: Default::default(),
                 post_eval: None,

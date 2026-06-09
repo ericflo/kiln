@@ -2492,6 +2492,7 @@ mod tests {
             job_id: "job-1".into(),
             reserved_bytes: 0,
             job: QueuedJob::Sft(SftRequest {
+                dataset: None,
                 examples: vec![],
                 config: Default::default(),
                 post_eval: None,
@@ -2501,6 +2502,7 @@ mod tests {
             job_id: "job-2".into(),
             reserved_bytes: 0,
             job: QueuedJob::Sft(SftRequest {
+                dataset: None,
                 examples: vec![],
                 config: Default::default(),
                 post_eval: None,
@@ -2510,6 +2512,7 @@ mod tests {
             job_id: "job-3".into(),
             reserved_bytes: 0,
             job: QueuedJob::Sft(SftRequest {
+                dataset: None,
                 examples: vec![],
                 config: Default::default(),
                 post_eval: None,
@@ -2530,6 +2533,7 @@ mod tests {
             job_id: "job-1".into(),
             reserved_bytes: 0,
             job: QueuedJob::Sft(SftRequest {
+                dataset: None,
                 examples: vec![],
                 config: Default::default(),
                 post_eval: None,
@@ -2539,6 +2543,7 @@ mod tests {
             job_id: "job-2".into(),
             reserved_bytes: 0,
             job: QueuedJob::Sft(SftRequest {
+                dataset: None,
                 examples: vec![],
                 config: Default::default(),
                 post_eval: None,
@@ -2548,6 +2553,7 @@ mod tests {
             job_id: "job-3".into(),
             reserved_bytes: 0,
             job: QueuedJob::Sft(SftRequest {
+                dataset: None,
                 examples: vec![],
                 config: Default::default(),
                 post_eval: None,

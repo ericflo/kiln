@@ -225,6 +225,7 @@ async fn main() -> Result<()> {
     kiln_server::logging::init(level, &config.logging.format)?;
 
     let host = &config.server.host;
+    kiln_server::api::terminal::set_bind_host(host);
     let port = config.server.port;
 
     let model_config = ModelConfig::qwen3_5_4b();
