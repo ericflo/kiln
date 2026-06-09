@@ -8,19 +8,19 @@
       html, body {
         margin: 0;
         padding: 0;
-        background: #0f1115;
-        color: #e6e6e6;
+        background: var(--bg);
+        color: var(--text);
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       }
       .wrap { padding: 24px; max-width: 520px; box-sizing: border-box; }
       h1 { font-size: 18px; margin: 0 0 16px 0; font-weight: 600; }
       fieldset {
-        border: 1px solid #2a2f3a;
+        border: 1px solid var(--border);
         border-radius: 6px;
         padding: 12px 16px 16px 16px;
         margin: 0 0 16px 0;
       }
-      legend { padding: 0 6px; color: #a8aeb8; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
+      legend { padding: 0 6px; color: var(--text-muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
       label.row {
         display: flex;
         align-items: center;
@@ -30,12 +30,12 @@
         padding: 6px 0;
         font-size: 13px;
       }
-      label.row > span.name { color: #cfd3da; }
+      label.row > span.name { color: var(--text-2); }
       label.row > span.hint {
         display: block;
         flex-basis: 100%;
         font-size: 12px;
-        color: #6c7280;
+        color: var(--text-muted);
         margin: 2px 0 0 0;
         font-weight: normal;
         line-height: 1.35;
@@ -44,7 +44,7 @@
         display: none;
         flex-basis: 100%;
         font-size: 12px;
-        color: #f0b080;
+        color: var(--warning-fg);
         margin: 2px 0 0 0;
         font-weight: normal;
         line-height: 1.35;
@@ -52,9 +52,9 @@
       label.row > span.path-warning.visible { display: block; }
       label.row > input[type="text"],
       label.row > input[type="number"] {
-        background: #181b21;
-        color: #e6e6e6;
-        border: 1px solid #2a2f3a;
+        background: var(--surface-2);
+        color: var(--text);
+        border: 1px solid var(--border);
         border-radius: 4px;
         padding: 4px 8px;
         font-size: 13px;
@@ -71,15 +71,15 @@
         width: 204px;
       }
       button.browse {
-        background: #2a2f3a;
-        color: #e6e6e6;
-        border: 1px solid #3a4050;
+        background: var(--surface-3);
+        color: var(--text);
+        border: 1px solid var(--border-strong);
         border-radius: 4px;
         padding: 3px 10px;
         font-size: 12px;
         cursor: pointer;
       }
-      button.browse:hover { background: #343a46; }
+      button.browse:hover { background: var(--border-strong); }
       .update-row {
         display: flex;
         align-items: center;
@@ -89,26 +89,26 @@
       }
       .update-status {
         font-size: 12px;
-        color: #a8aeb8;
+        color: var(--text-muted);
         line-height: 1.35;
       }
-      .update-status.checking { color: #a8aeb8; }
-      .update-status.up-to-date { color: #7fbf7f; }
-      .update-status.available { color: #f0b080; }
-      .update-status.warn { color: #e6c070; }
-      .update-status.error { color: #f08080; }
+      .update-status.checking { color: var(--text-muted); }
+      .update-status.up-to-date { color: var(--success-fg); }
+      .update-status.available { color: var(--warning-fg); }
+      .update-status.warn { color: var(--warning-fg); }
+      .update-status.error { color: var(--danger-fg); }
       .update-status .badge {
         display: inline-block;
         padding: 1px 6px;
         border-radius: 3px;
-        background: #2a2f3a;
-        color: #e6e6e6;
+        background: var(--surface-3);
+        color: var(--text);
         font-size: 11px;
         margin-left: 4px;
       }
-      .update-status.available .badge { background: #5a3f1a; color: #f6d3a6; }
-      .update-status.up-to-date .badge { background: #1f3a22; color: #b7e3b9; }
-      .update-status.warn .badge { background: #4a3a1a; color: #f0d98a; }
+      .update-status.available .badge { background: var(--warning-bg); color: var(--warning-fg); }
+      .update-status.up-to-date .badge { background: var(--success-bg); color: var(--success-fg); }
+      .update-status.warn .badge { background: var(--warning-bg); color: var(--warning-fg); }
       .update-download {
         display: flex;
         flex-direction: column;
@@ -120,33 +120,33 @@
       button.browse.hidden { display: none; }
       .update-download-bar {
         height: 6px;
-        background: #0f1115;
-        border: 1px solid #2a2f3a;
+        background: var(--bg);
+        border: 1px solid var(--border);
         border-radius: 3px;
         overflow: hidden;
       }
       .update-download-fill {
         height: 100%;
         width: 0%;
-        background: #2f66f0;
+        background: var(--accent);
         transition: width 120ms linear;
       }
       .update-download-line {
         font-size: 11px;
-        color: #a8aeb8;
+        color: var(--text-muted);
         line-height: 1.4;
         word-break: break-all;
       }
-      .update-download-line.error { color: #f08080; }
-      .update-download-line.success { color: #7fbf7f; }
+      .update-download-line.error { color: var(--danger-fg); }
+      .update-download-line.success { color: var(--success-fg); }
       .help-row {
-        color: #6c7280;
+        color: var(--text-muted);
         font-size: 12px;
         line-height: 1.4;
         margin: 2px 0 10px 0;
       }
       .help-row a {
-        color: #5f9bff;
+        color: var(--accent);
         text-decoration: none;
       }
       .help-row a:hover { text-decoration: underline; }
@@ -157,7 +157,7 @@
         margin-top: 8px;
       }
       button {
-        background: #2f66f0;
+        background: var(--accent);
         color: #fff;
         border: 0;
         border-radius: 4px;
@@ -165,13 +165,13 @@
         font-size: 13px;
         cursor: pointer;
       }
-      button.secondary { background: #2a2f3a; }
+      button.secondary { background: var(--surface-3); }
       button:disabled { opacity: 0.5; cursor: default; }
-      button#save:disabled { opacity: 0.55; cursor: default; background: #1f3a78; }
-      .status { margin-top: 8px; font-size: 12px; color: #7fbf7f; min-height: 16px; }
-      .status.error { color: #f08080; }
-      .todo { color: #a8aeb8; font-size: 11px; margin-top: 4px; }
-      .version-footer { margin-top: 16px; color: #6c7280; font-size: 11px; text-align: right; }
+      button#save:disabled { opacity: 0.55; cursor: default; background: var(--accent-press); }
+      .status { margin-top: 8px; font-size: 12px; color: var(--success-fg); min-height: 16px; }
+      .status.error { color: var(--danger-fg); }
+      .todo { color: var(--text-muted); font-size: 11px; margin-top: 4px; }
+      .version-footer { margin-top: 16px; color: var(--text-muted); font-size: 11px; text-align: right; }
       .modal-overlay {
         position: fixed;
         inset: 0;
@@ -186,8 +186,8 @@
         display: none !important;
       }
       .modal-card {
-        background: #1b1e24;
-        border: 1px solid #2a2f3a;
+        background: var(--surface);
+        border: 1px solid var(--border);
         border-radius: 8px;
         padding: 20px 24px;
         max-width: 420px;
@@ -209,13 +209,13 @@
         margin: 0;
         font-size: 15px;
         font-weight: 600;
-        color: #e6e6e6;
+        color: var(--text);
         flex: 0 0 auto;
       }
       .modal-card header button#shortcuts-close {
         margin: 0;
         background: transparent;
-        color: #a8aeb8;
+        color: var(--text-muted);
         border: 0;
         padding: 0 4px;
         font-size: 22px;
@@ -223,7 +223,7 @@
         cursor: pointer;
       }
       .modal-card header button#shortcuts-close:hover {
-        color: #e6e6e6;
+        color: var(--text);
         background: transparent;
       }
       .modal-card dl {
@@ -235,7 +235,7 @@
         align-items: center;
       }
       .modal-card dt {
-        color: #d8dbe2;
+        color: var(--text-2);
         font-size: 13px;
       }
       .modal-card dd {
@@ -248,40 +248,40 @@
       }
       .modal-card kbd {
         display: inline-block;
-        background: #0f1115;
-        border: 1px solid #2a2f3a;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
         border-radius: 4px;
         padding: 2px 6px;
         font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", "Courier New", monospace;
         font-size: 11px;
-        color: #e6e6e6;
+        color: var(--text);
         line-height: 1;
       }
       .modal-card p.hint {
         margin: 14px 0 0 0;
-        color: #6c7280;
+        color: var(--text-muted);
         font-size: 11px;
       }
       .hf-form label {
         display: block;
         margin: 10px 0 4px 0;
         font-size: 12px;
-        color: #cfd3da;
+        color: var(--text-2);
       }
       .hf-form input[type="text"],
       .hf-form input[type="password"] {
         width: 100%;
         box-sizing: border-box;
-        background: #0f1115;
-        color: #e6e6e6;
-        border: 1px solid #2a2f3a;
+        background: var(--surface-2);
+        color: var(--text);
+        border: 1px solid var(--border);
         border-radius: 4px;
         padding: 6px 8px;
         font-size: 13px;
       }
       .hf-form .hint {
         margin: 4px 0 0 0;
-        color: #6c7280;
+        color: var(--text-muted);
         font-size: 11px;
       }
       .hf-progress {
@@ -292,8 +292,8 @@
       }
       .hf-progress-bar {
         height: 6px;
-        background: #0f1115;
-        border: 1px solid #2a2f3a;
+        background: var(--bg);
+        border: 1px solid var(--border);
         border-radius: 3px;
         overflow: hidden;
         margin: 6px 0;
@@ -301,20 +301,20 @@
       .hf-progress-fill {
         height: 100%;
         width: 0%;
-        background: #2f66f0;
+        background: var(--accent);
         transition: width 120ms linear;
       }
       .hf-progress-line {
         font-size: 11px;
-        color: #a8aeb8;
+        color: var(--text-muted);
         line-height: 1.4;
         word-break: break-all;
       }
       .hf-progress-line.error {
-        color: #f08080;
+        color: var(--danger-fg);
       }
       .hf-progress-line.success {
-        color: #7fbf7f;
+        color: var(--success-fg);
       }
       .hf-actions {
         display: flex;
@@ -326,6 +326,12 @@
     <link rel="stylesheet" href="_kiln-tokens.css" />
   </head>
   <body>
+    <!-- Icon sprite — monochrome inline SVG (Lucide-style, 24px grid,
+         currentColor), shared with the server dashboard design system. -->
+    <svg width="0" height="0" style="position:absolute;width:0;height:0;overflow:hidden" aria-hidden="true" focusable="false"><defs>
+      <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+      <symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></symbol>
+    </defs></svg>
     <div class="wrap">
       <h1>Kiln Settings</h1>
 
@@ -442,17 +448,17 @@
       <div class="modal-card">
         <header>
           <h2 id="hf-download-title">Download from HuggingFace</h2>
-          <button id="hf-close" aria-label="Close">×</button>
+          <button id="hf-close" aria-label="Close"><svg class="icn"><use href="#i-close"></use></svg></button>
         </header>
         <div class="hf-form">
           <label for="hf_repo_id">Repo ID</label>
           <input type="text" id="hf_repo_id" placeholder="Qwen/Qwen3.5-4B" autocomplete="off" spellcheck="false" />
           <p class="hint">HuggingFace repo id, e.g. Qwen/Qwen3.5-4B. kiln requires a repo with safetensors weights.</p>
 
-          <label for="hf_revision">Revision <span style="color:#6c7280;font-weight:normal;">(optional)</span></label>
+          <label for="hf_revision">Revision <span style="color:var(--text-quiet);font-weight:normal;">(optional)</span></label>
           <input type="text" id="hf_revision" placeholder="main" autocomplete="off" spellcheck="false" />
 
-          <label for="hf_token">HuggingFace token <span style="color:#6c7280;font-weight:normal;">(optional, for gated repos)</span></label>
+          <label for="hf_token">HuggingFace token <span style="color:var(--text-quiet);font-weight:normal;">(optional, for gated repos)</span></label>
           <input type="password" id="hf_token" placeholder="hf_…" autocomplete="off" spellcheck="false" />
           <p class="hint">Not saved — used only for this download.</p>
         </div>
@@ -472,7 +478,7 @@
       <div class="modal-card">
         <header>
           <h2 id="shortcuts-title">Keyboard Shortcuts</h2>
-          <button id="shortcuts-close" aria-label="Close">×</button>
+          <button id="shortcuts-close" aria-label="Close"><svg class="icn"><use href="#i-close"></use></svg></button>
         </header>
         <dl>
           <dt>Show this help</dt>
@@ -797,7 +803,7 @@
       function resetHfModal() {
         hfProgressWrap.classList.add("hidden");
         hfProgressFill.style.width = "0%";
-        hfProgressFill.style.background = "#2f66f0";
+        hfProgressFill.style.background = "var(--accent)";
         hfProgressSummary.className = "hf-progress-line";
         hfProgressSummary.textContent = "Preparing…";
         hfProgressDetail.className = "hf-progress-line";
@@ -848,7 +854,7 @@
 
         hfProgressWrap.classList.remove("hidden");
         hfProgressFill.style.width = "0%";
-        hfProgressFill.style.background = "#2f66f0";
+        hfProgressFill.style.background = "var(--accent)";
         hfProgressSummary.className = "hf-progress-line";
         hfProgressSummary.textContent = "Listing repository files…";
         hfProgressDetail.textContent = "";
@@ -925,7 +931,7 @@
           hfProgressSummary.className = "hf-progress-line error";
           hfProgressSummary.textContent = "Download failed: " + err;
           hfProgressDetail.textContent = "";
-          hfProgressFill.style.background = "#3a2a2a";
+          hfProgressFill.style.background = "var(--danger-bg)";
           hfDownloading = false;
           hfStartBtn.disabled = false;
           hfStartBtn.textContent = "Retry";
@@ -1141,7 +1147,7 @@
           if (r.update_available) {
             setKilnUpdateStatus(
               "available",
-              "Current " + current + " → latest " + latest +
+              "Current " + current + ' <svg class="icn icn-sm" aria-hidden="true"><use href="#i-arrow-right"></use></svg> latest ' + latest +
                 ' <span class="badge">Update available</span>'
             );
             showKilnUpdateActions(r.latest);
@@ -1176,7 +1182,7 @@
           const latest = escapeHtml(p.latest);
           setKilnUpdateStatus(
             "available",
-            "Current " + current + " → latest " + latest +
+            "Current " + current + ' <svg class="icn icn-sm" aria-hidden="true"><use href="#i-arrow-right"></use></svg> latest ' + latest +
               ' <span class="badge">Update available</span>'
           );
           showKilnUpdateActions(p.latest);
@@ -1195,7 +1201,7 @@
         kilnUpdateInstallBtn.classList.add("hidden");
         kilnUpdateInstallBtn.disabled = true;
         kilnUpdateProgressWrap.classList.remove("hidden");
-        kilnUpdateProgressFill.style.background = "#2f66f0";
+        kilnUpdateProgressFill.style.background = "var(--accent)";
         kilnUpdateProgressFill.style.width = "0%";
         setKilnUpdateProgressLine("", "Starting download for v" + version + "…");
 
@@ -1257,7 +1263,7 @@
           if (!p || p.version !== version) return;
           const err = p.error || "Unknown error";
           const cancelled = !!p.cancelled;
-          kilnUpdateProgressFill.style.background = cancelled ? "#3a3a2a" : "#3a2a2a";
+          kilnUpdateProgressFill.style.background = cancelled ? "var(--warning-bg)" : "var(--danger-bg)";
           setKilnUpdateProgressLine(
             "error",
             (cancelled ? "Cancelled: " : "Download failed: ") + err
@@ -1295,7 +1301,7 @@
         kilnUpdateInstallBtn.classList.add("hidden");
         kilnUpdateInstallBtn.disabled = true;
         kilnUpdateProgressWrap.classList.remove("hidden");
-        kilnUpdateProgressFill.style.background = "#2f66f0";
+        kilnUpdateProgressFill.style.background = "var(--accent)";
         kilnUpdateProgressFill.style.width = "0%";
         setKilnUpdateProgressLine(
           "",
@@ -1356,7 +1362,7 @@
           if (!p || p.version !== version) return;
           const err = p.error || "Unknown error";
           const cancelled = !!p.cancelled;
-          kilnUpdateProgressFill.style.background = cancelled ? "#3a3a2a" : "#3a2a2a";
+          kilnUpdateProgressFill.style.background = cancelled ? "var(--warning-bg)" : "var(--danger-bg)";
           setKilnUpdateProgressLine(
             "error",
             (cancelled ? "Cancelled: " : "Extract failed: ") + err
@@ -1402,7 +1408,7 @@
         kilnUpdateInstallBtn.disabled = true;
         kilnUpdateInstallBtn.textContent = "Installing…";
         kilnUpdateProgressWrap.classList.remove("hidden");
-        kilnUpdateProgressFill.style.background = "#2f66f0";
+        kilnUpdateProgressFill.style.background = "var(--accent)";
         kilnUpdateProgressFill.style.width = "50%";
         setKilnUpdateProgressLine(
           "",
@@ -1436,7 +1442,7 @@
         const unFailed = await event.listen("install_staged_update_failed", (e) => {
           const p = (e && e.payload) || {};
           const err = p.error || "Unknown error";
-          kilnUpdateProgressFill.style.background = "#3a2a2a";
+          kilnUpdateProgressFill.style.background = "var(--danger-bg)";
           setKilnUpdateProgressLine(
             "error",
             "Install failed: " + err + " Previous binary restored."
@@ -1451,7 +1457,7 @@
         try {
           await invoke("install_staged_update");
         } catch (err) {
-          kilnUpdateProgressFill.style.background = "#3a2a2a";
+          kilnUpdateProgressFill.style.background = "var(--danger-bg)";
           setKilnUpdateProgressLine(
             "error",
             "Install failed: " + escapeHtml(String(err)) +

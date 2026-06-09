@@ -57,6 +57,11 @@ pub struct RequestRecord {
     pub prompt_full: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completion_full: Option<String>,
+    /// Raw `User-Agent` of the calling client, captured so the /ui dashboard
+    /// can attribute traffic to the agent that produced it (pi, opencode, the
+    /// OpenAI SDKs, curl, …). The dashboard maps it to a friendly label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
 }
 
 /// Cap on full prompt / completion body size kept in the ring (chars).
@@ -147,6 +152,7 @@ mod tests {
 
     fn make_record(id: &str) -> RequestRecord {
         RequestRecord {
+            user_agent: None,
             id: id.to_owned(),
             timestamp_unix_ms: 0,
             model: "kiln-test".to_owned(),

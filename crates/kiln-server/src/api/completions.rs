@@ -1,6 +1,6 @@
 use anyhow::Context;
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::{HeaderName, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -478,8 +478,20 @@ fn request_record_from_req(
         max_tokens: Some(chat_request_max_tokens(req).min(u32::MAX as usize) as u32),
         thinking_mode: Some(thinking_mode_for_request(req).to_string()),
         prefix_cache: Some("unknown".to_string()),
+        user_agent: req.user_agent.clone(),
         ..RequestRecord::default()
     }
+}
+
+/// Extract the calling client's `User-Agent` for per-agent attribution on the
+/// /ui dashboard. Bounded so a hostile header can't bloat the ring.
+fn extract_user_agent(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(200).collect())
 }
 
 const REASONING_OPEN_TAG: &str = "<think>\n";
@@ -1109,6 +1121,7 @@ fn record_failed_chat_completion(
     record_recent_request(
         state,
         RequestRecord {
+            user_agent: req.user_agent.clone(),
             prompt_tokens: prompt_tokens.min(u32::MAX as usize) as u32,
             completion_tokens: 0,
             duration_ms: request_start.elapsed().as_millis() as u64,
@@ -2204,6 +2217,7 @@ fn response_from_cached_completion(
     record_recent_request(
         state,
         RequestRecord {
+            user_agent: req.user_agent.clone(),
             completion_preview: truncate_chars(preview_source, COMPLETION_PREVIEW_MAX_CHARS),
             completion_full: Some(truncate_chars(preview_source, FULL_BODY_MAX_CHARS)),
             prompt_tokens: prompt_token_count as u32,
@@ -2306,6 +2320,7 @@ fn response_from_cached_chat_choices(
     record_recent_request(
         state,
         RequestRecord {
+            user_agent: req.user_agent.clone(),
             completion_preview: truncate_chars(preview_source, COMPLETION_PREVIEW_MAX_CHARS),
             completion_full: Some(truncate_chars(preview_source, FULL_BODY_MAX_CHARS)),
             prompt_tokens: cached.prompt_tokens as u32,
@@ -2389,6 +2404,7 @@ fn streaming_response_from_cached_completion(
     record_recent_request(
         state,
         RequestRecord {
+            user_agent: req.user_agent.clone(),
             completion_preview: truncate_chars(preview_source, COMPLETION_PREVIEW_MAX_CHARS),
             completion_full: Some(truncate_chars(preview_source, FULL_BODY_MAX_CHARS)),
             prompt_tokens: prompt_token_count as u32,
@@ -2876,6 +2892,10 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub model: Option<String>,
     pub messages: Vec<Message>,
+    /// Calling client's `User-Agent`, injected by the handler (never from the
+    /// JSON body) so the /ui dashboard can attribute traffic per agent.
+    #[serde(skip)]
+    pub user_agent: Option<String>,
     /// Number of completions to generate for this prompt. Defaults to 1.
     /// Non-streaming `n>1` reuses the same single-output fast paths below.
     #[serde(default)]
@@ -3340,10 +3360,15 @@ fn resolve_speculative_mode(
 
 async fn chat_completions(
     State(state): State<AppState>,
-    Json(req): Json<ChatCompletionRequest>,
+    headers: HeaderMap,
+    Json(mut req): Json<ChatCompletionRequest>,
 ) -> Result<Response, ApiError> {
     let start = std::time::Instant::now();
     let streaming = req.stream;
+    // Attribute this request to the calling agent (pi / opencode / SDK / curl)
+    // so the dashboard can show per-client traffic. Header-only, never trusted
+    // from the body.
+    req.user_agent = extract_user_agent(&headers);
     state.metrics.inc_active();
 
     let result = chat_completions_inner(&state, req).await;
@@ -4711,6 +4736,7 @@ async fn generate_real_batched(
     record_recent_request(
         state,
         RequestRecord {
+            user_agent: req.user_agent.clone(),
             completion_preview: truncate_chars(preview_source, COMPLETION_PREVIEW_MAX_CHARS),
             completion_full: Some(truncate_chars(preview_source, FULL_BODY_MAX_CHARS)),
             prompt_tokens: prompt_token_count as u32,
@@ -4804,6 +4830,7 @@ async fn generate_real_batched_streaming(
     let prompt_preview = truncate_chars(&prompt_text_full, PROMPT_PREVIEW_MAX_CHARS);
     let prompt_full = truncate_chars(&prompt_text_full, FULL_BODY_MAX_CHARS);
     let req_adapter = req.adapter.request_adapter_name();
+    let req_user_agent = req.user_agent.clone();
     let req_temperature = req.temperature;
     let req_top_p = req.top_p;
     let req_max_tokens = Some(chat_request_max_tokens(req).min(u32::MAX as usize) as u32);
@@ -4827,6 +4854,7 @@ async fn generate_real_batched_streaming(
             let mut decoded_prefix = String::new();
             let record = |finish_reason: String, completion: &str, completion_tokens: u32| {
                 let record = RequestRecord {
+                    user_agent: req_user_agent.clone(),
                     id: id.clone(),
                     timestamp_unix_ms: now_unix_ms(),
                     model: model.clone(),
@@ -5463,6 +5491,7 @@ async fn generate_real(
     record_recent_request(
         state,
         RequestRecord {
+            user_agent: req.user_agent.clone(),
             completion_preview: truncate_chars(preview_source, COMPLETION_PREVIEW_MAX_CHARS),
             completion_full: Some(truncate_chars(preview_source, FULL_BODY_MAX_CHARS)),
             prompt_tokens: prompt_token_count as u32,
@@ -5586,6 +5615,7 @@ async fn generate_real_streaming(
     let prompt_preview = truncate_chars(&prompt_text_full, PROMPT_PREVIEW_MAX_CHARS);
     let prompt_full = truncate_chars(&prompt_text_full, FULL_BODY_MAX_CHARS);
     let req_adapter = req.adapter.request_adapter_name();
+    let req_user_agent = req.user_agent.clone();
     let req_temperature = req.temperature;
     let req_top_p = req.top_p;
     let req_max_tokens = Some(chat_request_max_tokens(req).min(u32::MAX as usize) as u32);
@@ -5612,6 +5642,7 @@ async fn generate_real_streaming(
 
             let record = |finish_reason: String, completion: &str, completion_tokens: u32| {
                 let record = RequestRecord {
+                    user_agent: req_user_agent.clone(),
                     id: id.clone(),
                     timestamp_unix_ms: now_unix_ms(),
                     model: model.clone(),
@@ -6328,6 +6359,7 @@ async fn generate_mock(
     record_recent_request(
         state,
         RequestRecord {
+            user_agent: req.user_agent.clone(),
             completion_preview: truncate_chars(
                 assistant_output.preview_source(),
                 COMPLETION_PREVIEW_MAX_CHARS,
@@ -7605,6 +7637,7 @@ async fn batch_completions_inner(
                     let synth_req = ChatCompletionRequest {
                         model: model.clone(),
                         messages: messages.clone(),
+                        user_agent: None,
                         n: None,
                         temperature,
                         top_p,
@@ -7853,6 +7886,7 @@ async fn generate_multi_chat_response(
         let synth_req = ChatCompletionRequest {
             model: req.model.clone(),
             messages: req.messages.clone(),
+            user_agent: req.user_agent.clone(),
             n: None,
             temperature: req.temperature,
             top_p: req.top_p,
@@ -10053,6 +10087,7 @@ mod tests {
         let mut state = make_batch_test_state();
         state.slow_request_warn_threshold = Some(std::time::Duration::from_millis(50));
         let mut record = RequestRecord {
+            user_agent: None,
             id: "chatcmpl-test".to_string(),
             timestamp_unix_ms: 0,
             model: "kiln-test".to_string(),

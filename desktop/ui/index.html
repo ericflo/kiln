@@ -4,35 +4,44 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Kiln Desktop</title>
+    <link rel="stylesheet" href="_kiln-tokens.css" />
     <style>
       html, body {
-        margin: 0;
-        padding: 0;
-        height: 100%;
-        background: #0f1115;
-        color: #e6e6e6;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        margin: 0; padding: 0; height: 100%;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif);
       }
+      /* Centered, framed tray-landing card so the window reads as intentional,
+         not a stranded fragment in an empty canvas. */
       .wrap {
-        display: flex;
-        flex-direction: column;
-        align-items: flex-start;
-        justify-content: center;
-        height: 100%;
-        padding: 32px;
-        box-sizing: border-box;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 14px; height: 100%; padding: 32px; box-sizing: border-box; text-align: center;
       }
-      h1 { font-size: 22px; margin: 0 0 8px 0; font-weight: 600; }
-      p  { margin: 8px 0; color: #a8aeb8; font-size: 14px; max-width: 560px; }
-      p.hint { color: #6b7280; font-size: 12px; }
+      .mark {
+        width: 56px; height: 56px; border-radius: 13px;
+        background: linear-gradient(180deg, #fbbf24 0%, #f97316 52%, #c2410c 100%);
+        display: flex; align-items: center; justify-content: center;
+        box-shadow: 0 6px 24px rgba(249, 115, 22, 0.22);
+      }
+      .mark svg { width: 32px; height: 32px; }
+      h1 { font-size: 20px; margin: 4px 0 0; font-weight: 700; letter-spacing: -0.01em; }
+      p  { margin: 0; color: var(--text-2); font-size: 14px; line-height: 1.5; max-width: 460px; }
+      p.hint { color: var(--text-muted); font-size: 12px; }
+      .tray-dot { color: var(--accent); }
     </style>
-    <link rel="stylesheet" href="_kiln-tokens.css" />
   </head>
   <body>
     <div class="wrap">
-      <h1>Kiln Desktop</h1>
-      <p>Running in the system tray. Click the Kiln icon in your menu bar or system tray to open the dashboard, change settings, view logs, or quit.</p>
-      <p class="hint">If you do not see the tray icon, check that the app is running and that your OS is showing tray icons.</p>
+      <div class="mark" aria-hidden="true">
+        <!-- stacked-layers brand mark (echoes the logo), cut from the ember cube -->
+        <svg viewBox="0 0 32 32" fill="none" stroke="#0a0908" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" opacity="0.9">
+          <path d="M8 12.5l8 4 8-4" /><path d="M10 17.5l6 3 6-3" /><path d="M12 22.5l4 2 4-2" />
+        </svg>
+      </div>
+      <h1>Kiln is running</h1>
+      <p>Kiln lives in your <span class="tray-dot">system tray</span>. Click the tray icon to open the dashboard, watch logs, change settings, or quit.</p>
+      <p class="hint">No tray icon? Confirm the app is running and that your OS is showing tray icons.</p>
     </div>
   </body>
 </html>

@@ -537,6 +537,7 @@ mod tests {
         {
             let mut recent = state.recent_requests.lock().unwrap();
             recent.record(crate::recent_requests::RequestRecord {
+                user_agent: None,
                 id: "secret-id".to_string(),
                 prompt_preview: "secret prompt".to_string(),
                 prompt_full: Some("full secret prompt".to_string()),

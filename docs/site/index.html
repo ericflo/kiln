@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Kiln — your model gets better every time you use it</title>
   <meta name="description" content="A pure-Rust single-GPU inference server with live LoRA training. OpenAI-compatible API, hot-swap adapters, and SFT + GRPO over HTTP. Tuned for Qwen3.5-4B on a single A6000.">
-  <meta name="theme-color" content="#0d0e12">
+  <meta name="theme-color" content="#0a0908">
   <meta name="color-scheme" content="dark">
   <link rel="canonical" href="https://ericflo.github.io/kiln/">
 
@@ -50,12 +50,29 @@
 <body>
   <a class="skip-link" href="#content">Skip to content</a>
 
+  <!-- Inline icon sprite — mirrors the server dashboard #i-* symbols
+       (24px viewBox, 1.7px stroke). Referenced through SVG use of the symbol ids. -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+    <symbol id="i-stack" viewBox="0 0 24 24"><path d="M4 8.5l8 4 8-4"/><path d="M6 12.6l6 3 6-3"/><path d="M8 16.7l4 2 4-2"/></symbol>
+    <symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 4.5 13.5H11l-1 8.5L19.5 10H13l0-8Z"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="M9.5 14.5 14.5 9.5"/><path d="M11 6.5 12.2 5.3a4 4 0 0 1 5.7 5.7l-1.2 1.2"/><path d="M13 17.5l-1.2 1.2a4 4 0 0 1-5.7-5.7l1.2-1.2"/></symbol>
+    <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l3 8 4-16 3 8h4"/></symbol>
+    <symbol id="i-flask" viewBox="0 0 24 24"><path d="M9 3h6"/><path d="M10 3v6.5L5.2 18A1.6 1.6 0 0 0 6.6 21h10.8a1.6 1.6 0 0 0 1.4-3L14 9.5V3"/><path d="M7.6 14.5h8.8"/></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 20V4"/><path d="M4 20h16"/><path d="M8 20v-6"/><path d="M13 20V9"/><path d="M18 20v-4"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3"/><path d="M13 15h4"/></symbol>
+    <symbol id="i-merge" viewBox="0 0 24 24"><path d="M7 21V8"/><path d="M17 21v-6a4 4 0 0 0-4-4H7"/><path d="m4 11 3-3 3 3"/><path d="M14 18l3 3 3-3"/></symbol>
+  </defs></svg>
+
   <header class="topbar">
     <div class="topbar-inner">
       <a href="./" class="brand" aria-current="page" aria-label="Kiln home">
-        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-mark" aria-hidden="true"><svg class="brand-flame" viewBox="0 0 24 24"><use href="#i-stack"></use></svg></span>
         <span>kiln</span>
-        <span class="brand-version">v0.2.16</span>
+        <a class="brand-version" href="https://github.com/ericflo/kiln/releases/latest" rel="noopener">preview</a>
       </a>
       <nav class="nav site-nav" aria-label="Primary">
         <a href="quickstart.html">Quickstart</a>
@@ -81,6 +98,9 @@
         <div class="hero-copy">
           <span class="pill"><span class="pill-dot pill-dot--accent" aria-hidden="true"></span><a href="https://github.com/ericflo/kiln/releases/latest" style="color:inherit;text-decoration:none">latest release</a> · pre-1.0 preview</span>
           <h1 class="hero-title">Your model gets better<br><span class="txt-accent">every time you use it.</span></h1>
+          <p class="hero-subline">
+            Point <strong>pi</strong> or <strong>opencode</strong> at one local endpoint — every request becomes training data.
+          </p>
           <p class="hero-lede">
             Kiln is a pure-Rust, single-GPU inference server with live LoRA training <em>and</em> evals built in.
             Drop-in OpenAI API. Hot-swap adapters. <strong>SFT, GRPO, and a local eval loop over HTTP</strong> —
@@ -100,23 +120,155 @@
           </div>
         </div>
 
-        <aside class="hero-terminal" aria-label="The kiln loop">
+        <aside class="hero-terminal" aria-label="Connect your agent to Kiln">
           <div class="hero-terminal-bar">
             <span class="dot dot--r"></span><span class="dot dot--y"></span><span class="dot dot--g"></span>
-            <span class="hero-terminal-title">the kiln loop</span>
+            <span class="hero-terminal-title">connect your agent</span>
           </div>
-          <div class="hero-terminal-body"><span class="t-c"># 1. serve any OpenAI-compatible client</span>
-<span class="t-p">$</span> <span class="t-cmd">kiln serve</span> --model Qwen/Qwen3.5-4B
-<span class="t-d">  ▸ listening on :8420  • paged KV  • W4A16 marlin</span>
+          <div class="hero-terminal-body"><span class="t-c"># 1. serve Qwen3.5-4B on one local endpoint</span>
+<span class="t-p">$</span> <span class="t-cmd">kiln serve</span>
+<span class="t-d">  ▸ listening on <span class="t-a">http://localhost:8420/v1</span>  • api key: not required</span>
 
-<span class="t-c"># 2. generate, score, send rewards back</span>
-<span class="t-p">&gt;&gt;&gt;</span> <span class="t-cmd">curl /v1/train/grpo -d @rollouts.json</span>
-<span class="t-d">  ▸ adapter <span class="t-a">helpful-v3</span> hot-swapped <span class="t-ok">200 OK</span> in <span class="t-ok">1.4s</span></span>
+<span class="t-c"># 2. point your coding agent at it (pi or opencode)</span>
+<span class="t-p">$</span> <span class="t-cmd">kiln pi-setup</span>          <span class="t-d"># pi: Qwen3.5-4B is now the default</span>
+<span class="t-p">$</span> <span class="t-cmd">opencode</span>               <span class="t-d"># opencode: pick "Kiln · Qwen3.5-4B"</span>
 
-<span class="t-c"># 3. next request uses the new policy. no restart.</span>
-<span class="t-p">&gt;&gt;&gt;</span> <span class="t-cmd">openai chat.completions.create(...)</span>
-<span class="t-d">  ▸ <span class="kiln-pulse">●</span> serving with <span class="t-a">helpful-v3</span></span></div>
+<span class="t-c"># 3. every agent tool call streams into /ui as training data</span>
+<span class="t-p">&gt;</span> <span class="t-cmd">pi -p "run the tests and fix what fails"</span>
+<span class="t-d">  ▸ <span class="kiln-pulse">●</span> tool_call <span class="t-a">bash</span> · captured · serving with <span class="t-a">helpful-v3</span></span></div>
         </aside>
+      </div>
+    </section>
+
+    <!-- ===============================================================
+         Connect your agent — the #1 journey, directly under the hero.
+         Mirrors the server dashboard connect-panel: copyable Base URL +
+         Model id, "API key: not required", and the 5-tab snippet block
+         (pi | opencode | OpenAI Python | OpenAI JS | curl).
+         =============================================================== -->
+    <section class="section section--tight" id="connect" aria-label="Connect your agent">
+      <div class="page">
+        <section class="connect-band">
+          <div class="connect-head">
+            <span class="eyebrow eyebrow--accent">Connect your agent</span>
+            <h2>Point pi, opencode, or any OpenAI client at Kiln.</h2>
+            <p class="connect-note">No API key. No SDK swap. Change the base URL, keep your agent — every call it makes is captured as training data in <code>/ui</code>.</p>
+          </div>
+          <div class="connect-grid">
+            <div class="connect-facts">
+              <div class="connect-field">
+                <label for="connect-base-url">Base URL</label>
+                <div class="copy-field">
+                  <code id="connect-base-url">http://localhost:8420/v1</code>
+                  <button class="copy-btn" type="button" data-target="connect-base-url" aria-label="Copy base URL"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg>Copy</button>
+                </div>
+              </div>
+              <div class="connect-field">
+                <label for="connect-model">Model id <span style="text-transform:none;letter-spacing:0;font-weight:400;">(the <code style="font-size:10px;">model</code> field)</span></label>
+                <div class="copy-field">
+                  <code id="connect-model">Qwen3.5-4B</code>
+                  <button class="copy-btn" type="button" data-target="connect-model" aria-label="Copy model id"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg>Copy</button>
+                </div>
+              </div>
+              <div class="connect-field">
+                <label>API key</label>
+                <span class="connect-keychip">
+                  <svg class="icn icn-sm" aria-hidden="true"><use href="#i-check"></use></svg>
+                  Not required — any value works (we use <code>unused</code>)
+                </span>
+              </div>
+            </div>
+
+            <div class="connect-clients">
+              <span class="connect-clients-label">Set up your client</span>
+              <div class="tabs">
+                <div class="tabs-bar" role="tablist" aria-label="Client setup">
+                  <button class="tab-btn" role="tab" aria-selected="true" aria-controls="cx-pi" id="cxt-pi" tabindex="0">pi</button>
+                  <button class="tab-btn" role="tab" aria-selected="false" aria-controls="cx-opencode" id="cxt-opencode" tabindex="-1">opencode</button>
+                  <button class="tab-btn" role="tab" aria-selected="false" aria-controls="cx-python" id="cxt-python" tabindex="-1">OpenAI Python</button>
+                  <button class="tab-btn" role="tab" aria-selected="false" aria-controls="cx-js" id="cxt-js" tabindex="-1">OpenAI JS</button>
+                  <button class="tab-btn" role="tab" aria-selected="false" aria-controls="cx-curl" id="cxt-curl" tabindex="-1">curl</button>
+                </div>
+
+                <div class="tab-panel connect-snippet" role="tabpanel" id="cx-pi" aria-labelledby="cxt-pi" aria-hidden="false">
+                  <p class="connect-snippet-note">One command — backs up &amp; merges <code>~/.pi/agent/{models,settings}.json</code>, then makes Kiln pi&rsquo;s default model.</p>
+                  <div class="code-shell">
+                    <button class="copy-btn" type="button" data-target="cx-pi-code" aria-label="Copy code">copy</button>
+<pre id="cx-pi-code"><code># Point pi at this Kiln server
+kiln pi-setup
+
+# Remote server? pass its URL — /v1 is appended for you
+kiln pi-setup --kiln-url http://localhost:8420</code></pre>
+                  </div>
+                </div>
+
+                <div class="tab-panel connect-snippet" role="tabpanel" id="cx-opencode" aria-labelledby="cxt-opencode" aria-hidden="true" hidden>
+                  <p class="connect-snippet-note">Add this provider, then run <code>opencode</code> and pick the model with <code>/models</code>. No API key needed.</p>
+                  <div class="code-shell">
+                    <div class="code-block-path">~/.config/opencode/opencode.json</div>
+                    <button class="copy-btn" type="button" data-target="cx-opencode-code" aria-label="Copy code">copy</button>
+<pre id="cx-opencode-code"><code>{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "kiln": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Kiln (local)",
+      "options": { "baseURL": "http://localhost:8420/v1", "apiKey": "unused" },
+      "models": { "Qwen3.5-4B": { "name": "Kiln · Qwen3.5-4B" } }
+    }
+  }
+}</code></pre>
+                  </div>
+                </div>
+
+                <div class="tab-panel connect-snippet" role="tabpanel" id="cx-python" aria-labelledby="cxt-python" aria-hidden="true" hidden>
+                  <p class="connect-snippet-note">Drop-in OpenAI SDK — only <code>base_url</code> changes.</p>
+                  <div class="code-shell">
+                    <button class="copy-btn" type="button" data-target="cx-python-code" aria-label="Copy code">copy</button>
+<pre id="cx-python-code"><code>from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8420/v1", api_key="unused")
+
+resp = client.chat.completions.create(
+    model="Qwen3.5-4B",
+    messages=[{"role": "user", "content": "Hello from my agent"}],
+)
+print(resp.choices[0].message.content)</code></pre>
+                  </div>
+                </div>
+
+                <div class="tab-panel connect-snippet" role="tabpanel" id="cx-js" aria-labelledby="cxt-js" aria-hidden="true" hidden>
+                  <p class="connect-snippet-note">Drop-in OpenAI SDK for Node / Bun / Deno.</p>
+                  <div class="code-shell">
+                    <button class="copy-btn" type="button" data-target="cx-js-code" aria-label="Copy code">copy</button>
+<pre id="cx-js-code"><code>import OpenAI from "openai";
+
+const client = new OpenAI({ baseURL: "http://localhost:8420/v1", apiKey: "unused" });
+
+const resp = await client.chat.completions.create({
+  model: "Qwen3.5-4B",
+  messages: [{ role: "user", content: "Hello from my agent" }],
+});
+console.log(resp.choices[0].message.content);</code></pre>
+                  </div>
+                </div>
+
+                <div class="tab-panel connect-snippet" role="tabpanel" id="cx-curl" aria-labelledby="cxt-curl" aria-hidden="true" hidden>
+                  <p class="connect-snippet-note">Raw HTTP — drop into any shell, CI job, or script.</p>
+                  <div class="code-shell">
+                    <button class="copy-btn" type="button" data-target="cx-curl-code" aria-label="Copy code">copy</button>
+<pre id="cx-curl-code"><code>curl -s http://localhost:8420/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen3.5-4B",
+    "messages": [{"role": "user", "content": "Hello from my agent"}]
+  }'</code></pre>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
       </div>
     </section>
 
@@ -325,8 +477,8 @@ requests.post("http://localhost:8420/v1/train/grpo", json={
             <p>Sarathi-style chunked prefill. Decode requests merge into a running batch without head-of-line blocking.</p>
           </div>
           <div class="feature feature--compact">
-            <h3>pi agent backend</h3>
-            <p><code>kiln pi-setup</code> backs up and merges pi config, then serves Qwen3.5-4B as <code>Qwen3.5-4B</code> with OpenAI-shaped tool calls.</p>
+            <h3>pi &amp; opencode backend</h3>
+            <p><code>kiln pi-setup</code> wires up pi; one provider block wires up opencode. Both serve <code>Qwen3.5-4B</code> with OpenAI-shaped tool calls. <a href="#connect">Connect ↑</a></p>
           </div>
           <div class="feature feature--compact">
             <h3>Paged KV cache</h3>
@@ -480,23 +632,24 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve</code></pre>
           <tbody>
             <tr>
               <th scope="row">macOS (Apple Silicon)</th>
-              <td><a href="https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.16">desktop-v0.2.16 · macOS</a></td>
+              <td><a href="https://github.com/ericflo/kiln/releases/latest">Kiln Desktop · macOS</a></td>
             </tr>
             <tr>
               <th scope="row">Windows</th>
-              <td><a href="https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.16">desktop-v0.2.16 · Windows</a></td>
+              <td><a href="https://github.com/ericflo/kiln/releases/latest">Kiln Desktop · Windows</a></td>
             </tr>
             <tr>
               <th scope="row">Linux</th>
-              <td><a href="https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.16">desktop-v0.2.16 · Linux</a></td>
+              <td><a href="https://github.com/ericflo/kiln/releases/latest">Kiln Desktop · Linux</a></td>
             </tr>
           </tbody>
         </table>
         <p class="install-foot">
-          Using pi as your terminal agent? Start Kiln, then run <code>kiln pi-setup</code>.
-          It backs up and merges pi's provider config, sets <code>Qwen3.5-4B</code>
-          as the default model, and keeps OpenAI tool calls structured for pi.
-          <a href="cli.html#pi-setup">CLI details →</a>
+          Using pi or opencode as your coding agent? Start Kiln, then run <code>kiln pi-setup</code>
+          (pi) or add a provider in <code>opencode.json</code>.
+          Both point at <code>http://localhost:8420/v1</code>, model <code>Qwen3.5-4B</code>,
+          and stream every tool call into <code>/ui</code> as training data.
+          <a href="#connect">Connect your agent ↑</a> · <a href="cli.html#pi-setup">CLI details →</a>
         </p>
       </div>
     </section>
@@ -584,7 +737,7 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve</code></pre>
     <div class="page footer-inner">
       <div class="footer-brand">
         <a href="./" class="brand">
-          <span class="brand-mark" aria-hidden="true"></span>
+          <span class="brand-mark" aria-hidden="true"><svg class="brand-flame" viewBox="0 0 24 24"><use href="#i-stack"></use></svg></span>
           <span>kiln</span>
         </a>
         <p class="footer-blurb">Pure-Rust single-GPU inference + live LoRA training. MIT licensed.</p>
@@ -621,7 +774,7 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve</code></pre>
     </div>
     <div class="page footer-meta">
       <span>© 2026 Eric Florenzano</span>
-      <span>Built with kiln · <code>v0.2.16</code></span>
+      <span>Built with kiln · <a href="https://github.com/ericflo/kiln/releases/latest">latest release</a></span>
     </div>
   </footer>
 

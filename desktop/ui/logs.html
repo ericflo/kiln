@@ -10,8 +10,8 @@
         padding: 0;
         height: 100%;
         width: 100%;
-        background: #0f1115;
-        color: #e6e6e6;
+        background: var(--bg);
+        color: var(--text);
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
         overflow: hidden;
       }
@@ -24,8 +24,8 @@
         align-items: center;
         gap: 12px;
         padding: 10px 14px;
-        background: #161922;
-        border-bottom: 1px solid #232733;
+        background: var(--surface);
+        border-bottom: 1px solid var(--border);
         flex: 0 0 auto;
       }
       header h1 {
@@ -33,11 +33,11 @@
         font-weight: 600;
         margin: 0;
         flex: 1 1 auto;
-        color: #cfd3dc;
+        color: var(--text-2);
       }
       header label {
         font-size: 12px;
-        color: #a8aeb8;
+        color: var(--text-muted);
         display: flex;
         align-items: center;
         gap: 6px;
@@ -45,13 +45,13 @@
         user-select: none;
       }
       header input[type="checkbox"] {
-        accent-color: #2a6df4;
+        accent-color: var(--accent);
         margin: 0;
       }
       header input[type="search"] {
-        background: #0f1115;
-        color: #e6e6e6;
-        border: 1px solid #232733;
+        background: var(--surface-2);
+        color: var(--text);
+        border: 1px solid var(--border);
         border-radius: 6px;
         padding: 4px 8px;
         width: 180px;
@@ -59,34 +59,40 @@
         outline: none;
       }
       header input[type="search"]:focus {
-        border-color: #2a6df4;
+        border-color: var(--accent-ring);
       }
       #filter-count {
         font-size: 12px;
-        color: #a8aeb8;
+        color: var(--text-muted);
         font-variant-numeric: tabular-nums;
       }
       #filter-count.hidden {
         display: none;
       }
+      /* Toolbar buttons are utilities, not a primary action — neutral by
+         default (amber stays reserved for active/primary), amber only on focus. */
       button {
-        background: #2a6df4;
-        color: #fff;
-        border: 0;
+        background: var(--surface-2);
+        color: var(--text);
+        border: 1px solid var(--border);
         border-radius: 6px;
         padding: 6px 12px;
         font-size: 12px;
         cursor: pointer;
       }
-      button:hover { background: #3b7af5; }
-      button#copy.flash, button#save.flash { background: #245a32; }
-      button#copy.flash-warn, button#save.flash-warn { background: #5a3324; }
+      button:hover { background: var(--surface-3); border-color: var(--border-strong); }
+      button:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: 1px; }
+      /* Clear view discards the buffer — set it apart from Copy/Save with a
+         danger-tinted hover so it doesn't read as just another utility. */
+      button#clear:hover { border-color: var(--danger-bd); color: var(--danger-fg); }
+      button#copy.flash, button#save.flash { background: var(--success-bg); border-color: var(--success-bd); color: var(--success-fg); }
+      button#copy.flash-warn, button#save.flash-warn { background: var(--danger-bg); border-color: var(--danger-bd); color: var(--danger-fg); }
       #log {
         flex: 1 1 auto;
         margin: 0;
         padding: 12px 14px;
-        background: #0f1115;
-        color: #d6dae3;
+        background: var(--bg);
+        color: var(--text-2);
         font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
         font-size: 12px;
         line-height: 1.45;
@@ -96,14 +102,14 @@
         overflow-x: hidden;
       }
       #log.empty {
-        color: #6c7280;
+        color: var(--text-muted);
         font-style: italic;
       }
       #log .line {
         white-space: pre-wrap;
       }
       #log .line-stderr {
-        color: #f0a04a;
+        color: var(--warning-fg);
       }
       #log .line-stdout {
         color: inherit;
@@ -122,8 +128,8 @@
         display: none !important;
       }
       .modal-card {
-        background: #1b1e24;
-        border: 1px solid #2a2f3a;
+        background: var(--surface);
+        border: 1px solid var(--border);
         border-radius: 8px;
         padding: 20px 24px;
         max-width: 420px;
@@ -145,13 +151,13 @@
         margin: 0;
         font-size: 15px;
         font-weight: 600;
-        color: #e6e6e6;
+        color: var(--text);
         flex: 0 0 auto;
       }
       .modal-card header button#shortcuts-close {
         margin: 0;
         background: transparent;
-        color: #a8aeb8;
+        color: var(--text-muted);
         border: 0;
         padding: 0 4px;
         font-size: 22px;
@@ -159,7 +165,7 @@
         cursor: pointer;
       }
       .modal-card header button#shortcuts-close:hover {
-        color: #e6e6e6;
+        color: var(--text);
         background: transparent;
       }
       .modal-card dl {
@@ -171,7 +177,7 @@
         align-items: center;
       }
       .modal-card dt {
-        color: #d8dbe2;
+        color: var(--text-2);
         font-size: 13px;
       }
       .modal-card dd {
@@ -184,24 +190,29 @@
       }
       .modal-card kbd {
         display: inline-block;
-        background: #0f1115;
-        border: 1px solid #2a2f3a;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
         border-radius: 4px;
         padding: 2px 6px;
         font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", "Courier New", monospace;
         font-size: 11px;
-        color: #e6e6e6;
+        color: var(--text);
         line-height: 1;
       }
       .modal-card p.hint {
         margin: 14px 0 0 0;
-        color: #6c7280;
+        color: var(--text-quiet);
         font-size: 11px;
       }
     </style>
     <link rel="stylesheet" href="_kiln-tokens.css" />
   </head>
   <body>
+    <!-- Icon sprite — monochrome inline SVG (Lucide-style, 24px grid,
+         currentColor), shared with the server dashboard design system. -->
+    <svg width="0" height="0" style="position:absolute;width:0;height:0;overflow:hidden" aria-hidden="true" focusable="false"><defs>
+      <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+    </defs></svg>
     <header>
       <h1>Kiln server logs</h1>
       <label><input type="checkbox" id="autoscroll" checked /> Auto-scroll</label>
@@ -218,7 +229,7 @@
       <div class="modal-card">
         <header>
           <h2 id="shortcuts-title">Keyboard Shortcuts</h2>
-          <button id="shortcuts-close" aria-label="Close">×</button>
+          <button id="shortcuts-close" aria-label="Close"><svg class="icn"><use href="#i-close"></use></svg></button>
         </header>
         <dl>
           <dt>Show this help</dt>
