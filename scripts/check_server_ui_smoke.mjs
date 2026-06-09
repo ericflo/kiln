@@ -487,6 +487,17 @@ async function startServer({ failDashboardApis = false, availableAdapters = defa
       json(res, { window_secs: 60, sample_count: 0, tok_per_sec: 0, p50_itl_ms: 0, p99_itl_ms: 0, mean_itl_ms: 0 });
       return;
     }
+    if (url.pathname === '/v1/terminal/status') {
+      json(res, {
+        enabled: false,
+        disabled_reason: 'not available in the smoke fixture',
+        pi_available: false,
+        pi_path: null,
+        cwd: '/tmp',
+        session_active: false,
+      });
+      return;
+    }
     if (url.pathname === '/v1/stats/recent-requests') {
       json(res, []);
       return;
@@ -923,6 +934,10 @@ async function runMobileOnboardingSmoke(baseUrl) {
     await expectNoForbiddenPublicityCopy(page, 'Mobile server dashboard');
     await expectMobilePanelFlow(page);
     await goToPrimaryTab(page, 'training');
+    // The desktop pass earlier submitted jobs on this same server, so the
+    // empty-queue→SFT landing (asserted there) doesn't apply here. Make the
+    // starting sub-tab explicit before the keyboard checks.
+    await clickAndWait(page, '#training-tab-queue', 'Could not activate Queue tab before keyboard checks');
     await expectTrainingTabKeyboardNavigation(page);
     await clickAndWait(page, '#training-tab-queue', 'Could not activate mobile Queue tab');
     await waitForVisiblePanel(page, '#tab-queue', 'Mobile Queue tab did not activate');
@@ -994,12 +1009,14 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await waitForPanelText(page, '#adapters-panel', /adapter-alpha/, 'Adapter list should show the first smoke adapter');
     await waitForPanelText(page, '#adapters-panel', /adapter-beta/, 'Adapter list should show the second smoke adapter');
 
-    await clickAdapterAction(page, 'adapter-alpha', 'Load');
-    await expectTrainingToast(page, 'Loaded adapter: adapter-alpha');
-    await expectAdapterAction(page, 'adapter-alpha', 'Unload', 'Loaded adapter should refresh as active with an Unload button');
-    await clickAdapterAction(page, 'adapter-alpha', 'Unload');
-    await expectTrainingToast(page, 'Unloaded adapter');
-    await expectAdapterAction(page, 'adapter-alpha', 'Load', 'Unloaded adapter should refresh with a Load button');
+    // Swap interaction: non-active cards offer "Make active" (hot-swap), the
+    // active card offers "Unload (use base)" — plain-language state labels.
+    await clickAdapterAction(page, 'adapter-alpha', 'Make active');
+    await expectTrainingToast(page, "adapter-alpha is now serving — pi's next request uses it");
+    await expectAdapterAction(page, 'adapter-alpha', 'Unload (use base)', 'Loaded adapter should refresh as active with an Unload button');
+    await clickAdapterAction(page, 'adapter-alpha', 'Unload (use base)');
+    await expectTrainingToast(page, 'Adapter unloaded — requests now use the base model');
+    await expectAdapterAction(page, 'adapter-alpha', 'Make active', 'Unloaded adapter should refresh with a Make active button');
 
     const downloadResponsePromise = page.waitForResponse(
       (response) => response.url().endsWith('/v1/adapters/adapter-beta/download') && response.status() === 200,
@@ -1088,6 +1105,9 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await expectPanelLink(page, '#chat-output .empty', 'Troubleshooting guide', 'https://ericflo.github.io/kiln/troubleshooting.html');
 
     await goToPrimaryTab(page, 'training');
+    // Empty queue lands on the Train·SFT form by design (see mobile flow note).
+    await waitForVisiblePanel(page, '#tab-sft', 'Empty training queue should land on the Train·SFT form');
+    await clickAndWait(page, '#training-tab-queue', 'Could not activate Queue tab before keyboard checks');
     await expectTrainingTabKeyboardNavigation(page);
 
     await clickAndWait(page, '#training-tab-sft', 'Could not open SFT tab');

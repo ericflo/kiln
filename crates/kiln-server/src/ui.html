@@ -945,6 +945,10 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
 .recent-correct:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: 1px; }
 .recent-correct .icn { width: 12px; height: 12px; }
 .recent-correct.is-added { background: var(--success-bg); border-color: var(--success-bd); color: var(--success-fg); }
+/* Non-flagged rows get the same one-click capture, just quieter — any answer
+   can be worth correcting, not only the ones we auto-flagged. */
+.recent-correct.quiet { border-color: var(--border); color: var(--text-quiet); }
+.recent-correct.quiet:hover { border-color: var(--warning-fg); color: var(--warning-fg); background: transparent; }
 .recent-time {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
@@ -1740,7 +1744,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
    ===================================================================== */
 .toast-container {
   position: fixed;
-  bottom: var(--space-5);
+  /* Top-right, below the topbar — submit/primary buttons live bottom-right, and
+     a toast must NEVER cover the very button its message tells you to click. */
+  top: 72px;
   right: var(--space-5);
   display: flex;
   flex-direction: column;
@@ -3142,6 +3148,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
     font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-2); }
   .corr-remove { flex-shrink: 0; padding: 2px; line-height: 0; color: var(--text-quiet); }
   .corr-remove:hover { color: var(--danger-fg); }
+  .corr-trunc { flex-shrink: 0; display: inline-flex; align-items: center; gap: 4px;
+    font-size: var(--text-2xs); color: var(--warning-fg); text-transform: uppercase; letter-spacing: var(--tracking-caps); font-weight: 600; }
+  .corr-trunc .icn { width: 11px; height: 11px; }
   /* Per-correction status: "needs your answer" (muted) vs "ready to train"
      (success green once the ideal differs from pi's answer). The card's left
      edge echoes the state so a basket scans at a glance. */
@@ -3190,6 +3199,128 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
   .corr-receipt-dismiss:hover { color: var(--text); }
   .input-invalid { border-color: var(--danger-fg) !important; box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.18) !important; }
   #request-drill-correct.is-added { background: var(--success-bg); border-color: var(--success-bd); color: var(--success-fg); }
+
+  /* Direct "drop a file and train" data input (SFT + GRPO). The dropzone is the
+     primary path; paste/pick/sample are secondary text links below it. */
+  .train-data .dropzone {
+    display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center;
+    padding: var(--space-5) var(--space-4); border: 1.5px dashed var(--border-strong);
+    border-radius: var(--radius-md); background: var(--surface-2); cursor: pointer;
+    transition: border-color var(--t-fast) var(--ease-out), background var(--t-fast) var(--ease-out); }
+  .train-data .dropzone:hover, .train-data .dropzone:focus-visible { border-color: var(--accent); background: var(--accent-soft); outline: none; }
+  .train-data .dropzone.is-drag { border-color: var(--accent); background: var(--accent-soft); border-style: solid; }
+  .dropzone-icn { width: 22px; height: 22px; color: var(--text-muted); }
+  .train-data .dropzone:hover .dropzone-icn, .train-data .dropzone.is-drag .dropzone-icn { color: var(--accent-hover); }
+  .dropzone-main { font-size: var(--text-sm); color: var(--text); }
+  .dropzone-main code { font-size: 0.9em; }
+  .dropzone-browse { color: var(--accent-hover); text-decoration: underline; text-underline-offset: 2px; }
+  .dropzone-sub { font-size: var(--text-xs); color: var(--text-muted); max-width: 52ch; line-height: 1.45; }
+  .train-data-status { margin-top: var(--space-2); display: flex; align-items: center; gap: 7px;
+    font-size: var(--text-sm); padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); border: 1px solid var(--border); }
+  .train-data-status.is-good { color: var(--text); background: var(--success-bg); border-color: var(--success-bd); }
+  .train-data-status.is-good .icn { color: var(--success-fg); }
+  .train-data-status.is-good strong { color: var(--success-fg); }
+  .train-data-status.is-bad { color: var(--text-2); background: var(--warning-bg); border-color: var(--warning-bd); }
+  .train-data-status.is-bad .icn { color: var(--warning-fg); }
+  .train-data-status .icn { width: 14px; height: 14px; flex-shrink: 0; }
+  .train-data-skip { color: var(--warning-fg); }
+  .train-data-src { color: var(--text-muted); font-size: var(--text-xs); }
+  .train-data-alt { margin-top: var(--space-2); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: var(--text-xs); }
+  .train-data-alt .alt-sep { color: var(--border-strong); }
+  .btn-link { background: none; border: 0; padding: 0; cursor: pointer; color: var(--text-muted);
+    font-size: var(--text-xs); font-family: inherit; text-decoration: underline; text-underline-offset: 2px; }
+  .btn-link:hover { color: var(--accent-hover); }
+  .train-data-pick { display: flex; gap: 8px; align-items: center; margin-top: var(--space-2); }
+  .train-data-pick select { flex: 1; }
+  .train-data-pick-empty { font-size: var(--text-xs); color: var(--text-muted); line-height: 1.5; }
+  /* Inline failure reason on failed training cards — never make the user hunt */
+  .training-card-error { display: flex; align-items: flex-start; gap: 7px; margin-top: var(--space-2);
+    padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm);
+    background: var(--danger-bg); border: 1px solid var(--danger-bd);
+    font-size: var(--text-xs); color: var(--danger-fg); line-height: 1.45; }
+  .training-card-error .icn { width: 13px; height: 13px; flex-shrink: 0; margin-top: 1px; }
+  .train-data-paste { margin-top: var(--space-2); }
+  .train-next-hint { font-size: var(--text-xs); color: var(--text-muted); }
+  /* "Prove it after training" — the post_eval auto-hook in one row */
+  .prove-row { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;
+    padding: var(--space-2) var(--space-3); margin-bottom: var(--space-3);
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+  .prove-check { display: flex; align-items: center; gap: 7px; font-size: var(--text-sm); color: var(--text);
+    text-transform: none; letter-spacing: 0; font-weight: 500; cursor: pointer; white-space: nowrap; margin: 0; }
+  .prove-row select { max-width: 280px; }
+  .prove-row select:disabled { opacity: 0.55; }
+  .prove-hint { flex: 1 1 100%; font-size: var(--text-xs); color: var(--text-muted); line-height: 1.45; }
+  /* Method explainer at the top of each training form — plain language,
+     with a cross-link to the other method so nobody trains the wrong way. */
+  .method-lead { margin: 0 0 var(--space-4); font-size: var(--text-sm); color: var(--text-2); line-height: 1.55; max-width: 78ch; }
+  .method-lead .method-alt { color: var(--text-muted); }
+  .method-lead .btn-link { font-size: inherit; }
+
+  /* pi Terminal page — the terminal fills the card; warm theme matches xterm config */
+  .page-terminal { display: flex; flex-direction: column; }
+  .page-terminal.active { flex: 1; }
+  .terminal-card { display: flex; flex-direction: column; flex: 1; min-height: 480px; }
+  .terminal-body { flex: 1; display: flex; flex-direction: column; padding: 0 !important; min-height: 0; }
+  .terminal-state { padding: var(--space-5); }
+  .terminal-host { flex: 1; min-height: 420px; padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+    background: var(--ink-950); border-radius: 0 0 var(--radius-lg) var(--radius-lg); }
+  .terminal-host .xterm { height: 100%; }
+  .terminal-cwd { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-muted);
+    max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* Unreachable banner — loud, actionable, self-clearing */
+  .unreachable-banner { display: flex; align-items: center; gap: var(--space-3);
+    padding: var(--space-3) var(--space-4); margin-bottom: var(--space-3);
+    background: var(--danger-bg); border: 1px solid var(--danger-bd); border-radius: var(--radius-md); }
+  .unreachable-banner > .icn { width: 20px; height: 20px; color: var(--danger-fg); flex-shrink: 0; }
+  .unreachable-text { flex: 1; display: flex; flex-direction: column; gap: 2px; font-size: var(--text-sm); }
+  .unreachable-text strong { color: var(--danger-fg); }
+  .unreachable-text span { color: var(--text-2); }
+
+  /* First-run journey strip — three milestones, the pending "next" one glows */
+  .journey-strip { display: flex; align-items: center; gap: var(--space-3);
+    padding: var(--space-3) var(--space-4); margin-bottom: var(--space-3);
+    background: linear-gradient(135deg, var(--accent-soft), rgba(249,115,22,0.04));
+    border: 1px solid var(--accent-border); border-radius: var(--radius-md); }
+  .journey-steps { flex: 1; display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+  .journey-step { display: grid; grid-template-columns: auto 1fr; grid-template-rows: auto auto; column-gap: 8px;
+    align-items: center; text-align: left; padding: 6px 12px; border-radius: var(--radius-sm);
+    background: transparent; border: 1px solid transparent; cursor: pointer; color: inherit; font-family: inherit; }
+  .journey-step:hover { background: rgba(255,255,255,0.04); }
+  .journey-step .journey-dot { grid-row: 1 / 3; width: 18px; height: 18px; border-radius: 50%;
+    border: 2px solid var(--border-strong); position: relative; }
+  .journey-step.is-done .journey-dot { border-color: var(--success-fg); background: var(--success-bg); }
+  .journey-step.is-done .journey-dot::after { content: ''; position: absolute; inset: 3px;
+    background: var(--success-fg); border-radius: 50%; }
+  .journey-step.is-next { border-color: var(--accent-border); background: var(--accent-soft); }
+  .journey-step.is-next .journey-dot { border-color: var(--accent); animation: pulseDot 1.8s ease-in-out infinite; }
+  .journey-label { font-size: var(--text-sm); font-weight: 600; color: var(--text); }
+  .journey-step.is-done .journey-label { color: var(--text-muted); text-decoration: line-through; text-decoration-color: var(--border-strong); }
+  .journey-sub { grid-column: 2; font-size: var(--text-2xs); color: var(--text-muted); }
+  .journey-arrow { color: var(--text-quiet); display: inline-flex; }
+  .journey-dismiss { flex-shrink: 0; color: var(--text-quiet); }
+  @media (max-width: 760px) { .journey-arrow { display: none; } }
+
+  /* Completion notices that carry the next action */
+  .toast.toast-action { display: flex; align-items: center; gap: var(--space-3); cursor: default; padding-right: 8px; }
+  .toast-action-btn { flex-shrink: 0; }
+  .toast-action-close { background: none; border: 0; color: var(--text-muted); font-size: 16px; line-height: 1;
+    cursor: pointer; padding: 2px 6px; flex-shrink: 0; }
+  .toast-action-close:hover { color: var(--text); }
+
+  /* Small dialogs size to their content — no dead vertical space */
+  .modal-shell-fit { height: auto !important; }
+  /* Prove-an-adapter modal */
+  .adapter-eval-body { padding: var(--space-4) var(--space-5) var(--space-5); }
+  .adapter-eval-lead { margin: 0 0 var(--space-4); font-size: var(--text-sm); color: var(--text-2); line-height: 1.5; }
+  .adapter-eval-lead strong { color: var(--text); }
+
+  /* Advanced hyperparameters — collapsed, summary narrates the values */
+  .adv-row { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-3); }
+  .adv-summary { font-size: var(--text-xs); color: var(--text-quiet); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .adv-body { padding: var(--space-3); margin-bottom: var(--space-3);
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+  .adv-body .form-row { margin-bottom: 0; }
 
   /* Inspect-modal prev/next — step through the current Recent-requests filter
      (e.g. walk only the "Needs attention" rows) without leaving the modal. */
@@ -3329,6 +3460,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
   <button type="button" class="primary-tab" data-page="playground" role="tab" aria-selected="false" aria-controls="page-playground" id="primary-tab-playground">
     Playground
   </button>
+  <button type="button" class="primary-tab" data-page="terminal" role="tab" aria-selected="false" aria-controls="page-terminal" id="primary-tab-terminal">
+    pi Terminal
+  </button>
 </nav>
 
 <main id="content" tabindex="-1" class="main">
@@ -3337,6 +3471,45 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
        Overview page
        ================================================================= -->
   <section class="page active" id="page-overview" role="tabpanel" aria-labelledby="primary-tab-overview">
+
+    <!-- Unreachable banner — when /health can't be fetched at all, say so
+         loudly with the fix, instead of a quiet topbar dot + empty panels. -->
+    <div class="unreachable-banner" id="unreachable-banner" hidden role="alert">
+      <svg class="icn" aria-hidden="true"><use href="#i-warning"></use></svg>
+      <div class="unreachable-text">
+        <strong>Can't reach Kiln at <span id="unreachable-origin"></span></strong>
+        <span>Is <code>kiln serve</code> running on this host and port? The dashboard reconnects automatically the moment it answers.</span>
+      </div>
+      <button type="button" class="btn btn-sm" id="unreachable-retry">Retry now</button>
+      <a class="btn btn-sm btn-ghost" href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting</a>
+    </div>
+
+    <!-- First-run journey strip — three checkable milestones that walk a brand
+         new user from "server is up" to "first adapter live". Computed from the
+         live caches every poll; disappears for good once all three are done
+         (or when dismissed). -->
+    <div class="journey-strip" id="journey-strip" hidden role="region" aria-label="Getting started">
+      <div class="journey-steps">
+        <button type="button" class="journey-step" data-journey="server" title="Checks itself once /health answers. Click for the Quickstart guide (opens in a new tab).">
+          <span class="journey-dot" aria-hidden="true"></span>
+          <span class="journey-label">Server running</span>
+          <span class="journey-sub">model loaded &amp; healthy</span>
+        </button>
+        <span class="journey-arrow" aria-hidden="true"><svg class="icn icn-sm"><use href="#i-arrow-right"></use></svg></span>
+        <button type="button" class="journey-step" data-journey="agent" title="Checks itself when a request from pi, opencode, or an OpenAI SDK arrives. Click to open the connection snippets.">
+          <span class="journey-dot" aria-hidden="true"></span>
+          <span class="journey-label">Agent connected</span>
+          <span class="journey-sub">point pi or opencode here</span>
+        </button>
+        <span class="journey-arrow" aria-hidden="true"><svg class="icn icn-sm"><use href="#i-arrow-right"></use></svg></span>
+        <button type="button" class="journey-step" data-journey="adapter" title="Checks itself when your first trained adapter exists. Click to open the training form.">
+          <span class="journey-dot" aria-hidden="true"></span>
+          <span class="journey-label">First adapter trained</span>
+          <span class="journey-sub">teach it from your usage</span>
+        </button>
+      </div>
+      <button type="button" class="btn btn-sm btn-ghost journey-dismiss" id="journey-dismiss" aria-label="Dismiss getting-started guide"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-close"></use></svg></button>
+    </div>
 
     <!-- =================================================================
          Connect your agent — the onboarding centerpiece. The #1 task is
@@ -3386,6 +3559,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
             </div>
             <button class="btn btn-primary" id="connect-test" type="button">
               <svg class="icn icn-sm" aria-hidden="true"><use href="#i-bolt"></use></svg> Test connection
+            </button>
+            <button class="btn" id="connect-try-pi" type="button" hidden title="Launch a real pi session in the browser, already configured for this Kiln — nothing to install or set up">
+              <svg class="icn icn-sm" aria-hidden="true"><use href="#i-terminal"></use></svg> Or try pi right here
             </button>
             <div class="connect-test-result" id="connect-test-result" aria-live="polite"></div>
           </div>
@@ -3639,8 +3815,8 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
       </div>
       <div class="tabs" role="tablist" aria-label="Training views" data-training-tabs>
         <button class="tab active" id="training-tab-queue" data-tab="queue" type="button" role="tab" aria-selected="true" aria-controls="tab-queue" tabindex="0">Queue</button>
-        <button class="tab" id="training-tab-sft" data-tab="sft" type="button" role="tab" aria-selected="false" aria-controls="tab-sft" tabindex="-1">Submit SFT</button>
-        <button class="tab" id="training-tab-grpo" data-tab="grpo" type="button" role="tab" aria-selected="false" aria-controls="tab-grpo" tabindex="-1">Submit GRPO</button>
+        <button class="tab" id="training-tab-sft" data-tab="sft" type="button" role="tab" aria-selected="false" aria-controls="tab-sft" tabindex="-1">Train · SFT</button>
+        <button class="tab" id="training-tab-grpo" data-tab="grpo" type="button" role="tab" aria-selected="false" aria-controls="tab-grpo" tabindex="-1">Train · GRPO</button>
       </div>
 
       <div class="tab-content active" id="tab-queue" role="tabpanel" aria-labelledby="training-tab-queue" aria-live="polite" aria-atomic="false" aria-busy="true" data-panel-id="training-queue-panel">
@@ -3648,93 +3824,152 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
       </div>
 
       <div class="tab-content" id="tab-sft" role="tabpanel" aria-labelledby="training-tab-sft" hidden inert>
+        <p class="method-lead">Supervised fine-tuning — show the model examples of the answers you want. The everyday choice: corrections, style, project conventions. <span class="method-alt">Have multiple answers scored by quality instead? Use <button type="button" class="btn-link" onclick="document.getElementById('training-tab-grpo').click()">GRPO</button>.</span></p>
         <form id="sft-form">
-          <div class="form-row">
-            <div class="form-group">
-              <label for="sft-output-name">Adapter name</label>
-              <input type="text" id="sft-output-name" name="output_name" value="sft-adapter" aria-describedby="sft-output-name-help sft-output-name-state" required>
-              <div class="form-help" id="sft-output-name-help">Saved adapter name. Keep it short and path-safe.</div>
-              <div id="sft-output-name-state" style="font-size: var(--text-xs); color: var(--text-muted);" aria-live="polite">Ready to submit with this path-safe adapter name.</div>
+          <div class="form-group train-data">
+            <label>Training data</label>
+            <div class="dropzone" id="sft-dropzone" tabindex="0" role="button" aria-label="Add SFT training data — drop a file or browse">
+              <input type="file" id="sft-file" accept=".jsonl,.json" hidden>
+              <svg class="icn dropzone-icn" aria-hidden="true"><use href="#i-upload"></use></svg>
+              <div class="dropzone-main">Drop a <code>.jsonl</code> or <code>.json</code> file here, or <span class="dropzone-browse">browse</span></div>
+              <div class="dropzone-sub">One example per line (JSONL) or a JSON array — each with a <code>user</code> message and the <code>assistant</code> reply you want. Parsed and trained right here; no upload step.</div>
             </div>
-            <div class="form-group">
-              <label for="sft-epochs">Epochs</label>
-              <input type="number" id="sft-epochs" name="epochs" value="3" min="1" max="100">
+            <div class="train-data-status" id="sft-data-status" role="status" aria-live="polite" hidden></div>
+            <div class="train-data-alt">
+              <button type="button" class="btn-link" id="sft-pick-toggle">Use a dataset you uploaded</button>
+              <span class="alt-sep" aria-hidden="true">·</span>
+              <button type="button" class="btn-link" id="sft-paste-toggle">Paste JSON</button>
+              <span class="alt-sep" aria-hidden="true">·</span>
+              <button type="button" class="btn-link" id="use-sft-sample">Try a sample</button>
             </div>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label for="sft-learning-rate">Learning rate</label>
-              <input type="text" id="sft-learning-rate" name="learning_rate" value="0.0002">
+            <div class="train-data-pick" id="sft-pick-row" hidden>
+              <select id="sft-dataset-pick" aria-label="Uploaded SFT dataset"><option value="">Select an uploaded dataset…</option></select>
+              <span class="train-data-pick-empty" id="sft-pick-empty" hidden>No SFT datasets uploaded yet — <button type="button" class="btn-link" data-goto-datasets>upload a JSONL under Evals → Datasets</button> and it appears here.</span>
             </div>
-            <div class="form-group">
-              <label for="sft-rank">LoRA rank</label>
-              <input type="number" id="sft-rank" name="rank" value="8" min="1" max="128">
+            <div class="train-data-paste" id="sft-paste-row" hidden>
+              <textarea id="sft-examples" name="examples" rows="6" aria-label="Training examples (JSON array)" aria-describedby="sft-examples-help" placeholder='[{"messages":[{"role":"user","content":"Translate to French: Hello"},{"role":"assistant","content":"Bonjour"}]}]'></textarea>
+              <div class="form-help" id="sft-examples-help">A JSON array (or JSONL, one object per line). Each example needs a <code>messages</code> array with a <code>user</code> message and an <code>assistant</code> message.</div>
             </div>
-          </div>
-          <div class="form-group">
-            <label for="sft-dataset-pick">Pick from uploaded dataset <span class="hint">(optional)</span></label>
-            <div style="display:flex; gap:8px; align-items:center;">
-              <select id="sft-dataset-pick" style="flex:1;"><option value="">— or paste examples below —</option></select>
-              <button type="button" class="btn btn-sm" id="sft-dataset-load">Load examples</button>
-            </div>
-            <div class="form-help">Pick any SFT dataset uploaded under Evals → Datasets. Loading replaces the textarea below.</div>
+            <div id="sft-examples-state" data-sft-examples-state style="font-size: var(--text-xs); color: var(--text-muted); margin-top: var(--space-2);" aria-live="polite">Drop a file, pick a dataset, paste JSON, or try a sample to enable training.</div>
           </div>
           <div class="form-group">
-            <label for="sft-examples">Training examples (JSON array)</label>
-            <textarea id="sft-examples" name="examples" rows="6" aria-describedby="sft-examples-help sft-examples-state" placeholder='[{"messages":[{"role":"user","content":"Translate to French: Hello"},{"role":"assistant","content":"Bonjour"}]}]'></textarea>
-            <div class="form-help" id="sft-examples-help">Expected: a JSON array of examples. Each example needs a <code>messages</code> array with at least one <code>user</code> message and one <code>assistant</code> message.</div>
-            <div id="sft-examples-state" data-sft-examples-state style="font-size: var(--text-xs); color: var(--text-muted);" aria-live="polite">Paste examples JSON, pick a dataset, or use the sample payload to enable submit.</div>
-            <div style="display: flex; justify-content: flex-end; margin-top: var(--space-2);">
-              <button type="button" class="btn btn-sm" id="use-sft-sample">Use sample SFT payload</button>
+            <label for="sft-output-name">Adapter name</label>
+            <input type="text" id="sft-output-name" name="output_name" value="sft-adapter" aria-describedby="sft-output-name-help sft-output-name-state" required style="max-width: 340px;">
+            <div class="form-help" id="sft-output-name-help">Auto-suggested from your file — what the adapter is saved as.</div>
+            <div id="sft-output-name-state" style="font-size: var(--text-xs); color: var(--text-muted);" aria-live="polite">Ready to submit with this path-safe adapter name.</div>
+          </div>
+          <div class="prove-row" id="sft-prove-row" hidden>
+            <label class="prove-check" for="sft-prove">
+              <input type="checkbox" id="sft-prove"> Prove it after training
+            </label>
+            <select id="sft-prove-suite" aria-label="Eval suite to grade against" disabled></select>
+            <span class="prove-hint">Kiln grades the new adapter <em>and</em> base on this suite the moment training finishes — the verdict lands on the job.</span>
+          </div>
+          <div class="adv-row">
+            <button type="button" class="btn btn-sm btn-ghost" id="sft-adv-toggle" aria-expanded="false" aria-controls="sft-advanced"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-gear"></use></svg> Advanced</button>
+            <span class="adv-summary" id="sft-adv-summary">3 epochs · learning rate 0.0002 · LoRA rank 8 — sensible defaults, no tuning needed</span>
+          </div>
+          <div class="adv-body" id="sft-advanced" hidden>
+            <div class="form-row">
+              <div class="form-group">
+                <label for="sft-epochs">Epochs</label>
+                <input type="number" id="sft-epochs" name="epochs" value="3" min="1" max="100">
+                <div class="form-help">Passes over your examples. More can overfit small sets.</div>
+                <div class="form-help" id="sft-overfit-hint" hidden style="color: var(--warning-fg);"></div>
+              </div>
+              <div class="form-group">
+                <label for="sft-learning-rate">Learning rate</label>
+                <input type="text" id="sft-learning-rate" name="learning_rate" value="0.0002">
+                <div class="form-help">How hard each step pushes the weights.</div>
+              </div>
+              <div class="form-group">
+                <label for="sft-rank">LoRA rank</label>
+                <input type="number" id="sft-rank" name="rank" value="8" min="1" max="128">
+                <div class="form-help">Adapter capacity. 8 is plenty for corrections.</div>
+              </div>
             </div>
           </div>
           <div style="display: flex; gap: var(--space-3); align-items: center; padding-top: var(--space-3); border-top: 1px solid var(--border);">
             <label for="sft-auto-load" style="font-size: var(--text-xs); display: flex; align-items: center; gap: var(--space-2); color: var(--text-muted); text-transform: none; letter-spacing: 0; font-weight: 400;">
-              <input type="checkbox" id="sft-auto-load" name="auto_load" checked> Auto-load adapter after training
+              <input type="checkbox" id="sft-auto-load" name="auto_load" checked> Load it for pi the moment it finishes
             </label>
-            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Submit SFT job</button>
+            <span class="train-next-hint" id="sft-next-hint">Trains a LoRA from your examples, then hot-swaps it in.</span>
+            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Train adapter</button>
           </div>
         </form>
       </div>
 
       <div class="tab-content" id="tab-grpo" role="tabpanel" aria-labelledby="training-tab-grpo" hidden inert>
+        <p class="method-lead">Reward-scored tuning — give each prompt several candidate answers with numeric scores; the model learns to prefer the high-scoring ones. <span class="method-alt">Just have correct answers? Use <button type="button" class="btn-link" onclick="document.getElementById('training-tab-sft').click()">SFT</button> — it's simpler.</span></p>
         <form id="grpo-form">
-          <div class="form-row">
-            <div class="form-group">
-              <label for="grpo-output-name">Adapter name</label>
-              <input type="text" id="grpo-output-name" name="output_name" value="grpo-adapter" aria-describedby="grpo-output-name-help grpo-output-name-state" required>
-              <div class="form-help" id="grpo-output-name-help">Saved adapter name. Keep it short and path-safe.</div>
-              <div id="grpo-output-name-state" style="font-size: var(--text-xs); color: var(--text-muted);" aria-live="polite">Ready to submit with this path-safe adapter name.</div>
+          <div class="form-group train-data">
+            <label>Training data <span class="hint">— prompts with scored completions</span></label>
+            <div class="dropzone" id="grpo-dropzone" tabindex="0" role="button" aria-label="Add GRPO training data — drop a file or browse">
+              <input type="file" id="grpo-file" accept=".jsonl,.json" hidden>
+              <svg class="icn dropzone-icn" aria-hidden="true"><use href="#i-upload"></use></svg>
+              <div class="dropzone-main">Drop a <code>.jsonl</code> or <code>.json</code> file here, or <span class="dropzone-browse">browse</span></div>
+              <div class="dropzone-sub">One group per line (JSONL) or a JSON array — each group is a prompt (<code>messages</code>) plus <code>completions</code> that each carry a numeric <code>reward</code>.</div>
             </div>
-            <div class="form-group">
-              <label for="grpo-kl-coeff">KL coefficient</label>
-              <input type="text" id="grpo-kl-coeff" name="kl_coeff" value="0.1">
+            <div class="train-data-status" id="grpo-data-status" role="status" aria-live="polite" hidden></div>
+            <div class="train-data-alt">
+              <button type="button" class="btn-link" id="grpo-pick-toggle">Use a dataset you uploaded</button>
+              <span class="alt-sep" aria-hidden="true">·</span>
+              <button type="button" class="btn-link" id="grpo-paste-toggle">Paste JSON</button>
+              <span class="alt-sep" aria-hidden="true">·</span>
+              <button type="button" class="btn-link" id="use-grpo-sample">Try a sample</button>
             </div>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label for="grpo-learning-rate">Learning rate</label>
-              <input type="text" id="grpo-learning-rate" name="learning_rate" value="0.00005">
+            <div class="train-data-pick" id="grpo-pick-row" hidden>
+              <select id="grpo-dataset-pick" aria-label="Uploaded GRPO dataset"><option value="">Select an uploaded dataset…</option></select>
+              <span class="train-data-pick-empty" id="grpo-pick-empty" hidden>No GRPO datasets uploaded yet — <button type="button" class="btn-link" data-goto-datasets>upload a groups JSONL under Evals → Datasets</button> (format: GRPO groups) and it appears here.</span>
             </div>
-            <div class="form-group">
-              <label for="grpo-rank">LoRA rank</label>
-              <input type="number" id="grpo-rank" name="rank" value="8" min="1" max="128">
+            <div class="train-data-paste" id="grpo-paste-row" hidden>
+              <textarea id="grpo-groups" name="groups" rows="6" aria-label="GRPO groups (JSON array)" aria-describedby="grpo-groups-help" placeholder='[{"messages":[{"role":"user","content":"Write a haiku about the moon"}],"completions":[{"text":"Silent moonlit night / Silver clouds drift softly by / Dreams bloom in starlight","reward":0.9},{"text":"The moon is bright tonight.","reward":0.2}]}]'></textarea>
+              <div class="form-help" id="grpo-groups-help">A JSON array (or JSONL, one per line). Each group needs <code>messages</code> plus <code>completions</code> with <code>text</code> and a numeric <code>reward</code>.</div>
             </div>
+            <div id="grpo-groups-state" data-grpo-groups-state style="font-size: var(--text-xs); color: var(--text-muted); margin-top: var(--space-2);" aria-live="polite">Drop a file, pick a dataset, paste JSON, or try a sample to enable training.</div>
           </div>
           <div class="form-group">
-            <label for="grpo-groups">GRPO groups (JSON array)</label>
-            <textarea id="grpo-groups" name="groups" rows="6" aria-describedby="grpo-groups-help grpo-groups-state" placeholder='[{"messages":[{"role":"user","content":"Write a haiku about the moon"}],"completions":[{"text":"Silent moonlit night / Silver clouds drift softly by / Dreams bloom in starlight","reward":0.9},{"text":"The moon is bright tonight.","reward":0.2}]}]'></textarea>
-            <div class="form-help" id="grpo-groups-help">Expected: a JSON array of groups. Each group needs <code>messages</code> plus <code>completions</code> containing <code>text</code> and a numeric <code>reward</code>.</div>
-            <div id="grpo-groups-state" data-grpo-groups-state style="font-size: var(--text-xs); color: var(--text-muted);" aria-live="polite">Paste groups JSON or use the sample payload to enable submit.</div>
-            <div style="display: flex; justify-content: flex-end; margin-top: var(--space-2);">
-              <button type="button" class="btn btn-sm" id="use-grpo-sample">Use sample GRPO payload</button>
+            <label for="grpo-output-name">Adapter name</label>
+            <input type="text" id="grpo-output-name" name="output_name" value="grpo-adapter" aria-describedby="grpo-output-name-help grpo-output-name-state" required style="max-width: 340px;">
+            <div class="form-help" id="grpo-output-name-help">Auto-suggested from your file — what the adapter is saved as.</div>
+            <div id="grpo-output-name-state" style="font-size: var(--text-xs); color: var(--text-muted);" aria-live="polite">Ready to submit with this path-safe adapter name.</div>
+          </div>
+          <div class="prove-row" id="grpo-prove-row" hidden>
+            <label class="prove-check" for="grpo-prove">
+              <input type="checkbox" id="grpo-prove"> Prove it after training
+            </label>
+            <select id="grpo-prove-suite" aria-label="Eval suite to grade against" disabled></select>
+            <span class="prove-hint">Kiln grades the new adapter <em>and</em> base on this suite the moment training finishes — the verdict lands on the job.</span>
+          </div>
+          <div class="adv-row">
+            <button type="button" class="btn btn-sm btn-ghost" id="grpo-adv-toggle" aria-expanded="false" aria-controls="grpo-advanced"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-gear"></use></svg> Advanced</button>
+            <span class="adv-summary" id="grpo-adv-summary">KL 0.1 · learning rate 0.00005 · LoRA rank 8 — sensible defaults, no tuning needed</span>
+          </div>
+          <div class="adv-body" id="grpo-advanced" hidden>
+            <div class="form-row">
+              <div class="form-group">
+                <label for="grpo-kl-coeff">KL coefficient</label>
+                <input type="text" id="grpo-kl-coeff" name="kl_coeff" value="0.1">
+                <div class="form-help">How tightly the adapter sticks to the base model.</div>
+              </div>
+              <div class="form-group">
+                <label for="grpo-learning-rate">Learning rate</label>
+                <input type="text" id="grpo-learning-rate" name="learning_rate" value="0.00005">
+                <div class="form-help">How hard each step pushes the weights.</div>
+              </div>
+              <div class="form-group">
+                <label for="grpo-rank">LoRA rank</label>
+                <input type="number" id="grpo-rank" name="rank" value="8" min="1" max="128">
+                <div class="form-help">Adapter capacity. 8 is plenty to start.</div>
+              </div>
             </div>
           </div>
           <div style="display: flex; gap: var(--space-3); align-items: center; padding-top: var(--space-3); border-top: 1px solid var(--border);">
             <label for="grpo-auto-load" style="font-size: var(--text-xs); display: flex; align-items: center; gap: var(--space-2); color: var(--text-muted); text-transform: none; letter-spacing: 0; font-weight: 400;">
-              <input type="checkbox" id="grpo-auto-load" name="auto_load" checked> Auto-load adapter after training
+              <input type="checkbox" id="grpo-auto-load" name="auto_load" checked> Load it for pi the moment it finishes
             </label>
-            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Submit GRPO job</button>
+            <span class="train-next-hint" id="grpo-next-hint">Trains a LoRA against your reward scores, then hot-swaps it in.</span>
+            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Train adapter</button>
           </div>
         </form>
       </div>
@@ -4103,6 +4338,31 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
     </div>
   </div>
 
+  <!-- Prove-an-adapter modal: "Run eval…" on any adapter card opens this,
+       scoped to THAT adapter — pick a suite, compare against base, jump to
+       the verdict. No hunting through the Evals page. -->
+  <div id="adapter-eval-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="adapter-eval-title">
+    <div class="modal-shell modal-shell-fit" style="max-width: 480px;">
+      <div class="modal-head">
+        <h2 id="adapter-eval-title">Prove adapter</h2>
+        <span style="flex:1 1 auto;"></span>
+        <button class="modal-close" id="adapter-eval-close" aria-label="Close"><svg class="icn" aria-hidden="true"><use href="#i-close"></use></svg></button>
+      </div>
+      <div class="adapter-eval-body">
+        <p class="adapter-eval-lead">Grade <strong id="adapter-eval-name">—</strong> and the base model on the same suite — the verdict ("+N pts vs base") lands on the job.</p>
+        <div class="form-group" style="margin-bottom: var(--space-3);">
+          <label for="adapter-eval-suite">Eval suite</label>
+          <select id="adapter-eval-suite"></select>
+          <div class="form-help" id="adapter-eval-suite-help">No suites yet — an eval suite is a graded test set. <button type="button" class="btn-link" id="adapter-eval-goto-datasets">Upload a dataset and synthesize one</button> (≈1 minute), then come back here.</div>
+        </div>
+        <div style="display:flex; gap: var(--space-3); align-items:center;">
+          <button type="button" class="btn btn-primary" id="adapter-eval-compare">Compare vs base</button>
+          <button type="button" class="btn btn-sm" id="adapter-eval-solo" title="Score this adapter only, without a base-model run">Score only</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- =================================================================
        Distill page — §3 + §10.6 on-policy distillation workflows
        =================================================================
@@ -4149,6 +4409,12 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
            Submit OPD — POST /v1/train/opd
            ================================================================= -->
       <div class="tab-content active" id="distill-tab-opd-pane" role="tabpanel" aria-labelledby="distill-tab-opd">
+        <div class="corr-receipt" id="distill-recipes-hint" hidden role="note" style="margin-bottom: var(--space-4);">
+          <span class="corr-receipt-icon"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-book"></use></svg></span>
+          <span class="corr-receipt-text">New to distillation? <strong>Recipes</strong> pick the teacher, rank, and cost cap for you — one click instead of this whole form.</span>
+          <button type="button" class="btn btn-sm btn-primary" id="distill-recipes-go">Browse recipes</button>
+          <button type="button" class="btn btn-sm btn-ghost corr-receipt-dismiss" id="distill-recipes-dismiss" aria-label="Dismiss"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-close"></use></svg></button>
+        </div>
         <form id="opd-form">
           <div class="form-row">
             <div class="form-group">
@@ -4679,6 +4945,30 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
     </div>
   </section>
 
+  <!-- =================================================================
+       pi Terminal — a real pi session, in the browser, already pointed at
+       this Kiln. The server spawns `pi` in a PTY (after running the same
+       non-destructive config merge as `kiln pi-setup`) and streams it over
+       a WebSocket. Zero setup: open the tab, click Launch, start coding.
+       ================================================================= -->
+  <section class="page page-terminal" id="page-terminal" role="tabpanel" aria-labelledby="primary-tab-terminal" hidden inert>
+    <div class="card terminal-card">
+      <div class="card-head">
+        <h2>pi, already connected</h2>
+        <span class="eyebrow" id="terminal-eyebrow">a real pi session against this Kiln — no setup</span>
+        <span style="flex:1;"></span>
+        <span class="terminal-cwd" id="terminal-cwd" title="pi runs in the server's working directory"></span>
+        <button type="button" class="btn btn-sm" id="terminal-restart" hidden>Restart session</button>
+      </div>
+      <div class="card-body terminal-body" id="terminal-body">
+        <div class="terminal-state" id="terminal-state">
+          <div class="empty">Checking terminal availability…</div>
+        </div>
+        <div class="terminal-host" id="terminal-host" hidden></div>
+      </div>
+    </div>
+  </section>
+
 </main>
 
 <div class="toast-container" id="toasts" role="status" aria-live="polite" aria-atomic="true"></div>
@@ -4715,9 +5005,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
 
   const evalDatasets = () => ({
     datasets: [
-      { name: 'opencode-traces', format: 'sft_jsonl', description: 'Curated opencode agent trajectories with tool calls', num_rows: 12_480, size_bytes: 184 * MB, created_at: ISO(20 * 86400_000), updated_at: ISO(2 * 86400_000), stats: { num_assistant_turns: 38_210, num_tool_messages: 21_004, num_with_tool_calls: 18_902, max_messages_per_conv: 42, max_content_chars: 18_400, avg_messages_per_conv: 11.4, sample_role_patterns: ['system→user→assistant→tool→assistant'] } },
-      { name: 'rust-review-pairs', format: 'sft_jsonl', description: 'PR review comments paired with diffs', num_rows: 5_120, size_bytes: 72 * MB, created_at: ISO(14 * 86400_000), updated_at: ISO(5 * 86400_000), stats: { num_assistant_turns: 5_120, num_tool_messages: 0, num_with_tool_calls: 88, max_messages_per_conv: 4, max_content_chars: 9_200, avg_messages_per_conv: 3.0, sample_role_patterns: ['system→user→assistant'] } },
-      { name: 'sql-explain-gold', format: 'sft_jsonl', description: 'SQL queries with natural-language explanations', num_rows: 3_004, size_bytes: 28 * MB, created_at: ISO(9 * 86400_000), updated_at: ISO(9 * 86400_000), stats: { num_assistant_turns: 3_004, num_tool_messages: 0, num_with_tool_calls: 0, max_messages_per_conv: 2, max_content_chars: 4_100, avg_messages_per_conv: 2.0, sample_role_patterns: ['user→assistant'] } },
+      { name: 'opencode-traces', format: 'sft_chat', description: 'Curated opencode agent trajectories with tool calls', num_rows: 12_480, size_bytes: 184 * MB, created_at: ISO(20 * 86400_000), updated_at: ISO(2 * 86400_000), stats: { num_assistant_turns: 38_210, num_tool_messages: 21_004, num_with_tool_calls: 18_902, max_messages_per_conv: 42, max_content_chars: 18_400, avg_messages_per_conv: 11.4, sample_role_patterns: ['system→user→assistant→tool→assistant'] } },
+      { name: 'rust-review-pairs', format: 'sft_chat', description: 'PR review comments paired with diffs', num_rows: 5_120, size_bytes: 72 * MB, created_at: ISO(14 * 86400_000), updated_at: ISO(5 * 86400_000), stats: { num_assistant_turns: 5_120, num_tool_messages: 0, num_with_tool_calls: 88, max_messages_per_conv: 4, max_content_chars: 9_200, avg_messages_per_conv: 3.0, sample_role_patterns: ['system→user→assistant'] } },
+      { name: 'sql-explain-gold', format: 'sft_chat', description: 'SQL queries with natural-language explanations', num_rows: 3_004, size_bytes: 28 * MB, created_at: ISO(9 * 86400_000), updated_at: ISO(9 * 86400_000), stats: { num_assistant_turns: 3_004, num_tool_messages: 0, num_with_tool_calls: 0, max_messages_per_conv: 2, max_content_chars: 4_100, avg_messages_per_conv: 2.0, sample_role_patterns: ['user→assistant'] } },
     ],
   });
   const evalSuites = () => ({
@@ -4963,6 +5253,13 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
       ],
     }),
     '/v1/models': () => ({ data: [{ id: 'Qwen3.5-4B', object: 'model' }] }),
+    // The embedded pi terminal needs a live server (PTY + WebSocket) — be
+    // honest about that in the static demo instead of a broken Launch.
+    '/v1/terminal/status': () => ({
+      enabled: false,
+      disabled_reason: 'The embedded pi terminal needs a live Kiln server — this is the static demo. Run `kiln serve` and open /ui there.',
+      pi_available: false, pi_path: null, cwd: '—', session_active: false,
+    }),
     // Train / Eval / Distill pages so the whole demo is a complete agent-backend
     // showcase, not just the Overview.
     '/v1/eval/datasets': evalDatasets,
@@ -4985,6 +5282,16 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
     if (method === 'GET' && (m = path.match(/^\/v1\/eval\/suites\/(.+)$/))) return evalSuiteDetail(decodeURIComponent(m[1]));
     if (method === 'GET' && (m = path.match(/^\/v1\/eval\/jobs\/(.+)$/))) return evalJobDetail(decodeURIComponent(m[1]));
     if (method === 'GET' && (m = path.match(/^\/v1\/train\/jobs\/(.+)$/))) return trainJobDetail(decodeURIComponent(m[1]));
+    if (method === 'GET' && (m = path.match(/^\/v1\/eval\/datasets\/(.+)\/rows$/))) {
+      // Small representative SFT-chat rows so the "use an uploaded dataset"
+      // training path works in the demo.
+      return Array.from({ length: 24 }, (_, i) => ({
+        messages: [
+          { role: 'user', content: `Demo dataset row ${i + 1}: explain what this function does.` },
+          { role: 'assistant', content: `Row ${i + 1}: it validates the input, then maps each entry through the parser and returns the collected results.` },
+        ],
+      }));
+    }
     if (method === 'POST' && path === '/v1/agent/traces/discover') return agentDiscover();
     return undefined;
   }
@@ -4996,6 +5303,16 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
     const method = ((init && init.method) || (typeof input !== 'string' && input && input.method) || 'GET').toUpperCase();
     const ok = (body) => Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } }));
     if (responses[path]) return ok(responses[path]());
+    // Demo honesty: load/unload actually move the active adapter, so the
+    // ACTIVE pill, hero, and flywheel respond to a swap like the real server.
+    if (method === 'POST' && path === '/v1/adapters/load') {
+      try { demoState.active = JSON.parse(init && init.body || '{}').name || demoState.active; } catch {}
+      return ok({ ok: true, status: 'ok', message: 'Demo: loaded ' + demoState.active });
+    }
+    if (method === 'POST' && path === '/v1/adapters/unload') {
+      demoState.active = null;
+      return ok({ ok: true, status: 'ok', message: 'Demo: unloaded' });
+    }
     const param = paramResponse(method, path);
     if (param !== undefined) return ok(param);
     // Any other mutation under /v1 → generic success ack so buttons don't error.
@@ -5043,6 +5360,16 @@ function selectPage(name) {
   // #evals via deep link without having to mirror the polling guard.
   if (name === 'evals') refreshActiveEvalSubTab();
   if (name === 'distill') refreshActiveDistillSubTab();
+  if (name === 'terminal' && typeof initTerminalPage === 'function') initTerminalPage();
+  // Landing on an EMPTY queue helps nobody — if nothing ever ran and nothing
+  // is queued, the person opening Training came to train. Take them to the
+  // form. Requires a LOADED cache: an unfetched queue is unknown, not empty.
+  if (name === 'training') {
+    const tj = (typeof trainingJobsCache !== 'undefined') ? trainingJobsCache : null;
+    const queueEmpty = !!tj && !tj.running && (!tj.queued || !tj.queued.length) && (!tj.completed || !tj.completed.length);
+    const queueTabActive = document.getElementById('training-tab-queue')?.classList.contains('active');
+    if (queueEmpty && queueTabActive) document.getElementById('training-tab-sft')?.click();
+  }
 }
 
 // Trigger the refresh function matching the currently-active Evals sub-tab.
@@ -5107,6 +5434,39 @@ function toast(msg, type) {
   el.addEventListener('click', () => el.remove());
   c.appendChild(el);
   el.dataset.toastTimer = String(setTimeout(() => el.remove(), 4000));
+}
+
+// A completion notice that carries the NEXT ACTION. Sticks around (25s, plus
+// hover-to-keep) because "your adapter finished" deserves more than a 4-second
+// flash the user was never going to catch from another tab.
+function actionToast(msg, type, actions) {
+  const c = document.getElementById('toasts');
+  if (!c) return;
+  const el = document.createElement('div');
+  el.className = 'toast ' + (type || 'ok') + ' toast-action';
+  el.setAttribute('role', 'status');
+  const text = document.createElement('span');
+  text.textContent = msg;
+  el.appendChild(text);
+  (actions || []).forEach(a => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-sm toast-action-btn';
+    btn.textContent = a.label;
+    btn.addEventListener('click', ev => { ev.stopPropagation(); el.remove(); a.onClick && a.onClick(); });
+    el.appendChild(btn);
+  });
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'toast-action-close';
+  close.setAttribute('aria-label', 'Dismiss');
+  close.textContent = '×';
+  close.addEventListener('click', ev => { ev.stopPropagation(); el.remove(); });
+  el.appendChild(close);
+  c.appendChild(el);
+  let timer = setTimeout(() => el.remove(), 25000);
+  el.addEventListener('mouseenter', () => clearTimeout(timer));
+  el.addEventListener('mouseleave', () => { timer = setTimeout(() => el.remove(), 8000); });
 }
 
 // --- Icon helper ---
@@ -5366,6 +5726,9 @@ function addCorrectionFromRequest(r) {
     model: r.model || '', adapter: r.adapter || 'base',
     user: r.prompt_full || r.prompt_preview || '',
     original: r.completion_full || r.completion_preview || '',
+    // Only a preview was retained for this request — flag it so the operator
+    // knows the captured text may be cut short.
+    truncated: !(r.prompt_full && r.completion_full),
     // Start EMPTY — never pre-seed with the bad answer. A correction left
     // untouched must never silently train the model on its own mistake.
     ideal: '',
@@ -5403,6 +5766,7 @@ function renderCorrections() {
     <div class="corr-receipt" role="status">
       <span class="corr-receipt-icon">${icon('check', 'icn-sm')}</span>
       <span class="corr-receipt-text">Training <strong>${escapeHtml(corrReceipt.name)}</strong> from ${corrReceipt.count} correction${corrReceipt.count === 1 ? '' : 's'} — it'll hot-swap in when done.</span>
+      ${corrReceipt.firstPrompt ? `<button type="button" class="btn btn-sm" id="corr-receipt-verify" title="Replay the corrected prompt in Playground compare — base vs ${escapeHtml(corrReceipt.name)} — to see the fix land">Verify the fix</button>` : ''}
       <button type="button" class="btn btn-sm" id="corr-receipt-view">View in queue ${icon('arrow-right', 'icn-sm')}</button>
       <button type="button" class="btn btn-sm btn-ghost corr-receipt-dismiss" id="corr-receipt-dismiss" aria-label="Dismiss receipt">${icon('close', 'icn-sm')}</button>
     </div>` : '';
@@ -5414,6 +5778,7 @@ function renderCorrections() {
       <div class="corr-item-head">
         <span class="recent-agent">${escapeHtml(c.agent)}</span>
         <span class="corr-prompt" title="${escapeHtml(c.user)}">${escapeHtml(prev)}${c.user.length > 180 ? '…' : ''}</span>
+        ${c.truncated ? `<span class="corr-trunc" title="Only a preview of this request was retained — the captured text may be cut short. Check it before training.">${icon('warning', 'icn-sm')} preview only</span>` : ''}
         <span class="corr-state" data-corr-state="${rid}">${corrStateHtml(ready)}</span>
         <button type="button" class="btn btn-sm btn-ghost corr-remove" data-corr-remove="${rid}" aria-label="Remove correction">${icon('close', 'icn-sm')}</button>
       </div>
@@ -5445,6 +5810,11 @@ function renderCorrections() {
   document.getElementById('corr-receipt-view')?.addEventListener('click', () => {
     selectPage('training');
     setTimeout(() => document.querySelector('#page-training [data-tab="queue"]')?.click(), 40);
+  });
+  document.getElementById('corr-receipt-verify')?.addEventListener('click', () => {
+    if (!corrReceipt || !corrReceipt.firstPrompt) return;
+    selectPage('playground');
+    setTimeout(() => setupCompareReplay(corrReceipt.firstPrompt, '', corrReceipt.name), 60);
   });
   document.getElementById('corr-receipt-dismiss')?.addEventListener('click', () => { corrReceipt = null; renderCorrections(); });
   updateCorrFoot();
@@ -5491,8 +5861,9 @@ async function trainFromCorrections() {
     const trained = new Set(trainable.map(c => c.request_id));
     correctionsBasket = correctionsBasket.filter(c => !trained.has(c.request_id));
     // Leave a persistent in-card receipt instead of a disorienting auto-jump —
-    // the user stays in context and chooses when to view the job.
-    corrReceipt = { name, count: examples.length };
+    // the user stays in context and chooses when to view the job. Keep the
+    // first corrected prompt so "Verify the fix" can replay it base-vs-adapter.
+    corrReceipt = { name, count: examples.length, firstPrompt: trainable[0].user };
     saveCorrections(); renderCorrections();
     if (typeof pollTraining === 'function') pollTraining();
   } catch (e) { toast(e.message || 'Could not submit training', 'err'); }
@@ -5511,6 +5882,59 @@ function initCorrections() {
   });
 }
 window.addCorrectionFromRequest = addCorrectionFromRequest;
+
+/* First-run journey strip: three milestones computed from live caches.
+   - server:  /health answered (lastHealth set)
+   - agent:   a request from a RECOGNIZED coding agent seen (not just any curl)
+   - adapter: at least one trained adapter exists
+   Each pending step is a button that takes you to the action; the strip
+   disappears forever once all three are done (or on dismiss). */
+const JOURNEY_KEY = 'kiln.journey.dismissed.v1';
+function updateJourneyStrip() {
+  const strip = document.getElementById('journey-strip');
+  if (!strip) return;
+  let dismissed = false;
+  try { dismissed = localStorage.getItem(JOURNEY_KEY) === '1'; } catch {}
+  const serverUp = !!lastHealth;
+  const rows = recentRequestsCache || [];
+  const agentSeen = rows.some(r => { const k = clientFromUA(r.user_agent).key; return k && k !== 'unknown' && k !== 'curl'; });
+  const adapterTrained = nonBaseAdapterCount() > 0;
+  const allDone = serverUp && agentSeen && adapterTrained;
+  if (dismissed || allDone) {
+    // Once everything is done, retire the guide permanently so it never
+    // reappears if an adapter is later deleted.
+    if (allDone) { try { localStorage.setItem(JOURNEY_KEY, '1'); } catch {} }
+    strip.hidden = true;
+    return;
+  }
+  strip.hidden = false;
+  const states = { server: serverUp, agent: agentSeen, adapter: adapterTrained };
+  let nextMarked = false;
+  for (const [k, done] of Object.entries(states)) {
+    const el = strip.querySelector(`[data-journey="${k}"]`);
+    if (!el) continue;
+    el.classList.toggle('is-done', done);
+    const isNext = !done && !nextMarked;
+    if (isNext) nextMarked = true;
+    el.classList.toggle('is-next', isNext);
+  }
+}
+document.getElementById('journey-dismiss')?.addEventListener('click', () => {
+  try { localStorage.setItem(JOURNEY_KEY, '1'); } catch {}
+  const strip = document.getElementById('journey-strip');
+  if (strip) strip.hidden = true;
+});
+document.querySelectorAll('.journey-step').forEach(el => el.addEventListener('click', () => {
+  const k = el.dataset.journey;
+  if (k === 'server') { window.open('https://ericflo.github.io/kiln/quickstart.html', '_blank', 'noopener'); }
+  else if (k === 'agent') {
+    // When the embedded terminal is usable, the fastest "agent connected" is
+    // one click away — launch pi right here instead of copying snippets.
+    if (el.dataset.terminalReady === '1') selectPage('terminal');
+    else openConnect();
+  }
+  else if (k === 'adapter') { selectPage('training'); document.getElementById('training-tab-sft')?.click(); }
+}));
 
 // Update the flywheel ribbon from whatever live caches are populated. Called
 // from the various polls; tolerant of missing data (cold start).
@@ -5588,6 +6012,9 @@ function updateFlywheel() {
   tip('eval', (active && noEvals) ? 'Your active adapter has no eval yet — click to prove it beats base'
     : noEvals ? 'No evals run yet — click to score an adapter' : 'Eval suites & results — click to view');
   tip('swap', active ? `Serving adapter "${active}" — click to manage / hot-swap adapters` : 'Serving the base model — click to load a trained adapter');
+
+  // The journey strip reads the same caches — keep it in lockstep.
+  updateJourneyStrip();
 }
 
 function bindFlywheel() {
@@ -5748,6 +6175,8 @@ async function pollHealth() {
   try {
     const h = await api('/health');
     lastHealth = h;
+    const ub = document.getElementById('unreachable-banner');
+    if (ub) ub.hidden = true;
     renderHeader(h);
     renderServerStatus(h);
     renderHeroFromHealth(h);
@@ -5757,10 +6186,23 @@ async function pollHealth() {
     document.getElementById('status-dot').className = 'status-dot offline';
     document.getElementById('status-text').textContent = 'offline';
     if (statusPanel) statusPanel.innerHTML = apiFailureHtml('Server status', e, 'pollHealth');
+    // A server that doesn't answer at all gets a loud banner with the fix,
+    // not just a quiet topbar dot. Clears itself on the next good poll.
+    if (e && e.unreachable) {
+      lastHealth = null;
+      const b = document.getElementById('unreachable-banner');
+      if (b) { setText('unreachable-origin', window.location.origin); b.hidden = false; }
+    }
   } finally {
     setPanelBusy('server-status', false);
   }
 }
+
+document.getElementById('unreachable-retry')?.addEventListener('click', () => {
+  const b = document.getElementById('unreachable-retry');
+  if (b) { b.disabled = true; b.textContent = 'Checking…'; setTimeout(() => { b.disabled = false; b.textContent = 'Retry now'; }, 1200); }
+  pollHealth();
+});
 
 function renderHeader(h) {
   const dot = document.getElementById('status-dot');
@@ -6071,7 +6513,7 @@ function renderRecentRequests(rows) {
         <div class="recent-meta">
           <span class="recent-tokens">${tokens}${ttft}</span>
           <span>${finishPill}${dur ? `<span class="tabular-nums">${escapeHtml(dur)}</span>` : ''}</span>
-          ${attn ? `<button type="button" class="recent-correct" data-correct-id="${escapeHtml(r.id || '')}" title="Add this to your Corrections basket — write the fix on the Overview, then train">${icon('flask', 'icn-sm')} Correct</button>` : ''}
+          <button type="button" class="recent-correct${attn ? '' : ' quiet'}" data-correct-id="${escapeHtml(r.id || '')}" title="Add this to your Corrections basket — write the fix on the Overview, then train">${icon('flask', 'icn-sm')} Correct</button>
         </div>
       </li>
     `;
@@ -6303,13 +6745,20 @@ function setupCompareReplay(prompt, adapterA, adapterB) {
   if (toggle && !toggle.checked) { toggle.checked = true; toggle.dispatchEvent(new Event('change', { bubbles: true })); }
   const setSel = (id, val) => {
     const sel = document.getElementById(id);
-    if (!sel) return;
-    sel.value = Array.from(sel.options).some(o => o.value === val) ? val : '';
+    if (!sel) return false;
+    if (Array.from(sel.options).some(o => o.value === val)) { sel.value = val; return true; }
+    // The adapter may still be training — remember the intent and apply it
+    // automatically when the option shows up (see updateAdapterSelect).
+    sel.value = '';
+    if (val) sel.dataset.pendingValue = val;
+    return !val;
   };
   setSel('chat-adapter', adapterA || '');
-  setSel('chat-adapter-b', adapterB || '');
+  const bApplied = setSel('chat-adapter-b', adapterB || '');
   const aName = adapterA || 'base', bName = adapterB || 'base';
-  if (aName === bName) {
+  if (!bApplied && adapterB) {
+    toast(`Prompt loaded — ${adapterB} is still training; it'll be selected here automatically when it's ready`, 'info');
+  } else if (aName === bName) {
     toast(`Loaded for A/B — pick a second adapter to compare against ${aName}, then Send`, 'info');
   } else {
     toast(`Loaded A/B: ${aName} vs ${bName} — press Send to see if the swap helped`, 'ok');
@@ -6534,6 +6983,24 @@ function updateAdapterSelect(data) {
     });
   }
   sel.value = current;
+  // Keep the compare (B) dropdown's options in sync, preserving its selection.
+  const b = document.getElementById('chat-adapter-b');
+  if (b) {
+    const bCurrent = b.value;
+    b.innerHTML = sel.innerHTML;
+    b.value = bCurrent;
+  }
+  // Apply any deferred selection ("Verify the fix" names an adapter that's
+  // still training) the moment the option actually exists.
+  for (const el of [sel, b]) {
+    if (!el) continue;
+    const want = el.dataset.pendingValue;
+    if (want && Array.from(el.options).some(o => o.value === want)) {
+      el.value = want;
+      delete el.dataset.pendingValue;
+      toast(`${want} finished training — it's now selected for compare`, 'ok');
+    }
+  }
 }
 
 window.loadAdapter = async function(name) {
@@ -6932,6 +7399,36 @@ let trainingJobsCache = { running: null, queued: [], completed: [] };
 // the `lastAdaptersKey` guard on the adapters tab.
 let lastTrainingKey = null;
 
+// Job states from the previous poll, so finishing is an EVENT the UI announces
+// (with the next action attached) instead of a silent row moving between lists.
+let prevTrainingStates = null;
+function detectTrainingTransitions(data) {
+  const now = new Map();
+  if (data.running) now.set(data.running.job_id, 'running');
+  (data.queued || []).forEach(j => now.set(j.job_id, 'queued'));
+  (data.completed || []).forEach(j => now.set(j.job_id, (j.state || 'completed').toString().toLowerCase()));
+  if (prevTrainingStates) {
+    for (const [id, state] of now) {
+      const prev = prevTrainingStates.get(id);
+      // Only announce jobs we watched run/queue in THIS session — never history.
+      if (!prev || prev === state || (prev !== 'running' && prev !== 'queued')) continue;
+      const j = (data.completed || []).find(x => x.job_id === id) || {};
+      const adapter = j.adapter_name || 'adapter';
+      if (state === 'completed') {
+        actionToast(`${adapter} finished training — it's ready${j.job_type ? ' (' + j.job_type + ')' : ''}.`, 'ok', [
+          { label: 'Prove it vs base', onClick: () => openAdapterEvalModal(adapter) },
+          { label: 'View job', onClick: () => { selectPage('training'); document.querySelector('#page-training [data-tab="queue"]')?.click(); } },
+        ]);
+      } else if (state === 'failed' || state === 'error') {
+        actionToast(`Training ${adapter} failed.`, 'err', [
+          { label: 'View job', onClick: () => { selectPage('training'); document.querySelector('#page-training [data-tab="queue"]')?.click(); } },
+        ]);
+      }
+    }
+  }
+  prevTrainingStates = now;
+}
+
 async function pollTraining() {
   const queuePanel = setPanelBusy('tab-queue', true);
   if (!queuePanel) return;
@@ -6942,6 +7439,7 @@ async function pollTraining() {
       queued: data.queued || [],
       completed: data.completed || [],
     };
+    detectTrainingTransitions(data);
     const r = data.running;
     const key = [
       r ? `${r.job_id}:${(r.progress || 0).toFixed(3)}:${r.current_loss != null ? r.current_loss.toFixed(4) : ''}` : '',
@@ -7066,15 +7564,15 @@ function renderTrainingQueue(data) {
       <div class="eval-empty-icon"><svg class="icn"><use href="#i-flask"></use></svg></div>
       <div class="eval-empty-title">No training jobs yet.</div>
       <div class="eval-empty-body">Submit SFT examples to teach a correction, or use GRPO for scored completions. Datasets uploaded under Evals can be picked directly in the SFT/GRPO submit forms. New here? Read the <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener">Quickstart</a> or the <a href="https://ericflo.github.io/kiln/grpo.html" target="_blank" rel="noopener">GRPO Guide</a>.</div>
-      <button class="eval-empty-cta" type="button" onclick="document.getElementById('training-tab-sft').click();">Submit SFT</button>
+      <button class="eval-empty-cta" type="button" onclick="document.getElementById('training-tab-sft').click();">Train your first adapter</button>
     </div>`;
   }
   el.innerHTML = html;
   // Wire card clicks for drill-in (queued/running/completed all open the modal).
   el.querySelectorAll('[data-train-job-id]').forEach(card => {
     card.addEventListener('click', ev => {
-      // Don't trigger drill if user clicked the cancel button.
-      if (ev.target.closest('[data-train-cancel]')) return;
+      // Don't trigger drill if user clicked an inline action button.
+      if (ev.target.closest('[data-train-cancel],[data-train-prove]')) return;
       openTrainDrillModal(card.dataset.trainJobId);
     });
   });
@@ -7082,6 +7580,14 @@ function renderTrainingQueue(data) {
     b.addEventListener('click', ev => {
       ev.stopPropagation();
       cancelJobFromButton(b);
+    });
+  });
+  // Persistent "Prove it vs base" on completed cards — same modal the
+  // completion toast offers, so a missed toast is never a dead-end.
+  el.querySelectorAll('[data-train-prove]').forEach(b => {
+    b.addEventListener('click', ev => {
+      ev.stopPropagation();
+      openAdapterEvalModal(b.dataset.adapter);
     });
   });
   if (restoreFocus) {
@@ -7118,9 +7624,19 @@ function renderTrainingCard(j, state) {
     const stateNorm = (j.state || '').toString().toLowerCase();
     stateBadge = `<span class="job-state-pill ${stateNorm}">${escapeHtml(stateNorm || 'completed')}</span>`;
   }
-  const cancelBtn = (state === 'queued')
-    ? `<button class="btn btn-sm" data-train-cancel data-job-id="${escapeHtml(j.job_id)}" type="button" style="margin-left:auto;">Cancel</button>`
+  const stateNormForActions = (j.state || state || '').toString().toLowerCase();
+  // Completed cards carry the next action PERSISTENTLY — the completion toast
+  // is a courtesy, not the only door. Failed cards surface the reason inline.
+  let actionBtn = '';
+  if (state === 'queued') {
+    actionBtn = `<button class="btn btn-sm" data-train-cancel data-job-id="${escapeHtml(j.job_id)}" type="button" style="margin-left:auto;">Cancel</button>`;
+  } else if (stateNormForActions === 'completed' && j.adapter_name) {
+    actionBtn = `<button class="btn btn-sm" data-train-prove data-adapter="${escapeHtml(j.adapter_name)}" type="button" style="margin-left:auto;" title="Grade ${escapeHtml(j.adapter_name)} against base on an eval suite">Prove it vs base</button>`;
+  }
+  const errLine = (stateNormForActions === 'failed' && j.error)
+    ? `<div class="training-card-error">${icon('warning', 'icn-sm')} ${escapeHtml(String(j.error).slice(0, 220))}</div>`
     : '';
+  const cancelBtn = actionBtn;
   // Prefer the wall-clock timestamps (`submitted_unix_ms` /
   // `finished_unix_ms`) introduced with the on-disk archive — those
   // survive restarts. Fall back to `elapsed_secs` only when the server
@@ -7150,6 +7666,7 @@ function renderTrainingCard(j, state) {
         <span class="training-stat-label">${j.current_loss != null ? 'loss' : 'not started'}</span>
       </div>
     </div>
+    ${errLine}
     <div class="training-card-curve" id="training-curve-${escapeHtml(j.job_id)}"></div>
   </div>`;
 }
@@ -7198,9 +7715,11 @@ function fillSftSamplePayload() {
     return;
   }
   textarea.value = samplePayload;
+  const pasteRow = document.getElementById('sft-paste-row'); if (pasteRow) pasteRow.hidden = false;
+  clearTrainingData('sft');
   updateSftSubmitState();
   textarea.focus();
-  toast('Sample SFT payload inserted');
+  toast('Sample SFT payload inserted — edit it or Train as-is');
 }
 
 function fillGrpoSamplePayload() {
@@ -7224,51 +7743,291 @@ function fillGrpoSamplePayload() {
     return;
   }
   textarea.value = samplePayload;
+  const pasteRow = document.getElementById('grpo-paste-row'); if (pasteRow) pasteRow.hidden = false;
+  clearTrainingData('grpo');
   updateGrpoSubmitState();
   textarea.focus();
-  toast('Sample GRPO payload inserted');
+  toast('Sample GRPO payload inserted — edit it or Train as-is');
 }
 
 document.getElementById('use-sft-sample').addEventListener('click', fillSftSamplePayload);
 document.getElementById('use-grpo-sample').addEventListener('click', fillGrpoSamplePayload);
 
-// Populate the dataset picker on the SFT submit form. Gated on the SFT
-// sub-tab being active so we don't issue a `/v1/eval/datasets` request
-// every 5s when the Training page isn't even open (the Evals tab already
-// polls the same endpoint).
-async function refreshSftDatasetPicker() {
-  const sel = document.getElementById('sft-dataset-pick');
+/* ====== Direct "drop a file and train" data input (SFT + GRPO) ==============
+   /v1/train/{sft,grpo} take inline examples/groups, so the primary path is:
+   drop a .jsonl/.json file -> parse + validate + preview in place -> train.
+   No Evals detour, no dropdown round-trip, no megabytes pasted into a textarea.
+   trainingData[kind] holds parsed items from the file/dataset path; the textarea
+   is the secondary "paste" path. Exactly one source is active at a time. */
+const trainingData = { sft: null, grpo: null };
+const TRAIN_KIND = {
+  sft:  { noun: 'example', datasetFormat: 'sft_chat',  pickId: 'sft-dataset-pick',  textareaId: 'sft-examples', update: () => updateSftSubmitState(),  valid: (it) => sftItemValid(it) },
+  grpo: { noun: 'group',   datasetFormat: 'grpo_groups', pickId: 'grpo-dataset-pick', textareaId: 'grpo-groups',  update: () => updateGrpoSubmitState(), valid: (it) => grpoItemValid(it) },
+};
+
+function parseTrainingText(text) {
+  const t = (text || '').trim();
+  if (!t) return [];
+  if (t[0] === '[') {
+    const arr = JSON.parse(t);
+    if (!Array.isArray(arr)) throw new Error('Top-level JSON must be an array.');
+    return arr;
+  }
+  const items = [];
+  t.split('\n').forEach((line, i) => {
+    const s = line.trim(); if (!s) return;
+    try { items.push(JSON.parse(s)); }
+    catch { throw new Error(`Line ${i + 1} isn't valid JSON. Use JSONL (one object per line) or a JSON array.`); }
+  });
+  return items;
+}
+function sftItemValid(it) {
+  if (!it || !Array.isArray(it.messages) || !it.messages.length) return false;
+  const roles = it.messages.map(m => m && m.role);
+  return roles.includes('user') && roles.includes('assistant');
+}
+function grpoItemValid(it) {
+  if (!it || !Array.isArray(it.messages) || !it.messages.length) return false;
+  if (!Array.isArray(it.completions) || !it.completions.length) return false;
+  return it.completions.every(c => c && typeof c.text === 'string' && c.text.trim() && typeof c.reward === 'number' && Number.isFinite(c.reward));
+}
+function suggestAdapterName(filename, kind) {
+  let base = (filename || '').replace(/\.[^.]+$/, '').toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+  if (!base) base = kind + '-data';
+  return base.endsWith('-' + kind) ? base : base + '-' + kind;
+}
+// Auto-fill the adapter name from the data source UNLESS the user typed their
+// own. Tracks a dirty flag instead of matching the literal default, so loading
+// a second file/dataset re-suggests (no silent name collisions) while a
+// hand-chosen name is never clobbered.
+function maybeSuggestAdapterName(kind, sourceLabel) {
+  const input = document.getElementById(kind + '-output-name');
+  if (!input) return;
+  if (input.dataset.userEdited === '1' && input.value.trim()) return;
+  input.value = suggestAdapterName(sourceLabel, kind);
+  TRAIN_KIND[kind].update();
+}
+['sft', 'grpo'].forEach(kind => {
+  document.getElementById(kind + '-output-name')?.addEventListener('input', e => {
+    e.target.dataset.userEdited = e.target.value.trim() ? '1' : '';
+  });
+});
+function renderTrainingDataStatus(kind, total, valid, label, badIdx) {
+  const el = document.getElementById(kind + '-data-status');
+  const K = TRAIN_KIND[kind];
+  if (!el) return;
+  const why = kind === 'sft' ? 'needs a user message and an assistant reply' : 'needs messages plus scored completions';
+  if (!valid) {
+    el.hidden = false; el.className = 'train-data-status is-bad';
+    el.innerHTML = `${icon('warning', 'icn-sm')} No usable ${K.noun}s in ${escapeHtml(label || 'that input')}. Each ${why}.`;
+    return;
+  }
+  const skipped = total - valid;
+  // Name the offending entries so nobody has to open the file and hunt.
+  let skipDetail = '';
+  if (skipped > 0 && Array.isArray(badIdx) && badIdx.length) {
+    const shown = badIdx.slice(0, 3).map(i => '#' + (i + 1)).join(', ');
+    skipDetail = ` · skipped ${escapeHtml(shown)}${badIdx.length > 3 ? ` +${badIdx.length - 3} more` : ''} (each ${why})`;
+  } else if (skipped > 0) {
+    skipDetail = ` · ${skipped} skipped (invalid)`;
+  }
+  el.hidden = false; el.className = 'train-data-status is-good';
+  el.innerHTML = `${icon('check', 'icn-sm')} <strong>${valid}</strong> ${K.noun}${valid === 1 ? '' : 's'} ready`
+    + (skipDetail ? `<span class="train-data-skip">${skipDetail}</span>` : '')
+    + ` <span class="train-data-src">from ${escapeHtml(label || 'input')}</span>`;
+}
+// Set the file/dataset source for a kind. Clears the textarea so there's one
+// source of truth, validates, previews, and re-checks submit readiness.
+function setTrainingData(kind, items, label) {
+  const K = TRAIN_KIND[kind];
+  const valid = [], badIdx = [];
+  (items || []).forEach((it, i) => { if (K.valid(it)) valid.push(it); else badIdx.push(i); });
+  trainingData[kind] = valid.length ? { items: valid, total: (items || []).length, label } : null;
+  const ta = document.getElementById(K.textareaId);
+  if (ta) ta.value = '';                       // file/dataset is now the source
+  renderTrainingDataStatus(kind, (items || []).length, valid.length, label, badIdx);
+  K.update();
+  return valid.length;
+}
+function clearTrainingData(kind) {
+  trainingData[kind] = null;
+  const el = document.getElementById(kind + '-data-status'); if (el) el.hidden = true;
+}
+async function loadTrainingFile(kind, file) {
+  if (!file) return;
+  const K = TRAIN_KIND[kind];
+  const previous = trainingData[kind];
+  try {
+    const items = parseTrainingText(await file.text());
+    const n = setTrainingData(kind, items, file.name);
+    if (n) maybeSuggestAdapterName(kind, file.name);
+  } catch (e) {
+    // A bad drop must never destroy data you already loaded — keep it and say so.
+    trainingData[kind] = previous;
+    const el = document.getElementById(kind + '-data-status');
+    if (el) {
+      el.hidden = false; el.className = 'train-data-status is-bad';
+      el.innerHTML = `${icon('warning', 'icn-sm')} ${escapeHtml(e.message)}`
+        + (previous ? ` <span class="train-data-src">— kept your previous data (${escapeHtml(previous.label || 'loaded input')})</span>` : '');
+    }
+    K.update();
+  }
+}
+function wireDropzone(kind) {
+  const zone = document.getElementById(kind + '-dropzone');
+  const file = document.getElementById(kind + '-file');
+  if (!zone || !file) return;
+  zone.addEventListener('click', () => file.click());
+  zone.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); file.click(); } });
+  file.addEventListener('change', () => { loadTrainingFile(kind, file.files[0]); file.value = ''; });
+  ['dragenter', 'dragover'].forEach(ev => zone.addEventListener(ev, e => { e.preventDefault(); zone.classList.add('is-drag'); }));
+  ['dragleave', 'dragend'].forEach(ev => zone.addEventListener(ev, e => { e.preventDefault(); zone.classList.remove('is-drag'); }));
+  zone.addEventListener('drop', e => { e.preventDefault(); zone.classList.remove('is-drag'); const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; if (f) loadTrainingFile(kind, f); });
+}
+// Secondary affordance toggles (pick a dataset / paste JSON) reveal their row.
+function wireTrainingAlts(kind) {
+  const pickRow = document.getElementById(kind + '-pick-row');
+  const pasteRow = document.getElementById(kind + '-paste-row');
+  document.getElementById(kind + '-pick-toggle')?.addEventListener('click', () => { if (pickRow) { pickRow.hidden = !pickRow.hidden; if (!pickRow.hidden) refreshDatasetPicker(kind); } });
+  document.getElementById(kind + '-paste-toggle')?.addEventListener('click', () => { if (pasteRow) { pasteRow.hidden = !pasteRow.hidden; if (!pasteRow.hidden) document.getElementById(TRAIN_KIND[kind].textareaId)?.focus(); } });
+}
+wireDropzone('sft'); wireDropzone('grpo');
+wireTrainingAlts('sft'); wireTrainingAlts('grpo');
+
+// Advanced hyperparameters live behind a toggle; a one-line summary narrates the
+// current values so collapsing never hides information.
+function wireAdvanced(kind, summarize) {
+  const btn = document.getElementById(kind + '-adv-toggle');
+  const body = document.getElementById(kind + '-advanced');
+  const summary = document.getElementById(kind + '-adv-summary');
+  if (!btn || !body) return;
+  btn.addEventListener('click', () => {
+    const open = body.hidden;
+    body.hidden = !open;
+    btn.setAttribute('aria-expanded', String(open));
+  });
+  const update = () => { if (summary) summary.textContent = summarize(); };
+  body.querySelectorAll('input').forEach(i => i.addEventListener('input', update));
+  update();
+}
+wireAdvanced('sft', () => {
+  const v = id => document.getElementById(id)?.value || '?';
+  const isDefault = v('sft-epochs') === '3' && v('sft-learning-rate') === '0.0002' && v('sft-rank') === '8';
+  if (typeof updateSftOverfitHint === 'function') updateSftOverfitHint();
+  return `${v('sft-epochs')} epochs · learning rate ${v('sft-learning-rate')} · LoRA rank ${v('sft-rank')}`
+    + (isDefault ? ' — sensible defaults, no tuning needed' : ' — customized');
+});
+wireAdvanced('grpo', () => {
+  const v = id => document.getElementById(id)?.value || '?';
+  const isDefault = v('grpo-kl-coeff') === '0.1' && v('grpo-learning-rate') === '0.00005' && v('grpo-rank') === '8';
+  return `KL ${v('grpo-kl-coeff')} · learning rate ${v('grpo-learning-rate')} · LoRA rank ${v('grpo-rank')}`
+    + (isDefault ? ' — sensible defaults, no tuning needed' : ' — customized');
+});
+
+// "Prove it after training" — wires the server's post_eval auto-hook: when
+// checked, the train request carries post_eval:{suite, include_baseline:true}
+// and Kiln grades the fresh adapter AND base the moment training completes.
+// The row only appears when eval suites actually exist (no dead control).
+async function refreshProveRows() {
+  let suites = [];
+  try { const d = await api('/v1/eval/suites'); suites = d.suites || []; } catch (_) { /* leave hidden */ }
+  for (const kind of ['sft', 'grpo']) {
+    const row = document.getElementById(kind + '-prove-row');
+    const sel = document.getElementById(kind + '-prove-suite');
+    const check = document.getElementById(kind + '-prove');
+    if (!row || !sel || !check) continue;
+    if (!suites.length) { row.hidden = true; continue; }
+    row.hidden = false;
+    const cur = sel.value;
+    sel.innerHTML = suites.map(s => `<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)}${s.num_examples ? ' · ' + s.num_examples + ' examples' : ''}</option>`).join('');
+    if (cur && suites.some(s => s.name === cur)) sel.value = cur;
+    sel.disabled = !check.checked;
+  }
+}
+document.getElementById('sft-prove')?.addEventListener('change', e => { const s = document.getElementById('sft-prove-suite'); if (s) s.disabled = !e.target.checked; });
+document.getElementById('grpo-prove')?.addEventListener('change', e => { const s = document.getElementById('grpo-prove-suite'); if (s) s.disabled = !e.target.checked; });
+function provePostEval(kind) {
+  const check = document.getElementById(kind + '-prove');
+  const sel = document.getElementById(kind + '-prove-suite');
+  if (!check || !check.checked || !sel || !sel.value) return null;
+  return { suite: sel.value, include_baseline: true };
+}
+
+// Dataset picker, per-form and format-correct (fixes the old SFT-only picker
+// that filtered the wrong format and was always empty). Loading sets
+// trainingData directly — never dumps rows into a textarea.
+async function refreshDatasetPicker(kind) {
+  const K = TRAIN_KIND[kind];
+  const sel = document.getElementById(K.pickId);
   if (!sel) return;
-  const sftTab = document.getElementById('tab-sft');
-  if (!sftTab || sftTab.hidden) return;
   try {
     const d = await api('/v1/eval/datasets');
-    const datasets = (d.datasets || []).filter(m => m.format === 'sft_chat');
+    const datasets = (d.datasets || []).filter(m => m.format === K.datasetFormat);
     const cur = sel.value;
-    sel.innerHTML = '<option value="">— or paste examples below —</option>'
+    sel.innerHTML = '<option value="">Select an uploaded dataset…</option>'
       + datasets.map(m => `<option value="${escapeHtml(m.name)}">${escapeHtml(m.name)} · ${m.num_rows} rows</option>`).join('');
     if (cur) sel.value = cur;
+    // An empty picker is a dead-end without directions — say where data comes from.
+    const empty = document.getElementById(kind + '-pick-empty');
+    if (empty) empty.hidden = datasets.length > 0;
+    sel.hidden = datasets.length === 0;
   } catch (_) { /* best-effort */ }
 }
-// Refresh when the SFT tab becomes visible (cheap event-driven trigger)
-// and also on a slow interval so a newly-uploaded dataset shows up
-// without the user clicking around.
-document.getElementById('training-tab-sft')?.addEventListener('click', refreshSftDatasetPicker);
-refreshSftDatasetPicker();
-setInterval(refreshSftDatasetPicker, 10000);
-
-document.getElementById('sft-dataset-load')?.addEventListener('click', async () => {
-  const sel = document.getElementById('sft-dataset-pick');
-  const name = sel.value;
-  if (!name) { toast('Pick a dataset first', 'err'); return; }
+async function loadNamedDatasetIntoTraining(kind, name) {
+  const K = TRAIN_KIND[kind];
+  // Reference the dataset BY NAME — the server trains on its own copy
+  // (/v1/train/* accepts `dataset`), so rows never round-trip through the
+  // browser and nothing is truncated. We only fetch the manifest for the count.
+  let count = null;
   try {
-    const rows = await api('/v1/eval/datasets/' + encodeURIComponent(name) + '/rows?limit=5000');
-    const ta = document.getElementById('sft-examples');
-    ta.value = JSON.stringify(rows, null, 2);
-    ta.dispatchEvent(new Event('input', { bubbles: true }));
-    toast(`Loaded ${rows.length} examples from ${name}`, 'ok');
-  } catch (e) { toast('Load failed: ' + e.message, 'err'); }
-});
+    const d = await api('/v1/eval/datasets');
+    const m = (d.datasets || []).find(x => x.name === name);
+    if (m) count = m.num_rows;
+  } catch (_) {}
+  trainingData[kind] = { datasetName: name, count, label: name };
+  const ta = document.getElementById(K.textareaId);
+  if (ta) ta.value = '';
+  const el = document.getElementById(kind + '-data-status');
+  if (el) {
+    el.hidden = false; el.className = 'train-data-status is-good';
+    el.innerHTML = `${icon('check', 'icn-sm')} <strong>${escapeHtml(name)}</strong>`
+      + (count != null ? ` · ${Number(count).toLocaleString()} ${K.noun}${count === 1 ? '' : 's'}` : '')
+      + ` <span class="train-data-src">trains on the server's copy — nothing to re-upload, no row limit</span>`;
+  }
+  K.update();
+  maybeSuggestAdapterName(kind, name);
+  return count == null ? 1 : count;
+}
+async function loadDatasetIntoTraining(kind) {
+  const sel = document.getElementById(TRAIN_KIND[kind].pickId);
+  const name = sel && sel.value;
+  if (!name) return; // placeholder option — nothing to load
+  try { await loadNamedDatasetIntoTraining(kind, name); }
+  catch (e) { toast('Load failed: ' + e.message, 'err'); }
+}
+// One-click bridge from anywhere a dataset is listed: jump to the right
+// training form with the dataset already loaded and the adapter pre-named —
+// the next action is just "Train adapter".
+async function trainFromDataset(name, kind) {
+  selectPage('training');
+  document.getElementById('training-tab-' + kind)?.click();
+  try {
+    const n = await loadNamedDatasetIntoTraining(kind, name);
+    if (n) toast(`${name} loaded — review the name, then Train adapter`, 'ok');
+  } catch (e) { toast('Could not load ' + name + ': ' + e.message, 'err'); }
+}
+// Selecting a dataset LOADS it immediately — no separate Load click, and no
+// way for the dropdown to show one dataset while another is actually held.
+document.getElementById('sft-dataset-pick')?.addEventListener('change', () => loadDatasetIntoTraining('sft'));
+document.getElementById('grpo-dataset-pick')?.addEventListener('change', () => loadDatasetIntoTraining('grpo'));
+document.querySelectorAll('[data-goto-datasets]').forEach(b => b.addEventListener('click', () => {
+  selectPage('evals');
+  document.getElementById('evals-tab-datasets')?.click();
+  setTimeout(() => document.getElementById('dataset-name')?.focus(), 120);
+}));
+document.getElementById('training-tab-sft')?.addEventListener('click', () => { refreshDatasetPicker('sft'); refreshProveRows(); });
+document.getElementById('training-tab-grpo')?.addEventListener('click', () => { refreshDatasetPicker('grpo'); refreshProveRows(); });
+refreshProveRows();
 
 function parseJsonArrayField(value, label) {
   const text = value.trim();
@@ -7382,17 +8141,28 @@ function trainingOutputNameReadinessState(formId, label) {
   return { ready: true, message: 'Ready to submit with this path-safe adapter name.' };
 }
 
-function trainingPayloadReadinessState(textareaId, label) {
+function trainingPayloadReadinessState(textareaId, label, dataKind) {
+  // A file (parsed items) or a server-side dataset reference held in
+  // trainingData[dataKind] makes the form ready; the status chip narrates it.
+  const held = (dataKind && typeof trainingData !== 'undefined') ? trainingData[dataKind] : null;
+  if (held && ((held.items && held.items.length) || held.datasetName)) {
+    // Mirror the visual status chip in this aria-live line so screen-reader
+    // users tracking it hear the readiness change too.
+    const what = held.datasetName
+      ? `Dataset ${held.label || held.datasetName} ready — trains on the server's copy.`
+      : `${held.items.length} item${held.items.length === 1 ? '' : 's'} ready from ${held.label || 'your file'}.`;
+    return { ready: true, message: what + ' Train adapter is enabled.' };
+  }
   const textarea = document.getElementById(textareaId);
   if (!textarea || !textarea.value.trim()) {
-    return { ready: false, message: `Paste ${label} JSON or use the sample payload to enable submit.` };
+    return { ready: false, message: `Drop a file, pick a dataset, paste ${label} JSON, or try a sample to enable training.` };
   }
-  return { ready: true, message: `${label} payload present. Submit will validate the JSON before queuing.` };
+  return { ready: true, message: `${label} pasted — Train will validate before queuing.` };
 }
 
 function updateTrainingSubmitState(options) {
   const outputState = trainingOutputNameReadinessState(options.formId, options.outputLabel);
-  const payloadState = trainingPayloadReadinessState(options.payloadId, options.payloadLabel);
+  const payloadState = trainingPayloadReadinessState(options.payloadId, options.payloadLabel, options.dataKind);
   const outputHelper = document.getElementById(options.outputStateId);
   const payloadHelper = document.getElementById(options.payloadStateId);
   if (outputHelper) outputHelper.textContent = outputState.message;
@@ -7405,7 +8175,24 @@ function updateTrainingSubmitState(options) {
   return { ready: outputState.ready && payloadState.ready, outputState, payloadState };
 }
 
+// Cross-check epochs against how much data is actually loaded — many passes
+// over a handful of examples just memorizes them. Advisory, never blocking.
+function updateSftOverfitHint() {
+  const hint = document.getElementById('sft-overfit-hint');
+  if (!hint) return;
+  const epochs = parseInt(document.getElementById('sft-epochs')?.value || '0', 10) || 0;
+  const held = trainingData.sft;
+  const n = held && held.items ? held.items.length : 0;
+  if (n > 0 && n < 20 && epochs > 10) {
+    hint.hidden = false;
+    hint.textContent = `${epochs} passes over only ${n} example${n === 1 ? '' : 's'} will likely memorize them — 3 is usually plenty.`;
+  } else {
+    hint.hidden = true;
+  }
+}
+
 function updateSftSubmitState() {
+  updateSftOverfitHint();
   return updateTrainingSubmitState({
     formId: 'sft-form',
     outputStateId: 'sft-output-name-state',
@@ -7413,6 +8200,7 @@ function updateSftSubmitState() {
     payloadId: 'sft-examples',
     payloadStateId: 'sft-examples-state',
     payloadLabel: 'examples',
+    dataKind: 'sft',
   });
 }
 
@@ -7424,6 +8212,7 @@ function updateGrpoSubmitState() {
     payloadId: 'grpo-groups',
     payloadStateId: 'grpo-groups-state',
     payloadLabel: 'groups',
+    dataKind: 'grpo',
   });
 }
 
@@ -7466,21 +8255,36 @@ document.getElementById('sft-form').addEventListener('submit', async (e) => {
   const form = e.target;
   try {
     const outputName = parsePathSafeAdapterNameField(form.output_name, updateSftOutputNameState);
-    const examples = parseJsonArrayField(form.examples.value, 'SFT examples');
-    validateSftExamples(examples);
     const learningRate = parseFiniteNumberField(form.learning_rate.value, 'SFT learning rate');
     const epochs = parsePositiveIntegerField(form.epochs.value, 'SFT epochs');
     const rank = parsePositiveIntegerField(form.rank.value, 'SFT LoRA rank');
-    const body = {
-      examples,
-      config: {
-        output_name: outputName,
-        auto_load: form.auto_load.checked,
-        learning_rate: learningRate,
-        epochs,
-        lora_rank: rank,
-      }
+    const config = {
+      output_name: outputName,
+      auto_load: form.auto_load.checked,
+      learning_rate: learningRate,
+      epochs,
+      lora_rank: rank,
     };
+    const held = trainingData.sft;
+    let body;
+    if (held && held.datasetName) {
+      // Server-side dataset reference: the server reads its own copy — no rows
+      // travel in the request and nothing is truncated.
+      body = { dataset: held.datasetName, config };
+    } else {
+      let examples;
+      if (held && held.items && held.items.length) {
+        examples = held.items;
+      } else {
+        // Paste path accepts a JSON array OR JSONL — exactly what the help says.
+        examples = parseTrainingText(form.examples.value);
+        if (!examples.length) throw new Error('SFT examples cannot be empty. Drop a file, pick a dataset, paste JSON, or try a sample.');
+      }
+      validateSftExamples(examples);
+      body = { examples, config };
+    }
+    const postEval = provePostEval('sft');
+    if (postEval) body.post_eval = postEval;
     setTrainingSubmitBusy(form, true, 'Submitting SFT…');
     const res = await api('/v1/train/sft', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
     toast(res.message || 'SFT job submitted');
@@ -7497,21 +8301,33 @@ document.getElementById('grpo-form').addEventListener('submit', async (e) => {
   const form = e.target;
   try {
     const outputName = parsePathSafeAdapterNameField(form.output_name, updateGrpoOutputNameState);
-    const groups = parseJsonArrayField(form.groups.value, 'GRPO groups');
-    validateGrpoGroups(groups);
     const learningRate = parseFiniteNumberField(form.learning_rate.value, 'GRPO learning rate');
     const klCoeff = parseFiniteNumberField(form.kl_coeff.value, 'GRPO KL coefficient');
     const rank = parsePositiveIntegerField(form.rank.value, 'GRPO LoRA rank');
-    const body = {
-      groups,
-      config: {
-        output_name: outputName,
-        auto_load: form.auto_load.checked,
-        learning_rate: learningRate,
-        kl_coeff: klCoeff,
-        lora_rank: rank,
-      }
+    const config = {
+      output_name: outputName,
+      auto_load: form.auto_load.checked,
+      learning_rate: learningRate,
+      kl_coeff: klCoeff,
+      lora_rank: rank,
     };
+    const held = trainingData.grpo;
+    let body;
+    if (held && held.datasetName) {
+      body = { dataset: held.datasetName, config };
+    } else {
+      let groups;
+      if (held && held.items && held.items.length) {
+        groups = held.items;
+      } else {
+        groups = parseTrainingText(form.groups.value);
+        if (!groups.length) throw new Error('GRPO groups cannot be empty. Drop a file, pick a dataset, paste JSON, or try a sample.');
+      }
+      validateGrpoGroups(groups);
+      body = { groups, config };
+    }
+    const postEval = provePostEval('grpo');
+    if (postEval) body.post_eval = postEval;
     setTrainingSubmitBusy(form, true, 'Submitting GRPO…');
     const res = await api('/v1/train/grpo', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
     toast(res.message || 'GRPO job submitted');
@@ -8119,9 +8935,18 @@ function renderChat() {
     el.innerHTML = `<div class="empty">
       <div style="font-weight:600;color:var(--text);margin-bottom:6px;">Send a message to test inference.</div>
       <div>Quick Inference sends a chat completion to the currently selected adapter, or the <strong>Base model</strong>, using the temperature above.</div>
-      <div style="margin-top:var(--space-2);">Try: <code>Explain Kiln in one sentence.</code></div>
+      <div style="margin-top:var(--space-3);"><button type="button" class="btn btn-sm btn-primary" data-chat-example="Explain Kiln in one sentence.">Try an example prompt</button></div>
+      <div style="margin-top:var(--space-3);color:var(--text-3);">Tip: toggle <strong>Compare</strong> (above) to race two adapters side-by-side on the same prompt — the fastest way to eyeball whether a freshly trained adapter actually answers better.</div>
       <div style="margin-top:var(--space-2);">If the server is still starting, check <a href="/health" target="_blank" rel="noopener noreferrer">/health</a> or the <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting guide</a>.</div>
     </div>`;
+    el.querySelector('[data-chat-example]')?.addEventListener('click', (ev) => {
+      const input = document.getElementById('chat-input');
+      if (!input) return;
+      input.value = ev.currentTarget.dataset.chatExample || '';
+      if (typeof autoresizeChatInput === 'function') autoresizeChatInput();
+      if (typeof updateChatSendState === 'function') updateChatSendState();
+      input.focus();
+    });
     updateCopyChatResponseState();
     return;
   }
@@ -8795,9 +9620,9 @@ document.getElementById('upload-name').addEventListener('input', handleUploadNam
 document.getElementById('upload-archive').addEventListener('change', handleUploadArchiveChange);
 updateUploadAdapterState();
 document.getElementById('sft-output-name').addEventListener('input', updateSftSubmitState);
-document.getElementById('sft-examples').addEventListener('input', updateSftSubmitState);
+document.getElementById('sft-examples').addEventListener('input', (e) => { if (e.target.value.trim()) clearTrainingData('sft'); updateSftSubmitState(); });
 document.getElementById('grpo-output-name').addEventListener('input', updateGrpoSubmitState);
-document.getElementById('grpo-groups').addEventListener('input', updateGrpoSubmitState);
+document.getElementById('grpo-groups').addEventListener('input', (e) => { if (e.target.value.trim()) clearTrainingData('grpo'); updateGrpoSubmitState(); });
 updateSftSubmitState();
 updateGrpoSubmitState();
 document.getElementById('merge-output-name').addEventListener('input', updateMergeButtonState);
@@ -8957,14 +9782,20 @@ async function refreshDatasets() {
         </div>
         <div class="row-sub" style="font-family:var(--font-mono);">${escapeHtml(pattern)}</div>
         <div class="row-actions">
-          <button type="button" class="btn primary btn-sm" data-action="synth" data-name="${escapeHtml(m.name)}">Synthesize →</button>
+          ${m.format === 'sft_chat' ? `<button type="button" class="btn primary btn-sm" data-action="train-sft" data-name="${escapeHtml(m.name)}" title="Open Training with this dataset loaded — one click from here to a queued job">Train SFT →</button>` : ''}
+          ${m.format === 'grpo_groups' ? `<button type="button" class="btn primary btn-sm" data-action="train-grpo" data-name="${escapeHtml(m.name)}" title="Open Training with this dataset loaded — one click from here to a queued job">Train GRPO →</button>` : ''}
+          <button type="button" class="btn ${m.format === 'raw' ? 'primary ' : ''}btn-sm" data-action="synth" data-name="${escapeHtml(m.name)}">Synthesize eval</button>
           <button type="button" class="btn btn-sm" data-action="del" data-name="${escapeHtml(m.name)}">Delete</button>
         </div>
       </div>`;
     }).join('');
     el.querySelectorAll('button[data-action]').forEach(b => {
       const name = b.dataset.name;
-      if (b.dataset.action === 'synth') {
+      if (b.dataset.action === 'train-sft') {
+        b.addEventListener('click', () => trainFromDataset(name, 'sft'));
+      } else if (b.dataset.action === 'train-grpo') {
+        b.addEventListener('click', () => trainFromDataset(name, 'grpo'));
+      } else if (b.dataset.action === 'synth') {
         b.addEventListener('click', () => openSynthPanel(name));
       } else if (b.dataset.action === 'del') {
         b.addEventListener('click', async () => {
@@ -9147,10 +9978,40 @@ document.getElementById('dataset-upload-form')?.addEventListener('submit', async
     toast(`Uploaded "${m.name}" (${m.num_rows.toLocaleString()} rows)`, 'ok');
     document.getElementById('dataset-upload-form').reset();
     refreshDatasets();
-    // Auto-open the synthesize panel — the whole flow is "upload, synth, run".
-    openSynthPanel(m.name);
+    // Next step depends on what they uploaded: training data should lead to
+    // TRAINING (one click), not get hijacked into the eval-synthesis flow.
+    if (format === 'sft_chat' || format === 'grpo_groups') {
+      const kind = format === 'sft_chat' ? 'sft' : 'grpo';
+      showDatasetUploadedNext(m.name, kind, m.num_rows);
+    } else {
+      openSynthPanel(m.name);
+    }
   } catch (e) { toast('Upload failed: ' + e.message, 'err'); }
 });
+
+// Inline "uploaded — what next?" strip on the Datasets tab. Primary action is
+// training (that's why most people upload SFT/GRPO data); synthesizing an eval
+// from the same rows is offered alongside.
+function showDatasetUploadedNext(name, kind, numRows) {
+  const old = document.getElementById('dataset-uploaded-next');
+  if (old) old.remove();
+  const form = document.getElementById('dataset-upload-form');
+  if (!form) return;
+  const strip = document.createElement('div');
+  strip.id = 'dataset-uploaded-next';
+  strip.className = 'corr-receipt';
+  strip.setAttribute('role', 'status');
+  strip.innerHTML = `
+    <span class="corr-receipt-icon">${icon('check', 'icn-sm')}</span>
+    <span class="corr-receipt-text"><strong>${escapeHtml(name)}</strong> uploaded (${Number(numRows || 0).toLocaleString()} rows). Train on it now, or build an eval from it.</span>
+    <button type="button" class="btn btn-sm btn-primary" id="dataset-next-train">Train on this dataset ${icon('arrow-right', 'icn-sm')}</button>
+    <button type="button" class="btn btn-sm" id="dataset-next-synth">Synthesize an eval</button>
+    <button type="button" class="btn btn-sm btn-ghost corr-receipt-dismiss" id="dataset-next-dismiss" aria-label="Dismiss">${icon('close', 'icn-sm')}</button>`;
+  form.insertAdjacentElement('afterend', strip);
+  document.getElementById('dataset-next-train')?.addEventListener('click', () => { strip.remove(); trainFromDataset(name, kind); });
+  document.getElementById('dataset-next-synth')?.addEventListener('click', () => { strip.remove(); openSynthPanel(name); });
+  document.getElementById('dataset-next-dismiss')?.addEventListener('click', () => strip.remove());
+}
 
 /* ---------- Suites ---------- */
 
@@ -9195,8 +10056,8 @@ async function refreshSuites() {
         <div class="tabular-nums">${s.num_examples.toLocaleString()} examples · <span class="scorer-badge">${escapeHtml(s.default_scorer_kind)}</span></div>
         <div style="display:flex; gap:6px; align-items:center;">${recentBadge} ${sparkline}</div>
         <div class="row-actions">
-          <button type="button" class="btn primary btn-sm" data-suite="${escapeHtml(s.name)}" data-action="run" title="Queue an eval against the active adapter">Run</button>
-          <button type="button" class="btn btn-sm" data-suite="${escapeHtml(s.name)}" data-action="compare" title="Compare base model vs active adapter">A/B</button>
+          <button type="button" class="btn primary btn-sm" data-suite="${escapeHtml(s.name)}" data-action="run" ${evalActiveAdapter ? `title="Score ${escapeHtml(evalActiveAdapter)} (the active adapter) on this suite"` : 'title="Score the base model on this suite"'}>Run</button>
+          <button type="button" class="btn btn-sm" data-suite="${escapeHtml(s.name)}" data-action="compare" ${evalActiveAdapter ? `title="Compare base vs ${escapeHtml(evalActiveAdapter)} (the active adapter) — to compare a different adapter, use Run eval… on its card under Adapters"` : 'disabled title="No adapter is active — load one on the Adapters page, or use Run eval… on any adapter card"'}>A/B${evalActiveAdapter ? '' : ''}</button>
           <button type="button" class="btn btn-sm" data-suite="${escapeHtml(s.name)}" data-action="preview" title="Show the first few examples without running">Preview</button>
           <button type="button" class="btn btn-sm" data-suite="${escapeHtml(s.name)}" data-action="del">Delete</button>
         </div>
@@ -9338,6 +10199,7 @@ async function refreshEvalJobs() {
     const d = await api('/v1/eval/jobs');
     const jobs = d.jobs || [];
     evalJobsCache = jobs;
+    detectEvalTransitions(jobs);
     // Adapter cards show each adapter's latest eval score — refresh them now that
     // eval results changed (the dedup key includes the completed-eval signature).
     if (typeof refreshAdapterCards === 'function') refreshAdapterCards();
@@ -9392,6 +10254,43 @@ async function refreshEvalJobs() {
 // The flywheel's headline answer: did the adapter beat base, and by how much?
 // Reads the per-run accuracies (base run keyed by adapter==null) and renders the
 // existing-but-unused .delta-badge so the verdict isn't left as mental math.
+// Eval completions are announced with the VERDICT attached — the number the
+// user queued the job to learn, delivered instead of buried in the Jobs tab.
+let prevEvalStates = null;
+function detectEvalTransitions(jobs) {
+  const now = new Map();
+  (jobs || []).forEach(j => now.set(j.job_id, (j.state || '').toString().toLowerCase()));
+  if (prevEvalStates) {
+    for (const [id, state] of now) {
+      const prev = prevEvalStates.get(id);
+      if (!prev || prev === state || (prev !== 'running' && prev !== 'queued')) continue;
+      const j = (jobs || []).find(x => x.job_id === id) || {};
+      const suite = j.suite_name || 'eval';
+      if (state === 'completed') {
+        let verdict = '';
+        const runs = j.finished_runs || [];
+        const base = runs.find(r => r.adapter == null || r.adapter === 'base');
+        const cand = runs.filter(r => r.adapter != null && r.adapter !== 'base' && typeof r.metrics?.accuracy === 'number');
+        if (base && typeof base.metrics?.accuracy === 'number' && cand.length) {
+          const best = cand.reduce((a, b) => (b.metrics.accuracy > a.metrics.accuracy ? b : a));
+          const delta = Math.round((best.metrics.accuracy - base.metrics.accuracy) * 1000) / 10;
+          verdict = Math.abs(delta) <= 0.5 ? ` Verdict: matches base.` : ` Verdict: ${delta > 0 ? '+' : ''}${delta.toFixed(1)} pts vs base.`;
+        } else if (typeof j.headline_accuracy === 'number') {
+          verdict = ` Accuracy: ${(j.headline_accuracy * 100).toFixed(0)}%.`;
+        }
+        actionToast(`Eval ${suite} finished.${verdict}`, 'ok', [
+          { label: 'View result', onClick: () => { selectPage('evals'); document.getElementById('evals-tab-jobs')?.click(); setTimeout(() => openDrillModal(id), 250); } },
+        ]);
+      } else if (state === 'failed') {
+        actionToast(`Eval ${suite} failed${j.error ? ': ' + String(j.error).slice(0, 80) : ''}.`, 'err', [
+          { label: 'View job', onClick: () => { selectPage('evals'); document.getElementById('evals-tab-jobs')?.click(); } },
+        ]);
+      }
+    }
+  }
+  prevEvalStates = now;
+}
+
 function compareVerdictBadge(runs) {
   if (!Array.isArray(runs) || runs.length < 2) return '';
   const base = runs.find(r => r.adapter == null || r.adapter === 'base');
@@ -10604,7 +11503,7 @@ function toggleShortcutsSheet() {
   m.setAttribute('role', 'dialog');
   m.setAttribute('aria-modal', 'true');
   m.setAttribute('aria-label', 'Keyboard shortcuts');
-  m.innerHTML = `<div class="modal-shell shortcuts-shell">
+  m.innerHTML = `<div class="modal-shell modal-shell-fit shortcuts-shell">
     <div class="modal-head"><h2>Keyboard shortcuts</h2><span style="flex:1 1 auto;"></span>
       <button class="modal-close" id="shortcuts-close" aria-label="Close"><svg class="icn" aria-hidden="true"><use href="#i-close"></use></svg></button></div>
     <div class="shortcuts-body">${body}</div>
@@ -10936,9 +11835,16 @@ function renderAdaptersAsCards(data) {
     panel.innerHTML = `<div class="eval-empty empty">
       <div class="eval-empty-icon"><svg class="icn"><use href="#i-layers"></use></svg></div>
       <div class="eval-empty-title">No adapters found yet.</div>
-      <div class="eval-empty-body">Train one via the Training tab, or upload a PEFT-compatible <code>.tar.gz</code> archive below. New here? Read the <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener">Quickstart</a> or the <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener">Troubleshooting</a> guide.</div>
-      <button class="eval-empty-cta" type="button" data-focus-id="upload-name">Upload an adapter</button>
+      <div class="eval-empty-body">An adapter is a small LoRA layer that personalizes the base model. Train your first from a JSONL of examples — drop the file on the Training page and you're one click away. New here? Read the <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener">Quickstart</a> or the <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener">Troubleshooting</a> guide.</div>
+      <div style="display:flex; gap: var(--space-2); justify-content:center;">
+        <button class="eval-empty-cta" type="button" data-train-first>Train your first adapter</button>
+        <button class="btn btn-sm" type="button" data-focus-id="upload-name" style="align-self:center;">Or upload one</button>
+      </div>
     </div>`;
+    panel.querySelector('[data-train-first]')?.addEventListener('click', () => {
+      selectPage('training');
+      document.getElementById('training-tab-sft')?.click();
+    });
     panel.querySelector('[data-focus-id]')?.addEventListener('click', ev => {
       const id = ev.currentTarget.getAttribute('data-focus-id');
       if (id) document.getElementById(id)?.focus();
@@ -10949,7 +11855,9 @@ function renderAdaptersAsCards(data) {
     panel.innerHTML = `<div class="eval-empty"><div class="eval-empty-body">No adapters match <code>${escapeHtml(q)}</code>.</div></div>`;
     return;
   }
-  const cards = filtered.map(a => {
+  // Active card first — the one serving pi is the one you came to check.
+  const ordered = [...filtered].sort((a, b) => (b.name === active) - (a.name === active));
+  const cards = ordered.map(a => {
     const isActive = a.name === active;
     return `<div class="adapter-card adapter-item ${isActive ? 'adapter-card-active' : ''}" data-adapter-name="${escapeHtml(a.name)}">
       ${isActive ? '<span class="adapter-card-active-pill">active</span>' : ''}
@@ -10963,9 +11871,9 @@ function renderAdaptersAsCards(data) {
       </div>
       <div class="adapter-card-actions">
         ${isActive
-          ? `<button class="btn btn-sm" type="button" data-adapter-action="unload">Unload</button>`
-          : `<button class="btn btn-sm primary" type="button" data-adapter-action="load">Load</button>`}
-        <button class="btn btn-sm" type="button" data-adapter-action="eval">Run eval…</button>
+          ? `<button class="btn btn-sm" type="button" data-adapter-action="unload" title="Stop serving this adapter — requests fall back to the base model">Unload (use base)</button>`
+          : `<button class="btn btn-sm primary" type="button" data-adapter-action="load" title="Hot-swap this adapter in — pi's next request uses it, no restart">Make active</button>`}
+        <button class="btn btn-sm" type="button" data-adapter-action="eval" title="Grade this adapter on an eval suite — compare it against base">Run eval…</button>
         <button class="btn btn-sm" type="button" data-adapter-action="download">Download</button>
         <button class="btn btn-sm" type="button" data-adapter-action="delete" title="Delete this adapter from disk" style="margin-left:auto;">Delete</button>
       </div>
@@ -10987,13 +11895,18 @@ function renderAdaptersAsCards(data) {
         const action = b.dataset.adapterAction;
         try {
           if (action === 'load') {
+            b.disabled = true; b.textContent = 'Swapping…';
             await api('/v1/adapters/load', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name }) });
-            toast('Loaded adapter: ' + name, 'ok');
+            toast(name + ' is now serving — pi\'s next request uses it', 'ok');
+            // Refresh BOTH sources of "active" so cards, hero, and flywheel agree.
             pollAdapters && pollAdapters();
+            pollHealth && pollHealth();
           } else if (action === 'unload') {
+            b.disabled = true; b.textContent = 'Unloading…';
             await api('/v1/adapters/unload', { method: 'POST' });
-            toast('Unloaded adapter', 'ok');
+            toast('Adapter unloaded — requests now use the base model', 'ok');
             pollAdapters && pollAdapters();
+            pollHealth && pollHealth();
           } else if (action === 'download') {
             window.location.href = '/v1/adapters/' + encodeURIComponent(name) + '/download';
           } else if (action === 'delete') {
@@ -11002,12 +11915,15 @@ function renderAdaptersAsCards(data) {
             toast('Deleted adapter: ' + name, 'ok');
             pollAdapters && pollAdapters();
           } else if (action === 'eval') {
-            // Open command palette pre-filtered for "Run X vs name"
-            selectPage('evals');
-            document.getElementById('evals-tab-suites')?.click();
-            toast('Pick a suite to run against ' + name, 'ok');
+            // Prove THIS adapter: suite picker + compare-vs-base, scoped to it.
+            openAdapterEvalModal(name);
           }
-        } catch (e) { toast(action + ' failed: ' + e.message, 'err'); }
+        } catch (e) {
+          toast(action + ' failed: ' + e.message, 'err');
+          // Repaint so an in-flight "Swapping…" button never sticks around.
+          lastAdaptersKey = null;
+          refreshAdapterCards && refreshAdapterCards();
+        }
       });
     });
   });
@@ -11198,12 +12114,76 @@ document.getElementById('adapter-drill-load')?.addEventListener('click', async (
     pollAdapters && pollAdapters();
   } catch (e) { toast(e.message, 'err'); }
 });
+/* Prove-an-adapter modal — scoped to the adapter the user actually clicked.
+   Fixes the old dead-end where "Run eval…" dropped the adapter name and just
+   navigated to the suites list. */
+let adapterEvalName = null;
+async function openAdapterEvalModal(name) {
+  adapterEvalName = name;
+  const modal = document.getElementById('adapter-eval-modal');
+  if (!modal) return;
+  setText('adapter-eval-name', name);
+  const sel = document.getElementById('adapter-eval-suite');
+  const help = document.getElementById('adapter-eval-suite-help');
+  const go = document.getElementById('adapter-eval-compare');
+  const solo = document.getElementById('adapter-eval-solo');
+  let suites = [];
+  try { const d = await api('/v1/eval/suites'); suites = d.suites || []; } catch (_) {}
+  if (sel) {
+    sel.innerHTML = suites.map(s => `<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)}${s.num_examples ? ' · ' + s.num_examples + ' examples' : ''}</option>`).join('');
+    sel.disabled = !suites.length;
+  }
+  if (help) help.hidden = suites.length > 0;
+  if (go) go.disabled = !suites.length;
+  if (solo) solo.disabled = !suites.length;
+  modal.hidden = false;
+  document.body.style.overflow = 'hidden';
+  if (sel && suites.length) sel.focus();
+}
+function closeAdapterEvalModal() {
+  const modal = document.getElementById('adapter-eval-modal');
+  if (modal) modal.hidden = true;
+  document.body.style.overflow = '';
+}
+async function submitAdapterEval(compare) {
+  const suite = document.getElementById('adapter-eval-suite')?.value;
+  const name = adapterEvalName;
+  if (!suite || name == null) return;
+  const btn = document.getElementById(compare ? 'adapter-eval-compare' : 'adapter-eval-solo');
+  if (btn) btn.disabled = true;
+  try {
+    const res = compare
+      ? await api('/v1/eval/compare', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ suite, adapters: ['', name] }) })
+      : await api('/v1/eval/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ suite, adapter: name }) });
+    closeAdapterEvalModal();
+    selectPage('evals');
+    document.getElementById('evals-tab-jobs')?.click();
+    if (typeof refreshEvalJobs === 'function') refreshEvalJobs();
+    toast(compare
+      ? `Comparing ${name} vs base on ${suite} — the verdict shows here when it finishes`
+      : `Scoring ${name} on ${suite} — results show here when it finishes`, 'ok');
+  } catch (e) { toast('Could not queue eval: ' + e.message, 'err'); }
+  finally { if (btn) btn.disabled = false; }
+}
+document.getElementById('adapter-eval-goto-datasets')?.addEventListener('click', () => {
+  closeAdapterEvalModal();
+  selectPage('evals');
+  document.getElementById('evals-tab-datasets')?.click();
+  setTimeout(() => document.getElementById('dataset-name')?.focus(), 120);
+});
+document.getElementById('adapter-eval-close')?.addEventListener('click', closeAdapterEvalModal);
+document.getElementById('adapter-eval-modal')?.addEventListener('click', ev => { if (ev.target.id === 'adapter-eval-modal') closeAdapterEvalModal(); });
+document.getElementById('adapter-eval-compare')?.addEventListener('click', () => submitAdapterEval(true));
+document.getElementById('adapter-eval-solo')?.addEventListener('click', () => submitAdapterEval(false));
+document.addEventListener('keydown', ev => {
+  if (ev.key === 'Escape') { const m = document.getElementById('adapter-eval-modal'); if (m && !m.hidden) closeAdapterEvalModal(); }
+});
+
 document.getElementById('adapter-drill-eval')?.addEventListener('click', () => {
+  const name = adapterDrillName;
   document.getElementById('adapter-drill-modal').hidden = true;
   document.body.style.overflow = '';
-  selectPage('evals');
-  document.getElementById('evals-tab-suites')?.click();
-  toast('Pick a suite to run', 'ok');
+  if (name) openAdapterEvalModal(name);
 });
 
 /* =====================================================================
@@ -11746,6 +12726,200 @@ document.getElementById('chat-save-judgment')?.addEventListener('click', () => {
     } catch (e) { toast('Save failed: ' + e.message, 'err'); }
   });
 });
+
+/* =====================================================================
+   pi Terminal — embedded, pre-configured pi over a PTY WebSocket.
+   The server runs the `kiln pi-setup` merge before spawning, so this pi
+   is the user's pi, already pointed at this Kiln. xterm.js renders; its
+   assets are vendored into the binary and lazy-loaded on first launch.
+   ===================================================================== */
+let termInstance = null;   // xterm Terminal
+let termSocket = null;     // WebSocket
+let termFit = null;        // FitAddon
+let termAssetsLoaded = false;
+
+function termStateEl() { return document.getElementById('terminal-state'); }
+
+async function loadTerminalAssets() {
+  if (termAssetsLoaded) return true;
+  try {
+    await new Promise((resolve, reject) => {
+      const link = document.createElement('link');
+      link.rel = 'stylesheet'; link.href = '/ui/vendor/xterm.css';
+      link.onload = resolve; link.onerror = reject;
+      document.head.appendChild(link);
+    });
+    const loadScript = src => new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = src; s.onload = resolve; s.onerror = reject;
+      document.head.appendChild(s);
+    });
+    await loadScript('/ui/vendor/xterm.js');
+    await loadScript('/ui/vendor/xterm-addon-fit.js');
+    termAssetsLoaded = !!window.Terminal;
+    return termAssetsLoaded;
+  } catch (_) { return false; }
+}
+
+async function initTerminalPage() {
+  const state = termStateEl();
+  if (!state) return;
+  if (termSocket && termSocket.readyState === WebSocket.OPEN) return; // session live
+  state.innerHTML = '<div class="empty">Checking terminal availability…</div>';
+  let st = null;
+  try { st = await api('/v1/terminal/status'); } catch (e) {
+    state.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  setText('terminal-cwd', st.cwd ? ('runs in ' + st.cwd) : '');
+  if (!st.enabled) {
+    state.innerHTML = `<div class="eval-empty">
+      <div class="eval-empty-icon"><svg class="icn"><use href="#i-terminal"></use></svg></div>
+      <div class="eval-empty-title">Terminal disabled</div>
+      <div class="eval-empty-body">${escapeHtml(st.disabled_reason || 'Not available on this server.')}</div>
+    </div>`;
+    return;
+  }
+  if (!st.pi_available) {
+    state.innerHTML = `<div class="eval-empty">
+      <div class="eval-empty-icon"><svg class="icn"><use href="#i-terminal"></use></svg></div>
+      <div class="eval-empty-title">pi isn't installed on the server</div>
+      <div class="eval-empty-body">Install the <strong>pi</strong> coding agent on the machine running <code>kiln serve</code>, then come back — Kiln configures it automatically. See the <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener">Quickstart</a> for the pi setup walkthrough.</div>
+    </div>`;
+    return;
+  }
+  state.innerHTML = `<div class="eval-empty">
+    <div class="eval-empty-icon"><svg class="icn"><use href="#i-terminal"></use></svg></div>
+    <div class="eval-empty-title">Launch pi in your browser</div>
+    <div class="eval-empty-body">Kiln merges its connection into pi's config (the same non-destructive merge as <code>kiln pi-setup</code> — your other providers are kept), then starts a real <code>pi</code> session in <code>${escapeHtml(st.cwd || '.')}</code>. Everything it does flows through this Kiln — watch it land on the Overview.</div>
+    <button class="eval-empty-cta" type="button" id="terminal-launch">Launch pi</button>
+  </div>`;
+  document.getElementById('terminal-launch')?.addEventListener('click', launchTerminal);
+}
+
+async function launchTerminal() {
+  const state = termStateEl();
+  const host = document.getElementById('terminal-host');
+  if (!state || !host) return;
+  state.innerHTML = '<div class="empty">Loading terminal…</div>';
+  if (!(await loadTerminalAssets())) {
+    state.innerHTML = '<div class="empty">Could not load the terminal renderer (xterm). Is the server up to date?</div>';
+    return;
+  }
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const sock = new WebSocket(`${proto}//${window.location.host}/v1/terminal/ws`);
+  sock.binaryType = 'arraybuffer';
+  termSocket = sock;
+
+  sock.onopen = () => {
+    state.hidden = true;
+    host.hidden = false;
+    if (!termInstance) {
+      termInstance = new window.Terminal({
+        fontFamily: "'SF Mono', 'JetBrains Mono', 'Cascadia Code', Consolas, monospace",
+        fontSize: 13,
+        cursorBlink: true,
+        theme: {
+          background: '#0a0908', foreground: '#f7f4ef',
+          cursor: '#f97316', cursorAccent: '#0a0908',
+          selectionBackground: 'rgba(249,115,22,0.30)',
+        },
+      });
+      termFit = new window.FitAddon.FitAddon();
+      termInstance.loadAddon(termFit);
+      termInstance.open(host);
+      termInstance.onData(data => {
+        if (termSocket && termSocket.readyState === WebSocket.OPEN) {
+          termSocket.send(new TextEncoder().encode(data));
+        }
+      });
+      new ResizeObserver(() => {
+        if (!termFit) return;
+        try { termFit.fit(); } catch (_) {}
+        if (termSocket && termSocket.readyState === WebSocket.OPEN && termInstance) {
+          termSocket.send(JSON.stringify({ type: 'resize', cols: termInstance.cols, rows: termInstance.rows }));
+        }
+      }).observe(host);
+    } else {
+      termInstance.reset();
+    }
+    setTimeout(() => {
+      try { termFit.fit(); } catch (_) {}
+      if (termInstance) sock.send(JSON.stringify({ type: 'resize', cols: termInstance.cols, rows: termInstance.rows }));
+      termInstance.focus();
+    }, 60);
+    const restart = document.getElementById('terminal-restart');
+    if (restart) restart.hidden = false;
+  };
+  sock.onmessage = ev => {
+    if (typeof ev.data === 'string') {
+      try {
+        const m = JSON.parse(ev.data);
+        if (m.type === 'ready') {
+          setText('terminal-cwd', 'runs in ' + (m.cwd || '.'));
+          toast('pi is live — configured for ' + (m.kiln_url || 'this Kiln'), 'ok');
+        } else if (m.type === 'exit') {
+          if (termInstance) termInstance.write('\r\n\x1b[90m— pi exited. Restart session to relaunch. —\x1b[0m\r\n');
+        } else if (m.type === 'error') {
+          if (termInstance) termInstance.write(`\r\n\x1b[31m${m.message || 'terminal error'}\x1b[0m\r\n`);
+          else { const s = termStateEl(); if (s) { s.hidden = false; s.innerHTML = `<div class="empty">${escapeHtml(m.message || 'terminal error')}</div>`; } }
+        }
+      } catch (_) {}
+      return;
+    }
+    if (termInstance) termInstance.write(new Uint8Array(ev.data));
+  };
+  sock.onclose = () => {
+    if (termInstance) termInstance.write('\r\n\x1b[90m— session closed —\x1b[0m\r\n');
+    termSocket = null;
+  };
+  sock.onerror = () => {
+    const s = termStateEl();
+    if (s && host.hidden) { s.innerHTML = '<div class="empty">Could not open the terminal socket.</div>'; }
+  };
+}
+
+document.getElementById('terminal-restart')?.addEventListener('click', () => {
+  if (termSocket) { try { termSocket.close(); } catch (_) {} termSocket = null; }
+  launchTerminal();
+});
+
+// Surface "try pi right here" on the Connect panel + journey step when the
+// embedded terminal is actually usable on this server (live, gated-on, pi
+// installed). One status fetch at boot; quiet no-op otherwise.
+async function revealTerminalShortcuts() {
+  try {
+    const st = await api('/v1/terminal/status');
+    if (!st || !st.enabled || !st.pi_available) return;
+    const btn = document.getElementById('connect-try-pi');
+    if (btn) {
+      btn.hidden = false;
+      btn.addEventListener('click', () => selectPage('terminal'));
+    }
+    const agentStep = document.querySelector('.journey-step[data-journey="agent"]');
+    if (agentStep) {
+      agentStep.title = 'Checks itself when a request from pi, opencode, or an OpenAI SDK arrives. Click to try pi right here in the browser — already configured.';
+      agentStep.dataset.terminalReady = '1';
+    }
+  } catch (_) { /* static demo / unreachable: leave hidden */ }
+}
+revealTerminalShortcuts();
+
+// Distill "use a Recipe" hint — shown until dismissed (or used).
+(function initDistillRecipesHint() {
+  const hint = document.getElementById('distill-recipes-hint');
+  if (!hint) return;
+  let dismissed = false;
+  try { dismissed = localStorage.getItem('kiln.distill.recipes.hint') === '1'; } catch {}
+  hint.hidden = dismissed;
+  document.getElementById('distill-recipes-go')?.addEventListener('click', () => {
+    document.getElementById('distill-tab-recipes')?.click();
+  });
+  document.getElementById('distill-recipes-dismiss')?.addEventListener('click', () => {
+    try { localStorage.setItem('kiln.distill.recipes.hint', '1'); } catch {}
+    hint.hidden = true;
+  });
+})();
 
 // --- Init ---
 renderChat();

@@ -203,7 +203,7 @@ struct QueueStatusEntry {
 
 async fn submit_sft(
     State(state): State<AppState>,
-    Json(req): Json<SftRequest>,
+    Json(mut req): Json<SftRequest>,
 ) -> Result<Json<TrainingResponse>, ApiError> {
     // Reject new jobs during shutdown
     if state.shutdown.load(Ordering::Relaxed) {
@@ -228,6 +228,45 @@ async fn submit_sft(
     let tracked_now = state.training_jobs.read().unwrap().len();
     if tracked_now >= max_tracked {
         return Err(ApiError::training_tracked_full(max_tracked));
+    }
+
+    // Train-by-dataset-name: resolve an uploaded dataset (the eval dataset
+    // store) into inline examples server-side. The UI/CLI sends just the name,
+    // so rows never round-trip through the client and the whole dataset trains
+    // (the rows preview endpoint clamps at 5000 — this path has no such cap).
+    if let Some(dataset_name) = req.dataset.take() {
+        if !req.examples.is_empty() {
+            return Err(ApiError::training_invalid_request(
+                "SFT request must use either examples or dataset, not both",
+            ));
+        }
+        let registry = state
+            .dataset_registry
+            .as_ref()
+            .ok_or_else(ApiError::dataset_registry_unavailable)?;
+        let iter = registry.iter_sft(&dataset_name).map_err(|e| match e {
+            crate::eval::DatasetError::NotFound(_) => ApiError::dataset_not_found(&dataset_name),
+            crate::eval::DatasetError::InvalidName(_) => ApiError::dataset_invalid(&dataset_name),
+            other => ApiError::dataset_invalid(format!("{other}")),
+        })?;
+        req.examples = iter
+            .map(|conv| kiln_train::SftExample {
+                messages: conv
+                    .messages
+                    .into_iter()
+                    .map(|m| kiln_train::ChatMessage {
+                        role: m.role,
+                        content: m.content,
+                    })
+                    .collect(),
+            })
+            .filter(|ex| !ex.messages.is_empty())
+            .collect();
+        if req.examples.is_empty() {
+            return Err(ApiError::training_invalid_request(format!(
+                "dataset '{dataset_name}' contains no usable SFT examples",
+            )));
+        }
     }
 
     let num_examples = req.examples.len();
@@ -330,6 +369,30 @@ async fn submit_grpo(
     // Reject new jobs during shutdown
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
+    }
+
+    // Train-by-dataset-name: resolve an uploaded dataset (the eval dataset
+    // store) to its on-disk JSONL and ride the existing dataset_path
+    // streaming path. Callers send just the name — no rows round-trip.
+    if let Some(dataset_name) = req.dataset.take() {
+        if !req.groups.is_empty() || req.dataset_path.is_some() {
+            return Err(ApiError::training_invalid_request(
+                "GRPO request must use exactly one of groups, dataset_path, or dataset",
+            ));
+        }
+        let registry = state
+            .dataset_registry
+            .as_ref()
+            .ok_or_else(ApiError::dataset_registry_unavailable)?;
+        let dir = registry.dataset_dir(&dataset_name).map_err(|e| match e {
+            crate::eval::DatasetError::InvalidName(_) => ApiError::dataset_invalid(&dataset_name),
+            other => ApiError::dataset_invalid(format!("{other}")),
+        })?;
+        let path = dir.join("data.jsonl");
+        if !path.is_file() {
+            return Err(ApiError::dataset_not_found(&dataset_name));
+        }
+        req.dataset_path = Some(path.to_string_lossy().into_owned());
     }
 
     // Reject when the queue is at its configured cap. See submit_sft above
@@ -1212,6 +1275,7 @@ mod tests {
 
     fn grpo_req(dataset_path: Option<&str>, groups: Vec<GrpoGroup>) -> GrpoRequest {
         GrpoRequest {
+            dataset: None,
             groups,
             dataset_path: dataset_path.map(str::to_string),
             config: GrpoConfig::default(),

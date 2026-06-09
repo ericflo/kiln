@@ -2335,6 +2335,35 @@ fn print_job_line(job: &serde_json::Value) {
 const PI_PROVIDER_ID: &str = "kiln-local";
 const PI_MODEL_ID: &str = "Qwen3.5-4B";
 
+/// Quiet variant of `run_pi_setup` for in-process callers (the embedded
+/// dashboard terminal): performs the same non-destructive merge into pi's
+/// default config location, but logs instead of printing, and returns the
+/// models.json path it wrote.
+pub fn apply_pi_setup_quiet(url: &str) -> anyhow::Result<PathBuf> {
+    let path: PathBuf = match std::env::var("HOME") {
+        Ok(h) => PathBuf::from(h)
+            .join(".pi")
+            .join("agent")
+            .join("models.json"),
+        Err(_) => PathBuf::from("/tmp/pi-agent-models.json"),
+    };
+    let settings_path = pi_settings_path_for_models_path(&path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    backup_existing_file(&path)?;
+    backup_existing_file(&settings_path)?;
+    let models = merge_pi_models_config(read_json_file_if_exists(&path)?, url)?;
+    let settings = merge_pi_settings_config(read_json_file_if_exists(&settings_path)?)?;
+    write_json_pretty(&path, &models)?;
+    write_json_pretty(&settings_path, &settings)?;
+    tracing::info!(models = %path.display(), settings = %settings_path.display(), url = %url, "pi config merged for embedded terminal");
+    Ok(path)
+}
+
 /// §10.14 `kiln pi-setup` — merge kiln into pi's models/settings config.
 pub async fn run_pi_setup(url: &str, out: Option<&str>) -> anyhow::Result<()> {
     let default_out: PathBuf = match std::env::var("HOME") {
