@@ -16,7 +16,8 @@ use crate::{
     kiln_fused_l2_qk_norm_gqa, kiln_fused_mlp_silu_mul_bf16, kiln_fused_mlp_silu_mul_packed_bf16,
     kiln_fused_rmsnorm, kiln_fused_rmsnorm_bwd, kiln_fused_rotary_one, kiln_fused_rotary_one_bwd,
     kiln_fused_rotary_qk, kiln_fused_sigmoid_mul_bf16, kiln_lora_add_inplace_f32,
-    kiln_lora_decode_add_bf16, kiln_lora_decode_hidden_bf16, kiln_sgd_step_bf16, kiln_sgd_step_f32,
+    kiln_lora_decode_add_bf16, kiln_lora_decode_hidden_bf16, kiln_muon_step_bf16,
+    kiln_muon_step_f32, kiln_sgd_step_bf16, kiln_sgd_step_f32,
     kiln_silu_inplace_save_sigmoid_f32,
 };
 
