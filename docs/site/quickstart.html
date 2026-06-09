@@ -330,7 +330,7 @@
         <div class="install-card">
           <h3 class="font-semibold mb-2">Desktop App &middot; recommended</h3>
           <p class="mb-3" style="color: var(--fg-dim);">
-            Download <a href="https://github.com/ericflo/kiln/releases/latest">the latest Kiln Desktop build</a>, then choose or download the Qwen3.5-4B model in the app and start the server from the GUI.
+            Download <a href="https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.16">Kiln Desktop v0.2.16</a>, then choose or download the Qwen3.5-4B model in the app and start the server from the GUI.
           </p>
           <table class="installer-table mb-3" aria-label="Kiln Desktop installer downloads">
             <thead>
@@ -416,7 +416,7 @@ huggingface-cli download Qwen/Qwen3.5-4B --local-dir ./Qwen3.5-4B
 export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
         </div>
         <div class="card p-6">
-          <h3 class="font-semibold mb-2">b. Run <code>kiln serve</code></h3>
+          <h3 class="font-semibold mb-2">b. Run the server with <code>kiln serve</code></h3>
           <p class="mb-4" style="color: var(--fg-dim);">Server binaries bind to <code>127.0.0.1:8420</code> by default. No API key required.</p>
 <pre class="text-sm"><code>KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve</code></pre>
           <h3 class="font-semibold mt-6 mb-2">Docker (Linux + NVIDIA Container Toolkit)</h3>
@@ -476,7 +476,7 @@ export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
         <div class="card p-6">
           <h3 class="font-semibold mb-1 text-lg">pi</h3>
           <p class="mb-3" style="color: var(--fg-dim);">
-            <code>kiln pi-setup</code> adds Kiln as pi's <code>kiln-local</code> provider and sets <code>Qwen3.5-4B</code> as the default model. It backs up existing <code>models.json</code> and <code>settings.json</code>, then merges the Kiln entries while preserving your other providers.
+            Configure pi in one command: <code>kiln pi-setup</code> adds Kiln as pi's <code>kiln-local</code> provider and sets <code>Qwen3.5-4B</code> as the default model. It backs up existing <code>models.json</code> and <code>settings.json</code>, then merges the Kiln entries while preserving your other providers.
           </p>
 <pre class="text-sm"><code>kiln pi-setup
 pi -p "Use the bash tool to run: pwd"
@@ -597,6 +597,7 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
           Upload an SFT or GRPO JSONL to <code>POST /v1/eval/datasets/upload</code> and synthesize a graded suite from it in one call &mdash; no separate eval-set authoring needed. Then <code>POST /v1/eval/run</code> grades any adapter, <code>/v1/eval/compare</code> runs the suite head-to-head against another adapter, and any training request can carry <code>post_eval: { suite, include_baseline: true }</code> to auto-grade itself the moment it finishes. The whole loop runs locally; the optional LLM judge is itself a LoRA you train from A/B preferences in <code>/ui</code>. See the <a href="evals.html">Evals guide</a> for the full walkthrough.
         </p>
       </div>
+      <h2 class="text-2xl font-semibold tracking-tight mb-4">Where to go next</h2>
       <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <a class="card p-5 block" href="api.html#training">
           <h3 id="sft-corrections" class="font-semibold mb-2">SFT corrections</h3>
@@ -661,7 +662,7 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
             <span class="fw-sub">suites &amp; A/B</span>
           </a>
           <span class="flywheel-arrow" aria-hidden="true"><svg class="icn"><use href="#i-arrow-right"></use></svg></span>
-          <a class="flywheel-node" href="api.html#adapters">
+          <a class="flywheel-node" href="api.html#lora-lifecycle">
             <span class="fw-eyebrow"><svg class="icn" aria-hidden="true"><use href="#i-merge"></use></svg> Hot-swap</span>
             <span class="fw-value">No restart</span>
             <span class="fw-sub">live adapter</span>

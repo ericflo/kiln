@@ -123,6 +123,7 @@ mod tests {
             let mut ring = state.recent_requests.lock().unwrap();
             for (i, id) in ["first", "second", "third"].iter().enumerate() {
                 ring.record(RequestRecord {
+                    user_agent: None,
                     id: (*id).to_owned(),
                     timestamp_unix_ms: 1_000 + i as u64,
                     model: "kiln-test".to_owned(),

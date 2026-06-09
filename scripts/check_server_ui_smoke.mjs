@@ -777,7 +777,10 @@ async function expectNoMobileOverflow(page) {
 
 async function expectMobilePanelFlow(page) {
   const tabPanels = [
-    { tab: 'overview', selectors: ['#server-status', '#decode-perf-panel', '#recent-requests-panel'] },
+    // Recent requests is promoted to the top of Overview — live agent traffic is
+    // the primary thing a pi/opencode operator wants to see — followed by the
+    // server-status and decode-performance panels.
+    { tab: 'overview', selectors: ['#recent-requests-panel', '#server-status', '#decode-perf-panel'] },
     { tab: 'adapters', selectors: ['#adapters-panel'] },
     { tab: 'training', selectors: ['[data-training-tabs]'] },
     { tab: 'playground', selectors: ['#chat-output'] },

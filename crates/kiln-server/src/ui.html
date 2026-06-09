@@ -5992,9 +5992,10 @@ function renderRecentRequests(rows) {
   if (!el) return;
   if (!rows || rows.length === 0) {
     el.innerHTML = `<div class="empty">
-      <div style="font-weight:600;color:var(--text);margin-bottom:6px;">Waiting for your first agent request.</div>
+      <div style="font-weight:600;color:var(--text);margin-bottom:6px;">No recent requests yet. Waiting for your first agent request.</div>
       <div style="color:var(--text-3);">Point <strong>pi</strong>, <strong>opencode</strong>, or any OpenAI client at <code>${escapeHtml(connectBaseUrl())}</code> (model <code>${escapeHtml(connectModelId)}</code>) and every chat completion shows up here — prompt &amp; completion previews, tokens, latency, and finish status. That live traffic is the raw material your model learns from.</div>
       <div style="margin-top:var(--space-3);"><button type="button" class="btn btn-primary btn-sm" onclick="openConnect()">${icon('link','icn-sm')} Connect your agent</button> <button type="button" class="btn btn-sm" onclick="selectPage('playground')">${icon('chat','icn-sm')} Or try the Playground</button></div>
+      <div style="margin-top:var(--space-2);color:var(--text-3);">New to Kiln? Follow the <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a>.</div>
     </div>`;
     return;
   }

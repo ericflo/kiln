@@ -51,7 +51,7 @@
   <a class="skip-link" href="#content">Skip to content</a>
 
   <!-- Inline icon sprite — mirrors the server dashboard #i-* symbols
-       (24px viewBox, 1.7px stroke). Referenced via <use href="#i-…">. -->
+       (24px viewBox, 1.7px stroke). Referenced through SVG use of the symbol ids. -->
   <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
     <symbol id="i-stack" viewBox="0 0 24 24"><path d="M4 8.5l8 4 8-4"/><path d="M6 12.6l6 3 6-3"/><path d="M8 16.7l4 2 4-2"/></symbol>
     <symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></symbol>
@@ -621,9 +621,8 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve</code></pre>
         <p class="install-foot">
           The Kiln Desktop app and the Kiln server use
           <strong>separate GitHub release tags/version numbers</strong>
-          so each can ship at its own cadence. Grab the latest desktop build for
-          macOS, Windows, or Linux from
-          <a href="https://github.com/ericflo/kiln/releases/latest">the latest release</a>;
+          so each can ship at its own cadence. The latest desktop build is
+          <a href="https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.16"><code>desktop-v0.2.16</code></a>;
           the server tracks the latest <code>kiln-v*</code> tag.
         </p>
         <table class="installer-table">

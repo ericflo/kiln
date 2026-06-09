@@ -152,6 +152,7 @@ mod tests {
 
     fn make_record(id: &str) -> RequestRecord {
         RequestRecord {
+            user_agent: None,
             id: id.to_owned(),
             timestamp_unix_ms: 0,
             model: "kiln-test".to_owned(),
