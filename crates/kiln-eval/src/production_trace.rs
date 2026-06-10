@@ -27,7 +27,7 @@ use rand_core::Rng as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::qwen3::{ParsedToolCall, extract_tool_calls};
+use crate::qwen3::{ParsedToolCall, extract_tool_calls, tool_calls_from_value};
 use crate::scorers::{ArgsScoring, NameMatch, Scorer};
 use crate::suite::{EvalChatMessage, EvalExample, EvalGenerationParams, EvalSuite};
 use crate::trajectory::{AnthropicBlock, AnthropicMessage, anthropic_turn_to_sft_conversation};
@@ -37,6 +37,13 @@ use crate::trajectory::{AnthropicBlock, AnthropicMessage, anthropic_turn_to_sft_
 #[serde(rename_all = "snake_case")]
 pub enum ProductionTraceFormat {
     /// Inspect each row and pick the first recognized trace row shape.
+    /// Routing rules, in order: an explicit per-row `format`/`trace_format`
+    /// label wins; `prompt_messages` + `chosen` → prompt-chosen; an
+    /// `assistant_response` field → Anthropic single-turn; `messages` with
+    /// Anthropic `tool_use`/`tool_result` blocks → Anthropic trajectory;
+    /// `messages` with `tool`-role entries or multiple assistant `tool_calls`
+    /// turns → OpenAI trajectory; any other `messages` row → OpenAI
+    /// single-turn (last assistant message is the target).
     Auto,
     /// Rows with `prompt_messages` plus a separate `chosen` assistant message.
     PromptChosenJsonl,
@@ -154,6 +161,11 @@ pub struct ProductionTraceSuiteStats {
     pub sample_kept: u64,
     pub skipped_parse_error: u64,
     pub skipped_no_tool_call: u64,
+    /// Turns whose structured `tool_calls` array had at least one entry that
+    /// could not be parsed. Scoring a partial target would silently change
+    /// what the eval measures, so the whole turn is skipped instead.
+    #[serde(default)]
+    pub skipped_malformed_tool_call: u64,
     pub skipped_empty_prompt: u64,
     pub skipped_prompt_too_long: u64,
     pub skipped_target_too_long: u64,
@@ -340,6 +352,7 @@ where
             line_no,
             input.source_path.as_deref(),
             config.input_format,
+            config.sampling.max_prompt_chars,
         ) {
             Ok(row) => row,
             Err(err) => {
@@ -361,12 +374,23 @@ where
         }
 
         for turn in parsed_row.turns {
-            let Some((target, target_tools)) = target_tool_call_json(&turn.chosen) else {
-                stats.skipped_no_tool_call += 1;
-                continue;
+            let (target, target_tools) = match target_tool_calls(&turn.chosen) {
+                TargetToolCalls::Target { json, tools } => (json, tools),
+                TargetToolCalls::None => {
+                    stats.skipped_no_tool_call += 1;
+                    continue;
+                }
+                TargetToolCalls::Malformed => {
+                    stats.skipped_malformed_tool_call += 1;
+                    continue;
+                }
             };
             stats.eligible_tool_turns += 1;
 
+            if turn.prompt_oversize {
+                stats.skipped_prompt_too_long += 1;
+                continue;
+            }
             if turn.prompt_messages.is_empty() {
                 stats.skipped_empty_prompt += 1;
                 continue;
@@ -499,6 +523,7 @@ fn parse_trace_row(
     line_no: usize,
     source_path: Option<&str>,
     requested: ProductionTraceFormat,
+    max_prompt_chars: usize,
 ) -> Result<ParsedTraceRow, ProductionTraceError> {
     let value: serde_json::Value =
         serde_json::from_str(line).map_err(|e| ProductionTraceError::Parse {
@@ -506,17 +531,17 @@ fn parse_trace_row(
             message: format!("invalid JSON: {e}"),
         })?;
     match requested {
-        ProductionTraceFormat::Auto => parse_auto(&value, line_no, source_path),
+        ProductionTraceFormat::Auto => parse_auto(&value, line_no, source_path, max_prompt_chars),
         ProductionTraceFormat::PromptChosenJsonl => {
             parse_prompt_chosen(&value, line_no, source_path)
         }
         ProductionTraceFormat::OpenAiJsonl => parse_openai_messages(&value, line_no, source_path),
         ProductionTraceFormat::OpenAiTrajectoryJsonl => {
-            parse_openai_trajectory(&value, line_no, source_path)
+            parse_openai_trajectory(&value, line_no, source_path, max_prompt_chars)
         }
         ProductionTraceFormat::AnthropicJsonl => parse_anthropic_turn(&value, line_no, source_path),
         ProductionTraceFormat::AnthropicTrajectoryJsonl => {
-            parse_anthropic_trajectory(&value, line_no, source_path)
+            parse_anthropic_trajectory(&value, line_no, source_path, max_prompt_chars)
         }
     }
 }
@@ -525,6 +550,7 @@ fn parse_auto(
     value: &serde_json::Value,
     line_no: usize,
     source_path: Option<&str>,
+    max_prompt_chars: usize,
 ) -> Result<ParsedTraceRow, ProductionTraceError> {
     if let Some(format) = explicit_row_format(value)? {
         match format {
@@ -536,13 +562,13 @@ fn parse_auto(
                 return parse_openai_messages(value, line_no, source_path);
             }
             ProductionTraceFormat::OpenAiTrajectoryJsonl => {
-                return parse_openai_trajectory(value, line_no, source_path);
+                return parse_openai_trajectory(value, line_no, source_path, max_prompt_chars);
             }
             ProductionTraceFormat::AnthropicJsonl => {
                 return parse_anthropic_turn(value, line_no, source_path);
             }
             ProductionTraceFormat::AnthropicTrajectoryJsonl => {
-                return parse_anthropic_trajectory(value, line_no, source_path);
+                return parse_anthropic_trajectory(value, line_no, source_path, max_prompt_chars);
             }
         }
     }
@@ -554,7 +580,10 @@ fn parse_auto(
     }
     if value.get("messages").is_some() {
         if looks_like_anthropic_messages(value.get("messages")) {
-            return parse_anthropic_trajectory(value, line_no, source_path);
+            return parse_anthropic_trajectory(value, line_no, source_path, max_prompt_chars);
+        }
+        if looks_like_openai_trajectory(value.get("messages")) {
+            return parse_openai_trajectory(value, line_no, source_path, max_prompt_chars);
         }
         return parse_openai_messages(value, line_no, source_path);
     }
@@ -677,6 +706,7 @@ fn parse_openai_trajectory(
     value: &serde_json::Value,
     line_no: usize,
     source_path: Option<&str>,
+    max_prompt_chars: usize,
 ) -> Result<ParsedTraceRow, ProductionTraceError> {
     let messages = value
         .get("messages")
@@ -691,20 +721,35 @@ fn parse_openai_trajectory(
     }
     let tools = normalized_tools(value.get("tools"));
     let mut turns = Vec::new();
+    // Prefix size is monotone in `chosen_idx`, so once the running count
+    // crosses the prompt-size guard every later turn is over it too. Emit
+    // marker turns instead of materializing those prefixes — a long agent
+    // session would otherwise clone O(turns × messages) data only for the
+    // consumer to throw it away.
+    let mut prefix_chars = 0usize;
     for (chosen_idx, chosen) in parsed.iter().enumerate() {
-        if chosen.role != "assistant" || target_tool_call_json(chosen).is_none() {
-            continue;
+        let eligible = chosen.role == "assistant"
+            && !matches!(target_tool_calls(chosen), TargetToolCalls::None);
+        if eligible {
+            let prompt_oversize = prefix_chars > max_prompt_chars;
+            let mut turn = TraceTurn::from_export(
+                value,
+                line_no,
+                "openai_trajectory_jsonl",
+                if prompt_oversize {
+                    Vec::new()
+                } else {
+                    parsed[..chosen_idx].to_vec()
+                },
+                chosen.clone(),
+                tools.clone(),
+                Some(chosen_idx),
+                source_path,
+            );
+            turn.prompt_oversize = prompt_oversize;
+            turns.push(turn);
         }
-        turns.push(TraceTurn::from_export(
-            value,
-            line_no,
-            "openai_trajectory_jsonl",
-            parsed[..chosen_idx].to_vec(),
-            chosen.clone(),
-            tools.clone(),
-            Some(chosen_idx),
-            source_path,
-        ));
+        prefix_chars = prefix_chars.saturating_add(message_chars(chosen));
     }
     Ok(ParsedTraceRow::many("openai_trajectory_jsonl", turns))
 }
@@ -769,6 +814,7 @@ fn parse_anthropic_trajectory(
     value: &serde_json::Value,
     line_no: usize,
     source_path: Option<&str>,
+    max_prompt_chars: usize,
 ) -> Result<ParsedTraceRow, ProductionTraceError> {
     let raw: RawAnthropicTurn =
         serde_json::from_value(value.clone()).map_err(|e| ProductionTraceError::Parse {
@@ -781,16 +827,14 @@ fn parse_anthropic_trajectory(
         .map(normalize_tool_schema)
         .collect::<Vec<_>>();
     let mut turns = Vec::new();
+    // Converted prefixes only grow with `chosen_idx`, so once one crosses the
+    // prompt-size guard every later one does too. Emit marker turns instead
+    // of converting/cloning the rest of the row's prefixes.
+    let mut prefix_oversize = false;
     for (chosen_idx, chosen) in raw.messages.iter().enumerate() {
         if chosen.role != "assistant" || !anthropic_message_has_tool_use(chosen) {
             continue;
         }
-        let prefix_conv = anthropic_turn_to_sft_conversation(
-            &raw.messages[..chosen_idx],
-            &[],
-            raw.system_prompt.as_deref(),
-            Some(&tools),
-        );
         let chosen_conv = anthropic_turn_to_sft_conversation(
             &[],
             anthropic_assistant_response_blocks(chosen)
@@ -802,12 +846,28 @@ fn parse_anthropic_trajectory(
         let Some(chosen_msg) = chosen_conv.messages.last() else {
             continue;
         };
-        let prompt_messages = prefix_conv
-            .messages
-            .iter()
-            .map(sft_to_chat_message)
-            .collect();
-        turns.push(TraceTurn::from_export(
+        let prompt_messages = if prefix_oversize {
+            Vec::new()
+        } else {
+            let prefix_conv = anthropic_turn_to_sft_conversation(
+                &raw.messages[..chosen_idx],
+                &[],
+                raw.system_prompt.as_deref(),
+                Some(&tools),
+            );
+            let prompt: Vec<EvalChatMessage> = prefix_conv
+                .messages
+                .iter()
+                .map(sft_to_chat_message)
+                .collect();
+            if prompt_chars(&prompt) > max_prompt_chars {
+                prefix_oversize = true;
+                Vec::new()
+            } else {
+                prompt
+            }
+        };
+        let mut turn = TraceTurn::from_export(
             value,
             line_no,
             "anthropic_trajectory_jsonl",
@@ -816,7 +876,9 @@ fn parse_anthropic_trajectory(
             tools.clone(),
             Some(chosen_idx),
             source_path,
-        ));
+        );
+        turn.prompt_oversize = prefix_oversize;
+        turns.push(turn);
     }
     Ok(ParsedTraceRow::many("anthropic_trajectory_jsonl", turns))
 }
@@ -838,6 +900,34 @@ fn looks_like_anthropic_messages(messages: Option<&serde_json::Value>) -> bool {
                     })
                     .unwrap_or(false)
             })
+        })
+        .unwrap_or(false)
+}
+
+/// Auto-detect full OpenAI-style trajectories so they get per-turn
+/// materialization, symmetric with the Anthropic heuristic above. A
+/// `tool`-role message or more than one assistant `tool_calls` message means
+/// the row is a trajectory, not a single prompt+response turn. Single-turn
+/// rows ending in an assistant tool call stay on the openai_jsonl path,
+/// which materializes the identical example.
+fn looks_like_openai_trajectory(messages: Option<&serde_json::Value>) -> bool {
+    messages
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            let has_tool_role = arr
+                .iter()
+                .any(|msg| msg.get("role").and_then(|r| r.as_str()) == Some("tool"));
+            let assistant_tool_call_msgs = arr
+                .iter()
+                .filter(|msg| {
+                    msg.get("role").and_then(|r| r.as_str()) == Some("assistant")
+                        && msg
+                            .get("tool_calls")
+                            .and_then(|t| t.as_array())
+                            .is_some_and(|t| !t.is_empty())
+                })
+                .count();
+            has_tool_role || assistant_tool_call_msgs > 1
         })
         .unwrap_or(false)
 }
@@ -880,6 +970,8 @@ fn value_to_chat_message(
     let content = match obj.get("content") {
         None | Some(serde_json::Value::Null) => String::new(),
         Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(parts)) => flatten_content_parts(parts)
+            .unwrap_or_else(|| serde_json::Value::Array(parts.clone()).to_string()),
         Some(other) => other.to_string(),
     };
     let tool_calls = obj
@@ -901,6 +993,29 @@ fn value_to_chat_message(
     })
 }
 
+/// Flatten OpenAI-style content-part arrays
+/// (`[{"type":"text","text":"…"}, …]`) into the plain text the production
+/// model actually saw. Bare-string parts are accepted too; non-text parts
+/// (images, audio) are skipped. Returns `None` when no part carries text so
+/// genuinely unknown shapes keep the raw-JSON fallback.
+fn flatten_content_parts(parts: &[serde_json::Value]) -> Option<String> {
+    let texts: Vec<&str> = parts
+        .iter()
+        .filter_map(|part| match part.get("type").and_then(|v| v.as_str()) {
+            None | Some("text") => part
+                .get("text")
+                .and_then(|v| v.as_str())
+                .or_else(|| part.as_str()),
+            _ => None,
+        })
+        .collect();
+    if texts.is_empty() {
+        None
+    } else {
+        Some(texts.join(""))
+    }
+}
+
 fn sft_to_chat_message(m: &crate::synthesis::SftMessage) -> EvalChatMessage {
     EvalChatMessage {
         role: m.role.clone(),
@@ -911,18 +1026,39 @@ fn sft_to_chat_message(m: &crate::synthesis::SftMessage) -> EvalChatMessage {
     }
 }
 
-fn target_tool_call_json(chosen: &EvalChatMessage) -> Option<(String, Vec<String>)> {
+/// Outcome of extracting the eval target from a chosen assistant message.
+enum TargetToolCalls {
+    /// Canonical `{"tool_calls":[…]}` JSON plus the tool names.
+    Target { json: String, tools: Vec<String> },
+    /// The message carried no tool call.
+    None,
+    /// The message had structured `tool_calls` entries but at least one did
+    /// not parse. A partial target would silently misrepresent the recorded
+    /// turn, so the caller skips it under a dedicated stats counter.
+    Malformed,
+}
+
+fn target_tool_calls(chosen: &EvalChatMessage) -> TargetToolCalls {
     let calls = if let Some(tool_calls) = chosen.tool_calls.as_ref().filter(|tc| !tc.is_empty()) {
-        let raw = serde_json::json!({ "tool_calls": tool_calls }).to_string();
-        extract_tool_calls(&raw)
+        // Structured entries parse directly — never through the text
+        // scanners, whose XML pass would let an argument value containing
+        // `<tool_call>…</tool_call>` markup hijack the target.
+        let value = serde_json::json!({ "tool_calls": tool_calls });
+        match tool_calls_from_value(&value) {
+            Some(calls) if calls.len() == tool_calls.len() => calls,
+            _ => return TargetToolCalls::Malformed,
+        }
     } else {
         extract_tool_calls(&chosen.content)
     };
     if calls.is_empty() {
-        return None;
+        return TargetToolCalls::None;
     }
-    let tool_names = calls.iter().map(|c| c.name.clone()).collect::<Vec<_>>();
-    Some((canonical_target_json(&calls), tool_names))
+    let tools = calls.iter().map(|c| c.name.clone()).collect::<Vec<_>>();
+    TargetToolCalls::Target {
+        json: canonical_target_json(&calls),
+        tools,
+    }
 }
 
 fn canonical_target_json(calls: &[ParsedToolCall]) -> String {
@@ -983,27 +1119,26 @@ fn sanitize_tag_value(value: &str) -> Option<String> {
 }
 
 fn prompt_chars(messages: &[EvalChatMessage]) -> usize {
-    messages
-        .iter()
-        .map(|m| {
-            m.role.chars().count()
-                + m.content.chars().count()
-                + m.tool_calls
-                    .as_ref()
-                    .map(|tc| {
-                        serde_json::to_string(tc)
-                            .unwrap_or_default()
-                            .chars()
-                            .count()
-                    })
-                    .unwrap_or(0)
-                + m.name.as_ref().map(|s| s.chars().count()).unwrap_or(0)
-                + m.tool_call_id
-                    .as_ref()
-                    .map(|s| s.chars().count())
-                    .unwrap_or(0)
-        })
-        .sum()
+    messages.iter().map(message_chars).sum()
+}
+
+fn message_chars(m: &EvalChatMessage) -> usize {
+    m.role.chars().count()
+        + m.content.chars().count()
+        + m.tool_calls
+            .as_ref()
+            .map(|tc| {
+                serde_json::to_string(tc)
+                    .unwrap_or_default()
+                    .chars()
+                    .count()
+            })
+            .unwrap_or(0)
+        + m.name.as_ref().map(|s| s.chars().count()).unwrap_or(0)
+        + m.tool_call_id
+            .as_ref()
+            .map(|s| s.chars().count())
+            .unwrap_or(0)
 }
 
 fn example_hash(messages: &[EvalChatMessage], target: &str) -> String {
@@ -1132,6 +1267,10 @@ struct TraceTurn {
     chosen: EvalChatMessage,
     tools: Vec<serde_json::Value>,
     source_metadata: serde_json::Map<String, serde_json::Value>,
+    /// True when the trajectory parser already knows the prompt prefix
+    /// exceeds the configured size guard and skipped materializing it.
+    /// `prompt_messages` is empty for these marker turns.
+    prompt_oversize: bool,
 }
 
 impl TraceTurn {
@@ -1183,6 +1322,7 @@ impl TraceTurn {
             chosen,
             tools,
             source_metadata,
+            prompt_oversize: false,
         }
     }
 
@@ -1711,6 +1851,191 @@ mod tests {
             Some("claude_3.7_sonnet_prod".to_string())
         );
         assert_eq!(sanitize_tag_value("   "), None);
+    }
+
+    #[test]
+    fn structured_tool_calls_with_embedded_xml_are_not_hijacked() {
+        // A structured tool_calls entry whose argument value contains a
+        // compact, well-formed Qwen XML snippet (a coding agent writing docs
+        // about the format). The materialized target must stay the real
+        // production call, not the `Foo` embedded in the argument.
+        let embedded =
+            "Example: <tool_call><function=Foo><parameter=x>1</parameter></function></tool_call>";
+        let line = serde_json::json!({
+            "prompt_messages": [{"role":"user", "content":"document the tool-call format"}],
+            "chosen": {"role":"assistant", "content":"", "tool_calls":[{
+                "id":"call_1",
+                "type":"function",
+                "function":{
+                    "name":"Write",
+                    "arguments": serde_json::json!({"file_path":"/tmp/doc.md", "content": embedded}).to_string()
+                }
+            }]}
+        });
+        let (suite, stats) = build(&format!("{line}\n"), None);
+        assert_eq!(stats.eligible_tool_turns, 1);
+        let target: serde_json::Value =
+            serde_json::from_str(suite.examples[0].target.as_deref().unwrap()).unwrap();
+        let calls = target["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["name"], serde_json::json!("Write"));
+        assert_eq!(calls[0]["arguments"]["content"], serde_json::json!(embedded));
+        assert_eq!(stats.sampled_tool_histogram.get("Write"), Some(&1));
+        assert!(!stats.sampled_tool_histogram.contains_key("Foo"));
+        assert!(suite.examples[0].tags.contains(&"tool:Write".to_string()));
+    }
+
+    #[test]
+    fn partially_malformed_structured_tool_calls_skip_turn() {
+        // Two structured entries, one missing its name: scoring a silently
+        // truncated 1-call target would misrepresent the recorded turn, so
+        // the whole turn is skipped under a dedicated counter.
+        let malformed = serde_json::json!({
+            "prompt_messages": [{"role":"user", "content":"do two things"}],
+            "chosen": {"role":"assistant", "tool_calls":[
+                {"type":"function", "function":{"name":"Read", "arguments":"{\"path\":\"/a\"}"}},
+                {"type":"function", "function":{"arguments":"{\"path\":\"/b\"}"}}
+            ]}
+        });
+        let valid = serde_json::json!({
+            "prompt_messages": [{"role":"user", "content":"run pwd"}],
+            "chosen": {"role":"assistant", "tool_calls":[{
+                "type":"function",
+                "function":{"name":"Bash", "arguments":"{\"command\":\"pwd\"}"}
+            }]}
+        });
+        let (suite, stats) = build(&format!("{malformed}\n{valid}\n"), None);
+        assert_eq!(stats.skipped_malformed_tool_call, 1);
+        assert_eq!(stats.eligible_tool_turns, 1);
+        assert_eq!(suite.examples.len(), 1);
+        assert!(
+            suite.examples[0]
+                .target
+                .as_deref()
+                .unwrap()
+                .contains("\"Bash\"")
+        );
+    }
+
+    #[test]
+    fn openai_content_parts_flatten_to_text() {
+        let line = serde_json::json!({
+            "messages": [
+                {"role":"user", "content":[{"type":"text","text":"Run ls in /tmp"}]},
+                {"role":"assistant", "content":"", "tool_calls":[{
+                    "type":"function",
+                    "function":{"name":"Bash", "arguments":"{\"command\":\"ls /tmp\"}"}
+                }]}
+            ]
+        });
+        let (suite, _) = build(&format!("{line}\n"), None);
+        assert_eq!(suite.examples[0].messages.len(), 1);
+        assert_eq!(suite.examples[0].messages[0].content, "Run ls in /tmp");
+        assert!(!suite.examples[0].messages[0].content.contains("{\"type\""));
+    }
+
+    #[test]
+    fn auto_detects_openai_trajectory_rows() {
+        // No explicit format label: a full OpenAI trajectory ending in a
+        // plain-text assistant turn must still yield its tool-call turn
+        // under Auto instead of being skipped as a no-tool-call row.
+        let line = serde_json::json!({
+            "messages": [
+                {"role":"system", "content":"You are a coding agent."},
+                {"role":"user", "content":"run the tests"},
+                {"role":"assistant", "content":"", "tool_calls":[{
+                    "id":"call_1",
+                    "type":"function",
+                    "function":{"name":"Bash", "arguments":"{\"command\":\"cargo test\"}"}
+                }]},
+                {"role":"tool", "tool_call_id":"call_1", "content":"ok"},
+                {"role":"assistant", "content":"All tests passed."}
+            ]
+        });
+        let (suite, stats) = build(&format!("{line}\n"), None);
+        assert_eq!(stats.eligible_tool_turns, 1);
+        assert_eq!(suite.examples.len(), 1);
+        assert_eq!(
+            stats
+                .sampled_source_format_counts
+                .get("openai_trajectory_jsonl"),
+            Some(&1)
+        );
+        assert_eq!(suite.examples[0].messages.len(), 2);
+        let call = extract_first_tool_call(suite.examples[0].target.as_deref().unwrap()).unwrap();
+        assert_eq!(call.name, "Bash");
+    }
+
+    #[test]
+    fn trajectory_prefix_cap_skips_oversize_turns() {
+        // Turn 1's prefix fits the guard; a huge tool result pushes every
+        // later prefix over it. The parser stops materializing prefixes but
+        // the skip is still counted as prompt_too_long.
+        let big = "x".repeat(4096);
+        let line = serde_json::json!({
+            "format": "openai_trajectory_jsonl",
+            "messages": [
+                {"role":"user", "content":"inspect, then build"},
+                {"role":"assistant", "content":"", "tool_calls":[{
+                    "type":"function",
+                    "function":{"name":"Read", "arguments":"{\"path\":\"/a\"}"}
+                }]},
+                {"role":"tool", "content": big},
+                {"role":"assistant", "content":"", "tool_calls":[{
+                    "type":"function",
+                    "function":{"name":"Bash", "arguments":"{\"command\":\"cargo build\"}"}
+                }]},
+                {"role":"tool", "content": big},
+                {"role":"assistant", "content":"", "tool_calls":[{
+                    "type":"function",
+                    "function":{"name":"Bash", "arguments":"{\"command\":\"cargo test\"}"}
+                }]}
+            ]
+        });
+        let mut cfg = ProductionTraceSuiteConfig::new("prefix-cap");
+        cfg.sampling.seed = Some(3);
+        cfg.sampling.max_examples = None;
+        cfg.sampling.max_prompt_chars = 1024;
+        let (suite, stats) =
+            synthesize_production_trace_suite(std::io::Cursor::new(format!("{line}\n")), &cfg)
+                .unwrap();
+        assert_eq!(stats.eligible_tool_turns, 3);
+        assert_eq!(stats.skipped_prompt_too_long, 2);
+        assert_eq!(suite.examples.len(), 1);
+        let call = extract_first_tool_call(suite.examples[0].target.as_deref().unwrap()).unwrap();
+        assert_eq!(call.name, "Read");
+    }
+
+    #[test]
+    fn anthropic_trajectory_prefix_cap_skips_oversize_turns() {
+        let big = "x".repeat(4096);
+        let line = serde_json::json!({
+            "format": "anthropic_trajectory_jsonl",
+            "messages": [
+                {"role":"user", "content":"inspect, then build"},
+                {"role":"assistant", "content":[{
+                    "type":"tool_use", "id":"t1", "name":"Read", "input":{"path":"/a"}
+                }]},
+                {"role":"user", "content":[{
+                    "type":"tool_result", "tool_use_id":"t1", "content": big
+                }]},
+                {"role":"assistant", "content":[{
+                    "type":"tool_use", "id":"t2", "name":"Bash", "input":{"command":"cargo build"}
+                }]}
+            ]
+        });
+        let mut cfg = ProductionTraceSuiteConfig::new("anthropic-prefix-cap");
+        cfg.sampling.seed = Some(3);
+        cfg.sampling.max_examples = None;
+        cfg.sampling.max_prompt_chars = 1024;
+        let (suite, stats) =
+            synthesize_production_trace_suite(std::io::Cursor::new(format!("{line}\n")), &cfg)
+                .unwrap();
+        assert_eq!(stats.eligible_tool_turns, 2);
+        assert_eq!(stats.skipped_prompt_too_long, 1);
+        assert_eq!(suite.examples.len(), 1);
+        let call = extract_first_tool_call(suite.examples[0].target.as_deref().unwrap()).unwrap();
+        assert_eq!(call.name, "Read");
     }
 
     #[test]

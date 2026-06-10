@@ -337,8 +337,16 @@ fn is_shell_program(program: &str) -> bool {
     matches!(program, "bash" | "sh" | "zsh" | "dash")
 }
 
-fn is_shell_c_flag(token: &str) -> bool {
-    token.starts_with('-') && token[1..].chars().any(|c| c == 'c')
+/// True for short-option clusters that include `-c` (`-c`, `-lc`, `-xec`).
+/// Long options are excluded — `--norc` / `--rcfile` contain a `c` but do
+/// not introduce inline shell code.
+pub(crate) fn is_shell_c_flag(token: &str) -> bool {
+    let Some(cluster) = token.strip_prefix('-') else {
+        return false;
+    };
+    !cluster.is_empty()
+        && cluster.chars().all(|c| c.is_ascii_alphabetic())
+        && cluster.contains('c')
 }
 
 fn is_inline_program_flag(lang: &str, token: &str) -> bool {
@@ -584,6 +592,28 @@ mod tests {
         let intro = introspect("");
         assert_eq!(intro.program, "");
         assert!(intro.inline_language.is_none());
+    }
+
+    #[test]
+    fn shell_c_flag_matches_short_clusters_only() {
+        assert!(is_shell_c_flag("-c"));
+        assert!(is_shell_c_flag("-lc"));
+        assert!(is_shell_c_flag("-xec"));
+        assert!(!is_shell_c_flag("--norc"));
+        assert!(!is_shell_c_flag("--rcfile"));
+        assert!(!is_shell_c_flag("-l"));
+        assert!(!is_shell_c_flag("script.sh"));
+        assert!(!is_shell_c_flag("-"));
+    }
+
+    #[test]
+    fn introspect_long_option_does_not_become_inline_code() {
+        let intro = introspect("bash --norc script.sh");
+        assert!(intro.inline_code.is_none());
+        assert!(intro.inline_language.is_none());
+        let intro = introspect(r#"bash --rcfile /tmp/rc -c "echo hi""#);
+        assert_eq!(intro.inline_language.as_deref(), Some("bash"));
+        assert_eq!(intro.inline_code.as_deref(), Some("echo hi"));
     }
 
     #[test]

@@ -19,7 +19,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::qwen3::{ParsedToolCall, ToolCallFormat, extract_tool_calls, split_thinking};
+use crate::qwen3::{
+    ParsedToolCall, ToolCallFormat, extract_tool_calls, split_thinking, tool_calls_from_value,
+};
 use crate::result::EvalOutcomeKind;
 use crate::scorers::{
     JudgeRunner, Scorer, ScorerError, bash, code::extract_block, score_completion,
@@ -100,8 +102,11 @@ pub struct ToolCallWeights {
 const TOOL_CALL_PASS_THRESHOLD: f32 = 0.8;
 /// Score awarded when the predicted bash command shares the program but
 /// not the subcommand (e.g. `git commit` vs `git push`). Partial credit
-/// — same family, but the model picked the wrong action.
-const BASH_SAME_PROGRAM_DIFF_SUBCOMMAND: f32 = 0.35;
+/// — same family, but the model picked the wrong action. Must stay below
+/// `(TOOL_CALL_PASS_THRESHOLD - name_w - struct_w) / content_w` (1/3 under
+/// default weights): a single-`command`-arg call gets name and structure
+/// for free, so anything higher lets `git push` vs `git pull` Pass.
+const BASH_SAME_PROGRAM_DIFF_SUBCOMMAND: f32 = 0.25;
 /// Score awarded when the predicted bash command's classification doesn't
 /// match the target's at all (e.g. `python_inline` vs `pip_install`).
 const BASH_WRONG_FAMILY: f32 = 0.1;
@@ -137,7 +142,14 @@ pub(super) fn score(
         .target
         .as_deref()
         .ok_or(ScorerError::MissingTarget { kind: "tool_call" })?;
-    let target_calls = extract_tool_calls(target_raw);
+    // Targets are normally stored as canonical `{"tool_calls":[…]}` JSON, so
+    // parse them structurally first. The text scanners are only a fallback
+    // for prose/XML-shaped targets — running them on canonical JSON would
+    // let an argument value containing tool-call markup hijack the target.
+    let target_calls = serde_json::from_str::<serde_json::Value>(target_raw)
+        .ok()
+        .and_then(|v| tool_calls_from_value(&v))
+        .unwrap_or_else(|| extract_tool_calls(target_raw));
     if target_calls.is_empty() {
         return Err(ScorerError::MissingTarget {
             kind: "tool_call (target had no parseable tool call)",
@@ -659,9 +671,18 @@ fn score_shell_wrapper_pair(
     let predicted_shell = shell_wrapper_inner(predicted_intro);
     match (target_shell, predicted_shell) {
         (Some(t_inner), Some(p_inner)) => {
-            let raw_similarity = code_token_similarity(t_inner, p_inner);
             let recursive = score_bash_command_depth(t_inner, p_inner, depth + 1);
-            Some(raw_similarity.max(recursive))
+            // Raw token overlap only breaks ties between commands the
+            // introspector agrees on. When the inner classifications differ
+            // (wrong subcommand / wrong family), the semantic verdict stands
+            // — `git push` vs `git pull` share 3 of 4 tokens and would
+            // otherwise be rescued by the jaccard score.
+            if bash::introspect(t_inner).classification()
+                != bash::introspect(p_inner).classification()
+            {
+                return Some(recursive);
+            }
+            Some(code_token_similarity(t_inner, p_inner).max(recursive))
         }
         (Some(t_inner), None) => Some(score_bash_command_depth(t_inner, predicted_raw, depth + 1)),
         (None, Some(p_inner)) => Some(score_bash_command_depth(target_raw, p_inner, depth + 1)),
@@ -822,7 +843,10 @@ fn python_command_from_call_args(args: &str) -> Option<String> {
 
 fn python_command_from_string_list(parts: &[String]) -> Option<String> {
     let program = parts.first()?.as_str();
-    if matches!(program, "bash" | "sh" | "zsh") && parts.len() >= 3 && parts[1].contains('c') {
+    if matches!(program, "bash" | "sh" | "zsh")
+        && parts.len() >= 3
+        && bash::is_shell_c_flag(&parts[1])
+    {
         return Some(parts[2].clone());
     }
     Some(parts.join(" "))
@@ -1274,6 +1298,80 @@ mod tests {
         .unwrap();
         assert!(s > 0.95, "score was {s}");
         assert_eq!(kind, EvalOutcomeKind::Pass);
+    }
+
+    #[test]
+    fn wrong_git_subcommand_fails() {
+        let (s, kind, detail) =
+            score_bash_tool_commands("git push origin main", "git pull origin main");
+        assert_eq!(kind, EvalOutcomeKind::Fail, "{detail:?}");
+        assert!(s < 0.8, "score was {s}");
+    }
+
+    #[test]
+    fn wrong_git_subcommand_fails_under_shell_wrapper() {
+        let (s, kind, detail) = score_bash_tool_commands(
+            r#"bash -lc "git push origin main""#,
+            r#"bash -lc "git pull origin main""#,
+        );
+        assert_eq!(kind, EvalOutcomeKind::Fail, "{detail:?}");
+        assert!(s < 0.8, "score was {s}");
+    }
+
+    #[test]
+    fn pip_uninstall_vs_install_fails() {
+        let (s, kind, detail) = score_bash_tool_commands("pip install x", "pip uninstall x");
+        assert_eq!(kind, EvalOutcomeKind::Fail, "{detail:?}");
+        assert!(s < 0.8, "score was {s}");
+    }
+
+    #[test]
+    fn equal_commands_still_pass() {
+        let (s, kind, detail) =
+            score_bash_tool_commands("git push origin main", "git push origin main");
+        assert_eq!(kind, EvalOutcomeKind::Pass, "{detail:?}");
+        assert!(s > 0.95, "score was {s}");
+        let (s, kind, detail) = score_bash_tool_commands(
+            r#"bash -lc "git push origin main""#,
+            r#"bash -lc "git push origin main""#,
+        );
+        assert_eq!(kind, EvalOutcomeKind::Pass, "{detail:?}");
+        assert!(s > 0.95, "score was {s}");
+    }
+
+    #[test]
+    fn target_json_with_embedded_xml_markup_is_not_hijacked() {
+        // The canonical JSON target's argument value mentions tool-call XML
+        // (a Write call whose file content documents the format). The target
+        // must stay `Write`, not the `Foo` inside the argument string — a
+        // model that actually calls `Foo` has to fail.
+        let target = serde_json::json!({
+            "tool_calls": [{
+                "name": "Write",
+                "arguments": {
+                    "file_path": "/tmp/doc.md",
+                    "content": "Example: <tool_call><function=Foo><parameter=x>1</parameter></function></tool_call>"
+                }
+            }]
+        })
+        .to_string();
+        let pred = "<tool_call>\n<function=Foo>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>";
+        let (s, kind, detail) = score(
+            &ex(&target),
+            pred,
+            &NameMatch::CaseInsensitive,
+            &ArgsScoring::Auto,
+            None,
+            false,
+            &NoopJudgeRunner,
+        )
+        .unwrap();
+        assert_eq!(kind, EvalOutcomeKind::Fail, "{detail:?}");
+        assert!(s < 0.5, "score was {s}; detail={detail:?}");
+        assert!(
+            detail.as_deref().unwrap().contains("expected `Write`"),
+            "detail={detail:?}"
+        );
     }
 
     #[test]

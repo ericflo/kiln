@@ -147,8 +147,12 @@ Pass `--format openai_trajectory_jsonl` when every row is a full trajectory,
 pass `--format anthropic_trajectory_jsonl` for Anthropic full trajectories, or
 include `"format": "openai_trajectory_jsonl"` / `"trace_format": ...` on
 individual rows when mixing row shapes under `--format auto`. Auto-detection
-also recognizes Anthropic `messages` arrays that contain `tool_use` or
-`tool_result` content blocks.
+recognizes both vendors' trajectories: Anthropic `messages` arrays that
+contain `tool_use` or `tool_result` content blocks, and OpenAI `messages`
+arrays that contain `tool`-role messages or more than one assistant
+`tool_calls` turn. Both get per-turn materialization; remaining `messages`
+rows fall back to single-turn `openai_jsonl` scoring of the final assistant
+message.
 
 Rows without a current-turn tool call are skipped. Eligible rows are
 reservoir-sampled, so large exports can stream through without loading the
@@ -207,7 +211,17 @@ the target API's normal chat-completions surface, converts structured
 `message.tool_calls` responses back into canonical `tool_calls` JSON for
 scoring, and still accepts raw Qwen XML / fenced / inline JSON completions.
 This keeps the eval focused on tool-call semantics while letting each provider
-apply its own ideal chat/tool format.
+apply its own ideal chat/tool format. Requests carry a total per-request
+timeout (`--timeout-secs`, default 120) plus a 10s connect timeout, so a hung
+endpoint fails that example instead of stalling the run.
+
+One transport caveat: suites built with `--require-qwen-xml` cannot measure
+output *format* through this runner when tools are sent. An OpenAI-compatible
+server that parses tool calls returns them as structured `message.tool_calls`,
+erasing whatever wire format the model actually emitted — possibly genuine
+Qwen XML. For those responses the runner disables the XML-format requirement
+(with a one-time warning) and scores semantics only. Pass `--no-tools` to
+receive raw completions if format enforcement matters.
 
 For shell-heavy traces, the tool-call scorer compares beneath common wrappers:
 `bash -lc`, `python -c`, and Python here-doc/stdin forms are normalized before
@@ -696,7 +710,10 @@ shell layers (`bash -c` / `bash -lc`) and compares inline code from
 `python -c` or `python - <<'PY' ... PY` by token similarity instead of raw
 string equality. This catches the production pattern where the real action is
 buried inside a shell call without turning inconsequential wrapping changes
-into eval failures.
+into eval failures. "Right program, wrong action" predictions stay failures:
+a same-program subcommand mismatch (`git push` vs `git pull`,
+`pip install` vs `pip uninstall`) scores below the pass threshold under
+default weights, even when the command is wrapped in `bash -lc`.
 
 ### 3. Tools belong on the suite
 

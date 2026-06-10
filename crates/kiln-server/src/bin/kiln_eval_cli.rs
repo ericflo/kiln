@@ -158,7 +158,11 @@ struct TraceSuiteArgs {
     description: Option<String>,
     /// Input format: auto | prompt_chosen_jsonl | openai_jsonl |
     /// openai_trajectory_jsonl | anthropic_jsonl |
-    /// anthropic_trajectory_jsonl.
+    /// anthropic_trajectory_jsonl. `auto` inspects each row: explicit
+    /// per-row `format` labels win; OpenAI or Anthropic `messages` arrays
+    /// that look like full trajectories (tool-role messages, tool_use
+    /// blocks, or multiple tool-calling assistant turns) get per-turn
+    /// materialization; other `messages` rows score the final assistant.
     #[arg(long, default_value = "auto", value_parser = parse_trace_format)]
     format: ProductionTraceFormat,
     /// Reservoir sample size. Omit to use the production-trace default.
@@ -229,12 +233,17 @@ fn parse_trace_format(s: &str) -> std::result::Result<ProductionTraceFormat, Str
         "openai_trajectory_jsonl" | "openai-trajectory-jsonl" | "openai_trajectory" => {
             Ok(ProductionTraceFormat::OpenAiTrajectoryJsonl)
         }
-        "anthropic_jsonl" | "anthropic-jsonl" | "jsonl" => {
-            Ok(ProductionTraceFormat::AnthropicJsonl)
-        }
+        "anthropic_jsonl" | "anthropic-jsonl" => Ok(ProductionTraceFormat::AnthropicJsonl),
         "anthropic_trajectory_jsonl" | "anthropic-trajectory-jsonl" | "anthropic_trajectory" => {
             Ok(ProductionTraceFormat::AnthropicTrajectoryJsonl)
         }
+        // `jsonl` used to silently alias anthropic_jsonl, quietly skipping
+        // every non-Anthropic row. Too ambiguous to guess.
+        "jsonl" => Err(
+            "ambiguous trace format `jsonl`; pass an explicit format (auto | prompt_chosen_jsonl \
+             | openai_jsonl | openai_trajectory_jsonl | anthropic_jsonl | anthropic_trajectory_jsonl)"
+                .to_string(),
+        ),
         other => Err(format!(
             "unknown trace format `{other}` (try auto | prompt_chosen_jsonl | openai_jsonl | openai_trajectory_jsonl | anthropic_jsonl | anthropic_trajectory_jsonl)"
         )),
@@ -385,7 +394,8 @@ fn cmd_trace_suite(args: TraceSuiteArgs) -> Result<()> {
     let suite_json = serde_json::to_string_pretty(&suite)?;
     if args.stdout {
         println!("{suite_json}");
-    } else if let Some(output) = args.output.as_ref() {
+    }
+    if let Some(output) = args.output.as_ref() {
         write_string_file(output, &suite_json)?;
     }
 
@@ -420,14 +430,16 @@ fn cmd_trace_suite(args: TraceSuiteArgs) -> Result<()> {
     }
     if stats.skipped_parse_error > 0
         || stats.skipped_no_tool_call > 0
+        || stats.skipped_malformed_tool_call > 0
         || stats.skipped_prompt_too_long > 0
         || stats.skipped_target_too_long > 0
         || stats.skipped_duplicate > 0
     {
         eprintln!(
-            "skipped: parse_error={} no_tool_call={} empty_prompt={} prompt_too_long={} target_too_long={} duplicate={}",
+            "skipped: parse_error={} no_tool_call={} malformed_tool_call={} empty_prompt={} prompt_too_long={} target_too_long={} duplicate={}",
             stats.skipped_parse_error,
             stats.skipped_no_tool_call,
+            stats.skipped_malformed_tool_call,
             stats.skipped_empty_prompt,
             stats.skipped_prompt_too_long,
             stats.skipped_target_too_long,
@@ -457,7 +469,8 @@ fn cmd_panel_suite(args: PanelSuiteArgs) -> Result<()> {
     let panel_json = serde_json::to_string_pretty(&panel)?;
     if args.stdout {
         println!("{panel_json}");
-    } else if let Some(output) = args.output.as_ref() {
+    }
+    if let Some(output) = args.output.as_ref() {
         write_string_file(output, &panel_json)?;
     }
 
@@ -1449,4 +1462,54 @@ fn compute_flip_diff(result: &EvalResultPayload) -> Option<kiln_eval::FlipDiff> 
         error: None,
     };
     synthetic.flip_diff()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jsonl_format_alias_is_rejected() {
+        let err = parse_trace_format("jsonl").unwrap_err();
+        assert!(err.contains("ambiguous"), "{err}");
+        assert!(err.contains("anthropic_jsonl"), "{err}");
+        assert!(parse_trace_format("anthropic_jsonl").is_ok());
+        assert!(parse_trace_format("auto").is_ok());
+    }
+
+    #[test]
+    fn trace_suite_writes_output_file_even_with_stdout() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("trace.jsonl");
+        let row = serde_json::json!({
+            "prompt_messages": [{"role":"user", "content":"run pwd"}],
+            "chosen": {"role":"assistant", "tool_calls":[{
+                "type":"function",
+                "function":{"name":"Bash", "arguments":"{\"command\":\"pwd\"}"}
+            }]}
+        });
+        std::fs::write(&input, format!("{row}\n")).unwrap();
+        let output = dir.path().join("suite.json");
+        let args = TraceSuiteArgs {
+            input: vec![input],
+            output: Some(output.clone()),
+            stats_output: None,
+            suite_name: "stdout-and-output".into(),
+            description: None,
+            format: ProductionTraceFormat::Auto,
+            max_examples: None,
+            seed: Some(1),
+            max_prompt_chars: None,
+            max_target_chars: None,
+            dedupe: false,
+            require_qwen_xml: false,
+            max_tokens: None,
+            temperature: None,
+            stdout: true,
+        };
+        cmd_trace_suite(args).unwrap();
+        let suite: EvalSuite =
+            serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
+        assert_eq!(suite.examples.len(), 1);
+    }
 }
