@@ -96,6 +96,11 @@ pub struct EvalJobInfo {
     pub submitted_at: std::time::Instant,
     #[serde(skip, default)]
     pub finished_at: Option<std::time::Instant>,
+    /// Cooperative cancellation handle for the executor while the job is
+    /// Running. The cancel endpoint sets it; the worker installs it when the
+    /// job starts. Skipped from serde (runtime-only).
+    #[serde(skip, default)]
+    pub cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl EvalJobInfo {
@@ -125,6 +130,7 @@ impl EvalJobInfo {
             finished_at_iso: None,
             submitted_at: std::time::Instant::now(),
             finished_at: None,
+            cancel_flag: None,
         }
     }
 

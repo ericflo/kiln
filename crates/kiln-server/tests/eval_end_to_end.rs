@@ -100,6 +100,7 @@ async fn worker_runs_inline_suite_with_mock_generator() {
             finished_at_iso: None,
             submitted_at: now_instant,
             finished_at: None,
+            cancel_flag: None,
         },
     );
 
