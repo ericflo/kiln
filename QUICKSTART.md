@@ -19,7 +19,7 @@ All paths share these requirements:
 
 - **GPU + memory**: NVIDIA with 24GB+ VRAM and CUDA 12.4+ driver/runtime (RTX 3090, 4090, A6000, etc.), AMD Linux GPU with ROCm/HIP 7.2.4+ runtime, AMD/Intel Linux GPU with Vulkan 1.2+ runtime, or Apple Silicon Mac with 16GB+ unified memory. Intel Macs are not supported.
 - **Disk**: ~20GB free for the server binary, model weights, and adapters (Source / CLI builds also share this with build artifacts).
-- **Model**: `Qwen/Qwen3.5-4B` weights — downloaded by the Desktop App, by `huggingface-cli` for the Server binary path, or mounted into the container.
+- **Model**: `Qwen/Qwen3.5-4B` weights — downloaded by the Desktop App, by the `hf` CLI for the Server binary path, or mounted into the container.
 
 Build-tooling deltas by path:
 
@@ -142,8 +142,8 @@ The binary is at `target/release/kiln`.
 Kiln targets **Qwen3.5-4B**. Download the weights from Hugging Face:
 
 ```bash
-pip install huggingface-hub
-huggingface-cli download Qwen/Qwen3.5-4B --local-dir ./Qwen3.5-4B
+pip install -U huggingface_hub
+hf download Qwen/Qwen3.5-4B --local-dir ./Qwen3.5-4B
 ```
 
 This downloads ~8GB of safetensors weights plus the tokenizer.
