@@ -437,11 +437,16 @@ async fn cancel_job(
             })))
         }
         Some(EvalJobState::Running) => {
-            // Running cancellation is best-effort: the worker checks the
-            // tracked state at iteration boundaries.
+            // Cooperative cancellation: flip the executor's flag (checked at
+            // example boundaries) and mark the tracked state. The worker
+            // preserves Cancelled when the run returns, archiving whatever
+            // partial outcomes completed.
             let mut jobs = state.eval_jobs.write().unwrap();
             if let Some(job) = jobs.get_mut(&job_id) {
                 job.state = EvalJobState::Cancelled;
+                if let Some(flag) = job.cancel_flag.as_ref() {
+                    flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
             }
             Ok(Json(serde_json::json!({
                 "status": "cancelling",

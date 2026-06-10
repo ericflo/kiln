@@ -77,8 +77,21 @@ pub fn gc_eval_jobs(state: &AppState) -> usize {
 }
 
 async fn run_one_job(state: AppState, entry: EvalQueueEntry) {
+    let generator = generator_from_state(state.clone());
+    run_one_job_with_generator(state, entry, generator).await
+}
+
+/// `run_one_job` body with the generator injected — the seam the
+/// cancellation test uses to gate generation deterministically.
+async fn run_one_job_with_generator(
+    state: AppState,
+    entry: EvalQueueEntry,
+    generator: Arc<dyn crate::eval::generator::EvalGenerator>,
+) {
     let job_id = entry.job_id.clone();
-    // Mark as running and stamp started_at.
+    let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Mark as running, stamp started_at, and install the cancellation flag
+    // so DELETE /v1/eval/jobs/{id} can actually stop the executor.
     {
         let mut jobs = state.eval_jobs.write().unwrap();
         if let Some(job) = jobs.get_mut(&job_id) {
@@ -88,13 +101,13 @@ async fn run_one_job(state: AppState, entry: EvalQueueEntry) {
             }
             job.state = EvalJobState::Running;
             job.started_at_iso = Some(chrono::Utc::now().to_rfc3339());
+            job.cancel_flag = Some(cancel_flag.clone());
         } else {
             tracing::warn!(job_id = %job_id, "eval job not found in tracking map");
             return;
         }
     }
 
-    let generator = generator_from_state(state.clone());
     // TODO(eval): swap in a `LiveJudgeRunner` once judge calls are plumbed.
     // Until then judge scorers degrade to `Invalid` on every example.
     let judge_runner: Arc<dyn JudgeRunner> = noop_judge_runner();
@@ -109,35 +122,38 @@ async fn run_one_job(state: AppState, entry: EvalQueueEntry) {
             }
         });
 
-    let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // Wire a tracking-side cancellation flag: the cancel endpoint sets it on
-    // the job-info before re-checking.
-    // (We re-derive `cancel_flag` from job state below — for now, jobs
-    // marked Cancelled by the API are skipped on the next iteration.)
-
     let result = run_job(
         &state,
         &entry.job,
         generator,
         judge_runner,
         Some(progress_cb),
-        cancel_flag,
+        cancel_flag.clone(),
     )
     .await;
 
     let now_iso = chrono::Utc::now().to_rfc3339();
     let now_instant = std::time::Instant::now();
 
+    let was_cancelled = cancel_flag.load(std::sync::atomic::Ordering::Relaxed);
     let archive_snapshot = match result {
         Ok(runs) => {
             let headline = runs.iter().last().map(|r| r.metrics.accuracy);
             let mut jobs = state.eval_jobs.write().unwrap();
             jobs.get_mut(&job_id).map(|job| {
-                job.state = EvalJobState::Completed;
+                // A cancelled run still archives its partial outcomes, but
+                // the terminal state must stay Cancelled — not flip back to
+                // Completed and erase what the user asked for.
+                if was_cancelled || matches!(job.state, EvalJobState::Cancelled) {
+                    job.state = EvalJobState::Cancelled;
+                } else {
+                    job.state = EvalJobState::Completed;
+                }
                 job.finished_runs = runs;
                 job.headline_accuracy = headline;
                 job.finished_at_iso = Some(now_iso);
                 job.finished_at = Some(now_instant);
+                job.cancel_flag = None;
                 job.clone()
             })
         }
@@ -149,6 +165,7 @@ async fn run_one_job(state: AppState, entry: EvalQueueEntry) {
                 job.error = Some(err);
                 job.finished_at_iso = Some(now_iso);
                 job.finished_at = Some(now_instant);
+                job.cancel_flag = None;
                 job.clone()
             })
         }
@@ -237,6 +254,11 @@ async fn run_job(
             // panel shows zero progress for the entire job.
             let mut progress_slot = progress;
             for adapter in &spec.adapters {
+                // A cancelled compare job must not keep swapping adapters
+                // for runs nobody asked to finish.
+                if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
                 let adapter_opt = if adapter.is_empty() {
                     None
                 } else {
@@ -260,3 +282,218 @@ async fn run_job(
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::eval::queue::{EvalJobInfo, EvalQueueEntry, EvalSubmissionKind};
+    use kiln_eval::scorers::Scorer;
+    use kiln_eval::{EvalChatMessage, EvalExample, EvalGenerationParams, EvalSuite};
+    use tower::ServiceExt;
+
+    fn big_suite(n: usize) -> EvalSuite {
+        EvalSuite {
+            name: "cancel-me".into(),
+            description: None,
+            default_scorer: Scorer::Contains {
+                phrases: vec!["mock".into()],
+                mode: Default::default(),
+                case_sensitive: false,
+            },
+            generation: EvalGenerationParams::default(),
+            system_prompt: None,
+            examples: (0..n)
+                .map(|i| EvalExample {
+                    id: Some(format!("e{i}")),
+                    messages: vec![EvalChatMessage::new("user", format!("ping {i}"))],
+                    target: None,
+                    ..Default::default()
+                })
+                .collect(),
+            schema_version: 1,
+            tools: None,
+        }
+    }
+
+    /// Gate wrapper: first example completes, then generation parks on a
+    /// Notify until the test has cancelled through the real DELETE route.
+    struct GatedGenerator {
+        inner: crate::eval::MockEvalGenerator,
+        reached: Arc<tokio::sync::Notify>,
+        resume: Arc<tokio::sync::Notify>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl crate::eval::generator::EvalGenerator for GatedGenerator {
+        fn set_adapter(
+            &self,
+            adapter: Option<&str>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Option<String>, String>> + Send + '_>,
+        > {
+            self.inner.set_adapter(adapter)
+        }
+
+        fn prepare(
+            &self,
+            messages: &[EvalChatMessage],
+            system_prompt: Option<&str>,
+            tools: Option<&[serde_json::Value]>,
+            params: &EvalGenerationParams,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<crate::eval::generator::PreparedPrompt, String>,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            self.inner.prepare(messages, system_prompt, tools, params)
+        }
+
+        fn run(
+            &self,
+            prepared: &crate::eval::generator::PreparedPrompt,
+            params: &EvalGenerationParams,
+            completion_index: usize,
+            adapter_label: Option<&str>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<crate::eval::EvalCompletion, String>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            let call = self
+                .calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let fut = self.inner.run(prepared, params, completion_index, adapter_label);
+            let reached = self.reached.clone();
+            let resume = self.resume.clone();
+            Box::pin(async move {
+                if call == 1 {
+                    // One outcome is recorded; tell the test we are mid-run
+                    // and wait for it to fire the cancellation.
+                    reached.notify_one();
+                    resume.notified().await;
+                }
+                fut.await
+            })
+        }
+    }
+
+    /// DELETE /v1/eval/jobs/{id} mid-run must stop the executor at the next
+    /// example boundary and the terminal state must STAY Cancelled with the
+    /// partial outcomes recorded — the worker used to clobber it back to
+    /// Completed and the flag was never wired, so cancellation did nothing.
+    #[tokio::test]
+    async fn cancel_running_job_stops_early_and_stays_cancelled() {
+        // Archive writes go under adapter_dir — point it at a tempdir so
+        // the test never litters the repo tree (a stray adapters/.kiln-jobs
+        // breaks the health adapter-count test).
+        let adapter_dir = tempfile::tempdir().unwrap();
+        let state = {
+            let config = kiln_core::config::ModelConfig::qwen3_5_4b();
+            let scheduler = kiln_scheduler::Scheduler::new(
+                kiln_scheduler::SchedulerConfig {
+                    max_batch_tokens: 8192,
+                    max_batch_size: 64,
+                    block_size: 16,
+                    prefix_cache_enabled: false,
+                    ..Default::default()
+                },
+                256,
+            );
+            let engine = kiln_model::engine::MockEngine::new(config.clone());
+            crate::state::AppState::new_mock(
+                config,
+                scheduler,
+                Arc::new(engine),
+                crate::api::test_tokenizer(),
+                300,
+                "kiln-test".to_string(),
+            )
+        };
+        let mut state = state;
+        state.adapter_dir = adapter_dir.path().to_path_buf();
+        let state = state;
+        let total_examples = 8usize;
+        let job_id = "job-cancel".to_string();
+        state.eval_jobs.write().unwrap().insert(
+            job_id.clone(),
+            EvalJobInfo::queued(
+                job_id.clone(),
+                "cancel-me".into(),
+                vec![None],
+                EvalSubmissionKind::OnDemand,
+                None,
+            ),
+        );
+        let entry = EvalQueueEntry {
+            job_id: job_id.clone(),
+            job: QueuedEvalJob::Inline {
+                suite: Box::new(big_suite(total_examples)),
+                adapter: None,
+                generation_override: None,
+            },
+        };
+
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let generator = Arc::new(GatedGenerator {
+            inner: crate::eval::MockEvalGenerator::new(),
+            reached: reached.clone(),
+            resume: resume.clone(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }) as Arc<dyn crate::eval::generator::EvalGenerator>;
+
+        let worker = tokio::spawn(run_one_job_with_generator(
+            state.clone(),
+            entry,
+            generator,
+        ));
+
+        // Deterministic: the gate fires after the first outcome landed and
+        // the second example is mid-generation.
+        reached.notified().await;
+        {
+            let jobs = state.eval_jobs.read().unwrap();
+            let job = jobs.get(&job_id).unwrap();
+            assert_eq!(job.state, EvalJobState::Running);
+            assert!(job.cancel_flag.is_some(), "worker must install the handle");
+        }
+
+        // Cancel through the real route, exactly as the dashboard does.
+        let app = crate::api::router(state.clone());
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/eval/jobs/{job_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        resume.notify_one();
+
+        worker.await.unwrap();
+
+        let jobs = state.eval_jobs.read().unwrap();
+        let job = jobs.get(&job_id).expect("job should stay tracked");
+        assert_eq!(
+            job.state,
+            EvalJobState::Cancelled,
+            "worker must not clobber Cancelled back to Completed"
+        );
+        assert_eq!(job.finished_runs.len(), 1, "partial run should be recorded");
+        let outcomes = job.finished_runs[0].outcomes.len();
+        assert!(
+            outcomes >= 1 && outcomes < total_examples,
+            "executor should stop early, got {outcomes}/{total_examples} outcomes"
+        );
+        assert!(job.finished_at_iso.is_some(), "terminal timestamps stamped");
+                assert!(job.cancel_flag.is_none(), "handle cleared at terminal state");
+    }
+}
