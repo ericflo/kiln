@@ -388,6 +388,10 @@ mod tests {
     /// Completed and the flag was never wired, so cancellation did nothing.
     #[tokio::test]
     async fn cancel_running_job_stops_early_and_stays_cancelled() {
+        // Archive writes go under adapter_dir — point it at a tempdir so
+        // the test never litters the repo tree (a stray adapters/.kiln-jobs
+        // breaks the health adapter-count test).
+        let adapter_dir = tempfile::tempdir().unwrap();
         let state = {
             let config = kiln_core::config::ModelConfig::qwen3_5_4b();
             let scheduler = kiln_scheduler::Scheduler::new(
@@ -410,6 +414,9 @@ mod tests {
                 "kiln-test".to_string(),
             )
         };
+        let mut state = state;
+        state.adapter_dir = adapter_dir.path().to_path_buf();
+        let state = state;
         let total_examples = 8usize;
         let job_id = "job-cancel".to_string();
         state.eval_jobs.write().unwrap().insert(
