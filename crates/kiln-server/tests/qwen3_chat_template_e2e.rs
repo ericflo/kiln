@@ -100,7 +100,11 @@ fn agentic_followup_example_renders_prior_tool_call_and_response() {
         .iter()
         .find(|ex| ex.id.as_deref() == Some("agentic/weather-then-answer"))
         .expect("agentic followup example present in builtin suite");
-    assert_eq!(example.messages.len(), 3, "expected user/assistant/tool prompt");
+    assert_eq!(
+        example.messages.len(),
+        3,
+        "expected user/assistant/tool prompt"
+    );
 
     let tok = fixture_tokenizer();
     let chat = eval_to_chat_messages(&example.messages);

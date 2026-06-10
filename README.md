@@ -134,6 +134,19 @@ For multi-turn agentic rollouts — tool calls, command output, file contents �
 
 When your rollouts carry a `trajectory` field with `kind: "action"` / `kind: "observation"` segments, kiln-train's `tokenize_grpo_group` builds separate `action_mask` (policy-gradient targets) and `env_mask` (ECHO env-CE targets); both contribute to the same forward pass at default `λ_echo = 0.05`. Legacy single-turn rollouts (no `trajectory` field) get ECHO contribution = 0 — bit-identical behavior to the pre-ECHO loss.
 
+The training objective is:
+
+```text
+L_total = L_policy + lambda_echo * L_env
+L_env   = (1 / |E|) * sum_{t in env_mask} -log p_theta(e_t | prefix, e_<t)
+```
+
+Action tokens in `action_mask` get the GRPO/agentic policy loss; environment
+tokens in `env_mask` get the ECHO cross-entropy loss. Observation tokens are not
+sampled from the model during rollout, but they are already in the context for
+the next action, so ECHO extracts useful world-modeling gradient from the same
+forward pass.
+
 ```python
 import requests
 
@@ -157,16 +170,173 @@ requests.post("http://localhost:8420/v1/train/agentic", json={
 
 See [docs/ECHO_GUIDE.md](docs/ECHO_GUIDE.md) for full ECHO usage (CLI flags, env vars, verifier-free adaptation per paper §5.5, and the receipt-grade `env_ce_drop_pct` diagnostic).
 
-### Off-policy OPD teacher data
+### Recursive Pi / RLM harness
 
-For saturated tasks where reward-only GRPO is low signal, kiln-train also
-accepts off-policy teacher distillation data: prompt messages plus a teacher
-response, optionally with per-token teacher top-logprobs for reverse-KL. The
-same agentic `trajectory` shape can be attached so action tokens receive OPD
-supervision while observation tokens are accounted for ECHO.
+This branch also contains a research harness for turning Pi into a Recursive Language Model client without changing Pi's visible API. Pi sends a normal OpenAI-compatible request to a local proxy; the proxy stores the full Pi transcript and tools as external state; Qwen3.5-4B sees only a fixed-window controller prompt and emits internal JSON actions until it is ready to return one normal assistant message or one normal Pi-visible tool call.
 
-See [docs/OPD_TEACHER_JSONL.md](docs/OPD_TEACHER_JSONL.md) for the JSONL
-schema and the `reverse_kl` vs `cross_entropy` objective contract.
+```bash
+python3 scripts/pi_rlm_harness.py \
+  --listen 127.0.0.1:8421 \
+  --upstream http://127.0.0.1:8420/v1 \
+  --model Qwen3.5-4B \
+  --tokenizer /workspace/Qwen3.5-4B/tokenizer.json \
+  --require-tokenizer
+
+kiln pi-setup \
+  --url http://127.0.0.1:8420 \
+  --rlm-url http://127.0.0.1:8421
+```
+
+The fixed adapter contract is:
+
+```text
+8192 tokens: stable RLM prefix, action schema, Pi tool-call contract
+4096 tokens: dynamic environment summary, exact slices, recent observations
+4096 tokens: one JSON internal action or final Pi-visible finish action
+```
+
+The recursive primitive is `spawn_agent`, not a plain summarization call. A child receives a materialized child environment from parent message references, exact slices, and optional artifacts, then runs the same controller at `depth + 1`. That child can inspect/search/slice/subcall/spawn again before returning its final proposal as an observation to the parent. The only tool call Pi executes is the top-level final `finish.tool_call`.
+
+ECHO fits the harness directly. Internal controller JSON is `kind:"action"`; harness responses are `kind:"observation"`. The same state directory can be exported as exact fixed-window SFT rows and as agentic GRPO/ECHO rollout groups:
+
+```bash
+python3 scripts/pi_rlm_harness.py \
+  --export-state-dir .kiln/pi-rlm-harness \
+  --export-sft-jsonl /tmp/pi-rlm-root-actions.sft.jsonl
+
+python3 scripts/pi_rlm_harness.py \
+  --export-state-dir .kiln/pi-rlm-harness \
+  --export-echo-jsonl /tmp/pi-rlm-rollouts.echo.jsonl
+
+kiln trajectory inspect /tmp/pi-rlm-rollouts.echo.jsonl \
+  --tokenizer /workspace/Qwen3.5-4B/tokenizer.json
+```
+
+For production-trace evals, use the same-tool-eventually runner against a suite generated from tool-call traces:
+
+```bash
+python3 scripts/pi_rlm_harness.py \
+  --upstream http://127.0.0.1:8420/v1 \
+  --model Qwen3.5-4B \
+  --tokenizer /workspace/Qwen3.5-4B/tokenizer.json \
+  --require-tokenizer \
+  --no-direct-fallback \
+  --upstream-timeout 300 \
+  --eval-suite production_trace_suite.json \
+  --eval-output production_trace.rlm_report.json
+```
+
+That report answers the harness-specific question: after any number of internal inspect/search/slice/subcall/spawn steps, did the RLM eventually emit the same semantic Pi-visible tool call? The richer Rust production-trace scorer handles large audit reports, Wilson intervals, and deeper Bash/Python command equivalence.
+
+For live Pi serving, leave direct fallback enabled so Pi still receives a
+best-effort answer when the controller exhausts its internal action budget. For
+pure RLM evals, use `--no-direct-fallback`; otherwise the report can accidentally
+score a full-context upstream request rather than the bounded recursive
+controller.
+
+### Large-teacher trace distillation, no OPD
+
+For Pi/RLM work the practical path is now: use a larger model as the recursive
+teacher, then train Qwen3.5-4B on the teacher's bounded controller actions.
+This avoids OPD's current full-head f32 workspace while still using a stronger
+model to discover good inspect/search/slice policies.
+
+There are two teacher modes. Strict eval mode hides the recorded target and
+keeps only traces whose final Pi-visible tool call passes the same-tool scorer;
+this is the honest measurement path. Oracle synthesis mode shows the recorded
+target to the teacher only while it designs the internal trace, then exports
+small-model training prompts that do **not** include that target. This is the
+data-generation path when you want enough supervised traces quickly.
+
+The teacher data pipeline is:
+
+```text
+production turn -> EvalSuite example with target tool call
+large teacher -> internal action trace tau = (a_1, o_1, ..., a_n)
+strict mode: same-tool scorer -> reward r in {0, 1}
+oracle mode: target is teacher-only; exported prompts omit it
+accepted tau -> SFT action rows + optional ECHO rollout group
+```
+
+The action-imitation loss is plain fixed-window SFT:
+
+```text
+L_action = -(1 / |A|) * sum_{a_t in tau} log p_theta(a_t | c_t)
+```
+
+where `c_t` is the 8192-token stable RLM prefix plus the clipped 4096-token
+environment state shown to the controller at step `t`. The optional observation
+modeling stage uses ECHO, not OPD:
+
+```text
+L_env = -(1 / |E|) * sum_{e_t in env_mask} log p_theta(e_t | prefix, e_<t)
+```
+
+In practice, run SFT on the exported teacher actions first. Then, if the traces
+contain useful tool observations, run `/v1/train/agentic` with
+`{"loss":{"echo":{"lambda":0.05},"no_policy_loss":true}}` to train only the
+ECHO env-CE term from those trajectories. The action policy came from SFT; the
+ECHO pass teaches the small model to predict and use environment feedback.
+
+```bash
+# 1. Build production same-tool suites from trajectory-trainer.
+python3 scripts/pi_rlm_trace_experiment.py \
+  --total 1000 \
+  --train-count 900 \
+  --out-dir .kiln/pi-rlm-trace-experiment-1000 \
+  --tokenizer /workspace/Qwen3.5-4B/tokenizer.json \
+  --require-tokenizer
+
+# 2. Run a larger OpenAI-compatible teacher through the actual recursive loop.
+python3 scripts/pi_rlm_teacher_traces.py \
+  --suite .kiln/pi-rlm-trace-experiment-1000/train.suite.json \
+  --out-dir .kiln/pi-rlm-teacher-gpt54mini-oracle-200 \
+  --upstream https://api.openai.com/v1 \
+  --model gpt-5.4-mini \
+  --api-key "$OPENAI_API_KEY" \
+  --limit 200 \
+  --oracle-target \
+  --oracle-max-actions 4 \
+  --tokenizer /workspace/Qwen3.5-4B/tokenizer.json \
+  --require-tokenizer
+
+# 3. Train the controller action grammar with SFT.
+python3 - <<'PY'
+import json, requests
+examples = [json.loads(line) for line in open(".kiln/pi-rlm-teacher-gpt54mini-oracle-200/teacher.passed.sft.jsonl")]
+requests.post("http://localhost:8420/v1/train/sft", json={
+    "examples": examples,
+    "config": {
+        "output_name": "pi-rlm-large-teacher-sft-v1",
+        "epochs": 1,
+        "learning_rate": 1e-4,
+        "lora_rank": 16,
+        "lora_alpha": 32,
+        "checkpoint_interval": 25
+    }
+}).raise_for_status()
+PY
+
+# 4. Optional ECHO-only observation modeling from the same teacher traces.
+curl http://localhost:8420/v1/train/agentic \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dataset_path": "/workspace/rlm-data/pi-rlm-teacher-gpt54mini-oracle-200/teacher.passed.echo.jsonl",
+    "config": {
+      "loss": {"echo": {"lambda": 0.05}, "no_policy_loss": true},
+      "output_name": "pi-rlm-large-teacher-echo-v1",
+      "epochs": 1,
+      "learning_rate": 1e-4,
+      "lora_rank": 16,
+      "lora_alpha": 32,
+      "checkpoint_interval": 25
+    }
+  }'
+```
+
+For pure measurement, keep `--allow-direct-fallback` off in
+`pi_rlm_teacher_traces.py` so exported traces are produced by the bounded
+recursive controller, not by a full-context fallback request.
 
 ## The Eval Loop
 

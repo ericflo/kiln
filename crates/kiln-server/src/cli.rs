@@ -561,6 +561,11 @@ pub enum Commands {
         /// Override the kiln server URL. `/v1` is appended when omitted.
         #[arg(long, alias = "kiln-url", default_value = "http://localhost:8420")]
         url: String,
+        /// Point pi at a local RLM harness proxy while preserving the direct
+        /// kiln provider as a fallback. Start it with
+        /// `scripts/pi_rlm_harness.py --upstream <url>/v1`.
+        #[arg(long, alias = "rlm-harness-url")]
+        rlm_url: Option<String>,
         /// Output path for the models.json file. Default
         /// `$HOME/.pi/agent/models.json`.
         #[arg(long)]
@@ -2333,7 +2338,9 @@ fn print_job_line(job: &serde_json::Value) {
 // ===========================================================================
 
 const PI_PROVIDER_ID: &str = "kiln-local";
+const PI_RLM_PROVIDER_ID: &str = "kiln-rlm-local";
 const PI_MODEL_ID: &str = "Qwen3.5-4B";
+const PI_RLM_MODEL_ID: &str = "Qwen3.5-4B-RLM";
 
 /// Quiet variant of `run_pi_setup` for in-process callers (the embedded
 /// dashboard terminal): performs the same non-destructive merge into pi's
@@ -2365,7 +2372,11 @@ pub fn apply_pi_setup_quiet(url: &str) -> anyhow::Result<PathBuf> {
 }
 
 /// §10.14 `kiln pi-setup` — merge kiln into pi's models/settings config.
-pub async fn run_pi_setup(url: &str, out: Option<&str>) -> anyhow::Result<()> {
+pub async fn run_pi_setup(
+    url: &str,
+    out: Option<&str>,
+    rlm_url: Option<&str>,
+) -> anyhow::Result<()> {
     let default_out: PathBuf = match std::env::var("HOME") {
         Ok(h) => PathBuf::from(h)
             .join(".pi")
@@ -2388,8 +2399,8 @@ pub async fn run_pi_setup(url: &str, out: Option<&str>) -> anyhow::Result<()> {
     let models_backup = backup_existing_file(&path)?;
     let settings_backup = backup_existing_file(&settings_path)?;
 
-    let models = merge_pi_models_config(read_json_file_if_exists(&path)?, url)?;
-    let settings = merge_pi_settings_config(read_json_file_if_exists(&settings_path)?)?;
+    let models = merge_pi_models_config(read_json_file_if_exists(&path)?, url, rlm_url)?;
+    let settings = merge_pi_settings_config(read_json_file_if_exists(&settings_path)?, rlm_url)?;
     write_json_pretty(&path, &models)?;
     write_json_pretty(&settings_path, &settings)?;
 
@@ -2411,9 +2422,20 @@ pub async fn run_pi_setup(url: &str, out: Option<&str>) -> anyhow::Result<()> {
     }
     println!(
         "  pi now talks to {} as {}.",
-        pi_openai_base_url(url),
-        PI_MODEL_ID
+        pi_openai_base_url(rlm_url.unwrap_or(url)),
+        if rlm_url.is_some() {
+            PI_RLM_MODEL_ID
+        } else {
+            PI_MODEL_ID
+        }
     );
+    if rlm_url.is_some() {
+        println!(
+            "  direct kiln fallback provider preserved as {} at {}.",
+            PI_PROVIDER_ID,
+            pi_openai_base_url(url)
+        );
+    }
     println!(
         "  Next: {} once, then use pi normally; {} on Saturdays.",
         style("kiln judge distill").cyan(),
@@ -2485,6 +2507,7 @@ fn write_json_pretty(path: &Path, value: &serde_json::Value) -> anyhow::Result<(
 fn merge_pi_models_config(
     existing: Option<serde_json::Value>,
     url: &str,
+    rlm_url: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
     let mut root = match existing {
         Some(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
@@ -2504,6 +2527,12 @@ fn merge_pi_models_config(
         .unwrap_or_else(|| serde_json::json!({}));
     let mut providers = pi_providers_object_from_value(providers_value);
     providers.insert(PI_PROVIDER_ID.to_string(), kiln_pi_provider_config(url));
+    if let Some(rlm_url) = rlm_url {
+        providers.insert(
+            PI_RLM_PROVIDER_ID.to_string(),
+            kiln_pi_rlm_provider_config(rlm_url),
+        );
+    }
     root_obj.insert(
         "providers".to_string(),
         serde_json::Value::Object(providers),
@@ -2513,6 +2542,7 @@ fn merge_pi_models_config(
 
 fn merge_pi_settings_config(
     existing: Option<serde_json::Value>,
+    rlm_url: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
     let mut root = match existing {
         Some(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
@@ -2526,11 +2556,13 @@ fn merge_pi_settings_config(
     let root_obj = root
         .as_object_mut()
         .expect("root was constructed as a JSON object");
-    root_obj.insert(
-        "defaultProvider".to_string(),
-        serde_json::json!(PI_PROVIDER_ID),
-    );
-    root_obj.insert("defaultModel".to_string(), serde_json::json!(PI_MODEL_ID));
+    let (provider, model) = if rlm_url.is_some() {
+        (PI_RLM_PROVIDER_ID, PI_RLM_MODEL_ID)
+    } else {
+        (PI_PROVIDER_ID, PI_MODEL_ID)
+    };
+    root_obj.insert("defaultProvider".to_string(), serde_json::json!(provider));
+    root_obj.insert("defaultModel".to_string(), serde_json::json!(model));
     Ok(root)
 }
 
@@ -2574,6 +2606,25 @@ fn kiln_pi_provider_config(url: &str) -> serde_json::Value {
             "input": ["text"],
             "contextWindow": 262144,
             "maxTokens": 32768,
+        }],
+    })
+}
+
+fn kiln_pi_rlm_provider_config(url: &str) -> serde_json::Value {
+    serde_json::json!({
+        "baseUrl": pi_openai_base_url(url),
+        "api": "openai-completions",
+        "apiKey": "dummy",
+        "compat": {
+            "supportsDeveloperRole": false,
+            "supportsReasoningEffort": false,
+        },
+        "models": [{
+            "id": PI_RLM_MODEL_ID,
+            "name": "Qwen 3.5 4B RLM via Kiln Harness",
+            "input": ["text"],
+            "contextWindow": 16384,
+            "maxTokens": 4096,
         }],
     })
 }
@@ -2655,8 +2706,8 @@ pub async fn run_eval_adapter(
     scorer: &Path,
     output: &Path,
 ) -> anyhow::Result<()> {
-    let summary = crate::eval_adapter_cli::run_eval_adapter(
-        crate::eval_adapter_cli::EvalAdapterOptions {
+    let summary =
+        crate::eval_adapter_cli::run_eval_adapter(crate::eval_adapter_cli::EvalAdapterOptions {
             url: url.to_string(),
             adapter: adapter.to_string(),
             tasks: tasks.to_path_buf(),
@@ -2664,9 +2715,8 @@ pub async fn run_eval_adapter(
             request_template: request_template.to_path_buf(),
             scorer: scorer.to_path_buf(),
             output: output.to_path_buf(),
-        },
-    )
-    .await?;
+        })
+        .await?;
 
     println!(
         "{} eval-adapter completed: {} pair(s), mean lift {:.6}, stdev {:.6}, zero_count {}, wrote {}",
@@ -3037,9 +3087,13 @@ mod tests {
         )
         .unwrap();
 
-        run_pi_setup("http://localhost:8420", Some(models_path.to_str().unwrap()))
-            .await
-            .unwrap();
+        run_pi_setup(
+            "http://localhost:8420",
+            Some(models_path.to_str().unwrap()),
+            None,
+        )
+        .await
+        .unwrap();
 
         let models = read_json(&models_path);
         assert_eq!(models["unrelatedTopLevel"], true);
@@ -3096,6 +3150,7 @@ mod tests {
         run_pi_setup(
             "http://office-kiln:8420/v1/",
             Some(models_path.to_str().unwrap()),
+            None,
         )
         .await
         .unwrap();
@@ -3119,6 +3174,47 @@ mod tests {
         assert_eq!(settings["defaultModel"], PI_MODEL_ID);
         assert_eq!(backup_count(tmp.path(), "models.json"), 1);
         assert_eq!(backup_count(tmp.path(), "settings.json"), 0);
+    }
+
+    #[tokio::test]
+    async fn pi_setup_can_default_to_rlm_harness_provider() {
+        let tmp = tempfile::tempdir().unwrap();
+        let models_path = tmp.path().join("models.json");
+
+        run_pi_setup(
+            "http://office-kiln:8420",
+            Some(models_path.to_str().unwrap()),
+            Some("http://office-kiln:8421"),
+        )
+        .await
+        .unwrap();
+
+        let models = read_json(&models_path);
+        let providers = models["providers"].as_object().unwrap();
+        assert_eq!(
+            providers[PI_PROVIDER_ID]["baseUrl"],
+            "http://office-kiln:8420/v1"
+        );
+        assert_eq!(
+            providers[PI_RLM_PROVIDER_ID]["baseUrl"],
+            "http://office-kiln:8421/v1"
+        );
+        assert_eq!(
+            providers[PI_RLM_PROVIDER_ID]["models"][0]["id"],
+            PI_RLM_MODEL_ID
+        );
+        assert_eq!(
+            providers[PI_RLM_PROVIDER_ID]["models"][0]["maxTokens"],
+            4096
+        );
+        assert_eq!(
+            providers[PI_RLM_PROVIDER_ID]["models"][0]["contextWindow"],
+            16384
+        );
+
+        let settings = read_json(&tmp.path().join("settings.json"));
+        assert_eq!(settings["defaultProvider"], PI_RLM_PROVIDER_ID);
+        assert_eq!(settings["defaultModel"], PI_RLM_MODEL_ID);
     }
 
     #[test]

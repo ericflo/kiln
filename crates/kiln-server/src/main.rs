@@ -181,8 +181,12 @@ async fn main() -> Result<()> {
             }
         },
         // §10.14 — pi + kiln canonical pipeline subcommands.
-        Some(Commands::PiSetup { ref url, ref out }) => {
-            return cli::run_pi_setup(url, out.as_deref()).await;
+        Some(Commands::PiSetup {
+            ref url,
+            ref rlm_url,
+            ref out,
+        }) => {
+            return cli::run_pi_setup(url, out.as_deref(), rlm_url.as_deref()).await;
         }
         Some(Commands::Judge(ref jc)) => {
             return cli::run_judge(jc).await;
