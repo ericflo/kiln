@@ -979,6 +979,25 @@ pub fn print_ready_line(host: &str, port: u16) {
     let _ = writeln!(stderr);
 }
 
+/// Body of the `kiln serve` failed-bind diagnostic when the address is
+/// already in use. Pure so tests can assert the wording.
+pub(crate) fn bind_addr_in_use_message(host: &str, port: u16) -> String {
+    format!(
+        "{host}:{port} is already in use — another kiln (or another service) is likely listening there.\n  \
+         Run `kiln health` to check for a live server, stop the other process,\n  \
+         or pick a different port via KILN_PORT or `[server] port` in kiln.toml."
+    )
+}
+
+/// Print the AddrInUse diagnostic for a failed `kiln serve` listener bind.
+pub fn print_bind_addr_in_use(host: &str, port: u16) {
+    eprintln!(
+        "{} {}",
+        style("✗").red().bold(),
+        bind_addr_in_use_message(host, port)
+    );
+}
+
 /// Format a uptime duration in seconds as a compact human string ("1h 23m 4s",
 /// "5m 30s", "12s"). Drops leading zero units. Used by the pretty health view.
 fn format_uptime_secs(total: u64) -> String {
@@ -2778,6 +2797,15 @@ mod tests {
             verbose,
             quiet,
         }
+    }
+
+    #[test]
+    fn bind_addr_in_use_message_names_addr_and_remedies() {
+        let msg = bind_addr_in_use_message("127.0.0.1", 8420);
+        assert!(msg.contains("127.0.0.1:8420"));
+        assert!(msg.contains("kiln health"));
+        assert!(msg.contains("KILN_PORT"));
+        assert!(msg.contains("[server] port"));
     }
 
     #[test]
