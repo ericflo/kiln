@@ -286,8 +286,9 @@ pub struct SftConfig {
     /// so the run is still exactly reproducible.
     #[serde(default)]
     pub seed: Option<u64>,
-    /// Optimizer selection. Defaults to AdamW (decoupled weight decay) per
-    /// LoRA fine-tuning best practice. Plain SGD is available via
+    /// Optimizer selection. Defaults to Muon (momentum-orthogonalized SGD
+    /// with fused on-device Newton-Schulz). AdamW remains available via
+    /// `{"optimizer": {"kind": "adam_w"}}` and plain SGD via
     /// `{"optimizer": {"kind": "sgd"}}` for backwards-compatible runs.
     #[serde(default)]
     pub optimizer: Optimizer,
@@ -528,7 +529,8 @@ pub enum KlEstimator {
     K1,
     /// Schulman k3: `KL_t = exp(-log_ratio_t) - 1 + log_ratio_t`. Always
     /// non-negative; value-correct but the gradient is biased. DeepSeekMath
-    /// uses this form. Candle path only; not implemented on vk-native.
+    /// uses this form. Implemented on the shared kt tape path and the
+    /// Vulkan kernel (`VK_GRPO_KL_MODE_K3`).
     K3,
     /// No KL penalty. The reference forward still runs (still needed for the
     /// importance ratio); only the KL contribution to the loss is zeroed.
@@ -569,12 +571,14 @@ pub struct GrpoConfig {
     /// sides.
     #[serde(default)]
     pub clip_eps_high: Option<f64>,
-    /// Advantage normalization mode. Defaults to `Vanilla` (historical
-    /// kiln behavior). Set to `DrGrpo` to drop std-normalization.
+    /// Advantage normalization mode. Defaults to `DrGrpo` (drops
+    /// std-normalization per arXiv:2503.20783). Set to `Vanilla` for the
+    /// historical DeepSeekMath/R1 form.
     #[serde(default)]
     pub advantage_mode: AdvantageMode,
-    /// Surrogate-loss aggregation mode. Defaults to `PerSample` (historical
-    /// kiln behavior). Set to `TokenLevel` for the DAPO Token-Level Loss.
+    /// Surrogate-loss aggregation mode. Defaults to `TokenLevel` (the DAPO
+    /// Token-Level Loss, arXiv:2503.14476). Set to `PerSample` for the
+    /// historical per-completion form.
     #[serde(default)]
     pub loss_aggregation: LossAggregation,
     /// KL penalty estimator. Defaults to `K1` (historical kiln behavior).
@@ -1001,6 +1005,38 @@ pub struct TrainingResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pin the serde shape of the training-policy defaults. A future default
+    /// flip must update this snapshot in the same commit, which forces the
+    /// field/enum docs (and CHANGELOG) to be revisited together — the Muon
+    /// flip left "Defaults to AdamW" doc-rot behind precisely because nothing
+    /// tied the default to a literal.
+    #[test]
+    fn training_policy_defaults_match_pinned_snapshots() {
+        assert_eq!(
+            serde_json::to_value(Optimizer::default()).unwrap(),
+            serde_json::json!({
+                "kind": "muon",
+                // f32 fields widen to f64 in serde_json, so pin via casts.
+                "momentum": 0.95f32 as f64,
+                "nesterov": true,
+                "ns_iters": 5,
+                "weight_decay": 0.0f32 as f64
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(AdvantageMode::default()).unwrap(),
+            serde_json::json!("dr_grpo")
+        );
+        assert_eq!(
+            serde_json::to_value(LossAggregation::default()).unwrap(),
+            serde_json::json!("token_level")
+        );
+        assert_eq!(
+            serde_json::to_value(KlEstimator::default()).unwrap(),
+            serde_json::json!("k1")
+        );
+    }
 
     #[test]
     fn test_sft_config_default_checkpoint_interval_is_none() {

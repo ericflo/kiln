@@ -685,7 +685,8 @@ pub struct OpdConfig {
     #[serde(default)]
     pub seed: Option<u64>,
 
-    /// Optimizer. Defaults to AdamW per kiln convention.
+    /// Optimizer. Defaults to Muon (momentum-orthogonalized SGD), matching
+    /// SFT/GRPO; AdamW and SGD remain selectable per-request.
     #[serde(default)]
     pub optimizer: Optimizer,
 
