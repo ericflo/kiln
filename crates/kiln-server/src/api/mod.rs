@@ -65,7 +65,12 @@ pub fn router(state: AppState) -> Router {
         .merge(health::routes())
         .merge(metrics::routes())
         .merge(models::routes())
-        .merge(completions::routes())
+        // Inference routes get the durable request/response tap (no-op when
+        // [request_log] is disabled or unset on this AppState).
+        .merge(completions::routes().layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::request_log::tap,
+        )))
         .merge(adapters::routes())
         .merge(teachers::routes())
         .merge(recipes::routes())
