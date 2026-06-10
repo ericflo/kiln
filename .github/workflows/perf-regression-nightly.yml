@@ -244,12 +244,22 @@ jobs:
           print('OK — null baseline was seeded:', b)
           "
 
+      - name: Warn when the A6000 perf leg is offline
+        if: ${{ vars.KILN_A6000_ONLINE != 'true' }}
+        run: |
+          echo "::warning::A6000 perf leg offline (repo variable KILN_A6000_ONLINE != 'true') — the Tier-2 hardware perf gate is not running. Set the variable to 'true' after registering a cuda-a6000 self-hosted runner."
+
   # -------------------------------------------------------------------
   # Tier 2 / Tier 3: actual perf gate against the A6000 baseline.
   #
-  # Self-hosted runner labelled `cuda-a6000`. Until one is wired up
-  # this job is conditionally skipped — `gate-self-test` above still
-  # validates the regression-check script on every dispatch.
+  # Self-hosted runner labelled `cuda-a6000`. The job only runs when the
+  # repository variable KILN_A6000_ONLINE is set to 'true' — without the
+  # gate, every nightly cron queued against the (usually offline,
+  # spun-up-on-demand) runner for 24h and was auto-cancelled, producing
+  # zero perf signal plus daily Actions noise. Flip the variable on
+  # (Settings → Secrets and variables → Actions → Variables) after
+  # registering a runner; no workflow edit needed. `gate-self-test`
+  # above still validates the regression-check script on every dispatch.
   #
   # When the runner IS online, this job:
   #   1. Builds kiln-bench --release --features cuda
@@ -262,7 +272,7 @@ jobs:
     name: A6000 perf gate (${{ matrix.trainer }})
     runs-on: [self-hosted, linux, cuda-a6000]
     needs: gate-self-test
-    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.latency_fixture_id == 'none') }}
+    if: ${{ vars.KILN_A6000_ONLINE == 'true' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.latency_fixture_id == 'none')) }}
     strategy:
       fail-fast: false
       matrix:
