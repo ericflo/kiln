@@ -5,10 +5,18 @@
 //! and scores responses locally with the same scorer stack the Kiln server
 //! uses. It is useful for comparing a generated production trace suite against
 //! hosted models without starting a Kiln model server.
+//!
+//! One caveat to the "same scorer stack" claim: suites built with
+//! `--require-qwen-xml` cannot measure output *format* through this
+//! transport. OpenAI-compatible servers that parse tool calls return them as
+//! structured `message.tool_calls`, erasing whatever wire format the model
+//! actually emitted. For those responses the XML-format requirement is
+//! disabled (with a one-time warning) and only tool-call semantics are
+//! scored; pass `--no-tools` to receive raw completions if format matters.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -59,6 +67,10 @@ struct Args {
     /// previous serial behavior.
     #[arg(long, default_value_t = 1)]
     concurrency: usize,
+    /// Total per-request timeout in seconds. A hung endpoint fails that
+    /// example instead of stalling the run forever.
+    #[arg(long, default_value_t = 120)]
+    timeout_secs: u64,
     /// Do not send the suite/example tool catalogue to the API.
     #[arg(long)]
     no_tools: bool,
@@ -87,7 +99,10 @@ async fn main() -> Result<()> {
         .or_else(|| std::env::var(&args.api_key_env).ok())
         .filter(|s| !s.is_empty());
     let extra_body = parse_extra_body(args.extra_body_json.as_deref())?;
-    let client = reqwest::Client::builder().build()?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(args.timeout_secs))
+        .connect_timeout(Duration::from_secs(10))
+        .build()?;
     let started_at = chrono::Utc::now();
 
     let mut runs = Vec::new();
@@ -386,6 +401,10 @@ async fn call_chat_api(
     Ok(ApiCompletion::from_response(value)?)
 }
 
+/// Printed at most once per process when XML-format enforcement has to be
+/// waived because the transport returned pre-parsed tool calls.
+static XML_FORMAT_WAIVED_WARNING: std::sync::Once = std::sync::Once::new();
+
 fn score_api_response(
     scorer: &Scorer,
     example: &kiln_eval::EvalExample,
@@ -394,6 +413,35 @@ fn score_api_response(
     latency_ms: f64,
     suite: &EvalSuite,
 ) -> Result<(ExampleOutcome, Option<String>, Option<(u32, u32)>)> {
+    // API-native tool calls arrive pre-parsed: the serving layer already
+    // converted whatever the model emitted (possibly genuine Qwen XML) into
+    // structured JSON. Marking those Invalid would blame the model for the
+    // transport, so waive require_xml_format and score semantics only.
+    let scorer = match scorer {
+        Scorer::ToolCall {
+            require_xml_format: true,
+            ..
+        } if response.tool_calls_were_api_native => {
+            XML_FORMAT_WAIVED_WARNING.call_once(|| {
+                eprintln!(
+                    "warning: suite sets require_xml_format but the API returned structured \
+                     tool_calls; the transport erases the model's raw output format, so \
+                     XML-format enforcement is disabled for those responses. Pass --no-tools \
+                     (or rebuild the suite without --require-qwen-xml) to measure format."
+                );
+            });
+            let mut waived = scorer.clone();
+            if let Scorer::ToolCall {
+                require_xml_format, ..
+            } = &mut waived
+            {
+                *require_xml_format = false;
+            }
+            std::borrow::Cow::Owned(waived)
+        }
+        other => std::borrow::Cow::Borrowed(other),
+    };
+    let scorer = scorer.as_ref();
     let mut predicted_tool = None;
     let mut schema_violation = None;
     if matches!(scorer, Scorer::ToolCall { .. }) {
@@ -429,6 +477,10 @@ struct ApiCompletion {
     completion_text: String,
     prompt_tokens: Option<usize>,
     completion_tokens: Option<usize>,
+    /// True when the completion's tool calls came back as structured
+    /// `message.tool_calls` — the serving layer already parsed them, so the
+    /// raw output format the model emitted is unknowable here.
+    tool_calls_were_api_native: bool,
 }
 
 impl ApiCompletion {
@@ -454,14 +506,17 @@ impl ApiCompletion {
             answer.push_str(&content);
             answer.push('\n');
         }
+        let mut tool_calls_were_api_native = false;
         if let Some(tool_calls) = tool_calls.filter(|calls| !calls.is_empty()) {
             answer.push_str(&serde_json::to_string(
                 &json!({ "tool_calls": tool_calls }),
             )?);
+            tool_calls_were_api_native = true;
         }
         let usage = value.get("usage");
         Ok(Self {
             completion_text: answer,
+            tool_calls_were_api_native,
             prompt_tokens: usage
                 .and_then(|u| u.get("prompt_tokens"))
                 .and_then(|v| v.as_u64())
@@ -529,6 +584,122 @@ fn suite_hash(suite: &EvalSuite) -> Result<String> {
         out.push_str(&format!("{byte:02x}"));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kiln_eval::EvalExample;
+    use kiln_eval::scorers::{ArgsScoring, NameMatch};
+
+    fn xml_required_scorer() -> Scorer {
+        Scorer::ToolCall {
+            name_match: NameMatch::CaseInsensitive,
+            args: ArgsScoring::Auto,
+            weights: None,
+            require_xml_format: true,
+        }
+    }
+
+    fn suite_with_example(scorer: Scorer) -> EvalSuite {
+        EvalSuite {
+            name: "test".into(),
+            description: None,
+            default_scorer: scorer,
+            generation: EvalGenerationParams::default(),
+            system_prompt: None,
+            examples: vec![EvalExample {
+                messages: vec![kiln_eval::EvalChatMessage::new("user", "run pwd")],
+                target: Some(
+                    r#"{"tool_calls":[{"name":"Bash","arguments":{"command":"pwd"}}]}"#.into(),
+                ),
+                ..Default::default()
+            }],
+            schema_version: 1,
+            tools: None,
+        }
+    }
+
+    #[test]
+    fn timeout_secs_defaults_and_parses() {
+        let args = Args::parse_from(["trace_api_eval", "--suite", "s.json", "--model", "m"]);
+        assert_eq!(args.timeout_secs, 120);
+        let args = Args::parse_from([
+            "trace_api_eval",
+            "--suite",
+            "s.json",
+            "--model",
+            "m",
+            "--timeout-secs",
+            "7",
+        ]);
+        assert_eq!(args.timeout_secs, 7);
+    }
+
+    #[test]
+    fn from_response_marks_api_native_tool_calls() {
+        let native = ApiCompletion::from_response(json!({
+            "choices": [{"message": {"content": null, "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "Bash", "arguments": "{\"command\":\"pwd\"}"}
+            }]}}]
+        }))
+        .unwrap();
+        assert!(native.tool_calls_were_api_native);
+        let textual = ApiCompletion::from_response(json!({
+            "choices": [{"message": {"content": "{\"tool_calls\":[{\"name\":\"Bash\",\"arguments\":{\"command\":\"pwd\"}}]}"}}]
+        }))
+        .unwrap();
+        assert!(!textual.tool_calls_were_api_native);
+    }
+
+    #[test]
+    fn require_xml_format_is_waived_for_api_native_tool_calls() {
+        let suite = suite_with_example(xml_required_scorer());
+        let response = ApiCompletion::from_response(json!({
+            "choices": [{"message": {"content": null, "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "Bash", "arguments": "{\"command\":\"pwd\"}"}
+            }]}}]
+        }))
+        .unwrap();
+        let (outcome, predicted_tool, _) = score_api_response(
+            &suite.default_scorer,
+            &suite.examples[0],
+            0,
+            response,
+            1.0,
+            &suite,
+        )
+        .unwrap();
+        // The transport parsed the call; XML enforcement must not mark it
+        // Invalid — the call is semantically correct and should Pass.
+        assert_eq!(outcome.kind, EvalOutcomeKind::Pass, "{:?}", outcome.detail);
+        assert_eq!(predicted_tool.as_deref(), Some("Bash"));
+    }
+
+    #[test]
+    fn require_xml_format_still_applies_to_textual_completions() {
+        let suite = suite_with_example(xml_required_scorer());
+        // The model itself emitted a JSON-shaped call as text — that IS a
+        // format regression and stays Invalid.
+        let response = ApiCompletion::from_response(json!({
+            "choices": [{"message": {"content": "{\"tool_calls\":[{\"name\":\"Bash\",\"arguments\":{\"command\":\"pwd\"}}]}"}}]
+        }))
+        .unwrap();
+        let (outcome, _, _) = score_api_response(
+            &suite.default_scorer,
+            &suite.examples[0],
+            0,
+            response,
+            1.0,
+            &suite,
+        )
+        .unwrap();
+        assert_eq!(outcome.kind, EvalOutcomeKind::Invalid, "{:?}", outcome.detail);
+    }
 }
 
 fn print_summary(result: &EvalResult, started_at: chrono::DateTime<chrono::Utc>) {

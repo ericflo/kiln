@@ -273,6 +273,18 @@ pub fn extract_first_tool_call(raw: &str) -> Option<ParsedToolCall> {
     extract_tool_calls(raw).into_iter().next()
 }
 
+/// Parse tool calls from already-structured JSON (a `{"tool_calls": [...]}`
+/// envelope or a bare tool-call object), without running any of the text
+/// scanners. Use this whenever the calls arrive as structured data —
+/// scanning serialized JSON would let an argument *value* that happens to
+/// contain tool-call markup (e.g. a Write call whose `content` mentions
+/// `<tool_call>…</tool_call>`) hijack the result. Individual entries that
+/// fail to parse are dropped, so callers holding the original array should
+/// compare lengths to detect partial parses.
+pub fn tool_calls_from_value(value: &serde_json::Value) -> Option<Vec<ParsedToolCall>> {
+    json_to_tool_calls(value)
+}
+
 /// Parse every `<tool_call>…</tool_call>` block in `text`. Returns an empty
 /// vec when none are found.
 fn extract_qwen3_xml_tool_calls(text: &str) -> Vec<ParsedToolCall> {

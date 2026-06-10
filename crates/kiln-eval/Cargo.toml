@@ -25,3 +25,7 @@ clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { workspace = true }
+
+[[example]]
+name = "trace_api_eval"
+test = true
