@@ -592,7 +592,16 @@ async fn main() -> Result<()> {
     let app = api::router(state);
 
     let addr = format!("{host}:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(listener) => listener,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            cli::print_bind_addr_in_use(host, port);
+            std::process::exit(1);
+        }
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!("failed to bind {addr}")));
+        }
+    };
     tracing::debug!(
         host = %host,
         port = port,
