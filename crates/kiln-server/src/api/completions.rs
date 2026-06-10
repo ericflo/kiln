@@ -3454,6 +3454,23 @@ async fn completions_inner(
             "prompt must tokenize to at least one token",
         ));
     }
+    // The response materializes seq x top_k logprobs on the host, so an
+    // unbounded prompt is a memory amplification vector (4 MB+ per 4K
+    // tokens at the top_k cap); raw token-id prompts also bypass the
+    // tokenizer, so out-of-range ids would reach the embedding lookup.
+    if prompt_tokens.len() > MAX_COMPLETION_PROMPT_TOKENS {
+        return Err(ApiError::completion_invalid_request(format!(
+            "prompt is {} tokens; prompt-logprobs requests are capped at \
+             {MAX_COMPLETION_PROMPT_TOKENS} tokens",
+            prompt_tokens.len()
+        )));
+    }
+    let vocab_size = state.model_config.vocab_size;
+    if let Some(bad) = prompt_tokens.iter().find(|&&t| (t as usize) >= vocab_size) {
+        return Err(ApiError::completion_invalid_request(format!(
+            "prompt token id {bad} is out of range for vocab size {vocab_size}"
+        )));
+    }
 
     let prompt_logprobs = match state.backend.as_ref() {
         ModelBackend::Mock { .. } => mock_prompt_logprobs(state, &prompt_tokens, top_k),
@@ -3487,6 +3504,11 @@ async fn completions_inner(
 }
 
 const MAX_COMPLETION_PROMPT_LOGPROBS: usize = 256;
+
+/// Cap on prompt length for prompt-logprobs requests. OPD teachers score
+/// student rollouts in chunks well under this; the cap exists because each
+/// prompt token materializes a top-k logprob map in the JSON response.
+const MAX_COMPLETION_PROMPT_TOKENS: usize = 4096;
 
 fn validate_prompt_logprobs_top_k(state: &AppState, top_k: usize) -> Result<(), ApiError> {
     if top_k == 0 {
@@ -10313,6 +10335,64 @@ mod tests {
         let (status, json) = completion_post(make_batch_test_state(), &body).await;
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(json["error"]["code"], "completion_invalid_request");
+    }
+
+    #[tokio::test]
+    async fn completions_prompt_logprobs_rejects_out_of_range_token_ids() {
+        let state = make_batch_test_state();
+        let vocab_size = state.model_config.vocab_size;
+        let body = serde_json::json!({
+            "prompt": [11, vocab_size, 33],
+            "max_tokens": 1,
+            "prompt_logprobs": 4
+        })
+        .to_string();
+
+        let (status, json) = completion_post(state, &body).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "completion_invalid_request");
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("out of range"),
+            "{json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn completions_prompt_logprobs_rejects_over_long_prompts() {
+        let tokens: Vec<u32> = vec![7; MAX_COMPLETION_PROMPT_TOKENS + 1];
+        let body = serde_json::json!({
+            "prompt": tokens,
+            "max_tokens": 1,
+            "prompt_logprobs": 4
+        })
+        .to_string();
+
+        let (status, json) = completion_post(make_batch_test_state(), &body).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "completion_invalid_request");
+        assert!(
+            json["error"]["message"].as_str().unwrap().contains("capped"),
+            "{json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn completions_prompt_logprobs_accepts_boundary_valid_prompt() {
+        // In-range ids at a modest length must pass validation and produce
+        // mock logprobs.
+        let body = serde_json::json!({
+            "prompt": [11, 22, 33],
+            "max_tokens": 1,
+            "prompt_logprobs": 4
+        })
+        .to_string();
+
+        let (status, json) = completion_post(make_batch_test_state(), &body).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{json}");
+        assert_eq!(json["usage"]["prompt_tokens"], 3);
     }
 
     #[tokio::test]
