@@ -81,9 +81,7 @@ impl Default for ArgsScoring {
 impl ArgsScoring {
     pub(super) fn requires_judge(&self) -> bool {
         match self {
-            ArgsScoring::PerKey { scorers, .. } => {
-                scorers.values().any(|s| s.requires_judge())
-            }
+            ArgsScoring::PerKey { scorers, .. } => scorers.values().any(|s| s.requires_judge()),
             _ => false,
         }
     }
@@ -107,6 +105,10 @@ const BASH_SAME_PROGRAM_DIFF_SUBCOMMAND: f32 = 0.35;
 /// Score awarded when the predicted bash command's classification doesn't
 /// match the target's at all (e.g. `python_inline` vs `pip_install`).
 const BASH_WRONG_FAMILY: f32 = 0.1;
+/// Max shell-wrapper recursion while scoring command args. Production agents
+/// often wrap the real operation in `bash -lc`, which then invokes Python or
+/// another shell. A shallow bound avoids pathological self-similar strings.
+const BASH_RECURSION_LIMIT: usize = 4;
 
 impl Default for ToolCallWeights {
     fn default() -> Self {
@@ -131,9 +133,10 @@ pub(super) fn score(
     require_xml_format: bool,
     judge_runner: &dyn JudgeRunner,
 ) -> Result<(f32, EvalOutcomeKind, Option<String>), ScorerError> {
-    let target_raw = example.target.as_deref().ok_or(ScorerError::MissingTarget {
-        kind: "tool_call",
-    })?;
+    let target_raw = example
+        .target
+        .as_deref()
+        .ok_or(ScorerError::MissingTarget { kind: "tool_call" })?;
     let target_calls = extract_tool_calls(target_raw);
     if target_calls.is_empty() {
         return Err(ScorerError::MissingTarget {
@@ -155,9 +158,7 @@ pub(super) fn score(
         return Ok((
             0.0,
             EvalOutcomeKind::Invalid,
-            Some(
-                "non-XML tool call emitted (require_xml_format=true)".to_string(),
-            ),
+            Some("non-XML tool call emitted (require_xml_format=true)".to_string()),
         ));
     }
     if predicted_calls.is_empty() {
@@ -184,7 +185,11 @@ pub(super) fn score(
     let pair_count = pairs.len() as f32;
     let weights = weights.copied().unwrap_or_default();
     let total_weight = weights.name + weights.structure + weights.content;
-    let total_weight = if total_weight <= 0.0 { 1.0 } else { total_weight };
+    let total_weight = if total_weight <= 0.0 {
+        1.0
+    } else {
+        total_weight
+    };
     let n_w = weights.name / total_weight;
     let s_w = weights.structure / total_weight;
     let c_w = weights.content / total_weight;
@@ -283,7 +288,11 @@ fn score_pair(
     judge_runner: &dyn JudgeRunner,
 ) -> Result<(f32, bool, String), ScorerError> {
     let total_weight = weights.name + weights.structure + weights.content;
-    let total_weight = if total_weight <= 0.0 { 1.0 } else { total_weight };
+    let total_weight = if total_weight <= 0.0 {
+        1.0
+    } else {
+        total_weight
+    };
     let n_w = weights.name / total_weight;
     let s_w = weights.structure / total_weight;
     let c_w = weights.content / total_weight;
@@ -314,11 +323,7 @@ fn score_pair(
     Ok((combined, name_score >= 1.0, detail))
 }
 
-fn score_name(
-    predicted: &str,
-    target: &str,
-    match_mode: &NameMatch,
-) -> (f32, Option<String>) {
+fn score_name(predicted: &str, target: &str, match_mode: &NameMatch) -> (f32, Option<String>) {
     match match_mode {
         NameMatch::Exact => {
             if predicted == target {
@@ -335,9 +340,7 @@ fn score_name(
             }
         }
         NameMatch::OneOf { allowed } => {
-            let ok = allowed
-                .iter()
-                .any(|a| a.eq_ignore_ascii_case(predicted));
+            let ok = allowed.iter().any(|a| a.eq_ignore_ascii_case(predicted));
             if ok {
                 (1.0, None)
             } else {
@@ -353,7 +356,10 @@ fn score_name(
     }
 }
 
-fn score_structural(predicted: &serde_json::Value, target: &serde_json::Value) -> (f32, Option<String>) {
+fn score_structural(
+    predicted: &serde_json::Value,
+    target: &serde_json::Value,
+) -> (f32, Option<String>) {
     let p_keys: BTreeSet<&str> = predicted
         .as_object()
         .map(|m| m.keys().map(|s| s.as_str()).collect())
@@ -381,8 +387,18 @@ fn score_structural(predicted: &serde_json::Value, target: &serde_json::Value) -
     } else {
         Some(format!(
             "missing=[{}] extra=[{}]",
-            missing.iter().copied().copied().collect::<Vec<&str>>().join(","),
-            extra.iter().copied().copied().collect::<Vec<&str>>().join(",")
+            missing
+                .iter()
+                .copied()
+                .copied()
+                .collect::<Vec<&str>>()
+                .join(","),
+            extra
+                .iter()
+                .copied()
+                .copied()
+                .collect::<Vec<&str>>()
+                .join(",")
         ))
     };
     (score, detail)
@@ -548,7 +564,11 @@ fn score_arg_value_auto(
             }
         }
         (serde_json::Value::Bool(a), serde_json::Value::Bool(b)) => {
-            if a == b { 1.0 } else { 0.0 }
+            if a == b {
+                1.0
+            } else {
+                0.0
+            }
         }
         _ => {
             if canonicalize(target) == canonicalize(predicted) {
@@ -570,15 +590,26 @@ fn is_command_key(key: &str) -> bool {
 /// Score two bash command strings. Strategy:
 ///
 /// 1. Introspect both.
-/// 2. If classifications differ (e.g. `python_inline` vs `pip_install`),
+/// 2. Recursively unwrap shell wrappers like `bash -lc` when they carry the
+///    real command.
+/// 3. If classifications differ (e.g. `python_inline` vs `pip_install`),
 ///    return a low score (0.1) — the model picked the wrong tool entirely.
-/// 3. If classifications match but inline languages differ, return 0.2.
 /// 4. If both are inline programs of the same language, sub-score the
 ///    inner code with token similarity (lenient — variable renames OK).
 /// 5. Otherwise return token jaccard over the full command tail.
 fn score_bash_command(target: &str, predicted: &str) -> f32 {
+    score_bash_command_depth(target, predicted, 0)
+}
+
+fn score_bash_command_depth(target: &str, predicted: &str, depth: usize) -> f32 {
     let t_intro = bash::introspect(target);
     let p_intro = bash::introspect(predicted);
+    if depth < BASH_RECURSION_LIMIT {
+        if let Some(score) = score_shell_wrapper_pair(&t_intro, &p_intro, target, predicted, depth)
+        {
+            return score;
+        }
+    }
     if t_intro.classification() != p_intro.classification() {
         if t_intro.program == p_intro.program {
             return BASH_SAME_PROGRAM_DIFF_SUBCOMMAND;
@@ -589,6 +620,21 @@ fn score_bash_command(target: &str, predicted: &str) -> f32 {
         t_intro.inline_code.as_deref(),
         p_intro.inline_code.as_deref(),
     ) {
+        if t_intro.inline_language.as_deref() == Some("bash")
+            && p_intro.inline_language.as_deref() == Some("bash")
+            && depth < BASH_RECURSION_LIMIT
+        {
+            return code_token_similarity(t_code, p_code).max(score_bash_command_depth(
+                t_code,
+                p_code,
+                depth + 1,
+            ));
+        }
+        if t_intro.inline_language.as_deref() == Some("python")
+            && p_intro.inline_language.as_deref() == Some("python")
+        {
+            return score_python_inline_code(t_code, p_code, depth);
+        }
         return code_token_similarity(t_code, p_code);
     }
     // Same family, no inline code — compare argument tails as token sets.
@@ -600,6 +646,348 @@ fn score_bash_command(target: &str, predicted: &str) -> f32 {
     let inter = t_tokens.intersection(&p_tokens).count();
     let uni = t_tokens.union(&p_tokens).count().max(1);
     inter as f32 / uni as f32
+}
+
+fn score_shell_wrapper_pair(
+    target_intro: &bash::BashIntrospection,
+    predicted_intro: &bash::BashIntrospection,
+    target_raw: &str,
+    predicted_raw: &str,
+    depth: usize,
+) -> Option<f32> {
+    let target_shell = shell_wrapper_inner(target_intro);
+    let predicted_shell = shell_wrapper_inner(predicted_intro);
+    match (target_shell, predicted_shell) {
+        (Some(t_inner), Some(p_inner)) => {
+            let raw_similarity = code_token_similarity(t_inner, p_inner);
+            let recursive = score_bash_command_depth(t_inner, p_inner, depth + 1);
+            Some(raw_similarity.max(recursive))
+        }
+        (Some(t_inner), None) => Some(score_bash_command_depth(t_inner, predicted_raw, depth + 1)),
+        (None, Some(p_inner)) => Some(score_bash_command_depth(target_raw, p_inner, depth + 1)),
+        (None, None) => None,
+    }
+}
+
+fn shell_wrapper_inner(intro: &bash::BashIntrospection) -> Option<&str> {
+    match intro.inline_language.as_deref() {
+        Some("bash") => intro.inline_code.as_deref(),
+        _ => None,
+    }
+}
+
+fn score_python_inline_code(target: &str, predicted: &str, depth: usize) -> f32 {
+    let base = code_token_similarity(target, predicted);
+    let mut semantic_scores = Vec::new();
+
+    let target_commands = extract_python_shell_commands(target);
+    let predicted_commands = extract_python_shell_commands(predicted);
+    if !target_commands.is_empty() || !predicted_commands.is_empty() {
+        semantic_scores.push(score_command_list(
+            &target_commands,
+            &predicted_commands,
+            depth,
+        ));
+    }
+
+    let target_exec_paths = extract_python_exec_paths(target);
+    let predicted_exec_paths = extract_python_exec_paths(predicted);
+    if !target_exec_paths.is_empty() || !predicted_exec_paths.is_empty() {
+        semantic_scores.push(score_path_list(&target_exec_paths, &predicted_exec_paths));
+    }
+
+    if semantic_scores.is_empty() {
+        return base;
+    }
+
+    let semantic = semantic_scores.iter().sum::<f32>() / semantic_scores.len() as f32;
+    (semantic * 0.75 + base * 0.25).clamp(0.0, 1.0)
+}
+
+fn score_command_list(target: &[String], predicted: &[String], depth: usize) -> f32 {
+    if target.is_empty() && predicted.is_empty() {
+        return 1.0;
+    }
+    if target.is_empty() || predicted.is_empty() {
+        return 0.0;
+    }
+    let total = target.len().max(predicted.len()).max(1);
+    let mut sum = 0.0;
+    for i in 0..total {
+        let Some(t) = target.get(i) else {
+            continue;
+        };
+        let Some(p) = predicted.get(i) else {
+            continue;
+        };
+        sum += score_bash_command_depth(t, p, depth + 1);
+    }
+    sum / total as f32
+}
+
+fn score_path_list(target: &[String], predicted: &[String]) -> f32 {
+    if target.is_empty() && predicted.is_empty() {
+        return 1.0;
+    }
+    if target.is_empty() || predicted.is_empty() {
+        return 0.0;
+    }
+    let total = target.len().max(predicted.len()).max(1);
+    let mut sum = 0.0;
+    for i in 0..total {
+        let Some(t) = target.get(i) else {
+            continue;
+        };
+        let Some(p) = predicted.get(i) else {
+            continue;
+        };
+        sum += score_path(t, p);
+    }
+    sum / total as f32
+}
+
+fn score_path(target: &str, predicted: &str) -> f32 {
+    let t = normalize_path_like(target);
+    let p = normalize_path_like(predicted);
+    if t == p {
+        return 1.0;
+    }
+    let t_base = t.rsplit('/').next().unwrap_or(t.as_str());
+    let p_base = p.rsplit('/').next().unwrap_or(p.as_str());
+    if !t_base.is_empty() && t_base == p_base {
+        return 0.8;
+    }
+    0.0
+}
+
+fn normalize_path_like(path: &str) -> String {
+    let mut out = path.trim().replace('\\', "/");
+    while out.starts_with("./") {
+        out = out[2..].to_string();
+    }
+    while out.contains("//") {
+        out = out.replace("//", "/");
+    }
+    out
+}
+
+fn extract_python_shell_commands(code: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for pattern in [
+        "os.system(",
+        "os.popen(",
+        "subprocess.run(",
+        "subprocess.call(",
+        "subprocess.check_output(",
+        "subprocess.Popen(",
+        "Popen(",
+    ] {
+        let mut search_from = 0usize;
+        while let Some(rel) = code[search_from..].find(pattern) {
+            let match_start = search_from + rel;
+            if pattern == "Popen(" && has_qualified_python_call_prefix(code, match_start) {
+                search_from = match_start + pattern.len();
+                continue;
+            }
+            let args_start = match_start + pattern.len();
+            if let Some((args, end)) = extract_balanced_call_args(code, args_start) {
+                if let Some(command) = python_command_from_call_args(&args) {
+                    out.push(command);
+                }
+                search_from = end;
+            } else {
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn has_qualified_python_call_prefix(code: &str, match_start: usize) -> bool {
+    code[..match_start]
+        .chars()
+        .next_back()
+        .map(|ch| ch == '.' || ch == '_' || ch.is_ascii_alphanumeric())
+        .unwrap_or(false)
+}
+
+fn python_command_from_call_args(args: &str) -> Option<String> {
+    let trimmed = args.trim_start();
+    if trimmed.starts_with('[') {
+        return python_string_list(trimmed)
+            .and_then(|parts| python_command_from_string_list(&parts));
+    }
+    first_python_string_literal(trimmed).map(|(s, _)| s)
+}
+
+fn python_command_from_string_list(parts: &[String]) -> Option<String> {
+    let program = parts.first()?.as_str();
+    if matches!(program, "bash" | "sh" | "zsh") && parts.len() >= 3 && parts[1].contains('c') {
+        return Some(parts[2].clone());
+    }
+    Some(parts.join(" "))
+}
+
+fn extract_python_exec_paths(code: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for pattern in ["exec(open(", "runpy.run_path(", "Path("] {
+        let mut search_from = 0usize;
+        while let Some(rel) = code[search_from..].find(pattern) {
+            let args_start = search_from + rel + pattern.len();
+            if let Some((path, end)) = first_python_string_literal(&code[args_start..]) {
+                let suffix = code[args_start + end..].trim_start();
+                let suffix = suffix.strip_prefix(')').unwrap_or(suffix).trim_start();
+                if pattern != "Path(" || suffix.starts_with(".read_text") {
+                    out.push(path);
+                }
+                search_from = args_start + end;
+            } else {
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn extract_balanced_call_args(code: &str, start: usize) -> Option<(String, usize)> {
+    let mut depth = 1usize;
+    let mut in_string: Option<char> = None;
+    let mut escaped = false;
+    let mut out = String::new();
+    let mut iter = code[start..].char_indices().peekable();
+    while let Some((rel, ch)) = iter.next() {
+        if let Some(quote) = in_string {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == quote {
+                in_string = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => {
+                in_string = Some(ch);
+                out.push(ch);
+            }
+            '(' | '[' | '{' => {
+                depth += 1;
+                out.push(ch);
+            }
+            ')' | ']' | '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some((out, start + rel + ch.len_utf8()));
+                }
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    None
+}
+
+fn python_string_list(input: &str) -> Option<Vec<String>> {
+    let mut strings = Vec::new();
+    let mut idx = input.find('[')? + 1;
+    while idx < input.len() {
+        let rest = &input[idx..];
+        let skipped = rest.len()
+            - rest
+                .trim_start_matches(|ch: char| ch.is_whitespace() || ch == ',')
+                .len();
+        idx += skipped;
+        let rest = &input[idx..];
+        if rest.starts_with(']') {
+            return Some(strings);
+        }
+        if let Some((s, end)) = python_string_literal_at(input, idx) {
+            strings.push(s);
+            idx = end;
+        } else {
+            return None;
+        }
+    }
+    None
+}
+
+fn first_python_string_literal(input: &str) -> Option<(String, usize)> {
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if let Some(parsed) = python_string_literal_at(input, i) {
+            return Some(parsed);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn python_string_literal_at(input: &str, start: usize) -> Option<(String, usize)> {
+    let bytes = input.as_bytes();
+    if start >= bytes.len() {
+        return None;
+    }
+    let mut quote_idx = start;
+    let ch = bytes[quote_idx] as char;
+    if ch != '\'' && ch != '"' {
+        if !is_python_string_prefix(ch) {
+            return None;
+        }
+        let mut prefix_len = 0usize;
+        while quote_idx < bytes.len()
+            && prefix_len < 3
+            && is_python_string_prefix(bytes[quote_idx] as char)
+        {
+            quote_idx += 1;
+            prefix_len += 1;
+        }
+        if quote_idx >= bytes.len() {
+            return None;
+        }
+        let quote = bytes[quote_idx] as char;
+        if quote != '\'' && quote != '"' {
+            return None;
+        }
+    }
+    parse_python_string_literal(input, quote_idx)
+}
+
+fn is_python_string_prefix(ch: char) -> bool {
+    matches!(ch, 'r' | 'R' | 'u' | 'U' | 'b' | 'B' | 'f' | 'F')
+}
+
+fn parse_python_string_literal(input: &str, quote_idx: usize) -> Option<(String, usize)> {
+    let quote = input[quote_idx..].chars().next()?;
+    let quote_len = quote.len_utf8();
+    let triple_delim = quote.to_string().repeat(3);
+    let triple = input[quote_idx..].starts_with(&triple_delim);
+    let content_start = quote_idx + if triple { quote_len * 3 } else { quote_len };
+    let mut escaped = false;
+    let mut out = String::new();
+    let mut iter = input[content_start..].char_indices();
+    for (rel, ch) in &mut iter {
+        let abs = content_start + rel;
+        if triple && input[abs..].starts_with(&triple_delim) {
+            return Some((out, abs + quote_len * 3));
+        }
+        if escaped {
+            out.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if !triple && ch == quote {
+            return Some((out, abs + ch.len_utf8()));
+        }
+        out.push(ch);
+    }
+    None
 }
 
 /// Lightweight code similarity used both for arg-level bash inline code
@@ -670,6 +1058,32 @@ mod tests {
         }
     }
 
+    fn score_bash_tool_commands(
+        target_command: &str,
+        pred_command: &str,
+    ) -> (f32, EvalOutcomeKind, Option<String>) {
+        let target = serde_json::json!({
+            "tool_calls": [{
+                "name": "Bash",
+                "arguments": {"command": target_command}
+            }]
+        })
+        .to_string();
+        let pred = format!(
+            "<tool_call>\n<function=Bash>\n<parameter=command>\n{pred_command}\n</parameter>\n</function>\n</tool_call>"
+        );
+        score(
+            &ex(&target),
+            &pred,
+            &NameMatch::CaseInsensitive,
+            &ArgsScoring::Auto,
+            None,
+            false,
+            &NoopJudgeRunner,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn name_match_exact_passes_only_on_exact() {
         let (s, _) = score_name("get_weather", "get_weather", &NameMatch::Exact);
@@ -697,8 +1111,10 @@ mod tests {
 
     #[test]
     fn full_score_passes_on_canonical_target() {
-        let target = r#"{"tool_calls":[{"name":"get_weather","arguments":{"city":"Paris","units":"c"}}]}"#;
-        let pred = r#"{"tool_call":{"name":"get_weather","arguments":{"city":"Paris","units":"c"}}}"#;
+        let target =
+            r#"{"tool_calls":[{"name":"get_weather","arguments":{"city":"Paris","units":"c"}}]}"#;
+        let pred =
+            r#"{"tool_call":{"name":"get_weather","arguments":{"city":"Paris","units":"c"}}}"#;
         let (s, kind, _) = score(
             &ex(target),
             pred,
@@ -786,9 +1202,7 @@ mod tests {
             "content".to_string(),
             Scorer::Code {
                 language: Some("python".into()),
-                style: crate::scorers::CodeStyle::TokenSimilarity {
-                    min_jaccard: 0.6,
-                },
+                style: crate::scorers::CodeStyle::TokenSimilarity { min_jaccard: 0.6 },
             },
         );
         let (s, _, _) = score(
@@ -863,6 +1277,85 @@ mod tests {
     }
 
     #[test]
+    fn auto_args_recursively_score_bash_python_heredoc() {
+        let target_command = "bash -lc \"python3 - <<'PY'\nimport os\nprint(os.getcwd())\nPY\"";
+        let pred_command = "python3 -c 'import os\nprint(os.getcwd())'";
+        let target = serde_json::json!({
+            "tool_calls": [{
+                "name": "Bash",
+                "arguments": {"command": target_command}
+            }]
+        })
+        .to_string();
+        let pred = format!(
+            "<tool_call>\n<function=Bash>\n<parameter=command>\n{pred_command}\n</parameter>\n</function>\n</tool_call>"
+        );
+        let (s, kind, detail) = score(
+            &ex(&target),
+            &pred,
+            &NameMatch::CaseInsensitive,
+            &ArgsScoring::Auto,
+            None,
+            false,
+            &NoopJudgeRunner,
+        )
+        .unwrap();
+        assert_eq!(kind, EvalOutcomeKind::Pass, "{detail:?}");
+        assert!(s > 0.95, "score was {s}; detail={detail:?}");
+    }
+
+    #[test]
+    fn auto_args_fail_wrong_nested_python_body() {
+        let target_command = "bash -lc \"python3 - <<'PY'\nimport os\nprint(os.getcwd())\nPY\"";
+        let pred_command = "python3 -c 'print(\"hello\")'";
+        let (s, kind, _) = score_bash_tool_commands(target_command, pred_command);
+        assert_eq!(kind, EvalOutcomeKind::Fail);
+        assert!(s < 0.8, "score was {s}");
+    }
+
+    #[test]
+    fn auto_args_score_python_subprocess_equivalent_shell_command() {
+        let target_command = r#"python3 -c 'import os; os.system("grep -R TODO src")'"#;
+        let pred_command = r#"python3 -c 'import subprocess; subprocess.run(["bash", "-lc", "grep -R TODO src"], check=True)'"#;
+        let (s, kind, detail) = score_bash_tool_commands(target_command, pred_command);
+        assert_eq!(kind, EvalOutcomeKind::Pass, "{detail:?}");
+        assert!(s > 0.9, "score was {s}; detail={detail:?}");
+    }
+
+    #[test]
+    fn auto_args_fail_wrong_python_subprocess_shell_command() {
+        let target_command = r#"python3 -c 'import os; os.system("grep -R TODO src")'"#;
+        let pred_command =
+            r#"python3 -c 'import subprocess; subprocess.run(["bash", "-lc", "rm -rf /tmp/x"])'"#;
+        let (s, kind, _) = score_bash_tool_commands(target_command, pred_command);
+        assert_eq!(kind, EvalOutcomeKind::Fail);
+        assert!(s < 0.8, "score was {s}");
+    }
+
+    #[test]
+    fn auto_args_score_python_exec_equivalent_path() {
+        let target_command = r#"python3 -c 'exec(open("scripts/materialize_turn.py").read())'"#;
+        let pred_command = r#"python3 -c 'from pathlib import Path; exec(Path("./scripts/materialize_turn.py").read_text())'"#;
+        let (s, kind, detail) = score_bash_tool_commands(target_command, pred_command);
+        assert_eq!(kind, EvalOutcomeKind::Pass, "{detail:?}");
+        assert!(s > 0.9, "score was {s}; detail={detail:?}");
+    }
+
+    #[test]
+    fn auto_args_fail_python_exec_different_path() {
+        let target_command = r#"python3 -c 'exec(open("scripts/materialize_turn.py").read())'"#;
+        let pred_command = r#"python3 -c 'exec(open("totally/unrelated_runner.py").read())'"#;
+        let (s, kind, _) = score_bash_tool_commands(target_command, pred_command);
+        assert_eq!(kind, EvalOutcomeKind::Fail);
+        assert!(s < 0.8, "score was {s}");
+    }
+
+    #[test]
+    fn python_string_list_rejects_dynamic_command_tail() {
+        assert!(python_string_list(r#"["bash", "-lc", command]"#).is_none());
+    }
+
+    #[test]
     fn thinking_before_xml_call_is_ignored() {
         // Numeric XML args coerce to JSON numbers (matches what the chat
         // template emits from a source-side int).
@@ -904,8 +1397,7 @@ mod tests {
 
     #[test]
     fn multi_call_target_pairs_in_order() {
-        let target =
-            r#"{"tool_calls":[{"name":"a","arguments":{}},{"name":"b","arguments":{}}]}"#;
+        let target = r#"{"tool_calls":[{"name":"a","arguments":{}},{"name":"b","arguments":{}}]}"#;
         let pred = "<tool_call>\n<function=a>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>";
         let (_, kind, _) = score(
             &ex(target),
@@ -922,8 +1414,7 @@ mod tests {
 
     #[test]
     fn missing_second_call_drops_score() {
-        let target =
-            r#"{"tool_calls":[{"name":"a","arguments":{}},{"name":"b","arguments":{}}]}"#;
+        let target = r#"{"tool_calls":[{"name":"a","arguments":{}},{"name":"b","arguments":{}}]}"#;
         let pred = "<tool_call>\n<function=a>\n</function>\n</tool_call>";
         let (s, kind, detail) = score(
             &ex(target),
@@ -937,7 +1428,12 @@ mod tests {
         .unwrap();
         assert_eq!(kind, EvalOutcomeKind::Fail);
         assert!(s < 0.6, "score was {s}");
-        assert!(detail.as_deref().unwrap().contains("missing predicted call"));
+        assert!(
+            detail
+                .as_deref()
+                .unwrap()
+                .contains("missing predicted call")
+        );
     }
 
     #[test]

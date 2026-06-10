@@ -1374,14 +1374,17 @@ version = "0.3.5"
 dependencies = [
  "anyhow",
  "chrono",
+ "clap",
  "rand 0.10.1",
  "rand_core 0.10.1",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "unicode-normalization",
  "uuid",
 ]

@@ -1,0 +1,92 @@
+=== kiln-runpod-bg start 2026-05-25T06:38:39Z mode=truncate ===
+=== kiln-runpod-bg pid=19653 ===
+[36m=== kiln-runpod image ===[0m
+  GPU: NVIDIA RTX A6000, 570.195.03
+  CUDA toolkit: release 12.4
+  nsys: NVIDIA Nsight Systems version 2023.4.4.54-234433681190v0
+  rustc: 1.95.0 | cargo: 1.95.0
+  sccache: 0.9.1 | nextest: (1d5bf1ec9
+  torch: 2.4.1+cu124 (cuda=12.4)
+
+Quick start: [32mkiln-setup[0m (configures sccache+B2) then clone kiln & build.
+After build:  [32mkiln-smoke-check[0m (verifies fused CUDA kernels — see issue #1066).
+
+    Finished `release` profile [optimized] target(s) in 0.16s
+     Running `target/release/examples/trace_api_eval --suite /workspace/pr1383-qwen35-base-eval-1000/suite_shard_02.json --api-base 'http://127.0.0.1:8420/v1' --model Qwen3.5-4B --temperature 0 --max-tokens 1024 --extra-body-json '{"chat_template_kwargs":{"enable_thinking":false}}' --output /workspace/pr1383-qwen35-base-eval-1000/qwen35_base_trace_api_eval_result_shard_02.json`
+model=Qwen3.5-4B example=1/75 outcomes=1
+model=Qwen3.5-4B example=2/75 outcomes=2
+model=Qwen3.5-4B example=3/75 outcomes=3
+model=Qwen3.5-4B example=4/75 outcomes=4
+model=Qwen3.5-4B example=5/75 outcomes=5
+model=Qwen3.5-4B example=6/75 outcomes=6
+model=Qwen3.5-4B example=7/75 outcomes=7
+model=Qwen3.5-4B example=8/75 outcomes=8
+model=Qwen3.5-4B example=9/75 outcomes=9
+model=Qwen3.5-4B example=10/75 outcomes=10
+model=Qwen3.5-4B example=11/75 outcomes=11
+model=Qwen3.5-4B example=12/75 outcomes=12
+model=Qwen3.5-4B example=13/75 outcomes=13
+model=Qwen3.5-4B example=14/75 outcomes=14
+model=Qwen3.5-4B example=15/75 outcomes=15
+model=Qwen3.5-4B example=16/75 outcomes=16
+model=Qwen3.5-4B example=17/75 outcomes=17
+model=Qwen3.5-4B example=18/75 outcomes=18
+model=Qwen3.5-4B example=19/75 outcomes=19
+model=Qwen3.5-4B example=20/75 outcomes=20
+model=Qwen3.5-4B example=21/75 outcomes=21
+model=Qwen3.5-4B example=22/75 outcomes=22
+model=Qwen3.5-4B example=23/75 outcomes=23
+model=Qwen3.5-4B example=24/75 outcomes=24
+model=Qwen3.5-4B example=25/75 outcomes=25
+model=Qwen3.5-4B example=26/75 outcomes=26
+model=Qwen3.5-4B example=27/75 outcomes=27
+model=Qwen3.5-4B example=28/75 outcomes=28
+model=Qwen3.5-4B example=29/75 outcomes=29
+model=Qwen3.5-4B example=30/75 outcomes=30
+model=Qwen3.5-4B example=31/75 outcomes=31
+model=Qwen3.5-4B example=32/75 outcomes=32
+model=Qwen3.5-4B example=33/75 outcomes=33
+model=Qwen3.5-4B example=34/75 outcomes=34
+model=Qwen3.5-4B example=35/75 outcomes=35
+model=Qwen3.5-4B example=36/75 outcomes=36
+model=Qwen3.5-4B example=37/75 outcomes=37
+model=Qwen3.5-4B example=38/75 outcomes=38
+model=Qwen3.5-4B example=39/75 outcomes=39
+model=Qwen3.5-4B example=40/75 outcomes=40
+model=Qwen3.5-4B example=41/75 outcomes=41
+model=Qwen3.5-4B example=42/75 outcomes=42
+model=Qwen3.5-4B example=43/75 outcomes=43
+model=Qwen3.5-4B example=44/75 outcomes=44
+model=Qwen3.5-4B example=45/75 outcomes=45
+model=Qwen3.5-4B example=46/75 outcomes=46
+model=Qwen3.5-4B example=47/75 outcomes=47
+model=Qwen3.5-4B example=48/75 outcomes=48
+model=Qwen3.5-4B example=49/75 outcomes=49
+model=Qwen3.5-4B example=50/75 outcomes=50
+model=Qwen3.5-4B example=51/75 outcomes=51
+model=Qwen3.5-4B example=52/75 outcomes=52
+model=Qwen3.5-4B example=53/75 outcomes=53
+model=Qwen3.5-4B example=54/75 outcomes=54
+model=Qwen3.5-4B example=55/75 outcomes=55
+model=Qwen3.5-4B example=56/75 outcomes=56
+model=Qwen3.5-4B example=57/75 outcomes=57
+model=Qwen3.5-4B example=58/75 outcomes=58
+model=Qwen3.5-4B example=59/75 outcomes=59
+model=Qwen3.5-4B example=60/75 outcomes=60
+model=Qwen3.5-4B example=61/75 outcomes=61
+model=Qwen3.5-4B example=62/75 outcomes=62
+model=Qwen3.5-4B example=63/75 outcomes=63
+model=Qwen3.5-4B example=64/75 outcomes=64
+model=Qwen3.5-4B example=65/75 outcomes=65
+model=Qwen3.5-4B example=66/75 outcomes=66
+model=Qwen3.5-4B example=67/75 outcomes=67
+model=Qwen3.5-4B example=68/75 outcomes=68
+model=Qwen3.5-4B example=69/75 outcomes=69
+model=Qwen3.5-4B example=70/75 outcomes=70
+model=Qwen3.5-4B example=71/75 outcomes=71
+model=Qwen3.5-4B example=72/75 outcomes=72
+model=Qwen3.5-4B example=73/75 outcomes=73
+model=Qwen3.5-4B example=74/75 outcomes=74
+model=Qwen3.5-4B example=75/75 outcomes=75
+trace-api-eval completed in 5657.64s
+Qwen3.5-4B                       accuracy=38.7% pass=29/75 score=0.543 ci95=[28.5%, 50.0%] invalid=5 error=0 non_xml=70

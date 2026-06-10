@@ -11,20 +11,30 @@
 //!       submit an eval and (optionally) wait for results
 //!   - `kiln-eval compare --suite NAME --adapter NAME [NAME ...] [--watch]`
 //!       run a compare across multiple adapters and print a head-to-head
+//!   - `kiln-eval trace-suite --input TRACE.jsonl --output SUITE.json`
+//!       sample production tool-call turns from a generic JSONL export
+//!   - `kiln-eval panel-suite --suite FULL.json --max-examples N`
+//!       build a weighted stratified fast panel from a full eval suite
 //!
 //! All commands respect `KILN_SERVER_URL` and the `--server` flag (default
 //! `http://localhost:8420`). Output is human-readable by default; pass
 //! `--json` to emit the raw `EvalResult`.
 
+use std::collections::BTreeMap;
+use std::io::BufRead;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use kiln_eval::qwen3::extract_first_tool_call;
 use kiln_eval::{
-    EvalChatMessage, EvalCompareSpec, EvalExample, EvalGenerationParams, EvalSuite, SuiteResult,
+    EvalChatMessage, EvalCompareSpec, EvalExample, EvalGenerationParams, EvalSuite,
+    ProductionTraceError, ProductionTraceFormat, ProductionTraceInputLine,
+    ProductionTraceSuiteConfig, SuiteResult,
 };
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 const DEFAULT_SERVER_URL: &str = "http://localhost:8420";
 
@@ -58,6 +68,10 @@ enum Command {
     /// Quick-eval helper: build a single-example suite from CLI flags
     /// (great for sanity checks during development).
     Probe(ProbeArgs),
+    /// Build a tool-call eval suite from production trace JSONL.
+    TraceSuite(TraceSuiteArgs),
+    /// Build a weighted stratified fast panel from an existing EvalSuite.
+    PanelSuite(PanelSuiteArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -123,6 +137,110 @@ struct ProbeArgs {
     json: bool,
 }
 
+#[derive(Parser, Debug)]
+struct TraceSuiteArgs {
+    /// Production trace JSONL file. Repeat --input to sample one suite across
+    /// multiple exports.
+    #[arg(long, required = true)]
+    input: Vec<PathBuf>,
+    /// Output EvalSuite JSON file. Required unless --stdout is set.
+    #[arg(long)]
+    output: Option<PathBuf>,
+    /// Optional JSON sidecar with sampling config, skip counts, tool
+    /// histograms, and sampled example provenance.
+    #[arg(long)]
+    stats_output: Option<PathBuf>,
+    /// Suite name to write into the EvalSuite.
+    #[arg(long)]
+    suite_name: String,
+    /// Optional suite description.
+    #[arg(long)]
+    description: Option<String>,
+    /// Input format: auto | prompt_chosen_jsonl | openai_jsonl |
+    /// openai_trajectory_jsonl | anthropic_jsonl |
+    /// anthropic_trajectory_jsonl.
+    #[arg(long, default_value = "auto", value_parser = parse_trace_format)]
+    format: ProductionTraceFormat,
+    /// Reservoir sample size. Omit to use the production-trace default.
+    #[arg(long)]
+    max_examples: Option<usize>,
+    /// Deterministic sampling seed.
+    #[arg(long)]
+    seed: Option<u64>,
+    /// Prompt size guard in chars.
+    #[arg(long)]
+    max_prompt_chars: Option<usize>,
+    /// Target size guard in chars.
+    #[arg(long)]
+    max_target_chars: Option<usize>,
+    /// Dedupe exact prompt+target pairs. Off by default because repetition
+    /// is workload-frequency signal.
+    #[arg(long)]
+    dedupe: bool,
+    /// Require Qwen3.5 native XML output when scoring. Off by default so the
+    /// eval measures semantic tool-call correctness, not format differences.
+    #[arg(long)]
+    require_qwen_xml: bool,
+    /// Override suite generation max_tokens.
+    #[arg(long)]
+    max_tokens: Option<usize>,
+    /// Override suite generation temperature.
+    #[arg(long)]
+    temperature: Option<f32>,
+    /// Print the generated suite JSON to stdout instead of writing --output.
+    #[arg(long)]
+    stdout: bool,
+}
+
+#[derive(Parser, Debug)]
+struct PanelSuiteArgs {
+    /// Full EvalSuite JSON file to sample from.
+    #[arg(long)]
+    suite: PathBuf,
+    /// Output panel EvalSuite JSON file. Required unless --stdout is set.
+    #[arg(long)]
+    output: Option<PathBuf>,
+    /// Optional JSON sidecar with stratum populations, sample counts, and
+    /// selected example IDs.
+    #[arg(long)]
+    stats_output: Option<PathBuf>,
+    /// Suite name for the generated panel. Defaults to
+    /// `<source-suite>-panel-<max-examples>`.
+    #[arg(long)]
+    suite_name: Option<String>,
+    /// Maximum examples to keep in the fast panel.
+    #[arg(long, default_value_t = 200)]
+    max_examples: usize,
+    /// Deterministic sample seed.
+    #[arg(long, default_value_t = 17)]
+    seed: u64,
+    /// Print the generated panel JSON to stdout instead of writing --output.
+    #[arg(long)]
+    stdout: bool,
+}
+
+fn parse_trace_format(s: &str) -> std::result::Result<ProductionTraceFormat, String> {
+    match s {
+        "auto" => Ok(ProductionTraceFormat::Auto),
+        "prompt_chosen_jsonl" | "prompt-chosen-jsonl" => {
+            Ok(ProductionTraceFormat::PromptChosenJsonl)
+        }
+        "openai_jsonl" | "openai-jsonl" => Ok(ProductionTraceFormat::OpenAiJsonl),
+        "openai_trajectory_jsonl" | "openai-trajectory-jsonl" | "openai_trajectory" => {
+            Ok(ProductionTraceFormat::OpenAiTrajectoryJsonl)
+        }
+        "anthropic_jsonl" | "anthropic-jsonl" | "jsonl" => {
+            Ok(ProductionTraceFormat::AnthropicJsonl)
+        }
+        "anthropic_trajectory_jsonl" | "anthropic-trajectory-jsonl" | "anthropic_trajectory" => {
+            Ok(ProductionTraceFormat::AnthropicTrajectoryJsonl)
+        }
+        other => Err(format!(
+            "unknown trace format `{other}` (try auto | prompt_chosen_jsonl | openai_jsonl | openai_trajectory_jsonl | anthropic_jsonl | anthropic_trajectory_jsonl)"
+        )),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct EvalRunResponse {
     job_id: String,
@@ -156,6 +274,8 @@ async fn main() -> Result<()> {
         Command::Run(args) => cmd_run(&client, &server, args).await,
         Command::Compare(args) => cmd_compare(&client, &server, args).await,
         Command::Probe(args) => cmd_probe(&client, &server, args).await,
+        Command::TraceSuite(args) => cmd_trace_suite(args),
+        Command::PanelSuite(args) => cmd_panel_suite(args),
     }
 }
 
@@ -178,16 +298,23 @@ async fn cmd_list(client: &reqwest::Client, server: &str) -> Result<()> {
         .cloned()
         .unwrap_or_default();
     if suites.is_empty() {
-        println!("(no registered suites — register one with `kiln-eval register --file SUITE.json`)");
+        println!(
+            "(no registered suites — register one with `kiln-eval register --file SUITE.json`)"
+        );
         return Ok(());
     }
-    println!("{:<32}  {:<10}  {:<18}  description", "name", "examples", "scorer");
+    println!(
+        "{:<32}  {:<10}  {:<18}  description",
+        "name", "examples", "scorer"
+    );
     for s in suites {
         println!(
             "{:<32}  {:<10}  {:<18}  {}",
             s.get("name").and_then(|v| v.as_str()).unwrap_or(""),
             s.get("num_examples").and_then(|v| v.as_u64()).unwrap_or(0),
-            s.get("default_scorer_kind").and_then(|v| v.as_str()).unwrap_or(""),
+            s.get("default_scorer_kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
             s.get("description").and_then(|v| v.as_str()).unwrap_or(""),
         );
     }
@@ -214,6 +341,688 @@ async fn cmd_register(
         bail!("register failed ({status}): {text}");
     }
     println!("{text}");
+    Ok(())
+}
+
+fn cmd_trace_suite(args: TraceSuiteArgs) -> Result<()> {
+    if !args.stdout && args.output.is_none() {
+        bail!("--output is required unless --stdout is set");
+    }
+    let input_paths = args.input.clone();
+
+    let mut cfg = ProductionTraceSuiteConfig::new(args.suite_name);
+    cfg.description = args.description;
+    cfg.input_format = args.format;
+    cfg.require_xml_format = args.require_qwen_xml;
+    if let Some(max_examples) = args.max_examples {
+        cfg.sampling.max_examples = Some(max_examples);
+    }
+    if let Some(seed) = args.seed {
+        cfg.sampling.seed = Some(seed);
+    }
+    if let Some(max_prompt_chars) = args.max_prompt_chars {
+        cfg.sampling.max_prompt_chars = max_prompt_chars;
+    }
+    if let Some(max_target_chars) = args.max_target_chars {
+        cfg.sampling.max_target_chars = max_target_chars;
+    }
+    cfg.sampling.dedupe = args.dedupe;
+    if let Some(max_tokens) = args.max_tokens {
+        cfg.generation.max_tokens = max_tokens;
+    }
+    if let Some(temperature) = args.temperature {
+        cfg.generation.temperature = temperature;
+    }
+
+    let input_lines = TraceInputLines::new(input_paths.clone());
+    let (suite, stats) = kiln_eval::synthesize_production_trace_suite_from_lines(input_lines, &cfg)
+        .with_context(|| {
+            format!(
+                "building production trace suite from {}",
+                display_input_paths(&input_paths)
+            )
+        })?;
+    let suite_json = serde_json::to_string_pretty(&suite)?;
+    if args.stdout {
+        println!("{suite_json}");
+    } else if let Some(output) = args.output.as_ref() {
+        write_string_file(output, &suite_json)?;
+    }
+
+    if let Some(stats_output) = args.stats_output.as_ref() {
+        let report = serde_json::json!({
+            "schema_version": 1,
+            "kind": "production_trace_suite_report",
+            "input": input_paths.first().map(|p| p.display().to_string()),
+            "inputs": input_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+            "suite_output": args.output.as_ref().map(|p| p.display().to_string()),
+            "suite_name": &suite.name,
+            "config": &cfg,
+            "stats": &stats,
+        });
+        let report_json = serde_json::to_string_pretty(&report)?;
+        write_string_file(stats_output, &report_json)?;
+    }
+
+    eprintln!(
+        "trace-suite: rows={} parsed={} eligible_tool_turns={} kept={} seed={}",
+        stats.rows_seen,
+        stats.rows_parsed,
+        stats.eligible_tool_turns,
+        stats.sample_kept,
+        stats.effective_seed,
+    );
+    if !stats.target_tool_histogram.is_empty() {
+        eprintln!("target tools:");
+        for (tool, count) in &stats.target_tool_histogram {
+            eprintln!("  {tool}: {count}");
+        }
+    }
+    if stats.skipped_parse_error > 0
+        || stats.skipped_no_tool_call > 0
+        || stats.skipped_prompt_too_long > 0
+        || stats.skipped_target_too_long > 0
+        || stats.skipped_duplicate > 0
+    {
+        eprintln!(
+            "skipped: parse_error={} no_tool_call={} empty_prompt={} prompt_too_long={} target_too_long={} duplicate={}",
+            stats.skipped_parse_error,
+            stats.skipped_no_tool_call,
+            stats.skipped_empty_prompt,
+            stats.skipped_prompt_too_long,
+            stats.skipped_target_too_long,
+            stats.skipped_duplicate,
+        );
+    }
+    if !stats.parse_error_examples.is_empty() {
+        eprintln!("first parse errors:");
+        for err in &stats.parse_error_examples {
+            eprintln!("  {err}");
+        }
+    }
+    Ok(())
+}
+
+fn cmd_panel_suite(args: PanelSuiteArgs) -> Result<()> {
+    if !args.stdout && args.output.is_none() {
+        bail!("--output is required unless --stdout is set");
+    }
+    if args.max_examples == 0 {
+        bail!("--max-examples must be greater than zero");
+    }
+
+    let source = EvalSuite::load_json(&args.suite)
+        .with_context(|| format!("loading suite {}", args.suite.display()))?;
+    let (panel, stats) = build_panel_suite(&source, &args)?;
+    let panel_json = serde_json::to_string_pretty(&panel)?;
+    if args.stdout {
+        println!("{panel_json}");
+    } else if let Some(output) = args.output.as_ref() {
+        write_string_file(output, &panel_json)?;
+    }
+
+    if let Some(stats_output) = args.stats_output.as_ref() {
+        let report = serde_json::json!({
+            "schema_version": 1,
+            "kind": "production_trace_panel_suite_report",
+            "source_suite": args.suite.display().to_string(),
+            "suite_output": args.output.as_ref().map(|p| p.display().to_string()),
+            "stats": stats.clone(),
+        });
+        let report_json = serde_json::to_string_pretty(&report)?;
+        write_string_file(stats_output, &report_json)?;
+    }
+
+    eprintln!(
+        "panel-suite: source_examples={} kept={} strata={} dropped_strata={} seed={}",
+        source.examples.len(),
+        panel.examples.len(),
+        stats
+            .get("num_strata")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        stats
+            .get("dropped_strata")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        args.seed,
+    );
+    Ok(())
+}
+
+#[derive(Debug)]
+struct PanelStratum {
+    key: String,
+    tool: String,
+    split: String,
+    prompt_bucket: String,
+    prompt_size_basis: &'static str,
+    indices: Vec<usize>,
+    weight_sum: f64,
+    prompt_chars_sum: usize,
+    prompt_tokens_sum: usize,
+    prompt_tokens_count: usize,
+}
+
+fn build_panel_suite(
+    source: &EvalSuite,
+    args: &PanelSuiteArgs,
+) -> Result<(EvalSuite, serde_json::Value)> {
+    let total_examples = source.examples.len();
+    if total_examples == 0 {
+        bail!("source suite has no examples");
+    }
+    let target_examples = args.max_examples.min(total_examples);
+    let suite_tools_chars = source
+        .tools
+        .as_ref()
+        .and_then(|tools| serde_json::to_string(tools).ok())
+        .map(|s| s.len())
+        .unwrap_or(0);
+
+    let mut strata_by_key: BTreeMap<String, PanelStratum> = BTreeMap::new();
+    for (idx, example) in source.examples.iter().enumerate() {
+        let prompt_chars = metadata_usize(
+            example.metadata.as_ref(),
+            &["prompt_chars", "prompt_char_count", "input_chars"],
+        )
+        .unwrap_or_else(|| {
+            example_prompt_chars(example, source.tools.as_deref(), suite_tools_chars)
+        });
+        let prompt_tokens = metadata_usize(
+            example.metadata.as_ref(),
+            &[
+                "prompt_tokens",
+                "prompt_token_count",
+                "input_tokens",
+                "input_token_count",
+            ],
+        );
+        let (basis, prompt_bucket) = prompt_size_bucket(prompt_tokens, prompt_chars);
+        let tool = panel_tool_key(example);
+        let split = panel_split_key(example);
+        let key = format!("{tool}|{prompt_bucket}|{split}");
+        let stratum = strata_by_key
+            .entry(key.clone())
+            .or_insert_with(|| PanelStratum {
+                key,
+                tool,
+                split,
+                prompt_bucket,
+                prompt_size_basis: basis,
+                indices: Vec::new(),
+                weight_sum: 0.0,
+                prompt_chars_sum: 0,
+                prompt_tokens_sum: 0,
+                prompt_tokens_count: 0,
+            });
+        stratum.indices.push(idx);
+        stratum.weight_sum += example.weight as f64;
+        stratum.prompt_chars_sum += prompt_chars;
+        if let Some(tokens) = prompt_tokens {
+            stratum.prompt_tokens_sum += tokens;
+            stratum.prompt_tokens_count += 1;
+        }
+    }
+
+    let strata = strata_by_key.into_values().collect::<Vec<_>>();
+    let keep_counts = allocate_panel_counts(&strata, target_examples);
+    let mut selected = Vec::new();
+    let mut selected_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut selected_weight_sums: BTreeMap<String, f64> = BTreeMap::new();
+    let mut selected_prompt_chars: BTreeMap<String, usize> = BTreeMap::new();
+    let mut selected_prompt_tokens: BTreeMap<String, usize> = BTreeMap::new();
+    let mut selected_ids_by_stratum: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    for (stratum_idx, stratum) in strata.iter().enumerate() {
+        let keep = keep_counts[stratum_idx];
+        if keep == 0 {
+            continue;
+        }
+        let mut candidates = stratum
+            .indices
+            .iter()
+            .map(|idx| {
+                let example_id = source.examples[*idx].resolved_id();
+                (
+                    stable_sample_key(args.seed, &stratum.key, &example_id, *idx),
+                    *idx,
+                )
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        let chosen = candidates
+            .into_iter()
+            .take(keep)
+            .map(|(_, idx)| idx)
+            .collect::<Vec<_>>();
+        let selected_source_weight = chosen
+            .iter()
+            .map(|idx| source.examples[*idx].weight as f64)
+            .sum::<f64>();
+        let equal_weight = if keep > 0 {
+            (stratum.weight_sum / keep as f64) as f32
+        } else {
+            0.0
+        };
+        for idx in chosen {
+            let source_weight = source.examples[idx].weight as f64;
+            let panel_weight = if stratum.weight_sum == 0.0 {
+                0.0
+            } else if selected_source_weight > 0.0 {
+                (source_weight * stratum.weight_sum / selected_source_weight) as f32
+            } else {
+                equal_weight
+            };
+            selected.push((idx, panel_weight, stratum_idx));
+        }
+    }
+
+    selected.sort_by_key(|(idx, _, _)| *idx);
+    let mut panel_examples = Vec::with_capacity(selected.len());
+    let mut selected_example_ids = Vec::with_capacity(selected.len());
+    for (idx, panel_weight, stratum_idx) in &selected {
+        let mut example = source.examples[*idx].clone();
+        example.weight = *panel_weight;
+        let stratum = &strata[*stratum_idx];
+        let example_id = example.resolved_id();
+        *selected_counts.entry(stratum.key.clone()).or_default() += 1;
+        *selected_weight_sums.entry(stratum.key.clone()).or_default() += *panel_weight as f64;
+        *selected_prompt_chars
+            .entry(stratum.key.clone())
+            .or_default() += metadata_usize(
+            example.metadata.as_ref(),
+            &["prompt_chars", "prompt_char_count", "input_chars"],
+        )
+        .unwrap_or_else(|| {
+            example_prompt_chars(&example, source.tools.as_deref(), suite_tools_chars)
+        });
+        if let Some(tokens) = metadata_usize(
+            example.metadata.as_ref(),
+            &[
+                "prompt_tokens",
+                "prompt_token_count",
+                "input_tokens",
+                "input_token_count",
+            ],
+        ) {
+            *selected_prompt_tokens
+                .entry(stratum.key.clone())
+                .or_default() += tokens;
+        }
+        selected_ids_by_stratum
+            .entry(stratum.key.clone())
+            .or_default()
+            .push(example_id.clone());
+        selected_example_ids.push(example_id);
+        panel_examples.push(example);
+    }
+
+    let source_weight_sum = source
+        .examples
+        .iter()
+        .map(|example| example.weight as f64)
+        .sum::<f64>();
+    let panel_weight_sum = panel_examples
+        .iter()
+        .map(|example| example.weight as f64)
+        .sum::<f64>();
+    let source_prompt_chars = strata.iter().map(|s| s.prompt_chars_sum).sum::<usize>();
+    let source_prompt_tokens = strata.iter().map(|s| s.prompt_tokens_sum).sum::<usize>();
+    let selected_prompt_chars_sum = selected_prompt_chars.values().copied().sum::<usize>();
+    let selected_prompt_tokens_sum = selected_prompt_tokens.values().copied().sum::<usize>();
+    let dropped_strata = keep_counts.iter().filter(|keep| **keep == 0).count();
+    let strata_report = strata
+        .iter()
+        .enumerate()
+        .map(|(idx, stratum)| {
+            let selected_count = selected_counts.get(&stratum.key).copied().unwrap_or(0);
+            serde_json::json!({
+                "key": &stratum.key,
+                "tool": &stratum.tool,
+                "split": &stratum.split,
+                "prompt_bucket": &stratum.prompt_bucket,
+                "prompt_size_basis": stratum.prompt_size_basis,
+                "population": stratum.indices.len(),
+                "selected": selected_count,
+                "source_weight_sum": stratum.weight_sum,
+                "panel_weight_sum": selected_weight_sums.get(&stratum.key).copied().unwrap_or(0.0),
+                "source_prompt_chars": stratum.prompt_chars_sum,
+                "selected_prompt_chars": selected_prompt_chars.get(&stratum.key).copied().unwrap_or(0),
+                "source_prompt_tokens": (stratum.prompt_tokens_count > 0).then_some(stratum.prompt_tokens_sum),
+                "selected_prompt_tokens": selected_prompt_tokens.get(&stratum.key).copied(),
+                "selected_example_ids": selected_ids_by_stratum.get(&stratum.key).cloned().unwrap_or_default(),
+                "dropped": selected_count == 0,
+                "allocation_rank": idx,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let suite_name = args
+        .suite_name
+        .clone()
+        .unwrap_or_else(|| format!("{}-panel-{}", source.name, target_examples));
+    let panel = EvalSuite {
+        name: suite_name,
+        description: Some(format!(
+            "Weighted stratified fast panel sampled from `{}`: {}/{} examples. Prompts are preserved exactly; weights expand selected examples back to their source strata.",
+            source.name,
+            panel_examples.len(),
+            source.examples.len(),
+        )),
+        default_scorer: source.default_scorer.clone(),
+        generation: source.generation.clone(),
+        system_prompt: source.system_prompt.clone(),
+        examples: panel_examples,
+        schema_version: source.schema_version,
+        tools: source.tools.clone(),
+    };
+    let stats = serde_json::json!({
+        "source_suite_name": &source.name,
+        "panel_suite_name": &panel.name,
+        "seed": args.seed,
+        "requested_max_examples": args.max_examples,
+        "source_examples": total_examples,
+        "kept_examples": panel.examples.len(),
+        "num_strata": strata.len(),
+        "dropped_strata": dropped_strata,
+        "source_weight_sum": source_weight_sum,
+        "panel_weight_sum": panel_weight_sum,
+        "source_prompt_chars": source_prompt_chars,
+        "panel_prompt_chars": selected_prompt_chars_sum,
+        "source_prompt_tokens": (source_prompt_tokens > 0).then_some(source_prompt_tokens),
+        "panel_prompt_tokens": (selected_prompt_tokens_sum > 0).then_some(selected_prompt_tokens_sum),
+        "selected_example_ids": selected_example_ids,
+        "strata": strata_report,
+    });
+    Ok((panel, stats))
+}
+
+fn allocate_panel_counts(strata: &[PanelStratum], target_examples: usize) -> Vec<usize> {
+    let total_examples = strata.iter().map(|s| s.indices.len()).sum::<usize>();
+    if target_examples >= total_examples {
+        return strata.iter().map(|s| s.indices.len()).collect();
+    }
+
+    let mut keep_counts = vec![0usize; strata.len()];
+    if target_examples >= strata.len() {
+        for keep in &mut keep_counts {
+            *keep = 1;
+        }
+        let remaining = target_examples - strata.len();
+        let remaining_capacity = strata
+            .iter()
+            .map(|s| s.indices.len().saturating_sub(1))
+            .sum::<usize>();
+        distribute_panel_remainder(strata, &mut keep_counts, remaining, remaining_capacity);
+    } else {
+        let mut order = (0..strata.len()).collect::<Vec<_>>();
+        order.sort_by(|a, b| {
+            strata[*b]
+                .indices
+                .len()
+                .cmp(&strata[*a].indices.len())
+                .then_with(|| strata[*a].key.cmp(&strata[*b].key))
+        });
+        for idx in order.into_iter().take(target_examples) {
+            keep_counts[idx] = 1;
+        }
+    }
+    keep_counts
+}
+
+fn distribute_panel_remainder(
+    strata: &[PanelStratum],
+    keep_counts: &mut [usize],
+    remaining: usize,
+    remaining_capacity: usize,
+) {
+    if remaining == 0 || remaining_capacity == 0 {
+        return;
+    }
+    let mut assigned = 0usize;
+    let mut remainders = Vec::new();
+    for (idx, stratum) in strata.iter().enumerate() {
+        let capacity = stratum.indices.len().saturating_sub(keep_counts[idx]);
+        if capacity == 0 {
+            remainders.push((idx, 0.0f64));
+            continue;
+        }
+        let ideal = remaining as f64 * capacity as f64 / remaining_capacity as f64;
+        let whole = ideal.floor() as usize;
+        let add = whole.min(capacity);
+        keep_counts[idx] += add;
+        assigned += add;
+        remainders.push((idx, ideal - whole as f64));
+    }
+    while assigned < remaining {
+        remainders.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| strata[b.0].indices.len().cmp(&strata[a.0].indices.len()))
+                .then_with(|| strata[a.0].key.cmp(&strata[b.0].key))
+        });
+        let mut advanced = false;
+        for (idx, _) in &remainders {
+            if keep_counts[*idx] < strata[*idx].indices.len() {
+                keep_counts[*idx] += 1;
+                assigned += 1;
+                advanced = true;
+                break;
+            }
+        }
+        if !advanced {
+            break;
+        }
+    }
+}
+
+fn panel_tool_key(example: &EvalExample) -> String {
+    if let Some(tag) = example.tags.iter().find(|tag| tag.starts_with("tool:")) {
+        return tag.clone();
+    }
+    if let Some(target) = example.target.as_deref()
+        && let Some(call) = extract_first_tool_call(target)
+    {
+        return format!("tool:{}", call.name);
+    }
+    "tool:<none>".to_string()
+}
+
+fn panel_split_key(example: &EvalExample) -> String {
+    if let Some(tag) = example.tags.iter().find(|tag| tag.starts_with("split:")) {
+        return tag.clone();
+    }
+    if let Some(split) = example
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("split"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        return format!("split:{split}");
+    }
+    "split:<none>".to_string()
+}
+
+fn prompt_size_bucket(prompt_tokens: Option<usize>, prompt_chars: usize) -> (&'static str, String) {
+    if let Some(tokens) = prompt_tokens {
+        let label = match tokens {
+            0..=16_383 => "prompt_tokens:<16k",
+            16_384..=32_767 => "prompt_tokens:16k-32k",
+            32_768..=65_535 => "prompt_tokens:32k-65k",
+            65_536..=131_071 => "prompt_tokens:65k-131k",
+            _ => "prompt_tokens:>=131k",
+        };
+        return ("tokens", label.to_string());
+    }
+    let label = match prompt_chars {
+        0..=65_535 => "prompt_chars:<64k",
+        65_536..=131_071 => "prompt_chars:64k-128k",
+        131_072..=262_143 => "prompt_chars:128k-256k",
+        262_144..=524_287 => "prompt_chars:256k-512k",
+        _ => "prompt_chars:>=512k",
+    };
+    ("chars", label.to_string())
+}
+
+fn example_prompt_chars(
+    example: &EvalExample,
+    suite_tools: Option<&[serde_json::Value]>,
+    suite_tools_chars: usize,
+) -> usize {
+    let message_chars = serde_json::to_string(&example.messages)
+        .map(|s| s.len())
+        .unwrap_or_else(|_| {
+            example
+                .messages
+                .iter()
+                .map(|m| m.role.len() + m.content.len())
+                .sum()
+        });
+    let tool_chars = if let Some(tools) = example.tools.as_ref() {
+        serde_json::to_string(tools).map(|s| s.len()).unwrap_or(0)
+    } else if suite_tools.is_some() {
+        suite_tools_chars
+    } else {
+        0
+    };
+    message_chars + tool_chars
+}
+
+fn metadata_usize(metadata: Option<&serde_json::Value>, keys: &[&str]) -> Option<usize> {
+    let object = metadata?.as_object()?;
+    for key in keys {
+        if let Some(value) = object.get(*key)
+            && let Some(parsed) = json_value_usize(value)
+        {
+            return Some(parsed);
+        }
+    }
+    None
+}
+
+fn json_value_usize(value: &serde_json::Value) -> Option<usize> {
+    value
+        .as_u64()
+        .and_then(|v| usize::try_from(v).ok())
+        .or_else(|| value.as_f64().filter(|v| *v >= 0.0).map(|v| v as usize))
+        .or_else(|| value.as_str().and_then(|s| s.parse::<usize>().ok()))
+}
+
+fn stable_sample_key(seed: u64, stratum_key: &str, example_id: &str, ordinal: usize) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(seed.to_le_bytes());
+    hasher.update(stratum_key.as_bytes());
+    hasher.update([0]);
+    hasher.update(example_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(ordinal.to_le_bytes());
+    let digest = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
+struct TraceInputLines {
+    paths: Vec<PathBuf>,
+    next_path: usize,
+    current_path: Option<PathBuf>,
+    current_reader: Option<std::io::BufReader<std::fs::File>>,
+    current_line: usize,
+}
+
+impl TraceInputLines {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        Self {
+            paths,
+            next_path: 0,
+            current_path: None,
+            current_reader: None,
+            current_line: 0,
+        }
+    }
+}
+
+impl Iterator for TraceInputLines {
+    type Item = std::result::Result<ProductionTraceInputLine, ProductionTraceError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(reader) = self.current_reader.as_mut() {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => {
+                        self.current_reader = None;
+                        self.current_path = None;
+                        self.current_line = 0;
+                        continue;
+                    }
+                    Ok(_) => {
+                        self.current_line += 1;
+                        return Some(Ok(ProductionTraceInputLine {
+                            json: line,
+                            source_path: self
+                                .current_path
+                                .as_ref()
+                                .map(|p| p.display().to_string()),
+                            source_line: Some(self.current_line),
+                        }));
+                    }
+                    Err(e) => {
+                        let path = self
+                            .current_path
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "<unknown>".to_string());
+                        return Some(Err(ProductionTraceError::Io(format!("read {path}: {e}"))));
+                    }
+                }
+            }
+
+            if self.next_path >= self.paths.len() {
+                return None;
+            }
+
+            let path = self.paths[self.next_path].clone();
+            self.next_path += 1;
+            match std::fs::File::open(&path) {
+                Ok(file) => {
+                    self.current_path = Some(path);
+                    self.current_reader = Some(std::io::BufReader::new(file));
+                    self.current_line = 0;
+                }
+                Err(e) => {
+                    return Some(Err(ProductionTraceError::Io(format!(
+                        "open {}: {e}",
+                        path.display()
+                    ))));
+                }
+            }
+        }
+    }
+}
+
+fn display_input_paths(paths: &[PathBuf]) -> String {
+    match paths {
+        [] => "<none>".to_string(),
+        [one] => one.display().to_string(),
+        many => format!(
+            "{} inputs ({})",
+            many.len(),
+            many.iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn write_string_file(path: &PathBuf, contents: &str) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    std::fs::write(path, contents).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 
@@ -378,7 +1187,11 @@ async fn poll_until_done(
             .send()
             .await?;
         if !resp.status().is_success() {
-            bail!("status check failed ({}): {}", resp.status(), resp.text().await?);
+            bail!(
+                "status check failed ({}): {}",
+                resp.status(),
+                resp.text().await?
+            );
         }
         let payload: EvalResultPayload = resp.json().await?;
         match payload.state.as_str() {
@@ -416,14 +1229,21 @@ fn print_human(result: &EvalResultPayload) {
         let adapter_label = r
             .adapter
             .as_deref()
-            .map(|s| if s.is_empty() { "<base>".to_string() } else { s.to_string() })
+            .map(|s| {
+                if s.is_empty() {
+                    "<base>".to_string()
+                } else {
+                    s.to_string()
+                }
+            })
             .unwrap_or_else(|| "<base>".to_string());
         println!();
         println!("Suite: {} | Adapter: {}", r.suite_name, adapter_label);
         println!("  job: {}  hash: {}", result.job_id, r.suite_hash);
         println!(
-            "  accuracy: {:>5.1}%  |  mean: {:.3}  |  weighted: {:.3}",
+            "  accuracy: {:>5.1}% {}  |  mean: {:.3}  |  weighted: {:.3}",
             r.metrics.accuracy * 100.0,
+            format_ci(&r.metrics.accuracy_confidence_interval),
             r.metrics.mean_score,
             r.metrics.weighted_mean_score
         );
@@ -457,7 +1277,19 @@ fn print_human(result: &EvalResultPayload) {
                 );
             }
         }
-        if !r.metrics.pass_rate_by_tag.is_empty() {
+        if !r.metrics.tag_breakdown.is_empty() {
+            println!("  by tag:");
+            for (tag, br) in &r.metrics.tag_breakdown {
+                println!(
+                    "    {:<24}  {:>5.1}% {}  ({}/{})",
+                    tag,
+                    br.pass_rate * 100.0,
+                    format_ci(&br.confidence_interval),
+                    br.num_pass,
+                    br.num_examples
+                );
+            }
+        } else if !r.metrics.pass_rate_by_tag.is_empty() {
             println!("  by tag:");
             for (tag, rate) in &r.metrics.pass_rate_by_tag {
                 println!("    {:<24}  {:>5.1}%", tag, rate * 100.0);
@@ -467,9 +1299,10 @@ fn print_human(result: &EvalResultPayload) {
             println!("  by tool:");
             for (tool, br) in &r.metrics.pass_rate_by_tool {
                 println!(
-                    "    {:<24}  {:>5.1}%  ({}/{})",
+                    "    {:<24}  {:>5.1}% {}  ({}/{})",
                     tool,
                     br.pass_rate * 100.0,
+                    format_ci(&br.confidence_interval),
                     br.num_pass,
                     br.num_examples
                 );
@@ -489,10 +1322,7 @@ fn print_human(result: &EvalResultPayload) {
                         println!("  confusion (target → predicted):");
                         printed_header = true;
                     }
-                    println!(
-                        "    {:<20} → {:<20}  ×{}",
-                        target, predicted, count
-                    );
+                    println!("    {:<20} → {:<20}  ×{}", target, predicted, count);
                 }
             }
         }
@@ -518,16 +1348,20 @@ fn print_human(result: &EvalResultPayload) {
                 r.metrics.num_non_xml_tool_calls
             );
         }
-        if r.metrics.num_schema_missing_required > 0
-            || r.metrics.num_schema_extra_unknown > 0
-        {
+        if r.metrics.num_schema_missing_required > 0 || r.metrics.num_schema_extra_unknown > 0 {
             println!(
                 "  schema: missing-required={}  extra-unknown={}",
-                r.metrics.num_schema_missing_required,
-                r.metrics.num_schema_extra_unknown,
+                r.metrics.num_schema_missing_required, r.metrics.num_schema_extra_unknown,
             );
         }
     }
+}
+
+fn format_ci(ci: &kiln_eval::result::PassRateConfidenceInterval) -> String {
+    if ci.confidence_level <= 0.0 {
+        return String::new();
+    }
+    format!("(95% CI {:.1}-{:.1}%)", ci.lower * 100.0, ci.upper * 100.0)
 }
 
 fn print_compare(result: &EvalResultPayload) {
@@ -535,12 +1369,21 @@ fn print_compare(result: &EvalResultPayload) {
         eprintln!("no runs in compare result");
         return;
     }
-    println!("{:<24}  {:>10}  {:>10}  {:>10}", "adapter", "accuracy", "mean", "p50 ms");
+    println!(
+        "{:<24}  {:>10}  {:>10}  {:>10}",
+        "adapter", "accuracy", "mean", "p50 ms"
+    );
     for r in &result.runs {
         let adapter = r
             .adapter
             .as_deref()
-            .map(|s| if s.is_empty() { "<base>".to_string() } else { s.to_string() })
+            .map(|s| {
+                if s.is_empty() {
+                    "<base>".to_string()
+                } else {
+                    s.to_string()
+                }
+            })
             .unwrap_or_else(|| "<base>".to_string());
         println!(
             "{:<24}  {:>9.1}%  {:>10.3}  {:>10.0}",

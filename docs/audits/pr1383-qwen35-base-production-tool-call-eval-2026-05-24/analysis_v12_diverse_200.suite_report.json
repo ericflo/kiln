@@ -1,0 +1,1856 @@
+{
+  "config": {
+    "description": "Production trajectory tool-call eval from trajectory-trainer analysis-v12-diverse-200 sample materialized with materialize_turn.py",
+    "generation": {
+      "max_tokens": 1024,
+      "n": 1,
+      "seed": null,
+      "stop": [],
+      "temperature": 0.0,
+      "top_k": 0,
+      "top_p": 1.0
+    },
+    "input_format": "prompt_chosen_jsonl",
+    "require_xml_format": false,
+    "sampling": {
+      "dedupe": false,
+      "max_examples": 200,
+      "max_prompt_chars": 524288,
+      "max_target_chars": 131072,
+      "seed": 20260524
+    },
+    "suite_name": "production-tool-call-analysis-v12-diverse-200"
+  },
+  "input": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+  "inputs": [
+    "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl"
+  ],
+  "kind": "production_trace_suite_report",
+  "schema_version": 1,
+  "stats": {
+    "effective_seed": 20260524,
+    "eligible_tool_turns": 106,
+    "examples_generated": 106,
+    "parse_error_examples": [],
+    "rows_parsed": 200,
+    "rows_seen": 200,
+    "sample_kept": 106,
+    "sampled_examples": [
+      {
+        "example_id": "trace-srca1769f76-2-e38802966875d7ea19be26ff-f09de8236533",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 31551,
+        "session_id": "e9e2090e-39aa-4bf9-82cc-093405c1761b",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 2,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "val",
+        "target_chars": 439,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-04-20T19:59:59.297192262Z",
+        "turn_id": "e38802966875d7ea19be26ff"
+      },
+      {
+        "example_id": "trace-srca1769f76-4-28d3d4551eab27124af8e213-2bc3a9a3781a",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 212750,
+        "session_id": "unknown",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 4,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 15371,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-03-23T04:29:12.251293796Z",
+        "turn_id": "28d3d4551eab27124af8e213"
+      },
+      {
+        "example_id": "trace-srca1769f76-5-50f57aab042361866ec25676-f99dad641ca2",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 8654,
+        "session_id": "4efbbcea-57dd-46cd-92c9-5c88efc25ea0",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 5,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 400,
+        "target_tools": [
+          "Bash",
+          "Bash"
+        ],
+        "timestamp": "2026-04-15T01:22:22.27739594Z",
+        "turn_id": "50f57aab042361866ec25676"
+      },
+      {
+        "example_id": "trace-srca1769f76-6-365a9ecf7aa8a3d182333b8c-d36b9ee699ce",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 196773,
+        "session_id": "63f3e57d-363b-48b9-9fe5-3ccd1fa87e93",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 6,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "val",
+        "target_chars": 386,
+        "target_tools": [
+          "Bash",
+          "Bash",
+          "Bash"
+        ],
+        "timestamp": "2026-04-19T19:54:24.918488082Z",
+        "turn_id": "365a9ecf7aa8a3d182333b8c"
+      },
+      {
+        "example_id": "trace-srca1769f76-11-168ce009537e6413b3fc02d2-5073af2ac197",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 208535,
+        "session_id": "430a9323-891c-44bb-9613-4bce09133e57",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 11,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "val",
+        "target_chars": 7580,
+        "target_tools": [
+          "Write"
+        ],
+        "timestamp": "2026-04-21T05:03:55.045758922Z",
+        "turn_id": "168ce009537e6413b3fc02d2"
+      },
+      {
+        "example_id": "trace-srca1769f76-12-a050da18fcf04b12a593a40f-4df8b18898f1",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 85925,
+        "session_id": "88e72a94-d2f7-4efa-bfaa-9663c53c7a9e",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 12,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 4695,
+        "target_tools": [
+          "Edit"
+        ],
+        "timestamp": "2026-03-28T01:03:58.985158592Z",
+        "turn_id": "a050da18fcf04b12a593a40f"
+      },
+      {
+        "example_id": "trace-srca1769f76-13-99a764795395144e226cb99e-2ce9b81e4950",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 11418,
+        "session_id": "4efbbcea-57dd-46cd-92c9-5c88efc25ea0",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 13,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 412,
+        "target_tools": [
+          "WebFetch",
+          "WebFetch"
+        ],
+        "timestamp": "2026-04-15T01:22:30.484379259Z",
+        "turn_id": "99a764795395144e226cb99e"
+      },
+      {
+        "example_id": "trace-srca1769f76-16-51665791561811e6335fe82d-6293e3bf916f",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 211485,
+        "session_id": "b0b75247-7a5e-487e-9e0d-20618dc2a05a",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 16,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "test",
+        "target_chars": 295,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-04-29T06:31:50.955289952Z",
+        "turn_id": "51665791561811e6335fe82d"
+      },
+      {
+        "example_id": "trace-srca1769f76-17-0fcae58e6b311f3969f46da4-406a66c58b23",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 158657,
+        "session_id": "928bd65f-5c03-448a-988e-2b895fae770f",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 17,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 2120,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-03-28T08:59:24.662574874Z",
+        "turn_id": "0fcae58e6b311f3969f46da4"
+      },
+      {
+        "example_id": "trace-srca1769f76-18-3789c198fb93f6ccf6cf7485-312261bfa0bc",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 7542,
+        "session_id": "4efbbcea-57dd-46cd-92c9-5c88efc25ea0",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 18,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 365,
+        "target_tools": [
+          "Bash",
+          "Bash"
+        ],
+        "timestamp": "2026-04-15T01:22:19.95483469Z",
+        "turn_id": "3789c198fb93f6ccf6cf7485"
+      },
+      {
+        "example_id": "trace-srca1769f76-20-9ff8d9eaa31ef9083ed5f1c4-23d9dcc3456f",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 166515,
+        "session_id": "f49d4c14-d1ba-448b-a9f9-03ecae534f59",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 20,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 7767,
+        "target_tools": [
+          "Edit"
+        ],
+        "timestamp": "2026-05-16T04:10:55.690726249Z",
+        "turn_id": "9ff8d9eaa31ef9083ed5f1c4"
+      },
+      {
+        "example_id": "trace-srca1769f76-21-0373b92f90cbdd89e0d93836-32094ea696cc",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 56529,
+        "session_id": "928bd65f-5c03-448a-988e-2b895fae770f",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 21,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 475,
+        "target_tools": [
+          "Bash",
+          "Bash",
+          "Bash"
+        ],
+        "timestamp": "2026-03-28T08:53:23.116808725Z",
+        "turn_id": "0373b92f90cbdd89e0d93836"
+      },
+      {
+        "example_id": "trace-srca1769f76-23-efea42f7bb287960b9c3d50f-63710e127cd9",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 209329,
+        "session_id": "b0b75247-7a5e-487e-9e0d-20618dc2a05a",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 23,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "test",
+        "target_chars": 260,
+        "target_tools": [
+          "Grep"
+        ],
+        "timestamp": "2026-04-29T06:23:31.782776341Z",
+        "turn_id": "efea42f7bb287960b9c3d50f"
+      },
+      {
+        "example_id": "trace-srca1769f76-26-62aaa34fa1cbc3d8738a5225-bee614878a4f",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 66129,
+        "session_id": "35f5880c-a8ba-4bbf-9dae-345f901a974d",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 26,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 4141,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-03-28T07:10:43.797908427Z",
+        "turn_id": "62aaa34fa1cbc3d8738a5225"
+      },
+      {
+        "example_id": "trace-srca1769f76-28-8267a973c4c50b145ccb814a-eefcd37e2690",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 188995,
+        "session_id": "unknown",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 28,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 166,
+        "target_tools": [
+          "Read"
+        ],
+        "timestamp": "2026-03-21T17:41:55.096621841Z",
+        "turn_id": "8267a973c4c50b145ccb814a"
+      },
+      {
+        "example_id": "trace-srca1769f76-32-72032f449fd9cf8d33bc4072-f96b70a32e34",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 212604,
+        "session_id": "b0b75247-7a5e-487e-9e0d-20618dc2a05a",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 32,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "test",
+        "target_chars": 1824,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-04-29T06:32:02.123192188Z",
+        "turn_id": "72032f449fd9cf8d33bc4072"
+      },
+      {
+        "example_id": "trace-srca1769f76-35-a787fa597064a429d1869004-c66a2e5fcd12",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 207293,
+        "session_id": "36ce0123-40c9-48f5-be29-e3dfe3a9d0e7",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 35,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "val",
+        "target_chars": 1386,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-04-19T20:08:49.515963964Z",
+        "turn_id": "a787fa597064a429d1869004"
+      },
+      {
+        "example_id": "trace-srca1769f76-36-decf8ddde8c913f869bee4ba-decc18ee7fcf",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 171796,
+        "session_id": "unknown",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 36,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 273,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-03-16T01:01:19.719041679Z",
+        "turn_id": "decf8ddde8c913f869bee4ba"
+      },
+      {
+        "example_id": "trace-srca1769f76-37-af87af1c8ea4dcfd0a8c12ce-63378e5c2727",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 69265,
+        "session_id": "517a70f9-0738-4ccf-92b0-0d7cec4f7ff6",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 37,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 2620,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-03-28T08:35:21.142515104Z",
+        "turn_id": "af87af1c8ea4dcfd0a8c12ce"
+      },
+      {
+        "example_id": "trace-srca1769f76-40-681369e0ae1be92b9bbbe516-5cb0b7bb11ed",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 210233,
+        "session_id": "5f5d9ddf-f8d3-42ee-a718-720d41b80af2",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 40,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "val",
+        "target_chars": 182,
+        "target_tools": [
+          "Grep"
+        ],
+        "timestamp": "2026-04-21T16:42:02.930096489Z",
+        "turn_id": "681369e0ae1be92b9bbbe516"
+      },
+      {
+        "example_id": "trace-srca1769f76-42-2e8fbf1d43172921e4bc55df-8491b714adb8",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 61044,
+        "session_id": "e787a227-3498-418c-a546-ff7e83e80bb3",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 42,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 687,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-03-28T08:37:53.190892832Z",
+        "turn_id": "2e8fbf1d43172921e4bc55df"
+      },
+      {
+        "example_id": "trace-srca1769f76-43-c2b6c8e0cb0d6d0e80575e88-450d3f7d224f",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 202423,
+        "session_id": "b0b75247-7a5e-487e-9e0d-20618dc2a05a",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 43,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "test",
+        "target_chars": 180,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-04-29T06:31:37.448998031Z",
+        "turn_id": "c2b6c8e0cb0d6d0e80575e88"
+      },
+      {
+        "example_id": "trace-srca1769f76-44-ca0fad5e2c64b054d3466b56-7b90a630d10e",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 179427,
+        "session_id": "0ff30354-35ab-4cbf-ae34-242c7a8b2de4",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 44,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 10856,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-04-07T10:51:04.203521296Z",
+        "turn_id": "ca0fad5e2c64b054d3466b56"
+      },
+      {
+        "example_id": "trace-srca1769f76-46-1364c78cefb9472475f6ee8e-ee315a942113",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 216269,
+        "session_id": "430a9323-891c-44bb-9613-4bce09133e57",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 46,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "val",
+        "target_chars": 169,
+        "target_tools": [
+          "Read"
+        ],
+        "timestamp": "2026-04-21T04:53:21.295767438Z",
+        "turn_id": "1364c78cefb9472475f6ee8e"
+      },
+      {
+        "example_id": "trace-srca1769f76-49-6d6d0d99facb3e982607ce15-19d01397d4c8",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 27991,
+        "session_id": "4efbbcea-57dd-46cd-92c9-5c88efc25ea0",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 49,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 683,
+        "target_tools": [
+          "WebFetch",
+          "WebFetch"
+        ],
+        "timestamp": "2026-04-15T01:23:07.481218568Z",
+        "turn_id": "6d6d0d99facb3e982607ce15"
+      },
+      {
+        "example_id": "trace-srca1769f76-51-368616cb06f2426147072bb3-7b9130e6d7ff",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 203404,
+        "session_id": "5ab11f13-f382-46c2-ac24-c4a5ed7bd614",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 51,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "val",
+        "target_chars": 1060,
+        "target_tools": [
+          "Bash",
+          "Bash"
+        ],
+        "timestamp": "2026-04-19T17:42:09.969625039Z",
+        "turn_id": "368616cb06f2426147072bb3"
+      },
+      {
+        "example_id": "trace-srca1769f76-52-cfdb05d751715058028a64ff-a9e679e6b9f5",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 205122,
+        "session_id": "unknown",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 52,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 15135,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-03-22T16:48:38.716724121Z",
+        "turn_id": "cfdb05d751715058028a64ff"
+      },
+      {
+        "example_id": "trace-srca1769f76-53-aaa82ecf008f48ed87a54536-1f172409d226",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 10858,
+        "session_id": "4efbbcea-57dd-46cd-92c9-5c88efc25ea0",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 53,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 280,
+        "target_tools": [
+          "ToolSearch",
+          "Bash"
+        ],
+        "timestamp": "2026-04-15T01:22:25.184732471Z",
+        "turn_id": "aaa82ecf008f48ed87a54536"
+      },
+      {
+        "example_id": "trace-srca1769f76-56-6fb18142ac1adeb935064728-3e0159e70c3a",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 174889,
+        "session_id": "unknown",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 56,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 71,
+        "target_tools": [
+          "Glob"
+        ],
+        "timestamp": "2026-03-16T01:04:14.565145504Z",
+        "turn_id": "6fb18142ac1adeb935064728"
+      },
+      {
+        "example_id": "trace-srca1769f76-57-063595ab6263876e90d88359-346be4278e6f",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 52671,
+        "session_id": "cfecb9af-6866-4c42-8415-32d1f562dcdf",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 57,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 254,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-05-15T21:43:14.747316923Z",
+        "turn_id": "063595ab6263876e90d88359"
+      },
+      {
+        "example_id": "trace-srca1769f76-59-ebfbeb0b970fcce66ed1967f-c30a71e524e2",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 185327,
+        "session_id": "92381980-a89b-4851-bf0c-3485bfddaa1e",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 59,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 10582,
+        "target_tools": [
+          "Edit"
+        ],
+        "timestamp": "2026-03-28T11:12:38.350735227Z",
+        "turn_id": "ebfbeb0b970fcce66ed1967f"
+      },
+      {
+        "example_id": "trace-srca1769f76-60-58f6eef4c8315100e375093d-b7d5cf737102",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 14304,
+        "session_id": "4efbbcea-57dd-46cd-92c9-5c88efc25ea0",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 60,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 498,
+        "target_tools": [
+          "WebFetch",
+          "WebFetch"
+        ],
+        "timestamp": "2026-04-15T01:22:38.129424355Z",
+        "turn_id": "58f6eef4c8315100e375093d"
+      },
+      {
+        "example_id": "trace-srca1769f76-63-0da73184eaaa086e3aa333b8-1101c162d5b7",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 175078,
+        "session_id": "unknown",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 63,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 73,
+        "target_tools": [
+          "Glob"
+        ],
+        "timestamp": "2026-03-16T01:04:17.761387231Z",
+        "turn_id": "0da73184eaaa086e3aa333b8"
+      },
+      {
+        "example_id": "trace-srca1769f76-65-c7b8aac193d4cc39e1d53a41-6eb29a51cc44",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 114371,
+        "session_id": "928bd65f-5c03-448a-988e-2b895fae770f",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 65,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 8690,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-03-28T08:55:23.431707152Z",
+        "turn_id": "c7b8aac193d4cc39e1d53a41"
+      },
+      {
+        "example_id": "trace-srca1769f76-66-b25dea66205da2957b00a155-824d12b5b3ac",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 31551,
+        "session_id": "28530bcc-d506-4c7d-968c-6a7932514690",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 66,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "val",
+        "target_chars": 485,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-04-20T20:02:13.265600284Z",
+        "turn_id": "b25dea66205da2957b00a155"
+      },
+      {
+        "example_id": "trace-srca1769f76-67-91496f8097365ee0da9800dd-f2cb32f67481",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 4444,
+        "session_id": "4efbbcea-57dd-46cd-92c9-5c88efc25ea0",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 67,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 326,
+        "target_tools": [
+          "Bash",
+          "Bash"
+        ],
+        "timestamp": "2026-04-15T01:22:17.193917785Z",
+        "turn_id": "91496f8097365ee0da9800dd"
+      },
+      {
+        "example_id": "trace-srca1769f76-69-f4279dbe32f449c8986e1c77-c0cb88b6625d",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 57764,
+        "session_id": "3640478e-afbc-46aa-b2ce-89f7c61f2e01",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 69,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 2671,
+        "target_tools": [
+          "WebFetch",
+          "WebFetch",
+          "WebFetch",
+          "WebFetch"
+        ],
+        "timestamp": "2026-05-15T20:47:56.371695191Z",
+        "turn_id": "f4279dbe32f449c8986e1c77"
+      },
+      {
+        "example_id": "trace-srca1769f76-72-021898c1001004f8f22fe6ef-9e5c9373e5a3",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 186871,
+        "session_id": "unknown",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 72,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 216,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-03-21T17:41:40.391364644Z",
+        "turn_id": "021898c1001004f8f22fe6ef"
+      },
+      {
+        "example_id": "trace-srca1769f76-75-3da65f57fb0e8427939c71f5-93d8a6098bbe",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 142958,
+        "session_id": "unknown",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 75,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 10362,
+        "target_tools": [
+          "Edit"
+        ],
+        "timestamp": "2026-03-21T17:09:51.623520011Z",
+        "turn_id": "3da65f57fb0e8427939c71f5"
+      },
+      {
+        "example_id": "trace-srca1769f76-77-05331b8b38501c735fd3757a-a8fb5f4872e4",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 42704,
+        "session_id": "3640478e-afbc-46aa-b2ce-89f7c61f2e01",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 77,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 1672,
+        "target_tools": [
+          "WebFetch",
+          "WebFetch",
+          "WebFetch",
+          "WebFetch"
+        ],
+        "timestamp": "2026-05-15T20:47:33.478203144Z",
+        "turn_id": "05331b8b38501c735fd3757a"
+      },
+      {
+        "example_id": "trace-srca1769f76-80-a69cbea9135675d998b7b069-799dbce18725",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 185051,
+        "session_id": "unknown",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 80,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 194,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-03-21T17:41:23.772992218Z",
+        "turn_id": "a69cbea9135675d998b7b069"
+      },
+      {
+        "example_id": "trace-srca1769f76-81-c83e426eb5cf3c45c030ca52-5520088b42c6",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 208280,
+        "session_id": "e130f6db-1dc3-4319-a253-8d7df5eaf59d",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 81,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "val",
+        "target_chars": 871,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-04-19T08:20:09.899575831Z",
+        "turn_id": "c83e426eb5cf3c45c030ca52"
+      },
+      {
+        "example_id": "trace-srca1769f76-85-992db12de45162ab3aa38faa-246eabbb83da",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 5483,
+        "session_id": "3048fed1-98cd-4702-8f4d-01f0d1c1057f",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 85,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 374,
+        "target_tools": [
+          "Read",
+          "Read",
+          "Read"
+        ],
+        "timestamp": "2026-04-10T07:34:50.278211029Z",
+        "turn_id": "992db12de45162ab3aa38faa"
+      },
+      {
+        "example_id": "trace-srca1769f76-86-7ad6a1d7450c4669d97dc780-3d8ec6224498",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 197164,
+        "session_id": "b0b75247-7a5e-487e-9e0d-20618dc2a05a",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 86,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "test",
+        "target_chars": 460,
+        "target_tools": [
+          "Read",
+          "Read",
+          "Read"
+        ],
+        "timestamp": "2026-04-29T06:27:04.509755924Z",
+        "turn_id": "7ad6a1d7450c4669d97dc780"
+      },
+      {
+        "example_id": "trace-srca1769f76-87-d6afadbe80571a9adf816f65-f8efd1652185",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 192075,
+        "session_id": "unknown",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 87,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 591,
+        "target_tools": [
+          "Grep",
+          "Bash"
+        ],
+        "timestamp": "2026-03-26T20:44:45.39825264Z",
+        "turn_id": "d6afadbe80571a9adf816f65"
+      },
+      {
+        "example_id": "trace-srca1769f76-90-29f067edbd75fe329cf07ff2-904938b4f3ed",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 145909,
+        "session_id": "unknown",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 90,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 8252,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-03-16T02:56:46.887325956Z",
+        "turn_id": "29f067edbd75fe329cf07ff2"
+      },
+      {
+        "example_id": "trace-srca1769f76-95-6ee256ef6336ec268999defc-18b798209997",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 195497,
+        "session_id": "f57858e6-10c4-4f6a-b2eb-5ab940a215d2",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 95,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "val",
+        "target_chars": 143,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-04-19T19:26:34.48158218Z",
+        "turn_id": "6ee256ef6336ec268999defc"
+      },
+      {
+        "example_id": "trace-srca1769f76-96-efa4dca72d9e574be40dfef5-b2d4d56f75ba",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 192327,
+        "session_id": "unknown",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 96,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 10602,
+        "target_tools": [
+          "Edit"
+        ],
+        "timestamp": "2026-03-26T04:42:56.036337374Z",
+        "turn_id": "efa4dca72d9e574be40dfef5"
+      },
+      {
+        "example_id": "trace-srca1769f76-101-2ee26228173abd102686a37d-97359f6068ac",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 20891,
+        "session_id": "4efbbcea-57dd-46cd-92c9-5c88efc25ea0",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 101,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 598,
+        "target_tools": [
+          "WebFetch",
+          "WebFetch"
+        ],
+        "timestamp": "2026-04-15T01:22:55.559460656Z",
+        "turn_id": "2ee26228173abd102686a37d"
+      },
+      {
+        "example_id": "trace-srca1769f76-102-4bb0bec363d585abbb427f8e-5bc8d66f9b6a",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 212140,
+        "session_id": "ab9a923b-9f5a-41fc-b5f1-fc3013e60b49",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 102,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 13632,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-04-13T16:48:30.812881372Z",
+        "turn_id": "4bb0bec363d585abbb427f8e"
+      },
+      {
+        "example_id": "trace-srca1769f76-104-2aa3d9646a510c0209768d41-c72310d68289",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 38384,
+        "session_id": "86512264-6941-4b40-b073-3fbbb45e5790",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 104,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 91,
+        "target_tools": [
+          "Read"
+        ],
+        "timestamp": "2026-03-28T00:57:51.445442308Z",
+        "turn_id": "2aa3d9646a510c0209768d41"
+      },
+      {
+        "example_id": "trace-srca1769f76-108-61404dd1a36932dee1965724-98e702665d06",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 200672,
+        "session_id": "9522a47d-496c-445f-9e70-c0c47d05cb8b",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 108,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 6700,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-04-13T01:27:05.290702845Z",
+        "turn_id": "61404dd1a36932dee1965724"
+      },
+      {
+        "example_id": "trace-srca1769f76-109-4e2cfd5ee5d18bb83a09c179-942505f971d9",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 17080,
+        "session_id": "4efbbcea-57dd-46cd-92c9-5c88efc25ea0",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 109,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 733,
+        "target_tools": [
+          "WebFetch",
+          "WebFetch"
+        ],
+        "timestamp": "2026-04-15T01:22:45.395903802Z",
+        "turn_id": "4e2cfd5ee5d18bb83a09c179"
+      },
+      {
+        "example_id": "trace-srca1769f76-111-a7cd62776d70836631d5409b-7daf94971ad1",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 53421,
+        "session_id": "cfecb9af-6866-4c42-8415-32d1f562dcdf",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 111,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 289,
+        "target_tools": [
+          "Read",
+          "Bash"
+        ],
+        "timestamp": "2026-05-15T21:43:26.483802699Z",
+        "turn_id": "a7cd62776d70836631d5409b"
+      },
+      {
+        "example_id": "trace-srca1769f76-113-154f8a9f679178c2b0d8f65a-c48072914ea6",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 177602,
+        "session_id": "66539b2e-9a85-4c20-9572-0f893fa84b60",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 113,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 16442,
+        "target_tools": [
+          "Write"
+        ],
+        "timestamp": "2026-04-09T05:51:46.431203555Z",
+        "turn_id": "154f8a9f679178c2b0d8f65a"
+      },
+      {
+        "example_id": "trace-srca1769f76-115-d7254c7c9eca2d794c7db01e-78969de43545",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 177051,
+        "session_id": "fd8473a4-7f2f-4c63-b644-5d56bc405081",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 115,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 2428,
+        "target_tools": [
+          "Edit"
+        ],
+        "timestamp": "2026-03-28T10:48:06.539831177Z",
+        "turn_id": "d7254c7c9eca2d794c7db01e"
+      },
+      {
+        "example_id": "trace-srca1769f76-116-f852c20541c1a11079de985b-977dc1f6bec7",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 116557,
+        "session_id": "unknown",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 116,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 9589,
+        "target_tools": [
+          "Bash",
+          "Bash",
+          "Bash",
+          "Bash",
+          "Bash",
+          "Bash",
+          "Bash",
+          "Bash",
+          "Bash",
+          "Bash"
+        ],
+        "timestamp": "2026-03-22T23:35:52.842865081Z",
+        "turn_id": "f852c20541c1a11079de985b"
+      },
+      {
+        "example_id": "trace-srca1769f76-121-96167f1f124b17069e7d9511-7655e209b435",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 182779,
+        "session_id": "fd8473a4-7f2f-4c63-b644-5d56bc405081",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 121,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 6843,
+        "target_tools": [
+          "Edit"
+        ],
+        "timestamp": "2026-03-28T10:48:31.005214504Z",
+        "turn_id": "96167f1f124b17069e7d9511"
+      },
+      {
+        "example_id": "trace-srca1769f76-123-515577b246badc7777e06a3c-8505dd6b81b8",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 183705,
+        "session_id": "unknown",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 123,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 2103,
+        "target_tools": [
+          "Agent",
+          "Agent",
+          "Agent"
+        ],
+        "timestamp": "2026-03-23T06:37:13.053137235Z",
+        "turn_id": "515577b246badc7777e06a3c"
+      },
+      {
+        "example_id": "trace-srca1769f76-124-a2336c234642d0fb07bbe029-aa2c31f21f82",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 61080,
+        "session_id": "cfecb9af-6866-4c42-8415-32d1f562dcdf",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 124,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 225,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-05-15T21:43:32.379447969Z",
+        "turn_id": "a2336c234642d0fb07bbe029"
+      },
+      {
+        "example_id": "trace-srca1769f76-126-d5a05f4e0016e08ed64ffde5-d5454ba67b6b",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 49865,
+        "session_id": "4efbbcea-57dd-46cd-92c9-5c88efc25ea0",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 126,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 375,
+        "target_tools": [
+          "WebFetch",
+          "WebFetch"
+        ],
+        "timestamp": "2026-04-15T01:24:33.536046061Z",
+        "turn_id": "d5a05f4e0016e08ed64ffde5"
+      },
+      {
+        "example_id": "trace-srca1769f76-127-ca30d2f42502d1179972fc9b-5d63f2575d85",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 88046,
+        "session_id": "f83ca5a9-e3ed-4479-b84f-d1efd0a7da03",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 127,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 357,
+        "target_tools": [
+          "Bash",
+          "Bash",
+          "Read"
+        ],
+        "timestamp": "2026-05-16T18:55:51.338905076Z",
+        "turn_id": "ca30d2f42502d1179972fc9b"
+      },
+      {
+        "example_id": "trace-srca1769f76-128-eba5bf0c5ee2d8b3a2ecea2b-97ef12ac073d",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 48899,
+        "session_id": "17c382d3-6f5a-4074-94dd-57222114598a",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 128,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 111,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-03-28T07:36:05.075357663Z",
+        "turn_id": "eba5bf0c5ee2d8b3a2ecea2b"
+      },
+      {
+        "example_id": "trace-srca1769f76-131-610f2a40648c3ce3a1e670d6-e5bfee4264dd",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 119327,
+        "session_id": "f49d4c14-d1ba-448b-a9f9-03ecae534f59",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 131,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 260,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-05-16T04:09:28.233561982Z",
+        "turn_id": "610f2a40648c3ce3a1e670d6"
+      },
+      {
+        "example_id": "trace-srca1769f76-132-fbe805472c674a12de7f2351-b4740cf9da56",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 63496,
+        "session_id": "e787a227-3498-418c-a546-ff7e83e80bb3",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 132,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 840,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-03-28T08:38:07.649686326Z",
+        "turn_id": "fbe805472c674a12de7f2351"
+      },
+      {
+        "example_id": "trace-srca1769f76-133-5749c5942f6cd8983b1c0aef-19e804ce56b6",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 218991,
+        "session_id": "0ff30354-35ab-4cbf-ae34-242c7a8b2de4",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 133,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 3450,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-04-07T10:52:30.694932665Z",
+        "turn_id": "5749c5942f6cd8983b1c0aef"
+      },
+      {
+        "example_id": "trace-srca1769f76-136-ff9a290e01035155b15ea056-ed56767a0877",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 195710,
+        "session_id": "0ff30354-35ab-4cbf-ae34-242c7a8b2de4",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 136,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 2514,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-04-07T10:51:43.082331746Z",
+        "turn_id": "ff9a290e01035155b15ea056"
+      },
+      {
+        "example_id": "trace-srca1769f76-137-23c9724cbb74e66b8e270b9a-6430d6f194e7",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 65115,
+        "session_id": "e787a227-3498-418c-a546-ff7e83e80bb3",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 137,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 891,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-03-28T08:38:19.475839084Z",
+        "turn_id": "23c9724cbb74e66b8e270b9a"
+      },
+      {
+        "example_id": "trace-srca1769f76-139-ff521c322739c773415aeecc-e0924b1934cc",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 41343,
+        "session_id": "4efbbcea-57dd-46cd-92c9-5c88efc25ea0",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 139,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 351,
+        "target_tools": [
+          "WebFetch"
+        ],
+        "timestamp": "2026-04-15T01:23:53.747592079Z",
+        "turn_id": "ff521c322739c773415aeecc"
+      },
+      {
+        "example_id": "trace-srca1769f76-140-6501d998589fd77e5b9b61b4-0790cf3ff729",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 86807,
+        "session_id": "cfecb9af-6866-4c42-8415-32d1f562dcdf",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 140,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 560,
+        "target_tools": [
+          "Read",
+          "Read",
+          "Read",
+          "Read",
+          "Read",
+          "Read",
+          "Read",
+          "Read"
+        ],
+        "timestamp": "2026-05-15T21:45:12.020650184Z",
+        "turn_id": "6501d998589fd77e5b9b61b4"
+      },
+      {
+        "example_id": "trace-srca1769f76-143-d158b45dd945b42fb5f8e398-375d7ff00575",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 37567,
+        "session_id": "cfecb9af-6866-4c42-8415-32d1f562dcdf",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 143,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 236,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-05-15T21:19:02.043216733Z",
+        "turn_id": "d158b45dd945b42fb5f8e398"
+      },
+      {
+        "example_id": "trace-srca1769f76-144-91e0e81fd8b9bde1f2290b72-8b2129adaf00",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 51134,
+        "session_id": "82e3cec3-a24f-4a89-a078-cf404eeae611",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 144,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 103,
+        "target_tools": [
+          "Read"
+        ],
+        "timestamp": "2026-03-28T07:12:36.390912983Z",
+        "turn_id": "91e0e81fd8b9bde1f2290b72"
+      },
+      {
+        "example_id": "trace-srca1769f76-145-c9af4fb8b51e0491726230e8-afec3aba03f5",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 177085,
+        "session_id": "832a3900-cff9-4833-8b7f-2b0fe702465f",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 145,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 2571,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-04-07T07:48:05.646923747Z",
+        "turn_id": "c9af4fb8b51e0491726230e8"
+      },
+      {
+        "example_id": "trace-srca1769f76-149-d001e8c62a1c5269deddc2c2-0f04d2a337b3",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 51876,
+        "session_id": "cfecb9af-6866-4c42-8415-32d1f562dcdf",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 149,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 158,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-05-15T21:41:23.556153885Z",
+        "turn_id": "d001e8c62a1c5269deddc2c2"
+      },
+      {
+        "example_id": "trace-srca1769f76-150-18d9a4531950f822555338c5-7d56c013cc4d",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 146219,
+        "session_id": "fd8473a4-7f2f-4c63-b644-5d56bc405081",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 150,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 3328,
+        "target_tools": [
+          "Edit"
+        ],
+        "timestamp": "2026-03-28T10:47:22.412259647Z",
+        "turn_id": "18d9a4531950f822555338c5"
+      },
+      {
+        "example_id": "trace-srca1769f76-152-c0b2ab8bd15c8b79928693d9-614353dc49a6",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 91599,
+        "session_id": "f83ca5a9-e3ed-4479-b84f-d1efd0a7da03",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 152,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 2475,
+        "target_tools": [
+          "TaskCreate",
+          "TaskCreate",
+          "TaskCreate",
+          "TaskCreate",
+          "TaskCreate",
+          "TaskCreate"
+        ],
+        "timestamp": "2026-05-16T18:56:06.153175833Z",
+        "turn_id": "c0b2ab8bd15c8b79928693d9"
+      },
+      {
+        "example_id": "trace-srca1769f76-153-61d3214d9cfb5d98635ea41d-039bb97ed241",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 112705,
+        "session_id": "6d498ee7-0c97-4ad6-8568-699707ece370",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 153,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 77,
+        "target_tools": [
+          "Glob"
+        ],
+        "timestamp": "2026-03-28T11:02:48.242407658Z",
+        "turn_id": "61d3214d9cfb5d98635ea41d"
+      },
+      {
+        "example_id": "trace-srca1769f76-154-177aad03e966a011af123f25-ca04195250b2",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 61926,
+        "session_id": "cfecb9af-6866-4c42-8415-32d1f562dcdf",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 154,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 107,
+        "target_tools": [
+          "ToolSearch"
+        ],
+        "timestamp": "2026-05-15T21:43:40.304518012Z",
+        "turn_id": "177aad03e966a011af123f25"
+      },
+      {
+        "example_id": "trace-srca1769f76-157-b1428db1f2f7e89366b28a4a-9577dc905646",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 85860,
+        "session_id": "unknown",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 157,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 524,
+        "target_tools": [
+          "Read",
+          "Glob",
+          "Glob",
+          "Grep"
+        ],
+        "timestamp": "2026-03-15T08:01:14.950491644Z",
+        "turn_id": "b1428db1f2f7e89366b28a4a"
+      },
+      {
+        "example_id": "trace-srca1769f76-158-e96f50d5df86109abf3e9d70-7b6c12b82bf0",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 63990,
+        "session_id": "cfecb9af-6866-4c42-8415-32d1f562dcdf",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 158,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 151,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-05-15T21:43:55.858377368Z",
+        "turn_id": "e96f50d5df86109abf3e9d70"
+      },
+      {
+        "example_id": "trace-srca1769f76-160-e49fb62cf3da77f6e3e05cf8-4711772814b0",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 169736,
+        "session_id": "unknown",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 160,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 2819,
+        "target_tools": [
+          "Edit"
+        ],
+        "timestamp": "2026-03-15T03:23:24.450769708Z",
+        "turn_id": "e49fb62cf3da77f6e3e05cf8"
+      },
+      {
+        "example_id": "trace-srca1769f76-161-6923e9fa61169d0dd96727ad-8f6ad50675b7",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 60092,
+        "session_id": "f49d4c14-d1ba-448b-a9f9-03ecae534f59",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 161,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 650,
+        "target_tools": [
+          "Edit"
+        ],
+        "timestamp": "2026-05-16T04:08:34.994209201Z",
+        "turn_id": "6923e9fa61169d0dd96727ad"
+      },
+      {
+        "example_id": "trace-srca1769f76-163-fd7ab1e573689046ed895344-80bed4ab6ca0",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 45535,
+        "session_id": "4efbbcea-57dd-46cd-92c9-5c88efc25ea0",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 163,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 152,
+        "target_tools": [
+          "WebSearch"
+        ],
+        "timestamp": "2026-04-15T01:24:19.410432899Z",
+        "turn_id": "fd7ab1e573689046ed895344"
+      },
+      {
+        "example_id": "trace-srca1769f76-164-f4ebe709dff9748715c4ee95-6dee86b7d0e0",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 104145,
+        "session_id": "unknown",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 164,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 1598,
+        "target_tools": [
+          "Bash",
+          "Bash",
+          "Bash",
+          "Bash",
+          "Bash",
+          "Bash",
+          "Bash",
+          "Bash",
+          "Bash",
+          "Bash"
+        ],
+        "timestamp": "2026-03-22T23:35:15.365050045Z",
+        "turn_id": "f4ebe709dff9748715c4ee95"
+      },
+      {
+        "example_id": "trace-srca1769f76-165-0960a5acb745c58ce948f1e6-8ea3a75e182f",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 63472,
+        "session_id": "f49d4c14-d1ba-448b-a9f9-03ecae534f59",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 165,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 490,
+        "target_tools": [
+          "Bash",
+          "Bash"
+        ],
+        "timestamp": "2026-05-16T04:08:47.41318066Z",
+        "turn_id": "0960a5acb745c58ce948f1e6"
+      },
+      {
+        "example_id": "trace-srca1769f76-167-c03ee6429fb386406c94da4c-4fd6f04aca7c",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 113086,
+        "session_id": "6d498ee7-0c97-4ad6-8568-699707ece370",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 167,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 101,
+        "target_tools": [
+          "Read"
+        ],
+        "timestamp": "2026-03-28T11:03:15.052239748Z",
+        "turn_id": "c03ee6429fb386406c94da4c"
+      },
+      {
+        "example_id": "trace-srca1769f76-168-1c91877710f7ad802c71e20a-0194b2a1a5f5",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 159715,
+        "session_id": "unknown",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 168,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 450,
+        "target_tools": [
+          "Grep",
+          "Grep"
+        ],
+        "timestamp": "2026-03-15T00:09:48.12214386Z",
+        "turn_id": "1c91877710f7ad802c71e20a"
+      },
+      {
+        "example_id": "trace-srca1769f76-170-5f0b6e9217a85c6dabbc608f-47e5bf8805f8",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 50715,
+        "session_id": "cfecb9af-6866-4c42-8415-32d1f562dcdf",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 170,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 146,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-05-15T21:40:59.634419526Z",
+        "turn_id": "5f0b6e9217a85c6dabbc608f"
+      },
+      {
+        "example_id": "trace-srca1769f76-171-a01de97952903e37c64b714a-2eb723dc0276",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 215801,
+        "session_id": "98070819-60a5-4c03-95d1-3a8b6e0d9cb8",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 171,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 822,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-03-28T18:33:46.517770805Z",
+        "turn_id": "a01de97952903e37c64b714a"
+      },
+      {
+        "example_id": "trace-srca1769f76-173-974587a8268d6449a9c8a04b-40cb62e71909",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 72736,
+        "session_id": "86512264-6941-4b40-b073-3fbbb45e5790",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 173,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 95,
+        "target_tools": [
+          "ToolSearch"
+        ],
+        "timestamp": "2026-03-28T00:58:27.022076103Z",
+        "turn_id": "974587a8268d6449a9c8a04b"
+      },
+      {
+        "example_id": "trace-srca1769f76-175-4a5820558d24893f81bee21c-9205d0dee0e5",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 193743,
+        "session_id": "98070819-60a5-4c03-95d1-3a8b6e0d9cb8",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 175,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 1232,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-03-28T18:32:13.839234508Z",
+        "turn_id": "4a5820558d24893f81bee21c"
+      },
+      {
+        "example_id": "trace-srca1769f76-177-0bc1b16c7a34e3337025fd75-4a4c162b65a8",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 39110,
+        "session_id": "9753c598-e31c-466b-806f-4b967e147b60",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 177,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 504,
+        "target_tools": [
+          "Bash",
+          "Bash",
+          "Bash"
+        ],
+        "timestamp": "2026-03-28T00:44:21.421804177Z",
+        "turn_id": "0bc1b16c7a34e3337025fd75"
+      },
+      {
+        "example_id": "trace-srca1769f76-179-512f24fcc2a333a392fdc1f1-c1fcce8791d3",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 112900,
+        "session_id": "6d498ee7-0c97-4ad6-8568-699707ece370",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 179,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 73,
+        "target_tools": [
+          "Skill"
+        ],
+        "timestamp": "2026-03-28T11:02:51.706105646Z",
+        "turn_id": "512f24fcc2a333a392fdc1f1"
+      },
+      {
+        "example_id": "trace-srca1769f76-181-40698f523a423fc70c76c9ff-8059bd9c2b25",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 48466,
+        "session_id": "cfecb9af-6866-4c42-8415-32d1f562dcdf",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 181,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 181,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-05-15T21:32:29.201107334Z",
+        "turn_id": "40698f523a423fc70c76c9ff"
+      },
+      {
+        "example_id": "trace-srca1769f76-182-83e65ab251bdce122b4b094a-5c8ed8760ea3",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 194429,
+        "session_id": "unknown",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 182,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 3799,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-03-23T03:29:32.675880842Z",
+        "turn_id": "83e65ab251bdce122b4b094a"
+      },
+      {
+        "example_id": "trace-srca1769f76-183-b6452bb32be4bb9738ea1e4e-93a69d372be7",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 113262,
+        "session_id": "6d498ee7-0c97-4ad6-8568-699707ece370",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 183,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 81,
+        "target_tools": [
+          "Glob"
+        ],
+        "timestamp": "2026-03-28T11:02:21.94521226Z",
+        "turn_id": "b6452bb32be4bb9738ea1e4e"
+      },
+      {
+        "example_id": "trace-srca1769f76-187-3ce881c669e3a5c929ed5fb6-d3cc0673dea4",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 45623,
+        "session_id": "cfecb9af-6866-4c42-8415-32d1f562dcdf",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 187,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 412,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-05-15T21:32:09.56935508Z",
+        "turn_id": "3ce881c669e3a5c929ed5fb6"
+      },
+      {
+        "example_id": "trace-srca1769f76-188-de794e3efdac2a0e6d3df80f-94bd97915065",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 161445,
+        "session_id": "unknown",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 188,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 4413,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-03-23T00:32:21.853032175Z",
+        "turn_id": "de794e3efdac2a0e6d3df80f"
+      },
+      {
+        "example_id": "trace-srca1769f76-190-1b363524956aa40175a98e2d-bd2bdd729be8",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 184410,
+        "session_id": "92381980-a89b-4851-bf0c-3485bfddaa1e",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 190,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 114,
+        "target_tools": [
+          "Read"
+        ],
+        "timestamp": "2026-03-28T11:12:30.416596729Z",
+        "turn_id": "1b363524956aa40175a98e2d"
+      },
+      {
+        "example_id": "trace-srca1769f76-191-aa1bb46926812799ba345651-b2393be13322",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 58376,
+        "session_id": "e787a227-3498-418c-a546-ff7e83e80bb3",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 191,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 365,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-03-28T08:37:36.738956665Z",
+        "turn_id": "aa1bb46926812799ba345651"
+      },
+      {
+        "example_id": "trace-srca1769f76-194-c7116309df186c1adf79ba3c-6de340572f15",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 127929,
+        "session_id": "92381980-a89b-4851-bf0c-3485bfddaa1e",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 194,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 73,
+        "target_tools": [
+          "Skill"
+        ],
+        "timestamp": "2026-03-28T11:09:46.376468393Z",
+        "turn_id": "c7116309df186c1adf79ba3c"
+      },
+      {
+        "example_id": "trace-srca1769f76-195-b1aae5e3fffcbc66377d7dd5-b08e4e280dfc",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 198005,
+        "session_id": "unknown",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 195,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 2270,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-03-23T03:22:44.218943709Z",
+        "turn_id": "b1aae5e3fffcbc66377d7dd5"
+      },
+      {
+        "example_id": "trace-srca1769f76-196-5ec66ab0121d764506822db5-0bc7459ecd08",
+        "production_model": "claude-haiku-4-5-20251001",
+        "prompt_chars": 68650,
+        "session_id": "07bfabd0-745c-4a0e-b190-e434078761d2",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 196,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 49,
+        "target_tools": [
+          "string"
+        ],
+        "timestamp": "2026-04-15T17:08:30.756734376Z",
+        "turn_id": "5ec66ab0121d764506822db5"
+      },
+      {
+        "example_id": "trace-srca1769f76-198-a5a8937105e107881c61f6ad-2d724919bc61",
+        "production_model": "claude-opus-4-7",
+        "prompt_chars": 142539,
+        "session_id": "cfecb9af-6866-4c42-8415-32d1f562dcdf",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 198,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 560,
+        "target_tools": [
+          "Read",
+          "Read",
+          "Read",
+          "Read",
+          "Read",
+          "Read",
+          "Read",
+          "Read"
+        ],
+        "timestamp": "2026-05-15T21:45:34.893390931Z",
+        "turn_id": "a5a8937105e107881c61f6ad"
+      },
+      {
+        "example_id": "trace-srca1769f76-199-f902e590648ca57116137c57-21ea6ed4ea91",
+        "production_model": "claude-opus-4-6",
+        "prompt_chars": 50001,
+        "session_id": "82e3cec3-a24f-4a89-a078-cf404eeae611",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 199,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 130,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-03-28T07:12:27.411989102Z",
+        "turn_id": "f902e590648ca57116137c57"
+      },
+      {
+        "example_id": "trace-srca1769f76-200-edef2a20ad9bbf84bb90eff1-4c682b09abaf",
+        "production_model": "claude-sonnet-4-6",
+        "prompt_chars": 135239,
+        "session_id": "98070819-60a5-4c03-95d1-3a8b6e0d9cb8",
+        "source_format": "prompt_chosen_jsonl",
+        "source_line": 200,
+        "source_path": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl",
+        "split": "train",
+        "target_chars": 628,
+        "target_tools": [
+          "Bash"
+        ],
+        "timestamp": "2026-03-28T18:30:09.025897853Z",
+        "turn_id": "edef2a20ad9bbf84bb90eff1"
+      }
+    ],
+    "sampled_source_format_counts": {
+      "prompt_chosen_jsonl": 106
+    },
+    "sampled_tool_histogram": {
+      "Agent": 3,
+      "Bash": 89,
+      "Edit": 10,
+      "Glob": 6,
+      "Grep": 6,
+      "Read": 31,
+      "Skill": 2,
+      "TaskCreate": 6,
+      "ToolSearch": 3,
+      "WebFetch": 21,
+      "WebSearch": 1,
+      "Write": 2,
+      "string": 1
+    },
+    "skipped_duplicate": 0,
+    "skipped_empty_prompt": 0,
+    "skipped_no_tool_call": 94,
+    "skipped_parse_error": 0,
+    "skipped_prompt_too_long": 0,
+    "skipped_target_too_long": 0,
+    "source_format_counts": {
+      "prompt_chosen_jsonl": 200
+    },
+    "target_tool_histogram": {
+      "Agent": 3,
+      "Bash": 89,
+      "Edit": 10,
+      "Glob": 6,
+      "Grep": 6,
+      "Read": 31,
+      "Skill": 2,
+      "TaskCreate": 6,
+      "ToolSearch": 3,
+      "WebFetch": 21,
+      "WebSearch": 1,
+      "Write": 2,
+      "string": 1
+    }
+  },
+  "suite_name": "production-tool-call-analysis-v12-diverse-200",
+  "suite_output": "/workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.suite.json"
+}

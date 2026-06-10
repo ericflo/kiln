@@ -112,6 +112,117 @@ Most users never hand-author a suite. The canonical flow is:
 3. **Stash + re-run.** Suites live in `<adapter_dir>/.eval/suites/<name>/`
    on disk. Re-run the same suite against any adapter in 1 click.
 
+## Production trace tool-call evals
+
+For production agent workloads, use `kiln-eval trace-suite` to turn a JSONL
+export of recorded tool-calling turns into an eval suite:
+
+```bash
+kiln-eval trace-suite \
+  --input production-turns.jsonl \
+  --input more-production-turns.jsonl \
+  --output production-tool-calls.json \
+  --stats-output production-tool-calls.report.json \
+  --suite-name production-tool-calls \
+  --max-examples 1000 \
+  --seed 42
+
+kiln-eval run --file production-tool-calls.json --adapter my-agent-lora --watch
+```
+
+The importer is source-agnostic. Your production pipeline only needs to emit
+one JSON object per row in one of these shapes:
+
+- **`prompt_chosen_jsonl`**: `{ "prompt_messages": [...], "chosen": {...}, "tools": [...] }`
+- **`openai_jsonl`**: `{ "messages": [...prompt..., assistant_with_tool_calls], "tools": [...] }`
+- **`openai_trajectory_jsonl`**: `{ "messages": [full OpenAI-style trajectory], "tools": [...] }`;
+  every assistant message with a tool call becomes one sampled candidate, and
+  its prompt is the exact message prefix before that assistant turn.
+- **`anthropic_jsonl`**: `{ "system_prompt": "...", "messages": [...], "assistant_response": [...], "tools": [...] }`
+- **`anthropic_trajectory_jsonl`**: `{ "system_prompt": "...", "messages": [full Anthropic-style trajectory], "tools": [...] }`;
+  every assistant message containing a `tool_use` block becomes one sampled
+  candidate after converting the exact Anthropic prefix to Kiln's chat format.
+
+Pass `--format openai_trajectory_jsonl` when every row is a full trajectory,
+pass `--format anthropic_trajectory_jsonl` for Anthropic full trajectories, or
+include `"format": "openai_trajectory_jsonl"` / `"trace_format": ...` on
+individual rows when mixing row shapes under `--format auto`. Auto-detection
+also recognizes Anthropic `messages` arrays that contain `tool_use` or
+`tool_result` content blocks.
+
+Rows without a current-turn tool call are skipped. Eligible rows are
+reservoir-sampled, so large exports can stream through without loading the
+whole file. Dedupe is off by default because repeated production turns are
+workload-frequency signal.
+
+Repeat `--input` to sample one suite across multiple exports. Sampling stays
+global across all files, and the audit report records the physical source path
+and per-file source line for every sampled example.
+
+Use `--stats-output` for the audit sidecar you keep with eval results. It
+records the exact sampling config, effective seed, parse/skip counts, source
+format counts, retained-vs-sampled tool histograms, and one provenance record
+per sampled example (`example_id`, source line, source format, optional
+source path, turn/session/model fields, source message index for trajectory
+rows, target tools, prompt chars, target chars). This is the artifact that lets
+you later explain what production workload slice an adapter score actually
+measured.
+
+Each generated example also embeds the same provenance in `metadata`, and
+raw eval results echo that metadata on every outcome. When a production
+workload eval fails, the result JSON can be inspected directly to recover the
+source export path, source line, session/turn/model fields, and target tool
+set for that failed turn.
+
+Production trace examples are tagged for aggregate slicing. In addition to
+`production_trace`, `kind:tool_call`, and `tool:<name>`, Kiln adds
+`source_format:<format>` plus sanitized `production_model:<model>` and
+`split:<split>` tags when those fields exist in the export. The human CLI and
+raw `SuiteResult.metrics.pass_rate_by_tag` then show which source format,
+teacher model, split, or target tool is breaking for an adapter.
+
+The target is canonical semantic tool-call JSON, not the source model's wire
+format. At eval time, Kiln renders the saved `messages` and `tools` through
+the model backend's chat template, so Qwen3.5 sees its native `<tools>` prompt
+and is free to emit Qwen XML. The scorer accepts Qwen XML, OpenAI tool calls,
+inline JSON, and fenced tool-call blocks by default. Use
+`--require-qwen-xml` only when you intentionally want to grade native Qwen
+output formatting in addition to tool-call semantics.
+
+The scorer itself is not tied to a running Kiln server. For quick cross-model
+checks against hosted or local OpenAI-compatible APIs, build/run the standalone
+example from the `kiln-eval` crate:
+
+```bash
+cargo run -p kiln-eval --example trace_api_eval -- \
+  --suite production_tool_calls.json \
+  --api-base https://api.openai.com/v1 \
+  --model gpt-4.1-mini \
+  --model qwen/qwen3.5-4b \
+  --output production_tool_calls.api-result.json
+```
+
+The example sends the saved `messages` and effective `tools` catalogue through
+the target API's normal chat-completions surface, converts structured
+`message.tool_calls` responses back into canonical `tool_calls` JSON for
+scoring, and still accepts raw Qwen XML / fenced / inline JSON completions.
+This keeps the eval focused on tool-call semantics while letting each provider
+apply its own ideal chat/tool format.
+
+For shell-heavy traces, the tool-call scorer compares beneath common wrappers:
+`bash -lc`, `python -c`, and Python here-doc/stdin forms are normalized before
+the command argument is scored. That means a production target like
+`bash -lc "python3 - <<'PY' ... PY"` can score against a model prediction that
+uses an equivalent direct `python3 -c ...` call, while a different inner Python
+program still fails.
+
+Inline Python payloads are inspected recursively too. The scorer extracts
+`os.system`, `os.popen`, `subprocess.*`, and `Popen(...)` shell commands and
+scores those nested commands with the same shell scorer. It also compares
+executed file paths from `exec(open(...).read())`, `runpy.run_path(...)`, and
+`Path(...).read_text()` so equivalent wrappers around the same local script are
+not treated as source-format differences.
+
 ## The judgment flywheel (training a local judge LoRA, no frontier LLM)
 
 The eval system also captures *user preferences* into a separate kind of
@@ -438,12 +549,16 @@ Two layouts are supported:
 
 - `num_examples`, `num_pass`, `num_fail`, `num_invalid`, `num_error`
 - `accuracy` — pass rate
+- `accuracy_confidence_interval` — 95% Wilson interval around `accuracy`;
+  production trace suites are random samples, so treat this as the sampling
+  uncertainty around the point estimate.
 - `mean_score`, `weighted_mean_score`
 - `latency` — `{p50_ms, p90_ms, p99_ms, mean_ms, max_ms}`
 - `total_prompt_tokens`, `total_completion_tokens`
 - `elapsed_secs`
 - `pass_rate_by_tag` — per-tag pass rate (uses the first completion when
   `n>1`)
+- `tag_breakdown` — per-tag pass counts and confidence intervals
 - `by_scorer` — per-scorer-kind breakdown when the suite mixes scorers
 
 Every example record (`outcomes[]`) carries:
@@ -451,8 +566,9 @@ Every example record (`outcomes[]`) carries:
 - `example_id`, `completion_index`, `completion_text`
 - `kind` — `pass | fail | invalid | error`
 - `score`, `detail`
+- `tags`, `metadata` — copied from the source example for aggregate slicing
+  and per-outcome provenance
 - `prompt_tokens`, `completion_tokens`, `latency_ms`
-- `tags` echoed from the example
 
 ## Recipes
 
@@ -574,6 +690,14 @@ the corresponding pair. The scorer detail string surfaces the actual
 on-the-wire formats (`formats=[xml,json]`) so you can spot a model that
 regressed from native XML to JSON.
 
+Command-like arguments (`command`, `cmd`, `script`, `shell`, `bash`, `code`)
+receive recursive bash introspection in `auto` mode. The scorer unwraps common
+shell layers (`bash -c` / `bash -lc`) and compares inline code from
+`python -c` or `python - <<'PY' ... PY` by token similarity instead of raw
+string equality. This catches the production pattern where the real action is
+buried inside a shell call without turning inconsequential wrapping changes
+into eval failures.
+
 ### 3. Tools belong on the suite
 
 Agentic suites declare their tool catalogue once on the suite itself:
@@ -606,9 +730,10 @@ The executor passes these into the chat template so the Qwen3.5
 broader catalogue than the rest.
 
 For agentic suites, the result includes `pass_rate_by_tool`: a map from
-tool name to `(num_examples, num_pass, pass_rate)`. So you can spot a
-model that nails `Read` but flubs `Edit` without writing per-tool tags
-yourself.
+tool name to `(num_examples, num_pass, pass_rate, confidence_interval)`. So
+you can spot a model that nails `Read` but flubs `Edit` without writing
+per-tool tags yourself, while still seeing how much evidence each tool slice
+has.
 
 ## Built-in: `qwen3.5-agentic-core`
 

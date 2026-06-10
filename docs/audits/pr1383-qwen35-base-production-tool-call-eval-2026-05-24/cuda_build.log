@@ -1,0 +1,1398 @@
+[36m=== kiln-runpod image ===[0m
+  GPU: NVIDIA RTX A6000, 570.195.03
+  CUDA toolkit: release 12.4
+  nsys: NVIDIA Nsight Systems version 2023.4.4.54-234433681190v0
+  rustc: 1.95.0 | cargo: 1.95.0
+  sccache: 0.9.1 | nextest: (1d5bf1ec9
+  torch: 2.4.1+cu124 (cuda=12.4)
+
+Quick start: [32mkiln-setup[0m (configures sccache+B2) then clone kiln & build.
+After build:  [32mkiln-smoke-check[0m (verifies fused CUDA kernels — see issue #1066).
+
+[36m=== kiln-runpod image ===[0m
+  GPU: NVIDIA RTX A6000, 570.195.03
+  CUDA toolkit: release 12.4
+  nsys: NVIDIA Nsight Systems version 2023.4.4.54-234433681190v0
+  rustc: 1.95.0 | cargo: 1.95.0
+  sccache: 0.9.1 | nextest: (1d5bf1ec9
+  torch: 2.4.1+cu124 (cuda=12.4)
+
+Quick start: [32mkiln-setup[0m (configures sccache+B2) then clone kiln & build.
+After build:  [32mkiln-smoke-check[0m (verifies fused CUDA kernels — see issue #1066).
+
+ Downloading crates ...
+  Downloaded block-buffer v0.10.4
+  Downloaded gemm-c64 v0.18.2
+  Downloaded walkdir v2.5.0
+  Downloaded ug v0.5.0
+  Downloaded same-file v1.0.6
+  Downloaded yoke-derive v0.7.5
+  Downloaded ug-cuda v0.5.0
+  Downloaded pulp v0.21.5
+  Downloaded num-bigint v0.4.6
+  Downloaded libloading v0.9.0
+  Downloaded generic-array v0.14.7
+  Downloaded cudaforge v0.1.5
+  Downloaded sha2 v0.10.9
+  Downloaded num-rational v0.4.2
+  Downloaded libloading v0.8.9
+  Downloaded gemm-common v0.18.2
+  Downloaded gemm v0.18.2
+  Downloaded digest v0.10.7
+  Downloaded yoke v0.7.5
+  Downloaded which v7.0.3
+  Downloaded thiserror-impl v1.0.69
+  Downloaded num-integer v0.1.46
+  Downloaded gemm-f64 v0.18.2
+  Downloaded gemm-f32 v0.18.2
+  Downloaded gemm-f16 v0.18.2
+  Downloaded gemm-c32 v0.18.2
+  Downloaded fs2 v0.4.3
+  Downloaded env_home v0.1.0
+  Downloaded cudarc v0.17.8
+  Downloaded crypto-common v0.1.7
+  Downloaded cpufeatures v0.2.17
+  Downloaded candle-kernels v0.10.2
+  Downloaded safetensors v0.4.5
+  Downloaded num-iter v0.1.45
+  Downloaded num v0.4.3
+  Downloaded thiserror v1.0.69
+  Downloaded glob v0.3.3
+  Downloaded candle-ug v0.10.2
+  Downloaded cudarc v0.19.4
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.186
+   Compiling cfg-if v1.0.4
+   Compiling shlex v1.3.0
+   Compiling find-msvc-tools v0.1.9
+   Compiling serde_core v1.0.228
+   Compiling once_cell v1.21.4
+   Compiling cc v1.2.62
+   Compiling version_check v0.9.5
+   Compiling memchr v2.8.0
+   Compiling crossbeam-utils v0.8.21
+   Compiling itoa v1.0.18
+   Compiling smallvec v1.15.1
+   Compiling zmij v1.0.21
+   Compiling serde v1.0.228
+   Compiling rayon-core v1.13.0
+   Compiling getrandom v0.3.4
+   Compiling zerocopy v0.8.48
+   Compiling syn v2.0.117
+   Compiling stable_deref_trait v1.2.1
+   Compiling bitflags v2.11.1
+   Compiling autocfg v1.5.0
+   Compiling libm v0.2.16
+   Compiling rand_core v0.9.5
+   Compiling log v0.4.29
+   Compiling num-traits v0.2.19
+   Compiling paste v1.0.15
+   Compiling serde_json v1.0.149
+   Compiling either v1.15.0
+   Compiling thiserror v2.0.18
+   Compiling crossbeam-epoch v0.9.18
+   Compiling generic-array v0.14.7
+   Compiling pulp v0.22.2
+   Compiling typenum v1.20.0
+   Compiling crossbeam-deque v0.8.6
+   Compiling raw-cpuid v11.6.0
+   Compiling rayon v1.12.0
+   Compiling reborrow v0.5.5
+   Compiling strsim v0.11.1
+   Compiling anyhow v1.0.102
+   Compiling dyn-stack-macros v0.1.3
+   Compiling fnv v1.0.7
+   Compiling ident_case v1.0.1
+   Compiling pulp-wasm-simd-flag v0.1.0
+   Compiling aho-corasick v1.1.4
+   Compiling synstructure v0.13.2
+   Compiling darling_core v0.20.11
+   Compiling regex-syntax v0.8.10
+   Compiling rustix v1.1.4
+   Compiling crc32fast v1.5.0
+   Compiling ryu v1.0.23
+   Compiling serde_derive v1.0.228
+   Compiling zerofrom-derive v0.1.7
+   Compiling zerocopy-derive v0.8.48
+   Compiling yoke-derive v0.8.2
+   Compiling zerofrom v0.1.7
+   Compiling bytemuck_derive v1.10.2
+   Compiling yoke v0.8.2
+   Compiling thiserror-impl v2.0.18
+   Compiling seq-macro v0.3.6
+   Compiling darling_macro v0.20.11
+   Compiling regex-automata v0.4.14
+   Compiling bytemuck v1.25.0
+   Compiling num-complex v0.4.6
+   Compiling dyn-stack v0.13.2
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling pin-project-lite v0.2.17
+   Compiling linux-raw-sys v0.12.1
+   Compiling pkg-config v0.3.33
+   Compiling rustversion v1.0.22
+   Compiling ppv-lite86 v0.2.21
+   Compiling onig_sys v69.9.1
+   Compiling rand_chacha v0.9.0
+   Compiling digest v0.10.7
+   Compiling rand v0.9.4
+   Compiling darling v0.20.11
+   Compiling bytes v1.11.1
+   Compiling env_home v0.1.0
+   Compiling same-file v1.0.6
+   Compiling rand_distr v0.5.1
+   Compiling cpufeatures v0.2.17
+   Compiling equivalent v1.0.2
+   Compiling sha2 v0.10.9
+   Compiling which v7.0.3
+   Compiling half v2.7.1
+   Compiling walkdir v2.5.0
+   Compiling derive_builder_core v0.20.2
+   Compiling gemm-common v0.19.0
+   Compiling num_cpus v1.17.0
+   Compiling fs2 v0.4.3
+   Compiling zerovec-derive v0.11.3
+   Compiling esaxx-rs v0.1.10
+   Compiling ahash v0.8.12
+   Compiling glob v0.3.3
+   Compiling byteorder v1.5.0
+   Compiling minimal-lexical v0.2.1
+   Compiling castaway v0.2.4
+   Compiling derive_builder_macro v0.20.2
+   Compiling nom v7.1.3
+   Compiling regex v1.12.3
+   Compiling zerovec v0.11.6
+   Compiling cudaforge v0.1.5
+   Compiling displaydoc v0.2.5
+   Compiling monostate-impl v0.1.18
+   Compiling itertools v0.14.0
+   Compiling static_assertions v1.1.0
+   Compiling base64 v0.13.1
+   Compiling hashbrown v0.17.0
+   Compiling unicode-segmentation v1.13.2
+   Compiling macro_rules_attribute-proc_macro v0.2.2
+   Compiling indexmap v2.14.0
+   Compiling macro_rules_attribute v0.2.2
+   Compiling spm_precompiled v0.1.4
+   Compiling compact_str v0.9.0
+   Compiling candle-kernels v0.10.2
+   Compiling monostate v0.1.18
+   Compiling derive_builder v0.20.2
+   Compiling gemm-f32 v0.19.0
+   Compiling rayon-cond v0.4.0
+   Compiling dary_heap v0.3.9
+   Compiling unicode-normalization-alignments v0.1.12
+   Compiling cudarc v0.19.4
+   Compiling foldhash v0.2.0
+   Compiling unicode_categories v0.1.1
+   Compiling allocator-api2 v0.2.21
+   Compiling gemm-f16 v0.19.0
+   Compiling hashbrown v0.16.1
+   Compiling gemm-c32 v0.19.0
+   Compiling gemm-f64 v0.19.0
+   Compiling gemm-c64 v0.19.0
+   Compiling float8 v0.7.0
+   Compiling libloading v0.9.0
+   Compiling futures-core v0.3.32
+   Compiling typed-path v0.12.3
+   Compiling onig v6.5.1
+   Compiling tokenizers v0.22.2
+   Compiling zip v7.2.0
+   Compiling gemm v0.19.0
+   Compiling safetensors v0.7.0
+   Compiling tinystr v0.8.3
+   Compiling http v1.4.0
+   Compiling memmap2 v0.9.10
+   Compiling litemap v0.8.2
+   Compiling writeable v0.6.3
+   Compiling zerotrie v0.2.4
+   Compiling icu_locale_core v2.2.0
+   Compiling potential_utf v0.1.5
+   Compiling ring v0.17.14
+   Compiling tracing-core v0.1.36
+   Compiling icu_properties_data v2.2.0
+   Compiling zeroize v1.8.2
+   Compiling utf8_iter v1.0.4
+   Compiling icu_normalizer_data v2.2.0
+   Compiling percent-encoding v2.3.2
+   Compiling icu_collections v2.2.0
+   Compiling icu_provider v2.2.0
+   Compiling rustls-pki-types v1.14.0
+   Compiling parking_lot_core v0.9.12
+   Compiling tracing-attributes v0.1.31
+   Compiling kiln-blas v0.2.19 (/workspace/kiln/crates/kiln-blas)
+   Compiling getrandom v0.2.17
+   Compiling scopeguard v1.2.0
+   Compiling futures-sink v0.3.32
+   Compiling untrusted v0.9.0
+   Compiling futures-channel v0.3.32
+   Compiling lock_api v0.4.14
+   Compiling icu_properties v2.2.0
+   Compiling tracing v0.1.44
+   Compiling icu_normalizer v2.2.0
+   Compiling form_urlencoded v1.2.2
+   Compiling kiln-tensor v0.2.19 (/workspace/kiln/crates/kiln-tensor)
+   Compiling errno v0.3.14
+   Compiling rustls v0.23.38
+   Compiling signal-hook-registry v1.4.8
+   Compiling idna_adapter v1.2.1
+   Compiling parking_lot v0.12.5
+   Compiling tokio-macros v2.7.0
+   Compiling futures-macro v0.3.32
+   Compiling socket2 v0.6.3
+   Compiling mio v1.2.0
+   Compiling base64 v0.22.1
+   Compiling futures-io v0.3.32
+   Compiling subtle v2.6.1
+   Compiling futures-task v0.3.32
+   Compiling slab v0.4.12
+   Compiling tokio v1.52.3
+   Compiling idna v1.1.0
+   Compiling futures-util v0.3.32
+   Compiling webpki-roots v1.0.7
+   Compiling portable-atomic v1.13.1
+   Compiling getrandom v0.4.2
+   Compiling unicode-width v0.2.2
+   Compiling rustls-webpki v0.103.13
+   Compiling rand_core v0.10.1
+   Compiling hybrid-array v0.4.12
+   Compiling url v2.5.8
+   Compiling http-body v1.0.1
+   Compiling simd-adler32 v0.3.9
+   Compiling httparse v1.10.1
+   Compiling adler2 v2.0.1
+   Compiling miniz_oxide v0.8.9
+   Compiling cpufeatures v0.3.0
+   Compiling option-ext v0.2.0
+   Compiling tower-service v0.3.3
+   Compiling dirs-sys v0.5.0
+   Compiling flate2 v1.1.9
+   Compiling block-buffer v0.12.0
+   Compiling crypto-common v0.2.1
+   Compiling console v0.15.11
+   Compiling webpki-roots v0.26.11
+   Compiling socks v0.3.4
+   Compiling number_prefix v0.4.0
+   Compiling const-oid v0.10.2
+   Compiling try-lock v0.2.5
+   Compiling want v0.3.1
+   Compiling digest v0.11.3
+   Compiling indicatif v0.17.11
+   Compiling ureq v2.12.1
+   Compiling dirs v6.0.0
+   Compiling console v0.16.3
+   Compiling sync_wrapper v1.0.2
+   Compiling atomic-waker v1.1.2
+   Compiling httpdate v1.0.3
+   Compiling tower-layer v0.3.3
+   Compiling memo-map v0.3.3
+   Compiling unit-prefix v0.5.2
+   Compiling iana-time-zone v0.1.65
+   Compiling chrono v0.4.44
+   Compiling indicatif v0.18.4
+   Compiling minijinja v2.19.0
+   Compiling hyper v1.9.0
+   Compiling hf-hub v0.4.3
+   Compiling sha2 v0.11.0
+   Compiling uuid v1.23.1
+   Compiling ipnet v2.12.0
+   Compiling daachorse v1.0.1
+   Compiling tokenizers v0.23.1
+   Compiling hyper-util v0.1.20
+   Compiling minijinja-contrib v2.19.0
+   Compiling tower v0.5.3
+   Compiling chacha20 v0.10.0
+   Compiling http-body-util v0.1.3
+   Compiling kiln-conv1d-kernel v0.2.19 (/workspace/kiln/crates/kiln-conv1d-kernel)
+   Compiling kiln-rmsnorm-kernel v0.2.19 (/workspace/kiln/crates/kiln-rmsnorm-kernel)
+   Compiling kiln-marlin-gemm v0.2.19 (/workspace/kiln/crates/kiln-marlin-gemm)
+   Compiling kiln-flash-attn v0.2.19 (/workspace/kiln/crates/kiln-flash-attn)
+   Compiling kiln-gdn-kernel v0.2.19 (/workspace/kiln/crates/kiln-gdn-kernel)
+   Compiling tinyvec_macros v0.1.1
+   Compiling utf8parse v0.2.2
+   Compiling kiln-nvtx v0.2.19 (/workspace/kiln/crates/kiln-nvtx)
+   Compiling anstyle-parse v1.0.0
+   Compiling tinyvec v1.11.0
+   Compiling candle-core v0.10.2 (/workspace/kiln/vendor/candle-core)
+warning: unused import: `Error`
+  --> crates/kiln-tensor/src/cpu_allocator.rs:38:82
+   |
+38 |     allocator_frozen_error, Allocator, AllocatorMode, CpuStorage, DType, Device, Error, Result,
+   |                                                                                  ^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `DType`
+  --> crates/kiln-tensor/src/ops/broadcast.rs:23:31
+   |
+23 | use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+   |                               ^^^^^
+
+warning: unused import: `DType`
+  --> crates/kiln-tensor/src/ops/concat.rs:31:31
+   |
+31 | use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+   |                               ^^^^^
+
+warning: unused import: `DType`
+  --> crates/kiln-tensor/src/ops/repeat.rs:21:31
+   |
+21 | use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+   |                               ^^^^^
+
+warning: unused import: `DType`
+  --> crates/kiln-tensor/src/ops/stack.rs:28:31
+   |
+28 | use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+   |                               ^^^^^
+
+warning: unused import: `std::any::Any as _`
+   --> crates/kiln-tensor/src/cuda_storage.rs:410:9
+    |
+410 |     use std::any::Any as _;
+    |         ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::any::Any as _`
+   --> crates/kiln-tensor/src/cuda_storage.rs:529:9
+    |
+529 |     use std::any::Any as _;
+    |         ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::any::Any as _`
+   --> crates/kiln-tensor/src/cuda_storage.rs:672:9
+    |
+672 |     use std::any::Any as _;
+    |         ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::any::Any as _`
+   --> crates/kiln-tensor/src/cuda_storage.rs:797:9
+    |
+797 |     use std::any::Any as _;
+    |         ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::any::Any as _`
+   --> crates/kiln-tensor/src/cuda_storage.rs:895:9
+    |
+895 |     use std::any::Any as _;
+    |         ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `StorageBackend`
+  --> crates/kiln-tensor/src/tensor.rs:39:5
+   |
+39 |     StorageBackend, TensorId,
+   |     ^^^^^^^^^^^^^^
+
+warning: unused variable: `per`
+   --> crates/kiln-tensor/src/ops/gumbel_sample.rs:103:13
+    |
+103 |         let per = dtype.size_in_bytes();
+    |             ^^^ help: if this is intentional, prefix it with an underscore: `_per`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `rank`
+   --> crates/kiln-tensor/src/ops/reduce.rs:228:9
+    |
+228 |     let rank = shape.len();
+    |         ^^^^ help: if this is intentional, prefix it with an underscore: `_rank`
+
+warning: variable does not need to be mutable
+  --> crates/kiln-tensor/src/ops/sdpa.rs:67:9
+   |
+67 |     let mut full_mask_shape = scores_shape.to_vec();
+   |         ----^^^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling kiln-kt-bridge v0.2.19 (/workspace/kiln/crates/kiln-kt-bridge)
+warning: unused import: `BackendStorage`
+   --> crates/kiln-kt-bridge/src/lib.rs:355:34
+    |
+355 |         backend::{BackendDevice, BackendStorage},
+    |                                  ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+   --> crates/kiln-kt-bridge/src/lib.rs:549:29
+    |
+549 |             let (ptr, _g) = unsafe { view.device_ptr(&stream) };
+    |                             ^^^^^^ unnecessary `unsafe` block
+...
+554 |         C::F32 => src_ptr!(f32, "f32"),
+    |                   -------------------- in this macro invocation
+    |
+    = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+    = note: this warning originates in the macro `src_ptr` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unnecessary `unsafe` block
+   --> crates/kiln-kt-bridge/src/lib.rs:549:29
+    |
+549 |             let (ptr, _g) = unsafe { view.device_ptr(&stream) };
+    |                             ^^^^^^ unnecessary `unsafe` block
+...
+555 |         C::BF16 => src_ptr!(bf16, "bf16"),
+    |                    ---------------------- in this macro invocation
+    |
+    = note: this warning originates in the macro `src_ptr` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unnecessary `unsafe` block
+   --> crates/kiln-kt-bridge/src/lib.rs:549:29
+    |
+549 |             let (ptr, _g) = unsafe { view.device_ptr(&stream) };
+    |                             ^^^^^^ unnecessary `unsafe` block
+...
+556 |         C::F16 => src_ptr!(f16, "f16"),
+    |                   -------------------- in this macro invocation
+    |
+    = note: this warning originates in the macro `src_ptr` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unnecessary `unsafe` block
+   --> crates/kiln-kt-bridge/src/lib.rs:549:29
+    |
+549 |             let (ptr, _g) = unsafe { view.device_ptr(&stream) };
+    |                             ^^^^^^ unnecessary `unsafe` block
+...
+557 |         C::U32 => src_ptr!(u32, "u32"),
+    |                   -------------------- in this macro invocation
+    |
+    = note: this warning originates in the macro `src_ptr` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unnecessary `unsafe` block
+   --> crates/kiln-kt-bridge/src/lib.rs:549:29
+    |
+549 |             let (ptr, _g) = unsafe { view.device_ptr(&stream) };
+    |                             ^^^^^^ unnecessary `unsafe` block
+...
+558 |         C::U8 => src_ptr!(u8, "u8"),
+    |                  ------------------ in this macro invocation
+    |
+    = note: this warning originates in the macro `src_ptr` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unnecessary `unsafe` block
+   --> crates/kiln-kt-bridge/src/lib.rs:549:29
+    |
+549 |             let (ptr, _g) = unsafe { view.device_ptr(&stream) };
+    |                             ^^^^^^ unnecessary `unsafe` block
+...
+559 |         C::I64 => src_ptr!(i64, "i64"),
+    |                   -------------------- in this macro invocation
+    |
+    = note: this warning originates in the macro `src_ptr` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: `kiln-kt-bridge` (lib) generated 7 warnings
+   Compiling kiln-core v0.2.19 (/workspace/kiln/crates/kiln-core)
+   Compiling rand v0.10.1
+   Compiling tokio-rustls v0.26.4
+   Compiling serde_urlencoded v0.7.1
+   Compiling kiln-opd-loss-kernel v0.2.19 (/workspace/kiln/crates/kiln-opd-loss-kernel)
+   Compiling multer v3.1.0
+   Compiling anstyle-query v1.1.5
+   Compiling anstyle v1.0.14
+   Compiling lazy_static v1.5.0
+   Compiling mime v0.3.17
+   Compiling colorchoice v1.0.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling anstream v1.0.0
+   Compiling sharded-slab v0.1.7
+   Compiling hyper-rustls v0.27.9
+warning: unused import: `candle_core::cuda_backend::cudarc::driver::DevicePtr`
+  --> crates/kiln-conv1d-kernel/src/kt_api.rs:10:5
+   |
+10 | use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kiln-conv1d-kernel` (lib) generated 1 warning (run `cargo fix --lib -p kiln-conv1d-kernel` to apply 1 suggestion)
+warning: unused import: `candle_core::cuda_backend::cudarc::driver::DevicePtr`
+  --> crates/kiln-gdn-kernel/src/kt_api.rs:13:5
+   |
+13 | use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `vp_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:126:10
+    |
+126 |     let (vp_st, _) = cuda_storage_and_byte_offset(v_prime, KtDType::BF16, "v_prime")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_vp_st`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `bt_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:128:10
+    |
+128 |     let (bt_st, _) = cuda_storage_and_byte_offset(beta, KtDType::BF16, "beta")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_bt_st`
+
+warning: unused variable: `k_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:218:10
+    |
+218 |     let (k_st, _) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_k_st`
+
+warning: unused variable: `v_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:220:10
+    |
+220 |     let (v_st, _) = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_v_st`
+
+warning: unused variable: `bt_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:222:10
+    |
+222 |     let (bt_st, _) = cuda_storage_and_byte_offset(beta, KtDType::BF16, "beta")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_bt_st`
+
+warning: unused variable: `g_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:224:10
+    |
+224 |     let (g_st, _) = cuda_storage_and_byte_offset(g, KtDType::BF16, "g")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_g_st`
+
+warning: unused variable: `s_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:226:10
+    |
+226 |     let (s_st, _) = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_s_st`
+
+warning: unused variable: `k_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:312:10
+    |
+312 |     let (k_st, _) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_k_st`
+
+warning: unused variable: `v_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:314:10
+    |
+314 |     let (v_st, _) = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_v_st`
+
+warning: unused variable: `a_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:316:10
+    |
+316 |     let (a_st, _) = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_a_st`
+
+warning: unused variable: `bp_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:318:10
+    |
+318 |     let (bp_st, _) = cuda_storage_and_byte_offset(b_param, KtDType::BF16, "b")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_bp_st`
+
+warning: unused variable: `al_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:320:10
+    |
+320 |     let (al_st, _) = cuda_storage_and_byte_offset(a_log, KtDType::BF16, "a_log")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_al_st`
+
+warning: unused variable: `dt_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:322:10
+    |
+322 |     let (dt_st, _) = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_dt_st`
+
+warning: unused variable: `s_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:324:10
+    |
+324 |     let (s_st, _) = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_s_st`
+
+warning: unused variable: `z_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:326:10
+    |
+326 |     let (z_st, _) = cuda_storage_and_byte_offset(z, KtDType::BF16, "z")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_z_st`
+
+warning: unused variable: `w_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:328:10
+    |
+328 |     let (w_st, _) = cuda_storage_and_byte_offset(weight, KtDType::F32, "weight")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_w_st`
+
+warning: unused variable: `v_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:464:10
+    |
+464 |     let (v_st, _) = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_v_st`
+
+warning: unused variable: `kkt_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:466:10
+    |
+466 |     let (kkt_st, _) = cuda_storage_and_byte_offset(kkt, KtDType::BF16, "kkt")?;
+    |          ^^^^^^ help: if this is intentional, prefix it with an underscore: `_kkt_st`
+
+warning: unused variable: `qkt_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:468:10
+    |
+468 |     let (qkt_st, _) = cuda_storage_and_byte_offset(qkt, KtDType::BF16, "qkt")?;
+    |          ^^^^^^ help: if this is intentional, prefix it with an underscore: `_qkt_st`
+
+warning: unused variable: `ks_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:470:10
+    |
+470 |     let (ks_st, _) = cuda_storage_and_byte_offset(ks_entry, KtDType::BF16, "ks_entry")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_ks_st`
+
+warning: unused variable: `qs_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:472:10
+    |
+472 |     let (qs_st, _) = cuda_storage_and_byte_offset(q_s, KtDType::BF16, "q_s")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_qs_st`
+
+warning: unused variable: `bt_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:474:10
+    |
+474 |     let (bt_st, _) = cuda_storage_and_byte_offset(beta, KtDType::BF16, "beta")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_bt_st`
+
+warning: unused variable: `kt_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:476:10
+    |
+476 |     let (kt_st, _) = cuda_storage_and_byte_offset(k_t, KtDType::BF16, "k_t")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_kt_st`
+
+warning: unused variable: `s_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:478:10
+    |
+478 |     let (s_st, _) = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_s_st`
+
+warning: unused variable: `k_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:550:10
+    |
+550 |     let (k_st, _) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_k_st`
+
+warning: unused variable: `v_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:552:10
+    |
+552 |     let (v_st, _) = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_v_st`
+
+warning: unused variable: `a_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:554:10
+    |
+554 |     let (a_st, _) = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_a_st`
+
+warning: unused variable: `bp_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:556:10
+    |
+556 |     let (bp_st, _) = cuda_storage_and_byte_offset(b_param, KtDType::BF16, "b")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_bp_st`
+
+warning: unused variable: `al_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:558:10
+    |
+558 |     let (al_st, _) = cuda_storage_and_byte_offset(a_log, KtDType::BF16, "a_log")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_al_st`
+
+warning: unused variable: `dt_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:560:10
+    |
+560 |     let (dt_st, _) = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_dt_st`
+
+warning: unused variable: `s_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:562:10
+    |
+562 |     let (s_st, _) = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_s_st`
+
+warning: unused variable: `z_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:564:10
+    |
+564 |     let (z_st, _) = cuda_storage_and_byte_offset(z, KtDType::BF16, "z")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_z_st`
+
+warning: unused variable: `w_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:566:10
+    |
+566 |     let (w_st, _) = cuda_storage_and_byte_offset(weight, KtDType::F32, "weight")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_w_st`
+
+warning: unused variable: `k_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:640:10
+    |
+640 |     let (k_st, _) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_k_st`
+
+warning: unused variable: `v_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:642:10
+    |
+642 |     let (v_st, _) = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_v_st`
+
+warning: unused variable: `a_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:644:10
+    |
+644 |     let (a_st, _) = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_a_st`
+
+warning: unused variable: `bp_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:646:10
+    |
+646 |     let (bp_st, _) = cuda_storage_and_byte_offset(b_param, KtDType::BF16, "b")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_bp_st`
+
+warning: unused variable: `al_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:648:10
+    |
+648 |     let (al_st, _) = cuda_storage_and_byte_offset(a_log, KtDType::BF16, "a_log")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_al_st`
+
+warning: unused variable: `dt_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:650:10
+    |
+650 |     let (dt_st, _) = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_dt_st`
+
+warning: unused variable: `s_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:652:10
+    |
+652 |     let (s_st, _) = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_s_st`
+
+warning: unused variable: `k_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:726:10
+    |
+726 |     let (k_st, _) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_k_st`
+
+warning: unused variable: `v_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:728:10
+    |
+728 |     let (v_st, _) = cuda_storage_and_byte_offset(v, KtDType::F32, "v")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_v_st`
+
+warning: unused variable: `a_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:730:10
+    |
+730 |     let (a_st, _) = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_a_st`
+
+warning: unused variable: `bp_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:732:10
+    |
+732 |     let (bp_st, _) = cuda_storage_and_byte_offset(b_param, KtDType::BF16, "b")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_bp_st`
+
+warning: unused variable: `al_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:734:10
+    |
+734 |     let (al_st, _) = cuda_storage_and_byte_offset(a_log, KtDType::BF16, "a_log")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_al_st`
+
+warning: unused variable: `dt_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:736:10
+    |
+736 |     let (dt_st, _) = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_dt_st`
+
+warning: unused variable: `s_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:738:10
+    |
+738 |     let (s_st, _) = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_s_st`
+
+warning: unused variable: `z_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:740:10
+    |
+740 |     let (z_st, _) = cuda_storage_and_byte_offset(z, KtDType::BF16, "z")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_z_st`
+
+warning: unused variable: `w_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:742:10
+    |
+742 |     let (w_st, _) = cuda_storage_and_byte_offset(weight, KtDType::F32, "weight")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_w_st`
+
+warning: unused variable: `k_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:812:10
+    |
+812 |     let (k_st, _) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_k_st`
+
+warning: unused variable: `v_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:814:10
+    |
+814 |     let (v_st, _) = cuda_storage_and_byte_offset(v, KtDType::F32, "v")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_v_st`
+
+warning: unused variable: `a_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:816:10
+    |
+816 |     let (a_st, _) = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_a_st`
+
+warning: unused variable: `bp_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:818:10
+    |
+818 |     let (bp_st, _) = cuda_storage_and_byte_offset(b_param, KtDType::BF16, "b")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_bp_st`
+
+warning: unused variable: `al_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:820:10
+    |
+820 |     let (al_st, _) = cuda_storage_and_byte_offset(a_log, KtDType::BF16, "a_log")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_al_st`
+
+warning: unused variable: `dt_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:822:10
+    |
+822 |     let (dt_st, _) = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_dt_st`
+
+warning: unused variable: `s_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:824:10
+    |
+824 |     let (s_st, _) = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_s_st`
+
+warning: unused variable: `k_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:893:10
+    |
+893 |     let (k_st, _) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_k_st`
+
+warning: unused variable: `v_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:895:10
+    |
+895 |     let (v_st, _) = cuda_storage_and_byte_offset(v, KtDType::F32, "v")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_v_st`
+
+warning: unused variable: `a_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:897:10
+    |
+897 |     let (a_st, _) = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_a_st`
+
+warning: unused variable: `bp_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:899:10
+    |
+899 |     let (bp_st, _) = cuda_storage_and_byte_offset(b_param, KtDType::BF16, "b")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_bp_st`
+
+warning: unused variable: `al_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:901:10
+    |
+901 |     let (al_st, _) = cuda_storage_and_byte_offset(a_log, KtDType::BF16, "a_log")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_al_st`
+
+warning: unused variable: `dt_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:903:10
+    |
+903 |     let (dt_st, _) = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_dt_st`
+
+warning: unused variable: `s_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:905:10
+    |
+905 |     let (s_st, _) = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_s_st`
+
+warning: unused variable: `k_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:974:10
+    |
+974 |     let (k_st, _) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_k_st`
+
+warning: unused variable: `v_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:976:10
+    |
+976 |     let (v_st, _) = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_v_st`
+
+warning: unused variable: `a_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:978:10
+    |
+978 |     let (a_st, _) = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_a_st`
+
+warning: unused variable: `bp_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:980:10
+    |
+980 |     let (bp_st, _) = cuda_storage_and_byte_offset(b_param, KtDType::BF16, "b")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_bp_st`
+
+warning: unused variable: `al_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:982:10
+    |
+982 |     let (al_st, _) = cuda_storage_and_byte_offset(a_log, KtDType::BF16, "a_log")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_al_st`
+
+warning: unused variable: `dt_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:984:10
+    |
+984 |     let (dt_st, _) = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_dt_st`
+
+warning: unused variable: `s_st`
+   --> crates/kiln-gdn-kernel/src/kt_api.rs:986:10
+    |
+986 |     let (s_st, _) = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_s_st`
+
+warning: unused variable: `k_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1058:10
+     |
+1058 |     let (k_st, _) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_k_st`
+
+warning: unused variable: `v_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1060:10
+     |
+1060 |     let (v_st, _) = cuda_storage_and_byte_offset(v, KtDType::F32, "v")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_v_st`
+
+warning: unused variable: `a_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1062:10
+     |
+1062 |     let (a_st, _) = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_a_st`
+
+warning: unused variable: `bp_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1064:10
+     |
+1064 |     let (bp_st, _) = cuda_storage_and_byte_offset(b_param, KtDType::BF16, "b")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_bp_st`
+
+warning: unused variable: `al_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1066:10
+     |
+1066 |     let (al_st, _) = cuda_storage_and_byte_offset(a_log, KtDType::BF16, "a_log")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_al_st`
+
+warning: unused variable: `dt_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1068:10
+     |
+1068 |     let (dt_st, _) = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_dt_st`
+
+warning: unused variable: `s_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1070:10
+     |
+1070 |     let (s_st, _) = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_s_st`
+
+warning: unused variable: `z_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1072:10
+     |
+1072 |     let (z_st, _) = cuda_storage_and_byte_offset(z, KtDType::BF16, "z")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_z_st`
+
+warning: unused variable: `w_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1074:10
+     |
+1074 |     let (w_st, _) = cuda_storage_and_byte_offset(weight, KtDType::F32, "weight")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_w_st`
+
+warning: unused variable: `k_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1149:10
+     |
+1149 |     let (k_st, _) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_k_st`
+
+warning: unused variable: `v_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1151:10
+     |
+1151 |     let (v_st, _) = cuda_storage_and_byte_offset(v, KtDType::F32, "v")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_v_st`
+
+warning: unused variable: `a_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1153:10
+     |
+1153 |     let (a_st, _) = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_a_st`
+
+warning: unused variable: `bp_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1155:10
+     |
+1155 |     let (bp_st, _) = cuda_storage_and_byte_offset(b_param, KtDType::BF16, "b")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_bp_st`
+
+warning: unused variable: `al_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1157:10
+     |
+1157 |     let (al_st, _) = cuda_storage_and_byte_offset(a_log, KtDType::BF16, "a_log")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_al_st`
+
+warning: unused variable: `dt_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1159:10
+     |
+1159 |     let (dt_st, _) = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_dt_st`
+
+warning: unused variable: `s_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1161:10
+     |
+1161 |     let (s_st, _) = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_s_st`
+
+warning: unused variable: `z_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1163:10
+     |
+1163 |     let (z_st, _) = cuda_storage_and_byte_offset(z, KtDType::BF16, "z")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_z_st`
+
+warning: unused variable: `w_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1165:10
+     |
+1165 |     let (w_st, _) = cuda_storage_and_byte_offset(weight, KtDType::F32, "weight")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_w_st`
+
+warning: unused variable: `k_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1240:10
+     |
+1240 |     let (k_st, _) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_k_st`
+
+warning: unused variable: `v_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1242:10
+     |
+1242 |     let (v_st, _) = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_v_st`
+
+warning: unused variable: `a_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1244:10
+     |
+1244 |     let (a_st, _) = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_a_st`
+
+warning: unused variable: `bp_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1246:10
+     |
+1246 |     let (bp_st, _) = cuda_storage_and_byte_offset(b_param, KtDType::BF16, "b")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_bp_st`
+
+warning: unused variable: `al_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1248:10
+     |
+1248 |     let (al_st, _) = cuda_storage_and_byte_offset(a_log, KtDType::BF16, "a_log")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_al_st`
+
+warning: unused variable: `dt_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1250:10
+     |
+1250 |     let (dt_st, _) = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_dt_st`
+
+warning: unused variable: `s_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1252:10
+     |
+1252 |     let (s_st, _) = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_s_st`
+
+warning: unused variable: `z_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1254:10
+     |
+1254 |     let (z_st, _) = cuda_storage_and_byte_offset(z, KtDType::BF16, "z")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_z_st`
+
+warning: unused variable: `w_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1256:10
+     |
+1256 |     let (w_st, _) = cuda_storage_and_byte_offset(weight, KtDType::F32, "weight")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_w_st`
+
+warning: unused variable: `v_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1388:10
+     |
+1388 |     let (v_st, _) = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_v_st`
+
+warning: unused variable: `kkt_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1390:10
+     |
+1390 |     let (kkt_st, _) = cuda_storage_and_byte_offset(kkt, KtDType::BF16, "kkt")?;
+     |          ^^^^^^ help: if this is intentional, prefix it with an underscore: `_kkt_st`
+
+warning: unused variable: `qkt_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1392:10
+     |
+1392 |     let (qkt_st, _) = cuda_storage_and_byte_offset(qkt, KtDType::BF16, "qkt")?;
+     |          ^^^^^^ help: if this is intentional, prefix it with an underscore: `_qkt_st`
+
+warning: unused variable: `ks_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1394:10
+     |
+1394 |     let (ks_st, _) = cuda_storage_and_byte_offset(ks_entry, KtDType::BF16, "ks_entry")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_ks_st`
+
+warning: unused variable: `qs_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1396:10
+     |
+1396 |     let (qs_st, _) = cuda_storage_and_byte_offset(q_s, KtDType::BF16, "q_s")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_qs_st`
+
+warning: unused variable: `bt_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1398:10
+     |
+1398 |     let (bt_st, _) = cuda_storage_and_byte_offset(beta, KtDType::BF16, "beta")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_bt_st`
+
+warning: unused variable: `kt_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1400:10
+     |
+1400 |     let (kt_st, _) = cuda_storage_and_byte_offset(k_t, KtDType::BF16, "k_t")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_kt_st`
+
+warning: unused variable: `s_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1402:10
+     |
+1402 |     let (s_st, _) = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_s_st`
+
+warning: unused variable: `z_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1475:10
+     |
+1475 |     let (z_st, _) = cuda_storage_and_byte_offset(z, KtDType::BF16, "z")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_z_st`
+
+warning: unused variable: `w_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1477:10
+     |
+1477 |     let (w_st, _) = cuda_storage_and_byte_offset(weight, KtDType::F32, "weight")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_w_st`
+
+warning: unused variable: `b_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1593:10
+     |
+1593 |     let (b_st, _) = cuda_storage_and_byte_offset(b, KtDType::BF16, "b")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_b_st`
+
+warning: unused variable: `al_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1595:10
+     |
+1595 |     let (al_st, _) = cuda_storage_and_byte_offset(a_log, KtDType::BF16, "a_log")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_al_st`
+
+warning: unused variable: `dt_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1597:10
+     |
+1597 |     let (dt_st, _) = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_dt_st`
+
+warning: unused variable: `b_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1647:10
+     |
+1647 |     let (b_st, _) = cuda_storage_and_byte_offset(b, KtDType::BF16, "b")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_b_st`
+
+warning: unused variable: `al_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1649:10
+     |
+1649 |     let (al_st, _) = cuda_storage_and_byte_offset(a_log, KtDType::F32, "a_log")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_al_st`
+
+warning: unused variable: `dt_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1651:10
+     |
+1651 |     let (dt_st, _) = cuda_storage_and_byte_offset(dt_bias, KtDType::F32, "dt_bias")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_dt_st`
+
+warning: unused variable: `b_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1700:10
+     |
+1700 |     let (b_st, _) = cuda_storage_and_byte_offset(b, KtDType::BF16, "b")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_b_st`
+
+warning: unused variable: `al_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1702:10
+     |
+1702 |     let (al_st, _) = cuda_storage_and_byte_offset(a_log, KtDType::F32, "a_log")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_al_st`
+
+warning: unused variable: `dt_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1704:10
+     |
+1704 |     let (dt_st, _) = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_dt_st`
+
+warning: unused variable: `v_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1808:10
+     |
+1808 |     let (v_st, _) = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
+     |          ^^^^ help: if this is intentional, prefix it with an underscore: `_v_st`
+
+warning: unused variable: `kkt_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1810:10
+     |
+1810 |     let (kkt_st, _) = cuda_storage_and_byte_offset(kkt, KtDType::BF16, "kkt")?;
+     |          ^^^^^^ help: if this is intentional, prefix it with an underscore: `_kkt_st`
+
+warning: unused variable: `qkt_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1812:10
+     |
+1812 |     let (qkt_st, _) = cuda_storage_and_byte_offset(qkt, KtDType::BF16, "qkt")?;
+     |          ^^^^^^ help: if this is intentional, prefix it with an underscore: `_qkt_st`
+
+warning: unused variable: `ks_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1814:10
+     |
+1814 |     let (ks_st, _) = cuda_storage_and_byte_offset(ks_entry, KtDType::BF16, "ks_entry")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_ks_st`
+
+warning: unused variable: `qs_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1816:10
+     |
+1816 |     let (qs_st, _) = cuda_storage_and_byte_offset(q_s, KtDType::BF16, "q_s")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_qs_st`
+
+warning: unused variable: `bm_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1935:10
+     |
+1935 |     let (bm_st, _) = cuda_storage_and_byte_offset(b_mask, KtDType::BF16, "b_mask")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_bm_st`
+
+warning: unused variable: `vp_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1937:10
+     |
+1937 |     let (vp_st, _) = cuda_storage_and_byte_offset(v_prime, KtDType::BF16, "v_prime")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_vp_st`
+
+warning: unused variable: `qss_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1939:10
+     |
+1939 |     let (qss_st, _) = cuda_storage_and_byte_offset(q_s_scaled, KtDType::BF16, "q_s_scaled")?;
+     |          ^^^^^^ help: if this is intentional, prefix it with an underscore: `_qss_st`
+
+warning: unused variable: `bt_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1941:10
+     |
+1941 |     let (bt_st, _) = cuda_storage_and_byte_offset(beta, KtDType::BF16, "beta")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_bt_st`
+
+warning: unused variable: `dl_st`
+    --> crates/kiln-gdn-kernel/src/kt_api.rs:1943:10
+     |
+1943 |     let (dl_st, _) = cuda_storage_and_byte_offset(decay_last_col, KtDType::BF16, "decay_last_col")?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_dl_st`
+
+warning: `kiln-tensor` (lib) generated 14 warnings (run `cargo fix --lib -p kiln-tensor` to apply 13 suggestions)
+warning: unused import: `candle_core::cuda_backend::cudarc::driver::DevicePtr`
+  --> crates/kiln-rmsnorm-kernel/src/kt_api.rs:12:5
+   |
+12 | use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `candle_core::cuda_backend::cudarc::driver::DevicePtr`
+  --> crates/kiln-marlin-gemm/src/kt_api.rs:11:5
+   |
+11 | use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling candle-nn v0.10.2
+warning: `kiln-gdn-kernel` (lib) generated 127 warnings (run `cargo fix --lib -p kiln-gdn-kernel` to apply 127 suggestions)
+   Compiling unicode-normalization v0.1.25
+warning: `kiln-marlin-gemm` (lib) generated 1 warning (run `cargo fix --lib -p kiln-marlin-gemm` to apply 1 suggestion)
+   Compiling tower-http v0.6.11
+   Compiling xattr v1.6.1
+warning: `kiln-rmsnorm-kernel` (lib) generated 1 warning (run `cargo fix --lib -p kiln-rmsnorm-kernel` to apply 1 suggestion)
+   Compiling tracing-serde v0.2.0
+   Compiling tracing-log v0.2.0
+   Compiling matchers v0.2.0
+   Compiling filetime v0.2.29
+   Compiling encoding_rs v0.8.35
+   Compiling thread_local v1.1.9
+   Compiling nu-ansi-term v0.50.3
+   Compiling fastrand v2.4.1
+   Compiling heck v0.5.0
+   Compiling spin v0.9.8
+   Compiling clap_lex v1.1.0
+   Compiling winnow v1.0.2
+   Compiling clap_builder v4.6.0
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling clap_derive v4.6.1
+   Compiling tempfile v3.27.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling tar v0.4.46
+   Compiling reqwest v0.12.28
+   Compiling kiln-eval v0.2.19 (/workspace/kiln/crates/kiln-eval)
+   Compiling axum-core v0.5.6
+   Compiling kiln-flce-kernel v0.2.19 (/workspace/kiln/crates/kiln-flce-kernel)
+   Compiling futures-executor v0.3.32
+   Compiling serde_spanned v1.1.1
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling serde_path_to_error v0.1.20
+   Compiling toml_writer v1.1.1+spec-1.1.0
+   Compiling unsafe-libyaml v0.2.11
+   Compiling matchit v0.8.4
+   Compiling axum v0.8.9
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling toml v1.1.2+spec-1.1.0
+   Compiling futures v0.3.32
+   Compiling clap v4.6.1
+   Compiling kiln-scheduler v0.2.19 (/workspace/kiln/crates/kiln-scheduler)
+   Compiling tokio-stream v0.1.18
+warning: unused import: `candle_core::cuda_backend::cudarc::driver::DevicePtr`
+  --> crates/kiln-flash-attn/src/kt_api.rs:22:5
+   |
+22 | use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `cuda_storage_of` is never used
+  --> crates/kiln-flash-attn/src/kt_api.rs:60:4
+   |
+60 | fn cuda_storage_of<'a>(
+   |    ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling kiln-model v0.2.19 (/workspace/kiln/crates/kiln-model)
+warning: `kiln-flash-attn` (lib) generated 2 warnings
+warning: unused import: `StorageBackend`
+  --> crates/kiln-model/src/paged_kv_cache_kt.rs:40:56
+   |
+40 |     cuda_zeros, CudaStorage, DType as KtDType, Layout, StorageBackend,
+   |                                                        ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `route_resident`
+     --> crates/kiln-model/src/forward.rs:14406:9
+      |
+14406 |     let route_resident = backend.supports_resident_decode()
+      |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_route_resident`
+      |
+      = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `cuda_use_kt_api_flash_attn_fwd` is never used
+   --> crates/kiln-model/src/forward.rs:151:4
+    |
+151 | fn cuda_use_kt_api_flash_attn_fwd() -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `cuda_use_kt_api_gdn_full_chunk` is never used
+   --> crates/kiln-model/src/forward.rs:160:4
+    |
+160 | fn cuda_use_kt_api_gdn_full_chunk() -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+   Compiling kiln-train v0.2.19 (/workspace/kiln/crates/kiln-train)
+warning: function `tokenize_grpo_group` is never used
+    --> crates/kiln-train/src/trainer.rs:4929:4
+     |
+4929 | fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<TokenizedGrpoGroup> {
+     |    ^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling kiln-server v0.2.19 (/workspace/kiln/crates/kiln-server)
+warning: `kiln-model` (lib) generated 4 warnings (run `cargo fix --lib -p kiln-model` to apply 1 suggestion)
+warning: `kiln-train` (lib) generated 1 warning
+    Finished `release` profile [optimized] target(s) in 13m 59s

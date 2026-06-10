@@ -1,0 +1,40 @@
+=== kiln-runpod-bg start 2026-05-25T20:16:35Z mode=truncate ===
+=== kiln-runpod-bg pid=81734 ===
+[36m=== kiln-runpod image ===[0m
+  GPU: NVIDIA RTX A6000, 570.195.03
+  CUDA toolkit: release 12.4
+  nsys: NVIDIA Nsight Systems version 2023.4.4.54-234433681190v0
+  rustc: 1.95.0 | cargo: 1.95.0
+  sccache: 0.9.1 | nextest: (1d5bf1ec9
+  torch: 2.4.1+cu124 (cuda=12.4)
+
+Quick start: [32mkiln-setup[0m (configures sccache+B2) then clone kiln & build.
+After build:  [32mkiln-smoke-check[0m (verifies fused CUDA kernels — see issue #1066).
+
+model=Qwen3.5-4B example=1/25 outcomes=1
+model=Qwen3.5-4B example=2/25 outcomes=2
+model=Qwen3.5-4B example=3/25 outcomes=3
+model=Qwen3.5-4B example=4/25 outcomes=4
+model=Qwen3.5-4B example=5/25 outcomes=5
+model=Qwen3.5-4B example=6/25 outcomes=6
+model=Qwen3.5-4B example=7/25 outcomes=7
+model=Qwen3.5-4B example=8/25 outcomes=8
+model=Qwen3.5-4B example=9/25 outcomes=9
+model=Qwen3.5-4B example=10/25 outcomes=10
+model=Qwen3.5-4B example=11/25 outcomes=11
+model=Qwen3.5-4B example=12/25 outcomes=12
+model=Qwen3.5-4B example=13/25 outcomes=13
+model=Qwen3.5-4B example=14/25 outcomes=14
+model=Qwen3.5-4B example=15/25 outcomes=15
+model=Qwen3.5-4B example=16/25 outcomes=16
+model=Qwen3.5-4B example=17/25 outcomes=17
+model=Qwen3.5-4B example=18/25 outcomes=18
+model=Qwen3.5-4B example=19/25 outcomes=19
+model=Qwen3.5-4B example=20/25 outcomes=20
+model=Qwen3.5-4B example=21/25 outcomes=21
+model=Qwen3.5-4B example=22/25 outcomes=22
+model=Qwen3.5-4B example=23/25 outcomes=23
+model=Qwen3.5-4B example=24/25 outcomes=24
+model=Qwen3.5-4B example=25/25 outcomes=25
+trace-api-eval completed in 2257.45s
+Qwen3.5-4B                       accuracy=32.0% pass=8/25 score=0.518 ci95=[17.2%, 51.6%] invalid=1 error=0 non_xml=24

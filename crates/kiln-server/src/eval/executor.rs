@@ -61,7 +61,9 @@ pub async fn run_suite_against_adapter(
     let _ = generator
         .set_adapter(previous_adapter.as_deref())
         .await
-        .inspect_err(|e| tracing::warn!(error = %e, "failed to restore previous adapter after eval"));
+        .inspect_err(
+            |e| tracing::warn!(error = %e, "failed to restore previous adapter after eval"),
+        );
     result
 }
 
@@ -83,8 +85,7 @@ async fn run_suite_inner(
     let mut scorer_kind_by_example: BTreeMap<String, &'static str> = BTreeMap::new();
     let mut target_tool_by_example: BTreeMap<String, String> = BTreeMap::new();
     let mut predicted_tool_by_outcome: BTreeMap<(String, usize), String> = BTreeMap::new();
-    let mut schema_violations_by_outcome: BTreeMap<(String, usize), (u32, u32)> =
-        BTreeMap::new();
+    let mut schema_violations_by_outcome: BTreeMap<(String, usize), (u32, u32)> = BTreeMap::new();
     let mut running_pass: u32 = 0;
     let mut running_score: f32 = 0.0;
     let mut completions_seen: u32 = 0;
@@ -154,6 +155,7 @@ async fn run_suite_inner(
                     completion_tokens: None,
                     latency_ms: None,
                     tags: example.tags.clone(),
+                    metadata: example.metadata.clone(),
                     reasoning_text: None,
                     unclosed_thinking: false,
                 };
@@ -218,23 +220,16 @@ async fn run_suite_inner(
                         if !chk.is_clean() {
                             let mut parts = Vec::new();
                             if !chk.missing_required.is_empty() {
-                                parts.push(format!(
-                                    "missing={}",
-                                    chk.missing_required.join(",")
-                                ));
+                                parts.push(format!("missing={}", chk.missing_required.join(",")));
                             }
                             if !chk.extra_unknown.is_empty() {
-                                parts.push(format!(
-                                    "extra={}",
-                                    chk.extra_unknown.join(",")
-                                ));
+                                parts.push(format!("extra={}", chk.extra_unknown.join(",")));
                             }
                             let schema_note = format!(" || schema: {}", parts.join(" "));
-                            o.detail = Some(
-                                o.detail
-                                    .map(|d| d + &schema_note)
-                                    .unwrap_or_else(|| schema_note.trim_start_matches(" || ").to_string()),
-                            );
+                            o.detail =
+                                Some(o.detail.map(|d| d + &schema_note).unwrap_or_else(|| {
+                                    schema_note.trim_start_matches(" || ").to_string()
+                                }));
                         }
                     }
                     o
@@ -250,6 +245,7 @@ async fn run_suite_inner(
                     completion_tokens: None,
                     latency_ms: None,
                     tags: example.tags.clone(),
+                    metadata: example.metadata.clone(),
                     reasoning_text: None,
                     unclosed_thinking: false,
                 },
@@ -361,10 +357,13 @@ mod tests {
 
     #[tokio::test]
     async fn full_pass_when_mock_replies_with_target() {
-        let gen_ = Arc::new(
-            MockEvalGenerator::new().with_force_reply("the answer is 2")
-        ) as Arc<dyn EvalGenerator>;
-        let suite = suite_with_numeric_answer();
+        let gen_ = Arc::new(MockEvalGenerator::new().with_force_reply("the answer is 2"))
+            as Arc<dyn EvalGenerator>;
+        let mut suite = suite_with_numeric_answer();
+        suite.examples[0].metadata = Some(serde_json::json!({
+            "source_path": "prod.jsonl",
+            "source_line": 4
+        }));
         // Tweak the second example so the mock's reply "2" doesn't match 10.
         let result = run_suite_against_adapter(
             &suite,
@@ -380,11 +379,16 @@ mod tests {
         assert_eq!(result.outcomes.len(), 2);
         assert_eq!(result.metrics.num_pass, 1);
         assert_eq!(result.metrics.num_fail, 1);
+        assert_eq!(
+            result.outcomes[0].metadata.as_ref().unwrap()["source_line"],
+            serde_json::json!(4)
+        );
     }
 
     #[tokio::test]
     async fn cancellation_short_circuits_loop() {
-        let gen_ = Arc::new(MockEvalGenerator::new().with_force_reply("2")) as Arc<dyn EvalGenerator>;
+        let gen_ =
+            Arc::new(MockEvalGenerator::new().with_force_reply("2")) as Arc<dyn EvalGenerator>;
         let suite = suite_with_numeric_answer();
         let flag = Arc::new(AtomicBool::new(true));
         let result =
@@ -396,7 +400,8 @@ mod tests {
 
     #[tokio::test]
     async fn progress_callback_called_per_completion() {
-        let gen_ = Arc::new(MockEvalGenerator::new().with_force_reply("2")) as Arc<dyn EvalGenerator>;
+        let gen_ =
+            Arc::new(MockEvalGenerator::new().with_force_reply("2")) as Arc<dyn EvalGenerator>;
         let suite = suite_with_numeric_answer();
         let counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let counter_cb = counter.clone();

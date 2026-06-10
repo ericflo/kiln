@@ -24,6 +24,7 @@
 //! over HTTP, the CLI, or the post-training auto-eval hook.
 
 pub mod builtin;
+pub mod production_trace;
 pub mod qwen3;
 pub mod result;
 pub mod scorers;
@@ -31,9 +32,20 @@ pub mod suite;
 pub mod synthesis;
 pub mod trajectory;
 
+pub use builtin::{
+    AGENT_BENCH_SUITE_NAMES, PI_MINI_MCPATLAS, QWEN3_AGENTIC_CORE, REPO_GROUNDED_TASKS,
+    SWE_BENCH_MINI, TERMINAL_BENCH_MINI, qwen3_agentic_core,
+};
+pub use production_trace::{
+    ProductionTraceError, ProductionTraceFormat, ProductionTraceInputLine,
+    ProductionTraceSampleRecord, ProductionTraceSampling, ProductionTraceSuiteConfig,
+    ProductionTraceSuiteStats, synthesize_production_trace_suite,
+    synthesize_production_trace_suite_from_lines,
+};
 pub use result::{
     AggregateMetrics, EvalJobState, EvalOutcomeKind, EvalProgress, EvalResult, ExampleOutcome,
-    FlipDiff, LatencyStats, ReasoningLengthStats, ScorerBreakdown, SuiteResult, ToolBreakdown,
+    FlipDiff, LatencyStats, PassRateConfidenceInterval, ReasoningLengthStats, ScorerBreakdown,
+    SuiteResult, TagBreakdown, ToolBreakdown,
 };
 pub use scorers::{
     ArgsScoring, CodeStyle, NameMatch, NumericTolerance, Scorer, ScorerError, score_completion,
@@ -41,10 +53,6 @@ pub use scorers::{
 pub use suite::{
     EvalChatMessage, EvalCompareSpec, EvalExample, EvalGenerationParams, EvalSuite,
     EvalSuiteSummary, PostEvalConfig, default_max_tokens, default_temperature,
-};
-pub use builtin::{
-    AGENT_BENCH_SUITE_NAMES, PI_MINI_MCPATLAS, QWEN3_AGENTIC_CORE, REPO_GROUNDED_TASKS,
-    SWE_BENCH_MINI, TERMINAL_BENCH_MINI, qwen3_agentic_core,
 };
 pub use synthesis::{
     Sampling, ScorerChoice, SftConversation, SftMessage, SynthesisConfig, SynthesisError,

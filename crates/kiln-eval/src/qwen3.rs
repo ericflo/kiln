@@ -547,7 +547,10 @@ fn find_first_tool_call_object(text: &str) -> Option<serde_json::Value> {
         }
         // Quick lookahead — must mention a tool-call-shaped key within a
         // short window or this is some other JSON.
-        let lookahead_end = bytes.len().min(i + 384);
+        let mut lookahead_end = bytes.len().min(i + 384);
+        while !text.is_char_boundary(lookahead_end) {
+            lookahead_end -= 1;
+        }
         let head = &text[i..lookahead_end];
         if !looks_tool_call_json_head(head) {
             i += 1;
@@ -994,5 +997,14 @@ mod tests {
         let raw = "<tool_call>\n<function=real>\n<parameter=a>\n1\n</parameter>\n</function>\n</tool_call>\n\nNote: don't write `{\"name\":\"fake\"}` instead.";
         let call = extract_first_tool_call(raw).unwrap();
         assert_eq!(call.name, "real");
+    }
+
+    #[test]
+    fn json_probe_lookahead_is_utf8_boundary_safe() {
+        let raw = format!(
+            "```diff\n{}{{\"not_tool\":\"x\"}}\n```",
+            "\u{2550}".repeat(160)
+        );
+        assert!(extract_first_tool_call(&raw).is_none());
     }
 }

@@ -268,6 +268,7 @@ pub fn score_completion(
                     completion_tokens: None,
                     latency_ms: None,
                     tags: example.tags.clone(),
+                    metadata: example.metadata.clone(),
                     reasoning_text: split.reasoning.map(str::to_string),
                     unclosed_thinking: true,
                 };
@@ -284,7 +285,12 @@ pub fn score_completion(
         Scorer::ExactMatch {
             case_sensitive,
             strip_whitespace,
-        } => exact_match::score(example, answer_for_scorer, *case_sensitive, *strip_whitespace)?,
+        } => exact_match::score(
+            example,
+            answer_for_scorer,
+            *case_sensitive,
+            *strip_whitespace,
+        )?,
         Scorer::Contains {
             phrases,
             mode,
@@ -294,7 +300,13 @@ pub fn score_completion(
             pattern,
             capture_group,
             case_sensitive,
-        } => regex_match::score(example, answer_for_scorer, pattern, *capture_group, *case_sensitive)?,
+        } => regex_match::score(
+            example,
+            answer_for_scorer,
+            pattern,
+            *capture_group,
+            *case_sensitive,
+        )?,
         Scorer::JsonValidity {
             require_object,
             required_paths,
@@ -341,7 +353,11 @@ pub fn score_completion(
         }
         Scorer::All { scorers } => {
             if scorers.is_empty() {
-                (0.0, EvalOutcomeKind::Invalid, Some("empty composite".into()))
+                (
+                    0.0,
+                    EvalOutcomeKind::Invalid,
+                    Some("empty composite".into()),
+                )
             } else {
                 let mut sum = 0.0f32;
                 let mut all_pass = true;
@@ -380,7 +396,11 @@ pub fn score_completion(
         }
         Scorer::Any { scorers } => {
             if scorers.is_empty() {
-                (0.0, EvalOutcomeKind::Invalid, Some("empty composite".into()))
+                (
+                    0.0,
+                    EvalOutcomeKind::Invalid,
+                    Some("empty composite".into()),
+                )
             } else {
                 let mut best = 0.0f32;
                 let mut any_pass = false;
@@ -426,6 +446,7 @@ pub fn score_completion(
         completion_tokens: None,
         latency_ms: None,
         tags: example.tags.clone(),
+        metadata: example.metadata.clone(),
         reasoning_text: split.reasoning.map(str::to_string),
         unclosed_thinking: split.unclosed,
     })
@@ -484,6 +505,29 @@ mod tests {
         assert_eq!(
             out.reasoning_text.as_deref(),
             Some("The capital of France is Paris.")
+        );
+    }
+
+    #[test]
+    fn outcome_echoes_example_metadata() {
+        let scorer = Scorer::ExactMatch {
+            case_sensitive: true,
+            strip_whitespace: true,
+        };
+        let mut e = ex(Some("ok"));
+        e.metadata = Some(serde_json::json!({
+            "source_path": "prod.jsonl",
+            "source_line": 17,
+            "target_tools": ["Bash"]
+        }));
+        let out = score_completion(&scorer, &e, "ok", &NoopJudgeRunner).unwrap();
+        assert_eq!(
+            out.metadata.as_ref().unwrap()["source_path"],
+            serde_json::json!("prod.jsonl")
+        );
+        assert_eq!(
+            out.metadata.as_ref().unwrap()["source_line"],
+            serde_json::json!(17)
         );
     }
 

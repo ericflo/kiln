@@ -1,0 +1,133 @@
+[36m=== kiln-runpod image ===[0m
+  GPU: NVIDIA RTX A6000, 570.195.03
+  CUDA toolkit: release 12.4
+  nsys: NVIDIA Nsight Systems version 2023.4.4.54-234433681190v0
+  rustc: 1.95.0 | cargo: 1.95.0
+  sccache: 0.9.1 | nextest: (1d5bf1ec9
+  torch: 2.4.1+cu124 (cuda=12.4)
+
+Quick start: [32mkiln-setup[0m (configures sccache+B2) then clone kiln & build.
+After build:  [32mkiln-smoke-check[0m (verifies fused CUDA kernels — see issue #1066).
+
+[36m=== kiln-runpod image ===[0m
+  GPU: NVIDIA RTX A6000, 570.195.03
+  CUDA toolkit: release 12.4
+  nsys: NVIDIA Nsight Systems version 2023.4.4.54-234433681190v0
+  rustc: 1.95.0 | cargo: 1.95.0
+  sccache: 0.9.1 | nextest: (1d5bf1ec9
+  torch: 2.4.1+cu124 (cuda=12.4)
+
+Quick start: [32mkiln-setup[0m (configures sccache+B2) then clone kiln & build.
+After build:  [32mkiln-smoke-check[0m (verifies fused CUDA kernels — see issue #1066).
+
+   Compiling kiln-eval v0.2.19 (/workspace/kiln/crates/kiln-eval)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.98s
+     Running `target/debug/examples/trace_api_eval --suite /workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.suite.json --api-base 'http://127.0.0.1:8420/v1' --model Qwen3.5-4B --temperature 0 --max-tokens 1024 --extra-body-json '{"chat_template_kwargs":{"enable_thinking":false}}' --output /workspace/pr1383-qwen35-base-eval/qwen35_base_trace_api_eval_result.json`
+model=Qwen3.5-4B example=1/106 outcomes=1
+model=Qwen3.5-4B example=2/106 outcomes=2
+model=Qwen3.5-4B example=3/106 outcomes=3
+model=Qwen3.5-4B example=4/106 outcomes=4
+model=Qwen3.5-4B example=5/106 outcomes=5
+model=Qwen3.5-4B example=6/106 outcomes=6
+model=Qwen3.5-4B example=7/106 outcomes=7
+model=Qwen3.5-4B example=8/106 outcomes=8
+model=Qwen3.5-4B example=9/106 outcomes=9
+model=Qwen3.5-4B example=10/106 outcomes=10
+model=Qwen3.5-4B example=11/106 outcomes=11
+model=Qwen3.5-4B example=12/106 outcomes=12
+model=Qwen3.5-4B example=13/106 outcomes=13
+model=Qwen3.5-4B example=14/106 outcomes=14
+model=Qwen3.5-4B example=15/106 outcomes=15
+model=Qwen3.5-4B example=16/106 outcomes=16
+model=Qwen3.5-4B example=17/106 outcomes=17
+model=Qwen3.5-4B example=18/106 outcomes=18
+model=Qwen3.5-4B example=19/106 outcomes=19
+model=Qwen3.5-4B example=20/106 outcomes=20
+model=Qwen3.5-4B example=21/106 outcomes=21
+model=Qwen3.5-4B example=22/106 outcomes=22
+model=Qwen3.5-4B example=23/106 outcomes=23
+model=Qwen3.5-4B example=24/106 outcomes=24
+model=Qwen3.5-4B example=25/106 outcomes=25
+model=Qwen3.5-4B example=26/106 outcomes=26
+model=Qwen3.5-4B example=27/106 outcomes=27
+model=Qwen3.5-4B example=28/106 outcomes=28
+model=Qwen3.5-4B example=29/106 outcomes=29
+model=Qwen3.5-4B example=30/106 outcomes=30
+model=Qwen3.5-4B example=31/106 outcomes=31
+model=Qwen3.5-4B example=32/106 outcomes=32
+model=Qwen3.5-4B example=33/106 outcomes=33
+model=Qwen3.5-4B example=34/106 outcomes=34
+model=Qwen3.5-4B example=35/106 outcomes=35
+model=Qwen3.5-4B example=36/106 outcomes=36
+model=Qwen3.5-4B example=37/106 outcomes=37
+model=Qwen3.5-4B example=38/106 outcomes=38
+model=Qwen3.5-4B example=39/106 outcomes=39
+model=Qwen3.5-4B example=40/106 outcomes=40
+model=Qwen3.5-4B example=41/106 outcomes=41
+model=Qwen3.5-4B example=42/106 outcomes=42
+model=Qwen3.5-4B example=43/106 outcomes=43
+model=Qwen3.5-4B example=44/106 outcomes=44
+model=Qwen3.5-4B example=45/106 outcomes=45
+model=Qwen3.5-4B example=46/106 outcomes=46
+model=Qwen3.5-4B example=47/106 outcomes=47
+model=Qwen3.5-4B example=48/106 outcomes=48
+model=Qwen3.5-4B example=49/106 outcomes=49
+model=Qwen3.5-4B example=50/106 outcomes=50
+model=Qwen3.5-4B example=51/106 outcomes=51
+model=Qwen3.5-4B example=52/106 outcomes=52
+model=Qwen3.5-4B example=53/106 outcomes=53
+model=Qwen3.5-4B example=54/106 outcomes=54
+model=Qwen3.5-4B example=55/106 outcomes=55
+model=Qwen3.5-4B example=56/106 outcomes=56
+model=Qwen3.5-4B example=57/106 outcomes=57
+model=Qwen3.5-4B example=58/106 outcomes=58
+model=Qwen3.5-4B example=59/106 outcomes=59
+model=Qwen3.5-4B example=60/106 outcomes=60
+model=Qwen3.5-4B example=61/106 outcomes=61
+model=Qwen3.5-4B example=62/106 outcomes=62
+model=Qwen3.5-4B example=63/106 outcomes=63
+model=Qwen3.5-4B example=64/106 outcomes=64
+model=Qwen3.5-4B example=65/106 outcomes=65
+model=Qwen3.5-4B example=66/106 outcomes=66
+model=Qwen3.5-4B example=67/106 outcomes=67
+model=Qwen3.5-4B example=68/106 outcomes=68
+model=Qwen3.5-4B example=69/106 outcomes=69
+model=Qwen3.5-4B example=70/106 outcomes=70
+model=Qwen3.5-4B example=71/106 outcomes=71
+model=Qwen3.5-4B example=72/106 outcomes=72
+model=Qwen3.5-4B example=73/106 outcomes=73
+model=Qwen3.5-4B example=74/106 outcomes=74
+model=Qwen3.5-4B example=75/106 outcomes=75
+model=Qwen3.5-4B example=76/106 outcomes=76
+model=Qwen3.5-4B example=77/106 outcomes=77
+model=Qwen3.5-4B example=78/106 outcomes=78
+model=Qwen3.5-4B example=79/106 outcomes=79
+model=Qwen3.5-4B example=80/106 outcomes=80
+model=Qwen3.5-4B example=81/106 outcomes=81
+model=Qwen3.5-4B example=82/106 outcomes=82
+model=Qwen3.5-4B example=83/106 outcomes=83
+model=Qwen3.5-4B example=84/106 outcomes=84
+model=Qwen3.5-4B example=85/106 outcomes=85
+model=Qwen3.5-4B example=86/106 outcomes=86
+model=Qwen3.5-4B example=87/106 outcomes=87
+model=Qwen3.5-4B example=88/106 outcomes=88
+model=Qwen3.5-4B example=89/106 outcomes=89
+model=Qwen3.5-4B example=90/106 outcomes=90
+model=Qwen3.5-4B example=91/106 outcomes=91
+model=Qwen3.5-4B example=92/106 outcomes=92
+model=Qwen3.5-4B example=93/106 outcomes=93
+model=Qwen3.5-4B example=94/106 outcomes=94
+model=Qwen3.5-4B example=95/106 outcomes=95
+model=Qwen3.5-4B example=96/106 outcomes=96
+model=Qwen3.5-4B example=97/106 outcomes=97
+model=Qwen3.5-4B example=98/106 outcomes=98
+model=Qwen3.5-4B example=99/106 outcomes=99
+model=Qwen3.5-4B example=100/106 outcomes=100
+model=Qwen3.5-4B example=101/106 outcomes=101
+model=Qwen3.5-4B example=102/106 outcomes=102
+model=Qwen3.5-4B example=103/106 outcomes=103
+model=Qwen3.5-4B example=104/106 outcomes=104
+model=Qwen3.5-4B example=105/106 outcomes=105
+model=Qwen3.5-4B example=106/106 outcomes=106
+trace-api-eval completed in 4400.76s
+Qwen3.5-4B                       accuracy=18.9% pass=20/106 score=0.374 ci95=[12.6%, 27.4%] invalid=15 error=0 non_xml=91
