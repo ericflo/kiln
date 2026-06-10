@@ -1192,6 +1192,24 @@ pub async fn run_health(url: &str, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Warning text when the configured host listens beyond loopback, since the
+/// HTTP surface (inference AND training) ships with no built-in auth. Pure so
+/// tests can assert the wording.
+pub(crate) fn non_loopback_host_warning(host: &str) -> Option<String> {
+    let is_loopback = host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false);
+    (!is_loopback).then(|| {
+        format!(
+            "host \"{host}\" listens beyond loopback. Kiln has no built-in auth: anyone \
+who can reach this port can run inference and submit training data. Front it with an \
+authenticated reverse proxy or keep it on a private network (see README \"Security model\")."
+        )
+    })
+}
+
 /// Run the `config check` CLI subcommand: validate config without starting.
 pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
     use crate::config::KilnConfig;
@@ -1237,6 +1255,10 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
                 style("Speculative:").dim(),
                 config.speculative.enabled
             );
+            if let Some(warning) = non_loopback_host_warning(&config.server.host) {
+                println!();
+                println!("  {} {}", style("⚠").yellow().bold(), warning);
+            }
             Ok(())
         }
         Err(e) => {
@@ -2755,6 +2777,25 @@ mod tests {
             config: None,
             verbose,
             quiet,
+        }
+    }
+
+    #[test]
+    fn non_loopback_host_warning_skips_loopback_hosts() {
+        assert_eq!(non_loopback_host_warning("127.0.0.1"), None);
+        assert_eq!(non_loopback_host_warning("localhost"), None);
+        assert_eq!(non_loopback_host_warning("::1"), None);
+        assert_eq!(non_loopback_host_warning("127.0.0.2"), None);
+    }
+
+    #[test]
+    fn non_loopback_host_warning_names_host_and_security_model() {
+        for host in ["0.0.0.0", "::", "192.168.1.10", "my-box.example.com"] {
+            let warning = non_loopback_host_warning(host)
+                .unwrap_or_else(|| panic!("expected warning for host {host}"));
+            assert!(warning.contains(host));
+            assert!(warning.contains("no built-in auth"));
+            assert!(warning.contains("Security model"));
         }
     }
 

@@ -17,7 +17,10 @@
 # weights). See QUICKSTART.md or https://ericflo.github.io/kiln/quickstart.html.
 
 [server]
-host = "0.0.0.0"
+host = "127.0.0.1"                    # Kiln has no built-in auth. Set "0.0.0.0" to accept
+                                      # remote connections ONLY behind an authenticated
+                                      # reverse proxy or on a private network (WireGuard,
+                                      # Tailscale) — see README "Security model".
 port = 8420
 request_timeout_secs = 600
 shutdown_timeout_secs = 5
@@ -89,7 +92,7 @@ no_grad_checkpoint = false
 
 [logging]
 level = "info"                        # trace, debug, info, warn, error, or a filter directive
-format = "json"                       # json, pretty, text, human
+format = "auto"                       # auto (pretty on TTY, JSON otherwise), json, pretty, text, human
 
 [prefix_cache]
 enabled = true                        # Reuse KV cache blocks for shared prompt prefixes
@@ -100,7 +103,8 @@ enabled = true                        # Reuse KV cache blocks for shared prompt 
 
 [speculative]
 enabled = false                       # Self-speculative decoding (skip-layer draft)
-num_speculative_tokens = 4            # Tokens to draft per step (3-8 typical)
+num_speculative_tokens = 256          # Upper bound on drafted tokens per step (the paged
+                                      # skip-layer draft adapts within this budget)
 draft_layers = 8                      # First N layers used as draft model
                                       # Also settable via KILN_SPEC_ENABLED, KILN_SPEC_NUM_TOKENS,
                                       # KILN_SPEC_DRAFT_LAYERS env vars
