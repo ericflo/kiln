@@ -497,68 +497,6 @@ button, input, select, textarea { font-family: inherit; }
 }
 
 /* =====================================================================
-   Hero stats (used at top of overview page)
-   ===================================================================== */
-.hero {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 0;
-  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-2) 100%);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  overflow: hidden;
-  position: relative;
-}
-.hero::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(800px 200px at 8% 0%, rgba(249, 115, 22, 0.08), transparent 60%);
-  pointer-events: none;
-}
-.hero-cell {
-  position: relative;
-  padding: var(--space-5);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  border-right: 1px solid var(--border);
-}
-.hero-cell:last-child { border-right: 0; }
-.hero-eyebrow {
-  font-size: var(--text-2xs);
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-caps);
-  color: var(--text-muted);
-  font-weight: 600;
-}
-.hero-num {
-  font-family: var(--font-display);
-  font-size: var(--text-4xl);
-  font-weight: 700;
-  letter-spacing: var(--tracking-tight);
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
-  line-height: 1.08;
-}
-.hero-num .unit {
-  font-size: var(--text-md);
-  font-weight: 500;
-  color: var(--text-muted);
-  margin-left: 4px;
-}
-.hero-sub {
-  font-size: var(--text-xs);
-  color: var(--text-muted);
-  font-variant-numeric: tabular-nums;
-}
-@media (max-width: 900px) {
-  .hero { grid-template-columns: repeat(2, 1fr); }
-  .hero-cell:nth-child(2) { border-right: 0; }
-  .hero-cell:nth-child(1), .hero-cell:nth-child(2) { border-bottom: 1px solid var(--border); }
-}
-
-/* =====================================================================
    VRAM bar
    ===================================================================== */
 .vram-wrap { display: flex; flex-direction: column; gap: var(--space-2); }
@@ -1841,8 +1779,6 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
   .primary-nav { padding: var(--space-2) var(--space-4); top: auto; }
   .main { padding: var(--space-4); gap: var(--space-4); }
   .card-head, .card-body { padding: var(--space-4); }
-  .hero-cell { padding: var(--space-4); }
-  .hero-num { font-size: var(--text-2xl); }
 }
 
 /* =====================================================================
@@ -4703,8 +4639,8 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
             </div>
           </div>
           <div class="form-group">
-            <label for="merge-sources">Source adapters (JSON array)</label>
-            <textarea id="merge-sources" name="sources" rows="6" placeholder='[{"adapter":"rust-helper","weight":1.0},{"adapter":"python-helper","weight":1.0}]'></textarea>
+            <label for="distill-merge-sources">Source adapters (JSON array)</label>
+            <textarea id="distill-merge-sources" name="sources" rows="6" placeholder='[{"adapter":"rust-helper","weight":1.0},{"adapter":"python-helper","weight":1.0}]'></textarea>
             <div class="form-help">Each <code>{adapter, weight}</code> — the multi-tenant merge loads each source LoRA and uses it as the per-prompt teacher.</div>
           </div>
           <div style="display: flex; gap: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border);">
@@ -5304,7 +5240,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
     const ok = (body) => Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } }));
     if (responses[path]) return ok(responses[path]());
     // Demo honesty: load/unload actually move the active adapter, so the
-    // ACTIVE pill, hero, and flywheel respond to a swap like the real server.
+    // ACTIVE pill and flywheel respond to a swap like the real server.
     if (method === 'POST' && path === '/v1/adapters/load') {
       try { demoState.active = JSON.parse(init && init.body || '{}').name || demoState.active; } catch {}
       return ok({ ok: true, status: 'ok', message: 'Demo: loaded ' + demoState.active });
@@ -5490,7 +5426,16 @@ async function api(path, opts) {
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.detail || body.error || `HTTP ${res.status} from ${path}`);
+    // Kiln's canonical error shape is { error: { code, message, hint } };
+    // body.error may also be a plain string behind generic proxies.
+    const errObj = (body.error && typeof body.error === 'object') ? body.error : null;
+    const msg = (typeof body.error === 'string' && body.error)
+      || errObj?.message || body.detail || '';
+    const hint = errObj?.hint || '';
+    const err = new Error(msg ? (hint ? `${msg} — ${hint}` : msg) : `HTTP ${res.status} from ${path}`);
+    if (errObj?.code) err.code = errObj.code;
+    err.status = res.status;
+    throw err;
   }
   return res.json();
 }
@@ -6179,7 +6124,6 @@ async function pollHealth() {
     if (ub) ub.hidden = true;
     renderHeader(h);
     renderServerStatus(h);
-    renderHeroFromHealth(h);
     updateFlywheel();
     if (typeof refreshVramDonut === 'function') refreshVramDonut();
   } catch (e) {
@@ -6277,10 +6221,6 @@ function renderServerStatus(h) {
   el.innerHTML = vramHtml + schedHtml + checksHtml || '<div class="empty">No data</div>';
 }
 
-function renderHeroFromHealth(h) {
-  setText('hero-adapter', h.active_adapter || 'base');
-  setText('hero-adapter-sub', h.active_adapter ? 'Hot-swapped LoRA' : 'No adapter loaded');
-}
 
 // --- Decode Performance ---
 // Cached last response from `/v1/stats/decode`, populated by `pollDecodePerf`.
@@ -6302,10 +6242,6 @@ async function pollDecodePerf() {
         <div class="sched-stat" title="Streaming completions counted in this rolling window."><div class="num">0</div><div class="lbl">samples</div></div>
       </div>
       <div class="empty" style="margin-top: var(--space-4);">No streaming completions in the last ${window}s. Send a message in <strong>Playground</strong> to populate metrics, or check <a href="/health" target="_blank" rel="noopener noreferrer">/health</a> if the server is still warming up.</div>`;
-      setText('hero-tps', '—');
-      setText('hero-tps-sub', 'Awaiting completions');
-      setText('hero-itl', '—');
-      setText('hero-itl-sub', 'Inter-token latency');
       return;
     }
     const tps = data.tok_per_sec.toFixed(1);
@@ -6319,12 +6255,6 @@ async function pollDecodePerf() {
         <div class="sched-stat" title="Streaming completions counted in this rolling window."><div class="num">${data.sample_count}</div><div class="lbl">samples · ${window}s</div></div>
       </div>
       <div style="margin-top: var(--space-3); font-size: var(--text-xs); color: var(--text-muted);">Mean inter-token latency: <span class="tabular-nums" style="color: var(--text-2);">${mean} ms</span></div>`;
-    // Hero
-    setText('hero-tps', tps);
-    setHtml('hero-tps', `${tps}<span class="unit">tok/s</span>`);
-    setText('hero-tps-sub', `${data.sample_count} samples · ${window}s window`);
-    setHtml('hero-itl', `${p50}<span class="unit">/ ${p99} ms</span>`);
-    setText('hero-itl-sub', `mean ${mean} ms`);
     if (typeof refreshDecodeSparkline === 'function') refreshDecodeSparkline();
   } catch (e) {
     el.innerHTML = apiFailureHtml('Decode performance', e, 'pollDecodePerf');
@@ -7453,36 +7383,6 @@ async function pollTraining() {
     const liveCount = (data.running ? 1 : 0) + (data.queued ? data.queued.length : 0);
     setText('training-count', String(liveCount));
     updateFlywheel();
-    if (data.running) {
-      const j = data.running;
-      const pct = ((j.progress || 0) * 100).toFixed(0);
-      const lossLabel = j.current_loss != null ? ` · loss ${j.current_loss.toFixed(3)}` : '';
-      const adapterLabel = j.adapter_name ? ` ${j.adapter_name}` : '';
-      setText('hero-training', `${pct}%`);
-      setHtml('hero-training', `${pct}<span class="unit">%</span>`);
-      setText('hero-training-sub', `${j.job_type || 'job'}${adapterLabel}${lossLabel}`);
-    } else if ((data.queued || []).length > 0) {
-      const q = data.queued[0];
-      setText('hero-training', String(data.queued.length));
-      setHtml('hero-training', `${data.queued.length}<span class="unit">queued</span>`);
-      setText('hero-training-sub', `Next: ${q.adapter_name || q.job_id}`);
-    } else if (data.completed && data.completed.length > 0) {
-      // When the queue is empty but archived jobs exist, surface the most
-      // recent one in the hero stat instead of the un-informative "idle"
-      // placeholder. Users land on the dashboard wanting to know what
-      // their last run did, not that nothing is running right now.
-      const last = data.completed[0];
-      const lastLoss = last.current_loss != null ? last.current_loss.toFixed(3) : '—';
-      const lastState = (last.state || 'completed').toString().toLowerCase();
-      const when = last.finished_unix_ms || last.submitted_unix_ms;
-      setText('hero-training', 'idle');
-      setHtml('hero-training', `${data.completed.length}<span class="unit">recent</span>`);
-      setText('hero-training-sub', `Last ${lastState}: ${last.adapter_name || last.job_id} · loss ${lastLoss}${when ? ' · ' + fmtSmartTime(when) : ''}`);
-    } else {
-      setText('hero-training', 'idle');
-      setText('hero-training', 'idle');
-      setText('hero-training-sub', 'Submit SFT or GRPO to begin');
-    }
   } catch (e) {
     queuePanel.innerHTML = apiFailureHtml('Training queue', e, 'pollTraining');
   } finally {
@@ -11802,7 +11702,7 @@ function adapterEvalChip(name) {
 
 // The strongest signal for "is the loaded adapter actually better than base?":
 // the newest completed COMPARE eval (base run + this adapter's run). Returns
-// { delta, suite } in accuracy points, or null. Powers the hero/active-card verdict.
+// { delta, suite } in accuracy points, or null. Powers the active-card verdict.
 function adapterCompareVerdict(name) {
   const jobs = ((typeof evalJobsCache !== 'undefined' ? evalJobsCache : []) || [])
     .filter(j => (j.state || '').toLowerCase() === 'completed' && Array.isArray(j.finished_runs)
@@ -11898,7 +11798,7 @@ function renderAdaptersAsCards(data) {
             b.disabled = true; b.textContent = 'Swapping…';
             await api('/v1/adapters/load', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name }) });
             toast(name + ' is now serving — pi\'s next request uses it', 'ok');
-            // Refresh BOTH sources of "active" so cards, hero, and flywheel agree.
+            // Refresh BOTH sources of "active" so cards and flywheel agree.
             pollAdapters && pollAdapters();
             pollHealth && pollHealth();
           } else if (action === 'unload') {
@@ -11948,17 +11848,6 @@ function refreshAdapterCards() {
   if (key === lastAdaptersKey) return;
   lastAdaptersKey = key;
   renderAdaptersAsCards(d);
-  const count = (d.available || []).length;
-  const heroAdapter = document.getElementById('hero-adapter');
-  const heroSub = document.getElementById('hero-adapter-sub');
-  if (heroAdapter) heroAdapter.textContent = d.active || 'base';
-  if (heroSub) {
-    // Lead with the win verdict when the active adapter has a compare eval —
-    // "is what's serving pi actually better than base?" answered at the top.
-    const verdict = d.active ? adapterCompareVerdict(d.active) : null;
-    if (verdict) heroSub.innerHTML = verdictDeltaHtml(verdict);
-    else heroSub.textContent = d.active ? `${count} adapter${count === 1 ? '' : 's'} on disk` : `${count} adapter${count === 1 ? '' : 's'} available · base model active`;
-  }
 }
 // Driven from `pollAdapters` end-of-success directly — no standalone
 // interval, no first-render kick needed.

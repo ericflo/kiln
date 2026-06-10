@@ -91,9 +91,15 @@ function text(res, body, contentType = 'text/plain; charset=utf-8') {
 }
 
 function apiFailure(res, panelName, path) {
+  // Kiln's canonical error shape ({ error: { code, message, hint } }) — the
+  // dashboard must render message + hint, never "[object Object]".
   res.writeHead(503, { 'content-type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify({
-    detail: `${panelName} smoke failure from ${path}`,
+    error: {
+      code: 'smoke_failure',
+      message: `${panelName} smoke failure from ${path}`,
+      hint: 'Smoke hint: retry after startup.',
+    },
   }));
 }
 
@@ -891,6 +897,9 @@ async function expectApiFailurePanel(page, selector, action, detail) {
   await expectText(page, selector, /Quickstart/, `${action} failure copy missing Quickstart link`);
   await expectText(page, selector, /Troubleshooting/, `${action} failure copy missing Troubleshooting link`);
   await expectText(page, selector, new RegExp(escapeRegExp(detail)), `${action} failure copy missing error detail`);
+  await expectText(page, selector, /Smoke hint: retry after startup\./, `${action} failure copy missing the structured error hint`);
+  const panelText = await page.$eval(selector, (el) => el.textContent || '');
+  if (panelText.includes('[object Object]')) fail(`${action} failure panel rendered [object Object] — api() is not unwrapping the structured error body`);
 
   await expectPanelLink(page, `${selector} .api-failure`, 'Quickstart', 'https://ericflo.github.io/kiln/quickstart.html');
   await expectPanelLink(page, `${selector} .api-failure`, 'Troubleshooting', 'https://ericflo.github.io/kiln/troubleshooting.html');
