@@ -130,6 +130,27 @@ draft_layers = 8                      # First N layers used as draft model
 # max_tokens = 512
 # seed = 42
 
+[request_log]
+# Durable request/response log for the inference endpoints
+# (/v1/chat/completions, /v1/completions, /v1/completions/batch). Every
+# request and the exact response (SSE streams reassembled into the final
+# message) is appended as one JSON line, so production traffic can be
+# mined, filtered, and trained on later:
+#
+#   zcat requests-*.jsonl.gz | jq -c 'select(.status == 200)
+#     | {messages: (.request.messages + [.response.choices[0].message])}'
+#
+# Files: <dir>/requests-current.jsonl (active) and rotated
+# requests-<ts>.jsonl.gz. Env overrides: KILN_REQUEST_LOG_ENABLED,
+# KILN_REQUEST_LOG_DIR, KILN_REQUEST_LOG_MAX_FILE_BYTES,
+# KILN_REQUEST_LOG_MAX_TOTAL_BYTES, KILN_REQUEST_LOG_COMPRESS.
+enabled = true
+# dir = "/var/kiln/requests"          # Default: <adapter_dir>/.requests
+max_file_bytes = 67108864             # Rotate the active file at 64 MiB
+max_total_bytes = 2147483648          # Keep at most 2 GiB of log files (oldest deleted)
+compress = true                       # Gzip rotated files
+max_capture_bytes = 4194304           # Per-body cap stored in a row (wire is never truncated)
+
 [adapters]
 max_disk_bytes = 107374182400         # 100 GiB cap on total finalized adapter_dir size.
                                       # Rejects POST /v1/adapters/upload with HTTP 507

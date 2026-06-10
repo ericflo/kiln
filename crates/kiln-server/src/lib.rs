@@ -16,6 +16,7 @@ pub mod kv_autoscaler;
 pub mod logging;
 pub mod metrics;
 pub mod recent_requests;
+pub mod request_log;
 pub mod rollout_generate_cli;
 pub mod state;
 pub mod training_history;

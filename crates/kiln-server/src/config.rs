@@ -34,6 +34,10 @@ pub struct KilnConfig {
     /// location is left at its default `<adapter_dir>/.eval/suites`.
     #[serde(default)]
     pub eval: Option<EvalConfig>,
+    /// Durable request/response log for the inference endpoints
+    /// (mine→filter→train flywheel). See [`crate::request_log`].
+    #[serde(default)]
+    pub request_log: crate::request_log::RequestLogConfig,
 }
 
 /// Eval subsystem configuration.
@@ -440,6 +444,7 @@ impl Default for KilnConfig {
             streaming_prefill: StreamingPrefillConfig::default(),
             adapters: AdaptersConfig::default(),
             eval: None,
+            request_log: crate::request_log::RequestLogConfig::default(),
         }
     }
 }
@@ -646,6 +651,7 @@ impl KilnConfig {
         };
 
         config.apply_env_overrides();
+        config.request_log.apply_env_overrides();
         config.validate()?;
         Ok(config)
     }

@@ -1387,6 +1387,12 @@ pub struct AppState {
     pub decode_stats: Arc<std::sync::Mutex<DecodeStatsRing>>,
     /// Bounded history of recent chat-completion requests for the /ui dashboard.
     pub recent_requests: Arc<std::sync::Mutex<RecentRequestsRing>>,
+    /// Durable request/response JSONL log for the inference endpoints.
+    /// `None` when `[request_log] enabled = false` (or in tests that don't
+    /// set one up). See [`crate::request_log`].
+    pub request_log: Option<Arc<crate::request_log::RequestLogger>>,
+    /// Per-body cap on what the request log stores (never affects the wire).
+    pub request_log_max_capture_bytes: usize,
     /// Full-response cache for replayable completions.
     pub completion_cache: Arc<std::sync::Mutex<DeterministicCompletionCache>>,
     /// Full-response cache keyed before chat-template rendering/tokenization.
@@ -1543,6 +1549,9 @@ impl AppState {
             recent_requests: Arc::new(std::sync::Mutex::new(RecentRequestsRing::new(
                 RECENT_REQUESTS_CAPACITY,
             ))),
+            request_log: None,
+            request_log_max_capture_bytes:
+                crate::request_log::RequestLogConfig::default().max_capture_bytes,
             completion_cache: Arc::new(std::sync::Mutex::new(DeterministicCompletionCache::new(
                 DETERMINISTIC_COMPLETION_CACHE_CAPACITY,
             ))),
@@ -2189,6 +2198,9 @@ impl AppState {
             recent_requests: Arc::new(std::sync::Mutex::new(RecentRequestsRing::new(
                 RECENT_REQUESTS_CAPACITY,
             ))),
+            request_log: None,
+            request_log_max_capture_bytes:
+                crate::request_log::RequestLogConfig::default().max_capture_bytes,
             completion_cache: Arc::new(std::sync::Mutex::new(DeterministicCompletionCache::new(
                 DETERMINISTIC_COMPLETION_CACHE_CAPACITY,
             ))),

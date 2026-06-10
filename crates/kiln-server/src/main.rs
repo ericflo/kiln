@@ -578,6 +578,30 @@ async fn main() -> Result<()> {
         state.max_tracked_eval_jobs = cfg.max_tracked_jobs;
     }
 
+    // Durable request/response log: every inference request becomes a JSONL
+    // row under <adapter_dir>/.requests (rotated + gzipped + retention-capped)
+    // so production traffic is minable and trainable later.
+    if config.request_log.enabled {
+        let log_dir = config
+            .request_log
+            .dir
+            .clone()
+            .unwrap_or_else(|| state.adapter_dir.join(".requests"));
+        match kiln_server::request_log::RequestLogger::spawn(
+            log_dir.clone(),
+            config.request_log.clone(),
+        ) {
+            Ok(logger) => {
+                state.request_log = Some(logger);
+                state.request_log_max_capture_bytes = config.request_log.max_capture_bytes;
+                tracing::info!(dir = %log_dir.display(), "request log online");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, dir = %log_dir.display(), "request log disabled: could not initialize");
+            }
+        }
+    }
+
     // Spawn the background training queue worker
     let shutdown_flag = state.shutdown.clone();
     kiln_server::training_queue::spawn_training_worker(state.clone(), shutdown_flag.clone());
