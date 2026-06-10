@@ -12308,19 +12308,12 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    // #1082: `kiln_model::forward::rms_norm_fallback` is now a kt op, so the
-    // candle `Var`/`loss.backward()` autograd oracle this test relies on is
-    // SEVERED — candle's tape cannot trace through the kt RMSNorm, so
-    // `grads.get(hidden_var)` would not reflect the analytic formula. Per the
-    // documented policy (`kiln-candle-autograd-drops-attn-conv-grads`), the
-    // oracle must be ported to a kt-tape / finite-diff comparison (CP-4); this
-    // test is `#[ignore]`d rather than bridged into a falsely-passing/failing
-    // state. The body is bridged kt<->candle on the host purely so it still
-    // type-checks.
+    // The #1082 candle-drop left an `#[ignore]` here that belonged to a
+    // since-deleted candle-autograd gradient oracle; this test is pure CPU
+    // segment-boundary arithmetic and runs fine. The gradient oracle's
+    // replacement is `analytic_sft_tail_grad_matches_finite_difference`,
+    // already unignored.
     #[test]
-    #[ignore = "#1082: candle-autograd oracle severed by kt rms_norm_fallback; \
-                port to kt-tape/finite-diff oracle (CP-4)"]
-
     fn test_segment_boundaries() {
         // 32 layers, 4 segments → 8 each
         let segs = compute_segment_boundaries(32, 4);
