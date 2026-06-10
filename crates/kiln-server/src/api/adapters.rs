@@ -951,12 +951,14 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     (y, m, d)
 }
 
-/// Reject names that aren't safe single-segment identifiers. Read-only export
-/// of managed adapters only — never absolute paths, never path traversal.
-fn validate_adapter_name(name: &str) -> Result<(), ApiError> {
+/// Reject names that aren't safe single-segment identifiers — never absolute
+/// paths, never path traversal, never the dot-prefixed names reserved for
+/// kiln internals (`.composed/`, `.upload-tmp-*/`, `.eval/`). Shared by the
+/// adapter-management and training-submission surfaces so every adapter that
+/// training can create is one the API can manage.
+pub(crate) fn validate_adapter_name(name: &str) -> Result<(), ApiError> {
     if name.is_empty()
-        || name == "."
-        || name == ".."
+        || name.starts_with('.')
         || name.contains('/')
         || name.contains('\\')
         || name.contains("..")
