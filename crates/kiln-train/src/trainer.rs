@@ -1679,7 +1679,9 @@ fn sft_hyperparameters(
         rank: config.lora_rank,
         alpha: config.lora_alpha,
         alpha_over_rank,
-        learning_rate: config.learning_rate,
+        // Receipts record the RESOLVED learning rate — the value the
+        // optimizer actually stepped with — not the Option.
+        learning_rate: config.effective_learning_rate(),
         epochs: config.epochs,
         seed: effective_seed,
         shuffle: true,
@@ -1696,7 +1698,8 @@ fn grpo_hyperparameters(
         rank: config.lora_rank,
         alpha: config.lora_alpha,
         alpha_over_rank,
-        learning_rate: config.learning_rate,
+        // Resolved value, as in `sft_hyperparameters`.
+        learning_rate: config.effective_learning_rate(),
         epochs: 1,
         seed: effective_seed,
         shuffle: false,
@@ -2483,10 +2486,20 @@ pub fn sft_train(
     let backend = backend::for_device_kt(&device);
     let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
 
+    let learning_rate = config.effective_learning_rate();
+    if let Some(explicit) = config.learning_rate {
+        if let Some(warning) = crate::learning_rate_band_warning(
+            explicit,
+            crate::resolve_learning_rate(&config.optimizer, crate::TrainMode::Sft),
+        ) {
+            tracing::warn!(optimizer = ?config.optimizer, "SFT {warning}");
+        }
+    }
+
     tracing::info!(
         num_examples = examples.len(),
         epochs = config.epochs,
-        lr = config.learning_rate,
+        lr = learning_rate,
         rank = config.lora_rank,
         alpha = config.lora_alpha,
         adapter_name,
@@ -2612,7 +2625,7 @@ pub fn sft_train(
     // LoRA params so the on-device AdamW kernel's
     // `has_resident_activation(m/v)` gate passes (C1 fix — without this the
     // device path declines and a no-op interim corrupted the param).
-    let mut opt_state = make_opt_state(&params, config.optimizer, config.learning_rate, &device)?;
+    let mut opt_state = make_opt_state(&params, config.optimizer, learning_rate, &device)?;
     if let Some(state) = opt_state.as_ref() {
         state.register_with_backend(&*backend)?;
     }
@@ -2781,7 +2794,7 @@ pub fn sft_train(
                     &*backend,
                     &mut params,
                     &grads,
-                    config.learning_rate,
+                    learning_rate,
                     config.optimizer,
                     opt_state.as_mut(),
                 )?;
@@ -2969,12 +2982,21 @@ pub fn grpo_train(
     let mut lora_grad_norms = crate::train_receipt::LoraGradNormAccumulator::default();
     let mut phase_timings = GrpoBenchmarkTimings::default();
     let mut dynamic_groups_filtered = 0usize;
+    let learning_rate = config.effective_learning_rate();
+    if let Some(explicit) = config.learning_rate {
+        if let Some(warning) = crate::learning_rate_band_warning(
+            explicit,
+            crate::resolve_learning_rate(&config.optimizer, crate::TrainMode::Grpo),
+        ) {
+            tracing::warn!(optimizer = ?config.optimizer, "GRPO {warning}");
+        }
+    }
     tracing::info!(
         num_groups = groups.len(),
         total_completions,
         total_input_groups = groups.len(),
         total_input_completions = total_completions,
-        lr = config.learning_rate,
+        lr = learning_rate,
         kl_coeff = config.kl_coeff,
         clip_epsilon = config.clip_epsilon,
         rank = config.lora_rank,
@@ -3117,7 +3139,7 @@ pub fn grpo_train(
     // dispatches on-device against the registry buffers.
     params.register_with_backend(&*backend)?;
 
-    let mut opt_state = make_opt_state(&params, config.optimizer, config.learning_rate, &device)?;
+    let mut opt_state = make_opt_state(&params, config.optimizer, learning_rate, &device)?;
     // C1 fix: register per-param AdamW `m`/`v` device moments resident so the
     // on-device kernel fires with REAL distinct moments (not the param aliased
     // onto itself).
@@ -3804,9 +3826,18 @@ pub fn grpo_train_jsonl(
     let backend = backend::for_device_kt(&device);
     let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
 
+    let learning_rate = config.effective_learning_rate();
+    if let Some(explicit) = config.learning_rate {
+        if let Some(warning) = crate::learning_rate_band_warning(
+            explicit,
+            crate::resolve_learning_rate(&config.optimizer, crate::TrainMode::Grpo),
+        ) {
+            tracing::warn!(optimizer = ?config.optimizer, "GRPO {warning}");
+        }
+    }
     tracing::info!(
         dataset = %dataset_path.display(),
-        lr = config.learning_rate,
+        lr = learning_rate,
         kl_coeff = config.kl_coeff,
         clip_epsilon = config.clip_epsilon,
         rank = config.lora_rank,
@@ -3931,7 +3962,7 @@ pub fn grpo_train_jsonl(
 
     params.register_with_backend(&*backend)?;
 
-    let mut opt_state = make_opt_state(&params, config.optimizer, config.learning_rate, &device)?;
+    let mut opt_state = make_opt_state(&params, config.optimizer, learning_rate, &device)?;
     // C1 fix: register per-param AdamW `m`/`v` device moments resident so the
     // on-device kernel fires with REAL distinct moments (not the param aliased
     // onto itself).
@@ -5012,6 +5043,9 @@ fn train_tokenized_grpo_group_with_grad_norms(
 ) -> Result<GrpoGroupStepReport> {
     let skip_reference = matches!(config.reference_policy, ReferencePolicy::None);
 
+    // Same resolution as the `grpo_train` entry points — deterministic from
+    // the config, so the per-group helper doesn't need the value threaded in.
+    let learning_rate = config.effective_learning_rate();
     let advantages = compute_advantages(&tgroup.rewards, config.advantage_mode);
     let mut group_loss_sum = 0.0;
     let mut opt_state = opt_state;
@@ -5360,7 +5394,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 backend,
                 params,
                 &grads,
-                config.learning_rate,
+                learning_rate,
                 config.optimizer,
                 opt_state.as_deref_mut(),
             )?;
@@ -5402,7 +5436,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
             backend,
             params,
             &group_accum,
-            config.learning_rate,
+            learning_rate,
             config.optimizer,
             opt_state.as_deref_mut(),
         )?;
@@ -12568,7 +12602,7 @@ pub(crate) mod tests {
                              base_adapter: Option<&str>| {
                 let mut config = GrpoConfig::default();
                 config.dynamic_sampling = false;
-                config.learning_rate = 0.05;
+                config.learning_rate = Some(0.05);
                 config.lora_rank = 4;
                 config.lora_alpha = 8.0;
                 config.optimizer = Optimizer::Sgd;
@@ -13142,7 +13176,7 @@ pub(crate) mod tests {
         let (config, weights, tokenizer, examples) = build_perf_regression_cpu_fixture()?;
         let sft_config = crate::SftConfig {
             epochs: 1,
-            learning_rate: 1e-3,
+            learning_rate: Some(1e-3),
             lora_rank: 4,
             lora_alpha: 8.0,
             auto_load: false,
@@ -13256,7 +13290,7 @@ pub(crate) mod tests {
         let (config, weights, tokenizer, examples) = build_perf_regression_cpu_fixture()?;
         let sft_config = crate::SftConfig {
             epochs: 1,
-            learning_rate: 1e-3,
+            learning_rate: Some(1e-3),
             lora_rank: 4,
             lora_alpha: 8.0,
             auto_load: false,

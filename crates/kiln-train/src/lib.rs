@@ -253,12 +253,71 @@ fn default_muon_weight_decay() -> f32 {
     0.0
 }
 
+/// Which training mode a learning rate is being resolved for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrainMode {
+    Sft,
+    Grpo,
+    Opd,
+}
+
+/// Per-optimizer learning-rate default, used when a config omits
+/// `learning_rate`.
+///
+/// AdamW and SGD keep the legacy defaults (SFT 1e-4, GRPO/OPD 1e-5).
+/// Muon's orthogonalized, RMS-matched update is ~unit scale and wants a
+/// much larger step: SFT uses `kiln_optim::Muon::default_hp()`'s 2e-2,
+/// and GRPO/OPD scale the legacy AdamW SFT:GRPO ratio (10x down) by the
+/// same factor. The Muon GRPO/OPD band is an initial heuristic pending an
+/// empirical sweep; train receipts record the resolved value, so every
+/// run stays auditable either way.
+pub fn resolve_learning_rate(optimizer: &Optimizer, mode: TrainMode) -> f64 {
+    match (optimizer, mode) {
+        (Optimizer::Muon { .. }, TrainMode::Sft) => 2e-2,
+        (Optimizer::Muon { .. }, TrainMode::Grpo | TrainMode::Opd) => 2e-3,
+        (_, TrainMode::Sft) => 1e-4,
+        (_, TrainMode::Grpo | TrainMode::Opd) => 1e-5,
+    }
+}
+
+/// Warn when an explicit learning rate sits far outside the selected
+/// optimizer's band. The classic failure is an AdamW-era value (1e-4)
+/// submitted to a Muon run (band 2e-2) — it trains 200x too cold and
+/// silently produces a near-no-op adapter. Returns `None` inside the
+/// 50x band; ordinary tuning (a few x either way) never trips it.
+pub fn learning_rate_band_warning(explicit: f64, resolved_default: f64) -> Option<String> {
+    const BAND_RATIO: f64 = 50.0;
+    if !explicit.is_finite() || explicit <= 0.0 || resolved_default <= 0.0 {
+        return None;
+    }
+    let ratio = explicit / resolved_default;
+    if ratio > BAND_RATIO {
+        Some(format!(
+            "learning_rate {explicit:e} is {ratio:.0}x larger than this optimizer's \
+             default {resolved_default:e} — the run may diverge; omit learning_rate \
+             to use the per-optimizer default"
+        ))
+    } else if ratio < 1.0 / BAND_RATIO {
+        Some(format!(
+            "learning_rate {explicit:e} is {:.0}x smaller than this optimizer's \
+             default {resolved_default:e} — the run may train too cold to matter; \
+             omit learning_rate to use the per-optimizer default",
+            1.0 / ratio
+        ))
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SftConfig {
     #[serde(default = "default_epochs")]
     pub epochs: usize,
-    #[serde(default = "default_sft_lr")]
-    pub learning_rate: f64,
+    /// Learning rate. `None` (the default) resolves per optimizer at run
+    /// start — see [`resolve_learning_rate`]. Explicit values are used
+    /// verbatim; the train receipt records whichever value actually ran.
+    #[serde(default)]
+    pub learning_rate: Option<f64>,
     #[serde(default = "default_rank")]
     pub lora_rank: usize,
     #[serde(default = "default_alpha")]
@@ -304,9 +363,6 @@ fn default_auto_load() -> bool {
 fn default_epochs() -> usize {
     3
 }
-fn default_sft_lr() -> f64 {
-    1e-4
-}
 fn default_rank() -> usize {
     16
 }
@@ -314,11 +370,20 @@ fn default_alpha() -> f32 {
     32.0
 }
 
+impl SftConfig {
+    /// The explicit `learning_rate` when given, else the per-optimizer
+    /// default for SFT.
+    pub fn effective_learning_rate(&self) -> f64 {
+        self.learning_rate
+            .unwrap_or_else(|| resolve_learning_rate(&self.optimizer, TrainMode::Sft))
+    }
+}
+
 impl Default for SftConfig {
     fn default() -> Self {
         Self {
             epochs: default_epochs(),
-            learning_rate: default_sft_lr(),
+            learning_rate: None,
             lora_rank: default_rank(),
             lora_alpha: default_alpha(),
             base_adapter: None,
@@ -554,8 +619,11 @@ pub enum RewardFilterOnEmpty {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrpoConfig {
-    #[serde(default = "default_grpo_lr")]
-    pub learning_rate: f64,
+    /// Learning rate. `None` (the default) resolves per optimizer at run
+    /// start — see [`resolve_learning_rate`]. Explicit values are used
+    /// verbatim; the train receipt records whichever value actually ran.
+    #[serde(default)]
+    pub learning_rate: Option<f64>,
     #[serde(default = "default_kl_coeff")]
     pub kl_coeff: f64,
     /// Symmetric clip epsilon. When `clip_eps_high` is `None`, both the lower
@@ -681,9 +749,6 @@ pub struct GrpoConfig {
     pub loss: LossConfig,
 }
 
-fn default_grpo_lr() -> f64 {
-    1e-5
-}
 fn default_kl_coeff() -> f64 {
     0.1
 }
@@ -923,12 +988,19 @@ impl GrpoConfig {
             self.clip_eps_high.unwrap_or(self.clip_epsilon),
         )
     }
+
+    /// The explicit `learning_rate` when given, else the per-optimizer
+    /// default for GRPO.
+    pub fn effective_learning_rate(&self) -> f64 {
+        self.learning_rate
+            .unwrap_or_else(|| resolve_learning_rate(&self.optimizer, TrainMode::Grpo))
+    }
 }
 
 impl Default for GrpoConfig {
     fn default() -> Self {
         Self {
-            learning_rate: default_grpo_lr(),
+            learning_rate: None,
             kl_coeff: default_kl_coeff(),
             clip_epsilon: default_clip_eps(),
             clip_eps_high: None,
@@ -1036,6 +1108,82 @@ mod tests {
             serde_json::to_value(KlEstimator::default()).unwrap(),
             serde_json::json!("k1")
         );
+    }
+
+    /// Pin the full per-optimizer learning-rate table. AdamW/SGD are the
+    /// unchanged legacy defaults; Muon's SFT value is kiln-optim's
+    /// `Muon::default_hp()` lr, with GRPO/OPD scaled down by the legacy
+    /// AdamW SFT:GRPO ratio.
+    #[test]
+    fn learning_rate_resolution_table_snapshot() {
+        let adamw: Optimizer = serde_json::from_str(r#"{"kind": "adam_w"}"#).unwrap();
+        let muon = Optimizer::default();
+        let table = [
+            (&muon, TrainMode::Sft, 2e-2),
+            (&muon, TrainMode::Grpo, 2e-3),
+            (&muon, TrainMode::Opd, 2e-3),
+            (&adamw, TrainMode::Sft, 1e-4),
+            (&adamw, TrainMode::Grpo, 1e-5),
+            (&adamw, TrainMode::Opd, 1e-5),
+            (&Optimizer::Sgd, TrainMode::Sft, 1e-4),
+            (&Optimizer::Sgd, TrainMode::Grpo, 1e-5),
+            (&Optimizer::Sgd, TrainMode::Opd, 1e-5),
+        ];
+        for (optimizer, mode, expected) in table {
+            let resolved = resolve_learning_rate(optimizer, mode);
+            assert_eq!(
+                resolved, expected,
+                "resolve_learning_rate({optimizer:?}, {mode:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn learning_rate_serde_back_compat() {
+        // Explicit wire values still deserialize (full back-compat) …
+        let sft: SftConfig = serde_json::from_str(r#"{"learning_rate": 5e-5}"#).unwrap();
+        assert_eq!(sft.learning_rate, Some(5e-5));
+        let grpo: GrpoConfig = serde_json::from_str(r#"{"learning_rate": 5e-5}"#).unwrap();
+        assert_eq!(grpo.learning_rate, Some(5e-5));
+        // … and omitting the field means "resolve per optimizer".
+        let sft: SftConfig = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(sft.learning_rate, None);
+        let grpo: GrpoConfig = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(grpo.learning_rate, None);
+    }
+
+    #[test]
+    fn effective_learning_rate_prefers_explicit_value() {
+        let mut sft = SftConfig::default();
+        assert_eq!(sft.effective_learning_rate(), 2e-2); // Muon default
+        sft.learning_rate = Some(3e-4);
+        assert_eq!(sft.effective_learning_rate(), 3e-4);
+
+        let mut grpo = GrpoConfig::default();
+        assert_eq!(grpo.effective_learning_rate(), 2e-3); // Muon default
+        grpo.learning_rate = Some(7e-6);
+        assert_eq!(grpo.effective_learning_rate(), 7e-6);
+
+        let adamw_sft = SftConfig {
+            optimizer: serde_json::from_str(r#"{"kind": "adam_w"}"#).unwrap(),
+            ..SftConfig::default()
+        };
+        assert_eq!(adamw_sft.effective_learning_rate(), 1e-4);
+    }
+
+    #[test]
+    fn learning_rate_band_warning_fires_only_past_50x() {
+        // The motivating bug: AdamW-era 1e-4 against Muon's 2e-2 (200x cold).
+        assert!(learning_rate_band_warning(1e-4, 2e-2).is_some());
+        // 200x hot fires too.
+        assert!(learning_rate_band_warning(4.0, 2e-2).is_some());
+        // Ordinary tuning (10x either way) stays quiet.
+        assert!(learning_rate_band_warning(2e-3, 2e-2).is_none());
+        assert!(learning_rate_band_warning(2e-1, 2e-2).is_none());
+        // Exactly on band, and degenerate inputs, stay quiet.
+        assert!(learning_rate_band_warning(2e-2, 2e-2).is_none());
+        assert!(learning_rate_band_warning(0.0, 2e-2).is_none());
+        assert!(learning_rate_band_warning(f64::NAN, 2e-2).is_none());
     }
 
     #[test]

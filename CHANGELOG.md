@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- training: **learning rates now resolve per optimizer**. `learning_rate` is
+  optional in the SFT/GRPO/OPD configs; when omitted, the trainer picks the
+  selected optimizer's band — Muon (the default): SFT 2e-2, GRPO/OPD 2e-3;
+  AdamW/SGD keep the legacy defaults (SFT 1e-4, GRPO/OPD 1e-5). This fixes a
+  silent foot-gun from the Muon flip: the old AdamW-era defaults trained Muon
+  100–400x too cold. Explicit values still deserialize and are used verbatim
+  (full wire back-compat), train receipts record the *resolved* value, and an
+  explicit lr more than 50x outside the optimizer's band logs a warning at
+  run start. The dashboard's SFT/GRPO/OPD learning-rate fields now default to
+  blank ("auto (per optimizer)") and omit the field from the request when
+  blank; `kiln train sft --lr` is likewise optional. The Muon GRPO/OPD band
+  scales the legacy AdamW SFT:GRPO ratio and is an initial heuristic pending
+  an empirical sweep.
 - training: **Muon is now the default optimizer** for every training mode
   (SFT, GRPO, on-policy distillation / OPD, and the judge-LoRA flywheel that
   rides the OPD path). Muon is momentum-orthogonalized SGD — it keeps one

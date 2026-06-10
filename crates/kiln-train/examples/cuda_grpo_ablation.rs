@@ -697,7 +697,7 @@ fn main() -> Result<()> {
     // Base config: kiln Phase-1+2 defaults (which still match historical
     // behavior). Mode::apply layers the desired overrides on top.
     let base = GrpoConfig {
-        learning_rate: args.learning_rate,
+        learning_rate: Some(args.learning_rate),
         lora_rank: args.lora_rank,
         lora_alpha: args.lora_alpha,
         output_name: Some(args.adapter_name.clone()),
@@ -767,7 +767,7 @@ fn main() -> Result<()> {
         config.dynamic_sampling,
         config.is_level,
         config.reference_policy,
-        config.learning_rate,
+        config.effective_learning_rate(),
         config.lora_rank,
         config.lora_alpha,
         args.seed,

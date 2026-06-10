@@ -641,12 +641,13 @@ pub struct OpdConfig {
     #[serde(default = "default_opd_clip_eps")]
     pub clip_epsilon: f64,
 
-    /// Learning rate. §6: 10× the FullFT optimum (Schulman 2025 LoRA
-    /// Without Regret), which for kiln's bf16 training is ~1e-5. The
-    /// per-model auto-pick rule lives in `kiln-server`; this is the
-    /// safe fallback.
-    #[serde(default = "default_opd_lr")]
-    pub learning_rate: f64,
+    /// Learning rate. `None` (the default) resolves per optimizer at run
+    /// start — see [`crate::resolve_learning_rate`] (AdamW/SGD keep the
+    /// legacy 1e-5: §6's 10× the FullFT optimum per Schulman 2025 LoRA
+    /// Without Regret). Explicit values are used verbatim; the train
+    /// receipt records whichever value actually ran.
+    #[serde(default)]
+    pub learning_rate: Option<f64>,
 
     /// LoRA rank. §6: 16 (laptop) / 32 (prosumer) / 64+ (corporate).
     /// The trainer doesn't know its tier; the kiln-server endpoint
@@ -719,9 +720,6 @@ fn default_opd_max_tokens() -> usize {
 fn default_opd_clip_eps() -> f64 {
     0.2
 }
-fn default_opd_lr() -> f64 {
-    1e-5
-}
 fn default_opd_checkpoint_interval() -> Option<usize> {
     // Mid-flight checkpoint cadence. With OPD at ~150s/step (asymmetric
     // teacher conditioning, no skip-rate floor) a 25-step interval saves
@@ -735,6 +733,15 @@ fn default_auto_load() -> bool {
 }
 fn default_opd_epochs() -> usize {
     1
+}
+
+impl OpdConfig {
+    /// The explicit `learning_rate` when given, else the per-optimizer
+    /// default for OPD.
+    pub fn effective_learning_rate(&self) -> f64 {
+        self.learning_rate
+            .unwrap_or_else(|| crate::resolve_learning_rate(&self.optimizer, crate::TrainMode::Opd))
+    }
 }
 
 impl Default for OpdConfig {
@@ -751,7 +758,7 @@ impl Default for OpdConfig {
             stable_opd: StableOpdMode::default(),
             discount: 0.0,
             clip_epsilon: default_opd_clip_eps(),
-            learning_rate: default_opd_lr(),
+            learning_rate: None,
             lora_rank: default_rank(),
             lora_alpha: default_alpha(),
             allow_high_lora_scale: false,
@@ -2415,13 +2422,23 @@ pub fn opd_train(
         config.samples_per_prompt
     };
 
+    let learning_rate = config.effective_learning_rate();
+    if let Some(explicit) = config.learning_rate {
+        if let Some(warning) = crate::learning_rate_band_warning(
+            explicit,
+            crate::resolve_learning_rate(&config.optimizer, crate::TrainMode::Opd),
+        ) {
+            tracing::warn!(optimizer = ?config.optimizer, "OPD {warning}");
+        }
+    }
+
     tracing::info!(
         num_prompts = prompts.len(),
         samples_per_prompt = effective_samples_per_prompt,
         config_samples_per_prompt = config.samples_per_prompt,
         top_k = config.top_k,
         loss = ?config.loss,
-        lr = config.learning_rate,
+        lr = learning_rate,
         rank = config.lora_rank,
         alpha = config.lora_alpha,
         adapter_name,
@@ -2483,7 +2500,7 @@ pub fn opd_train(
             weight_decay,
         } => {
             let state = params.allocate_adamw_state(
-                config.learning_rate,
+                learning_rate,
                 beta1,
                 beta2,
                 eps,
@@ -2500,7 +2517,7 @@ pub fn opd_train(
             weight_decay,
         } => {
             let state = params.allocate_muon_state(
-                config.learning_rate,
+                learning_rate,
                 momentum,
                 nesterov,
                 ns_iters,
@@ -3075,7 +3092,7 @@ pub fn opd_train(
                             &*backend_rt,
                             &mut params,
                             &kt_grads,
-                            config.learning_rate,
+                            learning_rate,
                             config.optimizer,
                             opt_state.as_mut(),
                         )?;
@@ -3755,7 +3772,9 @@ fn write_opd_train_receipt_best_effort(
             rank: config.lora_rank,
             alpha: config.lora_alpha,
             alpha_over_rank,
-            learning_rate: config.learning_rate,
+            // Receipts record the RESOLVED learning rate — the value the
+            // optimizer actually stepped with — not the Option.
+            learning_rate: config.effective_learning_rate(),
             epochs: config.epochs.max(1),
             shuffle: false,
             seed: config.seed,

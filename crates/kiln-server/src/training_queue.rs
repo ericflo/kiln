@@ -1233,7 +1233,9 @@ fn run_distill_refresh(
     let midtrain_name = format!("{adapter_name}-midtrain");
     let midtrain_config = kiln_train::SftConfig {
         epochs: 1,
-        learning_rate: 1e-4,
+        // Resolved per optimizer at run start (the request's optimizer is
+        // forwarded below) — a pinned AdamW-era 1e-4 would train Muon cold.
+        learning_rate: None,
         lora_rank: req.config.lora_rank,
         lora_alpha: req.config.lora_alpha,
         base_adapter: req.config.base_adapter.clone(),

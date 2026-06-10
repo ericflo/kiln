@@ -175,7 +175,7 @@ fn run_one(
 
     let config = SftConfig {
         epochs: 1,
-        learning_rate: 1e-4,
+        learning_rate: None,
         lora_rank: 8,
         lora_alpha: 16.0,
         base_adapter: None,

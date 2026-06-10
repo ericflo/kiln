@@ -132,7 +132,7 @@ function validateSftPayload(body) {
   if (messages[0]?.role !== 'user' || messages[1]?.role !== 'assistant') return 'SFT sample messages should preserve chat roles';
   if (body?.config?.output_name !== 'sft-adapter') return 'SFT output_name should be nested under config';
   if (body?.config?.auto_load !== true) return 'SFT auto_load should be true by default';
-  if (!isFiniteNumber(body?.config?.learning_rate) || body.config.learning_rate !== 0.0002) return 'SFT learning_rate should be numeric';
+  if ('learning_rate' in (body?.config || {})) return 'SFT learning_rate should be omitted when the field is blank (server resolves the per-optimizer default)';
   if (body?.config?.epochs !== 3) return 'SFT epochs should be numeric and nested under config';
   if (body?.config?.lora_rank !== 8) return 'SFT lora_rank should be numeric and nested under config';
   if ('output_name' in body || 'adapter_name' in body || 'num_epochs' in body) return 'SFT payload should not use stale top-level training config fields';
@@ -147,7 +147,7 @@ function validateGrpoPayload(body) {
   if (!group.completions.every((completion) => typeof completion.text === 'string' && isFiniteNumber(completion.reward))) return 'GRPO completions should include text and numeric rewards';
   if (body?.config?.output_name !== 'grpo-adapter') return 'GRPO output_name should be nested under config';
   if (body?.config?.auto_load !== true) return 'GRPO auto_load should be true by default';
-  if (!isFiniteNumber(body?.config?.learning_rate) || body.config.learning_rate !== 0.00005) return 'GRPO learning_rate should be numeric';
+  if ('learning_rate' in (body?.config || {})) return 'GRPO learning_rate should be omitted when the field is blank (server resolves the per-optimizer default)';
   if (!isFiniteNumber(body?.config?.kl_coeff) || body.config.kl_coeff !== 0.1) return 'GRPO kl_coeff should be numeric';
   if (body?.config?.lora_rank !== 8) return 'GRPO lora_rank should be numeric and nested under config';
   if ('epochs' in (body?.config || {}) || 'output_name' in body || 'adapter_name' in body || 'num_epochs' in body) return 'GRPO payload should not use stale SFT/top-level training config fields';
