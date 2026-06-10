@@ -134,6 +134,40 @@ fn default_pi_sessions_dir() -> PathBuf {
     }
 }
 
+/// How deep below the sessions root to look for `*.jsonl` files. pi nests
+/// sessions one level down under a per-project slug directory
+/// (`sessions/<project-slug>/<session>.jsonl`); depth 3 leaves headroom for
+/// a future extra level without risking a runaway walk of `$HOME`.
+const SESSIONS_SCAN_MAX_DEPTH: usize = 3;
+
+/// Recursively collect pi session JSONL files under `dir` (depth-capped) and
+/// parse them into `index`. Returns how many sessions were indexed. Unreadable
+/// subdirectories are skipped with a warning rather than failing the scan.
+fn scan_sessions_dir(dir: &Path, depth_left: usize, index: &mut AgentTraceIndex) -> usize {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!(dir = %dir.display(), error = %e, "agent trace scan: read_dir failed");
+            return 0;
+        }
+    };
+    let mut count = 0;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            if depth_left > 0 {
+                count += scan_sessions_dir(&p, depth_left - 1, index);
+            }
+        } else if p.is_file() && p.extension().is_some_and(|s| s == "jsonl") {
+            if let Some(trace) = parse_pi_session(&p) {
+                index.traces.insert(trace.id.clone(), trace);
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
 async fn discover_traces(
     State(state): State<AppState>,
     Json(req): Json<DiscoverRequest>,
@@ -149,19 +183,7 @@ async fn discover_traces(
         )));
     }
     let mut index = AgentTraceIndex::default();
-    let mut count = 0;
-    for entry in std::fs::read_dir(&path)
-        .map_err(|e| ApiError::internal(format!("read_dir {}: {e}", path.display())))?
-    {
-        let entry = entry.map_err(|e| ApiError::internal(format!("dir entry: {e}")))?;
-        let p = entry.path();
-        if p.is_file() && p.extension().is_some_and(|s| s == "jsonl") {
-            if let Some(trace) = parse_pi_session(&p) {
-                index.traces.insert(trace.id.clone(), trace);
-                count += 1;
-            }
-        }
-    }
+    let count = scan_sessions_dir(&path, SESSIONS_SCAN_MAX_DEPTH, &mut index);
     let out_path = state.adapter_dir.join("agent_traces.json");
     if let Err(e) = index.save_to_path(&out_path) {
         tracing::warn!(error = %e, "failed to persist agent_traces.json");
@@ -207,6 +229,7 @@ fn parse_pi_session(path: &Path) -> Option<AgentTrace> {
     let text = std::str::from_utf8(&bytes).ok()?;
     let parsed_pi = parse_pi_session_str(text, false);
     let mut id: Option<String> = None;
+    let mut cwd: Option<String> = None;
     let mut parent_id: Option<String> = None;
     let mut num_turns = 0;
     let mut num_tool_calls = 0;
@@ -229,6 +252,14 @@ fn parse_pi_session(path: &Path) -> Option<AgentTrace> {
         if id.is_none() {
             if let Some(s) = v.get("id").and_then(|x| x.as_str()) {
                 id = Some(s.to_string());
+            }
+        }
+        if cwd.is_none() {
+            // Pi's session header row ({"type":"session", ..., "cwd": "..."})
+            // names the real working directory — the parent path is only the
+            // slug-encoded (and ambiguous) project directory.
+            if let Some(s) = v.get("cwd").and_then(|x| x.as_str()) {
+                cwd = Some(s.to_string());
             }
         }
         if parent_id.is_none() {
@@ -272,7 +303,13 @@ fn parse_pi_session(path: &Path) -> Option<AgentTrace> {
         if let Some(rc) = v.get("exit_code").and_then(|x| x.as_i64()) {
             last_exit_code = Some(rc);
         }
-        if let Some(ts) = v.get("at").and_then(|x| x.as_str()) {
+        // Legacy summary rows stamp "at"; the Pi 0.75.x event stream stamps
+        // "timestamp". Accept both so real sessions get first/last times.
+        if let Some(ts) = v
+            .get("at")
+            .or_else(|| v.get("timestamp"))
+            .and_then(|x| x.as_str())
+        {
             let ts = ts.to_string();
             if first_event_at.is_none() {
                 first_event_at = Some(ts.clone());
@@ -286,10 +323,11 @@ fn parse_pi_session(path: &Path) -> Option<AgentTrace> {
             .then(|| path.file_stem().map(|stem| stem.to_string_lossy().to_string()))
             .flatten()
     })?;
-    let working_dir = path
-        .parent()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
+    let working_dir = cwd.unwrap_or_else(|| {
+        path.parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    });
     Some(AgentTrace {
         id,
         working_dir,
@@ -417,6 +455,89 @@ mod tests {
             kiln_train::trajectory::TurnKind::Observation
         );
         assert_eq!(trace.trajectory[1].content, "ok\n");
+    }
+
+    #[test]
+    fn scan_finds_sessions_nested_under_project_slug_dirs() {
+        // Real pi layout: sessions/<project-slug>/<session>.jsonl — the
+        // pre-recursive scan indexed zero of these.
+        let dir = tempdir().unwrap();
+        let slug_dir = dir.path().join("--home-user-Development-proj--");
+        std::fs::create_dir(&slug_dir).unwrap();
+        write_jsonl(
+            &slug_dir.join("nested.jsonl"),
+            &[
+                json!({"type":"session","id":"nested-session","timestamp":"2026-06-01T10:00:00Z","cwd":"/home/user/Development/proj"}),
+                json!({"type":"message","timestamp":"2026-06-01T10:00:05Z","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}),
+            ],
+        );
+        // A flat file at the root must still be picked up.
+        write_jsonl(
+            &dir.path().join("flat.jsonl"),
+            &[json!({"id":"flat-session","at":"2026-06-01T11:00:00Z","messages":[{"role":"user","content":"hi"}]})],
+        );
+        // Non-jsonl files and too-deep nesting are ignored.
+        std::fs::write(slug_dir.join("notes.txt"), "ignore me").unwrap();
+
+        let mut index = AgentTraceIndex::default();
+        let count = scan_sessions_dir(dir.path(), SESSIONS_SCAN_MAX_DEPTH, &mut index);
+
+        assert_eq!(count, 2);
+        assert!(index.traces.contains_key("nested-session"));
+        assert!(index.traces.contains_key("flat-session"));
+    }
+
+    #[test]
+    fn scan_depth_cap_stops_runaway_walks() {
+        let dir = tempdir().unwrap();
+        let mut deep = dir.path().to_path_buf();
+        for level in 0..5 {
+            deep = deep.join(format!("level{level}"));
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        write_jsonl(
+            &deep.join("too-deep.jsonl"),
+            &[json!({"id":"too-deep","messages":[{"role":"user","content":"hi"}]})],
+        );
+
+        let mut index = AgentTraceIndex::default();
+        let count = scan_sessions_dir(dir.path(), SESSIONS_SCAN_MAX_DEPTH, &mut index);
+
+        assert_eq!(count, 0);
+        assert!(index.traces.is_empty());
+    }
+
+    #[test]
+    fn parse_session_header_supplies_working_dir_and_timestamps() {
+        // The session header's cwd is the real working directory; the parent
+        // path is only pi's slug-encoded (ambiguous) project name. Event rows
+        // stamp "timestamp" in Pi 0.75.x, not the legacy "at".
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("019e7acf.jsonl");
+        write_jsonl(
+            &p,
+            &[
+                json!({"type":"session","version":3,"id":"019e7acf","timestamp":"2026-05-30T21:35:00.144Z","cwd":"/tmp/rlm-agentic-test"}),
+                json!({"type":"message","timestamp":"2026-05-30T21:35:02.000Z","message":{"role":"user","content":[{"type":"text","text":"go"}]}}),
+                json!({"type":"message","timestamp":"2026-05-30T21:36:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}),
+            ],
+        );
+        let t = parse_pi_session(&p).unwrap();
+        assert_eq!(t.working_dir, "/tmp/rlm-agentic-test");
+        assert_eq!(t.first_event_at.as_deref(), Some("2026-05-30T21:35:00.144Z"));
+        assert_eq!(t.last_event_at.as_deref(), Some("2026-05-30T21:36:00.000Z"));
+    }
+
+    #[test]
+    fn parse_without_session_header_falls_back_to_parent_dir() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("legacy.jsonl");
+        write_jsonl(
+            &p,
+            &[json!({"id":"legacy","at":"2026-05-15T10:00:00Z","messages":[{"role":"user","content":"hi"}]})],
+        );
+        let t = parse_pi_session(&p).unwrap();
+        assert_eq!(t.working_dir, dir.path().display().to_string());
     }
 
     #[test]
