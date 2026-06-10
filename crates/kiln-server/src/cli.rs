@@ -546,16 +546,15 @@ pub enum Commands {
         file: Option<String>,
     },
 
-    /// §10.14: merge kiln into pi's models/settings config.
+    /// Configure pi to use this Kiln server as its model backend.
     ///
-    /// The canonical pi + kiln pipeline (§10.14 in the grand plan):
+    /// The full pi + kiln loop:
     ///
-    ///   brew install kiln pi
     ///   kiln serve &
     ///   kiln pi-setup       # one-time
-    ///   kiln judge distill  # one-time, §10.6.1
-    ///   pi                  # use normally; sessions captured
-    ///   kiln self-improve   # auto-runs Saturday
+    ///   pi                  # use normally; sessions are captured
+    ///   kiln self-improve   # retrain from the week's sessions
+    // (Grand plan §10.14 — the canonical pi + kiln pipeline.)
     #[command(name = "pi-setup", long_about = PI_SETUP_OVERVIEW)]
     PiSetup {
         /// Override the kiln server URL. `/v1` is appended when omitted.
@@ -567,12 +566,14 @@ pub enum Commands {
         out: Option<String>,
     },
 
-    /// §10.6 self-distillation engine — the "centerpiece" of the
-    /// grand plan's agentic deployment.
+    /// Train and maintain a local judge LoRA that scores agent turns.
+    // (Grand plan §10.6 — the self-distillation engine.)
     #[command(subcommand, name = "judge", long_about = JUDGE_OVERVIEW)]
     Judge(JudgeCommands),
 
-    /// §10.6.2 + §10.14 — kick the weekly self-improve loop.
+    /// Run the weekly self-improvement loop: judge-score recent agent
+    /// sessions, then train on the results.
+    // (Grand plan §10.6.2 + §10.14.)
     #[command(name = "self-improve", long_about = SELF_IMPROVE_OVERVIEW)]
     SelfImprove {
         /// Server URL.
@@ -584,17 +585,18 @@ pub enum Commands {
         /// Judge LoRA alias.
         #[arg(long, default_value = "judge-pi-v1")]
         judge: String,
-        /// Disable the §10.6.4 CRISP terseness pass.
+        /// Skip the CRISP terseness pass (training the model to reach the
+        /// same outcomes with fewer tokens).
         #[arg(long, default_value_t = false)]
         no_crisp: bool,
     },
 }
 
-/// §10.6 subcommands.
+/// `kiln judge` subcommands. (Grand plan §10.6.)
 #[derive(Subcommand)]
 pub enum JudgeCommands {
-    /// §10.6.1 — distil a turn-judge LoRA from the configured 27B
-    /// teacher's multi-axis scoring of (turn, context) pairs.
+    /// Distill a turn-judge LoRA from a teacher model's scoring of
+    /// (turn, context) pairs. Requires a configured teacher alias.
     Distill {
         /// Server URL.
         #[arg(long, default_value = "http://localhost:8420")]
@@ -606,8 +608,8 @@ pub enum JudgeCommands {
         #[arg(long, default_value = "qwen3.6-27b@local")]
         teacher: String,
     },
-    /// §10.6.3 drift check — periodically re-score with the 27B
-    /// teacher and refresh the judge if agreement < 80%.
+    /// Re-score a sample with the teacher and refresh the judge LoRA
+    /// when agreement drops below 80%.
     DriftCheck {
         /// Server URL.
         #[arg(long, default_value = "http://localhost:8420")]
@@ -621,18 +623,21 @@ pub enum JudgeCommands {
     },
 }
 
-const PI_SETUP_OVERVIEW: &str = "Merge kiln into ~/.pi/agent/models.json and settings.json.\n\
-Backs up existing files first and preserves unrelated pi providers/settings.\n\
-Part of the §10.14 canonical pi + kiln pipeline.";
+const PI_SETUP_OVERVIEW: &str = "Point pi at this Kiln server.\n\
+Merges a kiln-local provider into ~/.pi/agent/models.json and settings.json,\n\
+backing up existing files first and preserving unrelated providers/settings.";
 
-const JUDGE_OVERVIEW: &str = "§10.6 self-distillation engine.\n\
-Distill a turn-judge LoRA once (judge distill), then run the perpetual\n\
-self-improve loop forever (kiln self-improve). Drift-check periodically.";
+const JUDGE_OVERVIEW: &str = "Train and maintain a local judge LoRA for scoring agent turns.\n\
+Distill it once from a teacher model (kiln judge distill — requires a\n\
+configured teacher alias, default qwen3.6-27b@local), then let\n\
+`kiln self-improve` use it weekly. Re-check drift periodically with\n\
+`kiln judge drift-check`.";
 
-const SELF_IMPROVE_OVERVIEW: &str = "§10.6.2 + §10.14 — kick the weekly self-improve loop.\n\
-Scores the week's rollouts with the local judge LoRA, runs GRPO with\n\
-judge-derived advantages, optionally engages the §10.6.4 CRISP\n\
-terseness pass on successful trajectories.";
+const SELF_IMPROVE_OVERVIEW: &str = "Run the weekly self-improvement loop.\n\
+Scores recent agent sessions with the local judge LoRA, runs GRPO with\n\
+judge-derived advantages, and (unless --no-crisp) trains a terseness\n\
+pass on successful trajectories. Needs a judge LoRA from `kiln judge\n\
+distill` first.";
 
 #[derive(Subcommand)]
 pub enum TrainCommands {
@@ -2456,7 +2461,10 @@ pub async fn run_pi_setup(url: &str, out: Option<&str>) -> anyhow::Result<()> {
         PI_MODEL_ID
     );
     println!(
-        "  Next: {} once, then use pi normally; {} on Saturdays.",
+        "  Next: just use pi normally — your sessions become training data."
+    );
+    println!(
+        "  Optional: {} (needs a teacher model) enables {} for weekly retraining.",
         style("kiln judge distill").cyan(),
         style("kiln self-improve").cyan(),
     );
