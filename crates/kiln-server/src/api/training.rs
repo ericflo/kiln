@@ -271,6 +271,9 @@ async fn submit_sft(
 
     let num_examples = req.examples.len();
     let job_id = uuid::Uuid::new_v4().to_string();
+    if let Some(name) = req.config.output_name.as_deref() {
+        super::adapters::validate_adapter_name(name)?;
+    }
     let adapter_name = req
         .config
         .output_name
@@ -433,6 +436,9 @@ async fn submit_grpo(
         }
     };
     let job_id = uuid::Uuid::new_v4().to_string();
+    if let Some(name) = req.config.output_name.as_deref() {
+        super::adapters::validate_adapter_name(name)?;
+    }
     let adapter_name = req
         .config
         .output_name
@@ -593,6 +599,9 @@ async fn submit_opd(
     }
 
     let job_id = uuid::Uuid::new_v4().to_string();
+    if let Some(name) = req.config.output_name.as_deref() {
+        super::adapters::validate_adapter_name(name)?;
+    }
     let adapter_name = req
         .config
         .output_name
@@ -712,6 +721,7 @@ async fn submit_distill_refresh(
             "DistillRefresh: `name` must be non-empty".to_string(),
         ));
     }
+    super::adapters::validate_adapter_name(&req.name)?;
     if req.behavioural_teacher.trim().is_empty() {
         return Err(ApiError::training_invalid_request(
             "DistillRefresh: `behavioural_teacher` alias must be non-empty".to_string(),
@@ -802,6 +812,7 @@ async fn submit_distill_merge(
             "distill_merge: `name` must be non-empty".to_string(),
         ));
     }
+    super::adapters::validate_adapter_name(&req.name)?;
     enforce_queue_caps(&state)?;
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = req.name.clone();
@@ -833,6 +844,7 @@ async fn submit_distill_pump(
             "distill/pump: `teacher` alias must be non-empty".to_string(),
         ));
     }
+    super::adapters::validate_adapter_name(&req.name)?;
     enforce_queue_caps(&state)?;
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = req.name.clone();
@@ -864,6 +876,7 @@ async fn submit_distill_self(
             "distill/self: `name` must be non-empty".to_string(),
         ));
     }
+    super::adapters::validate_adapter_name(&req.name)?;
     enforce_queue_caps(&state)?;
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = req.name.clone();

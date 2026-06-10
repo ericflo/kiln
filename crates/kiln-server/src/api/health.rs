@@ -475,6 +475,9 @@ fn count_adapter_dirs(dir: &std::path::Path) -> usize {
             entries
                 .filter_map(|e| e.ok())
                 .filter(|e| e.path().is_dir())
+                // Dot-prefixed names are kiln internals (.composed,
+                // .upload-tmp-*, .eval, .requests, .kiln-jobs), not adapters.
+                .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
                 .count()
         })
         .unwrap_or(0)
