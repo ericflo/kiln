@@ -611,6 +611,31 @@ kernel void {entry}(
         param[gid] = ({ty})p;
     }}
 }}
+"#
+    );
+    let pipeline = op_pipeline(companion, &src, &entry)?;
+    let encoder = companion
+        .command_encoder()
+        .map_err(|e| Error::Msg(format!("metal_kernels::adamw_step: encoder: {e:?}")))?;
+    encoder.set_label("kt_adamw_step");
+    encoder.set_compute_pipeline_state(&pipeline);
+    encoder.set_buffer(0, Some(param), 0);
+    encoder.set_buffer(1, Some(grad), 0);
+    encoder.set_buffer(2, Some(first_moment), 0);
+    encoder.set_buffer(3, Some(second_moment), 0);
+    let n_u = n as u32;
+    encoder.set_bytes(4, &n_u);
+    encoder.set_bytes(5, &lr);
+    encoder.set_bytes(6, &beta1);
+    encoder.set_bytes(7, &beta2);
+    encoder.set_bytes(8, &eps);
+    encoder.set_bytes(9, &weight_decay);
+    encoder.set_bytes(10, &bc1);
+    encoder.set_bytes(11, &bc2);
+    dispatch_1d(&encoder, n);
+    drop(encoder);
+    Ok(())
+}
 
 // ----------------------------------------------------------------------
 // muon_step — kiln-owned fused on-device Muon (momentum-orthogonalized SGD;
@@ -921,31 +946,6 @@ kernel void {entry}(
         depth: 1,
     };
     encoder.dispatch_thread_groups(groups, threads);
-    drop(encoder);
-    Ok(())
-}
-"#
-    );
-    let pipeline = op_pipeline(companion, &src, &entry)?;
-    let encoder = companion
-        .command_encoder()
-        .map_err(|e| Error::Msg(format!("metal_kernels::adamw_step: encoder: {e:?}")))?;
-    encoder.set_label("kt_adamw_step");
-    encoder.set_compute_pipeline_state(&pipeline);
-    encoder.set_buffer(0, Some(param), 0);
-    encoder.set_buffer(1, Some(grad), 0);
-    encoder.set_buffer(2, Some(first_moment), 0);
-    encoder.set_buffer(3, Some(second_moment), 0);
-    let n_u = n as u32;
-    encoder.set_bytes(4, &n_u);
-    encoder.set_bytes(5, &lr);
-    encoder.set_bytes(6, &beta1);
-    encoder.set_bytes(7, &beta2);
-    encoder.set_bytes(8, &eps);
-    encoder.set_bytes(9, &weight_decay);
-    encoder.set_bytes(10, &bc1);
-    encoder.set_bytes(11, &bc2);
-    dispatch_1d(&encoder, n);
     drop(encoder);
     Ok(())
 }
