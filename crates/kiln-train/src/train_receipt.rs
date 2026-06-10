@@ -175,6 +175,11 @@ pub struct HyperparameterReceipt {
     pub learning_rate: f64,
     pub epochs: usize,
     pub seed: Option<u64>,
+    /// True when example order was shuffled per epoch (SFT). Recorded so a
+    /// receipt fully describes the data order a run saw; `seed` makes it
+    /// reproducible.
+    #[serde(default)]
+    pub shuffle: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1746,6 +1751,7 @@ mod tests {
                 learning_rate: 1e-4,
                 epochs: 1,
                 seed: Some(42),
+                shuffle: false,
             },
             serde_json::json!({"epochs": 1}),
         );
@@ -1798,6 +1804,7 @@ mod tests {
                 learning_rate: 1e-4,
                 epochs: 1,
                 seed: Some(7),
+                shuffle: false,
             },
             serde_json::json!({"adapter_smoke_test": true}),
         );
@@ -1870,6 +1877,7 @@ mod tests {
                 learning_rate: 1e-4,
                 epochs: 1,
                 seed: Some(9),
+                shuffle: false,
             },
             serde_json::json!({"base_adapter": "parent"}),
         );
@@ -1909,6 +1917,7 @@ mod tests {
                 learning_rate: 1e-5,
                 epochs: 1,
                 seed: None,
+                shuffle: false,
             },
             serde_json::json!({}),
         )

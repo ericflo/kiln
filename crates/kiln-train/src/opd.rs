@@ -3757,6 +3757,7 @@ fn write_opd_train_receipt_best_effort(
             alpha_over_rank,
             learning_rate: config.learning_rate,
             epochs: config.epochs.max(1),
+            shuffle: false,
             seed: config.seed,
         },
         serde_json::to_value(config).unwrap_or(serde_json::Value::Null),

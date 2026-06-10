@@ -1651,6 +1651,24 @@ fn resolve_and_validate_base_adapter(
     Ok(Some(base_dir))
 }
 
+/// Deterministic per-epoch permutation of `0..n` (Fisher-Yates seeded by
+/// `seed` + epoch). SFT previously replayed the dataset in identical order
+/// every epoch at batch size 1, so late examples always saw the
+/// freshest weights and inter-example gradient correlation repeated
+/// epoch over epoch.
+fn epoch_order(seed: u64, epoch: usize, n: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..n).collect();
+    // splitmix-style epoch mix so epoch streams are decorrelated even for
+    // adjacent epoch numbers.
+    let mixed = seed ^ (epoch as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut rng = StdRng::seed_from_u64(mixed);
+    for i in (1..n).rev() {
+        let j = rng.random_range(0..=i);
+        order.swap(i, j);
+    }
+    order
+}
+
 fn sft_hyperparameters(
     config: &SftConfig,
     effective_seed: Option<u64>,
@@ -1664,6 +1682,7 @@ fn sft_hyperparameters(
         learning_rate: config.learning_rate,
         epochs: config.epochs,
         seed: effective_seed,
+        shuffle: true,
     }
 }
 
@@ -1680,6 +1699,7 @@ fn grpo_hyperparameters(
         learning_rate: config.learning_rate,
         epochs: 1,
         seed: effective_seed,
+        shuffle: false,
     }
 }
 
@@ -2680,10 +2700,16 @@ pub fn sft_train(
 
         let pb = make_step_progress(total_steps, "sft training");
 
+        // Shuffle example order per epoch. Seeded runs (and replays, which
+        // always record a seed) stay exactly reproducible; unseeded runs
+        // draw a fresh order, matching the init-noise determinism contract.
+        let shuffle_seed = effective_seed.unwrap_or_else(rand::random);
+
         for epoch in 0..config.epochs {
             let mut epoch_loss = 0.0;
 
-            for &ex_idx in &valid_indices {
+            for &order_idx in &epoch_order(shuffle_seed, epoch, valid_indices.len()) {
+                let ex_idx = valid_indices[order_idx];
                 let (input_ids, label_mask) =
                     tokenize_for_training(&examples[ex_idx], tokenizer)
                         .with_context(|| format!("retokenize SFT example {ex_idx}"))?;
@@ -12306,6 +12332,37 @@ pub(crate) mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn epoch_order_is_deterministic_per_seed_and_epoch() {
+        assert_eq!(epoch_order(42, 0, 32), epoch_order(42, 0, 32));
+        assert_eq!(epoch_order(42, 3, 32), epoch_order(42, 3, 32));
+        assert_ne!(
+            epoch_order(42, 0, 32),
+            epoch_order(43, 0, 32),
+            "different seeds must produce different orders"
+        );
+    }
+
+    #[test]
+    fn epoch_order_differs_across_epochs() {
+        let e0 = epoch_order(7, 0, 32);
+        let e1 = epoch_order(7, 1, 32);
+        let e2 = epoch_order(7, 2, 32);
+        assert_ne!(e0, e1);
+        assert_ne!(e1, e2);
+        assert_ne!(e0, e2);
+    }
+
+    #[test]
+    fn epoch_order_is_a_permutation() {
+        for n in [0usize, 1, 2, 17, 64] {
+            let mut order = epoch_order(99, 5, n);
+            order.sort_unstable();
+            let expected: Vec<usize> = (0..n).collect();
+            assert_eq!(order, expected, "n={n} must be a bijection over 0..n");
+        }
     }
 
     // The #1082 candle-drop left an `#[ignore]` here that belonged to a
