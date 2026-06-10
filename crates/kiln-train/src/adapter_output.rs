@@ -677,6 +677,7 @@ mod tests {
                 learning_rate: 1e-4,
                 epochs: 1,
                 seed: Some(11),
+                shuffle: false,
             },
             serde_json::json!({"base_adapter": "parent-v1"}),
         );
