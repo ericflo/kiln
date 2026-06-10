@@ -210,8 +210,33 @@ async fn run_suite_inner(
                             }
                         }
                     }
-                    let mut o = score_completion(scorer, example, &completion.text, judge_runner)
-                        .map_err(|e| EvalExecutionError::Scorer(format!("{e}")))?;
+                    // A scorer error (missing target, bad regex, judge
+                    // unavailable) is a property of ONE example — record it
+                    // as that example's Error outcome instead of aborting
+                    // the run and discarding every completed outcome.
+                    let mut o = match score_completion(
+                        scorer,
+                        example,
+                        &completion.text,
+                        judge_runner,
+                    ) {
+                        Ok(o) => o,
+                        Err(e) => ExampleOutcome {
+                            example_id: example_id.clone(),
+                            completion_index: completion_idx,
+                            completion_text: completion.text.clone(),
+                            kind: EvalOutcomeKind::Error,
+                            score: 0.0,
+                            detail: Some(format!("scorer error: {e}")),
+                            prompt_tokens: None,
+                            completion_tokens: None,
+                            latency_ms: None,
+                            tags: example.tags.clone(),
+                            metadata: example.metadata.clone(),
+                            reasoning_text: None,
+                            unclosed_thinking: false,
+                        },
+                    };
                     o.completion_index = completion_idx;
                     o.prompt_tokens = Some(completion.prompt_tokens);
                     o.completion_tokens = Some(completion.completion_tokens);
@@ -383,6 +408,65 @@ mod tests {
             result.outcomes[0].metadata.as_ref().unwrap()["source_line"],
             serde_json::json!(4)
         );
+    }
+
+    #[tokio::test]
+    async fn scorer_error_becomes_per_example_outcome_instead_of_aborting() {
+        // Example 2 has no `target`, which is a ScorerError::MissingTarget
+        // under NumericTolerance. The run must complete with that example
+        // recorded as an Error outcome — not abort and discard examples 1/3.
+        let gen_ =
+            Arc::new(MockEvalGenerator::new().with_force_reply("2")) as Arc<dyn EvalGenerator>;
+        let mut suite = suite_with_numeric_answer();
+        suite.examples.insert(
+            1,
+            EvalExample {
+                id: Some("broken".into()),
+                messages: vec![EvalChatMessage::new("user", "no target here")],
+                target: None,
+                ..Default::default()
+            },
+        );
+        suite.examples.push(EvalExample {
+            id: Some("e3".into()),
+            messages: vec![EvalChatMessage::new("user", "1+1?")],
+            target: Some("2".into()),
+            ..Default::default()
+        });
+
+        let result = run_suite_against_adapter(
+            &suite,
+            None,
+            None,
+            gen_,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            noop_judge_runner(),
+        )
+        .await
+        .expect("a per-example scorer error must not abort the run");
+
+        assert_eq!(result.outcomes.len(), 4);
+        assert_eq!(result.metrics.num_error, 1);
+        let err_outcome = result
+            .outcomes
+            .iter()
+            .find(|o| o.example_id == "broken")
+            .expect("broken example should have an outcome");
+        assert!(matches!(err_outcome.kind, EvalOutcomeKind::Error));
+        assert!(
+            err_outcome
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.starts_with("scorer error:")),
+            "detail should name the scorer error, got {:?}",
+            err_outcome.detail
+        );
+        assert_eq!(err_outcome.completion_text, "2");
+        // The healthy examples still scored normally: e1 and e3 pass (reply
+        // "2" matches), the original "5+5?" example fails on the wrong reply.
+        assert_eq!(result.metrics.num_pass, 2);
+        assert_eq!(result.metrics.num_fail, 1);
     }
 
     #[tokio::test]
