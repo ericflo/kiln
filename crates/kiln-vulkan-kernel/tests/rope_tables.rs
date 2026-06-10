@@ -51,10 +51,25 @@ fn rope_tables_from_seq_lens_matches_cpu() -> Result<()> {
         for (pair, &inv) in inv_freq.iter().enumerate() {
             let idx = row * half_rotary + pair;
             let freq = position * inv;
+            // SPIR-V gives no precision guarantee for sin/cos at large
+            // arguments: a 1-ulp difference in the driver's argument
+            // reduction moves sin(x) by ~ulp(x) (≈2e-3 at x = 32767;
+            // lavapipe lands 1.1e-3 from the host libm value, RADV
+            // matches it). Scale the tolerance by the argument's ulp so
+            // the test pins shader LOGIC on every driver — real bugs
+            // (wrong position, swapped sin/cos) are O(1) errors.
+            let ulp = f32::from_bits(freq.to_bits() + 1) - freq;
+            let tol = 1e-3f32.max(2.0 * ulp);
             let cos_diff = (cos[idx] - freq.cos()).abs();
             let sin_diff = (sin[idx] - freq.sin()).abs();
-            assert!(cos_diff < 1e-3, "cos row={row} pair={pair} diff={cos_diff:e}");
-            assert!(sin_diff < 1e-3, "sin row={row} pair={pair} diff={sin_diff:e}");
+            assert!(
+                cos_diff < tol,
+                "cos row={row} pair={pair} diff={cos_diff:e} tol={tol:e}"
+            );
+            assert!(
+                sin_diff < tol,
+                "sin row={row} pair={pair} diff={sin_diff:e} tol={tol:e}"
+            );
         }
     }
 
