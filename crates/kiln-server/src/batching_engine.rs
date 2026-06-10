@@ -1016,16 +1016,19 @@ impl BatchingEngineActor {
             EngineCommand::Drain { reply } => {
                 self.accepting = false;
                 self.refresh_snapshot();
+                self.refresh_deferral_gauge();
                 let _ = reply.send(());
             }
             EngineCommand::Stop { reply } => {
                 self.accepting = false;
                 self.stopped = true;
                 self.refresh_snapshot();
+                self.refresh_deferral_gauge();
                 let _ = reply.send(());
             }
             EngineCommand::Snapshot { reply } => {
                 self.refresh_snapshot();
+                self.refresh_deferral_gauge();
                 let _ = reply.send(self.snapshot.clone());
             }
             EngineCommand::ResizeKv {
@@ -1090,18 +1093,20 @@ impl BatchingEngineActor {
             && admitted < admission_limit
             && !self.waiting.is_empty()
         {
-            let Some(waiting_idx) = self
-                .waiting
-                .iter()
-                .position(|queued| !self.should_defer_for_active_prefix(queued))
-            else {
-                self.snapshot.prefix_admission_deferrals =
-                    self.snapshot.prefix_admission_deferrals.saturating_add(
-                        self.waiting
-                            .iter()
-                            .filter(|queued| self.should_defer_for_active_prefix(queued))
-                            .count() as u64,
-                    );
+            // Count deferrals during the admission scan itself — when every
+            // waiting row is deferred, position() has already evaluated the
+            // predicate for all of them, so a second full filter pass would
+            // double the (prefix-cache-locking) work for the same answer.
+            let mut deferred_seen: u64 = 0;
+            let Some(waiting_idx) = self.waiting.iter().position(|queued| {
+                let defer = self.should_defer_for_active_prefix(queued);
+                deferred_seen += u64::from(defer);
+                !defer
+            }) else {
+                self.snapshot.prefix_admission_deferrals = self
+                    .snapshot
+                    .prefix_admission_deferrals
+                    .saturating_add(deferred_seen);
                 break;
             };
             let queued = self
@@ -1366,6 +1371,14 @@ impl BatchingEngineActor {
         self.snapshot.queue_depth = self.waiting.len();
         self.snapshot.active_decode = self.active.len();
         self.snapshot.adapter_groups_waiting = usize::from(!self.waiting.is_empty());
+    }
+
+    /// Recompute the `prefix_deferred_waiting` gauge. O(waiting x active x
+    /// prompt_len) with a prefix-cache lock per matching pair, so it runs
+    /// only when an observer asks for the snapshot (Snapshot/Drain/Stop) —
+    /// not on the per-decode-step hot path, where it burned CPU for a value
+    /// nobody read between observations.
+    fn refresh_deferral_gauge(&mut self) {
         self.snapshot.prefix_deferred_waiting = self
             .waiting
             .iter()
@@ -1385,6 +1398,7 @@ mod tests {
     struct MockForward {
         calls: StdMutex<Vec<Vec<TokenId>>>,
         reusable_prefixes: bool,
+        prefix_probe_calls: std::sync::atomic::AtomicUsize,
     }
 
     #[derive(Default)]
@@ -1394,6 +1408,8 @@ mod tests {
 
     impl DecodeForward for MockForward {
         fn can_reuse_as_strict_prefix(&self, prompt_token_len: usize) -> bool {
+            self.prefix_probe_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.reusable_prefixes && prompt_token_len > 0
         }
 
@@ -1902,6 +1918,70 @@ mod tests {
         assert_eq!(snapshot.total_decode_rows, 2);
         assert_eq!(snapshot.total_decode_tokens, 2);
         handle.stop().await.unwrap();
+    }
+
+    /// The O(waiting x active x prompt_len) deferral predicate (which also
+    /// takes a prefix-cache lock per matching pair) must stay off the
+    /// per-decode-step hot path: decode steps evaluate it zero times, one
+    /// admission scan evaluates it exactly once per waiting row, and the
+    /// snapshot observer path still reports a fresh gauge.
+    #[test]
+    fn deferral_predicate_stays_off_the_decode_hot_path() {
+        let forward = Arc::new(MockForward {
+            reusable_prefixes: true,
+            ..MockForward::default()
+        });
+        let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+        let mut actor = BatchingEngineActor::new(cmd_rx, forward.clone(), 8, true, 8, false);
+
+        // Root row becomes active; keep its receiver alive so decode steps
+        // can deliver tokens.
+        let (root_tx, _root_rx) = mpsc::channel(64);
+        actor.handle_command(EngineCommand::Enqueue {
+            req: request_with_tokens(vec![1, 2], 32),
+            response_tx: root_tx,
+        });
+        actor.admit_waiting();
+        assert_eq!(actor.active.len(), 1);
+
+        // Ten strict descendants stay deferred while the root is active.
+        let waiting = 10usize;
+        let mut keep_rx = Vec::new();
+        for _ in 0..waiting {
+            let (tx, rx) = mpsc::channel(64);
+            actor.handle_command(EngineCommand::Enqueue {
+                req: request_with_tokens(vec![1, 2, 3], 1),
+                response_tx: tx,
+            });
+            keep_rx.push(rx);
+        }
+
+        let probes = |f: &MockForward| {
+            f.prefix_probe_calls
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+        let before_decode = probes(&forward);
+        for _ in 0..10 {
+            actor.run_decode_batch();
+        }
+        assert_eq!(
+            probes(&forward) - before_decode,
+            0,
+            "decode steps must not evaluate the deferral predicate"
+        );
+
+        let before_admit = probes(&forward);
+        actor.admit_waiting();
+        assert_eq!(
+            probes(&forward) - before_admit,
+            waiting,
+            "one admission scan evaluates each waiting row exactly once"
+        );
+
+        actor.refresh_snapshot();
+        actor.refresh_deferral_gauge();
+        assert_eq!(actor.snapshot.prefix_deferred_waiting, waiting);
+        assert_eq!(actor.snapshot.queue_depth, waiting);
     }
 
     #[tokio::test]
