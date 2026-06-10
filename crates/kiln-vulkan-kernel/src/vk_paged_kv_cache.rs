@@ -124,6 +124,20 @@ impl VkPagedKvCache {
                 bytes_per_layer,
             )
             .with_context(|| format!("VkPagedKvCache: allocate V pool for layer {layer_idx}"))?;
+            // Vulkan gives no zero-init guarantee for device allocations
+            // (lavapipe hands back malloc garbage), so make the documented
+            // "zero-initialized" contract real with an explicit fill.
+            for (label, buf) in [("K", &k), ("V", &v)] {
+                VulkanBuffer::fill_zero(
+                    device.device(),
+                    device.queue(),
+                    device.queue_family_index(),
+                    buf,
+                )
+                .with_context(|| {
+                    format!("VkPagedKvCache: zero {label} pool for layer {layer_idx}")
+                })?;
+            }
             k_layers.push(Arc::new(k));
             v_layers.push(Arc::new(v));
         }
