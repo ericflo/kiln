@@ -205,7 +205,12 @@ jobs:
         run: cargo check --locked -p kiln-server --features vulkan
 
       - name: Test Vulkan kernel crate
-        run: cargo test --locked -p kiln-vulkan-kernel --test gdn_parity -- --nocapture
+        # Full suite (lib unit tests + every tests/ target), not just
+        # gdn_parity — this is the only CI leg that executes the Vulkan
+        # kernels (under lavapipe), and the restriction left e.g. the
+        # vk_muon_parity tests for the default optimizer's fused kernel
+        # never running in CI. 163 tests, <10s total.
+        run: cargo test --locked -p kiln-vulkan-kernel -- --nocapture
 
   linux-rocm:
     name: Linux / ROCm (build)

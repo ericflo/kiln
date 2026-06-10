@@ -221,6 +221,49 @@ impl VulkanBuffer {
         Ok(())
     }
 
+    /// Zero the whole buffer on-device via `vkCmdFillBuffer` (no staging).
+    /// Vulkan does NOT guarantee fresh device allocations read as zero —
+    /// RADV usually hands back kernel-zeroed pages, lavapipe hands back
+    /// host malloc garbage — so anything documented as "zero-initialized"
+    /// must call this explicitly.
+    pub fn fill_zero(
+        device: &Arc<ash::Device>,
+        queue: vk::Queue,
+        queue_family_index: u32,
+        dst: &VulkanBuffer,
+    ) -> Result<()> {
+        let pool_info = make_pool_info(queue_family_index);
+        let pool = unsafe {
+            device
+                .create_command_pool(&pool_info, None)
+                .context("fill_zero: failed to create command pool")?
+        };
+        let alloc_info = make_alloc_info(pool);
+        let command_buffers =
+            crate::vk_raw::allocate_command_buffers(device.handle(), &alloc_info, 1)
+                .context("fill_zero: failed to allocate command buffer")?;
+        let cmd = command_buffers[0];
+        let begin_info = make_begin_info();
+        unsafe {
+            device
+                .begin_command_buffer(cmd, &begin_info)
+                .context("fill_zero: failed to begin command buffer")?;
+            device.cmd_fill_buffer(cmd, dst.buffer, 0, vk::WHOLE_SIZE, 0);
+            device
+                .end_command_buffer(cmd)
+                .context("fill_zero: failed to end command buffer")?;
+            device
+                .queue_submit(queue, &[make_submit_info(&command_buffers)], vk::Fence::null())
+                .context("fill_zero: failed to submit fill")?;
+            device
+                .queue_wait_idle(queue)
+                .context("fill_zero: failed to wait for queue")?;
+            device.free_command_buffers(pool, &command_buffers);
+            device.destroy_command_pool(pool, None);
+        }
+        Ok(())
+    }
+
     pub fn upload_data(
         device: &Arc<ash::Device>,
         host_mem_type: u32,
