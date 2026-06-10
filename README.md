@@ -207,8 +207,8 @@ See [docs/EVAL_GUIDE.md](docs/EVAL_GUIDE.md) for the full scorer reference, data
 **Get the model weights** (Paths 2–4 share this step; the Desktop App handles it automatically):
 
 ```bash
-pip install huggingface-hub
-huggingface-cli download Qwen/Qwen3.5-4B --local-dir ./Qwen3.5-4B
+pip install -U huggingface_hub
+hf download Qwen/Qwen3.5-4B --local-dir ./Qwen3.5-4B
 ```
 
 This downloads `Qwen/Qwen3.5-4B` into `./Qwen3.5-4B`, which the commands below reference directly.

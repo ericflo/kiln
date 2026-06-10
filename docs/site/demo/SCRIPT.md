@@ -18,7 +18,7 @@ The companion file [`README.md`](README.md) inventories the full six-cast demo s
 Get the host into this exact state **before** opening `asciinema`. Do not include any of these in the recording itself.
 
 - Kiln binary available through `KILN_BIN`. It defaults to `./target/release/kiln`, but can point at an extracted release artifact or a source-built release binary (`--features cuda` on Linux/Windows or `--features metal` on macOS). See [`QUICKSTART.md` §1](../../../QUICKSTART.md).
-- Model weights at `./Qwen3.5-4B/` (downloaded via `huggingface-cli download Qwen/Qwen3.5-4B --local-dir ./Qwen3.5-4B`). See [`QUICKSTART.md` §2](../../../QUICKSTART.md).
+- Model weights at `./Qwen3.5-4B/` (downloaded via `hf download Qwen/Qwen3.5-4B --local-dir ./Qwen3.5-4B`). See [`QUICKSTART.md` §2](../../../QUICKSTART.md).
 - A clean shell working dir at the kiln repo root.
 - `asciinema` 2.4 or newer installed (`asciinema --version`). On Linux: `pip install asciinema` or distro package; on macOS: `brew install asciinema`.
 - Terminal sized **120 columns × 32 rows** exactly. The asciinema player renders responsively, but matching the recording aspect ratio keeps text crisp on the page. Set this with `printf '\e[8;32;120t'` in xterm/iTerm/most terminals, or resize the window manually.

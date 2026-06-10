@@ -411,8 +411,8 @@ Expand-Archive .\kiln-windows.zip -DestinationPath .\kiln</code></pre>
         <div class="card p-6">
           <h3 class="font-semibold mb-2">a. Download Qwen3.5-4B</h3>
           <p class="mb-4" style="color: var(--fg-dim);">Point <code>KILN_MODEL_PATH</code> at a local checkout of <code>Qwen/Qwen3.5-4B</code>.</p>
-<pre class="text-sm"><code>pip install huggingface-hub
-huggingface-cli download Qwen/Qwen3.5-4B --local-dir ./Qwen3.5-4B
+<pre class="text-sm"><code>pip install -U huggingface_hub
+hf download Qwen/Qwen3.5-4B --local-dir ./Qwen3.5-4B
 export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
         </div>
         <div class="card p-6">
