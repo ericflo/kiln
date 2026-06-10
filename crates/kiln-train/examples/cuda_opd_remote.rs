@@ -304,7 +304,7 @@ fn main() -> Result<()> {
 
     let mut cfg = OpdConfig::default();
     cfg.epochs = args.epochs;
-    cfg.learning_rate = args.learning_rate;
+    cfg.learning_rate = Some(args.learning_rate);
     cfg.lora_rank = args.lora_rank;
     cfg.lora_alpha = args.lora_alpha;
     cfg.allow_high_lora_scale = args.allow_high_lora_scale;

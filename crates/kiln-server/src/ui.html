@@ -3803,7 +3803,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
           </div>
           <div class="adv-row">
             <button type="button" class="btn btn-sm btn-ghost" id="sft-adv-toggle" aria-expanded="false" aria-controls="sft-advanced"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-gear"></use></svg> Advanced</button>
-            <span class="adv-summary" id="sft-adv-summary">3 epochs · learning rate 0.0002 · LoRA rank 8 — sensible defaults, no tuning needed</span>
+            <span class="adv-summary" id="sft-adv-summary">3 epochs · learning rate auto · LoRA rank 8 — sensible defaults, no tuning needed</span>
           </div>
           <div class="adv-body" id="sft-advanced" hidden>
             <div class="form-row">
@@ -3815,8 +3815,8 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
               </div>
               <div class="form-group">
                 <label for="sft-learning-rate">Learning rate</label>
-                <input type="text" id="sft-learning-rate" name="learning_rate" value="0.0002">
-                <div class="form-help">How hard each step pushes the weights.</div>
+                <input type="text" id="sft-learning-rate" name="learning_rate" value="" placeholder="auto (per optimizer)">
+                <div class="form-help">How hard each step pushes the weights. Blank picks the right value for the optimizer.</div>
               </div>
               <div class="form-group">
                 <label for="sft-rank">LoRA rank</label>
@@ -3879,7 +3879,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
           </div>
           <div class="adv-row">
             <button type="button" class="btn btn-sm btn-ghost" id="grpo-adv-toggle" aria-expanded="false" aria-controls="grpo-advanced"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-gear"></use></svg> Advanced</button>
-            <span class="adv-summary" id="grpo-adv-summary">KL 0.1 · learning rate 0.00005 · LoRA rank 8 — sensible defaults, no tuning needed</span>
+            <span class="adv-summary" id="grpo-adv-summary">KL 0.1 · learning rate auto · LoRA rank 8 — sensible defaults, no tuning needed</span>
           </div>
           <div class="adv-body" id="grpo-advanced" hidden>
             <div class="form-row">
@@ -3890,8 +3890,8 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
               </div>
               <div class="form-group">
                 <label for="grpo-learning-rate">Learning rate</label>
-                <input type="text" id="grpo-learning-rate" name="learning_rate" value="0.00005">
-                <div class="form-help">How hard each step pushes the weights.</div>
+                <input type="text" id="grpo-learning-rate" name="learning_rate" value="" placeholder="auto (per optimizer)">
+                <div class="form-help">How hard each step pushes the weights. Blank picks the right value for the optimizer.</div>
               </div>
               <div class="form-group">
                 <label for="grpo-rank">LoRA rank</label>
@@ -4389,8 +4389,8 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
           <div class="form-row">
             <div class="form-group">
               <label for="opd-lr">Learning rate</label>
-              <input type="text" id="opd-lr" name="learning_rate" value="1e-5">
-              <div class="form-help">10× the full fine-tune optimum.</div>
+              <input type="text" id="opd-lr" name="learning_rate" value="" placeholder="auto (per optimizer)">
+              <div class="form-help">Blank picks the right value for the optimizer.</div>
             </div>
             <div class="form-group">
               <label for="opd-rank">LoRA rank</label>
@@ -5045,7 +5045,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
   const trainJobDetail = (id) => ({
     job_id: id, state: 'Running', job_type: 'GRPO', adapter_name: 'rust-reviewer-v3', progress: 0.58, current_loss: 0.286, elapsed_secs: 1_842, submitted_unix_ms: NOW - 1_842_000,
     loss_history: Array.from({ length: 40 }, (_, i) => ({ step: i + 1, loss: 0.9 * Math.exp(-i / 14) + 0.22 + (Math.sin(i) * 0.01) })),
-    config: { lora_rank: 32, learning_rate: 1e-4, batch_size: 8, samples_per_prompt: 4 },
+    config: { lora_rank: 32, batch_size: 8, samples_per_prompt: 4 },
   });
   const adapterDetail = (name) => ({
     name, active: name === ACTIVE_ADAPTER, size_bytes: 86 * MB,
@@ -5797,7 +5797,9 @@ async function trainFromCorrections() {
   const btn = document.getElementById('corr-train');
   if (btn) btn.disabled = true;
   try {
-    const body = { examples, config: { output_name: name, auto_load: true, learning_rate: 0.0002, epochs: 3, lora_rank: 8 } };
+    // learning_rate omitted on purpose: the server resolves the
+    // per-optimizer default (Muon and AdamW want very different bands).
+    const body = { examples, config: { output_name: name, auto_load: true, epochs: 3, lora_rank: 8 } };
     const res = await api('/v1/train/sft', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     toast(res.message || `Training ${name} from ${examples.length} correction${examples.length === 1 ? '' : 's'} — it will hot-swap in when done`, 'ok');
     // Remove ONLY the corrections we actually trained on. Anything still
@@ -7810,17 +7812,22 @@ function wireAdvanced(kind, summarize) {
   body.querySelectorAll('input').forEach(i => i.addEventListener('input', update));
   update();
 }
+// A blank learning-rate field means "auto" — the server resolves the
+// per-optimizer default (Muon vs AdamW want very different bands).
+const lrSummary = id => (document.getElementById(id)?.value || '').trim() || 'auto';
 wireAdvanced('sft', () => {
   const v = id => document.getElementById(id)?.value || '?';
-  const isDefault = v('sft-epochs') === '3' && v('sft-learning-rate') === '0.0002' && v('sft-rank') === '8';
+  const lr = lrSummary('sft-learning-rate');
+  const isDefault = v('sft-epochs') === '3' && lr === 'auto' && v('sft-rank') === '8';
   if (typeof updateSftOverfitHint === 'function') updateSftOverfitHint();
-  return `${v('sft-epochs')} epochs · learning rate ${v('sft-learning-rate')} · LoRA rank ${v('sft-rank')}`
+  return `${v('sft-epochs')} epochs · learning rate ${lr} · LoRA rank ${v('sft-rank')}`
     + (isDefault ? ' — sensible defaults, no tuning needed' : ' — customized');
 });
 wireAdvanced('grpo', () => {
   const v = id => document.getElementById(id)?.value || '?';
-  const isDefault = v('grpo-kl-coeff') === '0.1' && v('grpo-learning-rate') === '0.00005' && v('grpo-rank') === '8';
-  return `KL ${v('grpo-kl-coeff')} · learning rate ${v('grpo-learning-rate')} · LoRA rank ${v('grpo-rank')}`
+  const lr = lrSummary('grpo-learning-rate');
+  const isDefault = v('grpo-kl-coeff') === '0.1' && lr === 'auto' && v('grpo-rank') === '8';
+  return `KL ${v('grpo-kl-coeff')} · learning rate ${lr} · LoRA rank ${v('grpo-rank')}`
     + (isDefault ? ' — sensible defaults, no tuning needed' : ' — customized');
 });
 
@@ -7961,6 +7968,13 @@ function parseFiniteNumberField(value, label) {
     throw new Error(`${label} must be a finite number.`);
   }
   return parsed;
+}
+
+// Blank means "omit the field" (the server resolves a default); anything
+// non-blank must still be a real number.
+function parseOptionalFiniteNumberField(value, label) {
+  if (!value.trim()) return null;
+  return parseFiniteNumberField(value, label);
 }
 
 function parsePositiveIntegerField(value, label) {
@@ -8155,16 +8169,17 @@ document.getElementById('sft-form').addEventListener('submit', async (e) => {
   const form = e.target;
   try {
     const outputName = parsePathSafeAdapterNameField(form.output_name, updateSftOutputNameState);
-    const learningRate = parseFiniteNumberField(form.learning_rate.value, 'SFT learning rate');
+    const learningRate = parseOptionalFiniteNumberField(form.learning_rate.value, 'SFT learning rate');
     const epochs = parsePositiveIntegerField(form.epochs.value, 'SFT epochs');
     const rank = parsePositiveIntegerField(form.rank.value, 'SFT LoRA rank');
     const config = {
       output_name: outputName,
       auto_load: form.auto_load.checked,
-      learning_rate: learningRate,
       epochs,
       lora_rank: rank,
     };
+    // Blank lr is omitted so the server resolves the per-optimizer default.
+    if (learningRate !== null) config.learning_rate = learningRate;
     const held = trainingData.sft;
     let body;
     if (held && held.datasetName) {
@@ -8201,16 +8216,17 @@ document.getElementById('grpo-form').addEventListener('submit', async (e) => {
   const form = e.target;
   try {
     const outputName = parsePathSafeAdapterNameField(form.output_name, updateGrpoOutputNameState);
-    const learningRate = parseFiniteNumberField(form.learning_rate.value, 'GRPO learning rate');
+    const learningRate = parseOptionalFiniteNumberField(form.learning_rate.value, 'GRPO learning rate');
     const klCoeff = parseFiniteNumberField(form.kl_coeff.value, 'GRPO KL coefficient');
     const rank = parsePositiveIntegerField(form.rank.value, 'GRPO LoRA rank');
     const config = {
       output_name: outputName,
       auto_load: form.auto_load.checked,
-      learning_rate: learningRate,
       kl_coeff: klCoeff,
       lora_rank: rank,
     };
+    // Blank lr is omitted so the server resolves the per-optimizer default.
+    if (learningRate !== null) config.learning_rate = learningRate;
     const held = trainingData.grpo;
     let body;
     if (held && held.datasetName) {
@@ -13054,6 +13070,8 @@ document.getElementById('opd-form')?.addEventListener('submit', async (e) => {
     }
     const teacher = document.getElementById('opd-teacher').value;
     if (!teacher) throw new Error('Pick a teacher first (Teachers tab)');
+    const opdLearningRate = parseOptionalFiniteNumberField(
+      document.getElementById('opd-lr').value, 'OPD learning rate');
     const body = {
       prompts,
       teacher,
@@ -13062,7 +13080,6 @@ document.getElementById('opd-form')?.addEventListener('submit', async (e) => {
         loss: document.getElementById('opd-loss').value,
         top_k: parseInt(document.getElementById('opd-top-k').value, 10),
         samples_per_prompt: parseInt(document.getElementById('opd-samples').value, 10),
-        learning_rate: parseFloat(document.getElementById('opd-lr').value),
         lora_rank: parseInt(document.getElementById('opd-rank').value, 10),
         max_tokens: parseInt(document.getElementById('opd-max-tokens').value, 10),
         temperature: parseFloat(document.getElementById('opd-temperature').value),
@@ -13070,6 +13087,8 @@ document.getElementById('opd-form')?.addEventListener('submit', async (e) => {
         auto_load: document.getElementById('opd-auto-load').checked,
       },
     };
+    // Blank lr is omitted so the server resolves the per-optimizer default.
+    if (opdLearningRate !== null) body.config.learning_rate = opdLearningRate;
     const maxCost = document.getElementById('opd-max-cost').value;
     if (maxCost.trim()) body.config.max_cost_usd = parseFloat(maxCost);
     const res = await api('/v1/train/opd', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });

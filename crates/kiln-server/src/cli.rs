@@ -652,9 +652,10 @@ pub enum TrainCommands {
         #[arg(long, default_value = "default")]
         adapter: String,
 
-        /// Learning rate
-        #[arg(long, default_value = "1e-4")]
-        lr: f64,
+        /// Learning rate. Omit to let the server pick the per-optimizer
+        /// default (Muon 2e-2, AdamW/SGD 1e-4).
+        #[arg(long)]
+        lr: Option<f64>,
 
         /// Number of epochs
         #[arg(long, default_value = "1")]
@@ -1996,7 +1997,7 @@ pub async fn run_train_sft(
     url: &str,
     file: &str,
     adapter: &str,
-    lr: f64,
+    lr: Option<f64>,
     epochs: u32,
     lora_rank: Option<usize>,
     adapter_smoke_test: bool,
@@ -2165,16 +2166,19 @@ fn build_grpo_jsonl_training_payload(
 fn build_sft_training_payload(
     examples: Vec<serde_json::Value>,
     adapter: &str,
-    lr: f64,
+    lr: Option<f64>,
     epochs: u32,
     lora_rank: Option<usize>,
     adapter_smoke_test: bool,
 ) -> serde_json::Value {
     let mut config = serde_json::json!({
         "output_name": adapter,
-        "learning_rate": lr,
         "epochs": epochs,
     });
+    // Omitted --lr means "let the server resolve per optimizer".
+    if let Some(lr) = lr {
+        config["learning_rate"] = serde_json::json!(lr);
+    }
     if let Some(rank) = lora_rank {
         config["lora_rank"] = serde_json::json!(rank);
     }
@@ -3208,7 +3212,7 @@ mod tests {
                 ]
             })],
             "sft-adapter",
-            2e-4,
+            Some(2e-4),
             3,
             Some(8),
             false,
@@ -3224,7 +3228,7 @@ mod tests {
 
     #[test]
     fn build_sft_training_payload_omits_unset_lora_rank() {
-        let body = build_sft_training_payload(vec![], "sft-adapter", 1e-4, 1, None, false);
+        let body = build_sft_training_payload(vec![], "sft-adapter", Some(1e-4), 1, None, false);
 
         assert_eq!(body["config"]["output_name"], "sft-adapter");
         assert!(body["config"].get("lora_rank").is_none());
@@ -3232,8 +3236,18 @@ mod tests {
     }
 
     #[test]
+    fn build_sft_training_payload_omits_unset_learning_rate() {
+        // No --lr → no learning_rate key, so the server resolves the
+        // per-optimizer default instead of an AdamW-era pin.
+        let body = build_sft_training_payload(vec![], "sft-adapter", None, 1, None, false);
+
+        assert!(body["config"].get("learning_rate").is_none());
+        assert_eq!(body["config"]["epochs"], 1);
+    }
+
+    #[test]
     fn build_sft_training_payload_sets_adapter_smoke_test_when_requested() {
-        let body = build_sft_training_payload(vec![], "sft-adapter", 1e-4, 1, None, true);
+        let body = build_sft_training_payload(vec![], "sft-adapter", Some(1e-4), 1, None, true);
 
         assert_eq!(body["config"]["adapter_smoke_test"], true);
     }

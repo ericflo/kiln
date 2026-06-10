@@ -1093,7 +1093,7 @@ fn test_real_model_gdn_sft_metal() {
     ];
     let sft_config = kiln_train::SftConfig {
         epochs: 3,
-        learning_rate: 1e-3,
+        learning_rate: Some(1e-3),
         lora_rank: 2,
         lora_alpha: 4.0,
         auto_load: false,
@@ -1179,7 +1179,7 @@ fn test_real_model_sft_metal() {
     ];
     let sft_config = kiln_train::SftConfig {
         epochs: 3,
-        learning_rate: 1e-3,
+        learning_rate: Some(1e-3),
         lora_rank: 2,
         lora_alpha: 4.0,
         auto_load: false,
@@ -1265,7 +1265,7 @@ fn test_real_model_grpo_metal() {
     ];
 
     let mut grpo_config = kiln_train::GrpoConfig {
-        learning_rate: 1e-3,
+        learning_rate: Some(1e-3),
         kl_coeff: 0.0,
         lora_rank: 2,
         lora_alpha: 4.0,
@@ -1417,7 +1417,7 @@ fn test_real_model_opd_metal() {
     );
 
     let mut opd_config = kiln_train::opd::OpdConfig {
-        learning_rate: 1e-3,
+        learning_rate: Some(1e-3),
         lora_rank: 2,
         lora_alpha: 4.0,
         auto_load: false,

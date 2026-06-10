@@ -370,7 +370,7 @@ fn main() -> Result<()> {
         .with_context(|| format!("creating {}", layout.adapter_dir.display()))?;
     let config = SftConfig {
         epochs: args.epochs,
-        learning_rate: args.learning_rate,
+        learning_rate: Some(args.learning_rate),
         lora_rank: args.lora_rank,
         lora_alpha: args.lora_alpha,
         base_adapter: args.base_adapter.clone(),

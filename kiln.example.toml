@@ -81,7 +81,10 @@ no_grad_checkpoint = false
 #   "optimizer": {"kind": "sgd"}
 # Omit the field entirely to use the Muon default. Muon uses a larger
 # learning rate than AdamW (its orthogonalized, RMS-matched update is
-# ~unit scale): ~2e-2 vs AdamW's ~1e-4 for LoRA.
+# ~unit scale): ~2e-2 vs AdamW's ~1e-4 for LoRA. Omit `learning_rate`
+# from the request and the server picks the per-optimizer default
+# automatically (Muon 2e-2 / AdamW 1e-4 for SFT, scaled down 10x for
+# GRPO/OPD); the train receipt records the resolved value.
 # webhook_url = "https://example.com/hook"  # POST training completion JSON to this URL.
                                               # Fields: job_id, job_type (sft|grpo),
                                               # status (completed|failed), adapter_name,

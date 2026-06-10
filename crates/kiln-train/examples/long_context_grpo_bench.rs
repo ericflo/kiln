@@ -344,7 +344,7 @@ fn checkpoint_segments(num_layers: usize, requested: usize) -> Option<Vec<(usize
 
 fn bench_config(args: &Args) -> GrpoConfig {
     GrpoConfig {
-        learning_rate: args.learning_rate,
+        learning_rate: Some(args.learning_rate),
         lora_rank: args.lora_rank,
         lora_alpha: args.lora_alpha,
         seed: Some(args.seed),
@@ -426,7 +426,7 @@ fn run_cuda_record(
             eps,
             weight_decay,
         } => Some(params.allocate_adamw_state(
-            config.learning_rate,
+            config.effective_learning_rate(),
             beta1,
             beta2,
             eps,
@@ -439,7 +439,7 @@ fn run_cuda_record(
             ns_iters,
             weight_decay,
         } => Some(params.allocate_muon_state(
-            config.learning_rate,
+            config.effective_learning_rate(),
             momentum,
             nesterov,
             ns_iters,

@@ -55,7 +55,7 @@ pub fn cuda_native_sft_train(
     tracing::info!(
         num_examples = examples.len(),
         epochs = config.epochs,
-        lr = config.learning_rate,
+        lr = config.effective_learning_rate(),
         rank = config.lora_rank,
         alpha = config.lora_alpha,
         adapter_name,
@@ -93,7 +93,7 @@ pub fn cuda_native_grpo_train(
 ) -> Result<PathBuf> {
     tracing::info!(
         num_groups = groups.len(),
-        learning_rate = config.learning_rate,
+        learning_rate = config.effective_learning_rate(),
         kl_coeff = config.kl_coeff,
         rank = config.lora_rank,
         adapter_name,
@@ -129,7 +129,7 @@ pub fn cuda_native_grpo_train_jsonl(
 ) -> Result<PathBuf> {
     tracing::info!(
         dataset_path = %dataset_path.display(),
-        learning_rate = config.learning_rate,
+        learning_rate = config.effective_learning_rate(),
         kl_coeff = config.kl_coeff,
         rank = config.lora_rank,
         adapter_name,
