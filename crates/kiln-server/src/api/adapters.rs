@@ -17,7 +17,6 @@ use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use kiln_model::adapter_merge::{PeftLora, merge_concat, merge_linear, merge_ties};
-use kiln_model::lora_loader::LoraWeights;
 
 use crate::error::ApiError;
 use crate::state::{AppState, ModelBackend};
@@ -228,31 +227,24 @@ async fn load_adapter(
         }
     };
 
-    // Two-phase load: read device/num_layers under a brief read lock, then load
-    // weights outside any lock so inference is not blocked during I/O.
-    let (device, num_layers) = {
-        let guard = runner.read().unwrap();
-        (
-            guard.weights.embed_tokens.device().clone(),
-            guard.config.num_layers,
-        )
-    };
-
-    let runner = runner.clone();
-    let path = resolved_adapter_path.clone();
+    let _ = runner; // barrier swap reaches the runner through the state
     let name = req.name.clone();
 
-    let load_result = tokio::task::spawn_blocking(move || {
-        // Load weights outside any lock (I/O + tensor allocation).
-        // #1082: LoraWeights::load is kt-native — pass the kt device directly.
-        let lora = LoraWeights::load(&path, num_layers, device).map_err(|e| format!("{e}"))?;
-        // Brief write lock to swap the adapter in.
-        let mut guard = runner.write().unwrap();
-        guard.swap_lora(Some(lora));
-        Ok::<(), String>(())
-    })
+    // Barrier swap (see `adapter_swap`): the weight flip waits for
+    // in-flight requests to finish instead of landing mid-generation.
+    let load_result = crate::adapter_swap::swap_runtime_adapter(
+        &state,
+        crate::adapter_swap::SwapRequest {
+            target: crate::adapter_swap::SwapTarget::Resolved {
+                active_name: req.name.clone(),
+                dir: resolved_adapter_path.clone(),
+            },
+            content_changed: false,
+            reason: "adapter_load_endpoint",
+        },
+    )
     .await
-    .map_err(|e| ApiError::internal(format!("join error: {e}")))?;
+    .map(|_| ());
     if let Err(err) = load_result {
         state
             .adapter_load_errors
@@ -282,7 +274,6 @@ fn record_adapter_loaded(state: &AppState, name: &str, path: &Path) {
     *state.active_adapter_name.write().unwrap() = Some(name.to_string());
     *state.loaded_adapter_name.write().unwrap() = Some(name.to_string());
     state.adapter_load_errors.write().unwrap().remove(name);
-    state.clear_real_prefix_cache();
 
     tracing::info!(
         request_id = %Uuid::new_v4(),
@@ -372,13 +363,17 @@ async fn unload_adapter(
         }
     };
 
-    let runner = runner.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut guard = runner.write().unwrap();
-        guard.unload_adapter();
-    })
+    let _ = runner; // barrier swap reaches the runner through the state
+    crate::adapter_swap::swap_runtime_adapter(
+        &state,
+        crate::adapter_swap::SwapRequest {
+            target: crate::adapter_swap::SwapTarget::Base,
+            content_changed: false,
+            reason: "adapter_unload_endpoint",
+        },
+    )
     .await
-    .map_err(|e| ApiError::internal(format!("join error: {e}")))?;
+    .map_err(ApiError::adapter_load_failed)?;
 
     record_adapter_unloaded(&state);
 
@@ -389,7 +384,6 @@ fn record_adapter_unloaded(state: &AppState) {
     let old = state.active_adapter_name.read().unwrap().clone();
     *state.active_adapter_name.write().unwrap() = None;
     *state.loaded_adapter_name.write().unwrap() = None;
-    state.clear_real_prefix_cache();
 
     tracing::info!(
         request_id = %Uuid::new_v4(),
@@ -437,6 +431,10 @@ async fn delete_adapter(
     }
 
     tracing::info!(adapter = %name, operation = "delete", "deleted adapter from disk");
+
+    // The name no longer refers to these weights — drop its cache entries
+    // so a future adapter recreated under the same name can't replay them.
+    state.purge_adapter_caches(&Some(name.clone()));
 
     Ok(Json(DeleteAdapterResponse {
         status: "deleted",
@@ -1500,6 +1498,11 @@ async fn upload_adapter(
         operation = "upload",
         "imported adapter from upload"
     );
+
+    // The directory content under this name just changed — stale
+    // name-keyed cache entries (prefix KV, deterministic completions)
+    // would replay whatever weights the name used to mean.
+    state.purge_adapter_caches(&Some(name.clone()));
 
     Ok(Json(UploadAdapterResponse {
         name,
