@@ -134,6 +134,11 @@ pub struct RequestLogEntry {
     pub streamed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
+    /// LoRA adapter that actually served this response (from the
+    /// `x-kiln-loaded-adapter` response header); `None` = base model.
+    /// Lets the mining pipeline split the corpus per adapter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
     pub request: serde_json::Value,
     pub response: serde_json::Value,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -380,6 +385,7 @@ pub async fn tap(State(state): State<AppState>, req: Request<Body>, next: Next) 
 
     let response = next.run(req).await;
     let status = response.status().as_u16();
+    let adapter = adapter_from_headers(response.headers());
     let is_sse = response
         .headers()
         .get(axum::http::header::CONTENT_TYPE)
@@ -402,6 +408,7 @@ pub async fn tap(State(state): State<AppState>, req: Request<Body>, next: Next) 
             duration_ms: started.elapsed().as_millis() as u64,
             streamed: false,
             user_agent,
+            adapter,
             request: request_value,
             response: response_value,
             request_truncated,
@@ -420,6 +427,7 @@ pub async fn tap(State(state): State<AppState>, req: Request<Body>, next: Next) 
         status,
         started,
         user_agent,
+        adapter,
         request_value,
         request_truncated,
         max_capture,
@@ -432,6 +440,16 @@ pub async fn tap(State(state): State<AppState>, req: Request<Body>, next: Next) 
         ctx: Some(ctx),
     };
     Response::from_parts(parts, Body::from_stream(tapped))
+}
+
+/// Adapter that served the response, read from the runtime headers the
+/// chat handlers attach. "base"/missing → None (base model).
+fn adapter_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get("x-kiln-loaded-adapter")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty() && *v != "base" && *v != "invalid")
+        .map(|v| v.to_string())
 }
 
 fn capture_json(bytes: &[u8], max_capture: usize) -> (serde_json::Value, bool) {
@@ -455,6 +473,7 @@ struct SseTapCtx {
     status: u16,
     started: Instant,
     user_agent: Option<String>,
+    adapter: Option<String>,
     request_value: serde_json::Value,
     request_truncated: bool,
     max_capture: usize,
@@ -491,6 +510,7 @@ impl SseTapCtx {
             duration_ms: self.started.elapsed().as_millis() as u64,
             streamed: true,
             user_agent: self.user_agent.take(),
+            adapter: self.adapter.take(),
             request: std::mem::take(&mut self.request_value),
             response,
             request_truncated: self.request_truncated,
@@ -680,6 +700,7 @@ mod tests {
             duration_ms: 5,
             streamed: false,
             user_agent: Some("test".into()),
+            adapter: None,
             request: serde_json::json!({ "messages": [{"role": "user", "content": "x".repeat(payload_size)}] }),
             response: serde_json::json!({ "choices": [{"message": {"role": "assistant", "content": "y"}}] }),
             request_truncated: false,
@@ -766,6 +787,18 @@ mod tests {
         let first: serde_json::Value =
             serde_json::from_str(text.lines().next().unwrap()).unwrap();
         assert_eq!(first["route"], "/v1/chat/completions");
+    }
+
+    #[test]
+    fn adapter_from_headers_filters_base_and_invalid() {
+        let mut headers = axum::http::HeaderMap::new();
+        assert_eq!(adapter_from_headers(&headers), None);
+        headers.insert("x-kiln-loaded-adapter", "base".parse().unwrap());
+        assert_eq!(adapter_from_headers(&headers), None);
+        headers.insert("x-kiln-loaded-adapter", "invalid".parse().unwrap());
+        assert_eq!(adapter_from_headers(&headers), None);
+        headers.insert("x-kiln-loaded-adapter", "my-adapter".parse().unwrap());
+        assert_eq!(adapter_from_headers(&headers), Some("my-adapter".to_string()));
     }
 
     #[test]
