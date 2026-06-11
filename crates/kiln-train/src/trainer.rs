@@ -2921,6 +2921,32 @@ fn run_mtp_alignment_phase(
     Ok(Some((trained, initial_ce, final_ce)))
 }
 
+/// The device training state (LoRA params, optimizer moments, linear
+/// state) must live on. Usually the weights' device — EXCEPT on the
+/// Vulkan hybrid substrate, where base weights are kt CPU-storage but
+/// the forward's ACTIVATIONS are Vulkan-resident (the embedding gather
+/// returns resident output by design). Training state must match the
+/// activations, not the frozen weights: a CPU LoRA pair against a
+/// Vulkan activation dies in the recorder with
+/// "inputs on different devices" (the operator-validation finding,
+/// 2026-06-11). Mixed frozen-weight projections are handled by the
+/// vulkan_matmul_bf16w host fallback.
+fn training_device_for_weights(weights: &GpuWeights) -> Device {
+    // NOTE (2026-06-11 operator validation, Strix Halo): two placements
+    // were tested for the Vulkan hybrid substrate (CPU-storage BF16 base
+    // weights, Vulkan-resident activations from the embedding gather):
+    //   * weights' device (Cpu): the FIRST GDN projection's recorder dies
+    //     on "inputs on different devices" (vulkan activation × cpu LoRA
+    //     param).
+    //   * Device::Vulkan(0): the failure moves INSIDE the GDN block
+    //     (a=cpu × b=vulkan in a later matmul) — mixed-device ops are
+    //     pervasive, not localized.
+    // Either way hybrid BF16-checkpoint training is unsupported until the
+    // residency port puts ALL training tensors on one device end to end.
+    // Keep the weights' device so the failure stays early and clean.
+    weights.embed_tokens.device()
+}
+
 pub fn sft_train(
     examples: &[SftExample],
     config: &SftConfig,
@@ -2951,7 +2977,7 @@ pub fn sft_train(
     // forward/backward), so keep `device` kt downstream. The only candle
     // touch left is the safetensors adapter I/O, which bridges the kt device
     // to candle locally inside `load_from_safetensors`/`save_peft`.
-    let device = weights.embed_tokens.device();
+    let device = training_device_for_weights(weights);
     let backend = backend::for_device_kt(&device);
     let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
 
@@ -3497,7 +3523,7 @@ pub fn grpo_train(
     // kt-native (kt `Parameter`s, kt AdamW state, kt tape forward/backward),
     // so keep `device` kt downstream. The only candle touch is safetensors
     // adapter I/O, which bridges kt->candle locally inside save/load.
-    let device = weights.embed_tokens.device();
+    let device = training_device_for_weights(weights);
     let backend = backend::for_device_kt(&device);
     let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
 
@@ -4365,7 +4391,7 @@ pub fn grpo_train_jsonl(
     // kt-native (kt `Parameter`s, kt AdamW state, kt tape forward/backward), so
     // keep `device` kt downstream. The only candle touch is safetensors adapter
     // I/O, which bridges kt->candle locally inside save/load.
-    let device = weights.embed_tokens.device();
+    let device = training_device_for_weights(weights);
     let backend = backend::for_device_kt(&device);
     let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
 
