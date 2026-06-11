@@ -229,8 +229,13 @@ async fn judgment_flywheel_create_append_compile() {
             "note": "test",
             "tags": ["prose"],
         });
-        let (status, _) = json_call(&router, "POST", "/v1/judgments/prose-judge/rows", &body).await;
+        let (status, appended) = json_call(&router, "POST", "/v1/judgments/prose-judge/rows", &body).await;
         assert_eq!(status, StatusCode::OK, "winner={} {}", winner.0, body);
+        // The POST response carries the appended row's id (the UI's Undo
+        // DELETEs by it) alongside the pre-existing manifest fields.
+        assert_eq!(appended["judgment_id"].as_str().unwrap(), format!("j{i}"), "{appended}");
+        assert_eq!(appended["name"], "prose-judge");
+        assert_eq!(appended["num_rows"].as_u64().unwrap(), (i + 1) as u64);
     }
 
     // 3. List judgments — should see prose-judge with 3 rows.
@@ -280,6 +285,42 @@ async fn judgment_flywheel_create_append_compile() {
     .await;
     assert_eq!(status, StatusCode::OK, "body={after}");
     assert_eq!(after["num_rows"].as_u64().unwrap(), 2);
+
+    // 6. Undo round-trip: append WITHOUT a client-supplied id — the server
+    // assigns a uuid and returns it as `judgment_id` — then DELETE with
+    // exactly that id removes the row again.
+    let body = serde_json::json!({
+        "prompt": [{"role":"user", "content":"Pick one"}],
+        "response_a": "alpha",
+        "response_b": "beta",
+        "winner": "a",
+    });
+    let (status, appended) = json_call(&router, "POST", "/v1/judgments/prose-judge/rows", &body).await;
+    assert_eq!(status, StatusCode::OK, "body={appended}");
+    let judgment_id = appended["judgment_id"]
+        .as_str()
+        .expect("POST response carries the server-assigned judgment_id")
+        .to_string();
+    assert!(!judgment_id.is_empty());
+    assert_eq!(appended["num_rows"].as_u64().unwrap(), 3);
+    let (status, undone) = json_call(
+        &router,
+        "DELETE",
+        &format!("/v1/judgments/prose-judge/rows/{judgment_id}"),
+        &serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={undone}");
+    assert_eq!(undone["num_rows"].as_u64().unwrap(), 2);
+    // A double-fired Undo can't corrupt counts: the second DELETE is a 404.
+    let (status, _) = json_call(
+        &router,
+        "DELETE",
+        &format!("/v1/judgments/prose-judge/rows/{judgment_id}"),
+        &serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

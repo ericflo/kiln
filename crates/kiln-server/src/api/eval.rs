@@ -801,11 +801,23 @@ struct AppendJudgmentBody {
     tags: Vec<String>,
 }
 
+/// Response for `POST /v1/judgments/{name}/rows`. Additive over the bare
+/// manifest the endpoint used to return: `judgment_id` is the id assigned
+/// to the row that was just appended, so the UI can offer Undo via
+/// `DELETE /v1/judgments/{name}/rows/{judgment_id}` without re-reading the
+/// dataset. Every pre-existing manifest field stays at the top level.
+#[derive(Debug, Serialize)]
+struct AppendJudgmentResponse {
+    judgment_id: String,
+    #[serde(flatten)]
+    manifest: JudgmentManifest,
+}
+
 async fn append_judgment(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
     Json(body): Json<AppendJudgmentBody>,
-) -> Result<Json<JudgmentManifest>, ApiError> {
+) -> Result<Json<AppendJudgmentResponse>, ApiError> {
     let store = state
         .judgment_store
         .as_ref()
@@ -827,7 +839,10 @@ async fn append_judgment(
         crate::eval::JudgmentError::InvalidName(n) => ApiError::dataset_invalid(n),
         other => ApiError::judgment_invalid(format!("{other}")),
     })?;
-    Ok(Json(m))
+    Ok(Json(AppendJudgmentResponse {
+        judgment_id: row.id,
+        manifest: m,
+    }))
 }
 
 async fn remove_judgment_row(
