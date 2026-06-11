@@ -384,3 +384,24 @@ pub fn parallel_pack_disabled() -> bool {
         Some("1") | Some("true") | Some("yes")
     )
 }
+
+impl MarlinPackedProj {
+    /// Training-session residency companion to
+    /// `GpuWeights::to_device_deep`: deep-copy the packed weight + scales
+    /// onto `device`; `groupsize`/`k`/`n` are metadata.
+    pub fn to_device_deep(&self, device: kiln_tensor::Device) -> anyhow::Result<Self> {
+        Ok(Self {
+            b_packed: self
+                .b_packed
+                .to_device(device)
+                .map_err(|e| anyhow::anyhow!("marlin b_packed to_device: {e}"))?,
+            scales: self
+                .scales
+                .to_device(device)
+                .map_err(|e| anyhow::anyhow!("marlin scales to_device: {e}"))?,
+            groupsize: self.groupsize,
+            k: self.k,
+            n: self.n,
+        })
+    }
+}

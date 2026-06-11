@@ -219,3 +219,23 @@ pub fn gumbel_sample_bf16(
 pub fn argmax_bf16(_x: &kiln_tensor::Tensor, _w: &RocmW8Proj) -> Result<u32> {
     anyhow::bail!("rocm_w8_proj::argmax_bf16 requires the rocm feature")
 }
+
+impl RocmW8Proj {
+    /// Training-session residency companion to
+    /// `GpuWeights::to_device_deep`: deep-copy the packed weight + scales
+    /// onto `device`; `k`/`n` are metadata.
+    pub fn to_device_deep(&self, device: kiln_tensor::Device) -> anyhow::Result<Self> {
+        Ok(Self {
+            q_weight: self
+                .q_weight
+                .to_device(device)
+                .map_err(|e| anyhow::anyhow!("w8 q_weight to_device: {e}"))?,
+            scales: self
+                .scales
+                .to_device(device)
+                .map_err(|e| anyhow::anyhow!("w8 scales to_device: {e}"))?,
+            k: self.k,
+            n: self.n,
+        })
+    }
+}

@@ -251,10 +251,14 @@ pub fn dispatch1<Op: DeviceOp1 + ?Sized>(op: &Op, input: &Tensor) -> Result<Tens
 pub fn dispatch2<Op: DeviceOp2 + ?Sized>(op: &Op, a: &Tensor, b: &Tensor) -> Result<Tensor> {
     if a.device() != b.device() {
         return Err(crate::Error::Msg(format!(
-            "DeviceOp2 {:?}: inputs on different devices: a={}, b={}",
+            "DeviceOp2 {:?}: inputs on different devices: a={} {:?} {:?}, b={} {:?} {:?}",
             op.name(),
             a.device(),
-            b.device()
+            a.dtype(),
+            a.shape(),
+            b.device(),
+            b.dtype(),
+            b.shape()
         )));
     }
     let result = match a.device() {
