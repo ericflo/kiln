@@ -19,7 +19,7 @@ const TOP_LEVEL_OVERVIEW: &str = r#"Kiln serves Qwen3.5-4B from one Rust process
 
 Running `kiln` with no subcommand starts the OpenAI-compatible server, just like `kiln serve`. Commands such as `kiln health`, `kiln train sft`, `kiln train grpo`, and `kiln adapters list` talk to a running server.
 
-After `kiln serve`, open http://127.0.0.1:8420/ui for the embedded dashboard: status, adapters, training monitoring, and quick inference.
+After `kiln serve`, open http://127.0.0.1:8420/ui/ for the embedded dashboard: status, adapters, training monitoring, and quick inference.
 
 Common next steps:
   kiln serve          start the server explicitly
@@ -33,7 +33,7 @@ const TOP_LEVEL_EXAMPLES: &str = r#"Examples:
   kiln serve
       Start the inference server explicitly. Running `kiln` with no subcommand also starts serving.
 
-      Then open http://127.0.0.1:8420/ui for status, adapters, training monitoring, and quick inference.
+      Then open http://127.0.0.1:8420/ui/ for status, adapters, training monitoring, and quick inference.
 
   kiln health
       Check whether the local server is ready and show model, adapter, scheduler, and training status.
@@ -50,7 +50,7 @@ const TOP_LEVEL_EXAMPLES: &str = r#"Examples:
 
 const SERVE_OVERVIEW: &str = r#"Start the OpenAI-compatible Kiln server for Qwen3.5-4B on http://127.0.0.1:8420 by default.
 
-Before starting, point Kiln at model weights with KILN_MODEL_PATH or pass a TOML config with --config. After startup, open http://127.0.0.1:8420/ui for the embedded dashboard and use kiln health to check readiness.
+Before starting, point Kiln at model weights with KILN_MODEL_PATH or pass a TOML config with --config. After startup, open http://127.0.0.1:8420/ui/ for the embedded dashboard and use kiln health to check readiness.
 
 If setup stalls, follow https://ericflo.github.io/kiln/quickstart.html first, then https://ericflo.github.io/kiln/troubleshooting.html for model path, CUDA, and config checks.
 "#;
@@ -71,7 +71,7 @@ const SERVE_EXAMPLES: &str = r#"Examples:
   kiln serve --config kiln.toml
       Start with a checked TOML config. Run `kiln config --file kiln.toml` first if you want to preview the effective settings.
 
-  open http://127.0.0.1:8420/ui
+  open http://127.0.0.1:8420/ui/
       Open the dashboard for status, adapters, training monitoring, and quick inference.
 
   kiln health
@@ -109,21 +109,21 @@ SFT reads JSONL: one chat correction example per line with a messages array. GRP
 
 Add --adapter-smoke-test to record a small base-vs-adapter canary check in train_receipt.json after successful training.
 
-Prefer http://127.0.0.1:8420/ui for guided submission and status. See docs/GRPO_GUIDE.md or docs/site/grpo.html for reward-loop examples.
+Prefer http://127.0.0.1:8420/ui/ for guided submission and status. See docs/GRPO_GUIDE.md or docs/site/grpo.html for reward-loop examples.
 "#;
 
 const TRAIN_SFT_OVERVIEW: &str = r#"Train from SFT JSONL: one chat correction example per line with a messages array.
 
 Use --adapter-smoke-test to compare base vs trained adapter logits and short greedy outputs before running a full eval.
 
-Open http://127.0.0.1:8420/ui for guided submission and training status.
+Open http://127.0.0.1:8420/ui/ for guided submission and training status.
 "#;
 
 const TRAIN_GRPO_OVERVIEW: &str = r#"Train from GRPO data: either one JSON request/batch with groups, or JSONL with one group per line.
 
 Use --adapter-smoke-test to compare base vs trained adapter logits and short greedy outputs before running a full eval.
 
-Open http://127.0.0.1:8420/ui for guided submission and training status. See docs/GRPO_GUIDE.md or docs/site/grpo.html for reward-loop examples.
+Open http://127.0.0.1:8420/ui/ for guided submission and training status. See docs/GRPO_GUIDE.md or docs/site/grpo.html for reward-loop examples.
 "#;
 
 const TRAIN_EXAMPLES: &str = r#"Examples:
@@ -953,7 +953,7 @@ pub fn print_banner(host: &str, port: u16, model_path: Option<&str>, config_path
     let _ = writeln!(stderr);
     let _ = writeln!(
         stderr,
-        "  {} /ui, /v1/chat/completions, /v1/completions, /v1/train/sft, /health, /metrics",
+        "  {} /ui/, /v1/chat/completions, /v1/completions, /v1/train/sft, /health, /metrics",
         style("Endpoints:").dim()
     );
     let _ = writeln!(stderr);

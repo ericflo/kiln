@@ -1,6 +1,7 @@
 name: UI smoke
 
-# The dashboard is a single ui.html served by kiln-server; this job drives it
+# The dashboard lives in crates/kiln-server/src/ui/ (index.html + styles.css
+# + demo.js + app.js) served by kiln-server; this job drives it
 # headless (empty-adapter, default, failure scenarios + payload-shape checks)
 # against the mock server in scripts/check_server_ui_smoke.mjs. Before this
 # job the smoke only ran when someone remembered to run it locally — UI
@@ -9,12 +10,12 @@ on:
   push:
     branches: [main]
     paths:
-      - 'crates/kiln-server/src/ui.html'
+      - 'crates/kiln-server/src/ui/**'
       - 'scripts/check_server_ui_smoke.mjs'
       - '.github/workflows/ui-smoke.yml'
   pull_request:
     paths:
-      - 'crates/kiln-server/src/ui.html'
+      - 'crates/kiln-server/src/ui/**'
       - 'scripts/check_server_ui_smoke.mjs'
       - '.github/workflows/ui-smoke.yml'
   workflow_dispatch:

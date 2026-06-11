@@ -34,7 +34,7 @@ macOS `.dmg` releases are signed with a Developer ID certificate and notarized b
 - **Crash restart** with exponential backoff, and a clear error state surfaced in the tray.
 - **System tray icon** with status states: stopped, starting, running, training-active, error.
 - **Right-click menu** — Open Dashboard, Settings, Start/Stop Server, View Logs, Quit.
-- **Dashboard window** — toolbar shows server state, model path, VRAM budget, active LoRA adapter, training status, and the OpenAI base URL with a one-click copy. The kiln server's built-in `/ui` is embedded below via a webview iframe.
+- **Dashboard window** — toolbar shows server state, model path, VRAM budget, active LoRA adapter, training status, and the OpenAI base URL with a one-click copy. The kiln server's built-in `/ui/` is embedded below via a webview iframe.
 - **Settings window** — model path, host, port, adapter directory, inference memory fraction, FP8 KV cache, CUDA graphs, prefix cache, speculative decoding, auto-start, auto-restart, launch-at-login. Persisted via `tauri-plugin-store`.
 - **Log viewer** — tails captured stdout/stderr lines from the ring buffer with auto-scroll and clear-view.
 - **Health and training polling** — hits `/v1/health` and `/v1/train/status` and drives the tray icon state.
@@ -47,7 +47,7 @@ See **[CHANGELOG.md](CHANGELOG.md)** for older versions and full release history
 
 ## Screenshots
 
-**Dashboard** — toolbar pills surface server state, model path, VRAM, active adapter, training status, and the OpenAI base URL (click-to-copy), with the kiln server's `/ui` embedded below.
+**Dashboard** — toolbar pills surface server state, model path, VRAM, active adapter, training status, and the OpenAI base URL (click-to-copy), with the kiln server's `/ui/` embedded below.
 
 ![Dashboard](../docs/desktop/dashboard.png)
 
@@ -70,7 +70,7 @@ Kiln Desktop (Tauri)
 │                                crash restart with backoff)
 ├── HTTP health/status poller   (Rust — /v1/health, /v1/train/status)
 ├── Settings store              (Rust — tauri-plugin-store)
-├── Dashboard window            (HTML, iframes the kiln server's /ui)
+├── Dashboard window            (HTML, iframes the kiln server's /ui/)
 ├── Settings window             (HTML + invoke())
 └── Log viewer window           (HTML + invoke())
           │

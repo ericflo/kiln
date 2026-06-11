@@ -9,7 +9,17 @@ import process from 'node:process';
 import { tmpdir } from 'node:os';
 
 const repoRoot = resolve(import.meta.dirname, '..');
-const uiPath = resolve(repoRoot, 'crates/kiln-server/src/ui.html');
+const uiDir = resolve(repoRoot, 'crates/kiln-server/src/ui');
+const uiIndexPath = resolve(uiDir, 'index.html');
+const uiStylesPath = resolve(uiDir, 'styles.css');
+const uiDemoJsPath = resolve(uiDir, 'demo.js');
+const uiAppJsPath = resolve(uiDir, 'app.js');
+const uiVendorDir = resolve(uiDir, 'vendor');
+const uiVendorFiles = {
+  'xterm.js': 'application/javascript',
+  'xterm.css': 'text/css',
+  'xterm-addon-fit.js': 'application/javascript',
+};
 const expectedHeaderHelpLinks = [
   ['Quickstart', 'https://ericflo.github.io/kiln/quickstart.html'],
   ['GRPO Guide', 'https://ericflo.github.io/kiln/grpo.html'],
@@ -258,16 +268,52 @@ function sse(res, chunks) {
 }
 
 async function startServer({ failDashboardApis = false, availableAdapters = defaultAvailableAdapters } = {}) {
-  const uiHtml = await readFile(uiPath, 'utf8');
+  const uiHtml = await readFile(uiIndexPath, 'utf8');
+  const uiStyles = await readFile(uiStylesPath, 'utf8');
+  const uiDemoJs = await readFile(uiDemoJsPath, 'utf8');
+  const uiAppJs = await readFile(uiAppJsPath, 'utf8');
   availableAdapters = availableAdapters.map((adapter) => ({ ...adapter }));
   let activeAdapter = availableAdapters.find((adapter) => adapter.active)?.name || null;
   const completedTrainingJobs = [];
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://127.0.0.1');
     const adapterRoute = parseAdapterRoute(url.pathname);
-    if (url.pathname === '/' || url.pathname === '/ui') {
+    // Mirror kiln-server's routing: `/` and `/ui` redirect to `/ui/` (query
+    // preserved) so the harness exercises the same redirect the real server
+    // performs; the split assets are served alongside the page.
+    if (url.pathname === '/') {
+      res.writeHead(303, { location: '/ui/' });
+      res.end();
+      return;
+    }
+    if (url.pathname === '/ui') {
+      res.writeHead(307, { location: `/ui/${url.search || ''}` });
+      res.end();
+      return;
+    }
+    if (url.pathname === '/ui/') {
       text(res, uiHtml, 'text/html; charset=utf-8');
       return;
+    }
+    if (url.pathname === '/ui/styles.css') {
+      text(res, uiStyles, 'text/css');
+      return;
+    }
+    if (url.pathname === '/ui/demo.js') {
+      text(res, uiDemoJs, 'application/javascript');
+      return;
+    }
+    if (url.pathname === '/ui/app.js') {
+      text(res, uiAppJs, 'application/javascript');
+      return;
+    }
+    if (url.pathname.startsWith('/ui/vendor/')) {
+      const name = url.pathname.slice('/ui/vendor/'.length);
+      const contentType = uiVendorFiles[name];
+      if (contentType) {
+        text(res, await readFile(resolve(uiVendorDir, name), 'utf8'), contentType);
+        return;
+      }
     }
     if (url.pathname === '/favicon.ico') {
       res.writeHead(204);

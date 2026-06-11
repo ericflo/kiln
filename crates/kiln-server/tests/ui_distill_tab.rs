@@ -1,11 +1,11 @@
 //! Smoke test for the §3 + §10.6 Distill tab in the embedded dashboard.
 //!
-//! The UI is a single ~10K-line HTML file (`ui.html`) baked into the
-//! binary via `include_str!`. The build path can succeed even if a
-//! handler accidentally drops markup. This test mounts the api router
-//! against a mock-backend state, fetches `/ui`, and verifies that the
-//! primary `Distill` tab and every sub-tab pane exist in the
-//! returned HTML — the cheap regression net for the OPD UI surfaces.
+//! The UI (`src/ui/{index.html,app.js,...}`) is baked into the binary via
+//! `include_str!`. The build path can succeed even if a handler
+//! accidentally drops markup. This test mounts the api router against a
+//! mock-backend state, fetches `/ui/` and `/ui/app.js`, and verifies that
+//! the primary `Distill` tab and every sub-tab pane exist in the returned
+//! HTML — the cheap regression net for the OPD UI surfaces.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -64,19 +64,24 @@ fn mock_state() -> AppState {
     )
 }
 
-#[tokio::test]
-async fn ui_contains_distill_primary_tab_and_every_sub_tab() {
-    let state = mock_state();
-    let app = api::router(state);
+async fn fetch_ui_route(app: axum::Router, uri: &str) -> String {
     let response = app
-        .oneshot(Request::builder().uri("/ui").body(Body::empty()).unwrap())
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::OK, "GET {uri}");
     let body = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
         .await
         .unwrap();
-    let html = std::str::from_utf8(&body).expect("UI HTML is valid utf-8");
+    String::from_utf8(body.to_vec()).expect("UI asset is valid utf-8")
+}
+
+#[tokio::test]
+async fn ui_contains_distill_primary_tab_and_every_sub_tab() {
+    let state = mock_state();
+    let html = fetch_ui_route(api::router(state.clone()), "/ui/").await;
+    let app_js = fetch_ui_route(api::router(state), "/ui/app.js").await;
+    let html = html.as_str();
 
     // Top-level Distill primary-nav tab.
     assert!(
@@ -139,7 +144,7 @@ async fn ui_contains_distill_primary_tab_and_every_sub_tab() {
         "library publish form missing"
     );
 
-    // JS handlers reference the actual endpoints.
+    // JS handlers (served at /ui/app.js) reference the actual endpoints.
     for endpoint in &[
         "/v1/train/opd",
         "/v1/teachers",
@@ -159,7 +164,7 @@ async fn ui_contains_distill_primary_tab_and_every_sub_tab() {
         "/v1/preflight/tiers",
     ] {
         assert!(
-            html.contains(endpoint),
+            app_js.contains(endpoint),
             "Distill UI doesn't reference endpoint {endpoint}"
         );
     }

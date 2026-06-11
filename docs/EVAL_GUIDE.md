@@ -22,7 +22,7 @@ Three things are unusual about kiln's eval stack:
    leaves your machine.
 
 Everything in this guide assumes a Kiln server running on
-`http://localhost:8420`. The `/ui` dashboard has a dedicated Evals tab with
+`http://localhost:8420`. The `/ui/` dashboard has a dedicated Evals tab with
 Datasets / Suites / Jobs / Judgments sub-tabs that drive every endpoint
 documented here.
 

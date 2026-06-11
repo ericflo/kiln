@@ -15,7 +15,7 @@ on:
       - 'scripts/check_release_versions.py'
       - 'scripts/check_docs_site_smoke.mjs'
       - 'scripts/check_server_ui_smoke.mjs'
-      - 'crates/kiln-server/src/ui.html'
+      - 'crates/kiln-server/src/ui/**'
       - '.github/workflows/release-version-drift.yml'
   pull_request:
     paths:
@@ -30,7 +30,7 @@ on:
       - 'scripts/check_release_versions.py'
       - 'scripts/check_docs_site_smoke.mjs'
       - 'scripts/check_server_ui_smoke.mjs'
-      - 'crates/kiln-server/src/ui.html'
+      - 'crates/kiln-server/src/ui/**'
       - '.github/workflows/release-version-drift.yml'
   workflow_dispatch:
 
