@@ -1066,6 +1066,37 @@ fn assistant_output_from_model_output(
     assistant_output_from_split_parts(req, reasoning_content, content, finish_reason)
 }
 
+/// Parse-then-truncate: run tool-call parsing on the UNTRUNCATED engine
+/// text, applying the stop truncation only when no tool calls parse.
+///
+/// Order matters: tools-bearing requests carry an implicit
+/// `</tool_call>` stop, and the Qwen3 XML extractor REQUIRES the close
+/// tag — truncating first (#1510's original shape) stripped the tag from
+/// every stop-finished tool call, so the call failed to parse and the
+/// raw XML leaked into `content`.
+fn assistant_output_from_model_output_stop_aware(
+    req: &ChatCompletionRequest,
+    model_output: &str,
+    prompt_text: &str,
+    wire_finish: &str,
+    engine_finish: &kiln_model::FinishReason,
+) -> AssistantOutputParts {
+    let parsed =
+        assistant_output_from_model_output(req, model_output, prompt_text, wire_finish);
+    if parsed.tool_calls.is_some() {
+        return parsed;
+    }
+    let mut parsed = parsed;
+    parsed.content = truncate_at_matched_stop(&parsed.content, engine_finish).to_string();
+    if parsed.content.is_empty() {
+        if let Some(reasoning) = parsed.reasoning_content.take() {
+            let truncated = truncate_at_matched_stop(&reasoning, engine_finish).to_string();
+            parsed.reasoning_content = (!truncated.is_empty()).then_some(truncated);
+        }
+    }
+    parsed
+}
+
 fn assistant_output_from_cached_parts(
     req: &ChatCompletionRequest,
     content: String,
@@ -1096,6 +1127,41 @@ fn assistant_output_from_split_parts(
         reasoning_content,
         content,
         finish_reason,
+    )
+}
+
+/// Stream-finish parsing with stop reconstruction: the emit gates strip
+/// the matched stop from `content_buf` (it must never reach the wire or
+/// the cache), but the implicit `</tool_call>` stop is part of the XML
+/// grammar — the extractor REQUIRES the close tag. Re-append the matched
+/// stop FOR PARSING ONLY; when no calls parse, fall back to the clean
+/// buffer so the stop text can't leak into content.
+fn stream_assistant_output_with_stop_reconstruction(
+    buffer_tool_content: bool,
+    reasoning_content: Option<String>,
+    content_buf: &str,
+    matched_stop: Option<&str>,
+    finish: &str,
+) -> AssistantOutputParts {
+    if buffer_tool_content {
+        if let Some(stop) = matched_stop {
+            let reconstructed = format!("{content_buf}{stop}");
+            let out = assistant_output_from_split_parts_with_tool_parsing(
+                true,
+                reasoning_content.clone(),
+                reconstructed,
+                finish,
+            );
+            if out.tool_calls.is_some() {
+                return out;
+            }
+        }
+    }
+    assistant_output_from_split_parts_with_tool_parsing(
+        buffer_tool_content,
+        reasoning_content,
+        content_buf.to_string(),
+        finish,
     )
 }
 
@@ -5040,9 +5106,13 @@ async fn generate_real_batched(
         .unwrap_or_else(|| state.served_model_id.clone());
     let completion_tokens =
         completion_usage_tokens(output.completion_tokens, &output.finish_reason);
-    let response_text = truncate_at_matched_stop(&output.text, &output.finish_reason);
-    let assistant_output =
-        assistant_output_from_model_output(req, response_text, prompt_text, finish_reason);
+    let assistant_output = assistant_output_from_model_output_stop_aware(
+        req,
+        &output.text,
+        prompt_text,
+        finish_reason,
+        &output.finish_reason,
+    );
     let metadata =
         chat_completion_metadata_from_prompt_and_output(state, req, prompt_text, &assistant_output);
     let assistant_output = apply_reasoning_content_policy(
@@ -5156,6 +5226,7 @@ async fn generate_real_batched_streaming(
     let prompt_starts_in_reasoning = prompt_starts_in_reasoning(prompt_text);
     let buffer_tool_content = request_allows_tool_call_parsing(req);
     let batching_engine = batching_engine.clone();
+    let stop_sequences = sampling.stop.clone();
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
 
     tokio::task::spawn({
@@ -5169,7 +5240,13 @@ async fn generate_real_batched_streaming(
             let mut content_buf = String::new();
             let mut completion_token_count: u32 = 0;
             let mut generated_tokens: Vec<TokenId> = Vec::new();
-            let mut decoded_prefix = String::new();
+            // Server-side emit gates for the engine path (the engine emits
+            // raw token ids; the server decodes): incremental detokenizer
+            // (no U+FFFD on multi-byte chars, bounded decode window instead
+            // of the old O(n²) full-prefix re-decode) + stop holdback (the
+            // matched stop never reaches the wire).
+            let mut detok = kiln_model::stream_text::IncrementalDetokenizer::new();
+            let mut stop_gate = kiln_model::stream_text::StopTailGate::new(&stop_sequences);
             let record = |finish_reason: String, completion: &str, completion_tokens: u32| {
                 let record = RequestRecord {
                     user_agent: req_user_agent.clone(),
@@ -5269,15 +5346,9 @@ async fn generate_real_batched_streaming(
                                 completion_token_count = completion_token_count.saturating_add(1);
                                 metrics.add_tokens(1);
 
-                                let decoded = tokenizer
-                                    .decode(&generated_tokens)
-                                    .unwrap_or_else(|_| decoded_prefix.clone());
-                                let delta = decoded
-                                    .strip_prefix(&decoded_prefix)
-                                    .map(str::to_owned)
-                                    .unwrap_or_else(|| tokenizer.decode(&[token]).unwrap_or_default());
-                                decoded_prefix = decoded;
-                                let chunk = reasoning_splitter.push(&delta);
+                                let delta = detok.next_delta(&tokenizer, &generated_tokens);
+                                let scan = stop_gate.push(&delta);
+                                let chunk = reasoning_splitter.push(&scan.emit);
                                 // The emit awaits channel capacity — a client
                                 // that stops reading (zero TCP window) would
                                 // otherwise park this task INSIDE the select
@@ -5324,6 +5395,42 @@ async fn generate_real_batched_streaming(
                                     kiln_model::FinishReason::MaxTokens => "length",
                                     kiln_model::FinishReason::StopSequence(_) => "stop",
                                 };
+                                // Flush the emit gates: detokenizer residue
+                                // passes the stop gate (a stop can complete
+                                // inside held bytes), then the splitter —
+                                // BEFORE the splitter's own flush.
+                                {
+                                    let residual =
+                                        detok.flush(&tokenizer, &generated_tokens);
+                                    let scan = stop_gate.push(&residual);
+                                    let mut gate_tail = scan.emit;
+                                    if scan.matched_stop.is_none() {
+                                        gate_tail.push_str(&stop_gate.flush());
+                                    }
+                                    if !gate_tail.is_empty() {
+                                        let chunk = reasoning_splitter.push(&gate_tail);
+                                        if !emit_or_buffer_reasoning_chunk(
+                                            &tx,
+                                            &id,
+                                            created,
+                                            &model,
+                                            chunk,
+                                            &mut completion_buf,
+                                            &mut reasoning_buf,
+                                            &mut content_buf,
+                                            buffer_tool_content,
+                                        )
+                                        .await
+                                        {
+                                            record(
+                                                "client_disconnect".to_string(),
+                                                &completion_buf,
+                                                completion_token_count,
+                                            );
+                                            return;
+                                        }
+                                    }
+                                }
                                 let trailing = reasoning_splitter.flush();
                                 if !emit_or_buffer_reasoning_chunk(
                                     &tx,
@@ -5350,11 +5457,21 @@ async fn generate_real_batched_streaming(
                                 } else {
                                     Some(reasoning_buf.clone())
                                 };
+                                let matched_stop = stop_gate
+                                    .matched()
+                                    .map(str::to_string)
+                                    .or(match &output.finish_reason {
+                                        kiln_model::FinishReason::StopSequence(s) => {
+                                            Some(s.clone())
+                                        }
+                                        _ => None,
+                                    });
                                 let assistant_output =
-                                    assistant_output_from_split_parts_with_tool_parsing(
+                                    stream_assistant_output_with_stop_reconstruction(
                                         buffer_tool_content,
                                         reasoning_content,
-                                        content_buf.clone(),
+                                        &content_buf,
+                                        matched_stop.as_deref(),
                                         finish,
                                     );
                                 if assistant_output.tool_calls.is_some()
@@ -5842,9 +5959,13 @@ async fn generate_real(
     // clients can render the two channels separately. For non-reasoning
     // templates this returns `(None, output.text)` and the response shape
     // is byte-identical to before.
-    let response_text = truncate_at_matched_stop(&output.text, &output.finish_reason);
-    let assistant_output =
-        assistant_output_from_model_output(req, response_text, prompt_text, finish_reason);
+    let assistant_output = assistant_output_from_model_output_stop_aware(
+        req,
+        &output.text,
+        prompt_text,
+        finish_reason,
+        &output.finish_reason,
+    );
     let metadata =
         chat_completion_metadata_from_prompt_and_output(state, req, prompt_text, &assistant_output);
     let assistant_output = apply_reasoning_content_policy(
@@ -6406,6 +6527,31 @@ async fn generate_real_streaming(
                                     kiln_model::FinishReason::MaxTokens => "length",
                                     kiln_model::FinishReason::StopSequence(_) => "stop",
                                 };
+                                // The engine-side emit gate (UTF-8 boundary +
+                                // stop-window holdback) releases its residue
+                                // at end-of-stream. It must pass through the
+                                // splitter BEFORE the splitter flush or a
+                                // `</think>` inside the residue would leak
+                                // into reasoning_content.
+                                if !done.trailing_text.is_empty() {
+                                    let chunk =
+                                        reasoning_splitter.push(&done.trailing_text);
+                                    if !emit_or_buffer_reasoning_chunk(
+                                        &tx,
+                                        &id,
+                                        created,
+                                        &model,
+                                        chunk,
+                                        &mut completion_buf,
+                                        &mut reasoning_buf,
+                                        &mut content_buf,
+                                        buffer_tool_content,
+                                    )
+                                    .await
+                                    {
+                                        break;
+                                    }
+                                }
                                 // Drain any partial-tag tail buffered in the
                                 // splitter before signaling end-of-stream so
                                 // we don't silently swallow up-to-7 chars
@@ -6436,11 +6582,18 @@ async fn generate_real_streaming(
                                 } else {
                                     Some(reasoning_buf.clone())
                                 };
+                                let matched_stop = match &done.finish_reason {
+                                    kiln_model::FinishReason::StopSequence(s) => {
+                                        Some(s.as_str())
+                                    }
+                                    _ => None,
+                                };
                                 let assistant_output =
-                                    assistant_output_from_split_parts_with_tool_parsing(
+                                    stream_assistant_output_with_stop_reconstruction(
                                         buffer_tool_content,
                                         reasoning_content,
-                                        content_buf.clone(),
+                                        &content_buf,
+                                        matched_stop,
                                         finish,
                                     );
                                 if assistant_output.tool_calls.is_some()
@@ -8893,6 +9046,40 @@ mod tests {
         assert_eq!(key.temperature, resolved.temperature);
         assert_eq!(key.presence_penalty, resolved.presence_penalty);
         assert_eq!(key.top_k, resolved.top_k);
+    }
+
+    /// Stream-finish stop reconstruction: a tool call terminated by the
+    /// implicit `</tool_call>` stop (which the emit gates strip) must
+    /// still parse — and when no call parses, the stop text must NOT
+    /// leak back into content.
+    #[test]
+    fn stream_stop_reconstruction_preserves_tool_calls_without_leaking() {
+        let xml = "<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n";
+        let out = stream_assistant_output_with_stop_reconstruction(
+            true,
+            None,
+            &format!("Sure.\n{xml}"),
+            Some("</tool_call>"),
+            "stop",
+        );
+        assert!(
+            out.tool_calls.is_some(),
+            "the reconstructed close tag must let the call parse: {out:?}"
+        );
+        assert_eq!(out.finish_reason, "tool_calls");
+        assert!(!out.content.contains("<tool_call>"), "{:?}", out.content);
+
+        // Plain text + a custom stop: nothing reconstructs, nothing leaks.
+        let out = stream_assistant_output_with_stop_reconstruction(
+            true,
+            None,
+            "I should check the file.\n",
+            Some("Observation:"),
+            "stop",
+        );
+        assert!(out.tool_calls.is_none());
+        assert!(!out.content.contains("Observation:"));
+        assert_eq!(out.content, "I should check the file.\n");
     }
 
     /// OpenAI semantics: the matched stop sequence must never appear in
