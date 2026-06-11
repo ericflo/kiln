@@ -278,6 +278,12 @@ async function startServer({ failDashboardApis = false, availableAdapters = defa
   availableAdapters = availableAdapters.map((adapter) => ({ ...adapter }));
   let activeAdapter = availableAdapters.find((adapter) => adapter.active)?.name || null;
   const completedTrainingJobs = [];
+  // Mirrors the real server's single running slot. SFT submit lands here
+  // (state Running) so the drill-modal Stop flow can exercise the
+  // cooperative running-job cancel; DELETE /v1/train/queue/:id moves it to
+  // `completedTrainingJobs` as Failed("cancelled by user"), exactly like
+  // the trainer aborting at the next step boundary.
+  let runningTrainingJob = null;
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://127.0.0.1');
     const adapterRoute = parseAdapterRoute(url.pathname);
@@ -496,7 +502,51 @@ async function startServer({ failDashboardApis = false, availableAdapters = defa
       return;
     }
     if (url.pathname === '/v1/train/queue' || url.pathname === '/v1/train/status') {
-      json(res, { running: null, queued: [], completed: completedTrainingJobs });
+      json(res, { running: runningTrainingJob, queued: [], completed: completedTrainingJobs });
+      return;
+    }
+    // Parameterized training-job routes, mirroring the real API:
+    //   GET    /v1/train/jobs/:id   — drill-modal detail payload
+    //   DELETE /v1/train/queue/:id  — cooperative cancel (running jobs)
+    const trainJobDetailMatch = /^\/v1\/train\/jobs\/([^/]+)$/.exec(url.pathname);
+    if (trainJobDetailMatch && req.method === 'GET') {
+      const jobId = decodeURIComponent(trainJobDetailMatch[1]);
+      const job = (runningTrainingJob && runningTrainingJob.job_id === jobId)
+        ? runningTrainingJob
+        : completedTrainingJobs.find((candidate) => candidate.job_id === jobId);
+      if (!job) {
+        res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: { code: 'training_job_not_found', message: `Training job '${jobId}' not found` } }));
+        return;
+      }
+      json(res, {
+        ...job,
+        progress: job.progress ?? 0,
+        loss_history: job.loss_history || [],
+        linked_eval_job_ids: job.linked_eval_job_ids || [],
+        auto_load: job.auto_load ?? false,
+      });
+      return;
+    }
+    const trainCancelMatch = /^\/v1\/train\/queue\/([^/]+)$/.exec(url.pathname);
+    if (trainCancelMatch && req.method === 'DELETE') {
+      const jobId = decodeURIComponent(trainCancelMatch[1]);
+      if (runningTrainingJob && runningTrainingJob.job_id === jobId) {
+        completedTrainingJobs.unshift({
+          ...runningTrainingJob,
+          state: 'Failed',
+          error: 'cancelled by user',
+        });
+        runningTrainingJob = null;
+        json(res, {
+          job_id: jobId,
+          status: 'cancelling',
+          message: 'stop requested — the trainer aborts at the next step boundary',
+        });
+        return;
+      }
+      res.writeHead(409, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ error: { code: 'training_job_not_cancellable', message: `Cannot cancel job '${jobId}'` } }));
       return;
     }
     if (url.pathname === '/v1/train/sft') {
@@ -511,14 +561,21 @@ async function startServer({ failDashboardApis = false, availableAdapters = defa
         apiBadRequest(res, validationError);
         return;
       }
-      completedTrainingJobs.unshift({
+      // SFT lands as the RUNNING job so the drill-modal Stop flow can
+      // assert running-job cooperative cancel against the mock.
+      runningTrainingJob = {
         job_id: 'smoke-sft',
         job_type: 'sft',
-        state: 'Completed',
-        progress: 1,
+        state: 'Running',
+        progress: 0.42,
+        current_loss: 1.234,
+        epoch: 1,
         adapter_name: body.config.output_name,
-        elapsed_secs: 1,
-      });
+        elapsed_secs: 12,
+        loss_history: [],
+        linked_eval_job_ids: [],
+        auto_load: false,
+      };
       setTimeout(() => json(res, { message: 'SFT job submitted', job_id: 'smoke-sft' }), 75);
       return;
     }
@@ -1284,6 +1341,49 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await expectActiveTrainingTab(page, 'queue', 'Submitting SFT should switch back to the training queue tab');
     await waitForPanelText(page, '#tab-queue', /smoke-sf/, 'Training queue should refresh after SFT submit');
     await waitForPanelText(page, '#tab-queue', /Adapter:\s*sft-adapter/, 'Training queue should show the submitted SFT adapter name');
+    await waitForPanelText(page, '#tab-queue', /running/, 'Training queue should show the SFT job as running');
+
+    // Drill modal for the RUNNING job: Stop must be live (running jobs are
+    // cancellable cooperatively — the trainer aborts at the next step
+    // boundary) and must route through the same DELETE /v1/train/queue/:id
+    // path the queue card uses. The modal stays open across the cancel so
+    // failures (and the cancelled repaint) surface in it.
+    await clickAndWait(page, '[data-train-job-id="smoke-sft"]', 'Could not open the train drill modal for the running SFT job');
+    await page.waitForFunction(
+      () => {
+        const modal = document.getElementById('train-drill-modal');
+        const stop = document.getElementById('train-drill-stop');
+        return modal && !modal.hidden && stop && !stop.hidden && !stop.disabled
+          && stop.title === 'Stop at the next training step'
+          && stop.dataset.jobId === 'smoke-sft';
+      },
+      { timeout: 5000 },
+    ).catch(() => fail('Train drill Stop should be enabled for a running job with title "Stop at the next training step"'));
+    page.once('dialog', async (dialog) => {
+      if (!/Stop this running job at the next training step\?/.test(dialog.message())) fail(`Unexpected stop confirmation text: ${dialog.message()}`);
+      await dialog.accept();
+    });
+    const stopRequestPromise = page.waitForRequest(
+      (request) => request.method() === 'DELETE' && request.url().endsWith('/v1/train/queue/smoke-sft'),
+      { timeout: 5000 },
+    );
+    await clickAndWait(page, '#train-drill-stop', 'Could not click the train drill Stop button');
+    await stopRequestPromise.catch(() => fail('Drill-modal Stop did not send DELETE /v1/train/queue/smoke-sft'));
+    await expectTrainingToast(page, 'Cancelled job smoke-sf');
+    const drillStillOpen = await page.$eval('#train-drill-modal', (el) => !el.hidden);
+    if (!drillStillOpen) fail('Train drill modal should stay open across Stop so failures and the cancelled state surface in it');
+    // The 1.5s drill poll repaints the now-terminal job: Stop hides, Delete shows.
+    await page.waitForFunction(
+      () => {
+        const stop = document.getElementById('train-drill-stop');
+        const del = document.getElementById('train-drill-delete');
+        return stop && stop.hidden && del && !del.hidden;
+      },
+      { timeout: 6000 },
+    ).catch(() => fail('Train drill modal did not repaint to the cancelled state after Stop'));
+    await clickAndWait(page, '#train-drill-close', 'Could not close the train drill modal');
+    await page.waitForFunction(() => document.getElementById('train-drill-modal')?.hidden === true, { timeout: 5000 })
+      .catch(() => fail('Train drill modal did not close'));
 
     await clickAndWait(page, '#training-tab-grpo', 'Could not open GRPO tab');
     await waitForVisiblePanel(page, '#tab-grpo', 'GRPO tab did not activate');

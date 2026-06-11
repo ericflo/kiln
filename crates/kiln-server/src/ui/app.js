@@ -7331,8 +7331,11 @@ async function fetchTrainDrill() {
       stopBtn.hidden = false;
       if (deleteBtn) deleteBtn.hidden = true;
     } else if (stateLow === 'running') {
-      stopBtn.disabled = true;
-      stopBtn.title = 'Cancellation of running training jobs is not yet supported.';
+      // Running jobs are stoppable too — DELETE /v1/train/queue/{id} sets
+      // the cooperative cancel flag and the trainer aborts at the next
+      // step boundary. Same path as the queue card's Stop button.
+      stopBtn.disabled = false;
+      stopBtn.title = 'Stop at the next training step';
       stopBtn.hidden = false;
       if (deleteBtn) deleteBtn.hidden = true;
     } else {
@@ -7344,6 +7347,9 @@ async function fetchTrainDrill() {
       }
     }
     stopBtn.dataset.jobId = j.job_id;
+    // The click handler words its confirm() by state (queued = removed
+    // from queue immediately; running = cooperative stop at the next step).
+    stopBtn.dataset.jobState = stateLow;
 
     document.getElementById('train-drill-content').innerHTML = renderTrainDrillBody(j);
     const curveEl = document.getElementById('train-drill-curve-host');
@@ -7442,15 +7448,23 @@ document.getElementById('train-drill-close')?.addEventListener('click', closeTra
 document.getElementById('train-drill-modal')?.addEventListener('click', ev => {
   if (ev.target.id === 'train-drill-modal') closeTrainDrillModal();
 });
-document.getElementById('train-drill-stop')?.addEventListener('click', () => {
-  const jobId = document.getElementById('train-drill-stop').dataset.jobId;
+document.getElementById('train-drill-stop')?.addEventListener('click', async () => {
+  const stopBtn = document.getElementById('train-drill-stop');
+  const jobId = stopBtn.dataset.jobId;
   if (!jobId) return;
-  if (!confirm('Cancel queued job?')) return;
+  const running = stopBtn.dataset.jobState === 'running';
+  const msg = running
+    ? 'Stop this running job at the next training step?'
+    : 'Cancel queued job?';
+  if (!confirm(msg)) return;
   // Reuse the in-flight set + toast + pollTraining refresh that
   // window.cancelJob already implements; calling DELETE directly
-  // would let rapid clicks fire duplicate requests.
-  closeTrainDrillModal();
-  window.cancelJob(jobId);
+  // would let rapid clicks fire duplicate requests. Keep the modal
+  // OPEN until the DELETE resolves — a failure surfaces right here
+  // instead of in a closed modal, and on success the 1.5s drill poll
+  // repaints the state to cancelled on its own.
+  trainDrillLastKey = null; // bypass change-detection so the repaint lands
+  await window.cancelJob(jobId);
 });
 document.getElementById('train-drill-delete')?.addEventListener('click', async () => {
   const jobId = document.getElementById('train-drill-delete').dataset.jobId;
