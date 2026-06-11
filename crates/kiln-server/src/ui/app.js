@@ -5895,6 +5895,9 @@ async function openDrillModal(jobId) {
   drillSelectedOutcome = null;
   document.getElementById('drill-search').value = '';
   document.querySelectorAll('[data-drill-filter]').forEach(b => b.classList.toggle('active', b.dataset.drillFilter === 'all'));
+  // A leftover raw-JSON block from a previously drilled job would show the
+  // wrong payload until the user re-toggles — drop it on every open.
+  document.getElementById('drill-raw-block')?.remove();
   document.getElementById('eval-drill-modal').hidden = false;
   document.body.style.overflow = 'hidden';
   await fetchDrillJob(jobId);
@@ -5910,6 +5913,7 @@ async function openDrillModal(jobId) {
 function closeDrillModal() {
   document.getElementById('eval-drill-modal').hidden = true;
   document.body.style.overflow = '';
+  document.getElementById('drill-raw-block')?.remove();
   drillJob = null;
   drillSelectedOutcome = null;
   drillSuiteCacheKey = null;
@@ -6011,6 +6015,17 @@ function renderDrillModal(preserveSelection) {
     const failingInAnyRun = (j.runs || []).some(r =>
       (r.outcomes || []).some(o => o.kind !== 'pass'));
     rerunBtn.hidden = isActive || !failingInAnyRun;
+  }
+  // Download outcomes (.jsonl): live across every run of the job (compare
+  // jobs export all adapters, one line per outcome). Disabled until the
+  // first outcome lands so the click never produces an empty file.
+  const exportBtn = document.getElementById('drill-download-outcomes');
+  if (exportBtn) {
+    const outcomeCount = (j.runs || []).reduce((n, r) => n + (r.outcomes || []).length, 0);
+    exportBtn.disabled = outcomeCount === 0;
+    exportBtn.title = outcomeCount
+      ? `Download all ${outcomeCount} per-example outcomes across ${(j.runs || []).length} run(s) as JSON Lines`
+      : 'No outcomes yet — the download unlocks as examples finish';
   }
 
   const runs = j.runs || [];
@@ -6298,6 +6313,75 @@ function renderOutcomeDetail(o) {
 document.getElementById('drill-close')?.addEventListener('click', closeDrillModal);
 document.getElementById('eval-drill-modal')?.addEventListener('click', ev => {
   if (ev.target.id === 'eval-drill-modal') closeDrillModal();
+});
+// Raw JSON toggle — same pattern as the request drill modal's `raw` button:
+// click appends a pretty-printed <pre> of the cached job to the modal
+// content, click again removes it.
+document.getElementById('drill-raw')?.addEventListener('click', () => {
+  if (!drillJob) return;
+  const content = document.getElementById('drill-content');
+  if (!content) return;
+  const existing = content.querySelector('#drill-raw-block');
+  if (existing) { existing.remove(); return; }
+  const pre = document.createElement('pre');
+  pre.id = 'drill-raw-block';
+  pre.className = 'req-pre';
+  pre.style.cssText = 'max-height:50vh; margin:var(--space-4) var(--space-5);';
+  pre.textContent = JSON.stringify(drillJob, null, 2);
+  content.appendChild(pre);
+  pre.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+});
+/// Trigger a browser download via a temporary object URL. The URL is
+/// revoked right after the click so repeated downloads don't pin every
+/// blob in memory for the lifetime of the page.
+function downloadBlobAsFile(filename, blob) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+/// One JSON line per outcome, across every finished run of the job. Each
+/// line is standalone: suite/job/adapter context first, then the outcome's
+/// verdict and (when present) its optional diagnostics, completion last.
+function buildDrillOutcomesJsonl(j) {
+  const lines = [];
+  for (const run of (j.runs || [])) {
+    (run.outcomes || []).forEach((o, i) => {
+      const line = {
+        suite: run.suite_name || j.suite_name || 'eval',
+        job_id: j.job_id,
+        adapter: run.adapter || 'base',
+        example_index: i,
+        example_id: o.example_id,
+        completion_index: o.completion_index,
+        kind: o.kind,
+        score: o.score,
+      };
+      if (o.detail != null) line.detail = o.detail;
+      if (o.latency_ms != null) line.latency_ms = o.latency_ms;
+      if (o.prompt_tokens != null) line.prompt_tokens = o.prompt_tokens;
+      if (o.completion_tokens != null) line.completion_tokens = o.completion_tokens;
+      if (o.tags && o.tags.length) line.tags = o.tags;
+      if (o.metadata != null) line.metadata = o.metadata;
+      if (o.reasoning_text != null) line.reasoning_text = o.reasoning_text;
+      line.completion_text = o.completion_text || '';
+      lines.push(JSON.stringify(line));
+    });
+  }
+  return lines;
+}
+document.getElementById('drill-download-outcomes')?.addEventListener('click', () => {
+  if (!drillJob) return;
+  const lines = buildDrillOutcomesJsonl(drillJob);
+  if (!lines.length) return; // button is disabled in this state; belt and braces
+  const suiteSlug = String(drillJob.suite_name || 'eval').replace(/[^A-Za-z0-9._-]+/g, '-');
+  const filename = `${suiteSlug}-${drillJob.job_id.slice(0, 8)}.outcomes.jsonl`;
+  downloadBlobAsFile(filename, new Blob([lines.join('\n') + '\n'], { type: 'application/jsonl' }));
+  toast(`Downloaded ${lines.length} outcome${lines.length === 1 ? '' : 's'} as ${filename}`, 'ok');
 });
 document.getElementById('drill-search')?.addEventListener('input', ev => {
   drillSearch = ev.target.value;
@@ -7903,6 +7987,9 @@ let trainDrillPollHandle = null;
 // modal polls every 1.5s; for a finished job that's a 1024-sample
 // loss_history shipping every poll otherwise.
 let trainDrillLastKey = null;
+// Loss samples of the currently drilled job, refreshed on every poll —
+// the header's "Copy loss CSV" button reads this instead of re-fetching.
+let trainDrillLossHistory = [];
 
 const TRAIN_TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled']);
 
@@ -7923,6 +8010,12 @@ async function openTrainDrillModal(jobId) {
 function closeTrainDrillModal() {
   trainDrillJobId = null;
   trainDrillLastKey = null;
+  trainDrillLossHistory = [];
+  const copyLossBtn = document.getElementById('train-drill-copy-loss');
+  if (copyLossBtn) {
+    copyLossBtn.disabled = true;
+    copyLossBtn.title = 'No loss samples recorded yet — the CSV unlocks once training reports its first loss';
+  }
   document.getElementById('train-drill-modal').hidden = true;
   document.body.style.overflow = '';
   if (trainDrillPollHandle) { clearInterval(trainDrillPollHandle); trainDrillPollHandle = null; }
@@ -7980,6 +8073,18 @@ async function fetchTrainDrill() {
     // The click handler words its confirm() by state (queued = removed
     // from queue immediately; running = cooperative stop at the next step).
     stopBtn.dataset.jobState = stateLow;
+
+    // Copy loss CSV: enabled the moment the first loss sample lands.
+    // Samples may be downsampled past TRAINING_LOSS_HISTORY_CAP, so the
+    // CSV column is `sample` (recorded order), not a training step.
+    trainDrillLossHistory = Array.isArray(j.loss_history) ? j.loss_history : [];
+    const copyLossBtn = document.getElementById('train-drill-copy-loss');
+    if (copyLossBtn) {
+      copyLossBtn.disabled = trainDrillLossHistory.length === 0;
+      copyLossBtn.title = trainDrillLossHistory.length
+        ? `Copy ${trainDrillLossHistory.length} loss sample${trainDrillLossHistory.length === 1 ? '' : 's'} as CSV (sample,epoch,progress,loss,elapsed_secs)`
+        : 'No loss samples recorded yet — the CSV unlocks once training reports its first loss';
+    }
 
     document.getElementById('train-drill-content').innerHTML = renderTrainDrillBody(j);
     const curveEl = document.getElementById('train-drill-curve-host');
@@ -8109,6 +8214,26 @@ document.getElementById('train-drill-delete')?.addEventListener('click', async (
   } catch (e) {
     toast('Delete failed: ' + e.message, 'err');
   }
+});
+// Copy loss history (CSV) — `sample` is the recorded order (the in-memory
+// history downsamples past 512 points, so it is NOT the optimizer step).
+// Loss samples carry no wall-clock timestamps; elapsed_secs is the offset
+// from job start.
+document.getElementById('train-drill-copy-loss')?.addEventListener('click', () => {
+  if (!trainDrillLossHistory.length) return;
+  const csv = ['sample,epoch,progress,loss,elapsed_secs']
+    .concat(trainDrillLossHistory.map((s, i) => `${i + 1},${s.epoch},${s.progress},${s.loss},${s.elapsed_secs}`))
+    .join('\n');
+  const writeText = navigator.clipboard?.writeText
+    ? navigator.clipboard.writeText.bind(navigator.clipboard)
+    : (t) => { fallbackCopyText(t); return Promise.resolve(); };
+  writeText(csv).then(() => {
+    if (Object.prototype.hasOwnProperty.call(window, '__copiedText')) window.__copiedText = csv;
+    toast('Loss history copied as CSV', 'ok');
+  }).catch(() => {
+    try { fallbackCopyText(csv); toast('Loss history copied as CSV', 'ok'); }
+    catch { toast('Copy failed', 'err'); }
+  });
 });
 
 /* =====================================================================

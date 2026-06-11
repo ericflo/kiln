@@ -905,6 +905,8 @@
       <div class="modal-head">
         <h2 id="drill-title">Eval results</h2>
         <span class="modal-meta" id="drill-meta"></span>
+        <button class="btn btn-sm btn-ghost" id="drill-raw" type="button" title="Toggle the raw JSON view of this eval job"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-terminal"></use></svg> raw</button>
+        <button class="btn btn-sm" id="drill-download-outcomes" type="button" disabled title="No outcomes yet — the download unlocks as examples finish"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-download"></use></svg> Download outcomes (.jsonl)</button>
         <button class="btn btn-sm" id="drill-cancel" type="button" hidden title="Cancel this eval job (queued only)"><svg class="icn icn-sm"><use href="#i-stop"></use></svg> Cancel</button>
         <button class="btn btn-sm" id="drill-rerun" type="button" title="Queue a new eval job that runs only the failing examples again"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-refresh"></use></svg> Re-run failures</button>
         <button class="modal-close" id="drill-close" aria-label="Close"><svg class="icn" aria-hidden="true"><use href="#i-close"></use></svg></button>
@@ -932,7 +934,7 @@
             <!-- outcome list rows injected here -->
           </div>
         </aside>
-        <main class="modal-content">
+        <main class="modal-content" id="drill-content">
           <div id="drill-detail" class="outcome-detail">
             <div class="detail-empty">
               <div style="font-size:32px; opacity:0.5; margin-bottom:12px;">←</div>
@@ -972,6 +974,7 @@
       <div class="modal-head">
         <h2 id="train-drill-title">Training job</h2>
         <span class="modal-meta" id="train-drill-meta"></span>
+        <button class="btn btn-sm" id="train-drill-copy-loss" type="button" disabled title="No loss samples recorded yet — the CSV unlocks once training reports its first loss"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg> Copy loss CSV</button>
         <button class="btn btn-sm" id="train-drill-stop" type="button" title="Stop this training job — queued jobs cancel immediately, running jobs stop at the next training step"><svg class="icn icn-sm"><use href="#i-stop"></use></svg> Stop</button>
         <button class="btn btn-sm" id="train-drill-delete" type="button" hidden title="Permanently delete this terminal job from memory and from the on-disk archive"><svg class="icn icn-sm"><use href="#i-trash"></use></svg> Delete</button>
         <button class="modal-close" id="train-drill-close" aria-label="Close"><svg class="icn" aria-hidden="true"><use href="#i-close"></use></svg></button>
