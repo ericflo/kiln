@@ -1148,7 +1148,11 @@ async function pollDecodePerf() {
       refreshDecodeSparkline();
     }
   } catch (e) {
+    // The failure HTML destroys both sub-hosts, so every dedupe key that
+    // could skip rebuilding them must be invalidated or the panel stays
+    // stuck on this message after the server recovers.
     lastDecodeStatsKey = null;
+    lastTpsRendered = null;
     el.innerHTML = apiFailureHtml('Decode performance', e, 'pollDecodePerf');
   } finally {
     setPanelBusy('decode-perf-panel', false);
@@ -1201,7 +1205,7 @@ function shortId(s) {
 }
 
 function apiFailureHtml(action, e, retryFn) {
-  const retryButton = retryFn ? `<div style="margin-top:var(--space-3);"><button type="button" class="btn btn-primary" onclick="${retryFn}()" aria-label="Retry ${escapeHtml(action)}">Retry ${escapeHtml(action)}</button></div>` : '';
+  const retryButton = retryFn ? `<div style="margin-top:var(--space-3);"><button type="button" class="btn btn-primary" data-retry="${escapeHtml(retryFn)}" aria-label="Retry ${escapeHtml(action)}">Retry ${escapeHtml(action)}</button></div>` : '';
   return `<div class="empty api-failure">
     <div style="font-weight:600;color:var(--text);margin-bottom:6px;">Dashboard is waiting for Kiln server APIs.</div>
     <div>${escapeHtml(action)} could not load yet. If this is a cold start, wait for <code>kiln serve</code> to finish model startup, then retry.</div>
@@ -1210,6 +1214,23 @@ function apiFailureHtml(action, e, retryFn) {
     <div style="margin-top:var(--space-2);font-family:var(--font-mono);font-size:var(--text-xs);">Details: ${escapeHtml(e.message)}</div>
   </div>`;
 }
+
+// The whole app lives inside an IIFE, so the failure panels' Retry buttons
+// can't use inline onclick (the poll functions aren't globals — a click would
+// throw ReferenceError). They dispatch through this delegated listener instead.
+const RETRY_ACTIONS = {
+  pollHealth,
+  pollDecodePerf,
+  pollRecentRequests,
+  pollAdapters,
+  pollTraining,
+};
+document.addEventListener('click', (ev) => {
+  const btn = ev.target.closest('[data-retry]');
+  if (!btn) return;
+  const action = RETRY_ACTIONS[btn.dataset.retry];
+  if (action) action();
+});
 
 let recentRequestsFilter = '';
 let recentAgentFilter = 'all';
@@ -1763,6 +1784,9 @@ async function pollRecentRequests() {
     lastRecentRequestsKey = key;
     renderRecentRequests(recentRequestsCache);
   } catch (e) {
+    // Invalidate the dedupe key: the failure HTML replaced the list, so an
+    // unchanged key after recovery would leave this panel stuck on the error.
+    lastRecentRequestsKey = null;
     el.innerHTML = apiFailureHtml('Recent requests', e, 'pollRecentRequests');
   } finally {
     setPanelBusy('recent-requests-panel', false);
@@ -1788,6 +1812,9 @@ async function pollAdapters() {
     const count = (data.available || []).length;
     setText('adapters-count', String(count));
   } catch (e) {
+    // refreshAdapterCards owns this panel and dedupes on lastAdaptersKey;
+    // reset it so the card list repaints once the server recovers.
+    lastAdaptersKey = null;
     adaptersPanel.innerHTML = apiFailureHtml('Adapters', e, 'pollAdapters');
   } finally {
     setPanelBusy('adapters-panel', false);
@@ -2217,7 +2244,11 @@ const cancellingTrainingJobIds = new Set();
 // Flat snapshot of the latest /v1/train/queue payload so the command
 // palette (and any other consumer) can search training jobs without
 // re-issuing the request. Updated on every pollTraining tick.
-let trainingJobsCache = { running: null, queued: [], completed: [] };
+// null until the first SUCCESSFUL fetch: an unfetched (or failing) queue is
+// unknown, not empty — seeding an empty shape here made selectPage('training')
+// auto-switch to the SFT form during outages, hiding the failure panel and
+// its Retry button.
+let trainingJobsCache = null;
 // Skip the wholesale `tab-queue` innerHTML rewrite when nothing changed
 // (running progress, queued list identity, recent finish-state). Mirrors
 // the `lastAdaptersKey` guard on the adapters tab.
@@ -2278,6 +2309,8 @@ async function pollTraining() {
     setText('training-count', String(liveCount));
     updateFlywheel();
   } catch (e) {
+    // Invalidate the queue's render key — the failure HTML replaced the list.
+    lastTrainingKey = null;
     queuePanel.innerHTML = apiFailureHtml('Training queue', e, 'pollTraining');
   } finally {
     setPanelBusy('tab-queue', false);
@@ -6236,11 +6269,11 @@ function buildCmdkIndex() {
   // Training runs (running + queued + most-recent completed) — same
   // drill-modal jump as clicking a card on the Training tab. Lets
   // power users find a finished run by adapter name without scrolling.
-  const trainingPool = [
+  const trainingPool = trainingJobsCache ? [
     ...(trainingJobsCache.running ? [trainingJobsCache.running] : []),
     ...(trainingJobsCache.queued || []),
     ...(trainingJobsCache.completed || []).slice(0, 30),
-  ];
+  ] : [];
   for (const j of trainingPool) {
     const stateNorm = (j.state || '').toString().toLowerCase() || 'queued';
     const lossLbl = j.current_loss != null ? `loss ${j.current_loss.toFixed(3)}` : 'no loss yet';
@@ -7156,6 +7189,9 @@ async function fetchTrainDrill() {
       trainDrillPollHandle = null;
     }
   } catch (e) {
+    // Reset the drill key so the next successful poll repaints over this
+    // error instead of being deduped away.
+    trainDrillLastKey = null;
     document.getElementById('train-drill-content').innerHTML = `<div class="detail-empty">Failed: ${escapeHtml(e.message)}</div>`;
   }
 }
