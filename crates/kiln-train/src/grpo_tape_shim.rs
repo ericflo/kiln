@@ -66,18 +66,21 @@
 //! (eliminating those I/O copies is a separate later #1082 task); the gradient
 //! math is otherwise entirely kt on-device.
 //!
+//! # ECHO env-CE (resurrection PR2 — COVERED)
+//!
+//! The ECHO term (`λ · mean_envCE`) IS folded into this root: the env rows
+//! are the same `coeff · (onehot − softmax)` assembly with the constant
+//! coefficient `−λ/|O|` (`EchoEnvSpec` / `EchoEnvNodeState`), the scalar
+//! gains `λ · (−Σ_env log p / |O|)` before `tape.record`, and the backward
+//! adds the env hidden-grad onto the PG hidden-grad. The Vulkan fused
+//! active-rows route does not carry env rows — ECHO-active steps take the
+//! KtComposite route instead (trainer dispatch).
+//!
 //! # Carve-outs (NOT covered by this tape root)
 //!
-//! * **ECHO env-CE.** The ECHO term (`λ · mean_envCE`) composes against the
-//!   SAME `policy_logits` and COULD be folded in here as extra
-//!   `(softmax − onehot)` rows at env positions — that is exactly the ECHO
-//!   resurrection plan's PR2. Until then there is NO fallback: the candle
-//!   gradient-checkpointing path that used to carry ECHO steps was deleted
-//!   in #1082, so ECHO-with-env-tokens configs are rejected at submission
-//!   and trainer entry (`LossConfig::validate_for_kt_tape`), never
-//!   dispatched.
-//! * **`no_policy_loss`.** With ECHO unavailable this is a constant-zero
-//!   loss; rejected at the same validation points.
+//! * **`no_policy_loss`** (verifier-free, ECHO-only training): not yet
+//!   re-wired — needs the PG coefficients zeroed while the env rows drive;
+//!   still rejected at validation.
 //! * **`KlEstimator` / `IsLevel`** are all SUPPORTED — the numeric-`coeff`
 //!   derivation handles every variant uniformly because it just re-runs
 //!   `grpo_loss`. CUDA/ROCm additionally use a device-resident fast path for
@@ -1069,6 +1072,164 @@ pub(crate) fn selected_log_probs_from_normed_hidden_chunked_kt(
     .map(|state| state.policy_log_probs)
 }
 
+/// ECHO env-CE spec for the fused GRPO loss roots (resurrection PR2).
+///
+/// `env_mask` selects environment-observation TARGET positions with the
+/// same shifted convention as `action_mask` (position `p` contributes when
+/// `env_mask[p+1]`, label = `input_ids[p+1]`). `total_obs_len` is `|O|` —
+/// the PRE-warning-filter observation token count (paper §3.1: normalize
+/// by `|O|`, not by the filtered `|O'|`, so filtered rows still count in
+/// the denominator). `lambda` is the ECHO weight.
+///
+/// Loss contribution: `λ · (−Σ_env' log p) / |O|`. Gradient contribution
+/// per env row: `(λ/|O|) · (softmax − onehot)` — i.e. the SAME
+/// `coeff · (onehot − softmax)` row assembly as the PG term with the
+/// constant coefficient `coeff = −λ/|O|`, which is why the env rows reuse
+/// the proven chunked builder via `coeff_override`.
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+#[derive(Debug, Clone)]
+pub(crate) struct EchoEnvSpec {
+    pub env_mask: Vec<bool>,
+    pub total_obs_len: usize,
+    pub lambda: f64,
+}
+
+/// Saved env-row state on the fused node: everything the backward needs to
+/// rebuild the env softmax rows chunk-by-chunk, plus the constant
+/// per-row coefficient magnitude `λ/|O|` (the backward negates and scales
+/// by the upstream seed).
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+#[derive(Debug)]
+struct EchoEnvNodeState {
+    env_log_probs: kiln_tensor::Tensor,
+    env_idx: kiln_tensor::Tensor,
+    env_labels: Vec<u32>,
+    env_running_max: kiln_tensor::Tensor,
+    env_running_sumexp: kiln_tensor::Tensor,
+    /// λ / |O| — positive magnitude; the backward applies `−(λ/|O|)·seed`.
+    coeff_magnitude: f64,
+}
+
+/// Compute the env-row chunked state + the ECHO env-CE scalar for one
+/// completion. Returns `None` when the spec selects no env rows (legacy
+/// single-turn rollouts) or `|O| == 0` — the term then contributes exactly
+/// nothing, matching the original pre-#1082 semantics.
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+fn echo_env_state_and_value_kt(
+    normed_hidden: &kiln_tensor::Tensor,
+    head_t: &kiln_tensor::Tensor,
+    input_ids: &[u32],
+    spec: &EchoEnvSpec,
+    chunk_size: usize,
+    device: &Device,
+) -> Result<Option<(EchoEnvNodeState, kiln_tensor::Tensor, f64)>> {
+    if spec.total_obs_len == 0 || spec.lambda == 0.0 {
+        return Ok(None);
+    }
+    let has_env = input_ids
+        .len()
+        .checked_sub(1)
+        .map(|n| (0..n).any(|p| spec.env_mask.get(p + 1).copied().unwrap_or(false)))
+        .unwrap_or(false);
+    if !has_env {
+        return Ok(None);
+    }
+    let env_state = selected_log_probs_from_normed_hidden_chunked_state_kt(
+        normed_hidden,
+        head_t,
+        input_ids,
+        &spec.env_mask,
+        chunk_size,
+        device,
+    )
+    .context("echo_env_state_and_value_kt: env log-prob state")?;
+    if env_state.active_labels.is_empty() {
+        return Ok(None);
+    }
+    // env_CE = −Σ log p / |O| (paper §3.1) — scalar on-device, then the λ
+    // weight is applied by the caller when composing the total loss.
+    let inv_obs = -1.0 / spec.total_obs_len as f64;
+    let env_ce_kt = env_state
+        .policy_log_probs
+        .sum_all()
+        .and_then(|s| s.affine(inv_obs, 0.0))
+        .map_err(|e| anyhow::anyhow!("echo_env_state_and_value_kt: env CE scalar: {e}"))?;
+    let env_ce_val = env_ce_kt
+        .to_dtype(kiln_tensor::DType::F32)
+        .and_then(|t| t.to_scalar::<f32>())
+        .map(f64::from)
+        .map_err(|e| anyhow::anyhow!("echo_env_state_and_value_kt: env CE to_scalar: {e}"))?;
+    let node_state = EchoEnvNodeState {
+        env_log_probs: env_state.policy_log_probs,
+        env_idx: env_state.active_idx,
+        env_labels: env_state.active_labels,
+        env_running_max: env_state.running_max,
+        env_running_sumexp: env_state.running_sumexp,
+        coeff_magnitude: spec.lambda / spec.total_obs_len as f64,
+    };
+    Ok(Some((node_state, env_ce_kt, env_ce_val)))
+}
+
+/// Build the env-row hidden gradient for one completion: the same chunked
+/// `coeff · (onehot − softmax)` assembly as the PG rows, with the constant
+/// coefficient `−(λ/|O|) · grad_scalar` injected via `coeff_override`.
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+fn echo_env_grad_from_normed_hidden_kt(
+    normed_hidden: &kiln_tensor::Tensor,
+    head_t: &kiln_tensor::Tensor,
+    echo: &EchoEnvNodeState,
+    loss_params: GrpoLossParams,
+    grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute,
+    grad_scalar: f64,
+    device: &Device,
+    chunk_size: usize,
+) -> Result<kiln_tensor::Tensor> {
+    let n = echo.env_labels.len();
+    let coeff = (-(echo.coeff_magnitude) * grad_scalar) as f32;
+    let coeff_col = kiln_tensor::Tensor::from_vec_on(*device, vec![coeff; n], vec![n, 1])
+        .map_err(|e| anyhow::anyhow!("echo_env_grad_from_normed_hidden_kt: coeff col: {e}"))?;
+    grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
+        normed_hidden,
+        head_t,
+        &echo.env_idx,
+        &echo.env_labels,
+        // With `coeff_override` set the builder never reads the log-prob /
+        // ref / loss-param inputs — they exist only for the PG coefficient
+        // derivation. Pass the env log-probs for shape-compatible refs.
+        &echo.env_log_probs,
+        &echo.env_log_probs,
+        loss_params,
+        grpo_kl_auxiliary_route,
+        grad_scalar,
+        device,
+        chunk_size,
+        &echo.env_running_max,
+        &echo.env_running_sumexp,
+        Some(&coeff_col),
+    )
+    .context("echo_env_grad_from_normed_hidden_kt: env rows grad")
+}
+
 #[cfg(any(
     feature = "cuda",
     feature = "metal",
@@ -1093,6 +1254,9 @@ struct GrpoPgLossFromNormedHiddenBackward {
     /// upstream seed is the implicit unit scalar `dL/dL = 1`. Avoid reading
     /// that scalar back from the device on the production long-context path.
     unit_root_grad: bool,
+    /// ECHO env-CE rows for this completion (resurrection PR2). `None`
+    /// when ECHO is off, the rollout has no env rows, or `|O| == 0`.
+    echo_env: Option<EchoEnvNodeState>,
 }
 
 #[cfg(any(
@@ -1138,12 +1302,38 @@ impl BackwardOp for GrpoPgLossFromNormedHiddenBackward {
             self.chunk_size,
             &self.running_max,
             &self.running_sumexp,
+            None,
         )
         .map_err(|e| {
             kiln_tensor::Error::Msg(format!(
                 "GrpoPgLossFromNormedHiddenBackward: analytic hidden-grad: {e:#}"
             ))
         })?;
+
+        // ECHO env-CE rows (resurrection PR2): the env term's gradient is
+        // the same row assembly with the constant coefficient −(λ/|O|),
+        // added onto the PG hidden grad.
+        let grad_hidden = match self.echo_env.as_ref() {
+            None => grad_hidden,
+            Some(echo) => {
+                let env_grad = echo_env_grad_from_normed_hidden_kt(
+                    &self.normed_hidden,
+                    &self.head_t,
+                    echo,
+                    self.loss_params,
+                    self.grpo_kl_auxiliary_route,
+                    grad_scalar,
+                    &self.device,
+                    self.chunk_size,
+                )
+                .map_err(|e| {
+                    kiln_tensor::Error::Msg(format!(
+                        "GrpoPgLossFromNormedHiddenBackward: ECHO env-CE hidden-grad: {e:#}"
+                    ))
+                })?;
+                (&grad_hidden + &env_grad)?
+            }
+        };
 
         Ok(vec![Some(grad_hidden), None])
     }
@@ -1195,6 +1385,7 @@ pub(crate) fn grpo_pg_loss_from_normed_hidden_grad_kt(
         chunk_size,
         &state.running_max,
         &state.running_sumexp,
+        None,
     )
 }
 
@@ -1219,6 +1410,11 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
     chunk_size: usize,
     running_max: &kiln_tensor::Tensor,
     running_sumexp: &kiln_tensor::Tensor,
+    // When set, the per-row coefficients are taken verbatim ([rows, 1] F32,
+    // already seed-scaled) and the PG derivation (fast path + host path,
+    // which read the log-prob/ref/loss-param inputs) is skipped entirely.
+    // The ECHO env-CE rows use this with the constant `−(λ/|O|)·seed`.
+    coeff_override: Option<&kiln_tensor::Tensor>,
 ) -> Result<kiln_tensor::Tensor> {
     use kiln_tensor::ops::{matmul_rhs_transposed, mul_scalar, scatter_add};
     use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
@@ -1286,7 +1482,15 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
         "grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: empty vocab"
     );
 
-    let coeff_col = match grpo_loss_coeff_col_device_fast_path_kt(
+    let coeff_col = if let Some(c) = coeff_override {
+        anyhow::ensure!(
+            c.dims() == [num_active, 1],
+            "grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: coeff_override shape {:?} != [{num_active}, 1]",
+            c.dims()
+        );
+        c.clone()
+    } else {
+        match grpo_loss_coeff_col_device_fast_path_kt(
         grpo_kl_auxiliary_route,
         policy_log_probs_kt,
         ref_log_probs_kt,
@@ -1318,6 +1522,7 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
             KtTensor::from_vec_on(*device, coeff_scaled, vec![num_active, 1])
                 .context("grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: coeff_col")?
         }
+    }
     };
     let mut grad_active_hidden =
         KtTensor::zeros(vec![num_active, hidden_size], KtDType::F32, *device).context(
@@ -1441,7 +1646,8 @@ pub(crate) fn grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
     grad_scalar: f64,
     device: &Device,
     chunk_size: usize,
-) -> Result<(kiln_tensor::Tensor, kiln_tensor::Tensor)> {
+    echo_env: Option<&EchoEnvSpec>,
+) -> Result<(kiln_tensor::Tensor, kiln_tensor::Tensor, Option<f64>)> {
     let state = selected_log_probs_from_normed_hidden_chunked_state_kt(
         normed_hidden,
         head_t,
@@ -1473,9 +1679,58 @@ pub(crate) fn grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
         chunk_size,
         &state.running_max,
         &state.running_sumexp,
+        None,
     )
     .context("grpo_pg_loss_from_normed_hidden_loss_and_grad_kt: hidden grad")?;
-    Ok((loss_kt, grad_hidden))
+
+    // ECHO env-CE term (resurrection PR2): value `λ·(−Σ_env log p / |O|)`
+    // added to the scalar; gradient = constant-coefficient rows added onto
+    // the PG hidden grad. Contributes exactly nothing when the rollout has
+    // no env rows.
+    let echo_state = match echo_env {
+        Some(spec) => echo_env_state_and_value_kt(
+            normed_hidden,
+            head_t,
+            input_ids,
+            spec,
+            chunk_size,
+            device,
+        )
+        .context("grpo_pg_loss_from_normed_hidden_loss_and_grad_kt: env state")?,
+        None => None,
+    };
+    let (loss_kt, grad_hidden, env_ce) = match echo_state {
+        None => (loss_kt, grad_hidden, None),
+        Some((node_state, env_ce_kt, env_ce_val)) => {
+            let lambda = echo_env.map(|s| s.lambda).unwrap_or(0.0);
+            let loss_kt = env_ce_kt
+                .affine(lambda, 0.0)
+                .and_then(|weighted| &loss_kt + &weighted)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "grpo_pg_loss_from_normed_hidden_loss_and_grad_kt: echo compose: {e}"
+                    )
+                })?;
+            let env_grad = echo_env_grad_from_normed_hidden_kt(
+                normed_hidden,
+                head_t,
+                &node_state,
+                loss_params,
+                grpo_kl_auxiliary_route,
+                grad_scalar,
+                device,
+                chunk_size,
+            )
+            .context("grpo_pg_loss_from_normed_hidden_loss_and_grad_kt: env grad")?;
+            let grad_hidden = (&grad_hidden + &env_grad).map_err(|e| {
+                anyhow::anyhow!(
+                    "grpo_pg_loss_from_normed_hidden_loss_and_grad_kt: echo grad add: {e}"
+                )
+            })?;
+            (loss_kt, grad_hidden, Some(env_ce_val))
+        }
+    };
+    Ok((loss_kt, grad_hidden, env_ce))
 }
 
 /// kt-native analytic `dL/d(logits)` for the GRPO scalar loss. Pure kt ops on
@@ -1808,7 +2063,8 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_kt(
     grpo_kl_auxiliary_route: GrpoKlAuxiliaryRoute,
     device: &Device,
     chunk_size: usize,
-) -> Result<Option<kiln_tensor::Tensor>> {
+    echo_env: Option<&EchoEnvSpec>,
+) -> Result<Option<(kiln_tensor::Tensor, Option<f64>)>> {
     if !tape_forward_enabled() {
         return Ok(None);
     }
@@ -1857,6 +2113,37 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_kt(
     )
     .context("try_tape_grpo_pg_loss_from_normed_hidden_kt: grpo_loss")?;
 
+    // ECHO env-CE (resurrection PR2): compose `λ·env_CE` into the recorded
+    // scalar BEFORE tape.record so the node output id IS the composite
+    // loss; the backward adds the matching constant-coefficient env rows.
+    let echo_state = match echo_env {
+        Some(spec) => echo_env_state_and_value_kt(
+            normed_hidden,
+            head_t,
+            input_ids,
+            spec,
+            chunk_size,
+            device,
+        )
+        .context("try_tape_grpo_pg_loss_from_normed_hidden_kt: env state")?,
+        None => None,
+    };
+    let (loss_kt_forward, echo_node, env_ce) = match echo_state {
+        None => (loss_kt_forward, None, None),
+        Some((node_state, env_ce_kt, env_ce_val)) => {
+            let lambda = echo_env.map(|s| s.lambda).unwrap_or(0.0);
+            let composed = env_ce_kt
+                .affine(lambda, 0.0)
+                .and_then(|weighted| &loss_kt_forward + &weighted)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "try_tape_grpo_pg_loss_from_normed_hidden_kt: echo compose: {e}"
+                    )
+                })?;
+            (composed, Some(node_state), Some(env_ce_val))
+        }
+    };
+
     let loss_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
         let loss_kt = loss_kt_forward;
         tape.record(
@@ -1876,6 +2163,7 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_kt(
                 device: *device,
                 chunk_size,
                 unit_root_grad: true,
+                echo_env: echo_node,
             }) as Box<dyn BackwardOp>,
         );
         Ok(loss_kt)
@@ -1885,7 +2173,7 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_kt(
     };
     let loss_kt =
         loss_kt.context("try_tape_grpo_pg_loss_from_normed_hidden_kt: kt-tape forward failed")?;
-    Ok(Some(loss_kt))
+    Ok(Some((loss_kt, env_ce)))
 }
 
 #[cfg(feature = "vulkan")]
@@ -2097,6 +2385,177 @@ mod tests {
     }
 
     #[cfg(any(feature = "cuda", feature = "vulkan"))]
+    /// Resurrection PR2 correctness gate: the ECHO env-CE rows added by
+    /// the fused root must match the dense closed form EXACTLY —
+    /// `Δgrad_hidden = Σ_env (λ/|O|)·(softmax_p − onehot_{y_p}) @ head_tᵀ`
+    /// at env rows and ZERO everywhere else, and
+    /// `Δloss = λ·(−Σ_env log p)/|O|`. The env coefficient is constant, so
+    /// this is a noise-free analytic check (no finite differences needed).
+    #[test]
+    fn grpo_normed_hidden_echo_env_grad_matches_closed_form_cpu() {
+        let device = kiln_tensor::Device::Cpu;
+        let (seq_len, hidden_size, vocab) = (6usize, 5usize, 13usize);
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2];
+        let action_mask = vec![false, false, true, true, false, true];
+        // Disjoint env targets at shifted rows {0, 3} (env_mask[p+1]).
+        let env_mask = vec![false, true, false, false, true, false];
+        let total_obs_len = 3usize; // |O| > filtered rows: §3.1 denominator
+        let lambda = 0.05f64;
+        let num_active = action_mask[1..].iter().filter(|m| **m).count();
+        let hidden_host: Vec<f32> = (0..seq_len * hidden_size)
+            .map(|i| (((i * 7) % 19) as f32 - 9.0) * 0.041)
+            .collect();
+        let head_host: Vec<f32> = (0..hidden_size * vocab)
+            .map(|i| (((i * 11) % 23) as f32 - 11.0) * 0.037)
+            .collect();
+        let normed_hidden =
+            KtTensor::from_vec_on(device, hidden_host.clone(), vec![1, seq_len, hidden_size])
+                .expect("hidden");
+        let head_t =
+            KtTensor::from_vec_on(device, head_host.clone(), vec![hidden_size, vocab])
+                .expect("head");
+        let read = |t: &KtTensor| -> Vec<f32> {
+            t.to_dtype(KtDType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+        };
+
+        // Reference log-probs for a stable PG term.
+        let plp = super::selected_log_probs_from_normed_hidden_chunked_kt(
+            &normed_hidden,
+            &head_t,
+            &input_ids,
+            &action_mask,
+            3,
+            &device,
+        )
+        .unwrap();
+        let ref_host: Vec<f32> = read(&plp).iter().map(|&p| p - 0.1).collect();
+        let ref_kt = KtTensor::from_vec_on(device, ref_host, vec![num_active]).expect("ref");
+        let params = GrpoLossParams {
+            advantage: 0.7,
+            clip_low: 0.8,
+            clip_high: 1.2,
+            kl_coeff: 0.1,
+            kl_estimator: crate::KlEstimator::K1,
+            loss_normalizer: 1.0 / num_active as f64,
+            is_level: crate::IsLevel::Token,
+            reinforce: false,
+            entropy_aware_kl_quantile: None,
+        };
+
+        let (loss_base, grad_base, env_ce_base) =
+            super::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
+                &normed_hidden,
+                &head_t,
+                &input_ids,
+                &action_mask,
+                &ref_kt,
+                params,
+                GrpoKlAuxiliaryRoute::HostComposite,
+                1.0,
+                &device,
+                3,
+                None,
+            )
+            .unwrap();
+        assert!(env_ce_base.is_none());
+
+        let spec = super::EchoEnvSpec {
+            env_mask: env_mask.clone(),
+            total_obs_len,
+            lambda,
+        };
+        let (loss_echo, grad_echo, env_ce) =
+            super::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
+                &normed_hidden,
+                &head_t,
+                &input_ids,
+                &action_mask,
+                &ref_kt,
+                params,
+                GrpoKlAuxiliaryRoute::HostComposite,
+                1.0,
+                &device,
+                3,
+                Some(&spec),
+            )
+            .unwrap();
+        let env_ce = env_ce.expect("env rows present → env_ce reported");
+
+        // --- Dense closed form on the host. ---
+        let row_logits = |p: usize| -> Vec<f32> {
+            (0..vocab)
+                .map(|v| {
+                    (0..hidden_size)
+                        .map(|h| hidden_host[p * hidden_size + h] * head_host[h * vocab + v])
+                        .sum()
+                })
+                .collect()
+        };
+        let softmax = |logits: &[f32]| -> Vec<f32> {
+            let m = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let exps: Vec<f32> = logits.iter().map(|&l| (l - m).exp()).collect();
+            let z: f32 = exps.iter().sum();
+            exps.iter().map(|&e| e / z).collect()
+        };
+        let env_rows: Vec<usize> = (0..seq_len - 1).filter(|&p| env_mask[p + 1]).collect();
+        assert_eq!(env_rows.len(), 2, "fixture sanity");
+
+        // Expected Δloss and env_ce.
+        let mut sum_logp = 0.0f64;
+        for &p in &env_rows {
+            let probs = softmax(&row_logits(p));
+            sum_logp += (probs[input_ids[p + 1] as usize] as f64).ln();
+        }
+        let expected_env_ce = -sum_logp / total_obs_len as f64;
+        assert!(
+            (env_ce - expected_env_ce).abs() < 1e-5,
+            "env_ce {env_ce} vs closed form {expected_env_ce}"
+        );
+        let loss_base_v = read(&loss_base)[0] as f64;
+        let loss_echo_v = read(&loss_echo)[0] as f64;
+        assert!(
+            ((loss_echo_v - loss_base_v) - lambda * expected_env_ce).abs() < 1e-5,
+            "Δloss {} vs λ·env_ce {}",
+            loss_echo_v - loss_base_v,
+            lambda * expected_env_ce
+        );
+
+        // Expected Δgrad: (λ/|O|)·(softmax − onehot) @ head_tᵀ at env rows.
+        let grad_base_v = read(&grad_base);
+        let grad_echo_v = read(&grad_echo);
+        assert_eq!(grad_base_v.len(), grad_echo_v.len());
+        let coeff = (lambda / total_obs_len as f64) as f32;
+        for p in 0..seq_len {
+            for h in 0..hidden_size {
+                let idx = p * hidden_size + h;
+                let delta = grad_echo_v[idx] - grad_base_v[idx];
+                let expected = if env_rows.contains(&p) {
+                    let probs = softmax(&row_logits(p));
+                    let label = input_ids[p + 1] as usize;
+                    (0..vocab)
+                        .map(|v| {
+                            let sm_minus_onehot =
+                                probs[v] - if v == label { 1.0 } else { 0.0 };
+                            coeff * sm_minus_onehot * head_host[h * vocab + v]
+                        })
+                        .sum::<f32>()
+                } else {
+                    0.0
+                };
+                assert!(
+                    (delta - expected).abs() < 1e-5,
+                    "env grad drift at pos {p} dim {h}: Δ={delta} expected={expected}"
+                );
+            }
+        }
+    }
+
+    #[cfg(any(feature = "cuda", feature = "vulkan"))]
     #[test]
     fn grpo_normed_hidden_chunked_matches_full_logits_cpu() {
         let device = kiln_tensor::Device::Cpu;
@@ -2249,7 +2708,7 @@ mod tests {
             )
             .unwrap();
             let loss_expected = grpo_loss(&plp_hidden, &ref_kt, params, &device).unwrap();
-            let (loss_cached, cached_hidden) =
+            let (loss_cached, cached_hidden, _env_ce) =
                 super::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
                     &normed_hidden,
                     &head_t,
@@ -2261,6 +2720,7 @@ mod tests {
                     1.0,
                     &device,
                     3,
+                    None,
                 )
                 .unwrap();
             let loss_diff = (read(&loss_expected)[0] - read(&loss_cached)[0]).abs();

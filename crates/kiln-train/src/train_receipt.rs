@@ -771,9 +771,9 @@ pub fn classify_training_failure(message: &str) -> TrainFailureReason {
     }
     // Untrainable loss compositions (validate_for_kt_tape) — must match
     // BEFORE the zero-env-tokens patterns since both mention env tokens.
-    if lower.contains("no gradient path")
-        || lower.contains("no_policy_loss requires")
-        || (lower.contains("echo") && lower.contains("post candle-drop"))
+    if lower.contains("no_policy_loss (verifier-free")
+        || lower.contains("not yet re-wired on the kt-tape path")
+        || lower.contains("loss.opd composition on grpo is reserved")
     {
         return TrainFailureReason::UnsupportedLossConfig;
     }

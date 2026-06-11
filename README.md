@@ -131,9 +131,9 @@ See [docs/GRPO_GUIDE.md](docs/GRPO_GUIDE.md) for worked verifiable-rewards examp
 
 ### Agentic GRPO with ECHO (multi-turn rollouts)
 
-For multi-turn agentic rollouts — tool calls, command output, file contents — kiln's GRPO is **ECHO-ready** (Shrivastava, Awadallah, Papailiopoulos, MSR AI Frontiers 2026): the trajectory format carries environment segments end-to-end, from rollout JSONL through tokenization and masking to the training receipt. ECHO adds a length-normalized cross-entropy loss on environment-observation tokens to the standard policy-gradient loss, with **zero extra forward-pass cost** — the env tokens are already in the rollout context. Paper headline: roughly doubles TerminalBench-2.0 pass@1. The env-CE term itself is **temporarily disabled** pending its kt-tape gradient root (#1082) — enabling it on rollouts with env tokens fails fast at submission (`unsupported_loss_config`) rather than silently training without the term.
+For multi-turn agentic rollouts — tool calls, command output, file contents — kiln's GRPO is **ECHO-by-default** (Shrivastava, Awadallah, Papailiopoulos, MSR AI Frontiers 2026): the trajectory format carries environment segments end-to-end, from rollout JSONL through tokenization and masking to the training receipt, and the env-CE term **trains by default at `λ = 0.05`** on any trajectory with observation segments. ECHO adds a length-normalized cross-entropy loss on environment-observation tokens to the standard policy-gradient loss, with **zero extra forward-pass cost** — the env tokens are already in the rollout context. Paper headline: roughly doubles TerminalBench-2.0 pass@1. Opt out with `--no-echo` / `loss.echo: null` / `KILN_ECHO_ENABLED=0`.
 
-When your rollouts carry a `trajectory` field with `kind: "action"` / `kind: "observation"` segments, kiln-train's `tokenize_grpo_group` builds separate `action_mask` (policy-gradient targets) and `env_mask` (ECHO env-CE targets, `λ_echo = 0.05` once the term is re-enabled). Today the action-token policy loss trains on the full trajectory while the env mask is carried through for diagnostics and the planned resurrection. Legacy single-turn rollouts (no `trajectory` field) behave bit-identically to the pre-ECHO loss.
+When your rollouts carry a `trajectory` field with `kind: "action"` / `kind: "observation"` segments, kiln-train's `tokenize_grpo_group` builds separate `action_mask` (policy-gradient targets) and `env_mask` (ECHO env-CE targets, `λ_echo = 0.05` by default). The env-CE gradient lives on the same fused GRPO tape root as constant-coefficient `(softmax − one-hot)` rows, and the training receipt records `echo.enabled: true` plus the initial/final env-CE. Legacy single-turn rollouts (no `trajectory` field) behave bit-identically to the pre-ECHO loss — with no env tokens the term contributes exactly zero.
 
 ```python
 import requests
@@ -152,9 +152,11 @@ requests.post("http://localhost:8420/v1/train/agentic", json={
             ]
         }]
     }],
-    # loss.echo is off by default; enabling it alongside observation
-    # segments fails fast (unsupported_loss_config) until #1082's
-    # env-CE gradient root is restored.
+    # ECHO env-CE applies by default (λ = 0.05) to the observation
+    # segments above — no config needed. To tune it explicitly:
+    #   "config": {"loss": {"echo": {"lambda": 0.02,
+    #       "env_mask_mode": "env_only", "warning_filter": true}}}
+    # or disable it with "loss": {"echo": null}.
     "config": {}
 })
 ```
@@ -167,8 +169,9 @@ For saturated tasks where reward-only GRPO is low signal, kiln-train also
 accepts off-policy teacher distillation data: prompt messages plus a teacher
 response, optionally with per-token teacher top-logprobs for reverse-KL. The
 same agentic `trajectory` shape can be attached so action tokens receive OPD
-supervision while observation tokens stay masked out of it (they are reserved
-for ECHO's env-CE once that term is restored).
+supervision while observation tokens stay masked out of it. Note the ECHO
+env-CE term is not yet wired into the OPD path — OPD receipts record
+`echo_combined: false`.
 
 See [docs/OPD_TEACHER_JSONL.md](docs/OPD_TEACHER_JSONL.md) for the JSONL
 schema and the `reverse_kl` vs `cross_entropy` objective contract.
@@ -373,7 +376,7 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | POST | `/v1/completions` | vLLM-compatible prompt logprobs for remote OPD teachers |
 | POST | `/v1/completions/batch` | Batch generation API for GRPO (up to 64 prompts per request) |
 | POST | `/v1/train/sft` | Submit SFT training examples (optionally with a `post_eval` hook) |
-| POST | `/v1/train/grpo` | Submit GRPO scored completions (optionally with a `post_eval` hook). Supports the new `agentic_groups` shape with multi-turn `trajectory` fields; action/observation masks are built end-to-end, but the ECHO env-CE term is temporarily disabled (#1082) — enabling it with env tokens fails fast (`unsupported_loss_config`). |
+| POST | `/v1/train/grpo` | Submit GRPO scored completions (optionally with a `post_eval` hook). Supports the new `agentic_groups` shape with multi-turn `trajectory` fields; action/observation masks are built end-to-end, and the ECHO env-CE term applies by default (λ=0.05) to trajectories with observation segments. |
 | POST | `/v1/train/agentic` | Canonical alias of `/v1/train/grpo` — same handler, semantically-honest name for multi-turn rollouts |
 | GET | `/v1/train/status` | Training queue and job status |
 | GET | `/v1/train/status/{job_id}` | Inspect one training job |

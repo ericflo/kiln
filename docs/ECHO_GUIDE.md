@@ -13,37 +13,37 @@ This guide is the operational companion to the integration plan
 
 ## Quick decisions
 
-**Is ECHO on by default?** No — not anymore. ECHO defaulted ON historically, but the env-CE term lost its gradient path when candle was removed (#1082), so `LossConfig::default()` now ships `loss.echo = None` (`default_echo_some()` in `crates/kiln-train/src/lib.rs`). Explicitly enabling ECHO on rollouts that carry environment/observation tokens **fails fast at submission** with `unsupported_loss_config` (`LossConfig::validate_for_kt_tape`) instead of silently training without the term. Pure-completion rollouts (no env tokens) accept an enabled config, but the term contributes nothing and the receipt records `enabled: false` with a `dropped_reason`. Resurrection is planned (env-CE as (softmax − one-hot) rows on the GRPO tape root); until it lands, the rest of this guide describes the *intended* semantics.
+**Is ECHO on by default?** Yes. `LossConfig::default()` ships `loss.echo = Some(EchoConfig::default())` — `λ = 0.05`, `env_mask_mode: env_only`, `warning_filter: true` (`default_echo_some()` in `crates/kiln-train/src/lib.rs`). (One sentence of history: the term was disabled between the #1082 candle removal, which deleted its only gradient producer, and resurrection PR2, which rebuilt env-CE as constant-coefficient `(softmax − one-hot)` rows on the fused GRPO tape root — `λ/|O|` per row, |O| = pre-warning-filter observation length per paper §3.1, validated by a closed-form CPU gradient test.) Submissions with ECHO plus observation segments validate and train; the receipt records `echo.enabled: true` with `initial_env_ce` / `final_env_ce`. Rollouts with no env tokens pay nothing — the term contributes exactly zero and the receipt's env-CE fields stay unset.
 
 **Do my legacy single-turn GRPO rollouts get ECHO?** No, but they get no harm either. For rollouts without a `trajectory` field, `env_mask` is empty → ECHO contributes exactly zero. The loss math is bit-identical to the pre-ECHO commit.
 
 **Do I need to change my capability code?** No, if you're on the new shared lib. The shared `capabilities/agentic-grpo/lib/pi_trajectory.py` already emits the canonical trajectory schema; cap authors call `pi_trajectory.build_scored_rollout(...)` instead of hand-concatenating turns.
 
-**Does ECHO work on all backends?** The plumbing does — the trajectory schema, env-mask construction, and receipt diagnostics are backend-shared. But the env-CE *loss term* is currently disabled on every backend: its gradient producer was deleted with candle (#1082), and `LossConfig::validate_for_kt_tape` rejects enabled-with-env-tokens configs up front rather than burning rollout forwards on a step that cannot train. When the kt-tape env-CE root lands, the term comes back uniformly for CUDA / CPU / Metal / Vulkan.
+**Does ECHO work on all backends?** Yes. The trajectory schema, env-mask construction, and receipt diagnostics are backend-shared, and the env-CE term rides the fused GRPO loss root, which is itself backend-shared — CUDA / CPU / Metal / Vulkan all train the same math. One backend wrinkle: Vulkan's fused active-rows fast path falls back to the composite root for ECHO steps — same math, different dispatch path.
 
 ## How to use ECHO
 
 ### From the CLI
 
 ```bash
-# Default — ECHO off (env-CE term disabled pending #1082 resurrection).
+# Default — ECHO on (λ = 0.05, env_mask_mode env_only, warning_filter on).
 cuda_grpo_ablation \
     --data train.jsonl --model /workspace/Qwen3.5-4B \
     --output adapter --mode phase1
 
-# Enable with explicit λ — NOTE: currently rejected at submission
-# (unsupported_loss_config) when rollouts carry observation tokens.
+# Tune λ explicitly.
 cuda_grpo_ablation ... --echo-lambda 0.02
 
-# Explicitly disable ECHO (matches the current default).
+# Explicitly disable ECHO (paired baselines, mask debugging).
 cuda_grpo_ablation ... --no-echo
 
-# Verifier-free env-only adaptation (paper §5.5) — intended semantics;
-# currently always rejected (no gradient source with the policy term masked).
+# Verifier-free env-only adaptation (paper §5.5) — NOT yet available;
+# rejected at submission (the PG coefficients aren't yet zeroed while
+# the env-CE rows drive the update).
 cuda_grpo_ablation ... --no-policy-loss --echo-lambda 0.05
 ```
 
-`--no-policy-loss` masks out the GRPO surrogate so only the ECHO env-CE drives gradients. Intended for keeping a strong agent improving on tasks where no programmatic verifier is available — but since the env-CE term has no gradient path post-#1082, `validate_for_kt_tape` rejects it unconditionally for now.
+`--no-policy-loss` masks out the GRPO surrogate so only the ECHO env-CE drives gradients. Intended for keeping a strong agent improving on tasks where no programmatic verifier is available — but it is **not yet available**: `validate_for_kt_tape` rejects it at submission because it needs the policy-gradient coefficients zeroed while the env-CE rows drive the update, and that wiring hasn't landed. The env-CE term itself is live and composes with the standard policy loss.
 
 ### From the kiln-server HTTP API
 
@@ -80,7 +80,7 @@ curl -X POST http://localhost:8420/v1/train/agentic \
   }'
 ```
 
-> **Current behavior:** this exact payload — `loss.echo` enabled plus `kind: "observation"` segments — is rejected at submission with `unsupported_loss_config` until the env-CE term regains its gradient root (#1082). Omit the `"echo"` key (or set it to `null`) and the action-token policy loss trains on the full trajectory today; the enabled form above is the intended post-resurrection usage.
+> **Current behavior:** this exact payload — `loss.echo` enabled plus `kind: "observation"` segments — validates and trains. The env-CE term fires on the observation tokens and the receipt records `echo.enabled: true` with `initial_env_ce` / `final_env_ce`. Since ECHO is on by default, the explicit `"echo"` block is only needed to tune the knobs; set `"echo": null` to disable.
 
 The legacy `/v1/train/grpo` endpoint accepts the same payload shape; both routes serve the same handler. Legacy clients posting `{ groups: [{messages, completions: [{text, reward}, ...]}] }` keep working — `completions` is a serde alias for `rollouts`, and `text`-only rollouts deserialize as one-segment Action trajectories.
 
@@ -98,11 +98,11 @@ For ops / CI orchestration without editing the request payload:
 
 Env vars take **precedence over CLI flags** in `cuda_grpo_ablation` — CLI is for inline dev tweaks; env vars are the right tool for shell-scripted orchestration.
 
-Note: `KILN_ECHO_ENABLED=1` / `KILN_ECHO_LAMBDA` produce an *enabled* config, which is subject to the same fail-fast validation — submission with environment tokens errors with `unsupported_loss_config` until the env-CE gradient root is restored.
+Note: `KILN_ECHO_ENABLED=1` / `KILN_ECHO_LAMBDA` produce an *enabled* config — which matches the default — so in practice they're for re-enabling ECHO after a `--no-echo` / `loss.echo: null` opt-out, or for overriding λ across a fleet of runs.
 
 ## How to read the diagnostics
 
-The trainer writes ECHO-specific fields to `<adapter_dir>/receipt.json` (when receipt-writing lands; the schema is in place today):
+The training receipt records the term firing today: `echo.enabled: true` (whenever configured with λ ≠ 0) plus `initial_env_ce` / `final_env_ce`. The richer adapter-dir `receipt.json::diagnostic_summary.echo` block below has its schema in place but is not yet auto-populated by the trainer:
 
 ```json
 {
@@ -130,7 +130,7 @@ The trainer writes ECHO-specific fields to `<adapter_dir>/receipt.json` (when re
 
 ## When to turn ECHO off
 
-ECHO is already off by default today (see [Quick decisions](#quick-decisions)). Once the resurrected term flips the default back on, three cases where opting out (`--no-echo`) is the right move:
+ECHO is on by default (see [Quick decisions](#quick-decisions)). Three cases where opting out (`--no-echo`) is the right move:
 
 1. **Single-turn rollouts with no observations.** ECHO is mathematically a no-op (env_mask is empty), so the cost is zero — but the diagnostic noise might be confusing. Cleaner to flip it off.
 2. **λ tuning ablations.** Run a paired `--no-echo` baseline so the ECHO contribution is visible as a delta.
@@ -180,7 +180,7 @@ This composition is what the integration plan §1 framing calls *"completing the
 When writing a new agentic-GRPO cap, you basically don't need to do anything ECHO-specific. The defaults handle it:
 
 1. **`rollout.py`:** import `pi_trajectory` from `capabilities/agentic-grpo/lib/` and call `pi_trajectory.build_scored_rollout(session_path, reward=...)`. Done — your JSONL now carries the canonical trajectory schema.
-2. **`capability.config.json`:** leave `loss.echo` at its default — which is `null` (ECHO off) since the #1082 candle removal. Do **not** explicitly enable it: an enabled config on trajectories with observation segments is rejected at submission (`unsupported_loss_config`) until the env-CE term's kt-tape root lands. When resurrection ships, the intended explicit form is:
+2. **`capability.config.json`:** leave `loss.echo` at its default — ECHO is on at `λ = 0.05` and applies automatically to trajectories with observation segments. Spell it out only to tune the knobs:
    ```json
    "loss": { "echo": { "lambda": 0.05, "env_mask_mode": "env_only", "warning_filter": true } }
    ```
