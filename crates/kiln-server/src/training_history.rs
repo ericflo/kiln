@@ -147,6 +147,7 @@ mod tests {
             finished_unix_ms: Some(2_000),
             error: None,
             linked_eval_job_ids: vec![],
+            post_eval_verdict: None,
             loss_history: vec![],
         }
     }

@@ -68,6 +68,26 @@ fn now_instant_default() -> std::time::Instant {
     std::time::Instant::now()
 }
 
+/// §8.7 promotion gate carried by a post-training eval job. When the run
+/// completes, the eval worker applies the verdict: accuracy >= threshold
+/// promotes (auto-loads) the adapter when training asked for that;
+/// accuracy below it renames the adapter dir to `<name>.failed` and the
+/// adapter is never promoted — "kiln must not make the model worse and
+/// silently keep serving it."
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostEvalGate {
+    /// Aggregate-accuracy floor from `PostEvalConfig::min_accuracy`.
+    pub min_accuracy: f32,
+    /// The adapter under judgment (the training job's output).
+    pub adapter_name: String,
+    /// Training job to stamp the verdict on.
+    pub training_job_id: String,
+    /// Training requested auto-load, which was DEFERRED until this gate
+    /// passes (§8.7: while the verdict is pending, the prior adapter
+    /// stays active).
+    pub auto_load_on_pass: bool,
+}
+
 /// Tracked eval job — mirrors `TrainingJobInfo` so the UI can render both
 /// with one code path. Stored under `state.eval_jobs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +121,11 @@ pub struct EvalJobInfo {
     /// job starts. Skipped from serde (runtime-only).
     #[serde(skip, default)]
     pub cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// §8.7 promotion gate — set by `enqueue_post_training_eval` on the
+    /// adapter's run (never the baseline run) when the training request
+    /// carried `post_eval.min_accuracy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_eval_gate: Option<PostEvalGate>,
 }
 
 impl EvalJobInfo {
@@ -131,6 +156,7 @@ impl EvalJobInfo {
             submitted_at: std::time::Instant::now(),
             finished_at: None,
             cancel_flag: None,
+            post_eval_gate: None,
         }
     }
 

@@ -110,6 +110,7 @@ fn fill_tracked(
                 finished_unix_ms: None,
                 error: None,
                 linked_eval_job_ids: Vec::new(),
+                post_eval_verdict: None,
                 loss_history: Vec::new(),
             },
         );
@@ -268,6 +269,7 @@ fn gc_evicts_terminal_entries_past_ttl() {
                 finished_unix_ms: None,
                 error: None,
                 linked_eval_job_ids: Vec::new(),
+                post_eval_verdict: None,
                 loss_history: Vec::new(),
             },
         );
@@ -289,6 +291,7 @@ fn gc_evicts_terminal_entries_past_ttl() {
                 finished_unix_ms: None,
                 error: None,
                 linked_eval_job_ids: Vec::new(),
+                post_eval_verdict: None,
                 loss_history: Vec::new(),
             },
         );

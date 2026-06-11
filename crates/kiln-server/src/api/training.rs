@@ -338,6 +338,7 @@ async fn submit_sft(
         finished_unix_ms: None,
         error: None,
         linked_eval_job_ids: Vec::new(),
+        post_eval_verdict: None,
         loss_history: Vec::new(),
     };
     state
@@ -499,6 +500,7 @@ async fn submit_grpo(
         finished_unix_ms: None,
         error: None,
         linked_eval_job_ids: Vec::new(),
+        post_eval_verdict: None,
         loss_history: Vec::new(),
     };
     state
@@ -669,6 +671,7 @@ async fn submit_opd(
         finished_unix_ms: None,
         error: None,
         linked_eval_job_ids: Vec::new(),
+        post_eval_verdict: None,
         loss_history: Vec::new(),
     };
     state
@@ -773,6 +776,7 @@ async fn submit_distill_refresh(
         finished_unix_ms: None,
         error: None,
         linked_eval_job_ids: Vec::new(),
+        post_eval_verdict: None,
         loss_history: Vec::new(),
     };
     state
@@ -943,6 +947,7 @@ fn register_and_enqueue_distill(
         finished_unix_ms: None,
         error: None,
         linked_eval_job_ids: Vec::new(),
+        post_eval_verdict: None,
         loss_history: Vec::new(),
     };
     state
@@ -1194,6 +1199,9 @@ struct TrainingJobDetail {
     /// Eval job IDs queued by `post_eval`. `None` when no post-eval was
     /// requested; otherwise newest-first.
     linked_eval_job_ids: Vec<String>,
+    /// §8.7 gate verdict (promoted / demoted to `.failed` / not measured)
+    /// once the post-training eval reaches a terminal state.
+    post_eval_verdict: Option<String>,
     /// Time-series of progress samples. Empty until the trainer emits
     /// its first callback.
     loss_history: Vec<crate::state::TrainingLossSample>,
@@ -1221,6 +1229,7 @@ async fn job_detail(
             adapter_path: job.adapter_path.clone(),
             auto_load: job.auto_load,
             linked_eval_job_ids: job.linked_eval_job_ids.clone(),
+            post_eval_verdict: job.post_eval_verdict.clone(),
             loss_history: job.loss_history.clone(),
         }
     };

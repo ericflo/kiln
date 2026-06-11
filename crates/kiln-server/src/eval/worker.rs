@@ -178,6 +178,10 @@ async fn run_one_job_with_generator(
             &state.adapter_dir,
             crate::eval_history::MAX_ARCHIVED_JOBS,
         );
+        // §8.7: this job may carry a promotion gate (post-training eval
+        // with min_accuracy). Apply the verdict now that the run is
+        // terminal.
+        apply_post_eval_gate(&state, &snapshot).await;
     }
 
     // Back-linking from eval-completion → training-job is intentionally
@@ -186,6 +190,140 @@ async fn run_one_job_with_generator(
     // training-side dashboard can link to the eval the moment it lands
     // in the queue (not after it finishes). Pushing again here would
     // duplicate every ID.
+}
+
+/// Apply the §8.7 promotion gate carried by a post-training eval job.
+///
+/// - **Pass** (`accuracy >= min_accuracy`): promote the adapter into
+///   serving when training deferred its auto-load to this verdict.
+/// - **Fail**: rename the adapter dir to `<name>.failed` (the documented
+///   `PostEvalConfig::min_accuracy` contract), purge its cache entries,
+///   and never promote. The previously-active adapter simply stays
+///   active — it was never displaced, because training defers auto-load
+///   while a gate is pending.
+/// - **Eval errored/cancelled**: leave the adapter on disk but do NOT
+///   promote — an unmeasured adapter must not start serving. The verdict
+///   on the training job says exactly that.
+async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::EvalJobInfo) {
+    let Some(gate) = snapshot.post_eval_gate.clone() else {
+        return;
+    };
+    let job_id = snapshot.job_id.clone();
+
+    let stamp_verdict = |verdict: String| {
+        tracing::info!(
+            eval_job = %job_id,
+            training_job = %gate.training_job_id,
+            adapter = %gate.adapter_name,
+            verdict = %verdict,
+            "post-eval gate verdict"
+        );
+        let mut jobs = state.training_jobs.write().unwrap();
+        if let Some(job) = jobs.get_mut(&gate.training_job_id) {
+            job.post_eval_verdict = Some(verdict);
+        }
+    };
+
+    if snapshot.state != EvalJobState::Completed {
+        stamp_verdict(format!(
+            "post-eval did not complete (state: {:?}) — adapter `{}` left on disk, NOT promoted",
+            snapshot.state, gate.adapter_name
+        ));
+        return;
+    }
+
+    let accuracy = snapshot
+        .finished_runs
+        .iter()
+        .find(|run| run.adapter.as_deref() == Some(gate.adapter_name.as_str()))
+        .map(|run| run.metrics.accuracy)
+        .or(snapshot.headline_accuracy);
+    let Some(accuracy) = accuracy else {
+        stamp_verdict(format!(
+            "post-eval produced no run for adapter `{}` — NOT promoted",
+            gate.adapter_name
+        ));
+        return;
+    };
+
+    if accuracy >= gate.min_accuracy {
+        if gate.auto_load_on_pass {
+            let adapter_dir = state.adapter_dir.join(&gate.adapter_name);
+            match crate::adapter_swap::swap_runtime_adapter(
+                state,
+                crate::adapter_swap::SwapRequest {
+                    target: crate::adapter_swap::SwapTarget::Resolved {
+                        active_name: gate.adapter_name.clone(),
+                        dir: adapter_dir,
+                    },
+                    content_changed: false,
+                    reason: "post_eval_gate_promotion",
+                },
+            )
+            .await
+            {
+                Ok(_) => {
+                    *state.active_adapter_name.write().unwrap() =
+                        Some(gate.adapter_name.clone());
+                    stamp_verdict(format!(
+                        "PASSED: accuracy {accuracy:.3} >= {:.3}; adapter `{}` promoted to active",
+                        gate.min_accuracy, gate.adapter_name
+                    ));
+                }
+                Err(e) => stamp_verdict(format!(
+                    "PASSED: accuracy {accuracy:.3} >= {:.3}, but promotion failed: {e}",
+                    gate.min_accuracy
+                )),
+            }
+        } else {
+            stamp_verdict(format!(
+                "PASSED: accuracy {accuracy:.3} >= {:.3}; adapter `{}` kept (auto_load not requested)",
+                gate.min_accuracy, gate.adapter_name
+            ));
+        }
+        return;
+    }
+
+    // FAILED the gate. If someone manually loaded the adapter while the
+    // eval ran, get it out of serving first.
+    let currently_loaded = state.loaded_adapter_name.read().unwrap().clone();
+    if currently_loaded.as_deref() == Some(gate.adapter_name.as_str()) {
+        if let Err(e) = crate::adapter_swap::swap_runtime_adapter(
+            state,
+            crate::adapter_swap::SwapRequest {
+                target: crate::adapter_swap::SwapTarget::Base,
+                content_changed: false,
+                reason: "post_eval_gate_demotion",
+            },
+        )
+        .await
+        {
+            tracing::warn!(error = %e, adapter = %gate.adapter_name, "failed to unload gated adapter");
+        }
+        let mut active = state.active_adapter_name.write().unwrap();
+        if active.as_deref() == Some(gate.adapter_name.as_str()) {
+            *active = None;
+        }
+    }
+
+    let src = state.adapter_dir.join(&gate.adapter_name);
+    let mut dst = state.adapter_dir.join(format!("{}.failed", gate.adapter_name));
+    if dst.exists() {
+        dst = state.adapter_dir.join(format!(
+            "{}.failed-{}",
+            gate.adapter_name,
+            crate::recent_requests::now_unix_ms()
+        ));
+    }
+    let rename_note = match std::fs::rename(&src, &dst) {
+        Ok(()) => format!("renamed to `{}`", dst.file_name().unwrap_or_default().to_string_lossy()),
+        Err(e) => format!("rename to .failed failed: {e}"),
+    };
+    state.purge_adapter_caches(&Some(gate.adapter_name.clone()));
+    stamp_verdict(format!(
+        "FAILED: accuracy {accuracy:.3} < {:.3}; adapter `{}` NOT promoted, {rename_note}",
+        gate.min_accuracy, gate.adapter_name
+    ));
 }
 
 async fn run_job(
@@ -380,6 +518,232 @@ mod tests {
                 fut.await
             })
         }
+    }
+
+    fn gate_test_state() -> (crate::state::AppState, tempfile::TempDir) {
+        let adapter_dir = tempfile::tempdir().unwrap();
+        let config = kiln_core::config::ModelConfig::qwen3_5_4b();
+        let scheduler = kiln_scheduler::Scheduler::new(
+            kiln_scheduler::SchedulerConfig {
+                max_batch_tokens: 8192,
+                max_batch_size: 64,
+                block_size: 16,
+                prefix_cache_enabled: false,
+                ..Default::default()
+            },
+            256,
+        );
+        let engine = kiln_model::engine::MockEngine::new(config.clone());
+        let mut state = crate::state::AppState::new_mock(
+            config,
+            scheduler,
+            Arc::new(engine),
+            crate::api::test_tokenizer(),
+            300,
+            "kiln-test".to_string(),
+        );
+        state.adapter_dir = adapter_dir.path().to_path_buf();
+        (state, adapter_dir)
+    }
+
+    fn seed_training_job(state: &crate::state::AppState, job_id: &str, adapter: &str) {
+        state.training_jobs.write().unwrap().insert(
+            job_id.to_string(),
+            crate::state::TrainingJobInfo {
+                job_id: job_id.to_string(),
+                adapter_name: adapter.to_string(),
+                job_type: crate::state::TrainingJobType::Sft,
+                state: kiln_train::TrainingState::Completed,
+                progress: 1.0,
+                loss: None,
+                epoch: None,
+                adapter_path: None,
+                submitted_at: std::time::Instant::now(),
+                submitted_unix_ms: crate::recent_requests::now_unix_ms(),
+                auto_load: true,
+                finished_at: None,
+                finished_unix_ms: None,
+                error: None,
+                linked_eval_job_ids: Vec::new(),
+                post_eval_verdict: None,
+                loss_history: Vec::new(),
+            },
+        );
+    }
+
+    /// One-example suite whose scorer passes iff the mock generator's
+    /// reply contains `phrase`.
+    fn gate_suite(phrase: &str) -> EvalSuite {
+        EvalSuite {
+            name: "gate-suite".into(),
+            description: None,
+            default_scorer: Scorer::Contains {
+                phrases: vec![phrase.into()],
+                mode: Default::default(),
+                case_sensitive: false,
+            },
+            generation: EvalGenerationParams::default(),
+            system_prompt: None,
+            examples: vec![EvalExample {
+                id: Some("e0".into()),
+                messages: vec![EvalChatMessage::new("user", "ping")],
+                target: None,
+                ..Default::default()
+            }],
+            schema_version: 1,
+            tools: None,
+        }
+    }
+
+    async fn run_gated_job(
+        state: &crate::state::AppState,
+        suite: EvalSuite,
+        gate: crate::eval::queue::PostEvalGate,
+        reply: &str,
+    ) {
+        let job_id = format!("eval-{}", gate.adapter_name);
+        let mut info = EvalJobInfo::queued(
+            job_id.clone(),
+            suite.name.clone(),
+            vec![Some(gate.adapter_name.clone())],
+            EvalSubmissionKind::PostTraining,
+            Some(gate.training_job_id.clone()),
+        );
+        info.post_eval_gate = Some(gate.clone());
+        state.eval_jobs.write().unwrap().insert(job_id.clone(), info);
+        let entry = EvalQueueEntry {
+            job_id,
+            job: QueuedEvalJob::Inline {
+                suite: Box::new(suite),
+                adapter: Some(gate.adapter_name.clone()),
+                generation_override: None,
+            },
+        };
+        let generator = Arc::new(
+            crate::eval::MockEvalGenerator::new().with_force_reply(reply.to_string()),
+        ) as Arc<dyn crate::eval::generator::EvalGenerator>;
+        run_one_job_with_generator(state.clone(), entry, generator).await;
+    }
+
+    fn verdict_of(state: &crate::state::AppState, training_job: &str) -> String {
+        state
+            .training_jobs
+            .read()
+            .unwrap()
+            .get(training_job)
+            .and_then(|j| j.post_eval_verdict.clone())
+            .expect("verdict stamped")
+    }
+
+    /// Gate FAIL: the adapter directory is renamed `<name>.failed` (the
+    /// documented PostEvalConfig::min_accuracy contract) and the verdict
+    /// lands on the training job. Before this, min_accuracy was parsed,
+    /// documented — and read by no code at all.
+    #[tokio::test]
+    async fn gate_failure_renames_adapter_and_stamps_verdict() {
+        let (state, _dir) = gate_test_state();
+        seed_training_job(&state, "train-1", "gated");
+        std::fs::create_dir(state.adapter_dir.join("gated")).unwrap();
+
+        run_gated_job(
+            &state,
+            gate_suite("phrase-the-reply-never-contains"),
+            crate::eval::queue::PostEvalGate {
+                min_accuracy: 0.9,
+                adapter_name: "gated".into(),
+                training_job_id: "train-1".into(),
+                auto_load_on_pass: false,
+            },
+            "mock reply",
+        )
+        .await;
+
+        assert!(
+            !state.adapter_dir.join("gated").exists(),
+            "failed adapter must not stay under its serving name"
+        );
+        assert!(
+            state.adapter_dir.join("gated.failed").exists(),
+            "failed adapter renamed per the documented contract"
+        );
+        let verdict = verdict_of(&state, "train-1");
+        assert!(verdict.contains("FAILED"), "{verdict}");
+        assert!(verdict.contains("gated.failed"), "{verdict}");
+    }
+
+    /// Gate PASS without a deferred auto-load: adapter stays under its
+    /// name, verdict records the pass.
+    #[tokio::test]
+    async fn gate_pass_keeps_adapter_and_stamps_verdict() {
+        let (state, _dir) = gate_test_state();
+        seed_training_job(&state, "train-2", "good");
+        std::fs::create_dir(state.adapter_dir.join("good")).unwrap();
+
+        run_gated_job(
+            &state,
+            gate_suite("mock"),
+            crate::eval::queue::PostEvalGate {
+                min_accuracy: 0.9,
+                adapter_name: "good".into(),
+                training_job_id: "train-2".into(),
+                auto_load_on_pass: false,
+            },
+            "a mock reply that matches",
+        )
+        .await;
+
+        assert!(state.adapter_dir.join("good").exists());
+        assert!(!state.adapter_dir.join("good.failed").exists());
+        let verdict = verdict_of(&state, "train-2");
+        assert!(verdict.contains("PASSED"), "{verdict}");
+    }
+
+    /// An errored eval must leave the adapter on disk and NOT promote it —
+    /// an unmeasured adapter never starts serving.
+    #[tokio::test]
+    async fn gate_on_errored_eval_does_not_promote_or_rename() {
+        let (state, _dir) = gate_test_state();
+        seed_training_job(&state, "train-3", "unmeasured");
+        std::fs::create_dir(state.adapter_dir.join("unmeasured")).unwrap();
+
+        // Registered suite with no registry configured → run_job errors →
+        // terminal state Failed.
+        let job_id = "eval-unmeasured".to_string();
+        let mut info = EvalJobInfo::queued(
+            job_id.clone(),
+            "missing-suite".into(),
+            vec![Some("unmeasured".into())],
+            EvalSubmissionKind::PostTraining,
+            Some("train-3".into()),
+        );
+        info.post_eval_gate = Some(crate::eval::queue::PostEvalGate {
+            min_accuracy: 0.5,
+            adapter_name: "unmeasured".into(),
+            training_job_id: "train-3".into(),
+            auto_load_on_pass: true,
+        });
+        state.eval_jobs.write().unwrap().insert(job_id.clone(), info);
+        let entry = EvalQueueEntry {
+            job_id,
+            job: QueuedEvalJob::Registered {
+                suite_name: "missing-suite".into(),
+                adapter: Some("unmeasured".into()),
+                generation_override: None,
+            },
+        };
+        let generator = Arc::new(crate::eval::MockEvalGenerator::new())
+            as Arc<dyn crate::eval::generator::EvalGenerator>;
+        run_one_job_with_generator(state.clone(), entry, generator).await;
+
+        assert!(state.adapter_dir.join("unmeasured").exists());
+        assert!(!state.adapter_dir.join("unmeasured.failed").exists());
+        assert!(
+            state.active_adapter_name.read().unwrap().is_none(),
+            "unmeasured adapter must not be promoted"
+        );
+        let verdict = verdict_of(&state, "train-3");
+        assert!(verdict.contains("did not complete"), "{verdict}");
+        assert!(verdict.contains("NOT promoted"), "{verdict}");
     }
 
     /// DELETE /v1/eval/jobs/{id} mid-run must stop the executor at the next
