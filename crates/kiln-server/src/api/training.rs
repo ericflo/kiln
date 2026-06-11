@@ -1469,11 +1469,13 @@ mod tests {
         validate_grpo_submission_source(&inline).unwrap();
     }
 
-    /// Post candle-drop (#1082) the kt-tape trainer cannot train ECHO
-    /// env-CE or no_policy_loss — submissions must fail HERE, not at
-    /// worker dequeue hours later behind a queue.
+    /// ECHO env-CE trains again (resurrection PR2), so echo-enabled
+    /// submissions with Observation segments now pass validation — the
+    /// flagship agentic shape. Still rejected at submission (not at worker
+    /// dequeue hours later): no_policy_loss (not yet re-wired) and the
+    /// reserved OPD slot.
     #[test]
-    fn grpo_submission_rejects_untrainable_loss_configs() {
+    fn grpo_submission_validates_loss_configs() {
         // ECHO + a rollout carrying an Observation segment.
         let mut group = grpo_group();
         group.completions[0].trajectory = vec![
@@ -1494,10 +1496,10 @@ mod tests {
         ];
         let mut req = grpo_req(None, vec![group.clone()]);
         req.config.loss.echo = Some(kiln_train::EchoConfig::default());
-        let err = validate_grpo_submission_source(&req).unwrap_err();
-        assert!(err.message.contains("no gradient path"), "{}", err.message);
+        validate_grpo_submission_source(&req)
+            .expect("echo + observation segments is the flagship agentic shape");
 
-        // Same data WITHOUT echo: fine — the policy loss trains the
+        // Same data WITHOUT echo: also fine — the policy loss trains the
         // trajectory's action tokens.
         let req = grpo_req(None, vec![group]);
         validate_grpo_submission_source(&req).unwrap();

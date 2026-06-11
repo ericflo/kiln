@@ -3746,20 +3746,10 @@ pub fn grpo_dry_run_jsonl(
                 token_counts.action_tokens > 0,
                 "GRPO dry run: dataset has no action tokens after mask construction"
             );
-            // The dry run pins the same constraint the real run enforces.
-            // (It used to demand the OPPOSITE — env tokens required when
-            // ECHO was on — so a dataset that passed the dry run was
-            // exactly one that failed the real run.)
-            if config.loss.echo_enabled() {
-                anyhow::ensure!(
-                    token_counts.env_tokens == 0,
-                    "GRPO dry run: ECHO is enabled and the dataset carries environment \
-                     tokens, but the env-CE term has no gradient path post candle-drop \
-                     (#1082) — the real run would fail after the rollout forwards. Pass \
-                     --no-echo (or set loss.echo to null); the action-token policy loss \
-                     still trains on the full trajectory."
-                );
-            }
+            // ECHO + env tokens is trainable again (resurrection PR2):
+            // the env-CE term has a fused-root gradient, so the dry run no
+            // longer rejects ECHO-enabled datasets with environment tokens.
+            // The report's env-token counts stand on their own.
         }
 
         Ok(GrpoDryRunReport {
@@ -5353,7 +5343,23 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 feature = "rocm"
             ))]
             {
-                let (lv, kt_grads) = if let Some(segs) = segments {
+                // ECHO env-CE spec (resurrection PR2): built when the term
+                // is enabled and this completion actually has env rows; the
+                // fused loss roots add λ·env_CE to the value and the matching
+                // constant-coefficient rows to the gradient.
+                let echo_env_spec = if config.loss.echo_enabled()
+                    && comp_env_count > 0
+                    && comp.total_obs_len > 0
+                {
+                    Some(crate::grpo_tape_shim::EchoEnvSpec {
+                        env_mask: comp.env_mask.clone(),
+                        total_obs_len: comp.total_obs_len,
+                        lambda: config.loss.echo_lambda(),
+                    })
+                } else {
+                    None
+                };
+                let (lv, env_ce, kt_grads) = if let Some(segs) = segments {
                     let step_started = Instant::now();
                     let out = checkpointed_grpo_forward_backward_tape_authoritative_kt(
                         backend,
@@ -5366,6 +5372,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                         loss_params,
                         segs,
                         device,
+                        echo_env_spec.as_ref(),
                     )?;
                     let step_elapsed = step_started.elapsed();
                     if let Some(t) = timings.as_deref_mut() {
@@ -5401,10 +5408,11 @@ fn train_tokenized_grpo_group_with_grad_norms(
                         streaming_tile_tokens,
                         checkpoint_segments,
                         timings.as_deref_mut(),
+                        echo_env_spec.as_ref(),
                     )?
                 };
                 loss_val = lv;
-                comp_echo_env_ce = None;
+                comp_echo_env_ce = env_ce;
                 GradSource::Kt(kt_grads)
             }
             #[cfg(not(any(
@@ -8862,12 +8870,13 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
     streaming_tile_tokens: usize,
     checkpoint_segments: usize,
     mut timings: Option<&mut GrpoBenchmarkTimings>,
-) -> Result<(f64, kiln_autograd::GradStore)> {
+    echo_env: Option<&crate::grpo_tape_shim::EchoEnvSpec>,
+) -> Result<(f64, Option<f64>, kiln_autograd::GradStore)> {
     let lora_weights = params.as_lora_weights();
     let mut linear_state = LinearAttentionState::new(model_config, device)?;
     let step_started = Instant::now();
 
-    let (loss_val, _loss_kt, grads_by_candle_raw) =
+    let ((loss_val, env_ce), _loss_kt, grads_by_candle_raw) =
         kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(|| {
             // Single policy forward through final RMSNorm, without materializing
             // `[1, T, V]` logits. The GRPO loss root chunks the frozen tied head
@@ -8883,9 +8892,11 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
             .context("GRPO tape-authoritative(kt) no-head policy forward")
             .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
 
+            // The Vulkan fused active-rows root carries no env rows — an
+            // ECHO-active step takes the KtComposite root below instead.
             #[cfg(feature = "vulkan")]
             let mut loss_opt = match TrainingLossBackend::runtime_grpo_loss_route(backend) {
-                GrpoLossRoute::VulkanActiveRows => {
+                GrpoLossRoute::VulkanActiveRows if echo_env.is_none() => {
                     crate::grpo_tape_shim::try_tape_grpo_pg_loss_from_normed_hidden_vulkan_kt(
                         &policy_hidden,
                         &weights.embed_tokens,
@@ -8896,8 +8907,9 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
                     )
                     .context("GRPO tape-authoritative(kt) Vulkan fused scalar loss")
                     .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
+                    .map(|l| (l, None))
                 }
-                GrpoLossRoute::KtComposite => None,
+                _ => None,
             };
             #[cfg(not(feature = "vulkan"))]
             let mut loss_opt = None;
@@ -8913,13 +8925,14 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
                         grpo_kl_auxiliary_route_for_backend(backend),
                         device,
                         DEFAULT_CHUNK_SIZE,
+                        echo_env,
                     )
                     .context("GRPO tape-authoritative(kt) scalar loss")
                     .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
             }
 
-            let loss = match loss_opt {
-                Some(l) => l,
+            let (loss, env_ce) = match loss_opt {
+                Some(pair) => pair,
                 None => {
                     return Err(kiln_kt_bridge::BridgeError::new(
                         "GRPO tape-authoritative(kt): try_tape_grpo_pg_loss_from_normed_hidden_kt \
@@ -8935,7 +8948,7 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
                     kiln_kt_bridge::BridgeError::new(format!("GRPO(kt) loss.to_scalar: {e}"))
                 })?
                 as f64;
-            Ok((loss_val, loss))
+            Ok(((loss_val, env_ce), loss))
         })
         .map_err(|e| anyhow::anyhow!("GRPO tape-authoritative(kt) backward: {e}"))?;
 
@@ -9002,7 +9015,7 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
         "GRPO step end (tape-authoritative kt)"
     );
 
-    Ok((loss_val, grads))
+    Ok((loss_val, env_ce, grads))
 }
 
 #[cfg(any(
@@ -9023,7 +9036,8 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
     loss_params: GrpoLossParams,
     segments: &[(usize, usize)],
     device: &Device,
-) -> Result<(f64, kiln_autograd::GradStore)> {
+    echo_env: Option<&crate::grpo_tape_shim::EchoEnvSpec>,
+) -> Result<(f64, Option<f64>, kiln_autograd::GradStore)> {
     let num_segments = segments.len();
     anyhow::ensure!(
         num_segments > 0,
@@ -9073,25 +9087,31 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
 
     let normed = model_forward_final_norm(&final_hidden, weights, model_config)
         .context("checkpointed GRPO final norm")?;
+    // The Vulkan fused active-rows tail carries no env rows — ECHO-active
+    // steps take the KtComposite tail instead.
     #[cfg(feature = "vulkan")]
-    let fused_vulkan_tail = match TrainingLossBackend::runtime_grpo_loss_route(backend) {
-        GrpoLossRoute::VulkanActiveRows => {
-            crate::grpo_tape_shim::vulkan_grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
-                &normed,
-                &weights.embed_tokens,
-                input_ids,
-                action_mask,
-                ref_log_probs,
-                loss_params,
-            )
-            .context("checkpointed GRPO Vulkan fused tail loss/gradient")?
+    let fused_vulkan_tail = if echo_env.is_some() {
+        None
+    } else {
+        match TrainingLossBackend::runtime_grpo_loss_route(backend) {
+            GrpoLossRoute::VulkanActiveRows => {
+                crate::grpo_tape_shim::vulkan_grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
+                    &normed,
+                    &weights.embed_tokens,
+                    input_ids,
+                    action_mask,
+                    ref_log_probs,
+                    loss_params,
+                )
+                .context("checkpointed GRPO Vulkan fused tail loss/gradient")?
+            }
+            GrpoLossRoute::KtComposite => None,
         }
-        GrpoLossRoute::KtComposite => None,
     };
     #[cfg(not(feature = "vulkan"))]
     let fused_vulkan_tail = None;
-    let (loss_kt, grad_normed) = match fused_vulkan_tail {
-        Some(pair) => pair,
+    let (loss_kt, grad_normed, env_ce) = match fused_vulkan_tail {
+        Some((l, g)) => (l, g, None),
         None => crate::grpo_tape_shim::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
             &normed,
             &weights.embed_tokens_t,
@@ -9103,6 +9123,7 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
             1.0,
             device,
             DEFAULT_CHUNK_SIZE,
+            echo_env,
         )
         .context("checkpointed GRPO tail loss/gradient")?,
     };
@@ -9183,7 +9204,7 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
         }
     }
 
-    Ok((loss_val, grads))
+    Ok((loss_val, env_ce, grads))
 }
 
 /// Bundled parameters for the GRPO surrogate / KL loss.
@@ -9879,14 +9900,13 @@ pub(crate) mod tests {
         assert!(err.to_string().contains("empty action_mask"));
     }
 
-    /// The dry run must pin the same constraint the real run enforces:
-    /// ECHO + env tokens has no gradient path post candle-drop (#1082), so
-    /// it REJECTS — while ECHO + legacy single-turn rollouts (zero env
-    /// tokens, zero contribution) passes. The pre-fix gate demanded the
-    /// exact opposite, so a dataset that passed the dry run was precisely
-    /// one that failed the real run.
+    /// Resurrection PR2: ECHO + env tokens TRAINS again, so the dry run
+    /// accepts both shapes — legacy single-turn rollouts (zero env tokens,
+    /// zero contribution) and trajectory rollouts WITH observations (the
+    /// flagship agentic shape). The report's env-token counts distinguish
+    /// them.
     #[test]
-    fn grpo_dry_run_rejects_echo_with_env_tokens_and_writes_receipt() -> Result<()> {
+    fn grpo_dry_run_accepts_echo_with_and_without_env_tokens() -> Result<()> {
         let tmp = tempfile::tempdir()?;
         let tok = make_echo_smoke_tokenizer()?;
 
@@ -9908,7 +9928,8 @@ pub(crate) mod tests {
         )?;
         assert_eq!(report.token_counts.env_tokens, 0);
 
-        // Trajectory rollouts WITH observations: rejected up front.
+        // Trajectory rollouts WITH observations: accepted, env tokens
+        // counted in the report.
         let env_group = dry_run_group(vec![
             crate::ScoredRollout::from_trajectory(
                 vec![
@@ -9926,7 +9947,7 @@ pub(crate) mod tests {
             crate::ScoredRollout::legacy("b".to_string(), 1.0),
         ]);
         let env_data = dry_run_dataset(tmp.path(), "echo-env.jsonl", &[env_group]);
-        let err = grpo_dry_run_jsonl(
+        let env_report = grpo_dry_run_jsonl(
             &env_data,
             &dry_run_config(true, false),
             &ModelConfig::qwen3_5_4b(),
@@ -9934,25 +9955,10 @@ pub(crate) mod tests {
             &output,
             "echo-env",
             false,
-        )
-        .unwrap_err();
-
+        )?;
         assert!(
-            err.to_string().contains("failure_reason=unsupported_loss_config"),
-            "{err}"
-        );
-        assert!(err.to_string().contains("--no-echo"), "{err}");
-        let receipt =
-            crate::train_receipt::TrainReceipt::read_from_adapter_dir(&output.join("echo-env"))?
-                .unwrap();
-        assert_eq!(
-            receipt.status,
-            crate::train_receipt::TrainReceiptStatus::Failed
-        );
-        assert!(receipt.token_counts.env_tokens > 0);
-        assert_eq!(
-            receipt.failure_reason.as_deref(),
-            Some("unsupported_loss_config")
+            env_report.token_counts.env_tokens > 0,
+            "observation tokens must be counted: {env_report:?}"
         );
         Ok(())
     }
@@ -13836,7 +13842,7 @@ pub(crate) mod tests {
         };
 
         let backend = backend::for_device_kt(&device);
-        let (loss_val, grads) = grpo_step_forward_backward_tape_authoritative_kt(
+        let (loss_val, _env_ce, grads) = grpo_step_forward_backward_tape_authoritative_kt(
             &*backend,
             &input_ids,
             &weights,
@@ -13852,6 +13858,7 @@ pub(crate) mod tests {
             0,          // streaming_tile_tokens (no streaming)
             0,          // checkpoint_segments (no checkpointing)
             None,       // timings
+            None,       // echo_env
         )
         .expect("grpo_step_forward_backward_tape_authoritative_kt (F32 Vulkan GRPO)");
 
@@ -14070,7 +14077,7 @@ pub(crate) mod tests {
         };
 
         let backend = backend::for_device_kt(&device);
-        let (loss_val, grads) = grpo_step_forward_backward_tape_authoritative_kt(
+        let (loss_val, _env_ce, grads) = grpo_step_forward_backward_tape_authoritative_kt(
             &*backend,
             &input_ids,
             &weights,
@@ -14086,6 +14093,7 @@ pub(crate) mod tests {
             0,
             0,
             None,
+            None, // echo_env
         )
         .expect("grpo_step_forward_backward_tape_authoritative_kt (BF16 Vulkan GRPO)");
 
