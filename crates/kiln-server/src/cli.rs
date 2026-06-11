@@ -2352,6 +2352,18 @@ fn print_job_summary(job: &serde_json::Value) {
         println!("  {} {loss:.4}", style("Loss:").dim());
     }
     println!("  {} {}s", style("Elapsed:").dim(), elapsed);
+    if let Some(verdict) = job.get("post_eval_verdict").and_then(|v| v.as_str()) {
+        // §8.7 promotion gate: color by outcome so a demotion can't be
+        // missed in a wall of job summaries.
+        let styled = if verdict.contains("promoted") && !verdict.contains("NOT") {
+            style(verdict).green()
+        } else if verdict.contains(".failed") || verdict.contains("demoted") {
+            style(verdict).red()
+        } else {
+            style(verdict).yellow()
+        };
+        println!("  {} {}", style("Gate:").dim(), styled);
+    }
     if state == "failed" {
         if let Some(err) = job.get("error").and_then(|v| v.as_str()) {
             println!("  {} {}", style("Error:").red().bold(), style(err).red());

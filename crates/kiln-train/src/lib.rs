@@ -1106,6 +1106,12 @@ pub struct TrainingStatus {
     /// payloads that predate the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// §8.7 promotion-gate verdict, stamped by the eval worker when the
+    /// request carried `post_eval.min_accuracy`: whether the adapter was
+    /// promoted, demoted to `<name>.failed`, or left unpromoted because
+    /// the eval errored. Absent for ungated jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_eval_verdict: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

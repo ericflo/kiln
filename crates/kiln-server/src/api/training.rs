@@ -1122,6 +1122,7 @@ fn training_status_from_info(j: &crate::state::TrainingJobInfo) -> TrainingStatu
             .into(),
         ),
         error: j.error.clone(),
+        post_eval_verdict: j.post_eval_verdict.clone(),
     }
 }
 
