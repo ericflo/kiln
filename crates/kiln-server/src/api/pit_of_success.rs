@@ -83,11 +83,6 @@ async fn submit_front_door(
         return Err(ApiError::shutting_down());
     }
 
-    let max_queued = state.max_queued_training_jobs;
-    if state.training_queue.lock().unwrap().len() >= max_queued {
-        return Err(ApiError::training_queue_full(max_queued));
-    }
-
     let (pipeline, job_type, adapter_name, auto_load, queued): (
         &'static str,
         TrainingJobType,
@@ -151,6 +146,11 @@ async fn submit_front_door(
         ),
     };
 
+    // The resolved name (explicit, derived, or generated) becomes a
+    // directory under adapter_dir — same gate as the dedicated endpoints.
+    super::adapters::validate_adapter_name(&adapter_name)?;
+    super::training::enforce_queue_caps(&state)?;
+
     let job_id = uuid::Uuid::new_v4().to_string();
     let info = TrainingJobInfo {
         job_id: job_id.clone(),
@@ -166,6 +166,7 @@ async fn submit_front_door(
         auto_load,
         finished_at: None,
         finished_unix_ms: None,
+        error: None,
         linked_eval_job_ids: Vec::new(),
         loss_history: Vec::new(),
     };

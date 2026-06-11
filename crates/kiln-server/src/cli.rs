@@ -2352,6 +2352,11 @@ fn print_job_summary(job: &serde_json::Value) {
         println!("  {} {loss:.4}", style("Loss:").dim());
     }
     println!("  {} {}s", style("Elapsed:").dim(), elapsed);
+    if state == "failed" {
+        if let Some(err) = job.get("error").and_then(|v| v.as_str()) {
+            println!("  {} {}", style("Error:").red().bold(), style(err).red());
+        }
+    }
 }
 
 fn print_job_line(job: &serde_json::Value) {
@@ -2376,6 +2381,11 @@ fn print_job_line(job: &serde_json::Value) {
         progress_pct,
         elapsed
     );
+    if state == "failed" {
+        if let Some(err) = job.get("error").and_then(|v| v.as_str()) {
+            println!("      {} {}", style("error:").red().bold(), style(err).red());
+        }
+    }
 }
 
 // ===========================================================================

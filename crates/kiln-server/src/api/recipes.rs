@@ -291,7 +291,10 @@ async fn run_recipe(
     // step's output adapter when the recipe didn't set one. PostEval
     // steps don't enqueue a job — they pin the next step's eval-gate
     // hook (a follow-up wires real eval gating into post_eval).
-    let mut job_ids = Vec::with_capacity(recipe.steps.len());
+    // Two phases: resolve + validate every step first, then enqueue. A bad
+    // adapter name on step N must reject the whole recipe before step 1 is
+    // queued — never a partially-enqueued recipe.
+    let mut prepared = Vec::with_capacity(recipe.steps.len());
     let mut previous_adapter: Option<String> = None;
     for step in &recipe.steps {
         if matches!(step, RecipeStep::PostEval { .. }) {
@@ -304,8 +307,14 @@ async fn run_recipe(
         }
         let job_id = uuid::Uuid::new_v4().to_string();
         let (adapter_name, queued) = step_to_queued_job(step, previous_adapter.as_deref(), &job_id)?;
+        previous_adapter = Some(adapter_name.clone());
+        prepared.push((job_id, adapter_name, queued));
+    }
+
+    let mut job_ids = Vec::with_capacity(prepared.len());
+    for (job_id, adapter_name, queued) in prepared {
+        super::training::enforce_queue_caps(&state)?;
         register_step_job(&state, &job_id, &adapter_name, queued);
-        previous_adapter = Some(adapter_name);
         job_ids.push(job_id);
     }
 
@@ -334,6 +343,19 @@ fn step_to_queued_job(
     _job_id: &str,
 ) -> Result<(String, crate::training_queue::QueuedJob), ApiError> {
     use crate::training_queue::QueuedJob;
+    // Every training step's `name` becomes a directory under adapter_dir —
+    // same single-segment gate as the dedicated submission endpoints.
+    match step {
+        RecipeStep::Sft { name, .. }
+        | RecipeStep::Opd { name, .. }
+        | RecipeStep::DistillMerge { name, .. }
+        | RecipeStep::DistillPump { name, .. }
+        | RecipeStep::DistillRefresh { name, .. }
+        | RecipeStep::DistillSelf { name, .. } => {
+            super::adapters::validate_adapter_name(name)?;
+        }
+        RecipeStep::PostEval { .. } => {}
+    }
     match step {
         RecipeStep::Sft {
             name,
@@ -530,6 +552,7 @@ fn register_step_job(
         auto_load: true,
         finished_at: None,
         finished_unix_ms: None,
+        error: None,
         linked_eval_job_ids: Vec::new(),
         loss_history: Vec::new(),
     };

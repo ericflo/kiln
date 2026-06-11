@@ -263,6 +263,12 @@ pub struct TrainingJobInfo {
     /// "finished 3h ago" even after a restart.
     #[serde(default)]
     pub finished_unix_ms: Option<u64>,
+    /// Failure detail for `Failed` jobs (trainer error message, mock-mode
+    /// rejection, or "cancelled while queued"). `None` for active and
+    /// `Completed` jobs — and for legacy archived entries that predate
+    /// the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     /// Eval job IDs that ran against this training run via the
     /// `post_eval` auto-hook. Populated at *enqueue* time by
     /// `enqueue_post_training_eval` (so the training-side dashboard can

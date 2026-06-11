@@ -145,6 +145,7 @@ mod tests {
             auto_load: false,
             finished_at: None,
             finished_unix_ms: Some(2_000),
+            error: None,
             linked_eval_job_ids: vec![],
             loss_history: vec![],
         }

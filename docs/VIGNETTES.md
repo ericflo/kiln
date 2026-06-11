@@ -110,6 +110,9 @@ kiln self-improve \
 
 # 5. Optional periodic drift check (§10.6.3). Auto-refreshes the
 #    judge if agreement on 50 contested cases drops below 80%.
+#    NOTE: the scoring run lands with the trainer body (#31); until
+#    then the server validates the inputs and returns 501, so this
+#    command exits non-zero.
 kiln judge drift-check \
   --judge office-judge \
   --teacher qwen3.6-27b@openrouter \

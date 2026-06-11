@@ -388,6 +388,40 @@ impl ApiError {
         }
     }
 
+    /// 400 returned when a training/agent endpoint references a teacher
+    /// alias that isn't in the registry. Failing at submit time beats
+    /// enqueueing a job that is guaranteed to fail at resolution time.
+    pub fn teacher_not_registered(detail: impl std::fmt::Display, registered: &[String]) -> Self {
+        let aliases = if registered.is_empty() {
+            "(none)".to_string()
+        } else {
+            registered.join(", ")
+        };
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "teacher_not_registered",
+            message: format!("{detail}; registered teacher aliases: {aliases}"),
+            hint: "Register the teacher first: curl -X POST http://localhost:8420/v1/teachers -H 'content-type: application/json' -d '{\"alias\":\"<alias>\",\"kind\":\"local\",\"model_id\":\"<model>\"}'. List aliases with GET /v1/teachers.",
+            retry_after_seconds: None,
+        }
+    }
+
+    /// 501 for `POST /v1/agent/judge_drift_check` — the teacher re-scoring
+    /// + agreement comparison land with the trainer body (#31). An honest
+    /// not-implemented beats the fake success the endpoint used to return.
+    pub fn drift_check_not_implemented() -> Self {
+        Self {
+            status: StatusCode::NOT_IMPLEMENTED,
+            code: "not_implemented",
+            message: "judge drift-check inputs are valid, but the scoring run \
+                      (teacher re-scoring + agreement comparison) is not implemented \
+                      yet — it lands with the trainer body (#31)"
+                .to_string(),
+            hint: "Until #31 lands, refresh the judge on a schedule with POST /v1/agent/judge_distill instead of polling drift.",
+            retry_after_seconds: None,
+        }
+    }
+
     pub fn training_job_not_found(job_id: impl std::fmt::Display) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,

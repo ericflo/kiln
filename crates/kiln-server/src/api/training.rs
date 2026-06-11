@@ -336,6 +336,7 @@ async fn submit_sft(
         auto_load,
         finished_at: None,
         finished_unix_ms: None,
+        error: None,
         linked_eval_job_ids: Vec::new(),
         loss_history: Vec::new(),
     };
@@ -496,6 +497,7 @@ async fn submit_grpo(
         auto_load,
         finished_at: None,
         finished_unix_ms: None,
+        error: None,
         linked_eval_job_ids: Vec::new(),
         loss_history: Vec::new(),
     };
@@ -665,6 +667,7 @@ async fn submit_opd(
         auto_load,
         finished_at: None,
         finished_unix_ms: None,
+        error: None,
         linked_eval_job_ids: Vec::new(),
         loss_history: Vec::new(),
     };
@@ -768,6 +771,7 @@ async fn submit_distill_refresh(
         auto_load,
         finished_at: None,
         finished_unix_ms: None,
+        error: None,
         linked_eval_job_ids: Vec::new(),
         loss_history: Vec::new(),
     };
@@ -895,8 +899,10 @@ async fn submit_distill_self(
     }))
 }
 
-/// Shared queue-cap enforcement used by all distill_* endpoints.
-fn enforce_queue_caps(state: &AppState) -> Result<(), ApiError> {
+/// Shared submission gate: queue cap, tracked-jobs cap, and mock-mode
+/// rejection. Used by the distill_* endpoints and every other surface
+/// that enqueues training jobs (front door, recipes, agent endpoints).
+pub(crate) fn enforce_queue_caps(state: &AppState) -> Result<(), ApiError> {
     let max_queued = state.max_queued_training_jobs;
     if state.training_queue.lock().unwrap().len() >= max_queued {
         return Err(ApiError::training_queue_full(max_queued));
@@ -935,6 +941,7 @@ fn register_and_enqueue_distill(
         auto_load,
         finished_at: None,
         finished_unix_ms: None,
+        error: None,
         linked_eval_job_ids: Vec::new(),
         loss_history: Vec::new(),
     };
@@ -970,6 +977,7 @@ fn training_status_from_info(j: &crate::state::TrainingJobInfo) -> TrainingStatu
             }
             .into(),
         ),
+        error: j.error.clone(),
     }
 }
 
@@ -1081,7 +1089,9 @@ async fn cancel_queued_job(
             let jt = jobs.get(&job_id).map(|j| j.job_type);
             if let Some(job) = jobs.get_mut(&job_id) {
                 job.state = TrainingState::Failed;
+                job.error = Some("cancelled while queued".to_string());
                 job.finished_at = Some(std::time::Instant::now());
+                job.finished_unix_ms = Some(crate::recent_requests::now_unix_ms());
             }
             jt
         };

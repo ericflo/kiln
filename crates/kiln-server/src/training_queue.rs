@@ -22,14 +22,15 @@ use crate::state::{AppState, ModelBackend, TrainingJobType, gpu_coordination_wri
 use crate::training_history;
 
 /// Mark the tracked job terminal (Completed / Failed), stamp `finished_at`
-/// + `finished_unix_ms`, and persist a clone to the on-disk archive.
-/// Archive write failures are logged, never propagated — disk wedged or
-/// quota-exceeded must not derail the worker's reporting path.
-fn finalize_job(state: &AppState, job_id: &str, new_state: TrainingState) {
+/// + `finished_unix_ms` + the failure detail, and persist a clone to the
+/// on-disk archive. Archive write failures are logged, never propagated —
+/// disk wedged or quota-exceeded must not derail the worker's reporting path.
+fn finalize_job(state: &AppState, job_id: &str, new_state: TrainingState, error: Option<String>) {
     let snapshot = {
         let mut jobs = state.training_jobs.write().unwrap();
         if let Some(job) = jobs.get_mut(job_id) {
             job.state = new_state;
+            job.error = error;
             job.finished_at = Some(std::time::Instant::now());
             job.finished_unix_ms = Some(now_unix_ms());
             Some(job.clone())
@@ -1922,7 +1923,12 @@ fn execute_job(state: AppState, entry: QueueEntry) {
     let runner_arc = match state.backend.as_ref() {
         ModelBackend::Real { runner, .. } => runner.clone(),
         ModelBackend::Mock { .. } => {
-            finalize_job(&state, &job_id, TrainingState::Failed);
+            finalize_job(
+                &state,
+                &job_id,
+                TrainingState::Failed,
+                Some("training requires real model weights (not available in mock mode)".to_string()),
+            );
             tracing::error!(job_id = %job_id, "training requires real model weights");
             return;
         }
@@ -2178,7 +2184,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                     job.adapter_path = Some(path_str.clone());
                 }
             }
-            finalize_job(&state, &job_id, TrainingState::Completed);
+            finalize_job(&state, &job_id, TrainingState::Completed, None);
             state
                 .metrics
                 .inc_training(metric_type, TrainingMetricStatus::Completed);
@@ -2274,7 +2280,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
         Err(e) => {
             tracing::error!(job_id = %job_id, job_type = ?job_type, "training failed: {e}");
             let error_msg = e.clone();
-            finalize_job(&state, &job_id, TrainingState::Failed);
+            finalize_job(&state, &job_id, TrainingState::Failed, Some(e));
             state
                 .metrics
                 .inc_training(metric_type, TrainingMetricStatus::Failed);

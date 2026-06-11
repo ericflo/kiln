@@ -86,6 +86,19 @@ async fn judge_distill(
             "judge_distill: `teacher` alias must be non-empty".to_string(),
         ));
     }
+    super::adapters::validate_adapter_name(&req.name)?;
+    // The pump resolves the teacher only when the worker dequeues the job
+    // (training_queue), so an unknown alias used to enqueue a job that was
+    // guaranteed to fail later. Fail fast with the remediation instead.
+    require_registered_teacher(
+        &state,
+        &req.teacher,
+        format!(
+            "judge_distill: teacher alias '{}' is not registered",
+            req.teacher
+        ),
+    )?;
+    super::training::enforce_queue_caps(&state)?;
 
     // §10.6.1 internally is a `distill_pump` against the judge_traces
     // canonical corpus. We construct the pump request server-side so
@@ -160,6 +173,22 @@ async fn self_improve(
             "self_improve: `agent` adapter must be non-empty".to_string(),
         ));
     }
+    // The derived `{agent}-improve` / `{agent}-crisp` output names are safe
+    // iff the agent name itself is a safe single segment.
+    super::adapters::validate_adapter_name(&req.agent)?;
+    // Both phases use the judge as their distillation teacher, resolved only
+    // when the worker dequeues the job — so an unregistered judge used to
+    // enqueue jobs that were guaranteed to fail later.
+    require_registered_teacher(
+        &state,
+        &req.judge,
+        format!(
+            "self_improve: judge '{}' must be registered as a teacher alias \
+             (it scores rollouts and serves as the distillation teacher)",
+            req.judge
+        ),
+    )?;
+    super::training::enforce_queue_caps(&state)?;
 
     // §10.6.2: score with judge → GRPO → CRISP pass. Each phase
     // queues independently. The trainer body (#31) wires the
@@ -248,39 +277,61 @@ fn default_drift_threshold() -> f64 {
     0.80
 }
 
-#[derive(Debug, Serialize)]
-struct JudgeDriftCheckResponse {
-    /// Whether a refresh was triggered as a result of this check.
-    refresh_triggered: bool,
-    /// Refresh job id, when triggered.
-    refresh_job_id: Option<String>,
-    /// Observed agreement rate (None when the check couldn't run —
-    /// e.g. judge or teacher not registered).
-    observed_agreement: Option<f64>,
-    message: String,
-}
-
+/// The actual scoring + comparison is a real GPU run that lands with #31.
+/// Until then the endpoint validates its inputs (so callers wire up the
+/// judge/teacher/thresholds correctly today) and returns an honest 501 —
+/// never a fake "no drift" success.
 async fn judge_drift_check(
     State(state): State<AppState>,
     Json(req): Json<JudgeDriftCheckRequest>,
-) -> Result<Json<JudgeDriftCheckResponse>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
     }
-    // The actual scoring + comparison is a real GPU run that lands
-    // with #31. For now the endpoint shape is established and the
-    // refresh-trigger path is wired so the dashboard can poll on
-    // the same schedule.
-    let _ = req;
-    let _ = state;
-    Ok(Json(JudgeDriftCheckResponse {
-        refresh_triggered: false,
-        refresh_job_id: None,
-        observed_agreement: None,
-        message: "§10.6.3 drift check shape established. Full scoring + comparison \
-                  + auto-refresh trigger wires alongside the trainer body (#31)."
-            .to_string(),
-    }))
+    super::adapters::validate_adapter_name(&req.judge)?;
+    let judge_dir = state.adapter_dir.join(&req.judge);
+    if !judge_dir.is_dir() {
+        return Err(ApiError::adapter_not_found(judge_dir.display()));
+    }
+    require_registered_teacher(
+        &state,
+        &req.teacher,
+        format!(
+            "judge_drift_check: teacher alias '{}' is not registered",
+            req.teacher
+        ),
+    )?;
+    if req.sample_size < 1 {
+        return Err(ApiError::training_invalid_request(
+            "judge_drift_check: `sample_size` must be >= 1".to_string(),
+        ));
+    }
+    if !(req.agreement_threshold > 0.0 && req.agreement_threshold <= 1.0) {
+        return Err(ApiError::training_invalid_request(format!(
+            "judge_drift_check: `agreement_threshold` must be in (0.0, 1.0], got {}",
+            req.agreement_threshold
+        )));
+    }
+    Err(ApiError::drift_check_not_implemented())
+}
+
+/// Resolve a teacher alias against the registry, failing with the
+/// remediation-bearing 400 (`teacher_not_registered`) when missing.
+fn require_registered_teacher(
+    state: &AppState,
+    alias: &str,
+    detail: String,
+) -> Result<(), ApiError> {
+    if state.teacher_registry.get(alias).is_some() {
+        return Ok(());
+    }
+    let registered: Vec<String> = state
+        .teacher_registry
+        .list()
+        .into_iter()
+        .map(|spec| spec.alias)
+        .collect();
+    Err(ApiError::teacher_not_registered(detail, &registered))
 }
 
 fn register_agent_job(
@@ -303,6 +354,7 @@ fn register_agent_job(
         auto_load: true,
         finished_at: None,
         finished_unix_ms: None,
+        error: None,
         linked_eval_job_ids: Vec::new(),
         loss_history: Vec::new(),
     };
