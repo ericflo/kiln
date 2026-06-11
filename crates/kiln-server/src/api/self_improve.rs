@@ -53,6 +53,10 @@ pub struct JudgeDistillRequest {
     /// judges work — "judging is easier than generating").
     #[serde(default = "default_judge_config")]
     pub config: OpdConfig,
+    /// §8.7 promotion gate for the judge adapter (same contract as
+    /// SelfImproveRequest.post_eval).
+    #[serde(default)]
+    pub post_eval: Option<kiln_eval::PostEvalConfig>,
 }
 
 fn default_judge_name() -> String {
@@ -137,6 +141,13 @@ pub struct SelfImproveRequest {
     /// Per-job OPD config.
     #[serde(default)]
     pub config: OpdConfig,
+    /// §8.7 promotion gate for the produced adapter. When set with
+    /// `min_accuracy`, auto-load is DEFERRED until the eval passes and a
+    /// failing adapter is demoted to `<name>.failed` — the same contract
+    /// explicit training requests get. Without it the flywheel's own
+    /// products would auto-load unmeasured.
+    #[serde(default)]
+    pub post_eval: Option<kiln_eval::PostEvalConfig>,
 }
 
 fn default_agent_name() -> String {
@@ -315,7 +326,7 @@ fn build_judge_pump_request(
         rollout_budget: 50_000,
         use_cache: true,
         config: req.config.clone(),
-        post_eval: None,
+        post_eval: req.post_eval.clone(),
     };
     Ok((pump_req, num_pairs))
 }
@@ -338,15 +349,35 @@ fn build_self_improve_jobs(
     .map_err(|e| ApiError::training_invalid_request(format!("self_improve: {e}")))?;
     let num_tasks = weekly.len();
 
+    // Warm start: when the agent's adapter already exists, this week's
+    // training CONTINUES from it instead of restarting from the base
+    // model. Without this, every self_improve cycle threw away the
+    // previous cycles' learning — the flywheel spun but nothing
+    // compounded ("your model gets better every time you use it"
+    // requires the weeks to stack). An explicit base_adapter in the
+    // request still wins; a missing adapter dir trains from base (first
+    // cycle).
+    let warm_start_base = |config: &kiln_train::OpdConfig| -> Option<String> {
+        if config.base_adapter.is_some() {
+            return config.base_adapter.clone();
+        }
+        adapter_dir
+            .join(&req.agent)
+            .is_dir()
+            .then(|| req.agent.clone())
+    };
+
     // Phase 1: the student re-rolls the week's pi tasks on-policy with
     // the judge as the scoring teacher. The selector resolves in the
     // worker via the same path that just validated it above.
+    let mut opd_config = req.config.clone();
+    opd_config.base_adapter = warm_start_base(&req.config);
     let opd_phase = OpdRequest {
         prompts: Vec::new(),
         dataset_path: Some("agent_traces:weekly".to_string()),
         teacher: req.judge.clone(),
-        config: req.config.clone(),
-        post_eval: None,
+        config: opd_config,
+        post_eval: req.post_eval.clone(),
     };
 
     // Phase 2: the same successful sessions re-prompted under
@@ -362,6 +393,7 @@ fn build_self_improve_jobs(
         })?;
         let mut crisp_config = req.config.clone();
         crisp_config.output_name = Some(format!("{}-crisp", req.agent));
+        crisp_config.base_adapter = warm_start_base(&req.config);
         Some(DistillPumpRequest {
             name: format!("{}-crisp", req.agent),
             teacher: req.judge.clone(),
@@ -372,7 +404,7 @@ fn build_self_improve_jobs(
             rollout_budget: 10_000,
             use_cache: true,
             config: crisp_config,
-            post_eval: None,
+            post_eval: req.post_eval.clone(),
         })
     } else {
         None
@@ -583,6 +615,58 @@ mod tests {
             "conciseness pressure folded into the system turn"
         );
         assert!(examples[0].messages[1].content.contains("Fix the flaky test"));
+    }
+
+    /// The flywheel must COMPOUND: when the agent's adapter already
+    /// exists, both phases continue from it; on the first cycle (no
+    /// adapter yet) they train from base; an explicit base_adapter in
+    /// the request always wins.
+    #[test]
+    fn self_improve_warm_starts_from_existing_agent_adapter() {
+        let dir = tempfile::tempdir().unwrap();
+        seeded_trace_index(dir.path());
+        let req: SelfImproveRequest = serde_json::from_str("{}").unwrap();
+
+        // First cycle: no adapter dir → base model.
+        let (opd, crisp, _) = build_self_improve_jobs(dir.path(), &req).unwrap();
+        assert!(opd.config.base_adapter.is_none());
+        assert!(crisp.unwrap().config.base_adapter.is_none());
+
+        // Later cycles: the agent adapter exists → warm start.
+        std::fs::create_dir(dir.path().join("pi-coder-current")).unwrap();
+        let (opd, crisp, _) = build_self_improve_jobs(dir.path(), &req).unwrap();
+        assert_eq!(opd.config.base_adapter.as_deref(), Some("pi-coder-current"));
+        assert_eq!(
+            crisp.unwrap().config.base_adapter.as_deref(),
+            Some("pi-coder-current")
+        );
+
+        // Explicit base_adapter wins over the warm-start default.
+        let req: SelfImproveRequest = serde_json::from_str(
+            r#"{"config": {"base_adapter": "my-pinned-base"}}"#,
+        )
+        .unwrap();
+        let (opd, _, _) = build_self_improve_jobs(dir.path(), &req).unwrap();
+        assert_eq!(opd.config.base_adapter.as_deref(), Some("my-pinned-base"));
+    }
+
+    /// The flywheel's own products honor the §8.7 gate: a post_eval on
+    /// the request rides into every produced job.
+    #[test]
+    fn self_improve_post_eval_gate_rides_into_all_phases() {
+        let dir = tempfile::tempdir().unwrap();
+        seeded_trace_index(dir.path());
+        let req: SelfImproveRequest = serde_json::from_str(
+            r#"{"post_eval": {"suite": "agentic-core", "min_accuracy": 0.7}}"#,
+        )
+        .unwrap();
+        let (opd, crisp, _) = build_self_improve_jobs(dir.path(), &req).unwrap();
+        assert_eq!(opd.post_eval.as_ref().unwrap().suite, "agentic-core");
+        assert_eq!(opd.post_eval.as_ref().unwrap().min_accuracy, Some(0.7));
+        assert_eq!(
+            crisp.unwrap().post_eval.as_ref().unwrap().suite,
+            "agentic-core"
+        );
     }
 
     #[test]
