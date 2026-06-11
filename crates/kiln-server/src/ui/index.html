@@ -1044,7 +1044,7 @@
   <section class="page" id="page-distill" role="tabpanel" aria-labelledby="primary-tab-distill" hidden inert>
     <div class="card">
       <div class="card-head">
-        <h2>On-Policy Distillation</h2>
+        <h2>Distill</h2>
         <span class="eyebrow">Teach your model a bigger model&rsquo;s behavior</span>
       </div>
       <!-- Grouped sub-nav: Methods (the distillation actions) · Setup
@@ -1053,9 +1053,9 @@
            them; every data-tab/aria-controls is preserved. -->
       <div class="tabs distill-tabs" role="tablist" aria-label="Distill views" data-distill-tabs>
         <span class="tab-group-label" aria-hidden="true">Methods</span>
-        <button class="tab active" id="distill-tab-opd" data-tab="opd" type="button" role="tab" aria-selected="true" aria-controls="distill-tab-opd-pane" tabindex="0" title="On-Policy Distillation — teach from a teacher model">Distill</button>
+        <button class="tab active" id="distill-tab-opd" data-tab="opd" type="button" role="tab" aria-selected="true" aria-controls="distill-tab-opd-pane" tabindex="0" title="Train your model on a teacher model&rsquo;s token-by-token feedback">Distill</button>
         <button class="tab" id="distill-tab-refresh" data-tab="refresh" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-refresh-pane" tabindex="-1" title="Refresh an adapter on new data (continual learning)">Refresh</button>
-        <button class="tab" id="distill-tab-pump" data-tab="pump" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-pump-pane" tabindex="-1" title="Boost a domain — 27B → 4B knowledge pump">Boost</button>
+        <button class="tab" id="distill-tab-pump" data-tab="pump" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-pump-pane" tabindex="-1" title="Boost a domain — distill a bigger teacher&rsquo;s knowledge into your model">Boost</button>
         <button class="tab" id="distill-tab-self" data-tab="self" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-self-pane" tabindex="-1" title="Self-improve via self-distillation">Self-improve</button>
         <button class="tab" id="distill-tab-merge" data-tab="merge" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-merge-pane" tabindex="-1" title="Behaviour-space LoRA merge">Merge</button>
         <span class="tab-group-sep" aria-hidden="true"></span>
@@ -1074,6 +1074,7 @@
            Submit OPD — POST /v1/train/opd
            ================================================================= -->
       <div class="tab-content active" id="distill-tab-opd-pane" role="tabpanel" aria-labelledby="distill-tab-opd">
+        <div class="form-help" style="margin: 0 0 var(--space-4);">On-policy distillation (OPD): your model writes the answers, a bigger teacher model grades every token, and the gap becomes the training signal. This form queues one distillation job.</div>
         <div class="corr-receipt" id="distill-recipes-hint" hidden role="note" style="margin-bottom: var(--space-4);">
           <span class="corr-receipt-icon"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-book"></use></svg></span>
           <span class="corr-receipt-text">New to distillation? <strong>Recipes</strong> pick the teacher, rank, and cost cap for you — one click instead of this whole form.</span>
@@ -1143,7 +1144,7 @@
             <div class="form-group">
               <label for="opd-max-cost">Cost cap (USD)</label>
               <input type="text" id="opd-max-cost" name="max_cost_usd" value="25" placeholder="25">
-              <div class="form-help">Hard cap. Default 25.</div>
+              <div class="form-help">Hard cap on remote-teacher API spend for this job (default $25). Local and fixture teachers cost $0.</div>
             </div>
           </div>
           <div class="form-group">
@@ -1151,14 +1152,14 @@
             <textarea id="opd-prompts" name="prompts" rows="8" placeholder='[{"messages":[{"role":"user","content":"Solve: 2x^2 - 5x + 3 = 0"},{"role":"assistant","content":"Use the quadratic formula..."}]}]'></textarea>
             <div class="form-help">Each prompt is one <code>{messages:[...]}</code> object. The trainer rolls out <code>samples_per_prompt</code> times per prompt.</div>
             <div style="display: flex; justify-content: flex-end; margin-top: var(--space-2);">
-              <button type="button" class="btn btn-sm" id="opd-use-sample">Use sample OPD payload</button>
+              <button type="button" class="btn btn-sm" id="opd-use-sample">Insert sample prompts</button>
             </div>
           </div>
           <div style="display: flex; gap: var(--space-3); align-items: center; padding-top: var(--space-3); border-top: 1px solid var(--border);">
             <label style="font-size: var(--text-xs); display: flex; align-items: center; gap: var(--space-2); color: var(--text-muted); text-transform: none; letter-spacing: 0; font-weight: 400;">
               <input type="checkbox" id="opd-auto-load" name="auto_load" checked> Auto-load adapter after training
             </label>
-            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Submit OPD job</button>
+            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Queue distillation job</button>
           </div>
         </form>
       </div>
@@ -1283,10 +1284,10 @@
           <div class="form-group">
             <label for="refresh-new-data">New data (JSON array of prompts)</label>
             <textarea id="refresh-new-data" name="new_data" rows="6" placeholder='[{"messages":[{"role":"user","content":"What is Project Aurora?"},{"role":"assistant","content":"..."}]}]'></textarea>
-            <div class="form-help">Inline OpdPrompts. Each is <code>{messages:[...]}</code>.</div>
+            <div class="form-help">Each entry is one <code>{messages:[...]}</code> prompt object.</div>
           </div>
           <div style="display: flex; gap: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border);">
-            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Submit distill/refresh</button>
+            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Queue refresh</button>
           </div>
         </form>
       </div>
@@ -1295,6 +1296,7 @@
            Pump — 27B → 4B knowledge pump
            ================================================================= -->
       <div class="tab-content" id="distill-tab-pump-pane" role="tabpanel" aria-labelledby="distill-tab-pump" hidden inert>
+        <div class="form-help" style="margin: 0 0 var(--space-4);">Boost (the &ldquo;knowledge pump&rdquo;): distill one domain &mdash; math, code, writing &mdash; from a bigger teacher into your model.</div>
         <form id="distill-pump-form">
           <div class="form-row">
             <div class="form-group">
@@ -1342,7 +1344,7 @@
             <textarea id="pump-examples" name="examples" rows="6" placeholder='[{"messages":[{"role":"user","content":"..."}]}]'></textarea>
           </div>
           <div style="display: flex; gap: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border);">
-            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Submit distill/pump</button>
+            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Queue boost job</button>
           </div>
         </form>
       </div>
@@ -1373,7 +1375,7 @@
             <div class="form-help">Each <code>{adapter, weight}</code> — the multi-tenant merge loads each source LoRA and uses it as the per-prompt teacher.</div>
           </div>
           <div style="display: flex; gap: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border);">
-            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Submit distill_merge</button>
+            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Queue merge</button>
           </div>
         </form>
       </div>
@@ -1389,13 +1391,14 @@
               <input type="text" id="self-name" name="name" required placeholder="concise-style">
             </div>
             <div class="form-group">
-              <label for="self-mode">PI mode</label>
+              <label for="self-mode">Privileged-information (PI) mode</label>
               <select id="self-mode" name="mode">
-                <option value="ground_truth_conditioning">GroundTruthConditioning (OPSD)</option>
-                <option value="conciseness" selected>Conciseness (CRISP — Lu et al.)</option>
-                <option value="document_as_pi">DocumentAsPi (GATES)</option>
-                <option value="reverse_teacher">ReverseTeacher (RLRT)</option>
+                <option value="ground_truth_conditioning">Ground-truth conditioning (OPSD)</option>
+                <option value="conciseness" selected>Conciseness (CRISP)</option>
+                <option value="document_as_pi">Document as privileged info (GATES)</option>
+                <option value="reverse_teacher">Reverse teacher (RLRT)</option>
               </select>
+              <div class="form-help">The teacher is this same model given privileged information &mdash; the right answer, retrieved documents &mdash; that the student never sees. (No relation to the pi coding agent.)</div>
             </div>
           </div>
           <div class="form-group">
@@ -1412,7 +1415,7 @@
             <textarea id="self-documents" name="documents" rows="3" placeholder='["Document text 1...", "Document text 2..."]'></textarea>
           </div>
           <div style="display: flex; gap: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border);">
-            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Submit distill/self</button>
+            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Queue self-improvement job</button>
           </div>
         </form>
       </div>
@@ -1453,7 +1456,7 @@
           <div class="form-row">
             <div class="form-group">
               <label for="library-publish-name">Adapter name</label>
-              <input type="text" id="library-publish-name" name="adapter_name" required placeholder="my-domain-pump">
+              <input type="text" id="library-publish-name" name="adapter_name" required placeholder="my-domain-adapter">
               <div class="form-help">Local adapter must have a reproducibility receipt; the library refuses to publish without one.</div>
             </div>
             <div class="form-group">
