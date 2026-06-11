@@ -134,6 +134,11 @@ pub struct RequestLogEntry {
     pub streamed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
+    /// First-party self-identification from the `X-Kiln-Client` header (the
+    /// /ui dashboard sends `dashboard` on its own traffic) so the mining
+    /// pipeline can exclude dashboard-originated rows. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
     /// LoRA adapter that actually served this response (from the
     /// `x-kiln-loaded-adapter` response header); `None` = base model.
     /// Lets the mining pipeline split the corpus per adapter.
@@ -365,6 +370,15 @@ pub async fn tap(State(state): State<AppState>, req: Request<Body>, next: Next) 
         .get(axum::http::header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .map(|v| v.chars().take(256).collect::<String>());
+    // `X-Kiln-Client` follows the same path as User-Agent: the /ui dashboard
+    // self-identifies (`dashboard`) so its own traffic is distinguishable.
+    let client = req
+        .headers()
+        .get("x-kiln-client")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|v| v.chars().take(64).collect::<String>());
     let max_capture = state.request_log_max_capture_bytes;
 
     let (parts, body) = req.into_parts();
@@ -408,6 +422,7 @@ pub async fn tap(State(state): State<AppState>, req: Request<Body>, next: Next) 
             duration_ms: started.elapsed().as_millis() as u64,
             streamed: false,
             user_agent,
+            client,
             adapter,
             request: request_value,
             response: response_value,
@@ -427,6 +442,7 @@ pub async fn tap(State(state): State<AppState>, req: Request<Body>, next: Next) 
         status,
         started,
         user_agent,
+        client,
         adapter,
         request_value,
         request_truncated,
@@ -473,6 +489,7 @@ struct SseTapCtx {
     status: u16,
     started: Instant,
     user_agent: Option<String>,
+    client: Option<String>,
     adapter: Option<String>,
     request_value: serde_json::Value,
     request_truncated: bool,
@@ -510,6 +527,7 @@ impl SseTapCtx {
             duration_ms: self.started.elapsed().as_millis() as u64,
             streamed: true,
             user_agent: self.user_agent.take(),
+            client: self.client.take(),
             adapter: self.adapter.take(),
             request: std::mem::take(&mut self.request_value),
             response,
@@ -700,6 +718,7 @@ mod tests {
             duration_ms: 5,
             streamed: false,
             user_agent: Some("test".into()),
+            client: None,
             adapter: None,
             request: serde_json::json!({ "messages": [{"role": "user", "content": "x".repeat(payload_size)}] }),
             response: serde_json::json!({ "choices": [{"message": {"role": "assistant", "content": "y"}}] }),

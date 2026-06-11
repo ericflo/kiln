@@ -233,6 +233,20 @@ function renderConnectSnippets(active) {
   }).join('');
 }
 
+// Push a freshly-resolved served-model id into every copyable surface: the
+// model-id field and the pi/opencode/SDK/curl snippets. Cold starts open the
+// dashboard before /v1/models can answer, so the panel initially renders the
+// fallback id — this silently upgrades it the moment the real id arrives.
+// Re-renders only on an actual change, preserving the selected tab.
+function applyServedModelId(id) {
+  if (!id || connectModelId === id) return;
+  connectModelId = id;
+  const modelEl = document.getElementById('connect-model');
+  if (modelEl) { modelEl.textContent = id; modelEl.title = id; }
+  const activeTab = document.querySelector('.connect-tabs .tab.active')?.dataset.connectTab || 'pi';
+  renderConnectSnippets(activeTab);
+}
+
 function selectConnectTab(key) {
   document.querySelectorAll('.connect-tabs .tab').forEach(t => {
     const on = t.dataset.connectTab === key;
@@ -268,13 +282,17 @@ function openConnect() {
   if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-// Auto-collapse to the slim "connected" bar once traffic flows (unless the
-// operator has manually picked a state this session).
+// Auto-collapse to the slim "connected" bar once EXTERNAL traffic flows
+// (unless the operator has manually picked a state this session). The
+// dashboard's own requests (Test connection, Playground — `client:
+// "dashboard"`) don't prove anything connected and must not hide the setup
+// snippets a first-run user still needs.
 function updateConnectSummary(rows) {
-  const n = Array.isArray(rows) ? rows.length : 0;
+  const external = (Array.isArray(rows) ? rows : []).filter(r => !rowIsDashboard(r));
+  const n = external.length;
   const txt = document.getElementById('connect-collapsed-text');
   if (txt && n > 0) {
-    const last = rows[0]?.timestamp_unix_ms;
+    const last = external[0]?.timestamp_unix_ms;
     txt.innerHTML = `<strong>Connected</strong> · <strong>${n}</strong> recent request${n === 1 ? '' : 's'}${last ? ' · last ' + fmtRelTime(last) : ''}`;
   }
   if (connectManualState === null && n > 0) setConnectCollapsed(true);
@@ -508,7 +526,7 @@ function addCorrectionFromRequest(r) {
   if (!r) return false;
   return addCorrectionItem({
     request_id: r.id || ('req-' + Date.now()),
-    agent: (clientFromUA(r.user_agent) || {}).label || 'client',
+    agent: (clientForRow(r) || {}).label || 'client',
     ts: r.timestamp_unix_ms || Date.now(),
     model: r.model || '', adapter: r.adapter || 'base',
     user: r.prompt_full || r.prompt_preview || '',
@@ -729,7 +747,14 @@ function updateJourneyStrip() {
   try { dismissed = localStorage.getItem(JOURNEY_KEY) === '1'; } catch {}
   const serverUp = !!lastHealth;
   const rows = recentRequestsCache || [];
-  const agentSeen = rows.some(r => { const k = clientFromUA(r.user_agent).key; return k && k !== 'unknown' && k !== 'curl'; });
+  // Only EXTERNAL traffic completes "Agent connected": the dashboard's own
+  // requests (Test connection, Playground — `client: "dashboard"`) never
+  // count, while curl DOES — a user who followed the curl tab really did
+  // connect something. When curl is the only client seen, the step carries
+  // an inline nudge to point a coding agent here next.
+  const externalKeys = rows.filter(r => !rowIsDashboard(r)).map(r => clientFromUA(r.user_agent).key);
+  const agentSeen = externalKeys.some(k => k && k !== 'unknown');
+  const curlOnly = agentSeen && externalKeys.every(k => !k || k === 'unknown' || k === 'curl');
   const adapterTrained = nonBaseAdapterCount() > 0;
   const allDone = serverUp && agentSeen && adapterTrained;
   if (dismissed || allDone) {
@@ -749,6 +774,15 @@ function updateJourneyStrip() {
     const isNext = !done && !nextMarked;
     if (isNext) nextMarked = true;
     el.classList.toggle('is-next', isNext);
+  }
+  // Inline (not hover-only) state on the agent step: when curl is the only
+  // external client seen, the milestone is honestly complete but the natural
+  // next move — pointing a real coding agent here — gets said out loud.
+  const agentSub = strip.querySelector('[data-journey="agent"] .journey-sub');
+  if (agentSub) {
+    agentSub.textContent = curlOnly
+      ? 'curl seen — point a coding agent here next'
+      : 'point pi or opencode here';
   }
 }
 document.getElementById('journey-dismiss')?.addEventListener('click', () => {
@@ -773,7 +807,9 @@ document.querySelectorAll('.journey-step').forEach(el => el.addEventListener('cl
 function updateFlywheel() {
   const set = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
   const rows = recentRequestsCache || [];
-  const agents = new Set(rows.map(r => clientFromUA(r.user_agent).key));
+  // Client count means EXTERNAL clients — the dashboard's own traffic
+  // (`client: "dashboard"`) is not an agent and never inflates this node.
+  const agents = new Set(rows.filter(r => !rowIsDashboard(r)).map(r => clientFromUA(r.user_agent).key));
   set('fw-agents', agents.size || 0);
   set('fw-agents-sub', agents.size ? (agents.size === 1 ? '1 client' : agents.size + ' clients') : 'none yet');
   set('fw-traffic', rows.length || 0);
@@ -903,7 +939,10 @@ function bindFlywheel() {
 async function initConnect() {
   const baseEl = document.getElementById('connect-base-url');
   if (baseEl) { baseEl.textContent = connectBaseUrl(); baseEl.title = connectBaseUrl(); }
-  try { const m = await api('/v1/models'); const id = m?.data?.[0]?.id; if (id) connectModelId = id; } catch {}
+  // One shared resolver with the Playground: if the server is mid-cold-start
+  // this fails harmlessly and pollHealth keeps retrying until a real id
+  // arrives (applyServedModelId then upgrades the rendered snippets in place).
+  await loadServedModelId();
   const modelEl = document.getElementById('connect-model');
   if (modelEl) { modelEl.textContent = connectModelId; modelEl.title = connectModelId; }
   renderConnectSnippets('pi');
@@ -934,7 +973,7 @@ async function testConnection() {
   const t0 = performance.now();
   try {
     const res = await fetch(connectBaseUrl() + '/chat/completions', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Kiln-Client': 'dashboard' },
       body: JSON.stringify({ model: connectModelId, messages: [{ role: 'user', content: 'Reply with the single word: connected' }], max_tokens: 8, temperature: 0 }),
     });
     const ms = Math.round(performance.now() - t0);
@@ -1046,6 +1085,12 @@ async function pollHealth() {
     renderHeader(h);
     renderServerStatus(h);
     updateFlywheel();
+    // Cold-start follow-up: /v1/models may have failed (or listed nothing)
+    // while weights loaded, leaving the fallback model id baked into the
+    // Connect snippets and Playground bodies. Piggyback the retry on this
+    // 2s poll — no extra interval — until a real id resolves, then stop
+    // (the resolved flag short-circuits).
+    if (!servedModelIdResolved) loadServedModelId();
   } catch (e) {
     document.getElementById('status-dot').className = 'status-dot offline';
     document.getElementById('status-text').textContent = 'offline';
@@ -1381,6 +1426,21 @@ function clientFromUA(ua) {
   return { key: 'other', label: (ua.split(/[\/ ]/)[0] || 'client').slice(0, 16) };
 }
 
+// The dashboard's own inference traffic (Test connection, Playground,
+// Compare, judgment generation) self-identifies via the `X-Kiln-Client:
+// dashboard` request header, which the server echoes back as `client` on
+// each recent-requests row. Those rows are labeled honestly and must NEVER
+// count as a connected agent — only external clients prove the
+// "Agent connected" milestone.
+function rowIsDashboard(r) { return !!r && r.client === 'dashboard'; }
+
+// Resolve a row to its client identity: trusted self-identification first,
+// User-Agent sniffing otherwise.
+function clientForRow(r) {
+  if (rowIsDashboard(r)) return { key: 'dashboard', label: 'dashboard' };
+  return clientFromUA(r && r.user_agent);
+}
+
 function renderRecentRequests(rows) {
   const el = document.getElementById('recent-requests-panel');
   if (!el) return;
@@ -1396,12 +1456,15 @@ function renderRecentRequests(rows) {
   // Tag every row with its calling agent so we can both badge it and offer
   // per-client filter chips — the operator confirms "is opencode getting
   // through?" in one click.
-  rows.forEach(r => { r._client = clientFromUA(r.user_agent); });
+  rows.forEach(r => { r._client = clientForRow(r); });
 
   // Build the agent-filter chips from the clients actually present.
+  // pi is the first-class agent integration — it always leads the
+  // enumeration; everything else orders by traffic volume.
   const counts = new Map();
   rows.forEach(r => counts.set(r._client.key, (counts.get(r._client.key) || 0) + 1));
-  const ordered = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  const ordered = [...counts.entries()].sort((a, b) =>
+    a[0] === 'pi' ? -1 : b[0] === 'pi' ? 1 : b[1] - a[1]);
   const labelFor = k => (rows.find(r => r._client.key === k)?._client.label) || k;
   if (!counts.has(recentAgentFilter) && recentAgentFilter !== 'all') recentAgentFilter = 'all';
   const chip = (key, label, n) =>
@@ -1562,7 +1625,7 @@ function openRequestDrillModal(id) {
   titleEl.textContent = `Request ${trimmedId.slice(0, 8) || 'unknown'}`;
   const pieces = [];
   pieces.push(escapeHtml(r.model || '—'));
-  if (r.user_agent) pieces.push(`via <strong>${escapeHtml(clientFromUA(r.user_agent).label)}</strong>`);
+  if (r.user_agent || rowIsDashboard(r)) pieces.push(`via <strong>${escapeHtml(clientForRow(r).label)}</strong>`);
   if (r.adapter) pieces.push(`adapter <code>${escapeHtml(r.adapter)}</code>`);
   pieces.push(r.streamed ? 'streamed' : 'unary');
   metaEl.innerHTML = pieces.join(' · ');
@@ -3363,16 +3426,27 @@ const chatMessages = [];
 let chatAbort = null;
 let chatGenerating = false;
 let servedModelId = null;
+// True once the SERVER reported a model id. Until then the Connect panel and
+// Playground run on the fallback id, and every successful health poll retries
+// /v1/models (cold start: the endpoint 503s or lists nothing while weights
+// load). Once resolved, the flag short-circuits — the retry stops for good.
+let servedModelIdResolved = false;
 
 async function loadServedModelId() {
+  if (servedModelIdResolved) return;
   try {
     const res = await fetch('/v1/models');
     if (!res.ok) return;
     const data = await res.json();
-    servedModelId = data?.data?.[0]?.id || null;
+    const id = data?.data?.[0]?.id;
+    if (!id) return;
+    servedModelId = id;
+    servedModelIdResolved = true;
+    // Upgrade the copyable snippets / model-id field that rendered with the
+    // fallback while weights were still loading.
+    applyServedModelId(id);
   } catch {}
 }
-loadServedModelId();
 
 /* ---------------------------------------------------------------------
    Playground settings persistence
@@ -4211,7 +4285,7 @@ async function streamAssistantTurn(temp) {
 
     const res = await fetch('/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Kiln-Client': 'dashboard' },
       body: JSON.stringify(body),
       signal: controller.signal,
     });
@@ -6287,7 +6361,7 @@ async function streamCompletion(slot, body) {
   try {
     const res = await fetch('/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+      headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream', 'X-Kiln-Client': 'dashboard' },
       body: JSON.stringify({ ...body, stream: true }),
       signal: ctrl.signal,
     });
@@ -6336,7 +6410,7 @@ async function streamCompletion(slot, body) {
 async function nonStreamingCompletion(slot, body, ctrl, target) {
   const res = await fetch('/v1/chat/completions', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-Kiln-Client': 'dashboard' },
     body: JSON.stringify({ ...body, stream: false }),
     signal: ctrl.signal,
   });
@@ -7912,7 +7986,7 @@ async function streamCompareSide(side, adapterName, prompt, temp, signal) {
 
     const res = await fetch('/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Kiln-Client': 'dashboard' },
       body: JSON.stringify(body),
       signal,
     });
