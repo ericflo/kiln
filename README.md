@@ -58,7 +58,7 @@ curl http://localhost:8420/v1/chat/completions \
 curl http://localhost:8420/v1/eval/run \
   -H "Content-Type: application/json" \
   -d '{"suite": "contract-summaries", "adapter": "active"}'
-# → Returns a job_id; drill into per-example outcomes at /ui or via
+# → Returns a job_id; drill into per-example outcomes at /ui/ or via
 #   GET /v1/eval/jobs/{job_id}. Suites can be hand-authored, synthesized
 #   from an uploaded SFT dataset (POST /v1/eval/datasets/.../synthesize),
 #   or built up from your A/B picks in the Judgments tab.
@@ -74,7 +74,7 @@ A 4B model continuously tuned to your specific workload — and continuously *me
 - **GRPO training** over HTTP — submit scored completions for reinforcement learning. You control the reward function.
 - **First-class evals** over HTTP — register suites, run them against any adapter, drill into per-example outcomes. Auto-detect picks the right scorer per example (`numeric_tolerance`, `multiple_choice`, `json_validity`, `regex`, `contains`, `tool_call`, `code`, `llm_judge`, `all`/`any` composites).
 - **Dataset → eval synthesis** — upload an SFT JSONL and Kiln decomposes it into an eval suite (final-assistant / first-turn / every-turn / tool-call-prediction strategies). No separate eval harness to write.
-- **Judgment flywheel** — A/B-judge two adapters in `/ui`, save your picks into a judgment dataset, compile to SFT, train a *local* judge LoRA, validate it on a held-out slice. The dashboard ships a streaming side-by-side viewer with `A`/`B`/`Tie`/`Skip` keyboard shortcuts.
+- **Judgment flywheel** — A/B-judge two adapters in `/ui/`, save your picks into a judgment dataset, compile to SFT, train a *local* judge LoRA, validate it on a held-out slice. The dashboard ships a streaming side-by-side viewer with `A`/`B`/`Tie`/`Skip` keyboard shortcuts.
 - **Post-training auto-eval** — attach `post_eval` to any SFT/GRPO request and the produced adapter is graded immediately, with results back-linked to the training job.
 - **Adapter smoke tests** — pass `--adapter-smoke-test` on SFT/GRPO CLI submissions to record base-vs-adapter canary metrics in `train_receipt.json` before a full eval.
 - **Muon optimizer (default)** — momentum-orthogonalized SGD with fused on-device Newton-Schulz kernels for every backend (CUDA, ROCm, Vulkan, Metal). Converges LoRA fine-tunes in fewer steps than AdamW at roughly half the optimizer state (one momentum buffer vs Adam's two moments). AdamW and SGD remain selectable per-request via `{"optimizer": {"kind": "adam_w"}}` / `{"kind": "sgd"}`. Omit `learning_rate` and the server picks the per-optimizer default (Muon ~2e-2 vs AdamW ~1e-4 for SFT LoRA).
@@ -85,9 +85,9 @@ A 4B model continuously tuned to your specific workload — and continuously *me
 - **FP8 KV cache** — optional quantization doubles effective context length.
 - **Prefix caching** — shared prompt prefixes reuse cached KV blocks.
 - **Gradient checkpointing** — training fits on consumer 24GB GPUs (RTX 3090/4090).
-- **Adapter management** — load, unload, upload (import), download (export), and version LoRA adapters; click any adapter in `/ui` for its provenance (training history + eval scores against it).
+- **Adapter management** — load, unload, upload (import), download (export), and version LoRA adapters; click any adapter in `/ui/` for its provenance (training history + eval scores against it).
 - **Adapter composition** — stack multiple LoRAs per request with per-adapter scaling, or merge them server-side via weighted_average / TIES / concatenation.
-- **Embedded web dashboard** at `/ui` — live server status, VRAM donut, adapter cards, training queue with live loss curves, full eval workflow (datasets / suites / jobs / judgments) with drill-in per-example modal, A/B compare playground, and a `⌘K` command palette across all of it. No extra service to run.
+- **Embedded web dashboard** at `/ui/` — live server status, VRAM donut, adapter cards, training queue with live loss curves, full eval workflow (datasets / suites / jobs / judgments) with drill-in per-example modal, A/B compare playground, and a `⌘K` command palette across all of it. No extra service to run.
 - **Prometheus metrics** at `/metrics` — request latency, throughput, training progress, memory usage.
 - **Durable request log** — every inference request/response (SSE streams reassembled) lands as one JSONL row under `<adapter_dir>/.requests`, size-rotated, gzipped, retention-capped, attributed to the serving adapter. Production traffic becomes a corpus you can mine into SFT data or a `kiln-eval trace-suite` eval with one `jq` line — see [docs/EVAL_GUIDE.md § Mine your own request log](docs/EVAL_GUIDE.md#mine-your-own-request-log).
 - **Training webhooks** — POST a JSON event to a configured URL on training job completion or failure.
@@ -198,7 +198,7 @@ curl -X POST http://localhost:8420/v1/eval/compare \
   -H 'content-type: application/json' \
   -d '{"suite":"support-eval","adapters":["v1","v2"]}'
 
-# 4. Drill into per-example outcomes at /ui — pass/fail/invalid badges with prompt + target + got
+# 4. Drill into per-example outcomes at /ui/ — pass/fail/invalid badges with prompt + target + got
 #    side-by-side, scorer detail, and a one-click "re-run failures" loop.
 ```
 
@@ -244,7 +244,7 @@ docker run --gpus all -p 8420:8420 \
   ghcr.io/ericflo/kiln-server:latest serve
 ```
 
-Open http://127.0.0.1:8420/ui after the container starts.
+Open http://127.0.0.1:8420/ui/ after the container starts.
 
 **Path 4 — Source / CLI:** Install Rust stable, then build the CLI from source when you are contributing, scripting against a local checkout, or need to test unreleased changes.
 
@@ -289,7 +289,7 @@ Vulkan builds auto-select a Vulkan physical device at startup. Use `KILN_VULKAN_
   VRAM:    49140 MiB total, 48891 MiB free
   Listen:  http://127.0.0.1:8420
 
-  Endpoints: /ui, /v1/chat/completions, /v1/train/sft, /health, /metrics
+  Endpoints: /ui/, /v1/chat/completions, /v1/train/sft, /health, /metrics
 ```
 
 The `GPU` and `VRAM` lines come from `nvidia-smi` and are skipped silently if it isn't installed.
@@ -336,7 +336,7 @@ See [QUICKSTART.md](QUICKSTART.md) for the full walkthrough including Desktop Ap
 
 Six short asciicasts captured on a single A6000 against `Qwen3.5-4B` show the main developer flows: first token from cold start, benchmark output, LoRA hot-swap, an OpenAI-compatible client, GRPO with a custom reward, and the full SFT online-learning loop. Watch them in the embedded player at **[ericflo.github.io/kiln/demo/](https://ericflo.github.io/kiln/demo/)** or browse the recording scripts and reference shell drivers under [`docs/site/demo/`](docs/site/demo/).
 
-The kiln server also ships an embedded web dashboard at `http://localhost:8420/ui` with live decode tok/s, p50/p99 ITL, VRAM breakdown, adapter management, training monitoring, and a chat playground — no extra service to run.
+The kiln server also ships an embedded web dashboard at `http://localhost:8420/ui/` with live decode tok/s, p50/p99 ITL, VRAM breakdown, adapter management, training monitoring, and a chat playground — no extra service to run.
 
 Here is the embedded server dashboard running with healthy status, active adapters, training progress, and the chat playground in one view:
 
@@ -427,7 +427,7 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | GET | `/v1/models` | List available models |
 | GET | `/v1/config` | Current server configuration |
 | GET | `/v1/debug/model-state` | Trusted eval/debug snapshot of active model, adapters, config hashes, env flags, batching, thinking defaults, and cache counts; enabled only with `server.eval_mode=true` or `KILN_DEBUG_ENDPOINTS=1` |
-| GET | `/ui` | Embedded web dashboard (Overview / Adapters / Training / Evals / Playground) |
+| GET | `/ui/` | Embedded web dashboard (Overview / Adapters / Training / Evals / Playground) |
 | GET | `/v1/stats/decode` | Live decode tokens/sec and inter-token latency stats used by the dashboard |
 | GET | `/v1/stats/recent-requests` | Bounded recent chat-completion history for the dashboard's request panel |
 | GET | `/health` | Server health and diagnostics |
@@ -578,7 +578,7 @@ See **[desktop/CHANGELOG.md](desktop/CHANGELOG.md)** for the full version histor
 
 The installer bundles the desktop wrapper only. On first launch the app offers to auto-download the matching prebuilt `kiln` server binary for your platform (macOS aarch64 / Metal, Linux x86_64 / CUDA 12.4 or Vulkan, Windows x86_64 / CUDA 12.4) from the latest `kiln-v*` GitHub release and verify it against the published SHA-256. The terminal-first server release matrix also includes a Linux x86_64 ROCm 7.2.4 artifact; you can point the app at an existing `kiln` binary from Settings. Model weights still need to be downloaded separately — the Settings window has a HuggingFace downloader, or you can use the CLI path in [QUICKSTART.md](QUICKSTART.md).
 
-**Dashboard** — a toolbar across the top surfaces server state, model path, VRAM usage, active LoRA adapter, training status, and the OpenAI base URL as click-to-copy pills, alongside Start / Stop / Restart Server, View Logs, and Settings buttons. A first-run empty state walks you through setting a model path, and if the kiln server crashes while the dashboard is open an error screen surfaces it with a one-click recovery path. Keyboard shortcuts cover the common actions — <kbd>Ctrl/Cmd</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> to start, <kbd>Ctrl/Cmd</kbd>+<kbd>Shift</kbd>+<kbd>.</kbd> to stop, <kbd>Ctrl/Cmd</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> to restart, <kbd>Ctrl/Cmd</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> to copy the base URL, <kbd>Ctrl/Cmd</kbd>+<kbd>L</kbd> for logs, <kbd>Ctrl/Cmd</kbd>+<kbd>,</kbd> for settings, and <kbd>?</kbd> for the full cheatsheet modal. The toolbar wraps gracefully at narrow window widths, and the kiln server's `/ui` is embedded below.
+**Dashboard** — a toolbar across the top surfaces server state, model path, VRAM usage, active LoRA adapter, training status, and the OpenAI base URL as click-to-copy pills, alongside Start / Stop / Restart Server, View Logs, and Settings buttons. A first-run empty state walks you through setting a model path, and if the kiln server crashes while the dashboard is open an error screen surfaces it with a one-click recovery path. Keyboard shortcuts cover the common actions — <kbd>Ctrl/Cmd</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> to start, <kbd>Ctrl/Cmd</kbd>+<kbd>Shift</kbd>+<kbd>.</kbd> to stop, <kbd>Ctrl/Cmd</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> to restart, <kbd>Ctrl/Cmd</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> to copy the base URL, <kbd>Ctrl/Cmd</kbd>+<kbd>L</kbd> for logs, <kbd>Ctrl/Cmd</kbd>+<kbd>,</kbd> for settings, and <kbd>?</kbd> for the full cheatsheet modal. The toolbar wraps gracefully at narrow window widths, and the kiln server's `/ui/` is embedded below.
 
 ![Dashboard](docs/desktop/dashboard.png)
 

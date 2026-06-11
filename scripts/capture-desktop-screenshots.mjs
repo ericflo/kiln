@@ -11,7 +11,7 @@ import { mkdir } from "node:fs/promises";
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
 const uiDir = resolve(repoRoot, "desktop/ui");
-const serverUiHtml = resolve(repoRoot, "crates/kiln-server/src/ui.html");
+const serverUiHtml = resolve(repoRoot, "crates/kiln-server/src/ui/index.html");
 const serverUiUrl = `file://${serverUiHtml}?demo=1#overview`;
 
 const targets = [
@@ -194,7 +194,7 @@ const tauriStub = () => {
 };
 
 const browser = await puppeteer.launch({
-  executablePath: "/usr/bin/chromium-browser",
+  executablePath: process.env.CHROME_BIN || "/usr/bin/chromium-browser",
   headless: "new",
   args: ["--no-sandbox", "--disable-setuid-sandbox", "--font-render-hinting=medium"],
   defaultViewport: { width: 1024, height: 768, deviceScaleFactor: 2 },

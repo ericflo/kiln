@@ -194,7 +194,7 @@ You'll see the startup banner:
   VRAM:    49140 MiB total, 48891 MiB free
   Listen:  http://127.0.0.1:8420
 
-  Endpoints: /ui, /v1/chat/completions, /v1/train/sft, /health, /metrics
+  Endpoints: /ui/, /v1/chat/completions, /v1/train/sft, /health, /metrics
 ```
 
 The `GPU` and `VRAM` lines come from `nvidia-smi` and are skipped silently if it isn't installed. If you launched with `--config kiln.toml`, a `Config:` line appears just below `Version:`.
@@ -257,7 +257,7 @@ The configured pi model id is `Qwen3.5-4B`, with `api: "openai-completions"` and
 
 ## 5. Open the Browser Dashboard
 
-Kiln ships with an embedded web dashboard. Open [http://localhost:8420/ui](http://localhost:8420/ui) in any browser:
+Kiln ships with an embedded web dashboard. Open [http://localhost:8420/ui/](http://localhost:8420/ui/) in any browser:
 
 - **Server Status** — live GPU VRAM breakdown (model / KV cache / training / free) plus scheduler queue depth
 - **Adapters** — list available LoRA adapters and switch the active one
@@ -271,7 +271,7 @@ It's a single HTML page served by the `kiln` binary itself — no extra process,
 
 ## First Inference Checkpoint
 
-If you only wanted to get Kiln running, you can stop here: the server is up, `POST /v1/chat/completions` works, and the dashboard is available at [http://127.0.0.1:8420/ui](http://127.0.0.1:8420/ui).
+If you only wanted to get Kiln running, you can stop here: the server is up, `POST /v1/chat/completions` works, and the dashboard is available at [http://127.0.0.1:8420/ui/](http://127.0.0.1:8420/ui/).
 
 Next steps are optional:
 
@@ -670,7 +670,7 @@ curl -X POST http://localhost:8420/v1/eval/compare \
   -d '{"suite": "support-eval", "adapters": ["support-bot-v1", "support-bot-v2"]}'
 ```
 
-**Drill into per-example outcomes** by opening `/ui` → Evals → Jobs and clicking the job card; the modal shows pass/fail/invalid/error counts, per-tag pass rates, a filterable+searchable outcome list, and a Target ↔ Got side-by-side panel with the scorer's commentary.
+**Drill into per-example outcomes** by opening `/ui/` → Evals → Jobs and clicking the job card; the modal shows pass/fail/invalid/error counts, per-tag pass rates, a filterable+searchable outcome list, and a Target ↔ Got side-by-side panel with the scorer's commentary.
 
 **Auto-eval after every training run** by attaching `post_eval` to your SFT/GRPO submission:
 
@@ -690,7 +690,7 @@ curl -X POST http://localhost:8420/v1/train/sft \
 # the training job's status under `linked_eval_job_ids`.
 ```
 
-**The judgment flywheel** turns your A/B picks into a *local* judge LoRA — no frontier-LLM dependency. Open `/ui` → Evals → Judgments, generate side-by-side replies for a prompt, click `A`/`B`/`Tie` (or `S` to skip). After ~20 judgments, click "Compile to SFT" to produce a training dataset, run `kiln train sft` on it to get a judge adapter, then point any future eval at it via `Scorer::LlmJudge { judge_adapter: "support-judge-v1" }`.
+**The judgment flywheel** turns your A/B picks into a *local* judge LoRA — no frontier-LLM dependency. Open `/ui/` → Evals → Judgments, generate side-by-side replies for a prompt, click `A`/`B`/`Tie` (or `S` to skip). After ~20 judgments, click "Compile to SFT" to produce a training dataset, run `kiln train sft` on it to get a judge adapter, then point any future eval at it via `Scorer::LlmJudge { judge_adapter: "support-judge-v1" }`.
 
 See [`docs/EVAL_GUIDE.md`](docs/EVAL_GUIDE.md) for the full scorer reference, the `kiln-eval` CLI (`list`, `register`, `run`, `compare`, `probe`), and recipes for tool-call evals, code-writing evals, and JSON-shape gates.
 
@@ -760,7 +760,7 @@ Use `kiln -v serve` when first-run startup or model-load diagnostics are needed.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/ui` | Embedded web dashboard (status, adapters, training, chat) |
+| GET | `/ui/` | Embedded web dashboard (status, adapters, training, chat) |
 | GET | `/v1/stats/decode` | Live decode tokens/sec and inter-token latency stats used by the dashboard |
 | GET | `/v1/stats/recent-requests` | Bounded recent chat-completion history for the dashboard's request panel |
 | GET | `/health` | Server health and diagnostics |
@@ -827,7 +827,7 @@ docker run --gpus all -p 8420:8420 \
   ghcr.io/ericflo/kiln-server:latest serve
 ```
 
-Replace `/path/to/Qwen3.5-4B` with your local Qwen3.5-4B model directory. After the server starts, verify it with `curl http://localhost:8420/health`, then open [http://localhost:8420/ui](http://localhost:8420/ui).
+Replace `/path/to/Qwen3.5-4B` with your local Qwen3.5-4B model directory. After the server starts, verify it with `curl http://localhost:8420/health`, then open [http://localhost:8420/ui/](http://localhost:8420/ui/).
 
 Optional: build from source if you are contributing to kiln or testing local image changes.
 
@@ -843,7 +843,7 @@ docker run --gpus all \
   kiln serve
 ```
 
-Use the same local model path replacement and post-run check: `curl http://localhost:8420/health`, then open [http://localhost:8420/ui](http://localhost:8420/ui).
+Use the same local model path replacement and post-run check: `curl http://localhost:8420/health`, then open [http://localhost:8420/ui/](http://localhost:8420/ui/).
 
 ## Running with systemd
 

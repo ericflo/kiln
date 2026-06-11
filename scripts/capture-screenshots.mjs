@@ -9,7 +9,7 @@ import { mkdir } from "node:fs/promises";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
-const uiHtml = resolve(repoRoot, "crates/kiln-server/src/ui.html");
+const uiHtml = resolve(repoRoot, "crates/kiln-server/src/ui/index.html");
 
 const targets = [
   { page: "overview",   out: "docs/site/assets/server-ui-dashboard.png", scrollWait: 0 },
@@ -19,7 +19,7 @@ const targets = [
 ];
 
 const browser = await puppeteer.launch({
-  executablePath: "/usr/bin/chromium-browser",
+  executablePath: process.env.CHROME_BIN || "/usr/bin/chromium-browser",
   headless: "new",
   args: ["--no-sandbox", "--disable-setuid-sandbox", "--font-render-hinting=medium"],
   defaultViewport: { width: 1440, height: 900, deviceScaleFactor: 2 },

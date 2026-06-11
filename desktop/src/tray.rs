@@ -321,7 +321,7 @@ pub(crate) fn kiln_ui_url(state: &ServerState, host: &str, port: u16) -> Option<
     match state {
         ServerState::Stopped | ServerState::Error(_) | ServerState::NoBinary(_) => None,
         ServerState::Starting | ServerState::Running | ServerState::TrainingActive => {
-            Some(format!("http://{}:{}/ui", host, port))
+            Some(format!("http://{}:{}/ui/", host, port))
         }
     }
 }
@@ -786,15 +786,15 @@ mod tests {
     fn kiln_ui_url_returns_url_for_running_and_training() {
         assert_eq!(
             kiln_ui_url(&ServerState::Running, "127.0.0.1", 9000),
-            Some("http://127.0.0.1:9000/ui".to_string())
+            Some("http://127.0.0.1:9000/ui/".to_string())
         );
         assert_eq!(
             kiln_ui_url(&ServerState::TrainingActive, "127.0.0.1", 9000),
-            Some("http://127.0.0.1:9000/ui".to_string())
+            Some("http://127.0.0.1:9000/ui/".to_string())
         );
         assert_eq!(
             kiln_ui_url(&ServerState::Starting, "127.0.0.1", 8080),
-            Some("http://127.0.0.1:8080/ui".to_string())
+            Some("http://127.0.0.1:8080/ui/".to_string())
         );
     }
 
@@ -815,9 +815,9 @@ mod tests {
 
     #[test]
     fn open_kiln_ui_failure_body_contains_url_and_error() {
-        let body = open_kiln_ui_failure_body("http://127.0.0.1:9000/ui", "xdg-open: not found");
+        let body = open_kiln_ui_failure_body("http://127.0.0.1:9000/ui/", "xdg-open: not found");
         assert!(
-            body.contains("http://127.0.0.1:9000/ui"),
+            body.contains("http://127.0.0.1:9000/ui/"),
             "body should include URL for manual paste, got: {}",
             body
         );
@@ -831,11 +831,11 @@ mod tests {
     #[test]
     fn open_kiln_ui_failure_body_distinct_inputs_flow_through() {
         let body = open_kiln_ui_failure_body(
-            "http://localhost:8080/ui",
+            "http://localhost:8080/ui/",
             "The system cannot find the file specified. (os error 2)",
         );
         assert!(
-            body.contains("http://localhost:8080/ui"),
+            body.contains("http://localhost:8080/ui/"),
             "body should include URL, got: {}",
             body
         );

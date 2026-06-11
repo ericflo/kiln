@@ -825,7 +825,7 @@ async fn get_kiln_url(
         }
         ServerState::Starting | ServerState::Running | ServerState::TrainingActive => {
             let s = state.read().await;
-            Ok(format!("http://{}:{}/ui", s.host, s.port))
+            Ok(format!("http://{}:{}/ui/", s.host, s.port))
         }
     }
 }

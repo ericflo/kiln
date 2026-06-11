@@ -487,11 +487,11 @@ function validateQuickstartMarkdownMedia() {
 }
 
 function validateEmbeddedUiHelpLinks() {
-  const uiPath = resolve(repoRoot, 'crates/kiln-server/src/ui.html');
+  const uiPath = resolve(repoRoot, 'crates/kiln-server/src/ui/index.html');
   const ui = readFileSync(uiPath, 'utf8');
   const navMatch = ui.match(/<nav class="header-help" aria-label="Help links">[\s\S]*?<\/nav>/);
   if (!navMatch) {
-    fail('crates/kiln-server/src/ui.html: missing embedded UI help nav');
+    fail('crates/kiln-server/src/ui/index.html: missing embedded UI help nav');
   }
 
   const nav = navMatch[0];
@@ -501,12 +501,12 @@ function validateEmbeddedUiHelpLinks() {
     return !linkPattern.test(nav);
   });
   if (missingLinks.length > 0) {
-    fail(`crates/kiln-server/src/ui.html: embedded UI help nav missing links: ${missingLinks.map(({ label }) => label).join(', ')}`);
+    fail(`crates/kiln-server/src/ui/index.html: embedded UI help nav missing links: ${missingLinks.map(({ label }) => label).join(', ')}`);
   }
 }
 
 async function validateEmbeddedUiControlAccessibleNames(browser) {
-  const uiPath = resolve(repoRoot, 'crates/kiln-server/src/ui.html');
+  const uiPath = resolve(repoRoot, 'crates/kiln-server/src/ui/index.html');
   const page = await browser.newPage();
   await page.goto(pathToFileURL(uiPath).href, { waitUntil: 'domcontentloaded', timeout: 10000 });
 
@@ -560,21 +560,21 @@ async function validateEmbeddedUiControlAccessibleNames(browser) {
 
     const missingControls = result.filter((control) => control.missing).map((control) => control.selector);
     if (missingControls.length > 0) {
-      fail(`crates/kiln-server/src/ui.html: missing embedded UI controls: ${missingControls.join(', ')}`);
+      fail(`crates/kiln-server/src/ui/index.html: missing embedded UI controls: ${missingControls.join(', ')}`);
     }
 
     const unnamedControls = result
       .filter((control) => control.missingLabelTerms?.length > 0)
       .map((control) => `${control.selector} missing label terms ${control.missingLabelTerms.join(', ')}`);
     if (unnamedControls.length > 0) {
-      fail(`crates/kiln-server/src/ui.html: embedded UI controls need accessible names: ${unnamedControls.join('; ')}`);
+      fail(`crates/kiln-server/src/ui/index.html: embedded UI controls need accessible names: ${unnamedControls.join('; ')}`);
     }
 
     const undescribedControls = result
       .filter((control) => control.missingDescriptionTerms?.length > 0)
       .map((control) => `${control.selector} missing description terms ${control.missingDescriptionTerms.join(', ')}`);
     if (undescribedControls.length > 0) {
-      fail(`crates/kiln-server/src/ui.html: embedded UI controls need aria-describedby help text: ${undescribedControls.join('; ')}`);
+      fail(`crates/kiln-server/src/ui/index.html: embedded UI controls need aria-describedby help text: ${undescribedControls.join('; ')}`);
     }
   } finally {
     await page.close();

@@ -2,10 +2,11 @@
 //!
 //! The eval drill modal's "Add to corrections" button closes the
 //! observe→correct loop for eval failures the same way the recent-requests
-//! capture does for live traffic. ui.html is `include_str!`-baked, so a
-//! redesign can silently drop the wiring without a compile error — this
-//! pins the markup hooks and the safety property that non-verbatim scorer
-//! targets are never pre-seeded as the ideal answer.
+//! capture does for live traffic. The dashboard JS (`src/ui/app.js`, served
+//! at `/ui/app.js`) is `include_str!`-baked, so a redesign can silently drop
+//! the wiring without a compile error — this pins the JS hooks (the drill
+//! modal renders its markup from app.js) and the safety property that
+//! non-verbatim scorer targets are never pre-seeded as the ideal answer.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -68,11 +69,16 @@ fn make_state() -> AppState {
 async fn ui_carries_eval_drill_correction_capture() {
     let app = api::router(make_state());
     let response = app
-        .oneshot(Request::builder().uri("/ui").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/ui/app.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let html = String::from_utf8(
+    let app_js = String::from_utf8(
         axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap()
@@ -82,21 +88,21 @@ async fn ui_carries_eval_drill_correction_capture() {
 
     // The capture button renders for failing outcomes...
     assert!(
-        html.contains("data-outcome-correct"),
+        app_js.contains("data-outcome-correct"),
         "eval drill must offer Add to corrections on failing outcomes"
     );
     // ...through the shared basket-insert helper...
-    assert!(html.contains("function addCorrectionItem"));
-    assert!(html.contains("function addCorrectionFromEvalOutcome"));
+    assert!(app_js.contains("function addCorrectionItem"));
+    assert!(app_js.contains("function addCorrectionFromEvalOutcome"));
     // ...and both capture surfaces go through it.
     assert!(
-        html.matches("addCorrectionItem(").count() >= 3,
+        app_js.matches("addCorrectionItem(").count() >= 3,
         "recent-requests and eval-drill captures must share addCorrectionItem"
     );
     // Safety property: only verbatim-target scorers pre-seed the ideal —
     // a pattern/choice target must never be trained as a reply.
     assert!(
-        html.contains("scorerKind === 'exact_match' || scorerKind === 'contains'"),
+        app_js.contains("scorerKind === 'exact_match' || scorerKind === 'contains'"),
         "ideal pre-seeding must stay restricted to verbatim-target scorers"
     );
 }
