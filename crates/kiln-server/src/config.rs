@@ -570,6 +570,17 @@ impl SpeculativeDecodingConfig {
         if let Ok(v) = std::env::var("KILN_SPEC_METHOD") {
             if let Some(m) = SpecMethod::parse_env(&v) {
                 self.method = m;
+                // Asking for a method IS asking for speculative decoding:
+                // `KILN_SPEC_METHOD=mtp` alone used to be a silent no-op
+                // (`effective_method()` returns Off unless `enabled`),
+                // which cost an operator-validation cycle to discover.
+                // An explicit KILN_SPEC_ENABLED still wins (it is read
+                // first above and re-checked here for ordering safety).
+                if !matches!(m, SpecMethod::Off)
+                    && std::env::var("KILN_SPEC_ENABLED").is_err()
+                {
+                    self.enabled = true;
+                }
             } else {
                 tracing::warn!(
                     "ignoring unknown KILN_SPEC_METHOD='{}' (expected off|skip_layer|mtp)",

@@ -171,23 +171,40 @@ pub fn row_from_csv_line(line: &str) -> Result<C1Row> {
     })
 }
 
-/// Drain the sink and write all rows as CSV to `path`. No-op when the sink
-/// is empty. Always clears the sink, even on I/O error, so a failed write
-/// never leaks into the next run.
+/// Drain the sink and APPEND all rows as CSV to `path` (header written
+/// only when the file is new/empty). No-op when the sink is empty. Always
+/// clears the sink, even on I/O error, so a failed write never leaks into
+/// the next run.
+///
+/// Append semantics matter: the serve path drains after EVERY MTP
+/// generation, so an overwrite (the old `fs::write`) would keep only the
+/// last request's rows and the measured acceptance rate would be a
+/// one-request sample.
 pub fn drain_to_csv(path: &str) -> Result<usize> {
+    use std::io::Write;
+
     let rows = drain();
     let n = rows.len();
     if n == 0 {
         return Ok(0);
     }
+    let needs_header = std::fs::metadata(path).map(|m| m.len() == 0).unwrap_or(true);
     let mut out = String::with_capacity(128 + n * 64);
-    out.push_str(CSV_HEADER);
-    out.push('\n');
+    if needs_header {
+        out.push_str(CSV_HEADER);
+        out.push('\n');
+    }
     for row in &rows {
         out.push_str(&row_to_csv_line(row));
         out.push('\n');
     }
-    std::fs::write(path, out).with_context(|| format!("write C1 attribution CSV to {path}"))?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("open C1 attribution CSV at {path}"))?;
+    f.write_all(out.as_bytes())
+        .with_context(|| format!("append C1 attribution CSV to {path}"))?;
     Ok(n)
 }
 

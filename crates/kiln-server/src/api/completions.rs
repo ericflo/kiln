@@ -1592,6 +1592,24 @@ pub(crate) fn encode_prompt_tokens(
     Ok(tokens)
 }
 
+/// Flush MTP acceptance-attribution rows (`KILN_C1_ATTR_PATH`) to the
+/// CSV. Appends and clears the in-memory sink; no-op (and free) when the
+/// env var is unset. The bench driver has always drained — this hook
+/// gives plain HTTP serving the same observability so the acceptance
+/// A/B can run against a live server.
+fn drain_c1_attr_csv_if_enabled() {
+    if !kiln_model::c1_attr::is_enabled() {
+        return;
+    }
+    if let Ok(path) = std::env::var("KILN_C1_ATTR_PATH") {
+        match kiln_model::c1_attr::drain_to_csv(&path) {
+            Ok(0) => {}
+            Ok(n) => tracing::debug!(rows = n, path = %path, "drained C1 MTP acceptance rows"),
+            Err(e) => tracing::warn!(error = %e, "C1 attr CSV drain failed"),
+        }
+    }
+}
+
 /// The serving context ceiling: the model's positional limit capped by
 /// what the KV pool can physically hold. `None` = no enforcible signal
 /// (mock backend).
@@ -5756,6 +5774,11 @@ async fn generate_real(
             ResolvedSpeculativeMode::Mtp => {
                 *prefix_cache_diagnostic_inner.lock().unwrap() = "not_used_speculative";
                 let output = runner_guard.generate_mtp_speculative(&prompt, &params)?;
+                // KILN_C1_ATTR_PATH acceptance instrumentation: rows are
+                // pushed per draft step but only the bench driver ever
+                // drained them — over plain HTTP serving the CSV never
+                // materialized and the acceptance-rate A/B was unmeasurable.
+                drain_c1_attr_csv_if_enabled();
                 Ok(TimedGenerationOutput::without_timings(GenerationOutput {
                     text: output.text,
                     token_ids: output.token_ids,
@@ -6279,7 +6302,12 @@ async fn generate_real_streaming(
                         let _gpu_guard = gpu_coordination_read_guard(&gpu_lock);
                         let runner_guard = runner.read().unwrap();
                         *prefix_cache_diagnostic.lock().unwrap() = "not_used_speculative";
-                        runner_guard.generate_streaming_mtp_speculative(&prompt, &params)
+                        let rx = runner_guard.generate_streaming_mtp_speculative(&prompt, &params);
+                        // Streaming drains at spawn end — rows from this
+                        // generation flush on the NEXT request or shutdown;
+                        // the non-streaming arm drains synchronously.
+                        drain_c1_attr_csv_if_enabled();
+                        rx
                     })
                     .await
                     {
