@@ -1498,16 +1498,40 @@ fn deterministic_completion_cache_key(
         return None;
     }
 
-    // Greedy argmax does not consult RNG or sampling filters, so normalize
-    // those fields to maximize equivalent cache hits. Seeded sampling is
-    // replayable and must keep every parameter that changes the token path.
-    let (temperature_bits, top_p_bits, top_k, seed) = if greedy {
-        (0.0f32.to_bits(), 1.0f32.to_bits(), 0, None)
+    // Greedy argmax does not consult RNG, sampling filters, or token
+    // penalties (`sample_step` short-circuits before the penalty pass —
+    // see kiln-model/src/sampling.rs), so normalize those fields to
+    // maximize equivalent cache hits. Seeded sampling is replayable and
+    // must keep every parameter that changes the token path.
+    let (
+        temperature_bits,
+        top_p_bits,
+        top_k,
+        min_p_bits,
+        presence_penalty_bits,
+        frequency_penalty_bits,
+        repetition_penalty_bits,
+        seed,
+    ) = if greedy {
+        (
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
+            0,
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
+            None,
+        )
     } else {
         (
             sampling.temperature.to_bits(),
             normalized_top_p_bits_for_cache(sampling.top_p),
             normalized_top_k_for_cache(sampling.top_k, state.model_config.vocab_size),
+            normalized_min_p_bits_for_cache(sampling.min_p),
+            normalized_penalty_bits_for_cache(sampling.presence_penalty, 0.0),
+            normalized_penalty_bits_for_cache(sampling.frequency_penalty, 0.0),
+            normalized_penalty_bits_for_cache(sampling.repetition_penalty, 1.0),
             sampling.seed,
         )
     };
@@ -1520,6 +1544,10 @@ fn deterministic_completion_cache_key(
         stop: normalized_stop_for_cache(&sampling.stop),
         top_p_bits,
         top_k,
+        min_p_bits,
+        presence_penalty_bits,
+        frequency_penalty_bits,
+        repetition_penalty_bits,
         seed,
         fold_reasoning_into_content,
     })
@@ -1541,6 +1569,10 @@ struct DeterministicChatRequestCacheKey<'a> {
     stop: Vec<String>,
     top_p_bits: u32,
     top_k: u32,
+    min_p_bits: u32,
+    presence_penalty_bits: u32,
+    frequency_penalty_bits: u32,
+    repetition_penalty_bits: u32,
     seed: Option<u64>,
 }
 
@@ -1561,6 +1593,10 @@ struct DeterministicChatChoicesCacheKey<'a> {
     stop: Vec<String>,
     top_p_bits: u32,
     top_k: u32,
+    min_p_bits: u32,
+    presence_penalty_bits: u32,
+    frequency_penalty_bits: u32,
+    repetition_penalty_bits: u32,
     seed: Option<u64>,
 }
 
@@ -1604,16 +1640,17 @@ fn deterministic_chat_request_cache_key_with_vocab_size_and_fold(
         return Ok(None);
     }
 
-    let (temperature_bits, stop, top_p_bits, top_k, seed) =
-        normalized_deterministic_request_sampling_key(
-            sampling.temperature,
-            sampling.max_tokens,
-            &sampling.stop,
-            sampling.top_p,
-            sampling.top_k,
-            sampling.seed,
-            vocab_size,
-        );
+    let NormalizedRequestSamplingKey {
+        temperature_bits,
+        stop,
+        top_p_bits,
+        top_k,
+        min_p_bits,
+        presence_penalty_bits,
+        frequency_penalty_bits,
+        repetition_penalty_bits,
+        seed,
+    } = normalized_deterministic_request_sampling_key(sampling, vocab_size);
 
     let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
     let normalized_tool_choice =
@@ -1633,10 +1670,55 @@ fn deterministic_chat_request_cache_key_with_vocab_size_and_fold(
         stop,
         top_p_bits,
         top_k,
+        min_p_bits,
+        presence_penalty_bits,
+        frequency_penalty_bits,
+        repetition_penalty_bits,
         seed,
     })
     .map(Some)
     .map_err(|err| ApiError::internal(format!("failed to key chat request cache: {err}")))
+}
+
+/// Resolve a raw chat request's optional sampling fields onto the same
+/// Qwen3.5-thinking-general defaults [`sampling_params_for_chat_request`]
+/// starts from, so cache keys computed from the request match keys
+/// computed from resolved [`SamplingParams`].
+fn chat_request_sampling_for_cache_key(
+    req: &ChatCompletionRequest,
+    seed: Option<u64>,
+) -> SamplingParams {
+    SamplingParams {
+        temperature: requested_or_default_temperature(req.temperature),
+        top_p: requested_or_default_top_p(req.top_p),
+        top_k: requested_or_default_top_k(req.top_k),
+        min_p: requested_or_default_min_p(req.min_p),
+        max_tokens: chat_request_max_tokens(req),
+        repetition_penalty: requested_or_default_repetition_penalty(req.repetition_penalty),
+        presence_penalty: requested_or_default_presence_penalty(req.presence_penalty),
+        frequency_penalty: requested_or_default_frequency_penalty(req.frequency_penalty),
+        stop: req.stop.clone().unwrap_or_default(),
+        seed,
+    }
+}
+
+/// Batch-request twin of [`chat_request_sampling_for_cache_key`].
+fn batch_request_sampling_for_cache_key(
+    req: &BatchCompletionRequest,
+    seed: Option<u64>,
+) -> SamplingParams {
+    SamplingParams {
+        temperature: requested_or_default_temperature(req.temperature),
+        top_p: requested_or_default_top_p(req.top_p),
+        top_k: requested_or_default_top_k(req.top_k),
+        min_p: requested_or_default_min_p(req.min_p),
+        max_tokens: batch_request_max_tokens(req),
+        repetition_penalty: requested_or_default_repetition_penalty(req.repetition_penalty),
+        presence_penalty: requested_or_default_presence_penalty(req.presence_penalty),
+        frequency_penalty: requested_or_default_frequency_penalty(req.frequency_penalty),
+        stop: req.stop.clone().unwrap_or_default(),
+        seed,
+    }
 }
 
 fn deterministic_chat_request_cache_key_from_chat_choice_with_vocab_size_and_fold(
@@ -1649,27 +1731,22 @@ fn deterministic_chat_request_cache_key_from_chat_choice_with_vocab_size_and_fol
         return Ok(None);
     }
 
-    let temperature = requested_or_default_temperature(req.temperature);
-    let top_k = requested_or_default_top_k(req.top_k);
-    let max_tokens = chat_request_max_tokens(req);
-    if max_tokens != 0
-        && !SamplingParams::values_are_effectively_greedy(temperature, top_k)
-        && seed.is_none()
-    {
+    let sampling = chat_request_sampling_for_cache_key(req, seed);
+    if sampling.max_tokens != 0 && !sampling.is_effectively_greedy() && sampling.seed.is_none() {
         return Ok(None);
     }
 
-    let stop = req.stop.as_deref().unwrap_or(&[]);
-    let (temperature_bits, stop, top_p_bits, top_k, seed) =
-        normalized_deterministic_request_sampling_key(
-            temperature,
-            max_tokens,
-            stop,
-            requested_or_default_top_p(req.top_p),
-            top_k,
-            seed,
-            vocab_size,
-        );
+    let NormalizedRequestSamplingKey {
+        temperature_bits,
+        stop,
+        top_p_bits,
+        top_k,
+        min_p_bits,
+        presence_penalty_bits,
+        frequency_penalty_bits,
+        repetition_penalty_bits,
+        seed,
+    } = normalized_deterministic_request_sampling_key(&sampling, vocab_size);
     let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
     let normalized_tool_choice =
         normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
@@ -1684,10 +1761,14 @@ fn deterministic_chat_request_cache_key_from_chat_choice_with_vocab_size_and_fol
         chat_template_kwargs: normalized_chat_template_kwargs,
         fold_reasoning_into_content,
         temperature_bits,
-        max_tokens,
+        max_tokens: sampling.max_tokens,
         stop,
         top_p_bits,
         top_k,
+        min_p_bits,
+        presence_penalty_bits,
+        frequency_penalty_bits,
+        repetition_penalty_bits,
         seed,
     })
     .map(Some)
@@ -1734,16 +1815,17 @@ fn deterministic_chat_choices_cache_key_with_vocab_size_and_fold(
         return Ok(None);
     }
 
-    let (temperature_bits, stop, top_p_bits, top_k, seed) =
-        normalized_deterministic_request_sampling_key(
-            sampling.temperature,
-            sampling.max_tokens,
-            &sampling.stop,
-            sampling.top_p,
-            sampling.top_k,
-            sampling.seed,
-            vocab_size,
-        );
+    let NormalizedRequestSamplingKey {
+        temperature_bits,
+        stop,
+        top_p_bits,
+        top_k,
+        min_p_bits,
+        presence_penalty_bits,
+        frequency_penalty_bits,
+        repetition_penalty_bits,
+        seed,
+    } = normalized_deterministic_request_sampling_key(sampling, vocab_size);
 
     let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
     let normalized_tool_choice =
@@ -1764,6 +1846,10 @@ fn deterministic_chat_choices_cache_key_with_vocab_size_and_fold(
         stop,
         top_p_bits,
         top_k,
+        min_p_bits,
+        presence_penalty_bits,
+        frequency_penalty_bits,
+        repetition_penalty_bits,
         seed,
     })
     .map(Some)
@@ -1804,27 +1890,22 @@ fn deterministic_chat_choices_cache_key_from_batch_prompt_with_vocab_size_and_fo
         return Ok(None);
     }
 
-    let temperature = requested_or_default_temperature(req.temperature);
-    let top_k = requested_or_default_top_k(req.top_k);
-    let max_tokens = batch_request_max_tokens(req);
-    if max_tokens != 0
-        && !SamplingParams::values_are_effectively_greedy(temperature, top_k)
-        && seed.is_none()
-    {
+    let sampling = batch_request_sampling_for_cache_key(req, seed);
+    if sampling.max_tokens != 0 && !sampling.is_effectively_greedy() && sampling.seed.is_none() {
         return Ok(None);
     }
 
-    let stop = req.stop.as_deref().unwrap_or(&[]);
-    let (temperature_bits, stop, top_p_bits, top_k, seed) =
-        normalized_deterministic_request_sampling_key(
-            temperature,
-            max_tokens,
-            stop,
-            requested_or_default_top_p(req.top_p),
-            top_k,
-            seed,
-            vocab_size,
-        );
+    let NormalizedRequestSamplingKey {
+        temperature_bits,
+        stop,
+        top_p_bits,
+        top_k,
+        min_p_bits,
+        presence_penalty_bits,
+        frequency_penalty_bits,
+        repetition_penalty_bits,
+        seed,
+    } = normalized_deterministic_request_sampling_key(&sampling, vocab_size);
     let message_keys = batch_synth_message_cache_keys(messages);
     let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
     let normalized_tool_choice =
@@ -1840,10 +1921,14 @@ fn deterministic_chat_choices_cache_key_from_batch_prompt_with_vocab_size_and_fo
         fold_reasoning_into_content,
         n: n_per,
         temperature_bits,
-        max_tokens,
+        max_tokens: sampling.max_tokens,
         stop,
         top_p_bits,
         top_k,
+        min_p_bits,
+        presence_penalty_bits,
+        frequency_penalty_bits,
+        repetition_penalty_bits,
         seed,
     })
     .map(Some)
@@ -1874,27 +1959,22 @@ fn deterministic_chat_request_cache_key_from_batch_prompt_with_vocab_size_and_fo
         return Ok(None);
     }
 
-    let temperature = requested_or_default_temperature(req.temperature);
-    let top_k = requested_or_default_top_k(req.top_k);
-    let max_tokens = batch_request_max_tokens(req);
-    if max_tokens != 0
-        && !SamplingParams::values_are_effectively_greedy(temperature, top_k)
-        && seed.is_none()
-    {
+    let sampling = batch_request_sampling_for_cache_key(req, seed);
+    if sampling.max_tokens != 0 && !sampling.is_effectively_greedy() && sampling.seed.is_none() {
         return Ok(None);
     }
 
-    let stop = req.stop.as_deref().unwrap_or(&[]);
-    let (temperature_bits, stop, top_p_bits, top_k, seed) =
-        normalized_deterministic_request_sampling_key(
-            temperature,
-            max_tokens,
-            stop,
-            requested_or_default_top_p(req.top_p),
-            top_k,
-            seed,
-            vocab_size,
-        );
+    let NormalizedRequestSamplingKey {
+        temperature_bits,
+        stop,
+        top_p_bits,
+        top_k,
+        min_p_bits,
+        presence_penalty_bits,
+        frequency_penalty_bits,
+        repetition_penalty_bits,
+        seed,
+    } = normalized_deterministic_request_sampling_key(&sampling, vocab_size);
     let message_keys = batch_synth_message_cache_keys(messages);
     let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
     let normalized_tool_choice =
@@ -1909,41 +1989,81 @@ fn deterministic_chat_request_cache_key_from_batch_prompt_with_vocab_size_and_fo
         chat_template_kwargs: normalized_chat_template_kwargs,
         fold_reasoning_into_content,
         temperature_bits,
-        max_tokens,
+        max_tokens: sampling.max_tokens,
         stop,
         top_p_bits,
         top_k,
+        min_p_bits,
+        presence_penalty_bits,
+        frequency_penalty_bits,
+        repetition_penalty_bits,
         seed,
     })
     .map(Some)
     .map_err(|err| ApiError::internal(format!("failed to key batch chat request cache: {err}")))
 }
 
-fn normalized_deterministic_request_sampling_key(
-    temperature: f32,
-    max_tokens: usize,
-    stop: &[String],
-    top_p: f32,
+/// Sampling fields of a deterministic request cache key, normalized so
+/// that equivalent spellings of the same token path share entries.
+struct NormalizedRequestSamplingKey {
+    temperature_bits: u32,
+    stop: Vec<String>,
+    top_p_bits: u32,
     top_k: u32,
+    min_p_bits: u32,
+    presence_penalty_bits: u32,
+    frequency_penalty_bits: u32,
+    repetition_penalty_bits: u32,
     seed: Option<u64>,
+}
+
+impl NormalizedRequestSamplingKey {
+    /// Greedy argmax (and the zero-output case) never consults the RNG,
+    /// the sampling filters, or the token penalties — `sample_step`
+    /// short-circuits before the penalty pass (kiln-model/src/sampling.rs)
+    /// — so pin every such field to its no-op spelling.
+    fn greedy(stop: Vec<String>) -> Self {
+        Self {
+            temperature_bits: 0.0f32.to_bits(),
+            stop,
+            top_p_bits: 1.0f32.to_bits(),
+            top_k: 0,
+            min_p_bits: 0.0f32.to_bits(),
+            presence_penalty_bits: 0.0f32.to_bits(),
+            frequency_penalty_bits: 0.0f32.to_bits(),
+            repetition_penalty_bits: 1.0f32.to_bits(),
+            seed: None,
+        }
+    }
+}
+
+fn normalized_deterministic_request_sampling_key(
+    sampling: &SamplingParams,
     vocab_size: usize,
-) -> (u32, Vec<String>, u32, u32, Option<u64>) {
-    if max_tokens == 0 {
-        return (0.0f32.to_bits(), Vec::new(), 1.0f32.to_bits(), 0, None);
+) -> NormalizedRequestSamplingKey {
+    if sampling.max_tokens == 0 {
+        return NormalizedRequestSamplingKey::greedy(Vec::new());
     }
 
-    let stop = normalized_stop_for_cache(stop);
-    if SamplingParams::values_are_effectively_greedy(temperature, top_k) {
-        return (0.0f32.to_bits(), stop, 1.0f32.to_bits(), 0, None);
+    let stop = normalized_stop_for_cache(&sampling.stop);
+    if sampling.is_effectively_greedy() {
+        return NormalizedRequestSamplingKey::greedy(stop);
     }
 
-    (
-        temperature.to_bits(),
+    NormalizedRequestSamplingKey {
+        temperature_bits: sampling.temperature.to_bits(),
         stop,
-        normalized_top_p_bits_for_cache(top_p),
-        normalized_top_k_for_cache(top_k, vocab_size),
-        seed,
-    )
+        top_p_bits: normalized_top_p_bits_for_cache(sampling.top_p),
+        top_k: normalized_top_k_for_cache(sampling.top_k, vocab_size),
+        min_p_bits: normalized_min_p_bits_for_cache(sampling.min_p),
+        presence_penalty_bits: normalized_penalty_bits_for_cache(sampling.presence_penalty, 0.0),
+        frequency_penalty_bits: normalized_penalty_bits_for_cache(sampling.frequency_penalty, 0.0),
+        repetition_penalty_bits: normalized_penalty_bits_for_cache(
+            sampling.repetition_penalty,
+            1.0,
+        ),
+        seed: sampling.seed,
+    }
 }
 
 fn normalized_top_p_bits_for_cache(top_p: f32) -> u32 {
@@ -1951,6 +2071,25 @@ fn normalized_top_p_bits_for_cache(top_p: f32) -> u32 {
         1.0f32.to_bits()
     } else {
         top_p.to_bits()
+    }
+}
+
+fn normalized_min_p_bits_for_cache(min_p: f32) -> u32 {
+    if SamplingParams::min_p_is_disabled(min_p) {
+        0.0f32.to_bits()
+    } else {
+        min_p.to_bits()
+    }
+}
+
+/// Fold alternate spellings of a penalty's no-op value (`-0.0` for the
+/// subtractive penalties) onto canonical no-op bits so equivalent
+/// requests share cache entries.
+fn normalized_penalty_bits_for_cache(value: f32, no_op: f32) -> u32 {
+    if value == no_op {
+        no_op.to_bits()
+    } else {
+        value.to_bits()
     }
 }
 
@@ -6601,6 +6740,10 @@ struct DeterministicBatchCacheKeyWire<'a> {
     stop: Vec<String>,
     top_p_bits: u32,
     top_k: u32,
+    min_p_bits: u32,
+    presence_penalty_bits: u32,
+    frequency_penalty_bits: u32,
+    repetition_penalty_bits: u32,
     seed: Option<u64>,
 }
 
@@ -6702,25 +6845,21 @@ fn deterministic_batch_cache_key_with_vocab_size_and_fold(
         return None;
     }
 
-    let temperature = requested_or_default_temperature(req.temperature);
-    let top_k = requested_or_default_top_k(req.top_k);
-    let max_tokens = batch_request_max_tokens(req);
-    if max_tokens != 0
-        && !SamplingParams::values_are_effectively_greedy(temperature, top_k)
-        && req.seed.is_none()
-    {
+    let sampling = batch_request_sampling_for_cache_key(req, req.seed);
+    if sampling.max_tokens != 0 && !sampling.is_effectively_greedy() && sampling.seed.is_none() {
         return None;
     }
-    let (temperature_bits, stop, top_p_bits, top_k, seed) =
-        normalized_deterministic_request_sampling_key(
-            temperature,
-            max_tokens,
-            &req.stop.clone().unwrap_or_default(),
-            requested_or_default_top_p(req.top_p),
-            top_k,
-            req.seed,
-            vocab_size,
-        );
+    let NormalizedRequestSamplingKey {
+        temperature_bits,
+        stop,
+        top_p_bits,
+        top_k,
+        min_p_bits,
+        presence_penalty_bits,
+        frequency_penalty_bits,
+        repetition_penalty_bits,
+        seed,
+    } = normalized_deterministic_request_sampling_key(&sampling, vocab_size);
     let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
     let normalized_tool_choice =
         normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
@@ -6739,10 +6878,14 @@ fn deterministic_batch_cache_key_with_vocab_size_and_fold(
         fold_reasoning_into_content,
         n: req.n.unwrap_or(1),
         temperature_bits,
-        max_tokens,
+        max_tokens: sampling.max_tokens,
         stop,
         top_p_bits,
         top_k,
+        min_p_bits,
+        presence_penalty_bits,
+        frequency_penalty_bits,
+        repetition_penalty_bits,
         seed,
     };
     Some(serde_json::to_string(&key).expect("serializing batch cache key should not fail"))
@@ -8068,6 +8211,18 @@ pub(crate) fn requested_or_default_top_p(v: Option<f32>) -> f32 {
 }
 pub(crate) fn requested_or_default_top_k(v: Option<u32>) -> u32 {
     v.unwrap_or(20)
+}
+pub(crate) fn requested_or_default_min_p(v: Option<f32>) -> f32 {
+    v.unwrap_or(0.0)
+}
+pub(crate) fn requested_or_default_presence_penalty(v: Option<f32>) -> f32 {
+    v.unwrap_or(1.5)
+}
+pub(crate) fn requested_or_default_frequency_penalty(v: Option<f32>) -> f32 {
+    v.unwrap_or(0.0)
+}
+pub(crate) fn requested_or_default_repetition_penalty(v: Option<f32>) -> f32 {
+    v.unwrap_or(1.0)
 }
 
 /// Map a `sampling_preset` string to its corresponding [`SamplingParams`]
@@ -11046,6 +11201,290 @@ mod tests {
             deterministic_completion_cache_key(&state, &prompt_tokens, &greedy_seed_1, false),
             deterministic_completion_cache_key(&state, &prompt_tokens, &top_k_one, false),
             "top_k=1 is effectively greedy, so seed/top-p/temperature must not split completion-cache entries"
+        );
+    }
+
+    #[test]
+    fn deterministic_completion_cache_key_includes_min_p_and_penalties() {
+        let state = make_batch_test_state();
+        let prompt_tokens = vec![1, 2, 3];
+
+        // Default carries Qwen3.5-thinking-general: min_p 0.0,
+        // presence 1.5, frequency 0.0, repetition 1.0.
+        let seeded_base = SamplingParams {
+            temperature: 0.7,
+            max_tokens: 4,
+            seed: Some(1),
+            ..Default::default()
+        };
+        let base_key =
+            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_base, false);
+        assert!(base_key.is_some());
+
+        for (label, changed) in [
+            (
+                "min_p",
+                SamplingParams {
+                    min_p: 0.05,
+                    ..seeded_base.clone()
+                },
+            ),
+            (
+                "presence_penalty",
+                SamplingParams {
+                    presence_penalty: 0.0,
+                    ..seeded_base.clone()
+                },
+            ),
+            (
+                "frequency_penalty",
+                SamplingParams {
+                    frequency_penalty: 0.5,
+                    ..seeded_base.clone()
+                },
+            ),
+            (
+                "repetition_penalty",
+                SamplingParams {
+                    repetition_penalty: 1.1,
+                    ..seeded_base.clone()
+                },
+            ),
+        ] {
+            assert_ne!(
+                base_key,
+                deterministic_completion_cache_key(&state, &prompt_tokens, &changed, false),
+                "seeded sampling must split completion-cache entries by {label}"
+            );
+        }
+
+        let min_p_negative = SamplingParams {
+            min_p: -1.0,
+            ..seeded_base.clone()
+        };
+        assert_eq!(
+            base_key,
+            deterministic_completion_cache_key(&state, &prompt_tokens, &min_p_negative, false),
+            "min_p <= 0 is disabled, so disabled spellings should share completion-cache entries"
+        );
+
+        let presence_zero = SamplingParams {
+            presence_penalty: 0.0,
+            ..seeded_base.clone()
+        };
+        let presence_negative_zero = SamplingParams {
+            presence_penalty: -0.0,
+            ..seeded_base.clone()
+        };
+        assert_eq!(
+            deterministic_completion_cache_key(&state, &prompt_tokens, &presence_zero, false),
+            deterministic_completion_cache_key(
+                &state,
+                &prompt_tokens,
+                &presence_negative_zero,
+                false
+            ),
+            "-0.0 is the same no-op presence penalty as 0.0 and should share completion-cache entries"
+        );
+
+        let greedy_default_penalties = SamplingParams {
+            temperature: 0.0,
+            max_tokens: 4,
+            ..Default::default()
+        };
+        let greedy_active_penalties = SamplingParams {
+            temperature: 0.0,
+            min_p: 0.2,
+            presence_penalty: 0.4,
+            frequency_penalty: 0.6,
+            repetition_penalty: 1.3,
+            max_tokens: 4,
+            ..Default::default()
+        };
+        assert_eq!(
+            deterministic_completion_cache_key(
+                &state,
+                &prompt_tokens,
+                &greedy_default_penalties,
+                false
+            ),
+            deterministic_completion_cache_key(
+                &state,
+                &prompt_tokens,
+                &greedy_active_penalties,
+                false
+            ),
+            "greedy decoding short-circuits min_p and penalties, so they must not split cache entries"
+        );
+    }
+
+    #[test]
+    fn deterministic_chat_cache_keys_normalize_omitted_min_p_and_penalties() {
+        // Path A keys from resolved SamplingParams; path B keys from raw
+        // request fields via requested_or_default_*. Both must agree on
+        // the Qwen3.5-thinking-general defaults (presence 1.5,
+        // repetition 1.0, frequency 0.0, min_p 0.0) or seeded batch and
+        // chat requests stop sharing cache entries.
+        let chat_omitted = parse_request(
+            r#"{"messages":[{"role":"user","content":"penalty defaults"}],"n":2,"temperature":0.7,"max_tokens":4,"seed":9}"#,
+        );
+        let chat_key = deterministic_chat_choices_cache_key(
+            &chat_omitted,
+            2,
+            &sampling_params_for_chat_request(&chat_omitted),
+        )
+        .unwrap()
+        .expect("seeded chat choices request should be cacheable");
+
+        let batch_omitted = parse_batch_request(
+            r#"{"prompts":[[{"role":"user","content":"penalty defaults"}]],"n":2,"temperature":0.7,"max_tokens":4,"seed":9}"#,
+        );
+        let batch_omitted_key =
+            deterministic_chat_choices_cache_key_from_single_prompt_batch_with_vocab_size_and_fold(
+                &batch_omitted,
+                usize::MAX,
+                false,
+            )
+            .unwrap()
+            .expect("seeded single-prompt batch should be cacheable");
+        assert_eq!(
+            chat_key, batch_omitted_key,
+            "request-side defaults must match the resolved sampling defaults across key paths"
+        );
+
+        let batch_explicit_defaults = parse_batch_request(
+            r#"{"prompts":[[{"role":"user","content":"penalty defaults"}]],"n":2,"temperature":0.7,"max_tokens":4,"seed":9,"min_p":0.0,"presence_penalty":1.5,"frequency_penalty":0.0,"repetition_penalty":1.0}"#,
+        );
+        assert_eq!(
+            Some(&batch_omitted_key),
+            deterministic_chat_choices_cache_key_from_single_prompt_batch_with_vocab_size_and_fold(
+                &batch_explicit_defaults,
+                usize::MAX,
+                false,
+            )
+            .unwrap()
+            .as_ref(),
+            "explicitly spelling the default min_p/penalties should not split cache entries"
+        );
+
+        let batch_min_p_disabled = parse_batch_request(
+            r#"{"prompts":[[{"role":"user","content":"penalty defaults"}]],"n":2,"temperature":0.7,"max_tokens":4,"seed":9,"min_p":-1.0}"#,
+        );
+        assert_eq!(
+            Some(&batch_omitted_key),
+            deterministic_chat_choices_cache_key_from_single_prompt_batch_with_vocab_size_and_fold(
+                &batch_min_p_disabled,
+                usize::MAX,
+                false,
+            )
+            .unwrap()
+            .as_ref(),
+            "min_p <= 0 is disabled and should share cache entries with the omitted spelling"
+        );
+
+        for (label, body) in [
+            (
+                "min_p",
+                r#"{"prompts":[[{"role":"user","content":"penalty defaults"}]],"n":2,"temperature":0.7,"max_tokens":4,"seed":9,"min_p":0.05}"#,
+            ),
+            (
+                "presence_penalty",
+                r#"{"prompts":[[{"role":"user","content":"penalty defaults"}]],"n":2,"temperature":0.7,"max_tokens":4,"seed":9,"presence_penalty":0.0}"#,
+            ),
+            (
+                "frequency_penalty",
+                r#"{"prompts":[[{"role":"user","content":"penalty defaults"}]],"n":2,"temperature":0.7,"max_tokens":4,"seed":9,"frequency_penalty":0.5}"#,
+            ),
+            (
+                "repetition_penalty",
+                r#"{"prompts":[[{"role":"user","content":"penalty defaults"}]],"n":2,"temperature":0.7,"max_tokens":4,"seed":9,"repetition_penalty":1.1}"#,
+            ),
+        ] {
+            let changed = parse_batch_request(body);
+            assert_ne!(
+                Some(&batch_omitted_key),
+                deterministic_chat_choices_cache_key_from_single_prompt_batch_with_vocab_size_and_fold(
+                    &changed,
+                    usize::MAX,
+                    false,
+                )
+                .unwrap()
+                .as_ref(),
+                "seeded requests must split cache entries by {label}"
+            );
+        }
+
+        // Greedy requests short-circuit min_p and penalties entirely.
+        let greedy_omitted = parse_batch_request(
+            r#"{"prompts":[[{"role":"user","content":"penalty defaults"}]],"n":2,"temperature":0.0,"max_tokens":4}"#,
+        );
+        let greedy_active = parse_batch_request(
+            r#"{"prompts":[[{"role":"user","content":"penalty defaults"}]],"n":2,"temperature":0.0,"max_tokens":4,"min_p":0.2,"presence_penalty":0.4,"frequency_penalty":0.6,"repetition_penalty":1.3}"#,
+        );
+        assert_eq!(
+            deterministic_chat_choices_cache_key_from_single_prompt_batch_with_vocab_size_and_fold(
+                &greedy_omitted,
+                usize::MAX,
+                false,
+            )
+            .unwrap(),
+            deterministic_chat_choices_cache_key_from_single_prompt_batch_with_vocab_size_and_fold(
+                &greedy_active,
+                usize::MAX,
+                false,
+            )
+            .unwrap(),
+            "greedy decoding ignores min_p and penalties, so they must not split cache entries"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_seeded_request_with_different_presence_penalty_misses_cache() {
+        let state = make_batch_test_state();
+        let body = serde_json::json!({
+            "messages": [{"role":"user","content":"presence penalty cache split"}],
+            "temperature": 0.7,
+            "max_tokens": 4,
+            "seed": 41
+        })
+        .to_string();
+        let presence_zero_body = serde_json::json!({
+            "messages": [{"role":"user","content":"presence penalty cache split"}],
+            "temperature": 0.7,
+            "max_tokens": 4,
+            "seed": 41,
+            "presence_penalty": 0.0
+        })
+        .to_string();
+
+        let (status_first, first) = chat_post(state.clone(), &body).await;
+        assert_eq!(status_first, axum::http::StatusCode::OK, "{first}");
+        let generated_after_first = state
+            .metrics
+            .tokens_generated
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert!(generated_after_first > 0);
+
+        let (status_repeat, repeat) = chat_post(state.clone(), &body).await;
+        assert_eq!(status_repeat, axum::http::StatusCode::OK, "{repeat}");
+        assert_eq!(
+            state
+                .metrics
+                .tokens_generated
+                .load(std::sync::atomic::Ordering::Relaxed),
+            generated_after_first,
+            "identical seeded repeat should hit the deterministic cache"
+        );
+
+        let (status_changed, changed) = chat_post(state.clone(), &presence_zero_body).await;
+        assert_eq!(status_changed, axum::http::StatusCode::OK, "{changed}");
+        assert!(
+            state
+                .metrics
+                .tokens_generated
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > generated_after_first,
+            "turning the default presence penalty off must miss the seeded cache and regenerate"
         );
     }
 

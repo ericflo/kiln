@@ -375,6 +375,10 @@ pub struct DeterministicCompletionCacheKey {
     pub stop: Vec<String>,
     pub top_p_bits: u32,
     pub top_k: u32,
+    pub min_p_bits: u32,
+    pub presence_penalty_bits: u32,
+    pub frequency_penalty_bits: u32,
+    pub repetition_penalty_bits: u32,
     pub seed: Option<u64>,
     pub fold_reasoning_into_content: bool,
 }
@@ -2786,6 +2790,10 @@ mod tests {
             stop: Vec::new(),
             top_p_bits: 1.0f32.to_bits(),
             top_k: 0,
+            min_p_bits: 0.0f32.to_bits(),
+            presence_penalty_bits: 0.0f32.to_bits(),
+            frequency_penalty_bits: 0.0f32.to_bits(),
+            repetition_penalty_bits: 1.0f32.to_bits(),
             seed: None,
             fold_reasoning_into_content: false,
         };
