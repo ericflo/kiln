@@ -176,6 +176,9 @@ fn assert_no_jobs(state: &AppState, context: &str) {
 
 #[tokio::test]
 async fn self_improve_without_trace_index_fails_fast_with_remediation() {
+    // Isolate from the developer's real ~/.pi sessions (auto-discovery
+    // would build a real index and defeat the missing-index assertion).
+    unsafe { std::env::set_var("KILN_PI_SESSIONS_DIR", "/nonexistent/pi/sessions") };
     let (state, _dir) = make_state();
     let app = api::router(state.clone());
     register_fixture_teacher(&app, "judge-pi-v1").await;
@@ -219,6 +222,9 @@ async fn self_improve_with_traces_passes_data_resolution() {
 
 #[tokio::test]
 async fn judge_distill_without_trace_index_fails_fast() {
+    // Isolate from the developer's real ~/.pi sessions (auto-discovery
+    // would build a real index and defeat the missing-index assertion).
+    unsafe { std::env::set_var("KILN_PI_SESSIONS_DIR", "/nonexistent/pi/sessions") };
     let (state, _dir) = make_state();
     let app = api::router(state.clone());
     register_fixture_teacher(&app, "qwen3.6-27b@local").await;
