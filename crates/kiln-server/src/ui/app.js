@@ -141,6 +141,143 @@ function modalHashOnUserClose(kind, parentHash, closeFn) {
   closeFn();
 }
 
+/* =====================================================================
+   Shared modal manager — focus, stacking, scroll lock, Escape (PR 18)
+   ---------------------------------------------------------------------
+   Every dialog claims aria-modal="true"; this is the machinery that makes
+   it true. One stack tracks the open dialogs (a drill with the command
+   palette over it is two layers). Per layer the manager owns exactly:
+
+     - focus IN on open (the explicit .modal-close button, else the shell);
+     - focus BACK on close (the element focused before that layer opened);
+     - the Tab trap (Tab/Shift+Tab wrap within the TOP layer's tabbables);
+     - the body scroll lock (released only when the stack empties);
+     - Escape (closes the TOP layer only).
+
+   Composition with the deep-link hash state machine above: the manager
+   NEVER touches history. openModal/closeModal are called by the per-modal
+   open/close fns, which keep their own modalHashOnOpen/OnUserClose calls.
+   Escape routes through the layer's `onClose` — the modal's USER-close fn
+   (e.g. userCloseDrillModal) — so an Esc press consumes the history entry
+   the open minted exactly like the X button does. The traversal path
+   (hashchange → syncDrillModalsToRoute → direct close fn) also lands in
+   closeModal because the direct close fns call it; closeModal is
+   idempotent for untracked elements, so the race is harmless.
+   ===================================================================== */
+const modalStack = []; // [{ el, onClose, restoreFocus }]
+
+function modalStackTop() {
+  return modalStack.length ? modalStack[modalStack.length - 1] : null;
+}
+
+// Tabbables: the standard focusable set, filtered to what a Tab press can
+// actually reach (visible, not disabled, not tabindex=-1).
+const MODAL_TABBABLE_SELECTOR = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled]):not([type="hidden"])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+  '[contenteditable="true"]',
+].join(', ');
+
+function modalTabbables(el) {
+  return Array.from(el.querySelectorAll(MODAL_TABBABLE_SELECTOR)).filter(node => {
+    if (node.closest('[hidden]')) return false;
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 || rect.height > 0;
+  });
+}
+
+// Move focus into a modal: the close button is the canonical first stop
+// (screen readers announce the dialog label, and the most likely next
+// action is "get me out"); fall back to the shell (tabindex="-1") and
+// finally the backdrop element itself. Open fns with a better target
+// (cmdk's search input, adapter-eval's suite select) focus it themselves
+// AFTER calling openModal — last write wins.
+function focusIntoModal(el) {
+  const target = el.querySelector('.modal-close')
+    || el.querySelector('.modal-shell, .cmdk-shell, [tabindex="-1"]')
+    || el;
+  try { target.focus(); } catch {}
+}
+
+// opts.onClose: the modal's USER-close fn — the one that runs its hash
+// state machine (history.back() vs replaceState). Escape routes through
+// it so keyboard close and X-button close are indistinguishable.
+function openModal(el, opts = {}) {
+  if (!el) return;
+  const existing = modalStack.find(layer => layer.el === el);
+  if (existing) {
+    // Re-entrant open of an already-tracked modal (request drill prev/next
+    // re-runs its open fn; route sync re-targets a drill by id): keep the
+    // original layer — same restore target, same scroll lock.
+    if (opts.onClose) existing.onClose = opts.onClose;
+    return;
+  }
+  const active = document.activeElement;
+  modalStack.push({
+    el,
+    onClose: opts.onClose || null,
+    restoreFocus: (active && active !== document.body) ? active : null,
+  });
+  document.body.style.overflow = 'hidden';
+  focusIntoModal(el);
+}
+
+function closeModal(el) {
+  const idx = modalStack.findIndex(layer => layer.el === el);
+  if (idx < 0) return; // not tracked (already closed) — idempotent
+  const layer = modalStack.splice(idx, 1)[0];
+  // Scroll stays locked while ANY layer remains (cmdk closing over a drill
+  // must not unlock the page under the drill).
+  if (!modalStack.length) document.body.style.overflow = '';
+  // A layer above the closed one (modal A closed underneath modal B, e.g.
+  // adapter drill → "Run eval…" hands off to adapter-eval) would restore
+  // focus into the now-hidden A; re-point it at A's own restore target.
+  const above = modalStack[idx];
+  if (above && layer.el.contains(above.restoreFocus)) above.restoreFocus = layer.restoreFocus;
+  const top = modalStackTop();
+  if (top) {
+    // Still a modal under this one: keep focus inside it.
+    const rf = layer.restoreFocus;
+    if (rf && top.el.contains(rf) && rf.isConnected) { try { rf.focus(); } catch {} }
+    else if (!top.el.contains(document.activeElement)) focusIntoModal(top.el);
+    return;
+  }
+  const rf = layer.restoreFocus;
+  if (rf && rf.isConnected && !rf.closest('[hidden]')) { try { rf.focus(); } catch {} }
+}
+
+// ONE delegated keydown for every dialog. Escape closes the TOP of the
+// stack only, through that modal's own close fn (hash machine included).
+// Tab/Shift+Tab wrap within the top modal so focus can't escape into the
+// inert page behind it.
+document.addEventListener('keydown', (ev) => {
+  const top = modalStackTop();
+  if (!top) return;
+  if (ev.key === 'Escape') {
+    ev.preventDefault();
+    if (top.onClose) top.onClose();
+    else closeModal(top.el);
+    return;
+  }
+  if (ev.key !== 'Tab') return;
+  const tabbables = modalTabbables(top.el);
+  if (!tabbables.length) { ev.preventDefault(); return; }
+  const first = tabbables[0];
+  const last = tabbables[tabbables.length - 1];
+  const active = document.activeElement;
+  const inside = top.el.contains(active);
+  if (ev.shiftKey) {
+    if (!inside || active === first) { ev.preventDefault(); last.focus(); }
+  } else if (!inside || active === last) {
+    ev.preventDefault();
+    first.focus();
+  }
+});
+
 // opts (optional):
 //   fromHash: true  — the call ORIGINATED from the hashchange handler
 //                     (browser Back/Forward or a live hash edit). The URL is
@@ -2127,7 +2264,7 @@ function openRequestDrillModal(id) {
     content.innerHTML = '<div class="detail-empty">No record for that request id (it may have been evicted from the in-memory ring).</div>';
     modal.hidden = false;
     modal.dataset.requestId = id;
-    document.body.style.overflow = 'hidden';
+    openModal(modal, { onClose: userCloseRequestDrillModal });
     updateRequestDrillNav(id);
     return;
   }
@@ -2225,7 +2362,7 @@ function openRequestDrillModal(id) {
   });
   modal.hidden = false;
   modal.dataset.requestId = id;
-  document.body.style.overflow = 'hidden';
+  openModal(modal, { onClose: userCloseRequestDrillModal });
   updateRequestDrillNav(id);
 }
 
@@ -2261,7 +2398,7 @@ function closeRequestDrillModal() {
   if (!modal) return;
   modal.hidden = true;
   delete modal.dataset.requestId;
-  document.body.style.overflow = '';
+  closeModal(modal);
 }
 // User-initiated close (X / backdrop / Esc): walk history per the deep-link
 // state machine. Flows that close on the way SOMEWHERE ELSE (Replay,
@@ -2393,10 +2530,13 @@ document.addEventListener('DOMContentLoaded', () => {
       setTimeout(() => { btn.innerHTML = orig; btn.classList.remove('is-added'); btn.disabled = false; }, 1100);
     }
   });
+  // Escape is handled by the shared modal manager (routes through
+  // userCloseRequestDrillModal via the layer's onClose).
   document.addEventListener('keydown', (ev) => {
     const m = document.getElementById('request-drill-modal');
     if (!m || m.hidden) return;
-    if (ev.key === 'Escape') { userCloseRequestDrillModal(); return; }
+    // Only while this drill is the TOP modal — cmdk over it owns the keys.
+    if (modalStackTop()?.el !== m) return;
     // Arrow-key triage through the filtered list — but not while typing in the
     // "Use as correction" editor or any field.
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test((ev.target.tagName || '')) || ev.target.isContentEditable;
@@ -5114,18 +5254,16 @@ document.getElementById('chat-stop').addEventListener('click', () => {
   if (chatAbort) chatAbort.abort();
   updateChatSendState();
 });
-// Esc aborts the active streaming generation when no other modal owns
-// the key. Standard chat-app keyboard shortcut — saves a mouse trip to
-// the Stop button mid-stream. Modal handlers run on their own listeners
-// and stop propagation, so this only fires when nothing else is open.
+// Esc aborts the active streaming generation when no modal owns the key.
+// Standard chat-app keyboard shortcut — saves a mouse trip to the Stop
+// button mid-stream. Any open modal claims Escape via the shared modal
+// manager, so this only fires when the modal stack is empty.
 document.addEventListener('keydown', (ev) => {
   if (ev.key !== 'Escape') return;
   // Only intervene when chat is actually streaming.
   if (!chatAbort && !chatCompareAbort) return;
-  // Don't fight any open modal — the modal's own Esc handler ran first.
-  const openModal = ['eval-drill-modal', 'train-drill-modal', 'adapter-drill-modal', 'request-drill-modal', 'cmdk-modal']
-    .some(id => { const el = document.getElementById(id); return el && !el.hidden; });
-  if (openModal) return;
+  // Don't fight any open modal — Escape there closes the top of the stack.
+  if (modalStack.length) return;
   if (chatAbort) { chatAbort.abort(); }
   if (chatCompareAbort) { chatCompareAbort.abort(); }
   ev.preventDefault();
@@ -5969,9 +6107,16 @@ async function refreshSuites() {
 }
 
 /* ---------- Suite preview (lightweight modal — first N examples) ---------- */
+function closeSuitePreviewModal() {
+  const modal = document.getElementById('suite-preview-modal');
+  if (!modal || modal.hidden) return;
+  modal.hidden = true;
+  closeModal(modal);
+}
 async function openSuitePreview(name) {
   // Lazy-create the modal scaffolding on first use. Reuses the same
-  // CSS classes as the other drill-ins for consistency.
+  // CSS classes as the other drill-ins for consistency. Escape, focus,
+  // and the scroll lock come from the shared modal manager.
   let modal = document.getElementById('suite-preview-modal');
   if (!modal) {
     modal = document.createElement('div');
@@ -5979,7 +6124,7 @@ async function openSuitePreview(name) {
     modal.className = 'modal-backdrop';
     modal.role = 'dialog';
     modal.setAttribute('aria-modal', 'true');
-    modal.innerHTML = `<div class="modal-shell">
+    modal.innerHTML = `<div class="modal-shell" tabindex="-1">
       <div class="modal-head">
         <h2 id="suite-preview-title">Suite preview</h2>
         <span class="modal-meta" id="suite-preview-meta"></span>
@@ -5990,20 +6135,13 @@ async function openSuitePreview(name) {
       </div>
     </div>`;
     document.body.appendChild(modal);
-    document.getElementById('suite-preview-close').addEventListener('click', () => {
-      modal.hidden = true; document.body.style.overflow = '';
-    });
+    document.getElementById('suite-preview-close').addEventListener('click', closeSuitePreviewModal);
     modal.addEventListener('click', (ev) => {
-      if (ev.target === modal) { modal.hidden = true; document.body.style.overflow = ''; }
-    });
-    document.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Escape' && !modal.hidden) {
-        modal.hidden = true; document.body.style.overflow = '';
-      }
+      if (ev.target === modal) closeSuitePreviewModal();
     });
   }
   modal.hidden = false;
-  document.body.style.overflow = 'hidden';
+  openModal(modal, { onClose: closeSuitePreviewModal });
   document.getElementById('suite-preview-title').textContent = `Suite: ${name}`;
   document.getElementById('suite-preview-meta').textContent = '';
   const content = document.getElementById('suite-preview-content');
@@ -6312,8 +6450,9 @@ async function openDrillModal(jobId) {
   // A leftover raw-JSON block from a previously drilled job would show the
   // wrong payload until the user re-toggles — drop it on every open.
   document.getElementById('drill-raw-block')?.remove();
-  document.getElementById('eval-drill-modal').hidden = false;
-  document.body.style.overflow = 'hidden';
+  const modal = document.getElementById('eval-drill-modal');
+  modal.hidden = false;
+  openModal(modal, { onClose: userCloseDrillModal });
   await fetchDrillJob(jobId);
   // If the job is still running, poll every second so the modal updates live.
   drillPollHandle = setInterval(async () => {
@@ -6325,8 +6464,9 @@ async function openDrillModal(jobId) {
 }
 
 function closeDrillModal() {
-  document.getElementById('eval-drill-modal').hidden = true;
-  document.body.style.overflow = '';
+  const modal = document.getElementById('eval-drill-modal');
+  modal.hidden = true;
+  closeModal(modal);
   document.getElementById('drill-raw-block')?.remove();
   drillJob = null;
   evalDrillJobId = null;
@@ -6855,14 +6995,16 @@ document.getElementById('drill-rerun')?.addEventListener('click', async () => {
   } catch (e) { toast('Re-run failed: ' + e.message, 'err'); }
 });
 
-// Modal-scoped keyboard shortcuts: Esc closes; / focuses search; J/K
-// scroll through outcomes (vim-style); R triggers re-run.
+// Modal-scoped keyboard shortcuts: / focuses search; J/K scroll through
+// outcomes (vim-style); R triggers re-run. Esc is the shared modal
+// manager's (routes through userCloseDrillModal via the layer's onClose).
 document.addEventListener('keydown', ev => {
-  const modalOpen = !document.getElementById('eval-drill-modal').hidden;
-  if (!modalOpen) return;
+  const modal = document.getElementById('eval-drill-modal');
+  if (modal.hidden) return;
+  // Only while this drill is the TOP modal — cmdk over it owns the keys.
+  if (modalStackTop()?.el !== modal) return;
   const tag = (ev.target.tagName || '').toUpperCase();
-  if (ev.key === 'Escape') { userCloseDrillModal(); return; }
-  // When focused in an input, only Esc and Cmd/Ctrl shortcuts fire.
+  // When focused in an input, only Cmd/Ctrl shortcuts fire.
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
   if (ev.key === '/') {
     ev.preventDefault();
@@ -7346,8 +7488,12 @@ let cmdkResultsCache = [];
 function openCmdk() {
   cmdkOpen = true;
   cmdkActiveIdx = 0;
-  document.getElementById('cmdk-modal').hidden = false;
-  document.body.style.overflow = 'hidden';
+  const modal = document.getElementById('cmdk-modal');
+  modal.hidden = false;
+  // The palette stacks over whatever is open (e.g. ⌘K from inside a drill):
+  // the manager keeps the drill's layer + scroll lock and Escape peels the
+  // palette off first.
+  openModal(modal, { onClose: closeCmdk });
   const input = document.getElementById('cmdk-input');
   input.value = '';
   input.focus();
@@ -7355,8 +7501,9 @@ function openCmdk() {
 }
 function closeCmdk() {
   cmdkOpen = false;
-  document.getElementById('cmdk-modal').hidden = true;
-  document.body.style.overflow = '';
+  const modal = document.getElementById('cmdk-modal');
+  modal.hidden = true;
+  closeModal(modal);
 }
 
 // Build the searchable index from cached state. Cheap to recompute on
@@ -7551,7 +7698,7 @@ document.getElementById('cmdk-modal')?.addEventListener('click', ev => {
 // so power users can discover triage/judging/playground keys without hunting.
 function toggleShortcutsSheet() {
   const existing = document.getElementById('shortcuts-modal');
-  if (existing) { existing.remove(); document.body.style.overflow = ''; return; }
+  if (existing) { closeModal(existing); existing.remove(); return; }
   const isMac = /Mac|iPhone|iPad/.test(navigator.platform || '');
   const mod = isMac ? '⌘' : 'Ctrl';
   const groups = [
@@ -7573,19 +7720,17 @@ function toggleShortcutsSheet() {
   m.setAttribute('role', 'dialog');
   m.setAttribute('aria-modal', 'true');
   m.setAttribute('aria-label', 'Keyboard shortcuts');
-  m.innerHTML = `<div class="modal-shell modal-shell-fit shortcuts-shell">
+  m.innerHTML = `<div class="modal-shell modal-shell-fit shortcuts-shell" tabindex="-1">
     <div class="modal-head"><h2>Keyboard shortcuts</h2><span style="flex:1 1 auto;"></span>
       <button class="modal-close" id="shortcuts-close" aria-label="Close"><svg class="icn" aria-hidden="true"><use href="#i-close"></use></svg></button></div>
     <div class="shortcuts-body">${body}</div>
   </div>`;
   document.body.appendChild(m);
-  document.body.style.overflow = 'hidden';
-  const close = () => toggleShortcutsSheet();
+  // Escape, focus, and the scroll lock come from the shared modal manager.
+  const close = () => { closeModal(m); m.remove(); };
   m.querySelector('#shortcuts-close')?.addEventListener('click', close);
   m.addEventListener('click', ev => { if (ev.target === m) close(); });
-  document.addEventListener('keydown', function esc(ev) {
-    if (ev.key === 'Escape' && document.getElementById('shortcuts-modal')) { close(); document.removeEventListener('keydown', esc); }
-  });
+  openModal(m, { onClose: close });
 }
 
 document.addEventListener('keydown', ev => {
@@ -7608,8 +7753,9 @@ document.addEventListener('keydown', ev => {
     return;
   }
   if (!cmdkOpen) return;
-  if (ev.key === 'Escape') { ev.preventDefault(); closeCmdk(); }
-  else if (ev.key === 'ArrowDown') {
+  // Escape is handled by the shared modal manager (closes the TOP of the
+  // stack — the palette when it's frontmost).
+  if (ev.key === 'ArrowDown') {
     ev.preventDefault();
     cmdkActiveIdx = Math.min(cmdkResultsCache.length - 1, cmdkActiveIdx + 1);
     renderCmdkResults(document.getElementById('cmdk-input').value);
@@ -8089,8 +8235,9 @@ async function openAdapterDrillModal(name) {
   adapterDrillName = name;
   modalHashOnOpen('adapter', '#adapters/' + encodeURIComponent(name));
   adapterDrillIsActive = false;
-  document.getElementById('adapter-drill-modal').hidden = false;
-  document.body.style.overflow = 'hidden';
+  const adapterModal = document.getElementById('adapter-drill-modal');
+  adapterModal.hidden = false;
+  openModal(adapterModal, { onClose: userCloseAdapterDrillModal });
   document.getElementById('adapter-drill-title').textContent = name;
   document.getElementById('adapter-drill-meta').textContent = 'Loading…';
   document.getElementById('adapter-drill-content').innerHTML = '<div class="detail-empty">Loading…</div>';
@@ -8304,8 +8451,9 @@ function renderAdapterDrillBody(d) {
 
 function closeAdapterDrillModal() {
   adapterDrillName = null;
-  document.getElementById('adapter-drill-modal').hidden = true;
-  document.body.style.overflow = '';
+  const adapterModal = document.getElementById('adapter-drill-modal');
+  adapterModal.hidden = true;
+  closeModal(adapterModal);
 }
 // User-initiated close: walk history per the deep-link state machine.
 function userCloseAdapterDrillModal() {
@@ -8354,13 +8502,14 @@ async function openAdapterEvalModal(name) {
   if (go) go.disabled = !suites.length;
   if (solo) solo.disabled = !suites.length;
   modal.hidden = false;
-  document.body.style.overflow = 'hidden';
+  openModal(modal, { onClose: closeAdapterEvalModal });
   if (sel && suites.length) sel.focus();
 }
 function closeAdapterEvalModal() {
   const modal = document.getElementById('adapter-eval-modal');
-  if (modal) modal.hidden = true;
-  document.body.style.overflow = '';
+  if (!modal) return;
+  modal.hidden = true;
+  closeModal(modal);
 }
 async function submitAdapterEval(compare) {
   const suite = document.getElementById('adapter-eval-suite')?.value;
@@ -8392,9 +8541,8 @@ document.getElementById('adapter-eval-close')?.addEventListener('click', closeAd
 document.getElementById('adapter-eval-modal')?.addEventListener('click', ev => { if (ev.target.id === 'adapter-eval-modal') closeAdapterEvalModal(); });
 document.getElementById('adapter-eval-compare')?.addEventListener('click', () => submitAdapterEval(true));
 document.getElementById('adapter-eval-solo')?.addEventListener('click', () => submitAdapterEval(false));
-document.addEventListener('keydown', ev => {
-  if (ev.key === 'Escape') { const m = document.getElementById('adapter-eval-modal'); if (m && !m.hidden) closeAdapterEvalModal(); }
-});
+// Escape is handled by the shared modal manager (closeAdapterEvalModal is
+// the layer's onClose).
 
 document.getElementById('adapter-drill-eval')?.addEventListener('click', () => {
   const name = adapterDrillName;
@@ -8423,8 +8571,9 @@ async function openTrainDrillModal(jobId) {
   trainDrillJobId = jobId;
   modalHashOnOpen('train', '#training/queue/' + encodeURIComponent(jobId));
   trainDrillLastKey = null;
-  document.getElementById('train-drill-modal').hidden = false;
-  document.body.style.overflow = 'hidden';
+  const trainModal = document.getElementById('train-drill-modal');
+  trainModal.hidden = false;
+  openModal(trainModal, { onClose: userCloseTrainDrillModal });
   document.getElementById('train-drill-content').innerHTML = '<div class="detail-empty">Loading…</div>';
   await fetchTrainDrill();
   if (trainDrillPollHandle) clearInterval(trainDrillPollHandle);
@@ -8443,8 +8592,9 @@ function closeTrainDrillModal() {
     copyLossBtn.disabled = true;
     copyLossBtn.title = 'No loss samples recorded yet — the CSV unlocks once training reports its first loss';
   }
-  document.getElementById('train-drill-modal').hidden = true;
-  document.body.style.overflow = '';
+  const trainModal = document.getElementById('train-drill-modal');
+  trainModal.hidden = true;
+  closeModal(trainModal);
   if (trainDrillPollHandle) { clearInterval(trainDrillPollHandle); trainDrillPollHandle = null; }
 }
 // User-initiated close (X / backdrop / Delete): walk history per the
