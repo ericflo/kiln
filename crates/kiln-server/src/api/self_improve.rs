@@ -309,6 +309,7 @@ fn build_judge_pump_request(
     adapter_dir: &std::path::Path,
     req: &JudgeDistillRequest,
 ) -> Result<(DistillPumpRequest, usize), ApiError> {
+    super::agent_traces::ensure_agent_trace_index(adapter_dir);
     let judge_prompts = crate::dataset_resolve::resolve_agent_trace_prompts(
         adapter_dir,
         "agent_traces:judge_turns",
@@ -341,6 +342,10 @@ fn build_self_improve_jobs(
     req: &SelfImproveRequest,
 ) -> Result<(OpdRequest, Option<DistillPumpRequest>, usize), ApiError> {
     let now_ms = crate::recent_requests::now_unix_ms() as i64;
+    // Canonical onboarding: build the trace index from the default pi
+    // sessions dir when it doesn't exist yet, instead of hard-failing
+    // and demanding a manual POST /v1/agent/traces/discover.
+    super::agent_traces::ensure_agent_trace_index(adapter_dir);
     let weekly = crate::dataset_resolve::resolve_agent_trace_prompts(
         adapter_dir,
         "agent_traces:weekly",
@@ -588,9 +593,18 @@ mod tests {
     #[test]
     fn judge_pump_without_index_carries_discover_remediation() {
         let dir = tempfile::tempdir().unwrap();
+        // Point auto-discovery away from the developer's real ~/.pi
+        // sessions so the missing-index path actually exercises. Restored
+        // after the call; tests in this mod run on separate adapter dirs.
+        let prev = std::env::var("KILN_PI_SESSIONS_DIR").ok();
+        unsafe { std::env::set_var("KILN_PI_SESSIONS_DIR", "/nonexistent/pi/sessions") };
         let req: JudgeDistillRequest = serde_json::from_str("{}").unwrap();
-        let err = build_judge_pump_request(dir.path(), &req).unwrap_err();
-        let msg = format!("{err:?}");
+        let result = build_judge_pump_request(dir.path(), &req);
+        match prev {
+            Some(v) => unsafe { std::env::set_var("KILN_PI_SESSIONS_DIR", v) },
+            None => unsafe { std::env::remove_var("KILN_PI_SESSIONS_DIR") },
+        }
+        let msg = format!("{:?}", result.unwrap_err());
         assert!(msg.contains("/v1/agent/traces/discover"), "{msg}");
     }
 

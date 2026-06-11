@@ -157,6 +157,10 @@ async fn judge_distill_registered_teacher_proceeds_past_resolution() {
     let (state, _dir) = make_state();
     let app = api::router(state.clone());
     register_teacher(&app, "fixture@t").await;
+    // Isolate from the developer's real ~/.pi sessions: auto-discovery
+    // (ensure_agent_trace_index) would otherwise build a populated index
+    // and sail past the corpus-resolution 400 this test asserts.
+    unsafe { std::env::set_var("KILN_PI_SESSIONS_DIR", "/nonexistent/pi/sessions") };
     let (status, response) = post(
         &app,
         "/v1/agent/judge_distill",
@@ -201,6 +205,7 @@ async fn self_improve_registered_judge_proceeds_past_resolution() {
     let (state, _dir) = make_state();
     let app = api::router(state.clone());
     register_teacher(&app, "judge-pi-v1").await;
+    unsafe { std::env::set_var("KILN_PI_SESSIONS_DIR", "/nonexistent/pi/sessions") };
     let (status, response) = post(
         &app,
         "/v1/agent/self_improve",

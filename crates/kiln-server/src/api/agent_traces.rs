@@ -134,6 +134,14 @@ struct DiscoverResponse {
 }
 
 fn default_pi_sessions_dir() -> PathBuf {
+    // KILN_PI_SESSIONS_DIR overrides the conventional location — for
+    // non-standard pi setups, and so tests can isolate auto-discovery
+    // from the developer's real ~/.pi sessions.
+    if let Ok(dir) = std::env::var("KILN_PI_SESSIONS_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
     if let Ok(home) = std::env::var("HOME") {
         PathBuf::from(home).join(".pi").join("agent").join("sessions")
     } else {
@@ -175,6 +183,51 @@ fn scan_sessions_dir(dir: &Path, depth_left: usize, index: &mut AgentTraceIndex)
     count
 }
 
+/// Build and persist `agent_traces.json` from a sessions directory —
+/// shared by the explicit POST /v1/agent/traces/discover route and the
+/// self_improve/judge_distill auto-discovery below. Returns the number
+/// of indexed sessions.
+pub(crate) fn discover_traces_into(
+    sessions_dir: &Path,
+    adapter_dir: &Path,
+) -> std::io::Result<usize> {
+    let mut index = AgentTraceIndex::default();
+    let count = scan_sessions_dir(sessions_dir, SESSIONS_SCAN_MAX_DEPTH, &mut index);
+    index.save_to_path(&adapter_dir.join("agent_traces.json"))?;
+    Ok(count)
+}
+
+/// Auto-discovery for the §10.6 endpoints: when `agent_traces.json` is
+/// missing, scan the default pi sessions dir and build it — the
+/// canonical onboarding (`kiln serve` → use pi → `kiln self-improve`)
+/// must not hard-fail asking for a manual POST
+/// /v1/agent/traces/discover first. An existing index is left alone
+/// (re-discovery stays explicit), and a missing sessions dir falls
+/// through to the resolver's actionable error.
+pub(crate) fn ensure_agent_trace_index(adapter_dir: &Path) -> Option<usize> {
+    if adapter_dir.join("agent_traces.json").exists() {
+        return None;
+    }
+    let sessions = default_pi_sessions_dir();
+    if !sessions.exists() {
+        return None;
+    }
+    match discover_traces_into(&sessions, adapter_dir) {
+        Ok(count) => {
+            tracing::info!(
+                indexed = count,
+                sessions_dir = %sessions.display(),
+                "auto-discovered pi agent traces for self_improve"
+            );
+            Some(count)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "agent-trace auto-discovery failed");
+            None
+        }
+    }
+}
+
 async fn discover_traces(
     State(state): State<AppState>,
     Json(req): Json<DiscoverRequest>,
@@ -189,12 +242,13 @@ async fn discover_traces(
             path.display()
         )));
     }
-    let mut index = AgentTraceIndex::default();
-    let count = scan_sessions_dir(&path, SESSIONS_SCAN_MAX_DEPTH, &mut index);
-    let out_path = state.adapter_dir.join("agent_traces.json");
-    if let Err(e) = index.save_to_path(&out_path) {
-        tracing::warn!(error = %e, "failed to persist agent_traces.json");
-    }
+    let count = match discover_traces_into(&path, &state.adapter_dir) {
+        Ok(count) => count,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to persist agent_traces.json");
+            0
+        }
+    };
     Ok(Json(DiscoverResponse {
         indexed: count,
         path: path.display().to_string(),
@@ -667,5 +721,30 @@ mod tests {
         let loaded = AgentTraceIndex::load_from_path(&path);
         assert_eq!(loaded.traces.len(), 1);
         assert_eq!(loaded.traces.get("abc").unwrap().num_turns, 5);
+    }
+    /// The shared discovery routine persists the index, and
+    /// ensure_agent_trace_index leaves an existing index alone (explicit
+    /// re-discovery only).
+    #[test]
+    fn discover_traces_into_persists_and_ensure_respects_existing() {
+        let sessions = tempfile::tempdir().unwrap();
+        let adapters = tempfile::tempdir().unwrap();
+        write_jsonl(
+            &sessions.path().join("s.jsonl"),
+            &[serde_json::json!({"type":"session","id":"s1","timestamp":"2026-06-01T10:00:00Z","cwd":"/p"}),
+              serde_json::json!({"type":"message","timestamp":"2026-06-01T10:00:05Z","message":{"role":"user","content":[{"type":"text","text":"hi"}]}})],
+        );
+        let count = discover_traces_into(sessions.path(), adapters.path()).unwrap();
+        assert_eq!(count, 1);
+        let index_path = adapters.path().join("agent_traces.json");
+        assert!(index_path.exists());
+
+        // An existing index is never clobbered by the auto path.
+        std::fs::write(&index_path, "{\"sessions\":[]}").unwrap();
+        assert!(ensure_agent_trace_index(adapters.path()).is_none());
+        assert_eq!(
+            std::fs::read_to_string(&index_path).unwrap(),
+            "{\"sessions\":[]}"
+        );
     }
 }
