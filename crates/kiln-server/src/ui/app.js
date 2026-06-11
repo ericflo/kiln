@@ -1044,10 +1044,33 @@ async function testConnection() {
   } finally { if (btn) btn.disabled = false; }
 }
 
+// aria-busy may flip only during a panel's FIRST load. The pollers call this
+// on every tick (2-3s), and once content has rendered, busy/idle thrash is
+// pure screen-reader noise. The `false` arm — every poller's `finally`, which
+// runs after both the success render and the failure HTML — marks the panel
+// loaded, so the guard is central and call sites stay untouched.
 function setPanelBusy(id, busy) {
   const el = document.getElementById(id);
-  if (el) el.setAttribute('aria-busy', String(busy));
+  if (!el) return null;
+  if (busy) {
+    if (!el.dataset.loaded) el.setAttribute('aria-busy', 'true');
+  } else {
+    el.setAttribute('aria-busy', 'false');
+    el.dataset.loaded = '1';
+  }
   return el;
+}
+
+// Write a terse one-line transition announcement into a visually-hidden
+// role="status" node. The polled data panels are deliberately NOT aria-live
+// (a content-keyed repaint of a 30-row list would be re-read in full); these
+// nodes are the screen-reader channel for the few transitions a sighted user
+// would actually notice. Re-setting identical text fires no live-region
+// mutation, so repeats get a non-breaking-space nudge to still announce.
+function announceStatus(id, msg) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = (el.textContent === msg) ? msg + '\u00a0' : msg;
 }
 
 // --- Training Tabs ---
@@ -2046,15 +2069,14 @@ document.addEventListener('DOMContentLoaded', () => {
 function refreshRecentTimes() {
   const el = document.getElementById('recent-requests-panel');
   if (!el) return;
-  const liveMode = el.getAttribute('aria-live');
-  el.setAttribute('aria-live', 'off');
+  // No aria-live suppression dance needed: the panel is deliberately not a
+  // live region (see index.html), so in-place timestamp ticks are silent.
   el.querySelectorAll('.recent-row').forEach(row => {
     const ts = Number(row.dataset.ts || 0);
     if (!ts) return;
     const tcell = row.querySelector('.recent-time');
     if (tcell) tcell.textContent = fmtRelTime(ts);
   });
-  if (liveMode) el.setAttribute('aria-live', liveMode);
 }
 
 // Wire the filter input. Re-render on every input event using the
@@ -2102,6 +2124,35 @@ document.addEventListener('click', (ev) => {
 // position on idle servers (`refreshRecentTimes` already updates the
 // relative timestamps in place every second).
 let lastRecentRequestsKey = null;
+
+// One-line screen-reader summary for the Recent requests card, spoken ONLY
+// when the needs-attention count changes — the moment the warning tint
+// appears or clears for a sighted user. Routine traffic never narrates (the
+// panel is not a live region), and "new" counts arrivals since the last
+// announcement so the line carries scale without ticking every poll.
+let lastAnnouncedAttentionCount = null;
+let lastAnnouncedRequestIds = new Set();
+function announceRecentAttention(rows) {
+  const ids = new Set(rows.map(r => `${r.timestamp_unix_ms || ''}:${r.id || ''}`));
+  const attn = rows.filter(requestNeedsAttention).length;
+  if (lastAnnouncedAttentionCount === null) {
+    // First poll is baseline — page load must not announce history.
+    lastAnnouncedAttentionCount = attn;
+    lastAnnouncedRequestIds = ids;
+    return;
+  }
+  if (attn === lastAnnouncedAttentionCount) return;
+  let fresh = 0;
+  ids.forEach(id => { if (!lastAnnouncedRequestIds.has(id)) fresh++; });
+  const newPart = fresh > 0 ? `${fresh} new request${fresh === 1 ? '' : 's'}, ` : '';
+  const attnPart = attn === 0
+    ? 'no requests need attention'
+    : `${attn} request${attn === 1 ? '' : 's'} need${attn === 1 ? 's' : ''} attention`;
+  announceStatus('recent-requests-status', `${newPart}${attnPart}.`);
+  lastAnnouncedAttentionCount = attn;
+  lastAnnouncedRequestIds = ids;
+}
+
 async function pollRecentRequests() {
   const el = setPanelBusy('recent-requests-panel', true);
   if (!el) return;
@@ -2111,6 +2162,7 @@ async function pollRecentRequests() {
     updateConnectSummary(recentRequestsCache);
     updateFlywheel();
     refreshRequestHealth();
+    announceRecentAttention(recentRequestsCache);
     const key = recentRequestsCache
       .map(r => `${r.timestamp_unix_ms || r.id || ''}:${r.completion_tokens || 0}`)
       .join('|');
@@ -2631,16 +2683,27 @@ function detectTrainingTransitions(data) {
   if (prevTrainingStates) {
     for (const [id, state] of now) {
       const prev = prevTrainingStates.get(id);
+      if (prev === state) continue;
+      // Start is an announce-only event (no toast — the submit flow already
+      // confirms visually): a job begins running that wasn't running before,
+      // whether it stepped queued→running or appeared mid-poll already running.
+      if (state === 'running') {
+        const adapter = (data.running && data.running.adapter_name) || 'adapter';
+        announceStatus('training-queue-status', `Training started: ${adapter}.`);
+        continue;
+      }
       // Only announce jobs we watched run/queue in THIS session — never history.
-      if (!prev || prev === state || (prev !== 'running' && prev !== 'queued')) continue;
+      if (!prev || (prev !== 'running' && prev !== 'queued')) continue;
       const j = (data.completed || []).find(x => x.job_id === id) || {};
       const adapter = j.adapter_name || 'adapter';
       if (state === 'completed') {
+        announceStatus('training-queue-status', `Training completed: ${adapter} is ready.`);
         actionToast(`${adapter} finished training — it's ready${j.job_type ? ' (' + j.job_type + ')' : ''}.`, 'ok', [
           { label: 'Prove it vs base', onClick: () => openAdapterEvalModal(adapter) },
           { label: 'View job', onClick: () => { selectPage('training'); document.querySelector('#page-training [data-tab="queue"]')?.click(); } },
         ]);
       } else if (state === 'failed' || state === 'error') {
+        announceStatus('training-queue-status', `Training failed: ${adapter}.`);
         actionToast(`Training ${adapter} failed.`, 'err', [
           { label: 'View job', onClick: () => { selectPage('training'); document.querySelector('#page-training [data-tab="queue"]')?.click(); } },
         ]);
@@ -5773,10 +5836,12 @@ function detectEvalTransitions(jobs) {
         } else if (typeof j.headline_accuracy === 'number') {
           verdict = ` Accuracy: ${(j.headline_accuracy * 100).toFixed(0)}%.`;
         }
+        announceStatus('eval-jobs-status', `Eval ${suite} finished.${verdict}`);
         actionToast(`Eval ${suite} finished.${verdict}`, 'ok', [
           { label: 'View result', onClick: () => { selectPage('evals'); document.getElementById('evals-tab-jobs')?.click(); setTimeout(() => openDrillModal(id), 250); } },
         ]);
       } else if (state === 'failed') {
+        announceStatus('eval-jobs-status', `Eval ${suite} failed.`);
         actionToast(`Eval ${suite} failed${j.error ? ': ' + String(j.error).slice(0, 80) : ''}.`, 'err', [
           { label: 'View job', onClick: () => { selectPage('evals'); document.getElementById('evals-tab-jobs')?.click(); } },
         ]);
