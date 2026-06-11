@@ -5790,6 +5790,8 @@ async fn generate_real(
     let memory_budget = state.memory_budget.clone();
     let metrics = state.metrics.clone();
     let timeout = state.request_timeout;
+    let mtp_acceptance = state.mtp_acceptance.clone();
+    let acceptance_adapter = adapter.clone().unwrap_or_else(|| "base".to_string());
     let prefix_cache_diagnostic = std::sync::Arc::new(std::sync::Mutex::new("unknown"));
     let prefix_cache_diagnostic_inner = prefix_cache_diagnostic.clone();
     // Cooperative cancellation: `tokio::time::timeout` cancels the outer
@@ -5965,6 +5967,18 @@ async fn generate_real(
             ResolvedSpeculativeMode::Mtp => {
                 *prefix_cache_diagnostic_inner.lock().unwrap() = "not_used_speculative";
                 let output = runner_guard.generate_mtp_speculative(&prompt, &params)?;
+                // Per-adapter acceptance counters — the always-on
+                // measurement (no KILN_C1_ATTR_PATH needed) that makes a
+                // draft head's alpha visible per serving adapter.
+                if output.total_draft_attempts > 0 {
+                    if let Ok(mut counters) = mtp_acceptance.lock() {
+                        let entry = counters
+                            .entry(acceptance_adapter.clone())
+                            .or_insert((0, 0));
+                        entry.0 += output.draft_accepted_count as u64;
+                        entry.1 += output.total_draft_attempts as u64;
+                    }
+                }
                 // KILN_C1_ATTR_PATH acceptance instrumentation: rows are
                 // pushed per draft step but only the bench driver ever
                 // drained them — over plain HTTP serving the CSV never

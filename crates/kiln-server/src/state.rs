@@ -1353,6 +1353,13 @@ pub struct AppState {
     /// This can differ from `active_adapter_name` during explicit per-request
     /// chat adapter overrides; missing `adapter` requests reload the default.
     pub loaded_adapter_name: Arc<std::sync::RwLock<Option<String>>>,
+    /// Per-adapter MTP/speculative draft acceptance counters:
+    /// adapter name ("base" when none) → (accepted, attempts). Fed by the
+    /// serve path after each MTP generation; surfaced via /v1/stats so
+    /// the draft head's alpha is measurable per adapter without the
+    /// KILN_C1_ATTR_PATH CSV.
+    pub mtp_acceptance:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, u64)>>>,
     /// Last adapter load failure by adapter name. Used by the registry so
     /// automation can distinguish "not loaded" from "failed to load".
     pub adapter_load_errors: Arc<std::sync::RwLock<HashMap<String, String>>>,
@@ -1616,6 +1623,7 @@ impl AppState {
             adapter_dir: PathBuf::from("adapters"),
             active_adapter_name: Arc::new(std::sync::RwLock::new(None)),
             loaded_adapter_name: Arc::new(std::sync::RwLock::new(None)),
+            mtp_acceptance: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             adapter_load_errors: Arc::new(std::sync::RwLock::new(HashMap::new())),
             adapter_swap_lock: Arc::new(tokio::sync::Mutex::new(())),
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
@@ -2266,6 +2274,7 @@ impl AppState {
             adapter_dir,
             active_adapter_name: Arc::new(std::sync::RwLock::new(None)),
             loaded_adapter_name: Arc::new(std::sync::RwLock::new(None)),
+            mtp_acceptance: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             adapter_load_errors: Arc::new(std::sync::RwLock::new(HashMap::new())),
             adapter_swap_lock: Arc::new(tokio::sync::Mutex::new(())),
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
