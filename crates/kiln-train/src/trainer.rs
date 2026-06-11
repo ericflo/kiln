@@ -14000,6 +14000,7 @@ fn grpo_dry_run_accepts_echo_with_and_without_env_tokens() -> Result<()> {
             "perf-regression-smoke",
             None,
             None,
+            None,
         )?;
         let elapsed = started.elapsed();
         let elapsed_ms = elapsed.as_millis();
@@ -14111,6 +14112,7 @@ fn grpo_dry_run_accepts_echo_with_and_without_env_tokens() -> Result<()> {
             &tokenizer,
             adapter_dir.path(),
             "perf-regression-tracing-smoke",
+            None,
             None,
             None,
         )?;

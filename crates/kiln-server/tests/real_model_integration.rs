@@ -1115,6 +1115,7 @@ fn test_real_model_gdn_sft_metal() {
         "gdn-sft-metal-smoke",
         Some(cb),
         None,
+        None,
     )
     .expect("GDN SFT training on Device::Metal(0) should complete");
     assert_adapter_written(&out);
@@ -1200,6 +1201,7 @@ fn test_real_model_sft_metal() {
         adapter_dir.path(),
         "sft-metal-smoke",
         Some(cb),
+        None,
         None,
     )
     .expect("SFT training on Device::Metal(0) should complete");
