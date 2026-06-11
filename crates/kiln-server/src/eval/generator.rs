@@ -55,16 +55,33 @@ pub struct PreparedPrompt {
 /// Generator trait. The executor calls `set_adapter` once per suite run,
 /// `prepare` once per example, `run` once per completion.
 pub trait EvalGenerator: Send + Sync {
-    /// Load `adapter` (or unload to the base model when `None`). Returns
-    /// the *previous* active adapter name so the caller can restore after
-    /// the suite run. Idempotent: when target == current, this is a
-    /// no-op return.
+    /// Load `adapter` (or unload to the base model when `None`) for an
+    /// eval run. Returns the *previous* active adapter name so the caller
+    /// can restore after the suite run.
+    ///
+    /// CONTRACT: an eval must measure the adapter's CURRENT DISK CONTENT.
+    /// Implementations must reload even when target == current name —
+    /// the §8.7 gate evaluates an adapter that was just RETRAINED under
+    /// its serving name, and a name-equality no-op would score (and then
+    /// "promote") the stale in-memory weights.
     fn set_adapter(
         &self,
         adapter: Option<&str>,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Option<String>, String>> + Send + '_>,
     >;
+
+    /// Restore the pre-suite adapter after the run. Unlike
+    /// [`Self::set_adapter`], a name match may no-op: the serving
+    /// adapter's content did not change while the eval held the runtime.
+    fn restore_adapter(
+        &self,
+        adapter: Option<&str>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Option<String>, String>> + Send + '_>,
+    > {
+        self.set_adapter(adapter)
+    }
 
     /// Render chat template + tokenize. Called once per example.
     /// `tools` is the effective tool catalogue (per-example override or
@@ -153,9 +170,13 @@ impl EvalGenerator for LiveEvalGenerator {
         let want = adapter.map(str::to_string).filter(|s| !s.is_empty());
         Box::pin(async move {
             let previous = state.active_adapter_name.read().unwrap().clone();
-            if want == previous {
-                return Ok(previous);
-            }
+            // NO name-equality early return here (round-4 discovery): the
+            // §8.7 gate evaluates an adapter that was just RETRAINED under
+            // its serving name — a no-op would score the stale in-memory
+            // weights and then "promote" them with a no-op swap. Evals
+            // measure disk content; content_changed forces the reload
+            // through the same-name fast path in adapter_swap.
+            //
             // Barrier swap (see `adapter_swap`): a streaming request that's
             // mid-generation when an eval starts finishes on its own
             // weights first. This also keeps `loaded_adapter_name`
@@ -171,8 +192,41 @@ impl EvalGenerator for LiveEvalGenerator {
                 &state,
                 crate::adapter_swap::SwapRequest {
                     target,
-                    content_changed: false,
+                    content_changed: true,
                     reason: "eval_set_adapter",
+                },
+            )
+            .await?;
+            *state.active_adapter_name.write().unwrap() = want;
+            Ok(previous)
+        })
+    }
+
+    fn restore_adapter(
+        &self,
+        adapter: Option<&str>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Option<String>, String>> + Send + '_>,
+    > {
+        let state = self.state.clone();
+        let want = adapter.map(str::to_string).filter(|s| !s.is_empty());
+        Box::pin(async move {
+            let previous = state.active_adapter_name.read().unwrap().clone();
+            if want == previous {
+                // Cheap restore: the serving adapter's content did not
+                // change while the eval held the runtime.
+                return Ok(previous);
+            }
+            let target = match want.as_ref() {
+                Some(name) => crate::adapter_swap::SwapTarget::Named(name.clone()),
+                None => crate::adapter_swap::SwapTarget::Base,
+            };
+            crate::adapter_swap::swap_runtime_adapter(
+                &state,
+                crate::adapter_swap::SwapRequest {
+                    target,
+                    content_changed: false,
+                    reason: "eval_restore_adapter",
                 },
             )
             .await?;
