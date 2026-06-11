@@ -150,6 +150,14 @@ pub struct SelfImproveRequest {
     pub post_eval: Option<kiln_eval::PostEvalConfig>,
 }
 
+impl Default for SelfImproveRequest {
+    /// The same defaults an empty POST body gets (serde field defaults) —
+    /// the scheduler's no-config case must match `{}` exactly.
+    fn default() -> Self {
+        serde_json::from_str("{}").expect("empty SelfImproveRequest parses")
+    }
+}
+
 fn default_agent_name() -> String {
     "pi-coder-current".to_string()
 }
@@ -158,16 +166,27 @@ fn default_crisp_enabled() -> bool {
 }
 
 #[derive(Debug, Serialize)]
-struct SelfImproveResponse {
-    job_ids: Vec<String>,
-    state: TrainingState,
-    message: String,
+pub struct SelfImproveResponse {
+    pub job_ids: Vec<String>,
+    pub state: TrainingState,
+    pub message: String,
 }
 
 async fn self_improve(
     State(state): State<AppState>,
     Json(req): Json<SelfImproveRequest>,
 ) -> Result<Json<SelfImproveResponse>, ApiError> {
+    submit_self_improve(&state, req).map(Json)
+}
+
+/// The §10.6.2 submission body, callable without an HTTP request — the
+/// `[agent] self_improve_interval_hours` scheduler drives the same code
+/// path the POST handler does, so validation, teacher gating, and queue
+/// caps apply identically to scheduled rounds.
+pub fn submit_self_improve(
+    state: &AppState,
+    req: SelfImproveRequest,
+) -> Result<SelfImproveResponse, ApiError> {
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
     }
@@ -183,7 +202,7 @@ async fn self_improve(
     // when the worker dequeues the job — so an unregistered judge used to
     // enqueue jobs that were guaranteed to fail later.
     require_registered_teacher(
-        &state,
+        state,
         &req.judge,
         format!(
             "self_improve: judge '{}' must be registered as a teacher alias \
@@ -199,7 +218,7 @@ async fn self_improve(
     // are included.)
     let (opd_phase, crisp_pump, num_tasks) =
         build_self_improve_jobs(&state.adapter_dir, &req)?;
-    super::training::enforce_queue_caps(&state)?;
+    super::training::enforce_queue_caps(state)?;
 
     // §10.6.2: score with judge → GRPO → CRISP pass. Each phase
     // queues independently. The trainer body (#31) wires the
@@ -208,7 +227,7 @@ async fn self_improve(
 
     let opd_job = uuid::Uuid::new_v4().to_string();
     register_agent_job(
-        &state,
+        state,
         &opd_job,
         &format!("{}-improve", req.agent),
         QueuedJob::Opd(opd_phase),
@@ -218,7 +237,7 @@ async fn self_improve(
     if let Some(crisp_pump) = crisp_pump {
         let crisp_job = uuid::Uuid::new_v4().to_string();
         register_agent_job(
-            &state,
+            state,
             &crisp_job,
             &format!("{}-crisp", req.agent),
             QueuedJob::DistillPump(crisp_pump),
@@ -226,7 +245,7 @@ async fn self_improve(
         job_ids.push(crisp_job);
     }
 
-    Ok(Json(SelfImproveResponse {
+    Ok(SelfImproveResponse {
         job_ids,
         state: TrainingState::Queued,
         message: format!(
@@ -235,7 +254,7 @@ async fn self_improve(
              Phase 2 = CRISP terseness pass.",
             req.agent, req.judge, req.crisp
         ),
-    }))
+    })
 }
 
 /// §10.6.3 judge drift check.
@@ -485,6 +504,27 @@ mod tests {
         assert_eq!(req.agent, "pi-coder-current");
         assert_eq!(req.judge, "judge-pi-v1");
         assert!(req.crisp, "§10.6.4 CRISP pass is on by default");
+    }
+
+    /// The scheduler's no-config request must equal an empty POST body,
+    /// and an [agent.self_improve] table must deserialize through the
+    /// same shape the endpoint accepts.
+    #[test]
+    fn scheduler_request_defaults_match_empty_post_body() {
+        let from_default = SelfImproveRequest::default();
+        let from_empty: SelfImproveRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(from_default.agent, from_empty.agent);
+        assert_eq!(from_default.judge, from_empty.judge);
+        assert_eq!(from_default.crisp, from_empty.crisp);
+        assert!(from_default.post_eval.is_none());
+
+        let toml_like = serde_json::json!({
+            "agent": "pi-coder-current",
+            "judge": "judge-pi-v1",
+            "post_eval": {"suite": "agentic-core", "min_accuracy": 0.7}
+        });
+        let req: SelfImproveRequest = serde_json::from_value(toml_like).unwrap();
+        assert_eq!(req.post_eval.unwrap().min_accuracy, Some(0.7));
     }
 
     #[test]

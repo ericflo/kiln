@@ -38,6 +38,29 @@ pub struct KilnConfig {
     /// (mine→filter→train flywheel). See [`crate::request_log`].
     #[serde(default)]
     pub request_log: crate::request_log::RequestLogConfig,
+    /// §10.6 self-improvement automation. `None` / omitted section means
+    /// the weekly loop stays manual (`kiln self-improve`).
+    #[serde(default)]
+    pub agent: Option<AgentConfig>,
+}
+
+/// `[agent]` — the self-improvement flywheel scheduler.
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentConfig {
+    /// Run the §10.6.2 self_improve loop every N hours (168 = weekly).
+    /// Omit to disable. The first run fires one full interval after
+    /// startup — never at boot, so a crash-looping server can't spam
+    /// training jobs.
+    #[serde(default)]
+    pub self_improve_interval_hours: Option<u64>,
+    /// The request the scheduler submits — same shape as
+    /// POST /v1/agent/self_improve. Defaults: agent pi-coder-current,
+    /// judge judge-pi-v1, CRISP on, no promotion gate. Set
+    /// `post_eval = { suite = "...", min_accuracy = ... }` to make every
+    /// scheduled round gated (§8.7: auto-load defers; failures demote).
+    #[serde(default)]
+    pub self_improve: Option<serde_json::Value>,
 }
 
 /// Eval subsystem configuration.
@@ -453,6 +476,7 @@ impl Default for KilnConfig {
             adapters: AdaptersConfig::default(),
             eval: None,
             request_log: crate::request_log::RequestLogConfig::default(),
+            agent: None,
         }
     }
 }
