@@ -3522,7 +3522,7 @@ function restorePlaygroundHistoryBanner() {
       <span style="color:var(--text-quiet);"> — ${stash.messages.length} message${stash.messages.length === 1 ? '' : 's'}${ageMin ? `, ${ageMin} min ago` : ''}.</span>
     </div>
     <div style="display:flex; gap:6px;">
-      <button class="btn btn-sm primary" type="button" data-restore="yes">Restore</button>
+      <button class="btn btn-sm btn-primary" type="button" data-restore="yes">Restore</button>
       <button class="btn btn-sm" type="button" data-restore="no">Discard</button>
     </div>`;
   out.parentNode.insertBefore(banner, out);
@@ -3892,7 +3892,7 @@ function renderChat() {
           <textarea class="user-edit-input">${escapeHtml(m.content)}</textarea>
           <div class="user-edit-actions">
             <button class="btn btn-sm" type="button" data-chat-action="edit-cancel" data-chat-id="${escapeHtml(m._id)}">Cancel</button>
-            <button class="btn btn-sm primary" type="button" data-chat-action="edit-save" data-chat-id="${escapeHtml(m._id)}">Save & resend</button>
+            <button class="btn btn-sm btn-primary" type="button" data-chat-action="edit-save" data-chat-id="${escapeHtml(m._id)}">Save & resend</button>
           </div>
         </div>
       </div>`;
@@ -4704,9 +4704,9 @@ async function refreshDatasets() {
         </div>
         <div class="row-sub" style="font-family:var(--font-mono);">${escapeHtml(pattern)}</div>
         <div class="row-actions">
-          ${m.format === 'sft_chat' ? `<button type="button" class="btn primary btn-sm" data-action="train-sft" data-name="${escapeHtml(m.name)}" title="Open Training with this dataset loaded — one click from here to a queued job">Train SFT →</button>` : ''}
-          ${m.format === 'grpo_groups' ? `<button type="button" class="btn primary btn-sm" data-action="train-grpo" data-name="${escapeHtml(m.name)}" title="Open Training with this dataset loaded — one click from here to a queued job">Train GRPO →</button>` : ''}
-          <button type="button" class="btn ${m.format === 'raw' ? 'primary ' : ''}btn-sm" data-action="synth" data-name="${escapeHtml(m.name)}">Synthesize eval</button>
+          ${m.format === 'sft_chat' ? `<button type="button" class="btn btn-primary btn-sm" data-action="train-sft" data-name="${escapeHtml(m.name)}" title="Open Training with this dataset loaded — one click from here to a queued job">Train SFT →</button>` : ''}
+          ${m.format === 'grpo_groups' ? `<button type="button" class="btn btn-primary btn-sm" data-action="train-grpo" data-name="${escapeHtml(m.name)}" title="Open Training with this dataset loaded — one click from here to a queued job">Train GRPO →</button>` : ''}
+          <button type="button" class="btn ${m.format === 'raw' ? 'btn-primary ' : ''}btn-sm" data-action="synth" data-name="${escapeHtml(m.name)}">Synthesize eval</button>
           <button type="button" class="btn btn-sm" data-action="del" data-name="${escapeHtml(m.name)}">Delete</button>
         </div>
       </div>`;
@@ -5014,7 +5014,7 @@ async function refreshSuites() {
         <div class="tabular-nums">${s.num_examples.toLocaleString()} examples · <span class="scorer-badge">${escapeHtml(s.default_scorer_kind)}</span></div>
         <div style="display:flex; gap:6px; align-items:center;">${recentBadge} ${sparkline}</div>
         <div class="row-actions">
-          <button type="button" class="btn primary btn-sm" data-suite="${escapeHtml(s.name)}" data-action="run" ${evalActiveAdapter ? `title="Score ${escapeHtml(evalActiveAdapter)} (the active adapter) on this suite"` : 'title="Score the base model on this suite"'}>Run</button>
+          <button type="button" class="btn btn-primary btn-sm" data-suite="${escapeHtml(s.name)}" data-action="run" ${evalActiveAdapter ? `title="Score ${escapeHtml(evalActiveAdapter)} (the active adapter) on this suite"` : 'title="Score the base model on this suite"'}>Run</button>
           <button type="button" class="btn btn-sm" data-suite="${escapeHtml(s.name)}" data-action="compare" ${evalActiveAdapter ? `title="Compare base vs ${escapeHtml(evalActiveAdapter)} (the active adapter) — to compare a different adapter, use Run eval… on its card under Adapters"` : 'disabled title="No adapter is active — load one on the Adapters page, or use Run eval… on any adapter card"'}>A/B${evalActiveAdapter ? '' : ''}</button>
           <button type="button" class="btn btn-sm" data-suite="${escapeHtml(s.name)}" data-action="preview" title="Show the first few examples without running">Preview</button>
           <button type="button" class="btn btn-sm" data-suite="${escapeHtml(s.name)}" data-action="del">Delete</button>
@@ -5886,7 +5886,7 @@ async function refreshJudgments() {
           <div class="tabular-nums">${m.num_rows} judgments</div>
           <div style="display:flex; gap:8px; align-items:center; font-size:11px;">${winnerBar}<span class="hint">A ${winners.a||0} · T ${winners.tie||0} · B ${winners.b||0}</span></div>
           <div class="row-actions">
-            <button type="button" class="btn primary btn-sm" data-action="judge" data-name="${escapeHtml(m.name)}">${isActive ? 'Continue' : 'Judge →'}</button>
+            <button type="button" class="btn btn-primary btn-sm" data-action="judge" data-name="${escapeHtml(m.name)}">${isActive ? 'Continue' : 'Judge →'}</button>
             <button type="button" class="btn btn-sm" data-action="promote" data-name="${escapeHtml(m.name)}">Promote</button>
             <button type="button" class="btn btn-sm" data-action="del" data-name="${escapeHtml(m.name)}">Delete</button>
           </div>
@@ -6872,7 +6872,7 @@ function renderAdaptersAsCards(data) {
       <div class="adapter-card-actions">
         ${isActive
           ? `<button class="btn btn-sm" type="button" data-adapter-action="unload" title="Stop serving this adapter — requests fall back to the base model">Unload (use base)</button>`
-          : `<button class="btn btn-sm primary" type="button" data-adapter-action="load" title="Hot-swap this adapter in — pi's next request uses it, no restart">Make active</button>`}
+          : `<button class="btn btn-sm btn-primary" type="button" data-adapter-action="load" title="Hot-swap this adapter in — pi's next request uses it, no restart">Make active</button>`}
         <button class="btn btn-sm" type="button" data-adapter-action="eval" title="Grade this adapter on an eval suite — compare it against base">Run eval…</button>
         <button class="btn btn-sm" type="button" data-adapter-action="download">Download</button>
         <button class="btn btn-sm" type="button" data-adapter-action="delete" title="Delete this adapter from disk" style="margin-left:auto;">Delete</button>
@@ -6973,7 +6973,7 @@ async function openAdapterDrillModal(name) {
       `<span class="hint">${d.is_active ? 'ACTIVE · ' : ''}${fmtBytes(d.size_bytes)} · ${d.files.length} file${d.files.length === 1 ? '' : 's'}</span>`;
     const loadBtn = document.getElementById('adapter-drill-load');
     loadBtn.textContent = d.is_active ? 'Unload' : 'Load';
-    loadBtn.classList.toggle('primary', !d.is_active);
+    loadBtn.classList.toggle('btn-primary', !d.is_active);
     const content = document.getElementById('adapter-drill-content');
     content.innerHTML = renderAdapterDrillBody(d);
     content.querySelectorAll('[data-eval-job]').forEach(row => {
@@ -7698,7 +7698,7 @@ document.getElementById('chat-save-judgment')?.addEventListener('click', () => {
       <option value="tie" selected>Tie</option>
       <option value="skip">Skip</option>
     </select>
-    <button class="btn btn-sm primary" id="chat-save-confirm" type="button">Save</button>
+    <button class="btn btn-sm btn-primary" id="chat-save-confirm" type="button">Save</button>
     <button class="btn btn-sm" id="chat-save-cancel" type="button">Cancel</button>`;
   host.parentNode.insertBefore(form, host.nextSibling);
   document.getElementById('chat-save-cancel').addEventListener('click', () => form.remove());

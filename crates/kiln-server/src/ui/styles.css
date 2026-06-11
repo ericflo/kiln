@@ -187,6 +187,8 @@ code {
 button { font: inherit; color: inherit; }
 button, input, select, textarea { font-family: inherit; }
 .tabular-nums { font-variant-numeric: tabular-nums; font-feature-settings: 'tnum' 1; }
+/* Secondary helper text; many call sites refine via inline style (inline wins). */
+.hint { color: var(--text-muted); font-size: var(--text-xs); }
 .sr-only {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
@@ -787,13 +789,16 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
   outline-offset: -2px;
 }
 
-.btn-primary {
+/* .btn.primary is a legacy token alias — keep stragglers styled */
+.btn-primary,
+.btn.primary {
   background: linear-gradient(180deg, var(--kiln-500), var(--kiln-600));
   border-color: var(--kiln-700);
   color: white;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 2px 8px rgba(249, 115, 22, 0.18);
 }
-.btn-primary:hover:not(:disabled) {
+.btn-primary:hover:not(:disabled),
+.btn.primary:hover:not(:disabled) {
   background: linear-gradient(180deg, var(--kiln-400), var(--kiln-500));
   border-color: var(--kiln-600);
   color: white;
@@ -1728,7 +1733,6 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
   background: var(--ink-850);
 }
 .empty a { font-weight: 500; }
-.empty .api-failure { background: var(--danger-bg); border-color: var(--danger-bd); }
 .empty.api-failure { border-color: var(--danger-bd); background: var(--danger-bg); }
 
 /* =====================================================================

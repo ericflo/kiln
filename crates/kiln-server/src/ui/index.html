@@ -688,7 +688,7 @@
             <label for="dataset-file">JSONL file</label>
             <input id="dataset-file" type="file" accept=".jsonl,.json" required>
           </div>
-          <button type="submit" class="btn primary">Upload</button>
+          <button type="submit" class="btn btn-primary">Upload</button>
         </form>
         <div id="datasets-list" class="empty" style="margin-top:12px;">Loading datasets…</div>
 
@@ -744,8 +744,8 @@
           </div>
           <div style="display:flex; gap:8px; margin-top:8px;">
             <button id="synth-preview-btn" class="btn" type="button">Preview 5 examples</button>
-            <button id="synth-save-btn" class="btn primary" type="button">Save suite</button>
-            <button id="synth-save-and-run-btn" class="btn primary" type="button" title="Save the suite and immediately run it against the active adapter">Save &amp; Run vs active</button>
+            <button id="synth-save-btn" class="btn btn-primary" type="button">Save suite</button>
+            <button id="synth-save-and-run-btn" class="btn btn-primary" type="button" title="Save the suite and immediately run it against the active adapter">Save &amp; Run vs active</button>
           </div>
           <div id="synth-preview-output" style="margin-top:12px;"></div>
         </div>
@@ -775,7 +775,7 @@
             <label for="judgment-create-name">New judgment dataset</label>
             <input id="judgment-create-name" type="text" placeholder="my-judgments">
           </div>
-          <button id="judgment-create-btn" type="button" class="btn primary">Create</button>
+          <button id="judgment-create-btn" type="button" class="btn btn-primary">Create</button>
         </div>
         <div id="judgments-list" class="empty" style="margin-top:12px;">Loading judgment datasets…</div>
 
@@ -803,7 +803,7 @@
                 <input id="judgment-autoadvance" type="checkbox" checked> Auto-advance
               </label>
             </div>
-            <button id="judgment-generate-btn" type="button" class="btn primary">
+            <button id="judgment-generate-btn" type="button" class="btn btn-primary">
               Generate pair <span class="judge-kbd">G</span>
             </button>
           </div>
@@ -858,7 +858,7 @@
               <label for="compile-judge-adapter">Validate adapter</label>
               <select id="compile-judge-adapter"><option value="">Base model</option></select>
             </div>
-            <button id="compile-btn" class="btn primary" type="button">Compile to SFT</button>
+            <button id="compile-btn" class="btn btn-primary" type="button">Compile to SFT</button>
             <button id="validate-btn" class="btn" type="button">Validate adapter</button>
           </div>
           <div id="compile-output" style="margin-top:8px;"></div>
@@ -991,7 +991,7 @@
       <div class="modal-head">
         <h2 id="adapter-drill-title">Adapter</h2>
         <span class="modal-meta" id="adapter-drill-meta"></span>
-        <button class="btn btn-sm primary" id="adapter-drill-load" type="button">Load</button>
+        <button class="btn btn-sm btn-primary" id="adapter-drill-load" type="button">Load</button>
         <button class="btn btn-sm" id="adapter-drill-eval" type="button">Run eval…</button>
         <button class="modal-close" id="adapter-drill-close" aria-label="Close"><svg class="icn" aria-hidden="true"><use href="#i-close"></use></svg></button>
       </div>
