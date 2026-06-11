@@ -3607,10 +3607,19 @@ fn resolve_speculative_mode_from_config(
             .map(ResolvedSpeculativeMode::SkipLayer)
             .unwrap_or(ResolvedSpeculativeMode::Off),
         SpecMethod::Mtp => {
-            let greedy_without_lora = sampling.temperature == 0.0 && !has_active_lora;
+            let greedy = sampling.temperature == 0.0;
+            // MTP now rides with an active LoRA: the verify pass applies
+            // the adapter, so committed tokens are exactly the tuned
+            // model's output. The draft block applies the adapter's
+            // `mtp.*` LoRA when present (MTP-trained adapters); without
+            // it the base draft can only cost acceptance rate, never
+            // fidelity. The old `!has_active_lora` gate predates the
+            // adapter-threaded MTP path and silently denied the speedup
+            // to every tuned adapter — the product's primary traffic.
+            let greedy_without_lora = greedy && !has_active_lora;
             if mtp_supported
                 && native_mtp_allowed
-                && greedy_without_lora
+                && greedy
                 && prompt_tokens <= speculative_policy.mtp_max_prompt_tokens
             {
                 ResolvedSpeculativeMode::Mtp
@@ -10479,7 +10488,7 @@ mod tests {
     }
 
     #[test]
-    fn mtp_requires_greedy_request_and_no_lora() {
+    fn mtp_requires_greedy_request() {
         let cfg = SpeculativeDecodingConfig {
             enabled: true,
             method: SpecMethod::Mtp,
@@ -10511,6 +10520,10 @@ mod tests {
         );
         assert!(matches!(sampled, ResolvedSpeculativeMode::Off));
 
+        // An active LoRA no longer disables MTP: the verify pass applies
+        // the adapter (output fidelity is anchored there), and MTP-trained
+        // adapters bring their own draft-block LoRA. Tuned adapters are
+        // kiln's primary traffic — they keep the speedup.
         let with_lora = resolve_speculative_mode_from_config(
             &ModelConfig::qwen3_5_4b(),
             &cfg,
@@ -10521,7 +10534,7 @@ mod tests {
             true,
             default_speculative_policy_for_test(),
         );
-        assert!(matches!(with_lora, ResolvedSpeculativeMode::Off));
+        assert!(matches!(with_lora, ResolvedSpeculativeMode::Mtp));
 
         let long_prompt = resolve_speculative_mode_from_config(
             &ModelConfig::qwen3_5_4b(),

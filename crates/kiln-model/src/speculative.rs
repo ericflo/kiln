@@ -838,6 +838,7 @@ pub fn speculative_mtp_decode_step(
     _params: &SamplingParams,
     eos_token_ids: &[TokenId],
     _rng: &mut StdRng,
+    lora: Option<&crate::lora_loader::LoraWeights>,
 ) -> Result<MtpSpeculativeStepResult> {
     // 1. Draft: one MTP step produces a single candidate next token.
     //
@@ -861,6 +862,7 @@ pub fn speculative_mtp_decode_step(
         mtp_block_table,
         base_pos,
         mtp_pos,
+        lora,
     )
     .context("mtp draft step failed")?;
     // Phase C35 H13 A/B — optional FP32 promotion before argmax. See
@@ -880,6 +882,11 @@ pub fn speculative_mtp_decode_step(
         .snapshot_for_decode_rollback()
         .context("snapshot linear attention state before MTP verify")?;
     let verify_input = [last_token, draft_token];
+    // The verify pass is the correctness anchor: with the adapter applied
+    // here, every COMMITTED token is exactly what the tuned model would
+    // emit — a base-weight draft can only cost acceptance rate, never
+    // output fidelity. (The old `None` was scaffolding parity from before
+    // adapters could ride this path at all.)
     let (verify_logits, hidden_after_draft) = model_forward_paged_with_last_hidden(
         backend,
         &verify_input,
@@ -889,7 +896,7 @@ pub fn speculative_mtp_decode_step(
         base_block_table,
         base_pos,
         Some(linear_state),
-        None, // no LoRA on the verify pass — keep parity with scaffolding.
+        lora,
         None, // positions_gpu: let the forward pass build positions internally.
     )
     .context("mtp two-token verify forward failed")?;
@@ -1027,7 +1034,7 @@ pub fn speculative_mtp_decode_step(
             base_block_table,
             base_pos,
             Some(linear_state),
-            None,
+            lora,
             None,
         )
         .context("mtp rejection replay forward failed")?;

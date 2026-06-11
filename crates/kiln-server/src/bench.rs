@@ -2334,6 +2334,8 @@ fn bench_latency_paged_mtp(
             &params,
             &eos_token_ids,
             &mut rng,
+            // The bench measures base-model MTP throughput — no adapter.
+            None,
         );
         kiln_model::mtp_debug::clear_h_main_replay_prefix_tokens();
         let step = step.context("speculative_mtp_decode_step failed")?;

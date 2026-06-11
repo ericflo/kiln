@@ -97,6 +97,13 @@ impl LoraLayerWeights {
 pub struct LoraWeights {
     /// Per-layer LoRA weights, indexed by layer number.
     pub layers: Vec<LoraLayerWeights>,
+    /// LoRA weights for the native MTP (multi-token-prediction) draft
+    /// block, when the adapter was trained with MTP alignment. Keyed in
+    /// the safetensors as `...mtp.layers.0.{self_attn,mlp}.{module}...`.
+    /// `None` for adapters that predate MTP training — the draft block
+    /// then runs base weights (correct, but acceptance degrades as the
+    /// tuned model diverges from the base).
+    pub mtp: Option<LoraLayerWeights>,
     /// LoRA rank.
     pub rank: usize,
     /// LoRA alpha (scaling factor).
@@ -119,7 +126,7 @@ impl LoraWeights {
         if !ResidencyBackend::runtime_supports_resident_activation(backend) {
             return Ok(());
         }
-        for layer in &self.layers {
+        for layer in self.layers.iter().chain(self.mtp.as_ref()) {
             let mut maybe_err: Option<anyhow::Error> = None;
             layer.for_each_projection(|proj| {
                 if maybe_err.is_some() {
@@ -152,7 +159,7 @@ impl LoraWeights {
         if !ResidencyBackend::runtime_supports_resident_activation(backend) {
             return;
         }
-        for layer in &self.layers {
+        for layer in self.layers.iter().chain(self.mtp.as_ref()) {
             layer.for_each_projection(|proj| {
                 // #1082: `evict_resident_activation` now takes a kt
                 // `&kiln_tensor::Tensor`, so pass `proj.a` / `proj.b`
@@ -205,11 +212,18 @@ impl LoraWeights {
             .context("failed to deserialize safetensors")?;
 
         // Parse all tensor names into a map: (layer_idx, module_name, "A"|"B") -> tensor_name
+        // MTP-block keys (`...mtp.layers.0...`) go to their own map — they
+        // would otherwise collide with main layer 0.
         let mut tensor_map: HashMap<(usize, String, String), String> = HashMap::new();
+        let mut mtp_tensor_map: HashMap<(String, String), String> = HashMap::new();
 
         for name in tensors.names() {
             if let Some(parsed) = parse_peft_key(name) {
-                tensor_map.insert((parsed.layer, parsed.module, parsed.ab), name.to_string());
+                if parsed.is_mtp {
+                    mtp_tensor_map.insert((parsed.module, parsed.ab), name.to_string());
+                } else {
+                    tensor_map.insert((parsed.layer, parsed.module, parsed.ab), name.to_string());
+                }
             }
         }
 
@@ -257,8 +271,53 @@ impl LoraWeights {
             layers.push(layer);
         }
 
+        // Optional MTP draft-block LoRA (one full-attention layer, k=1).
+        let mut mtp_layer = LoraLayerWeights::default();
+        let mut mtp_any = false;
+        for module in &config.target_modules {
+            let a_key = mtp_tensor_map.get(&(module.clone(), "A".to_string()));
+            let b_key = mtp_tensor_map.get(&(module.clone(), "B".to_string()));
+            if let (Some(a_name), Some(b_name)) = (a_key, b_key) {
+                let a_view = tensors
+                    .tensor(a_name)
+                    .with_context(|| format!("failed to get tensor {a_name}"))?;
+                let b_view = tensors
+                    .tensor(b_name)
+                    .with_context(|| format!("failed to get tensor {b_name}"))?;
+                let a = safetensor_to_kt(&a_view, device)
+                    .with_context(|| format!("converting {a_name}"))?;
+                let b = safetensor_to_kt(&b_view, device)
+                    .with_context(|| format!("converting {b_name}"))?;
+                let proj = LoraProjectionWeights { a, b };
+                mtp_any = true;
+                match module.as_str() {
+                    "q_proj" => mtp_layer.q_proj = Some(proj),
+                    "k_proj" => mtp_layer.k_proj = Some(proj),
+                    "v_proj" => mtp_layer.v_proj = Some(proj),
+                    "o_proj" => mtp_layer.o_proj = Some(proj),
+                    "gate_proj" => mtp_layer.gate_proj = Some(proj),
+                    "up_proj" => mtp_layer.up_proj = Some(proj),
+                    "down_proj" => mtp_layer.down_proj = Some(proj),
+                    _ => {
+                        mtp_any = mtp_any
+                            && (mtp_layer.q_proj.is_some()
+                                || mtp_layer.k_proj.is_some()
+                                || mtp_layer.v_proj.is_some()
+                                || mtp_layer.o_proj.is_some()
+                                || mtp_layer.gate_proj.is_some()
+                                || mtp_layer.up_proj.is_some()
+                                || mtp_layer.down_proj.is_some());
+                        tracing::warn!(
+                            "unsupported MTP LoRA target module: {module}, skipping"
+                        );
+                    }
+                }
+            }
+        }
+
         Ok(Self {
             layers,
+            mtp: mtp_any.then_some(mtp_layer),
             rank,
             alpha,
             scale,
@@ -271,6 +330,9 @@ struct ParsedKey {
     layer: usize,
     module: String,
     ab: String, // "A" or "B"
+    /// Key addresses the MTP draft block (`...mtp.layers.{i}...`) rather
+    /// than a main-model layer.
+    is_mtp: bool,
 }
 
 /// Parse a PEFT-style safetensors key into layer index, module name, and A/B indicator.
@@ -299,10 +361,15 @@ fn parse_peft_key(key: &str) -> Option<ParsedKey> {
     // The module name is the part just before "lora_A" or "lora_B"
     let module = parts.get(lora_pos.checked_sub(1)?)?.to_string();
 
+    // `...mtp.layers.0...` keys address the MTP draft block; without this
+    // check they'd alias main layer 0.
+    let is_mtp = parts[..layer_pos].contains(&"mtp");
+
     Some(ParsedKey {
         layer: layer_idx,
         module,
         ab,
+        is_mtp,
     })
 }
 
@@ -501,6 +568,110 @@ mod tests {
     fn test_parse_peft_key_invalid() {
         assert!(parse_peft_key("random.key.name").is_none());
         assert!(parse_peft_key("layers.abc.q_proj.lora_A.weight").is_none());
+    }
+
+    /// MTP draft-block keys must parse as MTP — without the flag they'd
+    /// alias main layer 0 and silently corrupt its LoRA.
+    #[test]
+    fn test_parse_peft_key_mtp() {
+        let key = "base_model.model.model.mtp.layers.0.self_attn.q_proj.lora_A.weight";
+        let parsed = parse_peft_key(key).unwrap();
+        assert!(parsed.is_mtp);
+        assert_eq!(parsed.layer, 0);
+        assert_eq!(parsed.module, "q_proj");
+
+        let main_key = "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight";
+        assert!(!parse_peft_key(main_key).unwrap().is_mtp);
+    }
+
+    /// Full load round-trip: an adapter carrying both main-layer and MTP
+    /// keys loads with `mtp: Some(...)`; an adapter without MTP keys
+    /// (every adapter trained before MTP alignment) loads `mtp: None`.
+    #[test]
+    fn test_load_adapter_with_and_without_mtp_keys() -> Result<()> {
+        use std::collections::BTreeMap;
+
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join("adapter_config.json"),
+            r#"{"r": 2, "lora_alpha": 4.0, "target_modules": ["q_proj", "gate_proj"]}"#,
+        )?;
+
+        let a_data: Vec<f32> = vec![0.1; 2 * 4]; // [rank=2, in=4]
+        let b_data: Vec<f32> = vec![0.2; 4 * 2]; // [out=4, rank=2]
+        fn bytemuck_cast_slice_f32(data: &[f32]) -> &[u8] {
+            unsafe {
+                std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
+            }
+        }
+        fn mk<'a>(data: &'a [f32], shape: Vec<usize>) -> safetensors::tensor::TensorView<'a> {
+            safetensors::tensor::TensorView::new(
+                safetensors::Dtype::F32,
+                shape,
+                bytemuck_cast_slice_f32(data),
+            )
+            .unwrap()
+        }
+
+        let mut tensors: BTreeMap<String, safetensors::tensor::TensorView<'_>> = BTreeMap::new();
+        tensors.insert(
+            "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight".into(),
+            mk(&a_data, vec![2, 4]),
+        );
+        tensors.insert(
+            "base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight".into(),
+            mk(&b_data, vec![4, 2]),
+        );
+        tensors.insert(
+            "base_model.model.model.mtp.layers.0.self_attn.q_proj.lora_A.weight".into(),
+            mk(&a_data, vec![2, 4]),
+        );
+        tensors.insert(
+            "base_model.model.model.mtp.layers.0.self_attn.q_proj.lora_B.weight".into(),
+            mk(&b_data, vec![4, 2]),
+        );
+        tensors.insert(
+            "base_model.model.model.mtp.layers.0.mlp.gate_proj.lora_A.weight".into(),
+            mk(&a_data, vec![2, 4]),
+        );
+        tensors.insert(
+            "base_model.model.model.mtp.layers.0.mlp.gate_proj.lora_B.weight".into(),
+            mk(&b_data, vec![4, 2]),
+        );
+        let st = safetensors::serialize(&tensors, None)?;
+        std::fs::write(dir.path().join("adapter_model.safetensors"), st)?;
+
+        let loaded = LoraWeights::load(dir.path(), 1, Device::Cpu)?;
+        assert!(loaded.layers[0].q_proj.is_some(), "main layer parsed");
+        assert!(
+            loaded.layers[0].gate_proj.is_none(),
+            "MTP keys must not bleed into main layer 0"
+        );
+        let mtp = loaded.mtp.as_ref().expect("MTP block parsed");
+        assert!(mtp.q_proj.is_some());
+        assert!(mtp.gate_proj.is_some());
+        assert!(mtp.o_proj.is_none());
+
+        // Legacy adapter (no MTP keys) → mtp: None.
+        let dir2 = tempfile::tempdir()?;
+        std::fs::write(
+            dir2.path().join("adapter_config.json"),
+            r#"{"r": 2, "lora_alpha": 4.0, "target_modules": ["q_proj"]}"#,
+        )?;
+        let mut legacy: BTreeMap<String, safetensors::tensor::TensorView<'_>> = BTreeMap::new();
+        legacy.insert(
+            "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight".into(),
+            mk(&a_data, vec![2, 4]),
+        );
+        legacy.insert(
+            "base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight".into(),
+            mk(&b_data, vec![4, 2]),
+        );
+        let st2 = safetensors::serialize(&legacy, None)?;
+        std::fs::write(dir2.path().join("adapter_model.safetensors"), st2)?;
+        let legacy_loaded = LoraWeights::load(dir2.path(), 1, Device::Cpu)?;
+        assert!(legacy_loaded.mtp.is_none());
+        Ok(())
     }
 
     #[test]
