@@ -1049,6 +1049,25 @@
   </div>
 
   <!-- =================================================================
+       pi session trace drill-in modal — opens when a trace card is clicked
+       ================================================================= -->
+  <div id="trace-drill-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="trace-drill-title">
+    <div class="modal-shell" tabindex="-1">
+      <div class="modal-head">
+        <h2 id="trace-drill-title">pi session</h2>
+        <span class="modal-meta" id="trace-drill-meta"></span>
+        <button class="btn btn-sm btn-ghost" id="trace-drill-raw" type="button" title="Toggle the raw JSON view of this pi session trace"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-terminal"></use></svg> raw</button>
+        <button class="modal-close" id="trace-drill-close" aria-label="Close"><svg class="icn" aria-hidden="true"><use href="#i-close"></use></svg></button>
+      </div>
+      <div class="modal-body" style="grid-template-columns: 1fr;">
+        <div class="modal-content" id="trace-drill-content">
+          <div class="detail-empty">Loading…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- =================================================================
        Adapter drill-in modal
        ================================================================= -->
   <div id="adapter-drill-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="adapter-drill-title">
@@ -1561,11 +1580,23 @@
           <h3 style="font-size: var(--text-lg);">pi session traces</h3>
           <span class="eyebrow" id="distill-tab-traces-desc">Import pi agent sessions for distillation</span>
         </div>
-        <div style="display: flex; gap: var(--space-3); margin-bottom: var(--space-3);">
-          <button type="button" class="btn btn-sm" id="agent-traces-refresh">Rescan ~/.pi/agent/sessions/</button>
+        <div style="display: flex; gap: var(--space-3); margin-bottom: var(--space-2); flex-wrap: wrap; align-items: center;">
+          <input type="text" id="agent-traces-path" style="flex: 1 1 280px;"
+                 placeholder="Sessions folder — empty scans pi's default (~/.pi/agent/sessions/)"
+                 title="Folder to scan for pi session files. Leave empty to scan pi's default sessions folder."
+                 aria-label="Sessions folder to scan">
+          <button type="button" class="btn btn-sm" id="agent-traces-refresh" title="Scan the folder for pi sessions and rebuild the index">Scan for pi sessions</button>
+        </div>
+        <div class="form-help" style="margin-bottom: var(--space-3);">Every session pi saved on this machine becomes a browsable trace — open one to read the conversation and tool calls before distilling from it.</div>
+        <div style="display: flex; gap: var(--space-3); margin-bottom: var(--space-3); flex-wrap: wrap; align-items: center;">
+          <div id="agent-traces-chips" style="flex: 1 1 auto; min-width: 0;"></div>
+          <input type="search" id="agent-traces-dir" style="flex: 0 1 240px;"
+                 placeholder="Filter by working directory…"
+                 title="Show only sessions whose working directory contains this text"
+                 aria-label="Filter sessions by working directory">
         </div>
         <div id="agent-traces-list">
-          <div class="empty">Click rescan to discover pi sessions.</div>
+          <div class="empty">No pi sessions discovered yet. Use pi against this server, then scan to find the sessions it saved.</div>
         </div>
       </div>
 

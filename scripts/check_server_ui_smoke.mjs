@@ -574,6 +574,54 @@ async function startServer({
       finished_at_iso: null,
     },
   ];
+  // Agent-trace fixtures, mirroring api/agent_traces.rs `AgentTrace` /
+  // `TraceOutcome` (trajectory segments are kiln-train `TurnSegment`s with
+  // snake_case `kind`; assistant actions embed <think>/<tool_call> blocks
+  // exactly as the pi trace normalizer renders them). One exit-0 session
+  // and one failed+forked session so the outcome chips have something to
+  // split.
+  const smokeAgentTraces = [
+    {
+      id: 'trace-good-1111',
+      working_dir: '/home/smoke/projects/widget',
+      num_turns: 3,
+      num_tool_calls: 1,
+      outcome: { ended_with_exit_0: true, user_edited_agent_files: [], has_followup_attempt: false },
+      first_event_at: '2026-06-10T10:00:00Z',
+      last_event_at: '2026-06-10T10:05:00Z',
+      forked: false,
+      parent_id: null,
+      tool_manifest_sha: 'sha256:smoke-manifest',
+      prompt_messages: [
+        { role: 'system', content: 'You are pi.' },
+        { role: 'user', content: 'Fix the widget test' },
+      ],
+      trajectory: [
+        { role: 'assistant', content: '<think>run the tests first</think><tool_call>{"name": "bash", "arguments": {"cmd": "cargo test -p widget"}}</tool_call>', kind: 'action' },
+        { role: 'tool', content: 'test result: ok. 12 passed; 0 failed', kind: 'observation', tool_call_id: 'call-1' },
+        { role: 'assistant', content: 'All 12 widget tests pass.', kind: 'action' },
+      ],
+    },
+    {
+      id: 'trace-fail-2222',
+      working_dir: '/home/smoke/projects/gadget',
+      num_turns: 2,
+      num_tool_calls: 1,
+      outcome: { ended_with_exit_0: false, user_edited_agent_files: ['src/main.rs'], has_followup_attempt: true },
+      first_event_at: '2026-06-09T09:00:00Z',
+      last_event_at: '2026-06-09T09:30:00Z',
+      forked: true,
+      parent_id: 'trace-parent-0000',
+      tool_manifest_sha: null,
+      prompt_messages: [
+        { role: 'user', content: 'Refactor the gadget pipeline' },
+      ],
+      trajectory: [
+        { role: 'assistant', content: '<tool_call>{"name": "bash", "arguments": {"cmd": "cargo build -p gadget"}}</tool_call>', kind: 'action' },
+        { role: 'tool', content: 'error[E0308]: mismatched types', kind: 'observation', tool_call_id: 'call-2' },
+      ],
+    },
+  ];
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://127.0.0.1');
     const adapterRoute = parseAdapterRoute(url.pathname);
@@ -1147,6 +1195,41 @@ async function startServer({
       dataset.winner_histogram[removed.winner] = Math.max(0, (dataset.winner_histogram[removed.winner] || 1) - 1);
       dataset.updated_at = new Date().toISOString();
       json(res, judgmentManifest(dataset));
+      return;
+    }
+    // Agent traces (api/agent_traces.rs): discover rescans a sessions dir
+    // (optional `path` in the POST body), the index GET lists every trace,
+    // and the per-trace GET returns one full record by id.
+    if (url.pathname === '/v1/agent/traces/discover' && req.method === 'POST') {
+      const body = await readJsonBody(req);
+      if ('path' in body && typeof body.path !== 'string') {
+        apiBadRequest(res, 'discover `path` must be a string when present');
+        return;
+      }
+      json(res, {
+        indexed: smokeAgentTraces.length,
+        path: body.path || '/home/smoke/.pi/agent/sessions',
+      });
+      return;
+    }
+    if (url.pathname === '/v1/agent/traces' && req.method === 'GET') {
+      json(res, { traces: smokeAgentTraces });
+      return;
+    }
+    const traceDetailMatch = /^\/v1\/agent\/traces\/([^/]+)$/.exec(url.pathname);
+    if (traceDetailMatch && req.method === 'GET') {
+      const traceId = decodeURIComponent(traceDetailMatch[1]);
+      const trace = smokeAgentTraces.find((candidate) => candidate.id === traceId);
+      if (!trace) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: {
+          code: 'training_invalid_request',
+          message: `trace ${traceId} not indexed`,
+          hint: 'Rescan with POST /v1/agent/traces/discover.',
+        } }));
+        return;
+      }
+      json(res, trace);
       return;
     }
     if (url.pathname === '/v1/chat/completions') {
@@ -2960,6 +3043,142 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await clickAndWait(page, '#drill-close', 'Could not close the queued-job eval drill modal');
     await page.waitForFunction(() => document.getElementById('eval-drill-modal')?.hidden === true, { timeout: 5000 })
       .catch(() => fail('Queued-job eval drill modal did not close'));
+
+    // ---- Agent traces (roadmap PR 23): the Distill → Agent traces tab is
+    // actionable — entering it lists the existing index, outcome chips and
+    // a working-dir filter narrow the list client-side, the scan path
+    // round-trips into the discover POST body (persisted in localStorage),
+    // and each card drills into the recorded conversation at
+    // #distill/traces/{id} through the shared modal manager.
+    await goToPrimaryTab(page, 'distill');
+    await clickAndWait(page, '#distill-tab-traces', 'Could not open the Agent traces distill tab');
+    await waitForPanelText(page, '#agent-traces-list', /trace-good-1111/, 'Traces tab should list the first mock pi session on entry (no manual scan needed)');
+    await waitForPanelText(page, '#agent-traces-list', /trace-fail-2222/, 'Traces tab should list the second mock pi session');
+    const tracesPaneCopy = await page.$eval('#distill-tab-traces-pane', (el) => el.innerText || '');
+    if (/\/v1\/agent\/traces/.test(tracesPaneCopy)) fail('Traces tab primary copy should not name raw API routes');
+
+    // Outcome chips: exit ≠ 0 narrows to the failing session.
+    const traceChips = await page.$$eval('#agent-traces-chips .agent-chip', (els) => els.map((el) => el.textContent.trim()));
+    if (traceChips.length < 5) fail(`Traces tab should render the outcome filter chips, got ${JSON.stringify(traceChips)}`);
+    if (!traceChips[0].startsWith('All sessions')) fail(`The first outcome chip should be "All sessions", got ${JSON.stringify(traceChips[0])}`);
+    await clickAndWait(page, '[data-trace-chip="exitnz"]', 'Could not click the exit ≠ 0 outcome chip');
+    await page.waitForFunction(() => {
+      const text = document.getElementById('agent-traces-list')?.textContent || '';
+      return text.includes('trace-fail-2222') && !text.includes('trace-good-1111');
+    }, { timeout: 5000 }).catch(() => fail('exit ≠ 0 chip should narrow the list to the failing session'));
+    await clickAndWait(page, '[data-trace-chip="all"]', 'Could not reset the outcome chip filter');
+    await waitForPanelText(page, '#agent-traces-list', /trace-good-1111/, 'All-sessions chip should restore the full list');
+
+    // working_dir filter narrows client-side over the fetched index.
+    await page.type('#agent-traces-dir', 'widget');
+    await page.waitForFunction(() => {
+      const text = document.getElementById('agent-traces-list')?.textContent || '';
+      return text.includes('trace-good-1111') && !text.includes('trace-fail-2222');
+    }, { timeout: 5000 }).catch(() => fail('Working-dir filter should narrow the list to sessions under …/widget'));
+    await page.$eval('#agent-traces-dir', (el) => {
+      el.value = '';
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await waitForPanelText(page, '#agent-traces-list', /trace-fail-2222/, 'Clearing the working-dir filter should restore the list');
+
+    // Custom scan path: rides the discover POST body and persists.
+    await page.$eval('#agent-traces-path', (el) => { el.value = ''; });
+    await page.type('#agent-traces-path', '/tmp/smoke-pi-sessions');
+    const discoverResponsePromise = page.waitForResponse(
+      (response) => response.url().endsWith('/v1/agent/traces/discover'),
+      { timeout: 5000 },
+    );
+    await clickAndWait(page, '#agent-traces-refresh', 'Could not click the pi session scan button');
+    const discoverResponse = await discoverResponsePromise.catch(() => fail('Scanning should POST the discover endpoint'));
+    let discoverBody = null;
+    try { discoverBody = JSON.parse(discoverResponse.request().postData() || '{}'); } catch { fail('Discover POST body should be JSON'); }
+    if (discoverBody.path !== '/tmp/smoke-pi-sessions') fail(`Custom scan path should ride the discover body, got ${JSON.stringify(discoverBody)}`);
+    await waitForPanelText(page, '#agent-traces-list', /Indexed 2 pi sessions from/, 'Scan headline should report the indexed count and folder');
+    const persistedScanPath = await page.evaluate(() => localStorage.getItem('kiln.traces.scanPath'));
+    if (persistedScanPath !== '/tmp/smoke-pi-sessions') fail(`Scan path should persist to localStorage, got ${JSON.stringify(persistedScanPath)}`);
+    // Empty input = server default: the path key is omitted entirely.
+    await page.$eval('#agent-traces-path', (el) => { el.value = ''; });
+    const defaultDiscoverPromise = page.waitForResponse(
+      (response) => response.url().endsWith('/v1/agent/traces/discover'),
+      { timeout: 5000 },
+    );
+    await clickAndWait(page, '#agent-traces-refresh', 'Could not rescan with the default sessions folder');
+    const defaultDiscover = await defaultDiscoverPromise.catch(() => fail('Default rescan should POST the discover endpoint'));
+    let defaultDiscoverBody = null;
+    try { defaultDiscoverBody = JSON.parse(defaultDiscover.request().postData() || '{}'); } catch { fail('Default discover POST body should be JSON'); }
+    if ('path' in defaultDiscoverBody) fail(`Empty scan path should omit the path field (server default), got ${JSON.stringify(defaultDiscoverBody)}`);
+    await waitForPanelText(page, '#agent-traces-list', /trace-good-1111/, 'Rescan should re-render the session list');
+
+    // Drill-in: focus the card, open it, and the shared modal manager
+    // moves focus into the dialog while the hash gains the id segment.
+    await page.focus('[data-trace-open="trace-good-1111"]');
+    await clickAndWait(page, '[data-trace-open="trace-good-1111"]', 'Could not open the pi session drill');
+    await page.waitForFunction(
+      () => document.getElementById('trace-drill-modal')?.hidden === false
+        && window.location.hash === '#distill/traces/trace-good-1111',
+      { timeout: 5000 },
+    ).catch(async () => {
+      const actual = await page.evaluate(() => ({
+        hidden: document.getElementById('trace-drill-modal')?.hidden,
+        hash: window.location.hash,
+      })).catch(() => ({ hidden: 'unknown', hash: 'unknown' }));
+      fail(`Trace drill should open with its id in the hash, got ${JSON.stringify(actual)}`);
+    });
+    const traceFocus = await page.evaluate(() => ({
+      inModal: document.getElementById('trace-drill-modal').contains(document.activeElement),
+      active: document.activeElement?.id || document.activeElement?.tagName || 'none',
+    }));
+    if (!traceFocus.inModal) fail(`Opening the trace drill should move focus into the dialog, got activeElement=${traceFocus.active}`);
+    await waitForPanelText(page, '#trace-drill-content', /\/home\/smoke\/projects\/widget/, 'Trace drill should show the session working directory');
+    await waitForPanelText(page, '#trace-drill-content', /Fix the widget test/, 'Trace drill should render the user task turn');
+    await waitForPanelText(page, '#trace-drill-content', /cargo test -p widget/, 'Trace drill should render the tool-call arguments');
+    await waitForPanelText(page, '#trace-drill-content', /test result: ok\. 12 passed/, 'Trace drill should render the tool-result turn');
+    const traceDrillText = await page.$eval('#trace-drill-content', (el) => el.textContent || '');
+    for (const expected of ['system', 'user', 'assistant', 'tool result', 'bash', 'run the tests first']) {
+      if (!traceDrillText.includes(expected)) fail(`Trace drill should role-label turns and name tool calls; missing ${JSON.stringify(expected)}`);
+    }
+
+    // Raw JSON toggle mirrors the other drills' raw buttons.
+    await clickAndWait(page, '#trace-drill-raw', 'Could not toggle the trace raw JSON view');
+    await page.waitForSelector('#trace-drill-raw-block', { timeout: 5000 })
+      .catch(() => fail('Trace raw JSON toggle did not render its block'));
+    const traceRawPayload = await page.$eval('#trace-drill-raw-block', (el) => el.textContent || '');
+    let parsedTraceRaw = null;
+    try { parsedTraceRaw = JSON.parse(traceRawPayload); } catch { fail('Trace raw JSON block should contain valid JSON'); }
+    if (parsedTraceRaw.id !== 'trace-good-1111') fail(`Trace raw JSON should show the drilled session, got id ${JSON.stringify(parsedTraceRaw.id)}`);
+    if (!Array.isArray(parsedTraceRaw.trajectory) || parsedTraceRaw.trajectory.length !== 3) fail('Trace raw JSON should carry the full trajectory');
+    await clickAndWait(page, '#trace-drill-raw', 'Could not untoggle the trace raw JSON view');
+    await page.waitForFunction(() => !document.getElementById('trace-drill-raw-block'), { timeout: 5000 })
+      .catch(() => fail('Second trace raw JSON click should remove the block'));
+
+    // Escape closes through the modal manager: the hash entry the open
+    // minted is consumed, and focus returns to the card that opened it.
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(
+      () => document.getElementById('trace-drill-modal')?.hidden === true
+        && window.location.hash === '#distill/traces',
+      { timeout: 5000 },
+    ).catch(async () => {
+      const actual = await page.evaluate(() => ({
+        hidden: document.getElementById('trace-drill-modal')?.hidden,
+        hash: window.location.hash,
+      })).catch(() => ({ hidden: 'unknown', hash: 'unknown' }));
+      fail(`Escape should close the trace drill and consume its hash entry, got ${JSON.stringify(actual)}`);
+    });
+    const traceRestoredFocus = await page.evaluate(() => document.activeElement?.getAttribute('data-trace-open') || 'none');
+    if (traceRestoredFocus !== 'trace-good-1111') fail(`Closing the trace drill should restore focus to its card, got ${traceRestoredFocus}`);
+
+    // Deep link: a fresh boot on #distill/traces/{id} opens the drill on
+    // that session (the per-trace GET feeds it; no list fetch required).
+    // Via about:blank so the hash change is a real navigation, not a
+    // same-document fragment jump.
+    await page.goto('about:blank');
+    await page.goto(`${baseUrl}/ui#distill/traces/trace-fail-2222`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(
+      () => document.getElementById('trace-drill-modal')?.hidden === false
+        && (document.getElementById('trace-drill-content')?.textContent || '').includes('/home/smoke/projects/gadget'),
+      { timeout: 5000 },
+    ).catch(() => fail('Booting on #distill/traces/{id} should deep-link into the trace drill'));
 
   } finally {
     await browser.close();

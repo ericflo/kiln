@@ -117,7 +117,7 @@ function pushSubTabHash(pageName) {
 // --- Drill-modal hash bookkeeping (see the state machine above) --------
 // Whether WE minted the history entry for the currently-open modal of each
 // kind; decides between history.back() and replaceState on user close.
-const modalHashPushed = { eval: false, train: false, adapter: false, request: false };
+const modalHashPushed = { eval: false, train: false, adapter: false, request: false, trace: false };
 
 function modalHashOnOpen(kind, hash, alreadyOpen = false) {
   if (hashWriteDepth > 0 || !history.pushState) { modalHashPushed[kind] = false; return; }
@@ -425,9 +425,10 @@ function applyHashRoute(opts = {}) {
         sub = activeSubTab(name);
         id = null;
       }
-      // Drill ids only ride on training/queue and evals/jobs.
+      // Drill ids ride on training/queue, evals/jobs, and distill/traces.
       if (name === 'training' && sub === 'queue' && id) drill = { kind: 'train', id };
       else if (name === 'evals' && sub === 'jobs' && id) drill = { kind: 'eval', id };
+      else if (name === 'distill' && sub === 'traces' && id) drill = { kind: 'trace', id };
       else id = null;
     } else if (name === 'adapters' && sub) {
       // #adapters/{name} — the second segment is a drill id, not a sub-tab.
@@ -451,7 +452,7 @@ function applyHashRoute(opts = {}) {
   if (history.replaceState && location.hash !== canonical) history.replaceState(null, '', canonical);
 }
 
-// Open/close the four drill modals so they match the route. Closes here are
+// Open/close the five drill modals so they match the route. Closes here are
 // direct (never history.back()): this runs FROM a traversal or boot, where
 // the URL is already where it should be. Opens run hash-suppressed by the
 // caller, so the open fns' own pushState helpers stay quiet. Each modal's
@@ -505,6 +506,16 @@ function syncDrillModalsToRoute(drill) {
         modalHashPushed.request = false;
         closeRequestDrillModal();
       }
+    }
+  }
+  const traceModal = document.getElementById('trace-drill-modal');
+  if (traceModal) {
+    const openId = traceModal.hidden ? null : (traceDrillId || null);
+    if (want.kind === 'trace') {
+      if (openId !== want.id) openTraceDrillModal(want.id);
+    } else if (openId !== null) {
+      modalHashPushed.trace = false;
+      closeTraceDrillModal();
     }
   }
 }
@@ -9457,7 +9468,7 @@ function refreshActiveDistillSubTab() {
   } else if (active === 'library') {
     refreshLibraryList();
   } else if (active === 'traces') {
-    /* user-triggered via rescan button */
+    refreshAgentTraces();
   } else if (active === 'preflight') {
     refreshPreflightSurfaces();
   }
@@ -9852,42 +9863,347 @@ document.getElementById('library-publish-form')?.addEventListener('submit', asyn
   } catch (err) { toast('Publish failed: ' + err.message, 'err'); }
 });
 
-// --- Agent traces (/v1/agent/traces) --------------------------------
+// --- Agent traces (pi sessions → distillation source) ----------------
+// The Distill → Agent traces tab: every pi session saved on this machine,
+// browsable before you distill from it. Entering the tab lists the
+// existing index; the scan button rebuilds it (optionally from a custom
+// sessions folder, persisted in localStorage). Outcome chips and a
+// working-dir filter narrow the list client-side — the index rows carry
+// the full §10.3 outcome heuristics — and every card drills into the
+// recorded conversation at #distill/traces/{id}.
+const TRACES_SCAN_PATH_KEY = 'kiln.traces.scanPath';
+let agentTracesCache = null;   // last fetched index; null = never loaded
+let agentTracesScanNote = '';  // headline HTML after an explicit scan
+let agentTraceOutcomeFilter = 'all';
+
+// Outcome buckets for the filter chips, derived from the heuristics the
+// index actually carries: last bash exit code, /tree forks, follow-up
+// attempts, and user-edited agent files. A trace can land in several.
+function agentTraceOutcomeBuckets(t) {
+  const buckets = [];
+  if (t.outcome?.ended_with_exit_0 === true) buckets.push('exit0');
+  if (t.outcome?.ended_with_exit_0 === false) buckets.push('exitnz');
+  if (t.forked || t.outcome?.has_followup_attempt === true || (t.outcome?.user_edited_agent_files || []).length > 0) buckets.push('sideways');
+  if (buckets.length === 0) buckets.push('nosignal');
+  return buckets;
+}
+
+// Human-readable outcome summary shared by the cards and the drill modal.
+function agentTraceOutcomeBits(t) {
+  const bits = [];
+  if (t.outcome?.ended_with_exit_0 === true) bits.push('exit 0');
+  if (t.outcome?.ended_with_exit_0 === false) bits.push('exit ≠ 0');
+  const edited = (t.outcome?.user_edited_agent_files || []).length;
+  if (edited) bits.push(`${edited} user-edited file${edited === 1 ? '' : 's'}`);
+  if (t.outcome?.has_followup_attempt === true) bits.push('has follow-up');
+  if (t.forked) bits.push('forked');
+  return bits;
+}
+
+// List the existing index (no rescan) — fired on tab entry so the tab is
+// useful without touching the scan button.
+async function refreshAgentTraces() {
+  const node = document.getElementById('agent-traces-list');
+  if (!node) return;
+  try {
+    const list = await api('/v1/agent/traces');
+    agentTracesCache = list.traces || [];
+    renderAgentTracesList();
+  } catch (e) {
+    setListHtml(node, 'err:' + e.message, `<div class="empty">Couldn't load pi sessions: ${escapeHtml(e.message)}</div>`);
+    setListHtml(document.getElementById('agent-traces-chips'), 'err', '');
+  }
+}
+
 document.getElementById('agent-traces-refresh')?.addEventListener('click', async () => {
   const node = document.getElementById('agent-traces-list');
-  node.innerHTML = '<div class="empty">Scanning…</div>';
+  if (!node) return;
+  const customPath = (document.getElementById('agent-traces-path')?.value || '').trim();
+  // Remember the last-used folder (empty = pi's default) for next visit.
+  try { localStorage.setItem(TRACES_SCAN_PATH_KEY, customPath); } catch {}
+  setListHtml(node, 'scanning', '<div class="empty">Scanning for pi sessions…</div>');
   try {
-    // First POST /v1/agent/traces/discover to rescan ~/.pi/agent/sessions/
-    // and write the index; then GET /v1/agent/traces to list it.
+    // Rescan first (rebuilds the index), then list what it indexed. An
+    // omitted path means the server scans pi's default sessions folder.
     const discover = await api('/v1/agent/traces/discover', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({}),
+      body: JSON.stringify(customPath ? { path: customPath } : {}),
     });
+    agentTracesScanNote = `Indexed ${discover.indexed} pi session${discover.indexed === 1 ? '' : 's'} from <code>${escapeHtml(discover.path || '')}</code>.`;
     const list = await api('/v1/agent/traces');
-    const traces = list.traces || [];
-    if (traces.length === 0) {
-      node.innerHTML = `<div class="empty">No pi sessions found under <code>${escapeHtml(discover.path || '~/.pi/agent/sessions/')}</code>.</div>`;
-      return;
-    }
-    node.innerHTML = `<div class="form-help" style="margin-bottom: var(--space-3);">Indexed ${discover.indexed} pi session${discover.indexed === 1 ? '' : 's'} from <code>${escapeHtml(discover.path)}</code>.</div>` +
-      traces.map(t => {
-        const outcomeBits = [];
-        if (t.outcome?.ended_with_exit_0 === true) outcomeBits.push('exit 0');
-        if (t.outcome?.ended_with_exit_0 === false) outcomeBits.push('exit ≠ 0');
-        if (t.outcome?.user_edited_agent_files?.length) outcomeBits.push(`${t.outcome.user_edited_agent_files.length} user-edited`);
-        if (t.outcome?.has_followup_attempt === true) outcomeBits.push('has follow-up');
-        if (t.forked) outcomeBits.push('forked');
-        return `<div class="adapter-card" style="margin-bottom:var(--space-2);">
-          <div style="font-weight:600; font-family:var(--font-mono); font-size:var(--text-xs);">${escapeHtml(t.id || '?')}</div>
-          <div style="font-size:var(--text-xs); color:var(--text-muted);">${t.num_turns || 0} turns · ${t.num_tool_calls || 0} tool calls · ${escapeHtml(t.working_dir || '')}</div>
-          ${outcomeBits.length ? `<div style="font-size:var(--text-2xs); color:var(--text-muted); margin-top:var(--space-1);">${outcomeBits.map(b => escapeHtml(b)).join(' · ')}</div>` : ''}
-        </div>`;
-      }).join('');
+    agentTracesCache = list.traces || [];
+    renderAgentTracesList();
   } catch (e) {
-    node.innerHTML = `<div class="empty">Failed: ${escapeHtml(e.message)}</div>`;
+    agentTracesScanNote = '';
+    setListHtml(node, 'scanerr:' + e.message, `<div class="empty">Scan failed: ${escapeHtml(e.message)}</div>`);
   }
 });
+
+// Restore the last-used scan path (empty = server default).
+try {
+  const savedScanPath = localStorage.getItem(TRACES_SCAN_PATH_KEY);
+  const scanPathInput = document.getElementById('agent-traces-path');
+  if (savedScanPath && scanPathInput) scanPathInput.value = savedScanPath;
+} catch {}
+
+document.getElementById('agent-traces-dir')?.addEventListener('input', () => renderAgentTracesList());
+
+function renderAgentTracesList() {
+  const node = document.getElementById('agent-traces-list');
+  const chipsNode = document.getElementById('agent-traces-chips');
+  if (!node) return;
+  const all = agentTracesCache || [];
+  const dirNeedle = (document.getElementById('agent-traces-dir')?.value || '').trim().toLowerCase();
+
+  const counts = { all: all.length, exit0: 0, exitnz: 0, sideways: 0, nosignal: 0 };
+  for (const t of all) for (const b of agentTraceOutcomeBuckets(t)) counts[b] += 1;
+  // A rescan can empty the active bucket; degrade to All instead of
+  // pinning the list on a filter that now matches nothing.
+  if (agentTraceOutcomeFilter !== 'all' && counts[agentTraceOutcomeFilter] === 0) agentTraceOutcomeFilter = 'all';
+
+  // Outcome chips — same pattern as the recent-requests client chips.
+  const chip = (key, label, n, title) =>
+    `<button type="button" class="agent-chip${agentTraceOutcomeFilter === key ? ' active' : ''}" data-trace-chip="${key}" title="${escapeHtml(title)}">${escapeHtml(label)}<span class="count">${n}</span></button>`;
+  const chipsHtml = all.length === 0 ? '' : `<div class="agent-chips" role="group" aria-label="Filter pi sessions by outcome" style="margin-bottom:0;">`
+    + chip('all', 'All sessions', counts.all, 'Every indexed pi session')
+    + chip('exit0', 'exit 0', counts.exit0, 'Sessions whose last shell command exited 0 — the likely successes worth distilling')
+    + chip('exitnz', 'exit ≠ 0', counts.exitnz, 'Sessions whose last shell command failed')
+    + chip('sideways', 'went sideways', counts.sideways, 'Forked with /tree, retried in a follow-up session, or hand-edited afterwards — signs the original branch went wrong')
+    + chip('nosignal', 'no signal', counts.nosignal, 'Sessions with no outcome heuristics extracted')
+    + '</div>';
+  if (chipsNode && setListHtml(chipsNode, 'chips:' + JSON.stringify([agentTraceOutcomeFilter, counts]), chipsHtml)) {
+    chipsNode.querySelectorAll('[data-trace-chip]').forEach(c => c.addEventListener('click', () => {
+      agentTraceOutcomeFilter = c.dataset.traceChip;
+      renderAgentTracesList();
+    }));
+  }
+
+  if (agentTracesCache === null) return; // first load pending — keep the static hint
+  const noteHtml = agentTracesScanNote ? `<div class="form-help" style="margin-bottom: var(--space-3);">${agentTracesScanNote}</div>` : '';
+  if (all.length === 0) {
+    setListHtml(node, 'empty:' + agentTracesScanNote,
+      noteHtml + '<div class="empty">No pi sessions found yet. Use pi against this server, then scan again — every session it saves becomes distillable here.</div>');
+    return;
+  }
+
+  const filtered = all.filter(t => {
+    if (agentTraceOutcomeFilter !== 'all' && !agentTraceOutcomeBuckets(t).includes(agentTraceOutcomeFilter)) return false;
+    if (dirNeedle && !String(t.working_dir || '').toLowerCase().includes(dirNeedle)) return false;
+    return true;
+  });
+  if (filtered.length === 0) {
+    setListHtml(node, 'nomatch:' + JSON.stringify([agentTraceOutcomeFilter, dirNeedle, agentTracesScanNote]),
+      noteHtml + '<div class="empty">No pi sessions match the current filters.</div>');
+    return;
+  }
+
+  const listKey = 'list:' + JSON.stringify([agentTraceOutcomeFilter, dirNeedle, agentTracesScanNote,
+    filtered.map(t => [t.id, t.num_turns, t.num_tool_calls, t.last_event_at])]);
+  const cards = filtered.map(t => {
+    const bits = agentTraceOutcomeBits(t);
+    const when = t.last_event_at || t.first_event_at || '';
+    return `<button type="button" class="adapter-card" data-trace-open="${escapeHtml(t.id || '')}" style="display:block; width:100%; text-align:left; font:inherit; color:inherit; margin-bottom:var(--space-2);" title="Open this pi session — read the conversation and tool calls before distilling from it">
+      <div style="display:flex; justify-content:space-between; gap:var(--space-3); align-items:baseline; flex-wrap:wrap;">
+        <span style="font-weight:600; font-family:var(--font-mono); font-size:var(--text-xs);">${escapeHtml(t.id || '?')}</span>
+        ${when ? `<span style="font-size:var(--text-2xs); color:var(--text-muted);">${escapeHtml(when)}</span>` : ''}
+      </div>
+      <div style="font-size:var(--text-xs); color:var(--text-muted);">${t.num_turns || 0} turns · ${t.num_tool_calls || 0} tool calls · ${escapeHtml(t.working_dir || '')}</div>
+      ${bits.length ? `<div style="font-size:var(--text-2xs); color:var(--text-muted); margin-top:var(--space-1);">${bits.map(b => escapeHtml(b)).join(' · ')}</div>` : ''}
+    </button>`;
+  }).join('');
+  if (setListHtml(node, listKey, noteHtml + cards)) {
+    node.querySelectorAll('[data-trace-open]').forEach(btn => {
+      btn.addEventListener('click', () => openTraceDrillModal(btn.dataset.traceOpen));
+    });
+  }
+}
+
+/* =====================================================================
+   pi session trace drill-in modal — the recorded conversation: turns,
+   tool calls, outcome heuristics. Read it before you distill from it.
+   ===================================================================== */
+let traceDrillId = null;
+let traceDrillData = null;
+// Full text per clamped block in the current drill render, keyed by the
+// data-trace-clamp attribute; the Show-all buttons swap it in on demand.
+let traceDrillTexts = new Map();
+const TRACE_CLAMP_CHARS = 700;
+
+// Trace ids are pi session ids — stable UUID-like file stems — so they
+// ride the #distill/traces/{id} deep-link grammar like the other drills.
+async function openTraceDrillModal(id) {
+  traceDrillId = id;
+  modalHashOnOpen('trace', '#distill/traces/' + encodeURIComponent(id));
+  const modal = document.getElementById('trace-drill-modal');
+  if (!modal) return;
+  modal.hidden = false;
+  openModal(modal, { onClose: userCloseTraceDrillModal });
+  document.getElementById('trace-drill-title').textContent = 'pi session';
+  document.getElementById('trace-drill-meta').textContent = id;
+  const content = document.getElementById('trace-drill-content');
+  content.innerHTML = '<div class="detail-empty">Loading…</div>';
+  traceDrillData = null;
+  try {
+    const t = await api('/v1/agent/traces/' + encodeURIComponent(id));
+    if (traceDrillId !== id) return; // closed or re-targeted while fetching
+    traceDrillData = t;
+    document.getElementById('trace-drill-title').textContent = `pi session ${String(t.id || id).slice(0, 8)}`;
+    const metaBits = [`${t.num_turns || 0} turns`, `${t.num_tool_calls || 0} tool calls`];
+    const outcomeBits = agentTraceOutcomeBits(t);
+    if (outcomeBits.length) metaBits.push(outcomeBits.join(' · '));
+    document.getElementById('trace-drill-meta').textContent = metaBits.join(' · ');
+    content.innerHTML = renderTraceDrillBody(t);
+    content.querySelectorAll('[data-trace-expand]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const pre = content.querySelector(`pre[data-trace-clamp="${btn.dataset.traceExpand}"]`);
+        const full = traceDrillTexts.get(btn.dataset.traceExpand);
+        if (pre && full != null) { pre.textContent = full; btn.remove(); }
+      });
+    });
+  } catch (e) {
+    if (traceDrillId !== id) return;
+    content.innerHTML = `<div class="detail-empty">Couldn't load this pi session: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function closeTraceDrillModal() {
+  traceDrillId = null;
+  traceDrillData = null;
+  traceDrillTexts = new Map();
+  const modal = document.getElementById('trace-drill-modal');
+  if (!modal) return;
+  modal.hidden = true;
+  closeModal(modal);
+}
+// User-initiated close (X / backdrop / Esc): walk history per the
+// deep-link state machine, exactly like the other drills.
+function userCloseTraceDrillModal() {
+  modalHashOnUserClose('trace', '#distill/traces', closeTraceDrillModal);
+}
+document.getElementById('trace-drill-close')?.addEventListener('click', userCloseTraceDrillModal);
+document.getElementById('trace-drill-modal')?.addEventListener('click', ev => {
+  if (ev.target.id === 'trace-drill-modal') userCloseTraceDrillModal();
+});
+// Raw JSON toggle — same pattern as the other drill modals' `raw` buttons.
+document.getElementById('trace-drill-raw')?.addEventListener('click', () => {
+  if (!traceDrillData) return;
+  const content = document.getElementById('trace-drill-content');
+  if (!content) return;
+  const existing = content.querySelector('#trace-drill-raw-block');
+  if (existing) { existing.remove(); return; }
+  const pre = document.createElement('pre');
+  pre.id = 'trace-drill-raw-block';
+  pre.className = 'req-pre';
+  pre.style.cssText = 'max-height:50vh; margin:var(--space-4) var(--space-5);';
+  pre.textContent = JSON.stringify(traceDrillData, null, 2);
+  content.appendChild(pre);
+  pre.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+});
+
+// Split an assistant action segment into displayable pieces: <think>
+// blocks, <tool_call>{json}</tool_call> blocks (the form the trace
+// normalizer emits), and the plain-text runs between them.
+function traceSegmentPieces(content) {
+  const pieces = [];
+  const re = /<think>([\s\S]*?)<\/think>|<tool_call>([\s\S]*?)<\/tool_call>/g;
+  let last = 0;
+  let m;
+  while ((m = re.exec(content)) !== null) {
+    if (m.index > last) pieces.push({ kind: 'text', text: content.slice(last, m.index) });
+    if (m[1] !== undefined) pieces.push({ kind: 'think', text: m[1] });
+    else pieces.push({ kind: 'tool_call', text: m[2] });
+    last = re.lastIndex;
+  }
+  if (last < content.length) pieces.push({ kind: 'text', text: content.slice(last) });
+  return pieces.filter(p => p.kind === 'tool_call' || p.text.trim().length > 0);
+}
+
+function renderTraceDrillBody(t) {
+  traceDrillTexts = new Map();
+  let clampSeq = 0;
+  // Long content is clamped with a Show-all expander so a 200-line tool
+  // result doesn't bury the conversation.
+  const clamped = (text) => {
+    const full = String(text ?? '');
+    if (full.length <= TRACE_CLAMP_CHARS) return `<pre class="req-pre">${escapeHtml(full)}</pre>`;
+    const key = 'seg' + (clampSeq++);
+    traceDrillTexts.set(key, full);
+    return `<pre class="req-pre" data-trace-clamp="${key}">${escapeHtml(full.slice(0, TRACE_CLAMP_CHARS))}…</pre>
+      <button type="button" class="btn btn-sm btn-ghost" data-trace-expand="${key}">Show all ${full.length.toLocaleString()} characters</button>`;
+  };
+
+  // Metadata header: where it ran, when, how big, how it ended.
+  const stats = [
+    ['Working dir', t.working_dir || '—'],
+    ['Turns', String(t.num_turns || 0)],
+    ['Tool calls', String(t.num_tool_calls || 0)],
+    ['Started', t.first_event_at || '—'],
+    ['Last event', t.last_event_at || '—'],
+  ];
+  if (t.parent_id) stats.push(['Forked from', t.parent_id]);
+  const outcomeBits = agentTraceOutcomeBits(t);
+  stats.push(['Outcome', outcomeBits.length ? outcomeBits.join(' · ') : 'no signal extracted']);
+  const statRow = stats
+    .map(([k, v]) => `<div class="req-stat"><span class="req-stat-k">${escapeHtml(k)}</span><span class="req-stat-v">${escapeHtml(v)}</span></div>`)
+    .join('');
+
+  const turnHtml = (role, kindLabel, bodyHtml) => `
+    <div class="req-section">
+      <div class="req-section-head">${escapeHtml(role)}${kindLabel ? ` <span class="hint" style="text-transform:none; letter-spacing:normal;">${escapeHtml(kindLabel)}</span>` : ''}</div>
+      ${bodyHtml}
+    </div>`;
+
+  // Leading system/user context — the task the session started from.
+  const promptHtml = (t.prompt_messages || [])
+    .map(m => turnHtml(m.role || '?', 'task scaffold', clamped(m.content)))
+    .join('');
+
+  // The trajectory proper: actions (with tool calls broken out by name),
+  // observations (tool results), and mid-session user/system context.
+  const segHtml = (t.trajectory || []).map(seg => {
+    const kind = seg.kind || 'context';
+    const content = seg.content || '';
+    if (seg.role === 'assistant' && /<tool_call>|<think>/.test(content)) {
+      const piecesHtml = traceSegmentPieces(content).map(p => {
+        if (p.kind === 'tool_call') {
+          let name = '?';
+          let argsText = p.text.trim();
+          try {
+            const parsed = JSON.parse(p.text);
+            if (parsed && typeof parsed === 'object') {
+              name = parsed.name || '?';
+              argsText = JSON.stringify(parsed.arguments ?? {});
+            }
+          } catch { /* malformed call JSON — show it verbatim */ }
+          return `<div style="border:1px solid var(--border); border-radius:var(--radius-sm); padding:var(--space-2) var(--space-3); margin:var(--space-1) 0; background:var(--surface);">
+            <div style="font-size:var(--text-xs); color:var(--text-muted); margin-bottom:4px;">tool call · <strong style="font-family:var(--font-mono); color:var(--text);">${escapeHtml(name)}</strong></div>
+            ${clamped(argsText)}
+          </div>`;
+        }
+        if (p.kind === 'think') {
+          return `<div style="margin:var(--space-1) 0;"><div style="font-size:var(--text-2xs); color:var(--text-muted); text-transform:uppercase; letter-spacing:var(--tracking-caps); margin-bottom:4px;">thinking</div>${clamped(p.text.trim())}</div>`;
+        }
+        return clamped(p.text.trim());
+      }).join('');
+      return turnHtml('assistant', null, piecesHtml);
+    }
+    const role = seg.role || '?';
+    const label = kind === 'observation'
+      ? `tool result${seg.tool_call_id ? ' · ' + seg.tool_call_id : ''}`
+      : (kind === 'action' ? null : 'context');
+    return turnHtml(role, label, clamped(content));
+  }).join('');
+
+  const conversationHtml = (promptHtml || segHtml)
+    ? promptHtml + segHtml
+    : '<div class="empty">This index entry predates turn-level capture — scan again to re-read the session with the current parser.</div>';
+
+  return `<div class="req-detail">
+    <div class="req-stats">${statRow}</div>
+    ${conversationHtml}
+  </div>`;
+}
 
 // --- Preflight (/v1/preflight/*) ------------------------------------
 async function refreshPreflightSurfaces() {
