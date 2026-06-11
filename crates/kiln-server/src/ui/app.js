@@ -292,9 +292,33 @@ window.selectPage = selectPage;
    warning, and ambient document.title + favicon so real problems break
    through without alt-tabbing back to the dashboard. */
 let lastRequestHealth = null;
+// Adapters demoted by a §8.7 eval gate are renamed `<name>.failed` (or
+// `<name>.failed-<unix_ms>` on collision) by eval/worker.rs and will never
+// serve again under that name; canary-quarantined and invalid registry
+// entries can't be hot-swapped either. None of those count as "a trained
+// adapter you could be serving" — a user whose only adapter was demoted is
+// serving base CORRECTLY, and must not have every request flagged forever.
+const GATE_DEMOTED_RE = /\.failed(-\d+)?$/;
 function nonBaseAdapterCount() {
   const av = (lastAdapters && lastAdapters.available) || [];
-  return av.filter(a => a && a.name && a.name !== 'base').length;
+  return av.filter(a => a && a.name && a.name !== 'base'
+    && !GATE_DEMOTED_RE.test(a.name)
+    && a.status !== 'quarantined' && a.status !== 'invalid').length;
+}
+// A base-served request is a SILENT fallback only when the server itself
+// claims a non-base adapter is active (/v1/adapters `active`) — that request
+// demonstrably bypassed the adapter the server says it serves. When `active`
+// is null the server is intentionally configured for base (the unload button
+// sets exactly this), so base-served requests are the requested behaviour,
+// not a per-request defect. NOTE (API follow-up): `active == null` cannot
+// distinguish "user explicitly unloaded" from "server restarted and nothing
+// re-promoted an adapter" — the server would need to ship WHY active is null
+// (e.g. explicit_unload vs never_loaded) for the ambient heartbeat nudge
+// below to also quiet the deliberate case.
+function servedBaseSilently(adapterName) {
+  if ((adapterName || 'base') !== 'base') return false;
+  const active = lastAdapters && lastAdapters.active;
+  return !!(active && active !== 'base');
 }
 function computeRequestHealth(rows) {
   rows = rows || [];
@@ -303,7 +327,10 @@ function computeRequestHealth(rows) {
   let errors = 0, truncated = 0; const ttfts = [];
   for (const r of sample) {
     const f = (r.finish_reason || '').toLowerCase();
-    if (r.error || f === 'error' || f === 'client_disconnect') errors++;
+    // 'client_disconnect' is the caller hanging up (Ctrl-C in pi mid-stream)
+    // — deliberate, not degraded service. It stays neutral so it never
+    // drives the error heartbeat/ambient states.
+    if (r.error || f === 'error') errors++;
     else if (f === 'length') truncated++;
     if (typeof r.ttft_ms === 'number') ttfts.push(r.ttft_ms);
   }
@@ -322,6 +349,11 @@ function updateHeartbeat(h) {
   const el = document.getElementById('recent-heartbeat');
   if (!el) return;
   const txt = el.querySelector('.hb-text');
+  // Deliberately broader than servedBaseSilently(): the ambient nudge fires
+  // whenever live traffic is on base while servable trained adapters sit
+  // idle — that catches the post-restart "active adapter was lost" hole that
+  // per-request attention no longer flags. The label is a factual status
+  // ("serving base model"), not an error count.
   const baseFallback = h.servedBy === 'base' && nonBaseAdapterCount() > 0;
   let cls, label;
   if (h.errors > 0) {
@@ -1261,15 +1293,18 @@ let recentStatusFilter = 'all';
 
 // A request "needs attention" if pi got a degraded result from it: an error, a
 // truncated (max_tokens-clipped) completion, or a silent fallback to the base
-// model while trained adapters exist. These are the rows worth turning into
-// corrections — the same predicate drives the heartbeat's warning states.
+// model while the server claims a non-base adapter is active. These are the
+// rows worth turning into corrections — the same predicate drives the
+// "Needs attention" filter chip and the per-row warning tint. Deliberate
+// non-problems stay neutral: 'client_disconnect' is the user pressing Ctrl-C
+// mid-stream, and base-served requests while NO adapter is active (explicit
+// unload, or none ever loaded) are the server doing exactly what it was told.
 function requestNeedsAttention(r) {
   if (!r) return false;
   const f = (r.finish_reason || '').toLowerCase();
-  if (r.error || f === 'error' || f === 'client_disconnect') return true;
+  if (r.error || f === 'error') return true;
   if (f === 'length') return true;
-  const adapterName = r.adapter || 'base';
-  if (adapterName === 'base' && nonBaseAdapterCount() > 0) return true;
+  if (servedBaseSilently(r.adapter)) return true;
   return false;
 }
 
@@ -1324,7 +1359,7 @@ function renderRecentRequests(rows) {
   const attentionCount = rows.filter(requestNeedsAttention).length;
   if (recentStatusFilter === 'attention' && attentionCount === 0) recentStatusFilter = 'all';
   const attentionChip = attentionCount > 0
-    ? `<button type="button" class="agent-chip attn-chip${recentStatusFilter === 'attention' ? ' active' : ''}" data-status-chip="attention" title="Errored, truncated, or served by the base model — the requests worth correcting">${icon('warning')}Needs attention<span class="count">${attentionCount}</span></button>`
+    ? `<button type="button" class="agent-chip attn-chip${recentStatusFilter === 'attention' ? ' active' : ''}" data-status-chip="attention" title="Errored, truncated, or silently served by the base model while an adapter is active — the requests worth correcting">${icon('warning')}Needs attention<span class="count">${attentionCount}</span></button>`
     : '';
   const chipsInner = (ordered.length > 1 || attentionChip)
     ? chip('all', 'All agents', rows.length) + ordered.map(([k, n]) => chip(k, labelFor(k), n)).join('') + attentionChip
@@ -1357,9 +1392,10 @@ function renderRecentRequests(rows) {
     const agentPill = `<span class="recent-agent" title="${escapeHtml(r.user_agent || 'unknown client')}">${escapeHtml(r._client.label)}</span>`;
     // Which adapter actually served this request — so a silent fallback to the
     // base model (your trained LoRA quietly off) is visible per request, not
-    // buried in the inspect modal. Base-while-adapters-exist gets a warning tint.
+    // buried in the inspect modal. Base-while-an-adapter-is-ACTIVE gets a
+    // warning tint; base while nothing is active is the configured behaviour.
     const adapterName = r.adapter || 'base';
-    const baseFallback = adapterName === 'base' && nonBaseAdapterCount() > 0;
+    const baseFallback = servedBaseSilently(adapterName);
     const adapterPill = `<span class="recent-served${baseFallback ? ' is-base' : ''}" title="${baseFallback ? 'Served by the BASE model — your trained adapters are not being used for this request' : 'Served by ' + escapeHtml(adapterName)}">${baseFallback ? icon('warning', 'icn-sm') : ''}${escapeHtml(adapterName)}</span>`;
     const tokens = `${r.prompt_tokens || 0} → ${r.completion_tokens || 0} tok`;
     const dur = (r.duration_ms != null) ? `${r.duration_ms} ms` : '';
