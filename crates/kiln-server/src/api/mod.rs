@@ -9,6 +9,7 @@ mod adapters;
 pub mod agent_traces;
 pub(crate) mod cache;
 pub(crate) mod completions;
+pub mod corrections;
 mod config;
 mod debug_model_state;
 mod eval;
@@ -72,6 +73,7 @@ pub fn router(state: AppState) -> Router {
             crate::request_log::tap,
         )))
         .merge(adapters::routes())
+        .merge(corrections::routes())
         .merge(teachers::routes())
         .merge(recipes::routes())
         .merge(cache::routes())

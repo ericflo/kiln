@@ -325,6 +325,17 @@ async function startServer({ failDashboardApis = false, availableAdapters = defa
       text(res, '# HELP kiln_mock_info Mock metrics for UI smoke\n# TYPE kiln_mock_info gauge\nkiln_mock_info 1\n');
       return;
     }
+    // Durable corrections store: the basket's init sync (GET) and
+    // write-through (POST/DELETE) run in every scenario.
+    if (url.pathname === '/v1/corrections') {
+      if (req.method === 'GET') { json(res, { corrections: [] }); return; }
+      if (req.method === 'POST') { json(res, { status: 'ok' }); return; }
+      if (req.method === 'DELETE') { json(res, { status: 'cleared', removed: 0 }); return; }
+    }
+    if (url.pathname.startsWith('/v1/corrections/')) {
+      json(res, { status: 'ok' });
+      return;
+    }
     if (url.pathname === '/v1/adapters') {
       json(res, { active: activeAdapter, available: availableAdapters });
       return;

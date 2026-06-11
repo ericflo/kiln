@@ -1,0 +1,373 @@
+//! Durable corrections store — the server-side home of the dashboard's
+//! corrections basket.
+//!
+//! The basket is, in the dashboard's own words, "the literal mechanism of
+//! 'your model gets better every time you use it'" — and until this module
+//! existed it lived ONLY in one browser's localStorage: invisible to other
+//! machines, unreachable by pi or any script, and (worst) the hand-written
+//! ideal answers were DELETED after training, so the user's most valuable
+//! data — what the model should have said, in their words — ended up
+//! existing nowhere. The repo's own philosophy is "the dataset is the
+//! asset"; this store makes corrections one.
+//!
+//! Storage: one JSON row per line at
+//! `<adapter_dir>/.eval/corrections/data.jsonl`, rewritten atomically on
+//! mutation (the basket is human-scale — tens to hundreds of rows).
+//! Trained rows are MARKED (`trained_into`), never deleted.
+//!
+//! | Method | Path                          | Purpose                          |
+//! |--------|-------------------------------|----------------------------------|
+//! | GET    | /v1/corrections               | List (active by default;         |
+//! |        |                               | `?include_trained=1` for all)    |
+//! | POST   | /v1/corrections               | Upsert one row by `request_id`   |
+//! | DELETE | /v1/corrections/{request_id}  | Remove one row                   |
+//! | DELETE | /v1/corrections               | Clear active (untrained) rows    |
+
+use std::path::{Path, PathBuf};
+
+use axum::extract::{Path as AxumPath, Query, State};
+use axum::routing::{delete, get};
+use axum::{Json, Router};
+use serde::{Deserialize, Serialize};
+
+use crate::error::ApiError;
+use crate::state::AppState;
+
+/// One captured correction. Field names mirror the dashboard basket so the
+/// write-through is mechanical; pi (or any script) can file rows with the
+/// same shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorrectionRow {
+    /// Capture identity — the originating request id (chat completion id,
+    /// eval outcome key, or a caller-chosen unique string). Upsert key.
+    pub request_id: String,
+    /// Which client produced the original answer (pi, opencode, eval:suite).
+    #[serde(default)]
+    pub agent: String,
+    /// Serving adapter at capture time (`None`/"base" = base model).
+    #[serde(default)]
+    pub adapter: Option<String>,
+    /// The user prompt the model answered.
+    pub user: String,
+    /// What the model actually answered.
+    #[serde(default)]
+    pub original: String,
+    /// What it SHOULD have answered — the human-authored asset.
+    #[serde(default)]
+    pub ideal: String,
+    /// Captured from a preview-only source (text may be cut short).
+    #[serde(default)]
+    pub truncated: bool,
+    /// RFC3339 capture time. Stamped server-side on first insert.
+    #[serde(default)]
+    pub created_at: String,
+    /// Adapter name this row trained into, once trained. Marked, not
+    /// deleted — the ideal answer outlives the job that consumed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trained_into: Option<String>,
+    /// RFC3339 time of the training submission that consumed this row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trained_at: Option<String>,
+}
+
+/// Append-only-in-spirit JSONL store, rewritten atomically per mutation.
+pub struct CorrectionsStore {
+    dir: PathBuf,
+}
+
+impl CorrectionsStore {
+    pub fn for_state(state: &AppState) -> Self {
+        Self {
+            dir: state.adapter_dir.join(".eval").join("corrections"),
+        }
+    }
+
+    fn data_path(&self) -> PathBuf {
+        self.dir.join("data.jsonl")
+    }
+
+    pub fn list(&self) -> Vec<CorrectionRow> {
+        let Ok(text) = std::fs::read_to_string(self.data_path()) else {
+            return Vec::new();
+        };
+        text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| match serde_json::from_str::<CorrectionRow>(l) {
+                Ok(row) => Some(row),
+                Err(e) => {
+                    tracing::warn!(error = %e, "skipping malformed corrections row");
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn write_all(&self, rows: &[CorrectionRow]) -> Result<(), String> {
+        std::fs::create_dir_all(&self.dir).map_err(|e| format!("{e}"))?;
+        let mut body = String::new();
+        for row in rows {
+            body.push_str(&serde_json::to_string(row).map_err(|e| format!("{e}"))?);
+            body.push('\n');
+        }
+        kiln_resource::locked_atomic_write(&self.data_path(), body.as_bytes())
+            .map_err(|e| format!("{e}"))
+    }
+
+    /// Insert or update by `request_id`. First insert stamps `created_at`;
+    /// updates preserve it (and `trained_*` unless the caller sets them).
+    pub fn upsert(&self, mut row: CorrectionRow) -> Result<CorrectionRow, String> {
+        let mut rows = self.list();
+        match rows.iter_mut().find(|r| r.request_id == row.request_id) {
+            Some(existing) => {
+                if row.created_at.is_empty() {
+                    row.created_at = existing.created_at.clone();
+                }
+                if row.trained_into.is_none() {
+                    row.trained_into = existing.trained_into.clone();
+                    row.trained_at = existing.trained_at.clone();
+                }
+                *existing = row.clone();
+            }
+            None => {
+                if row.created_at.is_empty() {
+                    row.created_at = chrono::Utc::now().to_rfc3339();
+                }
+                rows.insert(0, row.clone());
+            }
+        }
+        self.write_all(&rows)?;
+        Ok(row)
+    }
+
+    pub fn remove(&self, request_id: &str) -> Result<bool, String> {
+        let mut rows = self.list();
+        let before = rows.len();
+        rows.retain(|r| r.request_id != request_id);
+        let removed = rows.len() < before;
+        if removed {
+            self.write_all(&rows)?;
+        }
+        Ok(removed)
+    }
+
+    /// Remove every ACTIVE (untrained) row. Trained rows are history and
+    /// survive a basket clear.
+    pub fn clear_active(&self) -> Result<usize, String> {
+        let mut rows = self.list();
+        let before = rows.len();
+        rows.retain(|r| r.trained_into.is_some());
+        let removed = before - rows.len();
+        if removed > 0 {
+            self.write_all(&rows)?;
+        }
+        Ok(removed)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ListQuery {
+    #[serde(default)]
+    include_trained: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ListResponse {
+    corrections: Vec<CorrectionRow>,
+}
+
+async fn list_corrections(
+    State(state): State<AppState>,
+    Query(q): Query<ListQuery>,
+) -> Json<ListResponse> {
+    let include_trained = matches!(q.include_trained.as_deref(), Some("1" | "true" | "yes"));
+    let mut corrections = CorrectionsStore::for_state(&state).list();
+    if !include_trained {
+        corrections.retain(|r| r.trained_into.is_none());
+    }
+    Json(ListResponse { corrections })
+}
+
+async fn upsert_correction(
+    State(state): State<AppState>,
+    Json(row): Json<CorrectionRow>,
+) -> Result<Json<CorrectionRow>, ApiError> {
+    if row.request_id.trim().is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "correction request_id must be non-empty".to_string(),
+        ));
+    }
+    if row.user.trim().is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "correction `user` (the prompt) must be non-empty".to_string(),
+        ));
+    }
+    CorrectionsStore::for_state(&state)
+        .upsert(row)
+        .map(Json)
+        .map_err(|e| ApiError::internal(format!("corrections store: {e}")))
+}
+
+async fn delete_correction(
+    State(state): State<AppState>,
+    AxumPath(request_id): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let removed = CorrectionsStore::for_state(&state)
+        .remove(&request_id)
+        .map_err(|e| ApiError::internal(format!("corrections store: {e}")))?;
+    if removed {
+        Ok(Json(serde_json::json!({ "status": "deleted", "request_id": request_id })))
+    } else {
+        Err(ApiError::training_invalid_request(format!(
+            "no correction with request_id {request_id:?}"
+        )))
+    }
+}
+
+async fn clear_corrections(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let removed = CorrectionsStore::for_state(&state)
+        .clear_active()
+        .map_err(|e| ApiError::internal(format!("corrections store: {e}")))?;
+    Ok(Json(serde_json::json!({ "status": "cleared", "removed": removed })))
+}
+
+/// Mark a set of rows as trained into `adapter`. Called by the dashboard
+/// right after a successful corrections-train submit; the rows stay in
+/// the store as history.
+#[derive(Debug, Deserialize)]
+struct MarkTrainedRequest {
+    request_ids: Vec<String>,
+    adapter: String,
+}
+
+async fn mark_trained(
+    State(state): State<AppState>,
+    Json(req): Json<MarkTrainedRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let store = CorrectionsStore::for_state(&state);
+    let mut rows = store.list();
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut marked = 0usize;
+    for row in rows.iter_mut() {
+        if req.request_ids.iter().any(|id| id == &row.request_id) {
+            row.trained_into = Some(req.adapter.clone());
+            row.trained_at = Some(now.clone());
+            marked += 1;
+        }
+    }
+    if marked > 0 {
+        store
+            .write_all(&rows)
+            .map_err(|e| ApiError::internal(format!("corrections store: {e}")))?;
+    }
+    Ok(Json(serde_json::json!({ "status": "marked", "marked": marked })))
+}
+
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/v1/corrections",
+            get(list_corrections)
+                .post(upsert_correction)
+                .delete(clear_corrections),
+        )
+        .route("/v1/corrections/{request_id}", delete(delete_correction))
+        .route(
+            "/v1/corrections/mark_trained",
+            axum::routing::post(mark_trained),
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store(dir: &Path) -> CorrectionsStore {
+        CorrectionsStore {
+            dir: dir.join(".eval").join("corrections"),
+        }
+    }
+
+    fn row(id: &str, ideal: &str) -> CorrectionRow {
+        CorrectionRow {
+            request_id: id.to_string(),
+            agent: "pi".to_string(),
+            adapter: None,
+            user: "what is 2+2".to_string(),
+            original: "5".to_string(),
+            ideal: ideal.to_string(),
+            truncated: false,
+            created_at: String::new(),
+            trained_into: None,
+            trained_at: None,
+        }
+    }
+
+    #[test]
+    fn upsert_stamps_created_at_once_and_updates_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+
+        let first = s.upsert(row("r1", "")).unwrap();
+        assert!(!first.created_at.is_empty());
+
+        let updated = s.upsert(row("r1", "4")).unwrap();
+        assert_eq!(updated.created_at, first.created_at, "created_at preserved");
+        let rows = s.list();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].ideal, "4");
+    }
+
+    #[test]
+    fn trained_rows_survive_clear_and_are_hidden_from_active_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.upsert(row("done", "4")).unwrap();
+        s.upsert(row("pending", "")).unwrap();
+
+        // Mark "done" trained.
+        let mut rows = s.list();
+        rows.iter_mut()
+            .find(|r| r.request_id == "done")
+            .unwrap()
+            .trained_into = Some("fixes-v1".into());
+        s.write_all(&rows).unwrap();
+
+        // Clearing removes only the untrained row.
+        assert_eq!(s.clear_active().unwrap(), 1);
+        let remaining = s.list();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].request_id, "done");
+        assert_eq!(remaining[0].trained_into.as_deref(), Some("fixes-v1"));
+    }
+
+    #[test]
+    fn upsert_preserves_trained_marker_when_caller_omits_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut r = row("r1", "4");
+        r.trained_into = Some("fixes-v1".into());
+        s.upsert(r).unwrap();
+        // A later ideal-edit upsert without trained fields keeps history.
+        s.upsert(row("r1", "four")).unwrap();
+        let rows = s.list();
+        assert_eq!(rows[0].ideal, "four");
+        assert_eq!(rows[0].trained_into.as_deref(), Some("fixes-v1"));
+    }
+
+    #[test]
+    fn remove_and_persistence_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.upsert(row("a", "x")).unwrap();
+        s.upsert(row("b", "y")).unwrap();
+        assert!(s.remove("a").unwrap());
+        assert!(!s.remove("a").unwrap());
+        // Fresh store handle reads the same file.
+        let s2 = store(dir.path());
+        let rows = s2.list();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].request_id, "b");
+    }
+}
