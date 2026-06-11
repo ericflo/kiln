@@ -268,6 +268,9 @@ function sse(res, chunks) {
 }
 
 async function startServer({ failDashboardApis = false, availableAdapters = defaultAvailableAdapters } = {}) {
+  // Mutable so the failure scenario can heal/re-break the APIs mid-run and
+  // assert the dashboard recovers (Retry buttons + dedupe-key invalidation).
+  const apiState = { failDashboardApis };
   const uiHtml = await readFile(uiIndexPath, 'utf8');
   const uiStyles = await readFile(uiStylesPath, 'utf8');
   const uiDemoJs = await readFile(uiDemoJsPath, 'utf8');
@@ -320,7 +323,7 @@ async function startServer({ failDashboardApis = false, availableAdapters = defa
       res.end();
       return;
     }
-    if (failDashboardApis) {
+    if (apiState.failDashboardApis) {
       if (url.pathname === '/health') {
         apiFailure(res, 'Server status', url.pathname);
         return;
@@ -617,7 +620,11 @@ async function startServer({ failDashboardApis = false, availableAdapters = defa
   });
   const address = server.address();
   if (!address || typeof address === 'string') fail('Could not bind local smoke server.');
-  return { server, baseUrl: `http://127.0.0.1:${address.port}` };
+  return {
+    server,
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    setFailDashboardApis: (value) => { apiState.failDashboardApis = value; },
+  };
 }
 
 async function expectText(page, selector, pattern, message) {
@@ -1017,7 +1024,7 @@ async function runMobileOnboardingSmoke(baseUrl) {
   }
 }
 
-async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapters = false } = {}) {
+async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapters = false, setFailDashboardApis = null } = {}) {
   const puppeteer = await loadPuppeteer();
   const browser = await puppeteer.launch({
     executablePath: chromiumPath(),
@@ -1057,6 +1064,61 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       await expectApiFailurePanel(page, '#adapters-panel', 'Adapters', 'Adapters smoke failure from /v1/adapters');
       await goToPrimaryTab(page, 'training');
       await expectApiFailurePanel(page, '#tab-queue', 'Training queue', 'Training queue smoke failure from /v1/train/queue');
+
+      // Retry buttons must dispatch through the app's delegated listener.
+      // (The app is IIFE-scoped: the old inline onclick threw ReferenceError
+      // on every click, which the pageErrors assertion below would catch.)
+      await page.click('#tab-queue [data-retry]')
+        .catch((e) => fail(`Training queue failure panel has no clickable Retry button: ${e.message}`));
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      if (pageErrors.length > 0) fail(`Retry click emitted browser errors: ${pageErrors.join('; ')}`);
+
+      if (setFailDashboardApis) {
+        const recoverPanel = async (selector, pattern, message) => {
+          // Click Retry for an instant repaint when the button is still there;
+          // the interval polls (2-5s) cover the already-recovered case.
+          await page.click(`${selector} [data-retry]`).catch(() => {});
+          await waitForPanelText(page, selector, pattern, message);
+        };
+
+        // Heal the APIs: every panel must recover (Retry click or next poll).
+        setFailDashboardApis(false);
+        await goToPrimaryTab(page, 'overview');
+        await recoverPanel('#server-status', /GPU VRAM/, 'Server status did not recover after the APIs healed');
+        await page.waitForSelector('#server-status .vram-donut svg', { timeout: 5000 })
+          .catch(() => fail('VRAM donut missing from recovered server status panel'));
+        await recoverPanel('#decode-perf-panel', /No streaming completions/i, 'Decode panel did not recover after the APIs healed');
+        await recoverPanel('#recent-requests-panel', /No recent requests yet\./, 'Recent requests did not recover after the APIs healed');
+        await goToPrimaryTab(page, 'training');
+        await recoverPanel('#tab-queue', /No training jobs yet\./, 'Training queue did not recover after the APIs healed');
+        await goToPrimaryTab(page, 'adapters');
+        await recoverPanel('#adapters-panel', /adapter-alpha/, 'Adapters did not recover after the APIs healed');
+
+        // Break the APIs again, then heal again. The second recovery is the
+        // real regression test for the stuck-panel class: by now every render
+        // dedupe key holds the pre-failure value, so a failure writer that
+        // forgets to invalidate its key leaves the panel frozen on the error
+        // HTML forever (the data hasn't changed, so the repaint is skipped).
+        setFailDashboardApis(true);
+        await goToPrimaryTab(page, 'overview');
+        await expectApiFailurePanel(page, '#server-status', 'Server status', 'Server status smoke failure from /health');
+        await expectApiFailurePanel(page, '#decode-perf-panel', 'Decode performance', 'Decode performance smoke failure from /v1/stats/decode');
+        await expectApiFailurePanel(page, '#recent-requests-panel', 'Recent requests', 'Recent requests smoke failure from /v1/stats/recent-requests');
+        await goToPrimaryTab(page, 'training');
+        await expectApiFailurePanel(page, '#tab-queue', 'Training queue', 'Training queue smoke failure from /v1/train/queue');
+        await goToPrimaryTab(page, 'adapters');
+        await expectApiFailurePanel(page, '#adapters-panel', 'Adapters', 'Adapters smoke failure from /v1/adapters');
+
+        setFailDashboardApis(false);
+        await recoverPanel('#adapters-panel', /adapter-alpha/, 'Adapters stuck on failure HTML after second recovery (dedupe key not invalidated)');
+        await goToPrimaryTab(page, 'training');
+        await recoverPanel('#tab-queue', /No training jobs yet\./, 'Training queue stuck on failure HTML after second recovery (dedupe key not invalidated)');
+        await goToPrimaryTab(page, 'overview');
+        await recoverPanel('#server-status', /GPU VRAM/, 'Server status stuck on failure HTML after second recovery');
+        await recoverPanel('#decode-perf-panel', /No streaming completions/i, 'Decode panel stuck on failure HTML after second recovery');
+        await recoverPanel('#recent-requests-panel', /No recent requests yet\./, 'Recent requests stuck on failure HTML after second recovery (dedupe key not invalidated)');
+      }
+
       if (pageErrors.length > 0) fail(`Failure state UI emitted browser errors: ${pageErrors.join('; ')}`);
       return;
     }
@@ -1266,7 +1328,10 @@ try {
 const failureScenario = await startServer({ failDashboardApis: true });
 try {
   console.log('[smoke] failure scenario start');
-  await runSmoke(failureScenario.baseUrl, { expectFailureStates: true });
+  await runSmoke(failureScenario.baseUrl, {
+    expectFailureStates: true,
+    setFailDashboardApis: failureScenario.setFailDashboardApis,
+  });
   console.log('[smoke] failure scenario passed');
 } finally {
   await new Promise((accept) => failureScenario.server.close(accept));
