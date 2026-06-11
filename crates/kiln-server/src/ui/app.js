@@ -806,11 +806,26 @@ function updateFlywheel() {
   if (subEl) {
     subEl.classList.remove('fw-win', 'fw-loss');
     if (activeVerdict) {
-      subEl.textContent = Math.abs(activeVerdict.delta) <= 0.5 ? 'matches base' : `${activeVerdict.delta > 0 ? '+' : ''}${activeVerdict.delta.toFixed(1)} pts vs base`;
-      if (activeVerdict.delta > 0.5) subEl.classList.add('fw-win');       // green: the swap is proven better
-      else if (activeVerdict.delta < -0.5) subEl.classList.add('fw-loss'); // red: it regressed vs base
+      // Same gate as every other verdict surface: fw-win/fw-loss (and the
+      // "+N pts vs base" claim) only at p < SIGN_TEST_ALPHA. Ungated → neutral
+      // text, neither ribbon class.
+      const sig = activeVerdict.significant === true;
+      const detail = typeof activeVerdict.p === 'number'
+        ? `sign test improved ${activeVerdict.improved} / regressed ${activeVerdict.regressed}, ${fmtSignTestP(activeVerdict.p)}`
+        : '';
+      subEl.title = detail;
+      if (!sig && Math.abs(activeVerdict.delta) > 0.5) {
+        subEl.textContent = `${activeVerdict.delta > 0 ? '+' : ''}${activeVerdict.delta.toFixed(1)} pts — not enough evidence`;
+      } else if (Math.abs(activeVerdict.delta) <= 0.5) {
+        subEl.textContent = 'matches base';
+      } else {
+        subEl.textContent = `${activeVerdict.delta > 0 ? '+' : ''}${activeVerdict.delta.toFixed(1)} pts vs base`;
+        if (activeVerdict.delta > 0.5) subEl.classList.add('fw-win');  // green: proven better (significant)
+        else subEl.classList.add('fw-loss');                           // red: proven regression (significant)
+      }
     } else {
       subEl.textContent = active ? 'hot-swapped LoRA' : 'base model';
+      subEl.removeAttribute('title');
     }
   }
   // Caution the eval node when an adapter is live but never evaluated.
@@ -5272,13 +5287,19 @@ function detectEvalTransitions(jobs) {
       const suite = j.suite_name || 'eval';
       if (state === 'completed') {
         let verdict = '';
-        const runs = j.finished_runs || [];
-        const base = runs.find(r => r.adapter == null || r.adapter === 'base');
-        const cand = runs.filter(r => r.adapter != null && r.adapter !== 'base' && typeof r.metrics?.accuracy === 'number');
-        if (base && typeof base.metrics?.accuracy === 'number' && cand.length) {
-          const best = cand.reduce((a, b) => (b.metrics.accuracy > a.metrics.accuracy ? b : a));
-          const delta = Math.round((best.metrics.accuracy - base.metrics.accuracy) * 1000) / 10;
-          verdict = Math.abs(delta) <= 0.5 ? ` Verdict: matches base.` : ` Verdict: ${delta > 0 ? '+' : ''}${delta.toFixed(1)} pts vs base.`;
+        // Same gate as the adapter card: win/loss phrasing only when the
+        // paired sign test clears SIGN_TEST_ALPHA; otherwise the toast stays
+        // neutral. One verdict per candidate — no best-of-N reduce(max).
+        const verdicts = gatedCompareVerdicts(j.finished_runs || []);
+        if (verdicts.length) {
+          const phrase = (v) => v.significant
+            ? (Math.abs(v.delta) <= 0.5
+              ? `matches base (${fmtSignTestP(v.p)})`
+              : `${v.delta > 0 ? '+' : ''}${v.delta.toFixed(1)} pts vs base (${fmtSignTestP(v.p)})`)
+            : `no significant difference vs base (${fmtSignTestP(v.p)})`;
+          verdict = verdicts.length === 1
+            ? ` Verdict: ${phrase(verdicts[0])}.`
+            : ` Verdicts: ${verdicts.map(v => `${v.candidate} ${phrase(v)}`).join('; ')}.`;
         } else if (typeof j.headline_accuracy === 'number') {
           verdict = ` Accuracy: ${(j.headline_accuracy * 100).toFixed(0)}%.`;
         }
@@ -5296,16 +5317,23 @@ function detectEvalTransitions(jobs) {
 }
 
 function compareVerdictBadge(runs) {
-  if (!Array.isArray(runs) || runs.length < 2) return '';
-  const base = runs.find(r => r.adapter == null || r.adapter === 'base');
-  const cand = runs.filter(r => r.adapter != null && r.adapter !== 'base' && typeof r.metrics?.accuracy === 'number');
-  if (!base || typeof base.metrics?.accuracy !== 'number' || !cand.length) return '';
-  const adapter = cand.reduce((a, b) => (b.metrics.accuracy > a.metrics.accuracy ? b : a));
-  const delta = Math.round((adapter.metrics.accuracy - base.metrics.accuracy) * 1000) / 10; // pts
-  const cls = delta > 0.5 ? 'delta-up' : (delta < -0.5 ? 'delta-down' : 'delta-flat');
-  const label = cls === 'delta-flat' ? 'matches base' : `${delta > 0 ? '+' : ''}${delta.toFixed(1)} pts vs base`;
-  const title = `${escapeHtml(adapter.adapter)} ${(adapter.metrics.accuracy * 100).toFixed(0)}% vs base ${(base.metrics.accuracy * 100).toFixed(0)}%`;
-  return `<span class="delta-badge ${cls}" title="${title}">${label}</span>`;
+  // Same gate as the adapter card (gatedCompareVerdicts): a colored win/loss
+  // badge only renders at p < SIGN_TEST_ALPHA; below that it's the neutral
+  // "not enough evidence" treatment. One badge per candidate — no picking the
+  // max of N candidates (best-of-N selection bias dressed up as a verdict).
+  const verdicts = gatedCompareVerdicts(runs);
+  if (!verdicts.length) return '';
+  const multi = verdicts.length > 1;
+  return verdicts.map(v => {
+    const name = multi ? `${escapeHtml(v.candidate)}: ` : '';
+    const title = `${escapeHtml(v.candidate)} ${(v.accuracy * 100).toFixed(0)}% vs base ${(v.baseAccuracy * 100).toFixed(0)}% — sign test improved ${v.improved} / regressed ${v.regressed}, ${fmtSignTestP(v.p)}`;
+    if (!v.significant && Math.abs(v.delta) > 0.5) {
+      return `<span class="delta-badge delta-flat" title="${title}">${name}${v.delta > 0 ? '+' : ''}${v.delta.toFixed(1)} pts — not enough evidence (${fmtSignTestP(v.p)})</span>`;
+    }
+    const cls = v.delta > 0.5 ? 'delta-up' : (v.delta < -0.5 ? 'delta-down' : 'delta-flat');
+    const label = cls === 'delta-flat' ? 'matches base' : `${v.delta > 0 ? '+' : ''}${v.delta.toFixed(1)} pts vs base`;
+    return `<span class="delta-badge ${cls}" title="${title}">${name}${label}</span>`;
+  }).join('');
 }
 
 // Non-completed jobs have no score — show a state figure, never a giant "0"
@@ -6789,6 +6817,13 @@ function adapterEvalChip(name) {
 // Two-sided exact binomial sign test over discordant flips — mirrors
 // kiln-eval's SignTest so the dashboard verdicts use the same math as
 // the CLI. p=1 when there are no discordant examples.
+// One decision threshold for EVERY surface that turns a compare eval into a
+// win/loss claim (adapter card, job-card badge, completion toast, flywheel
+// ribbon). §8.7's promise is "promotion is gated on a paired sign test" — a
+// verdict colored green at p >= alpha anywhere breaks that promise.
+const SIGN_TEST_ALPHA = 0.05;
+// Shared p-value formatting so every surface prints the same string.
+function fmtSignTestP(p) { return p < 0.005 ? 'p<0.01' : 'p=' + p.toFixed(2); }
 function signTestP(improved, regressed) {
   const n = improved + regressed;
   if (n === 0) return 1.0;
@@ -6822,25 +6857,40 @@ function compareFlips(baseRun, adapterRun) {
   }
   return { improved, regressed };
 }
+// The one gate, shared by all surfaces: pair every candidate run against the
+// base run and attach the paired sign test, so "beats base" can only ever be
+// claimed at p < SIGN_TEST_ALPHA. Returns one verdict per candidate — never a
+// best-of-N pick (selecting the max of N noisy deltas is itself a bias) — or
+// [] when there is no base/candidate accuracy pair.
+function gatedCompareVerdicts(runs) {
+  if (!Array.isArray(runs) || runs.length < 2) return [];
+  const base = runs.find(r => r.adapter == null || r.adapter === 'base');
+  if (!base || typeof base.metrics?.accuracy !== 'number') return [];
+  return runs
+    .filter(r => r.adapter != null && r.adapter !== 'base' && typeof r.metrics?.accuracy === 'number')
+    .map(run => {
+      const flips = compareFlips(base, run);
+      const p = signTestP(flips.improved, flips.regressed);
+      return {
+        candidate: run.adapter,
+        delta: Math.round((run.metrics.accuracy - base.metrics.accuracy) * 1000) / 10,
+        accuracy: run.metrics.accuracy,
+        baseAccuracy: base.metrics.accuracy,
+        improved: flips.improved,
+        regressed: flips.regressed,
+        p,
+        significant: p < SIGN_TEST_ALPHA,
+      };
+    });
+}
 function adapterCompareVerdict(name) {
   const jobs = ((typeof evalJobsCache !== 'undefined' ? evalJobsCache : []) || [])
     .filter(j => (j.state || '').toLowerCase() === 'completed' && Array.isArray(j.finished_runs)
       && j.finished_runs.length >= 2 && Array.isArray(j.adapters) && j.adapters.includes(name));
   jobs.sort((a, b) => String(b.submitted_at_iso || '').localeCompare(String(a.submitted_at_iso || '')));
   for (const j of jobs) {
-    const base = j.finished_runs.find(r => r.adapter == null || r.adapter === 'base');
-    const run = j.finished_runs.find(r => r.adapter === name);
-    if (base && run && typeof base.metrics?.accuracy === 'number' && typeof run.metrics?.accuracy === 'number') {
-      const flips = compareFlips(base, run);
-      const p = signTestP(flips.improved, flips.regressed);
-      return {
-        delta: Math.round((run.metrics.accuracy - base.metrics.accuracy) * 1000) / 10,
-        suite: j.suite_name,
-        improved: flips.improved,
-        regressed: flips.regressed,
-        p,
-      };
-    }
+    const v = gatedCompareVerdicts(j.finished_runs).find(x => x.candidate === name);
+    if (v) return { ...v, suite: j.suite_name };
   }
   return null;
 }
@@ -6848,12 +6898,13 @@ function verdictDeltaHtml(v) {
   if (!v) return '';
   // A green/red verdict is a claim — gate it on the paired sign test so
   // a 2-example wobble doesn't render as "beats base".
-  const significant = typeof v.p === 'number' ? v.p < 0.05 : true;
+  const significant = v.significant === true;
   const detail = typeof v.p === 'number'
-    ? ` — sign test improved ${v.improved} / regressed ${v.regressed}, p=${v.p.toFixed(3)}`
+    ? ` — sign test improved ${v.improved} / regressed ${v.regressed}, ${fmtSignTestP(v.p)}`
     : '';
   if (!significant && Math.abs(v.delta) > 0.5) {
-    return `<span class="delta-badge delta-flat" title="vs base on ${escapeHtml(v.suite || 'eval')}${detail}">${v.delta > 0 ? '+' : ''}${v.delta.toFixed(1)} pts — not enough evidence</span>`;
+    const pTxt = typeof v.p === 'number' ? ` (${fmtSignTestP(v.p)})` : '';
+    return `<span class="delta-badge delta-flat" title="vs base on ${escapeHtml(v.suite || 'eval')}${detail}">${v.delta > 0 ? '+' : ''}${v.delta.toFixed(1)} pts — not enough evidence${pTxt}</span>`;
   }
   const cls = v.delta > 0.5 ? 'delta-up' : (v.delta < -0.5 ? 'delta-down' : 'delta-flat');
   const label = cls === 'delta-flat' ? 'matches base' : `${v.delta > 0 ? '+' : ''}${v.delta.toFixed(1)} pts vs base`;
