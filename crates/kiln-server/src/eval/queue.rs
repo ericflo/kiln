@@ -78,6 +78,14 @@ fn now_instant_default() -> std::time::Instant {
 pub struct PostEvalGate {
     /// Aggregate-accuracy floor from `PostEvalConfig::min_accuracy`.
     pub min_accuracy: f32,
+    /// distill_refresh §6.4: minimum FRACTIONAL recovery vs the baseline
+    /// run (`new/baseline >= x`). `None` for ordinary gates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative_recovery: Option<f32>,
+    /// distill_refresh §6.4: minimum ABSOLUTE gain vs the baseline run
+    /// (`new - baseline >= x`). `None` for ordinary gates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub absolute_gain: Option<f32>,
     /// The adapter under judgment (the training job's output).
     pub adapter_name: String,
     /// Training job to stamp the verdict on.
