@@ -881,6 +881,26 @@ pub fn vulkan_contiguous(t: &crate::Tensor) -> Result<crate::Tensor> {
 // vulkan_matmul_bf16w — #1443 step1: F32-act × BF16-weight mixed-precision GEMM
 // ----------------------------------------------------------------------
 
+
+/// Whether `t` is backed by [`VulkanStorage`] (resident on the GPU pool).
+fn is_vulkan_backed(t: &crate::Tensor) -> bool {
+    t.storage().as_any().downcast_ref::<VulkanStorage>().is_some()
+}
+
+/// One-shot WARN for the non-resident mixed-precision fallback so hybrid
+/// (CPU-storage) training runs are honest about taking the slow path.
+fn warn_bf16w_host_fallback_once() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        eprintln!(
+            "WARN vulkan_matmul_bf16w: inputs are not Vulkan-resident (hybrid \
+             CPU-storage training) — falling back to a host cast-to-F32 \
+             matmul. Correct but slow; the Vulkan residency port removes \
+             this path."
+        );
+    });
+}
+
 /// Vulkan mixed-precision linear `out = x @ W.T` where `x` is an F32
 /// activation `[rows, K]` and `W` is a **frozen** BF16-packed weight in the
 /// transposed `[N, K]` layout (`N = out_dim`, `K = hidden`). Returns an F32
@@ -939,6 +959,23 @@ pub fn vulkan_matmul_bf16w(x: &crate::Tensor, weight_t: &crate::Tensor) -> Resul
             x.shape()[1],
             weight_t.shape()[1]
         )));
+    }
+    // Hybrid (CPU-storage) training fallback: the kernel needs
+    // Vulkan-resident buffers; until the residency port, production
+    // training tensors are kt CPU-storage. Cast the frozen weight to F32
+    // and run the equal-dtype matmul — bitwise-equivalent math (the
+    // kernel also widens BF16 to F32 in-shader), just slower.
+    if !is_vulkan_backed(x) || !is_vulkan_backed(weight_t) {
+        warn_bf16w_host_fallback_once();
+        // Hybrid residency can mix devices (vulkan-resident activations,
+        // CPU-storage weights). Compute on host — moving the small
+        // activation is far cheaper than uploading the full F32 weight —
+        // then return to x's device.
+        let x_dev = x.device();
+        let x_host = x.to_device(Device::Cpu)?;
+        let w_f32 = weight_t.to_device(Device::Cpu)?.to_dtype(DType::F32)?;
+        let y = crate::ops::matmul_rhs_transposed(&x_host, &w_f32)?;
+        return y.to_device(x_dev);
     }
     let device_index = vulkan_device_index(x, "vulkan_matmul_bf16w")?;
 
@@ -1001,6 +1038,15 @@ pub fn vulkan_matmul_bf16w_bwd(
             grad_out.shape()[1],
             weight_t.shape()[0]
         )));
+    }
+    // Hybrid (CPU-storage) fallback — see `vulkan_matmul_bf16w`.
+    if !is_vulkan_backed(grad_out) || !is_vulkan_backed(weight_t) {
+        warn_bf16w_host_fallback_once();
+        let go_dev = grad_out.device();
+        let go_host = grad_out.to_device(Device::Cpu)?;
+        let w_f32 = weight_t.to_device(Device::Cpu)?.to_dtype(DType::F32)?;
+        let dx = go_host.matmul(&w_f32)?;
+        return dx.to_device(go_dev);
     }
     let device_index = vulkan_device_index(grad_out, "vulkan_matmul_bf16w_bwd")?;
 
