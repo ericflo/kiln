@@ -2085,6 +2085,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
     let started_instant = std::time::Instant::now();
     let progress_cb = Box::new(move |progress: trainer::TrainingProgress| {
         let mut jobs = training_jobs_cb.write().unwrap();
+        let mut control = trainer::TrainControl::Continue;
         if let Some(job) = jobs.get_mut(&job_id_cb) {
             job.progress = progress.progress;
             job.loss = Some(progress.loss);
@@ -2098,7 +2099,17 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                     elapsed_secs: started_instant.elapsed().as_secs_f64(),
                 },
             );
+            // The per-step progress call doubles as the cancellation
+            // point: DELETE /v1/train/queue/{id} on a RUNNING job sets
+            // this flag and the trainer aborts at the next boundary.
+            if job
+                .cancel_requested
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                control = trainer::TrainControl::Stop;
+            }
         }
+        control
     });
 
     // Apply server-level checkpoint_interval default if not set per-job
@@ -2439,12 +2450,26 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             }
         }
         Err(e) => {
-            tracing::error!(job_id = %job_id, job_type = ?job_type, "training failed: {e}");
+            // Operator cancellation surfaces as a distinguishable error
+            // from the trainer's step-boundary check; record it under the
+            // Cancelled metric (not Failed) so dashboards don't count a
+            // deliberate stop as a training failure.
+            let cancelled = e.contains("cancelled by user");
+            if cancelled {
+                tracing::info!(job_id = %job_id, job_type = ?job_type, "training cancelled by user");
+            } else {
+                tracing::error!(job_id = %job_id, job_type = ?job_type, "training failed: {e}");
+            }
             let error_msg = e.clone();
             finalize_job(&state, &job_id, TrainingState::Failed, Some(e));
-            state
-                .metrics
-                .inc_training(metric_type, TrainingMetricStatus::Failed);
+            state.metrics.inc_training(
+                metric_type,
+                if cancelled {
+                    TrainingMetricStatus::Cancelled
+                } else {
+                    TrainingMetricStatus::Failed
+                },
+            );
 
             if let Some(ref url) = state.training_webhook_url {
                 let event = TrainingCompletionEvent {

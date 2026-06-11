@@ -1503,8 +1503,21 @@ impl TrainableLoraParams {
     }
 }
 
-/// Progress callback for training.
-pub type ProgressCallback = Box<dyn Fn(TrainingProgress) + Send>;
+/// Flow-control verdict a progress callback returns. `Stop` requests a
+/// cooperative cancellation at the next step boundary — the run aborts
+/// with a "training cancelled by user" error and the receipt records
+/// failure_reason "cancelled".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrainControl {
+    Continue,
+    Stop,
+}
+
+/// Progress callback for training. Returns a [`TrainControl`] verdict —
+/// the per-step call site doubles as the cancellation point, so a running
+/// job can be stopped without threading a separate flag through every
+/// train loop.
+pub type ProgressCallback = Box<dyn Fn(TrainingProgress) -> TrainControl + Send>;
 
 /// Training progress update.
 #[derive(Debug, Clone)]
@@ -2836,7 +2849,7 @@ pub fn sft_train(
                 }
 
                 if let Some(ref cb) = progress_cb {
-                    cb(TrainingProgress {
+                    let control = cb(TrainingProgress {
                         epoch: epoch + 1,
                         total_epochs: config.epochs,
                         step: global_step,
@@ -2844,6 +2857,11 @@ pub fn sft_train(
                         loss: loss_val,
                         progress: global_step as f32 / total_steps as f32,
                     });
+                    if control == TrainControl::Stop {
+                        anyhow::bail!(
+                            "training cancelled by user (stop requested at step boundary)"
+                        );
+                    }
                 }
 
                 if global_step % 10 == 0 || global_step == total_steps {
@@ -3440,7 +3458,7 @@ pub fn grpo_train(
             }
 
             if let Some(ref cb) = progress_cb {
-                cb(TrainingProgress {
+                let control = cb(TrainingProgress {
                     epoch: 1,
                     total_epochs: 1,
                     step: global_step,
@@ -3448,6 +3466,11 @@ pub fn grpo_train(
                     loss: avg_group_loss,
                     progress: global_step as f32 / total_steps as f32,
                 });
+                            if control == TrainControl::Stop {
+                    anyhow::bail!(
+                        "training cancelled by user (stop requested at step boundary)"
+                    );
+                }
             }
 
             tracing::info!(
@@ -4309,7 +4332,7 @@ pub fn grpo_train_jsonl(
 
             let (step, total_steps, progress) = jsonl_byte_progress(total_bytes, bytes_read);
             if let Some(ref cb) = progress_cb {
-                cb(TrainingProgress {
+                let control = cb(TrainingProgress {
                     epoch: 1,
                     total_epochs: 1,
                     step,
@@ -4317,6 +4340,11 @@ pub fn grpo_train_jsonl(
                     loss: avg_group_loss,
                     progress,
                 });
+                            if control == TrainControl::Stop {
+                    anyhow::bail!(
+                        "training cancelled by user (stop requested at step boundary)"
+                    );
+                }
             }
 
             tracing::info!(
@@ -12671,6 +12699,7 @@ pub(crate) mod tests {
                 let loss_sink = std::sync::Arc::clone(&losses);
                 let progress: ProgressCallback = Box::new(move |progress| {
                     loss_sink.lock().unwrap().push(progress.loss);
+                    TrainControl::Continue
                 });
                 let dir = grpo_train(
                     &groups,

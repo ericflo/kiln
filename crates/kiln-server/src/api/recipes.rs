@@ -574,6 +574,7 @@ fn register_step_job(
         linked_eval_job_ids: Vec::new(),
         post_eval_verdict: None,
         loss_history: Vec::new(),
+        cancel_requested: Default::default(),
     };
     state
         .training_jobs

@@ -99,6 +99,7 @@ fn enqueue_sft_job(state: &AppState, job_id: &str) {
         linked_eval_job_ids: Vec::new(),
         post_eval_verdict: None,
         loss_history: Vec::new(),
+        cancel_requested: Default::default(),
     };
     state
         .training_jobs
@@ -208,4 +209,70 @@ async fn queued_job_status_omits_error_key() {
         body.get("error").is_none(),
         "queued job must not serialize an error key: {body}"
     );
+}
+
+/// DELETE on a RUNNING job sets the cooperative cancel flag (the trainer's
+/// per-step progress callback observes it and aborts at the next step
+/// boundary) and answers "cancelling" — it must NOT remove the job or mark
+/// it terminal; the worker does that when the trainer actually stops.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_running_job_sets_flag_without_terminal_transition() {
+    let (state, _dir) = make_state();
+    enqueue_sft_job(&state, "job-running");
+    {
+        let mut jobs = state.training_jobs.write().unwrap();
+        jobs.get_mut("job-running").unwrap().state = TrainingState::Running;
+    }
+    let app = api::router(state.clone());
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/v1/train/queue/job-running")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["status"], "cancelling", "{body}");
+
+    let jobs = state.training_jobs.read().unwrap();
+    let job = jobs.get("job-running").unwrap();
+    assert_eq!(job.state, TrainingState::Running, "stays Running until the trainer stops");
+    assert!(
+        job.cancel_requested
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "the cooperative flag must be set"
+    );
+}
+
+/// Terminal jobs are not cancellable — the existing contract holds.
+#[tokio::test]
+async fn cancelling_terminal_job_is_rejected() {
+    let (state, _dir) = make_state();
+    enqueue_sft_job(&state, "job-done");
+    {
+        let mut jobs = state.training_jobs.write().unwrap();
+        jobs.get_mut("job-done").unwrap().state = TrainingState::Completed;
+    }
+    let app = api::router(state.clone());
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/v1/train/queue/job-done")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
 }

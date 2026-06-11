@@ -7641,6 +7641,10 @@ function renderTrainingCard(j, state) {
   let actionBtn = '';
   if (state === 'queued') {
     actionBtn = `<button class="btn btn-sm" data-train-cancel data-job-id="${escapeHtml(j.job_id)}" type="button" style="margin-left:auto;">Cancel</button>`;
+  } else if (state === 'running') {
+    // Running jobs are stoppable too: the server sets a cooperative flag
+    // and the trainer aborts at the next step boundary.
+    actionBtn = `<button class="btn btn-sm" data-train-cancel data-job-id="${escapeHtml(j.job_id)}" type="button" style="margin-left:auto;" title="Stop at the next training step">Stop</button>`;
   } else if (stateNormForActions === 'completed' && j.adapter_name) {
     actionBtn = `<button class="btn btn-sm" data-train-prove data-adapter="${escapeHtml(j.adapter_name)}" type="button" style="margin-left:auto;" title="Grade ${escapeHtml(j.adapter_name)} against base on an eval suite">Prove it vs base</button>`;
   }
