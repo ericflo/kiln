@@ -36337,10 +36337,19 @@ mod tests {
             STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD
         ));
         assert_eq!(streaming_tile_tokens(), STREAMING_PREFILL_DEFAULT_TILE);
-        assert_eq!(
-            streaming_tile_tokens_for(&Device::Cpu),
+        // CPU-as-Vulkan-sentinel: on a Vulkan-capable host (feature +
+        // device present) the per-device policy treats CPU-device tensors
+        // as the Vulkan substrate, so the tile is the Vulkan-tuned value;
+        // on hosts without a Vulkan device (CI runners) it stays portable.
+        #[cfg(feature = "vulkan")]
+        let expected_cpu_tile = if crate::backend::vulkan_training_substrate_active() {
+            crate::backend::TrainingPrecisionPolicy::vulkan().streaming_prefill_tile_tokens
+        } else {
             STREAMING_PREFILL_DEFAULT_TILE
-        );
+        };
+        #[cfg(not(feature = "vulkan"))]
+        let expected_cpu_tile = STREAMING_PREFILL_DEFAULT_TILE;
+        assert_eq!(streaming_tile_tokens_for(&Device::Cpu), expected_cpu_tile);
         assert_eq!(
             streaming_tile_tokens_for(&Device::Cuda(0)),
             STREAMING_PREFILL_CUDA_DEFAULT_TILE
