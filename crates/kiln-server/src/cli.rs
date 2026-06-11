@@ -2395,11 +2395,35 @@ fn print_job_line(job: &serde_json::Value) {
 const PI_PROVIDER_ID: &str = "kiln-local";
 const PI_MODEL_ID: &str = "Qwen3.5-4B";
 
+/// Ask a running Kiln what model id it actually serves (`GET /v1/models`),
+/// so the pi provider block matches the server's announcement instead of a
+/// compiled-in guess. Short timeout — pi-setup must stay instant offline.
+async fn probe_kiln_served_model(url: &str) -> anyhow::Result<String> {
+    let base = pi_openai_base_url(url);
+    let resp = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()?
+        .get(format!("{base}/models"))
+        .send()
+        .await?
+        .error_for_status()?;
+    let body: serde_json::Value = resp.json().await?;
+    body.get("data")
+        .and_then(|d| d.as_array())
+        .and_then(|a| a.first())
+        .and_then(|m| m.get("id"))
+        .and_then(|id| id.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("no models in /v1/models response"))
+}
+
 /// Quiet variant of `run_pi_setup` for in-process callers (the embedded
 /// dashboard terminal): performs the same non-destructive merge into pi's
 /// default config location, but logs instead of printing, and returns the
-/// models.json path it wrote.
-pub fn apply_pi_setup_quiet(url: &str) -> anyhow::Result<PathBuf> {
+/// models.json path it wrote. In-process callers know the served model id —
+/// pass it so the provider block matches the live server.
+pub fn apply_pi_setup_quiet(url: &str, model_id: Option<&str>) -> anyhow::Result<PathBuf> {
+    let model_id = model_id.unwrap_or(PI_MODEL_ID);
     let path: PathBuf = match std::env::var("HOME") {
         Ok(h) => PathBuf::from(h)
             .join(".pi")
@@ -2416,8 +2440,8 @@ pub fn apply_pi_setup_quiet(url: &str) -> anyhow::Result<PathBuf> {
     }
     backup_existing_file(&path)?;
     backup_existing_file(&settings_path)?;
-    let models = merge_pi_models_config(read_json_file_if_exists(&path)?, url)?;
-    let settings = merge_pi_settings_config(read_json_file_if_exists(&settings_path)?)?;
+    let models = merge_pi_models_config(read_json_file_if_exists(&path)?, url, model_id)?;
+    let settings = merge_pi_settings_config(read_json_file_if_exists(&settings_path)?, model_id)?;
     write_json_pretty(&path, &models)?;
     write_json_pretty(&settings_path, &settings)?;
     tracing::info!(models = %path.display(), settings = %settings_path.display(), url = %url, "pi config merged for embedded terminal");
@@ -2445,11 +2469,40 @@ pub async fn run_pi_setup(url: &str, out: Option<&str>) -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
+    // Handshake with the running server so the provider block carries the
+    // model id Kiln actually announces. Silent success when the server is
+    // down was the #1 way pi-setup "worked" and pi still couldn't connect.
+    let probed_model = match probe_kiln_served_model(url).await {
+        Ok(id) => {
+            println!(
+                "{} Kiln reachable at {} — serving {}",
+                style("✓").green().bold(),
+                pi_openai_base_url(url),
+                style(&id).cyan()
+            );
+            Some(id)
+        }
+        Err(err) => {
+            println!(
+                "{} Kiln is not reachable at {} ({}).",
+                style("⚠").yellow().bold(),
+                pi_openai_base_url(url),
+                format_args!("{err:#}")
+            );
+            println!(
+                "  Writing the config anyway — start the server with {} and pi will connect.",
+                style("kiln serve").cyan()
+            );
+            None
+        }
+    };
+    let model_id = probed_model.as_deref().unwrap_or(PI_MODEL_ID);
+
     let models_backup = backup_existing_file(&path)?;
     let settings_backup = backup_existing_file(&settings_path)?;
 
-    let models = merge_pi_models_config(read_json_file_if_exists(&path)?, url)?;
-    let settings = merge_pi_settings_config(read_json_file_if_exists(&settings_path)?)?;
+    let models = merge_pi_models_config(read_json_file_if_exists(&path)?, url, model_id)?;
+    let settings = merge_pi_settings_config(read_json_file_if_exists(&settings_path)?, model_id)?;
     write_json_pretty(&path, &models)?;
     write_json_pretty(&settings_path, &settings)?;
 
@@ -2472,7 +2525,7 @@ pub async fn run_pi_setup(url: &str, out: Option<&str>) -> anyhow::Result<()> {
     println!(
         "  pi now talks to {} as {}.",
         pi_openai_base_url(url),
-        PI_MODEL_ID
+        model_id
     );
     println!(
         "  Next: just use pi normally — your sessions become training data."
@@ -2548,6 +2601,7 @@ fn write_json_pretty(path: &Path, value: &serde_json::Value) -> anyhow::Result<(
 fn merge_pi_models_config(
     existing: Option<serde_json::Value>,
     url: &str,
+    model_id: &str,
 ) -> anyhow::Result<serde_json::Value> {
     let mut root = match existing {
         Some(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
@@ -2566,7 +2620,10 @@ fn merge_pi_models_config(
         .remove("providers")
         .unwrap_or_else(|| serde_json::json!({}));
     let mut providers = pi_providers_object_from_value(providers_value);
-    providers.insert(PI_PROVIDER_ID.to_string(), kiln_pi_provider_config(url));
+    providers.insert(
+        PI_PROVIDER_ID.to_string(),
+        kiln_pi_provider_config(url, model_id),
+    );
     root_obj.insert(
         "providers".to_string(),
         serde_json::Value::Object(providers),
@@ -2576,6 +2633,7 @@ fn merge_pi_models_config(
 
 fn merge_pi_settings_config(
     existing: Option<serde_json::Value>,
+    model_id: &str,
 ) -> anyhow::Result<serde_json::Value> {
     let mut root = match existing {
         Some(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
@@ -2593,7 +2651,7 @@ fn merge_pi_settings_config(
         "defaultProvider".to_string(),
         serde_json::json!(PI_PROVIDER_ID),
     );
-    root_obj.insert("defaultModel".to_string(), serde_json::json!(PI_MODEL_ID));
+    root_obj.insert("defaultModel".to_string(), serde_json::json!(model_id));
     Ok(root)
 }
 
@@ -2622,7 +2680,12 @@ fn pi_providers_object_from_value(
     }
 }
 
-fn kiln_pi_provider_config(url: &str) -> serde_json::Value {
+fn kiln_pi_provider_config(url: &str, model_id: &str) -> serde_json::Value {
+    let display_name = if model_id == PI_MODEL_ID {
+        "Qwen 3.5 4B via Kiln".to_string()
+    } else {
+        format!("{model_id} via Kiln")
+    };
     serde_json::json!({
         "baseUrl": pi_openai_base_url(url),
         "api": "openai-completions",
@@ -2632,8 +2695,8 @@ fn kiln_pi_provider_config(url: &str) -> serde_json::Value {
             "supportsReasoningEffort": false,
         },
         "models": [{
-            "id": PI_MODEL_ID,
-            "name": "Qwen 3.5 4B via Kiln",
+            "id": model_id,
+            "name": display_name,
             "input": ["text"],
             "contextWindow": 262144,
             "maxTokens": 32768,
@@ -2874,6 +2937,35 @@ mod tests {
         assert_eq!(cli_with(0, true).effective_log_level("info"), "warn");
         // quiet wins regardless of fallback severity
         assert_eq!(cli_with(0, true).effective_log_level("trace"), "warn");
+    }
+
+    #[test]
+    fn merge_pi_models_config_uses_probed_model_id() {
+        let merged =
+            merge_pi_models_config(None, "http://localhost:8420", "my-served-id").unwrap();
+        let provider = &merged["providers"][PI_PROVIDER_ID];
+        assert_eq!(provider["baseUrl"], "http://localhost:8420/v1");
+        assert_eq!(provider["models"][0]["id"], "my-served-id");
+        assert_eq!(provider["models"][0]["name"], "my-served-id via Kiln");
+    }
+
+    #[test]
+    fn merge_pi_models_config_keeps_existing_providers_and_default_display_name() {
+        let existing = json!({"providers": {"other": {"baseUrl": "http://elsewhere"}}});
+        let merged =
+            merge_pi_models_config(Some(existing), "http://localhost:8420/", "Qwen3.5-4B")
+                .unwrap();
+        assert!(merged["providers"]["other"].is_object());
+        let provider = &merged["providers"][PI_PROVIDER_ID];
+        assert_eq!(provider["models"][0]["id"], "Qwen3.5-4B");
+        assert_eq!(provider["models"][0]["name"], "Qwen 3.5 4B via Kiln");
+    }
+
+    #[test]
+    fn merge_pi_settings_config_sets_default_model_to_served_id() {
+        let merged = merge_pi_settings_config(None, "custom-id").unwrap();
+        assert_eq!(merged["defaultProvider"], PI_PROVIDER_ID);
+        assert_eq!(merged["defaultModel"], "custom-id");
     }
 
     #[test]
