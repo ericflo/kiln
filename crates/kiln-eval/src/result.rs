@@ -650,6 +650,55 @@ impl EvalResult {
     }
 }
 
+/// Paired sign test over a [`FlipDiff`]'s discordant examples. The
+/// concordant pairs (both_pass / both_fail) carry no information about
+/// which adapter is better; under the null hypothesis each discordant
+/// example improves or regresses with probability 1/2.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SignTest {
+    pub improved: u32,
+    pub regressed: u32,
+    /// Two-sided exact binomial p-value. 1.0 when there are no discordant
+    /// pairs (no evidence either way).
+    pub p_value: f64,
+}
+
+impl SignTest {
+    /// Conventional 5% significance gate used by the CLI and dashboard
+    /// verdicts.
+    pub fn significant(&self) -> bool {
+        self.p_value < 0.05
+    }
+}
+
+/// Two-sided exact binomial sign test: probability of seeing a split at
+/// least as lopsided as (b, c) under p=1/2. Log-space so large suites
+/// don't underflow.
+pub fn sign_test(improved: u32, regressed: u32) -> SignTest {
+    let n = improved + regressed;
+    let p_value = if n == 0 {
+        1.0
+    } else {
+        let k = improved.min(regressed);
+        let ln2 = std::f64::consts::LN_2;
+        // ln C(n, i) built incrementally; tail = sum_{i<=k} C(n,i) / 2^n.
+        let mut ln_terms: Vec<f64> = Vec::with_capacity(k as usize + 1);
+        let mut ln_c = 0.0_f64; // ln C(n, 0)
+        for i in 0..=k {
+            ln_terms.push(ln_c - f64::from(n) * ln2);
+            ln_c += (f64::from(n - i)).ln() - (f64::from(i + 1)).ln();
+        }
+        let max = ln_terms.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let tail: f64 = ln_terms.iter().map(|t| (t - max).exp()).sum::<f64>() * max.exp();
+        (2.0 * tail).min(1.0)
+    };
+    SignTest {
+        improved,
+        regressed,
+        p_value,
+    }
+}
+
 /// Pass↔Fail flip diff between two adapter runs of the same suite.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FlipDiff {
@@ -667,6 +716,13 @@ pub struct FlipDiff {
     pub both_pass: u32,
     /// Examples that failed under both runs.
     pub both_fail: u32,
+}
+
+impl FlipDiff {
+    /// Sign test over this diff's discordant examples.
+    pub fn significance(&self) -> SignTest {
+        sign_test(self.improved.len() as u32, self.regressed.len() as u32)
+    }
 }
 
 #[cfg(test)]
@@ -710,6 +766,27 @@ mod tests {
             finished_at: "2026-05-14T00:00:01Z".into(),
             suite_hash: "deadbeef".into(),
         }
+    }
+
+    #[test]
+    fn sign_test_matches_known_exact_values() {
+        // b=9, c=2: n=11, k=2 -> 2 * (1+11+55)/2^11 = 134/2048.
+        let t = sign_test(9, 2);
+        assert!((t.p_value - 134.0 / 2048.0).abs() < 1e-12, "{}", t.p_value);
+        assert!(!t.significant());
+        // b=15, c=3: n=18, k=3 -> 2 * (1+18+153+816)/2^18.
+        let t = sign_test(15, 3);
+        assert!((t.p_value - 2.0 * 988.0 / 262144.0).abs() < 1e-12, "{}", t.p_value);
+        assert!(t.significant());
+        // No discordant pairs: no evidence.
+        assert_eq!(sign_test(0, 0).p_value, 1.0);
+        // Symmetric in b/c.
+        assert_eq!(sign_test(9, 2).p_value, sign_test(2, 9).p_value);
+        // Even split: p clamps to 1.0.
+        assert_eq!(sign_test(5, 5).p_value, 1.0);
+        // Large n must not underflow to 0-vs-NaN.
+        let t = sign_test(900, 700);
+        assert!(t.p_value > 0.0 && t.p_value <= 1.0, "{}", t.p_value);
     }
 
     #[test]
