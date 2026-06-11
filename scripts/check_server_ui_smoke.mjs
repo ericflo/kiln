@@ -486,6 +486,93 @@ async function startServer({
       hint: 'List judgments with GET /v1/judgments.',
     } }));
   };
+  // Eval drill fixtures, mirroring kiln-eval's ExampleOutcome / SuiteResult
+  // and the queue's EvalJobInfo: one completed compare job with real
+  // outcomes (the raw-JSON toggle + outcomes-JSONL export walk reads these)
+  // and one queued job with no runs yet (the export must disable on it).
+  const smokeEvalOutcome = (exampleId, kind, text, detail) => ({
+    example_id: exampleId,
+    completion_index: 0,
+    completion_text: text,
+    kind,
+    score: kind === 'pass' ? 1 : 0,
+    ...(detail ? { detail } : {}),
+    latency_ms: 42,
+    prompt_tokens: 12,
+    completion_tokens: 4,
+    tags: ['math'],
+  });
+  const smokeEvalRun = (adapter, outcomes) => {
+    const numPass = outcomes.filter((outcome) => outcome.kind === 'pass').length;
+    const accuracy = numPass / outcomes.length;
+    return {
+      suite_name: 'smoke-suite',
+      adapter,
+      metrics: {
+        num_examples: outcomes.length,
+        num_pass: numPass,
+        num_fail: outcomes.length - numPass,
+        num_invalid: 0,
+        num_error: 0,
+        accuracy,
+        mean_score: accuracy,
+        weighted_mean_score: accuracy,
+        latency: { p50_ms: 42, p90_ms: 55, p99_ms: 61 },
+        total_prompt_tokens: 36,
+        total_completion_tokens: 12,
+        elapsed_secs: 1.5,
+        pass_rate_by_tag: { math: accuracy },
+        by_scorer: [{ scorer_kind: 'exact_match', num_examples: outcomes.length, num_pass: numPass, accuracy }],
+      },
+      outcomes,
+      started_at: '2026-06-11T00:00:00Z',
+      finished_at: '2026-06-11T00:00:02Z',
+      suite_hash: 'smoke-suite-hash',
+    };
+  };
+  const smokeEvalJobs = [
+    {
+      job_id: 'smoke-eval-full',
+      suite_name: 'smoke-suite',
+      adapters: [null, 'smoke-tuned'],
+      submission_kind: 'compare',
+      state: 'completed',
+      progress: { examples_completed: 3, examples_total: 3, running_accuracy: 2 / 3, running_mean_score: 2 / 3 },
+      finished_runs: [
+        smokeEvalRun(null, [
+          smokeEvalOutcome('ex-1', 'pass', '4'),
+          smokeEvalOutcome('ex-2', 'fail', '41', 'expected 42, got 41'),
+          smokeEvalOutcome('ex-3', 'fail', '7', 'expected 9, got 7'),
+        ]),
+        smokeEvalRun('smoke-tuned', [
+          smokeEvalOutcome('ex-1', 'pass', '4'),
+          smokeEvalOutcome('ex-2', 'fail', '41', 'expected 42, got 41'),
+          smokeEvalOutcome('ex-3', 'pass', '9'),
+        ]),
+      ],
+      headline_accuracy: 2 / 3,
+      error: null,
+      source_training_job_id: null,
+      submitted_at_iso: '2026-06-11T00:00:00Z',
+      started_at_iso: '2026-06-11T00:00:00Z',
+      finished_at_iso: '2026-06-11T00:00:02Z',
+    },
+    {
+      job_id: 'smoke-eval-empty',
+      suite_name: 'smoke-suite',
+      adapters: [null],
+      submission_kind: 'on_demand',
+      state: 'queued',
+      progress: { examples_completed: 0, examples_total: 0, running_accuracy: 0, running_mean_score: 0 },
+      finished_runs: [],
+      headline_accuracy: null,
+      error: null,
+      source_training_job_id: null,
+      submitted_at_iso: '2026-06-11T00:00:01Z',
+      started_at_iso: null,
+      finished_at_iso: null,
+    },
+  ];
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://127.0.0.1');
     const adapterRoute = parseAdapterRoute(url.pathname);
@@ -825,7 +912,10 @@ async function startServer({
         return;
       }
       // SFT lands as the RUNNING job so the drill-modal Stop flow can
-      // assert running-job cooperative cancel against the mock.
+      // assert running-job cooperative cancel against the mock. The loss
+      // samples mirror state.rs TrainingLossSample (epoch/progress/loss/
+      // elapsed_secs — no step, no wall-clock) and feed the drill modal's
+      // "Copy loss CSV" assertion.
       runningTrainingJob = {
         job_id: 'smoke-sft',
         job_type: 'sft',
@@ -835,7 +925,11 @@ async function startServer({
         epoch: 1,
         adapter_name: body.config.output_name,
         elapsed_secs: 12,
-        loss_history: [],
+        loss_history: [
+          { epoch: 1, progress: 0.1, loss: 2.5, elapsed_secs: 2 },
+          { epoch: 1, progress: 0.25, loss: 1.9, elapsed_secs: 5 },
+          { epoch: 1, progress: 0.42, loss: 1.234, elapsed_secs: 12 },
+        ],
         linked_eval_job_ids: [],
         auto_load: false,
       };
@@ -894,10 +988,32 @@ async function startServer({
       return;
     }
     // The UI polls /v1/eval/jobs at startup to keep the Evals badge
-    // accurate before the user has visited the tab. Stub an empty list
-    // so the empty-adapter smoke run doesn't see a 404 in the console.
+    // accurate before the user has visited the tab. The fixture jobs feed
+    // the eval drill walk (raw JSON toggle + outcomes JSONL export); their
+    // adapters reference no real adapter card, so the rest of the
+    // dashboard is unaffected.
     if (url.pathname === '/v1/eval/jobs') {
-      json(res, { jobs: [] });
+      json(res, { jobs: smokeEvalJobs });
+      return;
+    }
+    // GET /v1/eval/jobs/:id — mirrors EvalJobInfo::to_result: the public
+    // detail payload renames finished_runs to `runs` and only ships
+    // `progress` while the job is still active.
+    const evalJobDetailMatch = /^\/v1\/eval\/jobs\/([^/]+)$/.exec(url.pathname);
+    if (evalJobDetailMatch && req.method === 'GET') {
+      const jobId = decodeURIComponent(evalJobDetailMatch[1]);
+      const job = smokeEvalJobs.find((candidate) => candidate.job_id === jobId);
+      if (!job) {
+        res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: { code: 'eval_job_not_found', message: `Eval job '${jobId}' not found` } }));
+        return;
+      }
+      json(res, {
+        job_id: job.job_id,
+        state: job.state,
+        runs: job.finished_runs,
+        ...(job.state === 'queued' || job.state === 'running' ? { progress: job.progress } : {}),
+      });
       return;
     }
     // Same shape as the production endpoints — only the empty cases
@@ -905,6 +1021,20 @@ async function startServer({
     // background polls don't surprise the mock.
     if (url.pathname === '/v1/eval/suites') {
       json(res, { suites: [] });
+      return;
+    }
+    // The drill modal lazily fetches the suite content so it can show the
+    // prompt next to each outcome. Serve the fixture suite (kept OUT of
+    // the suites list so the Suites empty-state assertions still hold).
+    if (url.pathname === '/v1/eval/suites/smoke-suite' && req.method === 'GET') {
+      json(res, {
+        name: 'smoke-suite',
+        examples: [
+          { id: 'ex-1', messages: [{ role: 'user', content: 'What is 2 + 2?' }], target: '4', tags: ['math'] },
+          { id: 'ex-2', messages: [{ role: 'user', content: 'What is 6 x 7?' }], target: '42', tags: ['math'] },
+          { id: 'ex-3', messages: [{ role: 'user', content: 'What is 3 squared?' }], target: '9', tags: ['math'] },
+        ],
+      });
       return;
     }
     if (url.pathname === '/v1/eval/datasets') {
@@ -2040,6 +2170,23 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       },
       { timeout: 5000 },
     ).catch(() => fail('Train drill Stop should be enabled for a running job with title "Stop at the next training step"'));
+    // Copy loss CSV: the running SFT job carries three TrainingLossSample
+    // rows (epoch/progress/loss/elapsed_secs — no step, no timestamps), so
+    // the header button must be live and put exactly that CSV on the
+    // clipboard via the shared __copiedText test hook.
+    await expectDisabled(page, '#train-drill-copy-loss', false, 'Copy loss CSV should enable once the job has loss samples');
+    await page.evaluate(() => { window.__copiedText = ''; });
+    await clickAndWait(page, '#train-drill-copy-loss', 'Could not click Copy loss CSV');
+    const expectedLossCsv = 'sample,epoch,progress,loss,elapsed_secs\n1,1,0.1,2.5,2\n2,1,0.25,1.9,5\n3,1,0.42,1.234,12';
+    await page.waitForFunction(
+      (expected) => window.__copiedText === expected,
+      { timeout: 5000 },
+      expectedLossCsv,
+    ).catch(async () => {
+      const copiedText = await page.evaluate(() => window.__copiedText).catch(() => undefined);
+      fail(`Copy loss CSV should copy the loss history rows, got ${JSON.stringify(copiedText)}`);
+    });
+    await expectTrainingToast(page, 'Loss history copied as CSV');
     page.once('dialog', async (dialog) => {
       if (!/Stop this running job at the next training step\?/.test(dialog.message())) fail(`Unexpected stop confirmation text: ${dialog.message()}`);
       await dialog.accept();
@@ -2077,6 +2224,18 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await expectActiveTrainingTab(page, 'queue', 'Submitting GRPO should switch back to the training queue tab');
     await waitForPanelText(page, '#tab-queue', /smoke-gr/, 'Training queue should refresh after GRPO submit');
     await waitForPanelText(page, '#tab-queue', /Adapter:\s*grpo-adapter/, 'Training queue should show the submitted GRPO adapter name');
+
+    // The completed GRPO job recorded no loss samples — Copy loss CSV must
+    // disable with a title that explains what unlocks it.
+    await clickAndWait(page, '[data-train-job-id="smoke-grpo"]', 'Could not open the train drill modal for the completed GRPO job');
+    await page.waitForFunction(() => document.getElementById('train-drill-modal')?.hidden === false, { timeout: 5000 })
+      .catch(() => fail('Train drill modal did not open for the GRPO job'));
+    await expectDisabled(page, '#train-drill-copy-loss', true, 'Copy loss CSV should disable when the job has no loss samples');
+    const copyLossTitle = await page.$eval('#train-drill-copy-loss', (el) => el.title);
+    if (!/No loss samples recorded yet/.test(copyLossTitle)) fail(`Disabled Copy loss CSV should explain what unlocks it, got: ${JSON.stringify(copyLossTitle)}`);
+    await clickAndWait(page, '#train-drill-close', 'Could not close the GRPO train drill modal');
+    await page.waitForFunction(() => document.getElementById('train-drill-modal')?.hidden === true, { timeout: 5000 })
+      .catch(() => fail('GRPO train drill modal did not close'));
 
     await goToPrimaryTab(page, 'playground');
     await expectDisabled(page, '#chat-send', true, 'Quick Inference send should start disabled until text is entered');
@@ -2200,6 +2359,109 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await expectTrainingToast(page, 'Undone — judgment removed from "smoke-judgments"');
     await waitForPanelText(page, '#judgment-rows-count', /0 judgments in "smoke-judgments"/, 'Undo should restore the judgment viewer count');
     await waitForPanelText(page, '#judgments-list', /0 judgments/, 'Judgments list should refresh to zero rows after Undo');
+
+    // ---- Eval drill power-user depth: the raw-JSON toggle mirrors the
+    // request drill modal's `raw` button; the outcomes export downloads one
+    // JSON line per outcome across every run of the job.
+    await clickAndWait(page, '#evals-tab-jobs', 'Could not open the Jobs sub-tab');
+    await waitForVisiblePanel(page, '#tab-evals-jobs', 'Jobs sub-tab did not activate');
+    await clickAndWait(page, '[data-job-id="smoke-eval-full"]', 'Could not open the eval drill modal for the completed compare job');
+    await page.waitForFunction(
+      () => document.getElementById('eval-drill-modal')?.hidden === false
+        && document.getElementById('drill-title')?.textContent === 'smoke-suite',
+      { timeout: 5000 },
+    ).catch(() => fail('Eval drill modal did not open on the completed compare job'));
+
+    // Raw JSON toggle: first click appends the pretty-printed cached job
+    // payload, second click removes it.
+    await clickAndWait(page, '#drill-raw', 'Could not click the eval drill raw JSON toggle');
+    await page.waitForSelector('#drill-raw-block', { timeout: 5000 })
+      .catch(() => fail('Raw JSON toggle did not render #drill-raw-block'));
+    const rawPayload = await page.$eval('#drill-raw-block', (el) => el.textContent || '');
+    let parsedRaw = null;
+    try { parsedRaw = JSON.parse(rawPayload); } catch { fail('Eval drill raw JSON block should contain valid JSON'); }
+    if (parsedRaw.job_id !== 'smoke-eval-full') fail(`Raw JSON should show the drilled job, got job_id ${JSON.stringify(parsedRaw.job_id)}`);
+    if (!Array.isArray(parsedRaw.runs) || parsedRaw.runs.length !== 2) fail('Raw JSON should carry both runs of the compare job');
+    if (!rawPayload.includes('\n  "runs"')) fail('Raw JSON should be pretty-printed with 2-space indentation');
+    if (!rawPayload.includes('"detail": "expected 42, got 41"')) fail('Raw JSON should surface per-outcome fields like detail');
+    await clickAndWait(page, '#drill-raw', 'Could not click the raw JSON toggle a second time');
+    await page.waitForFunction(() => !document.getElementById('drill-raw-block'), { timeout: 5000 })
+      .catch(() => fail('Second raw JSON click should remove the block'));
+
+    // Outcomes JSONL download: stub object URLs and anchor clicks so the
+    // blob is inspectable in-page, then assert the line schema and that
+    // every created URL is revoked (no leak across repeated downloads).
+    await expectDisabled(page, '#drill-download-outcomes', false, 'Download outcomes should enable when the job has outcomes');
+    await page.evaluate(() => {
+      window.__smokeDownloads = { created: 0, revoked: 0, name: '', blob: null };
+      URL.createObjectURL = (blob) => {
+        window.__smokeDownloads.created += 1;
+        window.__smokeDownloads.blob = blob;
+        return `blob:smoke-${window.__smokeDownloads.created}`;
+      };
+      URL.revokeObjectURL = () => { window.__smokeDownloads.revoked += 1; };
+      // Keep headless Chrome from navigating to the fake blob URL; buttons
+      // are unaffected (they use HTMLElement.prototype.click).
+      HTMLAnchorElement.prototype.click = function () { window.__smokeDownloads.name = this.download; };
+    });
+    await clickAndWait(page, '#drill-download-outcomes', 'Could not click Download outcomes (.jsonl)');
+    await page.waitForFunction(
+      () => window.__smokeDownloads?.created === 1 && window.__smokeDownloads?.revoked === 1,
+      { timeout: 5000 },
+    ).catch(async () => {
+      const counts = await page.evaluate(() => window.__smokeDownloads).catch(() => undefined);
+      fail(`Download should create then revoke exactly one object URL, got ${JSON.stringify(counts)}`);
+    });
+    // Toast asserted on the FIRST download — a repeat within 4s dedupes
+    // into the same toast with an appended ×2 counter, which exact-match
+    // would miss.
+    await expectTrainingToast(page, 'Downloaded 6 outcomes as smoke-suite-smoke-ev.outcomes.jsonl');
+    const download = await page.evaluate(async () => ({
+      name: window.__smokeDownloads.name,
+      text: window.__smokeDownloads.blob ? await window.__smokeDownloads.blob.text() : null,
+    }));
+    if (download.name !== 'smoke-suite-smoke-ev.outcomes.jsonl') {
+      fail(`Outcomes download filename should be <suite>-<job8>.outcomes.jsonl, got ${JSON.stringify(download.name)}`);
+    }
+    const jsonlLines = (download.text || '').split('\n').filter((line) => line.length > 0);
+    if (jsonlLines.length !== 6) fail(`Outcomes JSONL should carry 6 lines (2 runs x 3 outcomes), got ${jsonlLines.length}`);
+    const parsedLines = jsonlLines.map((line, index) => {
+      try { return JSON.parse(line); } catch { fail(`Outcomes JSONL line ${index + 1} is not valid JSON: ${line}`); }
+      return null;
+    });
+    const firstLine = parsedLines[0];
+    if (firstLine.suite !== 'smoke-suite' || firstLine.job_id !== 'smoke-eval-full' || firstLine.adapter !== 'base') {
+      fail(`First JSONL line should carry standalone context (suite/job_id/adapter), got ${JSON.stringify(firstLine)}`);
+    }
+    if (firstLine.example_id !== 'ex-1' || firstLine.example_index !== 0 || firstLine.kind !== 'pass' || firstLine.score !== 1 || firstLine.completion_text !== '4') {
+      fail(`First JSONL line should carry the outcome verdict fields, got ${JSON.stringify(firstLine)}`);
+    }
+    if (!parsedLines.some((line) => line.adapter === 'smoke-tuned')) fail('Outcomes JSONL should include the second run, tagged with its adapter');
+    const failLine = parsedLines.find((line) => line.adapter === 'base' && line.example_id === 'ex-2');
+    if (!failLine || failLine.kind !== 'fail' || failLine.detail !== 'expected 42, got 41' || failLine.latency_ms !== 42) {
+      fail(`Failing JSONL line should carry kind/detail/latency, got ${JSON.stringify(failLine)}`);
+    }
+    // A second download must mint and revoke a fresh URL (no leak on repeats).
+    await clickAndWait(page, '#drill-download-outcomes', 'Could not click Download outcomes a second time');
+    await page.waitForFunction(
+      () => window.__smokeDownloads?.created === 2 && window.__smokeDownloads?.revoked === 2,
+      { timeout: 5000 },
+    ).catch(() => fail('Repeated downloads should revoke every object URL they create'));
+    await clickAndWait(page, '#drill-close', 'Could not close the eval drill modal');
+    await page.waitForFunction(() => document.getElementById('eval-drill-modal')?.hidden === true, { timeout: 5000 })
+      .catch(() => fail('Eval drill modal did not close'));
+
+    // No-outcomes job: the export button must disable with an explanatory
+    // title (the raw toggle stays live — the job JSON itself exists).
+    await clickAndWait(page, '[data-job-id="smoke-eval-empty"]', 'Could not open the eval drill modal for the queued job');
+    await page.waitForFunction(() => document.getElementById('eval-drill-modal')?.hidden === false, { timeout: 5000 })
+      .catch(() => fail('Eval drill modal did not open on the queued job'));
+    await expectDisabled(page, '#drill-download-outcomes', true, 'Download outcomes should disable on a job with no outcomes');
+    const emptyDownloadTitle = await page.$eval('#drill-download-outcomes', (el) => el.title);
+    if (!/No outcomes yet/.test(emptyDownloadTitle)) fail(`Disabled outcomes download should explain what unlocks it, got: ${JSON.stringify(emptyDownloadTitle)}`);
+    await clickAndWait(page, '#drill-close', 'Could not close the queued-job eval drill modal');
+    await page.waitForFunction(() => document.getElementById('eval-drill-modal')?.hidden === true, { timeout: 5000 })
+      .catch(() => fail('Queued-job eval drill modal did not close'));
 
   } finally {
     await browser.close();
