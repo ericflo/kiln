@@ -98,28 +98,28 @@
 </header>
 
 <nav class="primary-nav" role="tablist" aria-label="Dashboard sections">
-  <button type="button" class="primary-tab active" data-page="overview" role="tab" aria-selected="true" aria-controls="page-overview" id="primary-tab-overview">
+  <button type="button" class="primary-tab active" data-page="overview" role="tab" aria-selected="true" aria-controls="page-overview" id="primary-tab-overview" tabindex="0">
     Overview
   </button>
-  <button type="button" class="primary-tab" data-page="adapters" role="tab" aria-selected="false" aria-controls="page-adapters" id="primary-tab-adapters">
+  <button type="button" class="primary-tab" data-page="adapters" role="tab" aria-selected="false" aria-controls="page-adapters" id="primary-tab-adapters" tabindex="-1">
     Adapters
     <span class="count" data-count="adapters" id="adapters-count">0</span>
   </button>
-  <button type="button" class="primary-tab" data-page="training" role="tab" aria-selected="false" aria-controls="page-training" id="primary-tab-training">
+  <button type="button" class="primary-tab" data-page="training" role="tab" aria-selected="false" aria-controls="page-training" id="primary-tab-training" tabindex="-1">
     Training
     <span class="count" data-count="training" id="training-count">0</span>
   </button>
-  <button type="button" class="primary-tab" data-page="evals" role="tab" aria-selected="false" aria-controls="page-evals" id="primary-tab-evals">
+  <button type="button" class="primary-tab" data-page="evals" role="tab" aria-selected="false" aria-controls="page-evals" id="primary-tab-evals" tabindex="-1">
     Evals
     <span class="count" data-count="evals" id="evals-count" title="Eval jobs queued or running">0</span>
   </button>
-  <button type="button" class="primary-tab" data-page="distill" role="tab" aria-selected="false" aria-controls="page-distill" id="primary-tab-distill">
+  <button type="button" class="primary-tab" data-page="distill" role="tab" aria-selected="false" aria-controls="page-distill" id="primary-tab-distill" tabindex="-1">
     Distill
   </button>
-  <button type="button" class="primary-tab" data-page="playground" role="tab" aria-selected="false" aria-controls="page-playground" id="primary-tab-playground">
+  <button type="button" class="primary-tab" data-page="playground" role="tab" aria-selected="false" aria-controls="page-playground" id="primary-tab-playground" tabindex="-1">
     Playground
   </button>
-  <button type="button" class="primary-tab" data-page="terminal" role="tab" aria-selected="false" aria-controls="page-terminal" id="primary-tab-terminal">
+  <button type="button" class="primary-tab" data-page="terminal" role="tab" aria-selected="false" aria-controls="page-terminal" id="primary-tab-terminal" tabindex="-1">
     pi Terminal
   </button>
 </nav>
@@ -228,11 +228,11 @@
           <div class="connect-clients">
             <span class="connect-clients-label">Set up your client</span>
             <div class="tabs connect-tabs" role="tablist" aria-label="Client setup">
-              <button class="tab active" type="button" role="tab" data-connect-tab="pi" aria-selected="true">pi</button>
-              <button class="tab" type="button" role="tab" data-connect-tab="opencode" aria-selected="false">opencode</button>
-              <button class="tab" type="button" role="tab" data-connect-tab="python" aria-selected="false">OpenAI Python</button>
-              <button class="tab" type="button" role="tab" data-connect-tab="js" aria-selected="false">OpenAI JS</button>
-              <button class="tab" type="button" role="tab" data-connect-tab="curl" aria-selected="false">curl</button>
+              <button class="tab active" type="button" role="tab" id="connect-tab-pi" data-connect-tab="pi" aria-selected="true" aria-controls="connect-snippet-pi" tabindex="0">pi</button>
+              <button class="tab" type="button" role="tab" id="connect-tab-opencode" data-connect-tab="opencode" aria-selected="false" aria-controls="connect-snippet-opencode" tabindex="-1">opencode</button>
+              <button class="tab" type="button" role="tab" id="connect-tab-python" data-connect-tab="python" aria-selected="false" aria-controls="connect-snippet-python" tabindex="-1">OpenAI Python</button>
+              <button class="tab" type="button" role="tab" id="connect-tab-js" data-connect-tab="js" aria-selected="false" aria-controls="connect-snippet-js" tabindex="-1">OpenAI JS</button>
+              <button class="tab" type="button" role="tab" id="connect-tab-curl" data-connect-tab="curl" aria-selected="false" aria-controls="connect-snippet-curl" tabindex="-1">curl</button>
             </div>
             <div class="connect-snippets" id="connect-snippets"><!-- rendered by initConnect() --></div>
           </div>
@@ -1118,28 +1118,42 @@
            them; every data-tab/aria-controls is preserved. -->
       <div class="tabs distill-tabs" role="tablist" aria-label="Distill views" data-distill-tabs>
         <span class="tab-group-label" aria-hidden="true">Methods</span>
-        <button class="tab active" id="distill-tab-opd" data-tab="opd" type="button" role="tab" aria-selected="true" aria-controls="distill-tab-opd-pane" tabindex="0" title="Train your model on a teacher model&rsquo;s token-by-token feedback">Distill</button>
-        <button class="tab" id="distill-tab-refresh" data-tab="refresh" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-refresh-pane" tabindex="-1" title="Refresh an adapter on new data (continual learning)">Refresh</button>
-        <button class="tab" id="distill-tab-pump" data-tab="pump" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-pump-pane" tabindex="-1" title="Boost a domain — distill a bigger teacher&rsquo;s knowledge into your model">Boost</button>
-        <button class="tab" id="distill-tab-self" data-tab="self" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-self-pane" tabindex="-1" title="Self-improve via self-distillation">Self-improve</button>
-        <button class="tab" id="distill-tab-merge" data-tab="merge" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-merge-pane" tabindex="-1" title="Behaviour-space LoRA merge">Merge</button>
+        <button class="tab active" id="distill-tab-opd" data-tab="opd" type="button" role="tab" aria-selected="true" aria-controls="distill-tab-opd-pane" aria-describedby="distill-tab-opd-intro" tabindex="0" title="Train your model on a teacher model&rsquo;s token-by-token feedback">Distill</button>
+        <button class="tab" id="distill-tab-refresh" data-tab="refresh" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-refresh-pane" aria-describedby="distill-tab-refresh-desc" tabindex="-1" title="Refresh an adapter on new data (continual learning)">Refresh</button>
+        <button class="tab" id="distill-tab-pump" data-tab="pump" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-pump-pane" aria-describedby="distill-tab-pump-intro" tabindex="-1" title="Boost a domain — distill a bigger teacher&rsquo;s knowledge into your model">Boost</button>
+        <button class="tab" id="distill-tab-self" data-tab="self" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-self-pane" aria-describedby="distill-tab-self-desc" tabindex="-1" title="Self-improve via self-distillation">Self-improve</button>
+        <button class="tab" id="distill-tab-merge" data-tab="merge" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-merge-pane" aria-describedby="distill-tab-merge-desc" tabindex="-1" title="Behaviour-space LoRA merge">Merge</button>
         <span class="tab-group-sep" aria-hidden="true"></span>
         <span class="tab-group-label" aria-hidden="true">Setup</span>
-        <button class="tab" id="distill-tab-teachers" data-tab="teachers" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-teachers-pane" tabindex="-1" title="Registered teacher models">Teachers</button>
-        <button class="tab" id="distill-tab-recipes" data-tab="recipes" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-recipes-pane" tabindex="-1" title="One-click recipes — Kiln picks the hyperparameters">Recipes</button>
-        <button class="tab" id="distill-tab-preflight" data-tab="preflight" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-preflight-pane" tabindex="-1" title="Capacity & compatibility checks before you run">Preflight</button>
+        <button class="tab" id="distill-tab-teachers" data-tab="teachers" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-teachers-pane" aria-describedby="distill-tab-teachers-desc" tabindex="-1" title="Registered teacher models">Teachers</button>
+        <button class="tab" id="distill-tab-recipes" data-tab="recipes" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-recipes-pane" aria-describedby="distill-tab-recipes-desc" tabindex="-1" title="One-click recipes — Kiln picks the hyperparameters">Recipes</button>
+        <button class="tab" id="distill-tab-preflight" data-tab="preflight" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-preflight-pane" aria-describedby="distill-tab-preflight-desc" tabindex="-1" title="Capacity & compatibility checks before you run">Preflight</button>
         <span class="tab-group-sep" aria-hidden="true"></span>
         <span class="tab-group-label" aria-hidden="true">Assets</span>
-        <button class="tab" id="distill-tab-cache" data-tab="cache" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-cache-pane" tabindex="-1" title="On-disk logit cache">Cache</button>
-        <button class="tab" id="distill-tab-library" data-tab="library" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-library-pane" tabindex="-1" title="Browse, install & publish adapters">Library</button>
-        <button class="tab" id="distill-tab-traces" data-tab="traces" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-traces-pane" tabindex="-1" title="Import pi agent sessions for distillation">Agent traces</button>
+        <button class="tab" id="distill-tab-cache" data-tab="cache" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-cache-pane" aria-describedby="distill-tab-cache-desc" tabindex="-1" title="On-disk logit cache">Cache</button>
+        <button class="tab" id="distill-tab-library" data-tab="library" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-library-pane" aria-describedby="distill-tab-library-desc" tabindex="-1" title="Browse, install & publish adapters">Library</button>
+        <button class="tab" id="distill-tab-traces" data-tab="traces" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-traces-pane" aria-describedby="distill-tab-traces-desc" tabindex="-1" title="Import pi agent sessions for distillation">Agent traces</button>
+      </div>
+
+      <!-- Accessible descriptions for the tabs whose only explanation was a
+           hover title= (useless to keyboard / screen-reader users). Where a
+           pane carries a visible intro line, aria-describedby points AT that
+           line instead (distill-tab-opd-intro / distill-tab-pump-intro and
+           the per-pane eyebrow ids below) — no duplicated text. The three
+           panes with no intro get description-only spans here: hidden, so
+           they are never read in document order but still resolve for the
+           tabs' accessible descriptions. -->
+      <div hidden>
+        <span id="distill-tab-refresh-desc">Refresh an adapter on new data (continual learning).</span>
+        <span id="distill-tab-self-desc">Self-improve via self-distillation.</span>
+        <span id="distill-tab-merge-desc">Behaviour-space LoRA merge.</span>
       </div>
 
       <!-- =================================================================
            Submit OPD — POST /v1/train/opd
            ================================================================= -->
       <div class="tab-content active" id="distill-tab-opd-pane" role="tabpanel" aria-labelledby="distill-tab-opd">
-        <div class="form-help" style="margin: 0 0 var(--space-4);">On-policy distillation (OPD): your model writes the answers, a bigger teacher model grades every token, and the gap becomes the training signal. This form queues one distillation job.</div>
+        <div class="form-help" id="distill-tab-opd-intro" style="margin: 0 0 var(--space-4);">On-policy distillation (OPD): your model writes the answers, a bigger teacher model grades every token, and the gap becomes the training signal. This form queues one distillation job.</div>
         <div class="corr-receipt" id="distill-recipes-hint" hidden role="note" style="margin-bottom: var(--space-4);">
           <span class="corr-receipt-icon"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-book"></use></svg></span>
           <span class="corr-receipt-text">New to distillation? <strong>Recipes</strong> pick the teacher, rank, and cost cap for you — one click instead of this whole form.</span>
@@ -1235,7 +1249,7 @@
       <div class="tab-content" id="distill-tab-teachers-pane" role="tabpanel" aria-labelledby="distill-tab-teachers" hidden inert>
         <div class="card-head" style="border:none; padding:0; margin-bottom: var(--space-3);">
           <h3 style="font-size: var(--text-lg);">Registered teachers</h3>
-          <span class="eyebrow">Registered teacher models</span>
+          <span class="eyebrow" id="distill-tab-teachers-desc">Registered teacher models</span>
         </div>
         <div id="teachers-list">
           <div class="empty">Loading…</div>
@@ -1297,7 +1311,7 @@
       <div class="tab-content" id="distill-tab-recipes-pane" role="tabpanel" aria-labelledby="distill-tab-recipes" hidden inert>
         <div class="card-head" style="border:none; padding:0; margin-bottom: var(--space-3);">
           <h3 style="font-size: var(--text-lg);">Bundled recipes</h3>
-          <span class="eyebrow">One-click — Kiln picks the hyperparameters</span>
+          <span class="eyebrow" id="distill-tab-recipes-desc">One-click — Kiln picks the hyperparameters</span>
         </div>
         <div id="recipes-list">
           <div class="empty">Loading…</div>
@@ -1361,7 +1375,7 @@
            Pump — 27B → 4B knowledge pump
            ================================================================= -->
       <div class="tab-content" id="distill-tab-pump-pane" role="tabpanel" aria-labelledby="distill-tab-pump" hidden inert>
-        <div class="form-help" style="margin: 0 0 var(--space-4);">Boost (the &ldquo;knowledge pump&rdquo;): distill one domain &mdash; math, code, writing &mdash; from a bigger teacher into your model.</div>
+        <div class="form-help" id="distill-tab-pump-intro" style="margin: 0 0 var(--space-4);">Boost (the &ldquo;knowledge pump&rdquo;): distill one domain &mdash; math, code, writing &mdash; from a bigger teacher into your model.</div>
         <form id="distill-pump-form">
           <div class="form-row">
             <div class="form-group">
@@ -1491,7 +1505,7 @@
       <div class="tab-content" id="distill-tab-cache-pane" role="tabpanel" aria-labelledby="distill-tab-cache" hidden inert>
         <div class="card-head" style="border:none; padding:0; margin-bottom: var(--space-3);">
           <h3 style="font-size: var(--text-lg);">Logit cache</h3>
-          <span class="eyebrow">Prefix-keyed logit cache on disk</span>
+          <span class="eyebrow" id="distill-tab-cache-desc">Prefix-keyed logit cache on disk</span>
         </div>
         <div id="cache-stats">
           <div class="empty">Loading…</div>
@@ -1509,7 +1523,7 @@
       <div class="tab-content" id="distill-tab-library-pane" role="tabpanel" aria-labelledby="distill-tab-library" hidden inert>
         <div class="card-head" style="border:none; padding:0; margin-bottom: var(--space-3);">
           <h3 style="font-size: var(--text-lg);">Adapter library</h3>
-          <span class="eyebrow">Browse, install &amp; publish adapters</span>
+          <span class="eyebrow" id="distill-tab-library-desc">Browse, install &amp; publish adapters</span>
         </div>
         <div id="library-list">
           <div class="empty">Loading…</div>
@@ -1545,7 +1559,7 @@
       <div class="tab-content" id="distill-tab-traces-pane" role="tabpanel" aria-labelledby="distill-tab-traces" hidden inert>
         <div class="card-head" style="border:none; padding:0; margin-bottom: var(--space-3);">
           <h3 style="font-size: var(--text-lg);">pi session traces</h3>
-          <span class="eyebrow">Import pi agent sessions for distillation</span>
+          <span class="eyebrow" id="distill-tab-traces-desc">Import pi agent sessions for distillation</span>
         </div>
         <div style="display: flex; gap: var(--space-3); margin-bottom: var(--space-3);">
           <button type="button" class="btn btn-sm" id="agent-traces-refresh">Rescan ~/.pi/agent/sessions/</button>
@@ -1561,7 +1575,7 @@
       <div class="tab-content" id="distill-tab-preflight-pane" role="tabpanel" aria-labelledby="distill-tab-preflight" hidden inert>
         <div class="card-head" style="border:none; padding:0; margin-bottom: var(--space-3);">
           <h3 style="font-size: var(--text-lg);">Compatibility table</h3>
-          <span class="eyebrow">Validated teacher × student × domain combos</span>
+          <span class="eyebrow" id="distill-tab-preflight-desc">Validated teacher × student × domain combos</span>
         </div>
         <div id="preflight-compat-list">
           <div class="empty">Loading…</div>
