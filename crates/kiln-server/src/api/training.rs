@@ -225,6 +225,8 @@ async fn submit_sft(
         return Err(ApiError::shutting_down());
     }
 
+    validate_post_eval_suite(&state, req.post_eval.as_ref())?;
+
     // Reject when the queue is at its configured cap. This protects the
     // server from queue-exhaustion DoS where a client submits jobs faster
     // than the trainer can drain them. Audit reference: security-audit-v0.1
@@ -418,6 +420,8 @@ async fn submit_grpo(
         return Err(ApiError::shutting_down());
     }
 
+    validate_post_eval_suite(&state, req.post_eval.as_ref())?;
+
     // Train-by-dataset-name: resolve an uploaded dataset (the eval dataset
     // store) to its on-disk JSONL and ride the existing dataset_path
     // streaming path. Callers send just the name — no rows round-trip.
@@ -599,6 +603,8 @@ async fn submit_opd(
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
     }
+
+    validate_post_eval_suite(&state, req.post_eval.as_ref())?;
 
     // Queue / tracking caps — mirror SFT/GRPO.
     let max_queued = state.max_queued_training_jobs;
@@ -793,6 +799,8 @@ async fn submit_distill_refresh(
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
     }
+
+    validate_post_eval_suite(&state, req.post_eval.as_ref())?;
     let max_queued = state.max_queued_training_jobs;
     let queued_now = state.training_queue.lock().unwrap().len();
     if queued_now >= max_queued {
@@ -912,6 +920,8 @@ async fn submit_distill_merge(
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
     }
+
+    validate_post_eval_suite(&state, req.post_eval.as_ref())?;
     if req.sources.is_empty() {
         return Err(ApiError::training_invalid_request(
             "distill_merge: `sources` must be non-empty".to_string(),
@@ -965,6 +975,8 @@ async fn submit_distill_pump(
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
     }
+
+    validate_post_eval_suite(&state, req.post_eval.as_ref())?;
     if req.teacher.trim().is_empty() {
         return Err(ApiError::training_invalid_request(
             "distill/pump: `teacher` alias must be non-empty".to_string(),
@@ -1010,6 +1022,8 @@ async fn submit_distill_self(
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
     }
+
+    validate_post_eval_suite(&state, req.post_eval.as_ref())?;
     if req.name.trim().is_empty() {
         return Err(ApiError::training_invalid_request(
             "distill/self: `name` must be non-empty".to_string(),
@@ -1043,6 +1057,39 @@ async fn submit_distill_self(
 /// Shared submission gate: queue cap, tracked-jobs cap, and mock-mode
 /// rejection. Used by the distill_* endpoints and every other surface
 /// that enqueues training jobs (front door, recipes, agent endpoints).
+/// Submission-time §8.7 gate validation: a post_eval naming a suite that
+/// isn't installed must reject NOW, not after training burns GPU-hours
+/// and the eval worker discovers the name resolves to nothing (round-4
+/// discovery: docs/tests pointed at "agentic-core" while the installed
+/// builtin is "qwen3.5-agentic-core" — gated rounds trained forever and
+/// never promoted).
+pub(crate) fn validate_post_eval_suite(
+    state: &AppState,
+    post_eval: Option<&kiln_eval::PostEvalConfig>,
+) -> Result<(), ApiError> {
+    let Some(cfg) = post_eval else {
+        return Ok(());
+    };
+    let Some(registry) = state.suite_registry.as_ref() else {
+        // No registry on this state (mock/test shapes) — the eval worker
+        // will surface the failure; don't block submission.
+        return Ok(());
+    };
+    if registry.load(&cfg.suite).is_err() {
+        let available: Vec<String> = registry
+            .list()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        return Err(ApiError::training_invalid_request(format!(
+            "post_eval.suite '{}' is not an installed eval suite — available: [{}]",
+            cfg.suite,
+            available.join(", ")
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn enforce_queue_caps(state: &AppState) -> Result<(), ApiError> {
     let max_queued = state.max_queued_training_jobs;
     if state.training_queue.lock().unwrap().len() >= max_queued {
