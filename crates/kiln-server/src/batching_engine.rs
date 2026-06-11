@@ -32,6 +32,27 @@ const DEFAULT_MAX_DECODE_BATCH: usize = 8;
 const DEFAULT_PREFILL_ADMISSION_QUANTUM: usize = 4;
 const DEFAULT_PREFIX_AWARE_ADMISSION: bool = true;
 
+/// How long a client with a FULL event channel (64 buffered tokens) may
+/// refuse to drain before the engine cancels its request. A healthy SSE
+/// consumer drains instantly; a slow link is absorbed by the channel
+/// buffer plus kernel TCP buffers. Hitting full-and-undrained for this
+/// long means the reader is gone (suspended process, slept laptop, zero
+/// TCP window). Tunable via `KILN_STREAM_STALL_GRACE_MS`.
+const DEFAULT_STALLED_SEND_GRACE: Duration = Duration::from_millis(2000);
+/// Poll cadence while waiting out the grace window.
+const STALLED_SEND_POLL: Duration = Duration::from_millis(10);
+
+fn stalled_client_send_grace() -> Duration {
+    static GRACE: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *GRACE.get_or_init(|| {
+        std::env::var("KILN_STREAM_STALL_GRACE_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(Duration::from_millis)
+            .unwrap_or(DEFAULT_STALLED_SEND_GRACE)
+    })
+}
+
 fn blocks_needed_for_tokens(num_tokens: usize, block_size: usize) -> usize {
     num_tokens.div_ceil(block_size)
 }
@@ -1277,30 +1298,79 @@ impl BatchingEngineActor {
         };
         self.snapshot.total_decode_tokens += 1;
 
-        if self.active[idx]
-            .response_tx
-            .blocking_send(EngineEvent::Token(token))
-            .is_err()
-        {
-            self.forward.discard_request(self.active.remove(idx).slot);
+        if !self.send_token_or_evict_stalled(idx, token) {
             return;
         }
 
-        let generated_tokens = self.generated_tokens_for(idx).to_vec();
-        let sampling = self.active[idx].req.sampling.clone();
-        match self
-            .forward
-            .stop_reason_after_emit(&generated_tokens, &sampling)
-        {
+        // No per-token Vec clone: `forward` is an Arc, so a cheap handle
+        // clone lets the generated-tokens slice borrow `self.active`
+        // directly. The old `.to_vec()` here re-copied the entire
+        // generated sequence on EVERY token — O(n²) churn on long
+        // completions, in the decode hot path.
+        let stop = {
+            let forward = self.forward.clone();
+            let generated_tokens = self.generated_tokens_for(idx);
+            let sampling = &self.active[idx].req.sampling;
+            forward.stop_reason_after_emit(generated_tokens, sampling)
+        };
+        match stop {
             Ok(Some(reason)) => {
                 self.finish_active(idx, reason);
             }
-            Ok(None) if generated_count >= sampling.max_tokens => {
+            Ok(None) if generated_count >= self.active[idx].req.sampling.max_tokens => {
                 self.finish_active(idx, FinishReason::MaxTokens);
             }
             Ok(None) => {}
             Err(err) => {
                 self.finish_one_with_error(idx, format!("{err:#}"));
+            }
+        }
+    }
+
+    /// Deliver a token to the request's event channel without letting one
+    /// stalled client halt the engine. The old `blocking_send` parked the
+    /// ENTIRE actor — decode and admission for every concurrent request,
+    /// the dashboard, evals — whenever a single client stopped reading
+    /// without closing its socket (laptop sleep mid-stream, suspended pi
+    /// process, TCP zero-window) until TCP gave up.
+    ///
+    /// Now: `try_send`, and on a full channel a bounded grace; a client
+    /// that has a full event buffer AND refuses to drain it for the whole
+    /// grace window is cancelled — its slot frees, everyone else keeps
+    /// decoding. Returns false when the request was removed.
+    fn send_token_or_evict_stalled(&mut self, idx: usize, token: TokenId) -> bool {
+        let mut event = EngineEvent::Token(token);
+        let mut waited = Duration::ZERO;
+        loop {
+            match self.active[idx].response_tx.try_send(event) {
+                Ok(()) => return true,
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    self.forward.discard_request(self.active.remove(idx).slot);
+                    return false;
+                }
+                Err(mpsc::error::TrySendError::Full(e)) => {
+                    if waited >= stalled_client_send_grace() {
+                        let active = self.active.remove(idx);
+                        tracing::warn!(
+                            request_id = %active.req.request_id,
+                            grace_ms = stalled_client_send_grace().as_millis() as u64,
+                            "cancelling stalled streaming client: event channel full and \
+                             undrained for the full grace window"
+                        );
+                        active.req.cancel.cancel();
+                        self.forward.discard_request(active.slot);
+                        self.snapshot.total_errors += 1;
+                        // Best-effort: the channel is full, so the error
+                        // event only lands if the client drains later.
+                        let _ = active
+                            .response_tx
+                            .try_send(EngineEvent::Error("stream stalled: client stopped reading".into()));
+                        return false;
+                    }
+                    event = e;
+                    thread::sleep(STALLED_SEND_POLL);
+                    waited += STALLED_SEND_POLL;
+                }
             }
         }
     }
@@ -1827,6 +1897,63 @@ mod tests {
             decodes_before_swap, 2,
             "both of A's decode steps precede the swap: {log:?}"
         );
+
+        handle.stop().await.unwrap();
+    }
+
+    /// One client that stops reading must not halt decode for everyone:
+    /// its 64-cap event channel fills, the bounded grace elapses, the
+    /// engine cancels THAT request, and a request queued behind the stall
+    /// still completes. (The old `blocking_send` parked the entire actor
+    /// until TCP gave up.)
+    #[tokio::test]
+    async fn stalled_streaming_client_is_evicted_and_others_proceed() {
+        // Shrink the grace so the test runs in milliseconds. OnceLock
+        // caches it process-wide; no other engine test exercises a full
+        // channel, so the cached small value is inert elsewhere.
+        unsafe { std::env::set_var("KILN_STREAM_STALL_GRACE_MS", "50") };
+        let forward = Arc::new(MockForward::default());
+        let handle = BatchingEngineHandle::start_with_options(forward, 8);
+
+        // A wants 200 tokens but its events are NEVER read — the channel
+        // (cap 64) fills and the client looks suspended.
+        let mut rx_a = handle.enqueue(request(101, 200)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // B arrives behind the stall and must still complete.
+        let mut rx_b = handle.enqueue(request(7, 1)).await.unwrap();
+        let b_done = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match rx_b.recv().await {
+                    Some(EngineEvent::Done { .. }) => break true,
+                    Some(_) => {}
+                    None => break false,
+                }
+            }
+        })
+        .await
+        .expect("engine must not stay parked on the stalled client");
+        assert!(b_done, "healthy request completes despite the stalled one");
+
+        // A was cancelled: draining its channel ends in the stall error
+        // (or channel close), never a Done.
+        let a_outcome = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match rx_a.recv().await {
+                    Some(EngineEvent::Error(e)) => break Some(e),
+                    Some(EngineEvent::Done { .. }) => {
+                        panic!("stalled request must be cancelled, not completed")
+                    }
+                    Some(_) => {}
+                    None => break None,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        if let Some(err) = a_outcome {
+            assert!(err.contains("stalled"), "{err}");
+        }
 
         handle.stop().await.unwrap();
     }

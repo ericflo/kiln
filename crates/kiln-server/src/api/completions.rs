@@ -5167,27 +5167,44 @@ async fn generate_real_batched_streaming(
                                     .unwrap_or_else(|| tokenizer.decode(&[token]).unwrap_or_default());
                                 decoded_prefix = decoded;
                                 let chunk = reasoning_splitter.push(&delta);
-                                if !emit_or_buffer_reasoning_chunk(
-                                    &tx,
-                                    &id,
-                                    created,
-                                    &model,
-                                    chunk,
-                                    &mut completion_buf,
-                                    &mut reasoning_buf,
-                                    &mut content_buf,
-                                    buffer_tool_content,
-                                )
-                                .await
-                                {
-                                    cancel.cancel();
-                                    let _ = batching_engine.cancel(request_id).await;
-                                    record(
-                                        "client_disconnect".to_string(),
-                                        &completion_buf,
-                                        completion_token_count,
-                                    );
-                                    return;
+                                // The emit awaits channel capacity — a client
+                                // that stops reading (zero TCP window) would
+                                // otherwise park this task INSIDE the select
+                                // arm, where the request-deadline arm can never
+                                // fire. Cap the wait at the same deadline.
+                                let emitted = tokio::time::timeout_at(
+                                    deadline,
+                                    emit_or_buffer_reasoning_chunk(
+                                        &tx,
+                                        &id,
+                                        created,
+                                        &model,
+                                        chunk,
+                                        &mut completion_buf,
+                                        &mut reasoning_buf,
+                                        &mut content_buf,
+                                        buffer_tool_content,
+                                    ),
+                                );
+                                match emitted.await {
+                                    Err(_) => {
+                                        // Deadline elapsed while the client
+                                        // refused bytes — same terminal path
+                                        // as the deadline arm.
+                                        timed_out = true;
+                                        break;
+                                    }
+                                    Ok(false) => {
+                                        cancel.cancel();
+                                        let _ = batching_engine.cancel(request_id).await;
+                                        record(
+                                            "client_disconnect".to_string(),
+                                            &completion_buf,
+                                            completion_token_count,
+                                        );
+                                        return;
+                                    }
+                                    Ok(true) => {}
                                 }
                             }
                             Some(EngineEvent::Done { output }) => {
