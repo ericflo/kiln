@@ -286,6 +286,23 @@ impl EvalGenerator for LiveEvalGenerator {
         let sampling = build_sampling(params, completion_index);
         let adapter_label = adapter_label.map(str::to_string);
         Box::pin(async move {
+            // Swap-corruption detection (round-4 discovery item 8): a
+            // concurrent chat request's ensure_runtime_adapter can
+            // barrier-swap the global weights MID-SUITE — the engine
+            // never checks label-vs-loaded, so without this guard the
+            // suite scores (and the §8.7 gate then promotes/demotes on)
+            // mixed-weight outputs. Detection over prevention: fail the
+            // example loudly; the gate's incomplete-run verdict refuses
+            // promotion and the operator sees exactly what happened.
+            let pinned = state.active_adapter_name.read().unwrap().clone();
+            let loaded = state.loaded_adapter_name.read().unwrap().clone();
+            if pinned != loaded {
+                return Err(format!(
+                    "eval invalidated by a concurrent adapter swap: the suite pinned                      `{}` but the runtime now serves `{}` — re-run the eval (or gate)                      when live traffic isn't swapping adapters",
+                    pinned.as_deref().unwrap_or("base"),
+                    loaded.as_deref().unwrap_or("base"),
+                ));
+            }
             let ModelBackend::Real {
                 batching_engine, ..
             } = state.backend.as_ref()
