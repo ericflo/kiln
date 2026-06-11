@@ -739,18 +739,25 @@ impl DecodeForward for RealDecodeForward {
         } = slot
         {
             self.release_hit(hit_entry_id);
-            let mut output = kiln_model::PrefixCachedGenerationOutput {
-                output: GenerationOutput {
-                    text: String::new(),
-                    token_ids: state.generated_tokens,
-                    finish_reason: FinishReason::MaxTokens,
-                },
-                registration: None,
-                extra_registrations: Vec::new(),
-                allocated_blocks: state.allocated_blocks,
-                prefill_duration: state.prefill_duration,
-                decode_duration: state.decode_duration,
+            // Route through the SAME finish path as a completed request so
+            // the prefill's prefix-cache registration survives. The old
+            // shape here dropped `state.registration` on the floor
+            // (registration: None), so a cancelled request — every pi
+            // ESC/steer — paid a full re-prefill of the identical
+            // multi-thousand-token context on the very next message.
+            let finished = match self.runner_guard().and_then(|runner| {
+                runner.finish_paged_batched_decode(state, FinishReason::MaxTokens)
+            }) {
+                Ok(output) => output,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %format!("{err:#}"),
+                        "failed to finish discarded request; its blocks may leak                          until the next cache eviction"
+                    );
+                    return;
+                }
             };
+            let mut output = finished;
             if let Err(err) = self.free_uncached_blocks(&mut output, adapter) {
                 tracing::warn!(
                     error = %format!("{err:#}"),
