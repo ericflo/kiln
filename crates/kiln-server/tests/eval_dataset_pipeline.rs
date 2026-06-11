@@ -256,9 +256,19 @@ async fn judgment_flywheel_create_append_compile() {
     .await;
     assert_eq!(status, StatusCode::OK, "body={compiled}");
     assert_eq!(compiled["status"], "compiled");
-    assert_eq!(compiled["rows"].as_u64().unwrap(), 3);
+    // 3 judgments x 2 orientations (swap augmentation defeats position bias).
+    assert_eq!(compiled["rows"].as_u64().unwrap(), 6);
     assert_eq!(compiled["dataset"]["name"], "prose-judge-sft");
-    assert_eq!(compiled["dataset"]["num_rows"].as_u64().unwrap(), 3);
+    assert_eq!(compiled["dataset"]["num_rows"].as_u64().unwrap(), 6);
+    // Bootstrap dataset (3 rows): auto-holdout is 0 and the response says so.
+    assert_eq!(compiled["holdout_n"].as_u64().unwrap(), 0);
+    assert!(
+        compiled["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("no holdout reserved"),
+        "{compiled}"
+    );
 
     // 5. Remove one judgment — manifest reflects the deletion.
     let (status, after) = json_call(
