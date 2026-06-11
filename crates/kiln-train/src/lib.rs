@@ -919,19 +919,19 @@ impl LossConfig {
     /// any GPU work. The ECHO env-CE term is live again (resurrection PR2:
     /// constant-coefficient rows on the fused GRPO tape root), so
     /// echo-enabled configs with environment tokens TRAIN now. Still
-    /// rejected: `no_policy_loss` (verifier-free ECHO-only training needs
-    /// the PG coefficients zeroed while the env rows drive — not yet
-    /// re-wired) and the reserved `opd` slot.
+    /// rejected: `no_policy_loss` WITHOUT an enabled ECHO term (nothing
+    /// to train on) and the reserved `opd` slot. `no_policy_loss` + ECHO
+    /// is the §5.5 verifier-free mode: env-CE rows drive the update while
+    /// the policy-gradient coefficients are zeroed.
     /// `has_env_tokens` = the training data carries trajectory
     /// Observation/tool segments that the env mask would cover.
     pub fn validate_for_kt_tape(&self, _has_env_tokens: bool) -> Result<(), String> {
-        if self.no_policy_loss {
+        if self.no_policy_loss && !self.echo_enabled() {
             return Err(
-                "loss.no_policy_loss (verifier-free, ECHO-only training) is not yet \
-                 re-wired on the kt-tape path: it needs the policy-gradient \
-                 coefficients zeroed while the env-CE rows drive the update. Remove \
-                 no_policy_loss — the ECHO env-CE term itself is live again and \
-                 composes with the standard policy loss."
+                "loss.no_policy_loss masks the policy-gradient term, so the ECHO \
+                 env-CE term must be enabled to provide a gradient source — with \
+                 both off there is nothing to train on. Enable loss.echo (the \
+                 default) or remove no_policy_loss."
                     .to_string(),
             );
         }
@@ -1469,12 +1469,16 @@ mod tests {
             "echo + env tokens is the flagship agentic shape — must validate"
         );
 
-        // no_policy_loss: verifier-free ECHO-only training is not yet
-        // re-wired (PG coefficients must be zeroed while env rows drive).
+        // no_policy_loss + ECHO (the default) = §5.5 verifier-free mode:
+        // env-CE rows drive while the PG term is masked — VALIDATES.
         let mut cfg = LossConfig::default();
         cfg.no_policy_loss = true;
+        assert!(cfg.validate_for_kt_tape(true).is_ok());
+        // Without an enabled ECHO term there is nothing to train on.
+        cfg.echo = None;
         let err = cfg.validate_for_kt_tape(false).unwrap_err();
         assert!(err.contains("no_policy_loss"), "{err}");
+        assert!(err.contains("nothing to train"), "{err}");
 
         // Reserved OPD slot: point at the real endpoint.
         let mut cfg = LossConfig::default();
