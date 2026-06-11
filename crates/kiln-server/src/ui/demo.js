@@ -273,7 +273,10 @@
         { job_id: 'job_44_sql_explainer_sft', state: 'Queued', adapter_name: 'sql-explainer-v2', position: 1, job_type: 'SFT' },
       ],
       completed: [
-        { job_id: 'job_42_pi_grpo',  state: 'Completed', progress: 1.0, current_loss: 0.214, adapter_name: 'pi-coder-v4', elapsed_secs: 5_280, job_type: 'GRPO' },
+        // §8.7 promotion-gate verdict: machine-readable gate_outcome next
+        // to the prose verdict, exactly as the live server stamps them —
+        // the demo's queue panel shows the green "promoted" pill.
+        { job_id: 'job_42_pi_grpo',  state: 'Completed', progress: 1.0, current_loss: 0.214, adapter_name: 'pi-coder-v4', elapsed_secs: 5_280, job_type: 'GRPO', gate_outcome: 'promoted', post_eval_verdict: 'PASSED: accuracy 0.913 >= 0.850; adapter `pi-coder-v4` promoted to active' },
         { job_id: 'job_41_commit_sft',     state: 'Completed', progress: 1.0, current_loss: 0.331, adapter_name: 'commit-msg-writer', elapsed_secs: 1_212, job_type: 'SFT' },
         { job_id: 'job_40_corrections_sft', state: 'Completed', progress: 1.0, current_loss: 0.402, adapter_name: 'codebase-corrections', elapsed_secs: 318, job_type: 'SFT' },
       ],

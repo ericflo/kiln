@@ -2439,6 +2439,11 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                             job.post_eval_verdict = Some(format!(
                                 "post-eval gate could not be enqueued ({e}) — adapter `{adapter_name}` left on disk, NOT promoted"
                             ));
+                            // Machine-readable twin (see GateOutcome): the
+                            // gate never ran, so this is an error, not a
+                            // measured pass/fail.
+                            job.gate_outcome =
+                                Some(crate::state::GateOutcome::Error.as_str().to_string());
                         }
                     }
                 }

@@ -1116,6 +1116,13 @@ pub struct TrainingStatus {
     /// the eval errored. Absent for ungated jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_eval_verdict: Option<String>,
+    /// Machine-readable classification of `post_eval_verdict`:
+    /// `promoted | kept | regression | demoted | error`. Additive twin of
+    /// the prose verdict so consumers (dashboard pill, scripts) never
+    /// classify prose by substring. Absent for ungated jobs and for
+    /// verdicts archived before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_outcome: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

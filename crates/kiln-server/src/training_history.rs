@@ -149,6 +149,7 @@ mod tests {
             error: None,
             linked_eval_job_ids: vec![],
             post_eval_verdict: None,
+            gate_outcome: None,
             loss_history: vec![],
             cancel_requested: Default::default(),
         }
@@ -165,6 +166,27 @@ mod tests {
         assert_eq!(loaded[0].adapter_name, "adapter-abc");
         assert_eq!(loaded[0].submitted_unix_ms, 1_000);
         assert_eq!(loaded[0].finished_unix_ms, Some(2_000));
+    }
+
+    /// The §8.7 gate stamps BOTH the prose verdict and its
+    /// machine-readable `gate_outcome` twin; the re-archive after
+    /// stamping must round-trip both, or a restart strips the pill's
+    /// color source and the UI falls back to substring-classifying prose.
+    #[test]
+    fn gate_verdict_and_outcome_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut job = make_job("gated", TrainingState::Completed);
+        job.post_eval_verdict =
+            Some("PASSED: accuracy 0.913 >= 0.850; adapter `a` promoted to active".into());
+        job.gate_outcome = Some(crate::state::GateOutcome::Promoted.as_str().to_string());
+        save(tmp.path(), &job).unwrap();
+        let loaded = load_all(tmp.path());
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].post_eval_verdict.as_deref(),
+            Some("PASSED: accuracy 0.913 >= 0.850; adapter `a` promoted to active")
+        );
+        assert_eq!(loaded[0].gate_outcome.as_deref(), Some("promoted"));
     }
 
     #[test]
