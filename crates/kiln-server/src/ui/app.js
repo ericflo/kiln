@@ -2106,6 +2106,11 @@ function updateMergeButtonState() {
   return state;
 }
 
+// Structural signature of the last merge-sources render. This function runs
+// on every 5s adapters poll; rebuilding the rows when nothing changed would
+// steal focus/caret from someone mid-typing a weight and snap open adapter
+// selects shut. Rebuild only when the adapter set or the row count changes.
+let lastMergeSourcesKey = null;
 function renderMergeSources() {
   const list = document.getElementById('merge-sources');
   if (!list) return;
@@ -2113,9 +2118,24 @@ function renderMergeSources() {
   const available = (adapterState && adapterState.available) || [];
   const canMerge = available.length >= 2;
   if (!canMerge) {
-    list.innerHTML = '';
+    lastMergeSourcesKey = null;
+    if (list.firstChild) list.innerHTML = '';
     updateMergeButtonState();
     return;
+  }
+  const structureKey = available.map(a => a.name).join('|') + '::' + mergeSourceCount;
+  if (structureKey === lastMergeSourcesKey && list.querySelector('.merge-source')) {
+    updateMergeButtonState();
+    return;
+  }
+  lastMergeSourcesKey = structureKey;
+  // A structural rebuild is required — if the user is focused in one of our
+  // inputs (e.g. an adapter was saved mid-edit), put them back afterwards.
+  const active = document.activeElement;
+  const restoreFocusId = active && list.contains(active) ? active.id : null;
+  let restoreSelStart = null, restoreSelEnd = null;
+  if (restoreFocusId) {
+    try { restoreSelStart = active.selectionStart; restoreSelEnd = active.selectionEnd; } catch {}
   }
   // Preserve current values across re-renders.
   const existing = Array.from(list.querySelectorAll('.merge-source')).map(row => ({
@@ -2145,6 +2165,14 @@ function renderMergeSources() {
     row.querySelector('.merge-src-name').addEventListener('change', updateMergeButtonState);
     row.querySelector('.merge-src-weight').addEventListener('input', updateMergeButtonState);
   });
+  if (restoreFocusId) {
+    const el = document.getElementById(restoreFocusId);
+    if (el) {
+      el.focus();
+      // setSelectionRange throws on <input type=number> in some browsers.
+      try { if (restoreSelStart != null && el.setSelectionRange) el.setSelectionRange(restoreSelStart, restoreSelEnd); } catch {}
+    }
+  }
   updateMergeButtonState();
 }
 

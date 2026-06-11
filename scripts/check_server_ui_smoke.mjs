@@ -1208,6 +1208,23 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await expectDisabled(page, '#merge-btn', true, 'Adapter merge should stay disabled before source adapters are selected');
     await page.select('#merge-src-name-1', 'adapter-alpha');
     await page.select('#merge-src-name-2', 'uploaded-smoke-adapter');
+
+    // Regression: the 5s adapters poll re-renders merge sources; it must not
+    // steal focus (or wipe selections) from someone mid-edit in a weight input.
+    // (Triple-click doesn't select-all in number inputs — use el.select().)
+    await page.$eval('#merge-src-weight-1', (el) => { el.focus(); el.select(); });
+    await page.keyboard.type('0.75');
+    await new Promise((resolve) => setTimeout(resolve, 5600)); // sit through one adapters poll
+    const mergeFocusState = await page.evaluate(() => ({
+      focusedId: document.activeElement?.id || null,
+      weight: document.getElementById('merge-src-weight-1')?.value,
+      src1: document.getElementById('merge-src-name-1')?.value,
+      src2: document.getElementById('merge-src-name-2')?.value,
+    }));
+    if (mergeFocusState.focusedId !== 'merge-src-weight-1') fail(`Merge weight input lost focus to ${mergeFocusState.focusedId || 'nothing'} during the adapters poll`);
+    if (mergeFocusState.weight !== '0.75') fail(`Merge weight value lost during the adapters poll: "${mergeFocusState.weight}"`);
+    if (mergeFocusState.src1 !== 'adapter-alpha' || mergeFocusState.src2 !== 'uploaded-smoke-adapter') fail(`Merge source selections lost during the adapters poll: ${mergeFocusState.src1}/${mergeFocusState.src2}`);
+
     await page.click('#merge-output-name', { clickCount: 3 });
     await page.type('#merge-output-name', 'merged-smoke-adapter');
     await expectDisabled(page, '#merge-btn', false, 'Adapter merge should enable after two distinct sources and path-safe output are selected');
