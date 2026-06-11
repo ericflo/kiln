@@ -331,12 +331,35 @@ fn build_sampling(params: &EvalGenerationParams, completion_index: usize) -> Sam
 
 /// Implementation of `JudgeRunner` that re-enters the live generator for a
 /// judge-style synchronous prompt. Used by the `LlmJudge` scorer.
-pub struct LiveJudgeRunner<'a> {
-    pub generator: &'a LiveEvalGenerator,
-    pub runtime: &'a tokio::runtime::Handle,
+///
+/// Contract: `judge()` MUST be called from a blocking thread (the
+/// executor's deferred judge pass runs scoring inside `spawn_blocking`) —
+/// `Handle::block_on` panics on a tokio worker thread, which is exactly
+/// how the previous borrow-based version would have died had anything
+/// constructed it (nothing did; the worker always installed the no-op
+/// runner, so every judge-scored example silently degraded to Invalid).
+///
+/// The judge adapter is swapped in by the EXECUTOR, once per suite run —
+/// not here. The old per-call `set_adapter` both thrashed the weights for
+/// every judge call and never restored them, so the rest of the suite
+/// would have run on the judge's weights.
+pub struct LiveJudgeRunner {
+    generator: Arc<LiveEvalGenerator>,
+    runtime: tokio::runtime::Handle,
 }
 
-impl<'a> JudgeRunner for LiveJudgeRunner<'a> {
+impl LiveJudgeRunner {
+    /// Capture the current runtime handle; call from async context (the
+    /// eval worker) at construction time.
+    pub fn new(state: AppState) -> Self {
+        Self {
+            generator: Arc::new(LiveEvalGenerator::new(state)),
+            runtime: tokio::runtime::Handle::current(),
+        }
+    }
+}
+
+impl JudgeRunner for LiveJudgeRunner {
     fn judge(&self, adapter: Option<&str>, prompt: &str) -> Option<String> {
         let messages = vec![EvalChatMessage::new("user", prompt)];
         let params = EvalGenerationParams {
@@ -357,7 +380,8 @@ impl<'a> JudgeRunner for LiveJudgeRunner<'a> {
                 return None;
             }
         };
-        let _ = self.runtime.block_on(self.generator.set_adapter(adapter));
+        // `adapter` is a label for the engine request only — the executor
+        // already activated the judge adapter at the batch boundary.
         let run_fut = self.generator.run(&prepared, &params, 0, adapter);
         match self.runtime.block_on(run_fut) {
             Ok(c) => Some(c.text),
@@ -378,6 +402,9 @@ pub struct MockEvalGenerator {
     /// the mock backend never holds real state, but tests want the
     /// previous-adapter return to be plausible.
     active: std::sync::Mutex<Option<String>>,
+    /// Every set_adapter target, in order — tests assert swap batching
+    /// (e.g. the judge adapter activates once per suite, not per call).
+    pub swap_log: std::sync::Mutex<Vec<Option<String>>>,
 }
 
 impl MockEvalGenerator {
@@ -386,6 +413,7 @@ impl MockEvalGenerator {
             force_reply: None,
             adapter_replies: std::collections::HashMap::new(),
             active: std::sync::Mutex::new(None),
+            swap_log: std::sync::Mutex::new(Vec::new()),
         }
     }
     pub fn with_force_reply(mut self, reply: impl Into<String>) -> Self {
@@ -414,6 +442,7 @@ impl EvalGenerator for MockEvalGenerator {
     > {
         let want = adapter.map(str::to_string).filter(|s| !s.is_empty());
         Box::pin(async move {
+            self.swap_log.lock().unwrap().push(want.clone());
             let mut slot = self.active.lock().unwrap();
             let previous = slot.clone();
             *slot = want;

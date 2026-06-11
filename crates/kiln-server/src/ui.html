@@ -4001,6 +4001,12 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
                 <option value="judge">LLM judge (local adapter)</option>
               </select>
             </div>
+            <div class="form-group" id="synth-judge-adapter-group" hidden>
+              <label for="synth-judge-adapter" title="The adapter that grades completions — typically a judge LoRA trained from your A/B picks. Base model when empty.">Judge adapter</label>
+              <select id="synth-judge-adapter">
+                <option value="">Base model</option>
+              </select>
+            </div>
             <div class="form-group">
               <label for="synth-max-examples">Max examples</label>
               <input id="synth-max-examples" type="number" value="100" min="1" max="10000">
@@ -9792,6 +9798,29 @@ document.getElementById('synth-close')?.addEventListener('click', () => {
   activeSynthDataset = null;
 });
 
+// The judge scorer needs to know WHICH adapter judges — typically the
+// judge LoRA trained from A/B picks. Reveal + populate the picker only
+// when the judge scorer is selected.
+document.getElementById('synth-scorer')?.addEventListener('change', () => {
+  const isJudge = document.getElementById('synth-scorer').value === 'judge';
+  const group = document.getElementById('synth-judge-adapter-group');
+  if (group) group.hidden = !isJudge;
+  if (isJudge) populateSynthJudgeAdapters();
+});
+
+async function populateSynthJudgeAdapters() {
+  const sel = document.getElementById('synth-judge-adapter');
+  if (!sel) return;
+  const current = sel.value;
+  try {
+    const res = await api('/v1/adapters');
+    const names = (res.available || []).map(a => a.name);
+    sel.innerHTML = '<option value="">Base model</option>' +
+      names.map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join('');
+    if (names.includes(current)) sel.value = current;
+  } catch (_) { /* adapter list unavailable — base-model option remains */ }
+}
+
 function readSynthConfig() {
   const suite_name = document.getElementById('synth-suite-name').value.trim();
   if (!suite_name) { toast('Suite name is required', 'err'); return null; }
@@ -9799,7 +9828,10 @@ function readSynthConfig() {
   const scorerChoice = document.getElementById('synth-scorer').value;
   let scorer;
   if (scorerChoice === 'auto')       scorer = { kind: 'auto_detect' };
-  else if (scorerChoice === 'judge') scorer = { kind: 'judge', judge_adapter: null };
+  else if (scorerChoice === 'judge') {
+    const judgeAdapter = document.getElementById('synth-judge-adapter')?.value || null;
+    scorer = { kind: 'judge', judge_adapter: judgeAdapter };
+  }
   else if (scorerChoice === 'exact_match') scorer = { kind: 'fixed', scorer: { kind: 'exact_match', case_sensitive: false, strip_whitespace: true } };
   else if (scorerChoice === 'contains')    scorer = { kind: 'fixed', scorer: { kind: 'contains', phrases: [], mode: 'any', case_sensitive: false } };
   else if (scorerChoice === 'numeric')     scorer = { kind: 'fixed', scorer: { kind: 'numeric_tolerance', atol: 0, rtol: 0, integer_only: false } };
@@ -11162,10 +11194,17 @@ document.getElementById('compile-btn')?.addEventListener('click', async () => {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ output_dataset, include_skips: false }),
     });
+    // One-click crank: the dataset is ready — go straight to training a
+    // judge LoRA on it instead of sending the user off to find the
+    // Training tab with an instruction string.
     document.getElementById('compile-output').innerHTML =
       `<div style="padding:10px; background:var(--success-bg); border:1px solid var(--success-bd); border-radius:6px; color:var(--success-fg); font-size:12px;">
-        ${icon('check','icn-sm')} Compiled <strong>${res.rows}</strong> judgments into SFT dataset <code>${escapeHtml(res.dataset.name)}</code> (${res.dataset.num_rows} rows). Train a judge LoRA via the Training tab using this dataset.
+        ${icon('check','icn-sm')} Compiled <strong>${res.rows}</strong> judgments into SFT dataset <code>${escapeHtml(res.dataset.name)}</code> (${res.dataset.num_rows} rows).
+        <button type="button" class="btn btn-primary btn-sm" style="margin-left:8px;" id="compile-train-judge-btn">${icon('flask','icn-sm')} Train judge LoRA now</button>
       </div>`;
+    document.getElementById('compile-train-judge-btn')?.addEventListener('click', () => {
+      trainFromDataset(res.dataset.name, 'sft');
+    });
     toast('Compiled to SFT', 'ok');
     refreshDatasets();
   } catch (e) { toast('Compile failed: ' + e.message, 'err'); }
