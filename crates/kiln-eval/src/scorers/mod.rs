@@ -361,6 +361,7 @@ pub fn score_completion(
             } else {
                 let mut sum = 0.0f32;
                 let mut all_pass = true;
+                let mut all_invalid = true;
                 let mut details = Vec::new();
                 let mut any_error = false;
                 for s in scorers {
@@ -368,6 +369,9 @@ pub fn score_completion(
                     sum += outcome.score;
                     if !matches!(outcome.kind, EvalOutcomeKind::Pass) {
                         all_pass = false;
+                    }
+                    if !matches!(outcome.kind, EvalOutcomeKind::Invalid) {
+                        all_invalid = false;
                     }
                     if matches!(outcome.kind, EvalOutcomeKind::Error) {
                         any_error = true;
@@ -380,6 +384,11 @@ pub fn score_completion(
                     EvalOutcomeKind::Error
                 } else if all_pass {
                     EvalOutcomeKind::Pass
+                } else if all_invalid {
+                    // Every branch declined to judge (e.g. judge scorers
+                    // without a runner) — the composite has no verdict,
+                    // which must not masquerade as a model failure.
+                    EvalOutcomeKind::Invalid
                 } else {
                     EvalOutcomeKind::Fail
                 };
@@ -404,6 +413,8 @@ pub fn score_completion(
             } else {
                 let mut best = 0.0f32;
                 let mut any_pass = false;
+                let mut any_error = false;
+                let mut all_invalid = true;
                 let mut details = Vec::new();
                 for s in scorers {
                     let outcome = score_completion(s, example, completion_text, judge_runner)?;
@@ -413,12 +424,24 @@ pub fn score_completion(
                     if matches!(outcome.kind, EvalOutcomeKind::Pass) {
                         any_pass = true;
                     }
+                    if matches!(outcome.kind, EvalOutcomeKind::Error) {
+                        any_error = true;
+                    }
+                    if !matches!(outcome.kind, EvalOutcomeKind::Invalid) {
+                        all_invalid = false;
+                    }
                     if let Some(d) = outcome.detail {
                         details.push(format!("{}: {d}", s.kind_label()));
                     }
                 }
+                // Pass wins (the contract of Any); otherwise surface the
+                // most informative non-verdict, mirroring the All arm.
                 let kind = if any_pass {
                     EvalOutcomeKind::Pass
+                } else if any_error {
+                    EvalOutcomeKind::Error
+                } else if all_invalid {
+                    EvalOutcomeKind::Invalid
                 } else {
                     EvalOutcomeKind::Fail
                 };
@@ -685,6 +708,60 @@ mod tests {
         assert_eq!(out.kind, EvalOutcomeKind::Pass);
         let out = score_completion(&scorer, &e, "no match here", &NoopJudgeRunner).unwrap();
         assert_eq!(out.kind, EvalOutcomeKind::Fail);
+    }
+
+    #[test]
+    fn any_composite_of_only_invalid_branches_is_invalid_not_fail() {
+        // A judge-only Any with no runner has no verdict at all — reporting
+        // Fail would count "couldn't judge" as a model failure.
+        let scorer = Scorer::Any {
+            scorers: vec![Scorer::LlmJudge {
+                judge_adapter: None,
+                template: llm_judge::default_judge_template(),
+                score_regex: llm_judge::default_judge_regex(),
+            }],
+        };
+        let e = ex(Some("hi"));
+        let out = score_completion(&scorer, &e, "anything", &NoopJudgeRunner).unwrap();
+        assert_eq!(out.kind, EvalOutcomeKind::Invalid);
+    }
+
+    #[test]
+    fn any_composite_mixed_invalid_and_fail_is_fail() {
+        let scorer = Scorer::Any {
+            scorers: vec![
+                Scorer::LlmJudge {
+                    judge_adapter: None,
+                    template: llm_judge::default_judge_template(),
+                    score_regex: llm_judge::default_judge_regex(),
+                },
+                Scorer::Contains {
+                    phrases: vec!["needle".into()],
+                    mode: contains::ContainsMode::Any,
+                    case_sensitive: false,
+                },
+            ],
+        };
+        let e = ex(Some("hi"));
+        let out = score_completion(&scorer, &e, "no match", &NoopJudgeRunner).unwrap();
+        assert_eq!(out.kind, EvalOutcomeKind::Fail);
+        // ...and a real pass still wins over the invalid branch.
+        let out = score_completion(&scorer, &e, "the needle", &NoopJudgeRunner).unwrap();
+        assert_eq!(out.kind, EvalOutcomeKind::Pass);
+    }
+
+    #[test]
+    fn all_composite_of_only_invalid_branches_is_invalid() {
+        let scorer = Scorer::All {
+            scorers: vec![Scorer::LlmJudge {
+                judge_adapter: None,
+                template: llm_judge::default_judge_template(),
+                score_regex: llm_judge::default_judge_regex(),
+            }],
+        };
+        let e = ex(Some("hi"));
+        let out = score_completion(&scorer, &e, "anything", &NoopJudgeRunner).unwrap();
+        assert_eq!(out.kind, EvalOutcomeKind::Invalid);
     }
 
     #[test]

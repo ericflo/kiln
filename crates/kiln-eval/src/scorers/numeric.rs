@@ -41,11 +41,20 @@ pub(super) fn score(
     let target_raw = example.target.as_deref().ok_or(ScorerError::MissingTarget {
         kind: "numeric_tolerance",
     })?;
-    let target = match parse_number(target_raw) {
-        Some(v) => v,
-        None => {
+    // The target must contain exactly ONE number. The old char-filter
+    // parser silently fused multi-number targets ("3 of 10" -> 310),
+    // turning authoring mistakes into wrong-but-passing examples.
+    let numbers = extract_numbers(target_raw);
+    let target = match numbers.as_slice() {
+        [v] => *v,
+        [] => {
             return Err(ScorerError::MissingTarget {
-                kind: "numeric_tolerance (unparseable target)",
+                kind: "numeric_tolerance (no number in target)",
+            });
+        }
+        _ => {
+            return Err(ScorerError::MissingTarget {
+                kind: "numeric_tolerance (ambiguous target: multiple numbers)",
             });
         }
     };
@@ -81,17 +90,14 @@ pub(super) fn score(
     }
 }
 
-fn parse_number(s: &str) -> Option<f64> {
-    let cleaned: String = s
-        .chars()
-        .filter(|c| {
-            c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E')
-        })
-        .collect();
-    cleaned.parse::<f64>().ok()
+fn extract_last_number(text: &str) -> Option<f64> {
+    extract_numbers(text).last().copied()
 }
 
-fn extract_last_number(text: &str) -> Option<f64> {
+/// Every number in `text`, in order, using the same scrubbing rules the
+/// completion side has always used (commas stripped as thousands
+/// separators, `$`/`%` treated as boundaries).
+fn extract_numbers(text: &str) -> Vec<f64> {
     // Strip common decorations. Commas inside a number are thousands
     // separators (`1,234.50`) and must be removed without replacing them
     // with whitespace, or "1,234" would parse as "234" only.
@@ -103,7 +109,7 @@ fn extract_last_number(text: &str) -> Option<f64> {
             other => Some(other),
         })
         .collect();
-    let mut last: Option<f64> = None;
+    let mut found: Vec<f64> = Vec::new();
     let bytes = scrubbed.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -142,14 +148,14 @@ fn extract_last_number(text: &str) -> Option<f64> {
                     .unwrap_or("")
                     .parse::<f64>()
                 {
-                    last = Some(val);
+                    found.push(val);
                 }
             }
         } else {
             i += 1;
         }
     }
-    last
+    found
 }
 
 #[cfg(test)]
@@ -173,6 +179,59 @@ mod tests {
         assert_eq!(extract_last_number("price is $1,234.50"), Some(1234.50));
         assert_eq!(extract_last_number("no number here"), None);
         assert_eq!(extract_last_number("1.5e3 kg"), Some(1500.0));
+    }
+
+    #[test]
+    fn multi_number_target_errors_instead_of_fusing_digits() {
+        // "3 of 10" used to char-filter into 310 and silently score
+        // against the wrong target.
+        let err = score(
+            &ex("3 of 10"),
+            "310",
+            &NumericTolerance {
+                atol: 0.0,
+                rtol: 0.0,
+                integer_only: false,
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("ambiguous"), "{err}");
+    }
+
+    #[test]
+    fn numberless_target_errors() {
+        let err = score(
+            &ex("no digits at all"),
+            "42",
+            &NumericTolerance {
+                atol: 0.0,
+                rtol: 0.0,
+                integer_only: false,
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("no number"), "{err}");
+    }
+
+    #[test]
+    fn decorated_single_number_targets_still_parse() {
+        for (target, completion) in [
+            ("42 meters", "42"),
+            ("$1,234.50", "1234.5"),
+            ("1.5e3 kg", "1500"),
+        ] {
+            let (_, kind, detail) = score(
+                &ex(target),
+                completion,
+                &NumericTolerance {
+                    atol: 0.0,
+                    rtol: 0.0,
+                    integer_only: false,
+                },
+            )
+            .unwrap();
+            assert_eq!(kind, EvalOutcomeKind::Pass, "target {target:?}: {detail:?}");
+        }
     }
 
     #[test]
