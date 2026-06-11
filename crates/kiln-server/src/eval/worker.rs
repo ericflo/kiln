@@ -293,7 +293,7 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
                         active_name: gate.adapter_name.clone(),
                         dir: adapter_dir,
                     },
-                    content_changed: false,
+                    content_changed: true,
                     reason: "post_eval_gate_promotion",
                 },
             )
@@ -329,7 +329,7 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
             state,
             crate::adapter_swap::SwapRequest {
                 target: crate::adapter_swap::SwapTarget::Base,
-                content_changed: false,
+                content_changed: true,
                 reason: "post_eval_gate_demotion",
             },
         )

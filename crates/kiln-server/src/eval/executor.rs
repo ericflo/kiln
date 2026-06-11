@@ -60,7 +60,7 @@ pub async fn run_suite_against_adapter(
     )
     .await;
     let _ = generator
-        .set_adapter(previous_adapter.as_deref())
+        .restore_adapter(previous_adapter.as_deref())
         .await
         .inspect_err(
             |e| tracing::warn!(error = %e, "failed to restore previous adapter after eval"),
