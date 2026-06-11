@@ -668,6 +668,7 @@ fn run_opd(
                 tokenizer,
                 weights,
                 model_config,
+                adapter_dir,
                 req.config.top_k,
                 req.config.training_mode,
             )?,
@@ -1070,30 +1071,57 @@ fn build_self_distill_teacher(
 /// Build a `FixtureLogitSource` populated from a local model forward
 /// pass — the §3.2 in-process LocalTeacher made concrete. Each prompt
 /// is tokenized like SFT (chat template with active assistant tokens
-/// marked), the model is run forward once per prompt with no LoRA
-/// applied (base-model teacher per Lu 2025's behavioural-recovery
-/// recipe), and the top-K logprobs at active positions are inserted
-/// into the fixture keyed by tokens_hash.
+/// marked), the model is run forward once per prompt — wearing the
+/// spec's `adapter` LoRA when one is registered, base model otherwise —
+/// and the top-K logprobs at active positions are inserted into the
+/// fixture keyed by tokens_hash.
+#[allow(clippy::too_many_arguments)]
 fn build_local_teacher_for(
     spec: &crate::api::teachers::TeacherSpec,
     prompts: &[kiln_train::opd::OpdPrompt],
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
     weights: &kiln_model::forward::GpuWeights,
     model_config: &kiln_core::config::ModelConfig,
+    adapter_dir: &std::path::Path,
     top_k: usize,
     training_mode: kiln_train::opd::OpdTrainingMode,
 ) -> std::result::Result<std::sync::Arc<dyn kiln_train::logit_source::LogitSource>, String> {
+    // The teacher's LoRA. A spec that names an adapter MUST wear it —
+    // the silent fall-through to `None` here is what made
+    // `distill_refresh` toward a prior self and `self_improve`'s
+    // judge-as-teacher distil toward the bare base model while claiming
+    // otherwise. Registration validates existence, so a load failure
+    // here is a hard error, not a quiet downgrade.
+    let teacher_lora = match spec.adapter.as_deref() {
+        Some(name) => {
+            let dir = adapter_dir.join(name);
+            let device = weights.embed_tokens.device().clone();
+            Some(
+                kiln_model::lora_loader::LoraWeights::load(&dir, model_config.num_layers, device)
+                    .map_err(|e| {
+                        format!(
+                            "teacher '{}' is registered to wear adapter '{name}' but it \
+                             failed to load from {}: {e}",
+                            spec.alias,
+                            dir.display()
+                        )
+                    })?,
+            )
+        }
+        None => None,
+    };
+
     // ON-POLICY self-distillation (#31): the student generates fresh rollouts, so
     // the teacher must score ARBITRARY token sequences live — a prompt-hash
     // fixture would miss every rollout. Return a LiveLocalTeacher that holds a
     // cheap (Arc-backed) clone of the loaded model and runs a detached forward on
-    // demand. Base-model teacher (no LoRA), per the behavioural-recovery recipe.
+    // demand.
     if matches!(training_mode, kiln_train::opd::OpdTrainingMode::OnPolicy) {
         return Ok(std::sync::Arc::new(kiln_train::opd::LiveLocalTeacher::new(
             spec.alias.clone(),
             weights.clone(),
             model_config.clone(),
-            None,
+            teacher_lora,
             top_k,
         )));
     }
@@ -1129,7 +1157,7 @@ fn build_local_teacher_for(
         &prompts_and_active,
         weights,
         model_config,
-        None,
+        teacher_lora.as_ref(),
         top_k,
         spec.tokenizer_hash.clone(),
     )
@@ -1148,7 +1176,7 @@ pub const DEFAULT_REMOTE_COST_CAP_USD: f64 = 25.0;
 /// adding a provider field — the §3.2 registry is intentionally
 /// minimal. Defaults to `Vllm` (the most common OSS top_logprobs
 /// endpoint shape) when no host token matches.
-fn guess_remote_provider(url: &str) -> kiln_train::RemoteProvider {
+pub(crate) fn guess_remote_provider(url: &str) -> kiln_train::RemoteProvider {
     let lower = url.to_ascii_lowercase();
     if lower.contains("openrouter.ai") {
         kiln_train::RemoteProvider::OpenRouter
@@ -1323,6 +1351,7 @@ fn run_distill_refresh(
             tokenizer,
             weights,
             model_config,
+            adapter_dir,
             req.config.top_k,
             // Distill refresh phase 2 scores fixed teacher turns — fixture path.
             kiln_train::opd::OpdTrainingMode::OffPolicy,
@@ -1681,6 +1710,7 @@ fn run_distill_pump(
             tokenizer,
             weights,
             model_config,
+            adapter_dir,
             req.config.top_k,
             // Distill pump pre-computes against fixed teacher turns — fixture path.
             kiln_train::opd::OpdTrainingMode::OffPolicy,

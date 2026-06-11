@@ -606,6 +606,39 @@ async fn submit_opd(
             "OPD request must specify a teacher alias (e.g. \"qwen3.6-27b@local\")".to_string(),
         ));
     }
+    // The worker resolves the teacher only at dequeue — a typo'd alias
+    // used to enqueue a job guaranteed to fail later, possibly hours
+    // later behind a long queue. Fail here with the remediation.
+    super::teachers::require_registered_teacher(
+        &state,
+        &req.teacher,
+        format!("OPD teacher alias '{}' is not registered", req.teacher),
+    )?;
+    // A plain-file dataset_path is pre-scored off-policy teacher JSONL;
+    // `agent_traces:` selectors are on-policy prompt sources. The worker
+    // enforces this too — but at submission the caller can still fix it.
+    if let Some(path) = req.dataset_path.as_deref() {
+        if !crate::dataset_resolve::is_agent_traces_selector(path)
+            && !matches!(
+                req.config.training_mode,
+                kiln_train::opd::OpdTrainingMode::OffPolicy
+            )
+        {
+            return Err(ApiError::training_invalid_request(
+                "OPD dataset_path (teacher-logprob JSONL) requires config.training_mode = \
+                 \"off_policy\"; for on-policy training on pi sessions use an \
+                 `agent_traces:` selector instead"
+                    .to_string(),
+            ));
+        }
+    }
+    for (i, prompt) in req.prompts.iter().enumerate() {
+        if prompt.messages.is_empty() {
+            return Err(ApiError::training_invalid_request(format!(
+                "OPD prompt {i} has no messages"
+            )));
+        }
+    }
     if req.config.top_k == 0 {
         return Err(ApiError::training_invalid_request(
             "OPD top_k must be > 0".to_string(),
@@ -748,6 +781,14 @@ async fn submit_distill_refresh(
             "DistillRefresh: `behavioural_teacher` alias must be non-empty".to_string(),
         ));
     }
+    super::teachers::require_registered_teacher(
+        &state,
+        &req.behavioural_teacher,
+        format!(
+            "DistillRefresh: behavioural_teacher alias '{}' is not registered",
+            req.behavioural_teacher
+        ),
+    )?;
     if !(0.0..=1.0).contains(&req.require_if_eval_recovery) {
         return Err(ApiError::training_invalid_request(
             "require_if_eval_recovery must be in [0.0, 1.0]".to_string(),
@@ -772,6 +813,17 @@ async fn submit_distill_refresh(
     if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
         return Err(ApiError::mock_mode_no_training());
     }
+
+    // Preflight BEFORE the tracking insert — a 413 here must not leave an
+    // orphaned Queued entry in the jobs map.
+    let reserved_bytes = distill_working_set_reservation(
+        &state,
+        match &req.new_data {
+            kiln_train::NewKnowledgeSource::Inline { examples } => examples.as_slice(),
+            kiln_train::NewKnowledgeSource::Dataset { .. } => &[],
+        },
+        &req.config,
+    )?;
 
     let info = TrainingJobInfo {
         job_id: job_id.clone(),
@@ -804,7 +856,7 @@ async fn submit_distill_refresh(
         let mut q = state.training_queue.lock().unwrap();
         q.push(QueueEntry {
             job_id: job_id.clone(),
-            reserved_bytes: 0, // no preflight estimate for distill refresh
+            reserved_bytes,
             job: QueuedJob::DistillRefresh(req),
         });
         q.len()
@@ -836,7 +888,22 @@ async fn submit_distill_merge(
         ));
     }
     super::adapters::validate_adapter_name(&req.name)?;
+    // A source adapter that doesn't exist on disk is a typo — fail now,
+    // not after the job dequeues and silently falls back to the base
+    // model for that source's prompts.
+    for source in &req.sources {
+        super::adapters::validate_adapter_name(&source.adapter)?;
+        let dir = state.adapter_dir.join(&source.adapter);
+        if !dir.is_dir() {
+            return Err(ApiError::training_invalid_request(format!(
+                "distill_merge: source adapter `{}` not found at {}",
+                source.adapter,
+                dir.display()
+            )));
+        }
+    }
     enforce_queue_caps(&state)?;
+    let reserved_bytes = distill_working_set_reservation(&state, &[], &req.config)?;
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = req.name.clone();
     let auto_load = req.config.auto_load;
@@ -845,6 +912,7 @@ async fn submit_distill_merge(
         &job_id,
         &adapter_name,
         auto_load,
+        reserved_bytes,
         QueuedJob::DistillMerge(req),
     );
     Ok(Json(TrainingResponse {
@@ -867,8 +935,20 @@ async fn submit_distill_pump(
             "distill/pump: `teacher` alias must be non-empty".to_string(),
         ));
     }
+    super::teachers::require_registered_teacher(
+        &state,
+        &req.teacher,
+        format!("distill/pump: teacher alias '{}' is not registered", req.teacher),
+    )?;
     super::adapters::validate_adapter_name(&req.name)?;
     enforce_queue_caps(&state)?;
+    let inline_prompts: &[kiln_train::opd::OpdPrompt] = match &req.mode {
+        kiln_train::DistillPumpMode::Examples { examples } => examples.as_slice(),
+        // Domain/Wide resolve to short seed prompts at run time; the
+        // rollout budget dominates the working set.
+        _ => &[],
+    };
+    let reserved_bytes = distill_working_set_reservation(&state, inline_prompts, &req.config)?;
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = req.name.clone();
     let auto_load = req.config.auto_load;
@@ -877,6 +957,7 @@ async fn submit_distill_pump(
         &job_id,
         &adapter_name,
         auto_load,
+        reserved_bytes,
         QueuedJob::DistillPump(req),
     );
     Ok(Json(TrainingResponse {
@@ -901,6 +982,11 @@ async fn submit_distill_self(
     }
     super::adapters::validate_adapter_name(&req.name)?;
     enforce_queue_caps(&state)?;
+    let reserved_bytes = distill_working_set_reservation(
+        &state,
+        req.prompts.as_deref().unwrap_or(&[]),
+        &req.config,
+    )?;
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = req.name.clone();
     let auto_load = req.config.auto_load;
@@ -909,6 +995,7 @@ async fn submit_distill_self(
         &job_id,
         &adapter_name,
         auto_load,
+        reserved_bytes,
         QueuedJob::DistillSelf(req),
     );
     Ok(Json(TrainingResponse {
@@ -936,6 +1023,35 @@ pub(crate) fn enforce_queue_caps(state: &AppState) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Working-set preflight for distill-family jobs: longest inline prompt
+/// plus the rollout budget, same estimator SFT/GRPO/OPD use. Distill jobs
+/// used to enqueue with `reserved_bytes: 0` — no VRAM check, no governor
+/// reservation — on a host that has been hard-crashed by exactly that
+/// class of unchecked training allocation before.
+fn distill_working_set_reservation(
+    state: &AppState,
+    inline_prompts: &[kiln_train::opd::OpdPrompt],
+    config: &kiln_train::OpdConfig,
+) -> Result<u64, ApiError> {
+    let max_seq_len = training_preflight::approximate_max_seq_len_opd(
+        inline_prompts,
+        config.max_tokens,
+        Some(state.tokenizer.as_ref()),
+    );
+    enforce_training_preflight(
+        state,
+        max_seq_len,
+        EstimateOptions {
+            max_supervised_tokens: None,
+            recompute_boundaries: training_preflight::recompute_checkpoint_boundaries_for_seq_len(
+                max_seq_len,
+            ),
+        },
+        config.lora_rank,
+        false,
+    )
+}
+
 /// Shared registration+enqueue for distill_* endpoints. Same shape as
 /// `submit_distill_refresh`/`submit_opd` but inlined for the simpler
 /// distill variants.
@@ -944,6 +1060,7 @@ fn register_and_enqueue_distill(
     job_id: &str,
     adapter_name: &str,
     auto_load: bool,
+    reserved_bytes: u64,
     job: QueuedJob,
 ) {
     let info = TrainingJobInfo {
@@ -973,7 +1090,7 @@ fn register_and_enqueue_distill(
     let mut q = state.training_queue.lock().unwrap();
     q.push(QueueEntry {
         job_id: job_id.to_string(),
-        reserved_bytes: 0,
+        reserved_bytes,
         job,
     });
 }

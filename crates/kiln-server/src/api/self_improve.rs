@@ -381,24 +381,7 @@ fn build_self_improve_jobs(
     Ok((opd_phase, crisp_pump, num_tasks))
 }
 
-/// Resolve a teacher alias against the registry, failing with the
-/// remediation-bearing 400 (`teacher_not_registered`) when missing.
-fn require_registered_teacher(
-    state: &AppState,
-    alias: &str,
-    detail: String,
-) -> Result<(), ApiError> {
-    if state.teacher_registry.get(alias).is_some() {
-        return Ok(());
-    }
-    let registered: Vec<String> = state
-        .teacher_registry
-        .list()
-        .into_iter()
-        .map(|spec| spec.alias)
-        .collect();
-    Err(ApiError::teacher_not_registered(detail, &registered))
-}
+use super::teachers::require_registered_teacher;
 
 fn register_agent_job(
     state: &AppState,

@@ -311,3 +311,176 @@ async fn drift_check_rejects_path_traversal_judge_names() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
     assert_eq!(response["error"]["code"], "invalid_adapter_name", "{response}");
 }
+
+// ── teacher registration honesty (adapter-wearing + provider gates) ──
+
+/// `adapter` only means something on Local teachers — and it must exist.
+/// Both rejections happen at REGISTRATION, not at job dequeue hours later.
+#[tokio::test]
+async fn teacher_registration_validates_adapter_field() {
+    let (state, _dir) = make_state();
+    let app = api::router(state.clone());
+
+    // adapter on a fixture teacher: rejected.
+    let (status, response) = post(
+        &app,
+        "/v1/teachers",
+        json!({"alias": "t@f", "kind": "fixture", "model_id": "m", "adapter": "judge-v1"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("kind=local"),
+        "{response}"
+    );
+
+    // Local teacher wearing a missing adapter: rejected with the path.
+    let (status, response) = post(
+        &app,
+        "/v1/teachers",
+        json!({"alias": "self@local", "kind": "local", "model_id": "m", "adapter": "ghost"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert!(
+        response["error"]["message"].as_str().unwrap().contains("ghost"),
+        "{response}"
+    );
+
+    // Local teacher wearing an adapter that exists: accepted, echoed back.
+    std::fs::create_dir(state.adapter_dir.join("prior-self")).unwrap();
+    let (status, response) = post(
+        &app,
+        "/v1/teachers",
+        json!({"alias": "self@local", "kind": "local", "model_id": "m", "adapter": "prior-self"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["spec"]["adapter"], "prior-self", "{response}");
+}
+
+/// Remote teachers whose URL resolves to a provider the runtime can't
+/// serve ("not yet wired") must be rejected at registration with the
+/// supported list — not enqueued into jobs guaranteed to die.
+#[tokio::test]
+async fn teacher_registration_rejects_unwired_remote_providers() {
+    let (state, _dir) = make_state();
+    let app = api::router(state.clone());
+
+    let (status, response) = post(
+        &app,
+        "/v1/teachers",
+        json!({"alias": "t@tgi", "kind": "remote", "model_id": "m", "url": "https://tgi.example.com"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    let message = response["error"]["message"].as_str().unwrap();
+    assert!(message.contains("vLLM"), "names the supported providers: {message}");
+
+    // A vLLM-shaped URL registers fine.
+    let (status, response) = post(
+        &app,
+        "/v1/teachers",
+        json!({"alias": "t@vllm", "kind": "remote", "model_id": "m", "url": "https://vllm.example.com"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+}
+
+// ── OPD / distill submission fail-fast ───────────────────────────────
+
+/// A typo'd teacher alias on /v1/train/opd fails at submission with the
+/// registered list, before the mock/queue gates.
+#[tokio::test]
+async fn opd_submission_rejects_unregistered_teacher() {
+    let (state, _dir) = make_state();
+    let app = api::router(state.clone());
+    register_teacher(&app, "real@t").await;
+    let (status, response) = post(
+        &app,
+        "/v1/train/opd",
+        json!({
+            "prompts": [{"messages": [{"role": "user", "content": "hi"}]}],
+            "teacher": "typo@t",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert_eq!(response["error"]["code"], "teacher_not_registered", "{response}");
+    assert!(
+        response["error"]["message"].as_str().unwrap().contains("typo@t"),
+        "{response}"
+    );
+    assert_no_jobs(&state, "opd unregistered teacher");
+}
+
+/// dataset_path (pre-scored off-policy teacher JSONL) with the default
+/// on-policy mode is a guaranteed worker failure — reject at submission
+/// and point at the agent_traces alternative.
+#[tokio::test]
+async fn opd_submission_rejects_dataset_path_mode_mismatch() {
+    let (state, _dir) = make_state();
+    let app = api::router(state.clone());
+    register_teacher(&app, "real@t").await;
+    let (status, response) = post(
+        &app,
+        "/v1/train/opd",
+        json!({
+            "dataset_path": "/tmp/teacher.jsonl",
+            "teacher": "real@t",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    let message = response["error"]["message"].as_str().unwrap();
+    assert!(message.contains("off_policy"), "{message}");
+    assert!(message.contains("agent_traces"), "offers the on-policy path: {message}");
+    assert_no_jobs(&state, "opd mode mismatch");
+}
+
+/// distill/pump with an unregistered teacher fails at submission.
+#[tokio::test]
+async fn distill_pump_rejects_unregistered_teacher() {
+    let (state, _dir) = make_state();
+    let app = api::router(state.clone());
+    let (status, response) = post(
+        &app,
+        "/v1/distill/pump",
+        json!({"name": "pumped", "teacher": "nope@t", "mode": {"domain": "math"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert_eq!(response["error"]["code"], "teacher_not_registered", "{response}");
+    assert_no_jobs(&state, "pump unregistered teacher");
+}
+
+/// distill_merge with a source adapter that doesn't exist on disk is a
+/// typo — fail at submission instead of silently distilling that
+/// source's prompts from the base model after dequeue.
+#[tokio::test]
+async fn distill_merge_rejects_missing_source_adapters() {
+    let (state, _dir) = make_state();
+    let app = api::router(state.clone());
+    std::fs::create_dir(state.adapter_dir.join("exists")).unwrap();
+    let (status, response) = post(
+        &app,
+        "/v1/adapters/distill_merge",
+        json!({
+            "name": "merged",
+            "sources": [
+                {"adapter": "exists", "weight": 1.0},
+                {"adapter": "missing", "weight": 1.0}
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert!(
+        response["error"]["message"].as_str().unwrap().contains("missing"),
+        "{response}"
+    );
+    assert_no_jobs(&state, "merge missing source");
+}
