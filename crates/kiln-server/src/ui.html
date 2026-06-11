@@ -11761,6 +11761,42 @@ function adapterEvalChip(name) {
 // The strongest signal for "is the loaded adapter actually better than base?":
 // the newest completed COMPARE eval (base run + this adapter's run). Returns
 // { delta, suite } in accuracy points, or null. Powers the active-card verdict.
+// Two-sided exact binomial sign test over discordant flips — mirrors
+// kiln-eval's SignTest so the dashboard verdicts use the same math as
+// the CLI. p=1 when there are no discordant examples.
+function signTestP(improved, regressed) {
+  const n = improved + regressed;
+  if (n === 0) return 1.0;
+  const k = Math.min(improved, regressed);
+  let lnC = 0;            // ln C(n, 0)
+  let lnTerms = [];
+  for (let i = 0; i <= k; i++) {
+    lnTerms.push(lnC - n * Math.LN2);
+    lnC += Math.log(n - i) - Math.log(i + 1);
+  }
+  const max = Math.max(...lnTerms);
+  const tail = lnTerms.reduce((acc, t) => acc + Math.exp(t - max), 0) * Math.exp(max);
+  return Math.min(2 * tail, 1.0);
+}
+// First-completion pass/fail flips between a base run and an adapter run.
+function compareFlips(baseRun, adapterRun) {
+  const verdictOf = (run) => {
+    const m = new Map();
+    for (const o of run.outcomes || []) {
+      if ((o.completion_index || 0) === 0) m.set(o.example_id, o.kind === 'pass');
+    }
+    return m;
+  };
+  const b = verdictOf(baseRun), a = verdictOf(adapterRun);
+  let improved = 0, regressed = 0;
+  for (const [id, basePass] of b) {
+    if (!a.has(id)) continue;
+    const adapterPass = a.get(id);
+    if (!basePass && adapterPass) improved++;
+    else if (basePass && !adapterPass) regressed++;
+  }
+  return { improved, regressed };
+}
 function adapterCompareVerdict(name) {
   const jobs = ((typeof evalJobsCache !== 'undefined' ? evalJobsCache : []) || [])
     .filter(j => (j.state || '').toLowerCase() === 'completed' && Array.isArray(j.finished_runs)
@@ -11770,16 +11806,33 @@ function adapterCompareVerdict(name) {
     const base = j.finished_runs.find(r => r.adapter == null || r.adapter === 'base');
     const run = j.finished_runs.find(r => r.adapter === name);
     if (base && run && typeof base.metrics?.accuracy === 'number' && typeof run.metrics?.accuracy === 'number') {
-      return { delta: Math.round((run.metrics.accuracy - base.metrics.accuracy) * 1000) / 10, suite: j.suite_name };
+      const flips = compareFlips(base, run);
+      const p = signTestP(flips.improved, flips.regressed);
+      return {
+        delta: Math.round((run.metrics.accuracy - base.metrics.accuracy) * 1000) / 10,
+        suite: j.suite_name,
+        improved: flips.improved,
+        regressed: flips.regressed,
+        p,
+      };
     }
   }
   return null;
 }
 function verdictDeltaHtml(v) {
   if (!v) return '';
+  // A green/red verdict is a claim — gate it on the paired sign test so
+  // a 2-example wobble doesn't render as "beats base".
+  const significant = typeof v.p === 'number' ? v.p < 0.05 : true;
+  const detail = typeof v.p === 'number'
+    ? ` — sign test improved ${v.improved} / regressed ${v.regressed}, p=${v.p.toFixed(3)}`
+    : '';
+  if (!significant && Math.abs(v.delta) > 0.5) {
+    return `<span class="delta-badge delta-flat" title="vs base on ${escapeHtml(v.suite || 'eval')}${detail}">${v.delta > 0 ? '+' : ''}${v.delta.toFixed(1)} pts — not enough evidence</span>`;
+  }
   const cls = v.delta > 0.5 ? 'delta-up' : (v.delta < -0.5 ? 'delta-down' : 'delta-flat');
   const label = cls === 'delta-flat' ? 'matches base' : `${v.delta > 0 ? '+' : ''}${v.delta.toFixed(1)} pts vs base`;
-  return `<span class="delta-badge ${cls}" title="vs base on ${escapeHtml(v.suite || 'eval')}">${label}</span>`;
+  return `<span class="delta-badge ${cls}" title="vs base on ${escapeHtml(v.suite || 'eval')}${detail}">${label}</span>`;
 }
 
 function renderAdaptersAsCards(data) {

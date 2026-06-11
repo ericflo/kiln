@@ -1447,6 +1447,18 @@ fn print_compare(result: &EvalResultPayload) {
                 diff.regressed.join(", ")
             );
         }
+        let test = diff.significance();
+        println!(
+            "  sign test: improved {} / regressed {} -> p={:.4} (two-sided exact)",
+            test.improved, test.regressed, test.p_value
+        );
+        if test.improved + test.regressed == 0 {
+            println!("  verdict: no discordant examples — the adapters are indistinguishable on this suite");
+        } else if test.significant() {
+            println!("  verdict: significant at p<0.05");
+        } else {
+            println!("  verdict: NOT significant at p<0.05 — the delta could be noise; add examples or rerun");
+        }
     }
 }
 
