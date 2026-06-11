@@ -109,6 +109,7 @@ async fn judge_distill(
     // to generic seed prompts and reported success.
     let (pump_req, num_pairs) =
         build_judge_pump_request(&state.adapter_dir, &req)?;
+    super::training::validate_post_eval_suite(&state, req.post_eval.as_ref())?;
     super::training::enforce_queue_caps(&state)?;
 
     let job_id = uuid::Uuid::new_v4().to_string();
@@ -385,6 +386,17 @@ fn build_self_improve_jobs(
         if config.base_adapter.is_some() {
             return config.base_adapter.clone();
         }
+        // The round's OUTPUT is "{agent}-improve" (register_agent_job
+        // below) — so that is what the NEXT round must continue from, or
+        // every scheduled cycle silently retrains from base and
+        // overwrites last week's product (round-4 discovery caught the
+        // original checking only the bare agent name, which nothing
+        // creates). Fall back to the bare agent dir for operators who
+        // maintain one by hand.
+        let improve_name = format!("{}-improve", req.agent);
+        if adapter_dir.join(&improve_name).is_dir() {
+            return Some(improve_name);
+        }
         adapter_dir
             .join(&req.agent)
             .is_dir()
@@ -527,7 +539,7 @@ mod tests {
         let toml_like = serde_json::json!({
             "agent": "pi-coder-current",
             "judge": "judge-pi-v1",
-            "post_eval": {"suite": "agentic-core", "min_accuracy": 0.7}
+            "post_eval": {"suite": "qwen3.5-agentic-core", "min_accuracy": 0.7}
         });
         let req: SelfImproveRequest = serde_json::from_value(toml_like).unwrap();
         assert_eq!(req.post_eval.unwrap().min_accuracy, Some(0.7));
@@ -696,6 +708,22 @@ mod tests {
             Some("pi-coder-current")
         );
 
+        // THE COMPOUNDING CASE (round-4 discovery): each round's output
+        // is "{agent}-improve" — when it exists, the next round must
+        // continue from IT, not the bare agent dir (and never from
+        // base). Without this, the weekly scheduler retrained from base
+        // and overwrote last week's product forever.
+        std::fs::create_dir(dir.path().join("pi-coder-current-improve")).unwrap();
+        let (opd, crisp, _) = build_self_improve_jobs(dir.path(), &req).unwrap();
+        assert_eq!(
+            opd.config.base_adapter.as_deref(),
+            Some("pi-coder-current-improve")
+        );
+        assert_eq!(
+            crisp.unwrap().config.base_adapter.as_deref(),
+            Some("pi-coder-current-improve")
+        );
+
         // Explicit base_adapter wins over the warm-start default.
         let req: SelfImproveRequest = serde_json::from_str(
             r#"{"config": {"base_adapter": "my-pinned-base"}}"#,
@@ -712,15 +740,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         seeded_trace_index(dir.path());
         let req: SelfImproveRequest = serde_json::from_str(
-            r#"{"post_eval": {"suite": "agentic-core", "min_accuracy": 0.7}}"#,
+            r#"{"post_eval": {"suite": "qwen3.5-agentic-core", "min_accuracy": 0.7}}"#,
         )
         .unwrap();
         let (opd, crisp, _) = build_self_improve_jobs(dir.path(), &req).unwrap();
-        assert_eq!(opd.post_eval.as_ref().unwrap().suite, "agentic-core");
+        assert_eq!(opd.post_eval.as_ref().unwrap().suite, "qwen3.5-agentic-core");
         assert_eq!(opd.post_eval.as_ref().unwrap().min_accuracy, Some(0.7));
         assert_eq!(
             crisp.unwrap().post_eval.as_ref().unwrap().suite,
-            "agentic-core"
+            "qwen3.5-agentic-core"
         );
     }
 

@@ -146,7 +146,7 @@ draft_layers = 8                      # First N layers used as draft model
 # [agent.self_improve]
 # agent = "pi-coder-current"
 # judge = "judge-pi-v1"
-# post_eval = { suite = "agentic-core", min_accuracy = 0.7 }
+# post_eval = { suite = "qwen3.5-agentic-core", min_accuracy = 0.7 }
 
 [request_log]
 # Durable request/response log for the inference endpoints

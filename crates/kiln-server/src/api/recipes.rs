@@ -297,18 +297,46 @@ async fn run_recipe(
     // queued — never a partially-enqueued recipe.
     let mut prepared = Vec::with_capacity(recipe.steps.len());
     let mut previous_adapter: Option<String> = None;
-    for step in &recipe.steps {
-        if matches!(step, RecipeStep::PostEval { .. }) {
-            tracing::info!(
-                recipe = %recipe_name,
-                step = ?step,
-                "PostEval step queued as no-op — real eval gating ships with the eval-suite registry follow-up"
-            );
+    for (idx, step) in recipe.steps.iter().enumerate() {
+        if let RecipeStep::PostEval { suite, adapter, .. } = step {
+            // A PostEval step is the §8.7 gate ON the preceding training
+            // step (attached via the lookahead below), never its own job.
+            // Validate placement here so a dangling/mismatched gate
+            // rejects the whole recipe before anything enqueues.
+            let Some(prev) = previous_adapter.as_deref() else {
+                return Err(ApiError::training_invalid_request(format!(
+                    "recipe '{recipe_name}': PostEval (suite={suite}) must follow a \
+                     training step — it gates that step's output adapter"
+                )));
+            };
+            if adapter != prev {
+                return Err(ApiError::training_invalid_request(format!(
+                    "recipe '{recipe_name}': PostEval adapter '{adapter}' does not match \
+                     the preceding step's output adapter '{prev}'"
+                )));
+            }
             continue;
         }
+        // Lookahead: a directly-following PostEval step becomes this
+        // job's promotion gate — auto-load defers until the eval passes
+        // and a failing adapter demotes to <name>.failed (the same
+        // training_queue §8.7 machinery direct submissions use).
+        let post_eval = match recipe.steps.get(idx + 1) {
+            Some(RecipeStep::PostEval {
+                suite,
+                require_min_score,
+                ..
+            }) => Some(kiln_eval::PostEvalConfig {
+                suite: suite.clone(),
+                generation: None,
+                min_accuracy: Some(*require_min_score as f32),
+                include_baseline: false,
+            }),
+            _ => None,
+        };
         let job_id = uuid::Uuid::new_v4().to_string();
         let (adapter_name, queued) =
-            step_to_queued_job(&state, step, previous_adapter.as_deref(), &job_id)?;
+            step_to_queued_job(&state, step, previous_adapter.as_deref(), &job_id, post_eval)?;
         previous_adapter = Some(adapter_name.clone());
         prepared.push((job_id, adapter_name, queued));
     }
@@ -344,6 +372,7 @@ fn step_to_queued_job(
     step: &RecipeStep,
     previous_adapter: Option<&str>,
     _job_id: &str,
+    post_eval: Option<kiln_eval::PostEvalConfig>,
 ) -> Result<(String, crate::training_queue::QueuedJob), ApiError> {
     use crate::training_queue::QueuedJob;
     // Every training step's `name` becomes a directory under adapter_dir —
@@ -393,7 +422,7 @@ fn step_to_queued_job(
                     dataset: None,
                     examples,
                     config: sft_config,
-                    post_eval: None,
+                    post_eval: post_eval.clone(),
                 }),
             ))
         }
@@ -435,7 +464,7 @@ fn step_to_queued_job(
                     dataset_path: None,
                     teacher: teacher.clone(),
                     config: opd_config,
-                    post_eval: None,
+                    post_eval: post_eval.clone(),
                 }),
             ))
         }
@@ -456,7 +485,7 @@ fn step_to_queued_job(
                     student: student.clone(),
                     rollout_budget: *rollout_budget,
                     config: c,
-                    post_eval: None,
+                    post_eval: post_eval.clone(),
                 }),
             ))
         }
@@ -481,7 +510,7 @@ fn step_to_queued_job(
                     rollout_budget: 50_000,
                     use_cache: true,
                     config: c,
-                    post_eval: None,
+                    post_eval: post_eval.clone(),
                 }),
             ))
         }
@@ -504,7 +533,7 @@ fn step_to_queued_job(
                     require_if_eval_recovery: 0.95,
                     require_internal_qa_gain: 0.05,
                     config: c,
-                    post_eval: None,
+                    post_eval: post_eval.clone(),
                     if_eval_suite: None,
                     new_knowledge_eval_suite: None,
                 }),
@@ -525,7 +554,7 @@ fn step_to_queued_job(
                     ground_truth: None,
                     documents: None,
                     config: c,
-                    post_eval: None,
+                    post_eval: post_eval.clone(),
                 }),
             ))
         }
@@ -623,7 +652,7 @@ mod tests {
     #[test]
     fn post_eval_step_parses_and_validates_placement() {
         let recipe: Recipe = serde_yaml::from_str(
-            "name: gated\nsteps:\n  - kind: post_eval\n    suite: agentic-core\n    adapter: x\n    require_min_score: 0.7\n",
+            "name: gated\nsteps:\n  - kind: post_eval\n    suite: qwen3.5-agentic-core\n    adapter: x\n    require_min_score: 0.7\n",
         )
         .unwrap();
         let RecipeStep::PostEval {
@@ -634,7 +663,7 @@ mod tests {
         else {
             panic!("expected PostEval step");
         };
-        assert_eq!(suite, "agentic-core");
+        assert_eq!(suite, "qwen3.5-agentic-core");
         assert_eq!(adapter, "x");
         assert!((require_min_score - 0.7).abs() < 1e-9);
         // The lookahead conversion used by the prepare loop.
