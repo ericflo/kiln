@@ -1708,8 +1708,14 @@ fn grpo_hyperparameters(
 
 fn grpo_echo_receipt(config: &GrpoConfig) -> crate::train_receipt::EchoReceipt {
     match config.loss.echo.as_ref() {
-        Some(echo) if config.loss.echo_enabled() => crate::train_receipt::EchoReceipt {
-            enabled: true,
+        // A present config records its knobs for provenance (a λ=0 config
+        // still steers mask construction / warning-filter accounting), but
+        // `enabled` records whether the env-CE term FIRED — and post
+        // candle-drop (#1082) it has no gradient root: λ≠0 runs only reach
+        // training when the data carries no env tokens (entry validation
+        // rejects the rest), so the term contributed exactly zero.
+        Some(echo) => crate::train_receipt::EchoReceipt {
+            enabled: false,
             lambda: Some(echo.lambda),
             env_mask_mode: serde_json::to_value(echo.env_mask_mode)
                 .ok()
@@ -1717,8 +1723,14 @@ fn grpo_echo_receipt(config: &GrpoConfig) -> crate::train_receipt::EchoReceipt {
             warning_filter: Some(echo.warning_filter),
             initial_env_ce: None,
             final_env_ce: None,
+            dropped_reason: config.loss.echo_enabled().then(|| {
+                "env-CE has no kt-tape gradient root post candle-drop (#1082); runs \
+                 with environment tokens are rejected at entry and runs without them \
+                 have a zero env-CE term"
+                    .to_string()
+            }),
         },
-        _ => crate::train_receipt::EchoReceipt::disabled(),
+        None => crate::train_receipt::EchoReceipt::disabled(),
     }
 }
 
@@ -2956,6 +2968,21 @@ pub fn grpo_train(
     replay_ctx: Option<ReplayContext>,
 ) -> Result<PathBuf> {
     let run_started = Instant::now();
+    // Fail fast on loss compositions the kt-tape path cannot train —
+    // BEFORE any forward pass. The old order discovered this per-step,
+    // after the rollout + reference forwards had already burned GPU time.
+    let has_env_tokens = groups.iter().any(|g| {
+        g.completions.iter().any(|c| {
+            c.trajectory
+                .iter()
+                .any(|seg| seg.kind == crate::trajectory::TurnKind::Observation)
+        })
+    });
+    config
+        .loss
+        .validate_for_kt_tape(has_env_tokens)
+        .map_err(|e| anyhow::anyhow!("GRPO loss config: {e}"))?;
+
     let output_dir = adapter_dir.join(adapter_name);
     let training_data_sha256 = crate::train_receipt::sha256_json_serializable(&groups);
     let requested_base_adapter_dir = config
@@ -3718,10 +3745,18 @@ pub fn grpo_dry_run_jsonl(
                 token_counts.action_tokens > 0,
                 "GRPO dry run: dataset has no action tokens after mask construction"
             );
+            // The dry run pins the same constraint the real run enforces.
+            // (It used to demand the OPPOSITE — env tokens required when
+            // ECHO was on — so a dataset that passed the dry run was
+            // exactly one that failed the real run.)
             if config.loss.echo_enabled() {
                 anyhow::ensure!(
-                    token_counts.env_tokens > 0,
-                    "GRPO dry run: ECHO is enabled but env_mask is empty across all valid groups; pass --no-echo or provide trajectory Observation/tool segments"
+                    token_counts.env_tokens == 0,
+                    "GRPO dry run: ECHO is enabled and the dataset carries environment \
+                     tokens, but the env-CE term has no gradient path post candle-drop \
+                     (#1082) — the real run would fail after the rollout forwards. Pass \
+                     --no-echo (or set loss.echo to null); the action-token policy loss \
+                     still trains on the full trajectory."
                 );
             }
         }
@@ -3800,6 +3835,15 @@ pub fn grpo_train_jsonl(
     use std::io::{BufRead, BufReader};
 
     let run_started = Instant::now();
+    // Fail fast on compositions the kt-tape path cannot train. The
+    // streaming path can't cheaply pre-scan every group for Observation
+    // segments, so `no_policy_loss` / reserved-OPD reject here and the
+    // echo+env case rejects per-group at mask-construction time, before
+    // that group's forward (plus in the dry-run gate below).
+    config
+        .loss
+        .validate_for_kt_tape(false)
+        .map_err(|e| anyhow::anyhow!("GRPO loss config: {e}"))?;
     let output_dir = adapter_dir.join(adapter_name);
     let training_data = crate::train_receipt::TrainingDataReceipt {
         source: "jsonl_grpo_groups".to_string(),
@@ -5294,8 +5338,11 @@ fn train_tokenized_grpo_group_with_grad_norms(
             tape_auth_eligible,
             "GRPO requires the kt tape-authoritative path (backend tape support, \
              compatible base dtype, no ECHO env-CE, no no_policy_loss) post \
-             candle-drop. The candle `loss.backward()` / ECHO / candle-checkpointed \
-             GRPO producers were removed in #1082."
+             candle-drop (#1082). If this fired on ECHO: set loss.echo to null / pass \
+             --no-echo — the action-token policy loss still trains on the full \
+             trajectory. (Submission-time and trainer-entry validation should have \
+             rejected this config before any GPU work; reaching this point is a bug \
+             worth reporting.)"
         );
         let grads: GradSource = {
             #[cfg(any(
@@ -9714,9 +9761,9 @@ pub(crate) mod tests {
             seed: Some(42),
             ..GrpoConfig::default()
         };
-        if !echo {
-            config.loss.echo = None;
-        }
+        // The default is now OFF (#1082) — `echo: true` means an explicit
+        // opt-in here.
+        config.loss.echo = echo.then(crate::EchoConfig::default);
         config
     }
 
@@ -9829,46 +9876,80 @@ pub(crate) mod tests {
         assert!(err.to_string().contains("empty action_mask"));
     }
 
+    /// The dry run must pin the same constraint the real run enforces:
+    /// ECHO + env tokens has no gradient path post candle-drop (#1082), so
+    /// it REJECTS — while ECHO + legacy single-turn rollouts (zero env
+    /// tokens, zero contribution) passes. The pre-fix gate demanded the
+    /// exact opposite, so a dataset that passed the dry run was precisely
+    /// one that failed the real run.
     #[test]
-    fn grpo_dry_run_rejects_echo_without_env_tokens_and_writes_receipt() -> Result<()> {
+    fn grpo_dry_run_rejects_echo_with_env_tokens_and_writes_receipt() -> Result<()> {
         let tmp = tempfile::tempdir()?;
         let tok = make_echo_smoke_tokenizer()?;
-        let group = dry_run_group(vec![
+
+        // Legacy rollouts (no observations): ECHO-enabled config passes.
+        let legacy_group = dry_run_group(vec![
             crate::ScoredRollout::legacy("a".to_string(), 0.0),
             crate::ScoredRollout::legacy("b".to_string(), 1.0),
         ]);
-        let data = dry_run_dataset(tmp.path(), "echo-empty-env.jsonl", &[group]);
+        let legacy_data = dry_run_dataset(tmp.path(), "echo-legacy.jsonl", &[legacy_group]);
         let output = tmp.path().join("out");
-
-        let err = grpo_dry_run_jsonl(
-            &data,
+        let report = grpo_dry_run_jsonl(
+            &legacy_data,
             &dry_run_config(true, false),
             &ModelConfig::qwen3_5_4b(),
             &tok,
             &output,
-            "echo-empty-env",
+            "echo-legacy",
+            false,
+        )?;
+        assert_eq!(report.token_counts.env_tokens, 0);
+
+        // Trajectory rollouts WITH observations: rejected up front.
+        let env_group = dry_run_group(vec![
+            crate::ScoredRollout::from_trajectory(
+                vec![
+                    crate::TurnSegment {
+                        role: "assistant".into(),
+                        content: "a".into(),
+                        kind: crate::trajectory::TurnKind::Action,
+                        tool_call_id: None,
+                        warning_prefix_len: None,
+                    },
+                    dry_run_observation("tool output"),
+                ],
+                0.0,
+            ),
+            crate::ScoredRollout::legacy("b".to_string(), 1.0),
+        ]);
+        let env_data = dry_run_dataset(tmp.path(), "echo-env.jsonl", &[env_group]);
+        let err = grpo_dry_run_jsonl(
+            &env_data,
+            &dry_run_config(true, false),
+            &ModelConfig::qwen3_5_4b(),
+            &tok,
+            &output,
+            "echo-env",
             false,
         )
         .unwrap_err();
 
-        assert!(err.to_string().contains("failure_reason=zero_env_tokens"));
-        assert!(err.to_string().contains("ECHO is enabled"));
-        let receipt = crate::train_receipt::TrainReceipt::read_from_adapter_dir(
-            &output.join("echo-empty-env"),
-        )?
-        .unwrap();
+        assert!(
+            err.to_string().contains("failure_reason=unsupported_loss_config"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("--no-echo"), "{err}");
+        let receipt =
+            crate::train_receipt::TrainReceipt::read_from_adapter_dir(&output.join("echo-env"))?
+                .unwrap();
         assert_eq!(
             receipt.status,
             crate::train_receipt::TrainReceiptStatus::Failed
         );
-        assert_eq!(receipt.token_counts.env_tokens, 0);
-        assert_eq!(receipt.failure_reason.as_deref(), Some("zero_env_tokens"));
-        assert!(
-            receipt
-                .failure_message
-                .as_deref()
-                .unwrap()
-                .contains("ECHO is enabled")
+        assert!(receipt.token_counts.env_tokens > 0);
+        assert_eq!(
+            receipt.failure_reason.as_deref(),
+            Some("unsupported_loss_config")
         );
         Ok(())
     }
@@ -10026,9 +10107,12 @@ pub(crate) mod tests {
         let data = dry_run_dataset(tmp.path(), "ok.jsonl", &[group]);
         let output = tmp.path().join("out");
 
+        // ECHO off: trajectory rollouts with observations are the normal
+        // agentic case post candle-drop — the env-token ACCOUNTING still
+        // records, the env-CE term simply isn't part of the loss.
         let report = grpo_dry_run_jsonl(
             &data,
-            &dry_run_config(true, false),
+            &dry_run_config(false, false),
             &ModelConfig::qwen3_5_4b(),
             &tok,
             &output,
@@ -10052,7 +10136,7 @@ pub(crate) mod tests {
         assert_eq!(receipt.rewards.min, Some(0.0));
         assert_eq!(receipt.rewards.max, Some(1.0));
         assert_eq!(receipt.rewards.group_count, 1);
-        assert!(receipt.echo.enabled);
+        assert!(!receipt.echo.enabled, "no env-CE gradient path post #1082");
         assert!(
             receipt.phase_timings.tokenize_ms > 0.0,
             "dry-run receipt should record tokenization timing"
@@ -10092,9 +10176,15 @@ pub(crate) mod tests {
         let data = dry_run_dataset(tmp.path(), "warning-filter.jsonl", &[group]);
         let output = tmp.path().join("out");
 
+        // λ=0 keeps the EchoConfig as a pure mask-construction knob
+        // carrier: the warning-filter accounting runs, while the (gated,
+        // post-#1082) env-CE term stays out of the loss so the dry run
+        // passes on env-token data.
+        let mut filter_on = dry_run_config(true, false);
+        filter_on.loss.echo.as_mut().expect("ECHO config").lambda = 0.0;
         let report = grpo_dry_run_jsonl(
             &data,
-            &dry_run_config(true, false),
+            &filter_on,
             &ModelConfig::qwen3_5_4b(),
             &tok,
             &output,
@@ -10131,12 +10221,11 @@ pub(crate) mod tests {
         );
 
         let mut filter_off = dry_run_config(true, false);
-        filter_off
-            .loss
-            .echo
-            .as_mut()
-            .expect("ECHO enabled")
-            .warning_filter = false;
+        {
+            let echo = filter_off.loss.echo.as_mut().expect("ECHO config");
+            echo.lambda = 0.0;
+            echo.warning_filter = false;
+        }
         let off_report = grpo_dry_run_jsonl(
             &data,
             &filter_off,

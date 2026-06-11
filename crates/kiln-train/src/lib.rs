@@ -742,9 +742,9 @@ pub struct GrpoConfig {
     /// record the result in `train_receipt.json`.
     #[serde(default)]
     pub adapter_smoke_test: bool,
-    /// Composition of per-token training objectives. ECHO is on by default
-    /// (paper §3.3 λ=0.05); OPD's slot is reserved but empty until the OPD
-    /// branch rebases. See `LossConfig` for the full design.
+    /// Composition of per-token training objectives. ECHO is OFF by
+    /// default until its env-CE term regains a kt-tape gradient root
+    /// (#1082); OPD's slot is reserved but empty. See `LossConfig`.
     #[serde(default)]
     pub loss: LossConfig,
 }
@@ -776,14 +776,13 @@ fn default_reward_filter_min_groups() -> usize {
 //           + λ_echo · L_envCE(observations) [paper: Shrivastava 2026]
 //           + λ_opd  · L_revKL(actions)      [paper: Lu 2025; wired in OPD merge]
 //
-// `LossConfig::default()` enables ECHO at λ=0.05 (paper §3.3 default).
-// `opd` is a placeholder None until the OPD branch rebases on top; its
-// shape is reserved here so the composition stays orthogonal.
-//
-// For legacy single-string rollouts (`scored.has_trajectory() == false`)
-// the env_mask is empty and ECHO contributes exactly 0 — bit-identical
-// to the pre-ECHO loss. ECHO only fires when a rollout carries
-// observation segments. This is what makes "ECHO on by default" safe.
+// `LossConfig::default()` has ECHO OFF: the candle drop (#1082) deleted
+// the only env-CE gradient producer, so until the kt-tape root is
+// restored (ECHO resurrection plan) an enabled term either contributes
+// nothing (no env tokens) or hard-errors (env tokens present). Explicit
+// opt-in is validated up front via `LossConfig::validate_for_kt_tape`.
+// `opd` is a placeholder None; its shape is reserved so the composition
+// stays orthogonal.
 
 /// What positions in an observation segment contribute to the env_mask.
 ///
@@ -827,8 +826,14 @@ fn default_echo_lambda() -> f64 {
 fn default_warning_filter() -> bool {
     true
 }
+/// ECHO default. OFF until the env-CE term regains a gradient path: the
+/// candle drop (#1082) deleted the only producer that could backpropagate
+/// it, so a default-ON config made default-config agentic GRPO on real pi
+/// trajectories fail by design — after burning the rollout/reference
+/// forwards. Flip back to `Some(EchoConfig::default())` when the kt-tape
+/// env-CE root lands (ECHO resurrection plan, PR2).
 fn default_echo_some() -> Option<EchoConfig> {
-    Some(EchoConfig::default())
+    None
 }
 
 impl Default for EchoConfig {
@@ -866,10 +871,11 @@ pub struct LossConfig {
     /// trainer reads them from the surrounding GrpoConfig.
     ///
     /// Observation-token cross-entropy (paper: Shrivastava et al. 2026).
-    /// Default: `Some(EchoConfig::default())` with λ=0.05. Set to None to
-    /// opt out. Even when Some, ECHO contributes exactly 0 to the loss for
-    /// rollouts whose `env_mask` is empty (i.e. legacy single-turn) — so
-    /// "ECHO on by default" is safe for existing GRPO callers.
+    /// Default: `None` until the env-CE term regains a kt-tape gradient
+    /// root (deleted with the candle drop, #1082). Explicitly enabling it
+    /// fails fast at submission/trainer entry when the data carries
+    /// Observation segments — the term would otherwise silently train
+    /// nothing or hard-error mid-run after the rollout forwards.
     #[serde(default = "default_echo_some")]
     pub echo: Option<EchoConfig>,
     /// Action-token reverse-KL to a teacher (OPD; Lu 2025). Default: None.
@@ -898,6 +904,43 @@ impl Default for LossConfig {
 }
 
 impl LossConfig {
+    /// Validate this composition against the kt-tape training path BEFORE
+    /// any GPU work. Post-candle-drop (#1082) the ECHO env-CE term has no
+    /// tape gradient root and `no_policy_loss` therefore has no gradient
+    /// source at all; both previously failed mid-run, after the rollout
+    /// and reference forwards had already burned GPU time.
+    /// `has_env_tokens` = the training data carries trajectory
+    /// Observation/tool segments that the env mask would cover.
+    pub fn validate_for_kt_tape(&self, has_env_tokens: bool) -> Result<(), String> {
+        if self.no_policy_loss {
+            return Err(
+                "loss.no_policy_loss requires the ECHO env-CE gradient root, which was \
+                 removed in the candle drop (#1082) — there is currently nothing to train \
+                 on with the policy term masked out. Remove no_policy_loss (restoration \
+                 is tracked in the ECHO resurrection plan)."
+                    .to_string(),
+            );
+        }
+        if self.echo_enabled() && has_env_tokens {
+            return Err(
+                "loss.echo is enabled and the rollouts carry Observation/tool segments, \
+                 but the ECHO env-CE term has no gradient path post candle-drop (#1082) — \
+                 the step would fail after the rollout forwards. Set loss.echo to null \
+                 (or pass --no-echo); the action-token policy loss still trains on the \
+                 full trajectory. Restoration is tracked in the ECHO resurrection plan."
+                    .to_string(),
+            );
+        }
+        if self.opd.is_some() {
+            return Err(
+                "loss.opd composition on GRPO is reserved but not wired — use \
+                 POST /v1/train/opd for on-policy distillation instead."
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
     /// Lambda for the ECHO term, or 0.0 if ECHO is disabled.
     pub fn echo_lambda(&self) -> f64 {
         self.echo.as_ref().map(|c| c.lambda).unwrap_or(0.0)
@@ -1393,13 +1436,47 @@ mod tests {
     }
 
     #[test]
-    fn loss_config_default_has_echo_on_at_0_05() {
+    fn loss_config_default_has_echo_off_until_tape_root_restored() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_kiln_echo_env_vars();
         let cfg = LossConfig::default();
-        assert!(cfg.echo.is_some(), "ECHO should be on by default");
-        assert!((cfg.echo_lambda() - 0.05).abs() < 1e-12);
+        // The env-CE term lost its gradient path in the candle drop
+        // (#1082): default-ON made default-config agentic GRPO on real pi
+        // trajectories fail by design. Flip back to ON alongside the
+        // kt-tape env-CE root (ECHO resurrection plan PR2).
+        assert!(
+            cfg.echo.is_none(),
+            "ECHO must default OFF while the env-CE term has no gradient path"
+        );
         assert!(cfg.opd.is_none(), "OPD should be off by default");
+        assert!(cfg.validate_for_kt_tape(true).is_ok());
+    }
+
+    #[test]
+    fn loss_config_validation_rejects_untrainable_compositions() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_kiln_echo_env_vars();
+
+        // Explicit ECHO + env tokens: would fail mid-run after the rollout
+        // forwards — must be rejected up front, with the remediation.
+        let mut cfg = LossConfig::default();
+        cfg.echo = Some(EchoConfig::default());
+        assert!(cfg.validate_for_kt_tape(false).is_ok(), "no env tokens = zero term, harmless");
+        let err = cfg.validate_for_kt_tape(true).unwrap_err();
+        assert!(err.contains("no gradient path"), "{err}");
+        assert!(err.contains("--no-echo"), "{err}");
+
+        // no_policy_loss: constant-zero loss post candle-drop.
+        let mut cfg = LossConfig::default();
+        cfg.no_policy_loss = true;
+        let err = cfg.validate_for_kt_tape(false).unwrap_err();
+        assert!(err.contains("no_policy_loss"), "{err}");
+
+        // Reserved OPD slot: point at the real endpoint.
+        let mut cfg = LossConfig::default();
+        cfg.opd = Some(OpdAuxConfig { lambda: 1.0 });
+        let err = cfg.validate_for_kt_tape(false).unwrap_err();
+        assert!(err.contains("/v1/train/opd"), "{err}");
     }
 
     #[test]
@@ -1417,8 +1494,10 @@ mod tests {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_kiln_echo_env_vars();
         unsafe { std::env::set_var("KILN_ECHO_ENABLED", "false") };
+        // Start from an explicitly-enabled config (the default is now OFF)
+        // so the env override has something to disable.
         let mut cfg = LossConfig::default();
-        assert!(cfg.echo.is_some());
+        cfg.echo = Some(EchoConfig::default());
         cfg.apply_kiln_echo_env_overrides();
         assert!(cfg.echo.is_none(), "KILN_ECHO_ENABLED=false should disable");
         clear_kiln_echo_env_vars();
@@ -1499,11 +1578,18 @@ mod tests {
     fn kiln_echo_no_env_vars_leaves_config_unchanged() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_kiln_echo_env_vars();
+        // Both the (now-OFF) default and an explicit opt-in survive a pass
+        // with no env vars set.
         let mut cfg = LossConfig::default();
+        cfg.apply_kiln_echo_env_overrides();
+        assert!(cfg.echo.is_none(), "default OFF stays OFF");
+
+        let mut cfg = LossConfig::default();
+        cfg.echo = Some(EchoConfig::default());
         let original_lambda = cfg.echo_lambda();
         cfg.apply_kiln_echo_env_overrides();
         assert!((cfg.echo_lambda() - original_lambda).abs() < 1e-12);
-        assert!(cfg.echo.is_some());
+        assert!(cfg.echo.is_some(), "explicit opt-in stays on");
     }
 
     #[test]

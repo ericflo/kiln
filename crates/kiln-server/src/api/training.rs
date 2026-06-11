@@ -179,6 +179,21 @@ fn validate_grpo_submission_source(req: &GrpoRequest) -> Result<(), ApiError> {
             "GRPO request needs either non-empty groups or dataset_path",
         ));
     }
+    // Fail fast on loss compositions the kt-tape trainer cannot train
+    // (ECHO env-CE with environment tokens, no_policy_loss, reserved OPD
+    // slot) — the worker would otherwise dequeue a job guaranteed to die,
+    // possibly hours later behind a long queue.
+    let has_env_tokens = req.groups.iter().any(|g| {
+        g.completions.iter().any(|c| {
+            c.trajectory
+                .iter()
+                .any(|seg| seg.kind == kiln_train::trajectory::TurnKind::Observation)
+        })
+    });
+    req.config
+        .loss
+        .validate_for_kt_tape(has_env_tokens)
+        .map_err(ApiError::training_invalid_request)?;
     Ok(())
 }
 
@@ -1324,6 +1339,51 @@ mod tests {
 
         let inline = grpo_req(None, vec![grpo_group()]);
         validate_grpo_submission_source(&inline).unwrap();
+    }
+
+    /// Post candle-drop (#1082) the kt-tape trainer cannot train ECHO
+    /// env-CE or no_policy_loss — submissions must fail HERE, not at
+    /// worker dequeue hours later behind a queue.
+    #[test]
+    fn grpo_submission_rejects_untrainable_loss_configs() {
+        // ECHO + a rollout carrying an Observation segment.
+        let mut group = grpo_group();
+        group.completions[0].trajectory = vec![
+            kiln_train::trajectory::TurnSegment {
+                role: "assistant".into(),
+                content: "running".into(),
+                kind: kiln_train::trajectory::TurnKind::Action,
+                tool_call_id: None,
+                warning_prefix_len: None,
+            },
+            kiln_train::trajectory::TurnSegment {
+                role: "tool".into(),
+                content: "exit 0".into(),
+                kind: kiln_train::trajectory::TurnKind::Observation,
+                tool_call_id: None,
+                warning_prefix_len: None,
+            },
+        ];
+        let mut req = grpo_req(None, vec![group.clone()]);
+        req.config.loss.echo = Some(kiln_train::EchoConfig::default());
+        let err = validate_grpo_submission_source(&req).unwrap_err();
+        assert!(err.message.contains("no gradient path"), "{}", err.message);
+
+        // Same data WITHOUT echo: fine — the policy loss trains the
+        // trajectory's action tokens.
+        let req = grpo_req(None, vec![group]);
+        validate_grpo_submission_source(&req).unwrap();
+
+        // ECHO on legacy single-turn rollouts: zero env term, harmless.
+        let mut req = grpo_req(None, vec![grpo_group()]);
+        req.config.loss.echo = Some(kiln_train::EchoConfig::default());
+        validate_grpo_submission_source(&req).unwrap();
+
+        // no_policy_loss: constant-zero loss.
+        let mut req = grpo_req(None, vec![grpo_group()]);
+        req.config.loss.no_policy_loss = true;
+        let err = validate_grpo_submission_source(&req).unwrap_err();
+        assert!(err.message.contains("no_policy_loss"), "{}", err.message);
     }
 
     #[test]
