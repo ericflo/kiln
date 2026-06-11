@@ -293,6 +293,7 @@ const smokeAdapterReceipt = {
   post_eval: { 'math-reasoning-suite': 0.84 },
 };
 
+
 // Mirrors api/eval.rs upload_dataset: multipart fields `name`, `format`
 // (sft_chat | grpo_groups | raw), optional `description`, and `file` whose
 // every JSONL line must parse into the SftConversation contract — messages[]
@@ -989,9 +990,10 @@ async function startServer({
     }
     // The UI polls /v1/eval/jobs at startup to keep the Evals badge
     // accurate before the user has visited the tab. The fixture jobs feed
-    // the eval drill walk (raw JSON toggle + outcomes JSONL export); their
-    // adapters reference no real adapter card, so the rest of the
-    // dashboard is unaffected.
+    // the eval drill walk (raw JSON toggle + outcomes JSONL export) and the
+    // deep-link drill walk (#evals/jobs/smoke-eval-full); their adapters
+    // reference no real adapter card, so the rest of the dashboard is
+    // unaffected.
     if (url.pathname === '/v1/eval/jobs') {
       json(res, { jobs: smokeEvalJobs });
       return;
@@ -1263,24 +1265,48 @@ async function goToPrimaryTab(page, name) {
 // Asserts BOTH halves of hash navigation: the page section is active AND
 // location.hash agrees. Used by the Back/Forward history assertions, where
 // either half regressing (page without hash, hash without page) is a bug.
-async function expectActivePageAndHash(page, name, message) {
+// `expectedHash` defaults to the page-level #name; deep-link assertions pass
+// the full #page/subtab[/id] spelling.
+async function expectActivePageAndHash(page, name, message, expectedHash = `#${name}`) {
   await page.waitForFunction(
-    (targetName) => {
+    (targetName, targetHash) => {
       const section = document.querySelector(`#page-${targetName}`);
       return section
         && section.classList.contains('active')
         && !section.hidden
         && !section.hasAttribute('inert')
-        && window.location.hash === `#${targetName}`;
+        && window.location.hash === targetHash;
     },
     { timeout: 5000 },
     name,
+    expectedHash,
   ).catch(async () => {
     const actual = await page.evaluate(() => ({
       hash: window.location.hash,
       page: document.querySelector('.page.active')?.id || 'none',
     })).catch(() => ({ hash: 'unknown', page: 'unknown' }));
-    fail(`${message}: expected page-${name} active with hash #${name}, got page=${actual.page} hash=${actual.hash}`);
+    fail(`${message}: expected page-${name} active with hash ${expectedHash}, got page=${actual.page} hash=${actual.hash}`);
+  });
+}
+
+// Eval-drill + hash agreement for the deep-link close state machine: either
+// half drifting (modal without its id hash, id hash without the modal) is
+// exactly the class of bug PR 17 guards against.
+async function expectEvalDrillState(page, { open, hash }, message) {
+  await page.waitForFunction(
+    (wantOpen, wantHash) => {
+      const modal = document.getElementById('eval-drill-modal');
+      return modal && modal.hidden === !wantOpen && window.location.hash === wantHash;
+    },
+    { timeout: 5000 },
+    open,
+    hash,
+  ).catch(async () => {
+    const actual = await page.evaluate(() => ({
+      hidden: document.getElementById('eval-drill-modal')?.hidden,
+      hash: window.location.hash,
+    })).catch(() => ({ hidden: 'unknown', hash: 'unknown' }));
+    fail(`${message}: expected drill ${open ? 'open' : 'closed'} with hash ${hash}, got modalHidden=${actual.hidden} hash=${actual.hash}`);
   });
 }
 
@@ -2024,27 +2050,128 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
 
     // --- Hash navigation: tab clicks mint history entries, browser
     // Back/Forward walks them, and live hash edits route through the
-    // page whitelist (roadmap PR 16). ---
+    // page whitelist (roadmap PR 16). Deep links extend the grammar to
+    // #page/subtab[/id] (roadmap PR 17): sub-tabs and drill modals are
+    // addressable, junk segments repair to the canonical spelling via
+    // replaceState, and a user-closed modal CONSUMES the history entry
+    // its open minted. ---
     await expectActivePageAndHash(page, 'overview', 'Landing on /ui (no fragment) should repair the URL to #overview in place');
+
+    // ---- Deep-link boots (PR 17). On a pre-PR17 build the whole fragment
+    // fails the page whitelist and falls back to #overview — the negative
+    // check for this branch. ----
+    await page.goto('about:blank');
+    await page.goto(`${baseUrl}/ui#training/sft`, { waitUntil: 'domcontentloaded' });
+    await expectActivePageAndHash(page, 'training', 'Deep-link boot #training/sft should land on the Training page with the hash intact', '#training/sft');
+    await expectActiveTrainingTab(page, 'sft', 'Deep-link boot #training/sft should activate the SFT sub-tab');
+
+    // Boot straight onto the evals Jobs sub-tab; the fixture job renders.
+    await page.goto('about:blank');
+    await page.goto(`${baseUrl}/ui#evals/jobs`, { waitUntil: 'domcontentloaded' });
+    await expectActivePageAndHash(page, 'evals', 'Deep-link boot #evals/jobs should land on the Jobs sub-tab', '#evals/jobs');
+    await waitForVisiblePanel(page, '#tab-evals-jobs', 'Deep-link boot #evals/jobs should activate the Jobs tab panel');
+    await waitForPanelText(page, '#eval-jobs-list', /smoke-suite/, 'Jobs list should render the smoke eval job');
+
+    // Mint a sub-tab trail so Back-after-close has a meaningful place to land.
+    await clickAndWait(page, '#evals-tab-datasets', 'Could not click the Datasets sub-tab');
+    await expectActivePageAndHash(page, 'evals', 'Sub-tab click should push #evals/datasets', '#evals/datasets');
+    await clickAndWait(page, '#evals-tab-jobs', 'Could not click back to the Jobs sub-tab');
+    await expectActivePageAndHash(page, 'evals', 'Sub-tab click should push #evals/jobs', '#evals/jobs');
+
+    // Open the eval drill: the job id lands in the hash (pushState).
+    await clickAndWait(page, '#eval-jobs-list .job-card[data-job-id="smoke-eval-full"]', 'Could not open the eval drill modal from the jobs list');
+    await expectEvalDrillState(page, { open: true, hash: '#evals/jobs/smoke-eval-full' }, 'Opening the eval drill should push the job id into the hash');
+
+    // Escape-close CONSUMES the modal entry (open pushed → close walks back)…
+    await page.keyboard.press('Escape');
+    await expectEvalDrillState(page, { open: false, hash: '#evals/jobs' }, 'Escape should close the eval drill and return the hash to #evals/jobs');
+    // …so Back now keeps walking pages instead of re-opening the modal.
+    await page.goBack();
+    await expectEvalDrillState(page, { open: false, hash: '#evals/datasets' }, 'Back after close should land on the prior sub-tab, not re-open the modal');
+    await page.goForward();
+    await expectEvalDrillState(page, { open: false, hash: '#evals/jobs' }, 'Forward should return to the Jobs sub-tab with the modal still closed');
+    // The modal entry itself stays LIVE in forward history (never dead):
+    // Forward onto it re-opens the drill.
+    await page.goForward();
+    await expectEvalDrillState(page, { open: true, hash: '#evals/jobs/smoke-eval-full' }, 'Forward onto the modal entry should re-open the eval drill');
+    // Closing a modal re-entered via history (we pushed nothing this time)
+    // repairs the entry in place instead of walking back out of the app.
+    await page.keyboard.press('Escape');
+    await expectEvalDrillState(page, { open: false, hash: '#evals/jobs' }, 'Escape on a history-reopened drill should close it and repair the hash in place');
+
+    // Junk sub-tab: the page still activates, the segment is repaired via
+    // replaceState to a real sub-tab spelling (which one depends on the
+    // localStorage restore + empty-queue redirect, both legitimate).
+    await page.goto('about:blank');
+    await page.goto(`${baseUrl}/ui#training/bogus`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(
+      () => document.querySelector('#page-training')?.classList.contains('active')
+        && /^#training\/(queue|sft|grpo)$/.test(window.location.hash),
+      { timeout: 5000 },
+    ).catch(async () => {
+      const got = await page.evaluate(() => ({ hash: window.location.hash, page: document.querySelector('.page.active')?.id || 'none' })).catch(() => ({}));
+      fail(`Junk sub-tab deep link #training/bogus should keep Training and repair the hash to a real sub-tab, got page=${got.page} hash=${got.hash}`);
+    });
+    // Arrow-key tab navigation mints hashes too (the write lives in the
+    // tab-select fn, so keyboard nav and programmatic .click() are covered).
+    await clickAndWait(page, '#training-tab-sft', 'Could not activate the SFT tab for keyboard hash checks');
+    await page.focus('#training-tab-sft');
+    await page.keyboard.press('ArrowRight');
+    await expectActivePageAndHash(page, 'training', 'Arrow-key sub-tab navigation should push #training/grpo', '#training/grpo');
+
+    // Adapter deep link (a page with no sub-tabs: #adapters/{name} is a
+    // drill id): the modal opens over the Adapters page.
+    await page.goto('about:blank');
+    await page.goto(`${baseUrl}/ui#adapters/adapter-alpha`, { waitUntil: 'domcontentloaded' });
+    await expectActivePageAndHash(page, 'adapters', 'Deep-link boot #adapters/adapter-alpha should land on Adapters with the hash intact', '#adapters/adapter-alpha');
+    await page.waitForFunction(
+      () => document.getElementById('adapter-drill-modal')?.hidden === false
+        && document.getElementById('adapter-drill-title')?.textContent === 'adapter-alpha',
+      { timeout: 5000 },
+    ).catch(() => fail('Adapter deep link should open the adapter drill modal for adapter-alpha'));
+    // X-closing a BOOT-opened modal has no entry of ours to consume — the
+    // hash repairs in place to the parent page instead of history.back()
+    // (which would exit the dashboard).
+    await clickAndWait(page, '#adapter-drill-close', 'Could not close the deep-linked adapter drill modal');
+    await page.waitForFunction(
+      () => document.getElementById('adapter-drill-modal')?.hidden === true && window.location.hash === '#adapters',
+      { timeout: 5000 },
+    ).catch(async () => {
+      const got = await page.evaluate(() => window.location.hash).catch(() => 'unknown');
+      fail(`Closing a boot-deep-linked adapter drill should repair the hash to #adapters, got ${got}`);
+    });
+
+    // ---- PR 16 page-level walk, re-run on a pristine boot (localStorage
+    // cleared so lastPage / sub-tab restores don't steer the canonical
+    // hashes minted below). ----
+    await page.evaluate(() => localStorage.clear());
+    await page.goto('about:blank');
+    await page.goto(`${baseUrl}/ui`, { waitUntil: 'domcontentloaded' });
+    await expectActivePageAndHash(page, 'overview', 'A pristine /ui boot should land on #overview');
+    // The Training click below asserts the canonical ONE-entry push
+    // (#training/sft via the empty-queue redirect); that redirect requires a
+    // LOADED queue cache, so gate on the queue render first.
+    await waitForPanelText(page, '#tab-queue', /No training jobs yet\./, 'Training queue poll should land before the hash-navigation walk');
     await goToPrimaryTab(page, 'adapters');
     await expectActivePageAndHash(page, 'adapters', 'Clicking the Adapters tab should push #adapters');
     await goToPrimaryTab(page, 'training');
-    await expectActivePageAndHash(page, 'training', 'Clicking the Training tab should push #training');
+    await expectActivePageAndHash(page, 'training', 'Clicking the Training tab should push ONE canonical entry — #training/sft via the empty-queue redirect, never #training plus a second sub-tab entry', '#training/sft');
     await page.goBack();
     await expectActivePageAndHash(page, 'adapters', 'Browser Back from Training should return to Adapters');
     await page.goBack();
     await expectActivePageAndHash(page, 'overview', 'Second browser Back should return to Overview');
     await page.goForward();
     await expectActivePageAndHash(page, 'adapters', 'Browser Forward should re-land on Adapters');
-    // A live hash edit (address bar / location.hash) must activate the page.
+    // A live hash edit (address bar / location.hash) must activate the page
+    // and canonicalize the bare page hash to its sub-tab spelling in place.
     await page.evaluate(() => { window.location.hash = '#evals'; });
-    await expectActivePageAndHash(page, 'evals', 'Setting location.hash = #evals should activate the Evals page');
+    await expectActivePageAndHash(page, 'evals', 'Setting location.hash = #evals should activate the Evals page and canonicalize the hash', '#evals/datasets');
     // A junk hash falls back to Overview and is repaired via replaceState —
     // the junk entry must NOT survive in history for Back to trip over.
     await page.evaluate(() => { window.location.hash = '#nonsense'; });
     await expectActivePageAndHash(page, 'overview', 'A junk hash should fall back to Overview with the URL repaired');
     await page.goBack();
-    await expectActivePageAndHash(page, 'evals', 'Back after a junk hash should land on Evals — #nonsense must not pollute history');
+    await expectActivePageAndHash(page, 'evals', 'Back after a junk hash should land on Evals — #nonsense must not pollute history', '#evals/datasets');
 
     await goToPrimaryTab(page, 'adapters');
     await waitForPanelText(page, '#adapters-panel', /adapter-alpha/, 'Adapter list should show the first smoke adapter');
@@ -2298,6 +2425,8 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     // path the queue card uses. The modal stays open across the cancel so
     // failures (and the cancelled repaint) surface in it.
     await clickAndWait(page, '[data-train-job-id="smoke-sft"]', 'Could not open the train drill modal for the running SFT job');
+    // Deep-link grammar: opening the train drill pushes the job id segment.
+    await expectActivePageAndHash(page, 'training', 'Opening the train drill should push the job id into the hash', '#training/queue/smoke-sft');
     await page.waitForFunction(
       () => {
         const modal = document.getElementById('train-drill-modal');
@@ -2351,8 +2480,15 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     // through the status node — same channel as completed/failed jobs.
     await expectStatusAnnouncement(page, 'training-queue-status', /Training failed: sft-adapter\./, 'Training cancel (failed) was not announced');
     await clickAndWait(page, '#train-drill-close', 'Could not close the train drill modal');
-    await page.waitForFunction(() => document.getElementById('train-drill-modal')?.hidden === true, { timeout: 5000 })
-      .catch(() => fail('Train drill modal did not close'));
+    // X-close consumes the entry the open minted: modal hidden AND the hash
+    // back to the queue sub-tab (the close routes through history.back()).
+    await page.waitForFunction(
+      () => document.getElementById('train-drill-modal')?.hidden === true && window.location.hash === '#training/queue',
+      { timeout: 5000 },
+    ).catch(async () => {
+      const got = await page.evaluate(() => window.location.hash).catch(() => 'unknown');
+      fail(`Train drill close should pop the hash back to #training/queue, got ${got}`);
+    });
 
     await clickAndWait(page, '#training-tab-grpo', 'Could not open GRPO tab');
     await waitForVisiblePanel(page, '#tab-grpo', 'GRPO tab did not activate');
