@@ -52,8 +52,11 @@
     ],
     schema_version: 1,
   });
+  // NOTE: the real server returns jobs sorted NEWEST-first (descending
+  // submitted_at_iso) — keep this array in that order so demo renders match.
   const evalJobs = () => ({
     jobs: [
+      { job_id: 'eval_44e5f607-0000-1111-2222-333344445555', suite_name: 'commit-msg-contains', adapters: ['commit-msg-writer'], submission_kind: 'on_demand', state: 'queued', progress: { examples_completed: 0, examples_total: 96, running_accuracy: 0, running_mean_score: 0 }, finished_runs: [], headline_accuracy: null, error: null, submitted_at_iso: ISO(30_000) },
       { job_id: 'eval_77a1c0de-aa11-bb22-cc33-dd44ee55ff66', suite_name: 'pi-toolcall-eval', adapters: [ACTIVE_ADAPTER], submission_kind: 'on_demand', state: 'running', progress: { examples_completed: 162, examples_total: 240, running_accuracy: 0.913, running_mean_score: 0.91 }, finished_runs: [], headline_accuracy: null, error: null, submitted_at_iso: ISO(180_000) },
       { job_id: 'eval_31b4f0a9-1234-5678-9abc-def012345678', suite_name: 'rust-review-quality', adapters: [null, ACTIVE_ADAPTER], submission_kind: 'compare', state: 'completed', progress: { examples_completed: 128, examples_total: 128, running_accuracy: 0, running_mean_score: 0 }, headline_accuracy: 0.84, error: null, submitted_at_iso: ISO(3 * 3600_000), finished_runs: [
         { suite_name: 'rust-review-quality', adapter: null, metrics: { num_examples: 128, num_pass: 79, accuracy: 0.617, mean_score: 0.62, pass_rate_by_tag: { correctness: 0.71, style: 0.55, security: 0.58 } }, outcomes: [] },
@@ -62,7 +65,6 @@
       { job_id: 'eval_9c2d1e8f-aaaa-bbbb-cccc-dddddddddddd', suite_name: 'sql-exact-match', adapters: [ACTIVE_ADAPTER], submission_kind: 'on_demand', state: 'completed', progress: { examples_completed: 300, examples_total: 300, running_accuracy: 0, running_mean_score: 0 }, headline_accuracy: 0.91, error: null, submitted_at_iso: ISO(8 * 3600_000), finished_runs: [
         { suite_name: 'sql-exact-match', adapter: ACTIVE_ADAPTER, metrics: { num_examples: 300, num_pass: 273, accuracy: 0.91, mean_score: 0.91, pass_rate_by_tag: { select: 0.96, join: 0.88, window: 0.79 } }, outcomes: [] },
       ] },
-      { job_id: 'eval_44e5f607-0000-1111-2222-333344445555', suite_name: 'commit-msg-contains', adapters: ['commit-msg-writer'], submission_kind: 'on_demand', state: 'queued', progress: { examples_completed: 0, examples_total: 96, running_accuracy: 0, running_mean_score: 0 }, finished_runs: [], headline_accuracy: null, error: null, submitted_at_iso: ISO(30_000) },
       { job_id: 'eval_55f6a708-9999-8888-7777-666655554444', suite_name: 'pi-toolcall-eval', adapters: ['tool-call-tuned-v1'], submission_kind: 'on_demand', state: 'failed', progress: { examples_completed: 41, examples_total: 240, running_accuracy: 0, running_mean_score: 0 }, finished_runs: [], headline_accuracy: null, error: 'adapter tool-call-tuned-v1 failed to load: rank mismatch (expected 32, got 16)', submitted_at_iso: ISO(2 * 86400_000) },
     ],
   });

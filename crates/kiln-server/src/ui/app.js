@@ -4881,13 +4881,18 @@ async function refreshSuites() {
       return;
     }
     el.className = '';
-    // Build a per-suite history from the cached job list.
+    // Build a per-suite history from the cached job list. The server returns
+    // jobs NEWEST-first (sorted descending by submitted_at_iso), but the
+    // sparkline draws points left-to-right in array order and the badge takes
+    // the LAST entry — so accumulate each history oldest→newest. Sort a copy
+    // (never mutate the shared evalJobsCache) rather than blindly reversing,
+    // matching the defensive re-sorts in adapterEvalChip/adapterCompareVerdict.
     const suiteHistory = {};
-    for (const j of evalJobsCache) {
-      if (j.state !== 'completed') continue;
-      const acc = j.headline_accuracy;
-      if (acc == null) continue;
-      (suiteHistory[j.suite_name] = suiteHistory[j.suite_name] || []).push(acc);
+    const completedOldestFirst = evalJobsCache
+      .filter(j => j.state === 'completed' && j.headline_accuracy != null)
+      .sort((a, b) => String(a.submitted_at_iso || '').localeCompare(String(b.submitted_at_iso || '')));
+    for (const j of completedOldestFirst) {
+      (suiteHistory[j.suite_name] = suiteHistory[j.suite_name] || []).push(j.headline_accuracy);
     }
     el.innerHTML = suites.map(s => {
       const hist = (suiteHistory[s.name] || []).slice(-10);
