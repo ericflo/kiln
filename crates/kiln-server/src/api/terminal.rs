@@ -117,7 +117,11 @@ fn kiln_url_from_headers(headers: &HeaderMap) -> String {
     format!("http://{host}")
 }
 
-async fn terminal_ws(ws: WebSocketUpgrade, headers: HeaderMap) -> impl IntoResponse {
+async fn terminal_ws(
+    ws: WebSocketUpgrade,
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let (enabled, reason) = terminal_gate();
     if !enabled {
         return (
@@ -127,11 +131,12 @@ async fn terminal_ws(ws: WebSocketUpgrade, headers: HeaderMap) -> impl IntoRespo
             .into_response();
     }
     let kiln_url = kiln_url_from_headers(&headers);
-    ws.on_upgrade(move |socket| handle_session(socket, kiln_url))
+    let served_model_id = state.served_model_id.clone();
+    ws.on_upgrade(move |socket| handle_session(socket, kiln_url, served_model_id))
         .into_response()
 }
 
-async fn handle_session(mut socket: WebSocket, kiln_url: String) {
+async fn handle_session(mut socket: WebSocket, kiln_url: String, served_model_id: String) {
     // Single-session guard.
     if SESSION_ACTIVE.swap(true, Ordering::SeqCst) {
         let _ = socket
@@ -165,8 +170,9 @@ async fn handle_session(mut socket: WebSocket, kiln_url: String) {
         return;
     };
 
-    // Same non-destructive merge as `kiln pi-setup`, pointed at this server.
-    if let Err(err) = crate::cli::apply_pi_setup_quiet(&kiln_url) {
+    // Same non-destructive merge as `kiln pi-setup`, pointed at this server —
+    // with the model id this server actually announces.
+    if let Err(err) = crate::cli::apply_pi_setup_quiet(&kiln_url, Some(&served_model_id)) {
         tracing::warn!(error = %err, "pi-setup merge failed; launching pi with existing config");
     }
 

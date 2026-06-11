@@ -4925,7 +4925,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
   // The demo paints Kiln as what it actually is: a local inference server that
   // coding agents (pi, opencode) point at, with a flywheel of trained adapters.
   const demoState = {
-    active: 'opencode-agent-v4',
+    active: 'pi-coder-v4',
   };
 
   function uptimeSeconds() { return Math.floor((Date.now() - start) / 1000); }
@@ -4941,14 +4941,14 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
 
   const evalDatasets = () => ({
     datasets: [
-      { name: 'opencode-traces', format: 'sft_chat', description: 'Curated opencode agent trajectories with tool calls', num_rows: 12_480, size_bytes: 184 * MB, created_at: ISO(20 * 86400_000), updated_at: ISO(2 * 86400_000), stats: { num_assistant_turns: 38_210, num_tool_messages: 21_004, num_with_tool_calls: 18_902, max_messages_per_conv: 42, max_content_chars: 18_400, avg_messages_per_conv: 11.4, sample_role_patterns: ['system→user→assistant→tool→assistant'] } },
+      { name: 'pi-traces', format: 'sft_chat', description: 'Curated pi agent trajectories with tool calls', num_rows: 12_480, size_bytes: 184 * MB, created_at: ISO(20 * 86400_000), updated_at: ISO(2 * 86400_000), stats: { num_assistant_turns: 38_210, num_tool_messages: 21_004, num_with_tool_calls: 18_902, max_messages_per_conv: 42, max_content_chars: 18_400, avg_messages_per_conv: 11.4, sample_role_patterns: ['system→user→assistant→tool→assistant'] } },
       { name: 'rust-review-pairs', format: 'sft_chat', description: 'PR review comments paired with diffs', num_rows: 5_120, size_bytes: 72 * MB, created_at: ISO(14 * 86400_000), updated_at: ISO(5 * 86400_000), stats: { num_assistant_turns: 5_120, num_tool_messages: 0, num_with_tool_calls: 88, max_messages_per_conv: 4, max_content_chars: 9_200, avg_messages_per_conv: 3.0, sample_role_patterns: ['system→user→assistant'] } },
       { name: 'sql-explain-gold', format: 'sft_chat', description: 'SQL queries with natural-language explanations', num_rows: 3_004, size_bytes: 28 * MB, created_at: ISO(9 * 86400_000), updated_at: ISO(9 * 86400_000), stats: { num_assistant_turns: 3_004, num_tool_messages: 0, num_with_tool_calls: 0, max_messages_per_conv: 2, max_content_chars: 4_100, avg_messages_per_conv: 2.0, sample_role_patterns: ['user→assistant'] } },
     ],
   });
   const evalSuites = () => ({
     suites: [
-      { name: 'opencode-toolcall-eval', description: 'Does the agent emit the correct tool call for the task?', num_examples: 240, default_scorer_kind: 'tool_call' },
+      { name: 'pi-toolcall-eval', description: 'Does the agent emit the correct tool call for the task?', num_examples: 240, default_scorer_kind: 'tool_call' },
       { name: 'rust-review-quality', description: 'LLM-judge scored review usefulness vs gold comments', num_examples: 128, default_scorer_kind: 'judge' },
       { name: 'sql-exact-match', description: 'Normalized SQL equivalence against the gold query', num_examples: 300, default_scorer_kind: 'exact_match' },
       { name: 'commit-msg-contains', description: 'Conventional-commit prefix + scope presence', num_examples: 96, default_scorer_kind: 'contains' },
@@ -4966,7 +4966,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
   });
   const evalJobs = () => ({
     jobs: [
-      { job_id: 'eval_77a1c0de-aa11-bb22-cc33-dd44ee55ff66', suite_name: 'opencode-toolcall-eval', adapters: [ACTIVE_ADAPTER], submission_kind: 'on_demand', state: 'running', progress: { examples_completed: 162, examples_total: 240, running_accuracy: 0.913, running_mean_score: 0.91 }, finished_runs: [], headline_accuracy: null, error: null, submitted_at_iso: ISO(180_000) },
+      { job_id: 'eval_77a1c0de-aa11-bb22-cc33-dd44ee55ff66', suite_name: 'pi-toolcall-eval', adapters: [ACTIVE_ADAPTER], submission_kind: 'on_demand', state: 'running', progress: { examples_completed: 162, examples_total: 240, running_accuracy: 0.913, running_mean_score: 0.91 }, finished_runs: [], headline_accuracy: null, error: null, submitted_at_iso: ISO(180_000) },
       { job_id: 'eval_31b4f0a9-1234-5678-9abc-def012345678', suite_name: 'rust-review-quality', adapters: [null, ACTIVE_ADAPTER], submission_kind: 'compare', state: 'completed', progress: { examples_completed: 128, examples_total: 128, running_accuracy: 0, running_mean_score: 0 }, headline_accuracy: 0.84, error: null, submitted_at_iso: ISO(3 * 3600_000), finished_runs: [
         { suite_name: 'rust-review-quality', adapter: null, metrics: { num_examples: 128, num_pass: 79, accuracy: 0.617, mean_score: 0.62, pass_rate_by_tag: { correctness: 0.71, style: 0.55, security: 0.58 } }, outcomes: [] },
         { suite_name: 'rust-review-quality', adapter: ACTIVE_ADAPTER, metrics: { num_examples: 128, num_pass: 108, accuracy: 0.844, mean_score: 0.85, pass_rate_by_tag: { correctness: 0.92, style: 0.80, security: 0.81 } }, outcomes: [] },
@@ -4975,7 +4975,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
         { suite_name: 'sql-exact-match', adapter: ACTIVE_ADAPTER, metrics: { num_examples: 300, num_pass: 273, accuracy: 0.91, mean_score: 0.91, pass_rate_by_tag: { select: 0.96, join: 0.88, window: 0.79 } }, outcomes: [] },
       ] },
       { job_id: 'eval_44e5f607-0000-1111-2222-333344445555', suite_name: 'commit-msg-contains', adapters: ['commit-msg-writer'], submission_kind: 'on_demand', state: 'queued', progress: { examples_completed: 0, examples_total: 96, running_accuracy: 0, running_mean_score: 0 }, finished_runs: [], headline_accuracy: null, error: null, submitted_at_iso: ISO(30_000) },
-      { job_id: 'eval_55f6a708-9999-8888-7777-666655554444', suite_name: 'opencode-toolcall-eval', adapters: ['tool-call-tuned-v1'], submission_kind: 'on_demand', state: 'failed', progress: { examples_completed: 41, examples_total: 240, running_accuracy: 0, running_mean_score: 0 }, finished_runs: [], headline_accuracy: null, error: 'adapter tool-call-tuned-v1 failed to load: rank mismatch (expected 32, got 16)', submitted_at_iso: ISO(2 * 86400_000) },
+      { job_id: 'eval_55f6a708-9999-8888-7777-666655554444', suite_name: 'pi-toolcall-eval', adapters: ['tool-call-tuned-v1'], submission_kind: 'on_demand', state: 'failed', progress: { examples_completed: 41, examples_total: 240, running_accuracy: 0, running_mean_score: 0 }, finished_runs: [], headline_accuracy: null, error: 'adapter tool-call-tuned-v1 failed to load: rank mismatch (expected 32, got 16)', submitted_at_iso: ISO(2 * 86400_000) },
     ],
   });
   const evalJobDetail = (id) => ({
@@ -5009,7 +5009,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
   });
   const library = () => ({
     adapters: [
-      { id: 'kiln/opencode-agent-v4', name: 'opencode-agent-v4', source_kind: 'local', description: 'Tool-calling coding agent, GRPO-tuned', uploader: 'floguy', size_bytes: 86 * MB, post_eval: { 'opencode-toolcall-eval': 0.93 } },
+      { id: 'kiln/pi-coder-v4', name: 'pi-coder-v4', source_kind: 'local', description: 'Tool-calling coding agent, GRPO-tuned', uploader: 'floguy', size_bytes: 86 * MB, post_eval: { 'pi-toolcall-eval': 0.93 } },
       { id: 'kiln/rust-reviewer-v2', name: 'rust-reviewer-v2', source_kind: 'local', description: 'Rust PR review assistant', uploader: 'floguy', size_bytes: 64 * MB, post_eval: { 'rust-review-quality': 0.84 } },
       { id: 'hub/math-tutor-distilled', name: 'math-tutor-distilled', source_kind: 'huggingface', description: 'Distilled from qwen3.6-27b for grade-school math', uploader: 'community', size_bytes: 41 * MB, post_eval: {} },
     ],
@@ -5021,7 +5021,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
   });
   const preflightCompat = () => ({
     matches: [
-      { teacher: 'qwen3.6-27b-local', student: MODEL, domain: 'coding-agent', predicted_initial_overlap: 0.72, recommended_rank: 32, expected_gpu_hours: 4.5, expected_cost_usd: 6.30, validation_eval: 'opencode-toolcall-eval', expected_eval_delta_points: 11.2, cold_start_epochs: 1 },
+      { teacher: 'qwen3.6-27b-local', student: MODEL, domain: 'coding-agent', predicted_initial_overlap: 0.72, recommended_rank: 32, expected_gpu_hours: 4.5, expected_cost_usd: 6.30, validation_eval: 'pi-toolcall-eval', expected_eval_delta_points: 11.2, cold_start_epochs: 1 },
       { teacher: 'qwen3.6-27b-local', student: MODEL, domain: 'sql', predicted_initial_overlap: 0.81, recommended_rank: 16, expected_gpu_hours: 2.1, expected_cost_usd: 2.94, validation_eval: 'sql-exact-match', expected_eval_delta_points: 6.8, cold_start_epochs: 1 },
       { teacher: 'gpt-frontier', student: MODEL, domain: 'review', predicted_initial_overlap: 0.41, recommended_rank: 64, expected_gpu_hours: 9.0, expected_cost_usd: 38.0, validation_eval: 'rust-review-quality', expected_eval_delta_points: 14.5, cold_start_epochs: 2 },
     ],
@@ -5052,7 +5052,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
     base_model: 'Qwen/Qwen3.5-4B', lora_rank: 32, lora_alpha: 64, target_modules: ['q_proj', 'k_proj', 'v_proj', 'o_proj'],
     created_at: ISO(6 * 3600_000),
     files: [ { name: 'adapter_config.json', size_bytes: 612 }, { name: 'adapter_model.safetensors', size_bytes: 85 * MB } ],
-    post_eval: { 'opencode-toolcall-eval': 0.93 },
+    post_eval: { 'pi-toolcall-eval': 0.93 },
   });
 
   const responses = {
@@ -5095,19 +5095,19 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
       return [
         {
           id: 'chatcmpl-9f2a7c41-0e3b-4a18-b9d2-1c8e7a4f02d1',
-          model: 'Qwen3.5-4B', adapter: 'opencode-agent-v4', streamed: true,
+          model: 'Qwen3.5-4B', adapter: 'pi-coder-v4', streamed: true,
           timestamp_unix_ms: now - 2_400, duration_ms: 1_812, ttft_ms: 38,
           prompt_tokens: 4_182, completion_tokens: 268, finish_reason: 'stop',
           temperature: 0.2, top_p: 0.95, max_tokens: 2048,
-          user_agent: 'opencode/0.4.2 (@ai-sdk/openai-compatible)',
+          user_agent: 'pi/1.2.0',
           prompt_preview: 'Refactor src/auth/session.rs to use the new TokenStore trait and update call sites',
           completion_preview: "I'll update `Session::new` to take a `TokenStore` and migrate the three call sites in `handlers/`. Running cargo check…",
-          prompt_full: 'You are opencode, an autonomous coding agent.\n\nRefactor src/auth/session.rs to use the new TokenStore trait and update call sites.',
+          prompt_full: 'You are pi, a terminal coding agent.\n\nRefactor src/auth/session.rs to use the new TokenStore trait and update call sites.',
           completion_full: "I'll update `Session::new` to take a `TokenStore` and migrate the three call sites in `handlers/`. Running cargo check now to confirm the trait bounds line up.",
         },
         {
           id: 'chatcmpl-7b1d5e92-aa14-4c0f-9e71-2f6b3d9c8a55',
-          model: 'Qwen3.5-4B', adapter: 'opencode-agent-v4', streamed: true,
+          model: 'Qwen3.5-4B', adapter: 'pi-coder-v4', streamed: true,
           timestamp_unix_ms: now - 9_100, duration_ms: 642, ttft_ms: 29,
           prompt_tokens: 2_011, completion_tokens: 96, finish_reason: 'tool_calls',
           temperature: 0.0, top_p: 1.0, max_tokens: 1024,
@@ -5119,7 +5119,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
         },
         {
           id: 'chatcmpl-3c8f0a17-7d22-49b6-8c41-0a5e6f2b1d34',
-          model: 'Qwen3.5-4B', adapter: 'opencode-agent-v4', streamed: true,
+          model: 'Qwen3.5-4B', adapter: 'pi-coder-v4', streamed: true,
           timestamp_unix_ms: now - 21_500, duration_ms: 3_204, ttft_ms: 41,
           prompt_tokens: 6_540, completion_tokens: 512, finish_reason: 'stop',
           temperature: 0.2, top_p: 0.95, max_tokens: 4096,
@@ -5143,7 +5143,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
         },
         {
           id: 'chatcmpl-8a3c1f76-6b94-4e2c-bf03-7d5a9e8c2b41',
-          model: 'Qwen3.5-4B', adapter: 'opencode-agent-v4', streamed: false,
+          model: 'Qwen3.5-4B', adapter: 'pi-coder-v4', streamed: false,
           timestamp_unix_ms: now - 92_300, duration_ms: 421, ttft_ms: null,
           prompt_tokens: 812, completion_tokens: 54, finish_reason: 'stop',
           temperature: 0.0, top_p: 1.0, max_tokens: 256,
@@ -5155,7 +5155,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
         },
         {
           id: 'chatcmpl-2d6b9e03-1a48-4f57-9b21-3e8c0a7d5f62',
-          model: 'Qwen3.5-4B', adapter: 'opencode-agent-v4', streamed: true,
+          model: 'Qwen3.5-4B', adapter: 'pi-coder-v4', streamed: true,
           timestamp_unix_ms: now - 158_400, duration_ms: 2_140, ttft_ms: 36,
           prompt_tokens: 3_902, completion_tokens: 318, finish_reason: 'length',
           temperature: 0.2, top_p: 0.95, max_tokens: 320,
@@ -5170,7 +5170,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
     '/v1/adapters': () => ({
       active: demoState.active,
       available: [
-        { name: 'opencode-agent-v4',  size_bytes: 86 * 1024 * 1024 },
+        { name: 'pi-coder-v4',  size_bytes: 86 * 1024 * 1024 },
         { name: 'rust-reviewer-v3',   size_bytes: 64 * 1024 * 1024 },
         { name: 'sql-explainer-v2',   size_bytes: 28 * 1024 * 1024 },
         { name: 'commit-msg-writer',  size_bytes: 12 * 1024 * 1024 + 600 * 1024 },
@@ -5183,7 +5183,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
         { job_id: 'job_44_sql_explainer_sft', state: 'Queued', adapter_name: 'sql-explainer-v2', position: 1, job_type: 'SFT' },
       ],
       completed: [
-        { job_id: 'job_42_opencode_grpo',  state: 'Completed', progress: 1.0, current_loss: 0.214, adapter_name: 'opencode-agent-v4', elapsed_secs: 5_280, job_type: 'GRPO' },
+        { job_id: 'job_42_pi_grpo',  state: 'Completed', progress: 1.0, current_loss: 0.214, adapter_name: 'pi-coder-v4', elapsed_secs: 5_280, job_type: 'GRPO' },
         { job_id: 'job_41_commit_sft',     state: 'Completed', progress: 1.0, current_loss: 0.331, adapter_name: 'commit-msg-writer', elapsed_secs: 1_212, job_type: 'SFT' },
         { job_id: 'job_40_corrections_sft', state: 'Completed', progress: 1.0, current_loss: 0.402, adapter_name: 'codebase-corrections', elapsed_secs: 318, job_type: 'SFT' },
       ],
@@ -5330,7 +5330,7 @@ let initialPage = (location.hash || '').slice(1);
 if (!initialPage) {
   try { initialPage = localStorage.getItem('kiln.lastPage') || ''; } catch {}
 }
-if (!['overview', 'adapters', 'training', 'evals', 'distill', 'playground'].includes(initialPage)) {
+if (!['overview', 'adapters', 'training', 'evals', 'distill', 'playground', 'terminal'].includes(initialPage)) {
   initialPage = 'overview';
 }
 selectPage(initialPage);
@@ -6385,9 +6385,11 @@ function requestNeedsAttention(r) {
 function clientFromUA(ua) {
   if (!ua) return { key: 'unknown', label: 'unknown' };
   const s = ua.toLowerCase();
-  if (s.includes('opencode')) return { key: 'opencode', label: 'opencode' };
   if (/(^|[\/ _-])pi([\/ _-]|$)|pi-agent|earendil/.test(s)) return { key: 'pi', label: 'pi' };
-  if (s.includes('ai-sdk')) return { key: 'opencode', label: 'opencode' };
+  if (s.includes('opencode')) return { key: 'opencode', label: 'opencode' };
+  // A bare Vercel AI SDK UA tells us the SDK, not the agent — don't credit
+  // it to any particular client.
+  if (s.includes('ai-sdk')) return { key: 'ai-sdk', label: 'AI SDK' };
   if (s.includes('openai-python') || s.includes('python-openai')) return { key: 'openai-python', label: 'OpenAI Python' };
   if (s.includes('openai') && (s.includes('node') || s.includes('js') || s.includes('deno') || s.includes('bun'))) return { key: 'openai-js', label: 'OpenAI JS' };
   if (s.includes('openai')) return { key: 'openai', label: 'OpenAI SDK' };
@@ -11258,6 +11260,8 @@ function buildCmdkIndex() {
   items.push({ kind: 'nav', icon: icon('layers'), title: 'Adapters',   sub: 'Saved LoRAs, upload, merge', action: () => selectPage('adapters') });
   items.push({ kind: 'nav', icon: icon('flask'), title: 'Training',   sub: 'SFT/GRPO queue + submit', action: () => selectPage('training') });
   items.push({ kind: 'nav', icon: icon('chart'), title: 'Evals',      sub: 'Datasets, suites, jobs, judgments', action: () => selectPage('evals') });
+  items.push({ kind: 'nav', icon: icon('flask'), title: 'Distill',    sub: 'Teachers, knowledge pump, self-improve', action: () => selectPage('distill') });
+  items.push({ kind: 'nav', icon: icon('terminal'), title: 'pi Terminal', sub: 'Run pi against this Kiln, right here', action: () => selectPage('terminal') });
   items.push({ kind: 'nav', icon: icon('chat'), title: 'Playground', sub: 'Quick inference + A/B compare', action: () => selectPage('playground') });
   // Actions
   items.push({ kind: 'action', icon: icon('link'), title: 'Connect your agent', sub: 'Base URL, model id, pi / opencode setup, test connection', action: () => openConnect() });
