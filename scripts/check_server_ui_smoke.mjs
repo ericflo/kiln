@@ -2099,6 +2099,103 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await page.keyboard.press('Escape');
     await expectEvalDrillState(page, { open: false, hash: '#evals/jobs' }, 'Escape on a history-reopened drill should close it and repair the hash in place');
 
+    // ---- Shared modal manager (roadmap PR 18): focus moves INTO the
+    // dialog on open and back to the pre-open element on close, Tab is
+    // trapped within the top modal, and stacked modals (palette over a
+    // drill) close outside-in with the body scroll lock held until the
+    // stack empties. The hash assertions interleaved below prove the
+    // manager composes with the deep-link close state machine instead of
+    // replacing it. ----
+
+    // Focus a known element, then open the drill with a programmatic
+    // .click() (which does not move focus) so the manager must capture
+    // THIS element as the restore target.
+    await page.focus('#evals-tab-jobs');
+    await page.evaluate(() => document.querySelector('#eval-jobs-list .job-card[data-job-id="smoke-eval-full"]').click());
+    await expectEvalDrillState(page, { open: true, hash: '#evals/jobs/smoke-eval-full' }, 'Opening the eval drill for the focus checks should push the job id into the hash');
+    const drillFocus = await page.evaluate(() => ({
+      inModal: document.getElementById('eval-drill-modal').contains(document.activeElement),
+      active: document.activeElement?.id || document.activeElement?.tagName || 'none',
+    }));
+    if (!drillFocus.inModal) fail(`Opening the eval drill should move focus into the dialog, got activeElement=${drillFocus.active}`);
+
+    // Tab trap: from the LAST tabbable a real Tab press wraps to the
+    // first; Shift+Tab from the first wraps back to the last. Outcomes
+    // must finish rendering first so the tabbable set is stable.
+    await page.waitForFunction(() => document.querySelector('#eval-drill-modal .outcome-item'), { timeout: 5000 })
+      .catch(() => fail('Eval drill outcomes did not render before the Tab-trap checks'));
+    const trapReady = await page.evaluate(() => {
+      const modal = document.getElementById('eval-drill-modal');
+      const sel = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"]), [contenteditable="true"]';
+      const list = Array.from(modal.querySelectorAll(sel)).filter((n) => {
+        if (n.closest('[hidden]')) return false;
+        const r = n.getBoundingClientRect();
+        return r.width > 0 || r.height > 0;
+      });
+      if (list.length < 2) return false;
+      list[0].setAttribute('data-smoke-first-tabbable', '1');
+      list[list.length - 1].setAttribute('data-smoke-last-tabbable', '1');
+      list[list.length - 1].focus();
+      return true;
+    });
+    if (!trapReady) fail('Eval drill should expose at least two tabbables for the Tab-trap checks');
+    await page.keyboard.press('Tab');
+    const wrappedForward = await page.evaluate(() => document.activeElement?.hasAttribute('data-smoke-first-tabbable') || false);
+    if (!wrappedForward) {
+      const got = await page.evaluate(() => document.activeElement?.id || document.activeElement?.tagName || 'none');
+      fail(`Tab from the last tabbable should wrap to the first inside the eval drill, got activeElement=${got}`);
+    }
+    await page.keyboard.down('Shift');
+    await page.keyboard.press('Tab');
+    await page.keyboard.up('Shift');
+    const wrappedBackward = await page.evaluate(() => document.activeElement?.hasAttribute('data-smoke-last-tabbable') || false);
+    if (!wrappedBackward) {
+      const got = await page.evaluate(() => document.activeElement?.id || document.activeElement?.tagName || 'none');
+      fail(`Shift+Tab from the first tabbable should wrap to the last inside the eval drill, got activeElement=${got}`);
+    }
+    await page.evaluate(() => {
+      document.querySelector('[data-smoke-first-tabbable]')?.removeAttribute('data-smoke-first-tabbable');
+      document.querySelector('[data-smoke-last-tabbable]')?.removeAttribute('data-smoke-last-tabbable');
+    });
+
+    // Escape closes the drill through its own user-close fn (the hash
+    // entry is consumed exactly like the X button) AND focus returns to
+    // the element that was focused before the open.
+    await page.keyboard.press('Escape');
+    await expectEvalDrillState(page, { open: false, hash: '#evals/jobs' }, 'Escape via the modal manager should close the eval drill and consume the hash entry');
+    const restoredFocus = await page.evaluate(() => document.activeElement?.id || 'none');
+    if (restoredFocus !== 'evals-tab-jobs') fail(`Closing the eval drill should return focus to the pre-open element #evals-tab-jobs, got ${restoredFocus}`);
+
+    // Stacking: the command palette over the drill. Escape peels layers
+    // outside-in (palette first, drill second) and the body scroll lock
+    // holds until the LAST layer closes.
+    await page.evaluate(() => document.querySelector('#eval-jobs-list .job-card[data-job-id="smoke-eval-full"]').click());
+    await expectEvalDrillState(page, { open: true, hash: '#evals/jobs/smoke-eval-full' }, 'Re-opening the eval drill for the stacking checks should push the job id');
+    const lockedWithDrill = await page.evaluate(() => document.body.style.overflow);
+    if (lockedWithDrill !== 'hidden') fail(`Opening the eval drill should lock body scroll, got overflow=${JSON.stringify(lockedWithDrill)}`);
+    await page.keyboard.down('Control');
+    await page.keyboard.press('k');
+    await page.keyboard.up('Control');
+    await page.waitForFunction(() => document.getElementById('cmdk-modal')?.hidden === false, { timeout: 5000 })
+      .catch(() => fail('Ctrl+K should open the command palette over the eval drill'));
+    const cmdkFocus = await page.evaluate(() => document.activeElement?.id || 'none');
+    if (cmdkFocus !== 'cmdk-input') fail(`Opening the palette should focus its input, got ${cmdkFocus}`);
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => document.getElementById('cmdk-modal')?.hidden === true, { timeout: 5000 })
+      .catch(() => fail('Escape should close the stacked command palette'));
+    const afterCmdkClose = await page.evaluate(() => ({
+      drillHidden: document.getElementById('eval-drill-modal')?.hidden,
+      overflow: document.body.style.overflow,
+      hash: window.location.hash,
+    }));
+    if (afterCmdkClose.drillHidden !== false) fail('Escape over a stacked palette should close ONLY the palette — the eval drill underneath must stay open');
+    if (afterCmdkClose.hash !== '#evals/jobs/smoke-eval-full') fail(`Closing the palette must not touch the drill's hash entry, got ${afterCmdkClose.hash}`);
+    if (afterCmdkClose.overflow !== 'hidden') fail(`Body scroll must stay locked while the drill is still open under the closed palette, got overflow=${JSON.stringify(afterCmdkClose.overflow)}`);
+    await page.keyboard.press('Escape');
+    await expectEvalDrillState(page, { open: false, hash: '#evals/jobs' }, 'The second Escape should close the drill itself and consume its hash entry');
+    const unlockedAfterStack = await page.evaluate(() => document.body.style.overflow);
+    if (unlockedAfterStack !== '') fail(`Body scroll lock should release once the modal stack empties, got overflow=${JSON.stringify(unlockedAfterStack)}`);
+
     // Junk sub-tab: the page still activates, the segment is repaired via
     // replaceState to a real sub-tab spelling (which one depends on the
     // localStorage restore + empty-queue redirect, both legitimate).

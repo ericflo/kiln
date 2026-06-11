@@ -933,7 +933,7 @@
        Eval drill-in modal — opens when a job-card is clicked
        ================================================================= -->
   <div id="eval-drill-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="drill-title">
-    <div class="modal-shell">
+    <div class="modal-shell" tabindex="-1">
       <div class="modal-head">
         <h2 id="drill-title">Eval results</h2>
         <span class="modal-meta" id="drill-meta"></span>
@@ -982,7 +982,7 @@
        Command palette (Cmd-K) — global search + actions
        ================================================================= -->
   <div id="cmdk-modal" class="cmdk-backdrop" hidden role="dialog" aria-modal="true" aria-label="Command palette">
-    <div class="cmdk-shell">
+    <div class="cmdk-shell" tabindex="-1">
       <div class="cmdk-input-row">
         <span class="cmdk-icon"><svg class="icn"><use href="#i-search"></use></svg></span>
         <input class="cmdk-input" id="cmdk-input" placeholder="Search adapters, suites, jobs, datasets, judgments… or run an action" autocomplete="off" spellcheck="false">
@@ -1002,7 +1002,7 @@
        Training drill-in modal — opens when a training-card is clicked
        ================================================================= -->
   <div id="train-drill-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="train-drill-title">
-    <div class="modal-shell">
+    <div class="modal-shell" tabindex="-1">
       <div class="modal-head">
         <h2 id="train-drill-title">Training job</h2>
         <span class="modal-meta" id="train-drill-meta"></span>
@@ -1023,7 +1023,7 @@
        Recent-request inspect modal
        ================================================================= -->
   <div id="request-drill-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="request-drill-title">
-    <div class="modal-shell">
+    <div class="modal-shell" tabindex="-1">
       <div class="modal-head">
         <h2 id="request-drill-title">Request</h2>
         <span class="modal-meta" id="request-drill-meta"></span>
@@ -1052,7 +1052,7 @@
        Adapter drill-in modal
        ================================================================= -->
   <div id="adapter-drill-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="adapter-drill-title">
-    <div class="modal-shell">
+    <div class="modal-shell" tabindex="-1">
       <div class="modal-head">
         <h2 id="adapter-drill-title">Adapter</h2>
         <span class="modal-meta" id="adapter-drill-meta"></span>
@@ -1072,7 +1072,7 @@
        scoped to THAT adapter — pick a suite, compare against base, jump to
        the verdict. No hunting through the Evals page. -->
   <div id="adapter-eval-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="adapter-eval-title">
-    <div class="modal-shell modal-shell-fit" style="max-width: 480px;">
+    <div class="modal-shell modal-shell-fit" tabindex="-1" style="max-width: 480px;">
       <div class="modal-head">
         <h2 id="adapter-eval-title">Prove adapter</h2>
         <span style="flex:1 1 auto;"></span>
