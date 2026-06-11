@@ -1,9 +1,14 @@
 # MTP Training Plan — keep the draft head aligned with the tuned model
 
-**Status:** PR-A (serving + adapter format) shipped: `LoraWeights.mtp`,
-LoRA-threaded MTP verify/replay, draft-block LoRA application, dispatch
-gate lifted. This document specifies PR-B: actually *training* the MTP
-draft block whenever an adapter trains.
+**Status:** PR-A (serving + adapter format) shipped (#1508). PR-B
+(training) IMPLEMENTED: `run_mtp_alignment_phase` in `sft_train` —
+auto-on when the checkpoint ships `mtp.*` tensors (`train_mtp: false`
+opts out), detached no-head hiddens, FLCE root over shifted ids/mask
+(the +2 objective), optimizer over the seven draft-block pairs via a
+one-layer params shuffle, saved under the PR-A keys, soft-fail so a
+draft-head problem never loses the main adapter. Remaining: the
+attended GPU validations at the foot of this doc (CE decreases over a
+real run; acceptance-rate A/B with KILN_C1_ATTR_PATH).
 
 ## Why
 

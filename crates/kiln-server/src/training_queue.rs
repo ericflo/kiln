@@ -1313,6 +1313,9 @@ fn run_distill_refresh(
         learning_rate: None,
         lora_rank: req.config.lora_rank,
         lora_alpha: req.config.lora_alpha,
+        // Midtrain is a scaffolding pass — the FINAL adapter's SFT run
+        // trains the draft head; aligning it twice wastes a phase.
+        train_mtp: Some(false),
         base_adapter: req.config.base_adapter.clone(),
         allow_adapter_shape_conversion: false,
         allow_high_lora_scale: req.config.allow_high_lora_scale,
