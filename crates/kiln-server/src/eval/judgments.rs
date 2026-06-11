@@ -81,6 +81,13 @@ pub struct JudgmentManifest {
     /// ("you've picked A in 90% of cases — is something off?").
     #[serde(default)]
     pub winner_histogram: std::collections::BTreeMap<String, u32>,
+    /// Row-index split recorded at the last SFT compile: rows `[0, split)`
+    /// went into the training dataset, the rest were held out. Lets
+    /// validation detect train/validation overlap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_compiled_split: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_compiled_at: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -132,6 +139,8 @@ impl JudgmentStore {
             created_at: now.clone(),
             updated_at: now,
             winner_histogram: Default::default(),
+            last_compiled_split: None,
+            last_compiled_at: None,
         };
         self.write_manifest(name, &manifest)?;
         Ok(manifest)
@@ -299,44 +308,102 @@ impl Iterator for JudgmentIter {
 /// The compiled dataset is written into the same `DatasetRegistry` that
 /// powers training, under the name `<judgment_name>-sft`. Train it via
 /// the regular `/v1/train/sft` flow.
+/// The same judgment with A and B exchanged. Used to augment the judge's
+/// SFT data (and balance the validation suite) so it cannot learn a
+/// position prior instead of a quality judgment. The free-form note is
+/// dropped on the swapped copy — notes reference "A"/"B" textually.
+fn swapped(row: &JudgmentRow) -> JudgmentRow {
+    JudgmentRow {
+        adapter_a: row.adapter_b.clone(),
+        adapter_b: row.adapter_a.clone(),
+        response_a: row.response_b.clone(),
+        response_b: row.response_a.clone(),
+        winner: match row.winner {
+            JudgmentWinner::A => JudgmentWinner::B,
+            JudgmentWinner::B => JudgmentWinner::A,
+            other => other,
+        },
+        note: None,
+        ..row.clone()
+    }
+}
+
+/// Deterministic coin flip from a row id (fnv-1a parity) — stable across
+/// runs so validation suites are reproducible.
+fn stable_orientation_flip(id: &str) -> bool {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in id.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash & 1 == 1
+}
+
+fn sft_line(row: &JudgmentRow) -> Option<String> {
+    let winner_label = match row.winner {
+        JudgmentWinner::A => "A",
+        JudgmentWinner::B => "B",
+        JudgmentWinner::Tie => "Tie",
+        JudgmentWinner::Skip => return None,
+    };
+    let user_prompt = format_judge_prompt(row);
+    let target_text = if let Some(note) = row.note.as_deref().filter(|n| !n.is_empty()) {
+        format!("Winner: {winner_label}\nReason: {note}")
+    } else {
+        format!("Winner: {winner_label}")
+    };
+    Some(
+        serde_json::json!({
+            "messages": [
+                {"role": "system", "content": "You are an impartial judge. Pick the better assistant reply. Output `Winner: A`, `Winner: B`, or `Winner: Tie`. Optionally add `Reason:` on the next line."},
+                {"role": "user", "content": user_prompt},
+                {"role": "assistant", "content": target_text},
+            ],
+        })
+        .to_string(),
+    )
+}
+
 pub fn compile_judgments_to_sft(
     judgments: &JudgmentStore,
     datasets: &DatasetRegistry,
     name: &str,
     output_dataset: &str,
     include_skips: bool,
-) -> Result<u64, CompilationError> {
-    let rows = judgments
+    holdout_n: usize,
+) -> Result<(u64, u64), CompilationError> {
+    let all: Vec<JudgmentRow> = judgments
         .iter_rows(name)
-        .map_err(|e| CompilationError::Judgment(format!("{e}")))?;
+        .map_err(|e| CompilationError::Judgment(format!("{e}")))?
+        .collect();
+    // Exclude the most-recent `holdout_n` rows — `build_validation_suite`
+    // scores against exactly those, and a judge trained on its own
+    // validation set reports a meaningless accuracy.
+    let split = all.len().saturating_sub(holdout_n);
+    if split == 0 {
+        return Err(CompilationError::Judgment(format!(
+            "holdout_n={holdout_n} leaves no training rows out of {} — \
+             add more judgments or pass a smaller holdout_n",
+            all.len()
+        )));
+    }
     let mut compiled = String::new();
     let mut compiled_rows = 0u64;
-    for row in rows {
+    for row in &all[..split] {
         if matches!(row.winner, JudgmentWinner::Skip) && !include_skips {
             continue;
         }
-        let winner_label = match row.winner {
-            JudgmentWinner::A => "A",
-            JudgmentWinner::B => "B",
-            JudgmentWinner::Tie => "Tie",
-            JudgmentWinner::Skip => continue,
-        };
-        let user_prompt = format_judge_prompt(&row);
-        let target_text = if let Some(note) = row.note.as_deref().filter(|n| !n.is_empty()) {
-            format!("Winner: {winner_label}\nReason: {note}")
-        } else {
-            format!("Winner: {winner_label}")
-        };
-        let sft = serde_json::json!({
-            "messages": [
-                {"role": "system", "content": "You are an impartial judge. Pick the better assistant reply. Output `Winner: A`, `Winner: B`, or `Winner: Tie`. Optionally add `Reason:` on the next line."},
-                {"role": "user", "content": user_prompt},
-                {"role": "assistant", "content": target_text},
-            ],
-        });
-        compiled.push_str(&sft.to_string());
+        let Some(line) = sft_line(row) else { continue };
+        compiled.push_str(&line);
         compiled.push('\n');
         compiled_rows += 1;
+        // Swap-augment: the same judgment in the opposite orientation, so
+        // the judge can't score well by always answering the popular side.
+        if let Some(line) = sft_line(&swapped(row)) {
+            compiled.push_str(&line);
+            compiled.push('\n');
+            compiled_rows += 1;
+        }
     }
     if compiled_rows == 0 {
         return Err(CompilationError::Empty);
@@ -346,12 +413,18 @@ pub fn compile_judgments_to_sft(
             output_dataset,
             DatasetFormat::SftChat,
             Some(format!(
-                "Compiled from {compiled_rows} judgments in `{name}` for training a local judge LoRA."
+                "Compiled from {compiled_rows} judgments in `{name}` (swap-augmented) for training a local judge LoRA."
             )),
             compiled.as_bytes(),
         )
         .map_err(|e| CompilationError::Dataset(format!("{e}")))?;
-    Ok(compiled_rows)
+    // Record the split so validation can detect train/validation overlap.
+    if let Ok(mut manifest) = judgments.load_manifest(name) {
+        manifest.last_compiled_split = Some(split as u64);
+        manifest.last_compiled_at = Some(chrono::Utc::now().to_rfc3339());
+        let _ = judgments.write_manifest(name, &manifest);
+    }
+    Ok((compiled_rows, split as u64))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -406,6 +479,15 @@ pub fn build_validation_suite(
     let examples: Vec<kiln_eval::EvalExample> = holdout
         .iter()
         .map(|row| {
+            // Orientation-balance the suite: roughly half the holdout is
+            // presented swapped (stable per row id), so a judge that
+            // always answers the same side scores ~50%, not its bias rate.
+            let row = if stable_orientation_flip(&row.id) {
+                std::borrow::Cow::Owned(swapped(row))
+            } else {
+                std::borrow::Cow::Borrowed(row)
+            };
+            let row = row.as_ref();
             let target = match row.winner {
                 JudgmentWinner::A => "A".to_string(),
                 JudgmentWinner::B => "B".to_string(),
@@ -527,10 +609,110 @@ mod tests {
         store.append("p", &row("j2", JudgmentWinner::B)).unwrap();
         store.append("p", &row("j3", JudgmentWinner::Tie)).unwrap();
         store.append("p", &row("j4", JudgmentWinner::Skip)).unwrap();
-        let n = compile_judgments_to_sft(&store, &datasets, "p", "p-sft", false).unwrap();
-        assert_eq!(n, 3);
+        // holdout_n = 0: every non-skip row compiles, swap-augmented (x2).
+        let (n, split) = compile_judgments_to_sft(&store, &datasets, "p", "p-sft", false, 0).unwrap();
+        assert_eq!(n, 6);
+        assert_eq!(split, 4);
         let listed = datasets.list();
         assert!(listed.iter().any(|m| m.name == "p-sft"));
+        // Swapped copies flip the winner label and drop notes.
+        let manifest = store.load_manifest("p").unwrap();
+        assert_eq!(manifest.last_compiled_split, Some(4));
+        assert!(manifest.last_compiled_at.is_some());
+    }
+
+    #[test]
+    fn compile_excludes_holdout_rows_from_training_data() {
+        let d = tempfile::tempdir().unwrap();
+        let datasets = DatasetRegistry::new(d.path().join("datasets"));
+        // Per-row unique responses so leakage is detectable by content.
+        let mut unique = |id: &str, win: JudgmentWinner| {
+            let mut r = row(id, win);
+            r.response_a = format!("resp-a-{id}");
+            r.response_b = format!("resp-b-{id}");
+            r
+        };
+        let store2 = JudgmentStore::new(d.path().join("judgments2"));
+        store2.create("q", None).unwrap();
+        for i in 0..10 {
+            let win = if i % 2 == 0 {
+                JudgmentWinner::A
+            } else {
+                JudgmentWinner::B
+            };
+            store2.append("q", &unique(&format!("j{i}"), win)).unwrap();
+        }
+        let (n, split) =
+            compile_judgments_to_sft(&store2, &datasets, "q", "q-sft", false, 3).unwrap();
+        // 7 training rows, swap-augmented.
+        assert_eq!(split, 7);
+        assert_eq!(n, 14);
+        // The validation suite over the same holdout is exactly the last 3.
+        let suite = build_validation_suite(&store2, "q", 3).unwrap();
+        let validation_ids: Vec<&str> =
+            suite.examples.iter().filter_map(|e| e.id.as_deref()).collect();
+        assert_eq!(validation_ids, ["j7", "j8", "j9"]);
+        // Compiled dataset must not contain any holdout responses.
+        let compiled = std::fs::read_to_string(
+            d.path().join("datasets").join("q-sft").join("data.jsonl"),
+        )
+        .unwrap();
+        for holdout_id in ["j7", "j8", "j9"] {
+            assert!(
+                !compiled.contains(&format!("resp-a-{holdout_id}")),
+                "holdout {holdout_id} leaked into the compiled SFT data"
+            );
+        }
+        assert!(compiled.contains("resp-a-j0"), "training rows present");
+    }
+
+    #[test]
+    fn compile_with_holdout_consuming_everything_errors() {
+        let d = tempfile::tempdir().unwrap();
+        let store = JudgmentStore::new(d.path().join("judgments"));
+        let datasets = DatasetRegistry::new(d.path().join("datasets"));
+        store.create("p", None).unwrap();
+        store.append("p", &row("j1", JudgmentWinner::A)).unwrap();
+        let err = compile_judgments_to_sft(&store, &datasets, "p", "p-sft", false, 5).unwrap_err();
+        assert!(format!("{err}").contains("leaves no training rows"), "{err}");
+    }
+
+    #[test]
+    fn swapped_rows_flip_winner_and_drop_note() {
+        let mut r = row("j1", JudgmentWinner::A);
+        r.note = Some("A was concise".into());
+        let sw = swapped(&r);
+        assert_eq!(sw.winner, JudgmentWinner::B);
+        assert_eq!(sw.response_a, r.response_b);
+        assert_eq!(sw.response_b, r.response_a);
+        assert_eq!(sw.adapter_a, r.adapter_b);
+        assert!(sw.note.is_none());
+        let tie = swapped(&row("j2", JudgmentWinner::Tie));
+        assert_eq!(tie.winner, JudgmentWinner::Tie);
+    }
+
+    #[test]
+    fn validation_suite_orientation_is_balanced_against_position_bias() {
+        let d = tempfile::tempdir().unwrap();
+        let store = JudgmentStore::new(d.path().to_path_buf());
+        store.create("p", None).unwrap();
+        // All-A judgments: an unbalanced suite would let an always-answer-A
+        // judge score 100%.
+        for i in 0..16 {
+            store
+                .append("p", &row(&format!("j{i}"), JudgmentWinner::A))
+                .unwrap();
+        }
+        let suite = build_validation_suite(&store, "p", 16).unwrap();
+        let b_targets = suite
+            .examples
+            .iter()
+            .filter(|e| e.target.as_deref() == Some("B"))
+            .count();
+        assert!(
+            (4..=12).contains(&b_targets),
+            "expected roughly half swapped orientations, got {b_targets}/16"
+        );
     }
 
     #[test]

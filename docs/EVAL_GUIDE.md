@@ -284,13 +284,19 @@ End-to-end loop:
    Each click POSTs one row to `/v1/judgments/<name>/rows`.
 4. **Compile to SFT.** Once you have ~20 judgments, click **Compile to SFT**
    — kiln writes a new SFT dataset whose target is the winner label plus
-   your note.
+   your note. Every judgment is emitted in BOTH orientations (A/B swapped,
+   winner flipped) so the judge can't learn a position prior, and the
+   most-recent rows are automatically held out of the training data
+   (default `min(20, rows/5)`; override with `holdout_n`) so validation in
+   step 6 measures generalization, not memorization.
 5. **Train a judge LoRA.** Submit the compiled dataset via `/v1/train/sft`
    like any other SFT job.
-6. **Validate.** Hold out the most-recent N judgments and click **Validate
-   adapter** — kiln runs an inline eval suite that asks the trained LoRA to
-   predict the winner on those held-out rows. Accuracy is your judge's
-   quality on your own picks.
+6. **Validate.** Click **Validate adapter** — kiln runs an inline eval
+   suite asking the trained LoRA to predict the winner on the held-out
+   rows, presenting roughly half of them in swapped orientation (a judge
+   that always answers one side scores ~50%, not its bias rate). The
+   response carries a warning if the validation rows overlap what the last
+   compile trained on.
 7. **Use it.** Reference the trained adapter as the `judge_adapter` in any
    future `LlmJudge` scorer. The flywheel closes — your evals get smarter
    the more you use kiln.

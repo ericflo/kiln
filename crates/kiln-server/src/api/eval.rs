@@ -869,6 +869,12 @@ struct CompileJudgmentBody {
     /// Include `skip` judgments in the compilation. Off by default.
     #[serde(default)]
     include_skips: bool,
+    /// Most-recent rows to EXCLUDE from compilation so `validate` scores
+    /// the judge on data it never trained on. Omitted → automatic:
+    /// `min(20, rows/5)`, so bootstrap datasets (a handful of picks)
+    /// still compile fully while grown datasets get a real holdout.
+    #[serde(default)]
+    holdout_n: Option<usize>,
 }
 
 async fn compile_judgment(
@@ -884,15 +890,40 @@ async fn compile_judgment(
         .dataset_registry
         .as_ref()
         .ok_or_else(ApiError::dataset_registry_unavailable)?;
-    let compiled = compile_judgments_to_sft(store, datasets, &name, &body.output_dataset, body.include_skips)
-        .map_err(|e| ApiError::judgment_invalid(format!("{e}")))?;
+    let total_rows = store
+        .load_manifest(&name)
+        .map(|m| m.num_rows as usize)
+        .unwrap_or(0);
+    let holdout_n = body
+        .holdout_n
+        .unwrap_or_else(|| (total_rows / 5).min(default_holdout()));
+    let mut warnings: Vec<String> = Vec::new();
+    if holdout_n == 0 {
+        warnings.push(
+            "no holdout reserved — validation against this dataset will score the judge \
+             on its own training rows until you have more judgments"
+                .to_string(),
+        );
+    }
+    let (compiled, split) = compile_judgments_to_sft(
+        store,
+        datasets,
+        &name,
+        &body.output_dataset,
+        body.include_skips,
+        holdout_n,
+    )
+    .map_err(|e| ApiError::judgment_invalid(format!("{e}")))?;
     let manifest = datasets
         .load_manifest(&body.output_dataset)
         .map_err(|e| ApiError::judgment_invalid(format!("{e}")))?;
     Ok(Json(serde_json::json!({
         "status": "compiled",
         "rows": compiled,
+        "holdout_n": holdout_n,
+        "train_validation_split": split,
         "dataset": manifest,
+        "warnings": warnings,
     })))
 }
 
@@ -920,6 +951,29 @@ async fn validate_judgment_adapter(
         .ok_or_else(ApiError::judgment_store_unavailable)?;
     let suite = build_validation_suite(store, &name, body.holdout_n)
         .map_err(|e| ApiError::judgment_invalid(format!("{e}")))?;
+    // Validation rows are the last `holdout_n`; compilation trained on
+    // rows [0, split). They overlap when total - holdout_n < split — the
+    // accuracy would then be partly measured on training data.
+    let mut warnings: Vec<String> = Vec::new();
+    if let Ok(manifest) = store.load_manifest(&name) {
+        if let Some(split) = manifest.last_compiled_split {
+            let total = manifest.num_rows;
+            if total.saturating_sub(body.holdout_n as u64) < split {
+                warnings.push(format!(
+                    "validation overlaps the compiled training set: last compile trained on \
+                     rows [0, {split}) of {total}, validation uses the last {} — recompile \
+                     with holdout_n >= {} or validate with fewer rows",
+                    body.holdout_n, body.holdout_n
+                ));
+            }
+        } else {
+            warnings.push(
+                "judgments were never compiled with a holdout split — if the judge trained \
+                 on this dataset, validation accuracy includes training rows"
+                    .to_string(),
+            );
+        }
+    }
     let suite_name = suite.name.clone();
     let job_id = state.enqueue_eval(
         suite_name,
@@ -936,6 +990,7 @@ async fn validate_judgment_adapter(
         "status": "queued",
         "eval_job_id": job_id,
         "validation_suite": format!("judge-validate-{name}"),
+        "warnings": warnings,
     })))
 }
 
