@@ -331,11 +331,19 @@
     <div class="card">
       <div class="card-head">
         <h2>Recent requests</h2>
-        <span class="heartbeat" id="recent-heartbeat" aria-live="polite"><span class="hb-dot"></span><span class="hb-text">Connecting…</span></span>
+        <!-- No aria-live here: the label embeds relative times / TTFT that
+             churn on every 2s poll, so a live region narrates routine traffic.
+             Attention transitions speak via #recent-requests-status below. -->
+        <span class="heartbeat" id="recent-heartbeat"><span class="hb-dot"></span><span class="hb-text">Connecting…</span></span>
         <span style="flex:1;"></span>
         <input class="search-input" id="recent-requests-filter" type="search" placeholder="Filter by prompt, completion, id…" aria-label="Filter recent requests" style="max-width:280px;">
       </div>
-      <div class="card-body" id="recent-requests-panel" aria-live="polite" aria-atomic="false" aria-busy="true">
+      <!-- Screen-reader channel for this card: one terse line, written only
+           when the needs-attention count CHANGES (announceRecentAttention in
+           app.js). The list itself is deliberately NOT aria-live — every
+           content-keyed repaint of a 30-row list would be re-read in full. -->
+      <div class="sr-only" role="status" id="recent-requests-status"></div>
+      <div class="card-body" id="recent-requests-panel" aria-busy="true">
         <div class="empty">Loading recent requests…</div>
       </div>
     </div>
@@ -374,7 +382,11 @@
           <h2>Server status</h2>
           <span class="eyebrow" id="server-status-eyebrow">VRAM &amp; scheduler</span>
         </div>
-        <div class="card-body" id="server-status" data-panel-id="server-status-panel" role="status" aria-live="polite" aria-atomic="false" aria-busy="true">
+        <!-- Deliberately NOT a live region: blocks_used/uptime churn repaints
+             this panel every 2s health poll, and a live region would re-read
+             the whole diagnostics block each time. Online/offline transitions
+             are announced by the scoped aria-live status chip in the header. -->
+        <div class="card-body" id="server-status" data-panel-id="server-status-panel" aria-busy="true">
           <div class="empty">Loading server diagnostics…</div>
         </div>
         <!-- Runtime config expander — deliberately a SIBLING of the keyed
@@ -404,7 +416,10 @@
           <h2>Decode performance</h2>
           <span class="eyebrow">live · 60s rolling window</span>
         </div>
-        <div class="card-body" id="decode-perf-panel" data-panel-id="decode-stats-panel" aria-live="polite" aria-atomic="false" aria-busy="true">
+        <!-- Deliberately NOT a live region: tok/s + latency stats churn with
+             traffic, and announcing continuous metrics every repaint is a
+             screen-reader firehose with no transition to anchor on. -->
+        <div class="card-body" id="decode-perf-panel" data-panel-id="decode-stats-panel" aria-busy="true">
           <div class="empty">Loading live metrics…</div>
         </div>
       </div>
@@ -422,7 +437,11 @@
         <span style="flex:1;"></span>
         <input class="search-input" id="adapters-filter" type="search" placeholder="Filter adapters by name…" aria-label="Filter adapters" style="max-width:240px;">
       </div>
-      <div class="card-body" id="adapters-panel" aria-live="polite" aria-atomic="false" aria-busy="true" style="padding: var(--space-4);">
+      <!-- Deliberately NOT a live region: this is a full card grid rebuilt on
+           content-key changes. Every meaningful adapter transition (load,
+           unload, upload, delete, merge, training completion) already speaks
+           through the toast channel. -->
+      <div class="card-body" id="adapters-panel" aria-busy="true" style="padding: var(--space-4);">
         <div class="empty">Loading adapter list…</div>
       </div>
     </div>
@@ -508,7 +527,14 @@
         <button class="tab" id="training-tab-grpo" data-tab="grpo" type="button" role="tab" aria-selected="false" aria-controls="tab-grpo" tabindex="-1">Train · GRPO</button>
       </div>
 
-      <div class="tab-content active" id="tab-queue" role="tabpanel" aria-labelledby="training-tab-queue" aria-live="polite" aria-atomic="false" aria-busy="true" data-panel-id="training-queue-panel">
+      <!-- Screen-reader channel for training transitions (started / completed
+           / failed), written by detectTrainingTransitions in app.js. Lives
+           OUTSIDE the tabpanels so sub-tab switches never hide it. The queue
+           list itself is deliberately NOT aria-live: progress/loss churn
+           repaints it every 3s poll and a live region would re-read it all. -->
+      <div class="sr-only" role="status" id="training-queue-status"></div>
+
+      <div class="tab-content active" id="tab-queue" role="tabpanel" aria-labelledby="training-tab-queue" aria-busy="true" data-panel-id="training-queue-panel">
         <div class="empty">Loading queued training jobs…</div>
       </div>
 
@@ -694,6 +720,12 @@
         <button class="tab"        id="evals-tab-jobs"      data-tab="jobs"      type="button" role="tab" aria-selected="false" aria-controls="tab-evals-jobs"      tabindex="-1">Jobs</button>
         <button class="tab"        id="evals-tab-judgments" data-tab="judgments" type="button" role="tab" aria-selected="false" aria-controls="tab-evals-judgments" tabindex="-1">Judgments</button>
       </div>
+
+      <!-- Screen-reader channel for eval-job transitions (finished + verdict /
+           failed), written by detectEvalTransitions in app.js. Lives OUTSIDE
+           the tabpanels so sub-tab switches never hide it; the jobs list is
+           deliberately not a live region. -->
+      <div class="sr-only" role="status" id="eval-jobs-status"></div>
 
       <!-- Datasets sub-tab -->
       <div class="tab-content active" id="tab-evals-datasets" role="tabpanel" aria-labelledby="evals-tab-datasets" data-panel-id="evals-datasets-panel">

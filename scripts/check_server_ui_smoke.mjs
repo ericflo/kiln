@@ -1577,6 +1577,102 @@ async function expectApiFailurePanel(page, selector, action, detail) {
   }
 }
 
+// ── aria-live hygiene (roadmap PR 24) ───────────────────────────────────────
+// Polled data panels must NOT be live regions: every content-keyed repaint
+// would be re-read wholesale by screen readers every 2-3s. Each affected card
+// owns a visually-hidden role="status" node instead, written only on genuine
+// transitions; aria-busy flips only during a panel's FIRST load.
+const polledDataPanelIds = [
+  'tab-queue',
+  'server-status',
+  'decode-perf-panel',
+  'recent-requests-panel',
+  'adapters-panel',
+  'recent-heartbeat',
+];
+const transitionStatusNodeIds = ['training-queue-status', 'eval-jobs-status', 'recent-requests-status'];
+
+async function expectAriaLiveHygieneAtBoot(page) {
+  // Static markup: the polled panels ship aria-busy="true" in index.html
+  // itself, so "busy at boot" holds before app.js ever runs (the live DOM is
+  // already past the first poll by the time puppeteer can look).
+  const staticHtml = await readFile(uiIndexPath, 'utf8');
+  for (const id of polledDataPanelIds) {
+    const tag = staticHtml.match(new RegExp(`<[a-z][^>]*\\bid="${id}"[^>]*>`))?.[0];
+    if (!tag) fail(`index.html is missing #${id}`);
+    if (/aria-live/.test(tag)) fail(`#${id} is a polled data panel and must not be aria-live in static markup: ${tag}`);
+    if (id !== 'recent-heartbeat' && !/aria-busy="true"/.test(tag)) {
+      fail(`#${id} must boot with aria-busy="true" in static markup, got: ${tag}`);
+    }
+  }
+
+  const state = await page.evaluate((panelIds, statusIds) => ({
+    missingPanels: panelIds.filter((id) => !document.getElementById(id)),
+    livePanels: panelIds.filter((id) => document.getElementById(id)?.hasAttribute('aria-live')),
+    serverStatusBusy: document.getElementById('server-status')?.getAttribute('aria-busy'),
+    statusNodes: statusIds.map((id) => {
+      const el = document.getElementById(id);
+      return { id, exists: Boolean(el), role: el?.getAttribute('role') || '', text: (el?.textContent || '').trim() };
+    }),
+    toastsRole: document.getElementById('toasts')?.getAttribute('role') || '',
+    toastsLive: document.getElementById('toasts')?.getAttribute('aria-live') || '',
+  }), polledDataPanelIds, transitionStatusNodeIds);
+  if (state.missingPanels.length > 0) fail(`Polled panels missing from the DOM: ${state.missingPanels.join(', ')}`);
+  if (state.livePanels.length > 0) fail(`Polled data panels must not be aria-live: ${state.livePanels.join(', ')}`);
+  // First load finished before networkidle0 resolved, so the live DOM must
+  // already be past busy — and (asserted later) it must never flip back.
+  if (state.serverStatusBusy !== 'false') {
+    fail(`#server-status aria-busy should be "false" after the first render, got "${state.serverStatusBusy}"`);
+  }
+  for (const node of state.statusNodes) {
+    if (!node.exists) fail(`Missing visually-hidden status node #${node.id}`);
+    if (node.role !== 'status') fail(`#${node.id} must have role="status", got "${node.role}"`);
+    if (node.text !== '') fail(`#${node.id} must be empty at boot (no announcement before a real transition), got ${JSON.stringify(node.text)}`);
+  }
+  // Toasts are the intentional announcement channel — they must stay live.
+  if (state.toastsRole !== 'status' || state.toastsLive !== 'polite') {
+    fail(`#toasts must keep role="status" aria-live="polite", got role="${state.toastsRole}" aria-live="${state.toastsLive}"`);
+  }
+
+  await installServerStatusBusyObserver(page);
+}
+
+// Record every aria-busy value change on #server-status from install time on.
+// The mock /health cycles blocks_used, so each 2s poll is a REAL repaint —
+// aria-busy must still never return to "true" (first-load-only guard). Wiped
+// by full page navigations; re-install after any page.goto/reload that
+// precedes reading window.__serverStatusBusyFlips.
+async function installServerStatusBusyObserver(page) {
+  // Arm only after the first load completed — the boot true→false flip is
+  // legitimate and must not pollute the "never flips again" record.
+  await page.waitForFunction(
+    () => document.getElementById('server-status')?.getAttribute('aria-busy') === 'false',
+    { timeout: 5000 },
+  ).catch(() => fail('#server-status never reached aria-busy="false" before arming the busy observer'));
+  await page.evaluate(() => {
+    const el = document.getElementById('server-status');
+    window.__serverStatusBusyFlips = [];
+    new MutationObserver((records) => {
+      for (let i = 0; i < records.length; i += 1) {
+        const next = i + 1 < records.length ? records[i + 1].oldValue : el.getAttribute('aria-busy');
+        if (records[i].oldValue !== next) window.__serverStatusBusyFlips.push(`${records[i].oldValue}→${next}`);
+      }
+    }).observe(el, { attributes: true, attributeFilter: ['aria-busy'], attributeOldValue: true });
+  });
+}
+
+async function expectStatusAnnouncement(page, nodeId, pattern, message) {
+  await page.waitForFunction(
+    (id, source) => new RegExp(source).test(document.getElementById(id)?.textContent || ''),
+    { timeout: 6000 },
+    nodeId,
+    pattern.source,
+  ).catch(async () => {
+    const text = await page.$eval(`#${nodeId}`, (el) => el.textContent).catch(() => '<missing>');
+    fail(`${message}: #${nodeId} should match ${pattern}, got ${JSON.stringify(text)}`);
+  });
+}
+
 async function runMobileOnboardingSmoke(baseUrl) {
   const puppeteer = await loadPuppeteer();
   const browser = await puppeteer.launch({
@@ -1719,6 +1815,7 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await expectText(page, '.header h1', /^\s*kiln\s*$/i, 'Header did not render');
     await expectHeaderHelpLinks(page);
     await expectNoForbiddenPublicityCopy(page, 'Server dashboard');
+    await expectAriaLiveHygieneAtBoot(page);
 
     if (expectFailureStates) {
       await goToPrimaryTab(page, 'overview');
@@ -1900,6 +1997,29 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       // Drain the fixture rows so the later empty-state assertions hold.
       setRecentRequests([]);
       await waitForPanelText(page, '#recent-requests-panel', /No recent requests yet\./, 'Recent requests did not drain after the journey-strip truth checks');
+
+      // ── Recent-requests status line: announce only on attention CHANGES ──
+      // Routine traffic first: a clean row arrives, the needs-attention count
+      // stays 0 → the status node must stay silent across the next poll tick.
+      const cleanRow = piRow();
+      setRecentRequests([cleanRow]);
+      await waitForPanelText(page, '#recent-requests-panel', /hello from pi/, 'Clean pi row did not render before the attention-announcement checks');
+      await new Promise((resolve) => setTimeout(resolve, 2500)); // ≥1 recent-requests poll
+      const routineText = await page.$eval('#recent-requests-status', (el) => el.textContent || '');
+      if (routineText.trim() !== '') fail(`Routine traffic must not announce; #recent-requests-status got ${JSON.stringify(routineText)}`);
+
+      // An errored row flips the count 0→1: exactly one terse line, counting
+      // arrivals since the last announcement plus the attention total.
+      setRecentRequests([smokeRecentRow({ user_agent: 'pi/1.2.0', prompt_preview: 'attention row', finish_reason: 'error' }), cleanRow]);
+      await expectStatusAnnouncement(page, 'recent-requests-status', /needs attention\./, 'Attention-count increase was not announced');
+
+      // Clearing the errored row flips 1→0: the recovery is announced too.
+      setRecentRequests([cleanRow]);
+      await expectStatusAnnouncement(page, 'recent-requests-status', /no requests need attention\./, 'Attention-count recovery was not announced');
+
+      // Re-drain so the later empty-state assertions hold.
+      setRecentRequests([]);
+      await waitForPanelText(page, '#recent-requests-panel', /No recent requests yet\./, 'Recent requests did not drain after the attention-announcement checks');
     }
 
     // --- Hash navigation: tab clicks mint history entries, browser
@@ -1950,6 +2070,9 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     if (!/^application\/gzip\b/i.test(downloadHeaders['content-type'] || '')) fail('Adapter download should return an archive content-type header');
     if (Number(downloadHeaders['content-length'] || 0) <= 0) fail('Adapter download should return non-empty archive bytes');
     await page.goto(`${baseUrl}/ui`, { waitUntil: 'domcontentloaded' });
+    // The reload wiped the boot-time aria-busy observer — re-arm it so the
+    // overview steady-state assertions below can read it.
+    await installServerStatusBusyObserver(page);
     await goToPrimaryTab(page, 'adapters');
     await waitForPanelText(page, '#adapters-panel', /adapter-alpha/, 'Adapter list should reload after adapter download');
     await waitForPanelText(page, '#adapters-panel', /adapter-beta/, 'Adapter list should still include adapter-beta after download');
@@ -2120,6 +2243,8 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       uptime: document.getElementById('header-uptime')?.textContent || '',
       configOpen: document.getElementById('runtime-config')?.open === true,
       configIntact: /nvidia-smi/.test(document.getElementById('runtime-config-body')?.textContent || ''),
+      serverStatusBusy: document.getElementById('server-status')?.getAttribute('aria-busy'),
+      busyFlips: window.__serverStatusBusyFlips || null,
     }));
     if (!overviewSteadyState.svg) fail('VRAM donut disappeared after subsequent health polls');
     if (overviewSteadyState.donuts !== 1) fail(`Expected exactly one VRAM donut, found ${overviewSteadyState.donuts}`);
@@ -2129,6 +2254,16 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     // the ≥2 genuine repaints above must not close it or destroy its content.
     if (!overviewSteadyState.configOpen) fail('Runtime config expander lost its open state across server-status repaints');
     if (!overviewSteadyState.configIntact) fail('Runtime config content was destroyed by the server-status repaint');
+    // aria-busy hygiene: the ≥2 genuine repaints above (blocks_used cycles, so
+    // content really changed) must not flip aria-busy — it toggles only on the
+    // FIRST load, then stays false for the life of the page.
+    if (overviewSteadyState.serverStatusBusy !== 'false') {
+      fail(`#server-status aria-busy should stay "false" across poll ticks, got "${overviewSteadyState.serverStatusBusy}"`);
+    }
+    if (overviewSteadyState.busyFlips === null) fail('aria-busy mutation observer was not installed on #server-status');
+    if (overviewSteadyState.busyFlips.length > 0) {
+      fail(`aria-busy on #server-status flipped on poll ticks after the first render: ${overviewSteadyState.busyFlips.join(', ')}`);
+    }
 
     await goToPrimaryTab(page, 'playground');
     await waitForPanelText(page, '#chat-output', /Send a message to test inference\./, 'Quick Inference empty state missing');
@@ -2153,6 +2288,9 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await waitForPanelText(page, '#tab-queue', /smoke-sf/, 'Training queue should refresh after SFT submit');
     await waitForPanelText(page, '#tab-queue', /Adapter:\s*sft-adapter/, 'Training queue should show the submitted SFT adapter name');
     await waitForPanelText(page, '#tab-queue', /running/, 'Training queue should show the SFT job as running');
+    // The queue panel is no longer aria-live; the card's visually-hidden
+    // status node must carry the start transition instead.
+    await expectStatusAnnouncement(page, 'training-queue-status', /Training started: sft-adapter\./, 'Training start was not announced');
 
     // Drill modal for the RUNNING job: Stop must be live (running jobs are
     // cancellable cooperatively — the trainer aborts at the next step
@@ -2209,6 +2347,9 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       },
       { timeout: 6000 },
     ).catch(() => fail('Train drill modal did not repaint to the cancelled state after Stop'));
+    // The running→failed transition (cancel lands as Failed) must also speak
+    // through the status node — same channel as completed/failed jobs.
+    await expectStatusAnnouncement(page, 'training-queue-status', /Training failed: sft-adapter\./, 'Training cancel (failed) was not announced');
     await clickAndWait(page, '#train-drill-close', 'Could not close the train drill modal');
     await page.waitForFunction(() => document.getElementById('train-drill-modal')?.hidden === true, { timeout: 5000 })
       .catch(() => fail('Train drill modal did not close'));
