@@ -52,11 +52,19 @@ pub struct EvalConfig {
     pub max_queued_jobs: usize,
     /// Maximum tracked eval-job entries (terminal entries TTL out).
     pub max_tracked_jobs: usize,
+    /// When set, every eval job that reaches a terminal state fires a
+    /// POST to this URL with `{job_id, suite, adapters, status,
+    /// headline_accuracy, gate_verdict, error, timestamp}` —
+    /// fire-and-forget, same contract as `training.webhook_url`. Eval
+    /// results become signals other systems can act on (CI gates,
+    /// alerting, retrain triggers) instead of numbers in a dashboard.
+    pub webhook_url: Option<String>,
 }
 
 impl Default for EvalConfig {
     fn default() -> Self {
         Self {
+            webhook_url: None,
             eval_dir: None,
             max_queued_jobs: 32,
             max_tracked_jobs: 1024,
