@@ -237,6 +237,17 @@
             <div class="connect-snippets" id="connect-snippets"><!-- rendered by initConnect() --></div>
           </div>
         </div>
+        <!-- Observability footer: the server has always exported Prometheus
+             metrics at /metrics — surface it where operators wire things up.
+             The scrape-config snippet (live origin) is rendered by
+             initConnect() and reuses the delegated data-copy-code handler. -->
+        <div class="connect-metrics" id="connect-metrics">
+          <span class="connect-metrics-line">
+            <svg class="icn icn-sm" aria-hidden="true"><use href="#i-activity"></use></svg>
+            Prometheus metrics at <a href="/metrics" target="_blank" rel="noopener"><code>/metrics</code></a> — scrape config:
+          </span>
+          <div class="code-block connect-metrics-snippet"><button class="copy-btn" type="button" data-copy-code aria-label="Copy Prometheus scrape config"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg>Copy</button><pre id="connect-metrics-snippet"><!-- rendered by initConnect() --></pre></div>
+        </div>
       </div>
     </section>
 
@@ -366,6 +377,25 @@
         <div class="card-body" id="server-status" data-panel-id="server-status-panel" role="status" aria-live="polite" aria-atomic="false" aria-busy="true">
           <div class="empty">Loading server diagnostics…</div>
         </div>
+        <!-- Runtime config expander — deliberately a SIBLING of the keyed
+             #server-status region. renderServerStatus repaints
+             #server-status.innerHTML on a content key every 2s health poll
+             (and pollHealth's failure path overwrites that element wholesale),
+             so anything rendered inside it gets destroyed on the next poll —
+             that is exactly how the VRAM donut used to vanish. This static
+             shell is never touched by the poll, so its open state and content
+             survive repaints by construction. Content fetches GET /v1/config
+             on first open only — no poll loop. -->
+        <details class="runtime-config" id="runtime-config">
+          <summary>
+            <svg class="icn icn-sm" aria-hidden="true"><use href="#i-gear"></use></svg>
+            Runtime config
+            <span class="runtime-config-hint">detected VRAM · KV cache · memory budget — GET /v1/config</span>
+          </summary>
+          <div class="runtime-config-body" id="runtime-config-body">
+            <div class="hint">Loading…</div>
+          </div>
+        </details>
       </div>
 
       <!-- Decode Performance card with live tok/s sparkline -->

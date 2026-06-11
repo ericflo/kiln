@@ -291,6 +291,17 @@ function applyServedModelId(id) {
   renderConnectSnippets(activeTab);
 }
 
+// Prometheus scrape config for this server's /metrics endpoint, built from
+// the live origin. Rendered once at init (the origin can't change without a
+// reload); the Copy button reuses the same delegated data-copy-code handler
+// as the client snippets above.
+function renderConnectMetricsSnippet() {
+  const pre = document.getElementById('connect-metrics-snippet');
+  if (!pre) return;
+  const code = `# prometheus.yml — scrape this Kiln server\nscrape_configs:\n  - job_name: "kiln"\n    metrics_path: "/metrics"\n    static_configs:\n      - targets: ["${window.location.host}"]`;
+  pre.innerHTML = renderHighlighted(code, 'sh');
+}
+
 function selectConnectTab(key) {
   document.querySelectorAll('.connect-tabs .tab').forEach(t => {
     const on = t.dataset.connectTab === key;
@@ -990,6 +1001,7 @@ async function initConnect() {
   const modelEl = document.getElementById('connect-model');
   if (modelEl) { modelEl.textContent = connectModelId; modelEl.title = connectModelId; }
   renderConnectSnippets('pi');
+  renderConnectMetricsSnippet();
   const tr = document.getElementById('connect-test-result');
   if (tr && !tr.textContent.trim()) tr.innerHTML = 'Once connected, your agent&rsquo;s calls stream into <strong>Recent requests</strong> below.';
   document.querySelectorAll('.connect-tabs .tab').forEach(t => t.addEventListener('click', () => selectConnectTab(t.dataset.connectTab)));
@@ -1251,6 +1263,107 @@ function renderServerStatus(h) {
 
   el.innerHTML = (vramHtml + schedHtml + checksHtml + donutHtml) || '<div class="empty">No data</div>';
 }
+
+/* =====================================================================
+   Runtime config expander — GET /v1/config (detected VRAM + detection
+   source, KV cache geometry, training checkpointing, memory budgets).
+   The <details> shell is static in index.html as a SIBLING of the keyed
+   #server-status region: renderServerStatus innerHTML-swaps that element
+   whenever its content key changes (and pollHealth's failure path
+   overwrites it wholesale), so anything rendered inside it is destroyed
+   by the 2s poll — exactly how the VRAM donut used to vanish. Out here
+   the open state and the rendered content survive repaints by
+   construction. Fetched once per open (no poll loop); Refresh re-fetches;
+   failures render a quiet retry line and never throw.
+   ===================================================================== */
+let runtimeConfigLoaded = false;
+let runtimeConfigFetchSeq = 0;
+
+function runtimeConfigRow(label, valueHtml, title) {
+  return `<div class="rc-row"${title ? ` title="${escapeHtml(title)}"` : ''}>
+    <span class="rc-label">${escapeHtml(label)}</span>
+    <span class="rc-value">${valueHtml}</span>
+  </div>`;
+}
+
+// Renders the genuinely useful subset of /v1/config (shape: api/config.rs
+// ConfigResponse — vram / kv_cache / training / memory_budget) plus a raw
+// pretty-printed JSON toggle so nothing the server reports is hidden.
+function renderRuntimeConfigBody(cfg) {
+  const vram = cfg.vram || {};
+  const kv = cfg.kv_cache || {};
+  const train = cfg.training || {};
+  const b = cfg.memory_budget || {};
+  const srcChip = s => s == null ? '' : ` <span class="rc-source" title="Where this value came from">${escapeHtml(String(s))}</span>`;
+  const onOff = v => v ? 'on' : 'off';
+  const num = v => (typeof v === 'number' && isFinite(v)) ? v.toLocaleString() : '—';
+  const gb = v => (typeof v === 'number' && isFinite(v)) ? v.toFixed(1) + ' GB' : '—';
+  return `
+    <div class="rc-groups">
+      <div class="rc-group">
+        <div class="rc-group-title">VRAM detection</div>
+        ${runtimeConfigRow('Detected', `<strong>${gb(vram.detected_gb)}</strong>${srcChip(vram.source)}`, 'GPU memory detected at startup, plus the detector that reported it (nvidia-smi, linux-drm-sysfs, KILN_GPU_MEMORY_GB, …).')}
+      </div>
+      <div class="rc-group">
+        <div class="rc-group-title">KV cache</div>
+        ${runtimeConfigRow('Blocks', `<strong>${num(kv.num_blocks)}</strong>${srcChip(kv.num_blocks_source)}`, 'Paged-attention blocks allocated by the running backend (auto-sized, or pinned via KILN_NUM_BLOCKS).')}
+        ${runtimeConfigRow('FP8 cache', `<strong>${onOff(kv.fp8_enabled)}</strong>`, 'Whether the KV cache stores keys/values in FP8 (halves cache memory per token).')}
+      </div>
+      <div class="rc-group">
+        <div class="rc-group-title">Training</div>
+        ${runtimeConfigRow('Grad checkpointing', `<strong>${onOff(train.checkpointing_enabled)}</strong>`, 'Gradient checkpointing trades recompute for activation memory during LoRA training.')}
+        ${runtimeConfigRow('Segments', `<strong>${num(train.checkpoint_segments)}</strong>${srcChip(train.checkpoint_segments_source)}`, 'Checkpoint segment count (auto-sized, or pinned via KILN_GRAD_CHECKPOINT_SEGMENTS).')}
+      </div>
+      <div class="rc-group">
+        <div class="rc-group-title">Memory budget</div>
+        ${runtimeConfigRow('Total VRAM', `<strong>${gb(b.total_vram_gb)}</strong>`)}
+        ${runtimeConfigRow('Model weights', `<strong>${gb(b.model_gb)}</strong>`)}
+        ${runtimeConfigRow('KV cache', `<strong>${gb(b.kv_cache_gb)}</strong>`)}
+        ${runtimeConfigRow('Training reserve', `<strong>${gb(b.training_budget_gb)}</strong>`)}
+        ${runtimeConfigRow('Inference fraction', `<strong>${(typeof b.inference_memory_fraction === 'number' && isFinite(b.inference_memory_fraction)) ? (b.inference_memory_fraction * 100).toFixed(0) + '%' : '—'}</strong>`, 'Fraction of usable VRAM reserved for inference (model + KV cache); the remainder is the training budget.')}
+      </div>
+    </div>
+    <div class="rc-actions">
+      <button class="btn btn-sm" type="button" data-rc-refresh>Refresh</button>
+      <button class="btn btn-sm btn-ghost" type="button" data-rc-raw aria-expanded="false">Raw JSON</button>
+    </div>
+    <pre class="rc-raw" data-rc-raw-pre hidden>${escapeHtml(JSON.stringify(cfg, null, 2))}</pre>`;
+}
+
+async function loadRuntimeConfig(force = false) {
+  const body = document.getElementById('runtime-config-body');
+  if (!body) return;
+  if (runtimeConfigLoaded && !force) return;
+  const seq = ++runtimeConfigFetchSeq;
+  body.innerHTML = '<div class="hint">Loading GET /v1/config…</div>';
+  try {
+    const cfg = await api('/v1/config');
+    if (seq !== runtimeConfigFetchSeq) return; // superseded by a newer refresh
+    runtimeConfigLoaded = true;
+    body.innerHTML = renderRuntimeConfigBody(cfg);
+  } catch (e) {
+    if (seq !== runtimeConfigFetchSeq) return;
+    runtimeConfigLoaded = false; // the next open retries automatically
+    body.innerHTML = `<div class="hint">Couldn't load /v1/config — ${escapeHtml((e && e.message) || 'request failed')}</div>
+      <div class="rc-actions"><button class="btn btn-sm" type="button" data-rc-refresh>Retry</button></div>`;
+  }
+}
+
+// Static shell: wire once at startup. `toggle` fires on open and close;
+// fetch on open only (and only the first time, unless Refresh forces it).
+(function initRuntimeConfig() {
+  const details = document.getElementById('runtime-config');
+  if (!details) return;
+  details.addEventListener('toggle', () => { if (details.open) loadRuntimeConfig(); });
+  details.addEventListener('click', e => {
+    if (e.target.closest('[data-rc-refresh]')) { loadRuntimeConfig(true); return; }
+    const raw = e.target.closest('[data-rc-raw]');
+    if (raw) {
+      const pre = details.querySelector('[data-rc-raw-pre]');
+      if (pre) { pre.hidden = !pre.hidden; raw.setAttribute('aria-expanded', String(!pre.hidden)); }
+    }
+  });
+})();
 
 
 // --- Decode Performance ---
@@ -7488,9 +7601,103 @@ async function openAdapterDrillModal(name) {
     content.querySelectorAll('[data-train-job]').forEach(row => {
       row.addEventListener('click', () => openTrainDrillModal(row.dataset.trainJob));
     });
+    // Provenance receipt loads after the detail body renders — its failure
+    // (404 is the normal case for uploaded/legacy adapters) must never take
+    // the rest of the modal down, so it's a separate fire-and-forget fetch.
+    loadAdapterReceipt(name);
   } catch (e) {
     document.getElementById('adapter-drill-content').innerHTML = `<div class="detail-empty">Failed to load: ${escapeHtml(e.message)}</div>`;
   }
+}
+
+/* ---- Adapter receipt (GET /v1/adapters/:name/receipt) -----------------
+   The §8.11 reproducibility receipt (kiln-train/src/receipt.rs
+   AdapterReceipt): training provenance — source kind, seed, teacher,
+   prompt corpus, hyperparameters, run diagnostics, post-train eval
+   scores. Fetched when the drill modal opens; 404 means no receipt.json
+   on disk (uploaded or pre-receipt adapters) and renders as a quiet
+   explanation; any other failure renders a one-line hint. */
+async function loadAdapterReceipt(name) {
+  // Re-resolve on every write: the modal may have switched to another
+  // adapter (or been repainted) while this fetch was in flight.
+  const section = () => (adapterDrillName === name
+    ? document.getElementById('adapter-receipt-section')
+    : null);
+  let receipt;
+  try {
+    receipt = await api('/v1/adapters/' + encodeURIComponent(name) + '/receipt');
+  } catch (e) {
+    const el = section();
+    if (!el) return;
+    el.innerHTML = (e && e.status === 404)
+      ? '<h4>Receipt</h4><div class="hint">No receipt — uploaded or legacy adapter. Adapters trained on this server ship a reproducibility receipt (<code>receipt.json</code>).</div>'
+      : `<h4>Receipt</h4><div class="hint">Couldn't load receipt — ${escapeHtml((e && e.message) || 'request failed')}</div>`;
+    return;
+  }
+  const el = section();
+  if (!el) return;
+  el.innerHTML = renderAdapterReceipt(receipt);
+  el.querySelectorAll('[data-train-job]').forEach(row => {
+    row.addEventListener('click', () => openTrainDrillModal(row.dataset.trainJob));
+  });
+  const rawBtn = el.querySelector('[data-receipt-raw]');
+  const rawPre = el.querySelector('[data-receipt-raw-pre]');
+  if (rawBtn && rawPre) {
+    rawBtn.addEventListener('click', () => {
+      rawPre.hidden = !rawPre.hidden;
+      rawBtn.setAttribute('aria-expanded', String(!rawPre.hidden));
+    });
+  }
+}
+
+function renderAdapterReceipt(r) {
+  const rows = [];
+  const line = (label, html) => rows.push(`<div><span class="hint">${escapeHtml(label)}:</span> ${html}</div>`);
+  if (r.source_kind) line('Trained via', `<code>${escapeHtml(String(r.source_kind))}</code>`);
+  if (r.produced_at) {
+    const t = Date.parse(r.produced_at);
+    line('Produced', escapeHtml(isFinite(t) ? fmtSmartTime(t) : String(r.produced_at)));
+  }
+  if (r.kiln_version) line('Kiln version', `<code>${escapeHtml(String(r.kiln_version))}</code>`);
+  if (r.seed != null) line('Seed', `<code>${escapeHtml(String(r.seed))}</code>`);
+  // The receipt schema has no dedicated job-id field today, but when a
+  // producer recorded one (top-level or inside the free-form
+  // hyperparameters object) link it through to the train drill.
+  const hp = (r.hyperparameters && typeof r.hyperparameters === 'object' && !Array.isArray(r.hyperparameters)) ? r.hyperparameters : null;
+  const jobId = r.job_id || r.training_job_id || (hp && (hp.job_id || hp.training_job_id)) || null;
+  if (jobId) line('Training job', `<a data-train-job="${escapeHtml(String(jobId))}" style="font-family:var(--font-mono); cursor:pointer;">${escapeHtml(String(jobId))}</a>`);
+  if (r.teacher && r.teacher.alias) {
+    const tid = r.teacher.model_id && r.teacher.model_id !== r.teacher.alias
+      ? ` <span class="hint">(${escapeHtml(String(r.teacher.model_id))})</span>` : '';
+    line('Teacher', `<code>${escapeHtml(String(r.teacher.alias))}</code>${tid}`);
+  }
+  if (r.prompts && r.prompts.source) {
+    const count = typeof r.prompts.count === 'number' ? ` <span class="hint">· ${r.prompts.count} prompts</span>` : '';
+    line('Dataset', `<code>${escapeHtml(String(r.prompts.source))}</code>${count}`);
+  }
+  const diag = r.diagnostic_summary || {};
+  if (typeof diag.final_loss === 'number') line('Final loss', `<code>${diag.final_loss.toFixed(4)}</code>`);
+  if (Array.isArray(diag.guardrail_triggers) && diag.guardrail_triggers.length) {
+    line('Guardrails fired', escapeHtml(diag.guardrail_triggers.join(', ')));
+  }
+  if (r.post_eval && typeof r.post_eval === 'object') {
+    const evals = Object.entries(r.post_eval).slice(0, 6)
+      .map(([suite, score]) => `${escapeHtml(suite)} <code>${typeof score === 'number' ? score.toFixed(3) : escapeHtml(String(score))}</code>`);
+    if (evals.length) line('Post-train evals', evals.join(' · '));
+  }
+  let hyperHtml = '';
+  if (hp) {
+    const chips = Object.entries(hp)
+      .filter(([, v]) => v === null || ['number', 'string', 'boolean'].includes(typeof v))
+      .slice(0, 12)
+      .map(([k, v]) => `<span class="receipt-chip"><span class="hint">${escapeHtml(k)}</span> ${escapeHtml(v === null ? 'default' : String(v))}</span>`);
+    if (chips.length) hyperHtml = `<div class="receipt-chips">${chips.join('')}</div>`;
+  }
+  return `<h4>Receipt</h4>
+    <div style="display:flex; flex-direction:column; gap:4px; font-size:13px;">${rows.join('') || '<div class="hint">Receipt present, but it carries no provenance fields.</div>'}</div>
+    ${hyperHtml}
+    <div style="margin-top:8px;"><button class="btn btn-sm btn-ghost" type="button" data-receipt-raw aria-expanded="false">Raw JSON</button></div>
+    <pre class="rc-raw" data-receipt-raw-pre hidden>${escapeHtml(JSON.stringify(r, null, 2))}</pre>`;
 }
 
 function renderAdapterDrillBody(d) {
@@ -7568,6 +7775,10 @@ function renderAdapterDrillBody(d) {
     </div>
   </div>
   ${lineageHtml}
+  <div class="detail-section" id="adapter-receipt-section">
+    <h4>Receipt</h4>
+    <div class="hint">Loading receipt…</div>
+  </div>
   <div class="detail-section">
     <h4>Eval history</h4>
     ${evalHtml}
