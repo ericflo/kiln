@@ -162,7 +162,10 @@ const expectedApiEndpoints = [
   '/v1/train/queue',
 ];
 
-const staleTrainingJobEndpoint = '/v1/train/jobs/{job_id}';
+// /v1/train/jobs/{job_id} is a REAL route (GET job detail + DELETE archived
+// job — see crates/kiln-server/src/api/training.rs routes); the api page
+// must document it rather than deny it.
+const trainingJobDetailEndpoint = '/v1/train/jobs/{job_id}';
 const staleAdapterListPhrases = [
   'List loaded adapters',
   'List loaded and available adapters',
@@ -1967,15 +1970,12 @@ async function runSmoke() {
           fail(`${sitePage.path}: missing API endpoint coverage: ${missingEndpoints.join(', ')}`);
         }
 
-        const normalizedStaleEndpoint = staleTrainingJobEndpoint.toLowerCase();
-        if (apiResult.endpointRoutes.includes(normalizedStaleEndpoint)) {
-          fail(`${sitePage.path}: stale route ${staleTrainingJobEndpoint} is presented as a real API endpoint; use /v1/train/status/{job_id} instead`);
+        const normalizedJobDetailEndpoint = trainingJobDetailEndpoint.toLowerCase();
+        if (!apiResult.endpointRoutes.includes(normalizedJobDetailEndpoint)) {
+          fail(`${sitePage.path}: missing ${trainingJobDetailEndpoint} endpoint (rich job detail; GET + DELETE)`);
         }
-        if (
-          apiResult.bodyText.includes(normalizedStaleEndpoint)
-          && !apiResult.bodyText.includes(`no separate ${normalizedStaleEndpoint} route`)
-        ) {
-          fail(`${sitePage.path}: stale route ${staleTrainingJobEndpoint} must appear only in explicit negative wording`);
+        if (apiResult.bodyText.includes(`no separate ${normalizedJobDetailEndpoint} route`)) {
+          fail(`${sitePage.path}: ${trainingJobDetailEndpoint} is a real route — remove the denial wording`);
         }
 
         for (const phrase of staleAdapterListPhrases) {
