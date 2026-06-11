@@ -5,6 +5,7 @@ pub mod adapter_verify;
 pub mod batching_engine;
 pub mod cli;
 pub mod config;
+pub mod dataset_resolve;
 pub mod decode_stats;
 pub mod device;
 pub(crate) mod device_memory;

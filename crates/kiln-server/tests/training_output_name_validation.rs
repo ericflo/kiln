@@ -73,6 +73,47 @@ fn make_state_with_dir() -> (AppState, tempfile::TempDir) {
     (state, dir)
 }
 
+/// Seed a minimal agent-trace index so the §10.6 agent endpoints get past
+/// corpus resolution and exercise the gate under test (queue cap / mock
+/// mode) instead of the missing-index 400.
+fn seed_trace_index(state: &AppState) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let trace = kiln_server::api::agent_traces::AgentTrace {
+        id: "session-a".into(),
+        working_dir: "/home/user/proj".into(),
+        num_turns: 2,
+        num_tool_calls: 0,
+        outcome: kiln_server::api::agent_traces::TraceOutcome {
+            ended_with_exit_0: Some(true),
+            user_edited_agent_files: Vec::new(),
+            has_followup_attempt: Some(false),
+        },
+        first_event_at: Some(now.clone()),
+        last_event_at: Some(now),
+        forked: false,
+        parent_id: None,
+        tool_manifest_sha: None,
+        prompt_messages: vec![kiln_train::ChatMessage {
+            role: "user".into(),
+            content: "Fix the failing test".into(),
+        }],
+        trajectory: vec![kiln_train::trajectory::TurnSegment {
+            role: "assistant".into(),
+            content: "On it.".into(),
+            kind: kiln_train::trajectory::TurnKind::Action,
+            tool_call_id: None,
+            warning_prefix_len: None,
+        }],
+    };
+    let mut map = std::collections::BTreeMap::new();
+    map.insert(trace.id.clone(), trace);
+    std::fs::write(
+        state.adapter_dir.join("agent_traces.json"),
+        serde_json::to_vec_pretty(&map).unwrap(),
+    )
+    .unwrap();
+}
+
 /// Register a fixture teacher alias through the API so endpoints with
 /// teacher-resolvability validation get past that gate.
 async fn register_teacher(app: &axum::Router, alias: &str) {
@@ -320,6 +361,7 @@ async fn missed_endpoints_enforce_queue_cap() {
     state.max_queued_training_jobs = 0; // queue is "at cap" immediately
     let app = api::router(state.clone());
     register_teacher(&app, "fixture@t").await;
+    seed_trace_index(&state);
 
     let full = StatusCode::SERVICE_UNAVAILABLE;
     let fd_sft = front_door_bodies("ok-name").remove(0).1;
@@ -356,6 +398,7 @@ async fn missed_endpoints_reject_mock_mode() {
     let (state, _dir) = make_state_with_dir();
     let app = api::router(state.clone());
     register_teacher(&app, "fixture@t").await;
+    seed_trace_index(&state);
 
     let unavailable = StatusCode::SERVICE_UNAVAILABLE;
     for (variant, body) in front_door_bodies("ok-name") {
