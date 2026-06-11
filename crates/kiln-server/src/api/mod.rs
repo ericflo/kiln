@@ -6,7 +6,7 @@ use tracing::Span;
 use crate::state::AppState;
 
 mod adapters;
-pub(crate) mod agent_traces;
+pub mod agent_traces;
 pub(crate) mod cache;
 pub(crate) mod completions;
 mod config;

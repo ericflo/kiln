@@ -306,7 +306,8 @@ async fn run_recipe(
             continue;
         }
         let job_id = uuid::Uuid::new_v4().to_string();
-        let (adapter_name, queued) = step_to_queued_job(step, previous_adapter.as_deref(), &job_id)?;
+        let (adapter_name, queued) =
+            step_to_queued_job(&state, step, previous_adapter.as_deref(), &job_id)?;
         previous_adapter = Some(adapter_name.clone());
         prepared.push((job_id, adapter_name, queued));
     }
@@ -338,6 +339,7 @@ async fn run_recipe(
 /// the §3.7 recipe contract is "each step's output is the next
 /// step's input by default."
 fn step_to_queued_job(
+    state: &AppState,
     step: &RecipeStep,
     previous_adapter: Option<&str>,
     _job_id: &str,
@@ -366,10 +368,15 @@ fn step_to_queued_job(
             let examples = match examples_from {
                 ExamplesSource::Inline { examples } => examples.clone(),
                 ExamplesSource::Dataset { dataset } => {
-                    return Err(ApiError::training_invalid_request(format!(
-                        "SFT step with `dataset: {dataset}` requires server-side dataset \
-                         resolution (eval-dataset registry follow-up)"
-                    )));
+                    crate::dataset_resolve::resolve_registry_sft_examples(
+                        state.dataset_registry.as_deref(),
+                        dataset,
+                    )
+                    .map_err(|e| {
+                        ApiError::training_invalid_request(format!(
+                            "SFT step `dataset: {dataset}`: {e}"
+                        ))
+                    })?
                 }
             };
             let mut sft_config = config.clone();
@@ -398,10 +405,21 @@ fn step_to_queued_job(
             let prompts = match prompts_from {
                 PromptsSource::Inline { prompts } => prompts.clone(),
                 PromptsSource::Dataset { dataset } => {
-                    return Err(ApiError::training_invalid_request(format!(
-                        "OPD step with `dataset: {dataset}` requires server-side dataset \
-                         resolution (eval-dataset registry follow-up)"
-                    )));
+                    // `agent_traces:` selectors (e.g. the day-one
+                    // learn-from-my-pi-history recipe) resolve against the
+                    // §10.3 trace index; bare names against the uploaded
+                    // dataset registry.
+                    crate::dataset_resolve::resolve_opd_dataset_selector(
+                        dataset,
+                        &state.adapter_dir,
+                        state.dataset_registry.as_deref(),
+                        crate::recent_requests::now_unix_ms() as i64,
+                    )
+                    .map_err(|e| {
+                        ApiError::training_invalid_request(format!(
+                            "OPD step `dataset: {dataset}`: {e}"
+                        ))
+                    })?
                 }
             };
             let mut opd_config = config.clone();

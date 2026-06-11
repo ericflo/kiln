@@ -556,40 +556,62 @@ fn run_opd(
     let mut dataset_summary: Option<kiln_train::OffPolicyDistillationSummary> = None;
     let mut owned_prompts: Option<Vec<kiln_train::opd::OpdPrompt>> = None;
     if let Some(path) = req.dataset_path.as_deref() {
-        if !matches!(
-            req.config.training_mode,
-            kiln_train::opd::OpdTrainingMode::OffPolicy
-        ) {
-            return Err(
-                "OPD dataset_path is only supported with config.training_mode = \"off_policy\""
+        // `agent_traces:<filter>` selectors resolve to live prompt
+        // scaffolds from the §10.3 trace index — the student re-rolls
+        // them on-policy against the registered teacher (this is the
+        // `/v1/agent/self_improve` data path). Plain file paths remain
+        // pre-scored off-policy teacher JSONL.
+        if crate::dataset_resolve::is_agent_traces_selector(path) {
+            let resolved = crate::dataset_resolve::resolve_agent_trace_prompts(
+                adapter_dir,
+                path,
+                crate::recent_requests::now_unix_ms() as i64,
+            )
+            .map_err(|e| format!("resolve OPD dataset_path {path:?}: {e}"))?;
+            tracing::info!(
+                job_id = %job_id,
+                dataset_path = %path,
+                prompts = resolved.len(),
+                "resolved agent-trace selector into OPD prompts"
+            );
+            owned_prompts = Some(resolved);
+        } else {
+            if !matches!(
+                req.config.training_mode,
+                kiln_train::opd::OpdTrainingMode::OffPolicy
+            ) {
+                return Err(
+                "OPD dataset_path is only supported with config.training_mode = \"off_policy\" \
+                 (or use an `agent_traces:` selector for on-policy training on pi sessions)"
                     .into(),
             );
+            }
+            let examples = kiln_train::load_off_policy_distillation_jsonl(path)
+                .map_err(|e| format!("load off-policy OPD dataset_path {path:?}: {e:#}"))?;
+            let prepared = kiln_train::prepare_off_policy_distillation_dataset(
+                &examples,
+                tokenizer,
+                req.teacher.clone(),
+                model_config.vocab_size,
+                req.config.top_k,
+                req.config.objective,
+                req.config.echo.as_ref(),
+            )
+            .map_err(|e| format!("prepare off-policy OPD dataset_path {path:?}: {e:#}"))?;
+            tracing::info!(
+                job_id = %job_id,
+                dataset_path = %path,
+                examples = prepared.summary.examples,
+                action_tokens = prepared.summary.action_tokens,
+                env_tokens = prepared.summary.env_tokens,
+                objective = ?prepared.summary.objective,
+                echo_combined = prepared.summary.echo_combined,
+                "loaded off-policy OPD teacher JSONL dataset"
+            );
+            dataset_teacher = Some(std::sync::Arc::new(prepared.teacher));
+            dataset_summary = Some(prepared.summary);
+            owned_prompts = Some(prepared.prompts);
         }
-        let examples = kiln_train::load_off_policy_distillation_jsonl(path)
-            .map_err(|e| format!("load off-policy OPD dataset_path {path:?}: {e:#}"))?;
-        let prepared = kiln_train::prepare_off_policy_distillation_dataset(
-            &examples,
-            tokenizer,
-            req.teacher.clone(),
-            model_config.vocab_size,
-            req.config.top_k,
-            req.config.objective,
-            req.config.echo.as_ref(),
-        )
-        .map_err(|e| format!("prepare off-policy OPD dataset_path {path:?}: {e:#}"))?;
-        tracing::info!(
-            job_id = %job_id,
-            dataset_path = %path,
-            examples = prepared.summary.examples,
-            action_tokens = prepared.summary.action_tokens,
-            env_tokens = prepared.summary.env_tokens,
-            objective = ?prepared.summary.objective,
-            echo_combined = prepared.summary.echo_combined,
-            "loaded off-policy OPD teacher JSONL dataset"
-        );
-        dataset_teacher = Some(std::sync::Arc::new(prepared.teacher));
-        dataset_summary = Some(prepared.summary);
-        owned_prompts = Some(prepared.prompts);
     }
     let prompts: &[kiln_train::opd::OpdPrompt] =
         owned_prompts.as_deref().unwrap_or(req.prompts.as_slice());
@@ -1170,6 +1192,7 @@ fn guess_remote_provider(url: &str) -> kiln_train::RemoteProvider {
 /// alongside the §3.1 trainer body (task #31), since the OPD step is
 /// what the refresh orchestrates.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn run_distill_refresh(
     req: &DistillRefreshRequest,
     model_config: &kiln_core::config::ModelConfig,
@@ -1179,6 +1202,7 @@ fn run_distill_refresh(
     adapter_name: &str,
     progress_cb: trainer::ProgressCallback,
     teacher_registry: &crate::api::teachers::TeacherRegistry,
+    dataset_registry: Option<&crate::eval::DatasetRegistry>,
     job_id: &str,
 ) -> std::result::Result<PathBuf, String> {
     if req.name.trim().is_empty() {
@@ -1189,14 +1213,19 @@ fn run_distill_refresh(
     }
 
     // Resolve the new-knowledge source to an inline list of prompts.
-    // Dataset-path resolution (server-side eval-datasets registry) is
-    // a follow-up — Inline is the path the §3.6 recipe uses today.
+    // Dataset sources go through the shared resolver: `agent_traces:`
+    // selectors hit the §10.3 trace index, bare names the uploaded
+    // dataset registry.
     let prompts: Vec<kiln_train::opd::OpdPrompt> = match &req.new_data {
         kiln_train::NewKnowledgeSource::Inline { examples } => examples.clone(),
         kiln_train::NewKnowledgeSource::Dataset { dataset } => {
-            return Err(format!(
-                "DistillRefresh: Dataset source {dataset:?} not yet resolved by the runtime — supply `examples` inline for now"
-            ));
+            crate::dataset_resolve::resolve_opd_dataset_selector(
+                dataset,
+                adapter_dir,
+                dataset_registry,
+                crate::recent_requests::now_unix_ms() as i64,
+            )
+            .map_err(|e| format!("DistillRefresh: resolve new_data dataset {dataset:?}: {e}"))?
         }
     };
     if prompts.is_empty() {
@@ -1609,7 +1638,9 @@ fn run_distill_pump(
     // end-to-end without depending on the corpus deliverable.
     let prompts: Vec<kiln_train::opd::OpdPrompt> = match &req.mode {
         kiln_train::DistillPumpMode::Examples { examples } => examples.clone(),
-        kiln_train::DistillPumpMode::Domain { domain } => canonical_domain_seed_prompts(domain),
+        kiln_train::DistillPumpMode::Domain { domain } => {
+            canonical_domain_seed_prompts(domain).map_err(|e| format!("distill_pump: {e}"))?
+        }
         kiln_train::DistillPumpMode::Wide { wide: _ } => wide_seed_prompts(),
     };
     if prompts.is_empty() {
@@ -1716,43 +1747,109 @@ fn run_distill_pump(
     Ok(output_dir)
 }
 
+/// Canonical pump domains, aligned with the §8.4 compatibility table in
+/// `api/pit_of_success.rs` and the shipped recipes. Unknown domains are a
+/// hard error — before this, anything (including typos and the agentic
+/// `judge_traces` corpus) silently fell through to three generic filler
+/// prompts and reported SUCCESS, producing meaningless adapters.
+const CANONICAL_PUMP_DOMAINS: &[&str] = &[
+    "math",
+    "math_reasoning",
+    "code",
+    "coding",
+    "python_codegen",
+    "rust_codegen",
+    "writing",
+    "chinese_writing",
+    "scientific_writing",
+    "legal_drafting",
+    "clinical_notes",
+    "instruction",
+    "if",
+    "instruction_following",
+    "tool_calling",
+    "long_context_summarization",
+];
+
 /// Tiny seed-prompt bank for the §3.5.1 targeted-domain pump. Maps a
 /// canonical-domain name to a handful of representative prompts. The
 /// full corpus lives on disk and ships in a separate Phase 3 artefact;
 /// these seeds let the runtime path exercise end-to-end against any
 /// registered teacher without depending on the corpus deliverable.
-fn canonical_domain_seed_prompts(domain: &str) -> Vec<kiln_train::opd::OpdPrompt> {
+fn canonical_domain_seed_prompts(
+    domain: &str,
+) -> std::result::Result<Vec<kiln_train::opd::OpdPrompt>, String> {
     use kiln_train::ChatMessage;
     let prompts: &[&str] = match domain.to_ascii_lowercase().as_str() {
-        "math" => &[
+        "math" | "math_reasoning" => &[
             "Solve for x: 2x^2 - 5x + 3 = 0.",
             "What is the derivative of sin(x^2)?",
             "Prove that the sum of the angles in a triangle is 180 degrees.",
             "Compute the integral of 1/(x^2 + 1) from -infinity to infinity.",
         ],
-        "code" | "coding" => &[
+        "code" | "coding" | "python_codegen" => &[
             "Write a Python function that reverses a linked list in place.",
             "Implement quicksort in Rust without using the standard sort.",
             "Explain the difference between a deadlock and a livelock with an example.",
             "Refactor this nested-for loop to a single map+filter call: nums = [1,2,3,4]; out = []; for n in nums: if n%2==0: out.append(n*n)",
+        ],
+        "rust_codegen" => &[
+            "Implement a thread-safe LRU cache in Rust with a fixed capacity.",
+            "Write a Rust iterator adapter that yields overlapping windows of size N over a slice.",
+            "Explain why this borrow fails and fix it: fn longest<'a>(a: &str, b: &'a str) -> &'a str { if a.len() > b.len() { a } else { b } }",
+            "Convert this blocking std::net TCP echo server sketch to tokio.",
         ],
         "writing" => &[
             "Write the opening paragraph of a short story set in a lighthouse.",
             "Compose a polite but firm email declining a vendor's price increase.",
             "Rewrite this sentence in active voice: 'The decision was made by the committee.'",
         ],
-        "instruction" | "if" => &[
+        "chinese_writing" => &[
+            "用三句话向新同事介绍团队的代码评审流程。",
+            "把这句话改写得更正式：\"这个方案不行，得重做。\"",
+            "为一款本地运行的笔记应用写一段 50 字以内的产品简介。",
+        ],
+        "scientific_writing" => &[
+            "Rewrite this sentence for a journal abstract: 'We tried a bunch of learning rates and picked the one that worked best.'",
+            "Summarize the difference between ablation and sensitivity analysis in two sentences.",
+            "Draft a one-sentence limitations statement for a study with n=12 participants.",
+        ],
+        "legal_drafting" => &[
+            "Draft a one-paragraph mutual confidentiality clause for a consulting agreement.",
+            "Rewrite this clause in plain English: 'Notwithstanding anything to the contrary herein, Licensor shall not be liable for indirect damages.'",
+            "List the essential elements of a valid termination-for-convenience clause.",
+        ],
+        "clinical_notes" => &[
+            "Convert to a SOAP note: 54yo male, 2 days of chest tightness on exertion, resolves with rest, no radiation, vitals stable.",
+            "Summarize this discharge plan for the patient in plain language: metoprolol 25mg BID, follow-up echo in 6 weeks, low-sodium diet.",
+            "List three red-flag symptoms that should trigger immediate escalation for a post-operative knee replacement patient.",
+        ],
+        "instruction" | "if" | "instruction_following" => &[
             "List exactly five reasons to ride a bicycle instead of driving, each in one sentence.",
             "Translate 'good morning' to Spanish, French, German, and Japanese in that order.",
             "Summarize the plot of Pride and Prejudice in fewer than 50 words.",
         ],
-        _ => &[
-            "Describe an interesting fact about this topic in two sentences.",
-            "Give a beginner-friendly explanation of a core concept in this domain.",
-            "List three open problems experts care about right now.",
+        "tool_calling" => &[
+            "You have tools read_file(path), write_file(path, content), and bash(cmd). Find every TODO comment under src/ and list the files that contain one.",
+            "You have tools grep(pattern, glob) and read_file(path). Determine which test file covers the RateLimiter struct.",
+            "You have a bash(cmd) tool. Check whether port 8420 is already in use and report the owning process.",
+            "You have tools ls(path) and read_file(path). Summarize what this repository does from its top-level files.",
         ],
+        "long_context_summarization" => &[
+            "Summarize the key decisions from this meeting transcript in five bullets, citing the speaker for each.",
+            "Given a long changelog, produce a one-paragraph 'what changed for users' summary, ignoring internal refactors.",
+            "Condense this multi-chapter design document into a half-page executive brief preserving every numbered requirement.",
+        ],
+        _ => {
+            return Err(format!(
+                "unknown pump domain {domain:?} — valid domains: {}. For agentic corpora \
+                 use the /v1/agent endpoints (they build prompts from your indexed pi \
+                 sessions instead of a seed bank)",
+                CANONICAL_PUMP_DOMAINS.join(", ")
+            ));
+        }
     };
-    prompts
+    Ok(prompts
         .iter()
         .map(|p| kiln_train::opd::OpdPrompt {
             messages: vec![ChatMessage {
@@ -1762,7 +1859,7 @@ fn canonical_domain_seed_prompts(domain: &str) -> Vec<kiln_train::opd::OpdPrompt
             teacher_extra_messages: vec![],
             trajectory: vec![],
         })
-        .collect()
+        .collect())
 }
 
 /// Tiny seed-prompt bank for the §3.5.2 wide-coverage pump. Covers
@@ -1771,7 +1868,10 @@ fn canonical_domain_seed_prompts(domain: &str) -> Vec<kiln_train::opd::OpdPrompt
 fn wide_seed_prompts() -> Vec<kiln_train::opd::OpdPrompt> {
     let mut all = Vec::new();
     for domain in ["math", "code", "writing", "instruction"] {
-        all.extend(canonical_domain_seed_prompts(domain));
+        all.extend(
+            canonical_domain_seed_prompts(domain)
+                .expect("wide pump iterates known-canonical domains"),
+        );
     }
     all
 }
@@ -2124,6 +2224,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 &adapter_name,
                 progress_cb,
                 &state.teacher_registry,
+                state.dataset_registry.as_deref(),
                 &job_id,
             )
         }

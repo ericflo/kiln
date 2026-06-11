@@ -167,8 +167,12 @@ async fn judge_distill_registered_teacher_proceeds_past_resolution() {
         response["error"]["code"], "teacher_not_registered",
         "registered teacher must pass resolution: {response}"
     );
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{response}");
-    assert_eq!(response["error"]["code"], "mock_mode", "{response}");
+    // Past the teacher gate, the next stop is §10.6.1 corpus resolution —
+    // with no trace index on this fresh state that's the actionable 400.
+    // (agent_traces_bridge.rs covers the populated-index path.)
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    let message = response["error"]["message"].as_str().unwrap();
+    assert!(message.contains("agent-trace index"), "{message}");
 }
 
 #[tokio::test]
@@ -207,8 +211,12 @@ async fn self_improve_registered_judge_proceeds_past_resolution() {
         response["error"]["code"], "teacher_not_registered",
         "registered judge must pass resolution: {response}"
     );
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{response}");
-    assert_eq!(response["error"]["code"], "mock_mode", "{response}");
+    // Past the judge gate, the next stop is §10.6.2 task resolution —
+    // with no trace index on this fresh state that's the actionable 400.
+    // (agent_traces_bridge.rs covers the populated-index path.)
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    let message = response["error"]["message"].as_str().unwrap();
+    assert!(message.contains("agent-trace index"), "{message}");
 }
 
 // ── judge_drift_check honesty ────────────────────────────────────────

@@ -60,7 +60,14 @@ pub struct AgentTrace {
     /// pi tool manifest fingerprint at the time the session ran
     /// (§10.11 tool-schema versioning).
     pub tool_manifest_sha: Option<String>,
-    /// Canonical action/observation trajectory parsed from Pi message events.
+    /// Leading system/user context the session started from — the task
+    /// scaffold the training bridge re-rolls (`agent_traces:` selectors).
+    /// Empty on indices written before prompt capture; re-run discover.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompt_messages: Vec<kiln_train::ChatMessage>,
+    /// Canonical trajectory parsed from Pi message events: Action and
+    /// Observation segments, with any mid-session user/system turns
+    /// preserved as Context segments (the masking layer skips Context).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trajectory: Vec<TurnSegment>,
 }
@@ -227,7 +234,10 @@ async fn get_trace(
 fn parse_pi_session(path: &Path) -> Option<AgentTrace> {
     let bytes = std::fs::read(path).ok()?;
     let text = std::str::from_utf8(&bytes).ok()?;
-    let parsed_pi = parse_pi_session_str(text, false);
+    // include_context=true keeps user/system turns ordered within the
+    // trajectory; the leading Context run is split off below as the prompt
+    // scaffold so the training bridge can re-roll the session's task.
+    let parsed_pi = parse_pi_session_str(text, true);
     let mut id: Option<String> = None;
     let mut cwd: Option<String> = None;
     let mut parent_id: Option<String> = None;
@@ -328,6 +338,26 @@ fn parse_pi_session(path: &Path) -> Option<AgentTrace> {
             .map(|p| p.display().to_string())
             .unwrap_or_default()
     });
+    // Split the leading Context run (system/user turns before the first
+    // action) into the prompt scaffold; mid-session Context turns stay in
+    // the trajectory, ordered, where the masking layer skips them.
+    let (prompt_messages, trajectory) = if saw_pi_message_event {
+        let mut trajectory = parsed_pi.trajectory;
+        let leading = trajectory
+            .iter()
+            .take_while(|seg| seg.kind == kiln_train::trajectory::TurnKind::Context)
+            .count();
+        let prompt_messages = trajectory
+            .drain(..leading)
+            .map(|seg| kiln_train::ChatMessage {
+                role: seg.role,
+                content: seg.content,
+            })
+            .collect();
+        (prompt_messages, trajectory)
+    } else {
+        (Vec::new(), Vec::new())
+    };
     Some(AgentTrace {
         id,
         working_dir,
@@ -343,11 +373,8 @@ fn parse_pi_session(path: &Path) -> Option<AgentTrace> {
         forked,
         parent_id,
         tool_manifest_sha,
-        trajectory: if saw_pi_message_event {
-            parsed_pi.trajectory
-        } else {
-            Vec::new()
-        },
+        prompt_messages,
+        trajectory,
     })
 }
 
@@ -416,6 +443,11 @@ mod tests {
         assert_eq!(trace.id, "pi0751");
         assert_eq!(trace.num_turns, 3);
         assert_eq!(trace.num_tool_calls, 1);
+        // The leading user turn is the task scaffold, not a trajectory
+        // segment — the training bridge re-rolls from it.
+        assert_eq!(trace.prompt_messages.len(), 1);
+        assert_eq!(trace.prompt_messages[0].role, "user");
+        assert_eq!(trace.prompt_messages[0].content, "Print 42");
         assert_eq!(trace.trajectory.len(), 3);
         assert_eq!(trace.trajectory[0].role, "assistant");
         assert_eq!(trace.trajectory[0].kind, kiln_train::trajectory::TurnKind::Action);
@@ -429,6 +461,39 @@ mod tests {
         assert_eq!(trace.trajectory[1].tool_call_id.as_deref(), Some("c1"));
         assert_eq!(trace.trajectory[1].content, "42\n");
         assert_eq!(trace.trajectory[2].content, "Done");
+    }
+
+    #[test]
+    fn parse_keeps_mid_session_user_turns_as_context_segments() {
+        let dir = tempdir().unwrap();
+        let session_path = dir.path().join("midctx.jsonl");
+        write_jsonl(
+            &session_path,
+            &[
+                json!({"type":"message","message":{"role":"system","content":[{"type":"text","text":"You are pi."}]}}),
+                json!({"type":"message","message":{"role":"user","content":[{"type":"text","text":"Run the tests"}]}}),
+                json!({"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Running."}]}}),
+                json!({"type":"message","message":{"role":"user","content":[{"type":"text","text":"Now fix the failure"}]}}),
+                json!({"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Fixed."}]}}),
+            ],
+        );
+
+        let trace = parse_pi_session(&session_path).unwrap();
+
+        // Leading system+user run = scaffold.
+        assert_eq!(trace.prompt_messages.len(), 2);
+        assert_eq!(trace.prompt_messages[0].role, "system");
+        assert_eq!(trace.prompt_messages[1].content, "Run the tests");
+        // Mid-session user turn stays ordered inside the trajectory as
+        // Context, between the two actions.
+        assert_eq!(trace.trajectory.len(), 3);
+        assert_eq!(trace.trajectory[0].content, "Running.");
+        assert_eq!(
+            trace.trajectory[1].kind,
+            kiln_train::trajectory::TurnKind::Context
+        );
+        assert_eq!(trace.trajectory[1].content, "Now fix the failure");
+        assert_eq!(trace.trajectory[2].content, "Fixed.");
     }
 
     #[test]
@@ -594,6 +659,7 @@ mod tests {
                 forked: false,
                 parent_id: None,
                 tool_manifest_sha: Some("sha256:abc".into()),
+                prompt_messages: Vec::new(),
                 trajectory: Vec::new(),
             },
         );
