@@ -64,6 +64,39 @@ fn make_state() -> AppState {
     )
 }
 
+/// State whose adapter_dir points into a tempdir so teacher-registry
+/// persistence (POST /v1/teachers) never writes into the repo checkout.
+fn make_state_with_dir() -> (AppState, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state();
+    state.adapter_dir = dir.path().to_path_buf();
+    (state, dir)
+}
+
+/// Register a fixture teacher alias through the API so endpoints with
+/// teacher-resolvability validation get past that gate.
+async fn register_teacher(app: &axum::Router, alias: &str) {
+    let (status, response) = post(
+        app,
+        "/v1/teachers",
+        json!({"alias": alias, "kind": "fixture", "model_id": "test-model"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "teacher registration: {response}");
+}
+
+fn assert_no_jobs(state: &AppState, context: &str) {
+    assert_eq!(
+        state.training_queue.lock().unwrap().len(),
+        0,
+        "{context}: queue must stay empty"
+    );
+    assert!(
+        state.training_jobs.read().unwrap().is_empty(),
+        "{context}: tracking map must stay empty"
+    );
+}
+
 async fn post(app: &axum::Router, path: &str, body: Value) -> (StatusCode, Value) {
     let response = app
         .clone()
@@ -183,4 +216,176 @@ async fn valid_output_name_proceeds_past_validation() {
         StatusCode::SERVICE_UNAVAILABLE,
         "mock mode rejects training AFTER validation: {response}"
     );
+}
+
+// ── The four endpoints #1484 missed ─────────────────────────────────
+
+/// All six `FrontDoorRequest` variants for `POST /v1/train`, each
+/// carrying `name` as the (eventual) output adapter name.
+fn front_door_bodies(name: &str) -> Vec<(&'static str, Value)> {
+    vec![
+        ("sft", json!({"kind": "sft", "examples": sft_body(name)["examples"], "config": {"output_name": name}})),
+        ("grpo", json!({"kind": "grpo", "groups": grpo_body(name)["groups"], "config": {"output_name": name}})),
+        ("opd", json!({"kind": "opd", "teacher": "qwen3.6-27b@local", "prompts": opd_body(name)["prompts"], "config": {"output_name": name}})),
+        ("distill_refresh", json!({"kind": "distill_refresh", "name": name, "new_data": {"dataset": "q4"}, "behavioural_teacher": "t@v1"})),
+        ("distill_merge", json!({"kind": "distill_merge", "name": name, "sources": [{"adapter": "a"}, {"adapter": "b"}]})),
+        ("distill_pump", json!({"kind": "distill_pump", "name": name, "teacher": "t@v1", "mode": {"domain": "math_reasoning"}})),
+    ]
+}
+
+fn inline_recipe_body(step_name: &str) -> Value {
+    json!({
+        "body": {
+            "name": "test-recipe",
+            "steps": [{
+                "kind": "sft",
+                "name": step_name,
+                "examples_from": {"examples": sft_body("x")["examples"]},
+            }],
+        },
+    })
+}
+
+#[tokio::test]
+async fn front_door_rejects_unsafe_names_across_all_variants() {
+    let state = make_state();
+    let app = api::router(state.clone());
+    for name in BAD_NAMES {
+        for (variant, body) in front_door_bodies(name) {
+            assert_invalid_name(&app, "/v1/train", body, &format!("{variant}:{name}")).await;
+        }
+    }
+    assert_no_jobs(&state, "/v1/train hostile names");
+}
+
+#[tokio::test]
+async fn recipe_run_rejects_unsafe_step_names() {
+    let state = make_state();
+    let app = api::router(state.clone());
+    for name in BAD_NAMES {
+        assert_invalid_name(&app, "/v1/recipes/run", inline_recipe_body(name), name).await;
+    }
+    assert_no_jobs(&state, "/v1/recipes/run hostile names");
+}
+
+/// A hostile name on a LATER step must reject the whole recipe before
+/// the earlier (valid) steps are enqueued.
+#[tokio::test]
+async fn recipe_run_rejects_whole_recipe_when_any_step_name_is_unsafe() {
+    let state = make_state();
+    let app = api::router(state.clone());
+    let body = json!({
+        "body": {
+            "name": "two-step",
+            "steps": [
+                {"kind": "sft", "name": "good-step",
+                 "examples_from": {"examples": sft_body("x")["examples"]}},
+                {"kind": "sft", "name": "../evil",
+                 "examples_from": {"examples": sft_body("x")["examples"]}},
+            ],
+        },
+    });
+    assert_invalid_name(&app, "/v1/recipes/run", body, "../evil (step 2)").await;
+    assert_no_jobs(&state, "/v1/recipes/run partial recipe");
+}
+
+#[tokio::test]
+async fn agent_endpoints_reject_unsafe_names() {
+    let state = make_state();
+    let app = api::router(state.clone());
+    for name in BAD_NAMES {
+        assert_invalid_name(&app, "/v1/agent/judge_distill", json!({"name": name}), name).await;
+        assert_invalid_name(&app, "/v1/agent/self_improve", json!({"agent": name}), name).await;
+    }
+    assert_no_jobs(&state, "agent endpoints hostile names");
+}
+
+// ── Queue caps + mock-mode on the same four endpoints ───────────────
+
+async fn assert_error_code(
+    app: &axum::Router,
+    path: &str,
+    body: Value,
+    status: StatusCode,
+    code: &str,
+) {
+    let (got_status, response) = post(app, path, body).await;
+    assert_eq!(got_status, status, "{path}: {response}");
+    assert_eq!(response["error"]["code"], code, "{path}: {response}");
+}
+
+#[tokio::test]
+async fn missed_endpoints_enforce_queue_cap() {
+    let (mut state, _dir) = make_state_with_dir();
+    state.max_queued_training_jobs = 0; // queue is "at cap" immediately
+    let app = api::router(state.clone());
+    register_teacher(&app, "fixture@t").await;
+
+    let full = StatusCode::SERVICE_UNAVAILABLE;
+    let fd_sft = front_door_bodies("ok-name").remove(0).1;
+    assert_error_code(&app, "/v1/train", fd_sft, full, "training_queue_full").await;
+    assert_error_code(
+        &app,
+        "/v1/recipes/run",
+        inline_recipe_body("ok-step"),
+        full,
+        "training_queue_full",
+    )
+    .await;
+    assert_error_code(
+        &app,
+        "/v1/agent/judge_distill",
+        json!({"name": "judge-ok", "teacher": "fixture@t"}),
+        full,
+        "training_queue_full",
+    )
+    .await;
+    assert_error_code(
+        &app,
+        "/v1/agent/self_improve",
+        json!({"agent": "agent-ok", "judge": "fixture@t"}),
+        full,
+        "training_queue_full",
+    )
+    .await;
+    assert_no_jobs(&state, "queue at cap");
+}
+
+#[tokio::test]
+async fn missed_endpoints_reject_mock_mode() {
+    let (state, _dir) = make_state_with_dir();
+    let app = api::router(state.clone());
+    register_teacher(&app, "fixture@t").await;
+
+    let unavailable = StatusCode::SERVICE_UNAVAILABLE;
+    for (variant, body) in front_door_bodies("ok-name") {
+        let (status, response) = post(&app, "/v1/train", body).await;
+        assert_eq!(status, unavailable, "{variant}: {response}");
+        assert_eq!(response["error"]["code"], "mock_mode", "{variant}: {response}");
+    }
+    assert_error_code(
+        &app,
+        "/v1/recipes/run",
+        inline_recipe_body("ok-step"),
+        unavailable,
+        "mock_mode",
+    )
+    .await;
+    assert_error_code(
+        &app,
+        "/v1/agent/judge_distill",
+        json!({"name": "judge-ok", "teacher": "fixture@t"}),
+        unavailable,
+        "mock_mode",
+    )
+    .await;
+    assert_error_code(
+        &app,
+        "/v1/agent/self_improve",
+        json!({"agent": "agent-ok", "judge": "fixture@t"}),
+        unavailable,
+        "mock_mode",
+    )
+    .await;
+    assert_no_jobs(&state, "mock mode");
 }

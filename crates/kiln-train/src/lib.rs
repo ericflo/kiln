@@ -1055,6 +1055,10 @@ pub struct TrainingStatus {
     /// payloads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_type: Option<String>,
+    /// Failure detail when `state == failed`; absent otherwise and on
+    /// payloads that predate the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1077,6 +1081,36 @@ pub struct TrainingResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Legacy `TrainingStatus` payloads (pre-`error` archives, older
+    /// servers) must keep deserializing, and the field must stay off the
+    /// wire when `None` so old dashboards see an unchanged shape.
+    #[test]
+    fn training_status_error_field_is_optional_and_skipped_when_none() {
+        let legacy = serde_json::json!({
+            "job_id": "job-1",
+            "state": "failed",
+            "progress": 0.5,
+            "current_loss": null,
+            "adapter_name": "a",
+            "started_at": "3s ago",
+            "elapsed_secs": 3.0
+        });
+        let status: TrainingStatus = serde_json::from_value(legacy).unwrap();
+        assert!(status.error.is_none());
+
+        let none_wire = serde_json::to_value(&status).unwrap();
+        assert!(none_wire.get("error").is_none(), "None must be omitted");
+
+        let failed = TrainingStatus {
+            error: Some("trainer exploded".to_string()),
+            ..status
+        };
+        let wire = serde_json::to_value(&failed).unwrap();
+        assert_eq!(wire["error"], "trainer exploded");
+        let back: TrainingStatus = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.error.as_deref(), Some("trainer exploded"));
+    }
 
     /// Pin the serde shape of the training-policy defaults. A future default
     /// flip must update this snapshot in the same commit, which forces the
