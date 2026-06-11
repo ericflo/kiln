@@ -2572,7 +2572,41 @@ pub fn enqueue_post_training_eval(
     if cfg.include_baseline {
         linked_ids.push(push(None));
     }
-    let adapter_eval_id = push(Some(adapter_name.to_string()));
+    // Regression detection (round-4 discovery): a gated run compares the
+    // new adapter against the CURRENT ACTIVE adapter (the previous
+    // generation; base model when none) in ONE Compare job, so the gate
+    // can reject a significant regression via the paired sign test even
+    // when the static min_accuracy floor passes. Ungated runs keep the
+    // single-adapter shape.
+    let baseline_for_gate: Option<String> = if cfg.min_accuracy.is_some() {
+        state
+            .active_adapter_name
+            .read()
+            .unwrap()
+            .clone()
+            .filter(|name| name != adapter_name)
+    } else {
+        None
+    };
+    let adapter_eval_id = if cfg.min_accuracy.is_some() {
+        let baseline_slot = baseline_for_gate.clone().unwrap_or_default();
+        state.enqueue_eval(
+            cfg.suite.clone(),
+            vec![
+                Some(baseline_slot.clone()).filter(|s| !s.is_empty()),
+                Some(adapter_name.to_string()),
+            ],
+            crate::eval::queue::EvalSubmissionKind::PostTraining,
+            Some(training_job_id.to_string()),
+            crate::eval::queue::QueuedEvalJob::Compare(kiln_eval::EvalCompareSpec {
+                suite: cfg.suite.clone(),
+                adapters: vec![baseline_slot, adapter_name.to_string()],
+                generation: cfg.generation.clone(),
+            }),
+        )
+    } else {
+        push(Some(adapter_name.to_string()))
+    };
     linked_ids.push(adapter_eval_id.clone());
 
     // §8.7 promotion gate: when the request set `min_accuracy`, the
@@ -2935,25 +2969,33 @@ mod tests {
         assert_eq!(jobs.len(), 2);
         let mut gated = 0;
         for job in jobs.values() {
-            match job.adapters.first() {
-                Some(Some(name)) => {
-                    assert_eq!(name, "trained-adapter");
-                    let gate = job
-                        .post_eval_gate
-                        .as_ref()
-                        .expect("adapter run carries the §8.7 gate");
-                    assert_eq!(gate.min_accuracy, 0.8);
-                    assert_eq!(gate.training_job_id, "train-gated");
-                    assert!(gate.auto_load_on_pass);
-                    gated += 1;
-                }
-                Some(None) => {
-                    assert!(
-                        job.post_eval_gate.is_none(),
-                        "baseline run must never carry the gate"
-                    );
-                }
-                None => panic!("job without adapters"),
+            if job
+                .adapters
+                .iter()
+                .any(|a| a.as_deref() == Some("trained-adapter"))
+            {
+                // The gated job is a COMPARE over [previous-active (base
+                // here — no active adapter in this fixture), new adapter]
+                // so the verdict can run the paired sign test for
+                // regression detection.
+                let gate = job
+                    .post_eval_gate
+                    .as_ref()
+                    .expect("adapter compare job carries the §8.7 gate");
+                assert_eq!(gate.min_accuracy, 0.8);
+                assert_eq!(gate.training_job_id, "train-gated");
+                assert!(gate.auto_load_on_pass);
+                assert_eq!(
+                    job.adapters.len(),
+                    2,
+                    "gated runs compare [baseline, new] for the sign test"
+                );
+                gated += 1;
+            } else {
+                assert!(
+                    job.post_eval_gate.is_none(),
+                    "the include_baseline job never carries the gate"
+                );
             }
         }
         assert_eq!(gated, 1);
