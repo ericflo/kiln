@@ -9,19 +9,20 @@
 //! - `DELETE /v1/teachers/{alias}` — drop a registered teacher.
 //!
 //! The registry maps `alias -> TeacherSpec` (a serializable description
-//! of how to build a `LogitSource`). At resolution time (e.g. inside
-//! `run_opd`) the spec is materialised into a concrete `LogitSource`
-//! impl. For milestone-9 we ship two kinds:
+//! of how to build a `LogitSource`). At resolution time (inside
+//! `run_opd` / the distill runtimes) the spec is materialised into a
+//! concrete `LogitSource`:
 //!
 //! - **Fixture** — in-memory deterministic source for unit tests +
 //!   `kiln-canonical` corpora that ship with pre-baked logits.
-//! - **Local** — placeholder pointing at "the model loaded in this
-//!   process at `model_id`." A second model handle is wired in when
-//!   the §3.1 trainer body lands; for now the resolver returns an
-//!   "OPD runtime not yet implemented" error.
-//!
-//! Future kinds (RemoteTeacher × 8 providers, CachedTeacher) plug in
-//! the same way.
+//! - **Local** — the model loaded in this process, optionally wearing a
+//!   LoRA named by `adapter` (this is what makes "distil toward my
+//!   prior self" and "judge as teacher" mean what they say). On-policy
+//!   runs get a `LiveLocalTeacher`; off-policy runs pre-compute a
+//!   fixture.
+//! - **Remote** — HTTP `prompt_logprobs`. Only vLLM/sglang are wired
+//!   today; registration rejects URLs that resolve to unsupported
+//!   providers instead of letting the job fail at dequeue.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
@@ -69,6 +70,13 @@ pub struct TeacherSpec {
     /// Free-form notes the user can attach (e.g. "shared cache key").
     #[serde(default)]
     pub notes: Option<String>,
+    /// For `Local` kinds: a LoRA adapter (a directory name under the
+    /// server's adapter dir) the teacher wears. Without this, a Local
+    /// teacher always means the BARE BASE MODEL — which silently broke
+    /// the two flagship continual-learning shapes: `distill_refresh`
+    /// toward a prior self, and `self_improve`'s judge-as-teacher.
+    #[serde(default)]
+    pub adapter: Option<String>,
 }
 
 /// Concrete teacher kind. The §3.2 abstraction stays a closed enum
@@ -208,6 +216,40 @@ async fn register_teacher(
             "Remote teacher requires a `url`".to_string(),
         ));
     }
+    // Fail registrations that are guaranteed to die at job dequeue —
+    // possibly hours later, behind a queue.
+    if let Some(adapter) = spec.adapter.as_deref() {
+        if !matches!(spec.kind, TeacherKind::Local) {
+            return Err(ApiError::training_invalid_request(format!(
+                "`adapter` is only valid on kind=local teachers (got kind={:?})",
+                spec.kind
+            )));
+        }
+        super::adapters::validate_adapter_name(adapter)?;
+        let dir = state.adapter_dir.join(adapter);
+        if !dir.is_dir() {
+            return Err(ApiError::training_invalid_request(format!(
+                "teacher adapter `{adapter}` not found at {} — train or upload it first",
+                dir.display()
+            )));
+        }
+    }
+    if matches!(spec.kind, TeacherKind::Remote) {
+        if let Some(url) = spec.url.as_deref() {
+            let provider = crate::training_queue::guess_remote_provider(url);
+            if !matches!(
+                provider,
+                kiln_train::RemoteProvider::Vllm | kiln_train::RemoteProvider::Sglang
+            ) {
+                return Err(ApiError::training_invalid_request(format!(
+                    "remote provider {provider:?} (inferred from url {url:?}) is not wired \
+                     yet — only vLLM and sglang prompt_logprobs are supported today. Point \
+                     the URL at a vLLM/sglang server, or self-host one in front of your \
+                     provider."
+                )));
+            }
+        }
+    }
     state.teacher_registry.insert(spec.clone());
     // Persist immediately so a crash doesn't lose the registration.
     let teachers_path = state.adapter_dir.join("teachers.json");
@@ -271,6 +313,28 @@ pub fn resolve_teacher(registry: &TeacherRegistry, alias: &str) -> Result<Teache
     })
 }
 
+/// Resolve a teacher alias against the registry, failing with the
+/// remediation-bearing 400 (`teacher_not_registered`) when missing.
+/// Shared by every submission endpoint that names a teacher — a typo'd
+/// alias must fail at submission, not at worker dequeue hours later
+/// behind a queue.
+pub(crate) fn require_registered_teacher(
+    state: &AppState,
+    alias: &str,
+    detail: String,
+) -> Result<(), ApiError> {
+    if state.teacher_registry.get(alias).is_some() {
+        return Ok(());
+    }
+    let registered: Vec<String> = state
+        .teacher_registry
+        .list()
+        .into_iter()
+        .map(|spec| spec.alias)
+        .collect();
+    Err(ApiError::teacher_not_registered(detail, &registered))
+}
+
 /// Shared registry handle stored on AppState.
 pub type SharedTeacherRegistry = Arc<TeacherRegistry>;
 
@@ -298,6 +362,7 @@ mod tests {
             url: None,
             api_key_env: None,
             notes: None,
+            adapter: None,
         };
         reg.insert(spec.clone());
         let got = reg.get("qwen3.6-27b@local").unwrap();
@@ -324,6 +389,7 @@ mod tests {
             url: None,
             api_key_env: None,
             notes: Some("unit test".into()),
+            adapter: None,
         });
         reg.save_to_path(&path).unwrap();
 
@@ -346,6 +412,7 @@ mod tests {
             url: Some("https://api".into()),
             api_key_env: None,
             notes: None,
+            adapter: None,
         };
         let caps = resolve_caps_for(&spec).unwrap();
         assert_eq!(caps.teacher_id, "x");
@@ -381,6 +448,7 @@ mod tests {
             url: Some("https://openrouter.ai/api/v1".into()),
             api_key_env: Some("OPENROUTER_API_KEY".into()),
             notes: None,
+            adapter: None,
         };
         let s = serde_json::to_string(&spec).unwrap();
         let parsed: TeacherSpec = serde_json::from_str(&s).unwrap();
