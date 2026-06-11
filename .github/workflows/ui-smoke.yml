@@ -1,0 +1,35 @@
+name: UI smoke
+
+# The dashboard is a single ui.html served by kiln-server; this job drives it
+# headless (empty-adapter, default, failure scenarios + payload-shape checks)
+# against the mock server in scripts/check_server_ui_smoke.mjs. Before this
+# job the smoke only ran when someone remembered to run it locally — UI
+# regressions reached main silently.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/kiln-server/src/ui.html'
+      - 'scripts/check_server_ui_smoke.mjs'
+      - '.github/workflows/ui-smoke.yml'
+  pull_request:
+    paths:
+      - 'crates/kiln-server/src/ui.html'
+      - 'scripts/check_server_ui_smoke.mjs'
+      - '.github/workflows/ui-smoke.yml'
+  workflow_dispatch:
+
+jobs:
+  ui-smoke:
+    name: Dashboard smoke (headless Chrome)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run dashboard smoke
+        # ubuntu-22.04 runners ship Google Chrome and Node 20+ preinstalled.
+        run: |
+          set -euo pipefail
+          CHROME="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium-browser)"
+          echo "using $CHROME"
+          CHROME_BIN="$CHROME" node scripts/check_server_ui_smoke.mjs

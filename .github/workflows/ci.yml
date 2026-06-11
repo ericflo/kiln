@@ -52,20 +52,20 @@ jobs:
       - name: Build (Metal)
         run: cargo build --locked --features metal
 
-      # Env-mutating tests are now serialized via an ENV_LOCK mutex inside
-      # the test module, so they no longer race in parallel runs. The
-      # `test_health_with_real_backend` skip remains because that test
-      # depends on a live network backend and is intentionally excluded
-      # from CI.
+      # Env-mutating tests are serialized via an ENV_LOCK mutex inside the
+      # test module, so they no longer race in parallel runs.
+      # `test_health_with_real_backend` is `#[ignore]`d at the source (its
+      # real-backend construction is too heavy for CI runners), so no
+      # per-job `--skip` threading is needed.
       - name: Test (default features — exercises CPU fallback)
-        run: cargo test --locked -- --skip test_health_with_real_backend
+        run: cargo test --locked
 
       - name: Test (Metal feature — exercises Apple Silicon GPU path)
         # `--test-threads=1` because concurrent `Device::new_metal(0)` calls
         # panic in candle-metal 0.10.2's MetalDevice::new (`swap_remove` on
         # an empty vec).
         run: |
-          cargo test --locked --features metal -- --test-threads=1 --skip test_health_with_real_backend
+          cargo test --locked --features metal -- --test-threads=1
 
   linux-default:
     name: Linux / default features
@@ -94,7 +94,7 @@ jobs:
         run: cargo build --locked
 
       - name: Test (default features)
-        run: cargo test --locked -- --skip test_health_with_real_backend
+        run: cargo test --locked
 
   candle-free-crate-tests:
     name: Linux / candle-free crate tests (#1082 transition)
@@ -114,16 +114,13 @@ jobs:
       - name: Fetch dependencies
         run: cargo fetch
 
-      - name: Test candle-free leaf crates directly
-        # During the #1082 candle removal the whole-workspace `cargo test`
-        # cannot compile `kiln-model` yet (mid-migration candle break), so
-        # the per-crate tests in already-candle-free leaf crates never run
-        # in the default job. Test them directly to keep coverage and to
-        # validate #1082 box work that lands in them (e.g. the kiln-optim
-        # AdamW stochastic-rounding path, the kiln-param Phase 2.7 atomic
-        # `Parameter::version` epoch counter, and the kiln-autograd tape).
-        # None of these depend on kiln-model, so they compile and run on a
-        # GPU-less runner.
+      - name: Test substrate leaf crates directly
+        # Historical note: added while the #1082 candle removal broke the
+        # whole-workspace build. That migration is DONE (the default job
+        # tests the workspace) — the per-crate runs stay because they
+        # exercise the substrate leaves (kiln-optim AdamW stochastic
+        # rounding, kiln-param's atomic `Parameter::version`, the
+        # kiln-autograd tape) in isolation, fast, on a GPU-less runner.
         run: cargo test --locked -p kiln-optim -p kiln-param -p kiln-autograd
 
       - name: Validate anomaly trap + deterministic envelope (#1082)
@@ -211,6 +208,61 @@ jobs:
         # vk_muon_parity tests for the default optimizer's fused kernel
         # never running in CI. 163 tests, <10s total.
         run: cargo test --locked -p kiln-vulkan-kernel -- --nocapture
+
+  linux-cuda:
+    name: Linux / CUDA (build)
+    # Compile-only gate for the CUDA backend — the same pattern as the ROCm
+    # job below. GitHub offers no NVIDIA-GPU runner, but nvcc compiles the
+    # csrc/*.cu kernels OFFLINE and the toolkit supplies the cudart/cuBLAS
+    # libraries for the link (cudarc uses dynamic linking, so no libcuda
+    # driver is needed at build time). Before this job, `--features cuda`
+    # could silently break for weeks: nothing on a PR compiled the primary
+    # production backend.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space for the CUDA toolkit
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL \
+            /usr/local/lib/node_modules || true
+          df -h /
+
+      - name: Install Rust stable
+        run: |
+          rustup set profile minimal
+          rustup default stable
+          rustc --version
+
+      - name: Install CUDA 12.6 toolkit (compile toolchain, no GPU driver)
+        # NVIDIA's keyring wires the apt repo; `cuda-toolkit-12-6` installs
+        # nvcc + headers + cudart/cuBLAS dev libraries — NOT the kernel
+        # driver, so no GPU is required.
+        run: |
+          set -euxo pipefail
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cuda-toolkit-12-6
+          echo "/usr/local/cuda/bin" >> "$GITHUB_PATH"
+          /usr/local/cuda/bin/nvcc --version
+          df -h /
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+
+      - name: Fetch dependencies
+        run: cargo fetch
+
+      - name: Build (CUDA)
+        # One gencode arch keeps per-kernel nvcc time down; kernel SOURCE is
+        # arch-agnostic for compile purposes. Building the server bin links
+        # cudart + cuBLAS, so link regressions surface here too.
+        env:
+          CUDA_ROOT: /usr/local/cuda
+          KILN_CUDA_ARCHS: "89"
+        run: cargo build --locked --bin kiln -p kiln-server --no-default-features --features cuda
 
   linux-rocm:
     name: Linux / ROCm (build)

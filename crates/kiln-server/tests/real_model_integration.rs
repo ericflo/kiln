@@ -565,6 +565,7 @@ async fn test_default_request_timeout() {
 }
 
 #[tokio::test]
+#[ignore = "constructs a full real-backend AppState (model prewarm) — too heavy for CI runners; run locally with --ignored"]
 async fn test_health_with_real_backend() {
     let config = tiny_config();
     let device = Device::Cpu;
