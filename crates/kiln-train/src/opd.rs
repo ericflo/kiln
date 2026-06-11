@@ -993,9 +993,13 @@ pub fn prepare_off_policy_distillation_dataset(
 
         let env_tokens = tokenized.env_mask.iter().filter(|&&active| active).count() as u64;
         summary.env_tokens = summary.env_tokens.saturating_add(env_tokens);
-        if echo.is_some() && env_tokens > 0 {
-            summary.echo_combined = true;
-        }
+        // HONESTY: env masks are *built* here, but the train step has no
+        // env-CE gradient root post candle-drop (#1082) — the term never
+        // combines into the loss. `echo_combined` stays false so the
+        // summary (and the receipt downstream) records what actually
+        // trains, not what the config requested. Flip back alongside the
+        // kt-tape env-CE root (ECHO resurrection plan PR2).
+        let _ = echo;
 
         prompts.push(prompt);
     }
@@ -3809,14 +3813,25 @@ fn write_opd_train_receipt_best_effort(
         samples_per_prompt: config.samples_per_prompt,
         action_tokens: token_counts.action_tokens,
         env_tokens: token_counts.env_tokens,
-        echo_combined: config.echo.is_some() && token_counts.env_tokens > 0,
+        // HONESTY: the env-CE term has no gradient path on the kt-only OPD
+        // step (the candle producer was deleted in #1082), so it never
+        // combines into the loss regardless of config. A receipt claiming
+        // `echo_combined: true` from config alone was asserting a loss
+        // term that never fired — audit-grade evidence must record what
+        // actually trained.
+        echo_combined: false,
         echo_lambda: config.echo.as_ref().map(|echo| echo.lambda),
         initial_opd_loss: None,
         final_opd_loss,
     });
     receipt.echo = match config.echo.as_ref() {
         Some(echo) => crate::train_receipt::EchoReceipt {
-            enabled: echo.lambda != 0.0,
+            // HONESTY: `enabled` records whether the term FIRED, not
+            // whether it was requested — and post candle-drop (#1082) the
+            // env-CE term has no gradient path on the kt OPD step. The
+            // request's lambda/knobs are still recorded for provenance,
+            // with the drop reason spelled out.
+            enabled: false,
             lambda: Some(echo.lambda),
             env_mask_mode: serde_json::to_value(echo.env_mask_mode)
                 .ok()
@@ -3824,6 +3839,11 @@ fn write_opd_train_receipt_best_effort(
             warning_filter: Some(echo.warning_filter),
             initial_env_ce: None,
             final_env_ce: None,
+            dropped_reason: Some(
+                "env-CE has no kt-tape gradient root post candle-drop (#1082); the \
+                 configured ECHO term did not contribute to this run's loss"
+                    .to_string(),
+            ),
         },
         None => crate::train_receipt::EchoReceipt::disabled(),
     };
@@ -4181,7 +4201,10 @@ mod tests {
             ce_prepared.summary.action_tokens
         );
         assert!(prepared.summary.env_tokens > 0);
-        assert!(prepared.summary.echo_combined);
+        // Env masks are built, but the env-CE term has no gradient path
+        // post candle-drop (#1082) — the summary must say it never
+        // combined, even when the config requested it.
+        assert!(!prepared.summary.echo_combined);
         Ok(())
     }
 

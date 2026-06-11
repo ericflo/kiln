@@ -57,6 +57,10 @@ pub enum TrainFailureReason {
     ZeroGroups,
     ZeroActionTokens,
     ZeroEnvTokens,
+    /// The loss composition asked for a term the kt-tape path cannot
+    /// train (ECHO env-CE with env tokens / no_policy_loss) — see
+    /// `LossConfig::validate_for_kt_tape`.
+    UnsupportedLossConfig,
     NanLoss,
     Oom,
     ShapeMismatch,
@@ -73,6 +77,7 @@ impl TrainFailureReason {
             Self::ZeroGroups => "zero_groups",
             Self::ZeroActionTokens => "zero_action_tokens",
             Self::ZeroEnvTokens => "zero_env_tokens",
+            Self::UnsupportedLossConfig => "unsupported_loss_config",
             Self::NanLoss => "nan_loss",
             Self::Oom => "oom",
             Self::ShapeMismatch => "shape_mismatch",
@@ -215,6 +220,9 @@ pub struct OpdReceipt {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EchoReceipt {
+    /// Whether the env-CE term actually FIRED during this run — not
+    /// whether it was requested. A requested-but-dropped term records
+    /// `enabled: false` plus `dropped_reason`.
     pub enabled: bool,
     pub lambda: Option<f64>,
     pub env_mask_mode: Option<String>,
@@ -223,6 +231,11 @@ pub struct EchoReceipt {
     pub initial_env_ce: Option<f64>,
     #[serde(default)]
     pub final_env_ce: Option<f64>,
+    /// Why a configured ECHO term did not contribute to the loss (e.g. no
+    /// kt-tape gradient root post candle-drop, #1082). `None` when the
+    /// term fired or was never requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -756,6 +769,14 @@ pub fn classify_training_failure(message: &str) -> TrainFailureReason {
     {
         return TrainFailureReason::Oom;
     }
+    // Untrainable loss compositions (validate_for_kt_tape) — must match
+    // BEFORE the zero-env-tokens patterns since both mention env tokens.
+    if lower.contains("no gradient path")
+        || lower.contains("no_policy_loss requires")
+        || (lower.contains("echo") && lower.contains("post candle-drop"))
+    {
+        return TrainFailureReason::UnsupportedLossConfig;
+    }
     if lower.contains("echo is enabled")
         && (lower.contains("env_mask is empty")
             || lower.contains("no environment tokens")
@@ -876,6 +897,7 @@ impl EchoReceipt {
             warning_filter: None,
             initial_env_ce: None,
             final_env_ce: None,
+            dropped_reason: None,
         }
     }
 }
@@ -2138,6 +2160,7 @@ mod tests {
             warning_filter: Some(true),
             initial_env_ce: None,
             final_env_ce: None,
+            dropped_reason: None,
         };
         metrics.apply_to_echo_receipt(&mut receipt);
 

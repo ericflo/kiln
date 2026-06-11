@@ -68,16 +68,16 @@
 //!
 //! # Carve-outs (NOT covered by this tape root)
 //!
-//! * **ECHO env-CE.** The ECHO term (`λ · mean_envCE`) is added to the policy
-//!   loss only on agentic off-policy data. It is composed against the SAME
-//!   `policy_logits`, so it COULD be folded in here, but matching the OPD
-//!   carve-out we keep any step with an active ECHO contribution on the candle
-//!   gradient-checkpointing path (the dispatch in
-//!   `train_tokenized_grpo_group_with_grad_norms` gates the tape path off when
-//!   ECHO fires). Non-ECHO GRPO — the common verifier-based and verifier-free
-//!   on-policy case — is the tape-authoritative target.
-//! * **`no_policy_loss` with no ECHO.** That config is a constant-zero loss
-//!   (already rejected by the candle path); the dispatch keeps it on candle.
+//! * **ECHO env-CE.** The ECHO term (`λ · mean_envCE`) composes against the
+//!   SAME `policy_logits` and COULD be folded in here as extra
+//!   `(softmax − onehot)` rows at env positions — that is exactly the ECHO
+//!   resurrection plan's PR2. Until then there is NO fallback: the candle
+//!   gradient-checkpointing path that used to carry ECHO steps was deleted
+//!   in #1082, so ECHO-with-env-tokens configs are rejected at submission
+//!   and trainer entry (`LossConfig::validate_for_kt_tape`), never
+//!   dispatched.
+//! * **`no_policy_loss`.** With ECHO unavailable this is a constant-zero
+//!   loss; rejected at the same validation points.
 //! * **`KlEstimator` / `IsLevel`** are all SUPPORTED — the numeric-`coeff`
 //!   derivation handles every variant uniformly because it just re-runs
 //!   `grpo_loss`. CUDA/ROCm additionally use a device-resident fast path for
