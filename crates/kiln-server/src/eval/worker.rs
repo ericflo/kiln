@@ -255,9 +255,25 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
             verdict = %verdict,
             "post-eval gate verdict"
         );
-        let mut jobs = state.training_jobs.write().unwrap();
-        if let Some(job) = jobs.get_mut(&gate.training_job_id) {
-            job.post_eval_verdict = Some(verdict);
+        let snapshot = {
+            let mut jobs = state.training_jobs.write().unwrap();
+            jobs.get_mut(&gate.training_job_id).map(|job| {
+                job.post_eval_verdict = Some(verdict);
+                job.clone()
+            })
+        };
+        // Re-archive: finalize_job persisted the terminal job BEFORE the
+        // gate eval ran, so without this re-save the verdict only lived
+        // in memory and a restart showed the gated job verdict-less
+        // (round-5 quick win).
+        if let Some(job) = snapshot {
+            if let Err(e) = crate::training_history::save(&state.adapter_dir, &job) {
+                tracing::warn!(
+                    error = %e,
+                    training_job = %gate.training_job_id,
+                    "failed to persist gate verdict to training history"
+                );
+            }
         }
     };
 
