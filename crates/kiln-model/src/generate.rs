@@ -611,6 +611,10 @@ pub struct StreamDone {
     pub finish_reason: FinishReason,
     /// Total number of generated tokens.
     pub completion_tokens: usize,
+    /// Text held back by the emit gates (UTF-8 char-boundary + stop-window
+    /// holdback) that became safe to emit only at end-of-stream. Empty
+    /// after a stop match (the held text WAS the stop) and on error paths.
+    pub trailing_text: String,
 }
 
 /// Events emitted during streaming generation.
@@ -1495,39 +1499,73 @@ fn sample_first_decode_token(
     }
 }
 
+/// Composite per-request emit gate: incremental detokenization + stop
+/// holdback. One per streaming generation; finish() drains residue at
+/// non-stop exits (a stop can complete inside held bytes).
+struct StreamTextGate {
+    detok: crate::stream_text::IncrementalDetokenizer,
+    stop: crate::stream_text::StopTailGate,
+}
+
+impl StreamTextGate {
+    fn new(stop_sequences: &[String]) -> Self {
+        Self {
+            detok: crate::stream_text::IncrementalDetokenizer::new(),
+            stop: crate::stream_text::StopTailGate::new(stop_sequences),
+        }
+    }
+
+    /// Non-stop loop exit: push the detokenizer residual through the stop
+    /// gate, then drain the stop holdback. Returns
+    /// `(trailing_text, late_stop)` — when `late_stop` is `Some`, a stop
+    /// completed inside the held bytes and the caller must override its
+    /// finish reason.
+    fn finish(
+        &mut self,
+        tokenizer: &KilnTokenizer,
+        tokens: &[TokenId],
+    ) -> (String, Option<String>) {
+        let residual = self.detok.flush(tokenizer, tokens);
+        let scan = self.stop.push(&residual);
+        if let Some(stop) = scan.matched_stop {
+            return (scan.emit, Some(stop));
+        }
+        let mut trailing = scan.emit;
+        trailing.push_str(&self.stop.flush());
+        (trailing, None)
+    }
+}
+
 fn emit_stream_token(
     tx: &mpsc::Sender<StreamEvent>,
     tokenizer: &KilnTokenizer,
+    gate: &mut StreamTextGate,
     generated_tokens: &mut Vec<TokenId>,
     token: TokenId,
-    stop_sequences: &[String],
 ) -> StreamTokenDisposition {
     generated_tokens.push(token);
 
-    let token_text = tokenizer.decode(&[token]).unwrap_or_default();
+    // CHECK BEFORE EMIT: the delta passes the stop gate first, so the
+    // matched stop never reaches the wire (the pre-gate code emitted the
+    // token THEN ran the stop check on the full decoded prefix — pi's
+    // stop-marker parsers saw phantom delimiters in every stream).
+    // Exactly one StreamEvent::Token per accepted token (text may be ""),
+    // keeping completion-token counting and usage exact.
+    let delta = gate.detok.next_delta(tokenizer, generated_tokens);
+    let scan = gate.stop.push(&delta);
     if tx
         .send(StreamEvent::Token(StreamToken {
             token_id: token,
-            text: token_text,
+            text: scan.emit,
         }))
         .is_err()
     {
         return StreamTokenDisposition::ReceiverDropped;
     }
-
-    if !stop_sequences.is_empty() {
-        if let Ok(text) = tokenizer.decode(generated_tokens) {
-            for stop_seq in stop_sequences {
-                if text.contains(stop_seq.as_str()) {
-                    return StreamTokenDisposition::Finished(FinishReason::StopSequence(
-                        stop_seq.clone(),
-                    ));
-                }
-            }
-        }
+    match scan.matched_stop {
+        Some(stop) => StreamTokenDisposition::Finished(FinishReason::StopSequence(stop)),
+        None => StreamTokenDisposition::Continue,
     }
-
-    StreamTokenDisposition::Continue
 }
 
 /// Why generation stopped.
@@ -1950,6 +1988,7 @@ impl ModelRunner {
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut step_seed = params.seed;
         let mut finish_reason = FinishReason::MaxTokens;
+        let mut gate = StreamTextGate::new(&params.stop);
 
         let mut next_token = if params.is_effectively_greedy() {
             greedy_sample(&logits)?
@@ -1968,41 +2007,23 @@ impl ModelRunner {
                 break;
             }
 
-            generated_tokens.push(next_token);
-
-            // Decode this token's text
-            let token_text = self.tokenizer.decode(&[next_token]).unwrap_or_default();
-
-            // Send token event; if receiver dropped, stop early
-            if tx
-                .send(StreamEvent::Token(StreamToken {
-                    token_id: next_token,
-                    text: token_text,
-                }))
-                .is_err()
-            {
-                return Ok(rx);
-            }
-
-            // Check stop sequences
-            if !params.stop.is_empty() {
-                let decoded_so_far = self
-                    .tokenizer
-                    .decode(&generated_tokens)
-                    .map_err(|e| anyhow::anyhow!("{e}"))
-                    .ok();
-                if let Some(text) = &decoded_so_far {
-                    for stop_seq in &params.stop {
-                        if text.contains(stop_seq.as_str()) {
-                            finish_reason = FinishReason::StopSequence(stop_seq.clone());
-                            let _ = tx.send(StreamEvent::Done(StreamDone {
-                                finish_reason,
-                                completion_tokens: generated_tokens.len(),
-                            }));
-                            return Ok(rx);
-                        }
-                    }
+            match emit_stream_token(
+                &tx,
+                &self.tokenizer,
+                &mut gate,
+                &mut generated_tokens,
+                next_token,
+            ) {
+                StreamTokenDisposition::ReceiverDropped => return Ok(rx),
+                StreamTokenDisposition::Finished(reason) => {
+                    let _ = tx.send(StreamEvent::Done(StreamDone {
+                        finish_reason: reason,
+                        completion_tokens: generated_tokens.len(),
+                        trailing_text: String::new(),
+                    }));
+                    return Ok(rx);
                 }
+                StreamTokenDisposition::Continue => {}
             }
 
             if generated_tokens.len() >= params.max_tokens {
@@ -2029,9 +2050,15 @@ impl ModelRunner {
             };
         }
 
+        let (trailing_text, late_stop) = gate.finish(&self.tokenizer, &generated_tokens);
+        let (finish_reason, trailing_text) = match late_stop {
+            Some(stop) => (FinishReason::StopSequence(stop), String::new()),
+            None => (finish_reason, trailing_text),
+        };
         let _ = tx.send(StreamEvent::Done(StreamDone {
             finish_reason,
             completion_tokens: generated_tokens.len(),
+            trailing_text,
         }));
 
         Ok(rx)
@@ -6785,6 +6812,7 @@ impl ModelRunner {
 
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut finish_reason = FinishReason::MaxTokens;
+        let mut gate = StreamTextGate::new(&params.stop);
         let mut rng = match params.seed {
             Some(s) => rand::rngs::StdRng::seed_from_u64(s),
             None => rand::make_rng::<rand::rngs::StdRng>(),
@@ -6809,9 +6837,9 @@ impl ModelRunner {
             match emit_stream_token(
                 &tx,
                 &self.tokenizer,
+                &mut gate,
                 &mut generated_tokens,
                 last_token,
-                &params.stop,
             ) {
                 StreamTokenDisposition::Continue => {}
                 StreamTokenDisposition::Finished(reason) => {
@@ -6819,6 +6847,7 @@ impl ModelRunner {
                     let _ = tx.send(StreamEvent::Done(StreamDone {
                         finish_reason: reason,
                         completion_tokens,
+                        trailing_text: String::new(),
                     }));
                     return Ok(rx);
                 }
@@ -6863,9 +6892,9 @@ impl ModelRunner {
                 match emit_stream_token(
                     &tx,
                     &self.tokenizer,
+                    &mut gate,
                     &mut generated_tokens,
                     token,
-                    &params.stop,
                 ) {
                     StreamTokenDisposition::Continue => {}
                     StreamTokenDisposition::Finished(reason) => {
@@ -6873,6 +6902,7 @@ impl ModelRunner {
                         let _ = tx.send(StreamEvent::Done(StreamDone {
                             finish_reason: reason,
                             completion_tokens,
+                            trailing_text: String::new(),
                         }));
                         return Ok(rx);
                     }
@@ -6900,9 +6930,15 @@ impl ModelRunner {
             }
         }
 
+        let (gate_trailing, late_stop) = gate.finish(&self.tokenizer, &generated_tokens);
+        let (finish_reason, gate_trailing) = match late_stop {
+            Some(stop) => (FinishReason::StopSequence(stop), String::new()),
+            None => (finish_reason, gate_trailing),
+        };
         let _ = tx.send(StreamEvent::Done(StreamDone {
             finish_reason,
             completion_tokens: generated_tokens.len(),
+            trailing_text: gate_trailing,
         }));
 
         Ok(rx)
@@ -7019,6 +7055,7 @@ impl ModelRunner {
         let mut mtp_pos = 0usize;
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut finish_reason = FinishReason::MaxTokens;
+        let mut gate = StreamTextGate::new(&params.stop);
         let mut rng = match params.seed {
             Some(s) => rand::rngs::StdRng::seed_from_u64(s),
             None => rand::make_rng::<rand::rngs::StdRng>(),
@@ -7037,9 +7074,9 @@ impl ModelRunner {
             match emit_stream_token(
                 &tx,
                 &self.tokenizer,
+                &mut gate,
                 &mut generated_tokens,
                 last_token,
-                &params.stop,
             ) {
                 StreamTokenDisposition::Continue => {}
                 StreamTokenDisposition::Finished(reason) => {
@@ -7047,6 +7084,7 @@ impl ModelRunner {
                     let _ = tx.send(StreamEvent::Done(StreamDone {
                         finish_reason: reason,
                         completion_tokens,
+                        trailing_text: String::new(),
                     }));
                     return Ok(rx);
                 }
@@ -7098,9 +7136,9 @@ impl ModelRunner {
                 match emit_stream_token(
                     &tx,
                     &self.tokenizer,
+                    &mut gate,
                     &mut generated_tokens,
                     token,
-                    &params.stop,
                 ) {
                     StreamTokenDisposition::Continue => {}
                     StreamTokenDisposition::Finished(reason) => {
@@ -7108,6 +7146,7 @@ impl ModelRunner {
                         let _ = tx.send(StreamEvent::Done(StreamDone {
                             finish_reason: reason,
                             completion_tokens,
+                            trailing_text: String::new(),
                         }));
                         return Ok(rx);
                     }
@@ -7135,9 +7174,15 @@ impl ModelRunner {
             }
         }
 
+        let (gate_trailing, late_stop) = gate.finish(&self.tokenizer, &generated_tokens);
+        let (finish_reason, gate_trailing) = match late_stop {
+            Some(stop) => (FinishReason::StopSequence(stop), String::new()),
+            None => (finish_reason, gate_trailing),
+        };
         let _ = tx.send(StreamEvent::Done(StreamDone {
             finish_reason,
             completion_tokens: generated_tokens.len(),
+            trailing_text: gate_trailing,
         }));
 
         Ok(rx)
@@ -7328,6 +7373,7 @@ impl ModelRunner {
                     let _ = tx.send(StreamEvent::Done(StreamDone {
                         finish_reason: FinishReason::MaxTokens,
                         completion_tokens: 0,
+                        trailing_text: String::new(),
                     }));
                 }
                 drop(tx);
@@ -7638,6 +7684,7 @@ impl ModelRunner {
                     let _ = tx.send(StreamEvent::Done(StreamDone {
                         finish_reason: FinishReason::MaxTokens,
                         completion_tokens: 0,
+                        trailing_text: String::new(),
                     }));
                 }
                 drop(tx);
@@ -8093,6 +8140,7 @@ impl ModelRunner {
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut step_seed = params.seed;
         let mut finish_reason = FinishReason::MaxTokens;
+        let mut gate = StreamTextGate::new(&params.stop);
 
         for _step in 0..params.max_tokens {
             if let Some(s) = step_seed.as_mut() {
@@ -8107,9 +8155,9 @@ impl ModelRunner {
             match emit_stream_token(
                 tx,
                 &self.tokenizer,
+                &mut gate,
                 &mut generated_tokens,
                 next_token,
-                &params.stop,
             ) {
                 StreamTokenDisposition::Continue => {}
                 StreamTokenDisposition::Finished(reason) => {
@@ -8140,9 +8188,15 @@ impl ModelRunner {
             seq_len += 1;
         }
 
+        let (gate_trailing, late_stop) = gate.finish(&self.tokenizer, &generated_tokens);
+        let (finish_reason, gate_trailing) = match late_stop {
+            Some(stop) => (FinishReason::StopSequence(stop), String::new()),
+            None => (finish_reason, gate_trailing),
+        };
         let _ = tx.send(StreamEvent::Done(StreamDone {
             finish_reason,
             completion_tokens: generated_tokens.len(),
+            trailing_text: gate_trailing,
         }));
 
         Ok(())
@@ -8201,6 +8255,7 @@ impl ModelRunner {
         let mut base_pos = prompt_tokens.len();
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut finish_reason = FinishReason::MaxTokens;
+        let mut gate = StreamTextGate::new(&params.stop);
         let mut last_token = greedy_sample(&logits)?;
 
         loop {
@@ -8216,9 +8271,9 @@ impl ModelRunner {
             match emit_stream_token(
                 &tx,
                 &self.tokenizer,
+                &mut gate,
                 &mut generated_tokens,
                 last_token,
-                &params.stop,
             ) {
                 StreamTokenDisposition::Continue => {}
                 StreamTokenDisposition::Finished(reason) => {
@@ -8270,9 +8325,9 @@ impl ModelRunner {
                 match emit_stream_token(
                     &tx,
                     &self.tokenizer,
+                    &mut gate,
                     &mut generated_tokens,
                     token,
-                    &params.stop,
                 ) {
                     StreamTokenDisposition::Continue => {}
                     StreamTokenDisposition::Finished(reason) => {
@@ -8302,9 +8357,15 @@ impl ModelRunner {
             }
         }
 
+        let (gate_trailing, late_stop) = gate.finish(&self.tokenizer, &generated_tokens);
+        let (finish_reason, gate_trailing) = match late_stop {
+            Some(stop) => (FinishReason::StopSequence(stop), String::new()),
+            None => (finish_reason, gate_trailing),
+        };
         let _ = tx.send(StreamEvent::Done(StreamDone {
             finish_reason,
             completion_tokens: generated_tokens.len(),
+            trailing_text: gate_trailing,
         }));
 
         Ok(rx)
@@ -8404,6 +8465,7 @@ impl ModelRunner {
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut step_seed = params.seed;
         let mut finish_reason = FinishReason::MaxTokens;
+        let mut gate = StreamTextGate::new(&params.stop);
 
         // Acquire CUDA graph runner for decode steps
         let mut graph_runner = self
@@ -8427,41 +8489,27 @@ impl ModelRunner {
                 break;
             }
 
-            generated_tokens.push(next_token);
-
-            let token_text = self.tokenizer.decode(&[next_token]).unwrap_or_default();
-
-            if tx
-                .send(StreamEvent::Token(StreamToken {
-                    token_id: next_token,
-                    text: token_text,
-                }))
-                .is_err()
-            {
-                block_manager.free_all(&allocated_blocks);
-                return Ok(rx);
-            }
-
-            // Check stop sequences
-            if !params.stop.is_empty() {
-                let decoded_so_far = self
-                    .tokenizer
-                    .decode(&generated_tokens)
-                    .map_err(|e| anyhow::anyhow!("{e}"))
-                    .ok();
-                if let Some(text) = &decoded_so_far {
-                    for stop_seq in &params.stop {
-                        if text.contains(stop_seq.as_str()) {
-                            finish_reason = FinishReason::StopSequence(stop_seq.clone());
-                            let _ = tx.send(StreamEvent::Done(StreamDone {
-                                finish_reason,
-                                completion_tokens: generated_tokens.len(),
-                            }));
-                            block_manager.free_all(&allocated_blocks);
-                            return Ok(rx);
-                        }
-                    }
+            match emit_stream_token(
+                &tx,
+                &self.tokenizer,
+                &mut gate,
+                &mut generated_tokens,
+                next_token,
+            ) {
+                StreamTokenDisposition::ReceiverDropped => {
+                    block_manager.free_all(&allocated_blocks);
+                    return Ok(rx);
                 }
+                StreamTokenDisposition::Finished(reason) => {
+                    let _ = tx.send(StreamEvent::Done(StreamDone {
+                        finish_reason: reason,
+                        completion_tokens: generated_tokens.len(),
+                        trailing_text: String::new(),
+                    }));
+                    block_manager.free_all(&allocated_blocks);
+                    return Ok(rx);
+                }
+                StreamTokenDisposition::Continue => {}
             }
 
             if generated_tokens.len() >= params.max_tokens {
@@ -8543,9 +8591,15 @@ impl ModelRunner {
             };
         }
 
+        let (gate_trailing, late_stop) = gate.finish(&self.tokenizer, &generated_tokens);
+        let (finish_reason, gate_trailing) = match late_stop {
+            Some(stop) => (FinishReason::StopSequence(stop), String::new()),
+            None => (finish_reason, gate_trailing),
+        };
         let _ = tx.send(StreamEvent::Done(StreamDone {
             finish_reason,
             completion_tokens: generated_tokens.len(),
+            trailing_text: gate_trailing,
         }));
 
         block_manager.free_all(&allocated_blocks);
