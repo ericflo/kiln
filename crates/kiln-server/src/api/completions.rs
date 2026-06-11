@@ -913,6 +913,26 @@ fn stream_tail_finish_and_record(
     }
 }
 
+/// OpenAI semantics: a matched stop sequence terminates the content
+/// BEFORE the stop text — the stop string itself must never reach the
+/// client. Kiln's engine detects the match on the decoded text but kept
+/// emitting the full buffer, so agent harnesses using stop markers
+/// (`"Observation:"`, `"</tool_call>"`, …) received the marker glued to
+/// the content and their parsers saw phantom delimiters.
+fn truncate_at_matched_stop<'a>(
+    text: &'a str,
+    finish_reason: &kiln_model::FinishReason,
+) -> &'a str {
+    if let kiln_model::FinishReason::StopSequence(stop) = finish_reason {
+        if !stop.is_empty() {
+            if let Some(idx) = text.find(stop.as_str()) {
+                return &text[..idx];
+            }
+        }
+    }
+    text
+}
+
 /// Non-streaming variant: split a fully-generated response text into
 /// `(reasoning_content, content)` around the same `</think>` boundary the
 /// streaming splitter handles. Returns `(None, raw)` when the prompt did not
@@ -4999,8 +5019,9 @@ async fn generate_real_batched(
         .unwrap_or_else(|| state.served_model_id.clone());
     let completion_tokens =
         completion_usage_tokens(output.completion_tokens, &output.finish_reason);
+    let response_text = truncate_at_matched_stop(&output.text, &output.finish_reason);
     let assistant_output =
-        assistant_output_from_model_output(req, &output.text, prompt_text, finish_reason);
+        assistant_output_from_model_output(req, response_text, prompt_text, finish_reason);
     let metadata =
         chat_completion_metadata_from_prompt_and_output(state, req, prompt_text, &assistant_output);
     let assistant_output = apply_reasoning_content_policy(
@@ -5795,8 +5816,9 @@ async fn generate_real(
     // clients can render the two channels separately. For non-reasoning
     // templates this returns `(None, output.text)` and the response shape
     // is byte-identical to before.
+    let response_text = truncate_at_matched_stop(&output.text, &output.finish_reason);
     let assistant_output =
-        assistant_output_from_model_output(req, &output.text, prompt_text, finish_reason);
+        assistant_output_from_model_output(req, response_text, prompt_text, finish_reason);
     let metadata =
         chat_completion_metadata_from_prompt_and_output(state, req, prompt_text, &assistant_output);
     let assistant_output = apply_reasoning_content_policy(
@@ -8775,6 +8797,25 @@ mod tests {
 
     fn parse_request(json: &str) -> ChatCompletionRequest {
         serde_json::from_str(json).expect("request should deserialize")
+    }
+
+    /// OpenAI semantics: the matched stop sequence must never appear in
+    /// the returned content. Agent harnesses parse on stop markers; a
+    /// leaked marker is a phantom delimiter.
+    #[test]
+    fn matched_stop_sequence_is_stripped_from_content() {
+        let stop = kiln_model::FinishReason::StopSequence("Observation:".to_string());
+        assert_eq!(
+            truncate_at_matched_stop("I should check the file.\nObservation: the file", &stop),
+            "I should check the file.\n"
+        );
+        // Stop text absent from the buffer (already trimmed upstream): no-op.
+        assert_eq!(truncate_at_matched_stop("clean text", &stop), "clean text");
+        // Other finish reasons: untouched.
+        assert_eq!(
+            truncate_at_matched_stop("text Observation: x", &kiln_model::FinishReason::Eos),
+            "text Observation: x"
+        );
     }
 
     /// Long pi sessions must hit the OpenAI-style 400 (the signal agent
