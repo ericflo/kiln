@@ -5660,12 +5660,24 @@ function loadCorrections() {
   catch { correctionsBasket = []; }
 }
 function saveCorrections() { try { localStorage.setItem(CORR_KEY, JSON.stringify(correctionsBasket)); } catch {} }
+// Shared basket insert for every capture surface (recent requests, eval
+// drill). Dedupes on request_id; persists + repaints + toasts.
+function addCorrectionItem(item) {
+  if (correctionsBasket.some(c => c.request_id === item.request_id)) {
+    toast('Already in your corrections', 'info');
+    return false;
+  }
+  correctionsBasket.unshift(item);
+  saveCorrections();
+  renderCorrections();
+  toast(`Added to corrections (${correctionsBasket.length}) — ${item.ideal ? 'review the ideal answer, then Train' : 'write the ideal answer, then Train'}`, 'ok');
+  return true;
+}
+
 function addCorrectionFromRequest(r) {
   if (!r) return false;
-  const rid = r.id || ('req-' + Date.now());
-  if (correctionsBasket.some(c => c.request_id === rid)) { toast('Already in your corrections', 'info'); return false; }
-  correctionsBasket.unshift({
-    request_id: rid,
+  return addCorrectionItem({
+    request_id: r.id || ('req-' + Date.now()),
     agent: (clientFromUA(r.user_agent) || {}).label || 'client',
     ts: r.timestamp_unix_ms || Date.now(),
     model: r.model || '', adapter: r.adapter || 'base',
@@ -5678,10 +5690,34 @@ function addCorrectionFromRequest(r) {
     // untouched must never silently train the model on its own mistake.
     ideal: '',
   });
-  saveCorrections();
-  renderCorrections();
-  toast(`Added to corrections (${correctionsBasket.length}) — write the ideal answer, then Train`, 'ok');
-  return true;
+}
+
+// Eval-drill capture: turn a failing outcome into a correction. The ideal
+// answer is pre-seeded from the example target ONLY for scorers whose
+// target IS the verbatim expected reply (exact_match / contains) — for
+// everything else the target is a pattern/choice/number, not a reply, and
+// pre-seeding would train garbage. corrTrainable still requires the ideal
+// to differ from the model's output before anything trains.
+function addCorrectionFromEvalOutcome(o, example, scorerKind) {
+  const rid = `eval-${drillJob?.job_id || 'job'}-${o.example_id}-${o.completion_index || 0}`;
+  const userMsg = example && example.messages
+    ? (example.messages.filter(m => m.role === 'user').pop()?.content || '')
+    : '';
+  if (!userMsg) { toast('Suite content unavailable — cannot capture this outcome', 'err'); return false; }
+  const seedIdeal = (scorerKind === 'exact_match' || scorerKind === 'contains')
+    ? (example.target || '')
+    : '';
+  return addCorrectionItem({
+    request_id: rid,
+    agent: 'eval:' + (drillJob?.suite_name || 'suite'),
+    ts: Date.now(),
+    model: '',
+    adapter: drillJob?.adapters?.[drillSelectedRun] ?? 'base',
+    user: userMsg,
+    original: o.completion_text || '',
+    truncated: false,
+    ideal: seedIdeal,
+  });
 }
 function removeCorrection(rid) { correctionsBasket = correctionsBasket.filter(c => c.request_id !== rid); saveCorrections(); renderCorrections(); }
 function clearCorrections() {
@@ -10663,6 +10699,7 @@ function renderOutcomeDetail(o) {
     <button type="button" class="btn btn-sm" data-outcome-copy="completion" title="Copy the model's output"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg> Copy output</button>
     ${promptForReplay ? `<button type="button" class="btn btn-sm" data-outcome-copy="prompt" title="Copy the full prompt as role-prefixed text"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg> Copy prompt</button>` : ''}
     ${userMsg ? `<button type="button" class="btn btn-sm" data-outcome-replay="1" title="Drop the last user message into the playground so you can iterate"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-chat"></use></svg> Replay in playground</button>` : ''}
+    ${(o.kind === 'fail' || o.kind === 'invalid') && userMsg ? `<button type="button" class="btn btn-sm" data-outcome-correct="1" title="Capture this failing example into the corrections basket — write the ideal answer, then train"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-pencil"></use></svg> Add to corrections</button>` : ''}
   </div>`;
   detail.innerHTML = `
     <div class="detail-section">
@@ -10686,6 +10723,11 @@ function renderOutcomeDetail(o) {
       const key = btn.dataset.outcomeCopy;
       const text = key === 'completion' ? (o.completion_text || '') : promptForReplay;
       navigator.clipboard.writeText(text).then(() => toast(`Copied ${key}`, 'ok'), () => toast('Copy failed', 'err'));
+    });
+  });
+  detail.querySelectorAll('[data-outcome-correct]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      addCorrectionFromEvalOutcome(o, example, scorerKind);
     });
   });
   detail.querySelectorAll('[data-outcome-replay]').forEach(btn => {
