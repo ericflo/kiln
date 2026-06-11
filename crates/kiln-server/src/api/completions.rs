@@ -828,6 +828,92 @@ async fn emit_or_buffer_reasoning_chunk(
     !tx.is_closed()
 }
 
+/// End-of-stream salvage for the timeout/error exits of the streaming
+/// handlers. Drains the reasoning splitter through the emit-or-buffer
+/// path, then — when tool-call buffering held generated content back
+/// from the client — parses the buffered text and emits it as a
+/// `tool_calls` delta (complete call) or a plain `content` delta
+/// (partial text) ahead of the caller's finish chunk, so an aborted
+/// stream never silently drops output the model already produced.
+///
+/// Returns the parsed parts so the caller can pick the finish reason
+/// (`finish_reason` stays as passed unless a complete tool call parsed,
+/// which flips it to `"tool_calls"`) and record the full salvaged
+/// completion; returns `None` when no content was buffered. Sends are
+/// best-effort — a disconnected client must not stop the caller from
+/// recording the salvaged output.
+#[allow(clippy::too_many_arguments)]
+async fn flush_buffered_stream_tail(
+    tx: &tokio::sync::mpsc::Sender<Event>,
+    id: &str,
+    created: u64,
+    model: &str,
+    reasoning_splitter: &mut ReasoningSplitter,
+    completion_preview_buf: &mut String,
+    reasoning_buf: &mut String,
+    content_buf: &mut String,
+    buffer_tool_content: bool,
+    finish_reason: &str,
+) -> Option<AssistantOutputParts> {
+    let trailing = reasoning_splitter.flush();
+    let _ = emit_or_buffer_reasoning_chunk(
+        tx,
+        id,
+        created,
+        model,
+        trailing,
+        completion_preview_buf,
+        reasoning_buf,
+        content_buf,
+        buffer_tool_content,
+    )
+    .await;
+
+    if !buffer_tool_content || content_buf.is_empty() {
+        return None;
+    }
+
+    let reasoning_content = if reasoning_buf.is_empty() {
+        None
+    } else {
+        Some(reasoning_buf.clone())
+    };
+    let assistant_output = assistant_output_from_split_parts_with_tool_parsing(
+        buffer_tool_content,
+        reasoning_content,
+        content_buf.clone(),
+        finish_reason,
+    );
+    if let Some(tool_calls) = assistant_output.tool_calls.as_deref() {
+        if !assistant_output.content.is_empty() {
+            let _ =
+                emit_content_chunk(tx, id, created, model, assistant_output.content.clone()).await;
+        }
+        let _ = emit_tool_calls_chunk(tx, id, created, model, tool_calls).await;
+    } else {
+        let _ = emit_content_chunk(tx, id, created, model, assistant_output.content.clone()).await;
+    }
+    Some(assistant_output)
+}
+
+/// Resolve what a timeout/error stream exit should report after the
+/// buffered-tail salvage: the finish reason for the wire and the
+/// completion text for the recent-requests record (the full salvaged
+/// content rather than the capped preview buffer).
+fn stream_tail_finish_and_record(
+    tail: Option<AssistantOutputParts>,
+    default_finish: &str,
+    fallback_completion: &str,
+) -> (String, String) {
+    match tail {
+        Some(parts) => {
+            let completion = parts.preview_source().to_string();
+            (parts.finish_reason, completion)
+        }
+        None => (default_finish.to_string(), fallback_completion.to_string()),
+    }
+}
+
 /// Non-streaming variant: split a fully-generated response text into
 /// `(reasoning_content, content)` around the same `</think>` boundary the
 /// streaming splitter handles. Returns `(None, raw)` when the prompt did not
@@ -5267,19 +5353,49 @@ async fn generate_real_batched_streaming(
                             }
                             Some(EngineEvent::Error(err)) => {
                                 tracing::error!(error = %err, "batched streaming generation failed");
+                                let tail = flush_buffered_stream_tail(
+                                    &tx,
+                                    &id,
+                                    created,
+                                    &model,
+                                    &mut reasoning_splitter,
+                                    &mut completion_buf,
+                                    &mut reasoning_buf,
+                                    &mut content_buf,
+                                    buffer_tool_content,
+                                    "error",
+                                )
+                                .await;
                                 let _ = tx.send(Event::default().data("[DONE]")).await;
+                                let (finish, record_completion) =
+                                    stream_tail_finish_and_record(tail, "error", &completion_buf);
                                 record(
-                                    "error".to_string(),
-                                    &completion_buf,
+                                    finish,
+                                    &record_completion,
                                     completion_token_count,
                                 );
                                 return;
                             }
                             None => {
+                                let tail = flush_buffered_stream_tail(
+                                    &tx,
+                                    &id,
+                                    created,
+                                    &model,
+                                    &mut reasoning_splitter,
+                                    &mut completion_buf,
+                                    &mut reasoning_buf,
+                                    &mut content_buf,
+                                    buffer_tool_content,
+                                    "error",
+                                )
+                                .await;
                                 let _ = tx.send(Event::default().data("[DONE]")).await;
+                                let (finish, record_completion) =
+                                    stream_tail_finish_and_record(tail, "error", &completion_buf);
                                 record(
-                                    "error".to_string(),
-                                    &completion_buf,
+                                    finish,
+                                    &record_completion,
                                     completion_token_count,
                                 );
                                 return;
@@ -5296,19 +5412,21 @@ async fn generate_real_batched_streaming(
             if timed_out {
                 cancel.cancel();
                 let _ = batching_engine.cancel(request_id).await;
-                let trailing = reasoning_splitter.flush();
-                let _ = emit_or_buffer_reasoning_chunk(
+                let tail = flush_buffered_stream_tail(
                     &tx,
                     &id,
                     created,
                     &model,
-                    trailing,
+                    &mut reasoning_splitter,
                     &mut completion_buf,
                     &mut reasoning_buf,
                     &mut content_buf,
                     buffer_tool_content,
+                    "timeout",
                 )
                 .await;
+                let (finish, record_completion) =
+                    stream_tail_finish_and_record(tail, "timeout", &completion_buf);
                 let timeout_chunk = ChatCompletionChunk {
                     id: id.clone(),
                     object: "chat.completion.chunk",
@@ -5322,18 +5440,14 @@ async fn generate_real_batched_streaming(
                             reasoning_content: None,
                             tool_calls: None,
                         },
-                        finish_reason: Some("timeout".to_string()),
+                        finish_reason: Some(finish.clone()),
                     }],
                 };
                 let _ = tx
                     .send(Event::default().data(serde_json::to_string(&timeout_chunk).unwrap()))
                     .await;
                 let _ = tx.send(Event::default().data("[DONE]")).await;
-                record(
-                    "timeout".to_string(),
-                    &completion_buf,
-                    completion_token_count,
-                );
+                record(finish, &record_completion, completion_token_count);
             }
         }
     });
@@ -6342,10 +6456,25 @@ async fn generate_real_streaming(
                             }
                             _ => {
                                 // Channel closed or join error
+                                let tail = flush_buffered_stream_tail(
+                                    &tx,
+                                    &id,
+                                    created,
+                                    &model,
+                                    &mut reasoning_splitter,
+                                    &mut completion_buf,
+                                    &mut reasoning_buf,
+                                    &mut content_buf,
+                                    buffer_tool_content,
+                                    "error",
+                                )
+                                .await;
                                 let _ = tx.send(Event::default().data("[DONE]")).await;
+                                let (finish, record_completion) =
+                                    stream_tail_finish_and_record(tail, "error", &completion_buf);
                                 record(
-                                    "error".to_string(),
-                                    &completion_buf,
+                                    finish,
+                                    &record_completion,
                                     completion_token_count,
                                 );
                                 return;
@@ -6363,21 +6492,24 @@ async fn generate_real_streaming(
             }
 
             if timed_out {
-                // Drain any pending partial-tag tail before the timeout
-                // chunk so the client doesn't lose those bytes.
-                let trailing = reasoning_splitter.flush();
-                let _ = emit_or_buffer_reasoning_chunk(
+                // Drain any pending partial-tag tail and any buffered
+                // tool-call content before the timeout chunk so the
+                // client doesn't lose those bytes.
+                let tail = flush_buffered_stream_tail(
                     &tx,
                     &id,
                     created,
                     &model,
-                    trailing,
+                    &mut reasoning_splitter,
                     &mut completion_buf,
                     &mut reasoning_buf,
                     &mut content_buf,
                     buffer_tool_content,
+                    "timeout",
                 )
                 .await;
+                let (finish, record_completion) =
+                    stream_tail_finish_and_record(tail, "timeout", &completion_buf);
                 let error_chunk = ChatCompletionChunk {
                     id: id.clone(),
                     object: "chat.completion.chunk",
@@ -6391,18 +6523,14 @@ async fn generate_real_streaming(
                             reasoning_content: None,
                             tool_calls: None,
                         },
-                        finish_reason: Some("timeout".to_string()),
+                        finish_reason: Some(finish.clone()),
                     }],
                 };
                 let _ = tx
                     .send(Event::default().data(serde_json::to_string(&error_chunk).unwrap()))
                     .await;
                 let _ = tx.send(Event::default().data("[DONE]")).await;
-                record(
-                    "timeout".to_string(),
-                    &completion_buf,
-                    completion_token_count,
-                );
+                record(finish, &record_completion, completion_token_count);
             }
         }
     });
@@ -9759,6 +9887,220 @@ mod tests {
             "buffered tool-call content must still notice dropped SSE clients"
         );
         assert!(content_buf.is_empty());
+    }
+
+    /// Render queued SSE [`Event`]s to wire text the way the streaming
+    /// handlers' `Sse` response would. The sender must be dropped first
+    /// so the stream terminates.
+    async fn sse_body_from_events(rx: tokio::sync::mpsc::Receiver<Event>) -> String {
+        use axum::body::to_bytes;
+
+        let stream = ReceiverStream::new(rx).map(Ok::<_, std::convert::Infallible>);
+        let resp = Sse::new(stream).into_response();
+        let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    fn sse_data_payloads(body: &str) -> Vec<serde_json::Value> {
+        body.lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|data| serde_json::from_str(data).expect("SSE data line should be JSON"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn flush_buffered_stream_tail_salvages_complete_tool_call() {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let mut splitter = ReasoningSplitter::new(false);
+        let mut completion_buf = String::new();
+        let mut reasoning_buf = String::new();
+        let mut content_buf = "<tool_call>\n<function=bash>\n<parameter=command>\nls -la\n</parameter>\n</function>\n</tool_call>".to_string();
+
+        let tail = flush_buffered_stream_tail(
+            &tx,
+            "chatcmpl-test",
+            0,
+            "kiln-test",
+            &mut splitter,
+            &mut completion_buf,
+            &mut reasoning_buf,
+            &mut content_buf,
+            true,
+            "timeout",
+        )
+        .await
+        .expect("a complete buffered tool call should be salvaged");
+        drop(tx);
+
+        assert_eq!(
+            tail.finish_reason, "tool_calls",
+            "a complete salvaged call reports tool_calls instead of timeout"
+        );
+        let calls = tail.tool_calls.as_deref().expect("tool calls parsed");
+        assert_eq!(calls[0]["function"]["name"], "bash");
+
+        let payloads = sse_data_payloads(&sse_body_from_events(rx).await);
+        assert_eq!(
+            payloads.len(),
+            1,
+            "a complete call with no preamble emits exactly one tool_calls chunk"
+        );
+        let choice = &payloads[0]["choices"][0];
+        assert_eq!(choice["delta"]["tool_calls"][0]["function"]["name"], "bash");
+        assert!(
+            choice["finish_reason"].is_null(),
+            "the caller, not the flush helper, emits the finish chunk"
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_buffered_stream_tail_emits_partial_content_on_timeout() {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let mut splitter = ReasoningSplitter::new(false);
+        let mut completion_buf = String::new();
+        let mut reasoning_buf = String::new();
+        let partial = "Checking files now\n<tool_call>\n<function=bash>\n<parameter=command>\nls";
+        let mut content_buf = partial.to_string();
+
+        let tail = flush_buffered_stream_tail(
+            &tx,
+            "chatcmpl-test",
+            0,
+            "kiln-test",
+            &mut splitter,
+            &mut completion_buf,
+            &mut reasoning_buf,
+            &mut content_buf,
+            true,
+            "timeout",
+        )
+        .await
+        .expect("partial buffered content should be salvaged");
+        drop(tx);
+
+        assert_eq!(
+            tail.finish_reason, "timeout",
+            "without a complete tool call the finish reason stays timeout"
+        );
+        assert!(tail.tool_calls.is_none());
+        assert_eq!(tail.preview_source(), partial);
+
+        let payloads = sse_data_payloads(&sse_body_from_events(rx).await);
+        assert_eq!(payloads.len(), 1);
+        let choice = &payloads[0]["choices"][0];
+        assert_eq!(
+            choice["delta"]["content"], partial,
+            "buffered partial text must reach the client before the finish chunk"
+        );
+        assert!(choice["finish_reason"].is_null());
+    }
+
+    #[tokio::test]
+    async fn flush_buffered_stream_tail_drains_reasoning_splitter_tail() {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let mut splitter = ReasoningSplitter::new(true);
+        // A token ending in a partial `</think>` prefix leaves bytes
+        // pending inside the splitter; the immediate part would already
+        // have been emitted by the stream loop.
+        let pushed = splitter.push("thinking</thi");
+        assert_eq!(pushed.reasoning.as_deref(), Some("thinking"));
+        let mut completion_buf = String::new();
+        let mut reasoning_buf = String::new();
+        let mut content_buf = String::new();
+
+        let tail = flush_buffered_stream_tail(
+            &tx,
+            "chatcmpl-test",
+            0,
+            "kiln-test",
+            &mut splitter,
+            &mut completion_buf,
+            &mut reasoning_buf,
+            &mut content_buf,
+            true,
+            "timeout",
+        )
+        .await;
+        drop(tx);
+
+        assert!(
+            tail.is_none(),
+            "reasoning-only tails have no buffered content to salvage"
+        );
+        assert_eq!(reasoning_buf, "</thi");
+        let payloads = sse_data_payloads(&sse_body_from_events(rx).await);
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0]["choices"][0]["delta"]["reasoning_content"], "</thi",
+            "pending splitter bytes must drain to the client on timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_buffered_stream_tail_skips_unbuffered_streams() {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let mut splitter = ReasoningSplitter::new(false);
+        let mut completion_buf = String::new();
+        let mut reasoning_buf = String::new();
+        // Without tool-call buffering this content already streamed to
+        // the client delta-by-delta; re-emitting it would duplicate it.
+        let mut content_buf = "already streamed".to_string();
+
+        let tail = flush_buffered_stream_tail(
+            &tx,
+            "chatcmpl-test",
+            0,
+            "kiln-test",
+            &mut splitter,
+            &mut completion_buf,
+            &mut reasoning_buf,
+            &mut content_buf,
+            false,
+            "timeout",
+        )
+        .await;
+        drop(tx);
+
+        assert!(tail.is_none());
+        assert!(
+            sse_data_payloads(&sse_body_from_events(rx).await).is_empty(),
+            "non-buffered streams must not replay content on timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_buffered_stream_tail_salvages_content_for_record_after_disconnect() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+        let mut splitter = ReasoningSplitter::new(false);
+        let mut completion_buf = String::new();
+        let mut reasoning_buf = String::new();
+        let mut content_buf = "partial answer text".to_string();
+
+        let tail = flush_buffered_stream_tail(
+            &tx,
+            "chatcmpl-test",
+            0,
+            "kiln-test",
+            &mut splitter,
+            &mut completion_buf,
+            &mut reasoning_buf,
+            &mut content_buf,
+            true,
+            "timeout",
+        )
+        .await
+        .expect("salvage must survive a dropped SSE client for the request record");
+
+        assert_eq!(tail.preview_source(), "partial answer text");
+
+        let (finish, record_completion) =
+            stream_tail_finish_and_record(Some(tail), "timeout", &completion_buf);
+        assert_eq!(finish, "timeout");
+        assert_eq!(
+            record_completion, "partial answer text",
+            "the record must keep the full salvaged content, not the capped preview buffer"
+        );
     }
 
     #[test]
