@@ -247,11 +247,12 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
     };
     let job_id = snapshot.job_id.clone();
 
-    let stamp_verdict = |verdict: String| {
+    let stamp_verdict = |outcome: crate::state::GateOutcome, verdict: String| {
         tracing::info!(
             eval_job = %job_id,
             training_job = %gate.training_job_id,
             adapter = %gate.adapter_name,
+            outcome = %outcome.as_str(),
             verdict = %verdict,
             "post-eval gate verdict"
         );
@@ -259,6 +260,10 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
             let mut jobs = state.training_jobs.write().unwrap();
             jobs.get_mut(&gate.training_job_id).map(|job| {
                 job.post_eval_verdict = Some(verdict);
+                // Machine-readable twin of the prose verdict — persisted
+                // together everywhere the verdict persists so consumers
+                // never classify prose by substring.
+                job.gate_outcome = Some(outcome.as_str().to_string());
                 job.clone()
             })
         };
@@ -278,10 +283,13 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
     };
 
     if snapshot.state != EvalJobState::Completed {
-        stamp_verdict(format!(
-            "post-eval did not complete (state: {:?}) — adapter `{}` left on disk, NOT promoted",
-            snapshot.state, gate.adapter_name
-        ));
+        stamp_verdict(
+            crate::state::GateOutcome::Error,
+            format!(
+                "post-eval did not complete (state: {:?}) — adapter `{}` left on disk, NOT promoted",
+                snapshot.state, gate.adapter_name
+            ),
+        );
         return;
     }
 
@@ -292,10 +300,13 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
         .map(|run| run.metrics.accuracy)
         .or(snapshot.headline_accuracy);
     let Some(accuracy) = accuracy else {
-        stamp_verdict(format!(
-            "post-eval produced no run for adapter `{}` — NOT promoted",
-            gate.adapter_name
-        ));
+        stamp_verdict(
+            crate::state::GateOutcome::Error,
+            format!(
+                "post-eval produced no run for adapter `{}` — NOT promoted",
+                gate.adapter_name
+            ),
+        );
         return;
     };
 
@@ -328,14 +339,17 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
             }
             let test = kiln_eval::result::sign_test(improved, regressed);
             if regressed > improved && test.significant() {
-                stamp_verdict(format!(
-                    "REGRESSION: `{}` significantly worse than `{}` \
-                     (improved {improved}, regressed {regressed}, p={:.4}) — \
-                     NOT promoted despite accuracy {accuracy:.3}",
-                    gate.adapter_name,
-                    baseline_run.adapter.as_deref().unwrap_or("base"),
-                    test.p_value
-                ));
+                stamp_verdict(
+                    crate::state::GateOutcome::Regression,
+                    format!(
+                        "REGRESSION: `{}` significantly worse than `{}` \
+                         (improved {improved}, regressed {regressed}, p={:.4}) — \
+                         NOT promoted despite accuracy {accuracy:.3}",
+                        gate.adapter_name,
+                        baseline_run.adapter.as_deref().unwrap_or("base"),
+                        test.p_value
+                    ),
+                );
                 return;
             }
 
@@ -350,24 +364,30 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
                     1.0
                 };
                 if recovery < min_recovery {
-                    stamp_verdict(format!(
-                        "RECOVERY FAILED: `{}` recovered only {recovery:.3} of `{}`'s \
-                         {baseline_acc:.3} (required {min_recovery:.2}) — NOT promoted",
-                        gate.adapter_name,
-                        baseline_run.adapter.as_deref().unwrap_or("base"),
-                    ));
+                    stamp_verdict(
+                        crate::state::GateOutcome::Regression,
+                        format!(
+                            "RECOVERY FAILED: `{}` recovered only {recovery:.3} of `{}`'s \
+                             {baseline_acc:.3} (required {min_recovery:.2}) — NOT promoted",
+                            gate.adapter_name,
+                            baseline_run.adapter.as_deref().unwrap_or("base"),
+                        ),
+                    );
                     return;
                 }
             }
             if let Some(min_gain) = gate.absolute_gain {
                 let gain = accuracy - baseline_acc;
                 if gain < min_gain {
-                    stamp_verdict(format!(
-                        "GAIN TOO SMALL: `{}` gained {gain:+.3} over `{}`'s \
-                         {baseline_acc:.3} (required {min_gain:+.2}) — NOT promoted",
-                        gate.adapter_name,
-                        baseline_run.adapter.as_deref().unwrap_or("base"),
-                    ));
+                    stamp_verdict(
+                        crate::state::GateOutcome::Regression,
+                        format!(
+                            "GAIN TOO SMALL: `{}` gained {gain:+.3} over `{}`'s \
+                             {baseline_acc:.3} (required {min_gain:+.2}) — NOT promoted",
+                            gate.adapter_name,
+                            baseline_run.adapter.as_deref().unwrap_or("base"),
+                        ),
+                    );
                     return;
                 }
             }
@@ -393,21 +413,33 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
                 Ok(_) => {
                     *state.active_adapter_name.write().unwrap() =
                         Some(gate.adapter_name.clone());
-                    stamp_verdict(format!(
-                        "PASSED: accuracy {accuracy:.3} >= {:.3}; adapter `{}` promoted to active",
-                        gate.min_accuracy, gate.adapter_name
-                    ));
+                    stamp_verdict(
+                        crate::state::GateOutcome::Promoted,
+                        format!(
+                            "PASSED: accuracy {accuracy:.3} >= {:.3}; adapter `{}` promoted to active",
+                            gate.min_accuracy, gate.adapter_name
+                        ),
+                    );
                 }
-                Err(e) => stamp_verdict(format!(
-                    "PASSED: accuracy {accuracy:.3} >= {:.3}, but promotion failed: {e}",
-                    gate.min_accuracy
-                )),
+                // The gate itself passed, but the system failed to apply
+                // the promotion — that is an operational error, not a
+                // measured success or failure.
+                Err(e) => stamp_verdict(
+                    crate::state::GateOutcome::Error,
+                    format!(
+                        "PASSED: accuracy {accuracy:.3} >= {:.3}, but promotion failed: {e}",
+                        gate.min_accuracy
+                    ),
+                ),
             }
         } else {
-            stamp_verdict(format!(
-                "PASSED: accuracy {accuracy:.3} >= {:.3}; adapter `{}` kept (auto_load not requested)",
-                gate.min_accuracy, gate.adapter_name
-            ));
+            stamp_verdict(
+                crate::state::GateOutcome::Kept,
+                format!(
+                    "PASSED: accuracy {accuracy:.3} >= {:.3}; adapter `{}` kept (auto_load not requested)",
+                    gate.min_accuracy, gate.adapter_name
+                ),
+            );
         }
         return;
     }
@@ -448,10 +480,13 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
         Err(e) => format!("rename to .failed failed: {e}"),
     };
     state.purge_adapter_caches(&Some(gate.adapter_name.clone()));
-    stamp_verdict(format!(
-        "FAILED: accuracy {accuracy:.3} < {:.3}; adapter `{}` NOT promoted, {rename_note}",
-        gate.min_accuracy, gate.adapter_name
-    ));
+    stamp_verdict(
+        crate::state::GateOutcome::Demoted,
+        format!(
+            "FAILED: accuracy {accuracy:.3} < {:.3}; adapter `{}` NOT promoted, {rename_note}",
+            gate.min_accuracy, gate.adapter_name
+        ),
+    );
 }
 
 async fn run_job(
@@ -695,6 +730,7 @@ mod tests {
                 error: None,
                 linked_eval_job_ids: Vec::new(),
                 post_eval_verdict: None,
+                gate_outcome: None,
                 loss_history: Vec::new(),
                 cancel_requested: Default::default(),
             },
@@ -765,6 +801,17 @@ mod tests {
             .expect("verdict stamped")
     }
 
+    /// The machine-readable twin stamped next to the prose verdict.
+    fn outcome_of(state: &crate::state::AppState, training_job: &str) -> String {
+        state
+            .training_jobs
+            .read()
+            .unwrap()
+            .get(training_job)
+            .and_then(|j| j.gate_outcome.clone())
+            .expect("gate_outcome stamped")
+    }
+
     /// Gate FAIL: the adapter directory is renamed `<name>.failed` (the
     /// documented PostEvalConfig::min_accuracy contract) and the verdict
     /// lands on the training job. Before this, min_accuracy was parsed,
@@ -801,6 +848,7 @@ mod tests {
         let verdict = verdict_of(&state, "train-1");
         assert!(verdict.contains("FAILED"), "{verdict}");
         assert!(verdict.contains("gated.failed"), "{verdict}");
+        assert_eq!(outcome_of(&state, "train-1"), "demoted");
     }
 
     /// Gate PASS without a deferred auto-load: adapter stays under its
@@ -830,6 +878,10 @@ mod tests {
         assert!(!state.adapter_dir.join("good.failed").exists());
         let verdict = verdict_of(&state, "train-2");
         assert!(verdict.contains("PASSED"), "{verdict}");
+        // A pass without a requested promotion is `kept` — distinct from
+        // `promoted` so the dashboard never paints it as a warning by
+        // substring-sniffing the prose.
+        assert_eq!(outcome_of(&state, "train-2"), "kept");
     }
 
     /// An errored eval must leave the adapter on disk and NOT promote it —
@@ -880,6 +932,65 @@ mod tests {
         let verdict = verdict_of(&state, "train-3");
         assert!(verdict.contains("did not complete"), "{verdict}");
         assert!(verdict.contains("NOT promoted"), "{verdict}");
+        assert_eq!(outcome_of(&state, "train-3"), "error");
+    }
+
+    /// The stamped verdict + machine-readable outcome must survive all the
+    /// way to the API payload shape: GET /v1/train/queue serializes the
+    /// completed job with BOTH `post_eval_verdict` (prose, for humans) and
+    /// `gate_outcome` (string enum, for the dashboard pill). Before
+    /// `gate_outcome` existed the UI classified the prose by substring and
+    /// a PASSED gate could render as a warning.
+    #[tokio::test]
+    async fn gate_outcome_reaches_train_queue_api_payload() {
+        let (state, _dir) = gate_test_state();
+        seed_training_job(&state, "train-api", "api-gated");
+        std::fs::create_dir(state.adapter_dir.join("api-gated")).unwrap();
+
+        run_gated_job(
+            &state,
+            gate_suite("mock"),
+            crate::eval::queue::PostEvalGate {
+                min_accuracy: 0.9,
+                relative_recovery: None,
+                absolute_gain: None,
+                adapter_name: "api-gated".into(),
+                training_job_id: "train-api".into(),
+                auto_load_on_pass: false,
+            },
+            "a mock reply that matches",
+        )
+        .await;
+
+        let app = crate::api::router(state.clone());
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/train/queue")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let job = payload["completed"]
+            .as_array()
+            .expect("completed array")
+            .iter()
+            .find(|j| j["job_id"] == "train-api")
+            .expect("gated training job present in /v1/train/queue");
+        assert_eq!(job["gate_outcome"], "kept", "payload: {job}");
+        assert!(
+            job["post_eval_verdict"]
+                .as_str()
+                .is_some_and(|v| v.contains("PASSED")),
+            "payload: {job}"
+        );
     }
 
     /// DELETE /v1/eval/jobs/{id} mid-run must stop the executor at the next

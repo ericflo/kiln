@@ -2327,7 +2327,12 @@ async function pollTraining() {
     const key = [
       r ? `${r.job_id}:${(r.progress || 0).toFixed(3)}:${r.current_loss != null ? r.current_loss.toFixed(4) : ''}` : '',
       (data.queued || []).map(j => j.job_id).join(','),
-      (data.completed || []).map(j => `${j.job_id}:${j.state}`).join(','),
+      // Completed jobs are NOT immutable: the §8.7 gate eval stamps
+      // post_eval_verdict/gate_outcome minutes AFTER state flips to
+      // 'completed', and failed jobs carry an error message. Key on their
+      // presence too, or the verdict pill / error line never repaints
+      // until some unrelated change touches the list.
+      (data.completed || []).map(j => `${j.job_id}:${j.state}:${j.gate_outcome || (j.post_eval_verdict ? 'v' : '')}:${j.error ? 'e' : ''}`).join(','),
     ].join('|');
     if (key !== lastTrainingKey) {
       lastTrainingKey = key;
@@ -2492,15 +2497,30 @@ function renderTrainingCard(j, state) {
   } else if (stateNormForActions === 'completed' && j.adapter_name) {
     actionBtn = `<button class="btn btn-sm" data-train-prove data-adapter="${escapeHtml(j.adapter_name)}" type="button" style="margin-left:auto;" title="Grade ${escapeHtml(j.adapter_name)} against base on an eval suite">Prove it vs base</button>`;
   }
-  // §8.7 promotion-gate verdict pill: green = promoted, red = demoted to
-  // .failed, amber = not measured (eval errored). Rendered whenever the
-  // backend stamped a verdict so a silent demotion can't hide.
+  // §8.7 promotion-gate verdict pill. Color keys off the server's
+  // machine-readable `gate_outcome` (stamped next to the prose verdict):
+  //   promoted          → green (gate passed, adapter serving)
+  //   kept              → amber chip with a CHECK icon — a pass without a
+  //                       requested promotion is a success, not a warning
+  //   regression/demoted → red (rejected vs baseline / demoted to .failed)
+  //   error             → amber + warning icon (gate couldn't measure)
+  // Pill text stays the prose verdict. Rendered whenever the backend
+  // stamped a verdict so a silent demotion can't hide.
   let gateLine = '';
-  if (j.post_eval_verdict) {
-    const v = String(j.post_eval_verdict);
-    const cls = (v.includes('promoted') && !v.includes('NOT')) ? 'ok'
-      : (v.includes('.failed') || v.includes('demoted')) ? 'err' : 'warn';
-    gateLine = `<div class="training-card-gate gate-${cls}" title="${escapeHtml(v)}">${icon(cls === 'ok' ? 'check' : 'warning', 'icn-sm')} ${escapeHtml(v.slice(0, 160))}</div>`;
+  if (j.post_eval_verdict || j.gate_outcome) {
+    const v = String(j.post_eval_verdict || j.gate_outcome);
+    const OUTCOME_CLS = { promoted: 'ok', kept: 'warn', regression: 'err', demoted: 'err', error: 'warn' };
+    let cls = OUTCOME_CLS[j.gate_outcome] || '';
+    if (!cls) {
+      // Fallback ONLY for jobs archived before `gate_outcome` existed
+      // (and for older servers): those carry prose alone, so classify by
+      // substring as the UI historically did. Known-imperfect — that
+      // heuristic is exactly why gate_outcome was added.
+      cls = (v.includes('promoted') && !v.includes('NOT')) ? 'ok'
+        : (v.includes('.failed') || v.includes('demoted') || v.includes('REGRESSION')) ? 'err' : 'warn';
+    }
+    const iconName = (cls === 'ok' || j.gate_outcome === 'kept') ? 'check' : 'warning';
+    gateLine = `<div class="training-card-gate gate-${cls}" title="${escapeHtml(v)}">${icon(iconName, 'icn-sm')} ${escapeHtml(v.slice(0, 160))}</div>`;
   }
   const errLine = (stateNormForActions === 'failed' && j.error)
     ? `<div class="training-card-error">${icon('warning', 'icn-sm')} ${escapeHtml(String(j.error).slice(0, 220))}</div>`

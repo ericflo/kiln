@@ -382,6 +382,7 @@ async fn submit_sft(
         error: None,
         linked_eval_job_ids: Vec::new(),
         post_eval_verdict: None,
+        gate_outcome: None,
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };
@@ -548,6 +549,7 @@ async fn submit_grpo(
         error: None,
         linked_eval_job_ids: Vec::new(),
         post_eval_verdict: None,
+        gate_outcome: None,
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };
@@ -758,6 +760,7 @@ async fn submit_opd(
         error: None,
         linked_eval_job_ids: Vec::new(),
         post_eval_verdict: None,
+        gate_outcome: None,
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };
@@ -886,6 +889,7 @@ async fn submit_distill_refresh(
         error: None,
         linked_eval_job_ids: Vec::new(),
         post_eval_verdict: None,
+        gate_outcome: None,
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };
@@ -1163,6 +1167,7 @@ fn register_and_enqueue_distill(
         error: None,
         linked_eval_job_ids: Vec::new(),
         post_eval_verdict: None,
+        gate_outcome: None,
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };
@@ -1200,6 +1205,7 @@ fn training_status_from_info(j: &crate::state::TrainingJobInfo) -> TrainingStatu
         ),
         error: j.error.clone(),
         post_eval_verdict: j.post_eval_verdict.clone(),
+        gate_outcome: j.gate_outcome.clone(),
     }
 }
 

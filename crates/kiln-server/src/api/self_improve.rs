@@ -475,6 +475,7 @@ fn register_agent_job(
         error: None,
         linked_eval_job_ids: Vec::new(),
         post_eval_verdict: None,
+        gate_outcome: None,
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };

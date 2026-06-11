@@ -231,6 +231,42 @@ fn now_instant_default() -> std::time::Instant {
     std::time::Instant::now()
 }
 
+/// Machine-readable §8.7 promotion-gate outcome, stamped on the training
+/// job alongside the prose `post_eval_verdict`. The prose is for humans;
+/// this is for the dashboard pill and API consumers — before it existed
+/// the UI classified verdicts by substring matching and a PASSED gate
+/// could render as a warning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateOutcome {
+    /// Gate passed and the adapter was swapped into serving.
+    Promoted,
+    /// Gate passed; adapter kept on disk but no promotion was requested
+    /// (`auto_load` off). A success, not a warning.
+    Kept,
+    /// Rejected relative to the previous generation: paired sign-test
+    /// regression, or the distill_refresh recovery/gain thresholds.
+    Regression,
+    /// Failed the accuracy floor: adapter demoted to `<name>.failed`.
+    Demoted,
+    /// The gate could not measure or apply: eval errored/cancelled,
+    /// produced no run, or the promotion swap itself failed.
+    Error,
+}
+
+impl GateOutcome {
+    /// Wire/persistence representation. Kept lowercase and stable — the
+    /// dashboard pill colors key off these exact strings.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GateOutcome::Promoted => "promoted",
+            GateOutcome::Kept => "kept",
+            GateOutcome::Regression => "regression",
+            GateOutcome::Demoted => "demoted",
+            GateOutcome::Error => "error",
+        }
+    }
+}
+
 /// Tracked training job info stored in AppState.
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct TrainingJobInfo {
@@ -288,6 +324,16 @@ pub struct TrainingJobInfo {
     /// left unpromoted because the eval itself errored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_eval_verdict: Option<String>,
+    /// Machine-readable classification of `post_eval_verdict`:
+    /// `promoted | kept | regression | demoted | error` (see
+    /// [`GateOutcome`]). Stamped together with the prose verdict so API
+    /// consumers and the dashboard pill never have to classify prose by
+    /// substring. `None` for ungated jobs and for archives stamped
+    /// before the field existed. Stored as a plain string (not the enum)
+    /// so a future outcome value never fails deserialization of an
+    /// archived job file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_outcome: Option<String>,
     /// Cooperative cancellation flag for a RUNNING job: set by
     /// `DELETE /v1/train/queue/{id}`, read by the training worker's
     /// per-step progress callback, which then returns
