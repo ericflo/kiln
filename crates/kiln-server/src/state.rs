@@ -1343,6 +1343,24 @@ pub enum ModelBackend {
 }
 
 /// Shared application state passed to all handlers.
+/// Durable status for the [agent] self_improve scheduler.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SelfImproveSchedulerStatus {
+    pub interval_hours: u64,
+    /// Unix ms of the last attempted run (success or failure).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_unix_ms: Option<u64>,
+    /// "queued N jobs" or the error string from the last attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_result: Option<String>,
+    /// Job ids the last successful round enqueued.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub last_job_ids: Vec<String>,
+    /// Unix ms when the next round fires (the restart-surviving anchor).
+    pub next_run_unix_ms: u64,
+}
+
+
 #[derive(Clone)]
 pub struct AppState {
     pub model_config: ModelConfig,
@@ -1366,6 +1384,11 @@ pub struct AppState {
     /// KILN_C1_ATTR_PATH CSV.
     pub mtp_acceptance:
         Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, u64)>>>,
+    /// [agent] self_improve scheduler status — None when the scheduler
+    /// isn't armed. Persisted to `<adapter_dir>/.self_improve_scheduler.json`
+    /// so the cadence survives restarts; surfaced via /health.
+    pub self_improve_scheduler:
+        Arc<std::sync::RwLock<Option<SelfImproveSchedulerStatus>>>,
     /// Last adapter load failure by adapter name. Used by the registry so
     /// automation can distinguish "not loaded" from "failed to load".
     pub adapter_load_errors: Arc<std::sync::RwLock<HashMap<String, String>>>,
@@ -1630,6 +1653,7 @@ impl AppState {
             active_adapter_name: Arc::new(std::sync::RwLock::new(None)),
             loaded_adapter_name: Arc::new(std::sync::RwLock::new(None)),
             mtp_acceptance: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            self_improve_scheduler: Arc::new(std::sync::RwLock::new(None)),
             adapter_load_errors: Arc::new(std::sync::RwLock::new(HashMap::new())),
             adapter_swap_lock: Arc::new(tokio::sync::Mutex::new(())),
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
@@ -2281,6 +2305,7 @@ impl AppState {
             active_adapter_name: Arc::new(std::sync::RwLock::new(None)),
             loaded_adapter_name: Arc::new(std::sync::RwLock::new(None)),
             mtp_acceptance: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            self_improve_scheduler: Arc::new(std::sync::RwLock::new(None)),
             adapter_load_errors: Arc::new(std::sync::RwLock::new(HashMap::new())),
             adapter_swap_lock: Arc::new(tokio::sync::Mutex::new(())),
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),

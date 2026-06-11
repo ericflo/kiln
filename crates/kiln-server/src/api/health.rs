@@ -33,6 +33,9 @@ struct HealthResponse {
     requests: RequestMetrics,
     recent_requests: RecentRequestMetrics,
     scheduler: Option<SchedulerStats>,
+    /// [agent] self_improve scheduler status (None = not armed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    self_improve_scheduler: Option<crate::state::SelfImproveSchedulerStatus>,
     gpu_memory: Option<GpuMemoryInfo>,
     prefix_cache: PrefixCacheInfo,
     prompt_caches: PromptCachesInfo,
@@ -454,6 +457,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         requests,
         recent_requests,
         scheduler: scheduler_stats,
+        self_improve_scheduler: state.self_improve_scheduler.read().unwrap().clone(),
         gpu_memory,
         prefix_cache,
         prompt_caches,
