@@ -180,7 +180,7 @@ struct GrpoPgLossFromLogitsBackward {
     feature = "vulkan",
     feature = "rocm"
 ))]
-fn grpo_scalar_seed_or_unit_kt(
+pub(crate) fn grpo_scalar_seed_or_unit_kt(
     grad_output: &kiln_tensor::Tensor,
     op_name: &str,
     unit_root_grad: bool,
@@ -1110,14 +1110,14 @@ pub(crate) struct EchoEnvSpec {
     feature = "rocm"
 ))]
 #[derive(Debug)]
-struct EchoEnvNodeState {
-    env_log_probs: kiln_tensor::Tensor,
-    env_idx: kiln_tensor::Tensor,
-    env_labels: Vec<u32>,
-    env_running_max: kiln_tensor::Tensor,
-    env_running_sumexp: kiln_tensor::Tensor,
+pub(crate) struct EchoEnvNodeState {
+    pub(crate) env_log_probs: kiln_tensor::Tensor,
+    pub(crate) env_idx: kiln_tensor::Tensor,
+    pub(crate) env_labels: Vec<u32>,
+    pub(crate) env_running_max: kiln_tensor::Tensor,
+    pub(crate) env_running_sumexp: kiln_tensor::Tensor,
     /// λ / |O| — positive magnitude; the backward applies `−(λ/|O|)·seed`.
-    coeff_magnitude: f64,
+    pub(crate) coeff_magnitude: f64,
 }
 
 /// Compute the env-row chunked state + the ECHO env-CE scalar for one
@@ -1130,7 +1130,7 @@ struct EchoEnvNodeState {
     feature = "vulkan",
     feature = "rocm"
 ))]
-fn echo_env_state_and_value_kt(
+pub(crate) fn echo_env_state_and_value_kt(
     normed_hidden: &kiln_tensor::Tensor,
     head_t: &kiln_tensor::Tensor,
     input_ids: &[u32],
@@ -1194,7 +1194,7 @@ fn echo_env_state_and_value_kt(
     feature = "vulkan",
     feature = "rocm"
 ))]
-fn echo_env_grad_from_normed_hidden_kt(
+pub(crate) fn echo_env_grad_from_normed_hidden_kt(
     normed_hidden: &kiln_tensor::Tensor,
     head_t: &kiln_tensor::Tensor,
     echo: &EchoEnvNodeState,
@@ -2433,6 +2433,103 @@ mod tests {
     }
 
     #[cfg(any(feature = "cuda", feature = "vulkan"))]
+    /// The OPD echo compose node (OPD half of the resurrection plan):
+    /// the backward must pass the seed through to the OPD loss input
+    /// unchanged and emit on the hidden input EXACTLY the env-row closed
+    /// form the GRPO fused root uses (same state, same builder).
+    #[cfg(any(feature = "cuda", feature = "vulkan"))]
+    #[test]
+    fn opd_echo_compose_backward_matches_env_closed_form() {
+        use kiln_autograd::BackwardOp;
+
+        let device = kiln_tensor::Device::Cpu;
+        let (seq_len, hidden_size, vocab) = (6usize, 5usize, 13usize);
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2];
+        let env_mask = vec![false, true, false, false, true, false];
+        let spec = super::EchoEnvSpec {
+            env_mask,
+            total_obs_len: 3,
+            lambda: 0.05,
+        };
+        let hidden_host: Vec<f32> = (0..seq_len * hidden_size)
+            .map(|i| (((i * 7) % 19) as f32 - 9.0) * 0.041)
+            .collect();
+        let head_host: Vec<f32> = (0..hidden_size * vocab)
+            .map(|i| (((i * 11) % 23) as f32 - 11.0) * 0.037)
+            .collect();
+        let hidden =
+            KtTensor::from_vec_on(device, hidden_host, vec![1, seq_len, hidden_size]).unwrap();
+        let head_t =
+            KtTensor::from_vec_on(device, head_host, vec![hidden_size, vocab]).unwrap();
+
+        let (node_state, _env_ce_kt, env_ce_val) =
+            super::echo_env_state_and_value_kt(&hidden, &head_t, &input_ids, &spec, 3, &device)
+                .unwrap()
+                .expect("env rows present");
+        assert!(env_ce_val.is_finite() && env_ce_val > 0.0);
+
+        // Reference env grad straight from the shared builder (seed 1.0).
+        let reference = super::echo_env_grad_from_normed_hidden_kt(
+            &hidden,
+            &head_t,
+            &node_state,
+            GrpoLossParams {
+                advantage: 0.0,
+                clip_low: 1.0,
+                clip_high: 1.0,
+                kl_coeff: 0.0,
+                kl_estimator: crate::KlEstimator::K1,
+                loss_normalizer: 1.0,
+                is_level: crate::IsLevel::Token,
+                reinforce: true,
+                entropy_aware_kl_quantile: None,
+            },
+            GrpoKlAuxiliaryRoute::HostComposite,
+            1.0,
+            &device,
+            3,
+        )
+        .unwrap();
+
+        // The node under test, applied with a unit seed.
+        let (node_state2, _e, _v) =
+            super::echo_env_state_and_value_kt(&hidden, &head_t, &input_ids, &spec, 3, &device)
+                .unwrap()
+                .unwrap();
+        let node = crate::opd_tape_shim::test_support::opd_echo_compose_node(
+            hidden.clone(),
+            head_t.clone(),
+            node_state2,
+            device,
+            3,
+        );
+        let seed = KtTensor::from_vec_on(device, vec![1.0f32], Vec::<usize>::new()).unwrap();
+        let grads = node.apply(&seed).unwrap();
+        assert_eq!(grads.len(), 2);
+        let passthrough = grads[0].as_ref().expect("opd seed passthrough");
+        assert_eq!(passthrough.to_dtype(KtDType::F32).unwrap().to_scalar::<f32>().unwrap(), 1.0);
+        let env_grad = grads[1].as_ref().expect("env grad");
+        let read = |t: &KtTensor| -> Vec<f32> {
+            t.to_dtype(KtDType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+        };
+        let got = read(env_grad);
+        let want = read(&reference);
+        assert_eq!(got.len(), want.len());
+        for i in 0..got.len() {
+            assert!(
+                (got[i] - want[i]).abs() < 1e-6,
+                "env grad mismatch at {i}: {} vs {}",
+                got[i],
+                want[i]
+            );
+        }
+    }
+
     /// §5.5 verifier-free mode (`no_policy_loss`): the loss must equal
     /// λ·env_CE EXACTLY and the gradient must equal the env-row closed
     /// form alone — the policy-gradient term contributes NOTHING.

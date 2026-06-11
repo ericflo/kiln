@@ -486,3 +486,168 @@ pub fn try_tape_opd_scalar_mean_vulkan_kt(
 
     Ok(Some(loss_kt))
 }
+
+/// ECHO env-CE composition for the OPD tape step (the OPD half of the
+/// resurrection plan): wraps the recorded OPD scalar in a two-input node
+/// whose value is `opd_loss + λ·env_CE` and whose backward (a) passes the
+/// seed straight through to the OPD loss node and (b) emits the
+/// constant-coefficient env-row gradient onto the recorded hidden — the
+/// same closed form the GRPO fused root uses (`(λ/|O|)·(softmax − onehot)
+/// @ head_tᵀ` at env rows, zero elsewhere).
+///
+/// Returns `None` (compose nothing) when the spec selects no env rows or
+/// λ = 0 — the OPD loss then trains exactly as before.
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn try_tape_opd_echo_env_compose_kt(
+    opd_loss_kt: &kiln_tensor::Tensor,
+    hidden: &kiln_tensor::Tensor,
+    head_t: &kiln_tensor::Tensor,
+    input_ids: &[u32],
+    spec: &crate::grpo_tape_shim::EchoEnvSpec,
+    chunk_size: usize,
+    device: &kiln_tensor::Device,
+) -> Result<Option<(kiln_tensor::Tensor, f64)>> {
+    use kiln_autograd::{Tape, with_active_tape};
+
+    let Some((node_state, env_ce_kt, env_ce_val)) =
+        crate::grpo_tape_shim::echo_env_state_and_value_kt(
+            hidden, head_t, input_ids, spec, chunk_size, device,
+        )
+        .context("opd echo compose: env state")?
+    else {
+        return Ok(None);
+    };
+    let weighted = env_ce_kt
+        .affine(spec.lambda, 0.0)
+        .map_err(|e| anyhow::anyhow!("opd echo compose: λ scale: {e}"))?;
+    let composed = (opd_loss_kt + &weighted)
+        .map_err(|e| anyhow::anyhow!("opd echo compose: add: {e}"))?;
+
+    let recorded = with_active_tape(|tape: &mut Tape| {
+        tape.record(
+            &composed,
+            &[opd_loss_kt, hidden],
+            Box::new(OpdEchoEnvComposeBackward {
+                hidden: hidden.clone(),
+                head_t: head_t.clone(),
+                node_state,
+                device: *device,
+                chunk_size,
+            }),
+        );
+        composed.clone()
+    });
+    match recorded {
+        Some(composed) => Ok(Some((composed, env_ce_val))),
+        // No active tape scope — the caller's loss is already un-recorded;
+        // don't pretend the term combined.
+        None => Ok(None),
+    }
+}
+
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+#[derive(Debug)]
+struct OpdEchoEnvComposeBackward {
+    hidden: kiln_tensor::Tensor,
+    head_t: kiln_tensor::Tensor,
+    node_state: crate::grpo_tape_shim::EchoEnvNodeState,
+    device: kiln_tensor::Device,
+    chunk_size: usize,
+}
+
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+impl kiln_autograd::BackwardOp for OpdEchoEnvComposeBackward {
+    fn name(&self) -> &'static str {
+        "opd_echo_env_compose_backward"
+    }
+
+    fn input_count(&self) -> usize {
+        2
+    }
+
+    fn requires_input(&self, _idx: usize) -> bool {
+        false
+    }
+
+    fn apply(
+        &self,
+        grad_output: &kiln_tensor::Tensor,
+    ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        let grad_scalar = crate::grpo_tape_shim::grpo_scalar_seed_or_unit_kt(
+            grad_output,
+            "OpdEchoEnvComposeBackward",
+            false,
+        )?;
+        // d(composed)/d(opd_loss) = 1 — the seed passes through unchanged
+        // so the OPD node's own backward runs exactly as it would have.
+        let passthrough = grad_output.clone();
+        // The env-row hidden gradient. The PG-param arguments are never
+        // read under coeff_override (the env coefficient is constant);
+        // GrpoLossParams::reinforce-shaped defaults keep the call total.
+        let env_grad = crate::grpo_tape_shim::echo_env_grad_from_normed_hidden_kt(
+            &self.hidden,
+            &self.head_t,
+            &self.node_state,
+            crate::trainer::GrpoLossParams {
+                advantage: 0.0,
+                clip_low: 1.0,
+                clip_high: 1.0,
+                kl_coeff: 0.0,
+                kl_estimator: crate::KlEstimator::K1,
+                loss_normalizer: 1.0,
+                is_level: crate::IsLevel::Token,
+                reinforce: true,
+                entropy_aware_kl_quantile: None,
+            },
+            kiln_model::backend::GrpoKlAuxiliaryRoute::HostComposite,
+            grad_scalar,
+            &self.device,
+            self.chunk_size,
+        )
+        .map_err(|e| kiln_tensor::Error::Msg(format!("opd echo compose backward: {e:#}")))?;
+        Ok(vec![Some(passthrough), Some(env_grad)])
+    }
+}
+
+/// Test-only constructor for the compose node (fields are private; the
+/// closed-form test lives in grpo_tape_shim where the echo fixtures are).
+#[cfg(test)]
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+pub(crate) mod test_support {
+    pub(crate) fn opd_echo_compose_node(
+        hidden: kiln_tensor::Tensor,
+        head_t: kiln_tensor::Tensor,
+        node_state: crate::grpo_tape_shim::EchoEnvNodeState,
+        device: kiln_tensor::Device,
+        chunk_size: usize,
+    ) -> impl kiln_autograd::BackwardOp {
+        super::OpdEchoEnvComposeBackward {
+            hidden,
+            head_t,
+            node_state,
+            device,
+            chunk_size,
+        }
+    }
+}
