@@ -156,44 +156,28 @@ impl EvalGenerator for LiveEvalGenerator {
             if want == previous {
                 return Ok(previous);
             }
-            // RwLock acquires + LoraWeights::load are blocking — punt to
-            // a dedicated thread so we don't stall the runtime.
-            tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
-                let ModelBackend::Real { runner, .. } = state.backend.as_ref() else {
-                    return Err("eval requires a real model backend".into());
-                };
-                let (device, num_layers) = {
-                    let guard = runner.read().unwrap();
-                    (
-                        guard.weights.embed_tokens.device().clone(),
-                        guard.config.num_layers,
-                    )
-                };
-                match want.as_ref() {
-                    Some(name) => {
-                        let path = state.adapter_dir.join(name);
-                        if !path.exists() {
-                            return Err(format!(
-                                "adapter `{name}` not found at {}",
-                                path.display()
-                            ));
-                        }
-                        // #1082: LoraWeights::load is kt-native — pass the kt device directly.
-                        let lora =
-                            kiln_model::lora_loader::LoraWeights::load(&path, num_layers, device)
-                                .map_err(|e| format!("loading adapter `{name}`: {e}"))?;
-                        runner.write().unwrap().swap_lora(Some(lora));
-                    }
-                    None => {
-                        runner.write().unwrap().unload_adapter();
-                    }
-                }
-                *state.active_adapter_name.write().unwrap() = want;
-                state.clear_real_prefix_cache();
-                Ok(previous)
-            })
-            .await
-            .map_err(|e| format!("join error: {e}"))?
+            // Barrier swap (see `adapter_swap`): a streaming request that's
+            // mid-generation when an eval starts finishes on its own
+            // weights first. This also keeps `loaded_adapter_name`
+            // truthful — the old direct swap left it stale, so the next
+            // chat request could no-op its adapter check and silently
+            // serve on the eval's weights. Per-adapter cache keying means
+            // the serving agent's prefix cache survives the round-trip.
+            let target = match want.as_ref() {
+                Some(name) => crate::adapter_swap::SwapTarget::Named(name.clone()),
+                None => crate::adapter_swap::SwapTarget::Base,
+            };
+            crate::adapter_swap::swap_runtime_adapter(
+                &state,
+                crate::adapter_swap::SwapRequest {
+                    target,
+                    content_changed: false,
+                    reason: "eval_set_adapter",
+                },
+            )
+            .await?;
+            *state.active_adapter_name.write().unwrap() = want;
+            Ok(previous)
         })
     }
 

@@ -17,7 +17,6 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::{ChatMessage, ChatTemplateOptions};
 use kiln_eval::qwen3::ParsedToolCall;
 use kiln_model::adapter_merge::{PeftLora, merge_concat};
-use kiln_model::lora_loader::LoraWeights;
 use kiln_model::{
     CancelHandle, GenerationOutput, ModelRunner, PagedPrefixReuse, SpeculativeConfig,
     SpeculativeDecodePolicy, StreamEvent,
@@ -4499,7 +4498,7 @@ async fn ensure_batch_adapter(
 
 async fn ensure_runtime_adapter(
     state: &AppState,
-    runner: &std::sync::Arc<std::sync::RwLock<ModelRunner>>,
+    _runner: &std::sync::Arc<std::sync::RwLock<ModelRunner>>,
     target_adapter: Option<String>,
     request_id: &str,
     reason: &str,
@@ -4509,57 +4508,30 @@ async fn ensure_runtime_adapter(
         return Ok(());
     }
 
-    match target_adapter.clone() {
+    let target = match target_adapter.clone() {
         Some(name) => {
             validate_compose_name(&name)?;
-            // Resolve adapter path
-            let adapter_path = state.adapter_dir.join(&name);
-            if !adapter_path.exists() {
+            if !state.adapter_dir.join(&name).exists() {
                 return Err(ApiError::adapter_not_found(&name));
             }
-
-            // Two-phase load: read device/num_layers, load weights, then swap.
-            let (device, num_layers) = {
-                let guard = runner.read().unwrap();
-                (
-                    guard.weights.embed_tokens.device().clone(),
-                    guard.config.num_layers,
-                )
-            };
-
-            let runner = runner.clone();
-            let adapter_name = name.clone();
-            let loaded_name = state.loaded_adapter_name.clone();
-
-            tokio::task::spawn_blocking(move || {
-                // #1082: LoraWeights::load is kt-native — pass the kt device directly.
-                let lora = LoraWeights::load(&adapter_path, num_layers, device)
-                    .map_err(|e| format!("{e}"))?;
-                let mut guard = runner.write().unwrap();
-                guard.swap_lora(Some(lora));
-                *loaded_name.write().unwrap() = Some(adapter_name);
-                Ok::<(), String>(())
-            })
-            .await
-            .map_err(|e| ApiError::internal(format!("join error: {e}")))?
-            .map_err(ApiError::adapter_load_failed)?;
-            state.clear_real_prefix_cache();
+            crate::adapter_swap::SwapTarget::Named(name)
         }
-        None => {
-            // Revert to base model.
-            let runner = runner.clone();
-            let loaded_name = state.loaded_adapter_name.clone();
+        None => crate::adapter_swap::SwapTarget::Base,
+    };
 
-            tokio::task::spawn_blocking(move || {
-                let mut guard = runner.write().unwrap();
-                guard.swap_lora(None);
-                *loaded_name.write().unwrap() = None;
-            })
-            .await
-            .map_err(|e| ApiError::internal(format!("join error: {e}")))?;
-            state.clear_real_prefix_cache();
-        }
-    }
+    // The actual weight flip happens at the batching engine's
+    // between-requests barrier (see `adapter_swap`), so a streaming
+    // request can never continue mid-generation on different weights.
+    crate::adapter_swap::swap_runtime_adapter(
+        state,
+        crate::adapter_swap::SwapRequest {
+            target,
+            content_changed: false,
+            reason: "per_request_adapter",
+        },
+    )
+    .await
+    .map_err(ApiError::adapter_load_failed)?;
 
     tracing::info!(
         request_id = %request_id,
@@ -4842,12 +4814,12 @@ fn composed_entry_size_bytes(root: &Path) -> u64 {
 
 /// Hot-swap the runner onto a synthesized composed adapter.
 ///
-/// Mirrors `ensure_adapter`'s two-phase RwLock pattern (read device + num
-/// layers, load weights outside any lock, then write-lock to swap). No-op if
-/// the composed adapter is already active.
+/// Same barrier semantics as `ensure_runtime_adapter` — composed names are
+/// content-hashed (`__composed:<hash>`), so they never alias stale cache
+/// entries and `content_changed` stays false. No-op if already active.
 async fn ensure_composed_adapter_swap(
     state: &AppState,
-    runner: &std::sync::Arc<std::sync::RwLock<ModelRunner>>,
+    _runner: &std::sync::Arc<std::sync::RwLock<ModelRunner>>,
     target: &ComposedTarget,
 ) -> Result<(), ApiError> {
     {
@@ -4857,31 +4829,19 @@ async fn ensure_composed_adapter_swap(
         }
     }
 
-    let (device, num_layers) = {
-        let guard = runner.read().unwrap();
-        (
-            guard.weights.embed_tokens.device().clone(),
-            guard.config.num_layers,
-        )
-    };
-
-    let runner = runner.clone();
-    let active_name = state.loaded_adapter_name.clone();
-    let cache_dir = target.cache_dir.clone();
-    let composed_active = target.active_name.clone();
-
-    tokio::task::spawn_blocking(move || {
-        // #1082: LoraWeights::load is kt-native — pass the kt device directly.
-        let lora = LoraWeights::load(&cache_dir, num_layers, device).map_err(|e| format!("{e}"))?;
-        let mut guard = runner.write().unwrap();
-        guard.swap_lora(Some(lora));
-        *active_name.write().unwrap() = Some(composed_active);
-        Ok::<(), String>(())
-    })
+    crate::adapter_swap::swap_runtime_adapter(
+        state,
+        crate::adapter_swap::SwapRequest {
+            target: crate::adapter_swap::SwapTarget::Resolved {
+                active_name: target.active_name.clone(),
+                dir: target.cache_dir.clone(),
+            },
+            content_changed: false,
+            reason: "composed_adapter",
+        },
+    )
     .await
-    .map_err(|e| ApiError::internal(format!("join error: {e}")))?
     .map_err(ApiError::adapter_load_failed)?;
-    state.clear_real_prefix_cache();
     if state.eval_mode {
         tracing::warn!(
             adapter = %target.active_name,

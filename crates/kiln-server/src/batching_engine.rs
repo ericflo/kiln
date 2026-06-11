@@ -864,7 +864,41 @@ impl BatchingEngineHandle {
             .map_err(|_| anyhow::anyhow!("batching engine stopped before resize ack"))?
             .map_err(|e| anyhow::anyhow!(e))
     }
+
+    /// Run `swap` at the engine's between-requests barrier: admission pauses
+    /// and the closure executes only once every in-flight request has
+    /// finished, so generation never continues across a weight change (KV
+    /// computed under the old weights + decode steps under the new weights
+    /// is silent garbage). Queued requests resume right after.
+    pub async fn swap_adapter(&self, swap: AdapterSwapClosure) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::SwapAdapter { swap, reply })
+            .await
+            .map_err(|_| anyhow::anyhow!("batching engine stopped"))?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("batching engine stopped before swap ack"))?
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    /// Blocking variant of [`Self::swap_adapter`] for the training worker's
+    /// (non-async) job thread.
+    pub fn swap_adapter_blocking(&self, swap: AdapterSwapClosure) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(EngineCommand::SwapAdapter { swap, reply })
+            .map_err(|_| anyhow::anyhow!("batching engine stopped"))?;
+        rx.blocking_recv()
+            .map_err(|_| anyhow::anyhow!("batching engine stopped before swap ack"))?
+            .map_err(|e| anyhow::anyhow!(e))
+    }
 }
+
+/// Deferred adapter-swap work executed on the engine thread at the
+/// between-requests barrier. The closure owns everything it needs (runner
+/// handle, pre-loaded LoRA weights, cache handles) so the engine stays
+/// ignorant of LoRA specifics.
+pub type AdapterSwapClosure = Box<dyn FnOnce() -> std::result::Result<(), String> + Send>;
 
 enum EngineCommand {
     Enqueue {
@@ -889,6 +923,19 @@ enum EngineCommand {
         target_blocks: usize,
         reply: oneshot::Sender<std::result::Result<usize, String>>,
     },
+    /// Swap adapter weights at the between-REQUESTS barrier: queued until
+    /// every active request has finished (admission pauses meanwhile), then
+    /// executed on the engine thread with no forward in flight anywhere.
+    SwapAdapter {
+        swap: AdapterSwapClosure,
+        reply: oneshot::Sender<std::result::Result<(), String>>,
+    },
+}
+
+/// A queued adapter swap waiting for the active batch to drain.
+struct PendingAdapterSwap {
+    swap: AdapterSwapClosure,
+    reply: oneshot::Sender<std::result::Result<(), String>>,
 }
 
 struct QueuedRequest {
@@ -922,6 +969,10 @@ struct BatchingEngineActor {
     // anti-scaling (n=32 slower than n=8). Set only for CUDA; Vulkan/Metal keep
     // their tuned yield behavior.
     burst_refill: bool,
+    /// Adapter swaps waiting for the active batch to drain. While any swap
+    /// is pending, admission pauses (waiting requests stay queued) so the
+    /// barrier is reached promptly; swaps then run FIFO on this thread.
+    pending_swaps: VecDeque<PendingAdapterSwap>,
     snapshot: BatchingEngineSnapshot,
 }
 
@@ -947,6 +998,7 @@ impl BatchingEngineActor {
             prefix_aware_admission,
             max_prefill_admissions_per_cycle,
             burst_refill,
+            pending_swaps: VecDeque::new(),
             snapshot: BatchingEngineSnapshot {
                 accepting: true,
                 max_prefill_admission_quantum: max_prefill_admissions_per_cycle,
@@ -957,11 +1009,20 @@ impl BatchingEngineActor {
 
     fn run(mut self) {
         while !self.stopped {
-            if self.active.is_empty() && self.waiting.is_empty() {
+            // Between-requests barrier: with no decode step in flight and
+            // the active batch drained, queued adapter swaps execute now —
+            // before blocking on the channel, so a swap queued behind a
+            // just-finished batch doesn't wait for the next command.
+            self.run_pending_swaps_at_barrier();
+
+            if self.active.is_empty() && self.waiting.is_empty() && self.pending_swaps.is_empty()
+            {
                 match self.rx.blocking_recv() {
                     Some(cmd) => self.handle_command(cmd),
                     None => break,
                 }
+                // A swap that arrived while idle executes immediately.
+                self.run_pending_swaps_at_barrier();
             }
 
             // Only sleep when we have nothing to do. Sleeping unconditionally
@@ -1045,6 +1106,26 @@ impl BatchingEngineActor {
                     .map_err(|e| format!("{e:#}"));
                 let _ = reply.send(result);
             }
+            EngineCommand::SwapAdapter { swap, reply } => {
+                // Unlike ResizeKv, a weight swap must also wait for the
+                // active batch to DRAIN (KV computed under the old weights
+                // can't continue under new ones), so it queues here and the
+                // run loop executes it at the between-requests barrier.
+                self.pending_swaps.push_back(PendingAdapterSwap { swap, reply });
+            }
+        }
+    }
+
+    /// Execute queued adapter swaps when the active batch has drained. The
+    /// run loop calls this between decode steps; while swaps are pending,
+    /// `admit_waiting` pauses admission so the barrier is reached promptly.
+    fn run_pending_swaps_at_barrier(&mut self) {
+        if self.pending_swaps.is_empty() || !self.active.is_empty() {
+            return;
+        }
+        while let Some(pending) = self.pending_swaps.pop_front() {
+            let result = (pending.swap)();
+            let _ = pending.reply.send(result);
         }
     }
 
@@ -1076,6 +1157,13 @@ impl BatchingEngineActor {
     }
 
     fn admit_waiting(&mut self) {
+        // A pending adapter swap needs the active batch to drain — admitting
+        // new requests now would (a) delay the swap arbitrarily and (b) run
+        // them under weights the caller is replacing. They stay queued and
+        // resume right after the swap executes.
+        if !self.pending_swaps.is_empty() {
+            return;
+        }
         let mut admitted = 0usize;
         // #1082 CUDA concurrency regression fix: CUDA (burst_refill) refills the
         // batch toward max_decode_batch every cycle — the LKG 2d9d4fc4 burst-fill
@@ -1364,6 +1452,9 @@ impl BatchingEngineActor {
                 .response_tx
                 .blocking_send(EngineEvent::Error(error.to_string()));
         }
+        while let Some(pending) = self.pending_swaps.pop_front() {
+            let _ = pending.reply.send(Err(error.to_string()));
+        }
     }
 
     fn refresh_snapshot(&mut self) {
@@ -1579,6 +1670,197 @@ mod tests {
             adapter: None,
             first_token_pending,
         }
+    }
+
+    /// Test double whose `forward_decode` blocks until the test releases a
+    /// step, and which records prepare/decode events into a shared log —
+    /// the deterministic harness for asserting barrier ordering.
+    struct GatedForward {
+        gate: StdMutex<std::sync::mpsc::Receiver<()>>,
+        events: Arc<StdMutex<Vec<String>>>,
+    }
+
+    impl GatedForward {
+        fn new(events: Arc<StdMutex<Vec<String>>>) -> (Self, std::sync::mpsc::Sender<()>) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            (
+                Self {
+                    gate: StdMutex::new(rx),
+                    events,
+                },
+                tx,
+            )
+        }
+    }
+
+    impl DecodeForward for GatedForward {
+        fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot> {
+            self.events.lock().unwrap().push(format!(
+                "prepare:{}",
+                req.prompt_tokens.last().copied().unwrap_or_default()
+            ));
+            Ok(DecodeSlot::Mock {
+                next_token: req.prompt_tokens.last().copied().unwrap_or_default(),
+                generated_tokens: Vec::new(),
+            })
+        }
+
+        fn forward_decode(
+            &self,
+            slots: &mut [&mut DecodeSlot],
+            _sampling: &[SamplingParams],
+        ) -> Result<Vec<TokenId>> {
+            // Hold the decode step until the test releases it.
+            self.gate.lock().unwrap().recv().ok();
+            self.events.lock().unwrap().push("decode".to_string());
+            Ok(slots
+                .iter()
+                .map(|slot| match slot {
+                    DecodeSlot::Mock { next_token, .. } => *next_token + 10,
+                    DecodeSlot::Real { .. } => unreachable!(),
+                })
+                .collect())
+        }
+
+        fn accept_token(&self, slot: &mut DecodeSlot, token: TokenId) -> Result<usize> {
+            let DecodeSlot::Mock {
+                next_token,
+                generated_tokens,
+            } = slot
+            else {
+                unreachable!();
+            };
+            generated_tokens.push(token);
+            *next_token = token;
+            Ok(generated_tokens.len())
+        }
+
+        fn finish_request(
+            &self,
+            slot: DecodeSlot,
+            finish_reason: FinishReason,
+        ) -> Result<DecodeForwardOutput> {
+            let DecodeSlot::Mock {
+                generated_tokens, ..
+            } = slot
+            else {
+                unreachable!();
+            };
+            Ok(DecodeForwardOutput {
+                output: GenerationOutput {
+                    text: String::new(),
+                    token_ids: generated_tokens,
+                    finish_reason,
+                },
+                prefill_duration: Duration::ZERO,
+                decode_duration: Duration::ZERO,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn adapter_swap_waits_for_active_request_and_pauses_admission() {
+        let events: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+        let (forward, release) = GatedForward::new(events.clone());
+        let handle = BatchingEngineHandle::start_with_options(Arc::new(forward), 8);
+
+        // Request A needs two decode steps; hold it mid-generation after
+        // the first release.
+        let mut rx_a = handle.enqueue(request(100, 2)).await.unwrap();
+        release.send(()).unwrap(); // A's first step runs; A stays active.
+        assert!(matches!(rx_a.recv().await, Some(EngineEvent::Token(_))));
+
+        // With A mid-generation: queue a swap, then request B behind it.
+        let swap_events = events.clone();
+        let swap_task = {
+            let handle = handle.clone();
+            tokio::spawn(async move {
+                handle
+                    .swap_adapter(Box::new(move || {
+                        swap_events.lock().unwrap().push("swap".to_string());
+                        Ok(())
+                    }))
+                    .await
+            })
+        };
+        // Give the swap command time to land in the actor's pending queue
+        // while A is still blocked on the gate.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut rx_b = handle.enqueue(request(200, 1)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Release everything: A's second step, then B's step after the swap.
+        release.send(()).unwrap();
+        release.send(()).unwrap();
+
+        swap_task.await.unwrap().unwrap();
+        loop {
+            match rx_a.recv().await {
+                Some(EngineEvent::Done { .. }) => break,
+                Some(_) => {}
+                None => panic!("request A channel closed before Done"),
+            }
+        }
+        loop {
+            match rx_b.recv().await {
+                Some(EngineEvent::Done { .. }) => break,
+                Some(_) => {}
+                None => panic!("request B channel closed before Done"),
+            }
+        }
+
+        let log = events.lock().unwrap().clone();
+        let swap_idx = log.iter().position(|e| e == "swap").expect("swap ran");
+        let prepare_b_idx = log
+            .iter()
+            .position(|e| e == "prepare:200")
+            .expect("B admitted");
+        // The swap executed only after A's final decode step (both steps
+        // precede it), and B was admitted only after the swap — so no
+        // request ever spans a weight change.
+        assert!(
+            swap_idx < prepare_b_idx,
+            "B must be admitted after the swap: {log:?}"
+        );
+        let decodes_before_swap = log[..swap_idx].iter().filter(|e| *e == "decode").count();
+        assert_eq!(
+            decodes_before_swap, 2,
+            "both of A's decode steps precede the swap: {log:?}"
+        );
+
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn adapter_swap_executes_immediately_when_idle() {
+        let forward = Arc::new(MockForward::default());
+        let handle = BatchingEngineHandle::start_with_options(forward, 8);
+        let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = fired.clone();
+        handle
+            .swap_adapter(Box::new(move || {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }))
+            .await
+            .unwrap();
+        assert!(fired.load(std::sync::atomic::Ordering::SeqCst));
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn adapter_swap_error_propagates_to_caller() {
+        let forward = Arc::new(MockForward::default());
+        let handle = BatchingEngineHandle::start_with_options(forward, 8);
+        let err = handle
+            .swap_adapter(Box::new(|| Err("load exploded".to_string())))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("load exploded"));
+        // The engine keeps serving after a failed swap.
+        let mut rx = handle.enqueue(request(7, 1)).await.unwrap();
+        assert!(matches!(rx.recv().await, Some(EngineEvent::Token(_))));
+        handle.stop().await.unwrap();
     }
 
     #[test]

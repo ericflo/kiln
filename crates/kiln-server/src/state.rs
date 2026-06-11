@@ -883,6 +883,26 @@ impl DeterministicCompletionCache {
         self.lru.clear();
     }
 
+    /// Drop every entry keyed to `adapter` (completed and in-flight),
+    /// leaving other adapters' entries intact. In-flight waiters get
+    /// `Ready(None)` — the recompute path — since the value they're
+    /// waiting on was produced under weights that no longer exist.
+    pub fn purge_adapter(&mut self, adapter: &Option<String>) {
+        self.entries.retain(|key, _| &key.adapter != adapter);
+        self.lru.retain(|key| &key.adapter != adapter);
+        let stale: Vec<DeterministicCompletionCacheKey> = self
+            .in_flight
+            .keys()
+            .filter(|key| &key.adapter == adapter)
+            .cloned()
+            .collect();
+        for key in stale {
+            if let Some(sender) = self.in_flight.remove(&key) {
+                let _ = sender.send(DeterministicCompletionInFlightState::Ready(None));
+            }
+        }
+    }
+
     pub fn stats(&self) -> usize {
         self.entries.len()
     }
@@ -1106,6 +1126,28 @@ impl RealPrefixCache {
         blocks
     }
 
+    /// Remove every entry cached for `adapter`, releasing its blocks.
+    /// Returns the block ids whose refcount dropped to zero (the caller
+    /// frees those in the BlockManager). Used when an adapter's directory
+    /// content changes (retrain/import): name-keyed entries would
+    /// otherwise replay KV computed under the OLD weights. Entries for
+    /// other adapters are untouched — that's the point (a background eval
+    /// swap must not destroy the serving agent's accumulated prefix
+    /// cache).
+    pub fn purge_adapter(&mut self, adapter: &Option<String>) -> Vec<u32> {
+        let mut freed = Vec::new();
+        let mut idx = 0;
+        while idx < self.entries.len() {
+            if &self.entries[idx].adapter == adapter {
+                let entry = self.entries.remove(idx);
+                freed.extend(self.release_entry_blocks(&entry.block_ids));
+            } else {
+                idx += 1;
+            }
+        }
+        freed
+    }
+
     fn oldest_evictable_entry_idx(&self) -> Option<usize> {
         self.entries
             .iter()
@@ -1300,6 +1342,10 @@ pub struct AppState {
     /// Last adapter load failure by adapter name. Used by the registry so
     /// automation can distinguish "not loaded" from "failed to load".
     pub adapter_load_errors: Arc<std::sync::RwLock<HashMap<String, String>>>,
+    /// Serializes adapter swap check-then-act sequences (see
+    /// `adapter_swap`): two concurrent requests for the same not-yet-loaded
+    /// adapter must produce one load, not two racing ones.
+    pub adapter_swap_lock: Arc<tokio::sync::Mutex<()>>,
     /// Tracked training jobs (job_id → info).
     pub training_jobs: TrainingJobs,
     /// GPU memory budget for coordinating inference and training.
@@ -1493,6 +1539,36 @@ impl AppState {
         }
     }
 
+    /// Invalidate everything cached under `adapter` — prefix KV entries
+    /// (freeing their blocks) plus the deterministic completion caches.
+    /// Call this whenever the adapter's on-disk content changes (retrain
+    /// auto-load, upload/import, delete): the name now refers to different
+    /// weights, so name-keyed cache entries would replay the old model.
+    /// Entries for OTHER adapters are deliberately left intact — prefix
+    /// lookups are adapter-filtered, so they're still correct, and
+    /// clearing them is what used to force minutes of re-prefill on the
+    /// serving agent every time a background eval or training job swapped.
+    ///
+    /// The string-keyed chat/batch caches embed the adapter in an opaque
+    /// hash, so they can't be purged selectively — they're cleared whole.
+    pub fn purge_adapter_caches(&self, adapter: &Option<String>) {
+        self.completion_cache.lock().unwrap().purge_adapter(adapter);
+        self.chat_request_cache.lock().unwrap().clear_completed();
+        self.chat_choices_cache.lock().unwrap().clear_completed();
+        self.batch_cache.lock().unwrap().clear_completed();
+        if let ModelBackend::Real {
+            block_manager,
+            prefix_cache,
+            ..
+        } = self.backend.as_ref()
+        {
+            let blocks = prefix_cache.lock().unwrap().purge_adapter(adapter);
+            if !blocks.is_empty() {
+                block_manager.lock().unwrap().free_all(&blocks);
+            }
+        }
+    }
+
     pub fn clear_eval_mode_transient_state(&self) {
         self.completion_cache.lock().unwrap().clear_completed();
         self.chat_request_cache.lock().unwrap().clear_completed();
@@ -1524,6 +1600,7 @@ impl AppState {
             active_adapter_name: Arc::new(std::sync::RwLock::new(None)),
             loaded_adapter_name: Arc::new(std::sync::RwLock::new(None)),
             adapter_load_errors: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            adapter_swap_lock: Arc::new(tokio::sync::Mutex::new(())),
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
             memory_budget: Arc::new(GpuMemoryBudget::compute(0, 0, 0, 0, 0, 1.0, None)),
             gpu_lock: Arc::new(std::sync::RwLock::new(())),
@@ -2172,6 +2249,7 @@ impl AppState {
             active_adapter_name: Arc::new(std::sync::RwLock::new(None)),
             loaded_adapter_name: Arc::new(std::sync::RwLock::new(None)),
             adapter_load_errors: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            adapter_swap_lock: Arc::new(tokio::sync::Mutex::new(())),
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
             memory_budget: Arc::new(memory_budget),
             gpu_lock,
@@ -3293,6 +3371,111 @@ mod tests {
                 .is_some()
         );
         Ok(())
+    }
+
+    #[test]
+    fn prefix_cache_purge_adapter_is_selective_and_frees_blocks() -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let device = cpu_device!();
+        let mut cache = RealPrefixCache::new(true, 4, 16, 1024, 49);
+        cache.register(
+            Some("retrained".to_string()),
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4],
+                block_ids: vec![10],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
+            },
+        );
+        cache.register(
+            Some("retrained".to_string()),
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                // Shares block 10 with the first entry, plus its own 11.
+                block_ids: vec![10, 11],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
+            },
+        );
+        cache.register(
+            Some("untouched".to_string()),
+            PagedPrefixRegistration {
+                prompt_tokens: vec![9, 9, 9, 9],
+                block_ids: vec![20],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
+            },
+        );
+
+        let mut freed = cache.purge_adapter(&Some("retrained".to_string()));
+        freed.sort_unstable();
+        // Both of the retrained adapter's blocks come back exactly once,
+        // shared refcounts unwound correctly; the other adapter's block 20
+        // stays held.
+        assert_eq!(freed, vec![10, 11]);
+
+        assert!(
+            cache
+                .lookup(&Some("retrained".to_string()), &[1, 2, 3, 4, 5])?
+                .is_none(),
+            "retrained adapter's entries are gone"
+        );
+        assert!(
+            cache
+                .lookup(&Some("untouched".to_string()), &[9, 9, 9, 9, 1])?
+                .is_some(),
+            "other adapters' entries survive — a background eval/training \
+             swap must not cost the serving agent its prefix cache"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn completion_cache_purge_adapter_is_selective() {
+        let mut cache = DeterministicCompletionCache::new(8);
+        let key = |adapter: Option<&str>| DeterministicCompletionCacheKey {
+            adapter: adapter.map(str::to_string),
+            prompt_tokens: vec![1, 2, 3],
+            temperature_bits: 0,
+            max_tokens: 16,
+            stop: Vec::new(),
+            top_p_bits: 0,
+            top_k: 0,
+            min_p_bits: 0,
+            presence_penalty_bits: 0,
+            frequency_penalty_bits: 0,
+            repetition_penalty_bits: 0,
+            seed: Some(7),
+            fold_reasoning_into_content: false,
+        };
+        let value = DeterministicCompletionCacheValue {
+            text: "old-weights answer".to_string(),
+            reasoning_content: None,
+            tool_calls: None,
+            finish_reason: "stop".to_string(),
+            completion_tokens: 3,
+        };
+        cache.insert_complete_value(key(Some("retrained")), value.clone());
+        cache.insert_complete_value(key(Some("other")), value.clone());
+        cache.insert_complete_value(key(None), value);
+
+        cache.purge_adapter(&Some("retrained".to_string()));
+
+        assert!(
+            matches!(
+                cache.probe(&key(Some("retrained"))),
+                DeterministicCompletionCacheProbe::Miss
+            ),
+            "retrained adapter must recompute"
+        );
+        assert!(matches!(
+            cache.probe(&key(Some("other"))),
+            DeterministicCompletionCacheProbe::Hit(_)
+        ));
+        assert!(matches!(
+            cache.probe(&key(None)),
+            DeterministicCompletionCacheProbe::Hit(_)
+        ));
     }
 
     // Regression tests for #673: prefix-cache eviction must never return block

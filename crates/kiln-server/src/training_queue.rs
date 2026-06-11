@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use kiln_model::lora_loader::LoraWeights;
 use kiln_train::trainer;
 use kiln_train::{
     self, DistillMergeRequest, DistillPumpRequest, DistillRefreshRequest, DistillSelfRequest,
@@ -2034,11 +2033,6 @@ fn execute_job(state: AppState, entry: QueueEntry) {
         }
     };
 
-    let (weights_ref, num_layers) = {
-        let guard = runner_arc.read().unwrap();
-        (runner_arc.clone(), guard.config.num_layers)
-    };
-
     // Get auto_load, adapter_name, and job_type from the job info
     let (auto_load, adapter_name, job_type) = {
         let jobs = state.training_jobs.read().unwrap();
@@ -2304,18 +2298,19 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             }
 
             if auto_load && adapter_canary_allows_auto_load(&adapter_path, &adapter_name, &job_id) {
-                if let Err(e) = auto_load_adapter(
-                    &weights_ref,
-                    &state.active_adapter_name,
-                    &state.loaded_adapter_name,
-                    &adapter_path,
-                    &adapter_name,
-                    num_layers,
-                ) {
+                if let Err(e) = auto_load_adapter(&state, &adapter_path, &adapter_name) {
                     tracing::error!(job_id = %job_id, "auto-load failed: {e}");
                 } else {
                     tracing::info!(job_id = %job_id, "auto-loaded trained adapter");
                 }
+            } else {
+                // Not promoting the fresh weights into serving — but the
+                // adapter directory CONTENT changed, so any cache entries
+                // keyed to this name (prefix KV, deterministic completions)
+                // now describe weights that no longer exist. Without this,
+                // retraining an idle adapter and swapping back to it later
+                // replays the old model's answers.
+                state.purge_adapter_caches(&Some(adapter_name.clone()));
             }
 
             // Post-training auto-eval: enqueue an eval job against the
@@ -2483,29 +2478,26 @@ fn adapter_canary_allows_auto_load(
 
 /// Load a LoRA adapter using the two-phase RwLock pattern.
 fn auto_load_adapter(
-    runner: &Arc<std::sync::RwLock<kiln_model::ModelRunner>>,
-    active_adapter_name: &Arc<std::sync::RwLock<Option<String>>>,
-    loaded_adapter_name: &Arc<std::sync::RwLock<Option<String>>>,
+    state: &AppState,
     adapter_path: &std::path::Path,
     adapter_name: &str,
-    num_layers: usize,
 ) -> Result<(), String> {
-    let device = {
-        let guard = runner.read().unwrap();
-        guard.weights.embed_tokens.device().clone()
-    };
-
-    // #1082: LoraWeights::load is kt-native — pass the kt device directly.
-    let lora = LoraWeights::load(adapter_path, num_layers, device)
-        .map_err(|e| format!("failed to load adapter: {e}"))?;
-
-    {
-        let mut guard = runner.write().unwrap();
-        guard.swap_lora(Some(lora));
-    }
-    *active_adapter_name.write().unwrap() = Some(adapter_name.to_string());
-    *loaded_adapter_name.write().unwrap() = Some(adapter_name.to_string());
-
+    // Barrier swap (see `adapter_swap`): in-flight requests finish on the
+    // weights they started with, THEN the fresh adapter activates and its
+    // stale name-keyed cache entries purge — `content_changed` because the
+    // directory was just rewritten by training.
+    crate::adapter_swap::swap_runtime_adapter_blocking(
+        state,
+        crate::adapter_swap::SwapRequest {
+            target: crate::adapter_swap::SwapTarget::Resolved {
+                active_name: adapter_name.to_string(),
+                dir: adapter_path.to_path_buf(),
+            },
+            content_changed: true,
+            reason: "training_auto_load",
+        },
+    )?;
+    *state.active_adapter_name.write().unwrap() = Some(adapter_name.to_string());
     Ok(())
 }
 
