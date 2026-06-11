@@ -75,6 +75,24 @@ impl TrainingCompletionEvent {
 /// network I/O. Webhook failures are logged at WARN but never propagate
 /// — a successful training job stays "completed" even if the
 /// notification POST fails.
+/// Fire-and-forget POST of an arbitrary JSON event. Same contract as
+/// [`fire_completion_webhook`]: failures are logged at WARN and never
+/// affect the job that emitted the event.
+pub fn fire_webhook_json(url: String, event: serde_json::Value) {
+    tokio::spawn(async move {
+        let client = reqwest::Client::new();
+        match client.post(&url).json(&event).send().await {
+            Ok(resp) if !resp.status().is_success() => {
+                tracing::warn!(url = %url, status = %resp.status(), "webhook POST returned non-success");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(url = %url, error = %e, "webhook POST failed");
+            }
+        }
+    });
+}
+
 pub fn fire_completion_webhook(url: String, event: TrainingCompletionEvent) {
     tokio::spawn(async move {
         // Defensive: an operator-set webhook URL that 302s into internal infra
@@ -2939,6 +2957,66 @@ mod tests {
     /// End-to-end test: spin up a tiny axum mock server, fire a webhook
     /// at it, and assert that the captured POST body matches the
     /// documented payload shape.
+    /// The eval-signals webhook helper posts arbitrary JSON with the
+    /// same fire-and-forget contract as the typed training event.
+    #[tokio::test]
+    async fn test_fire_webhook_json_posts_payload() {
+        use axum::Json;
+        use axum::extract::State;
+        use axum::routing::post;
+        use std::sync::Arc as StdArc;
+        use std::sync::Mutex as StdMutex;
+
+        let captured: StdArc<StdMutex<Vec<serde_json::Value>>> =
+            StdArc::new(StdMutex::new(Vec::new()));
+
+        async fn handler(
+            State(captured): State<StdArc<StdMutex<Vec<serde_json::Value>>>>,
+            Json(body): Json<serde_json::Value>,
+        ) -> &'static str {
+            captured.lock().unwrap().push(body);
+            "ok"
+        }
+
+        let app = axum::Router::new()
+            .route("/hook", post(handler))
+            .with_state(captured.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        fire_webhook_json(
+            format!("http://{addr}/hook"),
+            serde_json::json!({
+                "event": "eval_completed",
+                "job_id": "eval-1",
+                "suite": "math-sentinel",
+                "status": "completed",
+                "headline_accuracy": 0.85,
+                "gate_verdict": "promoted (accuracy 0.85 >= 0.8)",
+            }),
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if !captured.lock().unwrap().is_empty() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "webhook never arrived"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let got = captured.lock().unwrap();
+        assert_eq!(got[0]["event"], "eval_completed");
+        assert_eq!(got[0]["suite"], "math-sentinel");
+        assert_eq!(got[0]["headline_accuracy"], 0.85);
+        server.abort();
+    }
+
     #[tokio::test]
     async fn test_fire_completion_webhook_posts_expected_payload() {
         use axum::Json;

@@ -189,6 +189,36 @@ async fn run_one_job_with_generator(
         // with min_accuracy). Apply the verdict now that the run is
         // terminal.
         apply_post_eval_gate(&state, &snapshot).await;
+
+        // Eval results become signals: fire the completion webhook AFTER
+        // the gate so the payload carries the promotion verdict. The gate
+        // stamps its verdict on the LINKED TRAINING job; re-read it here.
+        if let Some(ref url) = state.eval_webhook_url {
+            let gate_verdict = snapshot
+                .post_eval_gate
+                .as_ref()
+                .and_then(|gate| {
+                    let jobs = state.training_jobs.read().unwrap();
+                    jobs.get(&gate.training_job_id)
+                        .and_then(|j| j.post_eval_verdict.clone())
+                });
+            let event = serde_json::json!({
+                "event": "eval_completed",
+                "job_id": snapshot.job_id,
+                "suite": snapshot.suite_name,
+                "adapters": snapshot.adapters,
+                "status": match snapshot.state {
+                    EvalJobState::Completed => "completed",
+                    EvalJobState::Cancelled => "cancelled",
+                    _ => "failed",
+                },
+                "headline_accuracy": snapshot.headline_accuracy,
+                "gate_verdict": gate_verdict,
+                "error": snapshot.error,
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+            });
+            crate::training_queue::fire_webhook_json(url.clone(), event);
+        }
     }
 
     // Back-linking from eval-completion → training-job is intentionally

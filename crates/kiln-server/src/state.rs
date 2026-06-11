@@ -1489,6 +1489,9 @@ pub struct AppState {
     /// Maximum tracked eval entries in `eval_jobs`. Mirrors
     /// `max_tracked_jobs`.
     pub max_tracked_eval_jobs: usize,
+    /// Fire-and-forget webhook for terminal eval jobs (`eval.webhook_url`
+    /// in the TOML). Mirrors `training_webhook_url`.
+    pub eval_webhook_url: Option<String>,
 }
 
 impl AppState {
@@ -1670,6 +1673,7 @@ impl AppState {
             judgment_store: None,
             max_queued_eval_jobs: 32,
             max_tracked_eval_jobs: 1024,
+            eval_webhook_url: None,
         }
     }
 
@@ -2320,6 +2324,7 @@ impl AppState {
             judgment_store: None,
             max_queued_eval_jobs: 32,
             max_tracked_eval_jobs: 1024,
+            eval_webhook_url: None,
         }
     }
 }

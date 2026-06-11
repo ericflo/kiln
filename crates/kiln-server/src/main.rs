@@ -576,6 +576,10 @@ async fn main() -> Result<()> {
     if let Some(cfg) = config.eval.as_ref() {
         state.max_queued_eval_jobs = cfg.max_queued_jobs;
         state.max_tracked_eval_jobs = cfg.max_tracked_jobs;
+        state.eval_webhook_url = cfg.webhook_url.clone();
+        if let Some(ref url) = state.eval_webhook_url {
+            tracing::info!(url = %url, "eval completion webhook enabled");
+        }
     }
 
     // Durable request/response log: every inference request becomes a JSONL
