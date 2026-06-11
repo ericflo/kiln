@@ -4,7 +4,18 @@
 /* =====================================================================
    Page switcher (Overview / Adapters / Training / Playground)
    ===================================================================== */
-function selectPage(name) {
+// The 7 primary pages — single source of truth shared by boot-time hash
+// resolution and the hashchange handler below.
+const PRIMARY_PAGES = ['overview', 'adapters', 'training', 'evals', 'distill', 'playground', 'terminal'];
+
+// opts (optional):
+//   fromHash: true  — the call ORIGINATED from the hashchange handler
+//                     (browser Back/Forward or a live hash edit). The URL is
+//                     already correct; pushing here would bury the entry the
+//                     user just traveled to, breaking Forward.
+//   replace:  true  — boot-time landing: repair the URL in place instead of
+//                     minting an entry, so Back still exits the dashboard.
+function selectPage(name, opts) {
   document.querySelectorAll('.primary-tab').forEach(t => {
     const active = t.dataset.page === name;
     t.classList.toggle('active', active);
@@ -16,10 +27,14 @@ function selectPage(name) {
     p.hidden = !active;
     if (active) p.removeAttribute('inert'); else p.setAttribute('inert', '');
   });
-  if (history.replaceState) {
-    const u = new URL(window.location.href);
-    u.hash = name;
-    history.replaceState(null, '', u);
+  // Real history entries (pushState) so browser Back/Forward walks the tab
+  // trail. Same-page guard: re-selecting the page already in the hash (tab
+  // re-click, polling re-entry) must not stack duplicate entries. Note that
+  // pushState itself fires neither hashchange nor popstate, so writing here
+  // cannot re-trigger the hashchange handler.
+  if (!(opts && opts.fromHash) && history.pushState && location.hash !== '#' + name) {
+    if (opts && opts.replace) history.replaceState(null, '', '#' + name);
+    else history.pushState(null, '', '#' + name);
   }
   // Remember the user's last tab so a fresh visit (no hash, no bookmark)
   // lands them back where they were instead of always on Overview.
@@ -65,10 +80,39 @@ let initialPage = (location.hash || '').slice(1);
 if (!initialPage) {
   try { initialPage = localStorage.getItem('kiln.lastPage') || ''; } catch {}
 }
-if (!['overview', 'adapters', 'training', 'evals', 'distill', 'playground', 'terminal'].includes(initialPage)) {
+if (!PRIMARY_PAGES.includes(initialPage)) {
   initialPage = 'overview';
 }
-selectPage(initialPage);
+selectPage(initialPage, { replace: true });
+
+// Browser Back/Forward + live hash edits re-resolve through the same
+// whitelist as boot. ONE hashchange listener suffices — no separate
+// popstate handler. Evidence (probed in headless Chrome 148, the same
+// binary the smoke suite drives):
+//   - history.pushState('#x') fires NEITHER hashchange nor popstate;
+//   - Back/Forward across pushState'd entries fires BOTH (the entries
+//     differ only by fragment, and fragment-differing same-document
+//     traversals fire hashchange per spec);
+//   - location.hash = '#x' assignment fires BOTH.
+// Every entry selectPage creates differs by fragment (same-page guard
+// above), so hashchange covers every traversal we can produce, and it is
+// the spec-guaranteed event for address-bar hash edits. Listening to both
+// events would double-invoke this handler on every Back/Forward.
+window.addEventListener('hashchange', () => {
+  const name = (location.hash || '').slice(1);
+  if (PRIMARY_PAGES.includes(name)) {
+    selectPage(name, { fromHash: true });
+    return;
+  }
+  // In-page anchor (e.g. the "Skip to content" link targets #content):
+  // leave the browser's native scroll/focus behavior alone.
+  if (name && document.getElementById(name)) return;
+  // Unknown/garbage hash: land on Overview and repair the URL in place —
+  // replaceState, NOT pushState, so the junk never survives as its own
+  // history entry for Back to trip over.
+  if (history.replaceState) history.replaceState(null, '', '#overview');
+  selectPage('overview', { fromHash: true });
+});
 
 // --- Toast Notifications ---
 function toast(msg, type) {

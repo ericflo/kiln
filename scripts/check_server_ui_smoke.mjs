@@ -914,6 +914,30 @@ async function goToPrimaryTab(page, name) {
   ).catch(() => fail(`Primary tab ${name} did not activate (${pageId})`));
 }
 
+// Asserts BOTH halves of hash navigation: the page section is active AND
+// location.hash agrees. Used by the Back/Forward history assertions, where
+// either half regressing (page without hash, hash without page) is a bug.
+async function expectActivePageAndHash(page, name, message) {
+  await page.waitForFunction(
+    (targetName) => {
+      const section = document.querySelector(`#page-${targetName}`);
+      return section
+        && section.classList.contains('active')
+        && !section.hidden
+        && !section.hasAttribute('inert')
+        && window.location.hash === `#${targetName}`;
+    },
+    { timeout: 5000 },
+    name,
+  ).catch(async () => {
+    const actual = await page.evaluate(() => ({
+      hash: window.location.hash,
+      page: document.querySelector('.page.active')?.id || 'none',
+    })).catch(() => ({ hash: 'unknown', page: 'unknown' }));
+    fail(`${message}: expected page-${name} active with hash #${name}, got page=${actual.page} hash=${actual.hash}`);
+  });
+}
+
 async function waitForVisiblePanel(page, selector, message) {
   await page.waitForFunction(
     (panelSelector) => {
@@ -1517,6 +1541,30 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       setRecentRequests([]);
       await waitForPanelText(page, '#recent-requests-panel', /No recent requests yet\./, 'Recent requests did not drain after the journey-strip truth checks');
     }
+
+    // --- Hash navigation: tab clicks mint history entries, browser
+    // Back/Forward walks them, and live hash edits route through the
+    // page whitelist (roadmap PR 16). ---
+    await expectActivePageAndHash(page, 'overview', 'Landing on /ui (no fragment) should repair the URL to #overview in place');
+    await goToPrimaryTab(page, 'adapters');
+    await expectActivePageAndHash(page, 'adapters', 'Clicking the Adapters tab should push #adapters');
+    await goToPrimaryTab(page, 'training');
+    await expectActivePageAndHash(page, 'training', 'Clicking the Training tab should push #training');
+    await page.goBack();
+    await expectActivePageAndHash(page, 'adapters', 'Browser Back from Training should return to Adapters');
+    await page.goBack();
+    await expectActivePageAndHash(page, 'overview', 'Second browser Back should return to Overview');
+    await page.goForward();
+    await expectActivePageAndHash(page, 'adapters', 'Browser Forward should re-land on Adapters');
+    // A live hash edit (address bar / location.hash) must activate the page.
+    await page.evaluate(() => { window.location.hash = '#evals'; });
+    await expectActivePageAndHash(page, 'evals', 'Setting location.hash = #evals should activate the Evals page');
+    // A junk hash falls back to Overview and is repaired via replaceState —
+    // the junk entry must NOT survive in history for Back to trip over.
+    await page.evaluate(() => { window.location.hash = '#nonsense'; });
+    await expectActivePageAndHash(page, 'overview', 'A junk hash should fall back to Overview with the URL repaired');
+    await page.goBack();
+    await expectActivePageAndHash(page, 'evals', 'Back after a junk hash should land on Evals — #nonsense must not pollute history');
 
     await goToPrimaryTab(page, 'adapters');
     await waitForPanelText(page, '#adapters-panel', /adapter-alpha/, 'Adapter list should show the first smoke adapter');
