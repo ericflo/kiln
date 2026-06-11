@@ -384,16 +384,15 @@ rollouts = [client.chat.completions.create(
     for _ in range(8)]
 
 # 2. Score with whatever reward you want.
-import requests  # noqa: F811 — same module, kept inline for clarity
-rewards = [score(prompt, r) for r in rollouts]
+scored = [{"text": r, "reward": score(prompt, r)} for r in rollouts]
 
 # 3. Send the batch back. Adapter is live on the next request.
 requests.post("http://localhost:8420/v1/train/grpo", json={
-    "adapter":       "helpful-v3",
-    "prompt":        prompt,
-    "completions":   rollouts,
-    "rewards":       rewards,
-    "learning_rate": 1e-4,
+    "groups": [{
+        "messages": [{"role": "user", "content": prompt}],
+        "completions": scored,
+    }],
+    "config": {"output_name": "helpful-v3"},
 })</code></pre>
           </div>
 

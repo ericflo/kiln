@@ -117,7 +117,6 @@ print(f"mean reward this round: {mean_reward:.3f}")
 job = requests.post(f"{KILN}/v1/train/grpo", json={
     "groups": groups,
     "config": {
-        "learning_rate": 1e-5,
         "kl_coeff":      0.1,
         "clip_epsilon":  0.2,
         "lora_rank":     16,
@@ -177,7 +176,7 @@ for item in batch["completions"]:
 
 requests.post(f"{KILN}/v1/train/grpo", json={
     "groups": groups,
-    "config": {"learning_rate": 1e-5, "lora_rank": 16, "output_name": "json-format"},
+    "config": {"lora_rank": 16, "output_name": "json-format"},
 }).raise_for_status()
 ```
 
@@ -260,7 +259,7 @@ for item in batch["completions"]:
 
 requests.post(f"{KILN}/v1/train/grpo", json={
     "groups": [group],
-    "config": {"learning_rate": 1e-5, "lora_rank": 16, "output_name": "code-runs"},
+    "config": {"lora_rank": 16, "output_name": "code-runs"},
 }).raise_for_status()
 ```
 
@@ -277,8 +276,14 @@ server-side default, so omit anything you don't want to override:
 - **`n` (in the batch request)** — group size. Defaults to 1; for GRPO use
   `>= 4`. 8 is the usual starting point; smaller groups have higher variance,
   larger groups eat the 64-completion batch cap faster.
-- **`learning_rate`** — defaults to `1e-5`. Halve it if you see reward
-  oscillate or KL spike; double it if reward improves but slowly.
+- **`learning_rate`** — omit it: the server resolves the default per
+  optimizer (Muon, the default: `2e-3` for GRPO; AdamW/SGD: legacy `1e-5`)
+  and the train receipt records the resolved value. If you do pin it, halve
+  on reward oscillation / KL spikes, double if reward improves but slowly —
+  and mind that Muon's band is ~200x AdamW's.
+- **`optimizer`** — defaults to Muon (momentum-orthogonalized SGD with fused
+  on-device kernels). Select AdamW/SGD per request via
+  `{"optimizer": {"kind": "adam_w"}}` / `{"kind": "sgd"}`.
 - **`kl_coeff`** — defaults to `0.1`. Higher keeps the adapter closer to the
   base model (more conservative, slower). Lower lets the adapter drift faster
   but risks mode collapse onto whatever scored highest in early rounds.

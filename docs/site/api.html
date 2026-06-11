@@ -357,7 +357,7 @@
       {"role": "user", "content": "Hi"},
       {"role": "assistant", "content": "Hey there!"}
     ]}],
-    "config": {"output_name": "default", "learning_rate": 1e-4, "epochs": 3}
+    "config": {"output_name": "default", "epochs": 3}
   }' \
   | python3 -m json.tool</code></pre>
           </section>
@@ -373,7 +373,7 @@
         {"text": "Blue", "reward": 0.0}
       ]
     }],
-    "config": {"output_name": "grpo-demo", "learning_rate": 1e-5, "kl_coeff": 0.1}
+    "config": {"output_name": "grpo-demo", "kl_coeff": 0.1}
   }' \
   | python3 -m json.tool</code></pre>
           </section>
@@ -468,6 +468,7 @@ kiln serve --config kiln.toml</code></pre>
         <h2 id="generation" class="text-2xl font-semibold mb-4">OpenAI-compatible generation</h2>
         <div class="endpoint-list" style="color: var(--fg-dim);">
           <div class="endpoint"><span class="method">POST</span> <code>/v1/chat/completions</code> &mdash; chat completions with OpenAI-shaped request and response bodies, including SSE streaming and normalized tool-call deltas.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/completions</code> &mdash; vLLM-compatible prompt-logprobs scoring for remote OPD teachers (no generation-only mode, no streaming; prompts capped at 4096 tokens).</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/completions/batch</code> &mdash; multi-prompt batch generation for efficient GRPO rollouts.</div>
         </div>
       </article>
@@ -480,6 +481,8 @@ kiln serve --config kiln.toml</code></pre>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/adapters/load</code> &mdash; load an adapter from disk.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/adapters/unload</code> &mdash; unload the active adapter.</div>
           <div class="endpoint"><span class="method">DELETE</span> <code>/v1/adapters/{name}</code> &mdash; delete an adapter.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/adapters/{name}/detail</code> &mdash; files, training history, and eval history for one adapter.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/adapters/{name}/receipt</code> &mdash; the adapter's train_receipt.json.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/adapters/{name}/download</code> &mdash; export an adapter as a tar.gz archive.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/adapters/upload</code> &mdash; import an adapter from a multipart tar.gz archive.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/adapters/merge</code> &mdash; combine adapters with weighted average, TIES, or concatenation.</div>
@@ -492,8 +495,11 @@ kiln serve --config kiln.toml</code></pre>
         <div class="endpoint-list" style="color: var(--fg-dim);">
           <div class="endpoint"><span class="method">POST</span> <code>/v1/train/sft</code> &mdash; submit supervised fine-tuning examples.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/train/grpo</code> &mdash; submit a GRPO batch of prompts, completions, and rewards.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/train/agentic</code> &mdash; canonical alias of <code>/v1/train/grpo</code> for multi-turn trajectory rollouts (ECHO applies automatically).</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/train/status</code> &mdash; summarize training queue and job state.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/v1/train/status/{job_id}</code> &mdash; inspect one training job; there is no separate <code>/v1/train/jobs/{job_id}</code> route.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/train/status/{job_id}</code> &mdash; inspect one training job.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/train/jobs/{job_id}</code> &mdash; rich job detail (loss curve + linked-eval back-references).</div>
+          <div class="endpoint"><span class="method">DELETE</span> <code>/v1/train/jobs/{job_id}</code> &mdash; remove an archived terminal job.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/train/queue</code> &mdash; list queued training jobs.</div>
           <div class="endpoint"><span class="method">DELETE</span> <code>/v1/train/queue/{job_id}</code> &mdash; cancel a queued job.</div>
         </div>
@@ -520,6 +526,7 @@ curl -s -X DELETE http://localhost:8420/v1/train/queue/$JOB_ID | python3 -m json
           <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/compare</code> &mdash; run one suite across multiple adapters head-to-head.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/eval/jobs</code> &mdash; list eval jobs and headline accuracies.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/eval/jobs/{id}</code> &mdash; fetch one eval job with full per-example outcomes.</div>
+          <div class="endpoint"><span class="method">DELETE</span> <code>/v1/eval/jobs/{id}</code> &mdash; cancel a queued/running eval (partial outcomes kept), or delete a terminal job from tracking.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/jobs/{id}/rerun</code> &mdash; re-run only the failures from a completed job.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/datasets/upload</code> &mdash; multipart upload of an SFT or GRPO JSONL file.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/datasets/{name}/synthesize</code> &mdash; decompose a dataset into a graded suite via <code>final_assistant</code>, <code>first_assistant_turn</code>, <code>every_assistant_turn</code>, or <code>tool_call_predict</code>.</div>

@@ -114,7 +114,39 @@ Most users never hand-author a suite. The canonical flow is:
 
 ## Production trace tool-call evals
 
-For production agent workloads, use `kiln-eval trace-suite` to turn a JSONL
+### Mine your own request log
+
+Every inference request kiln serves is already a recorded production trace:
+the server appends one JSON row per request/response to
+`<adapter_dir>/.requests/` (`requests-current.jsonl` plus rotated
+`requests-<ts>.jsonl.gz`, size-rotated and retention-capped; SSE streams are
+reassembled into the final-message shape). Each row carries the wire-format
+`request` and `response`, the HTTP `status`, the `user_agent`, and the
+`adapter` that served it (key omitted for base-model rows), so the corpus
+splits cleanly per adapter.
+
+```bash
+# SFT dataset from successful chats (request messages + assistant reply):
+zcat -f ~/models/Qwen3.5-4B/adapters/.requests/requests-*.jsonl* \
+  | jq -c 'select(.status == 200 and .route == "/v1/chat/completions")
+      | {messages: (.request.messages + [.response.choices[0].message])}' > mined-sft.jsonl
+
+# Or feed the importer below directly for a tool-call eval suite:
+zcat -f ~/models/Qwen3.5-4B/adapters/.requests/requests-*.jsonl* \
+  | jq -c 'select(.status == 200)
+      | {messages: (.request.messages + [.response.choices[0].message]), tools: .request.tools}' \
+  > mined-traces.jsonl
+kiln-eval trace-suite --input mined-traces.jsonl --format openai_jsonl \
+  --output mined-tool-calls.json --suite-name mined-tool-calls
+```
+
+(`zcat -f` reads the gzipped rotations and the plain active file in one
+stream. Rows whose final assistant message has no tool call are counted as
+`skipped_no_tool_call` by the importer — expected for plain chat traffic.)
+
+### Importing external traces
+
+For traces exported from other systems, `kiln-eval trace-suite` turns a JSONL
 export of recorded tool-calling turns into an eval suite:
 
 ```bash

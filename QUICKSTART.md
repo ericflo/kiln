@@ -308,7 +308,6 @@ curl -s http://localhost:8420/v1/train/sft \
     ],
     "config": {
       "output_name": "default",
-      "learning_rate": 1e-4,
       "epochs": 3
     }
   }' | python3 -m json.tool
@@ -795,6 +794,8 @@ Key settings:
 | `logging.format` | `KILN_LOG_FORMAT` | auto | Log format: `auto` (pretty on TTY, JSON otherwise), `json`, `pretty`, `text`, `human` |
 | `prefix_cache.enabled` | `KILN_PREFIX_CACHE_ENABLED` | true | Reuse KV cache for shared prefixes |
 | `prefix_cache.max_entries` | `KILN_PREFIX_CACHE_MAX_ENTRIES` | auto | Cap cached GDN state snapshots (~49 MiB each; auto budget ≤1 GiB) |
+| `request_log.enabled` | `KILN_REQUEST_LOG_ENABLED` | true | Durable JSONL log of every inference request/response (the mine→train corpus) |
+| `request_log.dir` | `KILN_REQUEST_LOG_DIR` | `<adapter_dir>/.requests` | Request log directory (size-rotated, gzipped, retention-capped) |
 
 ## Running with Docker
 

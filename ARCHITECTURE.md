@@ -424,7 +424,6 @@ Submit training examples via `POST /v1/train/sft`:
     {"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
   ],
   "num_epochs": 3,
-  "learning_rate": 1e-4,
   "rank": 8
 }
 ```
