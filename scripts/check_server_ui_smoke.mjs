@@ -243,11 +243,55 @@ function validateExistingAdapterName(name, availableAdapters, action) {
 }
 
 function parseAdapterRoute(pathname) {
-  const match = /^\/v1\/adapters\/([^/]+)(?:\/(download))?$/.exec(pathname);
+  const match = /^\/v1\/adapters\/([^/]+)(?:\/(download|detail|receipt))?$/.exec(pathname);
   if (!match) return null;
   if (['load', 'unload', 'upload', 'merge'].includes(match[1])) return null;
   return { name: decodeURIComponent(match[1]), action: match[2] || null };
 }
+
+function adapterNotFound(res, name) {
+  // Mirrors error.rs ApiError::adapter_not_found.
+  res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify({
+    error: {
+      code: 'adapter_not_found',
+      message: `Adapter '${name}' does not exist`,
+      hint: 'List available adapters with GET /v1/adapters.',
+    },
+  }));
+}
+
+// §8.11 reproducibility receipt for adapter-alpha — field-for-field the
+// kiln-train/src/receipt.rs AdapterReceipt shape (the /receipt endpoint
+// serializes that struct directly). Other adapters 404, exactly like
+// AdapterReceipt::read_from_adapter_dir returning Ok(None) for uploaded
+// or pre-receipt adapters.
+const smokeAdapterReceipt = {
+  schema_version: 1,
+  adapter: 'adapter-alpha',
+  produced_at: '2026-06-10T18:30:00Z',
+  kiln_version: '0.1.0',
+  kernel_versions: { 'kiln-opd-loss-kernel': '0.1.0' },
+  seed: 4218,
+  source_kind: 'opd',
+  teacher: { alias: 'qwen3.6-27b@openrouter', model_id: 'qwen/qwen-3.6-27b' },
+  prompts: {
+    source: 'kiln-canonical:math_reasoning:v3',
+    manifest_hash: 'f00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeed',
+    count: 128,
+  },
+  hyperparameters: {
+    learning_rate: 0.0001,
+    lora_rank: 16,
+    lora_alpha: 32,
+    epochs: 2,
+    temperature: 0.7,
+    top_k: 64,
+    top_p: 0.95,
+  },
+  diagnostic_summary: { overlap_ratio_final: 0.91, rep_rate_max: 0.0, final_loss: 0.0421 },
+  post_eval: { 'math-reasoning-suite': 0.84 },
+};
 
 // Mirrors api/eval.rs upload_dataset: multipart fields `name`, `format`
 // (sft_chat | grpo_groups | raw), optional `description`, and `file` whose
@@ -414,6 +458,8 @@ async function startServer({
   // `completedTrainingJobs` as Failed("cancelled by user"), exactly like
   // the trainer aborting at the next step boundary.
   let runningTrainingJob = null;
+  // Health-poll counter — see the /health handler.
+  let healthTick = 0;
   // Eval datasets created through POST /v1/eval/datasets/upload (the
   // "Try a sample dataset" golden path) — GET /v1/eval/datasets reflects
   // them so the Datasets list refresh after upload is observable.
@@ -494,6 +540,10 @@ async function startServer({
         apiFailure(res, 'Decode performance', url.pathname);
         return;
       }
+      if (url.pathname === '/v1/config') {
+        apiFailure(res, 'Runtime config', url.pathname);
+        return;
+      }
       if (url.pathname === '/v1/stats/recent-requests') {
         apiFailure(res, 'Recent requests', url.pathname);
         return;
@@ -520,15 +570,38 @@ async function startServer({
       }
     }
     if (url.pathname === '/health') {
+      // blocks_used cycles so renderServerStatus's content key changes on
+      // every poll — each 2s tick genuinely innerHTML-swaps #server-status,
+      // which is what the runtime-config-expander survival assertion (and
+      // the VRAM-donut regression assertion) must hold against.
+      healthTick += 1;
       json(res, {
         status: 'ok',
         model: 'Qwen3.5-4B',
         backend: 'mock',
         uptime_seconds: 42,
         active_adapter: activeAdapter,
-        scheduler: { waiting: 0, running: 0, blocks_used: 0, blocks_free: 1024 },
+        scheduler: { waiting: 0, running: 0, blocks_used: healthTick % 2, blocks_free: 1024 },
         gpu_memory: { total_vram_gb: 24, model_gb: 8, kv_cache_gb: 2, training_budget_gb: 4 },
         checks: [{ name: 'mock smoke server', pass: true }],
+      });
+      return;
+    }
+    // Mirrors api/config.rs ConfigResponse (vram / kv_cache / training /
+    // memory_budget) — the runtime-config expander fetches this once per
+    // open, never on a poll loop.
+    if (url.pathname === '/v1/config') {
+      json(res, {
+        vram: { detected_gb: 25.8, source: 'nvidia-smi' },
+        kv_cache: { num_blocks: 1024, num_blocks_source: 'auto', fp8_enabled: true },
+        training: { checkpoint_segments: 4, checkpoint_segments_source: 'auto', checkpointing_enabled: true },
+        memory_budget: {
+          total_vram_gb: 25.8,
+          model_gb: 8.2,
+          kv_cache_gb: 2.1,
+          training_budget_gb: 4.0,
+          inference_memory_fraction: 0.55,
+        },
       });
       return;
     }
@@ -580,6 +653,40 @@ async function startServer({
       }
       activeAdapter = null;
       setTimeout(() => json(res, { active: null }), 75);
+      return;
+    }
+    // Mirrors api/adapters.rs AdapterDetail — the drill modal's main body.
+    if (adapterRoute?.action === 'detail') {
+      const adapter = availableAdapters.find((candidate) => candidate.name === adapterRoute.name);
+      if (!adapter) {
+        adapterNotFound(res, adapterRoute.name);
+        return;
+      }
+      json(res, {
+        name: adapter.name,
+        is_active: activeAdapter === adapter.name,
+        has_config: true,
+        has_weights: true,
+        size_bytes: adapter.size_bytes,
+        files: [
+          { name: 'adapter_config.json', size_bytes: 512 },
+          { name: 'adapter_model.safetensors', size_bytes: adapter.size_bytes },
+        ],
+        training_jobs: [],
+        eval_jobs: [],
+      });
+      return;
+    }
+    // GET /v1/adapters/:name/receipt — adapter-alpha ships the smoke
+    // receipt; everything else 404s with the adapter_not_found envelope
+    // (api/adapters.rs adapter_receipt's Ok(None) branch).
+    if (adapterRoute?.action === 'receipt') {
+      const adapterExists = availableAdapters.some((candidate) => candidate.name === adapterRoute.name);
+      if (!adapterExists || adapterRoute.name !== 'adapter-alpha') {
+        adapterNotFound(res, `${adapterRoute.name}/receipt.json`);
+        return;
+      }
+      json(res, smokeAdapterReceipt);
       return;
     }
     if (adapterRoute?.action === 'download') {
@@ -1488,6 +1595,16 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       await expectApiFailurePanel(page, '#server-status', 'Server status', 'Server status smoke failure from /health');
       await expectApiFailurePanel(page, '#decode-perf-panel', 'Decode performance', 'Decode performance smoke failure from /v1/stats/decode');
       await expectApiFailurePanel(page, '#recent-requests-panel', 'Recent requests', 'Recent requests smoke failure from /v1/stats/recent-requests');
+
+      // Opening the runtime-config expander while /v1/config 503s must
+      // render a quiet retry line INSIDE the expander — the Server-status
+      // card keeps its own failure state, nothing throws (the pageErrors
+      // assertion at the end of this scenario backs that up).
+      await clickAndWait(page, '#runtime-config > summary', 'Could not open the runtime config expander in the failure scenario');
+      await waitForPanelText(page, '#runtime-config-body', /Couldn't load \/v1\/config/, 'Runtime config should render its graceful failure copy');
+      await page.$('#runtime-config [data-rc-refresh]')
+        .then((handle) => { if (!handle) fail('Runtime config failure copy should offer a Retry button'); });
+
       await goToPrimaryTab(page, 'adapters');
       await expectApiFailurePanel(page, '#adapters-panel', 'Adapters', 'Adapters smoke failure from /v1/adapters');
       await goToPrimaryTab(page, 'training');
@@ -1515,6 +1632,10 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
         await recoverPanel('#server-status', /GPU VRAM/, 'Server status did not recover after the APIs healed');
         await page.waitForSelector('#server-status .vram-donut svg', { timeout: 5000 })
           .catch(() => fail('VRAM donut missing from recovered server status panel'));
+        // The expander's Retry refetches /v1/config (no poll loop covers it).
+        await page.click('#runtime-config [data-rc-refresh]')
+          .catch(() => fail('Could not click the runtime config Retry button after the APIs healed'));
+        await waitForPanelText(page, '#runtime-config-body', /nvidia-smi/, 'Runtime config did not recover after Retry');
         await recoverPanel('#decode-perf-panel', /No streaming completions/i, 'Decode panel did not recover after the APIs healed');
         await recoverPanel('#recent-requests-panel', /No recent requests yet\./, 'Recent requests did not recover after the APIs healed');
         await goToPrimaryTab(page, 'training');
@@ -1732,6 +1853,47 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       await rm(uploadFixtureDir, { recursive: true, force: true });
     }
 
+    // ---- Adapter receipt viewer in the drill modal: adapter-alpha carries
+    // a §8.11 receipt.json → provenance fields + raw-JSON toggle render; the
+    // just-uploaded adapter 404s → the graceful no-receipt copy renders and
+    // the rest of the modal is unaffected.
+    const openAdapterDrill = async (name) => {
+      const clicked = await page.evaluate((target) => {
+        const card = document.querySelector(`#adapters-panel .adapter-card[data-adapter-name="${target}"]`);
+        if (!card) return false;
+        card.click();
+        return true;
+      }, name);
+      if (!clicked) fail(`Could not find the adapter card for ${name}`);
+      await page.waitForFunction(() => document.getElementById('adapter-drill-modal')?.hidden === false, { timeout: 5000 })
+        .catch(() => fail(`Adapter drill modal did not open for ${name}`));
+    };
+    const closeAdapterDrill = async () => {
+      await clickAndWait(page, '#adapter-drill-close', 'Could not close the adapter drill modal');
+      await page.waitForFunction(() => document.getElementById('adapter-drill-modal')?.hidden === true, { timeout: 5000 })
+        .catch(() => fail('Adapter drill modal did not close'));
+    };
+
+    await openAdapterDrill('adapter-alpha');
+    await waitForPanelText(page, '#adapter-receipt-section', /Trained via/, 'Receipt section should render provenance for adapter-alpha');
+    await waitForPanelText(page, '#adapter-receipt-section', /opd/, 'Receipt should render the source kind');
+    await waitForPanelText(page, '#adapter-receipt-section', /kiln-canonical:math_reasoning:v3/, 'Receipt should render the dataset source');
+    await waitForPanelText(page, '#adapter-receipt-section', /128 prompts/, 'Receipt should render the prompt count');
+    await waitForPanelText(page, '#adapter-receipt-section', /qwen3\.6-27b@openrouter/, 'Receipt should render the teacher alias');
+    await waitForPanelText(page, '#adapter-receipt-section', /lora_rank/, 'Receipt should render key hyperparameters');
+    await clickAndWait(page, '#adapter-receipt-section [data-receipt-raw]', 'Could not toggle the receipt raw JSON');
+    const receiptRawShown = await page.$eval(
+      '#adapter-receipt-section [data-receipt-raw-pre]',
+      (el) => !el.hidden && /"schema_version"/.test(el.textContent || ''),
+    );
+    if (!receiptRawShown) fail('Receipt raw JSON toggle should reveal the pretty-printed receipt payload');
+    await closeAdapterDrill();
+
+    await openAdapterDrill('uploaded-smoke-adapter');
+    await waitForPanelText(page, '#adapter-receipt-section', /No receipt — uploaded or legacy adapter/, 'A 404 receipt should render the graceful no-receipt copy');
+    await waitForPanelText(page, '#adapter-drill-content', /Files on disk/, 'The drill modal body should render fine alongside a 404 receipt');
+    await closeAdapterDrill();
+
     page.once('dialog', async (dialog) => {
       if (!/Delete adapter "adapter-beta"\?/.test(dialog.message())) fail(`Unexpected delete confirmation text: ${dialog.message()}`);
       await dialog.accept();
@@ -1786,10 +1948,38 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await waitForPanelText(page, '#decode-perf-panel', /No streaming completions/i, 'Empty decode performance state missing');
     await expectPanelLink(page, '#decode-perf-panel', '/health', '/health');
 
+    // ---- Hidden diagnostics: Prometheus /metrics line in the Connect panel
+    // with a live-origin scrape config behind the standard copy button.
+    await waitForPanelText(page, '#connect-metrics', /Prometheus metrics at/, 'Connect panel missing the /metrics line');
+    await expectPanelLink(page, '#connect-metrics', '/metrics', '/metrics');
+    const scrapeSnippet = await page.$eval('#connect-metrics-snippet', (el) => el.innerText || '');
+    if (!scrapeSnippet.includes(`targets: ["${new URL(baseUrl).host}"]`)) {
+      fail(`Prometheus scrape config should target the live origin, got: ${JSON.stringify(scrapeSnippet)}`);
+    }
+    if (!(await page.$('#connect-metrics [data-copy-code]'))) fail('Prometheus scrape config snippet missing its copy button');
+
+    // ---- Hidden diagnostics: the runtime-config expander on the Server
+    // status card fetches GET /v1/config on first open and renders the real
+    // ConfigResponse fields (VRAM detection, KV cache geometry, budgets).
+    await clickAndWait(page, '#runtime-config > summary', 'Could not open the runtime config expander');
+    await waitForPanelText(page, '#runtime-config-body', /nvidia-smi/, 'Runtime config should render the VRAM detection source');
+    await waitForPanelText(page, '#runtime-config-body', /25\.8 GB/, 'Runtime config should render detected VRAM');
+    await waitForPanelText(page, '#runtime-config-body', /1,024/, 'Runtime config should render the KV cache block count');
+    await waitForPanelText(page, '#runtime-config-body', /FP8 cache/, 'Runtime config should render the fp8 cache mode');
+    await waitForPanelText(page, '#runtime-config-body', /Training reserve/, 'Runtime config should render the memory budget rows');
+    await clickAndWait(page, '#runtime-config [data-rc-raw]', 'Could not toggle the runtime config raw JSON');
+    const configRawShown = await page.$eval(
+      '#runtime-config [data-rc-raw-pre]',
+      (el) => !el.hidden && /"memory_budget"/.test(el.textContent || ''),
+    );
+    if (!configRawShown) fail('Runtime config raw JSON toggle should reveal the pretty-printed /v1/config payload');
+
     // Regression (the "pie chart disappears" bug): the VRAM donut and header
     // stats must survive subsequent 2s health polls. The donut used to render
     // once, then renderServerStatus clobbered the panel while the donut
     // refresher's dedupe key skipped re-appending it — gone until reload.
+    // The mock /health cycles scheduler.blocks_used, so every poll below is
+    // a REAL innerHTML repaint of #server-status, not a deduped no-op.
     await page.waitForSelector('#server-status .vram-donut svg', { timeout: 5000 })
       .catch(() => fail('VRAM donut should render in the server status panel'));
     await new Promise((resolve) => setTimeout(resolve, 5200)); // sit through ≥2 health polls
@@ -1798,11 +1988,17 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       svg: Boolean(document.querySelector('#server-status .vram-donut svg')),
       model: document.getElementById('header-model')?.textContent || '',
       uptime: document.getElementById('header-uptime')?.textContent || '',
+      configOpen: document.getElementById('runtime-config')?.open === true,
+      configIntact: /nvidia-smi/.test(document.getElementById('runtime-config-body')?.textContent || ''),
     }));
     if (!overviewSteadyState.svg) fail('VRAM donut disappeared after subsequent health polls');
     if (overviewSteadyState.donuts !== 1) fail(`Expected exactly one VRAM donut, found ${overviewSteadyState.donuts}`);
     if (overviewSteadyState.model !== 'Qwen3.5-4B') fail(`Header model stat should render from /health, got "${overviewSteadyState.model}"`);
     if (!/^\d+[sm]/.test(overviewSteadyState.uptime)) fail(`Header uptime stat should render, got "${overviewSteadyState.uptime}"`);
+    // The expander is a static SIBLING of the keyed #server-status region —
+    // the ≥2 genuine repaints above must not close it or destroy its content.
+    if (!overviewSteadyState.configOpen) fail('Runtime config expander lost its open state across server-status repaints');
+    if (!overviewSteadyState.configIntact) fail('Runtime config content was destroyed by the server-status repaint');
 
     await goToPrimaryTab(page, 'playground');
     await waitForPanelText(page, '#chat-output', /Send a message to test inference\./, 'Quick Inference empty state missing');
