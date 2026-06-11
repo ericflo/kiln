@@ -38,6 +38,21 @@ fn finalize_job(state: &AppState, job_id: &str, new_state: TrainingState, error:
         }
     };
     let Some(job) = snapshot else { return };
+    // The corrections feed contract: rows consumed via the
+    // `corrections:active` dataset flip to trained_into only when the
+    // job actually COMPLETED — a failed/cancelled job leaves the basket
+    // intact so the hand-written ideals stay re-trainable.
+    if new_state == TrainingState::Completed && !job.consumed_correction_ids.is_empty() {
+        let store = crate::api::corrections::CorrectionsStore::for_state(state);
+        let marked =
+            store.mark_trained_into(&job.consumed_correction_ids, &job.adapter_name);
+        tracing::info!(
+            job_id = %job_id,
+            adapter = %job.adapter_name,
+            marked,
+            "corrections rows marked trained on job completion"
+        );
+    }
     if let Err(e) = training_history::save(&state.adapter_dir, &job) {
         tracing::warn!(error = %e, job_id = %job_id, "failed to archive terminal training job");
     }

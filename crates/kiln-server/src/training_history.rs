@@ -143,6 +143,7 @@ mod tests {
             submitted_at: std::time::Instant::now(),
             submitted_unix_ms: 1_000,
             auto_load: false,
+            consumed_correction_ids: Vec::new(),
             finished_at: None,
             finished_unix_ms: Some(2_000),
             error: None,

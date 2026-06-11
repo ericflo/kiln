@@ -598,6 +598,7 @@ mod tests {
                 submitted_at: std::time::Instant::now(),
                 submitted_unix_ms: crate::recent_requests::now_unix_ms(),
                 auto_load: true,
+                consumed_correction_ids: Vec::new(),
                 finished_at: None,
                 finished_unix_ms: None,
                 error: None,

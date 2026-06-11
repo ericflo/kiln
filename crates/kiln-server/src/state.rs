@@ -250,6 +250,12 @@ pub struct TrainingJobInfo {
     #[serde(default = "crate::recent_requests::now_unix_ms")]
     pub submitted_unix_ms: u64,
     pub auto_load: bool,
+    /// Correction-row request_ids this job consumed (the
+    /// `corrections:active` dataset). On COMPLETION — not submission —
+    /// the queue marks these rows trained_into the produced adapter, so
+    /// a failed job leaves the basket intact and re-trainable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consumed_correction_ids: Vec<String>,
     /// Wall-clock instant at which the job entered a terminal state
     /// (`Completed` or `Failed`). `None` while the job is still
     /// `Queued` or `Running`. Used by the training-queue worker's GC
