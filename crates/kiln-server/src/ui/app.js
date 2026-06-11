@@ -153,6 +153,10 @@ function selectPage(name, opts) {
     const active = t.dataset.page === name;
     t.classList.toggle('active', active);
     t.setAttribute('aria-selected', String(active));
+    // Roving tabindex lives here (not only in the wireTablist wrapper) so
+    // the MANY direct selectPage callers — boot, hashchange, quick actions,
+    // window.selectPage — keep exactly one nav tab in the Tab order.
+    t.tabIndex = active ? 0 : -1;
   });
   document.querySelectorAll('.page').forEach(p => {
     const active = p.id === 'page-' + name;
@@ -214,8 +218,11 @@ function refreshActiveEvalSubTab() {
   else if (active === 'judgments') refreshJudgments();
   else                             refreshDatasets(); // default sub-tab
 }
-document.querySelectorAll('.primary-tab').forEach(tab => {
-  tab.addEventListener('click', () => selectPage(tab.dataset.page));
+// Primary nav is a tablist too: clicks AND arrow/Home/End keys route
+// through selectPage (the existing nav click path), so history entries and
+// canonical #page/subtab hashes stay exactly as the click path mints them.
+wireTablist(document.querySelector('.primary-nav'), {
+  onSelect: tab => selectPage(tab.dataset.page),
 });
 // Prefer the URL hash (bookmarkable; first segment = page), then the user's
 // last tab from localStorage, then Overview. Sub-tab and drill-id segments
@@ -536,7 +543,9 @@ function renderConnectSnippets(active) {
   const snips = connectSnippets();
   host.innerHTML = Object.entries(snips).map(([key, s]) => {
     const pathLine = s.path ? `<div class="code-block-path">${escapeHtml(s.path)}</div>` : '';
-    return `<div class="connect-snippet${key === active ? ' active' : ''}" data-connect-pane="${key}">
+    // Tabpanel pairing mirrors the training tabs: the static tab buttons in
+    // index.html carry id="connect-tab-{key}" + aria-controls back at these.
+    return `<div class="connect-snippet${key === active ? ' active' : ''}" data-connect-pane="${key}" role="tabpanel" id="connect-snippet-${key}" aria-labelledby="connect-tab-${key}">
       <div class="connect-snippet-note">${s.note}</div>
       <div class="code-block">${pathLine}<button class="copy-btn" type="button" data-copy-code aria-label="Copy code"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg>Copy</button><pre>${renderHighlighted(s.code, s.lang)}</pre></div>
     </div>`;
@@ -573,6 +582,7 @@ function selectConnectTab(key) {
     const on = t.dataset.connectTab === key;
     t.classList.toggle('active', on);
     t.setAttribute('aria-selected', String(on));
+    t.tabIndex = on ? 0 : -1;
   });
   document.querySelectorAll('.connect-snippet').forEach(p => p.classList.toggle('active', p.dataset.connectPane === key));
 }
@@ -1270,7 +1280,9 @@ async function initConnect() {
   renderConnectMetricsSnippet();
   const tr = document.getElementById('connect-test-result');
   if (tr && !tr.textContent.trim()) tr.innerHTML = 'Once connected, your agent&rsquo;s calls stream into <strong>Recent requests</strong> below.';
-  document.querySelectorAll('.connect-tabs .tab').forEach(t => t.addEventListener('click', () => selectConnectTab(t.dataset.connectTab)));
+  wireTablist(document.querySelector('.connect-tabs'), {
+    onSelect: tab => selectConnectTab(tab.dataset.connectTab),
+  });
   document.getElementById('connect-panel')?.addEventListener('click', (e) => {
     const f = e.target.closest('[data-copy-target]');
     if (f) { copyText(document.getElementById(f.dataset.copyTarget)?.textContent || '', f); return; }
@@ -1339,6 +1351,59 @@ function announceStatus(id, msg) {
   el.textContent = (el.textContent === msg) ? msg + '\u00a0' : msg;
 }
 
+// --- Shared tablist wiring (roadmap PR 19) ---
+// One keyboard + click contract for every [role=tablist] in the dashboard:
+// ArrowRight/ArrowLeft wrap around, Home/End jump to the edges, and
+// selection FOLLOWS focus on arrow keys (automatic activation — matching
+// the original training-tabs behavior). Only [role=tab] descendants
+// participate: decorative children (the Distill group labels/separators)
+// are skipped by construction.
+//
+// The helper owns NO selection logic. onSelect(tab, { focus }) must route
+// to the tablist's existing select path (selectTrainingTab, selectEvalsTab,
+// the distill select fn, selectConnectTab, selectPage) so localStorage
+// restores, lazy refreshes, and the deep-link hash writes at the END of
+// those functions keep working unchanged. After onSelect runs, the roving
+// tabindex is re-asserted from aria-selected so tablists whose select fn
+// predates roving focus still end up with exactly one Tab stop.
+function wireTablist(root, { onSelect }) {
+  if (!root) return;
+  const tabsOf = () => Array.from(root.querySelectorAll('[role="tab"]'));
+  const applyRovingTabindex = () => {
+    tabsOf().forEach(t => { t.tabIndex = t.getAttribute('aria-selected') === 'true' ? 0 : -1; });
+  };
+  const select = (tab, focus) => {
+    onSelect(tab, { focus });
+    applyRovingTabindex();
+    if (focus) tab.focus();
+  };
+  root.addEventListener('click', event => {
+    const tab = event.target.closest('[role="tab"]');
+    if (!tab || !root.contains(tab)) return;
+    select(tab, false);
+  });
+  root.addEventListener('keydown', event => {
+    const tab = event.target.closest('[role="tab"]');
+    if (!tab) return;
+    const tabs = tabsOf();
+    const index = tabs.indexOf(tab);
+    if (index === -1) return;
+    let nextTab = null;
+    if (event.key === 'ArrowRight') nextTab = tabs[(index + 1) % tabs.length];
+    if (event.key === 'ArrowLeft') nextTab = tabs[(index - 1 + tabs.length) % tabs.length];
+    if (event.key === 'Home') nextTab = tabs[0];
+    if (event.key === 'End') nextTab = tabs[tabs.length - 1];
+    if (nextTab) {
+      event.preventDefault();
+      select(nextTab, true);
+    }
+  });
+  // Normalize the initial state: static markup without explicit tabindex
+  // attributes (Connect tabs, primary nav) starts with every tab in the
+  // Tab order — collapse that to the selected tab only.
+  applyRovingTabindex();
+}
+
 // --- Training Tabs ---
 function selectTrainingTab(tab, focus = false) {
   const panel = tab.closest('.card');
@@ -1363,21 +1428,8 @@ function selectTrainingTab(tab, focus = false) {
   pushSubTabHash('training');
 }
 
-document.querySelectorAll('[data-training-tabs] [role="tab"]').forEach(tab => {
-  tab.addEventListener('click', () => selectTrainingTab(tab));
-  tab.addEventListener('keydown', event => {
-    const tabs = Array.from(tab.closest('[role="tablist"]').querySelectorAll('[role="tab"]'));
-    const index = tabs.indexOf(tab);
-    let nextTab = null;
-    if (event.key === 'ArrowRight') nextTab = tabs[(index + 1) % tabs.length];
-    if (event.key === 'ArrowLeft') nextTab = tabs[(index - 1 + tabs.length) % tabs.length];
-    if (event.key === 'Home') nextTab = tabs[0];
-    if (event.key === 'End') nextTab = tabs[tabs.length - 1];
-    if (nextTab) {
-      event.preventDefault();
-      selectTrainingTab(nextTab, true);
-    }
-  });
+wireTablist(document.querySelector('[data-training-tabs]'), {
+  onSelect: (tab, { focus }) => selectTrainingTab(tab, focus),
 });
 
 // Restore last visited training sub-tab so users return to Submit SFT
@@ -5275,18 +5327,8 @@ function selectEvalsTab(tab, focus = false) {
   else if (which === 'jobs') refreshEvalJobs();
   else if (which === 'judgments') refreshJudgments();
 }
-document.querySelectorAll('[data-evals-tabs] [role="tab"]').forEach(tab => {
-  tab.addEventListener('click', () => selectEvalsTab(tab));
-  tab.addEventListener('keydown', event => {
-    const tabs = Array.from(tab.closest('[role="tablist"]').querySelectorAll('[role="tab"]'));
-    const index = tabs.indexOf(tab);
-    let nextTab = null;
-    if (event.key === 'ArrowRight') nextTab = tabs[(index + 1) % tabs.length];
-    if (event.key === 'ArrowLeft') nextTab = tabs[(index - 1 + tabs.length) % tabs.length];
-    if (event.key === 'Home') nextTab = tabs[0];
-    if (event.key === 'End') nextTab = tabs[tabs.length - 1];
-    if (nextTab) { event.preventDefault(); selectEvalsTab(nextTab, true); }
-  });
+wireTablist(document.querySelector('[data-evals-tabs]'), {
+  onSelect: (tab, { focus }) => selectEvalsTab(tab, focus),
 });
 
 // Restore the last visited eval sub-tab so users return to Jobs (or
@@ -9199,15 +9241,15 @@ setInterval(() => {
    ===================================================================== */
 
 // Sub-tab activation for the Distill page mirrors the evals/training
-// pattern: clicking a `.tab[data-tab="X"]` inside `[data-distill-tabs]`
+// pattern: selecting a `.tab[data-tab="X"]` inside `[data-distill-tabs]`
 // hides every `.tab-content` and shows the one with id
-// `distill-tab-X-pane`.
+// `distill-tab-X-pane`. Click + keyboard (arrow/Home/End) wiring comes
+// from the shared wireTablist helper, which skips the decorative
+// group-label/separator spans (they carry no role=tab).
 (function wireDistillTabs() {
   const root = document.querySelector('[data-distill-tabs]');
   if (!root) return;
-  root.addEventListener('click', (ev) => {
-    const btn = ev.target.closest('button.tab[data-tab]');
-    if (!btn) return;
+  function selectDistillTab(btn) {
     const wanted = btn.dataset.tab;
     root.querySelectorAll('.tab').forEach(t => {
       const active = t.dataset.tab === wanted;
@@ -9226,7 +9268,8 @@ setInterval(() => {
     // Deep-link hash for the sub-tab (no-op for hash-driven activation and
     // for the suppressed localStorage restore below).
     pushSubTabHash('distill');
-  });
+  }
+  wireTablist(root, { onSelect: selectDistillTab });
   // Restore the last-used sub-tab. Hash-suppressed: the no-hash fallback —
   // an explicit hash sub-tab is applied after this in the boot route pass.
   try {

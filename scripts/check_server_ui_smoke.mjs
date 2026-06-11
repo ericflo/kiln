@@ -2173,6 +2173,130 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await page.goBack();
     await expectActivePageAndHash(page, 'evals', 'Back after a junk hash should land on Evals — #nonsense must not pollute history', '#evals/datasets');
 
+    // --- Shared tablist keyboard contract (roadmap PR 19): every
+    // [role=tablist] — primary nav, training (asserted separately via
+    // expectTrainingTabKeyboardNavigation), evals, distill, Connect —
+    // answers ArrowLeft/ArrowRight/Home/End with automatic activation
+    // (selection follows focus) and a roving tabindex. ---
+
+    // Primary nav: arrows walk the pages through the same selectPage click
+    // path, so pages activate AND the canonical hashes get minted.
+    await goToPrimaryTab(page, 'overview');
+    await expectActivePageAndHash(page, 'overview', 'Primary-nav keyboard checks should start from Overview');
+    await page.focus('#primary-tab-overview');
+    await page.keyboard.press('ArrowRight');
+    await expectActivePageAndHash(page, 'adapters', 'ArrowRight on the primary nav should activate the Adapters page with its hash');
+    const navArrowState = await page.evaluate(() => ({
+      focused: document.activeElement?.id || null,
+      adaptersTabIndex: document.getElementById('primary-tab-adapters')?.tabIndex,
+      overviewTabIndex: document.getElementById('primary-tab-overview')?.tabIndex,
+    }));
+    if (navArrowState.focused !== 'primary-tab-adapters') fail(`ArrowRight should move focus to the Adapters nav tab, got ${navArrowState.focused}`);
+    if (navArrowState.adaptersTabIndex !== 0 || navArrowState.overviewTabIndex !== -1) {
+      fail(`Primary-nav roving tabindex should follow selection, got adapters=${navArrowState.adaptersTabIndex} overview=${navArrowState.overviewTabIndex}`);
+    }
+    await page.keyboard.press('ArrowLeft');
+    await expectActivePageAndHash(page, 'overview', 'ArrowLeft on the primary nav should return to Overview');
+    await page.keyboard.press('End');
+    await expectActivePageAndHash(page, 'terminal', 'End on the primary nav should jump to the last page (pi Terminal)');
+    await page.keyboard.press('Home');
+    await expectActivePageAndHash(page, 'overview', 'Home on the primary nav should jump back to Overview');
+
+    // Connect panel tabs: the JS-rendered snippet panes carry real tabpanel
+    // semantics paired to the tab button ids, and arrows walk the clients.
+    // (Earlier journey-strip traffic auto-collapsed the panel — re-expand.)
+    await page.evaluate(() => window.openConnect());
+    await page.waitForFunction(() => document.getElementById('connect-expanded')?.hidden === false, { timeout: 5000 })
+      .catch(() => fail('Connect panel did not expand for the tablist keyboard checks'));
+    const connectPaneAria = await page.evaluate(() => Array.from(document.querySelectorAll('.connect-snippet')).map((pane) => ({
+      key: pane.dataset.connectPane,
+      role: pane.getAttribute('role'),
+      id: pane.id,
+      labelledby: pane.getAttribute('aria-labelledby'),
+      tabControls: document.getElementById(`connect-tab-${pane.dataset.connectPane}`)?.getAttribute('aria-controls'),
+    })));
+    if (connectPaneAria.length === 0) fail('Connect snippet panes did not render');
+    for (const pane of connectPaneAria) {
+      if (pane.role !== 'tabpanel') fail(`Connect pane ${pane.key} should carry role=tabpanel, got ${JSON.stringify(pane.role)}`);
+      if (pane.labelledby !== `connect-tab-${pane.key}`) fail(`Connect pane ${pane.key} aria-labelledby should point at its tab, got ${JSON.stringify(pane.labelledby)}`);
+      if (pane.tabControls !== pane.id) fail(`Connect tab ${pane.key} aria-controls should point at its pane id ${pane.id}, got ${JSON.stringify(pane.tabControls)}`);
+    }
+    await clickAndWait(page, '#connect-tab-pi', 'Could not activate the pi connect tab before keyboard checks');
+    await page.focus('#connect-tab-pi');
+    await page.keyboard.press('ArrowRight');
+    const connectArrowState = await page.evaluate(() => ({
+      selected: document.getElementById('connect-tab-opencode')?.getAttribute('aria-selected'),
+      focused: document.activeElement?.id || null,
+      tabIndex: document.getElementById('connect-tab-opencode')?.tabIndex,
+      piTabIndex: document.getElementById('connect-tab-pi')?.tabIndex,
+      paneActive: !!document.getElementById('connect-snippet-opencode')?.classList.contains('active'),
+      paneVisible: (() => {
+        const rect = document.getElementById('connect-snippet-opencode')?.getBoundingClientRect();
+        return Boolean(rect && rect.width > 0 && rect.height > 0);
+      })(),
+    }));
+    if (connectArrowState.selected !== 'true') fail(`ArrowRight should select the opencode connect tab, aria-selected=${connectArrowState.selected}`);
+    if (connectArrowState.focused !== 'connect-tab-opencode') fail(`ArrowRight should focus the opencode connect tab, got ${connectArrowState.focused}`);
+    if (connectArrowState.tabIndex !== 0 || connectArrowState.piTabIndex !== -1) {
+      fail(`Connect-tabs roving tabindex should follow selection, got opencode=${connectArrowState.tabIndex} pi=${connectArrowState.piTabIndex}`);
+    }
+    if (!connectArrowState.paneActive || !connectArrowState.paneVisible) fail('ArrowRight should reveal the opencode snippet pane');
+    await page.keyboard.press('Home');
+    const connectHomeState = await page.evaluate(() => ({
+      selected: document.getElementById('connect-tab-pi')?.getAttribute('aria-selected'),
+      paneActive: !!document.getElementById('connect-snippet-pi')?.classList.contains('active'),
+    }));
+    if (connectHomeState.selected !== 'true' || !connectHomeState.paneActive) fail('Home should return the connect tabs to pi with its pane visible');
+
+    // Distill: the headline fix. Its 11 sub-tabs were completely
+    // unreachable by keyboard (roving tabindex=-1 with no arrow-key
+    // handler). Arrows now activate them, the decorative group
+    // labels/separators inside the tablist are skipped, and — per the
+    // deep-link wiring — every keyboard activation mints #distill/<tab>.
+    await goToPrimaryTab(page, 'distill');
+    await clickAndWait(page, '#distill-tab-opd', 'Could not activate the Distill (OPD) tab before keyboard checks');
+    await page.focus('#distill-tab-opd');
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('ArrowRight');
+    await expectActivePageAndHash(page, 'distill', 'ArrowRight x2 from Distill should select the third tab (Boost) and mint its deep-link hash', '#distill/pump');
+    const distillBoostState = await page.evaluate(() => {
+      const tab = document.getElementById('distill-tab-pump');
+      const pane = document.getElementById('distill-tab-pump-pane');
+      const rect = pane?.getBoundingClientRect();
+      return {
+        selected: tab?.getAttribute('aria-selected'),
+        focused: document.activeElement === tab,
+        tabIndex: tab?.tabIndex,
+        opdSelected: document.getElementById('distill-tab-opd')?.getAttribute('aria-selected'),
+        opdTabIndex: document.getElementById('distill-tab-opd')?.tabIndex,
+        paneHidden: Boolean(pane?.hidden),
+        paneVisible: Boolean(rect && rect.width > 0 && rect.height > 0),
+      };
+    });
+    if (distillBoostState.selected !== 'true') fail(`ArrowRight x2 should select the Boost tab, aria-selected=${distillBoostState.selected}`);
+    if (!distillBoostState.focused) fail('Boost tab should hold keyboard focus after arrow navigation');
+    if (distillBoostState.tabIndex !== 0 || distillBoostState.opdTabIndex !== -1) {
+      fail(`Distill roving tabindex should follow selection, got pump=${distillBoostState.tabIndex} opd=${distillBoostState.opdTabIndex}`);
+    }
+    if (distillBoostState.opdSelected !== 'false') fail('OPD tab should deselect when Boost activates');
+    if (distillBoostState.paneHidden || !distillBoostState.paneVisible) fail('Boost pane should be visible after arrow-key activation');
+    // Crossing a group boundary: Merge → Teachers skips the decorative
+    // label/separator spans inside the tablist.
+    await clickAndWait(page, '#distill-tab-merge', 'Could not activate the Merge distill tab');
+    await page.focus('#distill-tab-merge');
+    await page.keyboard.press('ArrowRight');
+    await expectActivePageAndHash(page, 'distill', 'ArrowRight from Merge should skip the group label/separator spans and land on Teachers', '#distill/teachers');
+    await page.keyboard.press('End');
+    await expectActivePageAndHash(page, 'distill', 'End should jump to the last distill tab (Agent traces)', '#distill/traces');
+    const tracesPaneVisible = await page.evaluate(() => {
+      const pane = document.getElementById('distill-tab-traces-pane');
+      const rect = pane?.getBoundingClientRect();
+      return Boolean(pane && !pane.hidden && rect && rect.width > 0 && rect.height > 0);
+    });
+    if (!tracesPaneVisible) fail('End should reveal the Agent traces pane');
+    await page.keyboard.press('Home');
+    await expectActivePageAndHash(page, 'distill', 'Home should jump back to the first distill tab', '#distill/opd');
+
     await goToPrimaryTab(page, 'adapters');
     await waitForPanelText(page, '#adapters-panel', /adapter-alpha/, 'Adapter list should show the first smoke adapter');
     await waitForPanelText(page, '#adapters-panel', /adapter-beta/, 'Adapter list should show the second smoke adapter');
