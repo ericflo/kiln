@@ -434,6 +434,7 @@ fn main() -> Result<()> {
             progress.progress,
             current_vram_mib()
         );
+        kiln_train::trainer::TrainControl::Continue
     }) as kiln_train::trainer::ProgressCallback);
 
     let result = match args.trainer {

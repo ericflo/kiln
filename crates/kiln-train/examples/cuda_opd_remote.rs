@@ -339,6 +339,7 @@ fn main() -> Result<()> {
             p.loss,
             current_vram_mib()
         );
+        kiln_train::trainer::TrainControl::Continue
     }) as kiln_train::trainer::ProgressCallback);
 
     let out = opd_train(
