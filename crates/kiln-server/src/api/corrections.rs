@@ -113,54 +113,82 @@ impl CorrectionsStore {
             .map_err(|e| format!("{e}"))
     }
 
+    /// Locked read-modify-write over the whole store. EVERY mutation goes
+    /// through here: the file lock covers the read AND the write, so two
+    /// concurrent mutators (the training worker's completion-time
+    /// mark_trained_into vs a dashboard upsert) merge instead of the
+    /// later write_all clobbering the earlier one — the exact lost-update
+    /// race the old unlocked list() → write_all() pattern had.
+    fn locked_mutate<R>(
+        &self,
+        mutate: impl FnOnce(&mut Vec<CorrectionRow>) -> R,
+    ) -> Result<R, String> {
+        std::fs::create_dir_all(&self.dir).map_err(|e| format!("{e}"))?;
+        let mut result: Option<R> = None;
+        kiln_resource::locked_update(&self.data_path(), |existing| {
+            let mut rows: Vec<CorrectionRow> = existing
+                .map(|bytes| {
+                    String::from_utf8_lossy(bytes)
+                        .lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .filter_map(|l| serde_json::from_str::<CorrectionRow>(l).ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            result = Some(mutate(&mut rows));
+            let mut body = String::new();
+            for row in &rows {
+                body.push_str(&serde_json::to_string(row).map_err(std::io::Error::other)?);
+                body.push('\n');
+            }
+            Ok(body.into_bytes())
+        })
+        .map_err(|e| format!("{e}"))?;
+        result.ok_or_else(|| "corrections locked_mutate: closure did not run".to_string())
+    }
+
     /// Insert or update by `request_id`. First insert stamps `created_at`;
     /// updates preserve it (and `trained_*` unless the caller sets them).
     pub fn upsert(&self, mut row: CorrectionRow) -> Result<CorrectionRow, String> {
-        let mut rows = self.list();
-        match rows.iter_mut().find(|r| r.request_id == row.request_id) {
-            Some(existing) => {
-                if row.created_at.is_empty() {
-                    row.created_at = existing.created_at.clone();
+        self.locked_mutate(move |rows| {
+            match rows.iter_mut().find(|r| r.request_id == row.request_id) {
+                Some(existing) => {
+                    if row.created_at.is_empty() {
+                        row.created_at = existing.created_at.clone();
+                    }
+                    if row.trained_into.is_none() {
+                        row.trained_into = existing.trained_into.clone();
+                        row.trained_at = existing.trained_at.clone();
+                    }
+                    *existing = row.clone();
                 }
-                if row.trained_into.is_none() {
-                    row.trained_into = existing.trained_into.clone();
-                    row.trained_at = existing.trained_at.clone();
+                None => {
+                    if row.created_at.is_empty() {
+                        row.created_at = chrono::Utc::now().to_rfc3339();
+                    }
+                    rows.insert(0, row.clone());
                 }
-                *existing = row.clone();
             }
-            None => {
-                if row.created_at.is_empty() {
-                    row.created_at = chrono::Utc::now().to_rfc3339();
-                }
-                rows.insert(0, row.clone());
-            }
-        }
-        self.write_all(&rows)?;
-        Ok(row)
+            row
+        })
     }
 
     pub fn remove(&self, request_id: &str) -> Result<bool, String> {
-        let mut rows = self.list();
-        let before = rows.len();
-        rows.retain(|r| r.request_id != request_id);
-        let removed = rows.len() < before;
-        if removed {
-            self.write_all(&rows)?;
-        }
-        Ok(removed)
+        self.locked_mutate(|rows| {
+            let before = rows.len();
+            rows.retain(|r| r.request_id != request_id);
+            rows.len() < before
+        })
     }
 
     /// Remove every ACTIVE (untrained) row. Trained rows are history and
     /// survive a basket clear.
     pub fn clear_active(&self) -> Result<usize, String> {
-        let mut rows = self.list();
-        let before = rows.len();
-        rows.retain(|r| r.trained_into.is_some());
-        let removed = before - rows.len();
-        if removed > 0 {
-            self.write_all(&rows)?;
-        }
-        Ok(removed)
+        self.locked_mutate(|rows| {
+            let before = rows.len();
+            rows.retain(|r| r.trained_into.is_some());
+            before - rows.len()
+        })
     }
 }
 
@@ -279,23 +307,24 @@ impl CorrectionsStore {
     /// job COMPLETION (not submission), so failed jobs leave the basket
     /// intact. Returns how many rows flipped.
     pub fn mark_trained_into(&self, request_ids: &[String], adapter: &str) -> usize {
-        let mut rows = self.list();
         let now = chrono::Utc::now().to_rfc3339();
-        let mut marked = 0usize;
-        for row in rows.iter_mut() {
-            if request_ids.iter().any(|id| id == &row.request_id) {
-                row.trained_into = Some(adapter.to_string());
-                row.trained_at = Some(now.clone());
-                marked += 1;
+        match self.locked_mutate(|rows| {
+            let mut marked = 0usize;
+            for row in rows.iter_mut() {
+                if request_ids.iter().any(|id| id == &row.request_id) {
+                    row.trained_into = Some(adapter.to_string());
+                    row.trained_at = Some(now.clone());
+                    marked += 1;
+                }
+            }
+            marked
+        }) {
+            Ok(marked) => marked,
+            Err(e) => {
+                tracing::warn!(error = %e, "corrections store: mark_trained_into failed");
+                0
             }
         }
-        if marked > 0 {
-            if let Err(e) = self.write_all(&rows) {
-                tracing::warn!(error = %e, "corrections store: mark_trained_into write failed");
-                return 0;
-            }
-        }
-        marked
     }
 }
 
@@ -304,21 +333,9 @@ async fn mark_trained(
     Json(req): Json<MarkTrainedRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let store = CorrectionsStore::for_state(&state);
-    let mut rows = store.list();
-    let now = chrono::Utc::now().to_rfc3339();
-    let mut marked = 0usize;
-    for row in rows.iter_mut() {
-        if req.request_ids.iter().any(|id| id == &row.request_id) {
-            row.trained_into = Some(req.adapter.clone());
-            row.trained_at = Some(now.clone());
-            marked += 1;
-        }
-    }
-    if marked > 0 {
-        store
-            .write_all(&rows)
-            .map_err(|e| ApiError::internal(format!("corrections store: {e}")))?;
-    }
+    // Locked RMW — this route races the training worker's
+    // completion-time marking and dashboard upserts.
+    let marked = store.mark_trained_into(&req.request_ids, &req.adapter);
     Ok(Json(serde_json::json!({ "status": "marked", "marked": marked })))
 }
 
@@ -467,5 +484,52 @@ mod tests {
         // …and the next feed no longer includes them.
         let (ids2, _) = store.trainable_rows();
         assert!(ids2.is_empty());
+    }
+    /// The lost-update race (round-5 discovery): a training-worker
+    /// mark_trained_into racing a dashboard upsert must merge — the old
+    /// unlocked list() → write_all() pattern dropped one side.
+    #[test]
+    fn concurrent_upsert_and_mark_trained_merge() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(CorrectionsStore {
+            dir: dir.path().to_path_buf(),
+        });
+        let row = |id: &str| CorrectionRow {
+            request_id: id.to_string(),
+            agent: "pi".to_string(),
+            adapter: None,
+            user: format!("prompt {id}"),
+            original: "wrong".to_string(),
+            ideal: "right".to_string(),
+            truncated: false,
+            created_at: String::new(),
+            trained_into: None,
+            trained_at: None,
+        };
+        store.upsert(row("seed")).unwrap();
+
+        let s1 = store.clone();
+        let mark = std::thread::spawn(move || {
+            for _ in 0..50 {
+                s1.mark_trained_into(&["seed".to_string()], "fixes-v1");
+            }
+        });
+        let s2 = store.clone();
+        let upserts = std::thread::spawn(move || {
+            for i in 0..50 {
+                s2.upsert(row(&format!("new-{i}"))).unwrap();
+            }
+        });
+        mark.join().unwrap();
+        upserts.join().unwrap();
+
+        let rows = store.list();
+        assert_eq!(rows.len(), 51, "no upsert may be lost");
+        let seed = rows.iter().find(|r| r.request_id == "seed").unwrap();
+        assert_eq!(
+            seed.trained_into.as_deref(),
+            Some("fixes-v1"),
+            "the trained marker must survive concurrent upserts"
+        );
     }
 }
