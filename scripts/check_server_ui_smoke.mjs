@@ -249,6 +249,92 @@ function parseAdapterRoute(pathname) {
   return { name: decodeURIComponent(match[1]), action: match[2] || null };
 }
 
+// Mirrors api/eval.rs upload_dataset: multipart fields `name`, `format`
+// (sft_chat | grpo_groups | raw), optional `description`, and `file` whose
+// every JSONL line must parse into the SftConversation contract — messages[]
+// of { role, content?, tool_calls?, name?, tool_call_id? }.
+function validateEvalDatasetUploadRequest(req, body) {
+  if (req.method !== 'POST') return { status: 405, detail: 'Use POST for dataset upload' };
+  const contentType = req.headers['content-type'] || '';
+  if (!/^multipart\/form-data\b/i.test(contentType)) {
+    return { status: 400, detail: 'Dataset upload should use multipart/form-data' };
+  }
+  const parts = parseMultipartFormData(contentType, body);
+  if (!parts) return { status: 400, detail: 'Dataset upload should include a multipart boundary' };
+  const name = parts.find((part) => part.name === 'name')?.content.toString('utf8').trim();
+  const format = parts.find((part) => part.name === 'format')?.content.toString('utf8').trim() || 'sft_chat';
+  const description = parts.find((part) => part.name === 'description')?.content.toString('utf8') || null;
+  const file = parts.find((part) => part.name === 'file');
+  if (!isPathSafeAdapterDirectoryName(name) || name.includes('..')) return { status: 400, detail: 'Dataset name should be path-safe' };
+  if (!['sft_chat', 'sft', 'grpo_groups', 'grpo', 'raw'].includes(format)) return { status: 400, detail: `unknown format \`${format}\`` };
+  if (!file) return { status: 400, detail: 'Dataset upload should include a file field' };
+  const jsonl = file.content.toString('utf8');
+  const lines = jsonl.split('\n').filter((line) => line.trim().length > 0);
+  if (lines.length === 0) return { status: 400, detail: 'Dataset file should contain at least one JSONL row' };
+  const stats = {
+    num_assistant_turns: 0,
+    num_with_tool_calls: 0,
+    num_tool_messages: 0,
+    max_messages_per_conv: 0,
+    max_content_chars: 0,
+    avg_messages_per_conv: 0,
+    sample_role_patterns: [],
+  };
+  let totalMessages = 0;
+  if (format !== 'raw') {
+    for (const [index, line] of lines.entries()) {
+      let row;
+      try {
+        row = JSON.parse(line);
+      } catch (error) {
+        return { status: 400, detail: `line ${index + 1} is not valid JSON: ${error.message}` };
+      }
+      if (!Array.isArray(row.messages) || row.messages.length === 0) {
+        return { status: 400, detail: `line ${index + 1} should have a non-empty messages array` };
+      }
+      for (const message of row.messages) {
+        if (typeof message.role !== 'string' || message.role.length === 0) {
+          return { status: 400, detail: `line ${index + 1} has a message without a string role` };
+        }
+        if (message.content !== undefined && typeof message.content !== 'string') {
+          return { status: 400, detail: `line ${index + 1} has a non-string content field` };
+        }
+        if (message.tool_calls !== undefined && !Array.isArray(message.tool_calls)) {
+          return { status: 400, detail: `line ${index + 1} has a non-array tool_calls field` };
+        }
+        if (message.role === 'tool' && typeof message.tool_call_id !== 'string') {
+          return { status: 400, detail: `line ${index + 1} has a tool reply without tool_call_id` };
+        }
+        if (message.role === 'assistant') {
+          stats.num_assistant_turns += 1;
+          if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) stats.num_with_tool_calls += 1;
+        }
+        if (message.role === 'tool') stats.num_tool_messages += 1;
+        stats.max_content_chars = Math.max(stats.max_content_chars, (message.content || '').length);
+      }
+      totalMessages += row.messages.length;
+      stats.max_messages_per_conv = Math.max(stats.max_messages_per_conv, row.messages.length);
+      if (stats.sample_role_patterns.length < 5) {
+        stats.sample_role_patterns.push(row.messages.map((message) => message.role).join(' '));
+      }
+    }
+    stats.avg_messages_per_conv = totalMessages / lines.length;
+  }
+  const now = new Date().toISOString();
+  return {
+    manifest: {
+      name,
+      format: format === 'sft' ? 'sft_chat' : format === 'grpo' ? 'grpo_groups' : format,
+      description,
+      num_rows: lines.length,
+      size_bytes: file.content.length,
+      created_at: now,
+      updated_at: now,
+      stats,
+    },
+  };
+}
+
 const defaultAvailableAdapters = [
   { name: 'adapter-alpha', active: false, size_bytes: 4096 },
   { name: 'adapter-beta', active: false, size_bytes: 8192 },
@@ -284,6 +370,10 @@ async function startServer({ failDashboardApis = false, availableAdapters = defa
   // `completedTrainingJobs` as Failed("cancelled by user"), exactly like
   // the trainer aborting at the next step boundary.
   let runningTrainingJob = null;
+  // Eval datasets created through POST /v1/eval/datasets/upload (the
+  // "Try a sample dataset" golden path) — GET /v1/eval/datasets reflects
+  // them so the Datasets list refresh after upload is observable.
+  const uploadedEvalDatasets = [];
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://127.0.0.1');
     const adapterRoute = parseAdapterRoute(url.pathname);
@@ -640,7 +730,30 @@ async function startServer({ failDashboardApis = false, availableAdapters = defa
       return;
     }
     if (url.pathname === '/v1/eval/datasets') {
-      json(res, { datasets: [] });
+      json(res, { datasets: uploadedEvalDatasets });
+      return;
+    }
+    // Mirrors api/eval.rs upload_dataset: multipart in, DatasetManifest out
+    // (the manifest JSON is the entire response body, not an envelope).
+    if (url.pathname === '/v1/eval/datasets/upload') {
+      const body = await readBufferBody(req);
+      const result = validateEvalDatasetUploadRequest(req, body);
+      if (result.detail) {
+        res.writeHead(result.status, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: { code: 'dataset_invalid', message: result.detail, hint: '' } }));
+        return;
+      }
+      if (uploadedEvalDatasets.some((dataset) => dataset.name === result.manifest.name)) {
+        res.writeHead(409, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: {
+          code: 'dataset_exists',
+          message: `Eval dataset '${result.manifest.name}' already exists`,
+          hint: 'Delete or rename the existing dataset, or use a different name.',
+        } }));
+        return;
+      }
+      uploadedEvalDatasets.push(result.manifest);
+      json(res, result.manifest);
       return;
     }
     if (url.pathname === '/v1/judgments') {
@@ -1416,6 +1529,56 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await clickAndWait(page, '#chat-clear', 'Could not click Quick Inference clear');
     await waitForPanelText(page, '#chat-output', /Send a message to test inference\./, 'Quick Inference clear should restore the empty state');
     await expectDisabled(page, '#copy-chat-response', true, 'Copy response should disable after clearing chat');
+
+    // ---- Evals golden path: a first-five-minutes user with no data must not
+    // dead-end. Suites empty state routes to Datasets (no raw-API copy);
+    // Datasets empty state offers a one-click sample upload through the real
+    // endpoint, then hands off to suite synthesis.
+    await goToPrimaryTab(page, 'evals');
+    await clickAndWait(page, '#evals-tab-suites', 'Could not open the Suites sub-tab');
+    await waitForPanelText(page, '#suites-list', /No eval suites yet/, 'Suites empty state missing');
+    await waitForPanelText(page, '#suites-list', /report card/, 'Suites empty state should explain suites in plain language');
+    const suitesEmptyText = await page.$eval('#suites-list', (el) => el.textContent || '');
+    if (/POST|\/v1\/eval\/suites/.test(suitesEmptyText)) fail('Suites empty state should not surface raw API instructions in primary copy');
+    const suitesCtaTitle = await page.$eval('#suites-list .eval-empty-cta', (el) => el.title).catch(() => '');
+    if (!suitesCtaTitle.includes('/v1/eval/suites')) fail('Suites empty-state CTA should keep the API mention as a title for power users');
+    await clickAndWait(page, '#suites-list .eval-empty-cta', 'Could not click the suites empty-state CTA');
+    await waitForVisiblePanel(page, '#tab-evals-datasets', 'Suites empty-state CTA should land on the Datasets sub-tab');
+
+    await waitForPanelText(page, '#datasets-list', /No datasets yet/, 'Datasets empty state missing');
+    await waitForPanelText(page, '#datasets-list', /Try a sample dataset/, 'Datasets empty state should offer the sample dataset CTA');
+    await expectDisabled(page, '#dataset-from-corrections', true, 'Corrections dataset CTA should be disabled while the basket is empty');
+    const corrCtaHint = await page.$eval('#dataset-from-corrections', (el) => el.title);
+    if (!/write the ideal answer/i.test(corrCtaHint)) fail(`Disabled corrections CTA should explain what unlocks it, got: ${JSON.stringify(corrCtaHint)}`);
+
+    const sampleUploadRequestPromise = page.waitForRequest(
+      (request) => request.method() === 'POST' && request.url().endsWith('/v1/eval/datasets/upload'),
+      { timeout: 5000 },
+    );
+    const sampleUploadResponsePromise = page.waitForResponse(
+      (response) => response.url().endsWith('/v1/eval/datasets/upload'),
+      { timeout: 5000 },
+    );
+    await clickAndWait(page, '#use-sample-dataset', 'Could not click Try a sample dataset');
+    await sampleUploadRequestPromise.catch(() => fail('Try a sample dataset did not POST /v1/eval/datasets/upload'));
+    const sampleUploadResponse = await sampleUploadResponsePromise.catch(() => fail('Sample dataset upload got no response'));
+    if (sampleUploadResponse.status() !== 200) {
+      const detail = await sampleUploadResponse.text().catch(() => '');
+      fail(`Sample dataset upload should return 200 (mock validates every JSONL row against the SftConversation contract), got ${sampleUploadResponse.status()}: ${detail}`);
+    }
+    await expectTrainingToast(page, 'Sample dataset added (10 rows) — next: synthesize an eval suite from it');
+    await waitForPanelText(page, '#datasets-list', /sample-coding-agent/, 'Datasets list should refresh with the uploaded sample');
+    // The handoff lands on the next step of the golden path: the synthesize
+    // panel, pre-filled from the sample dataset.
+    await page.waitForFunction(
+      () => {
+        const panel = document.getElementById('synthesize-panel');
+        return panel && !panel.hidden;
+      },
+      { timeout: 5000 },
+    ).catch(() => fail('Sample upload should open the synthesize panel (create a suite is the next step)'));
+    const synthSuiteName = await page.$eval('#synth-suite-name', (el) => el.value);
+    if (synthSuiteName !== 'sample-coding-agent-eval') fail(`Synthesize panel should pre-fill the suite name from the sample dataset, got ${JSON.stringify(synthSuiteName)}`);
 
   } finally {
     await browser.close();

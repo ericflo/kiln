@@ -2411,6 +2411,10 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
   font-size: var(--text-sm);
 }
 .eval-empty .eval-empty-cta:hover { background: var(--accent-hover); }
+/* Disabled CTA (e.g. "Build a dataset from your corrections" with an empty
+   basket) stays visible-but-quiet; the title attribute explains what unlocks it. */
+.eval-empty .eval-empty-cta:disabled { opacity: 0.55; cursor: not-allowed; }
+.eval-empty .eval-empty-cta:disabled:hover { background: var(--accent); }
 
 /* Tag chips */
 .tag-chip {
