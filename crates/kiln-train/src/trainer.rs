@@ -1275,6 +1275,7 @@ impl TrainableLoraParams {
 
         LoraWeights {
             layers,
+            mtp: None,
             rank: self.rank,
             alpha: self.alpha,
             scale: self.scale,
@@ -5920,6 +5921,7 @@ fn lora_snapshot_capture_or_blend(
         .collect::<Result<Vec<_>>>()?;
     Ok(LoraWeights {
         layers,
+        mtp: None,
         rank: current.rank,
         alpha: current.alpha,
         scale: current.scale,
@@ -7850,6 +7852,7 @@ pub(crate) fn lora_weights_detached(params: &TrainableLoraParams) -> LoraWeights
 
     LoraWeights {
         layers,
+        mtp: None,
         rank: params.rank,
         alpha: params.alpha,
         scale: params.scale,

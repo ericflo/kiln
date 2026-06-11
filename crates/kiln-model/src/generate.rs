@@ -6651,6 +6651,7 @@ impl ModelRunner {
                 params,
                 &self.eos_token_ids,
                 &mut rng,
+                self.active_lora.as_ref(),
             );
             crate::mtp_debug::clear_h_main_replay_prefix_tokens();
             let result = result.context("mtp speculative decode step failed")?;
@@ -7077,6 +7078,7 @@ impl ModelRunner {
                 params,
                 &self.eos_token_ids,
                 &mut rng,
+                self.active_lora.as_ref(),
             );
             crate::mtp_debug::clear_h_main_replay_prefix_tokens();
             let result = result.context("mtp speculative decode step failed")?;

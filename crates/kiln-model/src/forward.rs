@@ -26592,6 +26592,7 @@ pub fn mtp_forward_step(
     mtp_block_table: &BlockTable,
     base_pos: usize,
     mtp_pos: usize,
+    lora: Option<&crate::lora_loader::LoraWeights>,
 ) -> Result<(Tensor, Tensor)> {
     kiln_nvtx::range!(c"kiln/mtp/step");
     let mtp = weights.mtp_weights()?;
@@ -26821,7 +26822,10 @@ pub fn mtp_forward_step(
         mtp_cache,
         mtp_block_table,
         /* full_attn_layer_idx = */ 0,
-        /* lora = */ None,
+        // The adapter's MTP draft-block LoRA, when the adapter was
+        // trained with MTP alignment. Absent → base draft weights
+        // (verify stays exact; acceptance is what degrades).
+        lora.and_then(|l| l.mtp.as_ref().map(|m| (m, l.scale))),
     );
     // Always disarm in both success and error paths (`mtp_hidden_result`
     // is `?`-propagated below, so we cannot rely on the function tail).
