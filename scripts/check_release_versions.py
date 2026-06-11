@@ -181,10 +181,11 @@ def parse_cli_surface() -> CliSurface:
     command_variants = parse_variant_blocks(extract_block_after(text, "pub enum Commands"))
     train_variants = parse_variant_blocks(extract_block_after(text, "pub enum TrainCommands"))
     adapter_variants = parse_variant_blocks(extract_block_after(text, "pub enum AdapterCommands"))
+    judge_variants = parse_variant_blocks(extract_block_after(text, "pub enum JudgeCommands"))
 
     commands: dict[tuple[str, ...], CommandSpec] = {}
     for variant, block in command_variants.items():
-        if variant in {"Train", "Adapters"}:
+        if variant in {"Train", "Adapters", "Judge"}:
             continue
         cli_name = "config" if variant == "ConfigCheck" else variant_name_to_cli(variant)
         flags, positionals = parse_arg_fields(block)
@@ -197,6 +198,10 @@ def parse_cli_surface() -> CliSurface:
     for variant, block in adapter_variants.items():
         flags, positionals = parse_arg_fields(block)
         commands[("adapters", variant_name_to_cli(variant))] = CommandSpec(frozenset(flags), positionals)
+
+    for variant, block in judge_variants.items():
+        flags, positionals = parse_arg_fields(block)
+        commands[("judge", variant_name_to_cli(variant))] = CommandSpec(frozenset(flags), positionals)
 
     return CliSurface(frozenset(global_flags), commands)
 
@@ -318,7 +323,7 @@ def command_key(tokens: list[str], surface: CliSurface) -> tuple[tuple[str, ...]
         return None, index, None
 
     first = tokens[index]
-    if first in {"train", "adapters"}:
+    if first in {"train", "adapters", "judge"}:
         if index + 1 >= len(tokens):
             return None, index, f"unknown subcommand {' '.join(tokens[1:index + 1])!r}"
         key = (first, tokens[index + 1])

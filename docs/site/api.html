@@ -501,7 +501,7 @@ kiln serve --config kiln.toml</code></pre>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/train/jobs/{job_id}</code> &mdash; rich job detail (loss curve + linked-eval back-references).</div>
           <div class="endpoint"><span class="method">DELETE</span> <code>/v1/train/jobs/{job_id}</code> &mdash; remove an archived terminal job.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/train/queue</code> &mdash; list queued training jobs.</div>
-          <div class="endpoint"><span class="method">DELETE</span> <code>/v1/train/queue/{job_id}</code> &mdash; cancel a queued job.</div>
+          <div class="endpoint"><span class="method">DELETE</span> <code>/v1/train/queue/{job_id}</code> &mdash; cancel a job: queued jobs leave the queue; running jobs stop at the next step boundary.</div>
         </div>
         <div class="code-block mt-4" data-placeholder="JOB_ID=<job-id>"><pre><code>curl -s http://localhost:8420/v1/train/queue | python3 -m json.tool
 JOB_ID=&lt;job-id&gt;
