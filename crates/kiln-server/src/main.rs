@@ -114,6 +114,9 @@ async fn main() -> Result<()> {
             TrainCommands::Status { job_id, url } => {
                 return cli::run_train_status(url, job_id.as_deref()).await;
             }
+            TrainCommands::Cancel { job_id, url } => {
+                return cli::run_train_cancel(url, job_id).await;
+            }
         },
         Some(Commands::Adapters(ref adapter_cmd)) => match adapter_cmd {
             AdapterCommands::List { url } => {

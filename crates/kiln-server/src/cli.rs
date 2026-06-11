@@ -144,6 +144,10 @@ const TRAIN_EXAMPLES: &str = r#"Examples:
 
   kiln train status --job-id train_123
       Inspect one training job by ID.
+
+  kiln train cancel --job-id train_123
+      Cancel a job: queued jobs leave the queue; running jobs stop at the
+      next step boundary.
 "#;
 
 const ADAPTERS_OVERVIEW: &str = r#"Inspect and manage LoRA adapters on the running Kiln server at http://localhost:8420 by default.
@@ -701,6 +705,17 @@ pub enum TrainCommands {
         /// Specific job ID to look up. If omitted, shows the full queue.
         #[arg(long)]
         job_id: Option<String>,
+
+        /// Server URL; defaults to the local kiln serve instance
+        #[arg(long, default_value = "http://localhost:8420")]
+        url: String,
+    },
+    /// Cancel a queued or running training job
+    Cancel {
+        /// Job ID to cancel (queued jobs leave the queue; running jobs
+        /// stop at the next step boundary)
+        #[arg(long)]
+        job_id: String,
 
         /// Server URL; defaults to the local kiln serve instance
         #[arg(long, default_value = "http://localhost:8420")]
@@ -2225,6 +2240,39 @@ fn build_grpo_training_payload(
 /// With `job_id` set, GETs `/v1/train/status/{id}` and prints a one-job summary.
 /// Without `job_id`, GETs `/v1/train/status` (overall list) and prints all jobs
 /// grouped by state: running first, then queued, then completed/failed.
+pub async fn run_train_cancel(url: &str, job_id: &str) -> anyhow::Result<()> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .delete(format!("{url}/v1/train/queue/{job_id}"))
+        .send()
+        .await
+        .map_err(|e| handle_request_error(url, e))?;
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await?;
+    if !status.is_success() {
+        eprintln!(
+            "{} Could not cancel job '{}': {}",
+            style("✗").red().bold(),
+            job_id,
+            render_api_error(&body, status)
+        );
+        std::process::exit(1);
+    }
+    let outcome = body.get("status").and_then(|v| v.as_str()).unwrap_or("cancelled");
+    let message = body
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("job cancelled");
+    println!(
+        "{} Job {} {}: {}",
+        style("✓").green().bold(),
+        style(job_id).white().bold(),
+        outcome,
+        message
+    );
+    Ok(())
+}
+
 pub async fn run_train_status(url: &str, job_id: Option<&str>) -> anyhow::Result<()> {
     if let Some(id) = job_id {
         return print_single_job_status(url, id).await;
@@ -3662,6 +3710,20 @@ mod tests {
                 assert_eq!(url, "http://localhost:8420");
             }
             other => panic!("expected Train(Status), got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn parses_cancel_subcommand() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["kiln", "train", "cancel", "--job-id", "abc"])
+            .expect("parse failed");
+        match cli.command {
+            Some(Commands::Train(TrainCommands::Cancel { job_id, url })) => {
+                assert_eq!(job_id, "abc");
+                assert_eq!(url, "http://localhost:8420");
+            }
+            other => panic!("expected Train(Cancel), got {:?}", other.is_some()),
         }
     }
 
