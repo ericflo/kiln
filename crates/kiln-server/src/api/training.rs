@@ -606,14 +606,6 @@ async fn submit_opd(
             "OPD request must specify a teacher alias (e.g. \"qwen3.6-27b@local\")".to_string(),
         ));
     }
-    // The worker resolves the teacher only at dequeue — a typo'd alias
-    // used to enqueue a job guaranteed to fail later, possibly hours
-    // later behind a long queue. Fail here with the remediation.
-    super::teachers::require_registered_teacher(
-        &state,
-        &req.teacher,
-        format!("OPD teacher alias '{}' is not registered", req.teacher),
-    )?;
     // A plain-file dataset_path is pre-scored off-policy teacher JSONL;
     // `agent_traces:` selectors are on-policy prompt sources. The worker
     // enforces this too — but at submission the caller can still fix it.
@@ -654,6 +646,16 @@ async fn submit_opd(
     if let Some(name) = req.config.output_name.as_deref() {
         super::adapters::validate_adapter_name(name)?;
     }
+    // The worker resolves the teacher only at dequeue — a typo'd alias
+    // used to enqueue a job guaranteed to fail later, possibly hours
+    // later behind a long queue. Fail here with the remediation. (After
+    // the pure-input checks above: a malformed request is the caller's
+    // first problem, an unregistered teacher the second.)
+    super::teachers::require_registered_teacher(
+        &state,
+        &req.teacher,
+        format!("OPD teacher alias '{}' is not registered", req.teacher),
+    )?;
     let adapter_name = req
         .config
         .output_name

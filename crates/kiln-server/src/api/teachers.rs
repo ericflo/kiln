@@ -362,6 +362,7 @@ mod tests {
             url: None,
             api_key_env: None,
             notes: None,
+            adapter: None,
         };
         reg.insert(spec.clone());
         let got = reg.get("qwen3.6-27b@local").unwrap();
@@ -388,6 +389,7 @@ mod tests {
             url: None,
             api_key_env: None,
             notes: Some("unit test".into()),
+            adapter: None,
         });
         reg.save_to_path(&path).unwrap();
 
@@ -410,6 +412,7 @@ mod tests {
             url: Some("https://api".into()),
             api_key_env: None,
             notes: None,
+            adapter: None,
         };
         let caps = resolve_caps_for(&spec).unwrap();
         assert_eq!(caps.teacher_id, "x");
@@ -445,6 +448,7 @@ mod tests {
             url: Some("https://openrouter.ai/api/v1".into()),
             api_key_env: Some("OPENROUTER_API_KEY".into()),
             notes: None,
+            adapter: None,
         };
         let s = serde_json::to_string(&spec).unwrap();
         let parsed: TeacherSpec = serde_json::from_str(&s).unwrap();
