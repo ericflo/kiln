@@ -245,6 +245,31 @@ async fn submit_sft(
         return Err(ApiError::training_tracked_full(max_tracked));
     }
 
+    // The corrections feed: dataset "corrections:active" resolves the
+    // durable basket's trainable rows (hand-written ideal, not yet
+    // trained) server-side. The consumed row ids ride the job and flip
+    // to trained_into ON COMPLETION — a failed job leaves the basket
+    // intact and re-trainable.
+    let mut consumed_correction_ids: Vec<String> = Vec::new();
+    if req.dataset.as_deref() == Some("corrections:active") {
+        req.dataset = None;
+        if !req.examples.is_empty() {
+            return Err(ApiError::training_invalid_request(
+                "SFT request must use either examples or dataset, not both",
+            ));
+        }
+        let store = super::corrections::CorrectionsStore::for_state(&state);
+        let (ids, examples) = store.trainable_rows();
+        if examples.is_empty() {
+            return Err(ApiError::training_invalid_request(
+                "corrections:active has no trainable rows — write an ideal answer \
+                 (different from the original) for at least one correction first",
+            ));
+        }
+        consumed_correction_ids = ids;
+        req.examples = examples;
+    }
+
     // Train-by-dataset-name: resolve an uploaded dataset (the eval dataset
     // store) into inline examples server-side. The UI/CLI sends just the name,
     // so rows never round-trip through the client and the whole dataset trains
@@ -349,6 +374,7 @@ async fn submit_sft(
         submitted_at: std::time::Instant::now(),
         submitted_unix_ms: crate::recent_requests::now_unix_ms(),
         auto_load,
+        consumed_correction_ids,
         finished_at: None,
         finished_unix_ms: None,
         error: None,
@@ -512,6 +538,7 @@ async fn submit_grpo(
         submitted_at: std::time::Instant::now(),
         submitted_unix_ms: crate::recent_requests::now_unix_ms(),
         auto_load,
+        consumed_correction_ids: Vec::new(),
         finished_at: None,
         finished_unix_ms: None,
         error: None,
@@ -719,6 +746,7 @@ async fn submit_opd(
         submitted_at: std::time::Instant::now(),
         submitted_unix_ms: crate::recent_requests::now_unix_ms(),
         auto_load,
+        consumed_correction_ids: Vec::new(),
         finished_at: None,
         finished_unix_ms: None,
         error: None,
@@ -844,6 +872,7 @@ async fn submit_distill_refresh(
         submitted_at: std::time::Instant::now(),
         submitted_unix_ms: crate::recent_requests::now_unix_ms(),
         auto_load,
+        consumed_correction_ids: Vec::new(),
         finished_at: None,
         finished_unix_ms: None,
         error: None,
@@ -1081,6 +1110,7 @@ fn register_and_enqueue_distill(
         submitted_at: std::time::Instant::now(),
         submitted_unix_ms: crate::recent_requests::now_unix_ms(),
         auto_load,
+        consumed_correction_ids: Vec::new(),
         finished_at: None,
         finished_unix_ms: None,
         error: None,

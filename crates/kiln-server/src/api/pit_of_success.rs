@@ -164,6 +164,7 @@ async fn submit_front_door(
         submitted_at: std::time::Instant::now(),
         submitted_unix_ms: crate::recent_requests::now_unix_ms(),
         auto_load,
+        consumed_correction_ids: Vec::new(),
         finished_at: None,
         finished_unix_ms: None,
         error: None,

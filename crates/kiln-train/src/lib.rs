@@ -151,6 +151,10 @@ pub struct SftRequest {
     /// every row — callers never round-trip rows through the client, so large
     /// datasets train whole (no preview-endpoint truncation) and the request
     /// stays a few bytes. Mutually exclusive with `examples`.
+    ///
+    /// The magic name `corrections:active` resolves the durable corrections
+    /// basket's trainable rows (hand-written ideal answers not yet trained);
+    /// the consumed rows flip to `trained_into` when the job COMPLETES.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dataset: Option<String>,
     #[serde(default)]

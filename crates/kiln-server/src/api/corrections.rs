@@ -241,6 +241,64 @@ struct MarkTrainedRequest {
     adapter: String,
 }
 
+impl CorrectionsStore {
+    /// The `corrections:active` training feed: rows with a usable
+    /// hand-written ideal (non-empty, differs from the original) that
+    /// have not already trained into an adapter. Returns
+    /// (request_ids, SFT examples) in store order.
+    pub fn trainable_rows(&self) -> (Vec<String>, Vec<kiln_train::SftExample>) {
+        let mut ids = Vec::new();
+        let mut examples = Vec::new();
+        for row in self.list() {
+            let ideal = row.ideal.trim();
+            if row.trained_into.is_some()
+                || ideal.is_empty()
+                || ideal == row.original.trim()
+                || row.user.trim().is_empty()
+            {
+                continue;
+            }
+            ids.push(row.request_id.clone());
+            examples.push(kiln_train::SftExample {
+                messages: vec![
+                    kiln_train::ChatMessage {
+                        role: "user".to_string(),
+                        content: row.user.clone(),
+                    },
+                    kiln_train::ChatMessage {
+                        role: "assistant".to_string(),
+                        content: row.ideal.clone(),
+                    },
+                ],
+            });
+        }
+        (ids, examples)
+    }
+
+    /// Mark rows trained into `adapter` — the training queue calls this at
+    /// job COMPLETION (not submission), so failed jobs leave the basket
+    /// intact. Returns how many rows flipped.
+    pub fn mark_trained_into(&self, request_ids: &[String], adapter: &str) -> usize {
+        let mut rows = self.list();
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut marked = 0usize;
+        for row in rows.iter_mut() {
+            if request_ids.iter().any(|id| id == &row.request_id) {
+                row.trained_into = Some(adapter.to_string());
+                row.trained_at = Some(now.clone());
+                marked += 1;
+            }
+        }
+        if marked > 0 {
+            if let Err(e) = self.write_all(&rows) {
+                tracing::warn!(error = %e, "corrections store: mark_trained_into write failed");
+                return 0;
+            }
+        }
+        marked
+    }
+}
+
 async fn mark_trained(
     State(state): State<AppState>,
     Json(req): Json<MarkTrainedRequest>,
@@ -369,5 +427,45 @@ mod tests {
         let rows = s2.list();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].request_id, "b");
+    }
+    /// The corrections:active feed contract: only rows with a usable
+    /// hand-written ideal resolve; completion-time marking flips exactly
+    /// the consumed rows and removes them from the next feed.
+    #[test]
+    fn trainable_rows_and_completion_marking_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CorrectionsStore {
+            dir: dir.path().to_path_buf(),
+        };
+        let row = |id: &str, user: &str, original: &str, ideal: &str| CorrectionRow {
+            request_id: id.to_string(),
+            agent: "pi".to_string(),
+            adapter: None,
+            user: user.to_string(),
+            original: original.to_string(),
+            ideal: ideal.to_string(),
+            truncated: false,
+            created_at: String::new(),
+            trained_into: None,
+            trained_at: None,
+        };
+        store.upsert(row("a", "fix the bug", "wrong", "right")).unwrap();
+        store.upsert(row("b", "explain", "same", "same")).unwrap(); // ideal == original
+        store.upsert(row("c", "write docs", "meh", "")).unwrap(); // no ideal yet
+
+        let (ids, examples) = store.trainable_rows();
+        assert_eq!(ids, vec!["a".to_string()]);
+        assert_eq!(examples.len(), 1);
+        assert_eq!(examples[0].messages[1].content, "right");
+
+        // Completion marks ONLY the consumed rows…
+        assert_eq!(store.mark_trained_into(&ids, "fixes-v1"), 1);
+        let rows = store.list();
+        let a = rows.iter().find(|r| r.request_id == "a").unwrap();
+        assert_eq!(a.trained_into.as_deref(), Some("fixes-v1"));
+        assert!(a.trained_at.is_some());
+        // …and the next feed no longer includes them.
+        let (ids2, _) = store.trainable_rows();
+        assert!(ids2.is_empty());
     }
 }
