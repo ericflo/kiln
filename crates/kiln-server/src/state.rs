@@ -276,6 +276,12 @@ pub struct TrainingJobInfo {
     /// finishes). Empty when no post-training eval was requested.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub linked_eval_job_ids: Vec<String>,
+    /// §8.7 gate verdict stamped by the eval worker when the request
+    /// carried `post_eval.min_accuracy`: what the measured accuracy was,
+    /// whether the adapter was promoted, demoted to `<name>.failed`, or
+    /// left unpromoted because the eval itself errored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_eval_verdict: Option<String>,
     /// Loss history for live charts. Each sample is
     /// `{epoch, progress, loss, elapsed_secs}`. Capped at
     /// `TRAINING_LOSS_HISTORY_CAP` to bound memory; once full, every

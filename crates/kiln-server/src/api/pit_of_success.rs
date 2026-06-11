@@ -168,6 +168,7 @@ async fn submit_front_door(
         finished_unix_ms: None,
         error: None,
         linked_eval_job_ids: Vec::new(),
+        post_eval_verdict: None,
         loss_history: Vec::new(),
     };
     state

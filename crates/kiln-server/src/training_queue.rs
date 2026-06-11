@@ -2297,19 +2297,38 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 fire_completion_webhook(url.clone(), event);
             }
 
-            if auto_load && adapter_canary_allows_auto_load(&adapter_path, &adapter_name, &job_id) {
+            // §8.7: when the request carries a promotion gate
+            // (post_eval.min_accuracy), auto-load is DEFERRED until the
+            // gate passes — the prior adapter stays active while the
+            // verdict is pending, so a worse model is never serving while
+            // the eval that would catch it is still in the queue. (The old
+            // order hot-swapped the fresh adapter BEFORE the eval was even
+            // enqueued.)
+            let promotion_gate_pending = post_eval
+                .as_ref()
+                .is_some_and(|cfg| cfg.min_accuracy.is_some());
+            let canary_ok =
+                adapter_canary_allows_auto_load(&adapter_path, &adapter_name, &job_id);
+            if auto_load && canary_ok && !promotion_gate_pending {
                 if let Err(e) = auto_load_adapter(&state, &adapter_path, &adapter_name) {
                     tracing::error!(job_id = %job_id, "auto-load failed: {e}");
                 } else {
                     tracing::info!(job_id = %job_id, "auto-loaded trained adapter");
                 }
             } else {
-                // Not promoting the fresh weights into serving — but the
-                // adapter directory CONTENT changed, so any cache entries
-                // keyed to this name (prefix KV, deterministic completions)
-                // now describe weights that no longer exist. Without this,
-                // retraining an idle adapter and swapping back to it later
-                // replays the old model's answers.
+                if promotion_gate_pending {
+                    tracing::info!(
+                        job_id = %job_id,
+                        adapter = %adapter_name,
+                        "auto-load deferred until the post-eval gate passes (§8.7)"
+                    );
+                }
+                // Not promoting the fresh weights into serving (yet) — but
+                // the adapter directory CONTENT changed, so any cache
+                // entries keyed to this name (prefix KV, deterministic
+                // completions) now describe weights that no longer exist.
+                // Without this, retraining an idle adapter and swapping
+                // back to it later replays the old model's answers.
                 state.purge_adapter_caches(&Some(adapter_name.clone()));
             }
 
@@ -2318,8 +2337,24 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             // result. Failures here are warnings — we still consider the
             // training itself successful.
             if let Some(cfg) = post_eval.as_ref() {
-                if let Err(e) = enqueue_post_training_eval(&state, &job_id, &adapter_name, cfg) {
+                if let Err(e) = enqueue_post_training_eval(
+                    &state,
+                    &job_id,
+                    &adapter_name,
+                    cfg,
+                    auto_load && canary_ok,
+                ) {
                     tracing::warn!(job_id = %job_id, error = %e, "post-training eval enqueue failed");
+                    // The gate could not be installed — an auto_load that
+                    // was deferred to it would otherwise be lost silently.
+                    if promotion_gate_pending {
+                        let mut jobs = state.training_jobs.write().unwrap();
+                        if let Some(job) = jobs.get_mut(&job_id) {
+                            job.post_eval_verdict = Some(format!(
+                                "post-eval gate could not be enqueued ({e}) — adapter `{adapter_name}` left on disk, NOT promoted"
+                            ));
+                        }
+                    }
                 }
             }
 
@@ -2344,7 +2379,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                         min_accuracy: None,
                         include_baseline: true,
                     };
-                    if let Err(e) = enqueue_post_training_eval(&state, &job_id, &adapter_name, &cfg)
+                    if let Err(e) = enqueue_post_training_eval(&state, &job_id, &adapter_name, &cfg, false)
                     {
                         tracing::warn!(job_id = %job_id, suite = %suite, error = %e, "distill_refresh IF-eval enqueue failed");
                     } else {
@@ -2358,7 +2393,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                         min_accuracy: None,
                         include_baseline: true,
                     };
-                    if let Err(e) = enqueue_post_training_eval(&state, &job_id, &adapter_name, &cfg)
+                    if let Err(e) = enqueue_post_training_eval(&state, &job_id, &adapter_name, &cfg, false)
                     {
                         tracing::warn!(job_id = %job_id, suite = %suite, error = %e, "distill_refresh QA-eval enqueue failed");
                     } else {
@@ -2407,6 +2442,7 @@ pub fn enqueue_post_training_eval(
     training_job_id: &str,
     adapter_name: &str,
     cfg: &kiln_eval::PostEvalConfig,
+    auto_load_on_pass: bool,
 ) -> Result<(), String> {
     if state.suite_registry.is_none() {
         return Err("server has no eval suite registry".to_string());
@@ -2436,7 +2472,25 @@ pub fn enqueue_post_training_eval(
     if cfg.include_baseline {
         linked_ids.push(push(None));
     }
-    linked_ids.push(push(Some(adapter_name.to_string())));
+    let adapter_eval_id = push(Some(adapter_name.to_string()));
+    linked_ids.push(adapter_eval_id.clone());
+
+    // §8.7 promotion gate: when the request set `min_accuracy`, the
+    // adapter's run (never the baseline's) carries the gate. The eval
+    // worker applies the verdict at terminal time — promote on pass,
+    // rename to `<name>.failed` on fail.
+    if let Some(min_accuracy) = cfg.min_accuracy {
+        let mut jobs = state.eval_jobs.write().unwrap();
+        if let Some(job) = jobs.get_mut(&adapter_eval_id) {
+            job.post_eval_gate = Some(crate::eval::queue::PostEvalGate {
+                min_accuracy,
+                adapter_name: adapter_name.to_string(),
+                training_job_id: training_job_id.to_string(),
+                auto_load_on_pass,
+            });
+        }
+    }
+
     // Back-link the eval job IDs onto the training job so dashboards can
     // find them quickly.
     {
@@ -2747,7 +2801,7 @@ mod tests {
             min_accuracy: None,
             include_baseline: false,
         };
-        enqueue_post_training_eval(&state, "train-job-1", "trained-adapter", &cfg).unwrap();
+        enqueue_post_training_eval(&state, "train-job-1", "trained-adapter", &cfg, false).unwrap();
         assert_eq!(state.eval_queue.lock().unwrap().len(), 1);
         assert_eq!(state.eval_jobs.read().unwrap().len(), 1);
     }
@@ -2761,9 +2815,48 @@ mod tests {
             min_accuracy: None,
             include_baseline: true,
         };
-        enqueue_post_training_eval(&state, "train-job-2", "trained-adapter", &cfg).unwrap();
+        enqueue_post_training_eval(&state, "train-job-2", "trained-adapter", &cfg, false).unwrap();
         assert_eq!(state.eval_queue.lock().unwrap().len(), 2);
         assert_eq!(state.eval_jobs.read().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn enqueue_post_training_eval_installs_gate_on_adapter_job_only() {
+        let state = mk_post_eval_state();
+        let cfg = kiln_eval::PostEvalConfig {
+            suite: "smoke".into(),
+            generation: None,
+            min_accuracy: Some(0.8),
+            include_baseline: true,
+        };
+        enqueue_post_training_eval(&state, "train-gated", "trained-adapter", &cfg, true).unwrap();
+
+        let jobs = state.eval_jobs.read().unwrap();
+        assert_eq!(jobs.len(), 2);
+        let mut gated = 0;
+        for job in jobs.values() {
+            match job.adapters.first() {
+                Some(Some(name)) => {
+                    assert_eq!(name, "trained-adapter");
+                    let gate = job
+                        .post_eval_gate
+                        .as_ref()
+                        .expect("adapter run carries the §8.7 gate");
+                    assert_eq!(gate.min_accuracy, 0.8);
+                    assert_eq!(gate.training_job_id, "train-gated");
+                    assert!(gate.auto_load_on_pass);
+                    gated += 1;
+                }
+                Some(None) => {
+                    assert!(
+                        job.post_eval_gate.is_none(),
+                        "baseline run must never carry the gate"
+                    );
+                }
+                None => panic!("job without adapters"),
+            }
+        }
+        assert_eq!(gated, 1);
     }
 
     #[test]
@@ -2776,7 +2869,7 @@ mod tests {
             min_accuracy: None,
             include_baseline: false,
         };
-        let err = enqueue_post_training_eval(&state, "j", "a", &cfg).unwrap_err();
+        let err = enqueue_post_training_eval(&state, "j", "a", &cfg, false).unwrap_err();
         assert!(err.contains("no eval suite registry"));
     }
 
