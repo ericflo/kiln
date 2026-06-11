@@ -43,7 +43,7 @@ cuda_grpo_ablation ... --no-echo
 cuda_grpo_ablation ... --no-policy-loss --echo-lambda 0.05
 ```
 
-`--no-policy-loss` masks out the GRPO surrogate so only the ECHO env-CE drives gradients. Intended for keeping a strong agent improving on tasks where no programmatic verifier is available — but it is **not yet available**: `validate_for_kt_tape` rejects it at submission because it needs the policy-gradient coefficients zeroed while the env-CE rows drive the update, and that wiring hasn't landed. The env-CE term itself is live and composes with the standard policy loss.
+`--no-policy-loss` masks out the GRPO surrogate so only the ECHO env-CE drives gradients — the §5.5 verifier-free mode for keeping a strong agent improving on tasks with no programmatic verifier. It is **live**: with ECHO enabled (the default), the fused tape root records `λ·env_CE` alone and the backward emits only the env rows (closed-form verified). `no_policy_loss` without an enabled ECHO term is rejected at submission — with both off there would be nothing to train on.
 
 ### From the kiln-server HTTP API
 

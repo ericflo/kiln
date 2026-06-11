@@ -721,12 +721,29 @@ kiln train grpo --file grpo-batch.json --adapter support-bot
 kiln train status --job-id train_123
     Check a specific training job; omit --job-id to show the queue.
 
+kiln train cancel --job-id train_123
+    Cancel a job: queued jobs leave the queue; running jobs stop at the next step boundary.
+
+kiln self-improve
+    Run the §10.6 weekly loop once: index this week's pi sessions, re-roll them
+    on-policy scored by the judge (warm-starting from last round's adapter), then
+    the CRISP terseness pass. Add a post_eval gate to promote only on a passing eval.
+
+kiln judge distill
+    Distill the frozen teacher's judgment into a local judge LoRA (the scorer
+    self-improve uses).
+
 kiln adapters list
 kiln adapters load support-bot
 kiln adapters unload
 kiln adapters delete support-bot
     List, load, unload the active adapter to revert to the base model, or delete a saved adapter on the running server.
 ```
+
+Set it and forget it: `[agent] self_improve_interval_hours = 168` in kiln.toml runs the
+self-improve loop weekly through the same path as the CLI/API — auto-discovering traces,
+warm-starting from the previous round, and honoring the `post_eval` promotion gate
+(see `kiln.example.toml`'s `[agent]` section).
 
 The CLI currently covers the basic adapter lifecycle: `list`, `load`, `unload`, and `delete`. For advanced adapter download, upload, merge, and composition flows — plus training-completion webhooks — use the dashboard or the HTTP API examples in [9. Advanced API Examples](#9-advanced-api-examples).
 

@@ -382,6 +382,8 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | GET | `/v1/train/status/{job_id}` | Inspect one training job |
 | GET | `/v1/train/jobs/{job_id}` | Rich training job detail (loss curve + linked-eval back-references) |
 | GET | `/v1/train/queue` | List queued training jobs |
+| DELETE | `/v1/train/queue/{job_id}` | Cancel a job (queued: dequeued; running: stops at the next step boundary) |
+| GET | `/v1/stats/mtp-acceptance` | Per-adapter MTP draft acceptance (live alpha) |
 | DELETE | `/v1/train/queue/{job_id}` | Cancel a queued job |
 | POST | `/v1/distill/refresh` | Continual-learning distillation refresh job |
 | POST | `/v1/distill/pump` | Continual-learning distillation pump job |
