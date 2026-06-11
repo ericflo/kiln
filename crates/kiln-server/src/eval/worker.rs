@@ -322,6 +322,39 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
                 ));
                 return;
             }
+
+            // distill_refresh §6.4 dual thresholds against the SAME
+            // baseline run: fractional recovery (new/baseline) and
+            // absolute gain (new − baseline).
+            let baseline_acc = baseline_run.metrics.accuracy;
+            if let Some(min_recovery) = gate.relative_recovery {
+                let recovery = if baseline_acc > 0.0 {
+                    accuracy / baseline_acc
+                } else {
+                    1.0
+                };
+                if recovery < min_recovery {
+                    stamp_verdict(format!(
+                        "RECOVERY FAILED: `{}` recovered only {recovery:.3} of `{}`'s \
+                         {baseline_acc:.3} (required {min_recovery:.2}) — NOT promoted",
+                        gate.adapter_name,
+                        baseline_run.adapter.as_deref().unwrap_or("base"),
+                    ));
+                    return;
+                }
+            }
+            if let Some(min_gain) = gate.absolute_gain {
+                let gain = accuracy - baseline_acc;
+                if gain < min_gain {
+                    stamp_verdict(format!(
+                        "GAIN TOO SMALL: `{}` gained {gain:+.3} over `{}`'s \
+                         {baseline_acc:.3} (required {min_gain:+.2}) — NOT promoted",
+                        gate.adapter_name,
+                        baseline_run.adapter.as_deref().unwrap_or("base"),
+                    ));
+                    return;
+                }
+            }
         }
     }
 
@@ -731,6 +764,8 @@ mod tests {
             gate_suite("phrase-the-reply-never-contains"),
             crate::eval::queue::PostEvalGate {
                 min_accuracy: 0.9,
+                relative_recovery: None,
+                absolute_gain: None,
                 adapter_name: "gated".into(),
                 training_job_id: "train-1".into(),
                 auto_load_on_pass: false,
@@ -765,6 +800,8 @@ mod tests {
             gate_suite("mock"),
             crate::eval::queue::PostEvalGate {
                 min_accuracy: 0.9,
+                relative_recovery: None,
+                absolute_gain: None,
                 adapter_name: "good".into(),
                 training_job_id: "train-2".into(),
                 auto_load_on_pass: false,
@@ -799,6 +836,8 @@ mod tests {
         );
         info.post_eval_gate = Some(crate::eval::queue::PostEvalGate {
             min_accuracy: 0.5,
+            relative_recovery: None,
+            absolute_gain: None,
             adapter_name: "unmeasured".into(),
             training_job_id: "train-3".into(),
             auto_load_on_pass: true,

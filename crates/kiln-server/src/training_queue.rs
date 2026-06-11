@@ -2455,43 +2455,54 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             // adapter), and `require_internal_qa_gain` is an
             // *absolute* gain threshold; both translate to
             // PostEvalConfig knobs the eval worker already honours.
-            if let Some((if_suite, qa_suite, _frac_recovery, _qa_gain)) =
+            if let Some((if_suite, qa_suite, frac_recovery, qa_gain)) =
                 distill_refresh_dual.as_ref()
             {
-                if let Some(suite) = if_suite {
+                // §6.4 dual gates, ENFORCED (round-5 discovery: these
+                // thresholds were validated then silently discarded — the
+                // recipe advertised a 0.95/0.05 safety net that gated
+                // nothing). Each suite enqueues as a GATED comparison:
+                // min_accuracy 0.0 makes the run a Compare job
+                // [previous-active/base, refreshed] and the gate's new
+                // relative_recovery / absolute_gain thresholds apply
+                // against the baseline run in apply_post_eval_gate.
+                let mut enqueue_gated = |suite: &String,
+                                         relative_recovery: Option<f32>,
+                                         absolute_gain: Option<f32>,
+                                         label: &str| {
                     let cfg = kiln_eval::PostEvalConfig {
                         suite: suite.clone(),
                         generation: None,
-                        min_accuracy: None,
-                        include_baseline: true,
+                        min_accuracy: Some(0.0),
+                        include_baseline: false,
                     };
-                    if let Err(e) = enqueue_post_training_eval(&state, &job_id, &adapter_name, &cfg, false)
-                    {
-                        tracing::warn!(job_id = %job_id, suite = %suite, error = %e, "distill_refresh IF-eval enqueue failed");
-                    } else {
-                        tracing::info!(job_id = %job_id, suite = %suite, "distill_refresh IF-eval queued");
+                    match enqueue_post_training_eval(&state, &job_id, &adapter_name, &cfg, false) {
+                        Err(e) => tracing::warn!(job_id = %job_id, suite = %suite, error = %e, "distill_refresh {label} enqueue failed"),
+                        Ok(()) => {
+                            // Stamp the dual thresholds onto the gate the
+                            // standard enqueue just installed.
+                            let mut jobs = state.eval_jobs.write().unwrap();
+                            if let Some((_, job)) = jobs.iter_mut().find(|(_, j)| {
+                                j.post_eval_gate
+                                    .as_ref()
+                                    .is_some_and(|g| g.training_job_id == job_id)
+                                    && j.suite_name == *suite
+                            }) {
+                                if let Some(gate) = job.post_eval_gate.as_mut() {
+                                    gate.relative_recovery = relative_recovery;
+                                    gate.absolute_gain = absolute_gain;
+                                }
+                            }
+                            tracing::info!(job_id = %job_id, suite = %suite, "distill_refresh {label} queued (gated)");
+                        }
                     }
+                };
+                if let Some(suite) = if_suite {
+                    enqueue_gated(suite, Some(*frac_recovery as f32), None, "IF-eval");
                 }
                 if let Some(suite) = qa_suite {
-                    let cfg = kiln_eval::PostEvalConfig {
-                        suite: suite.clone(),
-                        generation: None,
-                        min_accuracy: None,
-                        include_baseline: true,
-                    };
-                    if let Err(e) = enqueue_post_training_eval(&state, &job_id, &adapter_name, &cfg, false)
-                    {
-                        tracing::warn!(job_id = %job_id, suite = %suite, error = %e, "distill_refresh QA-eval enqueue failed");
-                    } else {
-                        tracing::info!(job_id = %job_id, suite = %suite, "distill_refresh QA-eval queued");
-                    }
+                    enqueue_gated(suite, None, Some(*qa_gain as f32), "QA-eval");
                 }
-                // The §8.7 auto-rollback gate (rename .failed if
-                // refreshed_score / prior_score < require_if_eval_recovery
-                // OR refreshed - prior < require_internal_qa_gain) is
-                // applied by the eval worker once both eval pairs
-                // complete — implemented in a sibling commit alongside
-                // the eval-worker side of the dual-gate.
             }
         }
         Err(e) => {
@@ -2618,6 +2629,8 @@ pub fn enqueue_post_training_eval(
         if let Some(job) = jobs.get_mut(&adapter_eval_id) {
             job.post_eval_gate = Some(crate::eval::queue::PostEvalGate {
                 min_accuracy,
+                relative_recovery: None,
+                absolute_gain: None,
                 adapter_name: adapter_name.to_string(),
                 training_job_id: training_job_id.to_string(),
                 auto_load_on_pass,
