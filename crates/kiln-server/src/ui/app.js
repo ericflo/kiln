@@ -748,9 +748,22 @@ function updateFlywheel() {
     : queued ? queued + ' queued'
     : done ? done + ' completed' : 'idle');
 
-  const evalCountStr = document.getElementById('evals-count')?.textContent || '0';
-  const noEvals = evalCountStr === '0' || evalCountStr === '';
-  set('fw-eval', evalCountStr);
+  // Eval node derives from JS state (evalJobCounts, set by refreshEvalJobs) —
+  // never from the nav badge's textContent. The badge counts LIVE jobs only
+  // (queued + running), so reading it back here used to claim "no evals yet"
+  // the moment the last job finished, right next to a "+N pts vs base"
+  // verdict computed from those same completed evals.
+  const ec = (typeof evalJobCounts !== 'undefined') ? evalJobCounts : null;
+  const evalRunning = ec ? ec.running : 0;
+  const evalQueued = ec ? ec.queued : 0;
+  const evalLive = evalRunning + evalQueued;
+  const evalCompleted = ec ? ec.completed : 0;
+  // "No evals" is a strong claim — only make it from a LOADED jobs list
+  // (ec !== null). Before the first /v1/eval/jobs response lands the count is
+  // unknown, so the node keeps its neutral placeholder instead of asserting
+  // absence (same loaded-cache rule trainingJobsCache consumers follow).
+  const noEvals = !!ec && evalCompleted === 0 && evalLive === 0;
+  set('fw-eval', ec ? String(evalLive > 0 ? evalLive : evalCompleted) : '—');
 
   const active = lastHealth && lastHealth.active_adapter;
   set('fw-active', active || 'base');
@@ -769,7 +782,13 @@ function updateFlywheel() {
     }
   }
   // Caution the eval node when an adapter is live but never evaluated.
-  set('fw-eval-sub', (active && noEvals) ? 'not evaluated yet' : (noEvals ? 'no evals yet' : 'suites & jobs'));
+  set('fw-eval-sub',
+    evalRunning ? evalRunning + ' running'
+    : evalQueued ? evalQueued + ' queued'
+    : (active && noEvals) ? 'not evaluated yet'
+    : noEvals ? 'no evals yet'
+    : evalCompleted ? evalCompleted + ' completed'
+    : 'suites & jobs');
 
   // Highlight the single most valuable next stage (the "hot" node). A genuine
   // downstream GAP (active adapter that was never evaluated) wins over an
@@ -4926,6 +4945,11 @@ function showDatasetUploadedNext(name, kind, numRows) {
 
 // Cache job results so we can compute per-suite sparkline trends.
 let evalJobsCache = [];
+// Lifecycle counts derived from evalJobsCache on every refresh. `null` until
+// the first /v1/eval/jobs response lands so consumers (updateFlywheel) can
+// tell "not loaded yet" apart from "zero evals ever" — an unfetched jobs
+// list is unknown, not empty.
+let evalJobCounts = null;
 
 async function refreshSuites() {
   try {
@@ -5113,6 +5137,14 @@ async function refreshEvalJobs() {
     const d = await api('/v1/eval/jobs');
     const jobs = d.jobs || [];
     evalJobsCache = jobs;
+    // Lifecycle counts as JS state for the flywheel (and any other consumer):
+    // data must not round-trip through a badge's rendered textContent.
+    const stateOf = j => (j.state || '').toString().toLowerCase();
+    evalJobCounts = {
+      completed: jobs.filter(j => stateOf(j) === 'completed').length,
+      running: jobs.filter(j => stateOf(j) === 'running').length,
+      queued: jobs.filter(j => stateOf(j) === 'queued').length,
+    };
     detectEvalTransitions(jobs);
     // Adapter cards show each adapter's latest eval score — refresh them now that
     // eval results changed (the dedup key includes the completed-eval signature).
@@ -5120,11 +5152,13 @@ async function refreshEvalJobs() {
     // Header badge counts active jobs (queued + running), mirroring the
     // training badge — total job history is shown inside the tab so the
     // badge should signal "needs attention now", not "lifetime count".
-    const liveCount = jobs.filter(j => {
-      const st = (j.state || '').toString().toLowerCase();
-      return st === 'queued' || st === 'running';
-    }).length;
+    const liveCount = evalJobCounts.running + evalJobCounts.queued;
     setText('evals-count', String(liveCount));
+    const evalsBadge = document.getElementById('evals-count');
+    if (evalsBadge) evalsBadge.title = `${liveCount} eval job${liveCount === 1 ? '' : 's'} queued or running`;
+    // The flywheel's Eval node reads evalJobCounts — repaint it now instead of
+    // waiting for the next training/requests poll tick.
+    updateFlywheel();
     const el = document.getElementById('eval-jobs-list');
     const filtered = jobs.filter(matchesEvalJobsFilter);
     if (jobs.length && !filtered.length) {
