@@ -6446,7 +6446,7 @@ function buildCmdkIndex() {
   items.push({ kind: 'nav', icon: icon('layers'), title: 'Adapters',   sub: 'Saved LoRAs, upload, merge', action: () => selectPage('adapters') });
   items.push({ kind: 'nav', icon: icon('flask'), title: 'Training',   sub: 'SFT/GRPO queue + submit', action: () => selectPage('training') });
   items.push({ kind: 'nav', icon: icon('chart'), title: 'Evals',      sub: 'Datasets, suites, jobs, judgments', action: () => selectPage('evals') });
-  items.push({ kind: 'nav', icon: icon('flask'), title: 'Distill',    sub: 'Teachers, knowledge pump, self-improve', action: () => selectPage('distill') });
+  items.push({ kind: 'nav', icon: icon('flask'), title: 'Distill',    sub: 'Teachers, boost, refresh, merge, self-improve', action: () => selectPage('distill') });
   items.push({ kind: 'nav', icon: icon('terminal'), title: 'pi Terminal', sub: 'Run pi against this Kiln, right here', action: () => selectPage('terminal') });
   items.push({ kind: 'nav', icon: icon('chat'), title: 'Playground', sub: 'Quick inference + A/B compare', action: () => selectPage('playground') });
   // Actions
@@ -8377,7 +8377,7 @@ document.getElementById('opd-form')?.addEventListener('submit', async (e) => {
     const teacher = document.getElementById('opd-teacher').value;
     if (!teacher) throw new Error('Pick a teacher first (Teachers tab)');
     const opdLearningRate = parseOptionalFiniteNumberField(
-      document.getElementById('opd-lr').value, 'OPD learning rate');
+      document.getElementById('opd-lr').value, 'Learning rate');
     const body = {
       prompts,
       teacher,
@@ -8398,7 +8398,7 @@ document.getElementById('opd-form')?.addEventListener('submit', async (e) => {
     const maxCost = document.getElementById('opd-max-cost').value;
     if (maxCost.trim()) body.config.max_cost_usd = parseFloat(maxCost);
     const res = await api('/v1/train/opd', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    toast(res.message || 'OPD job submitted');
+    toast(res.message || 'Distillation job queued');
     selectPage('training');
   } catch (err) { toast(err.message, 'err'); }
 });
@@ -8424,7 +8424,7 @@ document.getElementById('distill-refresh-form')?.addEventListener('submit', asyn
     if (form.if_eval_suite.value.trim()) body.if_eval_suite = form.if_eval_suite.value.trim();
     if (form.new_knowledge_eval_suite.value.trim()) body.new_knowledge_eval_suite = form.new_knowledge_eval_suite.value.trim();
     const res = await api('/v1/distill/refresh', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    toast(res.message || 'distill/refresh queued');
+    toast(res.message || 'Refresh queued');
     selectPage('training');
   } catch (err) { toast(err.message, 'err'); }
 });
@@ -8464,7 +8464,7 @@ document.getElementById('distill-pump-form')?.addEventListener('submit', async (
       use_cache: form.use_cache.checked,
     };
     const res = await api('/v1/distill/pump', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    toast(res.message || 'distill/pump queued');
+    toast(res.message || 'Boost job queued');
     selectPage('training');
   } catch (err) { toast(err.message, 'err'); }
 });
@@ -8483,7 +8483,7 @@ document.getElementById('distill-merge-form')?.addEventListener('submit', async 
       rollout_budget: parseInt(form.rollout_budget.value, 10),
     };
     const res = await api('/v1/adapters/distill_merge', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    toast(res.message || 'distill_merge queued');
+    toast(res.message || 'Merge queued');
     selectPage('training');
   } catch (err) { toast(err.message, 'err'); }
 });
@@ -8513,7 +8513,7 @@ document.getElementById('distill-self-form')?.addEventListener('submit', async (
     const docs = document.getElementById('self-documents')?.value?.trim();
     if (docs) body.documents = JSON.parse(docs);
     const res = await api('/v1/distill/self', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    toast(res.message || 'distill/self queued');
+    toast(res.message || 'Self-improvement job queued');
     selectPage('training');
   } catch (err) { toast(err.message, 'err'); }
 });
