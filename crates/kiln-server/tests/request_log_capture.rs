@@ -115,6 +115,13 @@ async fn non_streaming_chat_completion_is_logged_with_full_bodies() {
     assert_eq!(row["status"], 200);
     assert_eq!(row["streamed"], false);
     assert_eq!(row["user_agent"], "request-log-test");
+    // Base model served this (mock state has no adapter loaded): the
+    // adapter key is omitted entirely so per-adapter mining can rely on
+    // `select(.adapter == "name")` vs absent.
+    assert!(
+        row.get("adapter").is_none(),
+        "base-served rows must omit adapter: {row}"
+    );
     assert_eq!(row["request"]["messages"][0]["content"], "Hello kiln");
     // The mining contract: request.messages + response message form a
     // complete chat transcript.
