@@ -1119,6 +1119,24 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await waitForPanelText(page, '#decode-perf-panel', /No streaming completions/i, 'Empty decode performance state missing');
     await expectPanelLink(page, '#decode-perf-panel', '/health', '/health');
 
+    // Regression (the "pie chart disappears" bug): the VRAM donut and header
+    // stats must survive subsequent 2s health polls. The donut used to render
+    // once, then renderServerStatus clobbered the panel while the donut
+    // refresher's dedupe key skipped re-appending it — gone until reload.
+    await page.waitForSelector('#server-status .vram-donut svg', { timeout: 5000 })
+      .catch(() => fail('VRAM donut should render in the server status panel'));
+    await new Promise((resolve) => setTimeout(resolve, 5200)); // sit through ≥2 health polls
+    const overviewSteadyState = await page.evaluate(() => ({
+      donuts: document.querySelectorAll('#server-status .vram-donut').length,
+      svg: Boolean(document.querySelector('#server-status .vram-donut svg')),
+      model: document.getElementById('header-model')?.textContent || '',
+      uptime: document.getElementById('header-uptime')?.textContent || '',
+    }));
+    if (!overviewSteadyState.svg) fail('VRAM donut disappeared after subsequent health polls');
+    if (overviewSteadyState.donuts !== 1) fail(`Expected exactly one VRAM donut, found ${overviewSteadyState.donuts}`);
+    if (overviewSteadyState.model !== 'Qwen3.5-4B') fail(`Header model stat should render from /health, got "${overviewSteadyState.model}"`);
+    if (!/^\d+[sm]/.test(overviewSteadyState.uptime)) fail(`Header uptime stat should render, got "${overviewSteadyState.uptime}"`);
+
     await goToPrimaryTab(page, 'playground');
     await waitForPanelText(page, '#chat-output', /Send a message to test inference\./, 'Quick Inference empty state missing');
     await expectPanelLink(page, '#chat-output .empty', '/health', '/health');
