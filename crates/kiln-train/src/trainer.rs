@@ -2990,6 +2990,7 @@ pub fn sft_train(
     adapter_name: &str,
     progress_cb: Option<ProgressCallback>,
     replay_ctx: Option<ReplayContext>,
+    gpu_step_lock: Option<std::sync::Arc<std::sync::RwLock<()>>>,
 ) -> Result<PathBuf> {
     let run_started = Instant::now();
     let output_dir = adapter_dir.join(adapter_name);
@@ -3260,6 +3261,16 @@ pub fn sft_train(
                     tokenize_for_training(&examples[ex_idx], tokenizer)
                         .with_context(|| format!("retokenize SFT example {ex_idx}"))?;
                 let loss_val;
+
+                // Per-STEP GPU coordination (the state.rs contract the
+                // job-long server guard violated): hold the write lock
+                // only across this step's forward/backward/optimizer so
+                // in-flight inference streams interleave between steps
+                // instead of freezing mid-token for the whole job.
+                // Tokenization above runs lock-free (CPU work).
+                let _step_gpu = gpu_step_lock
+                    .as_ref()
+                    .map(|l| l.write().unwrap_or_else(|p| p.into_inner()));
 
                 // (#1082 candle-drop) The SFT forward/backward is now UNCONDITIONALLY
                 // kt tape-authoritative — the candle checkpointed reverse + candle
@@ -13989,6 +14000,7 @@ fn grpo_dry_run_accepts_echo_with_and_without_env_tokens() -> Result<()> {
             "perf-regression-smoke",
             None,
             None,
+            None,
         )?;
         let elapsed = started.elapsed();
         let elapsed_ms = elapsed.as_millis();
@@ -14100,6 +14112,7 @@ fn grpo_dry_run_accepts_echo_with_and_without_env_tokens() -> Result<()> {
             &tokenizer,
             adapter_dir.path(),
             "perf-regression-tracing-smoke",
+            None,
             None,
             None,
         )?;

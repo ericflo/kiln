@@ -72,6 +72,7 @@ pub fn cuda_native_sft_train(
         adapter_name,
         progress_cb,
         None,
+        None,
     )
 }
 

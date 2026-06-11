@@ -275,6 +275,7 @@ fn run_one(
         &adapter_name,
         Some(progress),
         None,
+        None,
     );
     let elapsed = t0.elapsed().as_secs_f64();
     stop.store(true, Ordering::Relaxed);

@@ -370,6 +370,7 @@ fn run_sft(
     progress_cb: trainer::ProgressCallback,
     replay_ctx: trainer::ReplayContext,
     job_id: &str,
+    gpu_step_lock: Option<std::sync::Arc<std::sync::RwLock<()>>>,
 ) -> std::result::Result<PathBuf, String> {
     if native_route_enabled {
         #[cfg(feature = "cuda")]
@@ -413,6 +414,7 @@ fn run_sft(
         adapter_name,
         Some(progress_cb),
         Some(replay_ctx),
+        gpu_step_lock,
     )
     .map_err(|e| format!("{e:#}"))
 }
@@ -1352,6 +1354,7 @@ fn run_distill_refresh(
         &midtrain_name,
         Some(progress_cb),
         None,
+        None,
     )
     .map_err(|e| format!("distill_refresh phase 1 (SFT midtrain) failed: {e:#}"))?;
 
@@ -2216,7 +2219,12 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 request_body,
                 base_model: base_model.clone(),
             };
-            let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
+            // Per-STEP GPU coordination (the state.rs contract): the
+            // trainer acquires the write lock around each step's
+            // forward/backward/optimizer instead of this arm holding it
+            // job-long — in-flight inference streams interleave between
+            // steps rather than freezing mid-token for the whole job
+            // (which the [agent] scheduler now triggers unattended).
             let guard = runner_arc.read().unwrap();
             let training_dispatch = guard.backend_capabilities().training.server_dispatch;
             let native_route_enabled = training_dispatch.native_route_enabled();
@@ -2232,6 +2240,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 progress_cb,
                 _replay_ctx,
                 &job_id,
+                Some(state.gpu_lock.clone()),
             )
         }
         QueuedJob::Grpo(mut req) => {

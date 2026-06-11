@@ -2537,6 +2537,7 @@ fn bench_training(
             "bench-adapter",
             progress_cb,
             None,
+            None,
         )
     };
     #[cfg(not(feature = "cuda"))]
@@ -2559,6 +2560,7 @@ fn bench_training(
             &adapter_dir,
             "bench-adapter",
             progress_cb,
+            None,
             None,
         )
     };
