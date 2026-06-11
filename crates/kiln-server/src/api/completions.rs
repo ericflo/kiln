@@ -859,6 +859,31 @@ impl ToolCallGate {
     }
 }
 
+/// The OpenAI `stream_options.include_usage` final chunk: empty
+/// `choices`, populated `usage`, emitted after the finish chunk and
+/// before `[DONE]`.
+fn usage_chunk_json(
+    id: &str,
+    created: u64,
+    model: &str,
+    prompt_tokens: u32,
+    completion_tokens: u32,
+) -> String {
+    serde_json::json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        }
+    })
+    .to_string()
+}
+
 async fn emit_or_buffer_reasoning_chunk(
     tx: &tokio::sync::mpsc::Sender<Event>,
     id: &str,
@@ -3368,6 +3393,12 @@ where
     })
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct StreamOptions {
+    #[serde(default)]
+    pub include_usage: bool,
+}
+
 /// OpenAI-compatible chat completion request.
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionRequest {
@@ -3422,6 +3453,11 @@ pub struct ChatCompletionRequest {
     pub max_completion_tokens: Option<usize>,
     #[serde(default)]
     pub stream: bool,
+    /// OpenAI `stream_options`. `include_usage: true` appends a final
+    /// chunk (empty `choices`) carrying the request's token usage before
+    /// `[DONE]` — agent clients meter cost from it.
+    #[serde(default)]
+    pub stream_options: Option<StreamOptions>,
     #[serde(default, deserialize_with = "deserialize_optional_stop")]
     pub stop: Option<Vec<String>>,
     #[serde(default)]
@@ -5319,6 +5355,10 @@ async fn generate_real_batched_streaming(
     let prompt_starts_in_reasoning = prompt_starts_in_reasoning(prompt_text);
     let buffer_tool_content = request_allows_tool_call_parsing(req);
     let mut tool_gate = ToolCallGate::new(buffer_tool_content);
+    let include_usage = req
+        .stream_options
+        .as_ref()
+        .is_some_and(|o| o.include_usage);
     let batching_engine = batching_engine.clone();
     let stop_sequences = sampling.stop.clone();
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
@@ -5628,6 +5668,17 @@ async fn generate_real_batched_streaming(
                                 let _ = tx
                                     .send(Event::default().data(serde_json::to_string(&chunk).unwrap()))
                                     .await;
+                                if include_usage {
+                                    let _ = tx
+                                        .send(Event::default().data(usage_chunk_json(
+                                            &id,
+                                            created,
+                                            &model,
+                                            prompt_token_count as u32,
+                                            output.completion_tokens as u32,
+                                        )))
+                                        .await;
+                                }
                                 let _ = tx.send(Event::default().data("[DONE]")).await;
                                 record(
                                     finish,
@@ -6205,6 +6256,10 @@ async fn generate_real_streaming(
     let req_max_tokens = Some(chat_request_max_tokens(req).min(u32::MAX as usize) as u32);
     let buffer_tool_content = request_allows_tool_call_parsing(req);
     let mut tool_gate = ToolCallGate::new(buffer_tool_content);
+    let include_usage = req
+        .stream_options
+        .as_ref()
+        .is_some_and(|o| o.include_usage);
     let thinking_mode = thinking_mode_for_prompt(&prompt).to_string();
     let prefix_cache_diagnostic = std::sync::Arc::new(std::sync::Mutex::new("unknown"));
 
@@ -6754,6 +6809,17 @@ async fn generate_real_streaming(
                                             .data(serde_json::to_string(&chunk).unwrap()),
                                     )
                                     .await;
+                                if include_usage {
+                                    let _ = tx
+                                        .send(Event::default().data(usage_chunk_json(
+                                            &id,
+                                            created,
+                                            &model,
+                                            prompt_token_count as u32,
+                                            completion_token_count,
+                                        )))
+                                        .await;
+                                }
                                 let _ = tx.send(Event::default().data("[DONE]")).await;
                                 let cache_value = DeterministicCompletionCacheValue {
                                     text: assistant_output.content.clone(),
@@ -8276,6 +8342,7 @@ async fn batch_completions_inner(
                         max_tokens,
                         max_completion_tokens,
                         stream: false,
+                        stream_options: None,
                         stop: stop.clone(),
                         seed: derived_seed,
                         adapter: ChatAdapterSelection::Default,
@@ -8525,6 +8592,7 @@ async fn generate_multi_chat_response(
             max_tokens: req.max_tokens,
             max_completion_tokens: req.max_completion_tokens,
             stream: false,
+            stream_options: None,
             stop: stop.clone(),
             seed: derived_seed,
             adapter: ChatAdapterSelection::Default,
@@ -9217,6 +9285,28 @@ mod tests {
         buf.push_str("anything <tool_call> at all");
         let r = g.advance(&buf);
         assert_eq!(&buf[r], "anything <tool_call> at all");
+    }
+
+    /// stream_options.include_usage: the final chunk shape is the OpenAI
+    /// contract — empty choices, populated usage, exact totals.
+    #[test]
+    fn usage_chunk_matches_openai_contract() {
+        let json = usage_chunk_json("chatcmpl-x", 123, "kiln", 100, 25);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["object"], "chat.completion.chunk");
+        assert_eq!(v["choices"].as_array().unwrap().len(), 0);
+        assert_eq!(v["usage"]["prompt_tokens"], 100);
+        assert_eq!(v["usage"]["completion_tokens"], 25);
+        assert_eq!(v["usage"]["total_tokens"], 125);
+
+        // The request field parses and defaults off.
+        let req = parse_request(
+            r#"{"messages":[{"role":"user","content":"hi"}],
+                "stream":true,"stream_options":{"include_usage":true}}"#,
+        );
+        assert!(req.stream_options.unwrap().include_usage);
+        let req = parse_request(r#"{"messages":[{"role":"user","content":"hi"}]}"#);
+        assert!(req.stream_options.is_none());
     }
 
     /// OpenAI semantics: the matched stop sequence must never appear in
