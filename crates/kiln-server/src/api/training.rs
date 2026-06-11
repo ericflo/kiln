@@ -1531,9 +1531,12 @@ mod tests {
         req.config.loss.echo = Some(kiln_train::EchoConfig::default());
         validate_grpo_submission_source(&req).unwrap();
 
-        // no_policy_loss: constant-zero loss.
+        // no_policy_loss + default ECHO = §5.5 verifier-free mode: valid.
         let mut req = grpo_req(None, vec![grpo_group()]);
         req.config.loss.no_policy_loss = true;
+        validate_grpo_submission_source(&req).expect("verifier-free mode validates");
+        // Without ECHO there is nothing to train on — still rejected.
+        req.config.loss.echo = None;
         let err = validate_grpo_submission_source(&req).unwrap_err();
         assert!(err.message.contains("no_policy_loss"), "{}", err.message);
     }

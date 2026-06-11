@@ -5798,8 +5798,10 @@ fn train_tokenized_grpo_group_with_grad_norms(
         // rollout forwards.)
         let tape_auth_eligible = tape_authoritative_enabled()
             && backend_supports_tape_forward_backward(backend)
-            && base_dtype_supports_tape_for_backend(weights, backend)
-            && !config.loss.no_policy_loss;
+            && base_dtype_supports_tape_for_backend(weights, backend);
+        // No loss-shape exclusions remain: ECHO env-CE is wired (#1512/#1518)
+        // and no_policy_loss is the §5.5 verifier-free mode (env rows drive,
+        // PG masked) wired in this change.
         #[cfg(not(any(
             feature = "cuda",
             feature = "metal",
@@ -5960,6 +5962,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                         segs,
                         device,
                         echo_env_spec.as_ref(),
+                        config.loss.no_policy_loss,
                     )?;
                     let step_elapsed = step_started.elapsed();
                     if let Some(t) = timings.as_deref_mut() {
@@ -5996,6 +5999,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                         checkpoint_segments,
                         timings.as_deref_mut(),
                         echo_env_spec.as_ref(),
+                        config.loss.no_policy_loss,
                     )?
                 };
                 loss_val = lv;
@@ -9458,6 +9462,7 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
     checkpoint_segments: usize,
     mut timings: Option<&mut GrpoBenchmarkTimings>,
     echo_env: Option<&crate::grpo_tape_shim::EchoEnvSpec>,
+    no_pg: bool,
 ) -> Result<(f64, Option<f64>, kiln_autograd::GradStore)> {
     let lora_weights = params.as_lora_weights();
     let mut linear_state = LinearAttentionState::new(model_config, device)?;
@@ -9513,6 +9518,7 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
                         device,
                         DEFAULT_CHUNK_SIZE,
                         echo_env,
+                        no_pg,
                     )
                     .context("GRPO tape-authoritative(kt) scalar loss")
                     .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
@@ -9624,6 +9630,7 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
     segments: &[(usize, usize)],
     device: &Device,
     echo_env: Option<&crate::grpo_tape_shim::EchoEnvSpec>,
+    no_pg: bool,
 ) -> Result<(f64, Option<f64>, kiln_autograd::GradStore)> {
     let num_segments = segments.len();
     anyhow::ensure!(
@@ -9711,6 +9718,7 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
             device,
             DEFAULT_CHUNK_SIZE,
             echo_env,
+            no_pg,
         )
         .context("checkpointed GRPO tail loss/gradient")?,
     };
@@ -14169,18 +14177,43 @@ fn grpo_dry_run_accepts_echo_with_and_without_env_tokens() -> Result<()> {
 
         let gdn_config = tiny_config_bf16();
         let gdn_weights = tiny_weights_bf16(&gdn_config, &device)?;
+        // CPU-as-Vulkan-sentinel (#1517): on a Vulkan-capable host the
+        // per-device policy treats CPU-device tensors as the Vulkan
+        // substrate, whose F32-activation rule pins the planning width to
+        // 4 bytes; portable hosts (CI runners) keep the inflated GDN
+        // replay width.
+        #[cfg(feature = "vulkan")]
+        let expected_gdn_width =
+            if kiln_model::backend::vulkan_training_substrate_active() {
+                4
+            } else {
+                10
+            };
+        #[cfg(not(feature = "vulkan"))]
+        let expected_gdn_width = 10;
         assert_eq!(
             training_activation_bytes_per_elem(&gdn_weights, &device),
-            10,
-            "BF16 GDN training should use inflated effective activation planning"
+            expected_gdn_width,
+            "BF16 GDN training should use substrate-correct activation planning"
         );
 
         let full_attn_config = tiny_config_full_attn_bf16();
         let full_attn_weights = tiny_weights_bf16(&full_attn_config, &device)?;
+        // Same substrate rule: Vulkan hosts plan F32 activations (4 bytes)
+        // for CPU-device tensors; portable hosts keep BF16 (2 bytes).
+        #[cfg(feature = "vulkan")]
+        let expected_full_attn_width =
+            if kiln_model::backend::vulkan_training_substrate_active() {
+                4
+            } else {
+                2
+            };
+        #[cfg(not(feature = "vulkan"))]
+        let expected_full_attn_width = 2;
         assert_eq!(
             training_activation_bytes_per_elem(&full_attn_weights, &device),
-            2,
-            "BF16 full-attention-only training should keep BF16 activation planning"
+            expected_full_attn_width,
+            "BF16 full-attention-only training should keep substrate-correct planning"
         );
 
         Ok(())
@@ -14547,6 +14580,7 @@ fn grpo_dry_run_accepts_echo_with_and_without_env_tokens() -> Result<()> {
             0,          // checkpoint_segments (no checkpointing)
             None,       // timings
             None,       // echo_env
+            false,      // no_pg
         )
         .expect("grpo_step_forward_backward_tape_authoritative_kt (F32 Vulkan GRPO)");
 
@@ -14782,6 +14816,7 @@ fn grpo_dry_run_accepts_echo_with_and_without_env_tokens() -> Result<()> {
             0,
             None,
             None, // echo_env
+            false, // no_pg
         )
         .expect("grpo_step_forward_backward_tape_authoritative_kt (BF16 Vulkan GRPO)");
 
