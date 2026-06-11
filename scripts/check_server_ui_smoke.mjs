@@ -340,6 +340,42 @@ const defaultAvailableAdapters = [
   { name: 'adapter-beta', active: false, size_bytes: 8192 },
 ];
 
+// Recent-requests row factory for the journey-strip truth assertions. The
+// `client` field mirrors the server echoing the X-Kiln-Client header:
+// dashboard-originated rows carry `client: 'dashboard'` and must never
+// complete the "Agent connected" milestone; external rows (curl, pi) must.
+let smokeRowSeq = 0;
+function smokeRecentRow(overrides = {}) {
+  smokeRowSeq += 1;
+  return {
+    id: `chatcmpl-smoke-row-${smokeRowSeq}`,
+    timestamp_unix_ms: Date.now() - smokeRowSeq * 1000,
+    model: 'Qwen3.5-4B',
+    prompt_preview: 'smoke prompt',
+    completion_preview: 'smoke completion',
+    prompt_tokens: 12,
+    completion_tokens: 8,
+    duration_ms: 120,
+    streamed: false,
+    finish_reason: 'stop',
+    ...overrides,
+  };
+}
+const dashboardRow = () => smokeRecentRow({
+  user_agent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36',
+  client: 'dashboard',
+  prompt_preview: 'Reply with the single word: connected',
+  completion_preview: 'connected',
+});
+const curlRow = () => smokeRecentRow({
+  user_agent: 'curl/8.7.1',
+  prompt_preview: 'hello from the curl tab',
+});
+const piRow = () => smokeRecentRow({
+  user_agent: 'pi/1.2.0',
+  prompt_preview: 'hello from pi',
+});
+
 function sse(res, chunks) {
   res.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
@@ -353,10 +389,18 @@ function sse(res, chunks) {
   res.end();
 }
 
-async function startServer({ failDashboardApis = false, availableAdapters = defaultAvailableAdapters } = {}) {
+async function startServer({
+  failDashboardApis = false,
+  availableAdapters = defaultAvailableAdapters,
+  // Cold-start fixture: /v1/models 503s until healed via setModelsCold(false),
+  // then serves `servedModelId`. Distinct from the UI fallback ('Qwen3.5-4B')
+  // when the scenario needs to prove the snippets upgraded without reload.
+  modelsCold = false,
+  servedModelId = 'Qwen3.5-4B',
+} = {}) {
   // Mutable so the failure scenario can heal/re-break the APIs mid-run and
   // assert the dashboard recovers (Retry buttons + dedupe-key invalidation).
-  const apiState = { failDashboardApis };
+  const apiState = { failDashboardApis, modelsCold, recentRequests: [], modelsRequests: 0 };
   const uiHtml = await readFile(uiIndexPath, 'utf8');
   const uiStyles = await readFile(uiStylesPath, 'utf8');
   const uiDemoJs = await readFile(uiDemoJsPath, 'utf8');
@@ -693,7 +737,12 @@ async function startServer({ failDashboardApis = false, availableAdapters = defa
       return;
     }
     if (url.pathname === '/v1/models') {
-      json(res, { object: 'list', data: [{ id: 'Qwen3.5-4B', object: 'model', owned_by: 'kiln' }] });
+      apiState.modelsRequests += 1;
+      if (apiState.modelsCold) {
+        apiFailure(res, 'Models', url.pathname);
+        return;
+      }
+      json(res, { object: 'list', data: [{ id: servedModelId, object: 'model', owned_by: 'kiln' }] });
       return;
     }
     if (url.pathname === '/v1/stats/decode') {
@@ -712,7 +761,7 @@ async function startServer({ failDashboardApis = false, availableAdapters = defa
       return;
     }
     if (url.pathname === '/v1/stats/recent-requests') {
-      json(res, []);
+      json(res, apiState.recentRequests);
       return;
     }
     // The UI polls /v1/eval/jobs at startup to keep the Evals badge
@@ -766,6 +815,14 @@ async function startServer({ failDashboardApis = false, availableAdapters = defa
         res.end(JSON.stringify({ detail: 'Use POST for chat completions' }));
         return;
       }
+      // Bug-A regression: every dashboard-originated inference request must
+      // self-identify so the server can mark it `client: 'dashboard'` and
+      // onboarding milestones don't count the dashboard as an agent.
+      if (req.headers['x-kiln-client'] !== 'dashboard') {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ detail: 'Dashboard inference request is missing the X-Kiln-Client: dashboard header' }));
+        return;
+      }
       const body = await readJsonBody(req);
       const prompt = body?.messages?.findLast((message) => message.role === 'user')?.content || '';
       if (!body?.stream || !/Explain Kiln in one sentence\./.test(prompt)) {
@@ -794,6 +851,9 @@ async function startServer({ failDashboardApis = false, availableAdapters = defa
     server,
     baseUrl: `http://127.0.0.1:${address.port}`,
     setFailDashboardApis: (value) => { apiState.failDashboardApis = value; },
+    setRecentRequests: (rows) => { apiState.recentRequests = rows; },
+    setModelsCold: (value) => { apiState.modelsCold = value; },
+    getModelsRequests: () => apiState.modelsRequests,
   };
 }
 
@@ -1194,7 +1254,72 @@ async function runMobileOnboardingSmoke(baseUrl) {
   }
 }
 
-async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapters = false, setFailDashboardApis = null } = {}) {
+// ── Bug B: cold-start model-id resolution ──────────────────────────────
+// Open the dashboard while /v1/models still 503s (weights loading): the
+// Connect snippets render the fallback id. Heal the endpoint → the next
+// 2s health poll piggybacks a /v1/models retry, and the copyable model-id
+// field + snippets silently upgrade to the real id without a reload. Once
+// resolved, the retry stops for good.
+async function runModelColdStartSmoke(baseUrl, { setModelsCold, getModelsRequests }) {
+  const puppeteer = await loadPuppeteer();
+  const browser = await puppeteer.launch({
+    executablePath: chromiumPath(),
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+  });
+
+  const pageErrors = [];
+  try {
+    const page = await browser.newPage();
+    page.on('pageerror', (error) => pageErrors.push(error.message));
+    page.on('console', (entry) => {
+      if (entry.type() !== 'error') return;
+      const text = entry.text();
+      // The cold phase intentionally 503s /v1/models — that resource noise
+      // is the fixture, not a dashboard defect.
+      if (/Failed to load resource: the server responded with a status of 503/.test(text)) return;
+      pageErrors.push(text);
+    });
+
+    await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 1 });
+    await page.goto(`${baseUrl}/ui`, { waitUntil: 'networkidle0', timeout: 10000 });
+
+    // Cold: the panel runs on the fallback id.
+    await page.waitForFunction(
+      () => document.getElementById('connect-model')?.textContent === 'Qwen3.5-4B',
+      { timeout: 8000 },
+    ).catch(() => fail('Connect model id should show the fallback while /v1/models is cold'));
+    const coldSnippets = await page.$eval('#connect-snippets', (el) => el.textContent || '');
+    if (!coldSnippets.includes('Qwen3.5-4B')) fail('Connect snippets should render the fallback model id during cold start');
+    if (coldSnippets.includes('Qwen3.5-4B-resolved')) fail('Connect snippets must not know the real model id before /v1/models answers');
+
+    // Heal. The piggybacked retry on the 2s health poll must upgrade the
+    // copyable model-id field and the rendered snippets without a reload.
+    setModelsCold(false);
+    await page.waitForFunction(
+      () => document.getElementById('connect-model')?.textContent === 'Qwen3.5-4B-resolved',
+      { timeout: 10000 },
+    ).catch(() => fail('Connect model id did not upgrade to the served id after /v1/models recovered (no-reload retry broken)'));
+    const warmSnippets = await page.$eval('#connect-snippets', (el) => el.textContent || '');
+    if (!warmSnippets.includes('Qwen3.5-4B-resolved')) fail('Connect snippets did not re-render with the served model id after cold start');
+    // The fallback id is a PREFIX of the resolved one — assert no snippet
+    // still carries a bare fallback (every occurrence must be the resolved id).
+    const bareFallbacks = warmSnippets.split('Qwen3.5-4B').slice(1).filter((tail) => !tail.startsWith('-resolved')).length;
+    if (bareFallbacks > 0) fail(`Connect snippets still contain ${bareFallbacks} stale fallback model id(s) after resolution`);
+
+    // Resolved → the retry stops: no further /v1/models hits across >2 polls.
+    const settled = getModelsRequests();
+    await new Promise((resolve) => setTimeout(resolve, 5200));
+    const after = getModelsRequests();
+    if (after !== settled) fail(`/v1/models retry did not stop after resolution (${settled} → ${after} requests)`);
+
+    if (pageErrors.length > 0) fail(`Cold-start UI emitted browser errors: ${pageErrors.join('; ')}`);
+  } finally {
+    await browser.close();
+  }
+}
+
+async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapters = false, setFailDashboardApis = null, setRecentRequests = null } = {}) {
   const puppeteer = await loadPuppeteer();
   const browser = await puppeteer.launch({
     executablePath: chromiumPath(),
@@ -1299,8 +1424,98 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       await expectPanelLink(page, '#adapters-panel .empty', 'Quickstart', 'https://ericflo.github.io/kiln/quickstart.html');
       await expectPanelLink(page, '#adapters-panel .empty', 'Troubleshooting', 'https://ericflo.github.io/kiln/troubleshooting.html');
       await expectDisabled(page, '#merge-btn', true, 'Adapter merge should stay disabled when fewer than two adapters exist');
+
+      // ── Journey-strip truth (Bug A), novice golden path ────────────────
+      // No adapters trained yet → the strip stays on screen, so the agent
+      // step's honesty is directly observable through every transition.
+      if (setRecentRequests) {
+        await goToPrimaryTab(page, 'overview');
+        await page.waitForFunction(
+          () => { const strip = document.getElementById('journey-strip'); return strip && !strip.hidden; },
+          { timeout: 8000 },
+        ).catch(() => fail('Journey strip should be visible on a fresh server with no adapters'));
+
+        // Dashboard-only traffic (Test connection / Playground) must NOT
+        // complete "Agent connected" nor collapse the Connect panel.
+        setRecentRequests([dashboardRow()]);
+        await waitForPanelText(page, '#recent-requests-panel', /Reply with the single word: connected/, 'Dashboard-client row did not render in recent requests');
+        const dashOnly = await page.evaluate(() => ({
+          agentDone: !!document.querySelector('#journey-strip [data-journey="agent"]')?.classList.contains('is-done'),
+          sub: document.querySelector('#journey-strip [data-journey="agent"] .journey-sub')?.textContent || '',
+          connectExpandedHidden: !!document.getElementById('connect-expanded')?.hidden,
+          fwAgents: document.getElementById('fw-agents')?.textContent || '',
+        }));
+        if (dashOnly.agentDone) fail('Dashboard-only rows must NOT complete the "Agent connected" milestone');
+        if (dashOnly.sub !== 'point pi or opencode here') fail(`Agent step sub-text should stay default on dashboard-only rows, got "${dashOnly.sub}"`);
+        if (dashOnly.connectExpandedHidden) fail('Connect panel must not auto-collapse on dashboard-only traffic');
+        if (dashOnly.fwAgents !== '0') fail(`Flywheel client count should ignore dashboard rows, got "${dashOnly.fwAgents}"`);
+
+        // A curl row IS an external connection: the milestone completes,
+        // with the inline (not hover-only) "next move" hint.
+        setRecentRequests([dashboardRow(), curlRow()]);
+        await page.waitForFunction(
+          () => {
+            const strip = document.getElementById('journey-strip');
+            const step = strip?.querySelector('[data-journey="agent"]');
+            const sub = step?.querySelector('.journey-sub')?.textContent || '';
+            return strip && !strip.hidden && !!step?.classList.contains('is-done')
+              && sub === 'curl seen — point a coding agent here next';
+          },
+          { timeout: 8000 },
+        ).catch(() => fail('A curl row should complete "Agent connected" with the inline coding-agent hint'));
+        const collapsedAfterCurl = await page.evaluate(() => !document.getElementById('connect-collapsed')?.hidden);
+        if (!collapsedAfterCurl) fail('Connect panel should auto-collapse once external (curl) traffic flows');
+
+        // A recognized coding agent arrives → the curl hint clears, and pi
+        // leads the client-chip enumeration (hard preference).
+        setRecentRequests([dashboardRow(), curlRow(), piRow()]);
+        await page.waitForFunction(
+          () => {
+            const step = document.querySelector('#journey-strip [data-journey="agent"]');
+            const sub = step?.querySelector('.journey-sub')?.textContent || '';
+            return !!step?.classList.contains('is-done') && sub === 'point pi or opencode here';
+          },
+          { timeout: 8000 },
+        ).catch(() => fail('The curl hint should clear once a recognized coding agent connects'));
+        const chips = await page.$$eval('#recent-requests-panel .agent-chip', (els) => els.map((el) => el.textContent.trim()));
+        if (chips.length === 0) fail('Client filter chips should render when multiple clients are present');
+        if (!(chips[1] || '').startsWith('pi')) fail(`pi should lead the client chips after "All agents", got ${JSON.stringify(chips)}`);
+        if (!chips.some((chip) => chip.startsWith('dashboard'))) fail(`Dashboard rows should be labeled honestly in the client chips, got ${JSON.stringify(chips)}`);
+      }
+
       if (pageErrors.length > 0) fail(`Empty adapter UI emitted browser errors: ${pageErrors.join('; ')}`);
       return;
+    }
+
+    // ── Journey-strip truth (Bug A), default scenario ───────────────────
+    // Dashboard-client rows must not complete "Agent connected"; a curl row
+    // must. With smoke adapters already present, the curl row completes all
+    // three milestones, so the strip retires itself — that retirement IS the
+    // milestone assertion here (the empty-adapter scenario watches the step
+    // classes directly while the strip stays visible).
+    if (setRecentRequests) {
+      setRecentRequests([dashboardRow()]);
+      await waitForPanelText(page, '#recent-requests-panel', /Reply with the single word: connected/, 'Dashboard-client row did not render in recent requests');
+      const dashOnly = await page.evaluate(() => ({
+        stripHidden: !document.getElementById('journey-strip') || document.getElementById('journey-strip').hidden,
+        agentDone: !!document.querySelector('#journey-strip [data-journey="agent"]')?.classList.contains('is-done'),
+        connectExpandedHidden: !!document.getElementById('connect-expanded')?.hidden,
+      }));
+      if (dashOnly.stripHidden) fail('Journey strip should stay visible while only dashboard-client rows exist');
+      if (dashOnly.agentDone) fail('Dashboard-only rows must NOT complete the "Agent connected" milestone');
+      if (dashOnly.connectExpandedHidden) fail('Connect panel must not auto-collapse on dashboard-only traffic');
+
+      setRecentRequests([dashboardRow(), curlRow()]);
+      await page.waitForFunction(
+        () => document.getElementById('journey-strip')?.hidden === true,
+        { timeout: 8000 },
+      ).catch(() => fail('A curl row should complete "Agent connected" (all milestones done → journey strip retires)'));
+      const collapsedAfterCurl = await page.evaluate(() => !document.getElementById('connect-collapsed')?.hidden);
+      if (!collapsedAfterCurl) fail('Connect panel should auto-collapse once external (curl) traffic flows');
+
+      // Drain the fixture rows so the later empty-state assertions hold.
+      setRecentRequests([]);
+      await waitForPanelText(page, '#recent-requests-panel', /No recent requests yet\./, 'Recent requests did not drain after the journey-strip truth checks');
     }
 
     await goToPrimaryTab(page, 'adapters');
@@ -1588,21 +1803,36 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
 const emptyAdapterScenario = await startServer({ availableAdapters: [] });
 try {
   console.log('[smoke] empty adapter scenario start');
-  await runSmoke(emptyAdapterScenario.baseUrl, { expectEmptyAdapters: true });
+  await runSmoke(emptyAdapterScenario.baseUrl, {
+    expectEmptyAdapters: true,
+    setRecentRequests: emptyAdapterScenario.setRecentRequests,
+  });
   console.log('[smoke] empty adapter scenario passed');
 } finally {
   await new Promise((accept) => emptyAdapterScenario.server.close(accept));
 }
 
-const { server, baseUrl } = await startServer();
+const { server, baseUrl, setRecentRequests } = await startServer();
 try {
   console.log('[smoke] default scenario desktop start');
-  await runSmoke(baseUrl);
+  await runSmoke(baseUrl, { setRecentRequests });
   console.log('[smoke] default scenario desktop passed; mobile start');
   await runMobileOnboardingSmoke(baseUrl);
   console.log('[smoke] default scenario mobile passed');
 } finally {
   await new Promise((accept) => server.close(accept));
+}
+
+const coldStartScenario = await startServer({ modelsCold: true, servedModelId: 'Qwen3.5-4B-resolved' });
+try {
+  console.log('[smoke] model cold-start scenario start');
+  await runModelColdStartSmoke(coldStartScenario.baseUrl, {
+    setModelsCold: coldStartScenario.setModelsCold,
+    getModelsRequests: coldStartScenario.getModelsRequests,
+  });
+  console.log('[smoke] model cold-start scenario passed');
+} finally {
+  await new Promise((accept) => coldStartScenario.server.close(accept));
 }
 
 const failureScenario = await startServer({ failDashboardApis: true });

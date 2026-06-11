@@ -478,6 +478,7 @@ fn request_record_from_req(
         thinking_mode: Some(thinking_mode_for_request(req).to_string()),
         prefix_cache: Some("unknown".to_string()),
         user_agent: req.user_agent.clone(),
+        client: req.client.clone(),
         ..RequestRecord::default()
     }
 }
@@ -491,6 +492,19 @@ fn extract_user_agent(headers: &HeaderMap) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| s.chars().take(200).collect())
+}
+
+/// Extract the `X-Kiln-Client` self-identification header. The /ui dashboard
+/// sends `dashboard` on its own inference traffic so the journey strip /
+/// Connect panel can tell it apart from a real agent. Bounded like
+/// `extract_user_agent` so a hostile header can't bloat the ring.
+fn extract_client(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-kiln-client")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(64).collect())
 }
 
 const REASONING_OPEN_TAG: &str = "<think>\n";
@@ -1411,6 +1425,7 @@ fn record_failed_chat_completion(
         state,
         RequestRecord {
             user_agent: req.user_agent.clone(),
+            client: req.client.clone(),
             prompt_tokens: prompt_tokens.min(u32::MAX as usize) as u32,
             completion_tokens: 0,
             duration_ms: request_start.elapsed().as_millis() as u64,
@@ -2726,6 +2741,7 @@ fn response_from_cached_completion(
         state,
         RequestRecord {
             user_agent: req.user_agent.clone(),
+            client: req.client.clone(),
             completion_preview: truncate_chars(preview_source, COMPLETION_PREVIEW_MAX_CHARS),
             completion_full: Some(truncate_chars(preview_source, FULL_BODY_MAX_CHARS)),
             prompt_tokens: prompt_token_count as u32,
@@ -2829,6 +2845,7 @@ fn response_from_cached_chat_choices(
         state,
         RequestRecord {
             user_agent: req.user_agent.clone(),
+            client: req.client.clone(),
             completion_preview: truncate_chars(preview_source, COMPLETION_PREVIEW_MAX_CHARS),
             completion_full: Some(truncate_chars(preview_source, FULL_BODY_MAX_CHARS)),
             prompt_tokens: cached.prompt_tokens as u32,
@@ -2913,6 +2930,7 @@ fn streaming_response_from_cached_completion(
         state,
         RequestRecord {
             user_agent: req.user_agent.clone(),
+            client: req.client.clone(),
             completion_preview: truncate_chars(preview_source, COMPLETION_PREVIEW_MAX_CHARS),
             completion_full: Some(truncate_chars(preview_source, FULL_BODY_MAX_CHARS)),
             prompt_tokens: prompt_token_count as u32,
@@ -3410,6 +3428,12 @@ pub struct ChatCompletionRequest {
     /// JSON body) so the /ui dashboard can attribute traffic per agent.
     #[serde(skip)]
     pub user_agent: Option<String>,
+    /// First-party self-identification from the `X-Kiln-Client` header,
+    /// injected by the handler (never from the JSON body). The /ui dashboard
+    /// sends `dashboard` on its own traffic (Test connection, Playground,
+    /// Compare) so onboarding milestones don't mistake it for an agent.
+    #[serde(skip)]
+    pub client: Option<String>,
     /// Number of completions to generate for this prompt. Defaults to 1.
     /// Non-streaming `n>1` reuses the same single-output fast paths below.
     #[serde(default)]
@@ -3897,6 +3921,7 @@ async fn chat_completions(
     // so the dashboard can show per-client traffic. Header-only, never trusted
     // from the body.
     req.user_agent = extract_user_agent(&headers);
+    req.client = extract_client(&headers);
     state.metrics.inc_active();
 
     let result = chat_completions_inner(&state, req).await;
@@ -5254,6 +5279,7 @@ async fn generate_real_batched(
         state,
         RequestRecord {
             user_agent: req.user_agent.clone(),
+            client: req.client.clone(),
             completion_preview: truncate_chars(preview_source, COMPLETION_PREVIEW_MAX_CHARS),
             completion_full: Some(truncate_chars(preview_source, FULL_BODY_MAX_CHARS)),
             prompt_tokens: prompt_token_count as u32,
@@ -5348,6 +5374,7 @@ async fn generate_real_batched_streaming(
     let prompt_full = truncate_chars(&prompt_text_full, FULL_BODY_MAX_CHARS);
     let req_adapter = req.adapter.request_adapter_name();
     let req_user_agent = req.user_agent.clone();
+    let req_client = req.client.clone();
     let req_temperature = req.temperature;
     let req_top_p = req.top_p;
     let req_max_tokens = Some(chat_request_max_tokens(req).min(u32::MAX as usize) as u32);
@@ -5384,6 +5411,7 @@ async fn generate_real_batched_streaming(
             let record = |finish_reason: String, completion: &str, completion_tokens: u32| {
                 let record = RequestRecord {
                     user_agent: req_user_agent.clone(),
+                    client: req_client.clone(),
                     id: id.clone(),
                     timestamp_unix_ms: now_unix_ms(),
                     model: model.clone(),
@@ -6127,6 +6155,7 @@ async fn generate_real(
         state,
         RequestRecord {
             user_agent: req.user_agent.clone(),
+            client: req.client.clone(),
             completion_preview: truncate_chars(preview_source, COMPLETION_PREVIEW_MAX_CHARS),
             completion_full: Some(truncate_chars(preview_source, FULL_BODY_MAX_CHARS)),
             prompt_tokens: prompt_token_count as u32,
@@ -6251,6 +6280,7 @@ async fn generate_real_streaming(
     let prompt_full = truncate_chars(&prompt_text_full, FULL_BODY_MAX_CHARS);
     let req_adapter = req.adapter.request_adapter_name();
     let req_user_agent = req.user_agent.clone();
+    let req_client = req.client.clone();
     let req_temperature = req.temperature;
     let req_top_p = req.top_p;
     let req_max_tokens = Some(chat_request_max_tokens(req).min(u32::MAX as usize) as u32);
@@ -6283,6 +6313,7 @@ async fn generate_real_streaming(
             let record = |finish_reason: String, completion: &str, completion_tokens: u32| {
                 let record = RequestRecord {
                     user_agent: req_user_agent.clone(),
+                    client: req_client.clone(),
                     id: id.clone(),
                     timestamp_unix_ms: now_unix_ms(),
                     model: model.clone(),
@@ -7048,6 +7079,7 @@ async fn generate_mock(
         state,
         RequestRecord {
             user_agent: req.user_agent.clone(),
+            client: req.client.clone(),
             completion_preview: truncate_chars(
                 assistant_output.preview_source(),
                 COMPLETION_PREVIEW_MAX_CHARS,
@@ -8330,6 +8362,7 @@ async fn batch_completions_inner(
                         model: model.clone(),
                         messages: messages.clone(),
                         user_agent: None,
+                        client: None,
                         n: None,
                         temperature,
                         top_p,
@@ -8580,6 +8613,7 @@ async fn generate_multi_chat_response(
             model: req.model.clone(),
             messages: req.messages.clone(),
             user_agent: req.user_agent.clone(),
+            client: req.client.clone(),
             n: None,
             temperature: req.temperature,
             top_p: req.top_p,

@@ -62,6 +62,13 @@ pub struct RequestRecord {
     /// OpenAI SDKs, curl, …). The dashboard maps it to a friendly label.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
+    /// First-party self-identification from the `X-Kiln-Client` request
+    /// header. The /ui dashboard sends `dashboard` on its own traffic
+    /// (Test connection, Playground, Compare) so onboarding milestones like
+    /// "Agent connected" can tell dashboard-originated requests apart from a
+    /// real external agent. Additive: absent for every other caller.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
 }
 
 /// Cap on full prompt / completion body size kept in the ring (chars).
@@ -215,6 +222,20 @@ mod tests {
     fn capacity_is_clamped_to_at_least_one() {
         let ring = RecentRequestsRing::new(0);
         assert_eq!(ring.capacity(), 1);
+    }
+
+    #[test]
+    fn client_field_is_additive_serialized_only_when_present() {
+        // Absent for every normal caller — cold rings / old clients see no
+        // new key. Present verbatim when a first-party caller (the /ui
+        // dashboard) self-identifies via X-Kiln-Client.
+        let mut record = make_record("a");
+        let json = serde_json::to_value(&record).unwrap();
+        assert!(json.get("client").is_none());
+
+        record.client = Some("dashboard".to_owned());
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(json["client"], "dashboard");
     }
 
     #[test]

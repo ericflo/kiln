@@ -207,6 +207,36 @@
           prompt_full: 'What files import the deprecated `legacy_client` module?',
           completion_full: 'grep_repo({"pattern":"legacy_client","glob":"**/*.rs"})',
         },
+        // Dashboard-originated rows (`client: 'dashboard'` from the
+        // X-Kiln-Client header): labeled honestly in the list, but they never
+        // count toward "Agent connected", the client tally, or the Connect
+        // panel auto-collapse — only external traffic does.
+        {
+          id: 'chatcmpl-d05b3a92-4c17-4e8b-a6f0-8b2c9d1e7f43',
+          model: 'Qwen3.5-4B', adapter: 'pi-coder-v4', streamed: true,
+          timestamp_unix_ms: now - 14_700, duration_ms: 1_104, ttft_ms: 35,
+          prompt_tokens: 64, completion_tokens: 118, finish_reason: 'stop',
+          temperature: 0.7, top_p: 0.95, max_tokens: 1024,
+          user_agent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36',
+          client: 'dashboard',
+          prompt_preview: 'Compare base vs adapter: explain this regex',
+          completion_preview: 'This regex matches semantic version strings: an optional `v` prefix, then MAJOR.MINOR.PATCH digits…',
+          prompt_full: 'Compare base vs adapter: explain this regex: ^v?(\\d+)\\.(\\d+)\\.(\\d+)$',
+          completion_full: 'This regex matches semantic version strings: an optional `v` prefix, then MAJOR.MINOR.PATCH digit groups anchored to the whole string.',
+        },
+        {
+          id: 'chatcmpl-e1c47b08-9d35-4a62-b7e9-5f0a8c3d2b17',
+          model: 'Qwen3.5-4B', adapter: 'pi-coder-v4', streamed: false,
+          timestamp_unix_ms: now - 16_200, duration_ms: 287, ttft_ms: null,
+          prompt_tokens: 18, completion_tokens: 2, finish_reason: 'stop',
+          temperature: 0, top_p: 1.0, max_tokens: 8,
+          user_agent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36',
+          client: 'dashboard',
+          prompt_preview: 'Reply with the single word: connected',
+          completion_preview: 'connected',
+          prompt_full: 'Reply with the single word: connected',
+          completion_full: 'connected',
+        },
         {
           id: 'chatcmpl-3c8f0a17-7d22-49b6-8c41-0a5e6f2b1d34',
           model: 'Qwen3.5-4B', adapter: 'pi-coder-v4', streamed: true,
