@@ -768,6 +768,97 @@ async fn emit_content_chunk(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Cap on the whitespace-run holdback preceding a possible tool tag.
+const TOOL_TAG_WS_HOLDBACK_MAX: usize = 64;
+
+/// Streams content EAGERLY on tools-bearing requests, holding back only
+/// the longest tail that could still become `<tool_call>` (plus the
+/// whitespace run before it, because the finish path `trim_end()`s the
+/// pre-tag content — holding the whitespace means the wire never shows
+/// bytes the final content retracts). Flips to full buffering once the
+/// tag confirms.
+///
+/// Before this gate, `buffer_tool_content` withheld the ENTIRE content
+/// channel until Done on every tools-bearing request — and pi always
+/// sends tools, so the daily driver never saw a token stream.
+struct ToolCallGate {
+    enabled: bool,
+    confirmed: bool,
+    /// Bytes of `content_buf` already emitted on the wire.
+    streamed: usize,
+}
+
+impl ToolCallGate {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            confirmed: false,
+            streamed: 0,
+        }
+    }
+
+    /// Call after appending new text to `content_buf`. Returns the byte
+    /// range of `content_buf` now safe to stream (empty while holding
+    /// back or buffering a confirmed tag).
+    fn advance(&mut self, content_buf: &str) -> std::ops::Range<usize> {
+        if !self.enabled {
+            let r = self.streamed..content_buf.len();
+            self.streamed = content_buf.len();
+            return r;
+        }
+        if self.confirmed {
+            return self.streamed..self.streamed;
+        }
+        let tail = &content_buf[self.streamed..];
+        if let Some(i) = tail.find(QWEN_TOOL_CALL_OPEN_TAG) {
+            self.confirmed = true;
+            // The finish path trims trailing whitespace off the pre-tag
+            // content; never emit bytes the final content would retract.
+            let emit_end = self.streamed + tail[..i].trim_end().len();
+            let r = self.streamed..emit_end;
+            self.streamed = emit_end;
+            return r;
+        }
+        // Longest suffix that is a proper prefix of the open tag…
+        let mut hold = 0usize;
+        for k in (1..QWEN_TOOL_CALL_OPEN_TAG.len()).rev() {
+            if k <= tail.len() && tail.ends_with(&QWEN_TOOL_CALL_OPEN_TAG[..k]) {
+                hold = k;
+                break;
+            }
+        }
+        // …extended left over the whitespace run before it (capped).
+        let mut idx = tail.len() - hold;
+        let mut ws = 0usize;
+        while idx > 0 && ws < TOOL_TAG_WS_HOLDBACK_MAX {
+            let prev = tail[..idx].chars().next_back().unwrap_or('x');
+            if matches!(prev, ' ' | '\t' | '\r' | '\n') {
+                idx -= prev.len_utf8();
+                ws += 1;
+            } else {
+                break;
+            }
+        }
+        let emit_end = self.streamed + idx;
+        let r = self.streamed..emit_end;
+        self.streamed = emit_end;
+        r
+    }
+
+    fn confirmed(&self) -> bool {
+        self.confirmed
+    }
+
+    /// Unstreamed remainder for end-of-stream emission.
+    fn unsent<'a>(&self, content_buf: &'a str) -> &'a str {
+        &content_buf[self.streamed.min(content_buf.len())..]
+    }
+
+    fn mark_all_sent(&mut self, content_buf: &str) {
+        self.streamed = content_buf.len();
+    }
+}
+
 async fn emit_or_buffer_reasoning_chunk(
     tx: &tokio::sync::mpsc::Sender<Event>,
     id: &str,
@@ -777,24 +868,10 @@ async fn emit_or_buffer_reasoning_chunk(
     completion_preview_buf: &mut String,
     reasoning_buf: &mut String,
     content_buf: &mut String,
-    buffer_content: bool,
+    tool_gate: &mut ToolCallGate,
 ) -> bool {
     if tx.is_closed() {
         return false;
-    }
-
-    if !buffer_content {
-        return emit_reasoning_chunk(
-            tx,
-            id,
-            created,
-            model,
-            chunk,
-            completion_preview_buf,
-            reasoning_buf,
-            content_buf,
-        )
-        .await;
     }
 
     let ReasoningChunk { reasoning, content } = chunk;
@@ -823,6 +900,16 @@ async fn emit_or_buffer_reasoning_chunk(
             completion_preview_buf.push_str(&text);
         }
         content_buf.push_str(&text);
+        // Eager content streaming: emit whatever the tool gate clears
+        // (everything for tool-less requests; everything up to the
+        // ws+`<tool_call>`-prefix holdback otherwise).
+        let r = tool_gate.advance(content_buf);
+        if !r.is_empty() {
+            let delta = content_buf[r].to_string();
+            if !emit_content_chunk(tx, id, created, model, delta).await {
+                return false;
+            }
+        }
     }
     !tx.is_closed()
 }
@@ -851,7 +938,7 @@ async fn flush_buffered_stream_tail(
     completion_preview_buf: &mut String,
     reasoning_buf: &mut String,
     content_buf: &mut String,
-    buffer_tool_content: bool,
+    tool_gate: &mut ToolCallGate,
     finish_reason: &str,
 ) -> Option<AssistantOutputParts> {
     let trailing = reasoning_splitter.flush();
@@ -864,11 +951,11 @@ async fn flush_buffered_stream_tail(
         completion_preview_buf,
         reasoning_buf,
         content_buf,
-        buffer_tool_content,
+        tool_gate,
     )
     .await;
 
-    if !buffer_tool_content || content_buf.is_empty() {
+    if !tool_gate.enabled || content_buf.is_empty() {
         return None;
     }
 
@@ -878,20 +965,26 @@ async fn flush_buffered_stream_tail(
         Some(reasoning_buf.clone())
     };
     let assistant_output = assistant_output_from_split_parts_with_tool_parsing(
-        buffer_tool_content,
+        true,
         reasoning_content,
         content_buf.clone(),
         finish_reason,
     );
     if let Some(tool_calls) = assistant_output.tool_calls.as_deref() {
-        if !assistant_output.content.is_empty() {
-            let _ =
-                emit_content_chunk(tx, id, created, model, assistant_output.content.clone()).await;
-        }
+        // Pre-tag content already streamed eagerly (the gate's trim_end
+        // holdback makes the wire equal the parsed content exactly) —
+        // emit nothing extra, just the calls.
         let _ = emit_tool_calls_chunk(tx, id, created, model, tool_calls).await;
     } else {
-        let _ = emit_content_chunk(tx, id, created, model, assistant_output.content.clone()).await;
+        // Malformed/unclosed tag (the gate confirmed and buffered) or a
+        // pending holdback tail: the client receives the UNSENT suffix
+        // exactly once — never a replay of eagerly-streamed bytes.
+        let unsent = tool_gate.unsent(content_buf).to_string();
+        if !unsent.is_empty() {
+            let _ = emit_content_chunk(tx, id, created, model, unsent).await;
+        }
     }
+    tool_gate.mark_all_sent(content_buf);
     Some(assistant_output)
 }
 
@@ -5225,6 +5318,7 @@ async fn generate_real_batched_streaming(
     let thinking_mode = thinking_mode_for_prompt(prompt_text).to_string();
     let prompt_starts_in_reasoning = prompt_starts_in_reasoning(prompt_text);
     let buffer_tool_content = request_allows_tool_call_parsing(req);
+    let mut tool_gate = ToolCallGate::new(buffer_tool_content);
     let batching_engine = batching_engine.clone();
     let stop_sequences = sampling.stop.clone();
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
@@ -5365,7 +5459,7 @@ async fn generate_real_batched_streaming(
                                         &mut completion_buf,
                                         &mut reasoning_buf,
                                         &mut content_buf,
-                                        buffer_tool_content,
+                                        &mut tool_gate,
                                     ),
                                 );
                                 match emitted.await {
@@ -5418,7 +5512,7 @@ async fn generate_real_batched_streaming(
                                             &mut completion_buf,
                                             &mut reasoning_buf,
                                             &mut content_buf,
-                                            buffer_tool_content,
+                                            &mut tool_gate,
                                         )
                                         .await
                                         {
@@ -5441,7 +5535,7 @@ async fn generate_real_batched_streaming(
                                     &mut completion_buf,
                                     &mut reasoning_buf,
                                     &mut content_buf,
-                                    buffer_tool_content,
+                                    &mut tool_gate,
                                 )
                                 .await
                                 {
@@ -5474,24 +5568,10 @@ async fn generate_real_batched_streaming(
                                         matched_stop.as_deref(),
                                         finish,
                                     );
-                                if assistant_output.tool_calls.is_some()
-                                    && !assistant_output.content.is_empty()
-                                    && !emit_content_chunk(
-                                        &tx,
-                                        &id,
-                                        created,
-                                        &model,
-                                        assistant_output.content.clone(),
-                                    )
-                                    .await
-                                {
-                                    record(
-                                        "client_disconnect".to_string(),
-                                        &completion_buf,
-                                        completion_token_count,
-                                    );
-                                    return;
-                                }
+                                // Pre-tag content already streamed eagerly —
+                                // the gate's trim_end holdback makes the wire
+                                // equal the parsed content; emitting it again
+                                // would duplicate every tool-call preamble.
                                 if let Some(tool_calls) = assistant_output.tool_calls.as_deref() {
                                     if !emit_tool_calls_chunk(
                                         &tx,
@@ -5510,13 +5590,13 @@ async fn generate_real_batched_streaming(
                                         return;
                                     }
                                 } else if buffer_tool_content
-                                    && !assistant_output.content.is_empty()
+                                    && !tool_gate.unsent(&content_buf).is_empty()
                                     && !emit_content_chunk(
                                         &tx,
                                         &id,
                                         created,
                                         &model,
-                                        assistant_output.content.clone(),
+                                        tool_gate.unsent(&content_buf).to_string(),
                                     )
                                     .await
                                 {
@@ -5567,7 +5647,7 @@ async fn generate_real_batched_streaming(
                                     &mut completion_buf,
                                     &mut reasoning_buf,
                                     &mut content_buf,
-                                    buffer_tool_content,
+                                    &mut tool_gate,
                                     "error",
                                 )
                                 .await;
@@ -5591,7 +5671,7 @@ async fn generate_real_batched_streaming(
                                     &mut completion_buf,
                                     &mut reasoning_buf,
                                     &mut content_buf,
-                                    buffer_tool_content,
+                                    &mut tool_gate,
                                     "error",
                                 )
                                 .await;
@@ -5626,7 +5706,7 @@ async fn generate_real_batched_streaming(
                     &mut completion_buf,
                     &mut reasoning_buf,
                     &mut content_buf,
-                    buffer_tool_content,
+                    &mut tool_gate,
                     "timeout",
                 )
                 .await;
@@ -6110,6 +6190,7 @@ async fn generate_real_streaming(
     let req_top_p = req.top_p;
     let req_max_tokens = Some(chat_request_max_tokens(req).min(u32::MAX as usize) as u32);
     let buffer_tool_content = request_allows_tool_call_parsing(req);
+    let mut tool_gate = ToolCallGate::new(buffer_tool_content);
     let thinking_mode = thinking_mode_for_prompt(&prompt).to_string();
     let prefix_cache_diagnostic = std::sync::Arc::new(std::sync::Mutex::new("unknown"));
 
@@ -6509,7 +6590,7 @@ async fn generate_real_streaming(
                                     &mut completion_buf,
                                     &mut reasoning_buf,
                                     &mut content_buf,
-                                    buffer_tool_content,
+                                    &mut tool_gate,
                                 )
                                 .await
                                 {
@@ -6545,7 +6626,7 @@ async fn generate_real_streaming(
                                         &mut completion_buf,
                                         &mut reasoning_buf,
                                         &mut content_buf,
-                                        buffer_tool_content,
+                                        &mut tool_gate,
                                     )
                                     .await
                                     {
@@ -6566,7 +6647,7 @@ async fn generate_real_streaming(
                                     &mut completion_buf,
                                     &mut reasoning_buf,
                                     &mut content_buf,
-                                    buffer_tool_content,
+                                    &mut tool_gate,
                                 )
                                 .await
                                 {
@@ -6596,24 +6677,10 @@ async fn generate_real_streaming(
                                         matched_stop,
                                         finish,
                                     );
-                                if assistant_output.tool_calls.is_some()
-                                    && !assistant_output.content.is_empty()
-                                    && !emit_content_chunk(
-                                        &tx,
-                                        &id,
-                                        created,
-                                        &model,
-                                        assistant_output.content.clone(),
-                                    )
-                                    .await
-                                {
-                                    record(
-                                        "client_disconnect".to_string(),
-                                        &completion_buf,
-                                        completion_token_count,
-                                    );
-                                    return;
-                                }
+                                // Pre-tag content already streamed eagerly —
+                                // the gate's trim_end holdback makes the wire
+                                // equal the parsed content; emitting it again
+                                // would duplicate every tool-call preamble.
                                 if let Some(tool_calls) = assistant_output.tool_calls.as_deref() {
                                     if !emit_tool_calls_chunk(
                                         &tx,
@@ -6632,13 +6699,13 @@ async fn generate_real_streaming(
                                         return;
                                     }
                                 } else if buffer_tool_content
-                                    && !assistant_output.content.is_empty()
+                                    && !tool_gate.unsent(&content_buf).is_empty()
                                     && !emit_content_chunk(
                                         &tx,
                                         &id,
                                         created,
                                         &model,
-                                        assistant_output.content.clone(),
+                                        tool_gate.unsent(&content_buf).to_string(),
                                     )
                                     .await
                                 {
@@ -6717,7 +6784,7 @@ async fn generate_real_streaming(
                                     &mut completion_buf,
                                     &mut reasoning_buf,
                                     &mut content_buf,
-                                    buffer_tool_content,
+                                    &mut tool_gate,
                                     "error",
                                 )
                                 .await;
@@ -6756,7 +6823,7 @@ async fn generate_real_streaming(
                     &mut completion_buf,
                     &mut reasoning_buf,
                     &mut content_buf,
-                    buffer_tool_content,
+                    &mut tool_gate,
                     "timeout",
                 )
                 .await;
@@ -9082,6 +9149,62 @@ mod tests {
         assert_eq!(out.content, "I should check the file.\n");
     }
 
+    /// The eager-streaming contract: prose streams immediately, only a
+    /// possible `<tool_call>` tail (plus the whitespace run before it)
+    /// holds back, a confirmed tag freezes the wire, and false alarms
+    /// release every byte.
+    #[test]
+    fn tool_call_gate_streams_eagerly_with_tag_holdback() {
+        let mut buf = String::new();
+        let mut g = ToolCallGate::new(true);
+
+        // Plain prose streams as it arrives — except trailing whitespace,
+        // which always holds (a tag could start at the very next byte and
+        // the finish path trim_end()s the pre-tag content).
+        buf.push_str("Let me check that file. ");
+        assert_eq!(&buf[g.advance(&buf)], "Let me check that file.");
+
+        // The held space releases with the next prose; the possible tag
+        // start (plus the whitespace before it) holds back.
+        buf.push_str("Done.\n<tool");
+        assert_eq!(&buf[g.advance(&buf)], " Done.");
+        assert!(!g.confirmed());
+
+        // Tag confirms: wire freezes; nothing more emits.
+        buf.push_str("_call>\n<function=bash>");
+        assert_eq!(g.advance(&buf).len(), 0);
+        assert!(g.confirmed());
+        buf.push_str("more payload");
+        assert_eq!(g.advance(&buf).len(), 0);
+        assert!(g.unsent(&buf).starts_with("\n<tool_call>"));
+
+        // False alarm releases all bytes.
+        let mut buf = String::new();
+        let mut g = ToolCallGate::new(true);
+        buf.push_str("compare a <tool");
+        let r1 = g.advance(&buf);
+        assert_eq!(&buf[r1], "compare a");
+        buf.push_str("box> result");
+        let r2 = g.advance(&buf);
+        assert_eq!(&buf[r2], " <toolbox> result");
+        assert!(!g.confirmed());
+        assert!(g.unsent(&buf).is_empty());
+
+        // Generics aren't tool tags.
+        let mut buf = String::new();
+        let mut g = ToolCallGate::new(true);
+        buf.push_str("Vec<tool> and a < b hold");
+        let r = g.advance(&buf);
+        assert_eq!(&buf[r], "Vec<tool> and a < b hold");
+
+        // Disabled gate is a pure pass-through.
+        let mut buf = String::new();
+        let mut g = ToolCallGate::new(false);
+        buf.push_str("anything <tool_call> at all");
+        let r = g.advance(&buf);
+        assert_eq!(&buf[r], "anything <tool_call> at all");
+    }
+
     /// OpenAI semantics: the matched stop sequence must never appear in
     /// the returned content. Agent harnesses parse on stop markers; a
     /// leaked marker is a phantom delimiter.
@@ -10283,7 +10406,7 @@ mod tests {
             &mut completion_preview_buf,
             &mut reasoning_buf,
             &mut content_buf,
-            true,
+            &mut ToolCallGate::new(true),
         )
         .await;
 
@@ -10330,7 +10453,7 @@ mod tests {
             &mut completion_buf,
             &mut reasoning_buf,
             &mut content_buf,
-            true,
+            &mut ToolCallGate::new(true),
             "timeout",
         )
         .await
@@ -10376,7 +10499,7 @@ mod tests {
             &mut completion_buf,
             &mut reasoning_buf,
             &mut content_buf,
-            true,
+            &mut ToolCallGate::new(true),
             "timeout",
         )
         .await
@@ -10422,7 +10545,7 @@ mod tests {
             &mut completion_buf,
             &mut reasoning_buf,
             &mut content_buf,
-            true,
+            &mut ToolCallGate::new(true),
             "timeout",
         )
         .await;
@@ -10460,7 +10583,7 @@ mod tests {
             &mut completion_buf,
             &mut reasoning_buf,
             &mut content_buf,
-            false,
+            &mut ToolCallGate::new(false),
             "timeout",
         )
         .await;
@@ -10491,7 +10614,7 @@ mod tests {
             &mut completion_buf,
             &mut reasoning_buf,
             &mut content_buf,
-            true,
+            &mut ToolCallGate::new(true),
             "timeout",
         )
         .await
