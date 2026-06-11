@@ -3170,6 +3170,11 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
   .train-data-pick select { flex: 1; }
   .train-data-pick-empty { font-size: var(--text-xs); color: var(--text-muted); line-height: 1.5; }
   /* Inline failure reason on failed training cards — never make the user hunt */
+  .training-card-gate { display: flex; align-items: center; gap: 6px; font-size: 12px;
+    margin-top: 4px; padding: 4px 8px; border-radius: 6px; }
+  .training-card-gate.gate-ok { color: var(--ok, #3fb950); background: rgba(63,185,80,.08); }
+  .training-card-gate.gate-err { color: var(--err, #f85149); background: rgba(248,81,73,.08); }
+  .training-card-gate.gate-warn { color: var(--warn, #d29922); background: rgba(210,153,34,.08); }
   .training-card-error { display: flex; align-items: flex-start; gap: 7px; margin-top: var(--space-2);
     padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm);
     background: var(--danger-bg); border: 1px solid var(--danger-bd);
@@ -7648,6 +7653,16 @@ function renderTrainingCard(j, state) {
   } else if (stateNormForActions === 'completed' && j.adapter_name) {
     actionBtn = `<button class="btn btn-sm" data-train-prove data-adapter="${escapeHtml(j.adapter_name)}" type="button" style="margin-left:auto;" title="Grade ${escapeHtml(j.adapter_name)} against base on an eval suite">Prove it vs base</button>`;
   }
+  // §8.7 promotion-gate verdict pill: green = promoted, red = demoted to
+  // .failed, amber = not measured (eval errored). Rendered whenever the
+  // backend stamped a verdict so a silent demotion can't hide.
+  let gateLine = '';
+  if (j.post_eval_verdict) {
+    const v = String(j.post_eval_verdict);
+    const cls = (v.includes('promoted') && !v.includes('NOT')) ? 'ok'
+      : (v.includes('.failed') || v.includes('demoted')) ? 'err' : 'warn';
+    gateLine = `<div class="training-card-gate gate-${cls}" title="${escapeHtml(v)}">${icon(cls === 'ok' ? 'check' : 'warning', 'icn-sm')} ${escapeHtml(v.slice(0, 160))}</div>`;
+  }
   const errLine = (stateNormForActions === 'failed' && j.error)
     ? `<div class="training-card-error">${icon('warning', 'icn-sm')} ${escapeHtml(String(j.error).slice(0, 220))}</div>`
     : '';
@@ -7681,7 +7696,7 @@ function renderTrainingCard(j, state) {
         <span class="training-stat-label">${j.current_loss != null ? 'loss' : 'not started'}</span>
       </div>
     </div>
-    ${errLine}
+    ${gateLine}${errLine}
     <div class="training-card-curve" id="training-curve-${escapeHtml(j.job_id)}"></div>
   </div>`;
 }
