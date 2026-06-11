@@ -357,7 +357,6 @@
       ]
     }],
     "config": {
-      "learning_rate": 1e-5,
       "kl_coeff": 0.1,
       "clip_epsilon": 0.2,
       "lora_rank": 16,
@@ -371,7 +370,7 @@
           <div class="endpoint">
             <h3 class="font-semibold mb-2">Common config fields</h3>
             <ul class="space-y-2 text-sm" style="color: var(--fg-dim);">
-              <li><code>learning_rate</code>, <code>kl_coeff</code>, and <code>clip_epsilon</code> tune the GRPO update.</li>
+              <li><code>kl_coeff</code> and <code>clip_epsilon</code> tune the GRPO update; <code>learning_rate</code> is resolved per optimizer when omitted (Muon default: 2e-3).</li>
               <li><code>lora_rank</code> and <code>lora_alpha</code> control adapter capacity.</li>
               <li><code>base_adapter</code> continues from an existing adapter.</li>
               <li><code>output_name</code> names the saved adapter.</li>
