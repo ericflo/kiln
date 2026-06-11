@@ -131,9 +131,9 @@ See [docs/GRPO_GUIDE.md](docs/GRPO_GUIDE.md) for worked verifiable-rewards examp
 
 ### Agentic GRPO with ECHO (multi-turn rollouts)
 
-For multi-turn agentic rollouts — tool calls, command output, file contents — kiln's GRPO is **ECHO-by-default** (Shrivastava, Awadallah, Papailiopoulos, MSR AI Frontiers 2026). ECHO adds a length-normalized cross-entropy loss on environment-observation tokens to the standard policy-gradient loss, with **zero extra forward-pass cost** — the env tokens were already in the rollout context. Paper headline: roughly doubles TerminalBench-2.0 pass@1.
+For multi-turn agentic rollouts — tool calls, command output, file contents — kiln's GRPO is **ECHO-ready** (Shrivastava, Awadallah, Papailiopoulos, MSR AI Frontiers 2026): the trajectory format carries environment segments end-to-end, from rollout JSONL through tokenization and masking to the training receipt. ECHO adds a length-normalized cross-entropy loss on environment-observation tokens to the standard policy-gradient loss, with **zero extra forward-pass cost** — the env tokens are already in the rollout context. Paper headline: roughly doubles TerminalBench-2.0 pass@1. The env-CE term itself is **temporarily disabled** pending its kt-tape gradient root (#1082) — enabling it on rollouts with env tokens fails fast at submission (`unsupported_loss_config`) rather than silently training without the term.
 
-When your rollouts carry a `trajectory` field with `kind: "action"` / `kind: "observation"` segments, kiln-train's `tokenize_grpo_group` builds separate `action_mask` (policy-gradient targets) and `env_mask` (ECHO env-CE targets); both contribute to the same forward pass at default `λ_echo = 0.05`. Legacy single-turn rollouts (no `trajectory` field) get ECHO contribution = 0 — bit-identical behavior to the pre-ECHO loss.
+When your rollouts carry a `trajectory` field with `kind: "action"` / `kind: "observation"` segments, kiln-train's `tokenize_grpo_group` builds separate `action_mask` (policy-gradient targets) and `env_mask` (ECHO env-CE targets, `λ_echo = 0.05` once the term is re-enabled). Today the action-token policy loss trains on the full trajectory while the env mask is carried through for diagnostics and the planned resurrection. Legacy single-turn rollouts (no `trajectory` field) behave bit-identically to the pre-ECHO loss.
 
 ```python
 import requests
@@ -152,7 +152,10 @@ requests.post("http://localhost:8420/v1/train/agentic", json={
             ]
         }]
     }],
-    "config": {"loss": {"echo": {"lambda": 0.05}}}
+    # loss.echo is off by default; enabling it alongside observation
+    # segments fails fast (unsupported_loss_config) until #1082's
+    # env-CE gradient root is restored.
+    "config": {}
 })
 ```
 
@@ -164,7 +167,8 @@ For saturated tasks where reward-only GRPO is low signal, kiln-train also
 accepts off-policy teacher distillation data: prompt messages plus a teacher
 response, optionally with per-token teacher top-logprobs for reverse-KL. The
 same agentic `trajectory` shape can be attached so action tokens receive OPD
-supervision while observation tokens are accounted for ECHO.
+supervision while observation tokens stay masked out of it (they are reserved
+for ECHO's env-CE once that term is restored).
 
 See [docs/OPD_TEACHER_JSONL.md](docs/OPD_TEACHER_JSONL.md) for the JSONL
 schema and the `reverse_kl` vs `cross_entropy` objective contract.
@@ -369,13 +373,24 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | POST | `/v1/completions` | vLLM-compatible prompt logprobs for remote OPD teachers |
 | POST | `/v1/completions/batch` | Batch generation API for GRPO (up to 64 prompts per request) |
 | POST | `/v1/train/sft` | Submit SFT training examples (optionally with a `post_eval` hook) |
-| POST | `/v1/train/grpo` | Submit GRPO scored completions (optionally with a `post_eval` hook). Supports the new `agentic_groups` shape with multi-turn `trajectory` fields; ECHO env-CE applies automatically. |
+| POST | `/v1/train/grpo` | Submit GRPO scored completions (optionally with a `post_eval` hook). Supports the new `agentic_groups` shape with multi-turn `trajectory` fields; action/observation masks are built end-to-end, but the ECHO env-CE term is temporarily disabled (#1082) — enabling it with env tokens fails fast (`unsupported_loss_config`). |
 | POST | `/v1/train/agentic` | Canonical alias of `/v1/train/grpo` — same handler, semantically-honest name for multi-turn rollouts |
 | GET | `/v1/train/status` | Training queue and job status |
 | GET | `/v1/train/status/{job_id}` | Inspect one training job |
 | GET | `/v1/train/jobs/{job_id}` | Rich training job detail (loss curve + linked-eval back-references) |
 | GET | `/v1/train/queue` | List queued training jobs |
 | DELETE | `/v1/train/queue/{job_id}` | Cancel a queued job |
+| POST | `/v1/distill/refresh` | Continual-learning distillation refresh job |
+| POST | `/v1/distill/pump` | Continual-learning distillation pump job |
+| GET / POST | `/v1/corrections` | Durable corrections store — the basket survives the browser; pi can file corrections |
+| DELETE | `/v1/corrections/{request_id}` | Remove a correction |
+| POST | `/v1/corrections/mark_trained` | Mark correction rows as trained into an adapter (kept as history) |
+| GET / POST | `/v1/teachers` | Teacher registry for OPD/distillation (local teachers may wear an adapter) |
+| DELETE | `/v1/teachers/{alias}` | Remove a registered teacher |
+| POST | `/v1/agent/traces/discover` | Index pi/agent session traces for training |
+| GET | `/v1/agent/traces` | List discovered agent session traces |
+| POST | `/v1/agent/self_improve` | One-call agentic self-improvement (traces → OPD + judge distill) |
+| POST | `/v1/agent/judge_distill` | Distill a judge LoRA from agent traces |
 | GET | `/v1/adapters` | List saved/available LoRA adapters and identify the active adapter |
 | GET | `/v1/adapters/{name}/detail` | Files + training history + eval history for one adapter |
 | POST | `/v1/adapters/load` | Load adapter from disk |
@@ -384,6 +399,7 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | POST | `/v1/adapters/upload` | Multipart tar.gz import of an adapter |
 | GET  | `/v1/adapters/{name}/download` | Stream adapter as tar.gz (export) |
 | POST | `/v1/adapters/merge` | Merge adapters (weighted_average, TIES, or concatenation modes) |
+| POST | `/v1/adapters/distill_merge` | Behaviour-space adapter merge |
 | GET / POST | `/v1/eval/suites` | List or register eval suites (body = `EvalSuite`) |
 | GET / DELETE | `/v1/eval/suites/{name}` | Fetch / delete one suite |
 | POST | `/v1/eval/run` | Submit an eval (registered suite or inline) |
