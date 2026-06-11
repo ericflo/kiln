@@ -3608,6 +3608,38 @@ impl MtpGpuWeightsSlot {
         slot
     }
 
+    /// Training-session residency companion to
+    /// [`GpuWeights::to_device_deep`]. An uploaded slot deep-copies its
+    /// tensors onto `device` (eager); a lazy slot keeps its CPU source and
+    /// re-targets the device.
+    pub fn to_device_deep(
+        &self,
+        device: Device,
+        mv_layer: &dyn Fn(&GpuLayerWeights) -> Result<GpuLayerWeights>,
+    ) -> Result<MtpGpuWeightsSlot> {
+        if let Some(mtp) = self.weights.get() {
+            let mv = |t: &Tensor| -> Result<Tensor> {
+                t.to_device(device)
+                    .map_err(|e| anyhow::anyhow!("mtp to_device_deep: {e}"))
+            };
+            let moved = MtpGpuWeights {
+                fc: mv(&mtp.fc)?,
+                fc_t: mv(&mtp.fc_t)?,
+                pre_fc_norm_embedding: mv(&mtp.pre_fc_norm_embedding)?,
+                pre_fc_norm_hidden: mv(&mtp.pre_fc_norm_hidden)?,
+                layer: mv_layer(&mtp.layer)?,
+                final_layernorm: mv(&mtp.final_layernorm)?,
+            };
+            return Ok(MtpGpuWeightsSlot::eager(moved, &device));
+        }
+        Ok(MtpGpuWeightsSlot {
+            weights: OnceLock::new(),
+            source: self.source.clone(),
+            device,
+            init_lock: Mutex::new(()),
+        })
+    }
+
     pub fn is_uploaded(&self) -> bool {
         self.weights.get().is_some()
     }
@@ -6072,6 +6104,119 @@ fn install_marlin_packed(
 impl GpuWeights {
     pub fn has_mtp(&self) -> bool {
         self.mtp.is_some()
+    }
+
+    /// Deep-copy every tensor onto `device` — the training-session
+    /// residency primitive. On the Vulkan hybrid substrate the serving
+    /// weights are kt CPU-storage (with VulkanBuffer caches managed
+    /// separately), but TRAINING needs every operand on ONE device or the
+    /// tape recorders die on "inputs on different devices". A trainer
+    /// uploads a resident copy once per job (≈8 GB BF16 for Qwen3.5-4B —
+    /// affordable on unified-memory APUs), trains against it, and drops
+    /// it; the serving copy is never touched.
+    ///
+    /// Same-device moves are cheap (`Tensor::to_device` returns an Arc
+    /// clone), so calling this unconditionally is safe.
+    pub fn to_device_deep(&self, device: Device) -> Result<GpuWeights> {
+        let mv = |t: &Tensor| -> Result<Tensor> {
+            t.to_device(device)
+                .map_err(|e| anyhow::anyhow!("to_device_deep: {e}"))
+        };
+        let mv_opt = |t: &Option<Tensor>| -> Result<Option<Tensor>> {
+            t.as_ref().map(|t| mv(t)).transpose()
+        };
+        let mv_w8 =
+            |w: &Option<crate::rocm_w8_proj::RocmW8Proj>| -> Result<Option<crate::rocm_w8_proj::RocmW8Proj>> {
+                w.as_ref()
+                    .map(|w| w.to_device_deep(device))
+                    .transpose()
+            };
+        let mv_marlin = |w: &Option<crate::marlin_proj::MarlinPackedProj>| -> Result<Option<crate::marlin_proj::MarlinPackedProj>> {
+            w.as_ref().map(|w| w.to_device_deep(device)).transpose()
+        };
+        let mv_ffn = |m: &GpuFfnWeights| -> Result<GpuFfnWeights> {
+            Ok(GpuFfnWeights {
+                gate_proj: mv(&m.gate_proj)?,
+                up_proj: mv(&m.up_proj)?,
+                down_proj: mv(&m.down_proj)?,
+                gate_proj_t: mv(&m.gate_proj_t)?,
+                up_proj_t: mv(&m.up_proj_t)?,
+                down_proj_t: mv(&m.down_proj_t)?,
+                gate_up_proj_t: mv_opt(&m.gate_up_proj_t)?,
+                gate_proj_marlin: mv_marlin(&m.gate_proj_marlin)?,
+                up_proj_marlin: mv_marlin(&m.up_proj_marlin)?,
+                down_proj_marlin: mv_marlin(&m.down_proj_marlin)?,
+                gate_up_proj_w8: mv_w8(&m.gate_up_proj_w8)?,
+                down_proj_w8: mv_w8(&m.down_proj_w8)?,
+            })
+        };
+        let mv_layer = |l: &GpuLayerWeights| -> Result<GpuLayerWeights> {
+            let attention = match &l.attention {
+                GpuAttentionWeights::Full(a) => GpuAttentionWeights::Full(GpuFullAttentionWeights {
+                    q_proj: mv(&a.q_proj)?,
+                    k_proj: mv(&a.k_proj)?,
+                    v_proj: mv(&a.v_proj)?,
+                    o_proj: mv(&a.o_proj)?,
+                    q_norm: mv(&a.q_norm)?,
+                    k_norm: mv(&a.k_norm)?,
+                    q_proj_t: mv(&a.q_proj_t)?,
+                    k_proj_t: mv(&a.k_proj_t)?,
+                    v_proj_t: mv(&a.v_proj_t)?,
+                    qkv_proj_t: mv_opt(&a.qkv_proj_t)?,
+                    o_proj_t: mv(&a.o_proj_t)?,
+                    qkv_proj_w8: mv_w8(&a.qkv_proj_w8)?,
+                    o_proj_w8: mv_w8(&a.o_proj_w8)?,
+                    q_proj_marlin: mv_marlin(&a.q_proj_marlin)?,
+                }),
+                GpuAttentionWeights::Linear(a) => {
+                    GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
+                        in_proj_qkv: mv(&a.in_proj_qkv)?,
+                        in_proj_z: mv(&a.in_proj_z)?,
+                        out_proj: mv(&a.out_proj)?,
+                        in_proj_a: mv(&a.in_proj_a)?,
+                        in_proj_b: mv(&a.in_proj_b)?,
+                        conv1d: mv(&a.conv1d)?,
+                        norm: mv(&a.norm)?,
+                        a_log: mv(&a.a_log)?,
+                        a_log_gates: mv(&a.a_log_gates)?,
+                        dt_bias: mv(&a.dt_bias)?,
+                        in_proj_qkv_t: mv(&a.in_proj_qkv_t)?,
+                        in_proj_z_t: mv(&a.in_proj_z_t)?,
+                        in_proj_a_t: mv(&a.in_proj_a_t)?,
+                        in_proj_b_t: mv(&a.in_proj_b_t)?,
+                        in_proj_ab_t: mv_opt(&a.in_proj_ab_t)?,
+                        out_proj_t: mv(&a.out_proj_t)?,
+                        out_proj_marlin: mv_marlin(&a.out_proj_marlin)?,
+                        in_proj_qkvzab_w8: mv_w8(&a.in_proj_qkvzab_w8)?,
+                    })
+                }
+            };
+            Ok(GpuLayerWeights {
+                input_layernorm: mv(&l.input_layernorm)?,
+                post_attention_layernorm: mv(&l.post_attention_layernorm)?,
+                attention,
+                mlp: mv_ffn(&l.mlp)?,
+            })
+        };
+
+        let layers = self
+            .layers
+            .iter()
+            .map(&mv_layer)
+            .collect::<Result<Vec<_>>>()?;
+        let mtp = match &self.mtp {
+            None => None,
+            Some(slot) => Some(slot.to_device_deep(device, &mv_layer)?),
+        };
+        Ok(GpuWeights {
+            embed_tokens: mv(&self.embed_tokens)?,
+            embed_tokens_t: mv(&self.embed_tokens_t)?,
+            layers,
+            final_norm: mv(&self.final_norm)?,
+            rotary_inv_freq: mv(&self.rotary_inv_freq)?,
+            lm_head_w8: mv_w8(&self.lm_head_w8)?,
+            mtp,
+        })
     }
 
     pub fn mtp_weights(&self) -> Result<&MtpGpuWeights> {
@@ -36192,10 +36337,19 @@ mod tests {
             STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD
         ));
         assert_eq!(streaming_tile_tokens(), STREAMING_PREFILL_DEFAULT_TILE);
-        assert_eq!(
-            streaming_tile_tokens_for(&Device::Cpu),
+        // CPU-as-Vulkan-sentinel: on a Vulkan-capable host (feature +
+        // device present) the per-device policy treats CPU-device tensors
+        // as the Vulkan substrate, so the tile is the Vulkan-tuned value;
+        // on hosts without a Vulkan device (CI runners) it stays portable.
+        #[cfg(feature = "vulkan")]
+        let expected_cpu_tile = if crate::backend::vulkan_training_substrate_active() {
+            crate::backend::TrainingPrecisionPolicy::vulkan().streaming_prefill_tile_tokens
+        } else {
             STREAMING_PREFILL_DEFAULT_TILE
-        );
+        };
+        #[cfg(not(feature = "vulkan"))]
+        let expected_cpu_tile = STREAMING_PREFILL_DEFAULT_TILE;
+        assert_eq!(streaming_tile_tokens_for(&Device::Cpu), expected_cpu_tile);
         assert_eq!(
             streaming_tile_tokens_for(&Device::Cuda(0)),
             STREAMING_PREFILL_CUDA_DEFAULT_TILE

@@ -43,6 +43,15 @@ pub fn mark_vulkan_active() {
 }
 
 /// Returns true once `mark_vulkan_active()` has been called in this process.
+/// Whether THIS process trains on the Vulkan hybrid substrate: vulkan
+/// feature compiled in AND a Vulkan device present (same runtime probe
+/// `for_device_kt` keys on). Used by the trainer to place training
+/// state (LoRA params, optimizer moments) on the activation device.
+#[cfg(feature = "vulkan")]
+pub fn vulkan_training_substrate_active() -> bool {
+    vulkan::vulkan_is_available()
+}
+
 pub fn vulkan_active() -> bool {
     VULKAN_ACTIVE.load(Ordering::Relaxed)
 }
@@ -1838,8 +1847,14 @@ pub fn for_device_kt(device: &kiln_tensor::Device) -> Arc<dyn BackendRuntime> {
 /// Training precision policy selected through the concrete backend facet.
 ///
 /// `for_device_kt` intentionally treats CPU as a Vulkan runtime-detect sentinel
-/// in Vulkan-enabled binaries. Training policy callers need CPU tensors to keep
-/// the portable CPU policy, so this helper constructs the exact runtime family
+/// in Vulkan-enabled binaries — and so does THIS lookup when a Vulkan backend
+/// is ACTIVE in the process: on the Vulkan substrate the training tensors are
+/// kt CPU-storage tensors (hybrid residency), so a bare `Device::Cpu` match
+/// here returned the portable policy and the F32-activation × BF16-base-weight
+/// mixed exception never fired — production BF16 checkpoints failed in the
+/// first GDN projection ("MatmulOp: dtype mismatch a=f32 b=bf16") while the
+/// F32 unit fixtures passed. Processes that never constructed a Vulkan
+/// backend (pure-CPU tests in vulkan-feature builds) keep the portable policy
 /// needed for the policy query and then delegates to `TrainingLossBackend`.
 pub fn training_precision_policy_for_device_kt(
     device: kiln_tensor::Device,
@@ -1866,6 +1881,14 @@ pub fn training_precision_policy_for_device_kt(
             TrainingLossBackend::runtime_training_precision_policy(&backend)
         }
         _ => {
+            // CPU-as-Vulkan-sentinel: see the doc comment above. Keyed on
+            // the same runtime probe `for_device_kt` uses (NOT the
+            // mark_vulkan_active flag, whose state depends on incidental
+            // initialization order).
+            #[cfg(feature = "vulkan")]
+            if matches!(device, kiln_tensor::Device::Cpu) && vulkan::vulkan_is_available() {
+                return TrainingPrecisionPolicy::vulkan();
+            }
             let backend = cpu::CpuBackend::new(device);
             TrainingLossBackend::runtime_training_precision_policy(&backend)
         }
@@ -1901,6 +1924,15 @@ pub fn training_tape_route_for_device_kt(device: kiln_tensor::Device) -> Trainin
             TrainingLossBackend::runtime_tape_forward_backward_route(&backend)
         }
         _ => {
+            // CPU-as-Vulkan-sentinel (matches `for_device_kt` and the
+            // precision-policy lookup above): an active-Vulkan process
+            // trains on kt CPU-storage tensors, and the tape recorders'
+            // device gates must see the Vulkan route for them.
+            #[cfg(feature = "vulkan")]
+            if matches!(device, kiln_tensor::Device::Cpu) && vulkan::vulkan_is_available() {
+                let backend = vulkan::VulkanBackend::new(kiln_tensor::Device::Cpu);
+                return TrainingLossBackend::runtime_tape_forward_backward_route(&backend);
+            }
             let backend = cpu::CpuBackend::new(device);
             TrainingLossBackend::runtime_tape_forward_backward_route(&backend)
         }

@@ -2921,6 +2921,70 @@ fn run_mtp_alignment_phase(
     Ok(Some((trained, initial_ce, final_ce)))
 }
 
+/// The device training state (LoRA params, optimizer moments, linear
+/// state) must live on. Usually the weights' device — EXCEPT on the
+/// Vulkan hybrid substrate, where base weights are kt CPU-storage but
+/// the forward's ACTIVATIONS are Vulkan-resident (the embedding gather
+/// returns resident output by design). Training state must match the
+/// activations, not the frozen weights: a CPU LoRA pair against a
+/// Vulkan activation dies in the recorder with
+/// "inputs on different devices" (the operator-validation finding,
+/// 2026-06-11). Mixed frozen-weight projections are handled by the
+/// vulkan_matmul_bf16w host fallback.
+fn training_device_for_weights(weights: &GpuWeights) -> Device {
+    // Training-session residency experiment (2026-06-11, Strix Halo,
+    // probe-verified): the Vulkan backend has TWO half-substrates —
+    //   (A) kt CPU-device handles + backend kernel BRIDGES (production
+    //       inference; the bridges REQUIRE Device::Cpu inputs and return
+    //       CPU outputs), and
+    //   (B) Device::Vulkan kt-storage ops (the vk_*_proof tests; never
+    //       exercised on the FULL model forward).
+    // Training needs ONE of them complete. Uploading weights + training
+    // state to Vulkan(0) (this experiment, with GpuWeights::to_device_deep)
+    // pushes the forward off (A)'s bridges onto (B), which lacks ops —
+    // the GDN recurrent step dies on a host-composite piece
+    // (a=cpu [1,nv,T,dk] × b=vulkan [1,nv,dk,dv]). Completing (B) for the
+    // full model IS the residency port. Until then the one-device path is
+    // an explicit OPT-IN for porting work; the default stays on the
+    // weights' device, failing early and clean.
+    let device = weights.embed_tokens.device();
+    #[cfg(feature = "vulkan")]
+    {
+        if matches!(device, Device::Cpu)
+            && kiln_model::backend::vulkan_training_substrate_active()
+            && std::env::var("KILN_TRAIN_RESIDENT").is_ok_and(|v| v == "1")
+        {
+            return Device::Vulkan(0);
+        }
+    }
+    device
+}
+
+/// Upload a training-session resident copy of the weights when the
+/// training device differs from the weights' storage device (the Vulkan
+/// hybrid substrate). Returns `None` when no copy is needed — the caller
+/// keeps using the serving weights directly. The copy (~8 GB BF16 for
+/// Qwen3.5-4B) lives for the duration of the job and drops with the
+/// returned value; the serving weights are never touched.
+fn resident_training_weights(
+    weights: &GpuWeights,
+    training_device: &Device,
+) -> Result<Option<GpuWeights>> {
+    if weights.embed_tokens.device() == *training_device {
+        return Ok(None);
+    }
+    let started = Instant::now();
+    let resident = weights
+        .to_device_deep(*training_device)
+        .context("uploading training-session resident weights")?;
+    tracing::info!(
+        device = ?training_device,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "uploaded training-session resident weights"
+    );
+    Ok(Some(resident))
+}
+
 pub fn sft_train(
     examples: &[SftExample],
     config: &SftConfig,
@@ -2951,7 +3015,12 @@ pub fn sft_train(
     // forward/backward), so keep `device` kt downstream. The only candle
     // touch left is the safetensors adapter I/O, which bridges the kt device
     // to candle locally inside `load_from_safetensors`/`save_peft`.
-    let device = weights.embed_tokens.device();
+    let device = training_device_for_weights(weights);
+    // Training-session residency: upload a one-device copy of the weights
+    // when the substrate needs it (Vulkan hybrid). Shadow `weights` so the
+    // whole body trains against the resident copy; it drops at return.
+    let resident_weights = resident_training_weights(weights, &device)?;
+    let weights = resident_weights.as_ref().unwrap_or(weights);
     let backend = backend::for_device_kt(&device);
     let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
 
@@ -3497,7 +3566,12 @@ pub fn grpo_train(
     // kt-native (kt `Parameter`s, kt AdamW state, kt tape forward/backward),
     // so keep `device` kt downstream. The only candle touch is safetensors
     // adapter I/O, which bridges kt->candle locally inside save/load.
-    let device = weights.embed_tokens.device();
+    let device = training_device_for_weights(weights);
+    // Training-session residency: upload a one-device copy of the weights
+    // when the substrate needs it (Vulkan hybrid). Shadow `weights` so the
+    // whole body trains against the resident copy; it drops at return.
+    let resident_weights = resident_training_weights(weights, &device)?;
+    let weights = resident_weights.as_ref().unwrap_or(weights);
     let backend = backend::for_device_kt(&device);
     let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
 
@@ -4365,7 +4439,12 @@ pub fn grpo_train_jsonl(
     // kt-native (kt `Parameter`s, kt AdamW state, kt tape forward/backward), so
     // keep `device` kt downstream. The only candle touch is safetensors adapter
     // I/O, which bridges kt->candle locally inside save/load.
-    let device = weights.embed_tokens.device();
+    let device = training_device_for_weights(weights);
+    // Training-session residency: upload a one-device copy of the weights
+    // when the substrate needs it (Vulkan hybrid). Shadow `weights` so the
+    // whole body trains against the resident copy; it drops at return.
+    let resident_weights = resident_training_weights(weights, &device)?;
+    let weights = resident_weights.as_ref().unwrap_or(weights);
     let backend = backend::for_device_kt(&device);
     let training_precision_policy = training_precision_policy_for_backend(backend.as_ref());
 
