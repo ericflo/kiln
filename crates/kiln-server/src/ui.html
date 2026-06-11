@@ -3351,8 +3351,15 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
     </span>
   </a>
 
-  <div class="topbar-stats" id="header-stats" aria-live="polite">
-    <span class="stat"><span class="status-dot offline" id="status-dot"></span><span class="stat-val" id="status-text">connecting…</span></span>
+  <!-- Stable slots updated via textContent: rebuilding this strip with
+       innerHTML on every poll would wipe hover/selection state and spam
+       screen readers (uptime ticks every 2s, so only status is aria-live). -->
+  <div class="topbar-stats" id="header-stats">
+    <span class="stat" aria-live="polite"><span class="status-dot offline" id="status-dot"></span><span class="stat-val" id="status-text">connecting…</span></span>
+    <span class="stat"><span class="stat-label">Model</span><span class="stat-val" id="header-model">—</span></span>
+    <span class="stat"><span class="stat-label">Backend</span><span class="stat-val" id="header-backend">—</span></span>
+    <span class="stat"><span class="stat-label">Uptime</span><span class="stat-val" id="header-uptime">—</span></span>
+    <span class="stat"><span class="stat-label">Adapter</span><span class="stat-val" id="header-adapter">base</span></span>
   </div>
 
   <button class="connect-trigger" id="connect-trigger" type="button" title="Connect an agent to this Kiln server">
@@ -6239,7 +6246,6 @@ async function pollHealth() {
     renderHeader(h);
     renderServerStatus(h);
     updateFlywheel();
-    if (typeof refreshVramDonut === 'function') refreshVramDonut();
   } catch (e) {
     document.getElementById('status-dot').className = 'status-dot offline';
     document.getElementById('status-text').textContent = 'offline';
@@ -6263,27 +6269,34 @@ document.getElementById('unreachable-retry')?.addEventListener('click', () => {
 });
 
 function renderHeader(h) {
+  const ok = h.status === 'ok';
   const dot = document.getElementById('status-dot');
-  const txt = document.getElementById('status-text');
-  dot.className = 'status-dot ' + (h.status === 'ok' ? 'ok' : 'degraded');
-  txt.textContent = h.status === 'ok' ? 'Running' : (h.status || 'unknown');
-
-  const stats = document.getElementById('header-stats');
-  stats.innerHTML = `
-    <span class="stat"><span class="status-dot ${h.status === 'ok' ? 'ok' : 'degraded'}" id="status-dot"></span><span class="stat-val" id="status-text">${h.status === 'ok' ? 'Running' : h.status}</span></span>
-    <span class="stat"><span class="stat-label">Model</span><span class="stat-val" title="${escapeHtml(h.model || '')}">${escapeHtml(h.model || '—')}</span></span>
-    <span class="stat"><span class="stat-label">Backend</span><span class="stat-val">${escapeHtml(h.backend || '—')}</span></span>
-    <span class="stat"><span class="stat-label">Uptime</span><span class="stat-val">${fmtDuration(h.uptime_seconds)}</span></span>
-    <span class="stat"><span class="stat-label">Adapter</span><span class="stat-val">${escapeHtml(h.active_adapter || 'base')}</span></span>
-  `;
+  if (dot) dot.className = 'status-dot ' + (ok ? 'ok' : 'degraded');
+  setText('status-text', ok ? 'Running' : (h.status || 'unknown'));
+  const model = document.getElementById('header-model');
+  if (model) { model.textContent = h.model || '—'; model.title = h.model || ''; }
+  setText('header-backend', h.backend || '—');
+  setText('header-uptime', fmtDuration(h.uptime_seconds));
+  setText('header-adapter', h.active_adapter || 'base');
 }
 
+// Content key for the server-status card. The panel is innerHTML-swapped, so
+// repainting identical content on the 2s poll would flash the donut and wipe
+// hover/selection state. The card renders from exactly ONE place (here) —
+// a second writer racing this one is how the donut used to vanish.
+let lastServerStatusKey = null;
 function renderServerStatus(h) {
   const el = document.getElementById('server-status');
   const gpu = h.gpu_memory;
   const sched = h.scheduler;
+  const key = JSON.stringify([gpu, sched, h.checks]);
+  // Repaint when content changed, or when the failure path (`.api-failure`
+  // from pollHealth's catch) owns the panel and we're recovering.
+  if (key === lastServerStatusKey && el.firstElementChild && !el.querySelector('.api-failure')) return;
+  lastServerStatusKey = key;
 
   let vramHtml = '';
+  let donutHtml = '';
   if (gpu && gpu.total_vram_gb > 0) {
     const total = gpu.total_vram_gb;
     const model = gpu.model_gb || 0;
@@ -6311,6 +6324,21 @@ function renderServerStatus(h) {
         </div>
       </div>
     `;
+    const slices = [
+      { label: 'Model',            value: model, color: 'var(--accent)' },
+      { label: 'KV cache',         value: kv,    color: 'var(--info-fg)' },
+      { label: 'Training reserve', value: train, color: 'var(--success-fg)' },
+      { label: 'Free',             value: free,  color: 'var(--surface-3)' },
+    ].filter(s => s.value > 0);
+    const legendRows = slices.map(s => `<div class="vram-legend-row">
+      <span class="vram-legend-swatch" style="background:${s.color};"></span>
+      <span class="vram-legend-name">${escapeHtml(s.label)}</span>
+      <span class="vram-legend-value">${s.value.toFixed(1)}G</span>
+    </div>`).join('');
+    donutHtml = `<div class="vram-donut" style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);">
+      ${donutChartSvg(slices, { size: 120, stroke: 20, centerLabel: (model + kv).toFixed(1) + 'G', centerSub: 'used / ' + total.toFixed(1) + 'G' })}
+      <div class="vram-legend">${legendRows}</div>
+    </div>`;
   }
 
   let schedHtml = '';
@@ -6332,7 +6360,7 @@ function renderServerStatus(h) {
     </div>`;
   }
 
-  el.innerHTML = vramHtml + schedHtml + checksHtml || '<div class="empty">No data</div>';
+  el.innerHTML = (vramHtml + schedHtml + checksHtml + donutHtml) || '<div class="empty">No data</div>';
 }
 
 
@@ -6341,6 +6369,10 @@ function renderServerStatus(h) {
 // The Overview tab's tok/s sparkline reads from this so it never needs to
 // re-fetch what the original poll already produced.
 let lastDecode = null;
+// Content key for the decode stats block. Stats live in their own sub-host so
+// repaints never destroy the sparkline that refreshDecodeSparkline appends
+// after it — two writers clobbering one panel is how the VRAM donut vanished.
+let lastDecodeStatsKey = null;
 async function pollDecodePerf() {
   const el = setPanelBusy('decode-perf-panel', true);
   if (!el) return;
@@ -6348,29 +6380,58 @@ async function pollDecodePerf() {
     const data = await api('/v1/stats/decode');
     lastDecode = data;
     const window = data.window_secs ? Math.round(data.window_secs) : 60;
-    if (!data.sample_count || data.sample_count < 1) {
-      el.innerHTML = `<div class="sched-stats">
+    const idle = !data.sample_count || data.sample_count < 1;
+
+    let host = el.querySelector('.decode-stats-host');
+    if (!host) {
+      el.innerHTML = '';
+      host = document.createElement('div');
+      host.className = 'decode-stats-host';
+      el.appendChild(host);
+      lastDecodeStatsKey = null;
+    }
+
+    let key, html;
+    if (idle) {
+      key = 'idle|' + window;
+      html = `<div class="sched-stats">
         <div class="sched-stat" title="Decoded tokens per second across recent streaming completions."><div class="num">&mdash;</div><div class="lbl">tok/s</div></div>
         <div class="sched-stat" title="Median inter-token latency."><div class="num">&mdash;</div><div class="lbl">p50 ITL</div></div>
         <div class="sched-stat" title="99th-percentile inter-token latency."><div class="num">&mdash;</div><div class="lbl">p99 ITL</div></div>
         <div class="sched-stat" title="Streaming completions counted in this rolling window."><div class="num">0</div><div class="lbl">samples</div></div>
       </div>
       <div class="empty" style="margin-top: var(--space-4);">No streaming completions in the last ${window}s. Send a message in <strong>Playground</strong> to populate metrics, or check <a href="/health" target="_blank" rel="noopener noreferrer">/health</a> if the server is still warming up.</div>`;
-      return;
-    }
-    const tps = data.tok_per_sec.toFixed(1);
-    const p50 = data.p50_itl_ms.toFixed(1);
-    const p99 = data.p99_itl_ms.toFixed(1);
-    const mean = data.mean_itl_ms.toFixed(1);
-    el.innerHTML = `<div class="sched-stats">
+    } else {
+      const tps = data.tok_per_sec.toFixed(1);
+      const p50 = data.p50_itl_ms.toFixed(1);
+      const p99 = data.p99_itl_ms.toFixed(1);
+      const mean = data.mean_itl_ms.toFixed(1);
+      key = ['live', tps, p50, p99, mean, data.sample_count, window].join('|');
+      html = `<div class="sched-stats">
         <div class="sched-stat" title="Decoded tokens per second across recent streaming completions."><div class="num">${tps}</div><div class="lbl">tok/s</div></div>
         <div class="sched-stat" title="Median inter-token latency."><div class="num">${p50}<span style="font-size:0.55em;color:var(--text-muted);font-weight:500;"> ms</span></div><div class="lbl">p50 ITL</div></div>
         <div class="sched-stat" title="99th-percentile inter-token latency."><div class="num">${p99}<span style="font-size:0.55em;color:var(--text-muted);font-weight:500;"> ms</span></div><div class="lbl">p99 ITL</div></div>
         <div class="sched-stat" title="Streaming completions counted in this rolling window."><div class="num">${data.sample_count}</div><div class="lbl">samples · ${window}s</div></div>
       </div>
       <div style="margin-top: var(--space-3); font-size: var(--text-xs); color: var(--text-muted);">Mean inter-token latency: <span class="tabular-nums" style="color: var(--text-2);">${mean} ms</span></div>`;
-    if (typeof refreshDecodeSparkline === 'function') refreshDecodeSparkline();
+    }
+    if (key !== lastDecodeStatsKey || !host.firstChild) {
+      lastDecodeStatsKey = key;
+      host.innerHTML = html;
+    }
+
+    if (idle) {
+      // The rolling window drained: a stale sparkline under "no streaming
+      // completions" would contradict it. Drop it and start fresh next time.
+      const spark = el.querySelector('.decode-spark-host');
+      if (spark) spark.remove();
+      tpsHistory.length = 0;
+      lastTpsRendered = null;
+    } else if (typeof refreshDecodeSparkline === 'function') {
+      refreshDecodeSparkline();
+    }
   } catch (e) {
+    lastDecodeStatsKey = null;
     el.innerHTML = apiFailureHtml('Decode performance', e, 'pollDecodePerf');
   } finally {
     setPanelBusy('decode-perf-panel', false);
@@ -11759,7 +11820,7 @@ function donutChartSvg(slices, opts = {}) {
 }
 
 /* =====================================================================
-   Overview: VRAM donut + tok/s sparkline + quick actions
+   Overview: tok/s sparkline + quick actions
    ===================================================================== */
 
 const tpsHistory = [];
@@ -11807,49 +11868,13 @@ function refreshDecodeSparkline() {
   renderLineChart(spark.querySelector('.decode-spark-body'), series, { width: 520, height: 100, yZoom: true });
 }
 
-// VRAM donut. Same approach: read `lastHealth` cache, dedupe on a key
-// derived from the gpu_memory tuple so we don't re-paint the donut
-// unless the partition actually shifted.
-let lastVramKey = null;
-function refreshVramDonut() {
-  const h = lastHealth;
-  if (!h || !h.gpu_memory) return;
-  const g = h.gpu_memory;
-  const key = `${g.total_vram_gb}|${g.model_gb}|${g.kv_cache_gb}|${g.training_budget_gb}`;
-  if (key === lastVramKey) return;
-  lastVramKey = key;
-  const panel = document.getElementById('server-status');
-  if (!panel) return;
-  const remaining = Math.max(0, (g.total_vram_gb || 0) - (g.model_gb || 0) - (g.kv_cache_gb || 0) - (g.training_budget_gb || 0));
-  const slices = [
-    { label: 'Model',          value: g.model_gb || 0,         color: 'var(--accent)' },
-    { label: 'KV cache',       value: g.kv_cache_gb || 0,      color: 'var(--info-fg)' },
-    { label: 'Training reserve', value: g.training_budget_gb || 0, color: 'var(--success-fg)' },
-    { label: 'Free',           value: remaining,                color: 'var(--surface-3)' },
-  ].filter(s => s.value > 0);
-  const used = (g.model_gb || 0) + (g.kv_cache_gb || 0);
-  const totalLabel = (g.total_vram_gb || 0).toFixed(1) + 'G';
-  let host = panel.querySelector('.vram-donut-host');
-  if (!host) {
-    host = document.createElement('div');
-    host.className = 'vram-donut-host vram-donut';
-    host.style.marginTop = '12px';
-    host.style.paddingTop = '12px';
-    host.style.borderTop = '1px solid var(--border)';
-    panel.appendChild(host);
-  }
-  const legend = slices.map(s => `<div class="vram-legend-row">
-    <span class="vram-legend-swatch" style="background:${s.color};"></span>
-    <span class="vram-legend-name">${escapeHtml(s.label)}</span>
-    <span class="vram-legend-value">${s.value.toFixed(1)}G</span>
-  </div>`).join('');
-  host.innerHTML = `${donutChartSvg(slices, { size: 120, stroke: 20, centerLabel: used.toFixed(1)+'G', centerSub: 'used / '+totalLabel })}
-    <div class="vram-legend">${legend}</div>`;
-}
+// The VRAM donut renders inside `renderServerStatus` — the server-status card
+// has exactly one writer. (A second writer appending the donut here used to
+// race the card repaint and the donut vanished on the second poll.)
 
-// Refreshers are driven event-style from the bottom of `pollDecodePerf`
-// and `pollHealth` (success path). No need for a standalone interval —
-// the polls are already on the right cadence.
+// The sparkline refresher is driven event-style from the bottom of
+// `pollDecodePerf` (success path). No need for a standalone interval —
+// the poll is already on the right cadence.
 
 const QUICK_ACTIONS = {
   'new-eval':   () => { selectPage('evals');    document.getElementById('evals-tab-suites')?.click(); },
