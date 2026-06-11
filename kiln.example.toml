@@ -133,6 +133,21 @@ draft_layers = 8                      # First N layers used as draft model
 # max_tokens = 512
 # seed = 42
 
+# §10.6 self-improvement flywheel scheduler. Omit the section (or the
+# interval) to keep the weekly loop manual (`kiln self-improve`).
+#
+# [agent]
+# # Run the self_improve loop every N hours (168 = weekly). The first run
+# # fires one full interval after startup — never at boot.
+# self_improve_interval_hours = 168
+# # Optional request overrides (same shape as POST /v1/agent/self_improve).
+# # Add post_eval to gate every scheduled round behind §8.7 promotion:
+# # auto-load defers until the eval passes; failures demote to <name>.failed.
+# [agent.self_improve]
+# agent = "pi-coder-current"
+# judge = "judge-pi-v1"
+# post_eval = { suite = "agentic-core", min_accuracy = 0.7 }
+
 [request_log]
 # Durable request/response log for the inference endpoints
 # (/v1/chat/completions, /v1/completions, /v1/completions/batch). Every

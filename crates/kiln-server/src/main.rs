@@ -612,6 +612,59 @@ async fn main() -> Result<()> {
     // Spawn the background eval queue worker
     kiln_server::eval::spawn_eval_worker(state.clone(), shutdown_flag.clone());
 
+    // §10.6 flywheel scheduler: [agent] self_improve_interval_hours runs
+    // the weekly loop automatically through the SAME submission path as
+    // POST /v1/agent/self_improve (validation, teacher gate, queue caps).
+    // First run fires one full interval after startup — never at boot.
+    if let Some(agent_cfg) = config.agent.clone() {
+        if let Some(hours) = agent_cfg.self_improve_interval_hours.filter(|&h| h > 0) {
+            let scheduler_state = state.clone();
+            let req_template = agent_cfg.self_improve.clone();
+            tracing::info!(
+                interval_hours = hours,
+                "self_improve scheduler armed (first run in one interval)"
+            );
+            tokio::spawn(async move {
+                let interval = std::time::Duration::from_secs(hours.saturating_mul(3600));
+                loop {
+                    tokio::time::sleep(interval).await;
+                    if scheduler_state
+                        .shutdown
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        break;
+                    }
+                    let req = match &req_template {
+                        Some(v) => match serde_json::from_value(v.clone()) {
+                            Ok(req) => req,
+                            Err(e) => {
+                                tracing::error!(
+                                    error = %e,
+                                    "[agent].self_improve config invalid; scheduler stopping"
+                                );
+                                break;
+                            }
+                        },
+                        None => Default::default(),
+                    };
+                    match kiln_server::api::self_improve::submit_self_improve(
+                        &scheduler_state,
+                        req,
+                    ) {
+                        Ok(resp) => tracing::info!(
+                            jobs = resp.job_ids.len(),
+                            "scheduled self_improve round queued"
+                        ),
+                        Err(e) => tracing::warn!(
+                            error = ?e,
+                            "scheduled self_improve round failed to queue; will retry next interval"
+                        ),
+                    }
+                }
+            });
+        }
+    }
+
     let tokenizer_prewarm = state.tokenizer.clone();
     let prewarm_state = state.clone();
     // Cheap clones so the shutdown handler can reach the batching engine

@@ -19,7 +19,7 @@ mod metrics;
 mod models;
 pub(crate) mod pit_of_success;
 pub(crate) mod recipes;
-pub(crate) mod self_improve;
+pub mod self_improve;
 mod stats;
 pub(crate) mod teachers;
 pub mod terminal;
