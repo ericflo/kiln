@@ -1899,14 +1899,14 @@ fn grpo_hyperparameters(
 
 fn grpo_echo_receipt(config: &GrpoConfig) -> crate::train_receipt::EchoReceipt {
     match config.loss.echo.as_ref() {
-        // A present config records its knobs for provenance (a λ=0 config
-        // still steers mask construction / warning-filter accounting), but
-        // `enabled` records whether the env-CE term FIRED — and post
-        // candle-drop (#1082) it has no gradient root: λ≠0 runs only reach
-        // training when the data carries no env tokens (entry validation
-        // rejects the rest), so the term contributed exactly zero.
+        // The env-CE term is live again (resurrection PR2 #1512): `enabled`
+        // records whether the term is armed for this run (λ≠0). Whether it
+        // actually FIRED shows in initial/final_env_ce, filled in by the
+        // EchoActivityMetrics from per-step observations — a run whose
+        // rollouts carry no env tokens keeps env_ce: None and the standing
+        // warn_echo_enabled_without_env_tokens diagnostic.
         Some(echo) => crate::train_receipt::EchoReceipt {
-            enabled: false,
+            enabled: config.loss.echo_enabled(),
             lambda: Some(echo.lambda),
             env_mask_mode: serde_json::to_value(echo.env_mask_mode)
                 .ok()
@@ -1914,12 +1914,7 @@ fn grpo_echo_receipt(config: &GrpoConfig) -> crate::train_receipt::EchoReceipt {
             warning_filter: Some(echo.warning_filter),
             initial_env_ce: None,
             final_env_ce: None,
-            dropped_reason: config.loss.echo_enabled().then(|| {
-                "env-CE has no kt-tape gradient root post candle-drop (#1082); runs \
-                 with environment tokens are rejected at entry and runs without them \
-                 have a zero env-CE term"
-                    .to_string()
-            }),
+            dropped_reason: None,
         },
         None => crate::train_receipt::EchoReceipt::disabled(),
     }
@@ -5795,13 +5790,15 @@ fn train_tokenized_grpo_group_with_grad_norms(
             feature = "vulkan",
             feature = "rocm"
         ))]
+        // ECHO env-CE no longer excludes (resurrection PR2 #1512: the fused
+        // loss roots carry the env rows); only no_policy_loss remains
+        // un-wired. (This lift was authored with #1512 but lost in a stash
+        // conflict before commit — restored here. Without it the ensure!
+        // below killed exactly the env-token runs #1512 enabled, AFTER the
+        // rollout forwards.)
         let tape_auth_eligible = tape_authoritative_enabled()
             && backend_supports_tape_forward_backward(backend)
             && base_dtype_supports_tape_for_backend(weights, backend)
-            && !(config.loss.echo.is_some()
-                && config.loss.echo_enabled()
-                && comp_env_count > 0
-                && comp.total_obs_len > 0)
             && !config.loss.no_policy_loss;
         #[cfg(not(any(
             feature = "cuda",
@@ -5920,12 +5917,10 @@ fn train_tokenized_grpo_group_with_grad_norms(
         anyhow::ensure!(
             tape_auth_eligible,
             "GRPO requires the kt tape-authoritative path (backend tape support, \
-             compatible base dtype, no ECHO env-CE, no no_policy_loss) post \
-             candle-drop (#1082). If this fired on ECHO: set loss.echo to null / pass \
-             --no-echo — the action-token policy loss still trains on the full \
-             trajectory. (Submission-time and trainer-entry validation should have \
-             rejected this config before any GPU work; reaching this point is a bug \
-             worth reporting.)"
+             compatible base dtype, no no_policy_loss) post candle-drop (#1082). \
+             (Submission-time and trainer-entry validation should have rejected \
+             this config before any GPU work; reaching this point is a bug worth \
+             reporting.)"
         );
         let grads: GradSource = {
             #[cfg(any(
@@ -10497,8 +10492,25 @@ pub(crate) mod tests {
     /// zero contribution) and trajectory rollouts WITH observations (the
     /// flagship agentic shape). The report's env-token counts distinguish
     /// them.
+    /// Pin the resurrection-PR2 receipt contract (the original edit was
+    /// lost in a stash conflict before #1512 merged): an armed ECHO config
+    /// records enabled: true with NO dropped_reason.
     #[test]
-    fn grpo_dry_run_accepts_echo_with_and_without_env_tokens() -> Result<()> {
+    fn grpo_echo_receipt_records_armed_state() {
+        let mut config = GrpoConfig::default();
+        config.loss.echo = Some(crate::EchoConfig::default());
+        let receipt = grpo_echo_receipt(&config);
+        assert!(receipt.enabled, "armed ECHO must record enabled: true");
+        assert!(receipt.dropped_reason.is_none(), "{:?}", receipt.dropped_reason);
+        assert_eq!(receipt.lambda, Some(0.05));
+
+        config.loss.echo = None;
+        let receipt = grpo_echo_receipt(&config);
+        assert!(!receipt.enabled);
+    }
+
+    #[test]
+fn grpo_dry_run_accepts_echo_with_and_without_env_tokens() -> Result<()> {
         let tmp = tempfile::tempdir()?;
         let tok = make_echo_smoke_tokenizer()?;
 
