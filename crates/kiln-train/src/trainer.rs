@@ -638,6 +638,13 @@ pub struct TrainableLoraParams {
     /// Per-layer, per-module (A, B) parameter pairs.
     /// Indexed as: layers[layer_idx].module_name -> (Param_A, Param_B)
     pub layers: Vec<TrainableLoraLayerParams>,
+    /// LoRA pairs for the native MTP draft block (MTP training plan
+    /// PR-B). `None` unless the post-SFT MTP alignment phase initialized
+    /// them. Deliberately EXCLUDED from `all_params`/`all_params_mut` —
+    /// the main training phase must not see parameters that its forward
+    /// graph never touches; the alignment phase drives these through
+    /// [`Self::mtp_params`]/[`Self::mtp_params_mut`].
+    pub mtp: Option<TrainableLoraLayerParams>,
     pub rank: usize,
     pub alpha: f32,
     pub scale: f32,
@@ -868,10 +875,116 @@ impl TrainableLoraParams {
 
         Ok(Self {
             layers,
+            mtp: None,
             rank,
             alpha,
             scale,
         })
+    }
+
+    /// Initialize LoRA A/B pairs for the native MTP draft block's seven
+    /// modules (q/k/v/o + gate/up/down), shaped from the checkpoint's
+    /// actual `mtp.*` tensors. Returns `Ok(false)` (no-op) when the
+    /// checkpoint ships no MTP tensors. Same Kaiming-A / zero-B init and
+    /// precision policy as the main layers. (MTP training plan PR-B.)
+    pub fn initialize_mtp_seeded(
+        &mut self,
+        weights: &GpuWeights,
+        device: &Device,
+        seed: Option<u64>,
+    ) -> Result<bool> {
+        if weights.mtp.is_none() {
+            return Ok(false);
+        }
+        let mtp = weights
+            .mtp_weights()
+            .context("initialize_mtp_seeded: materializing mtp.* tensors")?;
+        let full = match &mtp.layer.attention {
+            kiln_model::forward::GpuAttentionWeights::Full(full) => full,
+            kiln_model::forward::GpuAttentionWeights::Linear(_) => {
+                anyhow::bail!(
+                    "initialize_mtp_seeded: MTP layer is linear-attention — the loader \
+                     guarantees full attention; checkpoint is malformed"
+                )
+            }
+        };
+        let mut rng = seed.map(StdRng::seed_from_u64);
+        let lora_dtype = training_precision_policy_for_device(device)
+            .lora_parameter_dtype_for_base_weight(weights.embed_tokens.dtype());
+        let rank = self.rank;
+
+        let mut pairs = TrainableLoraLayerParams::default();
+        let mut make_pair = |w_t: &kiln_tensor::Tensor,
+                             module: &str|
+         -> Result<(Parameter, Parameter)> {
+            let dims = w_t.dims();
+            anyhow::ensure!(
+                dims.len() == 2,
+                "initialize_mtp_seeded: expected rank-2 {module}_t, got {dims:?}"
+            );
+            let (in_features, out_features) = (dims[0], dims[1]);
+            let bound = (1.0 / in_features as f64).sqrt();
+            let a = kaiming_uniform_a(rng.as_mut(), bound, (rank, in_features), lora_dtype, device)
+                .with_context(|| format!("init MTP LoRA A for {module}"))?;
+            let b = lora_param_zeros((out_features, rank), lora_dtype, device)
+                .with_context(|| format!("init MTP LoRA B for {module}"))?;
+            Ok((a, b))
+        };
+        pairs.q_proj = Some(make_pair(&full.q_proj_t, "q_proj")?);
+        pairs.k_proj = Some(make_pair(&full.k_proj_t, "k_proj")?);
+        pairs.v_proj = Some(make_pair(&full.v_proj_t, "v_proj")?);
+        pairs.o_proj = Some(make_pair(&full.o_proj_t, "o_proj")?);
+        pairs.gate_proj = Some(make_pair(&mtp.layer.mlp.gate_proj_t, "gate_proj")?);
+        pairs.up_proj = Some(make_pair(&mtp.layer.mlp.up_proj_t, "up_proj")?);
+        pairs.down_proj = Some(make_pair(&mtp.layer.mlp.down_proj_t, "down_proj")?);
+        self.mtp = Some(pairs);
+        Ok(true)
+    }
+
+    /// MTP draft-block params for the alignment phase's grad lookup +
+    /// optimizer (empty when [`Self::mtp`] is `None`).
+    pub fn mtp_params(&self) -> Vec<&Parameter> {
+        let mut out = Vec::new();
+        if let Some(mtp) = &self.mtp {
+            for pair in [
+                &mtp.q_proj,
+                &mtp.k_proj,
+                &mtp.v_proj,
+                &mtp.o_proj,
+                &mtp.gate_proj,
+                &mtp.up_proj,
+                &mtp.down_proj,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                out.push(&pair.0);
+                out.push(&pair.1);
+            }
+        }
+        out
+    }
+
+    /// Mutable variant for the alignment phase's optimizer step.
+    pub fn mtp_params_mut(&mut self) -> Vec<&mut Parameter> {
+        let mut out: Vec<&mut Parameter> = Vec::new();
+        if let Some(mtp) = self.mtp.as_mut() {
+            for pair in [
+                &mut mtp.q_proj,
+                &mut mtp.k_proj,
+                &mut mtp.v_proj,
+                &mut mtp.o_proj,
+                &mut mtp.gate_proj,
+                &mut mtp.up_proj,
+                &mut mtp.down_proj,
+            ] {
+                if let Some((a, b)) = pair.as_mut() {
+                    out.push(a);
+                    out.push(b);
+                }
+            }
+        }
+        out
     }
 
     /// Phase 4.1: register every LoRA `Var` (A and B for all modules
@@ -948,10 +1061,14 @@ impl TrainableLoraParams {
             return Ok(0);
         }
         let mut synced = 0;
-        for param in self.all_params_mut() {
+        fn sync_one(
+            backend: &dyn BackendRuntime,
+            param: &mut Parameter,
+            synced: &mut usize,
+        ) -> Result<()> {
             let primary = param.forward_storage().primary_tensor().clone();
             if !ResidencyBackend::runtime_has_resident_activation(backend, &primary) {
-                continue;
+                return Ok(());
             }
             let dims: Vec<usize> = primary.dims().to_vec();
             let dtype = primary.dtype();
@@ -960,8 +1077,17 @@ impl TrainableLoraParams {
             )? {
                 param.replace_forward_storage(KtForwardStorage::Plain(resolved.clone()));
                 param.replace_backward_storage(Some(resolved));
-                synced += 1;
+                *synced += 1;
             }
+            Ok(())
+        }
+        for param in self.all_params_mut() {
+            sync_one(backend, param, &mut synced)?;
+        }
+        // The MTP draft-block pairs (alignment phase) sync too — save_peft
+        // serializes them under the mtp.* keys.
+        for param in self.mtp_params_mut() {
+            sync_one(backend, param, &mut synced)?;
         }
         Ok(synced)
     }
@@ -1273,9 +1399,27 @@ impl TrainableLoraParams {
             })
             .collect();
 
+        let make_proj_view =
+            |pair: &Option<(Parameter, Parameter)>| -> Option<LoraProjectionWeights> {
+                pair.as_ref().map(|(a, b)| LoraProjectionWeights {
+                    a: a.forward_storage().primary_tensor().clone(),
+                    b: b.forward_storage().primary_tensor().clone(),
+                })
+            };
+        let mtp = self.mtp.as_ref().map(|mp| LoraLayerWeights {
+            q_proj: make_proj_view(&mp.q_proj),
+            k_proj: make_proj_view(&mp.k_proj),
+            v_proj: make_proj_view(&mp.v_proj),
+            o_proj: make_proj_view(&mp.o_proj),
+            gate_proj: make_proj_view(&mp.gate_proj),
+            up_proj: make_proj_view(&mp.up_proj),
+            down_proj: make_proj_view(&mp.down_proj),
+            ..Default::default()
+        });
+
         LoraWeights {
             layers,
-            mtp: None,
+            mtp,
             rank: self.rank,
             alpha: self.alpha,
             scale: self.scale,
@@ -1477,6 +1621,39 @@ impl TrainableLoraParams {
             save_proj("gate_proj", &layer.gate_proj, false)?;
             save_proj("up_proj", &layer.up_proj, false)?;
             save_proj("down_proj", &layer.down_proj, false)?;
+        }
+
+        // MTP draft-block LoRA (MTP training plan PR-B). Keyed under
+        // `...mtp.layers.0...` — the loader parses these into
+        // `LoraWeights.mtp` (and `parse_peft_key.is_mtp` keeps them from
+        // aliasing main layer 0).
+        if let Some(mtp) = &self.mtp {
+            let mut save_mtp =
+                |name: &str, pair: &Option<(Parameter, Parameter)>, is_attn: bool| -> Result<()> {
+                    if let Some((a, b)) = pair {
+                        let sub = if is_attn { "self_attn" } else { "mlp" };
+                        let prefix = format!("base_model.model.model.mtp.layers.0.{sub}.{name}");
+                        let to_cpu = |kt: &KtTensor, key: &str| -> Result<KtTensor> {
+                            kt.to_device(kiln_tensor::Device::Cpu)
+                                .and_then(|t| t.contiguous())
+                                .map_err(|e| anyhow::anyhow!("save adapter {key}: to cpu: {e}"))
+                        };
+                        let a_key = format!("{prefix}.lora_A.weight");
+                        let b_key = format!("{prefix}.lora_B.weight");
+                        let a_cpu = to_cpu(a.forward_storage().primary_tensor(), &a_key)?;
+                        let b_cpu = to_cpu(b.forward_storage().primary_tensor(), &b_key)?;
+                        owned.push((a_key, a_cpu));
+                        owned.push((b_key, b_cpu));
+                    }
+                    Ok(())
+                };
+            save_mtp("q_proj", &mtp.q_proj, true)?;
+            save_mtp("k_proj", &mtp.k_proj, true)?;
+            save_mtp("v_proj", &mtp.v_proj, true)?;
+            save_mtp("o_proj", &mtp.o_proj, true)?;
+            save_mtp("gate_proj", &mtp.gate_proj, false)?;
+            save_mtp("up_proj", &mtp.up_proj, false)?;
+            save_mtp("down_proj", &mtp.down_proj, false)?;
         }
 
         let st_path = output_dir.join("adapter_model.safetensors");
@@ -2478,6 +2655,272 @@ fn write_grpo_train_receipt_best_effort(
 /// written — used by tests and benches that don't need replay.
 ///
 /// Returns the path to the saved adapter directory.
+/// Post-SFT MTP alignment phase (MTP training plan PR-B).
+///
+/// Trains LoRA on the native MTP draft block so the draft keeps
+/// predicting what the freshly-tuned model would say — every LoRA step
+/// moves the served distribution away from the frozen pretrained draft
+/// head, so speculative-decode acceptance decays exactly in proportion
+/// to personalization unless the draft trains too.
+///
+/// Per example: one detached no-head forward of the TUNED model gives
+/// post-final-norm hiddens h (the same tensor `mtp_forward_step` consumes
+/// as `h_prev` at serve time); the MTP block then trains under the kt
+/// tape on `fused_t = fc(concat(norm_e(emb(tok_{t+1})), norm_h(h_t)))`
+/// with the production FLCE root over the tied head — fed the shifted
+/// `ids[1..]` / `mask[1..]`, which makes row t's label `ids[t+2]`: the
+/// MTP objective, with zero new loss machinery. Only the seven
+/// draft-block LoRA pairs receive gradients (the hiddens are detached;
+/// fc / norms / tied head are frozen).
+///
+/// Returns `(examples_trained, initial_ce, final_ce)`; `None` when the
+/// checkpoint has no MTP tensors or the phase is disabled.
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+#[allow(clippy::too_many_arguments)]
+fn run_mtp_alignment_phase(
+    backend: &dyn BackendRuntime,
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    params: &mut TrainableLoraParams,
+    examples: &[SftExample],
+    valid_indices: &[usize],
+    tokenizer: &KilnTokenizer,
+    config: &SftConfig,
+    device: &Device,
+) -> Result<Option<(usize, Option<f64>, Option<f64>)>> {
+    let enabled = config.train_mtp.unwrap_or(true);
+    if !enabled || weights.mtp.is_none() {
+        return Ok(None);
+    }
+    if !params.initialize_mtp_seeded(weights, device, Some(0x4D54_5042))? {
+        return Ok(None);
+    }
+    let mtp = weights
+        .mtp_weights()
+        .context("mtp alignment: materializing mtp.* tensors")?;
+    let mtp_full_attention = matches!(
+        mtp.layer.attention,
+        kiln_model::forward::GpuAttentionWeights::Full(_)
+    );
+    anyhow::ensure!(mtp_full_attention, "mtp alignment: MTP layer must be full attention");
+
+    // Move the draft-block pairs into a one-layer TrainableLoraParams so
+    // the existing optimizer machinery (make_opt_state /
+    // optimizer_step_dispatch, both keyed on `all_params`) drives EXACTLY
+    // these seven pairs. Ownership moves — no clones — so Parameter
+    // identity (tensor_id, registry residency) is preserved; the pairs
+    // move back into `params.mtp` at the end for save_peft.
+    let taken = params
+        .mtp
+        .take()
+        .expect("initialize_mtp_seeded just populated params.mtp");
+    let mut mtp_train = TrainableLoraParams {
+        layers: vec![taken],
+        mtp: None,
+        rank: params.rank,
+        alpha: params.alpha,
+        scale: params.scale,
+    };
+
+    // Serving view of the trained MAIN adapter (applied to the hiddens
+    // forward) and the draft-block LoRA view (applied inside the block;
+    // shares the SAME kt tensors the optimizer updates).
+    let lora_view = params.as_lora_weights();
+    let mtp_lora_view = {
+        let mut v = mtp_train.as_lora_weights();
+        v.layers.remove(0)
+    };
+    let lora_scale = params.scale;
+
+    let learning_rate = config.effective_learning_rate();
+    let mut opt_state = make_opt_state(&mtp_train, config.optimizer, learning_rate, device)?;
+    if let Some(state) = opt_state.as_ref() {
+        state.register_with_backend(backend)?;
+    }
+    let param_raw_ids: std::collections::HashSet<u64> = mtp_train
+        .all_params()
+        .iter()
+        .map(|p| p.tensor_id().as_raw())
+        .collect();
+
+    let mut initial_ce: Option<f64> = None;
+    let mut final_ce: Option<f64> = None;
+    let mut trained = 0usize;
+    let phase_started = Instant::now();
+
+    for &idx in valid_indices {
+        let ex = &examples[idx];
+        let (input_ids, label_mask) = match tokenize_for_training(ex, tokenizer) {
+            Ok(pair) => pair,
+            Err(_) => continue,
+        };
+        let seq_len = input_ids.len();
+        // The +2 objective needs at least one supervised label at t+2.
+        if seq_len < 3 || !label_mask.get(2..).is_some_and(|m| m.iter().any(|&v| v)) {
+            continue;
+        }
+
+        // 1) Detached hiddens from the TUNED model — outside any tape scope.
+        let mut linear_state = LinearAttentionState::new(model_config, device)?;
+        let hidden = model_forward_no_head(
+            backend,
+            &input_ids,
+            weights,
+            model_config,
+            Some(&mut linear_state),
+            Some(&lora_view),
+        )
+        .context("mtp alignment: no-head hiddens forward")?
+        .detach();
+
+        // 2) MTP block forward + FLCE root under the tape-authoritative scope.
+        let shifted_ids: Vec<u32> = input_ids[1..].to_vec();
+        let shifted_mask: Vec<bool> = label_mask[1..].to_vec();
+        let positions: Vec<u32> = (0..seq_len as u32 - 1).collect();
+        let result = kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(|| {
+            let to_err =
+                |e: anyhow::Error| kiln_kt_bridge::BridgeError::new(format!("{e:#}"));
+            // emb rows for tok_{1..T} — frozen embedding, plain index_select.
+            let idx_t = kiln_tensor::Tensor::from_vec_on(
+                *device,
+                shifted_ids.clone(),
+                vec![seq_len - 1],
+            )
+            .map_err(|e| to_err(anyhow::anyhow!("mtp alignment: idx tensor: {e}")))?;
+            let emb = weights
+                .embed_tokens
+                .index_select(&idx_t, 0)
+                .map_err(|e| to_err(anyhow::anyhow!("mtp alignment: emb select: {e}")))?;
+            let norm_e = kiln_model::forward::rms_norm(
+                &emb.unsqueeze(0)
+                    .map_err(|e| to_err(anyhow::anyhow!("mtp alignment: emb unsqueeze: {e}")))?,
+                &mtp.pre_fc_norm_embedding,
+                model_config.rms_norm_eps,
+            )
+            .map_err(to_err)?;
+            let h_rows = hidden
+                .narrow(1, 0, seq_len - 1)
+                .map_err(|e| to_err(anyhow::anyhow!("mtp alignment: hidden narrow: {e}")))?;
+            let norm_h = kiln_model::forward::rms_norm(
+                &h_rows,
+                &mtp.pre_fc_norm_hidden,
+                model_config.rms_norm_eps,
+            )
+            .map_err(to_err)?;
+            let concat = kiln_tensor::ops::concat(&[&norm_e, &norm_h], 2)
+                .map_err(|e| to_err(anyhow::anyhow!("mtp alignment: concat: {e}")))?;
+            let fc_t = mtp
+                .fc_t
+                .to_dtype(concat.dtype())
+                .map_err(|e| to_err(anyhow::anyhow!("mtp alignment: fc cast: {e}")))?;
+            let fused = concat
+                .squeeze(0)
+                .and_then(|c2| c2.matmul(&fc_t))
+                .and_then(|f2| f2.unsqueeze(0))
+                .map_err(|e| to_err(anyhow::anyhow!("mtp alignment: fc matmul: {e}")))?;
+            let block_out = kiln_model::forward::transformer_block(
+                backend,
+                &fused,
+                &mtp.layer,
+                model_config,
+                &positions,
+                model_config.num_attention_heads,
+                model_config.num_kv_heads,
+                model_config.head_dim,
+                model_config.rotary_dim(),
+                &weights.rotary_inv_freq,
+                model_config.rms_norm_eps,
+                None,
+                0,
+                Some((&mtp_lora_view, lora_scale)),
+            )
+            .map_err(to_err)?;
+            let normed = kiln_model::forward::rms_norm(
+                &block_out,
+                &mtp.final_layernorm,
+                model_config.rms_norm_eps,
+            )
+            .map_err(to_err)?;
+            let loss = kiln_autograd::with_active_tape(|tape| {
+                kiln_flce_kernel::fused_linear_cross_entropy_phase_b_unit_grad_via_kt_tape(
+                    &normed,
+                    &weights.embed_tokens_t,
+                    &shifted_ids,
+                    &shifted_mask,
+                    DEFAULT_CHUNK_SIZE,
+                    tape,
+                )
+            })
+            .ok_or_else(|| {
+                kiln_kt_bridge::BridgeError::new("mtp alignment: no active kt tape".to_string())
+            })?
+            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("mtp alignment FLCE: {e}")))?;
+            let loss_val = loss
+                .to_dtype(kiln_tensor::DType::F32)
+                .and_then(|t| t.to_scalar::<f32>())
+                .map_err(|e| {
+                    kiln_kt_bridge::BridgeError::new(format!("mtp alignment loss read: {e}"))
+                })? as f64;
+            Ok((loss_val, loss))
+        });
+        let (loss_val, _loss_kt, grads_by_candle_raw) = match result {
+            Ok(triple) => triple,
+            Err(e) => anyhow::bail!("mtp alignment step failed: {e}"),
+        };
+
+        let mut grads = kiln_autograd::GradStore::new();
+        for (key_raw, kt_grad) in grads_by_candle_raw {
+            let Some(param_raw) =
+                kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(key_raw as u64)
+            else {
+                continue;
+            };
+            if param_raw_ids.contains(&param_raw) {
+                grads.insert(KtTensorId::from_raw(param_raw), kt_grad);
+            }
+        }
+        anyhow::ensure!(
+            !grads.is_empty(),
+            "mtp alignment: tape backward produced no MTP LoRA grads — the draft \
+             block's lora-linear did not record (report this; the adapter would \
+             silently ship an untrained draft head)"
+        );
+
+        optimizer_step_dispatch(
+            backend,
+            &mut mtp_train,
+            &GradSource::Kt(grads),
+            learning_rate,
+            config.optimizer,
+            opt_state.as_mut(),
+        )?;
+
+        if initial_ce.is_none() {
+            initial_ce = Some(loss_val);
+        }
+        final_ce = Some(loss_val);
+        trained += 1;
+    }
+
+    // Return the trained pairs to params.mtp — save_peft serializes them
+    // under the mtp.* keys.
+    params.mtp = Some(mtp_train.layers.remove(0));
+
+    tracing::info!(
+        examples = trained,
+        initial_ce = ?initial_ce,
+        final_ce = ?final_ce,
+        elapsed_ms = phase_started.elapsed().as_millis() as u64,
+        "MTP alignment phase complete"
+    );
+    Ok(Some((trained, initial_ce, final_ce)))
+}
+
 pub fn sft_train(
     examples: &[SftExample],
     config: &SftConfig,
@@ -2890,6 +3333,48 @@ pub fn sft_train(
 
         if let Some(pb) = pb {
             pb.finish_and_clear();
+        }
+
+        // MTP alignment phase (PR-B): train the native draft block's LoRA
+        // against the freshly-tuned model so speculative decoding keeps its
+        // acceptance rate under this adapter. Auto-on when the checkpoint
+        // ships mtp.* tensors; config.train_mtp = false opts out. Soft-fail:
+        // a draft-head alignment problem must not lose the main adapter.
+        #[cfg(any(
+            feature = "cuda",
+            feature = "metal",
+            feature = "vulkan",
+            feature = "rocm"
+        ))]
+        match run_mtp_alignment_phase(
+            &*backend,
+            weights,
+            model_config,
+            &mut params,
+            examples,
+            &valid_indices,
+            tokenizer,
+            config,
+            &device,
+        ) {
+            Ok(Some((mtp_examples, mtp_initial_ce, mtp_final_ce))) => {
+                tracing::info!(
+                    examples = mtp_examples,
+                    initial_ce = ?mtp_initial_ce,
+                    final_ce = ?mtp_final_ce,
+                    "MTP draft-block LoRA trained alongside the adapter"
+                );
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(
+                    error = %format!("{e:#}"),
+                    "MTP alignment phase failed — saving the adapter WITHOUT \
+                     a trained draft head (spec decode falls back to the base \
+                     draft for this adapter)"
+                );
+                params.mtp = None;
+            }
         }
 
         // Pull current Var values from registry into candle CPU
@@ -10910,6 +11395,89 @@ pub(crate) mod tests {
             max_diff < 1e-6,
             "chunked selected log-probs differ from full logits: max_diff={max_diff:e}"
         );
+        Ok(())
+    }
+
+    /// MTP PR-B round trip: initialize the draft-block LoRA from a tiny
+    /// fixture that ships MTP tensors, save the adapter, and load it back
+    /// — the mtp.* keys must materialize `LoraWeights.mtp` with all seven
+    /// modules and never bleed into main layer 0.
+    #[test]
+    fn mtp_lora_init_save_load_round_trip() -> Result<()> {
+        let device = Device::Cpu;
+        let config = tiny_config();
+        let mut weights = tiny_weights(&config, &device)?;
+
+        // Donate a full-attention layer as the MTP block (the real loader
+        // guarantees Full; the tiny fixture interleaves GDN + full).
+        let full_layer = weights
+            .layers
+            .iter()
+            .find(|l| {
+                matches!(
+                    l.attention,
+                    kiln_model::forward::GpuAttentionWeights::Full(_)
+                )
+            })
+            .expect("tiny fixture has a full-attention layer")
+            .clone();
+        let hidden = config.hidden_size;
+        let fc = kiln_tensor::Tensor::zeros(
+            vec![hidden, 2 * hidden],
+            kiln_tensor::DType::F32,
+            device,
+        )?;
+        let fc_t = kiln_tensor::Tensor::zeros(
+            vec![2 * hidden, hidden],
+            kiln_tensor::DType::F32,
+            device,
+        )?;
+        let norm = kiln_tensor::Tensor::ones(vec![hidden], kiln_tensor::DType::F32, device)?;
+        let mtp_gpu = kiln_model::forward::MtpGpuWeights {
+            fc,
+            fc_t,
+            pre_fc_norm_embedding: norm.clone(),
+            pre_fc_norm_hidden: norm.clone(),
+            layer: full_layer,
+            final_layernorm: norm,
+        };
+        weights.mtp = Some(kiln_model::forward::MtpGpuWeightsSlot::eager(
+            mtp_gpu, &device,
+        ));
+
+        let mut params = TrainableLoraParams::initialize(&config, &weights, 2, 4.0, &device)?;
+        assert!(params.mtp.is_none());
+        assert!(params.initialize_mtp_seeded(&weights, &device, Some(7))?);
+        assert_eq!(
+            params.mtp_params().len(),
+            14,
+            "7 modules × (A, B) pairs"
+        );
+        // The view exposes the draft-block LoRA for the serve/train paths.
+        assert!(params.as_lora_weights().mtp.is_some());
+
+        let dir = tempfile::tempdir()?;
+        let out = dir.path().join("mtp-adapter");
+        params.save_peft(&out, config.num_layers)?;
+
+        let loaded = LoraWeights::load(&out, config.num_layers, device)?;
+        let mtp = loaded.mtp.as_ref().expect("mtp.* keys load into the mtp slot");
+        for (name, proj) in [
+            ("q_proj", &mtp.q_proj),
+            ("k_proj", &mtp.k_proj),
+            ("v_proj", &mtp.v_proj),
+            ("o_proj", &mtp.o_proj),
+            ("gate_proj", &mtp.gate_proj),
+            ("up_proj", &mtp.up_proj),
+            ("down_proj", &mtp.down_proj),
+        ] {
+            assert!(proj.is_some(), "MTP {name} must round-trip");
+        }
+        // A no-MTP fixture stays None end to end (legacy adapters).
+        let weights_plain = tiny_weights(&config, &device)?;
+        let mut params_plain =
+            TrainableLoraParams::initialize(&config, &weights_plain, 2, 4.0, &device)?;
+        assert!(!params_plain.initialize_mtp_seeded(&weights_plain, &device, None)?);
         Ok(())
     }
 

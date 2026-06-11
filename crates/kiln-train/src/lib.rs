@@ -322,6 +322,15 @@ pub struct SftConfig {
     pub lora_rank: usize,
     #[serde(default = "default_alpha")]
     pub lora_alpha: f32,
+    /// Train the native MTP draft block's LoRA alongside the adapter
+    /// (post-SFT alignment phase — MTP training plan PR-B). `None` (the
+    /// default) auto-enables when the checkpoint ships `mtp.*` tensors:
+    /// every LoRA step moves the served distribution away from the
+    /// frozen draft head, so speculative-decode acceptance decays exactly
+    /// in proportion to personalization unless the draft trains too.
+    /// `Some(false)` opts out.
+    #[serde(default)]
+    pub train_mtp: Option<bool>,
     /// If set, continue training from this adapter instead of starting fresh.
     pub base_adapter: Option<String>,
     /// Reserved escape hatch for future explicit shape conversion. Today,
@@ -386,6 +395,7 @@ impl Default for SftConfig {
             learning_rate: None,
             lora_rank: default_rank(),
             lora_alpha: default_alpha(),
+            train_mtp: None,
             base_adapter: None,
             allow_adapter_shape_conversion: false,
             allow_high_lora_scale: false,

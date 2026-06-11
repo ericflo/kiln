@@ -1,9 +1,14 @@
 # MTP Training Plan — keep the draft head aligned with the tuned model
 
-**Status:** PR-A (serving + adapter format) shipped: `LoraWeights.mtp`,
-LoRA-threaded MTP verify/replay, draft-block LoRA application, dispatch
-gate lifted. This document specifies PR-B: actually *training* the MTP
-draft block whenever an adapter trains.
+**Status:** PR-A (serving + adapter format) shipped (#1508). PR-B
+(training) IMPLEMENTED: `run_mtp_alignment_phase` in `sft_train` —
+auto-on when the checkpoint ships `mtp.*` tensors (`train_mtp: false`
+opts out), detached no-head hiddens, FLCE root over shifted ids/mask
+(the +2 objective), optimizer over the seven draft-block pairs via a
+one-layer params shuffle, saved under the PR-A keys, soft-fail so a
+draft-head problem never loses the main adapter. Remaining: the
+attended GPU validations at the foot of this doc (CE decreases over a
+real run; acceptance-rate A/B with KILN_C1_ATTR_PATH).
 
 ## Why
 
@@ -84,3 +89,35 @@ tensors) and skipped silently when the model has no MTP weights.
   under the hood once the agent-traces bridge resolves prompts).
 - Dashboard: show draft acceptance rate per adapter (the data already
   exists in `MtpGenerationOutput::draft_accepted_count`).
+
+## Implementation anchors (recon 2026-06-11)
+
+- **Save**: `TrainableLoraParams::save_peft` (trainer.rs:~1426) writes
+  `base_model.model.model.layers.{i}.{self_attn|mlp}.{module}.lora_{A,B}.weight`
+  via per-module `save_proj` closures. MTP: add
+  `TrainableLoraParams.mtp: Option<TrainableLoraLayerParams>` and a second
+  loop emitting `base_model.model.model.mtp.layers.0.{sub}.{module}...`
+  (PR-A loader already parses these keys — `parse_peft_key.is_mtp`).
+- **Init**: mirror `TrainableLoraParams::initialize_seeded` (trainer.rs:687+)
+  for the 7 MTP modules; shapes come from `MtpWeights.layer`
+  (q/k/v/o from `AttentionWeights::Full`, gate/up/down from `FfnWeights`).
+- **Hiddens**: `model_forward_no_head` + `model_forward_final_norm`
+  (both already used by the GRPO step fn, trainer.rs:~8875) — NO paged
+  cache needed, returns post-final-norm [1,T,H] with the trained adapter
+  applied. Run OUTSIDE the tape scope, detach.
+- **Tape scope**: mirror `grpo_step_forward_backward_tape_authoritative_kt`
+  (trainer.rs:8849): `kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt`
+  + GradStore extraction keyed by `Parameter::tensor_id()` (the
+  `decode_kt_param_deposit` loop).
+- **MTP block forward under tape**: the serve path uses
+  `transformer_block_paged` (needs a paged cache). For training, compose
+  from tape primitives like the main training forward does, OR construct
+  a small throwaway PagedKvCache (the MTP debug/bench path shows how) and
+  reuse `transformer_block_paged` with `lora: Some((&mtp_lora_view, scale))`
+  — the lora matmuls route through the tape when the scope is armed
+  (same mechanism the main layers use).
+- **Loss**: `try_tape_cross_entropy_from_logits_kt` (the SFT CE root) over
+  the tied-head logits (`weights.embed_tokens_t` matmul), labels = +2
+  shift, masked to positions where `label_mask[t+2]`.
+- **Optimizer**: reuse the SFT step's optimizer construction on the MTP
+  param list only; a handful of epochs over the same examples.
