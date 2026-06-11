@@ -1541,11 +1541,15 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "DecodeBatcherPolicy": {
-      "field_count": 17,
+      "field_count": 18,
       "fields": [
         {
           "name": "max_batch",
           "type": "usize"
+        },
+        {
+          "name": "engine_max_decode_batch",
+          "type": "Option<usize>"
         },
         {
           "name": "wait_micros",

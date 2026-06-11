@@ -1002,7 +1002,16 @@ pub struct SpeculativeDecodePolicy {
 /// Backend-owned defaults for the live decode rendezvous worker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecodeBatcherPolicy {
+    /// LEGACY DecodeBatcher width (the in-runner row loop).
     pub max_batch: usize,
+    /// Concurrent-decode width for the BATCHING ENGINE actor, when it
+    /// should differ from `max_batch`. `None` → the engine reuses
+    /// `max_batch`. CUDA needs the split: its legacy batcher is serial
+    /// (`max_batch: 1`), but the engine ran width-8 from its
+    /// introduction until the policy-routing change silently pulled the
+    /// legacy 1 into the engine width and serialized all concurrent
+    /// CUDA requests.
+    pub engine_max_decode_batch: Option<usize>,
     pub wait_micros: u64,
     pub allow_mixed_seq_lens: bool,
     pub rowwise_retry_env: Option<&'static str>,
@@ -1708,6 +1717,7 @@ impl DecodeBatcherPolicy {
         match backend_kind_for_runtime(name, device) {
             kiln_tensor::Backend::Cuda => Self {
                 max_batch: 1,
+                engine_max_decode_batch: Some(Self::DEFAULT_MAX_BATCH),
                 wait_micros: 0,
                 allow_mixed_seq_lens: false,
                 rowwise_retry_env: None,
@@ -1729,6 +1739,7 @@ impl DecodeBatcherPolicy {
             },
             kiln_tensor::Backend::Metal => Self {
                 max_batch: Self::DEFAULT_MAX_BATCH,
+                engine_max_decode_batch: None,
                 wait_micros: Self::METAL_WAIT_MICROS,
                 allow_mixed_seq_lens: true,
                 rowwise_retry_env: None,
@@ -1748,6 +1759,7 @@ impl DecodeBatcherPolicy {
             },
             kiln_tensor::Backend::Vulkan => Self {
                 max_batch: Self::VULKAN_MAX_BATCH,
+                engine_max_decode_batch: None,
                 wait_micros: Self::VULKAN_WAIT_MICROS,
                 allow_mixed_seq_lens: true,
                 rowwise_retry_env: Some("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY"),
@@ -1767,6 +1779,7 @@ impl DecodeBatcherPolicy {
             },
             kiln_tensor::Backend::Rocm => Self {
                 max_batch: Self::DEFAULT_MAX_BATCH,
+                engine_max_decode_batch: None,
                 wait_micros: 0,
                 allow_mixed_seq_lens: false,
                 rowwise_retry_env: None,
@@ -1788,6 +1801,7 @@ impl DecodeBatcherPolicy {
             },
             _ => Self {
                 max_batch: Self::DEFAULT_MAX_BATCH,
+                engine_max_decode_batch: None,
                 wait_micros: 0,
                 allow_mixed_seq_lens: false,
                 rowwise_retry_env: None,

@@ -66,7 +66,14 @@ pub(crate) fn env_max_decode_batch_for_policy(policy: Option<DecodeBatcherPolicy
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .filter(|&n| n > 0)
-        .unwrap_or_else(|| policy.map_or(DEFAULT_MAX_DECODE_BATCH, |policy| policy.max_batch))
+        .unwrap_or_else(|| {
+            policy.map_or(DEFAULT_MAX_DECODE_BATCH, |policy| {
+                // The engine's width, not the legacy batcher's: CUDA keeps
+                // its serial legacy row loop (max_batch 1) while the engine
+                // decodes concurrently.
+                policy.engine_max_decode_batch.unwrap_or(policy.max_batch)
+            })
+        })
 }
 
 fn env_prefix_aware_admission() -> bool {
@@ -2314,6 +2321,16 @@ mod tests {
             DecodeBatcherPolicy::for_backend("vulkan", kiln_tensor::Device::Vulkan(0));
         let metal_policy = DecodeBatcherPolicy::for_backend("metal", kiln_tensor::Device::Metal(0));
         assert_eq!(env_max_decode_batch_for_policy(None), 8);
+        // CUDA: the legacy batcher stays serial (max_batch 1) but the
+        // ENGINE width must be the engine default — the policy-routing
+        // change that reused max_batch serialized all concurrent CUDA
+        // requests.
+        let cuda_policy = DecodeBatcherPolicy::for_backend(
+            "cuda",
+            kiln_tensor::Device::Cuda(0),
+        );
+        assert_eq!(cuda_policy.max_batch, 1);
+        assert_eq!(env_max_decode_batch_for_policy(Some(cuda_policy)), 8);
         assert_eq!(env_max_decode_batch_for_policy(Some(vulkan_policy)), 64);
         assert_eq!(env_max_decode_batch_for_policy(Some(metal_policy)), 8);
         unsafe {
