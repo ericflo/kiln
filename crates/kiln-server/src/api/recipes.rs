@@ -288,9 +288,10 @@ async fn run_recipe(
     // global training queue, so by the time step N+1 starts its base
     // adapter (step N's output) is already on disk. We auto-chain by
     // defaulting `base_adapter` on each training step to the previous
-    // step's output adapter when the recipe didn't set one. PostEval
-    // steps don't enqueue a job — they pin the next step's eval-gate
-    // hook (a follow-up wires real eval gating into post_eval).
+    // step's output adapter when the recipe didn't set one. A PostEval
+    // step doesn't enqueue a job — it becomes the PRECEDING step's §8.7
+    // promotion gate (post_eval on the queued job: auto-load defers
+    // until the eval passes; a failing adapter demotes to <name>.failed).
     // Two phases: resolve + validate every step first, then enqueue. A bad
     // adapter name on step N must reject the whole recipe before step 1 is
     // queued — never a partially-enqueued recipe.
@@ -533,16 +534,12 @@ fn step_to_queued_job(
             adapter,
             require_min_score: _,
         } => {
-            // Eval steps don't enqueue training jobs; for milestone-9
-            // we surface them as "no-op" entries in the response so
-            // the user sees the eval was acknowledged. Real
-            // post-eval gating lives in the trainer body (#31) which
-            // will run the eval inline and halt the recipe on
-            // failure.
+            // PostEval never reaches here: the prepare loop attaches it
+            // to the preceding step's post_eval config (or rejects the
+            // recipe when dangling/mismatched).
             Err(ApiError::training_invalid_request(format!(
-                "PostEval step (suite={suite}, adapter={adapter}) is handled inline by the \
-                 trainer body (#31); add as a config field instead of a standalone step \
-                 in pre-#31 recipes"
+                "PostEval step (suite={suite}, adapter={adapter}) is attached to the \
+                 preceding training step by the recipe runner; it is not a standalone job"
             )))
         }
     }
@@ -617,6 +614,36 @@ mod tests {
                 "recipe {name} has no steps"
             );
         }
+    }
+
+    /// A PostEval step becomes the preceding step's §8.7 gate; dangling
+    /// or mismatched gates reject the whole recipe before anything
+    /// enqueues.
+    #[test]
+    fn post_eval_step_parses_and_validates_placement() {
+        let recipe: Recipe = serde_yaml::from_str(
+            "name: gated\nsteps:\n  - kind: post_eval\n    suite: agentic-core\n    adapter: x\n    require_min_score: 0.7\n",
+        )
+        .unwrap();
+        let RecipeStep::PostEval {
+            suite,
+            adapter,
+            require_min_score,
+        } = &recipe.steps[0]
+        else {
+            panic!("expected PostEval step");
+        };
+        assert_eq!(suite, "agentic-core");
+        assert_eq!(adapter, "x");
+        assert!((require_min_score - 0.7).abs() < 1e-9);
+        // The lookahead conversion used by the prepare loop.
+        let gate = kiln_eval::PostEvalConfig {
+            suite: suite.clone(),
+            generation: None,
+            min_accuracy: Some(*require_min_score as f32),
+            include_baseline: false,
+        };
+        assert_eq!(gate.min_accuracy, Some(0.7f32));
     }
 
     #[test]
