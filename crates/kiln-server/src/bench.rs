@@ -2507,6 +2507,7 @@ fn bench_training(
             "    Step {}/{}: loss={:.6}",
             progress.step, progress.total_steps, progress.loss
         );
+        kiln_train::trainer::TrainControl::Continue
     }) as kiln_train::trainer::ProgressCallback);
 
     let start = Instant::now();

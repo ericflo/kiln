@@ -149,6 +149,7 @@ mod tests {
             linked_eval_job_ids: vec![],
             post_eval_verdict: None,
             loss_history: vec![],
+            cancel_requested: Default::default(),
         }
     }
 

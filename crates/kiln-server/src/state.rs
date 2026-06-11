@@ -282,6 +282,14 @@ pub struct TrainingJobInfo {
     /// left unpromoted because the eval itself errored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_eval_verdict: Option<String>,
+    /// Cooperative cancellation flag for a RUNNING job: set by
+    /// `DELETE /v1/train/queue/{id}`, read by the training worker's
+    /// per-step progress callback, which then returns
+    /// `TrainControl::Stop` and the trainer aborts at the next step
+    /// boundary. Shared (`Arc`) so the in-flight worker observes flips
+    /// on the tracked entry. Never serialized.
+    #[serde(skip, default)]
+    pub cancel_requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Loss history for live charts. Each sample is
     /// `{epoch, progress, loss, elapsed_secs}`. Capped at
     /// `TRAINING_LOSS_HISTORY_CAP` to bound memory; once full, every

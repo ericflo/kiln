@@ -898,6 +898,7 @@ fn main() -> Result<()> {
             progress.loss,
             current_vram_mib()
         );
+        kiln_train::trainer::TrainControl::Continue
     }) as kiln_train::trainer::ProgressCallback);
 
     let result = grpo_train_jsonl(

@@ -260,6 +260,7 @@ fn run_one(
         if let Ok(mut g) = final_loss_cb.lock() {
             *g = Some(step.loss);
         }
+        kiln_train::trainer::TrainControl::Continue
     });
 
     let t0 = Instant::now();

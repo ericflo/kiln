@@ -57,8 +57,12 @@ pub enum TrainFailureReason {
     ZeroGroups,
     ZeroActionTokens,
     ZeroEnvTokens,
+    /// The operator cancelled the running job (DELETE
+    /// /v1/train/queue/{id}) — the trainer aborted cooperatively at a
+    /// step boundary.
+    Cancelled,
     /// The loss composition asked for a term the kt-tape path cannot
-    /// train (ECHO env-CE with env tokens / no_policy_loss) — see
+    /// train (no_policy_loss / reserved OPD slot) — see
     /// `LossConfig::validate_for_kt_tape`.
     UnsupportedLossConfig,
     NanLoss,
@@ -77,6 +81,7 @@ impl TrainFailureReason {
             Self::ZeroGroups => "zero_groups",
             Self::ZeroActionTokens => "zero_action_tokens",
             Self::ZeroEnvTokens => "zero_env_tokens",
+            Self::Cancelled => "cancelled",
             Self::UnsupportedLossConfig => "unsupported_loss_config",
             Self::NanLoss => "nan_loss",
             Self::Oom => "oom",
@@ -756,6 +761,11 @@ pub fn read_adapter_canary_status_from_adapter_dir(
 
 pub fn classify_training_failure(message: &str) -> TrainFailureReason {
     let lower = message.to_ascii_lowercase();
+    // Operator cancellation: match FIRST — the message is unambiguous and
+    // nothing else should reclassify it.
+    if lower.contains("cancelled by user") {
+        return TrainFailureReason::Cancelled;
+    }
 
     if lower.contains("unsafe lora scaling") || lower.contains("lora rank must") {
         return TrainFailureReason::UnsafeLoraScale;

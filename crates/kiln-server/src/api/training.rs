@@ -355,6 +355,7 @@ async fn submit_sft(
         linked_eval_job_ids: Vec::new(),
         post_eval_verdict: None,
         loss_history: Vec::new(),
+        cancel_requested: Default::default(),
     };
     state
         .training_jobs
@@ -517,6 +518,7 @@ async fn submit_grpo(
         linked_eval_job_ids: Vec::new(),
         post_eval_verdict: None,
         loss_history: Vec::new(),
+        cancel_requested: Default::default(),
     };
     state
         .training_jobs
@@ -723,6 +725,7 @@ async fn submit_opd(
         linked_eval_job_ids: Vec::new(),
         post_eval_verdict: None,
         loss_history: Vec::new(),
+        cancel_requested: Default::default(),
     };
     state
         .training_jobs
@@ -847,6 +850,7 @@ async fn submit_distill_refresh(
         linked_eval_job_ids: Vec::new(),
         post_eval_verdict: None,
         loss_history: Vec::new(),
+        cancel_requested: Default::default(),
     };
     state
         .training_jobs
@@ -1083,6 +1087,7 @@ fn register_and_enqueue_distill(
         linked_eval_job_ids: Vec::new(),
         post_eval_verdict: None,
         loss_history: Vec::new(),
+        cancel_requested: Default::default(),
     };
     state
         .training_jobs
@@ -1196,17 +1201,33 @@ async fn list_queue(State(state): State<AppState>) -> Json<QueueResponse> {
     })
 }
 
-/// DELETE /v1/train/queue/:job_id — cancel a queued job.
+/// DELETE /v1/train/queue/:job_id — cancel a queued OR running job.
+///
+/// Queued: removed from the queue immediately. Running: the job's
+/// cooperative cancel flag is set; the trainer aborts at the next step
+/// boundary (typically one decode/optimizer step) and the job lands in
+/// `Failed` with error "cancelled by user" and receipt failure_reason
+/// "cancelled".
 async fn cancel_queued_job(
     State(state): State<AppState>,
     AxumPath(job_id): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // Check if the job exists and is in Queued state
+    // Check job state; flag running jobs for cooperative cancellation.
     {
         let jobs = state.training_jobs.read().unwrap();
         let job = jobs
             .get(&job_id)
             .ok_or_else(|| ApiError::training_job_not_found(&job_id))?;
+        if job.state == TrainingState::Running {
+            job.cancel_requested
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            tracing::info!(job_id = %job_id, "cancellation requested for running training job");
+            return Ok(Json(serde_json::json!({
+                "job_id": job_id,
+                "status": "cancelling",
+                "message": "stop requested — the trainer aborts at the next step boundary"
+            })));
+        }
         if job.state != TrainingState::Queued {
             return Err(ApiError::training_job_not_cancellable(
                 &job_id,

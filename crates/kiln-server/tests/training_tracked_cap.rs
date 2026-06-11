@@ -112,6 +112,7 @@ fn fill_tracked(
                 linked_eval_job_ids: Vec::new(),
                 post_eval_verdict: None,
                 loss_history: Vec::new(),
+                cancel_requested: Default::default(),
             },
         );
     }
@@ -271,6 +272,7 @@ fn gc_evicts_terminal_entries_past_ttl() {
                 linked_eval_job_ids: Vec::new(),
                 post_eval_verdict: None,
                 loss_history: Vec::new(),
+                cancel_requested: Default::default(),
             },
         );
         jobs.insert(
@@ -293,6 +295,7 @@ fn gc_evicts_terminal_entries_past_ttl() {
                 linked_eval_job_ids: Vec::new(),
                 post_eval_verdict: None,
                 loss_history: Vec::new(),
+                cancel_requested: Default::default(),
             },
         );
     }

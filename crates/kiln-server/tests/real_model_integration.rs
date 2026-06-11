@@ -869,6 +869,7 @@ fn loss_capture_cb() -> (
     let cb: kiln_train::trainer::ProgressCallback =
         Box::new(move |p: kiln_train::trainer::TrainingProgress| {
             sink.lock().unwrap().push(p.loss);
+            kiln_train::trainer::TrainControl::Continue
         });
     (losses, cb)
 }
