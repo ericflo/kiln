@@ -993,12 +993,11 @@ pub fn prepare_off_policy_distillation_dataset(
 
         let env_tokens = tokenized.env_mask.iter().filter(|&&active| active).count() as u64;
         summary.env_tokens = summary.env_tokens.saturating_add(env_tokens);
-        // HONESTY: env masks are *built* here, but the train step has no
-        // env-CE gradient root post candle-drop (#1082) — the term never
-        // combines into the loss. `echo_combined` stays false so the
-        // summary (and the receipt downstream) records what actually
-        // trains, not what the config requested. Flip back alongside the
-        // kt-tape env-CE root (ECHO resurrection plan PR2).
+        // The env masks built here feed the per-step EchoEnvSpec — the
+        // OPD env-CE root is live again (the GRPO resurrection's OPD
+        // half): the tape path composes via the OPD echo node, the
+        // checkpointed path adds the analytic env grad. The receipt's
+        // echo_combined keys off the term actually firing.
         let _ = echo;
 
         prompts.push(prompt);
@@ -2366,6 +2365,7 @@ pub fn opd_train(
             run_started.elapsed().as_millis() as u64,
             None,
             None,
+            None,
             Vec::new(),
             Some(message.to_string()),
         );
@@ -2467,6 +2467,7 @@ pub fn opd_train(
                 data_stats,
                 token_counts,
                 run_started.elapsed().as_millis() as u64,
+                None,
                 None,
                 None,
                 Vec::new(),
@@ -2571,6 +2572,7 @@ pub fn opd_train(
             run_started.elapsed().as_millis() as u64,
             Some(alpha_over_rank),
             None,
+            None,
             Vec::new(),
             Some(message.to_string()),
         );
@@ -2585,6 +2587,9 @@ pub fn opd_train(
     let total_steps = epochs * tokenized.len() * effective_samples_per_prompt.max(1);
     let mut global_step = 0usize;
     let mut last_loss = 0.0_f64;
+    // Last fired ECHO env-CE value across the run (None = the term never
+    // combined — receipt honesty keys off this, not off the config).
+    let mut run_env_ce: Option<f64> = None;
     // Per-module LoRA grad-norm accumulator — mirrors the SFT/GRPO
     // tape-authoritative producers. Populated each step from the
     // kt-native grad store and finalized into the train receipt so the
@@ -3029,7 +3034,20 @@ pub fn opd_train(
                     ))]
                     {
                         let step_started = std::time::Instant::now();
-                        let (loss_val, active_count, kt_grads) =
+                        // ECHO env-CE spec for this rollout (OPD half of the
+                        // resurrection plan): built from the trajectory env
+                        // mask the prepare pass already computed; None when
+                        // ECHO is off or the rollout has no observations.
+                        let echo_spec = config.echo.as_ref().and_then(|echo| {
+                            (total_obs_len > 0 && echo.lambda != 0.0).then(|| {
+                                crate::grpo_tape_shim::EchoEnvSpec {
+                                    env_mask: env_mask_owned.clone(),
+                                    total_obs_len,
+                                    lambda: echo.lambda,
+                                }
+                            })
+                        });
+                        let (loss_val, active_count, kt_grads, step_env_ce) =
                             if let Some(segs) = opd_segments.as_deref() {
                                 checkpointed_opd_step_forward_backward_tape_authoritative(
                                     &*backend_rt,
@@ -3045,6 +3063,7 @@ pub fn opd_train(
                                     config.top_k,
                                     teacher_tokens_opt,
                                     teacher_active_opt,
+                                    echo_spec.as_ref(),
                                     segs,
                                 )?
                             } else {
@@ -3062,8 +3081,12 @@ pub fn opd_train(
                                     config.top_k,
                                     teacher_tokens_opt,
                                     teacher_active_opt,
+                                    echo_spec.as_ref(),
                                 )?
                             };
+                        if let Some(env_ce) = step_env_ce {
+                            run_env_ce = Some(env_ce);
+                        }
                         tracing::info!(
                             prompt_idx,
                             sample_idx,
@@ -3246,6 +3269,7 @@ pub fn opd_train(
         run_started.elapsed().as_millis() as u64,
         Some(alpha_over_rank),
         Some(last_loss),
+        run_env_ce,
         lora_grad_norms.finish(),
         None,
     );
@@ -3311,7 +3335,8 @@ fn opd_step_forward_backward_tape_authoritative(
     top_k: usize,
     teacher_tokens: Option<&[u32]>,
     teacher_active_positions: Option<&[usize]>,
-) -> Result<(f64, usize, kiln_autograd::GradStore)> {
+    echo_env: Option<&crate::grpo_tape_shim::EchoEnvSpec>,
+) -> Result<(f64, usize, kiln_autograd::GradStore, Option<f64>)> {
     use kiln_model::forward::model_forward_no_head;
 
     // Teacher fetch + mask / top_k resolution — identical to the candle path
@@ -3328,6 +3353,8 @@ fn opd_step_forward_backward_tape_authoritative(
         teacher_active_positions,
     )?;
     let active_count = prepared.active_count;
+    // Captured by the tape closure; read after the scope returns.
+    let step_env_ce: std::cell::Cell<Option<f64>> = std::cell::Cell::new(None);
 
     let lora_weights = params.as_lora_weights();
 
@@ -3409,6 +3436,45 @@ fn opd_step_forward_backward_tape_authoritative(
                     ));
                 }
             };
+            // ECHO env-CE (OPD half of the resurrection plan): wrap the
+            // recorded OPD scalar in the compose node so the env rows
+            // gradient-flow alongside the distillation term. The head is
+            // dtype-aligned to the hidden for the env log-prob compute
+            // (Vulkan mixed precision: F32 hidden × BF16 head).
+            let loss = match echo_env {
+                Some(spec) => {
+                    let head_for_echo;
+                    let head_ref = if head_t.dtype() != normed.dtype() {
+                        head_for_echo =
+                            head_t.to_dtype(normed.dtype()).map_err(|e| {
+                                kiln_kt_bridge::BridgeError::new(format!(
+                                    "opd tape: echo head cast: {e}"
+                                ))
+                            })?;
+                        &head_for_echo
+                    } else {
+                        head_t
+                    };
+                    match crate::opd_tape_shim::try_tape_opd_echo_env_compose_kt(
+                        &loss,
+                        &normed,
+                        head_ref,
+                        input_ids,
+                        spec,
+                        512,
+                        device,
+                    )
+                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
+                    {
+                        Some((composed, env_ce_val)) => {
+                            step_env_ce.set(Some(env_ce_val));
+                            composed
+                        }
+                        None => loss,
+                    }
+                }
+                None => loss,
+            };
             let loss_val = loss.to_scalar::<f32>().map_err(|e| {
                 kiln_kt_bridge::BridgeError::new(format!("opd tape: loss.to_scalar: {e}"))
             })? as f64;
@@ -3474,7 +3540,7 @@ fn opd_step_forward_backward_tape_authoritative(
         }
     }
 
-    Ok((loss_val, active_count, grads))
+    Ok((loss_val, active_count, grads, step_env_ce.get()))
 }
 
 #[cfg(any(
@@ -3498,8 +3564,9 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
     top_k: usize,
     teacher_tokens: Option<&[u32]>,
     teacher_active_positions: Option<&[usize]>,
+    echo_env: Option<&crate::grpo_tape_shim::EchoEnvSpec>,
     segments: &[(usize, usize)],
-) -> Result<(f64, usize, kiln_autograd::GradStore)> {
+) -> Result<(f64, usize, kiln_autograd::GradStore, Option<f64>)> {
     use kiln_model::forward::{
         LinearAttentionState, model_forward_embed, model_forward_final_norm, model_forward_segment,
     };
@@ -3674,6 +3741,61 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
             }
         }
     };
+    // ECHO env-CE (OPD half of the resurrection plan), analytic variant for
+    // the checkpointed path: add λ·env_CE to the scalar and the matching
+    // constant-coefficient env-row gradient (seed 1.0) onto grad_normed —
+    // the replay segments then propagate it like any other hidden grad.
+    let (loss_val, grad_normed, step_env_ce) = match echo_env {
+        Some(spec) => {
+            let head_for_echo;
+            let head_ref = if head_t.dtype() != normed.dtype() {
+                head_for_echo = head_t
+                    .to_dtype(normed.dtype())
+                    .context("checkpointed OPD: echo head cast")?;
+                &head_for_echo
+            } else {
+                head_t
+            };
+            match crate::grpo_tape_shim::echo_env_state_and_value_kt(
+                &normed, head_ref, input_ids, spec, 512, device,
+            )
+            .context("checkpointed OPD: echo env state")?
+            {
+                Some((node_state, _env_ce_kt, env_ce_val)) => {
+                    let env_grad = crate::grpo_tape_shim::echo_env_grad_from_normed_hidden_kt(
+                        &normed,
+                        head_ref,
+                        &node_state,
+                        crate::trainer::GrpoLossParams {
+                            advantage: 0.0,
+                            clip_low: 1.0,
+                            clip_high: 1.0,
+                            kl_coeff: 0.0,
+                            kl_estimator: crate::KlEstimator::K1,
+                            loss_normalizer: 1.0,
+                            is_level: crate::IsLevel::Token,
+                            reinforce: true,
+                            entropy_aware_kl_quantile: None,
+                        },
+                        kiln_model::backend::GrpoKlAuxiliaryRoute::HostComposite,
+                        1.0,
+                        device,
+                        512,
+                    )
+                    .context("checkpointed OPD: echo env grad")?;
+                    let grad_normed = (&grad_normed + &env_grad)
+                        .context("checkpointed OPD: echo grad add")?;
+                    (
+                        loss_val + spec.lambda * env_ce_val,
+                        grad_normed,
+                        Some(env_ce_val),
+                    )
+                }
+                None => (loss_val, grad_normed, None),
+            }
+        }
+        None => (loss_val, grad_normed, None),
+    };
     let mut upstream_grad = crate::trainer::rms_norm_backward_pre_final_norm(
         TrainingLossBackend::runtime_final_rmsnorm_backward_route(backend_rt),
         &final_hidden,
@@ -3746,7 +3868,7 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
         }
     }
 
-    Ok((loss_val, active_count, grads))
+    Ok((loss_val, active_count, grads, step_env_ce))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3763,6 +3885,7 @@ fn write_opd_train_receipt_best_effort(
     wall_clock_ms: u64,
     alpha_over_rank: Option<f32>,
     final_opd_loss: Option<f64>,
+    run_env_ce: Option<f64>,
     lora_grad_norms: Vec<crate::train_receipt::LoraGradNormSummary>,
     status_error: Option<String>,
 ) {
@@ -3813,37 +3936,34 @@ fn write_opd_train_receipt_best_effort(
         samples_per_prompt: config.samples_per_prompt,
         action_tokens: token_counts.action_tokens,
         env_tokens: token_counts.env_tokens,
-        // HONESTY: the env-CE term has no gradient path on the kt-only OPD
-        // step (the candle producer was deleted in #1082), so it never
-        // combines into the loss regardless of config. A receipt claiming
-        // `echo_combined: true` from config alone was asserting a loss
-        // term that never fired — audit-grade evidence must record what
-        // actually trained.
-        echo_combined: false,
+        // HONESTY preserved, term restored: `echo_combined` records
+        // whether the env-CE term actually FIRED this run (the compose
+        // node / analytic add reported a value), never the config alone.
+        // A run whose rollouts carried no env rows stays false.
+        echo_combined: run_env_ce.is_some(),
         echo_lambda: config.echo.as_ref().map(|echo| echo.lambda),
         initial_opd_loss: None,
         final_opd_loss,
     });
     receipt.echo = match config.echo.as_ref() {
         Some(echo) => crate::train_receipt::EchoReceipt {
-            // HONESTY: `enabled` records whether the term FIRED, not
-            // whether it was requested — and post candle-drop (#1082) the
-            // env-CE term has no gradient path on the kt OPD step. The
-            // request's lambda/knobs are still recorded for provenance,
-            // with the drop reason spelled out.
-            enabled: false,
+            // `enabled` records whether the term FIRED (the OPD compose
+            // node / checkpointed analytic add reported an env-CE value),
+            // not merely whether it was requested. Rollouts with no env
+            // rows leave it false with the reason spelled out.
+            enabled: run_env_ce.is_some(),
             lambda: Some(echo.lambda),
             env_mask_mode: serde_json::to_value(echo.env_mask_mode)
                 .ok()
                 .and_then(|value| value.as_str().map(ToString::to_string)),
             warning_filter: Some(echo.warning_filter),
             initial_env_ce: None,
-            final_env_ce: None,
-            dropped_reason: Some(
-                "env-CE has no kt-tape gradient root post candle-drop (#1082); the \
-                 configured ECHO term did not contribute to this run's loss"
-                    .to_string(),
-            ),
+            final_env_ce: run_env_ce,
+            dropped_reason: run_env_ce.is_none().then(|| {
+                "ECHO was configured but this run's rollouts carried no \
+                 environment tokens — the env-CE term had nothing to train on"
+                    .to_string()
+            }),
         },
         None => crate::train_receipt::EchoReceipt::disabled(),
     };
@@ -4774,21 +4894,23 @@ mod tests {
 
         // (#1082) opd_step_forward_backward_tape_authoritative takes the kt device
         // directly now — no candle bridge.
-        let (loss_val, active_count, grads) = opd_step_forward_backward_tape_authoritative(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            &params,
-            &device,
-            &head_t,
-            teacher,
-            &active_positions,
-            OpdLossGranularity::TeacherTopK,
-            top_k,
-            None,
-            None,
-        )
+        let (loss_val, active_count, grads, _env_ce) =
+            opd_step_forward_backward_tape_authoritative(
+                &*backend,
+                &input_ids,
+                &weights,
+                &config,
+                &params,
+                &device,
+                &head_t,
+                teacher,
+                &active_positions,
+                OpdLossGranularity::TeacherTopK,
+                top_k,
+                None,
+                None,
+                None,
+            )
         .expect("tape-authoritative OPD step");
 
         // The active count must match the supervised positions.
@@ -4908,7 +5030,7 @@ mod tests {
         let backend = kiln_model::backend::for_device_kt(&device);
         let segments = crate::trainer::compute_segment_boundaries(config.num_layers, 2);
 
-        let (loss_val, active_count, grads) =
+        let (loss_val, active_count, grads, _env_ce) =
             checkpointed_opd_step_forward_backward_tape_authoritative(
                 &*backend,
                 &input_ids,
@@ -4921,6 +5043,7 @@ mod tests {
                 &active_positions,
                 OpdLossGranularity::TeacherTopK,
                 top_k,
+                None,
                 None,
                 None,
                 &segments,
@@ -5023,21 +5146,23 @@ mod tests {
             ));
 
         let backend = kiln_model::backend::for_device_kt(&device);
-        let (loss_val, active_count, grads) = opd_step_forward_backward_tape_authoritative(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            &params,
-            &device,
-            &head_t,
-            teacher,
-            &active_positions,
-            OpdLossGranularity::TeacherTopK,
-            top_k,
-            None,
-            None,
-        )
+        let (loss_val, active_count, grads, _env_ce) =
+            opd_step_forward_backward_tape_authoritative(
+                &*backend,
+                &input_ids,
+                &weights,
+                &config,
+                &params,
+                &device,
+                &head_t,
+                teacher,
+                &active_positions,
+                OpdLossGranularity::TeacherTopK,
+                top_k,
+                None,
+                None,
+                None,
+            )
         .expect("opd_step_forward_backward_tape_authoritative (F32 Vulkan OPD)");
 
         assert_eq!(active_count, active_positions.len());
@@ -5162,21 +5287,23 @@ mod tests {
             ));
 
         let backend = kiln_model::backend::for_device_kt(&device);
-        let (loss_val, active_count, grads) = opd_step_forward_backward_tape_authoritative(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            &params,
-            &device,
-            &head_t,
-            teacher,
-            &active_positions,
-            OpdLossGranularity::TeacherTopK,
-            top_k,
-            None,
-            None,
-        )
+        let (loss_val, active_count, grads, _env_ce) =
+            opd_step_forward_backward_tape_authoritative(
+                &*backend,
+                &input_ids,
+                &weights,
+                &config,
+                &params,
+                &device,
+                &head_t,
+                teacher,
+                &active_positions,
+                OpdLossGranularity::TeacherTopK,
+                top_k,
+                None,
+                None,
+                None,
+            )
         .expect("opd_step_forward_backward_tape_authoritative (BF16 Vulkan OPD)");
 
         assert_eq!(active_count, active_positions.len());
