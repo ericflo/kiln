@@ -5653,9 +5653,15 @@ function refreshRequestHealth() {
 /* === Corrections basket — the flywheel's core loop, one-click =============
    pi gives a bad answer → "Use as correction" APPENDS it here (not overwrite)
    → you fix the ideal answer inline → "Train" turns the whole basket into ONE
-   SFT job and hot-swaps the result. localStorage-backed so corrections
-   accumulate across a coding session and survive reloads. This is the literal
-   mechanism of "your model gets better every time you use it". */
+   SFT job and hot-swaps the result. This is the literal mechanism of "your
+   model gets better every time you use it".
+
+   Durability: the server's /v1/corrections store is the source of truth —
+   corrections survive across browsers/machines, pi can file them
+   programmatically, and trained rows are MARKED (kept as history with their
+   hand-written ideal answers) rather than deleted. localStorage remains a
+   write-behind cache so the basket still works in the static demo and
+   through transient server hiccups. */
 const CORR_KEY = 'kiln.corrections.v1';
 let correctionsBasket = [];
 // A persistent "training started" receipt shown in the Corrections card after a
@@ -5666,6 +5672,53 @@ function loadCorrections() {
   catch { correctionsBasket = []; }
 }
 function saveCorrections() { try { localStorage.setItem(CORR_KEY, JSON.stringify(correctionsBasket)); } catch {} }
+// ── server write-through (best-effort; the local basket never blocks) ──
+function corrRowForServer(c) {
+  return {
+    request_id: c.request_id,
+    agent: c.agent || '',
+    adapter: (c.adapter && c.adapter !== 'base') ? c.adapter : null,
+    user: c.user || '',
+    original: c.original || '',
+    ideal: c.ideal || '',
+    truncated: !!c.truncated,
+  };
+}
+function corrSyncUpsert(c) {
+  try {
+    api('/v1/corrections', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(corrRowForServer(c)) }).catch(() => {});
+  } catch (_) {}
+}
+function corrSyncRemove(rid) {
+  try { api('/v1/corrections/' + encodeURIComponent(rid), { method: 'DELETE' }).catch(() => {}); } catch (_) {}
+}
+// Debounced upsert per row so typing in the ideal editor doesn't spam the
+// server — flushes 800ms after the last keystroke.
+const corrSyncTimers = {};
+function corrSyncUpsertDebounced(c) {
+  clearTimeout(corrSyncTimers[c.request_id]);
+  corrSyncTimers[c.request_id] = setTimeout(() => corrSyncUpsert(c), 800);
+}
+// On load, the server list wins: rows existing there (incl. ones captured
+// from another browser or filed by pi) replace the local cache; local-only
+// rows (offline captures) are pushed up.
+async function corrSyncFromServer() {
+  let server;
+  try { server = await api('/v1/corrections'); } catch (_) { return; }
+  if (!server || !Array.isArray(server.corrections)) return;
+  const serverRows = server.corrections.map(r => ({
+    request_id: r.request_id, agent: r.agent || 'client', ts: Date.parse(r.created_at) || Date.now(),
+    model: '', adapter: r.adapter || 'base', user: r.user || '',
+    original: r.original || '', truncated: !!r.truncated, ideal: r.ideal || '',
+  }));
+  const serverIds = new Set(serverRows.map(r => r.request_id));
+  const localOnly = correctionsBasket.filter(c => !serverIds.has(c.request_id));
+  localOnly.forEach(corrSyncUpsert);
+  correctionsBasket = serverRows.concat(localOnly);
+  saveCorrections();
+  renderCorrections();
+}
 // Shared basket insert for every capture surface (recent requests, eval
 // drill). Dedupes on request_id; persists + repaints + toasts.
 function addCorrectionItem(item) {
@@ -5675,6 +5728,7 @@ function addCorrectionItem(item) {
   }
   correctionsBasket.unshift(item);
   saveCorrections();
+  corrSyncUpsert(item);
   renderCorrections();
   toast(`Added to corrections (${correctionsBasket.length}) — ${item.ideal ? 'review the ideal answer, then Train' : 'write the ideal answer, then Train'}`, 'ok');
   return true;
@@ -5725,10 +5779,11 @@ function addCorrectionFromEvalOutcome(o, example, scorerKind) {
     ideal: seedIdeal,
   });
 }
-function removeCorrection(rid) { correctionsBasket = correctionsBasket.filter(c => c.request_id !== rid); saveCorrections(); renderCorrections(); }
+function removeCorrection(rid) { correctionsBasket = correctionsBasket.filter(c => c.request_id !== rid); saveCorrections(); corrSyncRemove(rid); renderCorrections(); }
 function clearCorrections() {
   if (correctionsBasket.length && !confirm(`Discard ${correctionsBasket.length} correction${correctionsBasket.length === 1 ? '' : 's'}?`)) return;
   correctionsBasket = []; saveCorrections(); renderCorrections();
+  try { api('/v1/corrections', { method: 'DELETE' }).catch(() => {}); } catch (_) {}
 }
 // A correction trains ONLY if you supplied a genuinely different answer. Empty
 // (untouched) or identical-to-original (reverted) is excluded — the whole point
@@ -5784,13 +5839,13 @@ function renderCorrections() {
   }).join('');
   list.querySelectorAll('[data-corr-ideal]').forEach(ta => ta.addEventListener('input', () => {
     const c = correctionsBasket.find(x => x.request_id === ta.dataset.corrIdeal);
-    if (c) { c.ideal = ta.value; saveCorrections(); markCorrState(c); updateCorrFoot(); }
+    if (c) { c.ideal = ta.value; saveCorrections(); corrSyncUpsertDebounced(c); markCorrState(c); updateCorrFoot(); }
   }));
   list.querySelectorAll('[data-corr-seed]').forEach(b => b.addEventListener('click', () => {
     const c = correctionsBasket.find(x => x.request_id === b.dataset.corrSeed);
     if (!c) return;
     const ta = document.getElementById('corr-ideal-' + c.request_id);
-    if (ta) { ta.value = c.original; c.ideal = c.original; saveCorrections(); markCorrState(c); updateCorrFoot();
+    if (ta) { ta.value = c.original; c.ideal = c.original; saveCorrections(); corrSyncUpsertDebounced(c); markCorrState(c); updateCorrFoot();
       ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
   }));
   list.querySelectorAll('[data-corr-remove]').forEach(b => b.addEventListener('click', () => removeCorrection(b.dataset.corrRemove)));
@@ -5844,10 +5899,17 @@ async function trainFromCorrections() {
     const body = { examples, config: { output_name: name, auto_load: true, epochs: 3, lora_rank: 8 } };
     const res = await api('/v1/train/sft', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     toast(res.message || `Training ${name} from ${examples.length} correction${examples.length === 1 ? '' : 's'} — it will hot-swap in when done`, 'ok');
-    // Remove ONLY the corrections we actually trained on. Anything still
-    // awaiting an answer stays in the basket so no hand-written work is lost
-    // if a later job is submitted.
+    // Remove the trained corrections from the ACTIVE basket only — the
+    // server keeps them, marked with the adapter they trained into, so
+    // the hand-written ideal answers remain an asset (and re-trainable)
+    // instead of vanishing with the job. Anything still awaiting an
+    // answer stays in the basket so no hand-written work is lost.
     const trained = new Set(trainable.map(c => c.request_id));
+    trainable.forEach(c => { corrSyncUpsert(c); });
+    try {
+      api('/v1/corrections/mark_trained', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ request_ids: [...trained], adapter: name }) }).catch(() => {});
+    } catch (_) {}
     correctionsBasket = correctionsBasket.filter(c => !trained.has(c.request_id));
     // Leave a persistent in-card receipt instead of a disorienting auto-jump —
     // the user stays in context and chooses when to view the job. Keep the
@@ -5861,6 +5923,9 @@ async function trainFromCorrections() {
 function initCorrections() {
   loadCorrections();
   renderCorrections();
+  // Pull the durable store: corrections captured on another machine (or
+  // filed by pi via POST /v1/corrections) appear here too.
+  corrSyncFromServer();
   document.getElementById('corr-clear')?.addEventListener('click', clearCorrections);
   document.getElementById('corr-train')?.addEventListener('click', trainFromCorrections);
   // Inline adapter-name validation so a bad name isn't a submit-time surprise.
