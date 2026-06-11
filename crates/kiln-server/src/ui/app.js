@@ -320,6 +320,12 @@ function servedBaseSilently(adapterName) {
   const active = lastAdapters && lastAdapters.active;
   return !!(active && active !== 'base');
 }
+// Nearest-rank quantile of an ascending-sorted numeric array: q(0.99) over
+// 100 sorted samples returns the 99th-percentile element. Kept as a named
+// top-level function so the quantile math is testable in isolation.
+function sortedQuantile(sorted, p) {
+  return sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(p * (sorted.length - 1)))] : null;
+}
 function computeRequestHealth(rows) {
   rows = rows || [];
   const now = Date.now();
@@ -335,10 +341,13 @@ function computeRequestHealth(rows) {
     if (typeof r.ttft_ms === 'number') ttfts.push(r.ttft_ms);
   }
   ttfts.sort((a, b) => a - b);
-  const q = p => ttfts.length ? ttfts[Math.min(ttfts.length - 1, Math.floor(p * (ttfts.length - 1)))] : null;
+  const q = p => sortedQuantile(ttfts, p);
   const lastTs = rows.length ? rows[0].timestamp_unix_ms : null;
   return {
-    total: rows.length, errors, truncated, ttftP50: q(0.5), ttftP99: q(0.95),
+    // ttftP99 really is q(0.99) — the heartbeat tooltip renders it as "p99"
+    // (tail latency, matching /v1/stats/decode's p99_itl_ms), so computing
+    // anything else here would mislabel the number.
+    total: rows.length, errors, truncated, ttftP50: q(0.5), ttftP99: q(0.99),
     lastTs, sinceMs: lastTs ? now - lastTs : null,
     servedBy: rows.length ? (rows[0].adapter || 'base') : null,
   };
@@ -1550,20 +1559,26 @@ function openRequestDrillModal(id) {
   pieces.push(r.streamed ? 'streamed' : 'unary');
   metaEl.innerHTML = pieces.join(' · ');
 
+  // Two different tok/s figures appear in this modal and they legitimately
+  // disagree: this one divides by the WHOLE request duration (prefill +
+  // queueing + TTFT + streaming), while the latency bar below divides by
+  // streaming time only. Both are labeled explicitly so they never read as
+  // a contradiction.
   const stats = [
     ['Started',         formatUnixMs(r.timestamp_unix_ms)],
     ['Finish reason',   r.finish_reason || '—'],
     ['Duration',        r.duration_ms != null ? `${r.duration_ms} ms` : '—'],
     ['Prompt tokens',   r.prompt_tokens != null ? String(r.prompt_tokens) : '—'],
     ['Completion tok',  r.completion_tokens != null ? String(r.completion_tokens) : '—'],
-    ['Tokens/sec',      (r.duration_ms && r.completion_tokens) ? (r.completion_tokens / (r.duration_ms / 1000)).toFixed(1) : '—'],
+    ['tok/s (end-to-end)', (r.duration_ms && r.completion_tokens) ? (r.completion_tokens / (r.duration_ms / 1000)).toFixed(1) : '—',
+      'Completion tokens ÷ total request duration. Includes prefill, queueing, and the wait for the first token, so it reads lower than the decode-only rate in the latency bar.'],
   ];
   if (r.ttft_ms != null) stats.push(['TTFT', `${r.ttft_ms} ms`]);
   if (r.temperature != null) stats.push(['Temperature', String(r.temperature)]);
   if (r.top_p != null) stats.push(['top_p', String(r.top_p)]);
   if (r.max_tokens != null) stats.push(['max_tokens', String(r.max_tokens)]);
   const statRow = stats
-    .map(([k, v]) => `<div class="req-stat"><span class="req-stat-k">${escapeHtml(k)}</span><span class="req-stat-v">${escapeHtml(v)}</span></div>`)
+    .map(([k, v, title]) => `<div class="req-stat"${title ? ` title="${escapeHtml(title)}"` : ''}><span class="req-stat-k">${escapeHtml(k)}</span><span class="req-stat-v">${escapeHtml(v)}</span></div>`)
     .join('');
 
   const prompt = r.prompt_full || r.prompt_preview || '';
@@ -1584,11 +1599,11 @@ function openRequestDrillModal(id) {
         <div class="req-section-head">Latency pi felt</div>
         <div class="lat-bar" role="img" aria-label="Time to first token ${fmtMsShort(ttft)}, then ${fmtMsShort(decode)} streaming ${r.completion_tokens || 0} tokens, ${fmtMsShort(total)} total">
           <div class="lat-seg lat-ttft" style="width:${ttftPct.toFixed(1)}%" title="Time to first token (${fmtMsShort(ttft)}) — the wait pi feels before any output"></div>
-          <div class="lat-seg lat-decode" style="width:${(100 - ttftPct).toFixed(1)}%" title="Streaming the response (${fmtMsShort(decode)}${tps ? ', ' + tps + ' tok/s' : ''})"></div>
+          <div class="lat-seg lat-decode" style="width:${(100 - ttftPct).toFixed(1)}%" title="Streaming the response (${fmtMsShort(decode)}${tps ? ', ' + tps + ' tok/s decode-only' : ''})"></div>
         </div>
         <div class="lat-legend">
           <span><span class="lat-key lat-ttft"></span>first token in <strong>${fmtMsShort(ttft)}</strong></span>
-          <span><span class="lat-key lat-decode"></span>${r.completion_tokens || 0} tokens in <strong>${fmtMsShort(decode)}</strong>${tps ? ' · ' + tps + ' tok/s' : ''}</span>
+          <span><span class="lat-key lat-decode"></span>${r.completion_tokens || 0} tokens in <strong>${fmtMsShort(decode)}</strong>${tps ? ` · <span title="Completion tokens ÷ streaming time after the first token (inter-token rate). Excludes prefill and queueing, so it reads higher than the end-to-end tok/s above.">${tps} tok/s (decode)</span>` : ''}</span>
           <span class="lat-total">total <strong>${fmtMsShort(total)}</strong></span>
         </div>
       </div>`;
@@ -6813,6 +6828,22 @@ function donutChartSvg(slices, opts = {}) {
 const tpsHistory = [];
 const TPS_HISTORY_CAP = 60;
 
+// Real elapsed span of the tok/s history in seconds, derived from the stored
+// sample timestamps. Samples arrive once per poll tick (~2s), NOT once per
+// second, so counting entries would understate the window by ~2x. Each sample
+// represents one whole poll interval, so the span counts N intervals (last-to-
+// first delta plus one average gap); snapping to a 5s grid beyond 10s keeps
+// the label from flickering with poll-timer jitter. Returns null until two
+// samples exist (no honest span to claim yet).
+function decodeSparkSpanSecs(history) {
+  if (!history || history.length < 2) return null;
+  const spanMs = history[history.length - 1].ts - history[0].ts;
+  if (!(spanMs > 0)) return null;
+  const avgGapMs = spanMs / (history.length - 1);
+  const secs = Math.round((spanMs + avgGapMs) / 1000);
+  return secs >= 10 ? Math.round(secs / 5) * 5 : Math.max(secs, 1);
+}
+
 // Decode-perf sparkline. Driven from the end of `pollDecodePerf` so we
 // share the upstream fetch and never issue a second `/v1/stats/decode`
 // request. A change-detection guard skips the SVG repaint when tok/s is
@@ -6850,7 +6881,8 @@ function refreshDecodeSparkline() {
   }
   let peakTps = 0;
   for (const s of tpsHistory) if (s.tps > peakTps) peakTps = s.tps;
-  spark.firstChild.innerHTML = `tok/s over the last ${tpsHistory.length}s · peak <span class="tabular-nums" style="color:var(--text-2);">${peakTps.toFixed(0)}</span> · now <span class="tabular-nums" style="color:var(--text-2);">${tps.toFixed(1)}</span>`;
+  const spanSecs = decodeSparkSpanSecs(tpsHistory);
+  spark.firstChild.innerHTML = `${spanSecs != null ? `tok/s over the last ${spanSecs}s` : 'tok/s'} · peak <span class="tabular-nums" style="color:var(--text-2);">${peakTps.toFixed(0)}</span> · now <span class="tabular-nums" style="color:var(--text-2);">${tps.toFixed(1)}</span>`;
   const series = [{ points: tpsHistory.map((s, i) => [i, s.tps]), color: 'var(--accent)' }];
   renderLineChart(spark.querySelector('.decode-spark-body'), series, { width: 520, height: 100, yZoom: true });
 }
