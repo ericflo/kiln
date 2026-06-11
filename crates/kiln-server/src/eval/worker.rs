@@ -283,6 +283,48 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
         return;
     };
 
+    // Regression detection: gated runs are Compare jobs carrying the
+    // previous generation's run alongside the new adapter's. Pair the
+    // per-example outcomes and reject promotion when the new adapter is
+    // SIGNIFICANTLY worse (#1497 exact sign test) — a static floor alone
+    // happily promotes a regressed adapter as long as it clears the bar.
+    if let Some(baseline_run) = snapshot
+        .finished_runs
+        .iter()
+        .find(|run| run.adapter.as_deref() != Some(gate.adapter_name.as_str()))
+    {
+        if let Some(new_run) = snapshot
+            .finished_runs
+            .iter()
+            .find(|run| run.adapter.as_deref() == Some(gate.adapter_name.as_str()))
+        {
+            let mut improved = 0u32;
+            let mut regressed = 0u32;
+            for (b, n) in baseline_run.outcomes.iter().zip(new_run.outcomes.iter()) {
+                if b.example_id != n.example_id {
+                    continue;
+                }
+                if n.score > b.score {
+                    improved += 1;
+                } else if n.score < b.score {
+                    regressed += 1;
+                }
+            }
+            let test = kiln_eval::result::sign_test(improved, regressed);
+            if regressed > improved && test.significant() {
+                stamp_verdict(format!(
+                    "REGRESSION: `{}` significantly worse than `{}` \
+                     (improved {improved}, regressed {regressed}, p={:.4}) — \
+                     NOT promoted despite accuracy {accuracy:.3}",
+                    gate.adapter_name,
+                    baseline_run.adapter.as_deref().unwrap_or("base"),
+                    test.p_value
+                ));
+                return;
+            }
+        }
+    }
+
     if accuracy >= gate.min_accuracy {
         if gate.auto_load_on_pass {
             let adapter_dir = state.adapter_dir.join(&gate.adapter_name);
