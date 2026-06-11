@@ -6510,6 +6510,36 @@ async function generateJudgmentPair() {
 
 document.getElementById('judgment-generate-btn')?.addEventListener('click', () => generateJudgmentPair());
 
+// One toast with an Undo action for a just-recorded judgment. The rows POST
+// returns `judgment_id` (the appended row's stable id) — Undo DELETEs that
+// exact row, refreshes the visible counts, and confirms. A misclicked vote
+// no longer poisons the dataset permanently. `fired` guards double-fires:
+// actionToast removes the toast on click, but a queued second click must
+// not double-DELETE (the second DELETE would 404 and toast a scary error).
+function recordedJudgmentToast(message, datasetName, judgmentId) {
+  if (!judgmentId) { toast(message, 'ok'); return; }  // no id, no Undo
+  let fired = false;
+  actionToast(message, 'ok', [{
+    label: 'Undo',
+    onClick: async () => {
+      if (fired) return;
+      fired = true;
+      try {
+        const m = await api('/v1/judgments/' + encodeURIComponent(datasetName) + '/rows/' + encodeURIComponent(judgmentId), { method: 'DELETE' });
+        if (activeJudgmentDataset === datasetName) {
+          document.getElementById('judgment-rows-count').textContent =
+            `${m.num_rows} judgments in "${datasetName}". Press G to generate the next pair (A/B/T/S to vote).`;
+        }
+        refreshJudgments();
+        toast(`Undone — judgment removed from "${datasetName}"`, 'ok');
+      } catch (e) {
+        // Leave the counts as they are — the row may still exist server-side.
+        toast('Undo failed: ' + e.message, 'err');
+      }
+    },
+  }]);
+}
+
 async function recordJudgment(winner) {
   if (!activeJudgmentDataset || !pendingJudgmentPair) return;
   // If a stream is still going, capture whatever has been emitted so far so
@@ -6529,13 +6559,14 @@ async function recordJudgment(winner) {
     note: note || null,
     tags,
   };
+  const dataset = activeJudgmentDataset;
   try {
-    const m = await api('/v1/judgments/' + encodeURIComponent(activeJudgmentDataset) + '/rows', {
+    const m = await api('/v1/judgments/' + encodeURIComponent(dataset) + '/rows', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify(body),
     });
     document.getElementById('judgment-rows-count').textContent =
-      `${m.num_rows} judgments in "${activeJudgmentDataset}". Press G to generate the next pair (A/B/T/S to vote).`;
+      `${m.num_rows} judgments in "${dataset}". Press G to generate the next pair (A/B/T/S to vote).`;
     document.getElementById('judgment-note').value = '';
     pendingJudgmentPair = null;
     document.getElementById('judgment-actions').hidden = true;
@@ -6544,6 +6575,8 @@ async function recordJudgment(winner) {
     document.getElementById('judgment-b-text').textContent = '';
     document.getElementById('judgment-pair').hidden = true;
     refreshJudgments();
+    const winnerLabel = { a: 'A wins', b: 'B wins', tie: 'Tie', skip: 'Skip' }[winner] || winner;
+    recordedJudgmentToast(`Recorded ${winnerLabel} in "${dataset}"`, dataset, m.judgment_id);
     if (judgmentAutoAdvance) {
       // Re-focus the prompt for the next round.
       setTimeout(() => document.getElementById('judgment-prompt').focus(), 50);
@@ -8196,11 +8229,11 @@ document.getElementById('chat-save-judgment')?.addEventListener('click', () => {
     try {
       // 409 (already-exists) is fine — we just append a row below.
       try { await api('/v1/judgments', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name: datasetName }) }); } catch (_) { /* already exists is fine */ }
-      await api('/v1/judgments/' + encodeURIComponent(datasetName) + '/rows', {
+      const m = await api('/v1/judgments/' + encodeURIComponent(datasetName) + '/rows', {
         method: 'POST', headers: {'Content-Type':'application/json'},
         body: JSON.stringify({ ...chatComparePair, winner, note: 'from playground', tags: ['playground'] }),
       });
-      toast('Saved into ' + datasetName, 'ok');
+      recordedJudgmentToast('Saved into ' + datasetName, datasetName, m.judgment_id);
       form.remove();
     } catch (e) { toast('Save failed: ' + e.message, 'err'); }
   });

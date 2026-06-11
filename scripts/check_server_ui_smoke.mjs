@@ -418,6 +418,28 @@ async function startServer({
   // "Try a sample dataset" golden path) — GET /v1/eval/datasets reflects
   // them so the Datasets list refresh after upload is observable.
   const uploadedEvalDatasets = [];
+  // Judgment datasets created/judged through the A/B walk. The rows POST
+  // mirrors api/eval.rs append_judgment: it returns `judgment_id` plus the
+  // flattened manifest, so the smoke can assert the record → Undo → DELETE
+  // round-trip restores the visible counts.
+  const judgmentDatasets = [];
+  let judgmentRowCounter = 0;
+  const judgmentManifest = (dataset) => ({
+    name: dataset.name,
+    description: dataset.description,
+    num_rows: dataset.rows.length,
+    created_at: dataset.created_at,
+    updated_at: dataset.updated_at,
+    winner_histogram: { ...dataset.winner_histogram },
+  });
+  const judgmentNotFound = (res, detail) => {
+    res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ error: {
+      code: 'judgment_not_found',
+      message: `Judgment dataset '${detail}' not found`,
+      hint: 'List judgments with GET /v1/judgments.',
+    } }));
+  };
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://127.0.0.1');
     const adapterRoute = parseAdapterRoute(url.pathname);
@@ -806,7 +828,86 @@ async function startServer({
       return;
     }
     if (url.pathname === '/v1/judgments') {
-      json(res, { judgments: [] });
+      if (req.method === 'POST') {
+        const body = await readJsonBody(req);
+        const name = (body?.name || '').trim();
+        if (!isPathSafeAdapterDirectoryName(name)) {
+          apiBadRequest(res, 'Judgment dataset name should be path-safe');
+          return;
+        }
+        if (judgmentDatasets.some((dataset) => dataset.name === name)) {
+          res.writeHead(409, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: {
+            code: 'dataset_exists',
+            message: `Judgment dataset '${name}' already exists`,
+            hint: 'Append rows to the existing dataset or pick a new name.',
+          } }));
+          return;
+        }
+        const now = new Date().toISOString();
+        const dataset = {
+          name,
+          description: body?.description || null,
+          created_at: now,
+          updated_at: now,
+          winner_histogram: {},
+          rows: [],
+        };
+        judgmentDatasets.push(dataset);
+        json(res, judgmentManifest(dataset));
+        return;
+      }
+      json(res, { judgments: judgmentDatasets.map(judgmentManifest) });
+      return;
+    }
+    // POST /v1/judgments/:name/rows — append a judgment. Mirrors the real
+    // handler's response shape: `judgment_id` for the appended row plus the
+    // flattened manifest (the UI's Undo DELETEs by that id).
+    const judgmentRowsMatch = /^\/v1\/judgments\/([^/]+)\/rows$/.exec(url.pathname);
+    if (judgmentRowsMatch && req.method === 'POST') {
+      const name = decodeURIComponent(judgmentRowsMatch[1]);
+      const dataset = judgmentDatasets.find((candidate) => candidate.name === name);
+      if (!dataset) {
+        judgmentNotFound(res, name);
+        return;
+      }
+      const body = await readJsonBody(req);
+      if (!Array.isArray(body?.prompt) || body.prompt.length === 0) {
+        apiBadRequest(res, 'Judgment rows should carry the prompt messages');
+        return;
+      }
+      if (!['a', 'b', 'tie', 'skip'].includes(body?.winner)) {
+        apiBadRequest(res, 'Judgment winner should be one of a|b|tie|skip');
+        return;
+      }
+      if (typeof body?.response_a !== 'string' || typeof body?.response_b !== 'string') {
+        apiBadRequest(res, 'Judgment rows should carry both responses');
+        return;
+      }
+      judgmentRowCounter += 1;
+      const id = body.id || `smoke-judgment-${judgmentRowCounter}`;
+      dataset.rows.push({ id, winner: body.winner });
+      dataset.winner_histogram[body.winner] = (dataset.winner_histogram[body.winner] || 0) + 1;
+      dataset.updated_at = new Date().toISOString();
+      json(res, { judgment_id: id, ...judgmentManifest(dataset) });
+      return;
+    }
+    // DELETE /v1/judgments/:name/rows/:id — the Undo path. Unknown ids 404
+    // (a double-fired Undo must not silently "succeed").
+    const judgmentRowDeleteMatch = /^\/v1\/judgments\/([^/]+)\/rows\/([^/]+)$/.exec(url.pathname);
+    if (judgmentRowDeleteMatch && req.method === 'DELETE') {
+      const name = decodeURIComponent(judgmentRowDeleteMatch[1]);
+      const id = decodeURIComponent(judgmentRowDeleteMatch[2]);
+      const dataset = judgmentDatasets.find((candidate) => candidate.name === name);
+      const rowIndex = dataset ? dataset.rows.findIndex((row) => row.id === id) : -1;
+      if (!dataset || rowIndex === -1) {
+        judgmentNotFound(res, `${name}/${id}`);
+        return;
+      }
+      const [removed] = dataset.rows.splice(rowIndex, 1);
+      dataset.winner_histogram[removed.winner] = Math.max(0, (dataset.winner_histogram[removed.winner] || 1) - 1);
+      dataset.updated_at = new Date().toISOString();
+      json(res, judgmentManifest(dataset));
       return;
     }
     if (url.pathname === '/v1/chat/completions') {
@@ -825,6 +926,14 @@ async function startServer({
       }
       const body = await readJsonBody(req);
       const prompt = body?.messages?.findLast((message) => message.role === 'user')?.content || '';
+      // The judgment viewer streams the same prompt twice (slots A and B).
+      if (body?.stream && /Judge this smoke pair\./.test(prompt)) {
+        sse(res, [
+          { choices: [{ delta: { role: 'assistant' } }] },
+          { choices: [{ delta: { content: 'smoke reply for judging' } }] },
+        ]);
+        return;
+      }
       if (!body?.stream || !/Explain Kiln in one sentence\./.test(prompt)) {
         res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ detail: 'Unexpected Quick Inference smoke request' }));
@@ -1842,6 +1951,59 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     ).catch(() => fail('Sample upload should open the synthesize panel (create a suite is the next step)'));
     const synthSuiteName = await page.$eval('#synth-suite-name', (el) => el.value);
     if (synthSuiteName !== 'sample-coding-agent-eval') fail(`Synthesize panel should pre-fill the suite name from the sample dataset, got ${JSON.stringify(synthSuiteName)}`);
+
+    // ---- Judgment Undo: record an A/B pick, then the toast's Undo must
+    // DELETE exactly the row the POST response identified (judgment_id)
+    // and restore the visible counts.
+    await clickAndWait(page, '#evals-tab-judgments', 'Could not open the Judgments sub-tab');
+    await waitForVisiblePanel(page, '#tab-evals-judgments', 'Judgments sub-tab did not activate');
+    await page.type('#judgment-create-name', 'smoke-judgments');
+    await clickAndWait(page, '#judgment-create-btn', 'Could not create the smoke judgment dataset');
+    await waitForPanelText(page, '#judgment-rows-count', /Judging into "smoke-judgments"/, 'Judgment viewer should open on the new dataset');
+    await page.type('#judgment-prompt', 'Judge this smoke pair.');
+    await clickAndWait(page, '#judgment-generate-btn', 'Could not generate the judgment pair');
+    await page.waitForFunction(
+      () => !document.getElementById('judgment-actions')?.hidden
+        && /smoke reply for judging/.test(document.getElementById('judgment-a-text')?.textContent || '')
+        && /smoke reply for judging/.test(document.getElementById('judgment-b-text')?.textContent || ''),
+      { timeout: 5000 },
+    ).catch(() => fail('Judgment pair did not stream into both compare cards'));
+    const judgmentRecordResponsePromise = page.waitForResponse(
+      (response) => response.url().endsWith('/v1/judgments/smoke-judgments/rows')
+        && response.request().method() === 'POST',
+      { timeout: 5000 },
+    );
+    await clickAndWait(page, '#judgment-pick-a', 'Could not record the A vote');
+    const judgmentRecordResponse = await judgmentRecordResponsePromise
+      .catch(() => fail('Recording a judgment did not POST /v1/judgments/smoke-judgments/rows'));
+    const judgmentRecordBody = await judgmentRecordResponse.json().catch(() => ({}));
+    if (judgmentRecordBody.judgment_id !== 'smoke-judgment-1') {
+      fail(`Judgment POST response should carry the new row's judgment_id, got ${JSON.stringify(judgmentRecordBody.judgment_id)}`);
+    }
+    if (judgmentRecordBody.num_rows !== 1) {
+      fail(`Judgment POST response should keep the manifest fields (num_rows), got ${JSON.stringify(judgmentRecordBody.num_rows)}`);
+    }
+    await waitForPanelText(page, '#judgment-rows-count', /1 judgments in "smoke-judgments"/, 'Row count should reflect the recorded judgment');
+    const undoDeleteRequestPromise = page.waitForRequest(
+      (request) => request.method() === 'DELETE'
+        && request.url().endsWith('/v1/judgments/smoke-judgments/rows/smoke-judgment-1'),
+      { timeout: 5000 },
+    );
+    const undoClicked = await page.evaluate(() => {
+      const toastEl = Array.from(document.querySelectorAll('#toasts .toast-action'))
+        .find((candidate) => /Recorded A wins in "smoke-judgments"/.test(candidate.textContent || ''));
+      const undoBtn = Array.from(toastEl?.querySelectorAll('.toast-action-btn') || [])
+        .find((button) => button.textContent?.trim() === 'Undo');
+      if (!undoBtn) return false;
+      undoBtn.click();
+      return true;
+    });
+    if (!undoClicked) fail('Recorded-judgment toast should offer an Undo action');
+    await undoDeleteRequestPromise
+      .catch(() => fail('Undo did not DELETE /v1/judgments/smoke-judgments/rows/smoke-judgment-1'));
+    await expectTrainingToast(page, 'Undone — judgment removed from "smoke-judgments"');
+    await waitForPanelText(page, '#judgment-rows-count', /0 judgments in "smoke-judgments"/, 'Undo should restore the judgment viewer count');
+    await waitForPanelText(page, '#judgments-list', /0 judgments/, 'Judgments list should refresh to zero rows after Undo');
 
   } finally {
     await browser.close();
