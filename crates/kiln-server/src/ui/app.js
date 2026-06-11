@@ -1270,6 +1270,27 @@ function shortId(s) {
   return String(s == null ? '' : s).slice(0, 8);
 }
 
+// Skip an innerHTML rewrite when the content key hasn't changed — poll
+// loops must not repaint identical DOM (a rewrite destroys hover state,
+// in-progress text selection, click targets, and open <select> dropdowns
+// mid-interaction). The key lives on the element node itself rather than
+// in a module-level variable so "someone else replaced this panel" is
+// self-invalidating: a recreated node carries no key, and every writer
+// that paints INTO the same node (error/empty/list branches alike) must
+// route through this helper with its own distinct key, so a failure →
+// recovery transition always compares unequal — the #1547 lesson, where
+// module-level dedupe keys survived the failure writer and froze panels
+// on stale error HTML. Returns true when it wrote; callers that wire
+// listeners after rendering must skip that wiring when the DOM was left
+// untouched (the old nodes still hold their old listeners).
+function setListHtml(el, key, html) {
+  if (!el) return false;
+  if (el._kilnListKey === key) return false;
+  el.innerHTML = html;
+  el._kilnListKey = key;
+  return true;
+}
+
 function apiFailureHtml(action, e, retryFn) {
   const retryButton = retryFn ? `<div style="margin-top:var(--space-3);"><button type="button" class="btn btn-primary" data-retry="${escapeHtml(retryFn)}" aria-label="Retry ${escapeHtml(action)}">Retry ${escapeHtml(action)}</button></div>` : '';
   return `<div class="empty api-failure">
@@ -1893,23 +1914,27 @@ async function pollAdapters() {
 
 function updateAdapterSelect(data) {
   const sel = document.getElementById('chat-adapter');
-  const current = sel.value;
-  sel.innerHTML = '<option value="">Base model</option>';
-  if (data.available) {
-    data.available.forEach(a => {
-      const opt = document.createElement('option');
-      opt.value = a.name;
-      opt.textContent = a.name + (data.active === a.name ? ' (active)' : '');
-      sel.appendChild(opt);
-    });
-  }
-  sel.value = current;
-  // Keep the compare (B) dropdown's options in sync, preserving its selection.
   const b = document.getElementById('chat-adapter-b');
+  // Rebuild the <option> list only when its rendered content (names +
+  // active marker) actually changed — an unconditional rebuild on every
+  // adapters poll snaps an open dropdown shut mid-pick. In particular the
+  // option set is never rebuilt while the select has focus with unchanged
+  // options, because unchanged options always skip.
+  const names = (data.available || []).map(a => a.name);
+  const optionsKey = 'opts:' + JSON.stringify([names, data.active || '']);
+  const optionsHtml = '<option value="">Base model</option>' + names.map(n =>
+    `<option value="${escapeHtml(n)}">${escapeHtml(n)}${data.active === n ? ' (active)' : ''}</option>`
+  ).join('');
+  const current = sel.value;
+  if (setListHtml(sel, optionsKey, optionsHtml)) {
+    sel.value = current; // preserve the user's in-flight selection
+  }
+  // Keep the compare (B) dropdown's options in sync, preserving its selection.
   if (b) {
     const bCurrent = b.value;
-    b.innerHTML = sel.innerHTML;
-    b.value = bCurrent;
+    if (setListHtml(b, optionsKey, optionsHtml)) {
+      b.value = bCurrent;
+    }
   }
   // Apply any deferred selection ("Verify the fix" names an adapter that's
   // still training) the moment the option actually exists.
@@ -4665,14 +4690,22 @@ async function refreshAdapterDropdowns() {
     evalAdaptersCache = (d.available || []).map(a => a.name);
     evalActiveAdapter = d.active || '';
     const targets = ['judgment-adapter-a', 'judgment-adapter-b', 'compile-judge-adapter'];
+    // Rebuild the <option> lists only when the adapter name set changed —
+    // this runs on the Evals poll tick, and an unconditional rebuild snaps
+    // an open dropdown shut mid-pick. Unchanged options always skip, so a
+    // focused select is never rebuilt under the user.
+    const optionsKey = 'opts:' + JSON.stringify(evalAdaptersCache);
+    const optionsHtml = ['<option value="">Base model</option>']
+      .concat(evalAdaptersCache.map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`))
+      .join('');
     for (const id of targets) {
       const sel = document.getElementById(id);
       if (!sel) continue;
       const cur = sel.value;
-      sel.innerHTML = ['<option value="">Base model</option>']
-        .concat(evalAdaptersCache.map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`))
-        .join('');
-      if (cur && evalAdaptersCache.includes(cur)) sel.value = cur;
+      if (setListHtml(sel, optionsKey, optionsHtml)) {
+        // Preserve the user's in-flight selection across the rebuild.
+        if (cur && evalAdaptersCache.includes(cur)) sel.value = cur;
+      }
     }
   } catch (_) { /* best-effort */ }
 }
@@ -4731,15 +4764,20 @@ async function refreshDatasets() {
     const el = document.getElementById('datasets-list');
     if (!datasets.length) {
       el.className = 'eval-empty';
-      el.innerHTML = `
+      setListHtml(el, 'empty', `
         <div class="eval-empty-icon"><svg class="icn"><use href="#i-folder"></use></svg></div>
         <div class="eval-empty-title">No datasets yet</div>
         <div class="eval-empty-body">Upload an SFT JSONL above and Kiln will let you preview, sample, and synthesize an eval suite from it in seconds.</div>
-        <button class="eval-empty-cta" type="button" onclick="document.getElementById('dataset-name').focus()">Upload your first dataset</button>`;
+        <button class="eval-empty-cta" type="button" onclick="document.getElementById('dataset-name').focus()">Upload your first dataset</button>`);
       return;
     }
     el.className = '';
-    el.innerHTML = datasets.map(m => {
+    // Key on every payload field the rows display: stats covers the
+    // role-pattern column, the assistant/tool_calls counts, and the
+    // recommendStrategy badge (derived solely from stats).
+    const listKey = 'list:' + JSON.stringify(datasets.map(m =>
+      [m.name, m.format, m.description, m.num_rows, m.size_bytes, m.stats]));
+    const listHtml = datasets.map(m => {
       const stats = m.stats || {};
       const pattern = (stats.sample_role_patterns || []).slice(0, 1).join(' · ') || '';
       const recommendation = recommendStrategy(stats);
@@ -4762,6 +4800,7 @@ async function refreshDatasets() {
         </div>
       </div>`;
     }).join('');
+    if (!setListHtml(el, listKey, listHtml)) return; // unchanged — old nodes keep their listeners
     el.querySelectorAll('button[data-action]').forEach(b => {
       const name = b.dataset.name;
       if (b.dataset.action === 'train-sft') {
@@ -4782,7 +4821,11 @@ async function refreshDatasets() {
       }
     });
   } catch (e) {
-    document.getElementById('datasets-list').innerHTML = `<div class="eval-empty"><div class="eval-empty-title">Failed to load</div><div class="eval-empty-body">${escapeHtml(e.message)}</div></div>`;
+    // Route the failure write through setListHtml too: it stamps an
+    // error-specific key, so the post-recovery payload (even an identical
+    // empty list) compares unequal and repaints (#1547 regression shape).
+    setListHtml(document.getElementById('datasets-list'), 'err:' + e.message,
+      `<div class="eval-empty"><div class="eval-empty-title">Failed to load</div><div class="eval-empty-body">${escapeHtml(e.message)}</div></div>`);
   }
 }
 
@@ -5029,11 +5072,11 @@ async function refreshSuites() {
     const el = document.getElementById('suites-list');
     if (!suites.length) {
       el.className = 'eval-empty';
-      el.innerHTML = `
+      setListHtml(el, 'empty', `
         <div class="eval-empty-icon"><svg class="icn"><use href="#i-target"></use></svg></div>
         <div class="eval-empty-title">No eval suites yet</div>
         <div class="eval-empty-body">A suite is a named collection of (prompt, target, scorer) triplets. Synthesize one from a dataset, or POST an EvalSuite document to <code>/v1/eval/suites</code>.</div>
-        <button class="eval-empty-cta" type="button" onclick="document.getElementById('evals-tab-datasets').click()">Browse datasets</button>`;
+        <button class="eval-empty-cta" type="button" onclick="document.getElementById('evals-tab-datasets').click()">Browse datasets</button>`);
       return;
     }
     el.className = '';
@@ -5050,7 +5093,17 @@ async function refreshSuites() {
     for (const j of completedOldestFirst) {
       (suiteHistory[j.suite_name] = suiteHistory[j.suite_name] || []).push(j.headline_accuracy);
     }
-    el.innerHTML = suites.map(s => {
+    // Key on everything the cards display: the suites payload, the
+    // sparkline/badge history derived from evalJobsCache (#1548 — a new
+    // completed run must repaint even when the suites payload is byte-
+    // identical), and evalActiveAdapter (the Run/A-B button titles and the
+    // A/B disabled state embed it).
+    const listKey = 'list:' + JSON.stringify([
+      evalActiveAdapter,
+      suites.map(s => [s.name, s.description, s.num_examples, s.default_scorer_kind]),
+      completedOldestFirst.map(j => [j.suite_name, j.headline_accuracy]),
+    ]);
+    const listHtml = suites.map(s => {
       const hist = (suiteHistory[s.name] || []).slice(-10);
       const recent = hist.length ? hist[hist.length - 1] : null;
       const sparkline = hist.length >= 2 ? sparkSvg(hist) : '';
@@ -5072,6 +5125,7 @@ async function refreshSuites() {
         </div>
       </div>`;
     }).join('');
+    if (!setListHtml(el, listKey, listHtml)) return; // unchanged — old nodes keep their listeners
     el.querySelectorAll('button[data-suite]').forEach(b => {
       const suite = b.dataset.suite;
       b.addEventListener('click', async () => {
@@ -5105,7 +5159,9 @@ async function refreshSuites() {
       });
     });
   } catch (e) {
-    document.getElementById('suites-list').innerHTML = `<div class="eval-empty"><div class="eval-empty-body">Failed: ${escapeHtml(e.message)}</div></div>`;
+    // Error-specific key: recovery payloads (even identical ones) repaint.
+    setListHtml(document.getElementById('suites-list'), 'err:' + e.message,
+      `<div class="eval-empty"><div class="eval-empty-body">Failed: ${escapeHtml(e.message)}</div></div>`);
   }
 }
 
@@ -5234,35 +5290,53 @@ async function refreshEvalJobs() {
     const filtered = jobs.filter(matchesEvalJobsFilter);
     if (jobs.length && !filtered.length) {
       el.className = 'eval-empty';
-      el.innerHTML = `<div class="eval-empty-body">No eval jobs match the current filter. <button class="btn btn-sm" type="button" data-eval-jobs-filter="all">Clear filter</button></div>`;
-      el.querySelectorAll('[data-eval-jobs-filter]').forEach(btn => {
-        btn.addEventListener('click', () => {
-          document.querySelectorAll('[data-eval-jobs-filter]').forEach(b => b.classList.toggle('active', b.dataset.evalJobsFilter === 'all'));
-          evalJobsFilter.state = 'all';
-          const inp = document.getElementById('eval-jobs-filter');
-          if (inp) inp.value = '';
-          evalJobsFilter.query = '';
-          refreshEvalJobs();
+      if (setListHtml(el, 'nomatch', `<div class="eval-empty-body">No eval jobs match the current filter. <button class="btn btn-sm" type="button" data-eval-jobs-filter="all">Clear filter</button></div>`)) {
+        el.querySelectorAll('[data-eval-jobs-filter]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            document.querySelectorAll('[data-eval-jobs-filter]').forEach(b => b.classList.toggle('active', b.dataset.evalJobsFilter === 'all'));
+            evalJobsFilter.state = 'all';
+            const inp = document.getElementById('eval-jobs-filter');
+            if (inp) inp.value = '';
+            evalJobsFilter.query = '';
+            refreshEvalJobs();
+          });
         });
-      });
+      }
       return;
     }
     if (!jobs.length) {
       el.className = 'eval-empty';
-      el.innerHTML = `
+      setListHtml(el, 'empty', `
         <div class="eval-empty-icon"><svg class="icn"><use href="#i-chart"></use></svg></div>
         <div class="eval-empty-title">No eval jobs yet</div>
         <div class="eval-empty-body">Run a suite from the Suites tab. Jobs land here as they complete; click any job to drill into the per-example outcomes.</div>
-        <button class="eval-empty-cta" type="button" onclick="document.getElementById('evals-tab-suites').click()">Browse suites</button>`;
+        <button class="eval-empty-cta" type="button" onclick="document.getElementById('evals-tab-suites').click()">Browse suites</button>`);
       return;
     }
     el.className = '';
-    el.innerHTML = filtered.map(j => renderJobCard(j)).join('');
-    el.querySelectorAll('.job-card').forEach(card => {
-      card.addEventListener('click', () => openDrillModal(card.dataset.jobId));
-    });
+    // Key on the active filter (query + state pill) plus every field a job
+    // card displays — id/state, headline accuracy, the whole progress object
+    // (examples_completed/total, running accuracy/mean), per-run metrics and
+    // tag pass-rates, and the error line. The filter belongs in the key so a
+    // filter keystroke always repaints even when it yields the same set.
+    const listKey = 'jobs:' + JSON.stringify([
+      evalJobsFilter.query, evalJobsFilter.state,
+      filtered.map(j => [
+        j.job_id, j.state, j.suite_name, j.adapters, j.submission_kind,
+        j.headline_accuracy, j.progress, j.error,
+        (j.finished_runs || []).map(r => [r.adapter, r.metrics]),
+      ]),
+    ]);
+    if (setListHtml(el, listKey, filtered.map(j => renderJobCard(j)).join(''))) {
+      el.querySelectorAll('.job-card').forEach(card => {
+        card.addEventListener('click', () => openDrillModal(card.dataset.jobId));
+      });
+    }
   } catch (e) {
-    document.getElementById('eval-jobs-list').innerHTML = `<div class="eval-empty"><div class="eval-empty-body">Failed: ${escapeHtml(e.message)}</div></div>`;
+    // Error-specific key: the recovered list (even an identical empty
+    // payload) compares unequal and repaints (#1547 regression shape).
+    setListHtml(document.getElementById('eval-jobs-list'), 'err:' + e.message,
+      `<div class="eval-empty"><div class="eval-empty-body">Failed: ${escapeHtml(e.message)}</div></div>`);
   }
   // Refreshing jobs also updates suite sparklines.
   if (document.getElementById('evals-tab-suites')?.classList.contains('active')) {
@@ -5924,14 +5998,21 @@ async function refreshJudgments() {
     const el = document.getElementById('judgments-list');
     if (!items.length) {
       el.className = 'eval-empty';
-      el.innerHTML = `
+      setListHtml(el, 'empty', `
         <div class="eval-empty-icon"><svg class="icn"><use href="#i-scale"></use></svg></div>
         <div class="eval-empty-title">No judgment datasets yet</div>
         <div class="eval-empty-body">Create a dataset, then judge model outputs A/B/Tie. After ~20 picks you can compile them into SFT data and train a local judge LoRA — no frontier LLM in the loop.</div>
-        <button class="eval-empty-cta" type="button" onclick="document.getElementById('judgment-create-name').focus()">Create your first dataset</button>`;
+        <button class="eval-empty-cta" type="button" onclick="document.getElementById('judgment-create-name').focus()">Create your first dataset</button>`);
     } else {
       el.className = '';
-      el.innerHTML = items.map(m => {
+      // Key on the displayed payload fields plus activeJudgmentDataset —
+      // the "(active)" hint and the Continue/Judge button label depend on
+      // it, so switching datasets must repaint even with identical data.
+      const listKey = 'list:' + JSON.stringify([
+        activeJudgmentDataset,
+        items.map(m => [m.name, m.description, m.num_rows, m.winner_histogram]),
+      ]);
+      const listHtml = items.map(m => {
         const winners = m.winner_histogram || {};
         const total = (winners.a || 0) + (winners.b || 0) + (winners.tie || 0);
         const aPct = total ? ((winners.a || 0) / total * 100).toFixed(0) : 0;
@@ -5956,30 +6037,34 @@ async function refreshJudgments() {
           </div>
         </div>`;
       }).join('');
-      el.querySelectorAll('button[data-action]').forEach(b => {
-        const name = b.dataset.name;
-        if (b.dataset.action === 'judge') {
-          b.addEventListener('click', () => openJudgmentViewer(name));
-        } else if (b.dataset.action === 'promote') {
-          b.addEventListener('click', () => openJudgmentCompile(name));
-        } else if (b.dataset.action === 'del') {
-          b.addEventListener('click', async () => {
-            if (!confirm(`Delete judgment dataset "${name}"? Provenance is gone for good.`)) return;
-            try {
-              await api('/v1/judgments/' + encodeURIComponent(name), { method: 'DELETE' });
-              if (activeJudgmentDataset === name) {
-                activeJudgmentDataset = null;
-                document.getElementById('judgment-viewer').hidden = true;
-                document.getElementById('judgment-compile').hidden = true;
-              }
-              refreshJudgments();
-            } catch (e) { toast('Delete failed: ' + e.message, 'err'); }
-          });
-        }
-      });
+      if (setListHtml(el, listKey, listHtml)) {
+        el.querySelectorAll('button[data-action]').forEach(b => {
+          const name = b.dataset.name;
+          if (b.dataset.action === 'judge') {
+            b.addEventListener('click', () => openJudgmentViewer(name));
+          } else if (b.dataset.action === 'promote') {
+            b.addEventListener('click', () => openJudgmentCompile(name));
+          } else if (b.dataset.action === 'del') {
+            b.addEventListener('click', async () => {
+              if (!confirm(`Delete judgment dataset "${name}"? Provenance is gone for good.`)) return;
+              try {
+                await api('/v1/judgments/' + encodeURIComponent(name), { method: 'DELETE' });
+                if (activeJudgmentDataset === name) {
+                  activeJudgmentDataset = null;
+                  document.getElementById('judgment-viewer').hidden = true;
+                  document.getElementById('judgment-compile').hidden = true;
+                }
+                refreshJudgments();
+              } catch (e) { toast('Delete failed: ' + e.message, 'err'); }
+            });
+          }
+        });
+      }
     }
   } catch (e) {
-    document.getElementById('judgments-list').innerHTML = `<div class="eval-empty"><div class="eval-empty-body">Failed: ${escapeHtml(e.message)}</div></div>`;
+    // Error-specific key: recovery payloads (even identical ones) repaint.
+    setListHtml(document.getElementById('judgments-list'), 'err:' + e.message,
+      `<div class="eval-empty"><div class="eval-empty-body">Failed: ${escapeHtml(e.message)}</div></div>`);
   }
   refreshAdapterDropdowns();
 }
@@ -6294,8 +6379,9 @@ if (document.getElementById('page-evals')?.classList.contains('active')) {
 }
 
 // Periodic refresh — only updates the active sub-tab so we don't thrash.
-// Jobs tab refreshes every 1500ms (so a running job's progress feels alive),
-// other tabs every 4s.
+// Every sub-tab refreshes on the same 1.5s tick (so a running job's progress
+// feels alive); the content-keyed renders (setListHtml) make the unchanged
+// ticks free instead of clobbering hover/selection/open dropdowns.
 setInterval(() => {
   const evalsPage = document.getElementById('page-evals');
   if (!evalsPage || !evalsPage.classList.contains('active')) return;
