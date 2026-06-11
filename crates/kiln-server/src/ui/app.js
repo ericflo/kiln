@@ -2,11 +2,144 @@
 'use strict';
 
 /* =====================================================================
-   Page switcher (Overview / Adapters / Training / Playground)
+   Page switcher + deep-link hash router
    ===================================================================== */
 // The 7 primary pages — single source of truth shared by boot-time hash
 // resolution and the hashchange handler below.
 const PRIMARY_PAGES = ['overview', 'adapters', 'training', 'evals', 'distill', 'playground', 'terminal'];
+
+/* Deep-link grammar (roadmap PR 17, extending the PR 16 page hashes):
+
+     #page                          — primary page
+     #training/queue|sft|grpo       — training sub-tabs
+     #training/queue/{job_id}       — train drill modal over the queue
+     #evals/datasets|suites|jobs|judgments
+     #evals/jobs/{job_id}           — eval drill modal
+     #distill/{tab}                 — distill sub-tabs
+     #adapters/{name}               — adapter drill modal (page has no sub-tabs)
+     #overview/requests/{id}        — request drill modal. Ids are
+                                      `chatcmpl-{uuid}`, minted once per
+                                      request server-side (completions.rs) and
+                                      stable across /v1/stats/recent-requests
+                                      polls; FIFO eviction from the 100-entry
+                                      ring degrades to the modal's graceful
+                                      "no record" body.
+
+   State machine — who writes the hash, and how:
+
+   - Primary-tab click          → selectPage pushes the CANONICAL hash
+                                  (#page/active-subtab). One entry even when
+                                  selectPage internally redirects the sub-tab
+                                  (empty queue → SFT form): the internal click
+                                  runs hash-suppressed and the single write
+                                  happens after it, so "click Training" never
+                                  double-pushes (#training then #training/sft).
+   - Sub-tab activation         → pushState #page/subtab. The write lives at
+                                  the END of the tab-select fns, so arrow-key
+                                  navigation and every programmatic .click()
+                                  caller (cmdk, quick actions, "View job"
+                                  toasts) mint correct hashes for free.
+   - Modal open (user action)   → pushState the id segment and remember WE
+                                  minted that entry (modalHashPushed). In-modal
+                                  navigation to a sibling id (request drill
+                                  prev/next) replaceState's the id instead of
+                                  stacking an entry per arrow press.
+   - Modal close (X / Esc / backdrop / a modal action that closes it)
+                                → if we pushed on open: history.back(). The
+                                  hashchange handler lands on the parent hash
+                                  and closes the modal idempotently, so the
+                                  modal entry is CONSUMED — Back after close
+                                  keeps walking pages instead of re-opening
+                                  the modal, and closing via browser Back
+                                  directly takes the exact same path. Forward
+                                  after close re-opens the modal: that entry
+                                  is live on purpose, never dead.
+                                  If we did NOT push (a deep-link boot or live
+                                  hash edit opened it): history.back() could
+                                  exit the dashboard, so instead replaceState
+                                  to the parent #page/subtab and close
+                                  directly.
+                                  (A few flows intentionally close WITHOUT
+                                  touching history — e.g. "Replay in
+                                  playground" — so that Back returns to the
+                                  modal the user came from.)
+   - Boot + hashchange          → never mint entries here; junk sub-tab/id
+                                  segments keep the page and repair the URL to
+                                  the canonical #page/subtab via replaceState.
+   - localStorage sub-tab restores stay hash-suppressed: they are the no-hash
+     fallback only. An explicit hash sub-tab is applied AFTER them during the
+     boot route pass (applyHashRoute at the end of this file), so it wins.
+*/
+
+// While >0, the tab-select + modal-open hash writers below are no-ops: the
+// activation is hash-driven (boot / hashchange) or an internal redirect whose
+// caller owns the single history write for the whole gesture.
+let hashWriteDepth = 0;
+function withHashWritesSuppressed(fn) {
+  hashWriteDepth += 1;
+  try { fn(); } finally { hashWriteDepth -= 1; }
+}
+
+// Active sub-tab name for the pages that have a tablist (null for the rest).
+function activeSubTab(name) {
+  if (name === 'training') return document.querySelector('[data-training-tabs] [role="tab"].active')?.dataset.tab || null;
+  if (name === 'evals') return document.querySelector('[data-evals-tabs] [role="tab"].active')?.dataset.tab || null;
+  if (name === 'distill') return document.querySelector('[data-distill-tabs] [role="tab"].active')?.dataset.tab || null;
+  return null;
+}
+function canonicalPageHash(name) {
+  const sub = activeSubTab(name);
+  return '#' + name + (sub ? '/' + sub : '');
+}
+
+// The sub-tab BUTTON for a page/segment pair, or null when the segment is
+// junk. Doubles as the whitelist: a button only exists for real sub-tabs.
+function subTabButton(pageName, sub) {
+  let el = null;
+  if (pageName === 'training') el = document.getElementById('training-tab-' + sub);
+  else if (pageName === 'evals') el = document.getElementById('evals-tab-' + sub);
+  else if (pageName === 'distill') el = document.getElementById('distill-tab-' + sub);
+  // Guard against id-shaped collisions (e.g. "opd-pane" resolving to the
+  // PANEL div distill-tab-opd-pane): only role=tab buttons qualify.
+  return (el && el.getAttribute('role') === 'tab' && el.dataset.tab === sub) ? el : null;
+}
+
+// Push #page/subtab for a user-driven sub-tab change. No-op while writes are
+// suppressed (hash-driven activation) or when the page isn't frontmost (the
+// boot-time localStorage restores run while another page is showing).
+function pushSubTabHash(pageName) {
+  if (hashWriteDepth > 0 || !history.pushState) return;
+  if (!document.getElementById('page-' + pageName)?.classList.contains('active')) return;
+  const target = canonicalPageHash(pageName);
+  if (location.hash !== target) history.pushState(null, '', target);
+}
+
+// --- Drill-modal hash bookkeeping (see the state machine above) --------
+// Whether WE minted the history entry for the currently-open modal of each
+// kind; decides between history.back() and replaceState on user close.
+const modalHashPushed = { eval: false, train: false, adapter: false, request: false };
+
+function modalHashOnOpen(kind, hash, alreadyOpen = false) {
+  if (hashWriteDepth > 0 || !history.pushState) { modalHashPushed[kind] = false; return; }
+  if (location.hash === hash) return;
+  if (alreadyOpen) { history.replaceState(null, '', hash); return; }
+  history.pushState(null, '', hash);
+  modalHashPushed[kind] = true;
+}
+
+function modalHashOnUserClose(kind, parentHash, closeFn) {
+  const pushed = modalHashPushed[kind];
+  modalHashPushed[kind] = false;
+  if (pushed) {
+    // Consume the entry we minted on open: the hashchange handler lands on
+    // the parent hash and closes the modal. closeFn is idempotent, so the
+    // traversal-driven close racing a direct one is harmless.
+    history.back();
+    return;
+  }
+  if (history.replaceState && location.hash !== parentHash) history.replaceState(null, '', parentHash);
+  closeFn();
+}
 
 // opts (optional):
 //   fromHash: true  — the call ORIGINATED from the hashchange handler
@@ -27,14 +160,33 @@ function selectPage(name, opts) {
     p.hidden = !active;
     if (active) p.removeAttribute('inert'); else p.setAttribute('inert', '');
   });
+  // Landing on an EMPTY queue helps nobody — if nothing ever ran and nothing
+  // is queued, the person opening Training came to train. Take them to the
+  // form. Requires a LOADED cache: an unfetched queue is unknown, not empty.
+  // Runs BEFORE the hash write below (suppressed) so the redirect folds into
+  // the same history entry instead of minting #training AND #training/sft.
+  if (name === 'training') {
+    // try/catch, not typeof: a #training/... DEEP-LINK BOOT reaches here
+    // while `let trainingJobsCache` (declared further down this module) is
+    // still in its temporal dead zone, where even typeof throws.
+    let tj = null;
+    try { tj = trainingJobsCache; } catch { tj = null; }
+    const queueEmpty = !!tj && !tj.running && (!tj.queued || !tj.queued.length) && (!tj.completed || !tj.completed.length);
+    const queueTabActive = document.getElementById('training-tab-queue')?.classList.contains('active');
+    if (queueEmpty && queueTabActive) withHashWritesSuppressed(() => document.getElementById('training-tab-sft')?.click());
+  }
   // Real history entries (pushState) so browser Back/Forward walks the tab
-  // trail. Same-page guard: re-selecting the page already in the hash (tab
-  // re-click, polling re-entry) must not stack duplicate entries. Note that
-  // pushState itself fires neither hashchange nor popstate, so writing here
-  // cannot re-trigger the hashchange handler.
-  if (!(opts && opts.fromHash) && history.pushState && location.hash !== '#' + name) {
-    if (opts && opts.replace) history.replaceState(null, '', '#' + name);
-    else history.pushState(null, '', '#' + name);
+  // trail. The entry is the CANONICAL #page/active-subtab so traversing back
+  // to it restores the sub-tab too. Same-page guard: re-selecting the page
+  // already in the hash (tab re-click, polling re-entry) must not stack
+  // duplicate entries. Note that pushState itself fires neither hashchange
+  // nor popstate, so writing here cannot re-trigger the hashchange handler.
+  if (!(opts && opts.fromHash) && hashWriteDepth === 0 && history.pushState) {
+    const target = canonicalPageHash(name);
+    if (location.hash !== target) {
+      if (opts && opts.replace) history.replaceState(null, '', target);
+      else history.pushState(null, '', target);
+    }
   }
   // Remember the user's last tab so a fresh visit (no hash, no bookmark)
   // lands them back where they were instead of always on Overview.
@@ -47,15 +199,6 @@ function selectPage(name, opts) {
   if (name === 'evals') refreshActiveEvalSubTab();
   if (name === 'distill') refreshActiveDistillSubTab();
   if (name === 'terminal' && typeof initTerminalPage === 'function') initTerminalPage();
-  // Landing on an EMPTY queue helps nobody — if nothing ever ran and nothing
-  // is queued, the person opening Training came to train. Take them to the
-  // form. Requires a LOADED cache: an unfetched queue is unknown, not empty.
-  if (name === 'training') {
-    const tj = (typeof trainingJobsCache !== 'undefined') ? trainingJobsCache : null;
-    const queueEmpty = !!tj && !tj.running && (!tj.queued || !tj.queued.length) && (!tj.completed || !tj.completed.length);
-    const queueTabActive = document.getElementById('training-tab-queue')?.classList.contains('active');
-    if (queueEmpty && queueTabActive) document.getElementById('training-tab-sft')?.click();
-  }
 }
 
 // Trigger the refresh function matching the currently-active Evals sub-tab.
@@ -74,16 +217,153 @@ function refreshActiveEvalSubTab() {
 document.querySelectorAll('.primary-tab').forEach(tab => {
   tab.addEventListener('click', () => selectPage(tab.dataset.page));
 });
-// Prefer the URL hash (bookmarkable), then the user's last tab from
-// localStorage, then Overview.
-let initialPage = (location.hash || '').slice(1);
+// Prefer the URL hash (bookmarkable; first segment = page), then the user's
+// last tab from localStorage, then Overview. Sub-tab and drill-id segments
+// are applied by applyHashRoute at the END of the file, once every tablist
+// and modal open fn is wired; this first pass is hash-suppressed so the
+// deep link survives untouched in the URL until then.
+let initialPage = (location.hash || '').slice(1).split('/')[0];
 if (!initialPage) {
   try { initialPage = localStorage.getItem('kiln.lastPage') || ''; } catch {}
 }
 if (!PRIMARY_PAGES.includes(initialPage)) {
   initialPage = 'overview';
 }
-selectPage(initialPage, { replace: true });
+withHashWritesSuppressed(() => selectPage(initialPage, { replace: true }));
+
+// Parse location.hash against the full deep-link grammar and drive the UI to
+// match: page → sub-tab → drill modal (closing any modal whose id segment is
+// gone). Shared by the ONE hashchange listener below and the boot pass at the
+// end of the file. Writes back to the URL only as replaceState repairs — this
+// function never mints history entries, it consumes them.
+function applyHashRoute(opts = {}) {
+  const raw = (location.hash || '').slice(1);
+  const segs = raw.split('/').map(s => { try { return decodeURIComponent(s); } catch { return s; } });
+  const name = segs[0];
+  if (!PRIMARY_PAGES.includes(name)) {
+    // In-page anchor (e.g. the "Skip to content" link targets #content):
+    // leave the browser's native scroll/focus behavior alone.
+    if (raw && segs.length === 1 && document.getElementById(raw)) return;
+    if (opts.boot) {
+      // No (or junk) hash at boot: the localStorage landing above already
+      // picked the page — just canonicalize the URL in place.
+      const cur = document.querySelector('.page.active')?.id?.replace(/^page-/, '') || 'overview';
+      if (history.replaceState) history.replaceState(null, '', canonicalPageHash(cur));
+      withHashWritesSuppressed(() => syncDrillModalsToRoute(null));
+      return;
+    }
+    // Unknown/garbage hash: land on Overview and repair the URL in place —
+    // replaceState, NOT pushState, so the junk never survives as its own
+    // history entry for Back to trip over.
+    if (history.replaceState) history.replaceState(null, '', '#overview');
+    withHashWritesSuppressed(() => {
+      selectPage('overview', { fromHash: true });
+      syncDrillModalsToRoute(null);
+    });
+    return;
+  }
+  let sub = segs[1] || null;
+  let id = segs[2] || null;
+  let drill = null; // { kind: 'eval'|'train'|'adapter'|'request', id }
+  withHashWritesSuppressed(() => {
+    // Re-activating an already-active page would re-fire its lazy refreshes
+    // on every sub-tab/modal traversal — only switch when actually needed.
+    if (!document.getElementById('page-' + name)?.classList.contains('active')) {
+      selectPage(name, { fromHash: true });
+    }
+    if (name === 'training' || name === 'evals' || name === 'distill') {
+      const btn = sub ? subTabButton(name, sub) : null;
+      if (btn) {
+        if (!btn.classList.contains('active')) btn.click();
+      } else {
+        // Missing or junk sub-tab segment: keep the page (and whatever
+        // sub-tab is already showing) and let the repair below canonicalize.
+        sub = activeSubTab(name);
+        id = null;
+      }
+      // Drill ids only ride on training/queue and evals/jobs.
+      if (name === 'training' && sub === 'queue' && id) drill = { kind: 'train', id };
+      else if (name === 'evals' && sub === 'jobs' && id) drill = { kind: 'eval', id };
+      else id = null;
+    } else if (name === 'adapters' && sub) {
+      // #adapters/{name} — the second segment is a drill id, not a sub-tab.
+      drill = { kind: 'adapter', id: sub };
+      id = null;
+    } else if (name === 'overview' && sub === 'requests' && id) {
+      drill = { kind: 'request', id };
+    } else {
+      // Pages without segments (overview/adapters/playground/terminal), or
+      // segment shapes outside the grammar: degrade to the page itself.
+      sub = null;
+      id = null;
+    }
+    syncDrillModalsToRoute(drill);
+  });
+  // Repair the URL in place to the canonical spelling of what actually
+  // activated (drops junk segments). Never mints an entry.
+  const canonical = '#' + name
+    + (drill && drill.kind === 'adapter' ? '/' + encodeURIComponent(drill.id) : (sub ? '/' + sub : ''))
+    + (drill && drill.kind !== 'adapter' ? '/' + encodeURIComponent(drill.id) : '');
+  if (history.replaceState && location.hash !== canonical) history.replaceState(null, '', canonical);
+}
+
+// Open/close the four drill modals so they match the route. Closes here are
+// direct (never history.back()): this runs FROM a traversal or boot, where
+// the URL is already where it should be. Opens run hash-suppressed by the
+// caller, so the open fns' own pushState helpers stay quiet. Each modal's
+// open fn fetches its own data by id and degrades gracefully (error body or
+// toast-and-close), so routing ahead of the first poll is safe; the one
+// exception is the request drill, whose data source is the polled
+// recent-requests ring — when that hasn't loaded yet the open is DEFERRED to
+// the first poll (pendingRequestDrillId in pollRecentRequests) instead of
+// flashing a false "no record for that id".
+function syncDrillModalsToRoute(drill) {
+  const want = drill || {};
+  const evalModal = document.getElementById('eval-drill-modal');
+  if (evalModal) {
+    const openId = evalModal.hidden ? null : (evalDrillJobId || null);
+    if (want.kind === 'eval') {
+      if (openId !== want.id) openDrillModal(want.id);
+    } else if (openId !== null) {
+      modalHashPushed.eval = false;
+      closeDrillModal();
+    }
+  }
+  const trainModal = document.getElementById('train-drill-modal');
+  if (trainModal) {
+    const openId = trainModal.hidden ? null : (trainDrillJobId || null);
+    if (want.kind === 'train') {
+      if (openId !== want.id) openTrainDrillModal(want.id);
+    } else if (openId !== null) {
+      modalHashPushed.train = false;
+      closeTrainDrillModal();
+    }
+  }
+  const adapterModal = document.getElementById('adapter-drill-modal');
+  if (adapterModal) {
+    const openId = adapterModal.hidden ? null : (adapterDrillName || null);
+    if (want.kind === 'adapter') {
+      if (openId !== want.id) openAdapterDrillModal(want.id);
+    } else if (openId !== null) {
+      modalHashPushed.adapter = false;
+      closeAdapterDrillModal();
+    }
+  }
+  const requestModal = document.getElementById('request-drill-modal');
+  if (requestModal) {
+    const openId = requestModal.hidden ? null : (requestModal.dataset.requestId || null);
+    if (want.kind === 'request') {
+      if (!recentRequestsLoaded) pendingRequestDrillId = want.id;
+      else if (openId !== want.id) openRequestDrillModal(want.id);
+    } else {
+      pendingRequestDrillId = null;
+      if (openId !== null) {
+        modalHashPushed.request = false;
+        closeRequestDrillModal();
+      }
+    }
+  }
+}
 
 // Browser Back/Forward + live hash edits re-resolve through the same
 // whitelist as boot. ONE hashchange listener suffices — no separate
@@ -94,25 +374,11 @@ selectPage(initialPage, { replace: true });
 //     differ only by fragment, and fragment-differing same-document
 //     traversals fire hashchange per spec);
 //   - location.hash = '#x' assignment fires BOTH.
-// Every entry selectPage creates differs by fragment (same-page guard
-// above), so hashchange covers every traversal we can produce, and it is
+// Every entry the writers above create differs by fragment (same-hash
+// guards), so hashchange covers every traversal we can produce, and it is
 // the spec-guaranteed event for address-bar hash edits. Listening to both
 // events would double-invoke this handler on every Back/Forward.
-window.addEventListener('hashchange', () => {
-  const name = (location.hash || '').slice(1);
-  if (PRIMARY_PAGES.includes(name)) {
-    selectPage(name, { fromHash: true });
-    return;
-  }
-  // In-page anchor (e.g. the "Skip to content" link targets #content):
-  // leave the browser's native scroll/focus behavior alone.
-  if (name && document.getElementById(name)) return;
-  // Unknown/garbage hash: land on Overview and repair the URL in place —
-  // replaceState, NOT pushState, so the junk never survives as its own
-  // history entry for Back to trip over.
-  if (history.replaceState) history.replaceState(null, '', '#overview');
-  selectPage('overview', { fromHash: true });
-});
+window.addEventListener('hashchange', () => applyHashRoute({ fromHash: true }));
 
 // --- Toast Notifications ---
 function toast(msg, type) {
@@ -1090,6 +1356,11 @@ function selectTrainingTab(tab, focus = false) {
   });
   if (focus) tab.focus();
   try { localStorage.setItem('kiln.trainingSubTab', tab.dataset.tab); } catch {}
+  // Deep-link hash for the sub-tab (no-op when this activation is itself
+  // hash-driven, or when Training isn't the frontmost page). Living here —
+  // not in the click handler — covers arrow-key navigation and programmatic
+  // .click() callers too.
+  pushSubTabHash('training');
 }
 
 document.querySelectorAll('[data-training-tabs] [role="tab"]').forEach(tab => {
@@ -1110,12 +1381,14 @@ document.querySelectorAll('[data-training-tabs] [role="tab"]').forEach(tab => {
 });
 
 // Restore last visited training sub-tab so users return to Submit SFT
-// (or GRPO) instead of always-Queue after a refresh.
+// (or GRPO) instead of always-Queue after a refresh. Hash-suppressed: this
+// is the NO-HASH fallback — when the URL carries an explicit sub-tab the
+// boot route pass applies it after this and wins.
 try {
   const lastTrainingSubTab = localStorage.getItem('kiln.trainingSubTab');
   if (lastTrainingSubTab && lastTrainingSubTab !== 'queue') {
     const target = document.getElementById(`training-tab-${lastTrainingSubTab}`);
-    if (target) selectTrainingTab(target);
+    if (target) withHashWritesSuppressed(() => selectTrainingTab(target));
   }
 } catch {}
 
@@ -1469,6 +1742,11 @@ async function pollDecodePerf() {
 
 // --- Recent Requests ---
 let recentRequestsCache = [];
+// First /v1/stats/recent-requests poll landed? A #overview/requests/{id}
+// deep link defers its modal open until then (pendingRequestDrillId), so a
+// boot deep link doesn't flash "no record" before the ring ever loaded.
+let recentRequestsLoaded = false;
+let pendingRequestDrillId = null;
 // The ids currently shown in Recent requests, in display order, AFTER the active
 // agent/status/text filters. The inspect modal's prev/next steps through THIS —
 // so under "Needs attention" you walk only the problem requests.
@@ -1784,6 +2062,9 @@ function formatUnixMs(ms) {
 function openRequestDrillModal(id) {
   const modal = document.getElementById('request-drill-modal');
   if (!modal) return;
+  // Prev/next triage inside the open modal replaces the id segment instead
+  // of minting a history entry per arrow press.
+  modalHashOnOpen('request', '#overview/requests/' + encodeURIComponent(id), !modal.hidden);
   const r = findRecentRequest(id);
   const titleEl = document.getElementById('request-drill-title');
   const metaEl = document.getElementById('request-drill-meta');
@@ -1930,6 +2211,13 @@ function closeRequestDrillModal() {
   delete modal.dataset.requestId;
   document.body.style.overflow = '';
 }
+// User-initiated close (X / backdrop / Esc): walk history per the deep-link
+// state machine. Flows that close on the way SOMEWHERE ELSE (Replay,
+// Verify A/B) keep calling closeRequestDrillModal directly so Back returns
+// to the modal they left.
+function userCloseRequestDrillModal() {
+  modalHashOnUserClose('request', '#overview', closeRequestDrillModal);
+}
 
 // Load the Playground in compare mode with a prompt and a before/after adapter
 // pair, ready to Send. Used by the drill modal's "Verify A/B" to prove a fix.
@@ -1969,9 +2257,9 @@ function setupCompareReplay(prompt, adapterA, adapterB) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('request-drill-close')?.addEventListener('click', closeRequestDrillModal);
+  document.getElementById('request-drill-close')?.addEventListener('click', userCloseRequestDrillModal);
   document.getElementById('request-drill-modal')?.addEventListener('click', (ev) => {
-    if (ev.target.id === 'request-drill-modal') closeRequestDrillModal();
+    if (ev.target.id === 'request-drill-modal') userCloseRequestDrillModal();
   });
   document.getElementById('request-drill-prev')?.addEventListener('click', () => navigateRequestDrill(-1));
   document.getElementById('request-drill-next')?.addEventListener('click', () => navigateRequestDrill(1));
@@ -2056,7 +2344,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.addEventListener('keydown', (ev) => {
     const m = document.getElementById('request-drill-modal');
     if (!m || m.hidden) return;
-    if (ev.key === 'Escape') { closeRequestDrillModal(); return; }
+    if (ev.key === 'Escape') { userCloseRequestDrillModal(); return; }
     // Arrow-key triage through the filtered list — but not while typing in the
     // "Use as correction" editor or any field.
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test((ev.target.tagName || '')) || ev.target.isContentEditable;
@@ -2159,6 +2447,15 @@ async function pollRecentRequests() {
   try {
     const data = await api('/v1/stats/recent-requests');
     recentRequestsCache = Array.isArray(data) ? data : [];
+    recentRequestsLoaded = true;
+    // A #overview/requests/{id} deep link that arrived before the ring
+    // loaded parked its id here — open it now that lookup is meaningful
+    // (still hash-suppressed: the id is already in the URL).
+    if (pendingRequestDrillId) {
+      const wantId = pendingRequestDrillId;
+      pendingRequestDrillId = null;
+      withHashWritesSuppressed(() => openRequestDrillModal(wantId));
+    }
     updateConnectSummary(recentRequestsCache);
     updateFlywheel();
     refreshRequestHealth();
@@ -4970,6 +5267,9 @@ function selectEvalsTab(tab, focus = false) {
   if (focus) tab.focus();
   const which = tab.dataset.tab;
   try { localStorage.setItem('kiln.evalsSubTab', which); } catch {}
+  // Deep-link hash for the sub-tab — covers clicks, arrow keys, and every
+  // programmatic .click() caller (cmdk, quick actions, "View result" toasts).
+  pushSubTabHash('evals');
   if (which === 'datasets') refreshDatasets();
   else if (which === 'suites') refreshSuites();
   else if (which === 'jobs') refreshEvalJobs();
@@ -4991,11 +5291,13 @@ document.querySelectorAll('[data-evals-tabs] [role="tab"]').forEach(tab => {
 
 // Restore the last visited eval sub-tab so users return to Jobs (or
 // Suites / Judgments) instead of always-Datasets after a refresh.
+// Hash-suppressed: the no-hash fallback — an explicit hash sub-tab is
+// applied after this in the boot route pass and wins.
 try {
   const lastEvalsSubTab = localStorage.getItem('kiln.evalsSubTab');
   if (lastEvalsSubTab && lastEvalsSubTab !== 'datasets') {
     const target = document.getElementById(`evals-tab-${lastEvalsSubTab}`);
-    if (target) selectEvalsTab(target);
+    if (target) withHashWritesSuppressed(() => selectEvalsTab(target));
   }
 } catch {}
 
@@ -5942,6 +6244,9 @@ function renderJobCard(j) {
 /* ---------- Drill-in modal ---------- */
 
 let drillJob = null;
+// The job id the drill modal is showing (set before the fetch lands, unlike
+// drillJob) — the deep-link router diffs against it.
+let evalDrillJobId = null;
 let drillFilter = 'all';
 let drillSearch = '';
 let drillSelectedRun = 0;
@@ -5954,6 +6259,8 @@ let drillExamplesById = new Map();
 let drillSuiteCacheKey = null;
 
 async function openDrillModal(jobId) {
+  evalDrillJobId = jobId;
+  modalHashOnOpen('eval', '#evals/jobs/' + encodeURIComponent(jobId));
   drillFilter = 'all';
   drillSearch = '';
   drillSelectedRun = 0;
@@ -5980,10 +6287,18 @@ function closeDrillModal() {
   document.body.style.overflow = '';
   document.getElementById('drill-raw-block')?.remove();
   drillJob = null;
+  evalDrillJobId = null;
   drillSelectedOutcome = null;
   drillSuiteCacheKey = null;
   drillExamplesById = new Map();
   if (drillPollHandle) { clearInterval(drillPollHandle); drillPollHandle = null; }
+}
+// User-initiated close (X / backdrop / Esc / Cancel-Delete): walk history per
+// the deep-link state machine. "Replay in playground" and re-run keep calling
+// closeDrillModal directly — they navigate FORWARD from the modal, so its
+// entry should stay behind them for Back.
+function userCloseDrillModal() {
+  modalHashOnUserClose('eval', '#evals/jobs', closeDrillModal);
 }
 
 async function fetchDrillJob(jobId, preserveSelection = false) {
@@ -6023,7 +6338,9 @@ async function fetchDrillJob(jobId, preserveSelection = false) {
     renderDrillModal(preserveSelection);
   } catch (e) {
     toast('Failed to load job: ' + e.message, 'err');
-    closeDrillModal();
+    // userClose (not plain close): consumes/repairs the hash entry too, so a
+    // junk #evals/jobs/{id} deep link degrades to #evals/jobs cleanly.
+    userCloseDrillModal();
   }
 }
 
@@ -6375,9 +6692,9 @@ function renderOutcomeDetail(o) {
   });
 }
 
-document.getElementById('drill-close')?.addEventListener('click', closeDrillModal);
+document.getElementById('drill-close')?.addEventListener('click', userCloseDrillModal);
 document.getElementById('eval-drill-modal')?.addEventListener('click', ev => {
-  if (ev.target.id === 'eval-drill-modal') closeDrillModal();
+  if (ev.target.id === 'eval-drill-modal') userCloseDrillModal();
 });
 // Raw JSON toggle — same pattern as the request drill modal's `raw` button:
 // click appends a pretty-printed <pre> of the cached job to the modal
@@ -6470,7 +6787,7 @@ document.getElementById('drill-cancel')?.addEventListener('click', async () => {
   try {
     await api('/v1/eval/jobs/' + encodeURIComponent(drillJob.job_id), { method: 'DELETE' });
     toast(mode === 'delete' ? 'Eval job deleted' : 'Cancelled eval job', 'ok');
-    closeDrillModal();
+    userCloseDrillModal();
     refreshEvalJobs();
   } catch (e) { toast((mode === 'delete' ? 'Delete' : 'Cancel') + ' failed: ' + e.message, 'err'); }
 });
@@ -6502,7 +6819,7 @@ document.addEventListener('keydown', ev => {
   const modalOpen = !document.getElementById('eval-drill-modal').hidden;
   if (!modalOpen) return;
   const tag = (ev.target.tagName || '').toUpperCase();
-  if (ev.key === 'Escape') { closeDrillModal(); return; }
+  if (ev.key === 'Escape') { userCloseDrillModal(); return; }
   // When focused in an input, only Esc and Cmd/Ctrl shortcuts fire.
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
   if (ev.key === '/') {
@@ -7728,6 +8045,7 @@ let adapterDrillIsActive = false;
 
 async function openAdapterDrillModal(name) {
   adapterDrillName = name;
+  modalHashOnOpen('adapter', '#adapters/' + encodeURIComponent(name));
   adapterDrillIsActive = false;
   document.getElementById('adapter-drill-modal').hidden = false;
   document.body.style.overflow = 'hidden';
@@ -7942,15 +8260,18 @@ function renderAdapterDrillBody(d) {
   </div>`;
 }
 
-document.getElementById('adapter-drill-close')?.addEventListener('click', () => {
+function closeAdapterDrillModal() {
+  adapterDrillName = null;
   document.getElementById('adapter-drill-modal').hidden = true;
   document.body.style.overflow = '';
-});
+}
+// User-initiated close: walk history per the deep-link state machine.
+function userCloseAdapterDrillModal() {
+  modalHashOnUserClose('adapter', '#adapters', closeAdapterDrillModal);
+}
+document.getElementById('adapter-drill-close')?.addEventListener('click', userCloseAdapterDrillModal);
 document.getElementById('adapter-drill-modal')?.addEventListener('click', ev => {
-  if (ev.target.id === 'adapter-drill-modal') {
-    document.getElementById('adapter-drill-modal').hidden = true;
-    document.body.style.overflow = '';
-  }
+  if (ev.target.id === 'adapter-drill-modal') userCloseAdapterDrillModal();
 });
 document.getElementById('adapter-drill-load')?.addEventListener('click', async () => {
   if (!adapterDrillName) return;
@@ -7964,8 +8285,7 @@ document.getElementById('adapter-drill-load')?.addEventListener('click', async (
       await api('/v1/adapters/load', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name }) });
       toast('Loaded ' + name, 'ok');
     }
-    document.getElementById('adapter-drill-modal').hidden = true;
-    document.body.style.overflow = '';
+    userCloseAdapterDrillModal();
     pollAdapters && pollAdapters();
   } catch (e) { toast(e.message, 'err'); }
 });
@@ -8036,8 +8356,7 @@ document.addEventListener('keydown', ev => {
 
 document.getElementById('adapter-drill-eval')?.addEventListener('click', () => {
   const name = adapterDrillName;
-  document.getElementById('adapter-drill-modal').hidden = true;
-  document.body.style.overflow = '';
+  userCloseAdapterDrillModal();
   if (name) openAdapterEvalModal(name);
 });
 
@@ -8060,6 +8379,7 @@ const TRAIN_TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled']);
 
 async function openTrainDrillModal(jobId) {
   trainDrillJobId = jobId;
+  modalHashOnOpen('train', '#training/queue/' + encodeURIComponent(jobId));
   trainDrillLastKey = null;
   document.getElementById('train-drill-modal').hidden = false;
   document.body.style.overflow = 'hidden';
@@ -8084,6 +8404,13 @@ function closeTrainDrillModal() {
   document.getElementById('train-drill-modal').hidden = true;
   document.body.style.overflow = '';
   if (trainDrillPollHandle) { clearInterval(trainDrillPollHandle); trainDrillPollHandle = null; }
+}
+// User-initiated close (X / backdrop / Delete): walk history per the
+// deep-link state machine. The linked-eval jump keeps calling
+// closeTrainDrillModal directly — it navigates FORWARD to the eval drill,
+// so Back should return here.
+function userCloseTrainDrillModal() {
+  modalHashOnUserClose('train', '#training/queue', closeTrainDrillModal);
 }
 
 async function fetchTrainDrill() {
@@ -8244,9 +8571,9 @@ function renderTrainDrillBody(j) {
   return html;
 }
 
-document.getElementById('train-drill-close')?.addEventListener('click', closeTrainDrillModal);
+document.getElementById('train-drill-close')?.addEventListener('click', userCloseTrainDrillModal);
 document.getElementById('train-drill-modal')?.addEventListener('click', ev => {
-  if (ev.target.id === 'train-drill-modal') closeTrainDrillModal();
+  if (ev.target.id === 'train-drill-modal') userCloseTrainDrillModal();
 });
 document.getElementById('train-drill-stop')?.addEventListener('click', async () => {
   const stopBtn = document.getElementById('train-drill-stop');
@@ -8273,7 +8600,7 @@ document.getElementById('train-drill-delete')?.addEventListener('click', async (
   try {
     await api('/v1/train/jobs/' + encodeURIComponent(jobId), { method: 'DELETE' });
     toast('Training job deleted', 'ok');
-    closeTrainDrillModal();
+    userCloseTrainDrillModal();
     lastTrainingKey = null; // bypass change-detection so re-render happens
     pollTraining();
   } catch (e) {
@@ -8896,13 +9223,17 @@ setInterval(() => {
     });
     refreshActiveDistillSubTab();
     try { localStorage.setItem('kiln.distill.lastTab', wanted); } catch {}
+    // Deep-link hash for the sub-tab (no-op for hash-driven activation and
+    // for the suppressed localStorage restore below).
+    pushSubTabHash('distill');
   });
-  // Restore the last-used sub-tab.
+  // Restore the last-used sub-tab. Hash-suppressed: the no-hash fallback —
+  // an explicit hash sub-tab is applied after this in the boot route pass.
   try {
     const last = localStorage.getItem('kiln.distill.lastTab');
     if (last) {
       const btn = root.querySelector(`button.tab[data-tab="${last}"]`);
-      if (btn) btn.click();
+      if (btn) withHashWritesSuppressed(() => btn.click());
     }
   } catch {}
 })();
@@ -9419,5 +9750,15 @@ function formatBytes(n) {
   if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
   return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
 }
+
+/* =====================================================================
+   Boot pass 2: apply the full deep-link route (#page/subtab/id).
+   Runs LAST on purpose — every tablist, localStorage restore, and modal
+   open fn above is wired by now, so an explicit hash sub-tab overrides
+   the restores (the hash always wins) and drill ids can open their
+   modals. Only replaceState repairs happen here; the boot landing never
+   mints a history entry, so Back still exits the dashboard.
+   ===================================================================== */
+applyHashRoute({ boot: true });
 
 })();
