@@ -654,13 +654,21 @@ function updateCorrFoot() {
   const btn = document.getElementById('corr-train');
   if (btn) btn.disabled = ready === 0;
 }
+// The one corrections→SFT transform. Both consumers — the Train button on the
+// Corrections card and "Build a dataset from your corrections" on the Evals
+// Datasets tab — go through here, so a correction always becomes the same
+// (user prompt, ideal answer) chat row whether it trains directly or lands in
+// a dataset first.
+function correctionsToSftExamples(corrections) {
+  return corrections.map(c => ({ messages: [{ role: 'user', content: c.user }, { role: 'assistant', content: c.ideal }] }));
+}
 async function trainFromCorrections() {
   const trainable = correctionsBasket.filter(corrTrainable);
   if (!trainable.length) { toast('Write at least one ideal answer (different from pi’s) before training', 'err'); return; }
   const nameInput = document.getElementById('corr-adapter-name');
   const name = ((nameInput && nameInput.value) || '').trim() || 'codebase-corrections';
   if (!/^[A-Za-z0-9._-]+$/.test(name)) { toast('Adapter name: letters, digits, . _ - only', 'err'); nameInput && nameInput.focus(); return; }
-  const examples = trainable.map(c => ({ messages: [{ role: 'user', content: c.user }, { role: 'assistant', content: c.ideal }] }));
+  const examples = correctionsToSftExamples(trainable);
   const btn = document.getElementById('corr-train');
   if (btn) btn.disabled = true;
   try {
@@ -4779,11 +4787,26 @@ async function refreshDatasets() {
     const el = document.getElementById('datasets-list');
     if (!datasets.length) {
       el.className = 'eval-empty';
-      setListHtml(el, 'empty', `
+      // The corrections CTA tracks the basket: enabled the moment a finished
+      // correction exists. Key on that count so the 1.5s poll repaints the
+      // button state as corrections arrive (or get their ideal answers).
+      const corrReady = (typeof correctionsBasket !== 'undefined' && typeof corrTrainable === 'function')
+        ? correctionsBasket.filter(corrTrainable).length : 0;
+      const corrHint = corrReady > 0
+        ? `Turn your ${corrReady} finished correction${corrReady === 1 ? '' : 's'} into a dataset you can build evals from`
+        : 'Nothing to build yet — when pi gives a wrong answer, add it to Corrections (Overview page) and write the ideal answer first';
+      const wrote = setListHtml(el, 'empty:' + corrReady, `
         <div class="eval-empty-icon"><svg class="icn"><use href="#i-folder"></use></svg></div>
         <div class="eval-empty-title">No datasets yet</div>
-        <div class="eval-empty-body">Upload an SFT JSONL above and Kiln will let you preview, sample, and synthesize an eval suite from it in seconds.</div>
-        <button class="eval-empty-cta" type="button" onclick="document.getElementById('dataset-name').focus()">Upload your first dataset</button>`);
+        <div class="eval-empty-body">A dataset is a list of conversations — the raw material Kiln turns into eval suites and training runs. Upload your own above, or start with one of these:</div>
+        <div style="display:flex; gap:8px; justify-content:center; flex-wrap:wrap;">
+          <button class="eval-empty-cta" type="button" id="use-sample-dataset" title="Adds a small built-in dataset of coding-agent conversations — tool calls, code review, commit messages — so you can try the eval flow without bringing your own data">Try a sample dataset</button>
+          <button class="eval-empty-cta" type="button" id="dataset-from-corrections" ${corrReady > 0 ? '' : 'disabled '}title="${escapeHtml(corrHint)}">Build a dataset from your corrections</button>
+        </div>`);
+      if (wrote) {
+        document.getElementById('use-sample-dataset')?.addEventListener('click', ev => uploadSampleDataset(ev.currentTarget));
+        document.getElementById('dataset-from-corrections')?.addEventListener('click', ev => buildDatasetFromCorrections(ev.currentTarget));
+      }
       return;
     }
     el.className = '';
@@ -5013,6 +5036,25 @@ document.getElementById('synth-save-and-run-btn')?.addEventListener('click', asy
   await doSynthesize([evalActiveAdapter || '']);
 });
 
+// Shared multipart POST for every dataset-upload surface (the form, the
+// sample-dataset CTA, the corrections builder). Matches the server contract:
+// fields `name`, `format`, optional `description`, and `file` (JSONL bytes).
+async function postDatasetUpload(name, format, description, fileOrBlob) {
+  const fd = new FormData();
+  fd.append('name', name);
+  fd.append('format', format);
+  if (description) fd.append('description', description);
+  fd.append('file', fileOrBlob, fileOrBlob.name || name + '.jsonl');
+  const res = await fetch('/v1/eval/datasets/upload', { method: 'POST', body: fd });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    const e = new Error(err.error?.message || `HTTP ${res.status}`);
+    e.code = err.error?.code;
+    throw e;
+  }
+  return res.json();
+}
+
 document.getElementById('dataset-upload-form')?.addEventListener('submit', async ev => {
   ev.preventDefault();
   const name = document.getElementById('dataset-name').value.trim();
@@ -5020,18 +5062,8 @@ document.getElementById('dataset-upload-form')?.addEventListener('submit', async
   const description = document.getElementById('dataset-description').value.trim();
   const file = document.getElementById('dataset-file').files[0];
   if (!name || !file) { toast('Name and file are required', 'err'); return; }
-  const fd = new FormData();
-  fd.append('name', name);
-  fd.append('format', format);
-  if (description) fd.append('description', description);
-  fd.append('file', file);
   try {
-    const res = await fetch('/v1/eval/datasets/upload', { method: 'POST', body: fd });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error?.message || `HTTP ${res.status}`);
-    }
-    const m = await res.json();
+    const m = await postDatasetUpload(name, format, description, file);
     toast(`Uploaded "${m.name}" (${m.num_rows.toLocaleString()} rows)`, 'ok');
     document.getElementById('dataset-upload-form').reset();
     refreshDatasets();
@@ -5045,6 +5077,124 @@ document.getElementById('dataset-upload-form')?.addEventListener('submit', async
     }
   } catch (e) { toast('Upload failed: ' + e.message, 'err'); }
 });
+
+/* ---------- First-run CTAs: sample dataset + corrections → dataset ---------- */
+
+// A small built-in sft_chat dataset themed on realistic coding-agent traffic
+// (what pi actually sends Kiln: tool calls, code review, commit messages,
+// test writing) so "Run an eval" works in the first five minutes without
+// bringing your own data. Every row matches the server's SftConversation
+// contract exactly: messages[] of {role, content}, OpenAI-style tool_calls
+// on assistant turns, and name/tool_call_id on tool replies.
+const SAMPLE_DATASET_NAME = 'sample-coding-agent';
+function sampleDatasetRows() {
+  const call = (id, name, args) => ({ id, type: 'function', function: { name, arguments: JSON.stringify(args) } });
+  return [
+    { messages: [
+      { role: 'user', content: 'What files import the deprecated `legacy_client` module?' },
+      { role: 'assistant', content: '', tool_calls: [call('call_1', 'grep_repo', { pattern: 'legacy_client', glob: '**/*.rs' })] },
+      { role: 'tool', name: 'grep_repo', tool_call_id: 'call_1', content: 'src/api/handlers.rs:12\nsrc/sync/worker.rs:7\ntests/integration/client_test.rs:3' },
+      { role: 'assistant', content: 'Three files still import `legacy_client`: src/api/handlers.rs, src/sync/worker.rs, and tests/integration/client_test.rs. The two src/ call sites need migrating to `TokenStore` before the module can be removed; the test can be deleted with it.' },
+    ] },
+    { messages: [
+      { role: 'user', content: 'Run the cache tests and tell me if anything fails.' },
+      { role: 'assistant', content: '', tool_calls: [call('call_2', 'run_tests', { package: 'cache', filter: '' })] },
+      { role: 'tool', name: 'run_tests', tool_call_id: 'call_2', content: 'running 14 tests\ntest read_through_hit ... ok\ntest eviction_lru ... FAILED\n13 passed; 1 failed' },
+      { role: 'assistant', content: 'One failure: `eviction_lru`. The test expects the least-recently-used entry to be evicted first, but the current implementation evicts by insertion order. The fix is to touch the entry timestamp on read, not just on write.' },
+    ] },
+    { messages: [
+      { role: 'user', content: 'What does the retry helper in src/net/retry.rs actually do?' },
+      { role: 'assistant', content: '', tool_calls: [call('call_3', 'read_file', { path: 'src/net/retry.rs' })] },
+      { role: 'tool', name: 'read_file', tool_call_id: 'call_3', content: 'pub async fn with_retry<F, T>(op: F, max: u32) -> Result<T> { /* exponential backoff, jitter 0-50ms, caps at 5s */ }' },
+      { role: 'assistant', content: '`with_retry` wraps an async operation with exponential backoff: it retries up to `max` times, doubling the delay each attempt with 0-50ms of jitter, capped at 5 seconds per wait. Errors from the final attempt propagate to the caller unchanged.' },
+    ] },
+    { messages: [
+      { role: 'user', content: 'Generate a conventional-commit message for this change: swapped the blocking Mutex for an async RwLock in cache.rs so reads no longer serialize.' },
+      { role: 'assistant', content: 'fix(cache): replace blocking Mutex with async RwLock so concurrent reads no longer serialize' },
+    ] },
+    { messages: [
+      { role: 'user', content: 'Review this diff and flag anything risky: the PR holds a `.read()` guard across an `await` on the network fetch in cache.rs line 88.' },
+      { role: 'assistant', content: 'Risky: holding the RwLock read guard across the awaited network fetch blocks every writer for the full request latency, and can deadlock if the fetch path ever takes the write lock. Scope the guard to the lookup only — clone the value out, drop the guard, then await the fetch.' },
+    ] },
+    { messages: [
+      { role: 'user', content: 'How do I store handlers with different concrete types in one Vec in Rust?' },
+      { role: 'assistant', content: 'Use trait objects: define a common trait and store boxed instances — `Vec<Box<dyn Handler>>`. Each handler implements `Handler`, and you push `Box::new(MyHandler)` into the vec. If the handlers are cloned or shared across threads, use `Vec<Arc<dyn Handler + Send + Sync>>` instead.' },
+    ] },
+    { messages: [
+      { role: 'user', content: 'Write a unit test for the rate limiter covering burst then steady-state.' },
+      { role: 'assistant', content: '#[tokio::test]\nasync fn limiter_allows_burst_then_throttles() {\n    let lim = RateLimiter::new(5, Duration::from_secs(1));\n    for _ in 0..5 {\n        assert!(lim.try_acquire());\n    }\n    assert!(!lim.try_acquire(), "burst budget should be exhausted");\n    tokio::time::sleep(Duration::from_secs(1)).await;\n    assert!(lim.try_acquire(), "tokens should refill after the window");\n}' },
+    ] },
+    { messages: [
+      { role: 'user', content: 'Explain what this query does: SELECT user_id, COUNT(*) AS n FROM events WHERE ts > now() - interval \'7 days\' GROUP BY user_id HAVING COUNT(*) > 100;' },
+      { role: 'assistant', content: 'It finds heavy users from the last week: it filters `events` to rows newer than 7 days, groups them by `user_id`, counts each user\'s events, and keeps only users with more than 100 events. The result is one row per heavy user with their event count `n`.' },
+    ] },
+    { messages: [
+      { role: 'user', content: 'Why would the integration test `flaky_reconnect` fail intermittently but pass on retry?' },
+      { role: 'assistant', content: 'The test asserts reconnection within 100ms, but the client\'s backoff adds random jitter that can push the first retry to ~150ms under load. Either widen the assertion window to cover worst-case jitter or inject a deterministic backoff in tests.' },
+    ] },
+    { messages: [
+      { role: 'system', content: 'You are a careful coding agent working in a Rust codebase.' },
+      { role: 'user', content: 'Refactor src/auth/session.rs to use the new TokenStore trait. What is your plan?' },
+      { role: 'assistant', content: 'Plan: 1) add a `store: Arc<dyn TokenStore>` field to `Session` and thread it through `Session::new`; 2) replace the three direct `token_db` calls in handlers/ with `self.store` methods; 3) keep the old constructor behind a deprecated shim for one release; 4) run the auth test suite and fix call sites until green.' },
+    ] },
+  ];
+}
+
+// "Try a sample dataset" — upload the embedded rows through the same endpoint
+// a real JSONL file goes through, then hand off to the eval-suite synthesizer
+// (that is the next step on the eval golden path).
+async function uploadSampleDataset(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const jsonl = sampleDatasetRows().map(r => JSON.stringify(r)).join('\n') + '\n';
+    const blob = new Blob([jsonl], { type: 'application/jsonl' });
+    const m = await postDatasetUpload(SAMPLE_DATASET_NAME, 'sft_chat',
+      'Built-in sample: coding-agent conversations with tool calls', blob);
+    refreshDatasets();
+    toast(`Sample dataset added (${m.num_rows} rows) — next: synthesize an eval suite from it`, 'ok');
+    openSynthPanel(m.name);
+  } catch (e) {
+    if (e.code === 'dataset_exists' || /already exists/i.test(e.message || '')) {
+      toast('The sample dataset is already here — synthesize an eval suite from it', 'info');
+      refreshDatasets();
+      openSynthPanel(SAMPLE_DATASET_NAME);
+    } else {
+      toast('Could not add the sample dataset: ' + e.message, 'err');
+      if (btn) btn.disabled = false;
+    }
+  }
+}
+
+// "Build a dataset from your corrections" — the durable corrections store
+// (your hand-written ideal answers, including rows already trained into an
+// adapter) becomes an sft_chat dataset via the SAME transform the Corrections
+// card trains with, so you can eval exactly what you taught.
+async function buildDatasetFromCorrections(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    let rows = correctionsBasket;
+    try {
+      const d = await api('/v1/corrections?include_trained=1');
+      if (d && Array.isArray(d.corrections)) rows = d.corrections;
+    } catch (_) { /* server store unreachable — the local basket still works */ }
+    const finished = rows.filter(corrTrainable);
+    if (!finished.length) {
+      toast('Your corrections need ideal answers first — open Corrections on the Overview page and write what pi should have said', 'info');
+      if (btn) btn.disabled = false;
+      return;
+    }
+    const jsonl = correctionsToSftExamples(finished).map(r => JSON.stringify(r)).join('\n') + '\n';
+    const name = 'corrections-' + new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
+    const m = await postDatasetUpload(name, 'sft_chat',
+      'Your corrections: each row pairs a prompt with the answer you said pi should have given', new Blob([jsonl], { type: 'application/jsonl' }));
+    refreshDatasets();
+    toast(`Dataset "${m.name}" built from ${finished.length} correction${finished.length === 1 ? '' : 's'} — next: synthesize an eval suite from it`, 'ok');
+    openSynthPanel(m.name);
+  } catch (e) {
+    toast('Could not build the dataset: ' + e.message, 'err');
+    if (btn) btn.disabled = false;
+  }
+}
 
 // Inline "uploaded — what next?" strip on the Datasets tab. Primary action is
 // training (that's why most people upload SFT/GRPO data); synthesizing an eval
@@ -5090,8 +5240,8 @@ async function refreshSuites() {
       setListHtml(el, 'empty', `
         <div class="eval-empty-icon"><svg class="icn"><use href="#i-target"></use></svg></div>
         <div class="eval-empty-title">No eval suites yet</div>
-        <div class="eval-empty-body">A suite is a named collection of (prompt, target, scorer) triplets. Synthesize one from a dataset, or POST an EvalSuite document to <code>/v1/eval/suites</code>.</div>
-        <button class="eval-empty-cta" type="button" onclick="document.getElementById('evals-tab-datasets').click()">Browse datasets</button>`);
+        <div class="eval-empty-body">A suite is a set of prompts with expected answers and a scorer — your model's report card. Create one from a dataset on the Datasets tab; no data yet? The built-in sample dataset works out of the box.</div>
+        <button class="eval-empty-cta" type="button" title="Synthesize a suite from any dataset — power users can also POST an EvalSuite document to /v1/eval/suites" onclick="document.getElementById('evals-tab-datasets').click()">Create a suite from a dataset</button>`);
       return;
     }
     el.className = '';
