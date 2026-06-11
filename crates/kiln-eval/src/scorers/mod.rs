@@ -210,6 +210,20 @@ impl Scorer {
             _ => false,
         }
     }
+
+    /// First judge adapter named anywhere in this scorer tree. The executor
+    /// batches judge-scored examples per judge adapter so the model swaps
+    /// once per suite run, not once per judge call. `None` = judge with the
+    /// base model (or the scorer doesn't pin an adapter).
+    pub fn judge_adapter(&self) -> Option<&str> {
+        match self {
+            Scorer::LlmJudge { judge_adapter, .. } => judge_adapter.as_deref(),
+            Scorer::All { scorers } | Scorer::Any { scorers } => {
+                scorers.iter().find_map(|s| s.judge_adapter())
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Scorer-level errors. Most scorers degrade to `EvalOutcomeKind::Invalid`

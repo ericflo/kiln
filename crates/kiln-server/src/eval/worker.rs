@@ -108,9 +108,16 @@ async fn run_one_job_with_generator(
         }
     }
 
-    // TODO(eval): swap in a `LiveJudgeRunner` once judge calls are plumbed.
-    // Until then judge scorers degrade to `Invalid` on every example.
-    let judge_runner: Arc<dyn JudgeRunner> = noop_judge_runner();
+    // Live judge on the real backend: LlmJudge scorers re-enter the model
+    // through the executor's deferred judge pass (batch adapter swap +
+    // blocking-thread scoring). Mock mode keeps the no-op runner — judge
+    // scorers degrade to Invalid there, honestly.
+    let judge_runner: Arc<dyn JudgeRunner> = match state.backend.as_ref() {
+        crate::state::ModelBackend::Real { .. } => Arc::new(
+            crate::eval::generator::LiveJudgeRunner::new(state.clone()),
+        ),
+        crate::state::ModelBackend::Mock { .. } => noop_judge_runner(),
+    };
 
     let progress_state = state.eval_jobs.clone();
     let progress_job_id = job_id.clone();

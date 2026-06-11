@@ -43,7 +43,8 @@ pub async fn run_suite_against_adapter(
     // Hoist the adapter swap out of the per-example loop. The previous
     // active adapter is restored at the end via the same call so a suite
     // run never leaves the model in an unexpected state, even when an
-    // example errors mid-loop.
+    // example errors mid-loop (including after the deferred judge pass
+    // swapped to a judge adapter).
     let previous_adapter = generator
         .set_adapter(adapter)
         .await
@@ -52,10 +53,10 @@ pub async fn run_suite_against_adapter(
         suite,
         adapter,
         generation_override,
-        generator.as_ref(),
+        generator.clone(),
         progress,
         cancelled,
-        judge_runner.as_ref(),
+        judge_runner,
     )
     .await;
     let _ = generator
@@ -67,14 +68,32 @@ pub async fn run_suite_against_adapter(
     result
 }
 
+/// A completion whose scoring needs the LLM judge. Pass 1 (generation)
+/// records it with a placeholder outcome; pass 2 swaps to the judge
+/// adapter ONCE per distinct judge and scores the batch on a blocking
+/// thread. Before this existed, every judge call would have swapped the
+/// model's adapter mid-suite (poisoning subsequent generations) — and in
+/// practice none of it ran at all, because the worker always installed the
+/// no-op judge.
+struct DeferredJudgeScore {
+    outcome_index: usize,
+    example_index: usize,
+    completion_idx: usize,
+    completion_text: String,
+    prompt_tokens: usize,
+    completion_tokens: usize,
+    latency_ms: f64,
+    schema_note: Option<String>,
+}
+
 async fn run_suite_inner(
     suite: &EvalSuite,
     adapter: Option<&str>,
     generation_override: Option<&EvalGenerationParams>,
-    generator: &dyn EvalGenerator,
+    generator: Arc<dyn EvalGenerator>,
     progress: Option<ProgressCallback>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
-    judge_runner: &dyn JudgeRunner,
+    judge_runner: Arc<dyn JudgeRunner>,
 ) -> Result<SuiteResult, EvalExecutionError> {
     let started_at = chrono::Utc::now();
     let start_instant = Instant::now();
@@ -89,6 +108,7 @@ async fn run_suite_inner(
     let mut running_pass: u32 = 0;
     let mut running_score: f32 = 0.0;
     let mut completions_seen: u32 = 0;
+    let mut deferred_judge: Vec<DeferredJudgeScore> = Vec::new();
 
     let total_completions: u32 = suite
         .examples
@@ -102,7 +122,7 @@ async fn run_suite_inner(
         })
         .sum();
 
-    for example in &suite.examples {
+    for (outcomes_example_index, example) in suite.examples.iter().enumerate() {
         if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
             break;
         }
@@ -210,54 +230,90 @@ async fn run_suite_inner(
                             }
                         }
                     }
-                    // A scorer error (missing target, bad regex, judge
-                    // unavailable) is a property of ONE example — record it
-                    // as that example's Error outcome instead of aborting
-                    // the run and discarding every completed outcome.
-                    let mut o = match score_completion(
-                        scorer,
-                        example,
-                        &completion.text,
-                        judge_runner,
-                    ) {
-                        Ok(o) => o,
-                        Err(e) => ExampleOutcome {
+                    let schema_note = pending_schema_detail.as_ref().and_then(|chk| {
+                        if chk.is_clean() {
+                            return None;
+                        }
+                        let mut parts = Vec::new();
+                        if !chk.missing_required.is_empty() {
+                            parts.push(format!("missing={}", chk.missing_required.join(",")));
+                        }
+                        if !chk.extra_unknown.is_empty() {
+                            parts.push(format!("extra={}", chk.extra_unknown.join(",")));
+                        }
+                        Some(format!(" || schema: {}", parts.join(" ")))
+                    });
+                    if scorer.requires_judge() {
+                        // Defer judge-backed scoring to pass 2: the judge
+                        // runs on a (possibly different) adapter, and
+                        // swapping mid-generation-loop would poison the
+                        // remaining generations. A placeholder Invalid
+                        // outcome holds the slot; pass 2 replaces it.
+                        deferred_judge.push(DeferredJudgeScore {
+                            outcome_index: outcomes.len(),
+                            example_index: outcomes_example_index,
+                            completion_idx,
+                            completion_text: completion.text.clone(),
+                            prompt_tokens: completion.prompt_tokens,
+                            completion_tokens: completion.completion_tokens,
+                            latency_ms: completion.latency_ms,
+                            schema_note: schema_note.clone(),
+                        });
+                        ExampleOutcome {
                             example_id: example_id.clone(),
                             completion_index: completion_idx,
                             completion_text: completion.text.clone(),
-                            kind: EvalOutcomeKind::Error,
+                            kind: EvalOutcomeKind::Invalid,
                             score: 0.0,
-                            detail: Some(format!("scorer error: {e}")),
-                            prompt_tokens: None,
-                            completion_tokens: None,
-                            latency_ms: None,
+                            detail: Some("awaiting judge pass".into()),
+                            prompt_tokens: Some(completion.prompt_tokens),
+                            completion_tokens: Some(completion.completion_tokens),
+                            latency_ms: Some(completion.latency_ms),
                             tags: example.tags.clone(),
                             metadata: example.metadata.clone(),
                             reasoning_text: None,
                             unclosed_thinking: false,
-                        },
-                    };
-                    o.completion_index = completion_idx;
-                    o.prompt_tokens = Some(completion.prompt_tokens);
-                    o.completion_tokens = Some(completion.completion_tokens);
-                    o.latency_ms = Some(completion.latency_ms);
-                    if let Some(chk) = pending_schema_detail.as_ref() {
-                        if !chk.is_clean() {
-                            let mut parts = Vec::new();
-                            if !chk.missing_required.is_empty() {
-                                parts.push(format!("missing={}", chk.missing_required.join(",")));
-                            }
-                            if !chk.extra_unknown.is_empty() {
-                                parts.push(format!("extra={}", chk.extra_unknown.join(",")));
-                            }
-                            let schema_note = format!(" || schema: {}", parts.join(" "));
-                            o.detail =
-                                Some(o.detail.map(|d| d + &schema_note).unwrap_or_else(|| {
-                                    schema_note.trim_start_matches(" || ").to_string()
-                                }));
                         }
+                    } else {
+                        // A scorer error (missing target, bad regex, judge
+                        // unavailable) is a property of ONE example — record
+                        // it as that example's Error outcome instead of
+                        // aborting the run and discarding every completed
+                        // outcome.
+                        let mut o = match score_completion(
+                            scorer,
+                            example,
+                            &completion.text,
+                            judge_runner.as_ref(),
+                        ) {
+                            Ok(o) => o,
+                            Err(e) => ExampleOutcome {
+                                example_id: example_id.clone(),
+                                completion_index: completion_idx,
+                                completion_text: completion.text.clone(),
+                                kind: EvalOutcomeKind::Error,
+                                score: 0.0,
+                                detail: Some(format!("scorer error: {e}")),
+                                prompt_tokens: None,
+                                completion_tokens: None,
+                                latency_ms: None,
+                                tags: example.tags.clone(),
+                                metadata: example.metadata.clone(),
+                                reasoning_text: None,
+                                unclosed_thinking: false,
+                            },
+                        };
+                        o.completion_index = completion_idx;
+                        o.prompt_tokens = Some(completion.prompt_tokens);
+                        o.completion_tokens = Some(completion.completion_tokens);
+                        o.latency_ms = Some(completion.latency_ms);
+                        if let Some(note) = schema_note.as_ref() {
+                            o.detail = Some(o.detail.map(|d| d + note).unwrap_or_else(|| {
+                                note.trim_start_matches(" || ").to_string()
+                            }));
+                        }
+                        o
                     }
-                    o
                 }
                 Err(err) => ExampleOutcome {
                     example_id: example_id.clone(),
@@ -298,6 +354,110 @@ async fn run_suite_inner(
                     },
                 };
                 cb(progress_snap);
+            }
+        }
+    }
+
+    // ── Pass 2: deferred judge scoring ──────────────────────────────
+    // Group by judge adapter, swap once per group (the barrier swap makes
+    // each swap wait out in-flight requests — once per suite, not once
+    // per call), then score the batch on a blocking thread: the live
+    // judge re-enters the generator via Handle::block_on, which panics on
+    // a runtime worker thread.
+    if !deferred_judge.is_empty() && !cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+        let mut groups: BTreeMap<Option<String>, Vec<DeferredJudgeScore>> = BTreeMap::new();
+        for item in deferred_judge.drain(..) {
+            let scorer = suite.examples[item.example_index]
+                .scorer
+                .as_ref()
+                .unwrap_or(&suite.default_scorer);
+            groups
+                .entry(scorer.judge_adapter().map(str::to_string))
+                .or_default()
+                .push(item);
+        }
+        for (judge_adapter, items) in groups {
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            if let Err(e) = generator.set_adapter(judge_adapter.as_deref()).await {
+                for item in items {
+                    outcomes[item.outcome_index].detail =
+                        Some(format!("judge adapter swap failed: {e}"));
+                }
+                continue;
+            }
+            let batch: Vec<(DeferredJudgeScore, kiln_eval::scorers::Scorer, kiln_eval::EvalExample)> =
+                items
+                    .into_iter()
+                    .map(|item| {
+                        let example = suite.examples[item.example_index].clone();
+                        let scorer = example
+                            .scorer
+                            .clone()
+                            .unwrap_or_else(|| suite.default_scorer.clone());
+                        (item, scorer, example)
+                    })
+                    .collect();
+            let judge = judge_runner.clone();
+            let cancel_flag = cancelled.clone();
+            let scored = tokio::task::spawn_blocking(move || {
+                batch
+                    .into_iter()
+                    .map(|(item, scorer, example)| {
+                        if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                            return (item, None);
+                        }
+                        let result =
+                            score_completion(&scorer, &example, &item.completion_text, judge.as_ref());
+                        (item, Some(result))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .map_err(|e| EvalExecutionError::Scorer(format!("judge scoring task: {e}")))?;
+
+            for (item, result) in scored {
+                let Some(result) = result else { continue };
+                let slot = &mut outcomes[item.outcome_index];
+                match result {
+                    Ok(mut o) => {
+                        o.completion_index = item.completion_idx;
+                        o.prompt_tokens = Some(item.prompt_tokens);
+                        o.completion_tokens = Some(item.completion_tokens);
+                        o.latency_ms = Some(item.latency_ms);
+                        if let Some(note) = item.schema_note.as_ref() {
+                            o.detail = Some(o.detail.map(|d| d + note).unwrap_or_else(|| {
+                                note.trim_start_matches(" || ").to_string()
+                            }));
+                        }
+                        if matches!(o.kind, EvalOutcomeKind::Pass) {
+                            running_pass += 1;
+                        }
+                        running_score += o.score;
+                        *slot = o;
+                    }
+                    Err(e) => {
+                        slot.kind = EvalOutcomeKind::Error;
+                        slot.detail = Some(format!("scorer error: {e}"));
+                    }
+                }
+            }
+            if let Some(cb) = progress.as_ref() {
+                cb(EvalProgress {
+                    examples_completed: completions_seen,
+                    examples_total: total_completions,
+                    running_accuracy: if completions_seen > 0 {
+                        running_pass as f32 / completions_seen as f32
+                    } else {
+                        0.0
+                    },
+                    running_mean_score: if completions_seen > 0 {
+                        running_score / completions_seen as f32
+                    } else {
+                        0.0
+                    },
+                });
             }
         }
     }
@@ -467,6 +627,123 @@ mod tests {
         // "2" matches), the original "5+5?" example fails on the wrong reply.
         assert_eq!(result.metrics.num_pass, 2);
         assert_eq!(result.metrics.num_fail, 1);
+    }
+
+    /// Judge runner test double: replies with a fixed judge verdict and
+    /// records the thread context plus every (adapter, prompt) it saw.
+    struct ScriptedJudge {
+        reply: &'static str,
+        calls: std::sync::Mutex<Vec<Option<String>>>,
+    }
+
+    impl kiln_eval::scorers::JudgeRunner for ScriptedJudge {
+        fn judge(&self, adapter: Option<&str>, _prompt: &str) -> Option<String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(adapter.map(str::to_string));
+            Some(self.reply.to_string())
+        }
+    }
+
+    fn judge_suite() -> EvalSuite {
+        let mk = |id: &str| EvalExample {
+            id: Some(id.into()),
+            messages: vec![EvalChatMessage::new("user", "rate me")],
+            target: Some("anything".into()),
+            ..Default::default()
+        };
+        EvalSuite {
+            name: "judged".into(),
+            description: None,
+            default_scorer: Scorer::LlmJudge {
+                judge_adapter: Some("judge-x".into()),
+                template: kiln_eval::scorers::llm_judge::default_judge_template(),
+                score_regex: kiln_eval::scorers::llm_judge::default_judge_regex(),
+            },
+            generation: EvalGenerationParams::default(),
+            system_prompt: None,
+            examples: vec![mk("j1"), mk("j2")],
+            schema_version: 1,
+            tools: None,
+        }
+    }
+
+    /// The flywheel's payoff step: judge-scored examples actually score
+    /// (no more Invalid-on-every-example), the judge adapter activates
+    /// ONCE for the whole batch (never per call), and the eval adapter is
+    /// restored afterwards.
+    #[tokio::test]
+    async fn judge_scoring_runs_in_deferred_pass_with_single_batch_swap() {
+        let mock = Arc::new(MockEvalGenerator::new().with_force_reply("model answer"));
+        let gen_ = mock.clone() as Arc<dyn EvalGenerator>;
+        let judge = Arc::new(ScriptedJudge {
+            reply: "Score: 1",
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+
+        let result = run_suite_against_adapter(
+            &judge_suite(),
+            Some("eval-adapter"),
+            None,
+            gen_,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            judge.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.outcomes.len(), 2);
+        for o in &result.outcomes {
+            assert!(
+                matches!(o.kind, EvalOutcomeKind::Pass),
+                "judge-scored example must Pass, got {:?} ({:?})",
+                o.kind,
+                o.detail
+            );
+            assert!(o.prompt_tokens.is_some(), "generation metadata survives");
+        }
+        assert_eq!(result.metrics.num_pass, 2);
+        assert_eq!(judge.calls.lock().unwrap().len(), 2);
+
+        // Swap sequence: eval adapter in, judge adapter ONCE for the
+        // deferred batch, previous adapter restored at the end.
+        let swaps = mock.swap_log.lock().unwrap().clone();
+        assert_eq!(
+            swaps,
+            vec![
+                Some("eval-adapter".to_string()),
+                Some("judge-x".to_string()),
+                None,
+            ],
+            "judge adapter must activate exactly once for the batch"
+        );
+    }
+
+    /// Without a live judge (mock mode / noop runner) judge-scored
+    /// examples degrade to Invalid with the honest detail — never stuck
+    /// on the pass-1 placeholder.
+    #[tokio::test]
+    async fn judge_scoring_without_runner_degrades_to_invalid() {
+        let gen_ = Arc::new(MockEvalGenerator::new().with_force_reply("model answer"))
+            as Arc<dyn EvalGenerator>;
+        let result = run_suite_against_adapter(
+            &judge_suite(),
+            None,
+            None,
+            gen_,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            noop_judge_runner(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.outcomes.len(), 2);
+        for o in &result.outcomes {
+            assert!(matches!(o.kind, EvalOutcomeKind::Invalid));
+            assert_eq!(o.detail.as_deref(), Some("judge runner unavailable"));
+        }
     }
 
     #[tokio::test]
