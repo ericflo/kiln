@@ -462,7 +462,7 @@ impl ApiError {
             status: StatusCode::CONFLICT,
             code: "training_job_not_cancellable",
             message: format!("Cannot cancel job '{job_id}': current state is {state}"),
-            hint: "Only jobs in 'queued' state can be cancelled. Running jobs must complete.",
+            hint: "DELETE /v1/train/queue/{job_id} cancels queued jobs immediately and stops running jobs cooperatively (the trainer aborts at the next step boundary). Jobs already in a terminal state can only be deleted via DELETE /v1/train/jobs/{job_id}.",
             retry_after_seconds: None,
         }
     }
