@@ -1871,26 +1871,20 @@ fn deterministic_chat_request_cache_key_with_vocab_size_and_fold(
     .map_err(|err| ApiError::internal(format!("failed to key chat request cache: {err}")))
 }
 
-/// Resolve a raw chat request's optional sampling fields onto the same
-/// Qwen3.5-thinking-general defaults [`sampling_params_for_chat_request`]
-/// starts from, so cache keys computed from the request match keys
-/// computed from resolved [`SamplingParams`].
+/// Resolve a raw chat request's sampling for cache keying by deriving
+/// from [`sampling_params_for_chat_request`] itself — lockstep BY
+/// CONSTRUCTION (any future profile/preset logic flows into keys
+/// automatically; the old per-field duplicate defaults could silently
+/// diverge). Key semantics preserved: raw request stops (not the
+/// generation-augmented set) and the caller's seed.
 fn chat_request_sampling_for_cache_key(
     req: &ChatCompletionRequest,
     seed: Option<u64>,
 ) -> SamplingParams {
-    SamplingParams {
-        temperature: requested_or_default_temperature(req.temperature),
-        top_p: requested_or_default_top_p(req.top_p),
-        top_k: requested_or_default_top_k(req.top_k),
-        min_p: requested_or_default_min_p(req.min_p),
-        max_tokens: chat_request_max_tokens(req),
-        repetition_penalty: requested_or_default_repetition_penalty(req.repetition_penalty),
-        presence_penalty: requested_or_default_presence_penalty(req.presence_penalty),
-        frequency_penalty: requested_or_default_frequency_penalty(req.frequency_penalty),
-        stop: req.stop.clone().unwrap_or_default(),
-        seed,
-    }
+    let mut params = sampling_params_for_chat_request(req);
+    params.stop = req.stop.clone().unwrap_or_default();
+    params.seed = seed;
+    params
 }
 
 /// Batch-request twin of [`chat_request_sampling_for_cache_key`].
@@ -8396,7 +8390,7 @@ fn chat_response_from_multi_responses(
 /// override the preset values, so callers that send no sampling fields
 /// get the model-card recommendation by default.
 fn sampling_params_for_chat_request(req: &ChatCompletionRequest) -> SamplingParams {
-    let mut base = preset_or_default(req.sampling_preset.as_deref());
+    let mut base = preset_or_default_for_request(req);
     if let Some(t) = req.temperature {
         base.temperature = t;
     }
@@ -8461,6 +8455,24 @@ pub(crate) fn requested_or_default_repetition_penalty(v: Option<f32>) -> f32 {
 /// Map a `sampling_preset` string to its corresponding [`SamplingParams`]
 /// starting point. Unknown values silently fall back to the Qwen3.5
 /// thinking-general default — same shape a user gets with no preset.
+/// Default profile selection for a chat request. An explicit
+/// `sampling_preset` always wins; otherwise TOOLS-BEARING requests get
+/// the Qwen3.5 thinking-coding profile (temperature 0.6,
+/// presence_penalty 0.0) instead of thinking-general (1.0 / 1.5):
+/// presence_penalty punishes re-emitting tokens, which for code means
+/// punishing every reuse of an identifier — kiln's own preset docs call
+/// the general profile wrong for code, yet every preset-less pi request
+/// (pi ALWAYS sends tools) was getting it. Explicit per-field values on
+/// the request still override the profile either way.
+fn preset_or_default_for_request(req: &ChatCompletionRequest) -> SamplingParams {
+    if req.sampling_preset.is_none()
+        && req.tools.as_ref().is_some_and(|tools| !tools.is_empty())
+    {
+        return SamplingParams::qwen3_thinking_coding();
+    }
+    preset_or_default(req.sampling_preset.as_deref())
+}
+
 fn preset_or_default(name: Option<&str>) -> SamplingParams {
     match name.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
         Some("greedy") => SamplingParams::greedy(),
@@ -8834,6 +8846,53 @@ mod tests {
 
     fn parse_request(json: &str) -> ChatCompletionRequest {
         serde_json::from_str(json).expect("request should deserialize")
+    }
+
+    /// pi always sends tools, and presence_penalty 1.5 punishes every
+    /// identifier reuse — tools-bearing preset-less requests must resolve
+    /// to the coding profile, explicit fields must still win, and the
+    /// cache key must match the resolved sampling by construction.
+    #[test]
+    fn tools_bearing_requests_default_to_the_coding_profile() {
+        let plain = parse_request(r#"{"messages":[{"role":"user","content":"hi"}]}"#);
+        let p = sampling_params_for_chat_request(&plain);
+        assert_eq!(p.temperature, 1.0, "no tools → thinking-general");
+        assert_eq!(p.presence_penalty, 1.5);
+
+        let tools = parse_request(
+            r#"{"messages":[{"role":"user","content":"hi"}],
+                "tools":[{"type":"function","function":{"name":"run"}}]}"#,
+        );
+        let p = sampling_params_for_chat_request(&tools);
+        assert_eq!(p.temperature, 0.6, "tools → thinking-coding");
+        assert_eq!(p.presence_penalty, 0.0);
+        assert_eq!(p.top_p, 0.95);
+
+        // Explicit fields override the profile.
+        let explicit = parse_request(
+            r#"{"messages":[{"role":"user","content":"hi"}],
+                "tools":[{"type":"function","function":{"name":"run"}}],
+                "temperature":0.9,"presence_penalty":1.0}"#,
+        );
+        let p = sampling_params_for_chat_request(&explicit);
+        assert_eq!(p.temperature, 0.9);
+        assert_eq!(p.presence_penalty, 1.0);
+
+        // An explicit preset wins over the tools heuristic.
+        let preset = parse_request(
+            r#"{"messages":[{"role":"user","content":"hi"}],
+                "tools":[{"type":"function","function":{"name":"run"}}],
+                "sampling_preset":"qwen3-non-thinking-general"}"#,
+        );
+        let p = sampling_params_for_chat_request(&preset);
+        assert_ne!(p.temperature, 0.6);
+
+        // Cache key matches the resolved sampling for the sampled fields.
+        let key = chat_request_sampling_for_cache_key(&tools, None);
+        let resolved = sampling_params_for_chat_request(&tools);
+        assert_eq!(key.temperature, resolved.temperature);
+        assert_eq!(key.presence_penalty, resolved.presence_penalty);
+        assert_eq!(key.top_k, resolved.top_k);
     }
 
     /// OpenAI semantics: the matched stop sequence must never appear in
