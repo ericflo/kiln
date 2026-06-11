@@ -3849,7 +3849,7 @@ function restorePlaygroundHistoryBanner() {
   banner.innerHTML = `
     <div>
       <strong>Restore previous chat?</strong>
-      <span style="color:var(--text-quiet);"> — ${stash.messages.length} message${stash.messages.length === 1 ? '' : 's'}${ageMin ? `, ${ageMin} min ago` : ''}.</span>
+      <span style="color:var(--text-muted);"> — ${stash.messages.length} message${stash.messages.length === 1 ? '' : 's'}${ageMin ? `, ${ageMin} min ago` : ''}.</span>
     </div>
     <div style="display:flex; gap:6px;">
       <button class="btn btn-sm btn-primary" type="button" data-restore="yes">Restore</button>
@@ -4069,9 +4069,9 @@ function renderAssistantBubble(m) {
       body = `<pre>Generating…</pre>`;
     }
   } else if (m.pending && hasReasoning && !hasContent) {
-    body = `<pre style="color:var(--text-quiet);font-style:italic;">Drafting answer…</pre>`;
+    body = `<pre style="color:var(--text-muted);font-style:italic;">Drafting answer…</pre>`;
   } else if (!hasContent && !hasReasoning) {
-    body = `<pre style="color:var(--text-quiet);">(empty response)</pre>`;
+    body = `<pre style="color:var(--text-muted);">(empty response)</pre>`;
   }
   parts.push(body);
 
@@ -5212,9 +5212,9 @@ function renderSynthPreview(container, preview) {
         <div class="eyebrow">Example ${i+1}</div>
         <span class="scorer-badge">${escapeHtml(scorerKind)}</span>
       </div>
-      <div style="font-size:11px; color:var(--text-quiet); margin-bottom:2px;">prompt</div>
+      <div style="font-size:11px; color:var(--text-muted); margin-bottom:2px;">prompt</div>
       <div style="font-family:var(--font-mono); font-size:12px; max-height:60px; overflow:auto; margin-bottom:6px;">${escapeHtml(truncate(userText, 240))}</div>
-      <div style="font-size:11px; color:var(--text-quiet); margin-bottom:2px;">target</div>
+      <div style="font-size:11px; color:var(--text-muted); margin-bottom:2px;">target</div>
       <div style="font-family:var(--font-mono); font-size:12px; max-height:80px; overflow:auto;">${escapeHtml(truncate(ex.target || '', 320))}</div>
       <div style="margin-top:6px;">${tags}</div>
     </div>`;
@@ -5222,15 +5222,15 @@ function renderSynthPreview(container, preview) {
   container.innerHTML = `
     <div style="margin-bottom:8px; padding:10px; background:var(--surface-2); border-radius:6px; display:flex; gap:16px; align-items:center; flex-wrap:wrap;">
       <div>
-        <div class="hint" style="font-size:11px; color:var(--text-quiet);">examples generated</div>
+        <div class="hint" style="font-size:11px; color:var(--text-muted);">examples generated</div>
         <div style="font-size:18px; font-weight:700; font-variant-numeric:tabular-nums;">${(s.examples_generated || 0).toLocaleString()}</div>
       </div>
       <div>
-        <div class="hint" style="font-size:11px; color:var(--text-quiet);">trajectories used</div>
+        <div class="hint" style="font-size:11px; color:var(--text-muted);">trajectories used</div>
         <div style="font-size:18px; font-weight:700; font-variant-numeric:tabular-nums;">${(s.trajectories_used || 0).toLocaleString()}</div>
       </div>
       <div style="flex:1; min-width:200px;">
-        <div class="hint" style="font-size:11px; color:var(--text-quiet); margin-bottom:4px;">auto-detected scorers</div>
+        <div class="hint" style="font-size:11px; color:var(--text-muted); margin-bottom:4px;">auto-detected scorers</div>
         <div>${histStr || '<span class="hint">n/a</span>'}</div>
       </div>
     </div>
@@ -5621,7 +5621,7 @@ async function openSuitePreview(name) {
         : '';
       const tags = (ex.tags || []).map(t => `<span class="tag-chip">${escapeHtml(t)}</span>`).join('');
       return `<div style="border:1px solid var(--border); border-radius:var(--radius-md); padding:var(--space-3); margin-bottom:var(--space-3); background:var(--surface-2);">
-        <div style="font-size:11px; color:var(--text-quiet); font-family:var(--font-mono); margin-bottom:6px;">#${i + 1}${ex.id ? ' · ' + escapeHtml(ex.id) : ''}</div>
+        <div style="font-size:11px; color:var(--text-muted); font-family:var(--font-mono); margin-bottom:6px;">#${i + 1}${ex.id ? ' · ' + escapeHtml(ex.id) : ''}</div>
         ${msgs}
         ${target}
         ${tags ? `<div style="margin-top:6px;">${tags}</div>` : ''}
@@ -7226,7 +7226,7 @@ function donutChartSvg(slices, opts = {}) {
   }).join('');
   const center = opts.centerLabel
     ? `<text x="${c}" y="${c - 2}" text-anchor="middle" style="fill:var(--text); font-weight:700; font-size:14px; font-variant-numeric:tabular-nums;">${escapeHtml(opts.centerLabel)}</text>
-       <text x="${c}" y="${c + 12}" text-anchor="middle" style="fill:var(--text-quiet); font-size:9px; text-transform:uppercase; letter-spacing: var(--tracking-caps);">${escapeHtml(opts.centerSub || '')}</text>`
+       <text x="${c}" y="${c + 12}" text-anchor="middle" style="fill:var(--text-muted); font-size:9px; text-transform:uppercase; letter-spacing: var(--tracking-caps);">${escapeHtml(opts.centerSub || '')}</text>`
     : '';
   return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg">
     <circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="var(--surface-3)" stroke-width="${stroke}"/>
@@ -8024,7 +8024,7 @@ function renderTrainDrillBody(j) {
     durationSecs = Math.max(0, (Date.now() - j.submitted_unix_ms) / 1000);
   }
   const timeRow = (j.submitted_unix_ms || j.finished_unix_ms)
-    ? `<div style="margin-top:6px; font-size:11px; color:var(--text-quiet);">
+    ? `<div style="margin-top:6px; font-size:11px; color:var(--text-muted);">
         ${j.submitted_unix_ms ? `submitted ${escapeHtml(fmtSmartTime(j.submitted_unix_ms))}` : ''}
         ${j.finished_unix_ms ? ` · finished ${escapeHtml(fmtSmartTime(j.finished_unix_ms))}` : ''}
       </div>`
@@ -8161,7 +8161,7 @@ if (playgroundCard) {
   comparePair.className = 'compare-pair';
   comparePair.style.display = 'none';
   comparePair.style.padding = '0 var(--space-5) var(--space-4)';
-  const sidePlaceholder = `<div style="color:var(--text-quiet); font-style:italic; font-size:12px; padding:8px 0;">Pick adapters above and send a prompt to fan it out side-by-side.</div>`;
+  const sidePlaceholder = `<div style="color:var(--text-muted); font-style:italic; font-size:12px; padding:8px 0;">Pick adapters above and send a prompt to fan it out side-by-side.</div>`;
   comparePair.innerHTML = `
     <div class="compare-side"><div class="compare-side-head">A · <span id="chat-compare-a-name">base</span></div><div class="compare-side-body" id="chat-compare-a-body">${sidePlaceholder}</div></div>
     <div class="compare-side"><div class="compare-side-head">B · <span id="chat-compare-b-name">base</span></div><div class="compare-side-body" id="chat-compare-b-body">${sidePlaceholder}</div></div>`;
@@ -8231,7 +8231,7 @@ function _renderCompareSide(side, m) {
       ? `<pre style="white-space:pre-wrap; margin:0;">${escapeHtml(m.content)}</pre>`
       : `<div class="md-body">${renderMarkdown(m.content)}</div>`;
   } else if (m.pending) {
-    html += `<div style="color:var(--text-quiet); font-style:italic; font-size:11px;">Generating…</div>`;
+    html += `<div style="color:var(--text-muted); font-style:italic; font-size:11px;">Generating…</div>`;
   }
   if (m.ttftMs != null || m.durationMs != null) {
     const stats = [];
@@ -8847,7 +8847,7 @@ async function refreshRecipesList() {
       <div style="flex:1; min-width:0;">
         <div style="font-weight:600;">${escapeHtml(r.name)}</div>
         <div style="font-size:var(--text-xs); color:var(--text-muted);">${escapeHtml(r.description || '')}</div>
-        <div style="font-size:var(--text-2xs); color:var(--text-quiet); margin-top:var(--space-1);">${r.num_steps || 0} step${(r.num_steps || 0) === 1 ? '' : 's'}</div>
+        <div style="font-size:var(--text-2xs); color:var(--text-muted); margin-top:var(--space-1);">${r.num_steps || 0} step${(r.num_steps || 0) === 1 ? '' : 's'}</div>
       </div>
       <button class="btn btn-sm" data-recipe-run="${escapeHtml(r.name)}">Run</button>
     </div>`).join('');
@@ -9167,7 +9167,7 @@ document.getElementById('agent-traces-refresh')?.addEventListener('click', async
         return `<div class="adapter-card" style="margin-bottom:var(--space-2);">
           <div style="font-weight:600; font-family:var(--font-mono); font-size:var(--text-xs);">${escapeHtml(t.id || '?')}</div>
           <div style="font-size:var(--text-xs); color:var(--text-muted);">${t.num_turns || 0} turns · ${t.num_tool_calls || 0} tool calls · ${escapeHtml(t.working_dir || '')}</div>
-          ${outcomeBits.length ? `<div style="font-size:var(--text-2xs); color:var(--text-quiet); margin-top:var(--space-1);">${outcomeBits.map(b => escapeHtml(b)).join(' · ')}</div>` : ''}
+          ${outcomeBits.length ? `<div style="font-size:var(--text-2xs); color:var(--text-muted); margin-top:var(--space-1);">${outcomeBits.map(b => escapeHtml(b)).join(' · ')}</div>` : ''}
         </div>`;
       }).join('');
   } catch (e) {
@@ -9214,7 +9214,7 @@ async function refreshPreflightSurfaces() {
           </div>
           <div style="font-size:var(--text-xs); color:var(--text-muted); margin-top:var(--space-1);">rank ${t.lora_rank} · top-K ${t.default_top_k} · loss ${escapeHtml(t.default_loss || '')} · batch ${t.batch_size}</div>
           <div style="font-size:var(--text-xs); color:var(--text-muted);">cost cap ${t.cost_cap_default_usd == null ? '—' : '$' + t.cost_cap_default_usd.toFixed(0)} · max rollout ${(t.max_rollout_tokens || 0).toLocaleString()} tok · checkpoint every ${t.auto_checkpoint_cadence_steps} steps</div>
-          <div style="font-size:var(--text-2xs); color:var(--text-quiet); margin-top:var(--space-1);">samples/prompt: ${t.samples_per_prompt_default} (data-multiplier: ${t.samples_per_prompt_data_multiplier}) · cold-start ≥ ${t.cold_start_overlap_threshold} · goldens ${(t.mixture_distillation_golden_fraction * 100).toFixed(0)}%</div>
+          <div style="font-size:var(--text-2xs); color:var(--text-muted); margin-top:var(--space-1);">samples/prompt: ${t.samples_per_prompt_default} (data-multiplier: ${t.samples_per_prompt_data_multiplier}) · cold-start ≥ ${t.cold_start_overlap_threshold} · goldens ${(t.mixture_distillation_golden_fraction * 100).toFixed(0)}%</div>
         </div>`).join('');
   } catch (e) {
     tierNode.innerHTML = `<div class="empty">Failed: ${escapeHtml(e.message)}</div>`;
