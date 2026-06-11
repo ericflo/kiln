@@ -241,6 +241,15 @@ pub trait DecodeForward: Send + Sync + 'static {
     fn can_reuse_as_strict_prefix(&self, _prompt_token_len: usize) -> bool {
         false
     }
+    /// Grow KV capacity for the ready decode rows BEFORE the forward.
+    /// Returns the indices of slots that could NOT be grown because the
+    /// block pool is exhausted — the actor finishes those requests as
+    /// `length` casualties (they outgrew the pool) instead of letting a
+    /// later atomic-grow failure kill the ENTIRE batch. Non-capacity
+    /// errors still propagate.
+    fn grow_for_decode(&self, _slots: &mut [&mut DecodeSlot]) -> Result<Vec<usize>> {
+        Ok(Vec::new())
+    }
     fn forward_decode(
         &self,
         slots: &mut [&mut DecodeSlot],
@@ -474,9 +483,52 @@ impl RealDecodeForward {
 
         Ok(())
     }
+
+    /// Per-slot KV growth for the actor's pre-decode pass. Unlike the
+    /// atomic `grow_ready_decode_slots` (which the forward keeps as a
+    /// backstop), a pool-exhausted allocation here starves ONLY the slots
+    /// that needed blocks — everyone else keeps decoding.
+    fn grow_for_decode_per_slot(&self, slots: &mut [&mut DecodeSlot]) -> Result<Vec<usize>> {
+        let block_size = self.block_manager_guard()?.block_size();
+        let mut starved = Vec::new();
+        for (idx, slot) in slots.iter_mut().enumerate() {
+            let DecodeSlot::Real {
+                state,
+                first_token_pending: false,
+                ..
+            } = &mut **slot
+            else {
+                continue;
+            };
+            let required_blocks =
+                blocks_needed_for_tokens(state.seq_len.saturating_add(1), block_size);
+            let missing = required_blocks.saturating_sub(state.block_table.blocks.len());
+            if missing == 0 {
+                continue;
+            }
+            let allocated = {
+                let mut bm_guard = self.block_manager_guard()?;
+                bm_guard.allocate(missing)
+            };
+            match allocated {
+                Ok(new_blocks) => {
+                    state.block_table.blocks.extend(new_blocks.iter().copied());
+                    state.allocated_blocks.extend(new_blocks.iter().copied());
+                }
+                Err(kiln_core::block::BlockError::OutOfMemory { .. }) => {
+                    starved.push(idx);
+                }
+            }
+        }
+        Ok(starved)
+    }
 }
 
 impl DecodeForward for RealDecodeForward {
+    fn grow_for_decode(&self, slots: &mut [&mut DecodeSlot]) -> Result<Vec<usize>> {
+        self.grow_for_decode_per_slot(slots)
+    }
+
     fn can_reuse_as_strict_prefix(&self, prompt_token_len: usize) -> bool {
         self.prefix_cache
             .lock()
@@ -1237,10 +1289,26 @@ impl BatchingEngineActor {
                     self.emit_pending_first_token_at(active_idx);
                 }
                 Err(err) => {
+                    // A block-pool shortage while other requests are active
+                    // is TRANSIENT — they free blocks as they finish. Put
+                    // the request back at the front and retry next cycle
+                    // (the caller's request timeout bounds the wait)
+                    // instead of failing it instantly under concurrent
+                    // load. With nothing active, nothing will ever free —
+                    // fail honestly.
+                    let msg = format!("{err:#}");
+                    if msg.contains("out of memory: no free blocks") && !self.active.is_empty() {
+                        tracing::debug!(
+                            request_id = %queued.req.request_id,
+                            "block pool busy — request stays queued for the next cycle"
+                        );
+                        self.waiting.push_front(queued);
+                        break;
+                    }
                     self.snapshot.total_errors += 1;
                     let _ = queued
                         .response_tx
-                        .blocking_send(EngineEvent::Error(format!("{err:#}")));
+                        .blocking_send(EngineEvent::Error(msg));
                 }
             }
         }
@@ -1391,6 +1459,46 @@ impl BatchingEngineActor {
     }
 
     fn run_decode_batch(&mut self) {
+        // Pre-grow KV per slot: a request that has outgrown the block pool
+        // finishes as a `length` casualty HERE — the old order let the
+        // forward's atomic grow fail and `finish_batch_with_error` killed
+        // EVERY active request because one conversation got long.
+        {
+            let mut probe_slots: Vec<&mut DecodeSlot> = self
+                .active
+                .iter_mut()
+                .take(self.max_decode_batch)
+                .map(|active| &mut active.slot)
+                .collect();
+            match self.forward.grow_for_decode(&mut probe_slots) {
+                Ok(starved) => {
+                    drop(probe_slots);
+                    for idx in starved.into_iter().rev() {
+                        if idx >= self.active.len() {
+                            continue;
+                        }
+                        tracing::warn!(
+                            request_id = %self.active[idx].req.request_id,
+                            "KV block pool exhausted for this request — finishing it as \
+                             `length`; other requests keep decoding"
+                        );
+                        self.finish_active(idx, FinishReason::MaxTokens);
+                    }
+                    if self.active.is_empty() {
+                        self.refresh_snapshot();
+                        return;
+                    }
+                }
+                Err(err) => {
+                    let batch_len = self.active.len().min(self.max_decode_batch);
+                    self.snapshot.total_errors += batch_len as u64;
+                    self.finish_batch_with_error(batch_len, format!("{err:#}"));
+                    self.refresh_snapshot();
+                    return;
+                }
+            }
+        }
+
         let batch_len = self.active.len().min(self.max_decode_batch);
         let sampling: Vec<SamplingParams> = self
             .active
@@ -1955,6 +2063,177 @@ mod tests {
             assert!(err.contains("stalled"), "{err}");
         }
 
+        handle.stop().await.unwrap();
+    }
+
+    /// Forward whose `prepare_request` reports a block-pool shortage for a
+    /// marked prompt while the flag is up, and whose decode steps block on
+    /// a test-released gate (so a request stays ACTIVE deterministically)
+    /// — the transient-admission case.
+    struct FlakyPrepareForward {
+        inner: MockForward,
+        fail_oom_for: TokenId,
+        failing: std::sync::atomic::AtomicBool,
+        gate: StdMutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl DecodeForward for FlakyPrepareForward {
+        fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot> {
+            if req.prompt_tokens.last().copied() == Some(self.fail_oom_for)
+                && self.failing.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                anyhow::bail!("out of memory: no free blocks available (need 2, have 0)");
+            }
+            self.inner.prepare_request(req)
+        }
+        fn forward_decode(
+            &self,
+            slots: &mut [&mut DecodeSlot],
+            sampling: &[SamplingParams],
+        ) -> Result<Vec<TokenId>> {
+            self.gate.lock().unwrap().recv().ok();
+            self.inner.forward_decode(slots, sampling)
+        }
+        fn accept_token(&self, slot: &mut DecodeSlot, token: TokenId) -> Result<usize> {
+            self.inner.accept_token(slot, token)
+        }
+        fn finish_request(
+            &self,
+            slot: DecodeSlot,
+            finish_reason: FinishReason,
+        ) -> Result<DecodeForwardOutput> {
+            self.inner.finish_request(slot, finish_reason)
+        }
+    }
+
+    /// A transient block shortage under concurrent load must keep the
+    /// request QUEUED for the next admission cycle — not fail it
+    /// instantly. (Blocks free up as other requests finish.)
+    #[tokio::test]
+    async fn transient_block_shortage_keeps_request_queued() {
+        let (release, gate) = std::sync::mpsc::channel();
+        let forward = Arc::new(FlakyPrepareForward {
+            inner: MockForward::default(),
+            fail_oom_for: 999,
+            failing: std::sync::atomic::AtomicBool::new(true),
+            gate: StdMutex::new(gate),
+        });
+        let handle = BatchingEngineHandle::start_with_options(forward.clone(), 8);
+
+        // A needs 3 gated decode steps — it stays active while B knocks.
+        let mut rx_a = handle.enqueue(request(100, 3)).await.unwrap();
+        release.send(()).unwrap();
+        assert!(matches!(rx_a.recv().await, Some(EngineEvent::Token(_))));
+
+        // B hits the (transient) shortage — it must NOT receive an error.
+        let mut rx_b = handle.enqueue(request(999, 1)).await.unwrap();
+        release.send(()).unwrap(); // A step 2; B's admission retries with A active
+        assert!(matches!(rx_a.recv().await, Some(EngineEvent::Token(_))));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            matches!(rx_b.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "request must stay queued through a transient shortage"
+        );
+
+        // Blocks "free up": B admits on a later cycle and completes.
+        forward
+            .failing
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        release.send(()).unwrap(); // A step 3 (done)
+        release.send(()).unwrap(); // B's step
+        let b_done = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match rx_b.recv().await {
+                    Some(EngineEvent::Done { .. }) => break true,
+                    Some(EngineEvent::Error(e)) => panic!("B must not fail: {e}"),
+                    Some(_) => {}
+                    None => break false,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(b_done);
+        handle.stop().await.unwrap();
+    }
+
+    /// Forward that starves one slot's KV growth exactly once — the
+    /// single-victim decode-growth case.
+    struct StarvingGrowForward {
+        inner: MockForward,
+        starve_once: std::sync::atomic::AtomicBool,
+    }
+
+    impl DecodeForward for StarvingGrowForward {
+        fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot> {
+            self.inner.prepare_request(req)
+        }
+        fn grow_for_decode(&self, slots: &mut [&mut DecodeSlot]) -> Result<Vec<usize>> {
+            if slots.len() > 1
+                && self
+                    .starve_once
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Ok(vec![0]);
+            }
+            Ok(Vec::new())
+        }
+        fn forward_decode(
+            &self,
+            slots: &mut [&mut DecodeSlot],
+            sampling: &[SamplingParams],
+        ) -> Result<Vec<TokenId>> {
+            self.inner.forward_decode(slots, sampling)
+        }
+        fn accept_token(&self, slot: &mut DecodeSlot, token: TokenId) -> Result<usize> {
+            self.inner.accept_token(slot, token)
+        }
+        fn finish_request(
+            &self,
+            slot: DecodeSlot,
+            finish_reason: FinishReason,
+        ) -> Result<DecodeForwardOutput> {
+            self.inner.finish_request(slot, finish_reason)
+        }
+    }
+
+    /// A request that outgrows the KV pool finishes as a `length`
+    /// casualty — the rest of the batch keeps decoding. (The old path
+    /// called finish_batch_with_error and killed EVERY active request
+    /// because one conversation got long.)
+    #[tokio::test]
+    async fn kv_growth_starvation_finishes_only_the_victim() {
+        let forward = Arc::new(StarvingGrowForward {
+            inner: MockForward::default(),
+            starve_once: std::sync::atomic::AtomicBool::new(true),
+        });
+        let handle = BatchingEngineHandle::start_with_options(forward, 8);
+
+        let mut rx_a = handle.enqueue(request(100, 5)).await.unwrap();
+        let mut rx_b = handle.enqueue(request(200, 5)).await.unwrap();
+
+        let outcome = |mut rx: mpsc::Receiver<EngineEvent>| async move {
+            loop {
+                match rx.recv().await {
+                    Some(EngineEvent::Done { output }) => break Ok(output),
+                    Some(EngineEvent::Error(e)) => break Err(e),
+                    Some(_) => {}
+                    None => break Err("closed".to_string()),
+                }
+            }
+        };
+        let (a, b) = tokio::join!(
+            tokio::time::timeout(Duration::from_secs(10), outcome(rx_a)),
+            tokio::time::timeout(Duration::from_secs(10), outcome(rx_b)),
+        );
+        let a = a.unwrap().expect("victim finishes cleanly, not with an engine error");
+        let b = b.unwrap().expect("survivor completes");
+        // One of the two was starved (admission order isn't pinned);
+        // whichever it was finished early as `length`, the other decoded
+        // all 5 tokens.
+        let (victim, survivor) = if a.completion_tokens < 5 { (a, b) } else { (b, a) };
+        assert!(victim.completion_tokens < 5, "victim was cut short");
+        assert_eq!(survivor.completion_tokens, 5, "survivor unaffected");
         handle.stop().await.unwrap();
     }
 

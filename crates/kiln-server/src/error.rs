@@ -80,6 +80,28 @@ impl ApiError {
         }
     }
 
+    /// OpenAI-compatible context overflow: agent harnesses (pi included)
+    /// key their auto-compaction off HTTP 400 + this exact code, so both
+    /// must match the convention.
+    pub fn context_length_exceeded(
+        max_context: usize,
+        prompt_tokens: usize,
+        max_tokens: usize,
+    ) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "context_length_exceeded",
+            message: format!(
+                "This model's maximum context length is {max_context} tokens. However, your \
+                 messages resulted in {prompt_tokens} tokens (plus max_tokens={max_tokens}). \
+                 Please reduce the length of the messages."
+            ),
+            hint: "Compact or summarize the conversation history, or start a new session. \
+                   Agent harnesses usually do this automatically on this error code.",
+            retry_after_seconds: None,
+        }
+    }
+
     pub fn request_timeout(timeout_secs: u64) -> Self {
         Self {
             status: StatusCode::REQUEST_TIMEOUT,

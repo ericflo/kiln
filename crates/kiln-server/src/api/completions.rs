@@ -1572,6 +1572,74 @@ pub(crate) fn encode_prompt_tokens(
     Ok(tokens)
 }
 
+/// The serving context ceiling: the model's positional limit capped by
+/// what the KV pool can physically hold. `None` = no enforcible signal
+/// (mock backend).
+pub(crate) fn serving_context_ceiling(state: &AppState) -> Option<usize> {
+    let model_max = state.model_config.max_position_embeddings;
+    match state.backend.as_ref() {
+        ModelBackend::Real { block_manager, .. } => {
+            let bm = block_manager.lock().unwrap();
+            let kv_max = bm.num_blocks().saturating_mul(bm.block_size());
+            Some(model_max.min(kv_max))
+        }
+        ModelBackend::Mock { .. } => None,
+    }
+}
+
+/// Long agent sessions used to die in opaque 500s exactly when the
+/// conversation grew: nothing validated the prompt against the model's
+/// positional limit or the KV pool, so BlockManager OOM surfaced as a
+/// generic "Retry the request" — and agent harnesses (pi included) key
+/// their auto-compaction off an OpenAI-style 400 with code
+/// `context_length_exceeded`, which kiln never sent.
+///
+/// - Prompt alone ≥ ceiling → the 400 the harness can act on, with the
+///   counts in the message (OpenAI wording shape).
+/// - Prompt fits but prompt+max_tokens overflows → clamp max_tokens to
+///   the remaining window; the truncation is visible as
+///   finish_reason="length".
+pub(crate) fn enforce_context_window(
+    state: &AppState,
+    sampling: &mut SamplingParams,
+    prompt_token_count: usize,
+) -> Result<(), ApiError> {
+    enforce_context_window_with_ceiling(
+        serving_context_ceiling(state),
+        sampling,
+        prompt_token_count,
+    )
+}
+
+pub(crate) fn enforce_context_window_with_ceiling(
+    ceiling: Option<usize>,
+    sampling: &mut SamplingParams,
+    prompt_token_count: usize,
+) -> Result<(), ApiError> {
+    let Some(ceiling) = ceiling else {
+        return Ok(());
+    };
+    if prompt_token_count >= ceiling {
+        return Err(ApiError::context_length_exceeded(
+            ceiling,
+            prompt_token_count,
+            sampling.max_tokens,
+        ));
+    }
+    let remaining = ceiling - prompt_token_count;
+    if sampling.max_tokens > remaining {
+        tracing::debug!(
+            prompt_tokens = prompt_token_count,
+            requested_max_tokens = sampling.max_tokens,
+            clamped_max_tokens = remaining,
+            ceiling,
+            "clamping max_tokens to the remaining context window"
+        );
+        sampling.max_tokens = remaining;
+    }
+    Ok(())
+}
+
 fn deterministic_completion_cache_key(
     state: &AppState,
     prompt_tokens: &[TokenId],
@@ -3938,7 +4006,7 @@ async fn chat_completions_inner(
     }
 
     apply_eval_mode_chat_defaults(state, &mut req);
-    let sampling = sampling_params_for_chat_request(&req);
+    let mut sampling = sampling_params_for_chat_request(&req);
 
     // Validate adapter / adapters mutual exclusion. Done up front (before
     // backend dispatch) so 400-on-misuse is observable from any backend.
@@ -4123,6 +4191,7 @@ async fn chat_completions_inner(
         req.chat_template_kwargs.as_ref(),
     )?;
     let prompt_tokens = encode_prompt_tokens(state, &prompt_text)?;
+    enforce_context_window(state, &mut sampling, prompt_tokens.len())?;
 
     if sampling.max_tokens == 0 {
         let cache_value = DeterministicChatRequestCacheValue {
@@ -8706,6 +8775,41 @@ mod tests {
 
     fn parse_request(json: &str) -> ChatCompletionRequest {
         serde_json::from_str(json).expect("request should deserialize")
+    }
+
+    /// Long pi sessions must hit the OpenAI-style 400 (the signal agent
+    /// harnesses key auto-compaction on) instead of an opaque 500 from a
+    /// downstream BlockManager OOM — and a fitting prompt with an
+    /// oversized max_tokens clamps instead of erroring.
+    #[test]
+    fn context_window_rejects_oversized_prompts_and_clamps_max_tokens() {
+        let mut sampling = SamplingParams {
+            max_tokens: 4096,
+            ..SamplingParams::default()
+        };
+
+        // No ceiling signal (mock backend): no-op.
+        enforce_context_window_with_ceiling(None, &mut sampling, 1_000_000).unwrap();
+        assert_eq!(sampling.max_tokens, 4096);
+
+        // Prompt alone over the ceiling → the 400 with the exact code.
+        let err = enforce_context_window_with_ceiling(Some(8192), &mut sampling, 9000)
+            .unwrap_err();
+        assert_eq!(err.code, "context_length_exceeded");
+        assert!(err.message.contains("8192"), "{}", err.message);
+        assert!(err.message.contains("9000"), "{}", err.message);
+
+        // Prompt fits, sum overflows → clamp to the remaining window.
+        enforce_context_window_with_ceiling(Some(8192), &mut sampling, 6000).unwrap();
+        assert_eq!(sampling.max_tokens, 8192 - 6000);
+
+        // Already-fitting requests untouched.
+        let mut small = SamplingParams {
+            max_tokens: 10,
+            ..SamplingParams::default()
+        };
+        enforce_context_window_with_ceiling(Some(8192), &mut small, 6000).unwrap();
+        assert_eq!(small.max_tokens, 10);
     }
 
     fn make_qwen_template_test_state() -> AppState {
