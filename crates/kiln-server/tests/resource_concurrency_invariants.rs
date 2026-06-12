@@ -13,6 +13,17 @@ fn read(path: &str) -> String {
     std::fs::read_to_string(workspace_root().join(path)).unwrap()
 }
 
+fn source_between<'a>(source: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
+    let start = source
+        .find(start_marker)
+        .unwrap_or_else(|| panic!("missing start marker: {start_marker}"));
+    let rest = &source[start..];
+    let end = rest
+        .find(end_marker)
+        .unwrap_or_else(|| panic!("missing end marker: {end_marker}"));
+    &rest[..end]
+}
+
 #[test]
 fn rocm_disk_cache_persistence_has_no_server_call_sites() {
     let main = read("crates/kiln-server/src/main.rs");
@@ -251,6 +262,45 @@ fn rocm_graph_replay_failure_is_a_circuit_breaker() {
     assert!(
         rocm_graph.matches("self.captured.clear();").count() >= 4,
         "ROCm graph replay failures must clear captured graph state before eager fallback"
+    );
+}
+
+#[test]
+fn rocm_graph_warm_pass_prewarms_capture_stream() {
+    let rocm_graph = read("crates/kiln-model/src/rocm_graph.rs");
+    let capture = source_between(
+        &rocm_graph,
+        "fn try_capture_hidden(",
+        "fn new_token_buffer(",
+    );
+    let warm_pass = source_between(
+        capture,
+        "let htod_before = kiln_tensor::rocm_htod_count();",
+        "if let Err(err) = warm_result",
+    );
+
+    assert!(
+        capture.contains("ROCm graph capture: sync kt default stream before warm pass"),
+        "ROCm graph capture must make default-stream input fills visible before warming the capture stream"
+    );
+    assert!(
+        warm_pass.contains("kiln_tensor::with_active_rocm_stream(stream.clone(), ||"),
+        "ROCm graph warm pass must run on the same stream that will be captured, so hipBLASLt per-stream workspace is preallocated before begin_capture"
+    );
+    assert!(
+        capture.contains("sync capture stream after ROCm graph warm pass"),
+        "ROCm graph capture must wait for the warm pass before restoring state or falling back"
+    );
+
+    let warm_stream = capture
+        .find("kiln_tensor::with_active_rocm_stream(stream.clone(), ||")
+        .expect("warm pass should install active ROCm stream");
+    let begin_capture = capture
+        .find(".begin_capture()")
+        .expect("capture path should call begin_capture");
+    assert!(
+        warm_stream < begin_capture,
+        "ROCm capture stream must be warmed before hipStreamBeginCapture"
     );
 }
 

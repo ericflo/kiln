@@ -177,7 +177,8 @@ struct CapturedDecodeGraphRocm {
     /// The source graph — retained because dropping it `hipGraphDestroy`s the
     /// handle; the exec is launched, the graph is kept alive alongside it.
     _graph: kiln_hip::RocmGraph,
-    /// The instantiated, launchable graph (AUTO_FREE_ON_LAUNCH).
+    /// The instantiated, launchable graph. ROCm uses plain instantiation
+    /// (`flags = 0`); auto-free was rejected on gfx1151 / ROCm 7.2.4.
     exec: kiln_hip::RocmGraphExec,
     /// Graph-stable PRE-final-norm hidden `[1, 1, hidden]`; refreshed in place by
     /// the captured forward, read eagerly by lm_head after launch.
@@ -1894,6 +1895,13 @@ impl RocmGraphRunner {
         let gdn_snapshot = linear_state
             .snapshot()
             .context("freeze-pointers: snapshot GDN recurrent state before warm pass")?;
+        // The graph-stable input buffers and GDN snapshot above were filled on
+        // the kt default stream. The warm pass deliberately runs on the SAME
+        // non-default stream that will be captured so hipBLASLt's per-stream
+        // workspace is allocated before `hipStreamBeginCapture`; sync first so
+        // that stream sees initialized inputs/state.
+        kiln_tensor::rocm_synchronize_default_stream(device_idx)
+            .context("ROCm graph capture: sync kt default stream before warm pass")?;
         // Snapshot the host→device copy count across the warm forward. Any
         // host_to_rocm_copy issued by the forward (e.g. a GDN-gates/softplus or
         // KV-write FALLBACK path that allocates a device tensor from host) does a
@@ -1905,27 +1913,39 @@ impl RocmGraphRunner {
         // BEFORE begin_capture, leaving the device clean.
         let htod_before = kiln_tensor::rocm_htod_count();
         let warm_result = kiln_tensor::with_rocm_capture_arena(arena.clone(), || {
-            let hidden = model_forward_paged_hidden_with_graph_inputs(
-                backend,
-                &[token_id],
-                weights,
-                config,
-                paged_cache,
-                block_table,
-                seq_len,
-                Some(linear_state),
-                lora,
-                &token_buffer,
-                &position_buffer,
-                graph_inputs.as_ref(),
-            )?;
-            kiln_tensor::rocm_slice_set_dim0(&output_hidden, &hidden, 0)
-                .context("freeze-pointers warm pass: copy hidden into stable output")?;
-            Ok::<(), anyhow::Error>(())
+            kiln_tensor::with_active_rocm_stream(stream.clone(), || {
+                let hidden = model_forward_paged_hidden_with_graph_inputs(
+                    backend,
+                    &[token_id],
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    Some(linear_state),
+                    lora,
+                    &token_buffer,
+                    &position_buffer,
+                    graph_inputs.as_ref(),
+                )?;
+                kiln_tensor::rocm_slice_set_dim0(&output_hidden, &hidden, 0)
+                    .context("freeze-pointers warm pass: copy hidden into stable output")?;
+                Ok::<(), anyhow::Error>(())
+            })
         });
+        let warm_sync_result = stream
+            .synchronize()
+            .map_err(|e| anyhow::anyhow!("sync capture stream after ROCm graph warm pass: {e}"));
         if let Err(err) = warm_result {
+            if let Err(sync_err) = warm_sync_result {
+                tracing::warn!("post-warm-failure capture stream sync failed: {sync_err:#}");
+            }
             *linear_state = gdn_snapshot;
             return Err(err).context("freeze-pointers warm (Record) pass failed");
+        }
+        if let Err(sync_err) = warm_sync_result {
+            *linear_state = gdn_snapshot;
+            return Err(sync_err);
         }
         // Restore the GDN recurrent state so the captured pass advances it once.
         *linear_state = gdn_snapshot;
