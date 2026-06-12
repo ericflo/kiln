@@ -6,7 +6,7 @@
 //! | POST   | /v1/agent/runs             | Start a run `{task, cwd?, label?, ...}`|
 //! | GET    | /v1/agent/runs             | List runs (newest first)               |
 //! | GET    | /v1/agent/runs/{id}        | One run record                         |
-//! | GET    | /v1/agent/runs/{id}/events | Event feed (`?after=<seq>` cursor)     |
+//! | GET    | /v1/agent/runs/{id}/events | Event feed: returns events with seq >= `after`; pass the response's `next_after` back to poll incrementally |
 //! | POST   | /v1/agent/runs/{id}/steer  | Queue a steering message               |
 //! | POST   | /v1/agent/runs/{id}/follow_up | Queue a follow-up task              |
 //! | POST   | /v1/agent/runs/{id}/abort  | Abort the run                          |
@@ -23,14 +23,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use crate::agent_runs::{AgentRunRecord, ControlError, NewRunParams};
+use crate::agent_runs::{AgentRunRecord, ControlError, NewRunParams, StartRunError};
 use crate::error::ApiError;
 use crate::state::AppState;
-
-/// Active (queued + running) runs allowed before new submissions are
-/// turned away — a backstop against a runaway submitter, not a tuning
-/// knob (concurrency is `[agent].max_concurrent_runs`).
-const MAX_ACTIVE_RUNS: usize = 32;
 
 const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh"];
 
@@ -58,6 +53,20 @@ fn runs_gate() -> (bool, Option<String>) {
             ),
         )
     }
+}
+
+/// The gate guards reads too: run records and event feeds carry task
+/// prompts, server paths, and raw tool output — closing the gate must
+/// take the data side off the network, not just creation. /status
+/// stays open (it only reports the gate itself).
+fn require_runs_enabled() -> Result<(), ApiError> {
+    let (enabled, reason) = runs_gate();
+    if !enabled {
+        return Err(ApiError::agent_runs_disabled(
+            reason.unwrap_or_else(|| "gate closed".into()),
+        ));
+    }
+    Ok(())
 }
 
 async fn runs_status(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -102,12 +111,7 @@ async fn create_run(
     if state.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
     }
-    let (enabled, reason) = runs_gate();
-    if !enabled {
-        return Err(ApiError::agent_runs_disabled(
-            reason.unwrap_or_else(|| "gate closed".into()),
-        ));
-    }
+    require_runs_enabled()?;
     let task = req.task.trim();
     if task.is_empty() {
         return Err(ApiError::agent_run_invalid_request(
@@ -148,11 +152,6 @@ async fn create_run(
             "`pi` is not installed on the server's PATH",
         ));
     };
-    if state.agent_runs.active_count() >= MAX_ACTIVE_RUNS {
-        return Err(ApiError::agent_runs_unavailable(format!(
-            "{MAX_ACTIVE_RUNS} runs are already queued or running — wait for some to finish"
-        )));
-    }
     let record = state.agent_runs.start_run(NewRunParams {
         task: task.to_string(),
         cwd,
@@ -164,7 +163,10 @@ async fn create_run(
         model: state.served_model_id.clone(),
         kiln_url: Some(crate::agent_runs::self_url()),
     });
-    Ok(Json(record))
+    match record {
+        Ok(record) => Ok(Json(record)),
+        Err(StartRunError::AtCapacity(max)) => Err(ApiError::agent_runs_at_capacity(max)),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,18 +179,20 @@ struct ListRunsQuery {
 async fn list_runs(
     State(state): State<AppState>,
     Query(q): Query<ListRunsQuery>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_runs_enabled()?;
     let mut runs = state.agent_runs.list();
     if let Some(label) = &q.label {
         runs.retain(|r| r.label.as_deref() == Some(label.as_str()));
     }
-    Json(serde_json::json!({ "runs": runs }))
+    Ok(Json(serde_json::json!({ "runs": runs })))
 }
 
 async fn get_run(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<AgentRunRecord>, ApiError> {
+    require_runs_enabled()?;
     state
         .agent_runs
         .get(&id)
@@ -208,18 +212,24 @@ async fn run_events(
     AxumPath(id): AxumPath<String>,
     Query(q): Query<EventsQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let Some((events, status)) = state.agent_runs.events_after(&id, q.after) else {
+    require_runs_enabled()?;
+    let Some(page) = state.agent_runs.events_after(&id, q.after) else {
         return Err(ApiError::agent_run_not_found(&id));
     };
-    let next_after = events.last().map(|(seq, _)| seq + 1).unwrap_or(q.after);
-    let events: Vec<serde_json::Value> = events
+    let next_after = page.events.last().map(|(seq, _)| seq + 1).unwrap_or(q.after);
+    let events: Vec<serde_json::Value> = page
+        .events
         .into_iter()
         .map(|(seq, event)| serde_json::json!({ "seq": seq, "event": event }))
         .collect();
     Ok(Json(serde_json::json!({
         "events": events,
         "next_after": next_after,
-        "status": status,
+        "status": page.status,
+        // Replay-gap detection: events before the cursor are gone when
+        // truncated (ring prune on a long run, or a server restart).
+        "first_available_seq": page.first_available_seq,
+        "truncated": page.truncated,
     })))
 }
 
@@ -240,6 +250,7 @@ async fn steer_run(
     AxumPath(id): AxumPath<String>,
     Json(req): Json<MessageRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    require_runs_enabled()?;
     if req.message.trim().is_empty() {
         return Err(ApiError::agent_run_invalid_request(
             "`message` must be non-empty",
@@ -257,6 +268,7 @@ async fn follow_up_run(
     AxumPath(id): AxumPath<String>,
     Json(req): Json<MessageRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    require_runs_enabled()?;
     if req.message.trim().is_empty() {
         return Err(ApiError::agent_run_invalid_request(
             "`message` must be non-empty",
@@ -273,6 +285,7 @@ async fn abort_run(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    require_runs_enabled()?;
     state
         .agent_runs
         .abort(&id)

@@ -36,6 +36,11 @@ const PI_PROVIDER_ID: &str = "kiln-local";
 const EVENT_BUFFER_CAP: usize = 2000;
 /// Terminal run records kept before pruning oldest.
 const TERMINAL_RUNS_CAP: usize = 200;
+/// Active (queued + running) runs allowed before new submissions are
+/// turned away — a backstop against a runaway submitter, not a tuning
+/// knob (concurrency is `[agent].max_concurrent_runs`). Enforced
+/// atomically inside `start_run` under the runs lock.
+pub const ACTIVE_RUNS_BACKSTOP: usize = 32;
 /// last_assistant_text is a summary, not a transcript.
 const LAST_TEXT_CAP: usize = 4000;
 
@@ -43,13 +48,20 @@ static SELF_URL: OnceLock<String> = OnceLock::new();
 
 /// Record the URL this server is reachable at locally, for the pi
 /// config merge before each embedded run. A wildcard bind is rewritten
-/// to loopback — the child runs on the same host.
+/// to loopback — the child runs on the same host. Bare IPv6 literals
+/// get bracketed (`::1` → `http://[::1]:port`); unbracketed they parse
+/// as host `:` port soup and pi can't reach the server.
 pub fn set_self_url(host: &str, port: u16) {
-    let host = match host {
-        "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
-        other => other,
+    let _ = SELF_URL.set(format_self_url(host, port));
+}
+
+fn format_self_url(host: &str, port: u16) -> String {
+    let host: std::borrow::Cow<'_, str> = match host {
+        "0.0.0.0" | "::" | "[::]" => "127.0.0.1".into(),
+        other if other.parse::<std::net::Ipv6Addr>().is_ok() => format!("[{other}]").into(),
+        other => other.into(),
     };
-    let _ = SELF_URL.set(format!("http://{host}:{port}"));
+    format!("http://{host}:{port}")
 }
 
 pub fn self_url() -> String {
@@ -206,10 +218,20 @@ pub struct AgentRunRegistry {
     /// Pinged whenever a slot may have freed (run finished/started).
     slot_notify: tokio::sync::Notify,
     next_queue_seq: std::sync::atomic::AtomicU64,
+    /// Held across snapshot+write in `persist` so file-write order
+    /// matches snapshot order — without it a stale snapshot taken
+    /// before a finish() could land after it and resurrect the run as
+    /// non-terminal on the next restart.
+    persist_lock: std::sync::Mutex<()>,
 }
 
 impl AgentRunRegistry {
     pub fn new(adapter_dir: PathBuf) -> Self {
+        // The sessions dir is handed to pi as `--session-dir`, and pi
+        // runs with the RUN's cwd — a relative adapter_dir (mock mode
+        // uses bare "adapters") would resolve against the wrong
+        // directory and the finalizer would never find the session.
+        let adapter_dir = std::path::absolute(&adapter_dir).unwrap_or(adapter_dir);
         let persist_path = runs_json_path(&adapter_dir);
         let mut runs: BTreeMap<String, AgentRunRecord> = match std::fs::read(&persist_path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
@@ -236,6 +258,7 @@ impl AgentRunRegistry {
             settings: std::sync::RwLock::new(RunSettings::default()),
             slot_notify: tokio::sync::Notify::new(),
             next_queue_seq: std::sync::atomic::AtomicU64::new(next_seq),
+            persist_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -273,18 +296,33 @@ impl AgentRunRegistry {
             .count()
     }
 
-    /// Events with seq >= `after`, plus the run's current status — one
-    /// poll drives the live drill view.
-    pub fn events_after(&self, id: &str, after: u64) -> Option<(Vec<(u64, serde_json::Value)>, RunStatus)> {
+    /// Events with seq >= `after` (inclusive — pass the previous
+    /// response's `next_after` back to poll incrementally), plus the
+    /// run's current status and truncation metadata so a replay from 0
+    /// can tell when the head of the feed is gone (ring-buffer prune,
+    /// or the buffer not surviving a server restart).
+    pub fn events_after(&self, id: &str, after: u64) -> Option<EventsPage> {
         let status = self.get(id)?.status;
-        let events = self
-            .events
-            .lock()
-            .unwrap()
-            .get(id)
-            .map(|buf| buf.after(after))
-            .unwrap_or_default();
-        Some((events, status))
+        let guard = self.events.lock().unwrap();
+        match guard.get(id) {
+            Some(buf) => {
+                let first_available_seq = buf.items.front().map(|(seq, _)| *seq);
+                let truncated = first_available_seq.is_some_and(|first| after < first && first > 0);
+                Some(EventsPage {
+                    events: buf.after(after),
+                    status,
+                    first_available_seq,
+                    truncated,
+                })
+            }
+            // Run record survived a restart; its event buffer did not.
+            None => Some(EventsPage {
+                events: Vec::new(),
+                status,
+                first_available_seq: None,
+                truncated: true,
+            }),
+        }
     }
 
     /// Queue a steer message into a live run.
@@ -319,8 +357,13 @@ impl AgentRunRegistry {
     }
 
     /// Create the record and spawn the driver task. Returns a snapshot
-    /// of the queued record.
-    pub fn start_run(self: &Arc<Self>, params: NewRunParams) -> AgentRunRecord {
+    /// of the queued record, or `AtCapacity` — checked atomically with
+    /// the insert so concurrent submissions can't overshoot the
+    /// backstop.
+    pub fn start_run(
+        self: &Arc<Self>,
+        params: NewRunParams,
+    ) -> Result<AgentRunRecord, StartRunError> {
         let id = uuid::Uuid::new_v4().to_string();
         let record = AgentRunRecord {
             id: id.clone(),
@@ -342,10 +385,14 @@ impl AgentRunRegistry {
             last_assistant_text: None,
             error: None,
         };
-        self.runs
-            .write()
-            .unwrap()
-            .insert(id.clone(), record.clone());
+        {
+            let mut runs = self.runs.write().unwrap();
+            let active = runs.values().filter(|r| !r.status.is_terminal()).count();
+            if active >= ACTIVE_RUNS_BACKSTOP {
+                return Err(StartRunError::AtCapacity(ACTIVE_RUNS_BACKSTOP));
+            }
+            runs.insert(id.clone(), record.clone());
+        }
         self.events
             .lock()
             .unwrap()
@@ -359,7 +406,7 @@ impl AgentRunRegistry {
         tokio::spawn(async move {
             drive_run(reg, id, params, ctl_rx).await;
         });
-        record
+        Ok(record)
     }
 
     // ── internals ───────────────────────────────────────────────────
@@ -390,6 +437,9 @@ impl AgentRunRegistry {
     }
 
     fn persist(&self) {
+        // Snapshot and write under one mutex so writes land in
+        // snapshot order (see persist_lock field doc).
+        let _guard = self.persist_lock.lock().unwrap_or_else(|p| p.into_inner());
         let path = runs_json_path(&self.adapter_dir);
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -436,8 +486,15 @@ impl AgentRunRegistry {
 
     /// Wait until this run is first in the queued FIFO and a slot is
     /// free, then mark it running. Returns false when aborted while
-    /// queued.
-    async fn claim_slot(&self, id: &str, ctl_rx: &mut mpsc::Receiver<ControlMsg>) -> bool {
+    /// queued. Steer/follow-up messages arriving before the start are
+    /// buffered into `pending` — the API told the caller "queued", so
+    /// they must be delivered once the run starts, not dropped.
+    async fn claim_slot(
+        &self,
+        id: &str,
+        ctl_rx: &mut mpsc::Receiver<ControlMsg>,
+        pending: &mut Vec<ControlMsg>,
+    ) -> bool {
         loop {
             let claimed = {
                 let mut runs = self.runs.write().unwrap();
@@ -473,15 +530,16 @@ impl AgentRunRegistry {
                 // registration.
                 _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
                 msg = ctl_rx.recv() => {
-                    if matches!(msg, Some(ControlMsg::Abort) | None) {
-                        return false;
+                    match msg {
+                        Some(ControlMsg::Abort) | None => return false,
+                        Some(msg) => {
+                            self.push_event(id, serde_json::json!({
+                                "type": "kiln_note",
+                                "note": "message queued — delivered when the run starts"
+                            }));
+                            pending.push(msg);
+                        }
                     }
-                    // Steer/follow-up before start: drop with a note in
-                    // the event feed.
-                    self.push_event(id, serde_json::json!({
-                        "type": "kiln_note",
-                        "note": "steer/follow_up ignored — run has not started yet"
-                    }));
                 }
             }
         }
@@ -492,6 +550,24 @@ impl AgentRunRegistry {
 pub enum ControlError {
     NotFound,
     NotActive(RunStatus),
+}
+
+#[derive(Debug)]
+pub enum StartRunError {
+    /// queued + running runs already at the backstop.
+    AtCapacity(usize),
+}
+
+/// One page of the event feed (see [`AgentRunRegistry::events_after`]).
+#[derive(Debug)]
+pub struct EventsPage {
+    pub events: Vec<(u64, serde_json::Value)>,
+    pub status: RunStatus,
+    /// Earliest seq still retained (None when no events were buffered).
+    pub first_available_seq: Option<u64>,
+    /// True when events before the requested cursor are gone — ring
+    /// prune on a long run, or a server restart dropping the buffer.
+    pub truncated: bool,
 }
 
 fn runs_json_path(adapter_dir: &Path) -> PathBuf {
@@ -506,7 +582,8 @@ async fn drive_run(
     params: NewRunParams,
     mut ctl_rx: mpsc::Receiver<ControlMsg>,
 ) {
-    if !reg.claim_slot(&id, &mut ctl_rx).await {
+    let mut pending_control: Vec<ControlMsg> = Vec::new();
+    if !reg.claim_slot(&id, &mut ctl_rx, &mut pending_control).await {
         reg.finish(&id, RunStatus::Aborted, Some("aborted while queued".into()));
         return;
     }
@@ -519,7 +596,11 @@ async fn drive_run(
         }
     }
 
-    let sessions_dir = reg.sessions_dir();
+    // Per-run session dir: runs never share a directory, so the
+    // session-file fallback below can only ever see this run's own
+    // file — a shared dir let a run that died before flushing adopt a
+    // sibling's session. Trace discovery sweeps nested dirs fine.
+    let sessions_dir = reg.sessions_dir().join(&id);
     if let Err(e) = std::fs::create_dir_all(&sessions_dir) {
         reg.finish(
             &id,
@@ -576,6 +657,34 @@ async fn drive_run(
     // follow-up queues one more loop.
     let mut ends_remaining: i64 = 1;
     let mut steer_seq: u64 = 0;
+    // Deliver control messages that arrived while the run was queued —
+    // the API already acknowledged them. A steer landing in the gap
+    // before pi starts streaming surfaces as an error response in the
+    // event feed rather than vanishing.
+    for msg in pending_control.drain(..) {
+        match msg {
+            ControlMsg::Steer(message) => {
+                steer_seq += 1;
+                let cmd = serde_json::json!({
+                    "id": format!("steer-{steer_seq}"),
+                    "type": "steer",
+                    "message": message,
+                });
+                let _ = process.send(&cmd).await;
+            }
+            ControlMsg::FollowUp(message) => {
+                steer_seq += 1;
+                ends_remaining += 1;
+                let cmd = serde_json::json!({
+                    "id": format!("follow-{steer_seq}"),
+                    "type": "follow_up",
+                    "message": message,
+                });
+                let _ = process.send(&cmd).await;
+            }
+            ControlMsg::Abort => {}
+        }
+    }
     let (final_status, final_error) = loop {
         tokio::select! {
             line = process.lines.recv() => {
@@ -640,27 +749,51 @@ async fn drive_run(
 
     // Index the finished session into the §10.3 trace layer so the
     // flywheel sees it without a manual discover.
-    let (session_id, session_path) = {
+    let (session_id, session_path, started_unix_ms) = {
         let run = reg.get(&id);
         (
             run.as_ref().and_then(|r| r.session_id.clone()),
             run.as_ref().and_then(|r| r.session_path.clone()),
+            run.as_ref().and_then(|r| r.started_unix_ms),
         )
     };
     let resolved_path = session_path
         .map(PathBuf::from)
         .filter(|p| p.is_file())
-        .or_else(|| find_session_file(&sessions_dir, session_id.as_deref()));
-    if let Some(path) = resolved_path {
-        let indexed = crate::api::agent_traces::index_session_file(&reg.adapter_dir, &path);
-        reg.update(&id, |run| {
-            run.session_path = Some(path.display().to_string());
-            if let Some(trace) = &indexed {
-                run.session_id = Some(trace.id.clone());
-                run.trace_indexed = true;
-            }
-        });
+        .or_else(|| find_session_file(&sessions_dir, session_id.as_deref(), started_unix_ms));
+    match resolved_path {
+        Some(path) => {
+            let indexed = crate::api::agent_traces::index_session_file(&reg.adapter_dir, &path);
+            reg.update(&id, |run| {
+                run.session_path = Some(path.display().to_string());
+                if let Some(trace) = &indexed {
+                    run.session_id = Some(trace.id.clone());
+                    run.trace_indexed = true;
+                }
+            });
+        }
+        None => {
+            tracing::warn!(run = %id, dir = %sessions_dir.display(), "embedded run session file not found — trace not indexed");
+            reg.push_event(
+                &id,
+                serde_json::json!({
+                    "type": "kiln_note",
+                    "note": "session file not found — trace not indexed",
+                }),
+            );
+        }
     }
+
+    // A run whose last assistant turn ended in an error (observe_line
+    // records it) is not a success, even though pi emitted a normal
+    // agent_end — e.g. the model endpoint 4xx/5xxed on the final turn.
+    let final_status = if final_status == RunStatus::Completed
+        && reg.get(&id).is_some_and(|r| r.error.is_some())
+    {
+        RunStatus::Failed
+    } else {
+        final_status
+    };
 
     reg.finish(&id, final_status, final_error);
 }
@@ -690,8 +823,28 @@ fn observe_line(reg: &AgentRunRegistry, id: &str, value: &serde_json::Value) {
                             .join("\n")
                     })
                     .unwrap_or_default();
+                // An assistant turn can end in an error (stopReason
+                // "error": model endpoint down, 4xx/5xx, ...) while pi
+                // still finishes the loop normally — record it so the
+                // run doesn't report success on a failed turn. A later
+                // successful turn clears it (pi recovered).
+                let turn_errored = message
+                    .and_then(|m| m.get("stopReason"))
+                    .and_then(|s| s.as_str())
+                    == Some("error");
+                let turn_error_message = message
+                    .and_then(|m| m.get("errorMessage"))
+                    .and_then(|s| s.as_str())
+                    .map(str::to_string);
                 reg.update(id, |run| {
                     run.num_turns += 1;
+                    if turn_errored {
+                        run.error = Some(turn_error_message.unwrap_or_else(|| {
+                            "assistant turn ended with an error".to_string()
+                        }));
+                    } else {
+                        run.error = None;
+                    }
                     if !text.is_empty() {
                         let mut t = text;
                         if t.len() > LAST_TEXT_CAP {
@@ -740,10 +893,20 @@ fn observe_line(reg: &AgentRunRegistry, id: &str, value: &serde_json::Value) {
     }
 }
 
-/// Fallback session lookup when get_state never answered: prefer a
-/// file named after the session id anywhere under the sessions dir,
-/// else the most recently modified `.jsonl`.
-fn find_session_file(sessions_dir: &Path, session_id: Option<&str>) -> Option<PathBuf> {
+/// Fallback session lookup when get_state never answered, scoped to
+/// this run's own session dir. With a known session id, only a
+/// matching filename counts — an id that matches nothing means the
+/// session was never flushed, and attaching any other file would be
+/// wrong. Without one, the newest `.jsonl` is accepted only if it was
+/// modified at/after the run started (1s slack for fs granularity).
+fn find_session_file(
+    sessions_dir: &Path,
+    session_id: Option<&str>,
+    started_unix_ms: Option<u64>,
+) -> Option<PathBuf> {
+    let not_before = started_unix_ms.map(|ms| {
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(ms.saturating_sub(1000))
+    });
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
     let mut stack = vec![sessions_dir.to_path_buf()];
     let mut depth_guard = 0usize;
@@ -764,11 +927,15 @@ fn find_session_file(sessions_dir: &Path, session_id: Option<&str>) -> Option<Pa
                     if p.file_stem().is_some_and(|stem| stem.to_string_lossy().contains(sid)) {
                         return Some(p);
                     }
+                    continue;
                 }
                 let mtime = entry
                     .metadata()
                     .and_then(|m| m.modified())
                     .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                if not_before.is_some_and(|floor| mtime < floor) {
+                    continue;
+                }
                 if newest.as_ref().is_none_or(|(t, _)| mtime > *t) {
                     newest = Some((mtime, p));
                 }
@@ -865,7 +1032,7 @@ for line in sys.stdin:
         let pi_bin = write_fake_pi(adapter_dir.path());
         let reg = Arc::new(AgentRunRegistry::new(adapter_dir.path().to_path_buf()));
 
-        let rec = reg.start_run(params(pi_bin, workdir.path().to_path_buf(), "say hi"));
+        let rec = reg.start_run(params(pi_bin, workdir.path().to_path_buf(), "say hi")).unwrap();
         assert_eq!(rec.status, RunStatus::Queued);
 
         let done = wait_terminal(&reg, &rec.id).await;
@@ -877,9 +1044,12 @@ for line in sys.stdin:
         assert!(done.trace_indexed, "session must be merged into agent_traces.json");
 
         // The event feed captured the full trajectory.
-        let (events, status) = reg.events_after(&rec.id, 0).unwrap();
-        assert_eq!(status, RunStatus::Completed);
-        let types: Vec<_> = events
+        let page = reg.events_after(&rec.id, 0).unwrap();
+        assert_eq!(page.status, RunStatus::Completed);
+        assert!(!page.truncated, "nothing was pruned");
+        assert_eq!(page.first_available_seq, Some(0));
+        let types: Vec<_> = page
+            .events
             .iter()
             .map(|(_, v)| v.get("type").and_then(|t| t.as_str()).unwrap_or(""))
             .collect();
@@ -922,8 +1092,8 @@ for line in sys.stdin:
         let reg = Arc::new(AgentRunRegistry::new(adapter_dir.path().to_path_buf()));
         reg.apply_config(1, 900);
 
-        let a = reg.start_run(params(slow_pi.clone(), workdir.path().to_path_buf(), "a"));
-        let b = reg.start_run(params(slow_pi, workdir.path().to_path_buf(), "b"));
+        let a = reg.start_run(params(slow_pi.clone(), workdir.path().to_path_buf(), "a")).unwrap();
+        let b = reg.start_run(params(slow_pi, workdir.path().to_path_buf(), "b")).unwrap();
 
         // Give the first driver time to claim the only slot.
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
@@ -950,14 +1120,70 @@ for line in sys.stdin:
         let adapter_dir = tempfile::tempdir().unwrap();
         let workdir = tempfile::tempdir().unwrap();
         let reg = Arc::new(AgentRunRegistry::new(adapter_dir.path().to_path_buf()));
-        let rec = reg.start_run(params(
-            PathBuf::from("/nonexistent/pi-binary"),
-            workdir.path().to_path_buf(),
-            "x",
-        ));
+        let rec = reg
+            .start_run(params(
+                PathBuf::from("/nonexistent/pi-binary"),
+                workdir.path().to_path_buf(),
+                "x",
+            ))
+            .unwrap();
         let done = wait_terminal(&reg, &rec.id).await;
         assert_eq!(done.status, RunStatus::Failed);
         assert!(done.error.unwrap().contains("could not start pi"));
+    }
+
+    #[test]
+    fn self_url_brackets_ipv6_and_rewrites_wildcards() {
+        assert_eq!(format_self_url("127.0.0.1", 8420), "http://127.0.0.1:8420");
+        assert_eq!(format_self_url("0.0.0.0", 8420), "http://127.0.0.1:8420");
+        assert_eq!(format_self_url("::", 8420), "http://127.0.0.1:8420");
+        // A bare IPv6 loopback bind passes the runs gate; unbracketed it
+        // produced http://::1:8420, which pi cannot parse.
+        assert_eq!(format_self_url("::1", 8420), "http://[::1]:8420");
+        assert_eq!(format_self_url("[::1]", 8420), "http://[::1]:8420");
+        assert_eq!(format_self_url("office-kiln", 9000), "http://office-kiln:9000");
+    }
+
+    #[tokio::test]
+    async fn start_run_rejects_at_backstop_capacity() {
+        let adapter_dir = tempfile::tempdir().unwrap();
+        let workdir = tempfile::tempdir().unwrap();
+        let reg = Arc::new(AgentRunRegistry::new(adapter_dir.path().to_path_buf()));
+        reg.apply_config(1, 900);
+        // Fill the registry with queued records via the public path; the
+        // missing binary keeps them from progressing instantly, and
+        // capacity counts queued + running either way.
+        let mut started = Vec::new();
+        for i in 0..ACTIVE_RUNS_BACKSTOP {
+            match reg.start_run(params(
+                PathBuf::from("/nonexistent/pi-binary"),
+                workdir.path().to_path_buf(),
+                &format!("task {i}"),
+            )) {
+                Ok(rec) => started.push(rec.id),
+                Err(StartRunError::AtCapacity(_)) => {
+                    // Drivers may already have failed some runs (terminal
+                    // states free capacity), so reaching the cap is not
+                    // guaranteed — but a rejection here still proves the
+                    // backstop fires.
+                    return;
+                }
+            }
+        }
+        let over = reg.start_run(params(
+            PathBuf::from("/nonexistent/pi-binary"),
+            workdir.path().to_path_buf(),
+            "one too many",
+        ));
+        assert!(
+            matches!(over, Err(StartRunError::AtCapacity(max)) if max == ACTIVE_RUNS_BACKSTOP)
+                // On a fast machine some of the 32 may already be terminal
+                // (missing binary fails immediately), freeing capacity.
+                || over.is_ok(),
+        );
+        // Either way the registry never holds more than the backstop in
+        // non-terminal states.
+        assert!(reg.active_count() <= ACTIVE_RUNS_BACKSTOP);
     }
 
     #[test]

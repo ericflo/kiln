@@ -70,6 +70,7 @@ A 4B model continuously tuned to your specific workload — and continuously *me
 
 - **OpenAI-compatible API** — drop in as a local replacement. SSE streaming, chat completions, tool use formatting.
 - **pi integration** — `kiln pi-setup` backs up and merges `~/.pi/agent/models.json` + `settings.json`, then points pi at Kiln as an OpenAI-compatible tool-calling backend.
+- **Embedded agent runs** — the server drives pi itself (`POST /v1/agent/runs`): spawns `pi --mode rpc` against its own model, streams the trajectory live with steer/abort, and auto-indexes finished sessions into the trace layer the self-improvement flywheel trains on.
 - **SFT training** over HTTP — submit examples, model updates in seconds via LoRA hot-swap.
 - **GRPO training** over HTTP — submit scored completions for reinforcement learning. You control the reward function.
 - **First-class evals** over HTTP — register suites, run them against any adapter, drill into per-example outcomes. Auto-detect picks the right scorer per example (`numeric_tolerance`, `multiple_choice`, `json_validity`, `regex`, `contains`, `tool_call`, `code`, `llm_judge`, `all`/`any` composites).
@@ -330,6 +331,22 @@ pi -p "Use the bash tool to run: pwd"
 
 Kiln accepts Qwen3.5's native XML tool-call generations internally, but OpenAI-compatible clients receive normal `tool_calls` in both streaming and non-streaming responses. pi should execute the tool call instead of printing raw `<tool_call>` XML.
 
+**Embedded agent runs: kiln drives pi itself.** Beyond serving pi as a model backend, the server can spawn `pi --mode rpc` as a managed child, hand it a task, stream the trajectory live, and merge the finished session straight into the agent-trace layer the self-improvement flywheel reads — on-policy rollouts on demand, no human at the keyboard:
+
+```bash
+# Start a run (the spawned pi talks back to this same server)
+curl http://localhost:8420/v1/agent/runs \
+  -H "Content-Type: application/json" \
+  -d '{"task": "Run the test suite and fix the first failure", "cwd": "/path/to/project"}'
+
+# Watch it live (poll cursor), steer it, or abort it
+curl "http://localhost:8420/v1/agent/runs/<id>/events?after=0"
+curl http://localhost:8420/v1/agent/runs/<id>/steer -d '{"message": "Prefer a minimal fix"}' -H "Content-Type: application/json"
+curl -X POST http://localhost:8420/v1/agent/runs/<id>/abort
+```
+
+Runs queue FIFO (`[agent].max_concurrent_runs`, default 2; `run_timeout_secs`, default 900), persist across restarts, and auto-index into `GET /v1/agent/traces` when they finish — so `kiln self-improve` trains on them in the same cycle. Because embedded runs execute code on the server, they are enabled only on loopback binds by default (`KILN_AGENT_RUNS=1` opts in elsewhere, `=0` force-disables). The dashboard's **Distill → Agent runs** tab provides a launch form and a live trajectory view.
+
 See [QUICKSTART.md](QUICKSTART.md) for the full walkthrough including Desktop App setup, source builds, GRPO, adapter management, Docker, and systemd setup. If setup stalls on binary downloads, CUDA/ROCm/Vulkan/Metal, model paths, `/health`, mock mode, training endpoints, or adapter directories, start with the [Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html). For tools-bearing workloads on older pinned releases, see [QUICKSTART.md §9.2](QUICKSTART.md#92-troubleshooting-older-release-long-prefill-timeouts) for the legacy `workers=1` / request-timeout troubleshooting note ([#664](https://github.com/ericflo/kiln/issues/664)).
 
 ## See it in action
@@ -396,6 +413,13 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | GET | `/v1/agent/traces` | List discovered agent session traces |
 | POST | `/v1/agent/self_improve` | One-call agentic self-improvement (traces → OPD + judge distill) |
 | POST | `/v1/agent/judge_distill` | Distill a judge LoRA from agent traces |
+| GET / POST | `/v1/agent/runs` | Embedded pi runs — the server spawns `pi --mode rpc`, streams the trajectory, auto-indexes the session as a trace |
+| GET | `/v1/agent/runs/status` | Embedded-run gate state, pi availability, capacity |
+| GET | `/v1/agent/runs/{id}` | One run record (status, counters, session link) |
+| GET | `/v1/agent/runs/{id}/events` | Live event feed for a run (`?after=<seq>` poll cursor) |
+| POST | `/v1/agent/runs/{id}/steer` | Queue a steering message into a live run |
+| POST | `/v1/agent/runs/{id}/follow_up` | Queue a follow-up task into a live run |
+| POST | `/v1/agent/runs/{id}/abort` | Abort a queued or running run |
 | GET | `/v1/adapters` | List saved/available LoRA adapters and identify the active adapter |
 | GET | `/v1/adapters/{name}/detail` | Files + training history + eval history for one adapter |
 | POST | `/v1/adapters/load` | Load adapter from disk |

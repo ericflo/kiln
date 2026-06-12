@@ -496,6 +496,18 @@ impl ApiError {
         }
     }
 
+    pub fn agent_runs_at_capacity(max: usize) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "agent_runs_at_capacity",
+            message: format!(
+                "{max} agent runs are already queued or running — wait for some to finish"
+            ),
+            hint: "Check active runs with GET /v1/agent/runs, abort one with POST /v1/agent/runs/{id}/abort, or retry shortly.",
+            retry_after_seconds: Some(30),
+        }
+    }
+
     pub fn training_job_not_found(job_id: impl std::fmt::Display) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,

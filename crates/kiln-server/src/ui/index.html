@@ -1068,6 +1068,35 @@
   </div>
 
   <!-- =================================================================
+       Agent run drill-in modal — live event feed + steer / follow-up /
+       abort for one embedded pi run
+       ================================================================= -->
+  <div id="run-drill-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="run-drill-title">
+    <div class="modal-shell" tabindex="-1">
+      <div class="modal-head">
+        <h2 id="run-drill-title">Agent run</h2>
+        <span class="modal-meta" id="run-drill-meta"></span>
+        <button class="btn btn-sm btn-danger" id="run-drill-abort" type="button" title="Abort this run — pi stops at the next opportunity"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-stop"></use></svg> Abort</button>
+        <button class="modal-close" id="run-drill-close" aria-label="Close"><svg class="icn" aria-hidden="true"><use href="#i-close"></use></svg></button>
+      </div>
+      <div class="modal-body" style="grid-template-columns: 1fr;">
+        <div class="modal-content" id="run-drill-content">
+          <div class="req-detail" id="run-drill-events" style="flex: 1 1 auto;">
+            <div class="detail-empty">Loading…</div>
+          </div>
+          <div style="display: flex; gap: var(--space-2); padding: var(--space-3) var(--space-5); border-top: 1px solid var(--border); flex-shrink: 0;">
+            <input type="text" id="run-drill-steer-input" style="flex: 1 1 auto;"
+                   placeholder="Message for the agent — Steer interrupts the current turn, Follow-up queues after it"
+                   aria-label="Message to steer or follow up the run">
+            <button type="button" class="btn btn-sm" id="run-drill-steer-send" title="Interrupt the agent with this message now">Steer</button>
+            <button type="button" class="btn btn-sm" id="run-drill-followup-send" title="Queue this message as a follow-up task once the current one finishes">Follow-up</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- =================================================================
        Adapter drill-in modal
        ================================================================= -->
   <div id="adapter-drill-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="adapter-drill-title">
@@ -1152,6 +1181,7 @@
         <button class="tab" id="distill-tab-cache" data-tab="cache" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-cache-pane" aria-describedby="distill-tab-cache-desc" tabindex="-1" title="On-disk logit cache">Cache</button>
         <button class="tab" id="distill-tab-library" data-tab="library" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-library-pane" aria-describedby="distill-tab-library-desc" tabindex="-1" title="Browse, install & publish adapters">Library</button>
         <button class="tab" id="distill-tab-traces" data-tab="traces" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-traces-pane" aria-describedby="distill-tab-traces-desc" tabindex="-1" title="Import pi agent sessions for distillation">Agent traces</button>
+        <button class="tab" id="distill-tab-runs" data-tab="runs" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-runs-pane" aria-describedby="distill-tab-runs-desc" tabindex="-1" title="Run pi tasks on this server and watch them live">Agent runs</button>
       </div>
 
       <!-- Accessible descriptions for the tabs whose only explanation was a
@@ -1166,6 +1196,7 @@
         <span id="distill-tab-refresh-desc">Refresh an adapter on new data (continual learning).</span>
         <span id="distill-tab-self-desc">Self-improve via self-distillation.</span>
         <span id="distill-tab-merge-desc">Behaviour-space LoRA merge.</span>
+        <span id="distill-tab-runs-desc">Run pi tasks on this server and watch them live.</span>
       </div>
 
       <!-- =================================================================
@@ -1597,6 +1628,38 @@
         </div>
         <div id="agent-traces-list">
           <div class="empty">No pi sessions discovered yet. Use pi against this server, then scan to find the sessions it saved.</div>
+        </div>
+      </div>
+
+      <!-- =================================================================
+           Agent runs — embedded pi run engine (/v1/agent/runs)
+           ================================================================= -->
+      <div class="tab-content" id="distill-tab-runs-pane" role="tabpanel" aria-labelledby="distill-tab-runs" hidden inert>
+        <div class="card-head" style="border:none; padding:0; margin-bottom: var(--space-3);">
+          <h3 style="font-size: var(--text-lg);">Embedded pi runs</h3>
+          <span class="eyebrow">Server-driven rollouts &middot; steer, follow up, abort</span>
+        </div>
+        <div class="form-help" id="agent-runs-status" style="margin-bottom: var(--space-3);">Checking the run engine&hellip;</div>
+        <div style="display: flex; gap: var(--space-3); margin-bottom: var(--space-2); flex-wrap: wrap; align-items: center;">
+          <textarea id="agent-run-task" rows="3" style="flex: 1 1 100%;"
+                    placeholder="Task for pi — e.g. run the test suite and fix the first failure (Ctrl+Enter starts the run)"
+                    title="The task prompt handed to pi. Ctrl+Enter starts the run."
+                    aria-label="Task for the agent run"></textarea>
+        </div>
+        <div style="display: flex; gap: var(--space-3); margin-bottom: var(--space-3); flex-wrap: wrap; align-items: center;">
+          <input type="text" id="agent-run-cwd" style="flex: 1 1 280px;"
+                 placeholder="Working directory — empty uses the server&rsquo;s cwd"
+                 title="Directory the agent runs in. Leave empty to use the server's working directory."
+                 aria-label="Working directory for the run">
+          <input type="text" id="agent-run-label" style="flex: 0 1 200px;"
+                 placeholder="Label (optional)"
+                 title="Free-form grouping label, e.g. a rollout batch name"
+                 aria-label="Grouping label for the run">
+          <button type="button" class="btn btn-sm btn-primary" id="agent-run-start" title="Queue this task on the embedded pi run engine">Start run</button>
+        </div>
+        <div class="form-help" style="margin-bottom: var(--space-3);">Each run is a full pi session driven by this server — watch it live, steer it mid-flight, and distill from the trace it leaves behind.</div>
+        <div id="agent-runs-list">
+          <div class="empty">No runs yet. Describe a task above and start one — every run saves a pi session you can distill from.</div>
         </div>
       </div>
 

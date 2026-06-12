@@ -208,15 +208,29 @@ pub(crate) fn discover_traces_into(
 /// Merge one session JSONL into the persisted index — the embedded-run
 /// finalizer calls this so every run kiln drives lands in the trace
 /// layer immediately, without clobbering previously discovered traces.
+///
+/// The whole read-modify-write happens inside `locked_update`: two run
+/// finalizers landing at once must both survive into the index (an
+/// unlocked load→insert→save here lost one of them most of the time).
+/// Returns `None` when the merge did not persist, so callers don't
+/// report a trace as indexed that isn't.
 pub(crate) fn index_session_file(adapter_dir: &Path, session_path: &Path) -> Option<AgentTrace> {
     let trace = parse_pi_session(session_path)?;
     let index_path = adapter_dir.join("agent_traces.json");
-    let mut index = AgentTraceIndex::load_from_path(&index_path);
-    index.traces.insert(trace.id.clone(), trace.clone());
-    if let Err(e) = index.save_to_path(&index_path) {
-        tracing::warn!(error = %e, "agent_traces.json merge write failed");
+    let merged = kiln_resource::locked_update(&index_path, |existing| {
+        let mut traces: BTreeMap<String, AgentTrace> = existing
+            .and_then(|bytes| serde_json::from_slice(bytes).ok())
+            .unwrap_or_default();
+        traces.insert(trace.id.clone(), trace.clone());
+        serde_json::to_vec_pretty(&traces).map_err(std::io::Error::other)
+    });
+    match merged {
+        Ok(()) => Some(trace),
+        Err(e) => {
+            tracing::warn!(error = %e, "agent_traces.json merge write failed");
+            None
+        }
     }
-    Some(trace)
 }
 
 /// Auto-discovery for the §10.6 endpoints: when `agent_traces.json` is

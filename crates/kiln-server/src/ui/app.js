@@ -117,7 +117,7 @@ function pushSubTabHash(pageName) {
 // --- Drill-modal hash bookkeeping (see the state machine above) --------
 // Whether WE minted the history entry for the currently-open modal of each
 // kind; decides between history.back() and replaceState on user close.
-const modalHashPushed = { eval: false, train: false, adapter: false, request: false, trace: false };
+const modalHashPushed = { eval: false, train: false, adapter: false, request: false, trace: false, run: false };
 
 function modalHashOnOpen(kind, hash, alreadyOpen = false) {
   if (hashWriteDepth > 0 || !history.pushState) { modalHashPushed[kind] = false; return; }
@@ -408,7 +408,7 @@ function applyHashRoute(opts = {}) {
   }
   let sub = segs[1] || null;
   let id = segs[2] || null;
-  let drill = null; // { kind: 'eval'|'train'|'adapter'|'request', id }
+  let drill = null; // { kind: 'eval'|'train'|'adapter'|'request'|'trace'|'run', id }
   withHashWritesSuppressed(() => {
     // Re-activating an already-active page would re-fire its lazy refreshes
     // on every sub-tab/modal traversal — only switch when actually needed.
@@ -425,10 +425,12 @@ function applyHashRoute(opts = {}) {
         sub = activeSubTab(name);
         id = null;
       }
-      // Drill ids ride on training/queue, evals/jobs, and distill/traces.
+      // Drill ids ride on training/queue, evals/jobs, distill/traces, and
+      // distill/runs.
       if (name === 'training' && sub === 'queue' && id) drill = { kind: 'train', id };
       else if (name === 'evals' && sub === 'jobs' && id) drill = { kind: 'eval', id };
       else if (name === 'distill' && sub === 'traces' && id) drill = { kind: 'trace', id };
+      else if (name === 'distill' && sub === 'runs' && id) drill = { kind: 'run', id };
       else id = null;
     } else if (name === 'adapters' && sub) {
       // #adapters/{name} — the second segment is a drill id, not a sub-tab.
@@ -452,7 +454,7 @@ function applyHashRoute(opts = {}) {
   if (history.replaceState && location.hash !== canonical) history.replaceState(null, '', canonical);
 }
 
-// Open/close the five drill modals so they match the route. Closes here are
+// Open/close the six drill modals so they match the route. Closes here are
 // direct (never history.back()): this runs FROM a traversal or boot, where
 // the URL is already where it should be. Opens run hash-suppressed by the
 // caller, so the open fns' own pushState helpers stay quiet. Each modal's
@@ -516,6 +518,16 @@ function syncDrillModalsToRoute(drill) {
     } else if (openId !== null) {
       modalHashPushed.trace = false;
       closeTraceDrillModal();
+    }
+  }
+  const runModal = document.getElementById('run-drill-modal');
+  if (runModal) {
+    const openId = runModal.hidden ? null : (runDrillId || null);
+    if (want.kind === 'run') {
+      if (openId !== want.id) openRunDrillModal(want.id);
+    } else if (openId !== null) {
+      modalHashPushed.run = false;
+      closeRunDrillModal();
     }
   }
 }
@@ -9469,6 +9481,8 @@ function refreshActiveDistillSubTab() {
     refreshLibraryList();
   } else if (active === 'traces') {
     refreshAgentTraces();
+  } else if (active === 'runs') {
+    refreshAgentRuns();
   } else if (active === 'preflight') {
     refreshPreflightSurfaces();
   }
@@ -10204,6 +10218,392 @@ function renderTraceDrillBody(t) {
     ${conversationHtml}
   </div>`;
 }
+
+/* =====================================================================
+   Agent runs — the embedded pi run engine (/v1/agent/runs). Submit a
+   task, watch the live event feed, steer / follow up / abort mid-flight.
+   Every finished run leaves a pi session the Agent traces tab can
+   distill from.
+   ===================================================================== */
+const AGENT_RUN_TERMINAL = new Set(['completed', 'failed', 'aborted', 'timed_out', 'interrupted']);
+
+// queued/running/completed/failed map straight onto the job-state-pill
+// palette; the run-only terminals reuse the closest existing tone (no
+// new CSS): aborted/interrupted read as cancelled, timed_out as failed.
+function agentRunPill(status) {
+  const s = String(status || 'queued');
+  let cls = (s === 'aborted' || s === 'interrupted') ? 'cancelled' : (s === 'timed_out' ? 'failed' : s);
+  // The status lands in a class attribute — only known tokens pass (an
+  // unexpected server value must not write arbitrary attribute text).
+  if (!/^[a-z_]+$/.test(cls)) cls = 'queued';
+  return `<span class="job-state-pill ${cls}">${escapeHtml(s.replace(/_/g, ' '))}</span>`;
+}
+
+// List the run engine's status line + run history — fired on tab entry
+// and every 3s while the pane is visible.
+async function refreshAgentRuns() {
+  const statusNode = document.getElementById('agent-runs-status');
+  const node = document.getElementById('agent-runs-list');
+  if (!node) return;
+  const startBtn = document.getElementById('agent-run-start');
+  try {
+    const st = await api('/v1/agent/runs/status');
+    const ready = st.enabled && st.pi_available;
+    let line;
+    if (!st.enabled) {
+      line = `Embedded runs are disabled — ${escapeHtml(st.disabled_reason || 'gate closed')}.`;
+    } else if (!st.pi_available) {
+      line = 'Embedded runs need <code>pi</code> on the server’s PATH — <code>npm install -g @earendil-works/pi-coding-agent</code>, then come back here.';
+    } else {
+      line = `Run engine ready — pi at <code>${escapeHtml(st.pi_path || '')}</code> · ${st.active_runs}/${st.max_concurrent_runs} active · sessions land in <code>${escapeHtml(st.sessions_dir || '')}</code>.`;
+    }
+    // The key carries every field the line renders, or a changed
+    // disabled_reason/path would paint stale.
+    setListHtml(statusNode, 'status:' + JSON.stringify([st.enabled, st.disabled_reason, st.pi_available, st.pi_path, st.sessions_dir, st.active_runs, st.max_concurrent_runs]), line);
+    if (startBtn) startBtn.disabled = !ready;
+  } catch (e) {
+    setListHtml(statusNode, 'statuserr:' + e.message, `Couldn't reach the run engine: ${escapeHtml(e.message)}`);
+  }
+  try {
+    const res = await api('/v1/agent/runs');
+    renderAgentRunsList(res.runs || []);
+  } catch (e) {
+    setListHtml(node, 'err:' + e.message, `<div class="empty">Couldn't load runs: ${escapeHtml(e.message)}</div>`);
+  }
+}
+
+function renderAgentRunsList(runs) {
+  const node = document.getElementById('agent-runs-list');
+  if (!node) return;
+  if (runs.length === 0) {
+    setListHtml(node, 'empty',
+      '<div class="empty">No runs yet. Describe a task above and start one — every run saves a pi session you can distill from.</div>');
+    return;
+  }
+  // The minute bucket keeps the relative "Nm ago" stamps moving — the
+  // setListHtml key must change whenever rendered content would.
+  const listKey = 'list:' + Math.floor(Date.now() / 60000) + ':' +
+    JSON.stringify(runs.map(r => [r.id, r.status, r.num_turns, r.num_tool_calls, r.finished_unix_ms]));
+  const cards = runs.map(r => {
+    const task = String(r.task || '');
+    const preview = task.length > 90 ? task.slice(0, 90) + '…' : task;
+    const errLine = (r.status === 'failed' || r.status === 'timed_out') && r.error
+      ? `<div style="font-size:var(--text-2xs); color:var(--danger-fg); margin-top:var(--space-1);">${escapeHtml(String(r.error).length > 160 ? String(r.error).slice(0, 160) + '…' : String(r.error))}</div>`
+      : '';
+    return `<button type="button" class="adapter-card" data-run-open="${escapeHtml(r.id || '')}" style="display:block; width:100%; text-align:left; font:inherit; color:inherit; margin-bottom:var(--space-2);" title="Open this run — watch the live event feed, steer it, or read how it ended">
+      <div style="display:flex; gap:var(--space-3); align-items:baseline; flex-wrap:wrap;">
+        <span style="font-weight:600; font-family:var(--font-mono); font-size:var(--text-xs);">${escapeHtml(shortId(r.id))}</span>
+        ${agentRunPill(r.status)}
+        ${r.label ? `<span class="hint">${escapeHtml(r.label)}</span>` : ''}
+        <span style="margin-left:auto; font-size:var(--text-2xs); color:var(--text-muted);">${escapeHtml(fmtSmartTime(r.created_unix_ms))}</span>
+      </div>
+      <div style="font-size:var(--text-xs); margin-top:var(--space-1);">${escapeHtml(preview)}</div>
+      <div style="font-size:var(--text-xs); color:var(--text-muted);">${r.num_turns || 0} turns · ${r.num_tool_calls || 0} tool calls · ${escapeHtml(r.cwd || '')}</div>
+      ${errLine}
+    </button>`;
+  }).join('');
+  if (setListHtml(node, listKey, cards)) {
+    node.querySelectorAll('[data-run-open]').forEach(btn => {
+      btn.addEventListener('click', () => openRunDrillModal(btn.dataset.runOpen));
+    });
+  }
+}
+
+// New-run form: POST /v1/agent/runs, then drill straight into the run.
+async function submitAgentRun() {
+  const taskEl = document.getElementById('agent-run-task');
+  const task = (taskEl?.value || '').trim();
+  if (!task) { toast('Describe a task for the agent first', 'err'); taskEl?.focus(); return; }
+  const cwd = (document.getElementById('agent-run-cwd')?.value || '').trim();
+  const label = (document.getElementById('agent-run-label')?.value || '').trim();
+  const body = { task };
+  if (cwd) body.cwd = cwd;
+  if (label) body.label = label;
+  const startBtn = document.getElementById('agent-run-start');
+  if (startBtn) startBtn.disabled = true;
+  try {
+    const rec = await api('/v1/agent/runs', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (taskEl) taskEl.value = '';
+    toast(`Run ${shortId(rec.id)} queued`, 'ok');
+    refreshAgentRuns();
+    openRunDrillModal(rec.id);
+  } catch (e) {
+    toast(e.message, 'err');
+  } finally {
+    // refreshAgentRuns re-applies the status gate on its next pass.
+    if (startBtn) startBtn.disabled = false;
+  }
+}
+document.getElementById('agent-run-start')?.addEventListener('click', submitAgentRun);
+document.getElementById('agent-run-task')?.addEventListener('keydown', (ev) => {
+  if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') { ev.preventDefault(); submitAgentRun(); }
+});
+
+// Keep the list live while the runs pane is showing — gated on the pane
+// AND the Distill page being frontmost, mirroring the eval-badge pattern
+// of visibility-gated background intervals.
+setInterval(() => {
+  const pane = document.getElementById('distill-tab-runs-pane');
+  if (!pane || pane.hidden) return;
+  if (!document.getElementById('page-distill')?.classList.contains('active')) return;
+  refreshAgentRuns();
+}, 3000);
+
+/* =====================================================================
+   Agent run drill-in modal — live event feed (1s ?after= cursor polls)
+   + steer / follow-up / abort for one embedded run.
+   ===================================================================== */
+let runDrillId = null;
+let runDrillCursor = 0;
+let runDrillStatus = null;
+let runDrillPollHandle = null;
+// Generation token: bumped on every open AND close. Post-await guards
+// compare against it instead of the run id — id equality can't tell
+// "same run, new modal session" apart, which let a stale in-flight poll
+// regress the fresh cursor or leak a second interval on quick
+// close-then-reopen of the same run.
+let runDrillGen = 0;
+// In-flight guard: a poll that outlives its 1s slot must not overlap
+// the next one — overlapping polls share a cursor and append the same
+// events twice (this feed appends; it can't repaint idempotently).
+let runDrillPollBusy = false;
+
+const RUN_EVENT_CLAMP_CHARS = 400;
+const RUN_TEXT_CLAMP_CHARS = 700;
+
+function runEventClamp(text, limit) {
+  const s = String(text ?? '');
+  return s.length > limit ? s.slice(0, limit) + '…' : s;
+}
+
+// Run ids ride the #distill/runs/{id} deep-link grammar like the other
+// drills.
+async function openRunDrillModal(id) {
+  const gen = ++runDrillGen;
+  runDrillId = id;
+  modalHashOnOpen('run', '#distill/runs/' + encodeURIComponent(id));
+  const modal = document.getElementById('run-drill-modal');
+  if (!modal) return;
+  modal.hidden = false;
+  openModal(modal, { onClose: userCloseRunDrillModal });
+  document.getElementById('run-drill-title').textContent = 'Agent run';
+  document.getElementById('run-drill-meta').textContent = id;
+  const feed = document.getElementById('run-drill-events');
+  feed.innerHTML = '<div class="detail-empty">Loading…</div>';
+  delete feed.dataset.gapNoted;
+  runDrillCursor = 0;
+  runDrillStatus = null;
+  runDrillPollBusy = false;
+  if (runDrillPollHandle) { clearInterval(runDrillPollHandle); runDrillPollHandle = null; }
+  let rec;
+  try {
+    rec = await api('/v1/agent/runs/' + encodeURIComponent(id));
+    if (gen !== runDrillGen) return; // closed or re-targeted while fetching
+    renderRunDrillHead(rec);
+  } catch (e) {
+    if (gen !== runDrillGen) return;
+    feed.innerHTML = `<div class="detail-empty">Couldn't load this run: ${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  feed.innerHTML = '';
+  await pollRunDrillEvents(gen);
+  if (gen !== runDrillGen) return;
+  // A run that's already over still owes the reader its ending — the
+  // live path appends the error on the status flip, but a deep link or
+  // reopen arrives after the flip already happened.
+  if (AGENT_RUN_TERMINAL.has(rec.status) && rec.error) {
+    feed.insertAdjacentHTML('beforeend',
+      `<div class="req-section req-error"><div class="req-section-head">error</div><pre class="req-pre">${escapeHtml(runEventClamp(rec.error, RUN_EVENT_CLAMP_CHARS))}</pre></div>`);
+    feed.scrollTop = feed.scrollHeight;
+  }
+  if (!(runDrillStatus && AGENT_RUN_TERMINAL.has(runDrillStatus))) {
+    runDrillPollHandle = setInterval(() => pollRunDrillEvents(gen), 1000);
+  }
+}
+
+function renderRunDrillHead(rec) {
+  runDrillStatus = rec.status || null;
+  document.getElementById('run-drill-title').textContent = `Agent run ${shortId(rec.id)}`;
+  const bits = [`${rec.num_turns || 0} turns`, `${rec.num_tool_calls || 0} tool calls`];
+  if (rec.label) bits.push(rec.label);
+  if (rec.cwd) bits.push(rec.cwd);
+  document.getElementById('run-drill-meta').innerHTML =
+    `${agentRunPill(rec.status)} <span class="hint" style="margin-left:8px;">${bits.map(b => escapeHtml(b)).join(' · ')}</span>`;
+  const abortBtn = document.getElementById('run-drill-abort');
+  if (abortBtn) abortBtn.disabled = AGENT_RUN_TERMINAL.has(rec.status);
+}
+
+async function pollRunDrillEvents(gen) {
+  if (gen !== runDrillGen) return;
+  if (runDrillPollBusy) return; // previous poll still in flight
+  const id = runDrillId;
+  if (!id) return;
+  const feed = document.getElementById('run-drill-events');
+  if (!feed) return;
+  runDrillPollBusy = true;
+  try {
+    const res = await api('/v1/agent/runs/' + encodeURIComponent(id) + '/events?after=' + runDrillCursor);
+    if (gen !== runDrillGen) return;
+    runDrillCursor = res.next_after ?? runDrillCursor;
+    // Auto-scroll only when the user is already reading the bottom — a
+    // scrolled-up reader keeps their place while events keep landing.
+    const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40;
+    if (res.truncated && !feed.dataset.gapNoted) {
+      feed.dataset.gapNoted = '1';
+      feed.insertAdjacentHTML('beforeend',
+        '<div style="font-size:var(--text-2xs); color:var(--text-muted);">… earlier events are no longer buffered (long run or server restart) — the full trajectory lives in the session trace …</div>');
+    }
+    const html = (res.events || []).map(item => renderRunEvent(item.event)).filter(Boolean).join('');
+    if (html) feed.insertAdjacentHTML('beforeend', html);
+    if (atBottom) feed.scrollTop = feed.scrollHeight;
+    if (res.status && res.status !== runDrillStatus) {
+      // Status flipped (queued→running or →terminal): re-pull the record
+      // so the header pill, counts, and error are fresh.
+      try {
+        const rec = await api('/v1/agent/runs/' + encodeURIComponent(id));
+        if (gen !== runDrillGen) return;
+        renderRunDrillHead(rec);
+        if (AGENT_RUN_TERMINAL.has(rec.status) && rec.error) {
+          feed.insertAdjacentHTML('beforeend',
+            `<div class="req-section req-error"><div class="req-section-head">error</div><pre class="req-pre">${escapeHtml(runEventClamp(rec.error, RUN_EVENT_CLAMP_CHARS))}</pre></div>`);
+          if (atBottom) feed.scrollTop = feed.scrollHeight;
+        }
+      } catch {
+        // Record fetch is best-effort, but the status flip must still
+        // land — on a terminal flip there IS no next poll to catch up.
+        runDrillStatus = res.status;
+        const pill = document.querySelector('#run-drill-meta .job-state-pill');
+        if (pill) pill.outerHTML = agentRunPill(res.status);
+        const abortBtn = document.getElementById('run-drill-abort');
+        if (abortBtn) abortBtn.disabled = AGENT_RUN_TERMINAL.has(res.status);
+      }
+    }
+    if (res.status && AGENT_RUN_TERMINAL.has(res.status) && runDrillPollHandle) {
+      clearInterval(runDrillPollHandle);
+      runDrillPollHandle = null;
+    }
+  } catch (e) {
+    // Run vanished (e.g. server restart): stop hammering the endpoint.
+    if (gen === runDrillGen && e.status === 404 && runDrillPollHandle) {
+      clearInterval(runDrillPollHandle);
+      runDrillPollHandle = null;
+    }
+  } finally {
+    runDrillPollBusy = false;
+  }
+}
+
+// One pi agent event → one compact feed line (or '' for noise).
+function renderRunEvent(ev) {
+  if (!ev || typeof ev !== 'object') return '';
+  const ty = ev.type || '';
+  const dim = (text) => `<div style="font-size:var(--text-2xs); color:var(--text-muted);">${escapeHtml(text)}</div>`;
+  if (ty === 'agent_start') return dim('— agent start —');
+  if (ty === 'agent_end') return dim('— agent end —');
+  if (ty === 'kiln_note') return dim('kiln: ' + (ev.note || ''));
+  if (ty === 'message_end') {
+    const msg = ev.message || {};
+    if (msg.role !== 'assistant') return '';
+    const blocks = Array.isArray(msg.content) ? msg.content : [];
+    const parts = blocks.map(b => {
+      if (!b || typeof b !== 'object') return '';
+      if (b.type === 'text' && b.text) {
+        return `<pre class="req-pre">${escapeHtml(runEventClamp(b.text, RUN_TEXT_CLAMP_CHARS))}</pre>`;
+      }
+      if (b.type === 'thinking' && b.thinking) {
+        return `<div><div style="font-size:var(--text-2xs); color:var(--text-muted); text-transform:uppercase; letter-spacing:var(--tracking-caps); margin-bottom:4px;">thinking</div><pre class="req-pre">${escapeHtml(runEventClamp(b.thinking, RUN_EVENT_CLAMP_CHARS))}</pre></div>`;
+      }
+      return ''; // toolCall blocks are covered by tool_execution_start
+    }).filter(Boolean).join('');
+    if (!parts) return '';
+    return `<div class="req-section"><div class="req-section-head">assistant</div>${parts}</div>`;
+  }
+  if (ty === 'tool_execution_start') {
+    let args = '';
+    try { args = JSON.stringify(ev.args ?? {}); } catch { args = String(ev.args ?? ''); }
+    return `<div style="font-family:var(--font-mono); font-size:var(--text-xs); color:var(--text-muted);">→ ${escapeHtml(ev.toolName || '?')}(${escapeHtml(runEventClamp(args, 160))})</div>`;
+  }
+  if (ty === 'tool_execution_end') {
+    let result = ev.result;
+    if (result != null && typeof result !== 'string') {
+      try { result = JSON.stringify(result); } catch { result = String(result); }
+    }
+    return `<div class="req-section${ev.isError ? ' req-error' : ''}"><div class="req-section-head">${escapeHtml(ev.toolName || 'tool')}${ev.isError ? ' · error' : ''}</div><pre class="req-pre">${escapeHtml(runEventClamp(result || '', RUN_EVENT_CLAMP_CHARS))}</pre></div>`;
+  }
+  if (ty === 'response') {
+    if (ev.success === false) {
+      return `<div class="req-section req-error"><div class="req-section-head">${escapeHtml(ev.command || 'command')} failed</div><pre class="req-pre">${escapeHtml(runEventClamp(ev.error || JSON.stringify(ev), RUN_EVENT_CLAMP_CHARS))}</pre></div>`;
+    }
+    return '';
+  }
+  return '';
+}
+
+function closeRunDrillModal() {
+  runDrillGen++; // invalidate any in-flight fetches from this session
+  runDrillId = null;
+  runDrillCursor = 0;
+  runDrillStatus = null;
+  runDrillPollBusy = false;
+  if (runDrillPollHandle) { clearInterval(runDrillPollHandle); runDrillPollHandle = null; }
+  const modal = document.getElementById('run-drill-modal');
+  if (!modal) return;
+  const feed = document.getElementById('run-drill-events');
+  if (feed) delete feed.dataset.gapNoted;
+  modal.hidden = true;
+  closeModal(modal);
+}
+// User-initiated close (X / backdrop / Esc): walk history per the
+// deep-link state machine, exactly like the other drills.
+function userCloseRunDrillModal() {
+  modalHashOnUserClose('run', '#distill/runs', closeRunDrillModal);
+}
+document.getElementById('run-drill-close')?.addEventListener('click', userCloseRunDrillModal);
+document.getElementById('run-drill-modal')?.addEventListener('click', ev => {
+  if (ev.target.id === 'run-drill-modal') userCloseRunDrillModal();
+});
+
+// Steer interrupts the current turn; Follow-up queues after agent_end.
+// Both share the one input row at the bottom of the modal.
+async function sendRunDrillMessage(endpoint, verb) {
+  const id = runDrillId;
+  if (!id) return;
+  const input = document.getElementById('run-drill-steer-input');
+  const message = (input?.value || '').trim();
+  if (!message) { toast(`Type a message to ${verb.toLowerCase()} with first`, 'err'); input?.focus(); return; }
+  try {
+    await api('/v1/agent/runs/' + encodeURIComponent(id) + '/' + endpoint, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ message }),
+    });
+    if (input) input.value = '';
+    toast(`${verb} queued`, 'ok');
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+}
+document.getElementById('run-drill-steer-send')?.addEventListener('click', () => sendRunDrillMessage('steer', 'Steer'));
+document.getElementById('run-drill-followup-send')?.addEventListener('click', () => sendRunDrillMessage('follow_up', 'Follow-up'));
+document.getElementById('run-drill-steer-input')?.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter') { ev.preventDefault(); sendRunDrillMessage('steer', 'Steer'); }
+});
+
+document.getElementById('run-drill-abort')?.addEventListener('click', async () => {
+  const id = runDrillId;
+  if (!id) return;
+  if (!confirm('Abort this run? pi stops at the next opportunity.')) return;
+  try {
+    await api('/v1/agent/runs/' + encodeURIComponent(id) + '/abort', { method: 'POST' });
+    toast('Abort requested', 'ok');
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+});
 
 // --- Preflight (/v1/preflight/*) ------------------------------------
 async function refreshPreflightSurfaces() {
