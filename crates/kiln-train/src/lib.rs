@@ -269,15 +269,14 @@ pub enum TrainMode {
 /// `learning_rate`.
 ///
 /// AdamW and SGD keep the legacy defaults (SFT 1e-4, GRPO/OPD 1e-5).
-/// Muon's orthogonalized, RMS-matched update is ~unit scale and wants a
-/// much larger step: SFT uses `kiln_optim::Muon::default_hp()`'s 2e-2,
-/// and GRPO/OPD scale the legacy AdamW SFT:GRPO ratio (10x down) by the
-/// same factor. The Muon GRPO/OPD band is an initial heuristic pending an
-/// empirical sweep; train receipts record the resolved value, so every
-/// run stays auditable either way.
+/// Muon's orthogonalized, RMS-matched update is larger than AdamW's update,
+/// but the optimizer-library 2e-2 default is too hot for LoRA SFT on long
+/// correction examples. SFT therefore uses the empirically stable 1e-3
+/// band, while GRPO/OPD keep the earlier 2e-3 heuristic. Train receipts
+/// record the resolved value, so every run stays auditable either way.
 pub fn resolve_learning_rate(optimizer: &Optimizer, mode: TrainMode) -> f64 {
     match (optimizer, mode) {
-        (Optimizer::Muon { .. }, TrainMode::Sft) => 2e-2,
+        (Optimizer::Muon { .. }, TrainMode::Sft) => 1e-3,
         (Optimizer::Muon { .. }, TrainMode::Grpo | TrainMode::Opd) => 2e-3,
         (_, TrainMode::Sft) => 1e-4,
         (_, TrainMode::Grpo | TrainMode::Opd) => 1e-5,
@@ -285,10 +284,8 @@ pub fn resolve_learning_rate(optimizer: &Optimizer, mode: TrainMode) -> f64 {
 }
 
 /// Warn when an explicit learning rate sits far outside the selected
-/// optimizer's band. The classic failure is an AdamW-era value (1e-4)
-/// submitted to a Muon run (band 2e-2) — it trains 200x too cold and
-/// silently produces a near-no-op adapter. Returns `None` inside the
-/// 50x band; ordinary tuning (a few x either way) never trips it.
+/// optimizer's band. Returns `None` inside the 50x band; ordinary tuning
+/// (a few x either way) never trips it.
 pub fn learning_rate_band_warning(explicit: f64, resolved_default: f64) -> Option<String> {
     const BAND_RATIO: f64 = 50.0;
     if !explicit.is_finite() || explicit <= 0.0 || resolved_default <= 0.0 {
@@ -1209,15 +1206,15 @@ mod tests {
     }
 
     /// Pin the full per-optimizer learning-rate table. AdamW/SGD are the
-    /// unchanged legacy defaults; Muon's SFT value is kiln-optim's
-    /// `Muon::default_hp()` lr, with GRPO/OPD scaled down by the legacy
-    /// AdamW SFT:GRPO ratio.
+    /// unchanged legacy defaults; Muon's SFT value is lower than the raw
+    /// optimizer-library default because LoRA SFT diverges at 2e-2 on
+    /// correction-style long examples.
     #[test]
     fn learning_rate_resolution_table_snapshot() {
         let adamw: Optimizer = serde_json::from_str(r#"{"kind": "adam_w"}"#).unwrap();
         let muon = Optimizer::default();
         let table = [
-            (&muon, TrainMode::Sft, 2e-2),
+            (&muon, TrainMode::Sft, 1e-3),
             (&muon, TrainMode::Grpo, 2e-3),
             (&muon, TrainMode::Opd, 2e-3),
             (&adamw, TrainMode::Sft, 1e-4),
@@ -1253,7 +1250,7 @@ mod tests {
     #[test]
     fn effective_learning_rate_prefers_explicit_value() {
         let mut sft = SftConfig::default();
-        assert_eq!(sft.effective_learning_rate(), 2e-2); // Muon default
+        assert_eq!(sft.effective_learning_rate(), 1e-3); // Muon default
         sft.learning_rate = Some(3e-4);
         assert_eq!(sft.effective_learning_rate(), 3e-4);
 
@@ -1271,17 +1268,16 @@ mod tests {
 
     #[test]
     fn learning_rate_band_warning_fires_only_past_50x() {
-        // The motivating bug: AdamW-era 1e-4 against Muon's 2e-2 (200x cold).
-        assert!(learning_rate_band_warning(1e-4, 2e-2).is_some());
-        // 200x hot fires too.
-        assert!(learning_rate_band_warning(4.0, 2e-2).is_some());
+        assert!(learning_rate_band_warning(1e-5, 1e-3).is_some());
+        // 100x hot fires too.
+        assert!(learning_rate_band_warning(1e-1, 1e-3).is_some());
         // Ordinary tuning (10x either way) stays quiet.
-        assert!(learning_rate_band_warning(2e-3, 2e-2).is_none());
-        assert!(learning_rate_band_warning(2e-1, 2e-2).is_none());
+        assert!(learning_rate_band_warning(1e-4, 1e-3).is_none());
+        assert!(learning_rate_band_warning(1e-2, 1e-3).is_none());
         // Exactly on band, and degenerate inputs, stay quiet.
-        assert!(learning_rate_band_warning(2e-2, 2e-2).is_none());
-        assert!(learning_rate_band_warning(0.0, 2e-2).is_none());
-        assert!(learning_rate_band_warning(f64::NAN, 2e-2).is_none());
+        assert!(learning_rate_band_warning(1e-3, 1e-3).is_none());
+        assert!(learning_rate_band_warning(0.0, 1e-3).is_none());
+        assert!(learning_rate_band_warning(f64::NAN, 1e-3).is_none());
     }
 
     #[test]

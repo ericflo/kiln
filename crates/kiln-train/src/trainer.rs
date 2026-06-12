@@ -3263,6 +3263,10 @@ pub fn sft_train(
         let total_steps = config.epochs * valid_indices.len();
         let mut global_step = 0;
         let mut last_loss = 0.0;
+        let mut first_epoch_loss: Option<f64> = None;
+        let mut best_epoch_loss = f64::INFINITY;
+        const SFT_DIVERGENCE_RATIO: f64 = 8.0;
+        const SFT_DIVERGENCE_MIN_INCREASE: f64 = 5.0;
 
         let pb = make_step_progress(total_steps, "sft training");
 
@@ -3352,6 +3356,12 @@ pub fn sft_train(
                     loss_val = lv;
                     g
                 };
+                anyhow::ensure!(
+                    loss_val.is_finite(),
+                    "SFT loss became non-finite at epoch {} step {}: {loss_val}",
+                    epoch + 1,
+                    global_step + 1
+                );
                 observe_lora_grad_norms_dispatch(&mut lora_grad_norms, &params, &grads)?;
                 optimizer_step_dispatch(
                     &*backend,
@@ -3418,6 +3428,23 @@ pub fn sft_train(
             }
 
             let avg_loss = epoch_loss / valid_indices.len() as f64;
+            anyhow::ensure!(
+                avg_loss.is_finite(),
+                "SFT epoch {} average loss became non-finite: {avg_loss}",
+                epoch + 1
+            );
+            let first_loss = *first_epoch_loss.get_or_insert(avg_loss);
+            if epoch > 0
+                && avg_loss > first_loss * SFT_DIVERGENCE_RATIO
+                && avg_loss - best_epoch_loss > SFT_DIVERGENCE_MIN_INCREASE
+            {
+                anyhow::bail!(
+                    "SFT loss diverged at epoch {}: avg_loss={avg_loss:.6}, \
+                     first_epoch_loss={first_loss:.6}, best_epoch_loss={best_epoch_loss:.6}",
+                    epoch + 1
+                );
+            }
+            best_epoch_loss = best_epoch_loss.min(avg_loss);
             tracing::info!(
                 epoch = epoch + 1,
                 avg_loss = format!("{avg_loss:.6}"),
