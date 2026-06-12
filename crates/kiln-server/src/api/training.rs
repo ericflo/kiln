@@ -16,7 +16,10 @@ use kiln_train::{
 };
 use serde::Serialize;
 
-use std::sync::atomic::Ordering;
+use std::{
+    path::{Path, PathBuf},
+    sync::atomic::Ordering,
+};
 
 use crate::error::ApiError;
 use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
@@ -1470,16 +1473,6 @@ async fn delete_archived_job(
     })))
 }
 
-/// Body-size cap for SFT training submissions (audit LOW §1).
-/// 64 MiB accommodates long-context training examples that exceed the 2 MiB axum default.
-const SFT_BODY_LIMIT: usize = 64 * 1024 * 1024;
-/// Body-size cap for GRPO training submissions (audit LOW §1).
-/// 64 MiB accommodates batches of scored completions.
-const GRPO_BODY_LIMIT: usize = 64 * 1024 * 1024;
-/// Body-size cap for OPD training submissions. Matches GRPO since the
-/// payload shape — prompts + config — is structurally similar.
-const OPD_BODY_LIMIT: usize = 64 * 1024 * 1024;
-
 /// Rich detail payload exposed at `GET /v1/train/jobs/:job_id`. Flattens
 /// `TrainingStatus` so the wire shape stays a superset (no field drift)
 /// and adds the curve + back-references the UI's drill-in panel needs.
@@ -1500,6 +1493,122 @@ struct TrainingJobDetail {
     /// Time-series of progress samples. Empty until the trainer emits
     /// its first callback.
     loss_history: Vec<crate::state::TrainingLossSample>,
+    /// Machine-readable training receipt from the adapter directory when
+    /// present. This carries the resolved hyperparameters, data hashes,
+    /// token counts, and backend audit trail.
+    train_receipt: Option<serde_json::Value>,
+    /// Replay request summary from `replay.jsonl`. Large inline datasets are
+    /// reduced to counts so the drill-in remains usable.
+    replay_request: Option<serde_json::Value>,
+    /// Non-fatal metadata read/parse error. Missing metadata is represented
+    /// by null fields rather than an error.
+    metadata_error: Option<String>,
+}
+
+fn training_job_adapter_dir(
+    adapter_root: &Path,
+    adapter_name: &str,
+    adapter_path: Option<&str>,
+) -> PathBuf {
+    if let Some(path) = adapter_path {
+        let path = PathBuf::from(path);
+        if path.is_absolute() || path.exists() {
+            return path;
+        }
+    }
+    adapter_root.join(adapter_name)
+}
+
+fn read_optional_json(path: &Path) -> Result<Option<serde_json::Value>, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| format!("parse {}: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("read {}: {e}", path.display())),
+    }
+}
+
+fn summarize_replay_request(mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(body) = value
+        .as_object_mut()
+        .and_then(|obj| obj.get_mut("request_body"))
+        .and_then(|body| body.as_object_mut())
+    {
+        for key in ["examples", "groups", "prompts"] {
+            if let Some(rows) = body.remove(key) {
+                let count = rows.as_array().map(|rows| rows.len()).unwrap_or(0);
+                body.insert(format!("{key}_count"), serde_json::json!(count));
+            }
+        }
+    }
+    value
+}
+
+fn read_replay_request(
+    adapter_dir: &Path,
+    job_id: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let replay_path = adapter_dir.join("replay.jsonl");
+    let file = match std::fs::File::open(&replay_path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("read {}: {e}", replay_path.display())),
+    };
+    use std::io::BufRead;
+    let mut first_request = None;
+    for (idx, line) in std::io::BufReader::new(file).lines().enumerate() {
+        let line =
+            line.map_err(|e| format!("read {} line {}: {e}", replay_path.display(), idx + 1))?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(trimmed)
+            .map_err(|e| format!("parse {} line {}: {e}", replay_path.display(), idx + 1))?;
+        if value.get("type").and_then(|v| v.as_str()) != Some("request") {
+            continue;
+        }
+        let summary = summarize_replay_request(value);
+        if summary.get("request_id").and_then(|v| v.as_str()) == Some(job_id) {
+            return Ok(Some(summary));
+        }
+        if first_request.is_none() {
+            first_request = Some(summary);
+        }
+    }
+    Ok(first_request)
+}
+
+fn read_training_job_metadata(
+    adapter_dir: &Path,
+    job_id: &str,
+) -> (
+    Option<serde_json::Value>,
+    Option<serde_json::Value>,
+    Option<String>,
+) {
+    let mut errors = Vec::new();
+    let train_receipt = match read_optional_json(&adapter_dir.join("train_receipt.json")) {
+        Ok(value) => value,
+        Err(err) => {
+            errors.push(err);
+            None
+        }
+    };
+    let replay_request = match read_replay_request(adapter_dir, job_id) {
+        Ok(value) => value,
+        Err(err) => {
+            errors.push(err);
+            None
+        }
+    };
+    let metadata_error = if errors.is_empty() {
+        None
+    } else {
+        Some(errors.join("; "))
+    };
+    (train_receipt, replay_request, metadata_error)
 }
 
 async fn job_detail(
@@ -1512,22 +1621,37 @@ async fn job_detail(
     // callback contends for the WRITE lock on every step. Building
     // outside a `let _ = jobs;` would extend the borrow until end of
     // function.
-    let detail = {
+    let (mut detail, metadata_dir) = {
         let jobs = state.training_jobs.read().unwrap();
         let job = jobs
             .get(&job_id)
             .ok_or_else(|| ApiError::training_job_not_found(&job_id))?;
-        TrainingJobDetail {
-            status: training_status_from_info(job),
-            job_type: job.job_type,
-            epoch: job.epoch,
-            adapter_path: job.adapter_path.clone(),
-            auto_load: job.auto_load,
-            linked_eval_job_ids: job.linked_eval_job_ids.clone(),
-            post_eval_verdict: job.post_eval_verdict.clone(),
-            loss_history: job.loss_history.clone(),
-        }
+        (
+            TrainingJobDetail {
+                status: training_status_from_info(job),
+                job_type: job.job_type,
+                epoch: job.epoch,
+                adapter_path: job.adapter_path.clone(),
+                auto_load: job.auto_load,
+                linked_eval_job_ids: job.linked_eval_job_ids.clone(),
+                post_eval_verdict: job.post_eval_verdict.clone(),
+                loss_history: job.loss_history.clone(),
+                train_receipt: None,
+                replay_request: None,
+                metadata_error: None,
+            },
+            training_job_adapter_dir(
+                &state.adapter_dir,
+                &job.adapter_name,
+                job.adapter_path.as_deref(),
+            ),
+        )
     };
+    let (train_receipt, replay_request, metadata_error) =
+        read_training_job_metadata(&metadata_dir, &job_id);
+    detail.train_receipt = train_receipt;
+    detail.replay_request = replay_request;
+    detail.metadata_error = metadata_error;
     Ok(Json(detail))
 }
 
@@ -1535,11 +1659,11 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
             "/v1/train/sft",
-            post(submit_sft).layer(DefaultBodyLimit::max(SFT_BODY_LIMIT)),
+            post(submit_sft).layer(DefaultBodyLimit::disable()),
         )
         .route(
             "/v1/train/grpo",
-            post(submit_grpo).layer(DefaultBodyLimit::max(GRPO_BODY_LIMIT)),
+            post(submit_grpo).layer(DefaultBodyLimit::disable()),
         )
         // Canonical alias for /v1/train/grpo after the ECHO trajectory
         // schema landing. The "agentic" name reflects what the endpoint
@@ -1548,27 +1672,27 @@ pub fn routes() -> Router<AppState> {
         // keep working unchanged.
         .route(
             "/v1/train/agentic",
-            post(submit_grpo).layer(DefaultBodyLimit::max(GRPO_BODY_LIMIT)),
+            post(submit_grpo).layer(DefaultBodyLimit::disable()),
         )
         .route(
             "/v1/train/opd",
-            post(submit_opd).layer(DefaultBodyLimit::max(OPD_BODY_LIMIT)),
+            post(submit_opd).layer(DefaultBodyLimit::disable()),
         )
         .route(
             "/v1/distill/refresh",
-            post(submit_distill_refresh).layer(DefaultBodyLimit::max(OPD_BODY_LIMIT)),
+            post(submit_distill_refresh).layer(DefaultBodyLimit::disable()),
         )
         .route(
             "/v1/adapters/distill_merge",
-            post(submit_distill_merge).layer(DefaultBodyLimit::max(OPD_BODY_LIMIT)),
+            post(submit_distill_merge).layer(DefaultBodyLimit::disable()),
         )
         .route(
             "/v1/distill/pump",
-            post(submit_distill_pump).layer(DefaultBodyLimit::max(OPD_BODY_LIMIT)),
+            post(submit_distill_pump).layer(DefaultBodyLimit::disable()),
         )
         .route(
             "/v1/distill/self",
-            post(submit_distill_self).layer(DefaultBodyLimit::max(OPD_BODY_LIMIT)),
+            post(submit_distill_self).layer(DefaultBodyLimit::disable()),
         )
         .route("/v1/train/status", get(training_status))
         .route("/v1/train/status/{job_id}", get(job_status))

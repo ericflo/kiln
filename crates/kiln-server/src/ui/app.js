@@ -3663,6 +3663,15 @@ function suggestAdapterName(filename, kind) {
   if (!base) base = kind + '-data';
   return base.endsWith('-' + kind) ? base : base + '-' + kind;
 }
+function trainingDatasetNameForFile(filename, kind) {
+  const base = suggestAdapterName(filename, kind)
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48) || (kind + '-data');
+  return `${base}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
 // Auto-fill the adapter name from the data source UNLESS the user typed their
 // own. Tracks a dirty flag instead of matching the literal default, so loading
 // a second file/dataset re-suggests (no silent name collisions) while a
@@ -3725,9 +3734,25 @@ async function loadTrainingFile(kind, file) {
   const K = TRAIN_KIND[kind];
   const previous = trainingData[kind];
   try {
-    const items = parseTrainingText(await file.text());
-    const n = setTrainingData(kind, items, file.name);
+    const datasetName = trainingDatasetNameForFile(file.name, kind);
+    trainingData[kind] = null;
+    const el = document.getElementById(kind + '-data-status');
+    if (el) {
+      el.hidden = false; el.className = 'train-data-status';
+      el.innerHTML = `${icon('upload', 'icn-sm')} Uploading ${escapeHtml(file.name)} into the local dataset store…`;
+    }
+    K.update();
+    const manifest = await postDatasetUpload(
+      datasetName,
+      K.datasetFormat,
+      `Uploaded from ${file.name} for ${kind.toUpperCase()} training`,
+      file,
+    );
+    const n = await loadNamedDatasetIntoTraining(kind, manifest.name || datasetName);
     if (n) maybeSuggestAdapterName(kind, file.name);
+    if (typeof refreshDatasets === 'function') refreshDatasets();
+    refreshDatasetPicker(kind);
+    toast(`Uploaded "${manifest.name || datasetName}" (${Number(manifest.num_rows || 0).toLocaleString()} rows)`, 'ok');
   } catch (e) {
     // A bad drop must never destroy data you already loaded — keep it and say so.
     trainingData[kind] = previous;
@@ -3774,25 +3799,42 @@ function wireAdvanced(kind, summarize) {
     btn.setAttribute('aria-expanded', String(open));
   });
   const update = () => { if (summary) summary.textContent = summarize(); };
-  body.querySelectorAll('input').forEach(i => i.addEventListener('input', update));
+  body.querySelectorAll('input, select').forEach(i => {
+    i.addEventListener('input', update);
+    i.addEventListener('change', update);
+  });
   update();
 }
 // A blank learning-rate field means "auto" — the server resolves the
 // per-optimizer default (Muon vs AdamW want very different bands).
 const lrSummary = id => (document.getElementById(id)?.value || '').trim() || 'auto';
+const optimizerLabel = id => {
+  const value = document.getElementById(id)?.value || 'muon';
+  if (value === 'adam_w') return 'AdamW';
+  if (value === 'sgd') return 'SGD';
+  return 'Muon';
+};
+function readTrainingOptimizer(kind) {
+  const value = document.getElementById(kind + '-optimizer')?.value || 'muon';
+  if (value === 'adam_w') return { kind: 'adam_w' };
+  if (value === 'sgd') return { kind: 'sgd' };
+  return { kind: 'muon' };
+}
 wireAdvanced('sft', () => {
   const v = id => document.getElementById(id)?.value || '?';
   const lr = lrSummary('sft-learning-rate');
-  const isDefault = v('sft-epochs') === '3' && lr === 'auto' && v('sft-rank') === '8';
+  const opt = optimizerLabel('sft-optimizer');
+  const isDefault = v('sft-epochs') === '3' && opt === 'Muon' && lr === 'auto' && v('sft-rank') === '8';
   if (typeof updateSftOverfitHint === 'function') updateSftOverfitHint();
-  return `${v('sft-epochs')} epochs · learning rate ${lr} · LoRA rank ${v('sft-rank')}`
+  return `${v('sft-epochs')} epochs · ${opt} · learning rate ${lr} · LoRA rank ${v('sft-rank')}`
     + (isDefault ? ' — sensible defaults, no tuning needed' : ' — customized');
 });
 wireAdvanced('grpo', () => {
   const v = id => document.getElementById(id)?.value || '?';
   const lr = lrSummary('grpo-learning-rate');
-  const isDefault = v('grpo-kl-coeff') === '0.1' && lr === 'auto' && v('grpo-rank') === '8';
-  return `KL ${v('grpo-kl-coeff')} · learning rate ${lr} · LoRA rank ${v('grpo-rank')}`
+  const opt = optimizerLabel('grpo-optimizer');
+  const isDefault = v('grpo-kl-coeff') === '0.1' && opt === 'Muon' && lr === 'auto' && v('grpo-rank') === '8';
+  return `KL ${v('grpo-kl-coeff')} · ${opt} · learning rate ${lr} · LoRA rank ${v('grpo-rank')}`
     + (isDefault ? ' — sensible defaults, no tuning needed' : ' — customized');
 });
 
@@ -4061,7 +4103,7 @@ function updateSftOverfitHint() {
   if (!hint) return;
   const epochs = parseInt(document.getElementById('sft-epochs')?.value || '0', 10) || 0;
   const held = trainingData.sft;
-  const n = held && held.items ? held.items.length : 0;
+  const n = held && held.items ? held.items.length : (held && held.count ? held.count : 0);
   if (n > 0 && n < 20 && epochs > 10) {
     hint.hidden = false;
     hint.textContent = `${epochs} passes over only ${n} example${n === 1 ? '' : 's'} will likely memorize them — 3 is usually plenty.`;
@@ -4145,6 +4187,7 @@ document.getElementById('sft-form').addEventListener('submit', async (e) => {
       // Paired explicitly: the server's default alpha (32) over the form's
       // default rank (8) trips the trainer's alpha/rank safety gate.
       lora_alpha: loraAlphaFor(rank),
+      optimizer: readTrainingOptimizer('sft'),
     };
     // Blank lr is omitted so the server resolves the per-optimizer default.
     if (learningRate !== null) config.learning_rate = learningRate;
@@ -4195,6 +4238,7 @@ document.getElementById('grpo-form').addEventListener('submit', async (e) => {
       // Paired explicitly: the server's default alpha (32) over the form's
       // default rank (8) trips the trainer's alpha/rank safety gate.
       lora_alpha: loraAlphaFor(rank),
+      optimizer: readTrainingOptimizer('grpo'),
     };
     // Blank lr is omitted so the server resolves the per-optimizer default.
     if (learningRate !== null) config.learning_rate = learningRate;
@@ -8789,6 +8833,71 @@ async function fetchTrainDrill() {
   }
 }
 
+function drillValue(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return String(value);
+    return Math.abs(value) >= 10000 ? value.toLocaleString() : String(value);
+  }
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  return String(value);
+}
+
+function drillOptimizerName(config, replayRequest) {
+  const opt = config?.optimizer || replayRequest?.request_body?.config?.optimizer;
+  const kind = typeof opt === 'string' ? opt : opt?.kind;
+  if (kind === 'adam_w') return 'AdamW';
+  if (kind === 'sgd') return 'SGD';
+  if (kind === 'muon') return 'Muon';
+  return '—';
+}
+
+function renderDrillKv(label, value) {
+  return `<div class="req-stat"><span class="req-stat-k">${escapeHtml(label)}</span><span class="req-stat-v"><code>${escapeHtml(drillValue(value))}</code></span></div>`;
+}
+
+function renderTrainMetadata(j) {
+  const receipt = j.train_receipt || null;
+  const replay = j.replay_request || null;
+  const hp = receipt?.hyperparameters || {};
+  const data = receipt?.data || {};
+  const source = receipt?.training_data || {};
+  const config = replay?.request_body?.config || null;
+  const rows = [
+    renderDrillKv('Mode', hp.mode || replay?.kind || j.job_type),
+    renderDrillKv('Optimizer', drillOptimizerName(config, replay)),
+    renderDrillKv('Learning rate', hp.learning_rate ?? config?.learning_rate ?? 'auto'),
+    renderDrillKv('Epochs', hp.epochs ?? config?.epochs),
+    renderDrillKv('LoRA rank', hp.rank ?? config?.lora_rank),
+    renderDrillKv('LoRA alpha', hp.alpha ?? config?.lora_alpha),
+    renderDrillKv('Alpha / rank', hp.alpha_over_rank),
+    renderDrillKv('Seed', hp.seed ?? replay?.seed),
+    renderDrillKv('Examples trained', data.examples_trained),
+    renderDrillKv('Groups trained', data.groups_trained),
+    renderDrillKv('Completions trained', data.completions_trained),
+    renderDrillKv('Data source', source.source || replay?.request_body?.dataset || replay?.request_body?.dataset_path),
+  ].join('');
+  const receiptRaw = receipt
+    ? `<details style="margin-top:12px;"><summary>Raw train receipt</summary><pre class="req-pre">${escapeHtml(JSON.stringify(receipt, null, 2))}</pre></details>`
+    : '';
+  const replayRaw = replay
+    ? `<details style="margin-top:8px;"><summary>Replay request summary</summary><pre class="req-pre">${escapeHtml(JSON.stringify(replay, null, 2))}</pre></details>`
+    : '';
+  const error = j.metadata_error
+    ? `<div class="training-card-error" style="margin-top:10px;">${icon('warning', 'icn-sm')} ${escapeHtml(j.metadata_error)}</div>`
+    : '';
+  const empty = !receipt && !replay && !j.metadata_error
+    ? '<div class="hint">No receipt or replay metadata was found for this job.</div>'
+    : '';
+  return `<div class="detail-section">
+    <h4>Run metadata</h4>
+    ${receipt || replay ? `<div class="req-stats" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));">${rows}</div>` : empty}
+    ${error}
+    ${receiptRaw}
+    ${replayRaw}
+  </div>`;
+}
+
 function renderTrainDrillBody(j) {
   const linkedIds = j.linked_eval_job_ids || [];
   const linkedHtml = linkedIds.length
@@ -8831,6 +8940,7 @@ function renderTrainDrillBody(j) {
     <h4>Loss curve</h4>
     <div id="train-drill-curve-host"></div>
   </div>
+  ${renderTrainMetadata(j)}
   <div class="detail-section">
     <h4>Adapter</h4>
     <div style="display:flex; gap:8px; align-items:center;">

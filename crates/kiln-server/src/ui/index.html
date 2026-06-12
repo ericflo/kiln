@@ -547,7 +547,7 @@
               <input type="file" id="sft-file" accept=".jsonl,.json" hidden>
               <svg class="icn dropzone-icn" aria-hidden="true"><use href="#i-upload"></use></svg>
               <div class="dropzone-main">Drop a <code>.jsonl</code> or <code>.json</code> file here, or <span class="dropzone-browse">browse</span></div>
-              <div class="dropzone-sub">One example per line (JSONL) or a JSON array — each with a <code>user</code> message and the <code>assistant</code> reply you want. Parsed and trained right here; no upload step.</div>
+              <div class="dropzone-sub">One example per line (JSONL) or a JSON array — uploaded into the local dataset store, then trained by reference.</div>
             </div>
             <div class="train-data-status" id="sft-data-status" role="status" aria-live="polite" hidden></div>
             <div class="train-data-alt">
@@ -582,7 +582,7 @@
           </div>
           <div class="adv-row">
             <button type="button" class="btn btn-sm btn-ghost" id="sft-adv-toggle" aria-expanded="false" aria-controls="sft-advanced"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-gear"></use></svg> Advanced</button>
-            <span class="adv-summary" id="sft-adv-summary">3 epochs · learning rate auto · LoRA rank 8 — sensible defaults, no tuning needed</span>
+            <span class="adv-summary" id="sft-adv-summary">3 epochs · Muon · learning rate auto · LoRA rank 8 — sensible defaults, no tuning needed</span>
           </div>
           <div class="adv-body" id="sft-advanced" hidden>
             <div class="form-row">
@@ -591,6 +591,15 @@
                 <input type="number" id="sft-epochs" name="epochs" value="3" min="1" max="100">
                 <div class="form-help">Passes over your examples. More can overfit small sets.</div>
                 <div class="form-help" id="sft-overfit-hint" hidden style="color: var(--warning-fg);"></div>
+              </div>
+              <div class="form-group">
+                <label for="sft-optimizer">Optimizer</label>
+                <select id="sft-optimizer" name="optimizer">
+                  <option value="muon" selected>Muon</option>
+                  <option value="adam_w">AdamW</option>
+                  <option value="sgd">SGD</option>
+                </select>
+                <div class="form-help">Muon is the fast default; AdamW is the conservative baseline.</div>
               </div>
               <div class="form-group">
                 <label for="sft-learning-rate">Learning rate</label>
@@ -623,7 +632,7 @@
               <input type="file" id="grpo-file" accept=".jsonl,.json" hidden>
               <svg class="icn dropzone-icn" aria-hidden="true"><use href="#i-upload"></use></svg>
               <div class="dropzone-main">Drop a <code>.jsonl</code> or <code>.json</code> file here, or <span class="dropzone-browse">browse</span></div>
-              <div class="dropzone-sub">One group per line (JSONL) or a JSON array — each group is a prompt (<code>messages</code>) plus <code>completions</code> that each carry a numeric <code>reward</code>.</div>
+              <div class="dropzone-sub">One group per line (JSONL) or a JSON array — uploaded into the local dataset store, then trained by reference.</div>
             </div>
             <div class="train-data-status" id="grpo-data-status" role="status" aria-live="polite" hidden></div>
             <div class="train-data-alt">
@@ -658,7 +667,7 @@
           </div>
           <div class="adv-row">
             <button type="button" class="btn btn-sm btn-ghost" id="grpo-adv-toggle" aria-expanded="false" aria-controls="grpo-advanced"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-gear"></use></svg> Advanced</button>
-            <span class="adv-summary" id="grpo-adv-summary">KL 0.1 · learning rate auto · LoRA rank 8 — sensible defaults, no tuning needed</span>
+            <span class="adv-summary" id="grpo-adv-summary">KL 0.1 · Muon · learning rate auto · LoRA rank 8 — sensible defaults, no tuning needed</span>
           </div>
           <div class="adv-body" id="grpo-advanced" hidden>
             <div class="form-row">
@@ -666,6 +675,15 @@
                 <label for="grpo-kl-coeff">KL coefficient</label>
                 <input type="text" id="grpo-kl-coeff" name="kl_coeff" value="0.1">
                 <div class="form-help">How tightly the adapter sticks to the base model.</div>
+              </div>
+              <div class="form-group">
+                <label for="grpo-optimizer">Optimizer</label>
+                <select id="grpo-optimizer" name="optimizer">
+                  <option value="muon" selected>Muon</option>
+                  <option value="adam_w">AdamW</option>
+                  <option value="sgd">SGD</option>
+                </select>
+                <div class="form-help">Muon is the fast default; AdamW is the conservative baseline.</div>
               </div>
               <div class="form-group">
                 <label for="grpo-learning-rate">Learning rate</label>

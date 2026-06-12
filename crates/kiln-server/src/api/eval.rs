@@ -90,8 +90,6 @@ struct EvalJobListResponse {
 
 const EVAL_BODY_LIMIT: usize = 32 * 1024 * 1024;
 const SUITE_BODY_LIMIT: usize = 32 * 1024 * 1024;
-/// 1 GiB cap on uploaded datasets (matches `datasets::DATASET_MAX_BYTES`).
-const DATASET_BODY_LIMIT: usize = 1024 * 1024 * 1024;
 
 async fn list_suites(State(state): State<AppState>) -> Result<Json<SuiteListResponse>, ApiError> {
     let Some(reg) = state.suite_registry.as_ref() else {
@@ -621,9 +619,6 @@ async fn upload_dataset(
                     .await
                     .map_err(|e| ApiError::dataset_invalid(format!("file chunk: {e}")))?
                 {
-                    if buf.len() + chunk.len() > crate::eval::datasets::DATASET_MAX_BYTES as usize {
-                        return Err(ApiError::dataset_invalid("upload exceeds 1 GiB cap"));
-                    }
                     buf.extend_from_slice(&chunk);
                 }
                 file_bytes = Some(buf);
@@ -639,17 +634,46 @@ async fn upload_dataset(
         "sft_chat" | "sft" => DatasetFormat::SftChat,
         "grpo_groups" | "grpo" => DatasetFormat::GrpoGroups,
         "raw" => DatasetFormat::Raw,
-        other => return Err(ApiError::dataset_invalid(format!("unknown format `{other}`"))),
+        other => {
+            return Err(ApiError::dataset_invalid(format!(
+                "unknown format `{other}`"
+            )));
+        }
     };
-    let manifest = reg.create(&name, format, description, &file_bytes).map_err(|e| {
-        match e {
+    let file_bytes = normalize_dataset_upload(format, file_bytes)?;
+    let manifest = reg
+        .create(&name, format, description, &file_bytes)
+        .map_err(|e| match e {
             crate::eval::DatasetError::AlreadyExists(_) => ApiError::dataset_exists(&name),
             crate::eval::DatasetError::InvalidName(_) => ApiError::dataset_invalid(&name),
-            crate::eval::DatasetError::QuotaExceeded(m) => ApiError::dataset_invalid(m),
             other => ApiError::dataset_invalid(format!("{other}")),
-        }
-    })?;
+        })?;
     Ok(Json(manifest))
+}
+
+fn normalize_dataset_upload(
+    format: DatasetFormat,
+    file_bytes: Vec<u8>,
+) -> Result<Vec<u8>, ApiError> {
+    if matches!(format, DatasetFormat::Raw) {
+        return Ok(file_bytes);
+    }
+    let first = file_bytes
+        .iter()
+        .copied()
+        .find(|b| !b.is_ascii_whitespace());
+    if first != Some(b'[') {
+        return Ok(file_bytes);
+    }
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&file_bytes)
+        .map_err(|e| ApiError::dataset_invalid(format!("dataset JSON array: {e}")))?;
+    let mut jsonl = Vec::with_capacity(file_bytes.len());
+    for row in rows {
+        serde_json::to_writer(&mut jsonl, &row)
+            .map_err(|e| ApiError::dataset_invalid(format!("dataset JSONL encode: {e}")))?;
+        jsonl.push(b'\n');
+    }
+    Ok(jsonl)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1054,7 +1078,7 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/eval/datasets", get(list_datasets))
         .route(
             "/v1/eval/datasets/upload",
-            post(upload_dataset).layer(DefaultBodyLimit::max(DATASET_BODY_LIMIT)),
+            post(upload_dataset).layer(DefaultBodyLimit::disable()),
         )
         .route(
             "/v1/eval/datasets/{name}",

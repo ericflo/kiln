@@ -71,12 +71,8 @@ pub enum DatasetError {
     AlreadyExists(String),
     #[error("invalid jsonl: {0}")]
     InvalidJsonl(String),
-    #[error("io quota: {0}")]
-    QuotaExceeded(String),
 }
 
-/// Maximum decompressed dataset size we accept in a single upload (1 GiB).
-pub const DATASET_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 /// Max rows analyzed during the stat pass — beyond this we sample.
 const STAT_SCAN_ROWS: u64 = 1000;
 
@@ -116,12 +112,6 @@ impl DatasetRegistry {
         let dir = self.dataset_dir(name)?;
         if dir.exists() {
             return Err(DatasetError::AlreadyExists(name.to_string()));
-        }
-        if jsonl_bytes.len() as u64 > DATASET_MAX_BYTES {
-            return Err(DatasetError::QuotaExceeded(format!(
-                "dataset exceeds {} GiB limit",
-                DATASET_MAX_BYTES / (1024 * 1024 * 1024)
-            )));
         }
         std::fs::create_dir_all(&dir).map_err(|e| DatasetError::Io(format!("{e}")))?;
         let path = dir.join("data.jsonl");
@@ -554,12 +544,4 @@ mod tests {
         assert_eq!(pattern, "assistant tool×3 assistant");
     }
 
-    #[test]
-    fn quota_rejects_oversize_uploads() {
-        let dir = tempfile::tempdir().unwrap();
-        let reg = DatasetRegistry::new(dir.path().to_path_buf());
-        let huge = vec![b'x'; (DATASET_MAX_BYTES + 1) as usize];
-        let err = reg.create("a", DatasetFormat::Raw, None, &huge).unwrap_err();
-        assert!(matches!(err, DatasetError::QuotaExceeded(_)));
-    }
 }
