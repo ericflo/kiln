@@ -3111,6 +3111,8 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
   .corr-receipt { display: flex; align-items: center; gap: 10px; padding: var(--space-2) var(--space-3);
     margin-bottom: var(--space-3); border-radius: var(--radius-md);
     background: var(--success-bg); border: 1px solid var(--success-bd); }
+  .corr-receipt-failed { background: var(--danger-bg); border-color: var(--danger-bd); }
+  .corr-receipt-failed .corr-receipt-icon { color: var(--danger-fg); }
   .corr-receipt-icon { color: var(--success-fg); display: inline-flex; flex-shrink: 0; }
   .corr-receipt-icon .icn { width: 15px; height: 15px; }
   .corr-receipt-text { flex: 1; min-width: 0; font-size: var(--text-sm); color: var(--text-2); }
