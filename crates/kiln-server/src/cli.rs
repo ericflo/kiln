@@ -2477,12 +2477,23 @@ async fn probe_kiln_served_model(url: &str) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("no models in /v1/models response"))
 }
 
+/// Serializes in-process pi-setup merges: embedded runs re-merge before
+/// every spawn (up to `max_concurrent_runs` drivers at once) and the
+/// dashboard terminal does too — unserialized read-modify-writes here
+/// lost edits and let a spawning pi read a half-written config.
+static PI_SETUP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Quiet variant of `run_pi_setup` for in-process callers (the embedded
-/// dashboard terminal): performs the same non-destructive merge into pi's
-/// default config location, but logs instead of printing, and returns the
-/// models.json path it wrote. In-process callers know the served model id —
-/// pass it so the provider block matches the live server.
+/// dashboard terminal and the embedded run engine): performs the same
+/// non-destructive merge into pi's default config location, but logs
+/// instead of printing, and returns the models.json path. In-process
+/// callers know the served model id — pass it so the provider block
+/// matches the live server. No-op (no backup, no write) when the merged
+/// config equals what's already on disk — the common case for every
+/// embedded run after the first, which would otherwise litter
+/// `~/.pi/agent` with a backup pair per run.
 pub fn apply_pi_setup_quiet(url: &str, model_id: Option<&str>) -> anyhow::Result<PathBuf> {
+    let _guard = PI_SETUP_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let model_id = model_id.unwrap_or(PI_MODEL_ID);
     let path: PathBuf = match std::env::var("HOME") {
         Ok(h) => PathBuf::from(h)
@@ -2498,13 +2509,23 @@ pub fn apply_pi_setup_quiet(url: &str, model_id: Option<&str>) -> anyhow::Result
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    backup_existing_file(&path)?;
-    backup_existing_file(&settings_path)?;
-    let models = merge_pi_models_config(read_json_file_if_exists(&path)?, url, model_id)?;
-    let settings = merge_pi_settings_config(read_json_file_if_exists(&settings_path)?, model_id)?;
-    write_json_pretty(&path, &models)?;
-    write_json_pretty(&settings_path, &settings)?;
-    tracing::info!(models = %path.display(), settings = %settings_path.display(), url = %url, "pi config merged for embedded terminal");
+    let existing_models = read_json_file_if_exists(&path)?;
+    let models = merge_pi_models_config(existing_models.clone(), url, model_id)?;
+    let existing_settings = read_json_file_if_exists(&settings_path)?;
+    let settings = merge_pi_settings_config(existing_settings.clone(), model_id)?;
+    let models_changed = existing_models.as_ref() != Some(&models);
+    let settings_changed = existing_settings.as_ref() != Some(&settings);
+    if models_changed {
+        backup_existing_file(&path)?;
+        write_json_pretty(&path, &models)?;
+    }
+    if settings_changed {
+        backup_existing_file(&settings_path)?;
+        write_json_pretty(&settings_path, &settings)?;
+    }
+    if models_changed || settings_changed {
+        tracing::info!(models = %path.display(), settings = %settings_path.display(), url = %url, "pi config merged for embedded agent");
+    }
     Ok(path)
 }
 
@@ -2652,10 +2673,26 @@ fn backup_existing_file(path: &Path) -> anyhow::Result<Option<PathBuf>> {
     ))
 }
 
+/// Write via temp-file + rename so a concurrently *starting* pi never
+/// reads a truncated config — embedded runs re-merge before every
+/// spawn, and pi children read these files at startup.
 fn write_json_pretty(path: &Path, value: &serde_json::Value) -> anyhow::Result<()> {
     let mut bytes = serde_json::to_vec_pretty(value)?;
     bytes.push(b'\n');
-    std::fs::write(path, bytes).map_err(|err| anyhow::anyhow!("write {}: {err}", path.display()))
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = parent.join(format!(
+        ".{}.tmp-{}",
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "pi-config".into()),
+        std::process::id()
+    ));
+    std::fs::write(&tmp, bytes)
+        .map_err(|err| anyhow::anyhow!("write {}: {err}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|err| {
+        let _ = std::fs::remove_file(&tmp);
+        anyhow::anyhow!("rename {} -> {}: {err}", tmp.display(), path.display())
+    })
 }
 
 fn merge_pi_models_config(

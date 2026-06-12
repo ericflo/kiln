@@ -48,7 +48,7 @@ pub fn set_bind_host(host: &str) {
     let _ = BIND_HOST.set(host.to_string());
 }
 
-fn bind_host_is_loopback() -> bool {
+pub(crate) fn bind_host_is_loopback() -> bool {
     let host = BIND_HOST.get().map(String::as_str).unwrap_or("127.0.0.1");
     matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]")
 }
@@ -79,16 +79,9 @@ fn terminal_gate() -> (bool, Option<String>) {
     }
 }
 
-/// Locate `pi` on the server's PATH without shelling out.
+/// Locate `pi` — shared with the embedded-run engine (honors KILN_PI_BIN).
 fn find_pi() -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join("pi");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    crate::pi_rpc::find_pi()
 }
 
 async fn terminal_status() -> Json<serde_json::Value> {

@@ -140,6 +140,12 @@ draft_layers = 8                      # First N layers used as draft model
 # # Run the self_improve loop every N hours (168 = weekly). The first run
 # # fires one full interval after startup — never at boot.
 # self_improve_interval_hours = 168
+# # Embedded pi runs (POST /v1/agent/runs): the server drives pi itself,
+# # streams the trajectory live, and auto-indexes finished sessions into
+# # the agent-trace layer. Enabled on loopback binds by default;
+# # KILN_AGENT_RUNS=1 opts in on network binds, =0 force-disables.
+# max_concurrent_runs = 2       # runs executing at once (FIFO queue)
+# run_timeout_secs = 900        # wall-clock cap per run (abort + index partial)
 # # Optional request overrides (same shape as POST /v1/agent/self_improve).
 # # Add post_eval to gate every scheduled round behind §8.7 promotion:
 # # auto-load defers until the eval passes; failures demote to <name>.failed.

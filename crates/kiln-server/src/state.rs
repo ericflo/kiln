@@ -1435,6 +1435,9 @@ pub struct AppState {
     /// so the cadence survives restarts; surfaced via /health.
     pub self_improve_scheduler:
         Arc<std::sync::RwLock<Option<SelfImproveSchedulerStatus>>>,
+    /// Embedded pi agent runs — the server-driven rollout engine
+    /// (`/v1/agent/runs`). Records persist under `<adapter_dir>/agent_runs/`.
+    pub agent_runs: Arc<crate::agent_runs::AgentRunRegistry>,
     /// Last adapter load failure by adapter name. Used by the registry so
     /// automation can distinguish "not loaded" from "failed to load".
     pub adapter_load_errors: Arc<std::sync::RwLock<HashMap<String, String>>>,
@@ -1700,6 +1703,9 @@ impl AppState {
             loaded_adapter_name: Arc::new(std::sync::RwLock::new(None)),
             mtp_acceptance: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             self_improve_scheduler: Arc::new(std::sync::RwLock::new(None)),
+            agent_runs: Arc::new(crate::agent_runs::AgentRunRegistry::new(PathBuf::from(
+                "adapters",
+            ))),
             adapter_load_errors: Arc::new(std::sync::RwLock::new(HashMap::new())),
             adapter_swap_lock: Arc::new(tokio::sync::Mutex::new(())),
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
@@ -2347,6 +2353,9 @@ impl AppState {
                 decode_batcher,
             }),
             tokenizer: Arc::new(tokenizer),
+            agent_runs: Arc::new(crate::agent_runs::AgentRunRegistry::new(
+                adapter_dir.clone(),
+            )),
             adapter_dir,
             active_adapter_name: Arc::new(std::sync::RwLock::new(None)),
             loaded_adapter_name: Arc::new(std::sync::RwLock::new(None)),

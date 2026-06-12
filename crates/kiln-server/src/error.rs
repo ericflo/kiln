@@ -444,6 +444,70 @@ impl ApiError {
         }
     }
 
+    // ── Embedded agent runs ─────────────────────────────────────────
+
+    pub fn agent_run_invalid_request(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "agent_run_invalid_request",
+            message: format!("{detail}"),
+            hint: "POST /v1/agent/runs takes {\"task\": \"...\"} plus optional cwd, label, tools, timeout_secs.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn agent_run_not_found(run_id: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "agent_run_not_found",
+            message: format!("Agent run '{run_id}' not found"),
+            hint: "List runs with GET /v1/agent/runs.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn agent_run_not_active(run_id: impl std::fmt::Display, status: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "agent_run_not_active",
+            message: format!("Agent run '{run_id}' is not active (status: {status})"),
+            hint: "Steer/abort only apply to queued or running runs; check GET /v1/agent/runs/{id}.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn agent_runs_disabled(reason: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            code: "agent_runs_disabled",
+            message: format!("Embedded agent runs are disabled: {reason}"),
+            hint: "Embedded runs execute arbitrary code on the server. They are enabled on loopback binds by default; set KILN_AGENT_RUNS=1 to opt in on network binds.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn agent_runs_unavailable(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "agent_runs_unavailable",
+            message: format!("{detail}"),
+            hint: "Install pi (npm i -g @earendil-works/pi-coding-agent) on the server, or set KILN_PI_BIN to the binary path.",
+            retry_after_seconds: Some(30),
+        }
+    }
+
+    pub fn agent_runs_at_capacity(max: usize) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "agent_runs_at_capacity",
+            message: format!(
+                "{max} agent runs are already queued or running — wait for some to finish"
+            ),
+            hint: "Check active runs with GET /v1/agent/runs, abort one with POST /v1/agent/runs/{id}/abort, or retry shortly.",
+            retry_after_seconds: Some(30),
+        }
+    }
+
     pub fn training_job_not_found(job_id: impl std::fmt::Display) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
