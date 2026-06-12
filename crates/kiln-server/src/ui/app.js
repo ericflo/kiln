@@ -1083,14 +1083,42 @@ function renderCorrections() {
   // basket emptied out (all corrections were just trained in).
   if (card) card.hidden = n === 0 && !corrReceipt;
   if (!list) { updateCorrFoot(); return; }
-  const receiptHtml = corrReceipt ? `
+  // The receipt tracks the submitted job through the queue poll
+  // (watchCorrectionsJob): 'training' while queued/running, 'done' on
+  // completion, 'failed' with the job's error once the worker gives up —
+  // at which point the durable rows (never marked, per the completion-time
+  // contract) are pulled back into the basket for fix-and-retrain.
+  const dismissBtnHtml = `<button type="button" class="btn btn-sm btn-ghost corr-receipt-dismiss" id="corr-receipt-dismiss" aria-label="Dismiss receipt">${icon('close', 'icn-sm')}</button>`;
+  const receiptHtml = corrReceipt ? (() => {
+    const nameHtml = `<strong>${escapeHtml(corrReceipt.name)}</strong>`;
+    const plural = corrReceipt.count === 1 ? '' : 's';
+    if (corrReceipt.state === 'failed') {
+      return `
+    <div class="corr-receipt corr-receipt-failed" role="alert">
+      <span class="corr-receipt-icon">${icon('warning', 'icn-sm')}</span>
+      <span class="corr-receipt-text">Training ${nameHtml} failed: ${escapeHtml(String(corrReceipt.error || 'unknown error').slice(0, 220))} — your correction${plural} ${corrReceipt.count === 1 ? 'is' : 'are'} back below. Fix and train again.</span>
+      <button type="button" class="btn btn-sm" id="corr-receipt-view">View job ${icon('arrow-right', 'icn-sm')}</button>
+      ${dismissBtnHtml}
+    </div>`;
+    }
+    if (corrReceipt.state === 'done') {
+      return `
     <div class="corr-receipt" role="status">
       <span class="corr-receipt-icon">${icon('check', 'icn-sm')}</span>
-      <span class="corr-receipt-text">Training <strong>${escapeHtml(corrReceipt.name)}</strong> from ${corrReceipt.count} correction${corrReceipt.count === 1 ? '' : 's'} — it'll hot-swap in when done.</span>
+      <span class="corr-receipt-text">Trained ${nameHtml} from ${corrReceipt.count} correction${plural} — hot-swapped in.</span>
       ${corrReceipt.firstPrompt ? `<button type="button" class="btn btn-sm" id="corr-receipt-verify" title="Replay the corrected prompt in Playground compare — base vs ${escapeHtml(corrReceipt.name)} — to see the fix land">Verify the fix</button>` : ''}
       <button type="button" class="btn btn-sm" id="corr-receipt-view">View in queue ${icon('arrow-right', 'icn-sm')}</button>
-      <button type="button" class="btn btn-sm btn-ghost corr-receipt-dismiss" id="corr-receipt-dismiss" aria-label="Dismiss receipt">${icon('close', 'icn-sm')}</button>
-    </div>` : '';
+      ${dismissBtnHtml}
+    </div>`;
+    }
+    return `
+    <div class="corr-receipt" role="status">
+      <span class="corr-receipt-icon">${icon('check', 'icn-sm')}</span>
+      <span class="corr-receipt-text">Training ${nameHtml} from ${corrReceipt.count} correction${plural} — it'll hot-swap in when done.</span>
+      <button type="button" class="btn btn-sm" id="corr-receipt-view">View in queue ${icon('arrow-right', 'icn-sm')}</button>
+      ${dismissBtnHtml}
+    </div>`;
+  })() : '';
   list.innerHTML = receiptHtml + correctionsBasket.map(c => {
     const prev = (c.user || '').slice(0, 180);
     const rid = escapeHtml(c.request_id);
@@ -1163,13 +1191,34 @@ function updateCorrFoot() {
   const btn = document.getElementById('corr-train');
   if (btn) btn.disabled = ready === 0;
 }
-// The one corrections→SFT transform. Both consumers — the Train button on the
-// Corrections card and "Build a dataset from your corrections" on the Evals
-// Datasets tab — go through here, so a correction always becomes the same
-// (user prompt, ideal answer) chat row whether it trains directly or lands in
-// a dataset first.
+// The client-side corrections→SFT transform, used by "Build a dataset from
+// your corrections" on the Evals Datasets tab. The Corrections card's Train
+// button no longer builds rows client-side — it submits dataset
+// "corrections:active" and the server applies the same (user prompt, ideal
+// answer) transform in CorrectionsStore::trainable_rows, so a correction
+// becomes the same chat row whichever path it takes.
 function correctionsToSftExamples(corrections) {
   return corrections.map(c => ({ messages: [{ role: 'user', content: c.user }, { role: 'assistant', content: c.ideal }] }));
+}
+// The trainer refuses alpha/rank > 2.0 (unsafe LoRA scaling) and the server
+// default alpha is 32 — so any rank below 16 MUST send a matching alpha or
+// the job is rejected. 2×rank, capped at the 32 default, is the standard pair.
+function loraAlphaFor(rank) { return Math.min(32, 2 * rank); }
+// Pre-train flush: push every locally-edited row to the durable store and
+// WAIT for the writes. The server resolves corrections:active from its own
+// copy, so a still-debounced ideal edit would otherwise train stale text.
+async function corrFlushToServer(rows) {
+  const ids = new Set(rows.map(c => c.request_id));
+  Object.keys(corrSyncTimers).forEach(id => {
+    clearTimeout(corrSyncTimers[id]); delete corrSyncTimers[id]; ids.add(id);
+  });
+  const byId = new Map(correctionsBasket.map(c => [c.request_id, c]));
+  await Promise.all([...ids].map(id => {
+    const c = byId.get(id);
+    if (!c) return Promise.resolve();
+    return api('/v1/corrections', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(corrRowForServer(c)) });
+  }));
 }
 async function trainFromCorrections() {
   const trainable = correctionsBasket.filter(corrTrainable);
@@ -1177,35 +1226,50 @@ async function trainFromCorrections() {
   const nameInput = document.getElementById('corr-adapter-name');
   const name = ((nameInput && nameInput.value) || '').trim() || 'codebase-corrections';
   if (!/^[A-Za-z0-9._-]+$/.test(name)) { toast('Adapter name: letters, digits, . _ - only', 'err'); nameInput && nameInput.focus(); return; }
-  const examples = correctionsToSftExamples(trainable);
   const btn = document.getElementById('corr-train');
   if (btn) btn.disabled = true;
   try {
+    // The durable store is what trains: dataset "corrections:active" makes
+    // the SERVER resolve the trainable rows and mark them trained only when
+    // the job COMPLETES. A failed job never marks anything, so every
+    // hand-written ideal stays re-trainable instead of being burned by an
+    // optimistic submit-time mark (the pre-0.4.2 dead-end).
+    await corrFlushToServer(trainable);
     // learning_rate omitted on purpose: the server resolves the
     // per-optimizer default (Muon and AdamW want very different bands).
-    const body = { examples, config: { output_name: name, auto_load: true, epochs: 3, lora_rank: 8 } };
+    const body = { dataset: 'corrections:active', config: { output_name: name, auto_load: true, epochs: 3, lora_rank: 8, lora_alpha: loraAlphaFor(8) } };
     const res = await api('/v1/train/sft', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    toast(res.message || `Training ${name} from ${examples.length} correction${examples.length === 1 ? '' : 's'} — it will hot-swap in when done`, 'ok');
-    // Remove the trained corrections from the ACTIVE basket only — the
-    // server keeps them, marked with the adapter they trained into, so
-    // the hand-written ideal answers remain an asset (and re-trainable)
-    // instead of vanishing with the job. Anything still awaiting an
-    // answer stays in the basket so no hand-written work is lost.
-    const trained = new Set(trainable.map(c => c.request_id));
-    trainable.forEach(c => { corrSyncUpsert(c); });
-    try {
-      api('/v1/corrections/mark_trained', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ request_ids: [...trained], adapter: name }) }).catch(() => {});
-    } catch (_) {}
-    correctionsBasket = correctionsBasket.filter(c => !trained.has(c.request_id));
+    toast(res.message || `Training ${name} from ${trainable.length} correction${trainable.length === 1 ? '' : 's'} — it will hot-swap in when done`, 'ok');
+    // Clear the submitted rows from the LOCAL view only. The durable rows
+    // stay active server-side until the job completes; if it fails,
+    // watchCorrectionsJob pulls them straight back into the basket.
+    const submitted = new Set(trainable.map(c => c.request_id));
+    correctionsBasket = correctionsBasket.filter(c => !submitted.has(c.request_id));
     // Leave a persistent in-card receipt instead of a disorienting auto-jump —
     // the user stays in context and chooses when to view the job. Keep the
-    // first corrected prompt so "Verify the fix" can replay it base-vs-adapter.
-    corrReceipt = { name, count: examples.length, firstPrompt: trainable[0].user };
+    // first corrected prompt so "Verify the fix" can replay it base-vs-adapter,
+    // and the job id so the queue poll can resolve this receipt's outcome.
+    corrReceipt = { name, count: trainable.length, firstPrompt: trainable[0].user, jobId: res.job_id, state: 'training', error: null };
     saveCorrections(); renderCorrections();
     if (typeof pollTraining === 'function') pollTraining();
   } catch (e) { toast(e.message || 'Could not submit training', 'err'); }
   finally { if (btn) btn.disabled = correctionsBasket.filter(corrTrainable).length === 0; }
+}
+// Resolve an in-flight corrections-train receipt against the queue poll.
+// Failed → flip the receipt to its error state and pull the (never-marked)
+// rows back from the durable store so the user can fix and train again.
+function watchCorrectionsJob(data) {
+  if (!corrReceipt || !corrReceipt.jobId || corrReceipt.state !== 'training') return;
+  const job = (data.completed || []).find(j => j.job_id === corrReceipt.jobId);
+  if (!job) return;
+  if (job.state === 'failed') {
+    corrReceipt.state = 'failed';
+    corrReceipt.error = job.error || 'training failed';
+    corrSyncFromServer(); // restores the basket, then re-renders
+  } else {
+    corrReceipt.state = 'done';
+  }
+  renderCorrections();
 }
 function initCorrections() {
   loadCorrections();
@@ -3236,6 +3300,7 @@ async function pollTraining() {
       completed: data.completed || [],
     };
     detectTrainingTransitions(data);
+    watchCorrectionsJob(data);
     const r = data.running;
     const key = [
       r ? `${r.job_id}:${(r.progress || 0).toFixed(3)}:${r.current_loss != null ? r.current_loss.toFixed(4) : ''}` : '',
@@ -4077,6 +4142,9 @@ document.getElementById('sft-form').addEventListener('submit', async (e) => {
       auto_load: form.auto_load.checked,
       epochs,
       lora_rank: rank,
+      // Paired explicitly: the server's default alpha (32) over the form's
+      // default rank (8) trips the trainer's alpha/rank safety gate.
+      lora_alpha: loraAlphaFor(rank),
     };
     // Blank lr is omitted so the server resolves the per-optimizer default.
     if (learningRate !== null) config.learning_rate = learningRate;
@@ -4124,6 +4192,9 @@ document.getElementById('grpo-form').addEventListener('submit', async (e) => {
       auto_load: form.auto_load.checked,
       kl_coeff: klCoeff,
       lora_rank: rank,
+      // Paired explicitly: the server's default alpha (32) over the form's
+      // default rank (8) trips the trainer's alpha/rank safety gate.
+      lora_alpha: loraAlphaFor(rank),
     };
     // Blank lr is omitted so the server resolves the per-optimizer default.
     if (learningRate !== null) config.learning_rate = learningRate;

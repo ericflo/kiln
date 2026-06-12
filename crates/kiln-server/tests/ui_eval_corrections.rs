@@ -106,3 +106,62 @@ async fn ui_carries_eval_drill_correction_capture() {
         "ideal pre-seeding must stay restricted to verbatim-target scorers"
     );
 }
+
+/// The dashboard's Train button must ride the server's completion-time
+/// marking contract — the submit-time `mark_trained` call it shipped with
+/// burned the basket whenever the job later failed (the 0.4.1 corrections
+/// dead-end). Pin the migrated shape so it can't quietly regress.
+#[tokio::test]
+async fn ui_trains_corrections_through_completion_time_marking() {
+    let app = api::router(make_state());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/ui/app.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let app_js = String::from_utf8(
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+
+    // Train submits the server-resolved corrections feed…
+    assert!(
+        app_js.contains("dataset: 'corrections:active'"),
+        "corrections train must submit the server-resolved feed"
+    );
+    // …and never marks rows itself: the worker does it at job COMPLETION,
+    // so a failed job leaves every hand-written ideal re-trainable.
+    assert!(
+        !app_js.contains("mark_trained"),
+        "the dashboard must not mark corrections trained at submit time"
+    );
+    // The local edits flush to the durable store BEFORE submit — the
+    // server trains its own copy of the rows.
+    assert!(
+        app_js.contains("await corrFlushToServer("),
+        "pending ideal edits must be flushed (and awaited) before training"
+    );
+    // A failed job surfaces on the receipt and restores the basket.
+    assert!(
+        app_js.contains("function watchCorrectionsJob"),
+        "the corrections receipt must resolve the job's terminal state"
+    );
+    // The trainer rejects alpha/rank > 2.0 and the server default alpha is
+    // 32: every UI-built training config must pair alpha with rank.
+    assert!(
+        app_js.contains("function loraAlphaFor"),
+        "UI training configs must pair lora_alpha with lora_rank"
+    );
+    assert!(
+        app_js.matches("lora_alpha: loraAlphaFor(").count() >= 3,
+        "corrections train + SFT form + GRPO form must all send a paired alpha"
+    );
+}

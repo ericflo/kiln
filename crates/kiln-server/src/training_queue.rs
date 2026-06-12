@@ -2710,10 +2710,141 @@ fn auto_load_adapter(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::TrainingJobInfo;
     use kiln_model::{ServerTrainingDispatchPolicy, ServerTrainingNativeRoute};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn mock_state_in(dir: &std::path::Path) -> AppState {
+        let config = kiln_core::config::ModelConfig::qwen3_5_4b();
+        let scheduler = kiln_scheduler::Scheduler::new(
+            kiln_scheduler::SchedulerConfig {
+                max_batch_tokens: 8192,
+                max_batch_size: 64,
+                block_size: 16,
+                prefix_cache_enabled: false,
+                ..Default::default()
+            },
+            256,
+        );
+        let engine = kiln_model::engine::MockEngine::new(config.clone());
+        let mut vocab = std::collections::HashMap::new();
+        for i in 0u32..32 {
+            vocab.insert(format!("t{i}"), i);
+        }
+        let tokenizer_json = serde_json::json!({
+            "version": "1.0",
+            "model": { "type": "BPE", "vocab": vocab, "merges": [] },
+            "added_tokens": [{
+                "id": 0, "content": "<|endoftext|>",
+                "single_word": false, "lstrip": false, "rstrip": false,
+                "normalized": false, "special": true,
+            }]
+        });
+        let tokenizer = kiln_core::tokenizer::KilnTokenizer::from_bytes(
+            &serde_json::to_vec(&tokenizer_json).unwrap(),
+        )
+        .unwrap();
+        let mut state = AppState::new_mock(
+            config,
+            scheduler,
+            Arc::new(engine),
+            tokenizer,
+            300,
+            "Qwen3.5-4B".to_string(),
+        );
+        state.adapter_dir = dir.to_path_buf();
+        state
+    }
+
+    fn tracked_job(job_id: &str, adapter: &str, correction_ids: Vec<String>) -> TrainingJobInfo {
+        TrainingJobInfo {
+            job_id: job_id.to_string(),
+            adapter_name: adapter.to_string(),
+            job_type: TrainingJobType::Sft,
+            state: TrainingState::Running,
+            progress: 0.5,
+            loss: None,
+            epoch: None,
+            adapter_path: None,
+            submitted_at: std::time::Instant::now(),
+            submitted_unix_ms: 1,
+            auto_load: false,
+            consumed_correction_ids: correction_ids,
+            finished_at: None,
+            finished_unix_ms: None,
+            error: None,
+            linked_eval_job_ids: Vec::new(),
+            post_eval_verdict: None,
+            gate_outcome: None,
+            loss_history: Vec::new(),
+            cancel_requested: Default::default(),
+        }
+    }
+
+    /// The completion-time corrections contract the dashboard now depends
+    /// on (it submits dataset "corrections:active" and never marks rows
+    /// itself): finalize_job flips consumed rows to trained_into ONLY on
+    /// Completed. A Failed job — the rank-8/alpha-32 corrections train
+    /// that shipped in 0.4.1 was one — must leave every row active and
+    /// re-trainable.
+    #[test]
+    fn finalize_job_marks_corrections_on_completion_not_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = mock_state_in(dir.path());
+
+        let store = crate::api::corrections::CorrectionsStore::for_state(&state);
+        store
+            .upsert(crate::api::corrections::CorrectionRow {
+                request_id: "r1".to_string(),
+                agent: "pi".to_string(),
+                adapter: None,
+                user: "what is 2+2".to_string(),
+                original: "5".to_string(),
+                ideal: "4".to_string(),
+                truncated: false,
+                created_at: String::new(),
+                trained_into: None,
+                trained_at: None,
+            })
+            .unwrap();
+
+        let ids = vec!["r1".to_string()];
+        {
+            let mut jobs = state.training_jobs.write().unwrap();
+            jobs.insert(
+                "job-fail".into(),
+                tracked_job("job-fail", "fixes-v1", ids.clone()),
+            );
+            jobs.insert(
+                "job-done".into(),
+                tracked_job("job-done", "fixes-v1", ids.clone()),
+            );
+        }
+
+        finalize_job(
+            &state,
+            "job-fail",
+            TrainingState::Failed,
+            Some("unsafe LoRA scaling".to_string()),
+        );
+        let rows = store.list();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0].trained_into.is_none(),
+            "a FAILED job must leave the basket intact and re-trainable"
+        );
+
+        finalize_job(&state, "job-done", TrainingState::Completed, None);
+        let rows = store.list();
+        assert_eq!(
+            rows[0].trained_into.as_deref(),
+            Some("fixes-v1"),
+            "a COMPLETED job marks exactly the consumed rows"
+        );
+        assert!(rows[0].trained_at.is_some());
+    }
 
     #[test]
     fn server_training_dispatch_policy_treats_empty_and_zero_as_disabled() {

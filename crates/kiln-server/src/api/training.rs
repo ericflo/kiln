@@ -216,6 +216,24 @@ struct QueueStatusEntry {
     position: usize,
 }
 
+/// Submit-time guard for the trainer's LoRA alpha/rank safety gate.
+///
+/// The trainer enforces this anyway — but only after the job has been
+/// accepted, queued, and run, so the caller sees a 200 and a doomed job
+/// instead of a 400. The dashboard's corrections train shipped a
+/// rank-8/alpha-32 (ratio 4.0) config that failed every job this way
+/// while the UI had already marked the basket trained. Same message as
+/// the trainer's so the two surfaces never disagree.
+pub(crate) fn validate_lora_scale_at_submit(
+    lora_rank: usize,
+    lora_alpha: f32,
+    allow_high_lora_scale: bool,
+) -> Result<(), ApiError> {
+    kiln_train::lora_scaling::validate_lora_scaling(lora_rank, lora_alpha, allow_high_lora_scale)
+        .map(|_| ())
+        .map_err(|e| ApiError::training_invalid_request(format!("{e:#}")))
+}
+
 async fn submit_sft(
     State(state): State<AppState>,
     Json(mut req): Json<SftRequest>,
@@ -316,6 +334,11 @@ async fn submit_sft(
     if let Some(name) = req.config.output_name.as_deref() {
         super::adapters::validate_adapter_name(name)?;
     }
+    validate_lora_scale_at_submit(
+        req.config.lora_rank,
+        req.config.lora_alpha,
+        req.config.allow_high_lora_scale,
+    )?;
     let adapter_name = req
         .config
         .output_name
@@ -488,6 +511,11 @@ async fn submit_grpo(
     if let Some(name) = req.config.output_name.as_deref() {
         super::adapters::validate_adapter_name(name)?;
     }
+    validate_lora_scale_at_submit(
+        req.config.lora_rank,
+        req.config.lora_alpha,
+        req.config.allow_high_lora_scale,
+    )?;
     let adapter_name = req
         .config
         .output_name
@@ -683,6 +711,11 @@ async fn submit_opd(
     if let Some(name) = req.config.output_name.as_deref() {
         super::adapters::validate_adapter_name(name)?;
     }
+    validate_lora_scale_at_submit(
+        req.config.lora_rank,
+        req.config.lora_alpha,
+        req.config.allow_high_lora_scale,
+    )?;
     // The worker resolves the teacher only at dequeue — a typo'd alias
     // used to enqueue a job guaranteed to fail later, possibly hours
     // later behind a long queue. Fail here with the remediation. (After
@@ -820,6 +853,11 @@ async fn submit_distill_refresh(
         ));
     }
     super::adapters::validate_adapter_name(&req.name)?;
+    validate_lora_scale_at_submit(
+        req.config.lora_rank,
+        req.config.lora_alpha,
+        req.config.allow_high_lora_scale,
+    )?;
     if req.behavioural_teacher.trim().is_empty() {
         return Err(ApiError::training_invalid_request(
             "DistillRefresh: `behavioural_teacher` alias must be non-empty".to_string(),
@@ -937,6 +975,11 @@ async fn submit_distill_merge(
         ));
     }
     super::adapters::validate_adapter_name(&req.name)?;
+    validate_lora_scale_at_submit(
+        req.config.lora_rank,
+        req.config.lora_alpha,
+        req.config.allow_high_lora_scale,
+    )?;
     // A source adapter that doesn't exist on disk is a typo — fail now,
     // not after the job dequeues and silently falls back to the base
     // model for that source's prompts.
@@ -992,6 +1035,14 @@ async fn submit_distill_pump(
         format!("distill/pump: teacher alias '{}' is not registered", req.teacher),
     )?;
     super::adapters::validate_adapter_name(&req.name)?;
+    // The worker overrides config.lora_rank with the request's top-level
+    // `rank` when set (training_queue.rs pump arm) — validate the rank
+    // that will actually train, not the config default it shadows.
+    validate_lora_scale_at_submit(
+        req.rank.unwrap_or(req.config.lora_rank),
+        req.config.lora_alpha,
+        req.config.allow_high_lora_scale,
+    )?;
     enforce_queue_caps(&state)?;
     let inline_prompts: &[kiln_train::opd::OpdPrompt] = match &req.mode {
         kiln_train::DistillPumpMode::Examples { examples } => examples.as_slice(),
@@ -1034,6 +1085,11 @@ async fn submit_distill_self(
         ));
     }
     super::adapters::validate_adapter_name(&req.name)?;
+    validate_lora_scale_at_submit(
+        req.config.lora_rank,
+        req.config.lora_alpha,
+        req.config.allow_high_lora_scale,
+    )?;
     enforce_queue_caps(&state)?;
     let reserved_bytes = distill_working_set_reservation(
         &state,
