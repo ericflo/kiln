@@ -83,11 +83,12 @@ async fn submit_front_door(
         return Err(ApiError::shutting_down());
     }
 
-    let (pipeline, job_type, adapter_name, auto_load, queued): (
+    let (pipeline, job_type, adapter_name, auto_load, lora_scale, queued): (
         &'static str,
         TrainingJobType,
         String,
         bool,
+        (usize, f32, bool),
         QueuedJob,
     ) = match req {
         FrontDoorRequest::DistillRefresh(r) => (
@@ -98,6 +99,7 @@ async fn submit_front_door(
                 .clone()
                 .unwrap_or_else(|| format!("{}-refresh", r.name)),
             r.config.auto_load,
+            (r.config.lora_rank, r.config.lora_alpha, r.config.allow_high_lora_scale),
             QueuedJob::DistillRefresh(r),
         ),
         FrontDoorRequest::DistillMerge(r) => (
@@ -105,6 +107,7 @@ async fn submit_front_door(
             TrainingJobType::Opd,
             r.name.clone(),
             r.config.auto_load,
+            (r.config.lora_rank, r.config.lora_alpha, r.config.allow_high_lora_scale),
             QueuedJob::DistillMerge(r),
         ),
         FrontDoorRequest::DistillPump(r) => (
@@ -112,6 +115,7 @@ async fn submit_front_door(
             TrainingJobType::Opd,
             r.name.clone(),
             r.config.auto_load,
+            (r.rank.unwrap_or(r.config.lora_rank), r.config.lora_alpha, r.config.allow_high_lora_scale),
             QueuedJob::DistillPump(r),
         ),
         FrontDoorRequest::Opd(r) => (
@@ -122,6 +126,7 @@ async fn submit_front_door(
                 .clone()
                 .unwrap_or_else(|| format!("opd-{}", uuid::Uuid::new_v4())),
             r.config.auto_load,
+            (r.config.lora_rank, r.config.lora_alpha, r.config.allow_high_lora_scale),
             QueuedJob::Opd(r),
         ),
         FrontDoorRequest::Grpo(r) => (
@@ -132,6 +137,7 @@ async fn submit_front_door(
                 .clone()
                 .unwrap_or_else(|| format!("grpo-{}", uuid::Uuid::new_v4())),
             r.config.auto_load,
+            (r.config.lora_rank, r.config.lora_alpha, r.config.allow_high_lora_scale),
             QueuedJob::Grpo(r),
         ),
         FrontDoorRequest::Sft(r) => (
@@ -142,6 +148,7 @@ async fn submit_front_door(
                 .clone()
                 .unwrap_or_else(|| format!("sft-{}", uuid::Uuid::new_v4())),
             r.config.auto_load,
+            (r.config.lora_rank, r.config.lora_alpha, r.config.allow_high_lora_scale),
             QueuedJob::Sft(r),
         ),
     };
@@ -149,6 +156,7 @@ async fn submit_front_door(
     // The resolved name (explicit, derived, or generated) becomes a
     // directory under adapter_dir — same gate as the dedicated endpoints.
     super::adapters::validate_adapter_name(&adapter_name)?;
+    super::training::validate_lora_scale_at_submit(lora_scale.0, lora_scale.1, lora_scale.2)?;
     super::training::enforce_queue_caps(&state)?;
 
     let job_id = uuid::Uuid::new_v4().to_string();

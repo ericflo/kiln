@@ -224,7 +224,7 @@ struct QueueStatusEntry {
 /// rank-8/alpha-32 (ratio 4.0) config that failed every job this way
 /// while the UI had already marked the basket trained. Same message as
 /// the trainer's so the two surfaces never disagree.
-fn validate_lora_scale_at_submit(
+pub(crate) fn validate_lora_scale_at_submit(
     lora_rank: usize,
     lora_alpha: f32,
     allow_high_lora_scale: bool,
@@ -1035,8 +1035,11 @@ async fn submit_distill_pump(
         format!("distill/pump: teacher alias '{}' is not registered", req.teacher),
     )?;
     super::adapters::validate_adapter_name(&req.name)?;
+    // The worker overrides config.lora_rank with the request's top-level
+    // `rank` when set (training_queue.rs pump arm) — validate the rank
+    // that will actually train, not the config default it shadows.
     validate_lora_scale_at_submit(
-        req.config.lora_rank,
+        req.rank.unwrap_or(req.config.lora_rank),
         req.config.lora_alpha,
         req.config.allow_high_lora_scale,
     )?;
