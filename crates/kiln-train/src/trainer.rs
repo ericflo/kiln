@@ -1024,6 +1024,12 @@ impl TrainableLoraParams {
                 param.forward_storage().primary_tensor(),
             )?;
         }
+        for param in self.mtp_params() {
+            ResidencyBackend::runtime_register_resident_activation(
+                backend,
+                param.forward_storage().primary_tensor(),
+            )?;
+        }
         Ok(())
     }
 
@@ -1037,6 +1043,12 @@ impl TrainableLoraParams {
             return;
         }
         for param in self.all_params() {
+            ResidencyBackend::runtime_evict_resident_activation(
+                backend,
+                param.forward_storage().primary_tensor(),
+            );
+        }
+        for param in self.mtp_params() {
             ResidencyBackend::runtime_evict_resident_activation(
                 backend,
                 param.forward_storage().primary_tensor(),
@@ -2721,6 +2733,9 @@ fn run_mtp_alignment_phase(
         alpha: params.alpha,
         scale: params.scale,
     };
+    mtp_train
+        .register_with_backend(backend)
+        .context("mtp alignment: registering draft-block LoRA params with resident backend")?;
 
     // Serving view of the trained MAIN adapter (applied to the hiddens
     // forward) and the draft-block LoRA view (applied inside the block;
@@ -2900,6 +2915,10 @@ fn run_mtp_alignment_phase(
         }
         final_ce = Some(loss_val);
         trained += 1;
+    }
+
+    if let Some(state) = opt_state.as_ref() {
+        state.evict_from_backend(backend);
     }
 
     // Return the trained pairs to params.mtp — save_peft serializes them
