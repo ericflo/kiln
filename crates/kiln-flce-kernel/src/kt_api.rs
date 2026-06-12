@@ -37,11 +37,11 @@
 use std::sync::Arc;
 
 use kiln_tensor::{
-    ops::{
-        broadcast_to, exp, index_select, ln, matmul, matmul_rhs_transposed, max_axis, mean_all, mul,
-        mul_scalar, scatter_add, sub, sum_axis, to_f32,
-    },
     DType as KtDType, Device as KtDevice, Error as KtError, Tensor as KtTensor,
+    ops::{
+        broadcast_to, exp, index_select, ln, matmul, matmul_rhs_transposed, max_axis, mean_all,
+        mul, mul_scalar, scatter_add, sub, sum_axis, to_f32,
+    },
 };
 
 /// Error type for the kiln-tensor-typed FLCE surface.
@@ -208,34 +208,6 @@ pub fn fused_linear_cross_entropy_phase_b_with_metadata_kt(
     label_mask: &[bool],
     chunk_size: usize,
 ) -> Result<(KtTensor, Option<FlceActiveMetadata>), FlceError> {
-    // ROCm host-staging (Phase R.7): this crate is a PURE-KT COMPOSITE built
-    // out of generic `kiln_tensor` ops (`matmul`, `index_select`,
-    // `scatter_add`, `max_axis`, `sum_axis`, ...). Those generic `DeviceOp*`
-    // entries have native `cuda_fwd` arms (so the CUDA path runs on-device,
-    // untouched) but NO `rocm_fwd` — the ROCm parity-green surface lives in
-    // the standalone `rocm_*` functions, which the composite does not call.
-    // `dispatch*` for a ROCm device falls through to `cpu_fwd` *without* the
-    // host round-trip Metal/Vulkan get, so every op here would hard-error on
-    // `RocmStorage` ("... storage must be CpuStorage"). Mirror the Metal/Vulkan
-    // host fallback at the composite boundary instead: stage the device inputs
-    // down to host, run the identical CPU composite, then upload the scalar
-    // loss back to the originating ROCm device so the result's device matches
-    // the inputs' (the established kiln-tensor ROCm-parity helper pattern).
-    #[cfg(feature = "rocm")]
-    if let KtDevice::Rocm(dev_idx) = hidden.device() {
-        let hidden_host = rocm_stage_to_host(hidden)?;
-        let head_host = rocm_stage_to_host(head_t)?;
-        let (loss_host, _) = fused_linear_cross_entropy_phase_b_with_metadata_kt(
-            &hidden_host,
-            &head_host,
-            input_ids,
-            label_mask,
-            chunk_size,
-        )?;
-        let loss_roc = rocm_upload_from_host(&loss_host, dev_idx)?;
-        return Ok((loss_roc, None));
-    }
-
     let seq_len = input_ids.len();
     if label_mask.len() != seq_len {
         return Err(FlceError::msg(format!(
@@ -358,8 +330,8 @@ pub fn fused_linear_cross_entropy_phase_b_with_metadata_kt(
                     .map_err(FlceError::Kt)?
                     .contiguous()
                     .map_err(FlceError::Kt)?;
-                let chunk_max_b = broadcast_to(&chunk_max_2d, &[num_active, chunk_len])
-                    .map_err(FlceError::Kt)?;
+                let chunk_max_b =
+                    broadcast_to(&chunk_max_2d, &[num_active, chunk_len]).map_err(FlceError::Kt)?;
                 let shifted = sub(&logits_chunk, &chunk_max_b).map_err(FlceError::Kt)?;
                 let exped = exp(&shifted).map_err(FlceError::Kt)?;
                 let chunk_sumexp_1d = sum_axis(&exped, 1).map_err(FlceError::Kt)?;
@@ -379,8 +351,8 @@ pub fn fused_linear_cross_entropy_phase_b_with_metadata_kt(
                     .map_err(FlceError::Kt)?
                     .contiguous()
                     .map_err(FlceError::Kt)?;
-                let new_max_b = broadcast_to(&new_max_2d, &[num_active, chunk_len])
-                    .map_err(FlceError::Kt)?;
+                let new_max_b =
+                    broadcast_to(&new_max_2d, &[num_active, chunk_len]).map_err(FlceError::Kt)?;
                 let shifted = sub(&logits_chunk, &new_max_b).map_err(FlceError::Kt)?;
                 let exped = exp(&shifted).map_err(FlceError::Kt)?;
                 let chunk_sumexp_1d = sum_axis(&exped, 1).map_err(FlceError::Kt)?;
@@ -417,15 +389,15 @@ pub fn fused_linear_cross_entropy_phase_b_with_metadata_kt(
             // `tape_forward::try_tape_cross_entropy_from_logits_kt` uses.
             // First take the hit rows (axis-0 index_select is CUDA-capable),
             // then index the flattened `[hits, chunk_len]` at `r*chunk_len + col`.
-            let selected_rows = index_select(&logits_chunk, 0, &row_idx_t)
-                .map_err(FlceError::Kt)?; // [hits, chunk_len]
+            let selected_rows =
+                index_select(&logits_chunk, 0, &row_idx_t).map_err(FlceError::Kt)?; // [hits, chunk_len]
             let flat_hit_idx: Vec<u32> = col_hits
                 .iter()
                 .enumerate()
                 .map(|(r, &col)| (r as u32) * (chunk_len as u32) + col)
                 .collect();
-            let flat_hit_idx_t = KtTensor::from_vec_on(device, flat_hit_idx, vec![hits])
-                .map_err(FlceError::Kt)?;
+            let flat_hit_idx_t =
+                KtTensor::from_vec_on(device, flat_hit_idx, vec![hits]).map_err(FlceError::Kt)?;
             let gathered_1d = selected_rows
                 .contiguous()
                 .map_err(FlceError::Kt)?
@@ -439,8 +411,8 @@ pub fn fused_linear_cross_entropy_phase_b_with_metadata_kt(
             // F32 values): each active row falls in exactly one chunk, so each
             // `[num_active]` slot is touched exactly once → scatter_add is
             // equivalent to a scatter.
-            let scattered = scatter_add(&gathered_1d, 0, &row_idx_t, num_active)
-                .map_err(FlceError::Kt)?;
+            let scattered =
+                scatter_add(&gathered_1d, 0, &row_idx_t, num_active).map_err(FlceError::Kt)?;
             correct_logit = Some(match correct_logit.take() {
                 Some(cur) => kiln_tensor::ops::add(&cur, &scattered).map_err(FlceError::Kt)?,
                 None => scattered,
@@ -450,10 +422,9 @@ pub fn fused_linear_cross_entropy_phase_b_with_metadata_kt(
         chunk_start = chunk_end;
     }
 
-    let running_max_1d = running_max
-        .ok_or_else(|| FlceError::msg("kt-flce: vocab_size was 0"))?;
-    let running_sumexp_1d = running_sumexp
-        .ok_or_else(|| FlceError::msg("kt-flce: vocab_size was 0"))?;
+    let running_max_1d = running_max.ok_or_else(|| FlceError::msg("kt-flce: vocab_size was 0"))?;
+    let running_sumexp_1d =
+        running_sumexp.ok_or_else(|| FlceError::msg("kt-flce: vocab_size was 0"))?;
     let correct_logit_1d = correct_logit.ok_or_else(|| {
         FlceError::msg("kt-flce: no labels fell inside any vocab chunk — label >= vocab_size?")
     })?;
@@ -589,31 +560,6 @@ fn fused_linear_cross_entropy_phase_b_backward_impl_kt(
     grad_loss: Option<&KtTensor>,
     active_metadata: Option<&FlceActiveMetadata>,
 ) -> Result<KtTensor, FlceError> {
-    // ROCm host-staging — same rationale as the forward entry point above:
-    // the generic-op composite has no `rocm_fwd` arm, so stage the device
-    // inputs (hidden, head_t, AND the seed grad — the backward's
-    // broadcast-mul folds it in, and it lives on the same ROCm device) down
-    // to host, run the identical CPU composite, then upload `dhidden` back to
-    // the originating ROCm device so it stays single-device for downstream use.
-    #[cfg(feature = "rocm")]
-    if let KtDevice::Rocm(dev_idx) = hidden.device() {
-        let hidden_host = rocm_stage_to_host(hidden)?;
-        let head_host = rocm_stage_to_host(head_t)?;
-        let grad_host = grad_loss
-            .map(rocm_stage_to_host)
-            .transpose()?;
-        let dhidden_host = fused_linear_cross_entropy_phase_b_backward_impl_kt(
-            &hidden_host,
-            &head_host,
-            input_ids,
-            label_mask,
-            chunk_size,
-            grad_host.as_ref(),
-            None,
-        )?;
-        return rocm_upload_from_host(&dhidden_host, dev_idx);
-    }
-
     let seq_len = input_ids.len();
     if label_mask.len() != seq_len {
         return Err(FlceError::msg(format!(
@@ -705,130 +651,122 @@ fn fused_linear_cross_entropy_phase_b_backward_impl_kt(
     // Pass 1: use forward softmax stats when available, otherwise
     // recompute running_max + running_sumexp.
     // -----------------------------------------------------------------
-    let (running_max_1d, running_sumexp_1d) =
-        match (
-            active_metadata.running_max.as_ref(),
-            active_metadata.running_sumexp.as_ref(),
-        ) {
-            (Some(saved_max), Some(saved_sumexp)) => {
-                if saved_max.dtype() != KtDType::F32 {
-                    return Err(FlceError::msg(format!(
-                        "kt-flce-bwd: saved running_max dtype {} != F32",
-                        saved_max.dtype()
-                    )));
-                }
-                if saved_sumexp.dtype() != KtDType::F32 {
-                    return Err(FlceError::msg(format!(
-                        "kt-flce-bwd: saved running_sumexp dtype {} != F32",
-                        saved_sumexp.dtype()
-                    )));
-                }
-                if saved_max.device() != device {
-                    return Err(FlceError::msg(format!(
-                        "kt-flce-bwd: saved running_max device {} != hidden device {}",
-                        saved_max.device().short_name(),
-                        device.short_name()
-                    )));
-                }
-                if saved_sumexp.device() != device {
-                    return Err(FlceError::msg(format!(
-                        "kt-flce-bwd: saved running_sumexp device {} != hidden device {}",
-                        saved_sumexp.device().short_name(),
-                        device.short_name()
-                    )));
-                }
-                if saved_max.shape() != [num_active] {
-                    return Err(FlceError::msg(format!(
-                        "kt-flce-bwd: saved running_max shape {:?} != [{num_active}]",
-                        saved_max.shape()
-                    )));
-                }
-                if saved_sumexp.shape() != [num_active] {
-                    return Err(FlceError::msg(format!(
-                        "kt-flce-bwd: saved running_sumexp shape {:?} != [{num_active}]",
-                        saved_sumexp.shape()
-                    )));
-                }
-                (saved_max.clone(), saved_sumexp.clone())
+    let (running_max_1d, running_sumexp_1d) = match (
+        active_metadata.running_max.as_ref(),
+        active_metadata.running_sumexp.as_ref(),
+    ) {
+        (Some(saved_max), Some(saved_sumexp)) => {
+            if saved_max.dtype() != KtDType::F32 {
+                return Err(FlceError::msg(format!(
+                    "kt-flce-bwd: saved running_max dtype {} != F32",
+                    saved_max.dtype()
+                )));
             }
-            (None, None) => {
-                let mut running_max: Option<KtTensor> = None; // 1-D [num_active] F32
-                let mut running_sumexp: Option<KtTensor> = None; // 1-D [num_active] F32
-                let mut chunk_start = 0usize;
-                while chunk_start < vocab_size {
-                    let chunk_len = chunk_size.min(vocab_size - chunk_start);
-                    let head_chunk = head_t_f32
-                        .narrow(1, chunk_start, chunk_len)
-                        .map_err(FlceError::Kt)?
-                        .contiguous()
-                        .map_err(FlceError::Kt)?;
-                    let logits_chunk =
-                        matmul(&active_hidden_f32, &head_chunk).map_err(FlceError::Kt)?;
-                    let chunk_max_1d = max_axis(&logits_chunk, 1).map_err(FlceError::Kt)?;
+            if saved_sumexp.dtype() != KtDType::F32 {
+                return Err(FlceError::msg(format!(
+                    "kt-flce-bwd: saved running_sumexp dtype {} != F32",
+                    saved_sumexp.dtype()
+                )));
+            }
+            if saved_max.device() != device {
+                return Err(FlceError::msg(format!(
+                    "kt-flce-bwd: saved running_max device {} != hidden device {}",
+                    saved_max.device().short_name(),
+                    device.short_name()
+                )));
+            }
+            if saved_sumexp.device() != device {
+                return Err(FlceError::msg(format!(
+                    "kt-flce-bwd: saved running_sumexp device {} != hidden device {}",
+                    saved_sumexp.device().short_name(),
+                    device.short_name()
+                )));
+            }
+            if saved_max.shape() != [num_active] {
+                return Err(FlceError::msg(format!(
+                    "kt-flce-bwd: saved running_max shape {:?} != [{num_active}]",
+                    saved_max.shape()
+                )));
+            }
+            if saved_sumexp.shape() != [num_active] {
+                return Err(FlceError::msg(format!(
+                    "kt-flce-bwd: saved running_sumexp shape {:?} != [{num_active}]",
+                    saved_sumexp.shape()
+                )));
+            }
+            (saved_max.clone(), saved_sumexp.clone())
+        }
+        (None, None) => {
+            let mut running_max: Option<KtTensor> = None; // 1-D [num_active] F32
+            let mut running_sumexp: Option<KtTensor> = None; // 1-D [num_active] F32
+            let mut chunk_start = 0usize;
+            while chunk_start < vocab_size {
+                let chunk_len = chunk_size.min(vocab_size - chunk_start);
+                let head_chunk = head_t_f32
+                    .narrow(1, chunk_start, chunk_len)
+                    .map_err(FlceError::Kt)?
+                    .contiguous()
+                    .map_err(FlceError::Kt)?;
+                let logits_chunk =
+                    matmul(&active_hidden_f32, &head_chunk).map_err(FlceError::Kt)?;
+                let chunk_max_1d = max_axis(&logits_chunk, 1).map_err(FlceError::Kt)?;
 
-                    let (new_max_1d, new_sumexp_1d) =
-                        match (running_max.as_ref(), running_sumexp.as_ref()) {
-                            (None, None) => {
-                                let chunk_max_2d = chunk_max_1d
-                                    .unsqueeze(1)
-                                    .map_err(FlceError::Kt)?
-                                    .contiguous()
+                let (new_max_1d, new_sumexp_1d) =
+                    match (running_max.as_ref(), running_sumexp.as_ref()) {
+                        (None, None) => {
+                            let chunk_max_2d = chunk_max_1d
+                                .unsqueeze(1)
+                                .map_err(FlceError::Kt)?
+                                .contiguous()
+                                .map_err(FlceError::Kt)?;
+                            let chunk_max_b = broadcast_to(&chunk_max_2d, &[num_active, chunk_len])
+                                .map_err(FlceError::Kt)?;
+                            let shifted =
+                                sub(&logits_chunk, &chunk_max_b).map_err(FlceError::Kt)?;
+                            let exped = exp(&shifted).map_err(FlceError::Kt)?;
+                            let chunk_sumexp_1d = sum_axis(&exped, 1).map_err(FlceError::Kt)?;
+                            (chunk_max_1d, chunk_sumexp_1d)
+                        }
+                        (Some(prev_max), Some(prev_sumexp)) => {
+                            let new_max_1d = elementwise_max(prev_max, &chunk_max_1d)?;
+                            let prev_scale_1d =
+                                exp(&sub(prev_max, &new_max_1d).map_err(FlceError::Kt)?)
                                     .map_err(FlceError::Kt)?;
-                                let chunk_max_b =
-                                    broadcast_to(&chunk_max_2d, &[num_active, chunk_len])
-                                        .map_err(FlceError::Kt)?;
-                                let shifted =
-                                    sub(&logits_chunk, &chunk_max_b).map_err(FlceError::Kt)?;
-                                let exped = exp(&shifted).map_err(FlceError::Kt)?;
-                                let chunk_sumexp_1d =
-                                    sum_axis(&exped, 1).map_err(FlceError::Kt)?;
-                                (chunk_max_1d, chunk_sumexp_1d)
-                            }
-                            (Some(prev_max), Some(prev_sumexp)) => {
-                                let new_max_1d = elementwise_max(prev_max, &chunk_max_1d)?;
-                                let prev_scale_1d =
-                                    exp(&sub(prev_max, &new_max_1d).map_err(FlceError::Kt)?)
-                                        .map_err(FlceError::Kt)?;
-                                let scaled_prev_1d =
-                                    mul(prev_sumexp, &prev_scale_1d).map_err(FlceError::Kt)?;
-                                let new_max_2d = new_max_1d
-                                    .unsqueeze(1)
-                                    .map_err(FlceError::Kt)?
-                                    .contiguous()
+                            let scaled_prev_1d =
+                                mul(prev_sumexp, &prev_scale_1d).map_err(FlceError::Kt)?;
+                            let new_max_2d = new_max_1d
+                                .unsqueeze(1)
+                                .map_err(FlceError::Kt)?
+                                .contiguous()
+                                .map_err(FlceError::Kt)?;
+                            let new_max_b = broadcast_to(&new_max_2d, &[num_active, chunk_len])
+                                .map_err(FlceError::Kt)?;
+                            let shifted = sub(&logits_chunk, &new_max_b).map_err(FlceError::Kt)?;
+                            let exped = exp(&shifted).map_err(FlceError::Kt)?;
+                            let chunk_sumexp_1d = sum_axis(&exped, 1).map_err(FlceError::Kt)?;
+                            let new_sumexp_1d =
+                                kiln_tensor::ops::add(&scaled_prev_1d, &chunk_sumexp_1d)
                                     .map_err(FlceError::Kt)?;
-                                let new_max_b =
-                                    broadcast_to(&new_max_2d, &[num_active, chunk_len])
-                                        .map_err(FlceError::Kt)?;
-                                let shifted =
-                                    sub(&logits_chunk, &new_max_b).map_err(FlceError::Kt)?;
-                                let exped = exp(&shifted).map_err(FlceError::Kt)?;
-                                let chunk_sumexp_1d =
-                                    sum_axis(&exped, 1).map_err(FlceError::Kt)?;
-                                let new_sumexp_1d =
-                                    kiln_tensor::ops::add(&scaled_prev_1d, &chunk_sumexp_1d)
-                                        .map_err(FlceError::Kt)?;
-                                (new_max_1d, new_sumexp_1d)
-                            }
-                            _ => unreachable!("running_max and running_sumexp are set together"),
-                        };
-                    running_max = Some(new_max_1d);
-                    running_sumexp = Some(new_sumexp_1d);
-                    chunk_start += chunk_len;
-                }
+                            (new_max_1d, new_sumexp_1d)
+                        }
+                        _ => unreachable!("running_max and running_sumexp are set together"),
+                    };
+                running_max = Some(new_max_1d);
+                running_sumexp = Some(new_sumexp_1d);
+                chunk_start += chunk_len;
+            }
 
-                (
-                    running_max
-                        .ok_or_else(|| FlceError::msg("kt-flce-bwd: vocab_size was 0"))?,
-                    running_sumexp
-                        .ok_or_else(|| FlceError::msg("kt-flce-bwd: vocab_size was 0"))?,
-                )
-            }
-            _ => {
-                return Err(FlceError::msg(
-                    "kt-flce-bwd: active metadata has incomplete saved softmax stats",
-                ));
-            }
-        };
+            (
+                running_max.ok_or_else(|| FlceError::msg("kt-flce-bwd: vocab_size was 0"))?,
+                running_sumexp.ok_or_else(|| FlceError::msg("kt-flce-bwd: vocab_size was 0"))?,
+            )
+        }
+        _ => {
+            return Err(FlceError::msg(
+                "kt-flce-bwd: active metadata has incomplete saved softmax stats",
+            ));
+        }
+    };
 
     // -----------------------------------------------------------------
     // Pass 2: accumulate dhidden_active by chunk.
@@ -926,18 +864,16 @@ fn fused_linear_cross_entropy_phase_b_backward_impl_kt(
         let logits_chunk = matmul(&active_hidden_f32, &head_chunk).map_err(FlceError::Kt)?;
 
         // softmax_chunk = exp(logits_chunk - running_max) / running_sumexp
-        let max_b = broadcast_to(&running_max_2d, &[num_active, chunk_len])
-            .map_err(FlceError::Kt)?;
+        let max_b =
+            broadcast_to(&running_max_2d, &[num_active, chunk_len]).map_err(FlceError::Kt)?;
         let shifted = sub(&logits_chunk, &max_b).map_err(FlceError::Kt)?;
         let exp_chunk = exp(&shifted).map_err(FlceError::Kt)?;
-        let sumexp_b = broadcast_to(&running_sumexp_2d, &[num_active, chunk_len])
-            .map_err(FlceError::Kt)?;
-        let softmax_chunk =
-            kiln_tensor::ops::div(&exp_chunk, &sumexp_b).map_err(FlceError::Kt)?;
+        let sumexp_b =
+            broadcast_to(&running_sumexp_2d, &[num_active, chunk_len]).map_err(FlceError::Kt)?;
+        let softmax_chunk = kiln_tensor::ops::div(&exp_chunk, &sumexp_b).map_err(FlceError::Kt)?;
 
         // softmax contribution: softmax * (grad_loss / N)
-        let grad_logits_softmax =
-            mul_scalar(&softmax_chunk, grad_scale).map_err(FlceError::Kt)?;
+        let grad_logits_softmax = mul_scalar(&softmax_chunk, grad_scale).map_err(FlceError::Kt)?;
 
         // softmax_contrib = grad_logits_softmax @ head_chunk.T
         // shape [num_active, hidden_size]
@@ -1034,9 +970,8 @@ fn build_flce_active_metadata(
     }
 
     let num_active = active_positions.len();
-    let active_idx =
-        KtTensor::from_vec_on(hidden.device(), active_positions, vec![num_active])
-            .map_err(FlceError::Kt)?;
+    let active_idx = KtTensor::from_vec_on(hidden.device(), active_positions, vec![num_active])
+        .map_err(FlceError::Kt)?;
     Ok(Some(FlceActiveMetadata {
         active_idx,
         active_labels,
@@ -1105,33 +1040,6 @@ fn zero_scalar() -> Result<KtTensor, FlceError> {
 /// the public re-export to keep imports tight.
 fn elementwise_max(a: &KtTensor, b: &KtTensor) -> Result<KtTensor, FlceError> {
     kiln_tensor::ops::maximum(a, b).map_err(FlceError::Kt)
-}
-
-/// ROCm → host stage for the pure-kt-composite host fallback (Phase R.7).
-///
-/// Copies a `Device::Rocm` tensor down to a CPU tensor via the established
-/// `rocm_to_host_copy` helper (the same one the kiln-tensor ROCm parity tests
-/// use). A CPU tensor passes straight through — keeps the call sites in the
-/// `Rocm` branch uniform.
-#[cfg(feature = "rocm")]
-fn rocm_stage_to_host(t: &KtTensor) -> Result<KtTensor, FlceError> {
-    match t.device() {
-        KtDevice::Rocm(_) => kiln_tensor::rocm_to_host_copy(t).map_err(FlceError::Kt),
-        _ => Ok(t.clone()),
-    }
-}
-
-/// Host → ROCm upload for the pure-kt-composite host fallback (Phase R.7).
-///
-/// Uploads a CPU result tensor back to `Device::Rocm(dev_idx)` via
-/// `host_to_rocm_copy` so the composite's output device matches its ROCm
-/// inputs (single-device contract for downstream consumers). `host_to_rocm_copy`
-/// requires a contiguous, non-packed CPU source; the composite's scalar loss /
-/// `dhidden` are both contiguous F32, so this holds.
-#[cfg(feature = "rocm")]
-fn rocm_upload_from_host(t: &KtTensor, dev_idx: usize) -> Result<KtTensor, FlceError> {
-    let contig = t.contiguous().map_err(FlceError::Kt)?;
-    kiln_tensor::host_to_rocm_copy(&contig, dev_idx).map_err(FlceError::Kt)
 }
 
 #[cfg(test)]
@@ -1245,8 +1153,8 @@ mod tests {
         let head = dummy_head_t(h, v); // all zeros
         let ids = vec![0u32, 1, 2, 3];
         let mask = vec![true; seq];
-        let loss = fused_linear_cross_entropy_phase_b_kt(&hidden, &head, &ids, &mask, 4)
-            .expect("forward");
+        let loss =
+            fused_linear_cross_entropy_phase_b_kt(&hidden, &head, &ids, &mask, 4).expect("forward");
         // Read scalar value.
         let storage = loss.storage();
         let cpu = storage
@@ -1272,8 +1180,8 @@ mod tests {
         let ids = vec![0u32, 1, 2, 3];
         // label_mask[1..] is the shifted mask; mark all false.
         let mask = vec![true, false, false, false];
-        let loss = fused_linear_cross_entropy_phase_b_kt(&hidden, &head, &ids, &mask, 4)
-            .expect("forward");
+        let loss =
+            fused_linear_cross_entropy_phase_b_kt(&hidden, &head, &ids, &mask, 4).expect("forward");
         assert_eq!(loss.shape(), &[] as &[usize]);
         let storage = loss.storage();
         let cpu = storage
@@ -1298,12 +1206,12 @@ mod tests {
         let ids = vec![0u32, 1, 2, 3];
         let mask = vec![true; seq];
 
-        let l_single =
-            scalar_value(fused_linear_cross_entropy_phase_b_kt(&hidden, &head, &ids, &mask, v)
-                .unwrap());
-        let l_multi =
-            scalar_value(fused_linear_cross_entropy_phase_b_kt(&hidden, &head, &ids, &mask, 4)
-                .unwrap());
+        let l_single = scalar_value(
+            fused_linear_cross_entropy_phase_b_kt(&hidden, &head, &ids, &mask, v).unwrap(),
+        );
+        let l_multi = scalar_value(
+            fused_linear_cross_entropy_phase_b_kt(&hidden, &head, &ids, &mask, 4).unwrap(),
+        );
         assert!(
             (l_single - l_multi).abs() < 1e-4,
             "single-chunk {l_single} != multi-chunk {l_multi}"
@@ -1350,9 +1258,10 @@ mod tests {
         let ids = vec![0u32];
         let mask = vec![true];
         let grad_loss = KtTensor::from_vec(vec![1.0f32], vec![]).unwrap();
-        let g =
-            fused_linear_cross_entropy_phase_b_backward_kt(&hidden, &head, &ids, &mask, 4, &grad_loss)
-                .expect("backward");
+        let g = fused_linear_cross_entropy_phase_b_backward_kt(
+            &hidden, &head, &ids, &mask, 4, &grad_loss,
+        )
+        .expect("backward");
         assert_eq!(g.shape(), &[1, 1, 4]);
         assert!(read_f32_vec(&g).iter().all(|&v| v == 0.0));
     }
@@ -1366,9 +1275,10 @@ mod tests {
         // Mask shifted positions all false.
         let mask = vec![true, false, false, false];
         let grad_loss = KtTensor::from_vec(vec![1.0f32], vec![]).unwrap();
-        let g =
-            fused_linear_cross_entropy_phase_b_backward_kt(&hidden, &head, &ids, &mask, 4, &grad_loss)
-                .expect("backward");
+        let g = fused_linear_cross_entropy_phase_b_backward_kt(
+            &hidden, &head, &ids, &mask, 4, &grad_loss,
+        )
+        .expect("backward");
         assert_eq!(g.shape(), &[1, 4, 8]);
         assert!(read_f32_vec(&g).iter().all(|&v| v == 0.0));
     }
@@ -1393,12 +1303,7 @@ mod tests {
         let mask = vec![true; seq];
         let grad_loss = KtTensor::from_vec(vec![1.0f32], vec![]).unwrap();
         let g = fused_linear_cross_entropy_phase_b_backward_kt(
-            &hidden,
-            &head,
-            &ids,
-            &mask,
-            4,
-            &grad_loss,
+            &hidden, &head, &ids, &mask, 4, &grad_loss,
         )
         .expect("backward");
         assert_eq!(g.shape(), &[1, seq, h]);
@@ -1475,9 +1380,9 @@ mod tests {
             .collect();
         let mask: Vec<bool> = (0..seq_len).map(|i| i > 0).collect();
 
-        let hidden_kt = KtTensor::from_vec(hidden_vec.clone(), vec![1, seq_len, hidden_size]).unwrap();
-        let head_kt =
-            KtTensor::from_vec(head_vec.clone(), vec![hidden_size, vocab_size]).unwrap();
+        let hidden_kt =
+            KtTensor::from_vec(hidden_vec.clone(), vec![1, seq_len, hidden_size]).unwrap();
+        let head_kt = KtTensor::from_vec(head_vec.clone(), vec![hidden_size, vocab_size]).unwrap();
         let grad_loss_kt = KtTensor::from_vec(vec![1.0f32], vec![]).unwrap();
 
         let g_single = fused_linear_cross_entropy_phase_b_backward_kt(
@@ -1508,7 +1413,11 @@ mod tests {
             max_abs = max_abs.max((a - b).abs());
             max_mag = max_mag.max(a.abs());
         }
-        let rel = if max_mag > 1e-6 { max_abs / max_mag } else { max_abs };
+        let rel = if max_mag > 1e-6 {
+            max_abs / max_mag
+        } else {
+            max_abs
+        };
         assert!(
             max_abs < 1e-4 || rel < 1e-4,
             "chunk parity bwd: max_abs={max_abs:.2e} max_mag={max_mag:.6} rel={rel:.2e}"
@@ -1537,20 +1446,11 @@ mod tests {
         let grad_loss = KtTensor::from_vec(vec![1.0f32], vec![]).unwrap();
 
         let seeded = fused_linear_cross_entropy_phase_b_backward_kt(
-            &hidden,
-            &head,
-            &ids,
-            &mask,
-            4,
-            &grad_loss,
+            &hidden, &head, &ids, &mask, 4, &grad_loss,
         )
         .unwrap();
         let unit = fused_linear_cross_entropy_phase_b_backward_unit_grad_kt(
-            &hidden,
-            &head,
-            &ids,
-            &mask,
-            4,
+            &hidden, &head, &ids, &mask, 4,
         )
         .unwrap();
 
@@ -1639,36 +1539,21 @@ mod tests {
         let mask: Vec<bool> = vec![false, true, true, false, true, false, true];
         let hidden = KtTensor::from_vec_on(device, hidden_vec, vec![1, seq_len, hidden_size])
             .expect("cuda hidden");
-        let head =
-            KtTensor::from_vec_on(device, head_vec, vec![hidden_size, vocab_size])
-                .expect("cuda head");
-        let grad_loss = KtTensor::from_vec_on(device, vec![1.0f32], vec![])
-            .expect("cuda grad_loss");
+        let head = KtTensor::from_vec_on(device, head_vec, vec![hidden_size, vocab_size])
+            .expect("cuda head");
+        let grad_loss =
+            KtTensor::from_vec_on(device, vec![1.0f32], vec![]).expect("cuda grad_loss");
 
         let g_single = fused_linear_cross_entropy_phase_b_backward_kt(
-            &hidden,
-            &head,
-            &ids,
-            &mask,
-            vocab_size,
-            &grad_loss,
+            &hidden, &head, &ids, &mask, vocab_size, &grad_loss,
         )
         .expect("single chunk cuda backward");
         let g_multi = fused_linear_cross_entropy_phase_b_backward_kt(
-            &hidden,
-            &head,
-            &ids,
-            &mask,
-            4,
-            &grad_loss,
+            &hidden, &head, &ids, &mask, 4, &grad_loss,
         )
         .expect("multi chunk cuda backward");
         let g_unit = fused_linear_cross_entropy_phase_b_backward_unit_grad_kt(
-            &hidden,
-            &head,
-            &ids,
-            &mask,
-            4,
+            &hidden, &head, &ids, &mask, 4,
         )
         .expect("unit-seed cuda backward");
 

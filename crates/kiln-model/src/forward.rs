@@ -7361,6 +7361,22 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
             Ok(out32.to_dtype(in_dtype)?)
         };
     }
+    // ROCm training/tape path: use the same fused kt-tape RMSNorm recorder as
+    // CUDA when a tape scope is active. Without this, final RMSNorm is a
+    // forward-only leaf on ROCm and SFT gradients stop at the FLCE dhidden.
+    #[cfg(feature = "rocm")]
+    if crate::tape_forward::tape_forward_enabled()
+        && kiln_rmsnorm_kernel::supports_rmsnorm_kt(x, weight)
+    {
+        if let Some(out_kt) = crate::tape_forward::with_active_tape(|tape| {
+            kiln_rmsnorm_kernel::fused_rmsnorm_via_kt_tape(x, weight, eps as f32, tape)
+        }) {
+            return out_kt
+                .map_err(|e| anyhow::anyhow!("rocm fused_rmsnorm_via_kt_tape: {e}"))
+                .context("rms_norm rocm kt-tape forward failed");
+        }
+    }
+
     // ROCm inference path: route through the native fused RMSNorm kernel
     // (`kiln_rmsnorm_kernel::fused_rmsnorm_kt`, R.7) — same FFI shape as the
     // CUDA kt-only branch above. Without this ROCm fell through to
@@ -7368,7 +7384,7 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
     // tensor and `to_device`s it on EVERY call: ~2 H2D syncs per layer
     // (input + post-attn norm), which was the dominant remaining per-token
     // host round-trip (`[2560]` was ~60% of all H2D in the decode profile).
-    // Forward-only (gated on !track_op); training stays CUDA-BF16/kt-tape.
+    // Forward-only (gated on !track_op); training uses the kt-tape branch above.
     #[cfg(feature = "rocm")]
     if !x.track_op()
         && !weight.track_op()

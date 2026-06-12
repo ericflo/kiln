@@ -181,6 +181,26 @@ extern "C" int kiln_adamw_step_bf16(
 
 #define KILN_MUON_K_MAX 48
 #define KILN_MUON_BLK 256
+#define KILN_MUON_PARALLEL_THRESHOLD 4096
+#define KILN_MUON_PARALLEL_MAX_BLOCKS 512
+
+static inline int kiln_muon_parallel_blocks(int64_t n) {
+    int blocks = (int)((n + KILN_MUON_BLK - 1) / KILN_MUON_BLK);
+    if (blocks < 1) {
+        blocks = 1;
+    }
+    if (blocks > KILN_MUON_PARALLEL_MAX_BLOCKS) {
+        blocks = KILN_MUON_PARALLEL_MAX_BLOCKS;
+    }
+    return blocks;
+}
+
+template <typename T>
+__device__ inline float muon_bval(const T* grad, const T* momentum, int64_t idx, float mom, int nesterov) {
+    float g = kiln_to_float<T>(grad[idx]);
+    float m = kiln_to_float<T>(momentum[idx]);
+    return nesterov ? (g + mom * m) : m;
+}
 
 template <typename T>
 __global__ void muon_step_kernel(
@@ -402,6 +422,276 @@ __global__ void muon_step_kernel(
     }
 }
 
+template <typename T>
+__global__ void muon_momentum_sgd_parallel_kernel(
+    T* param,
+    const T* grad,
+    T* momentum,
+    float lr,
+    float mom,
+    int nesterov,
+    float wd,
+    int64_t n) {
+    int64_t stride = (int64_t)gridDim.x * (int64_t)blockDim.x;
+    for (int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += stride) {
+        float g = kiln_to_float<T>(grad[idx]);
+        float mnew = mom * kiln_to_float<T>(momentum[idx]) + g;
+        momentum[idx] = kiln_from_float<T>(mnew);
+        float b = nesterov ? (g + mom * mnew) : mnew;
+        float p = kiln_to_float<T>(param[idx]);
+        p = p * (1.0f - lr * wd) - lr * b;
+        param[idx] = kiln_from_float<T>(p);
+    }
+}
+
+template <typename T>
+__global__ void muon_update_momentum_parallel_kernel(
+    const T* grad,
+    T* momentum,
+    float mom,
+    int64_t n) {
+    int64_t stride = (int64_t)gridDim.x * (int64_t)blockDim.x;
+    for (int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += stride) {
+        float mnew = mom * kiln_to_float<T>(momentum[idx]) + kiln_to_float<T>(grad[idx]);
+        momentum[idx] = kiln_from_float<T>(mnew);
+    }
+}
+
+template <typename T>
+__global__ void muon_prepare_partials_parallel_kernel(
+    const T* grad,
+    const T* momentum,
+    float mom,
+    int nesterov,
+    int rows,
+    int cols,
+    float* partials,
+    int partial_stride) {
+    extern __shared__ float scratch[];
+    float* red = scratch;
+    float* gram = scratch + KILN_MUON_BLK;
+
+    const int tid = threadIdx.x;
+    const int k = rows < cols ? rows : cols;
+    const bool transpose = rows > cols;
+    const int64_t n = (int64_t)rows * (int64_t)cols;
+    const int kk = k * k;
+
+    for (int i = tid; i < kk; i += blockDim.x) {
+        gram[i] = 0.0f;
+    }
+    __syncthreads();
+
+    float frob_partial = 0.0f;
+    int64_t stride = (int64_t)gridDim.x * (int64_t)blockDim.x;
+    for (int64_t idx = (int64_t)blockIdx.x * blockDim.x + tid; idx < n; idx += stride) {
+        int r = (int)(idx / cols);
+        int c = (int)(idx - (int64_t)r * cols);
+        float b = muon_bval<T>(grad, momentum, idx, mom, nesterov);
+        frob_partial += b * b;
+
+        if (!transpose) {
+            int i = r;
+            for (int j = 0; j < k; ++j) {
+                int64_t peer = (int64_t)j * cols + c;
+                float bj = muon_bval<T>(grad, momentum, peer, mom, nesterov);
+                atomicAdd(&gram[i * k + j], b * bj);
+            }
+        } else {
+            int i = c;
+            for (int j = 0; j < k; ++j) {
+                int64_t peer = (int64_t)r * cols + j;
+                float bj = muon_bval<T>(grad, momentum, peer, mom, nesterov);
+                atomicAdd(&gram[i * k + j], b * bj);
+            }
+        }
+    }
+
+    red[tid] = frob_partial;
+    __syncthreads();
+    for (int s = KILN_MUON_BLK / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            red[tid] += red[tid + s];
+        }
+        __syncthreads();
+    }
+
+    float* out = partials + (int64_t)blockIdx.x * partial_stride;
+    if (tid == 0) {
+        out[0] = red[0];
+    }
+    for (int i = tid; i < kk; i += blockDim.x) {
+        out[1 + i] = gram[i];
+    }
+}
+
+__global__ void muon_reduce_project_parallel_kernel(
+    const float* partials,
+    float* state,
+    int partial_blocks,
+    int partial_stride,
+    int rows,
+    int cols,
+    int ns_iters) {
+    const int tid = threadIdx.x;
+    const int k = rows < cols ? rows : cols;
+    const bool transpose = rows > cols;
+    const int kk = k * k;
+
+    __shared__ float A[KILN_MUON_K_MAX * KILN_MUON_K_MAX];
+    __shared__ float M[KILN_MUON_K_MAX * KILN_MUON_K_MAX];
+    __shared__ float P[KILN_MUON_K_MAX * KILN_MUON_K_MAX];
+    __shared__ float Tm[KILN_MUON_K_MAX * KILN_MUON_K_MAX];
+    __shared__ float red[KILN_MUON_BLK];
+
+    float frob_partial = 0.0f;
+    for (int block = tid; block < partial_blocks; block += blockDim.x) {
+        frob_partial += partials[(int64_t)block * partial_stride];
+    }
+    red[tid] = frob_partial;
+    __syncthreads();
+    for (int s = KILN_MUON_BLK / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            red[tid] += red[tid + s];
+        }
+        __syncthreads();
+    }
+    float frob2 = red[0];
+    float inv_frob = frob2 == 0.0f ? 0.0f : rsqrtf(frob2);
+    float inv_frob2 = frob2 == 0.0f ? 0.0f : 1.0f / frob2;
+    if (tid == 0) {
+        state[0] = inv_frob;
+    }
+    __syncthreads();
+    if (frob2 == 0.0f) {
+        return;
+    }
+
+    for (int pair = tid; pair < kk; pair += blockDim.x) {
+        float s = 0.0f;
+        for (int block = 0; block < partial_blocks; ++block) {
+            s += partials[(int64_t)block * partial_stride + 1 + pair];
+        }
+        A[pair] = s * inv_frob2;
+        P[pair] = (pair / k == pair % k) ? 1.0f : 0.0f;
+    }
+    __syncthreads();
+
+    const float ca = 3.4445f;
+    const float cb = -4.7750f;
+    const float cc = 2.0315f;
+    for (int iter = 0; iter < ns_iters; ++iter) {
+        for (int pair = tid; pair < kk; pair += blockDim.x) {
+            int i = pair / k;
+            int j = pair % k;
+            float s = 0.0f;
+            for (int t = 0; t < k; ++t) {
+                s += A[i * k + t] * A[t * k + j];
+            }
+            Tm[pair] = s;
+        }
+        __syncthreads();
+        for (int pair = tid; pair < kk; pair += blockDim.x) {
+            int i = pair / k;
+            int j = pair % k;
+            M[pair] = ca * ((i == j) ? 1.0f : 0.0f) + cb * A[pair] + cc * Tm[pair];
+        }
+        __syncthreads();
+        for (int pair = tid; pair < kk; pair += blockDim.x) {
+            int i = pair / k;
+            int j = pair % k;
+            float s = 0.0f;
+            if (!transpose) {
+                for (int t = 0; t < k; ++t) {
+                    s += M[i * k + t] * P[t * k + j];
+                }
+            } else {
+                for (int t = 0; t < k; ++t) {
+                    s += P[i * k + t] * M[t * k + j];
+                }
+            }
+            Tm[pair] = s;
+        }
+        __syncthreads();
+        for (int pair = tid; pair < kk; pair += blockDim.x) {
+            P[pair] = Tm[pair];
+        }
+        __syncthreads();
+        for (int pair = tid; pair < kk; pair += blockDim.x) {
+            int i = pair / k;
+            int j = pair % k;
+            float s = 0.0f;
+            for (int t = 0; t < k; ++t) {
+                s += M[i * k + t] * A[t * k + j];
+            }
+            Tm[pair] = s;
+        }
+        __syncthreads();
+        for (int pair = tid; pair < kk; pair += blockDim.x) {
+            int i = pair / k;
+            int j = pair % k;
+            float s = 0.0f;
+            for (int t = 0; t < k; ++t) {
+                s += Tm[i * k + t] * M[t * k + j];
+            }
+            A[pair] = s;
+        }
+        __syncthreads();
+    }
+
+    for (int pair = tid; pair < kk; pair += blockDim.x) {
+        state[1 + pair] = P[pair];
+    }
+}
+
+template <typename T>
+__global__ void muon_apply_projected_parallel_kernel(
+    T* param,
+    const T* grad,
+    const T* momentum,
+    const float* state,
+    float lr,
+    float mom,
+    int nesterov,
+    float wd,
+    int rows,
+    int cols) {
+    const int64_t n = (int64_t)rows * (int64_t)cols;
+    const int k = rows < cols ? rows : cols;
+    const bool transpose = rows > cols;
+    const int maxdim = rows > cols ? rows : cols;
+    const float scale = sqrtf((float)maxdim);
+    const float inv_frob = state[0];
+    const float* P = state + 1;
+
+    int64_t stride = (int64_t)gridDim.x * (int64_t)blockDim.x;
+    for (int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += stride) {
+        float p = kiln_to_float<T>(param[idx]);
+        if (inv_frob == 0.0f) {
+            param[idx] = kiln_from_float<T>(p * (1.0f - lr * wd));
+            continue;
+        }
+
+        int r = (int)(idx / cols);
+        int c = (int)(idx - (int64_t)r * cols);
+        float o = 0.0f;
+        if (!transpose) {
+            for (int t = 0; t < k; ++t) {
+                int64_t peer = (int64_t)t * cols + c;
+                o += P[r * k + t] * muon_bval<T>(grad, momentum, peer, mom, nesterov);
+            }
+        } else {
+            for (int t = 0; t < k; ++t) {
+                int64_t peer = (int64_t)r * cols + t;
+                o += muon_bval<T>(grad, momentum, peer, mom, nesterov) * P[t * k + c];
+            }
+        }
+        o *= scale * inv_frob;
+        p = p * (1.0f - lr * wd) - lr * o;
+        param[idx] = kiln_from_float<T>(p);
+    }
+}
+
 extern "C" int kiln_muon_step_f32(
     float* param,
     const float* grad,
@@ -419,6 +709,45 @@ extern "C" int kiln_muon_step_f32(
     }
     if (rows == 0 || cols == 0) {
         return 0;
+    }
+    const int64_t n = (int64_t)rows * (int64_t)cols;
+    const int k = rows < cols ? rows : cols;
+    const bool do_ortho = (rows >= 2 && cols >= 2 && k <= KILN_MUON_K_MAX);
+    if (n >= KILN_MUON_PARALLEL_THRESHOLD) {
+        const int blocks = kiln_muon_parallel_blocks(n);
+        if (!do_ortho) {
+            muon_momentum_sgd_parallel_kernel<float><<<blocks, KILN_MUON_BLK, 0, stream>>>(
+                param, grad, m, lr, mom, nesterov, wd, n);
+            return cudaGetLastError() == cudaSuccess ? 0 : 2;
+        }
+
+        const int partial_stride = 1 + k * k;
+        float* partials = nullptr;
+        float* state = nullptr;
+        cudaError_t alloc = cudaMalloc((void**)&partials, (size_t)blocks * partial_stride * sizeof(float));
+        if (alloc != cudaSuccess) {
+            return 3;
+        }
+        alloc = cudaMalloc((void**)&state, (size_t)partial_stride * sizeof(float));
+        if (alloc != cudaSuccess) {
+            cudaFree(partials);
+            return 3;
+        }
+
+        muon_update_momentum_parallel_kernel<float><<<blocks, KILN_MUON_BLK, 0, stream>>>(
+            grad, m, mom, n);
+        size_t shmem = (size_t)(KILN_MUON_BLK + k * k) * sizeof(float);
+        muon_prepare_partials_parallel_kernel<float><<<blocks, KILN_MUON_BLK, shmem, stream>>>(
+            grad, m, mom, nesterov, rows, cols, partials, partial_stride);
+        muon_reduce_project_parallel_kernel<<<1, KILN_MUON_BLK, 0, stream>>>(
+            partials, state, blocks, partial_stride, rows, cols, ns_iters);
+        muon_apply_projected_parallel_kernel<float><<<blocks, KILN_MUON_BLK, 0, stream>>>(
+            param, grad, m, state, lr, mom, nesterov, wd, rows, cols);
+
+        cudaError_t err = cudaGetLastError();
+        cudaFree(state);
+        cudaFree(partials);
+        return err == cudaSuccess ? 0 : 2;
     }
     muon_step_kernel<float><<<1, KILN_MUON_BLK, 0, stream>>>(
         param, grad, m, lr, mom, nesterov, ns_iters, wd, rows, cols);
@@ -442,6 +771,45 @@ extern "C" int kiln_muon_step_bf16(
     }
     if (rows == 0 || cols == 0) {
         return 0;
+    }
+    const int64_t n = (int64_t)rows * (int64_t)cols;
+    const int k = rows < cols ? rows : cols;
+    const bool do_ortho = (rows >= 2 && cols >= 2 && k <= KILN_MUON_K_MAX);
+    if (n >= KILN_MUON_PARALLEL_THRESHOLD) {
+        const int blocks = kiln_muon_parallel_blocks(n);
+        if (!do_ortho) {
+            muon_momentum_sgd_parallel_kernel<__nv_bfloat16><<<blocks, KILN_MUON_BLK, 0, stream>>>(
+                param, grad, m, lr, mom, nesterov, wd, n);
+            return cudaGetLastError() == cudaSuccess ? 0 : 2;
+        }
+
+        const int partial_stride = 1 + k * k;
+        float* partials = nullptr;
+        float* state = nullptr;
+        cudaError_t alloc = cudaMalloc((void**)&partials, (size_t)blocks * partial_stride * sizeof(float));
+        if (alloc != cudaSuccess) {
+            return 3;
+        }
+        alloc = cudaMalloc((void**)&state, (size_t)partial_stride * sizeof(float));
+        if (alloc != cudaSuccess) {
+            cudaFree(partials);
+            return 3;
+        }
+
+        muon_update_momentum_parallel_kernel<__nv_bfloat16><<<blocks, KILN_MUON_BLK, 0, stream>>>(
+            grad, m, mom, n);
+        size_t shmem = (size_t)(KILN_MUON_BLK + k * k) * sizeof(float);
+        muon_prepare_partials_parallel_kernel<__nv_bfloat16><<<blocks, KILN_MUON_BLK, shmem, stream>>>(
+            grad, m, mom, nesterov, rows, cols, partials, partial_stride);
+        muon_reduce_project_parallel_kernel<<<1, KILN_MUON_BLK, 0, stream>>>(
+            partials, state, blocks, partial_stride, rows, cols, ns_iters);
+        muon_apply_projected_parallel_kernel<__nv_bfloat16><<<blocks, KILN_MUON_BLK, 0, stream>>>(
+            param, grad, m, state, lr, mom, nesterov, wd, rows, cols);
+
+        cudaError_t err = cudaGetLastError();
+        cudaFree(state);
+        cudaFree(partials);
+        return err == cudaSuccess ? 0 : 2;
     }
     muon_step_kernel<__nv_bfloat16><<<1, KILN_MUON_BLK, 0, stream>>>(
         param, grad, m, lr, mom, nesterov, ns_iters, wd, rows, cols);

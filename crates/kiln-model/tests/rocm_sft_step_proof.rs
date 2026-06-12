@@ -8,7 +8,7 @@
 //!   TIER 2 — `try_tape_cross_entropy_from_logits_kt` as the scalar SFT loss head
 //!            over the LoRA-linear logits; backward from the CE scalar → finite
 //!            LoRA grads. The real SFT forward+loss+backward on ROCm.
-//!   TIER 3 — ONE `OptimizerBackend` AdamW step on the LoRA A/B params using
+//!   TIER 3 — ONE `OptimizerBackend` AdamW/Muon step on the LoRA A/B params using
 //!            the tier-2 grads; assert the param bytes CHANGED and stayed finite.
 //!
 //! Tiny tensors (seq=2, hidden=4, vocab=4, rank=2), single bounded step, no loop,
@@ -23,7 +23,7 @@ use kiln_model::lora_loader::LoraProjectionWeights;
 use kiln_model::tape_forward::{
     try_tape_cross_entropy_from_logits_kt, try_tape_lora_linear_kt, with_thread_local_tape,
 };
-use kiln_tensor::{ops, DType, Device, Tensor};
+use kiln_tensor::{DType, Device, Tensor, ops};
 
 const SEQ: usize = 2;
 const HIDDEN: usize = 4;
@@ -40,16 +40,22 @@ fn rocm_enabled(test: &str) -> bool {
 }
 
 fn read_host_f32(t: &Tensor) -> Vec<f32> {
-    t.to_device(Device::Cpu).expect("D2H").to_vec::<f32>().expect("readback")
+    t.to_device(Device::Cpu)
+        .expect("D2H")
+        .to_vec::<f32>()
+        .expect("readback")
 }
 
 fn build_lora_fixtures() -> (Tensor, Tensor, LoraProjectionWeights) {
     let x_data: Vec<f32> = (0..SEQ * HIDDEN).map(|i| (i as f32) * 0.1 - 0.3).collect();
     let w_data: Vec<f32> = (0..HIDDEN * OUT).map(|i| 0.05 * (i as f32) - 0.2).collect();
-    let a_data: Vec<f32> = (0..RANK * HIDDEN).map(|i| 0.07 * (i as f32) - 0.1).collect();
+    let a_data: Vec<f32> = (0..RANK * HIDDEN)
+        .map(|i| 0.07 * (i as f32) - 0.1)
+        .collect();
     let b_data: Vec<f32> = (0..OUT * RANK).map(|i| 0.03 * (i as f32) + 0.02).collect();
     let x = Tensor::from_vec_on(Device::Rocm(0), x_data, vec![SEQ, HIDDEN]).expect("x");
-    let weight_t = Tensor::from_vec_on(Device::Rocm(0), w_data, vec![HIDDEN, OUT]).expect("weight_t");
+    let weight_t =
+        Tensor::from_vec_on(Device::Rocm(0), w_data, vec![HIDDEN, OUT]).expect("weight_t");
     let a = Tensor::from_vec_on(Device::Rocm(0), a_data, vec![RANK, HIDDEN]).expect("a");
     let b = Tensor::from_vec_on(Device::Rocm(0), b_data, vec![OUT, RANK]).expect("b");
     (x, weight_t, LoraProjectionWeights { a, b })
@@ -75,13 +81,22 @@ fn rocm_sft_lora_linear_backprops() {
             .expect("try_tape_lora_linear_kt returned None — recorder did NOT record on ROCm")
     });
 
-    assert_eq!(tape.len(), 4, "LoRA-linear recorded {} nodes, expected 4", tape.len());
+    assert_eq!(
+        tape.len(),
+        4,
+        "LoRA-linear recorded {} nodes, expected 4",
+        tape.len()
+    );
     assert_eq!(out.device(), Device::Rocm(0), "forward output left ROCm");
     assert_eq!(out.shape(), &[SEQ, OUT], "LoRA-linear output wrong shape");
     let out_v = read_host_f32(&out);
-    assert!(out_v.iter().all(|v| v.is_finite()), "non-finite forward: {out_v:?}");
+    assert!(
+        out_v.iter().all(|v| v.is_finite()),
+        "non-finite forward: {out_v:?}"
+    );
 
-    let seed = Tensor::from_vec_on(Device::Rocm(0), vec![1.0_f32; SEQ * OUT], vec![SEQ, OUT]).expect("seed");
+    let seed = Tensor::from_vec_on(Device::Rocm(0), vec![1.0_f32; SEQ * OUT], vec![SEQ, OUT])
+        .expect("seed");
     let grads = tape
         .backward(out.id(), seed, |g, z| ops::add(g, z))
         .expect("Tape::backward errored on the LoRA-linear ROCm graph");
@@ -94,7 +109,10 @@ fn rocm_sft_lora_linear_backprops() {
         da_v.iter().chain(db_v.iter()).all(|v| v.is_finite()),
         "non-finite LoRA grads: dA={da_v:?} dB={db_v:?}"
     );
-    eprintln!("[ROCm TIER1 PASS] tape.len()={} out={out_v:?} dA={da_v:?} dB={db_v:?}", tape.len());
+    eprintln!(
+        "[ROCm TIER1 PASS] tape.len()={} out={out_v:?} dA={da_v:?} dB={db_v:?}",
+        tape.len()
+    );
 }
 
 fn run_sft_forward_loss_backward() -> (f32, Tensor, Tensor, LoraProjectionWeights) {
@@ -175,7 +193,45 @@ fn adamw_one_step_in_place(
     ResidencyBackend::runtime_evict_resident_activation(backend, &v);
     let after = read_host_f32(param);
     assert_eq!(after.len(), before.len(), "param len changed");
-    assert!(after.iter().all(|v| v.is_finite()), "non-finite param after AdamW: {after:?}");
+    assert!(
+        after.iter().all(|v| v.is_finite()),
+        "non-finite param after AdamW: {after:?}"
+    );
+    after
+}
+
+/// ONE Muon step in place on a ROCm-resident param using its grad, with fresh
+/// zeroed momentum. Asserts the param bytes changed and stayed finite.
+fn muon_one_step_in_place(
+    backend: &RocmBackend,
+    param: &Tensor,
+    grad: &Tensor,
+    before: &[f32],
+) -> Vec<f32> {
+    let n = param.element_count();
+    assert_eq!(grad.element_count(), n, "param/grad element-count mismatch");
+    let momentum = Tensor::zeros_on(Device::Rocm(0), param.dims().to_vec(), DType::F32)
+        .expect("momentum zeros");
+    ResidencyBackend::runtime_register_resident_activation(backend, param).expect("register param");
+    ResidencyBackend::runtime_register_resident_activation(backend, grad).expect("register grad");
+    ResidencyBackend::runtime_register_resident_activation(backend, &momentum)
+        .expect("register momentum");
+    let dispatched = OptimizerBackend::runtime_dispatch_muon_step(
+        backend, param, grad, &momentum, 2e-2, 0.95, true, 5, 0.0,
+    )
+    .expect("dispatch_muon_step failed");
+    assert!(
+        dispatched,
+        "ROCm Muon should dispatch through OptimizerBackend on resident tensors"
+    );
+    ResidencyBackend::runtime_evict_resident_activation(backend, grad);
+    ResidencyBackend::runtime_evict_resident_activation(backend, &momentum);
+    let after = read_host_f32(param);
+    assert_eq!(after.len(), before.len(), "param len changed");
+    assert!(
+        after.iter().all(|v| v.is_finite()),
+        "non-finite param after Muon: {after:?}"
+    );
     after
 }
 
@@ -196,15 +252,65 @@ fn rocm_sft_one_adamw_step_changes_params() {
     let b_after = adamw_one_step_in_place(&backend, &lora.b, &db, &b_before);
 
     let max_abs_delta = |before: &[f32], after: &[f32]| {
-        before.iter().zip(after).map(|(x, y)| (x - y).abs()).fold(0.0_f32, f32::max)
+        before
+            .iter()
+            .zip(after)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0_f32, f32::max)
     };
     let a_delta = max_abs_delta(&a_before, &a_after);
     let b_delta = max_abs_delta(&b_before, &b_after);
-    assert!(a_delta > 0.0, "AdamW did NOT change LoRA A: before={a_before:?} after={a_after:?}");
-    assert!(b_delta > 0.0, "AdamW did NOT change LoRA B: before={b_before:?} after={b_after:?}");
+    assert!(
+        a_delta > 0.0,
+        "AdamW did NOT change LoRA A: before={a_before:?} after={a_after:?}"
+    );
+    assert!(
+        b_delta > 0.0,
+        "AdamW did NOT change LoRA B: before={b_before:?} after={b_after:?}"
+    );
 
     eprintln!(
         "[ROCm TIER3 PASS] one full SFT step on Device::Rocm(0): CE loss={loss:.6}\n  \
+         LoRA A max|Δ|={a_delta:.3e}  LoRA B max|Δ|={b_delta:.3e}"
+    );
+}
+
+#[test]
+fn rocm_sft_one_muon_step_changes_params() {
+    if !rocm_enabled("rocm_sft_one_muon_step_changes_params") {
+        return;
+    }
+    let (loss, da, db, lora) = run_sft_forward_loss_backward();
+    assert!(loss.is_finite(), "non-finite CE loss: {loss}");
+    assert_eq!(da.device(), Device::Rocm(0), "dA left ROCm");
+    assert_eq!(db.device(), Device::Rocm(0), "dB left ROCm");
+
+    let a_before = read_host_f32(&lora.a);
+    let b_before = read_host_f32(&lora.b);
+    let backend = RocmBackend::new(Device::Rocm(0));
+    let a_after = muon_one_step_in_place(&backend, &lora.a, &da, &a_before);
+    let b_after = muon_one_step_in_place(&backend, &lora.b, &db, &b_before);
+
+    let max_abs_delta = |before: &[f32], after: &[f32]| {
+        before
+            .iter()
+            .zip(after)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0_f32, f32::max)
+    };
+    let a_delta = max_abs_delta(&a_before, &a_after);
+    let b_delta = max_abs_delta(&b_before, &b_after);
+    assert!(
+        a_delta > 0.0,
+        "Muon did NOT change LoRA A: before={a_before:?} after={a_after:?}"
+    );
+    assert!(
+        b_delta > 0.0,
+        "Muon did NOT change LoRA B: before={b_before:?} after={b_after:?}"
+    );
+
+    eprintln!(
+        "[ROCm TIER3 PASS] one full SFT Muon step on Device::Rocm(0): CE loss={loss:.6}\n  \
          LoRA A max|Δ|={a_delta:.3e}  LoRA B max|Δ|={b_delta:.3e}"
     );
 }
