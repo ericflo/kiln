@@ -1338,6 +1338,7 @@ fn run_distill_refresh(
         output_name: Some(midtrain_name.clone()),
         auto_load: false,
         checkpoint_interval: None,
+        grad_checkpoint_segments: None,
         seed: req.config.seed,
         optimizer: req.config.optimizer,
         adapter_smoke_test: false,

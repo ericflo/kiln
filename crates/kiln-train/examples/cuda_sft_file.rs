@@ -374,6 +374,7 @@ fn main() -> Result<()> {
         output_name: Some(layout.adapter_name.clone()),
         auto_load: false,
         checkpoint_interval: args.checkpoint_interval,
+        grad_checkpoint_segments: None,
         seed: Some(0xC0DA_5EED),
         optimizer: Optimizer::default(),
         adapter_smoke_test: false,

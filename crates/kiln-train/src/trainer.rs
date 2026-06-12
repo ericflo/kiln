@@ -3231,15 +3231,22 @@ pub fn sft_train(
         // this typically disables checkpointing entirely (~10-30% faster).
         let activation_bytes_per_elem =
             training_activation_bytes_per_elem_for_policy(weights, training_precision_policy);
-        let ckpt_config = CheckpointConfig::auto_for_workload_with_activation_bytes(
-            model_config.num_layers,
-            max_seq_len_tokens,
-            model_config.hidden_size,
-            model_config.intermediate_size,
-            model_config.vocab_size,
-            2, // BF16 base weights (canonical kiln inference dtype)
-            activation_bytes_per_elem,
-        );
+        let ckpt_config = config
+            .grad_checkpoint_segments
+            .map(|segments| {
+                CheckpointConfig::from_resolved_segments(model_config.num_layers, segments)
+            })
+            .unwrap_or_else(|| {
+                CheckpointConfig::auto_for_workload_with_activation_bytes(
+                    model_config.num_layers,
+                    max_seq_len_tokens,
+                    model_config.hidden_size,
+                    model_config.intermediate_size,
+                    model_config.vocab_size,
+                    2, // BF16 base weights (canonical kiln inference dtype)
+                    activation_bytes_per_elem,
+                )
+            });
         let segments = if ckpt_config.enabled {
             Some(compute_segment_boundaries(
                 model_config.num_layers,
@@ -3955,15 +3962,22 @@ pub fn grpo_train(
         // when activation tape comfortably fits in available VRAM.
         let activation_bytes_per_elem =
             training_activation_bytes_per_elem_for_policy(weights, training_precision_policy);
-        let ckpt_config = CheckpointConfig::auto_for_workload_with_activation_bytes(
-            model_config.num_layers,
-            max_seq_len_tokens,
-            model_config.hidden_size,
-            model_config.intermediate_size,
-            model_config.vocab_size,
-            2, // BF16 base weights
-            activation_bytes_per_elem,
-        );
+        let ckpt_config = config
+            .grad_checkpoint_segments
+            .map(|segments| {
+                CheckpointConfig::from_resolved_segments(model_config.num_layers, segments)
+            })
+            .unwrap_or_else(|| {
+                CheckpointConfig::auto_for_workload_with_activation_bytes(
+                    model_config.num_layers,
+                    max_seq_len_tokens,
+                    model_config.hidden_size,
+                    model_config.intermediate_size,
+                    model_config.vocab_size,
+                    2, // BF16 base weights
+                    activation_bytes_per_elem,
+                )
+            });
         let segments = if ckpt_config.enabled {
             Some(compute_segment_boundaries(
                 model_config.num_layers,
@@ -4646,7 +4660,12 @@ pub fn grpo_train_jsonl(
         // dataset, so we stay on the VRAM-only auto-tune path here. The
         // (non-streaming) `grpo_train` path uses the workload-shape-aware
         // `CheckpointConfig::auto_for_workload` after tokenization.
-        let ckpt_config = CheckpointConfig::from_env(model_config.num_layers);
+        let ckpt_config = config
+            .grad_checkpoint_segments
+            .map(|segments| {
+                CheckpointConfig::from_resolved_segments(model_config.num_layers, segments)
+            })
+            .unwrap_or_else(|| CheckpointConfig::from_env(model_config.num_layers));
         let segments = if ckpt_config.enabled {
             Some(compute_segment_boundaries(
                 model_config.num_layers,
@@ -8240,6 +8259,15 @@ pub struct CheckpointConfig {
 }
 
 impl CheckpointConfig {
+    pub fn from_resolved_segments(num_layers: usize, num_segments: usize) -> Self {
+        let num_segments = num_segments.min(num_layers).max(1);
+        Self {
+            num_segments,
+            enabled: num_segments > 1,
+            auto_configured: true,
+        }
+    }
+
     /// Create config from environment with VRAM-aware defaults.
     ///
     /// Priority for num_segments:

@@ -2495,6 +2495,7 @@ fn bench_training(
         output_name: Some("bench-adapter".to_string()),
         auto_load: false,
         checkpoint_interval: None,
+        grad_checkpoint_segments: None,
         seed: None,
         optimizer: kiln_train::Optimizer::default(),
         adapter_smoke_test: false,

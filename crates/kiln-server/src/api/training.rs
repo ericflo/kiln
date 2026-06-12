@@ -25,9 +25,9 @@ use crate::error::ApiError;
 use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
 use crate::state::{AppState, ModelBackend, TrainingJobInfo, TrainingJobType};
 use crate::training_preflight::{
-    self, EstimateOptions, WeightResidency, available_for_training_bytes,
-    estimate_step_working_set_with_options, estimate_vk_native_recompute_working_set,
-    format_oom_message_with_source,
+    self, EstimateOptions, WeightResidency, auto_fit_checkpoint_segments,
+    available_for_training_bytes, estimate_step_working_set_with_options,
+    estimate_vk_native_recompute_working_set, format_oom_message_with_source,
 };
 use crate::training_queue::{QueueEntry, QueuedJob};
 
@@ -36,6 +36,58 @@ struct GrpoSubmissionStats {
     total_completions: Option<usize>,
     max_seq_len: usize,
     streaming_dataset: bool,
+}
+
+struct PreflightAdmission {
+    reserved_bytes: u64,
+    checkpoint_segments: Option<usize>,
+}
+
+fn model_dtype_bytes(dtype: kiln_core::config::DType) -> usize {
+    match dtype {
+        kiln_core::config::DType::BF16 | kiln_core::config::DType::FP16 => 2,
+        kiln_core::config::DType::FP32 => 4,
+    }
+}
+
+fn training_activation_bytes_per_elem_for_state(state: &AppState) -> usize {
+    let base = model_dtype_bytes(state.model_config.dtype);
+    let ModelBackend::Real { runner, .. } = state.backend.as_ref() else {
+        return base;
+    };
+    let Ok(runner) = runner.read() else {
+        tracing::warn!(
+            "model runner lock poisoned while sizing training preflight; using model dtype width"
+        );
+        return base;
+    };
+    if runner
+        .training_precision_policy()
+        .uses_f32_activations_for_mixed_base_weights()
+    {
+        4
+    } else {
+        base
+    }
+}
+
+fn checkpoint_env_override_present() -> bool {
+    std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .is_some()
+        || std::env::var("KILN_NO_GRAD_CHECKPOINT")
+            .as_deref()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+}
+
+fn effective_checkpoint_segments(config: kiln_train::CheckpointConfig) -> usize {
+    if config.enabled {
+        config.num_segments
+    } else {
+        1
+    }
 }
 
 fn validate_grpo_jsonl_submission_head(
@@ -96,17 +148,26 @@ fn validate_grpo_jsonl_submission_head(
 /// stays SFT/GRPO-agnostic.
 /// Validate a training submission fits in VRAM AND return the estimated per-step
 /// working-set bytes (so the caller can stash it on the queue entry and hold a
-/// governor reservation across the job — #24). Returns `Ok(0)` when no estimate
-/// is available (no memory signal / zero-length); callers skip the reservation.
+/// governor reservation across the job — #24), plus the resolved dynamic
+/// checkpoint segment count. Returns zero bytes and no segment override when no
+/// estimate is available (no memory signal / zero-length); callers skip the
+/// reservation and let the trainer fall back to its own guard.
 fn enforce_training_preflight(
     state: &AppState,
     max_seq_len: usize,
-    options: EstimateOptions,
+    mut options: EstimateOptions,
     lora_rank: usize,
     vk_native_recompute: bool,
-) -> Result<u64, ApiError> {
+) -> Result<PreflightAdmission, ApiError> {
     if max_seq_len == 0 {
-        return Ok(0);
+        return Ok(PreflightAdmission {
+            reserved_bytes: 0,
+            checkpoint_segments: None,
+        });
+    }
+    if options.activation_bytes_per_elem.is_none() {
+        options.activation_bytes_per_elem =
+            Some(training_activation_bytes_per_elem_for_state(state));
     }
     let vram = kiln_memory::vram::detect_vram();
     let available = available_for_training_bytes(&vram);
@@ -114,10 +175,19 @@ fn enforce_training_preflight(
         // No memory signal at all — let the trainer be the line of
         // defense. Better than rejecting every submission on machines
         // where detection is misconfigured.
-        return Ok(0);
+        return Ok(PreflightAdmission {
+            reserved_bytes: 0,
+            checkpoint_segments: None,
+        });
     }
-    let num_segments =
-        kiln_train::CheckpointConfig::from_env(state.model_config.num_layers).num_segments;
+    let checkpoint_env_override = checkpoint_env_override_present();
+    let env_segments = if vk_native_recompute || checkpoint_env_override {
+        effective_checkpoint_segments(kiln_train::CheckpointConfig::from_env(
+            state.model_config.num_layers,
+        ))
+    } else {
+        1
+    };
     // Until the resident registry (Phase 1.2-1.4) lands, weights on
     // Vulkan APUs live in BOTH candle CPU storage and VulkanBuffer
     // caches — same physical RAM on unified memory. The estimator
@@ -139,23 +209,40 @@ fn enforce_training_preflight(
             | kiln_memory::vram::VramSource::AppleSilicon
             | kiln_memory::vram::VramSource::EnvOverride
     );
-    let estimate = if vk_native_recompute {
-        estimate_vk_native_recompute_working_set(
-            &state.model_config,
-            max_seq_len,
-            lora_rank,
-            residency,
-            weights_already_resident,
+    let (num_segments, estimate) = if vk_native_recompute {
+        (
+            env_segments,
+            estimate_vk_native_recompute_working_set(
+                &state.model_config,
+                max_seq_len,
+                lora_rank,
+                residency,
+                weights_already_resident,
+            ),
+        )
+    } else if checkpoint_env_override {
+        (
+            env_segments,
+            estimate_step_working_set_with_options(
+                &state.model_config,
+                max_seq_len,
+                lora_rank,
+                env_segments,
+                residency,
+                weights_already_resident,
+                options,
+            ),
         )
     } else {
-        estimate_step_working_set_with_options(
+        auto_fit_checkpoint_segments(
             &state.model_config,
             max_seq_len,
             lora_rank,
-            num_segments,
+            state.model_config.num_layers,
             residency,
             weights_already_resident,
             options,
+            available,
         )
     };
     if estimate.total_bytes > available {
@@ -168,7 +255,10 @@ fn enforce_training_preflight(
         );
         return Err(ApiError::training_will_not_fit(msg));
     }
-    Ok(estimate.total_bytes)
+    Ok(PreflightAdmission {
+        reserved_bytes: estimate.total_bytes,
+        checkpoint_segments: Some(num_segments),
+    })
 }
 
 fn validate_grpo_submission_source(req: &GrpoRequest) -> Result<(), ApiError> {
@@ -365,7 +455,7 @@ async fn submit_sft(
         &req.examples,
         Some(state.tokenizer.as_ref()),
     );
-    let reserved_bytes = enforce_training_preflight(
+    let admission = enforce_training_preflight(
         &state,
         max_seq_len,
         EstimateOptions {
@@ -373,6 +463,7 @@ async fn submit_sft(
             recompute_boundaries: training_preflight::recompute_checkpoint_boundaries_for_seq_len(
                 max_seq_len,
             ),
+            ..Default::default()
         },
         req.config.lora_rank,
         // Vulkan now trains through the shared kt-tape path (segment-
@@ -380,6 +471,8 @@ async fn submit_sft(
         // preflight uses the standard segment-checkpoint working-set estimate.
         false,
     )?;
+    req.config.grad_checkpoint_segments = admission.checkpoint_segments;
+    let reserved_bytes = admission.reserved_bytes;
 
     tracing::info!(
         num_examples,
@@ -553,13 +646,15 @@ async fn submit_grpo(
     // through the shared kt-tape (segment-checkpointed) path now, not the
     // deleted vk_native recompute fork, so the standard estimate applies.
     let max_seq_len = stats.max_seq_len;
-    let reserved_bytes = enforce_training_preflight(
+    let admission = enforce_training_preflight(
         &state,
         max_seq_len,
         EstimateOptions::default(),
         req.config.lora_rank,
         false,
     )?;
+    req.config.grad_checkpoint_segments = admission.checkpoint_segments;
+    let reserved_bytes = admission.reserved_bytes;
 
     // Register the job in the tracking map
     let info = TrainingJobInfo {
@@ -774,10 +869,12 @@ async fn submit_opd(
             recompute_boundaries: training_preflight::recompute_checkpoint_boundaries_for_seq_len(
                 opd_max_seq_len,
             ),
+            ..Default::default()
         },
         req.config.lora_rank,
         false,
-    )?;
+    )?
+    .reserved_bytes;
 
     let info = TrainingJobInfo {
         job_id: job_id.clone(),
@@ -1183,7 +1280,7 @@ fn distill_working_set_reservation(
         config.max_tokens,
         Some(state.tokenizer.as_ref()),
     );
-    enforce_training_preflight(
+    Ok(enforce_training_preflight(
         state,
         max_seq_len,
         EstimateOptions {
@@ -1191,10 +1288,12 @@ fn distill_working_set_reservation(
             recompute_boundaries: training_preflight::recompute_checkpoint_boundaries_for_seq_len(
                 max_seq_len,
             ),
+            ..Default::default()
         },
         config.lora_rank,
         false,
-    )
+    )?
+    .reserved_bytes)
 }
 
 /// Shared registration+enqueue for distill_* endpoints. Same shape as

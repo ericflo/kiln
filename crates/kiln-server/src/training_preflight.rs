@@ -98,6 +98,7 @@ pub struct WorkingSet {
 pub struct EstimateOptions {
     pub max_supervised_tokens: Option<usize>,
     pub recompute_boundaries: bool,
+    pub activation_bytes_per_elem: Option<usize>,
 }
 
 const BYTES_PER_GB: u64 = 1024 * 1024 * 1024;
@@ -144,8 +145,20 @@ fn approximate_base_weight_bytes(cfg: &ModelConfig) -> u64 {
 /// Closed-form upper bound per layer: hidden state stash + QKV + attn
 /// output + MLP up/gate/down intermediates. Multiplied by sequence
 /// length and dtype size, then by the number of layers per segment.
-fn per_segment_activation_bytes(cfg: &ModelConfig, max_seq_len: usize, num_segments: usize) -> u64 {
-    let elem = dtype_bytes(cfg.dtype);
+fn estimate_activation_bytes_per_elem(cfg: &ModelConfig, options: EstimateOptions) -> u64 {
+    options
+        .activation_bytes_per_elem
+        .map(|bytes| bytes.max(1) as u64)
+        .unwrap_or_else(|| dtype_bytes(cfg.dtype))
+}
+
+fn per_segment_activation_bytes(
+    cfg: &ModelConfig,
+    max_seq_len: usize,
+    num_segments: usize,
+    activation_bytes_per_elem: u64,
+) -> u64 {
+    let elem = activation_bytes_per_elem.max(1);
     let h = cfg.hidden_size as u64;
     let i = cfg.intermediate_size as u64;
     let t = max_seq_len as u64;
@@ -161,9 +174,10 @@ fn boundary_state_bytes(
     max_seq_len: usize,
     num_segments: usize,
     recompute_boundaries: bool,
+    activation_bytes_per_elem: u64,
 ) -> u64 {
+    let elem = activation_bytes_per_elem.max(1);
     if recompute_boundaries {
-        let elem = dtype_bytes(cfg.dtype);
         let h = cfg.hidden_size as u64;
         let t = max_seq_len as u64;
         // Long-context SFT recomputes segment inputs on demand. At peak it
@@ -172,7 +186,6 @@ fn boundary_state_bytes(
         // overlap during recompute/backprop.
         return 2 * h * t * 4 + h * t * elem;
     }
-    let elem = dtype_bytes(cfg.dtype);
     let h = cfg.hidden_size as u64;
     let t = max_seq_len as u64;
     (num_segments as u64 + 1) * h * t * elem
@@ -292,15 +305,22 @@ pub fn estimate_step_working_set_with_options(
     } else {
         approximate_base_weight_bytes(cfg).saturating_mul(residency.weight_multiplier())
     };
+    let activation_bytes_per_elem = estimate_activation_bytes_per_elem(cfg, options);
     let flce_tokens = options.max_supervised_tokens.unwrap_or(max_seq_len).max(1);
     let bd = Breakdown {
         base_weights,
-        per_segment_activations: per_segment_activation_bytes(cfg, max_seq_len, num_segments),
+        per_segment_activations: per_segment_activation_bytes(
+            cfg,
+            max_seq_len,
+            num_segments,
+            activation_bytes_per_elem,
+        ),
         boundary_states: boundary_state_bytes(
             cfg,
             max_seq_len,
             num_segments,
             options.recompute_boundaries,
+            activation_bytes_per_elem,
         ),
         flce_intermediates: flce_chunk_intermediate_bytes(cfg, flce_tokens),
         lora_param_grad: lora_param_and_grad_bytes(cfg, lora_rank),
@@ -311,6 +331,47 @@ pub fn estimate_step_working_set_with_options(
         max_seq_len,
         breakdown: bd,
     }
+}
+
+pub fn auto_fit_checkpoint_segments(
+    cfg: &ModelConfig,
+    max_seq_len: usize,
+    lora_rank: usize,
+    max_segments: usize,
+    residency: WeightResidency,
+    weights_already_resident: bool,
+    options: EstimateOptions,
+    available_bytes: u64,
+) -> (usize, WorkingSet) {
+    let max_segments = max_segments.max(1);
+    let mut last = estimate_step_working_set_with_options(
+        cfg,
+        max_seq_len,
+        lora_rank,
+        1,
+        residency,
+        weights_already_resident,
+        options,
+    );
+    if last.total_bytes <= available_bytes {
+        return (1, last);
+    }
+    for num_segments in 2..=max_segments {
+        let estimate = estimate_step_working_set_with_options(
+            cfg,
+            max_seq_len,
+            lora_rank,
+            num_segments,
+            residency,
+            weights_already_resident,
+            options,
+        );
+        if estimate.total_bytes <= available_bytes {
+            return (num_segments, estimate);
+        }
+        last = estimate;
+    }
+    (max_segments, last)
 }
 
 fn f32_matrix_bytes(rows: usize, cols: usize) -> u64 {
@@ -678,10 +739,11 @@ pub fn format_oom_message_with_source(
          {avail_gb:.2} GB is available{source_clause}. Breakdown: weights {bw_gb:.2} GB, \
          activations {act_gb:.2} GB (max_seq_len={msl}, num_segments={num_segments}), \
          FLCE chunk {flce_gb:.2} GB, LoRA params+grads {lora_gb:.2} GB \
-         (lora_rank={lora_rank}). To fit, raise KILN_GRAD_CHECKPOINT_SEGMENTS \
-         (more segments = less per-segment activation memory), shrink lora_rank, \
-         send fewer/shorter examples per submission, or set KILN_TRAINING_MEMORY_RESERVE_GB \
-         lower if your host can spare RAM from other processes.",
+         (lora_rank={lora_rank}). Dynamic checkpointing already tried up to \
+         this segment count. To fit, shrink lora_rank, send fewer/shorter \
+         examples per submission, free memory from other processes, or set \
+         KILN_TRAINING_MEMORY_RESERVE_GB lower if your host can spare RAM from \
+         other processes.",
         msl = estimate.max_seq_len,
     )
 }
@@ -726,6 +788,54 @@ mod tests {
     }
 
     #[test]
+    fn auto_fit_segments_raises_segments_until_long_context_fits() {
+        let cfg = qwen_4b();
+        let max_seq_len = 104_412;
+        let available = 21 * BYTES_PER_GB;
+        let four_segment = estimate_step_working_set_with_options(
+            &cfg,
+            max_seq_len,
+            8,
+            4,
+            WeightResidency::DualResidentCpuAndVulkan,
+            true,
+            EstimateOptions {
+                max_supervised_tokens: Some(512),
+                recompute_boundaries: true,
+                activation_bytes_per_elem: Some(2),
+            },
+        );
+        assert!(
+            four_segment.total_bytes > available,
+            "fixed 4-segment plan should reproduce the rejected long-context case"
+        );
+
+        let (segments, fit) = auto_fit_checkpoint_segments(
+            &cfg,
+            max_seq_len,
+            8,
+            cfg.num_layers,
+            WeightResidency::DualResidentCpuAndVulkan,
+            true,
+            EstimateOptions {
+                max_supervised_tokens: Some(512),
+                recompute_boundaries: true,
+                activation_bytes_per_elem: Some(2),
+            },
+            available,
+        );
+        assert!(
+            segments > 4,
+            "auto-fit should raise segments beyond the VRAM-only default"
+        );
+        assert!(
+            fit.total_bytes <= available,
+            "auto-fit plan must fit: segments={segments}, estimate={}, available={available}",
+            fit.total_bytes
+        );
+    }
+
+    #[test]
     fn estimator_uses_supervised_tokens_for_flce() {
         let cfg = qwen_4b();
         let full_prompt =
@@ -740,6 +850,7 @@ mod tests {
             EstimateOptions {
                 max_supervised_tokens: Some(512),
                 recompute_boundaries: false,
+                ..Default::default()
             },
         );
         assert!(
@@ -798,6 +909,7 @@ mod tests {
             EstimateOptions {
                 max_supervised_tokens: None,
                 recompute_boundaries: true,
+                ..Default::default()
             },
         );
         assert!(
@@ -820,6 +932,7 @@ mod tests {
             EstimateOptions {
                 max_supervised_tokens: None,
                 recompute_boundaries: true,
+                ..Default::default()
             },
         );
         let h = cfg.hidden_size as u64;
@@ -1104,7 +1217,7 @@ mod tests {
         let cfg = qwen_4b();
         let est = estimate_step_working_set(&cfg, 8192, 16, 4, WeightResidency::SingleCopy, false);
         let msg = format_oom_message(&est, 8 * BYTES_PER_GB, 16, 4);
-        assert!(msg.contains("KILN_GRAD_CHECKPOINT_SEGMENTS"));
+        assert!(msg.contains("Dynamic checkpointing already tried"));
         assert!(msg.contains("lora_rank"));
         assert!(msg.contains("KILN_TRAINING_MEMORY_RESERVE_GB"));
     }

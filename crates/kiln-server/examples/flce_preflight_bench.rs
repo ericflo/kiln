@@ -184,6 +184,7 @@ fn run_one(
         output_name: Some(format!("flce-preflight-T{target_t}")),
         auto_load: false,
         checkpoint_interval: None,
+        grad_checkpoint_segments: None,
         seed: None,
         optimizer: Default::default(),
         adapter_smoke_test: false,

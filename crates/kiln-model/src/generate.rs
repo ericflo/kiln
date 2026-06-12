@@ -20,7 +20,7 @@ use kiln_core::tokenizer::KilnTokenizer;
 
 use crate::backend::{
     self, BackendIdentity, BackendRuntime, LinearBackend, ReplayBackend, ResidencyBackend,
-    SamplingBackend, StartupBackend, TrainingLossBackend,
+    SamplingBackend, StartupBackend, TrainingLossBackend, TrainingPrecisionPolicy,
     capability::{
         BackendCapabilities, BackendCapabilityQueries, DecodeBatcherPolicy, ReplayNativePrimitive,
         ReplayRequest, Support, decode_hot_path_fallback_policy_for_backend,
@@ -1674,6 +1674,10 @@ impl ModelRunner {
 
     pub fn backend_capabilities(&self) -> BackendCapabilities {
         BackendCapabilityQueries::backend_capabilities(self.backend.as_ref())
+    }
+
+    pub fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
+        TrainingLossBackend::runtime_training_precision_policy(self.backend.as_ref())
     }
 
     /// Eagerly allocate the backend-resident decode scratch ring when the

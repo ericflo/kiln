@@ -231,6 +231,7 @@ fn run_one(
         output_name: Some(format!("phase10-rmsnorm-T{target_t}-{tag}")),
         auto_load: false,
         checkpoint_interval: None,
+        grad_checkpoint_segments: None,
         seed: None,
         optimizer: Default::default(),
         adapter_smoke_test: false,

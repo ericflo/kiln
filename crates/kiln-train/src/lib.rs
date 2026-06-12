@@ -349,6 +349,10 @@ pub struct SftConfig {
     /// Save adapter weights every N training steps. None = only save at the end.
     #[serde(default)]
     pub checkpoint_interval: Option<usize>,
+    /// Internal submit-time resolution of dynamic gradient checkpointing.
+    /// None means the trainer should auto-tune from the workload shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grad_checkpoint_segments: Option<usize>,
     /// Deterministic seed for LoRA init and any RNG-dependent steps. If
     /// `None`, the trainer generates one and records it in `replay.jsonl`
     /// so the run is still exactly reproducible.
@@ -402,6 +406,7 @@ impl Default for SftConfig {
             output_name: None,
             auto_load: default_auto_load(),
             checkpoint_interval: None,
+            grad_checkpoint_segments: None,
             seed: None,
             optimizer: Optimizer::default(),
             adapter_smoke_test: false,
@@ -740,6 +745,10 @@ pub struct GrpoConfig {
     /// Save adapter weights every N training steps. None = only save at the end.
     #[serde(default)]
     pub checkpoint_interval: Option<usize>,
+    /// Internal submit-time resolution of dynamic gradient checkpointing.
+    /// None means the trainer should auto-tune from the workload shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grad_checkpoint_segments: Option<usize>,
     /// Deterministic seed for LoRA init and any RNG-dependent steps. If
     /// `None`, the trainer generates one and records it in `replay.jsonl`
     /// so the run is still exactly reproducible.
@@ -1072,6 +1081,7 @@ impl Default for GrpoConfig {
             output_name: None,
             auto_load: default_auto_load(),
             checkpoint_interval: None,
+            grad_checkpoint_segments: None,
             seed: None,
             optimizer: Optimizer::default(),
             adapter_smoke_test: false,
