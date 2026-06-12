@@ -712,10 +712,8 @@ pub fn format_oom_message(
 
 /// Variant that includes the VRAM detection source in the message
 /// when supplied. On unified-memory APUs the operator benefits from
-/// knowing the available number is `MemTotal − reserve` rather than
-/// the raw GPU report — that's what `KILN_TRAINING_MEMORY_RESERVE_GB`
-/// actually controls, and seeing it in the rejection message makes
-/// the actionable knob obvious.
+/// knowing whether the available number came from the live UMA signal
+/// rather than a static discrete-GPU budget.
 pub fn format_oom_message_with_source(
     estimate: &WorkingSet,
     available_bytes: u64,
@@ -741,9 +739,7 @@ pub fn format_oom_message_with_source(
          FLCE chunk {flce_gb:.2} GB, LoRA params+grads {lora_gb:.2} GB \
          (lora_rank={lora_rank}). Dynamic checkpointing already tried up to \
          this segment count. To fit, shrink lora_rank, send fewer/shorter \
-         examples per submission, free memory from other processes, or set \
-         KILN_TRAINING_MEMORY_RESERVE_GB lower if your host can spare RAM from \
-         other processes.",
+         examples per submission, or free memory from other processes.",
         msl = estimate.max_seq_len,
     )
 }
@@ -1273,7 +1269,7 @@ mod tests {
         let msg = format_oom_message(&est, 8 * BYTES_PER_GB, 16, 4);
         assert!(msg.contains("Dynamic checkpointing already tried"));
         assert!(msg.contains("lora_rank"));
-        assert!(msg.contains("KILN_TRAINING_MEMORY_RESERVE_GB"));
+        assert!(!msg.contains("KILN_TRAINING_MEMORY_RESERVE_GB"));
     }
 
     #[test]
@@ -1281,8 +1277,8 @@ mod tests {
         let cfg = qwen_4b();
         let est = estimate_step_working_set(&cfg, 8192, 16, 4, WeightResidency::SingleCopy, false);
         // On a unified-memory APU the rejection message must call out
-        // the corrected source so the operator knows the
-        // KILN_TRAINING_MEMORY_RESERVE_GB knob is the relevant one.
+        // the corrected source so the operator knows the available
+        // number is coming from live UMA memory, not static dGPU VRAM.
         let msg = format_oom_message_with_source(
             &est,
             8 * BYTES_PER_GB,
@@ -1294,7 +1290,7 @@ mod tests {
             msg.contains("vram_source=linux-drm-sysfs-unified"),
             "expected unified-memory provenance, got: {msg}"
         );
-        assert!(msg.contains("KILN_TRAINING_MEMORY_RESERVE_GB"));
+        assert!(!msg.contains("KILN_TRAINING_MEMORY_RESERVE_GB"));
 
         // None preserves the legacy message — no provenance clause.
         let no_src = format_oom_message_with_source(&est, 8 * BYTES_PER_GB, 16, 4, None);

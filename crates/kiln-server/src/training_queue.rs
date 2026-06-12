@@ -2067,6 +2067,140 @@ fn run_distill_self(
     Ok(output_dir)
 }
 
+struct TrainingMemoryRuntime {
+    batching_engine: Option<crate::batching_engine::BatchingEngineHandle>,
+    paged_cache: Arc<kiln_model::PagedKvCacheKt>,
+    allocator_policy: kiln_model::GpuAllocatorMemoryProbePolicy,
+    device: kiln_tensor::Device,
+    kv_cache_reclaimable: bool,
+}
+
+fn training_memory_runtime(state: &AppState) -> Option<TrainingMemoryRuntime> {
+    let ModelBackend::Real {
+        runner,
+        paged_cache,
+        batching_engine,
+        ..
+    } = state.backend.as_ref()
+    else {
+        return None;
+    };
+    let runner = runner.read().ok()?;
+    let capabilities = runner.backend_capabilities();
+    let device = runner.weights.embed_tokens.device();
+    let cache_device_matches_model = paged_cache
+        .device()
+        .is_some_and(|cache_device| cache_device == device);
+    Some(TrainingMemoryRuntime {
+        batching_engine: batching_engine.clone(),
+        paged_cache: paged_cache.clone(),
+        allocator_policy: capabilities.storage.gpu_allocator_memory_probe_policy,
+        device,
+        kv_cache_reclaimable: capabilities.storage.kv_cache_device_memory_pressure
+            && cache_device_matches_model,
+    })
+}
+
+fn current_training_safe_bytes(
+    runtime: Option<&TrainingMemoryRuntime>,
+    current_reservation_bytes: u64,
+) -> u64 {
+    let governor = kiln_memory::MemoryGovernor::global();
+    let other_reserved = governor
+        .soft_reserved_bytes()
+        .saturating_sub(current_reservation_bytes);
+    let live = governor
+        .refresh()
+        .free_bytes
+        .saturating_sub(governor.config().floor_bytes)
+        .saturating_sub(other_reserved);
+    let allocator = runtime
+        .and_then(|runtime| {
+            crate::device_memory::allocator_safe_available_bytes_with_soft_reserved(
+                runtime.allocator_policy,
+                &runtime.device,
+                governor.config().floor_bytes,
+                other_reserved,
+            )
+        })
+        .unwrap_or(0);
+    live.max(allocator)
+}
+
+fn kv_shrink_target_for_training(
+    current_blocks: usize,
+    bytes_per_block: u64,
+    required_bytes: u64,
+    available_bytes: u64,
+) -> Option<usize> {
+    if current_blocks <= 1 || bytes_per_block == 0 || required_bytes <= available_bytes {
+        return None;
+    }
+    let deficit = required_bytes.saturating_sub(available_bytes);
+    let blocks_to_free = deficit
+        .div_ceil(bytes_per_block)
+        .min(current_blocks as u64 - 1) as usize;
+    let target = current_blocks.saturating_sub(blocks_to_free).max(1);
+    (target < current_blocks).then_some(target)
+}
+
+fn prepare_training_memory_for_job(state: &AppState, reserved_bytes: u64) -> Result<(), String> {
+    if reserved_bytes == 0 {
+        return Ok(());
+    }
+    let runtime = training_memory_runtime(state);
+    let before = current_training_safe_bytes(runtime.as_ref(), reserved_bytes);
+    if before < reserved_bytes {
+        if let Some(runtime) = runtime.as_ref() {
+            let current_blocks = runtime.paged_cache.num_blocks();
+            let bytes_per_block = runtime.paged_cache.bytes_per_block() as u64;
+            if runtime.kv_cache_reclaimable
+                && let Some(target_blocks) = kv_shrink_target_for_training(
+                    current_blocks,
+                    bytes_per_block,
+                    reserved_bytes,
+                    before,
+                )
+                && let Some(engine) = runtime.batching_engine.as_ref()
+            {
+                state.clear_real_prefix_cache();
+                match engine.resize_kv_blocking(target_blocks) {
+                    Ok(achieved) => tracing::info!(
+                        from_blocks = current_blocks,
+                        target_blocks,
+                        achieved_blocks = achieved,
+                        reserved_gb = reserved_bytes as f64 / 1e9,
+                        available_before_gb = before as f64 / 1e9,
+                        "training worker shrank KV cache before allocation"
+                    ),
+                    Err(err) => tracing::warn!(
+                        error = %format!("{err:#}"),
+                        target_blocks,
+                        "training worker failed to shrink KV cache before allocation"
+                    ),
+                }
+            }
+        }
+        let reclaimed = kiln_memory::MemoryGovernor::global().reclaim(u64::MAX);
+        if reclaimed > 0 {
+            tracing::info!(
+                reclaimed_mb = reclaimed / (1024 * 1024),
+                "training worker reclaimed pooled memory before allocation"
+            );
+        }
+    }
+
+    let after = current_training_safe_bytes(runtime.as_ref(), reserved_bytes);
+    if after < reserved_bytes {
+        return Err(format!(
+            "training memory could not be dynamically reclaimed: estimated step needs {:.2} GB but only {:.2} GB is available after cache/allocator reclamation",
+            reserved_bytes as f64 / 1e9,
+            after as f64 / 1e9,
+        ));
+    }
+    Ok(())
+}
+
 /// Execute a single training job (runs on a blocking thread).
 fn execute_job(state: AppState, entry: QueueEntry) {
     let job_id = entry.job_id.clone();
@@ -2208,150 +2342,156 @@ fn execute_job(state: AppState, entry: QueueEntry) {
         kiln_memory::MemoryGovernor::global().reserve(bytes)
     });
 
-    let result: std::result::Result<PathBuf, String> = match entry.job {
-        QueuedJob::Sft(mut req) => {
-            if req.config.checkpoint_interval.is_none() {
-                req.config.checkpoint_interval = server_checkpoint_interval;
+    let memory_ready = prepare_training_memory_for_job(&state, entry.reserved_bytes);
+    let result: std::result::Result<PathBuf, String> = if let Err(err) = memory_ready {
+        Err(err)
+    } else {
+        match entry.job {
+            QueuedJob::Sft(mut req) => {
+                if req.config.checkpoint_interval.is_none() {
+                    req.config.checkpoint_interval = server_checkpoint_interval;
+                }
+                let request_body = serde_json::to_value(&req).unwrap_or_else(
+                    |_| serde_json::json!({"error": "failed to serialize SftRequest"}),
+                );
+                let _replay_ctx = trainer::ReplayContext {
+                    request_id: job_id.clone(),
+                    kind: kiln_train::ReplayKind::Sft,
+                    request_body,
+                    base_model: base_model.clone(),
+                };
+                // Per-STEP GPU coordination (the state.rs contract): the
+                // trainer acquires the write lock around each step's
+                // forward/backward/optimizer instead of this arm holding it
+                // job-long — in-flight inference streams interleave between
+                // steps rather than freezing mid-token for the whole job
+                // (which the [agent] scheduler now triggers unattended).
+                let guard = runner_arc.read().unwrap();
+                let training_dispatch = guard.backend_capabilities().training.server_dispatch;
+                let native_route_enabled = training_dispatch.native_route_enabled();
+                run_sft(
+                    native_route_enabled,
+                    training_dispatch.native_training_env,
+                    &req,
+                    &state.model_config,
+                    &guard.weights,
+                    &state.tokenizer,
+                    &state.adapter_dir,
+                    &adapter_name,
+                    progress_cb,
+                    _replay_ctx,
+                    &job_id,
+                    Some(state.gpu_lock.clone()),
+                )
             }
-            let request_body = serde_json::to_value(&req)
-                .unwrap_or_else(|_| serde_json::json!({"error": "failed to serialize SftRequest"}));
-            let _replay_ctx = trainer::ReplayContext {
-                request_id: job_id.clone(),
-                kind: kiln_train::ReplayKind::Sft,
-                request_body,
-                base_model: base_model.clone(),
-            };
-            // Per-STEP GPU coordination (the state.rs contract): the
-            // trainer acquires the write lock around each step's
-            // forward/backward/optimizer instead of this arm holding it
-            // job-long — in-flight inference streams interleave between
-            // steps rather than freezing mid-token for the whole job
-            // (which the [agent] scheduler now triggers unattended).
-            let guard = runner_arc.read().unwrap();
-            let training_dispatch = guard.backend_capabilities().training.server_dispatch;
-            let native_route_enabled = training_dispatch.native_route_enabled();
-            run_sft(
-                native_route_enabled,
-                training_dispatch.native_training_env,
-                &req,
-                &state.model_config,
-                &guard.weights,
-                &state.tokenizer,
-                &state.adapter_dir,
-                &adapter_name,
-                progress_cb,
-                _replay_ctx,
-                &job_id,
-                Some(state.gpu_lock.clone()),
-            )
-        }
-        QueuedJob::Grpo(mut req) => {
-            if req.config.checkpoint_interval.is_none() {
-                req.config.checkpoint_interval = server_checkpoint_interval;
+            QueuedJob::Grpo(mut req) => {
+                if req.config.checkpoint_interval.is_none() {
+                    req.config.checkpoint_interval = server_checkpoint_interval;
+                }
+                let request_body = serde_json::to_value(&req).unwrap_or_else(
+                    |_| serde_json::json!({"error": "failed to serialize GrpoRequest"}),
+                );
+                let replay_ctx = trainer::ReplayContext {
+                    request_id: job_id.clone(),
+                    kind: kiln_train::ReplayKind::Grpo,
+                    request_body,
+                    base_model: base_model.clone(),
+                };
+                let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
+                let guard = runner_arc.read().unwrap();
+                let training_dispatch = guard.backend_capabilities().training.server_dispatch;
+                let native_route_enabled = training_dispatch.native_route_enabled();
+                run_grpo(
+                    native_route_enabled,
+                    training_dispatch.native_training_env,
+                    &req,
+                    &state.model_config,
+                    &guard.weights,
+                    &state.tokenizer,
+                    &state.adapter_dir,
+                    &adapter_name,
+                    progress_cb,
+                    replay_ctx,
+                    &job_id,
+                )
             }
-            let request_body = serde_json::to_value(&req).unwrap_or_else(
-                |_| serde_json::json!({"error": "failed to serialize GrpoRequest"}),
-            );
-            let replay_ctx = trainer::ReplayContext {
-                request_id: job_id.clone(),
-                kind: kiln_train::ReplayKind::Grpo,
-                request_body,
-                base_model: base_model.clone(),
-            };
-            let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
-            let guard = runner_arc.read().unwrap();
-            let training_dispatch = guard.backend_capabilities().training.server_dispatch;
-            let native_route_enabled = training_dispatch.native_route_enabled();
-            run_grpo(
-                native_route_enabled,
-                training_dispatch.native_training_env,
-                &req,
-                &state.model_config,
-                &guard.weights,
-                &state.tokenizer,
-                &state.adapter_dir,
-                &adapter_name,
-                progress_cb,
-                replay_ctx,
-                &job_id,
-            )
-        }
-        QueuedJob::Opd(mut req) => {
-            if req.config.checkpoint_interval.is_none() {
-                req.config.checkpoint_interval = server_checkpoint_interval;
+            QueuedJob::Opd(mut req) => {
+                if req.config.checkpoint_interval.is_none() {
+                    req.config.checkpoint_interval = server_checkpoint_interval;
+                }
+                let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
+                let guard = runner_arc.read().unwrap();
+                run_opd(
+                    &req,
+                    &state.model_config,
+                    &guard.weights,
+                    &state.tokenizer,
+                    &state.adapter_dir,
+                    &adapter_name,
+                    progress_cb,
+                    &state.teacher_registry,
+                    &job_id,
+                )
             }
-            let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
-            let guard = runner_arc.read().unwrap();
-            run_opd(
-                &req,
-                &state.model_config,
-                &guard.weights,
-                &state.tokenizer,
-                &state.adapter_dir,
-                &adapter_name,
-                progress_cb,
-                &state.teacher_registry,
-                &job_id,
-            )
-        }
-        QueuedJob::DistillRefresh(req) => {
-            let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
-            let guard = runner_arc.read().unwrap();
-            run_distill_refresh(
-                &req,
-                &state.model_config,
-                &guard.weights,
-                &state.tokenizer,
-                &state.adapter_dir,
-                &adapter_name,
-                progress_cb,
-                &state.teacher_registry,
-                state.dataset_registry.as_deref(),
-                &job_id,
-            )
-        }
-        QueuedJob::DistillMerge(req) => {
-            let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
-            let guard = runner_arc.read().unwrap();
-            run_distill_merge(
-                &req,
-                &state.model_config,
-                &guard.weights,
-                &state.tokenizer,
-                &state.adapter_dir,
-                &adapter_name,
-                progress_cb,
-                &job_id,
-            )
-        }
-        QueuedJob::DistillPump(req) => {
-            let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
-            let guard = runner_arc.read().unwrap();
-            run_distill_pump(
-                &req,
-                &state.model_config,
-                &guard.weights,
-                &state.tokenizer,
-                &state.adapter_dir,
-                &adapter_name,
-                progress_cb,
-                &state.teacher_registry,
-                &job_id,
-            )
-        }
-        QueuedJob::DistillSelf(req) => {
-            let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
-            let guard = runner_arc.read().unwrap();
-            run_distill_self(
-                &req,
-                &state.model_config,
-                &guard.weights,
-                &state.tokenizer,
-                &state.adapter_dir,
-                &adapter_name,
-                progress_cb,
-                &job_id,
-            )
+            QueuedJob::DistillRefresh(req) => {
+                let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
+                let guard = runner_arc.read().unwrap();
+                run_distill_refresh(
+                    &req,
+                    &state.model_config,
+                    &guard.weights,
+                    &state.tokenizer,
+                    &state.adapter_dir,
+                    &adapter_name,
+                    progress_cb,
+                    &state.teacher_registry,
+                    state.dataset_registry.as_deref(),
+                    &job_id,
+                )
+            }
+            QueuedJob::DistillMerge(req) => {
+                let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
+                let guard = runner_arc.read().unwrap();
+                run_distill_merge(
+                    &req,
+                    &state.model_config,
+                    &guard.weights,
+                    &state.tokenizer,
+                    &state.adapter_dir,
+                    &adapter_name,
+                    progress_cb,
+                    &job_id,
+                )
+            }
+            QueuedJob::DistillPump(req) => {
+                let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
+                let guard = runner_arc.read().unwrap();
+                run_distill_pump(
+                    &req,
+                    &state.model_config,
+                    &guard.weights,
+                    &state.tokenizer,
+                    &state.adapter_dir,
+                    &adapter_name,
+                    progress_cb,
+                    &state.teacher_registry,
+                    &job_id,
+                )
+            }
+            QueuedJob::DistillSelf(req) => {
+                let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
+                let guard = runner_arc.read().unwrap();
+                run_distill_self(
+                    &req,
+                    &state.model_config,
+                    &guard.weights,
+                    &state.tokenizer,
+                    &state.adapter_dir,
+                    &adapter_name,
+                    progress_cb,
+                    &job_id,
+                )
+            }
         }
     };
 
@@ -2759,6 +2899,24 @@ mod tests {
         );
         state.adapter_dir = dir.to_path_buf();
         state
+    }
+
+    #[test]
+    fn kv_shrink_target_frees_only_needed_blocks() {
+        let gb = 1024 * 1024 * 1024;
+        assert_eq!(
+            kv_shrink_target_for_training(16, gb, 12 * gb, 8 * gb),
+            Some(12)
+        );
+    }
+
+    #[test]
+    fn kv_shrink_target_preserves_one_block_floor() {
+        let gb = 1024 * 1024 * 1024;
+        assert_eq!(
+            kv_shrink_target_for_training(4, gb, 20 * gb, 1 * gb),
+            Some(1)
+        );
     }
 
     fn tracked_job(job_id: &str, adapter: &str, correction_ids: Vec<String>) -> TrainingJobInfo {

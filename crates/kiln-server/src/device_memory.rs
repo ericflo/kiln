@@ -121,11 +121,25 @@ pub(crate) fn allocator_safe_available_bytes(
     governor: &kiln_memory::MemoryGovernor,
     device: &Device,
 ) -> Option<u64> {
+    allocator_safe_available_bytes_with_soft_reserved(
+        policy,
+        device,
+        governor.config().floor_bytes,
+        governor.soft_reserved_bytes(),
+    )
+}
+
+pub(crate) fn allocator_safe_available_bytes_with_soft_reserved(
+    policy: GpuAllocatorMemoryProbePolicy,
+    device: &Device,
+    floor_bytes: u64,
+    soft_reserved_bytes: u64,
+) -> Option<u64> {
     let snap = allocator_memory_snapshot(policy, device)?;
     Some(safe_available_bytes_from_free(
         snap.free_bytes,
-        governor.config().floor_bytes,
-        governor.soft_reserved_bytes(),
+        floor_bytes,
+        soft_reserved_bytes,
     ))
 }
 

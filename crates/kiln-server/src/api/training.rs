@@ -43,6 +43,14 @@ struct PreflightAdmission {
     checkpoint_segments: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TrainingMemoryAvailability {
+    bytes: u64,
+    live_bytes: u64,
+    allocator_bytes: Option<u64>,
+    reclaimable_kv_bytes: u64,
+}
+
 fn model_dtype_bytes(dtype: kiln_core::config::DType) -> usize {
     match dtype {
         kiln_core::config::DType::BF16 | kiln_core::config::DType::FP16 => 2,
@@ -109,6 +117,79 @@ fn effective_checkpoint_segments(config: kiln_train::CheckpointConfig) -> usize 
         config.num_segments
     } else {
         1
+    }
+}
+
+fn combine_training_available_bytes(
+    live_bytes: u64,
+    allocator_bytes: Option<u64>,
+    reclaimable_kv_bytes: u64,
+    total_bytes: u64,
+    floor_bytes: u64,
+) -> u64 {
+    let base = allocator_bytes.map_or(live_bytes, |bytes| live_bytes.max(bytes));
+    let with_reclaimable = base.saturating_add(reclaimable_kv_bytes);
+    if total_bytes == 0 {
+        with_reclaimable
+    } else {
+        with_reclaimable.min(total_bytes.saturating_sub(floor_bytes))
+    }
+}
+
+fn dynamic_training_availability(
+    state: &AppState,
+    vram: &kiln_memory::vram::GpuVramInfo,
+    live_available: u64,
+) -> TrainingMemoryAvailability {
+    let governor = kiln_memory::MemoryGovernor::global();
+    let floor_bytes = governor.config().floor_bytes;
+    let soft_reserved = governor.soft_reserved_bytes();
+    let live_bytes = live_available.saturating_sub(soft_reserved);
+    let mut allocator_bytes = None;
+    let mut reclaimable_kv_bytes = 0u64;
+
+    if let ModelBackend::Real {
+        runner,
+        paged_cache,
+        batching_engine,
+        ..
+    } = state.backend.as_ref()
+        && let Ok(runner) = runner.read()
+    {
+        let capabilities = runner.backend_capabilities();
+        let device = runner.weights.embed_tokens.device();
+        allocator_bytes = crate::device_memory::allocator_safe_available_bytes_with_soft_reserved(
+            capabilities.storage.gpu_allocator_memory_probe_policy,
+            &device,
+            floor_bytes,
+            soft_reserved,
+        );
+
+        let cache_device_matches_model = paged_cache
+            .device()
+            .is_some_and(|cache_device| cache_device == device);
+        if capabilities.storage.kv_cache_device_memory_pressure
+            && batching_engine.is_some()
+            && cache_device_matches_model
+        {
+            let current_blocks = paged_cache.num_blocks();
+            let bytes_per_block = paged_cache.bytes_per_block() as u64;
+            reclaimable_kv_bytes = current_blocks.saturating_sub(1) as u64 * bytes_per_block;
+        }
+    }
+
+    let bytes = combine_training_available_bytes(
+        live_bytes,
+        allocator_bytes,
+        reclaimable_kv_bytes,
+        vram.total_bytes,
+        floor_bytes,
+    );
+    TrainingMemoryAvailability {
+        bytes,
+        live_bytes,
+        allocator_bytes,
+        reclaimable_kv_bytes,
     }
 }
 
@@ -192,8 +273,8 @@ fn enforce_training_preflight(
             Some(training_activation_bytes_per_elem_for_state(state));
     }
     let vram = kiln_memory::vram::detect_vram();
-    let available = available_for_training_bytes(&vram);
-    if available == u64::MAX {
+    let live_available = available_for_training_bytes(&vram);
+    if live_available == u64::MAX {
         // No memory signal at all — let the trainer be the line of
         // defense. Better than rejecting every submission on machines
         // where detection is misconfigured.
@@ -201,6 +282,16 @@ fn enforce_training_preflight(
             reserved_bytes: 0,
             checkpoint_segments: None,
         });
+    }
+    let available = dynamic_training_availability(state, &vram, live_available);
+    if available.bytes > live_available {
+        tracing::info!(
+            live_available_gb = available.live_bytes as f64 / 1e9,
+            effective_available_gb = available.bytes as f64 / 1e9,
+            allocator_available_gb = available.allocator_bytes.map(|bytes| bytes as f64 / 1e9),
+            reclaimable_kv_gb = available.reclaimable_kv_bytes as f64 / 1e9,
+            "training preflight using dynamic memory availability"
+        );
     }
     let checkpoint_env_override = checkpoint_env_override_present();
     let env_segments = if vk_native_recompute || checkpoint_env_override {
@@ -264,13 +355,13 @@ fn enforce_training_preflight(
             residency,
             weights_already_resident,
             options,
-            available,
+            available.bytes,
         )
     };
-    if estimate.total_bytes > available {
+    if estimate.total_bytes > available.bytes {
         let msg = format_oom_message_with_source(
             &estimate,
-            available,
+            available.bytes,
             lora_rank,
             num_segments,
             Some(vram.source),
@@ -1860,6 +1951,24 @@ mod tests {
         assert_eq!(training_activation_bytes_per_elem(2, false, false), 2);
         assert_eq!(training_activation_bytes_per_elem(2, false, true), 10);
         assert_eq!(training_activation_bytes_per_elem(2, true, true), 4);
+    }
+
+    #[test]
+    fn dynamic_training_available_counts_allocator_and_reclaimable_kv() {
+        let gb = 1024 * 1024 * 1024;
+        assert_eq!(
+            combine_training_available_bytes(21 * gb, Some(80 * gb), 8 * gb, 120 * gb, gb),
+            88 * gb
+        );
+    }
+
+    #[test]
+    fn dynamic_training_available_is_capped_by_total_minus_floor() {
+        let gb = 1024 * 1024 * 1024;
+        assert_eq!(
+            combine_training_available_bytes(21 * gb, Some(118 * gb), 8 * gb, 120 * gb, gb),
+            119 * gb
+        );
     }
 
     #[test]
