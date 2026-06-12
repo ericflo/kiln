@@ -30,6 +30,7 @@ use crate::training_preflight::{
     estimate_vk_native_recompute_working_set, format_oom_message_with_source,
 };
 use crate::training_queue::{QueueEntry, QueuedJob};
+use kiln_memory::vram::VramSource;
 
 struct GrpoSubmissionStats {
     num_groups: Option<usize>,
@@ -126,8 +127,16 @@ fn combine_training_available_bytes(
     reclaimable_kv_bytes: u64,
     total_bytes: u64,
     floor_bytes: u64,
+    vram_source: VramSource,
 ) -> u64 {
-    let base = allocator_bytes.map_or(live_bytes, |bytes| live_bytes.max(bytes));
+    let base = if matches!(
+        vram_source,
+        VramSource::LinuxDrmSysfsUnified | VramSource::AppleSilicon
+    ) {
+        live_bytes
+    } else {
+        allocator_bytes.map_or(live_bytes, |bytes| live_bytes.max(bytes))
+    };
     let with_reclaimable = base.saturating_add(reclaimable_kv_bytes);
     if total_bytes == 0 {
         with_reclaimable
@@ -184,6 +193,7 @@ fn dynamic_training_availability(
         reclaimable_kv_bytes,
         vram.total_bytes,
         floor_bytes,
+        vram.source,
     );
     TrainingMemoryAvailability {
         bytes,
@@ -1957,8 +1967,31 @@ mod tests {
     fn dynamic_training_available_counts_allocator_and_reclaimable_kv() {
         let gb = 1024 * 1024 * 1024;
         assert_eq!(
-            combine_training_available_bytes(21 * gb, Some(80 * gb), 8 * gb, 120 * gb, gb),
+            combine_training_available_bytes(
+                21 * gb,
+                Some(80 * gb),
+                8 * gb,
+                120 * gb,
+                gb,
+                VramSource::NvidiaSmi,
+            ),
             88 * gb
+        );
+    }
+
+    #[test]
+    fn dynamic_training_available_does_not_trust_allocator_over_live_unified_memory() {
+        let gb = 1024 * 1024 * 1024;
+        assert_eq!(
+            combine_training_available_bytes(
+                21 * gb,
+                Some(80 * gb),
+                8 * gb,
+                120 * gb,
+                gb,
+                VramSource::LinuxDrmSysfsUnified,
+            ),
+            29 * gb
         );
     }
 
@@ -1966,7 +1999,14 @@ mod tests {
     fn dynamic_training_available_is_capped_by_total_minus_floor() {
         let gb = 1024 * 1024 * 1024;
         assert_eq!(
-            combine_training_available_bytes(21 * gb, Some(118 * gb), 8 * gb, 120 * gb, gb),
+            combine_training_available_bytes(
+                21 * gb,
+                Some(118 * gb),
+                8 * gb,
+                120 * gb,
+                gb,
+                VramSource::NvidiaSmi,
+            ),
             119 * gb
         );
     }

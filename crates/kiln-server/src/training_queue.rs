@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use kiln_memory::vram::VramSource;
 use kiln_train::trainer;
 use kiln_train::{
     self, DistillMergeRequest, DistillPumpRequest, DistillRefreshRequest, DistillSelfRequest,
@@ -2073,6 +2074,7 @@ struct TrainingMemoryRuntime {
     allocator_policy: kiln_model::GpuAllocatorMemoryProbePolicy,
     device: kiln_tensor::Device,
     kv_cache_reclaimable: bool,
+    vram_source: VramSource,
 }
 
 fn training_memory_runtime(state: &AppState) -> Option<TrainingMemoryRuntime> {
@@ -2098,7 +2100,15 @@ fn training_memory_runtime(state: &AppState) -> Option<TrainingMemoryRuntime> {
         device,
         kv_cache_reclaimable: capabilities.storage.kv_cache_device_memory_pressure
             && cache_device_matches_model,
+        vram_source: kiln_memory::vram::detect_vram().source,
     })
+}
+
+fn allocator_can_expand_training_budget(vram_source: VramSource) -> bool {
+    !matches!(
+        vram_source,
+        VramSource::LinuxDrmSysfsUnified | VramSource::AppleSilicon
+    )
 }
 
 fn current_training_safe_bytes(
@@ -2115,6 +2125,7 @@ fn current_training_safe_bytes(
         .saturating_sub(governor.config().floor_bytes)
         .saturating_sub(other_reserved);
     let allocator = runtime
+        .filter(|runtime| allocator_can_expand_training_budget(runtime.vram_source))
         .and_then(|runtime| {
             crate::device_memory::allocator_safe_available_bytes_with_soft_reserved(
                 runtime.allocator_policy,
@@ -2917,6 +2928,19 @@ mod tests {
             kv_shrink_target_for_training(4, gb, 20 * gb, 1 * gb),
             Some(1)
         );
+    }
+
+    #[test]
+    fn unified_memory_does_not_let_allocator_expand_training_budget() {
+        assert!(!allocator_can_expand_training_budget(
+            kiln_memory::vram::VramSource::LinuxDrmSysfsUnified
+        ));
+        assert!(!allocator_can_expand_training_budget(
+            kiln_memory::vram::VramSource::AppleSilicon
+        ));
+        assert!(allocator_can_expand_training_budget(
+            kiln_memory::vram::VramSource::NvidiaSmi
+        ));
     }
 
     fn tracked_job(job_id: &str, adapter: &str, correction_ids: Vec<String>) -> TrainingJobInfo {
