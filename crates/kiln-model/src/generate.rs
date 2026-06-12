@@ -19,8 +19,8 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 
 use crate::backend::{
-    self, BackendIdentity, BackendRuntime, LinearBackend, ReplayBackend,
-    ResidencyBackend, SamplingBackend, StartupBackend, TrainingLossBackend,
+    self, BackendIdentity, BackendRuntime, LinearBackend, ReplayBackend, ResidencyBackend,
+    SamplingBackend, StartupBackend, TrainingLossBackend,
     capability::{
         BackendCapabilities, BackendCapabilityQueries, DecodeBatcherPolicy, ReplayNativePrimitive,
         ReplayRequest, Support, decode_hot_path_fallback_policy_for_backend,
@@ -2694,8 +2694,14 @@ impl ModelRunner {
                 &self.weights.embed_tokens.device(),
                 prefill_tokens.len(),
             );
-        let split_pos =
-            strict_prompt_prefix_split_pos(prompt_tokens.len(), cached_tokens, block_size);
+        // Same capability gate as the batching-engine path: the split
+        // snapshot is what makes multi-turn strict-prefix lookups possible
+        // (RealPrefixCache only serves longer prompts from block-aligned
+        // entries), so a backend opting out here opts out of multi-turn
+        // prefix caching entirely.
+        let split_pos = prefix_cache_split_snapshot_allowed(self.backend.as_ref())
+            .then(|| strict_prompt_prefix_split_pos(prompt_tokens.len(), cached_tokens, block_size))
+            .flatten();
         let mut prefill_split_snapshot: Option<RollingPrefixSnapshot> = None;
         let prefill_start = std::time::Instant::now();
         let prefill_source = {
@@ -2762,10 +2768,15 @@ impl ModelRunner {
                     PrefillSampleSource::Logits(logits)
                 }
             } else if use_greedy_prefill_token {
-                PrefillSampleSource::GreedyToken(
-                    model_forward_paged_last_token_greedy(
+                if let Some(split_pos) = split_pos {
+                    // Split the prefill at the last block boundary so the
+                    // linear-attention state can be snapshotted at the
+                    // cross-turn-safe position (mirrors the batching-engine
+                    // path). The head pass's logits are discarded.
+                    let head_tokens = &prompt_tokens[cached_tokens..split_pos];
+                    let _ = model_forward_paged_last_token(
                         &*self.backend,
-                        prefill_tokens,
+                        head_tokens,
                         &self.weights,
                         &self.config,
                         pc_guard,
@@ -2775,8 +2786,97 @@ impl ModelRunner {
                         self.active_lora.as_ref(),
                         None,
                     )
-                    .context("greedy prefill forward pass (paged prefix cache) failed")?,
+                    .context("greedy prefill forward pass (paged prefix cache, head) failed")?;
+                    prefill_split_snapshot = Some(RollingPrefixSnapshot {
+                        position: split_pos,
+                        linear_state: linear_state
+                            .snapshot()
+                            .context("snapshot linear state at greedy prefill split")?,
+                    });
+
+                    let tail_tokens = &prompt_tokens[split_pos..];
+                    let pc_guard = lock_paged_cache(paged_cache)?;
+                    PrefillSampleSource::GreedyToken(
+                        model_forward_paged_last_token_greedy(
+                            &*self.backend,
+                            tail_tokens,
+                            &self.weights,
+                            &self.config,
+                            pc_guard,
+                            block_table,
+                            split_pos,
+                            Some(&mut linear_state),
+                            self.active_lora.as_ref(),
+                            None,
+                        )
+                        .context("greedy prefill forward pass (paged prefix cache, tail) failed")?,
+                    )
+                } else {
+                    PrefillSampleSource::GreedyToken(
+                        model_forward_paged_last_token_greedy(
+                            &*self.backend,
+                            prefill_tokens,
+                            &self.weights,
+                            &self.config,
+                            pc_guard,
+                            block_table,
+                            cached_tokens,
+                            Some(&mut linear_state),
+                            self.active_lora.as_ref(),
+                            None,
+                        )
+                        .context("greedy prefill forward pass (paged prefix cache) failed")?,
+                    )
+                }
+            } else if let Some(split_pos) = split_pos {
+                // Split the prefill at the last block boundary so the
+                // linear-attention state can be snapshotted at the
+                // cross-turn-safe position (mirrors the batching-engine
+                // path). The head pass's logits are discarded.
+                let head_tokens = &prompt_tokens[cached_tokens..split_pos];
+                let _ = model_forward_paged_last_token(
+                    &*self.backend,
+                    head_tokens,
+                    &self.weights,
+                    &self.config,
+                    pc_guard,
+                    block_table,
+                    cached_tokens,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    None,
                 )
+                .context("prefill forward pass (paged prefix cache, head) failed")?;
+                prefill_split_snapshot = Some(RollingPrefixSnapshot {
+                    position: split_pos,
+                    linear_state: linear_state
+                        .snapshot()
+                        .context("snapshot linear state at prefill split")?,
+                });
+                if let Some(cancel) = cancel {
+                    cancel.report_prefill_tokens_completed(head_tokens.len() as u64);
+                }
+
+                let tail_tokens = &prompt_tokens[split_pos..];
+                let pc_guard = lock_paged_cache(paged_cache)?;
+                let logits = model_forward_paged_last_token(
+                    &*self.backend,
+                    tail_tokens,
+                    &self.weights,
+                    &self.config,
+                    pc_guard,
+                    block_table,
+                    split_pos,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    None,
+                )
+                .context("prefill forward pass (paged prefix cache, tail) failed")?;
+                if let Some(cancel) = cancel {
+                    cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
+                }
+                // (#1082) kt-native logits — sampler is kt now; no candle bridge.
+                PrefillSampleSource::Logits(logits)
             } else {
                 let logits = model_forward_paged_last_token(
                     &*self.backend,
@@ -3280,7 +3380,9 @@ impl ModelRunner {
             };
             match result {
                 Ok(tokens) => sampled = Some(tokens),
-                Err(err) if !decode_hot_path_generic_fallback_enabled_for_backend(&*self.backend) => {
+                Err(err)
+                    if !decode_hot_path_generic_fallback_enabled_for_backend(&*self.backend) =>
+                {
                     return Err(err).context(decode_hot_path_fallback_disabled_context(
                         &*self.backend,
                         "contiguous-batched decode declined",
@@ -3489,7 +3591,11 @@ impl ModelRunner {
                         .context("sample Vulkan resident multi-row hidden batch")?;
                         sampled = Some(tokens);
                     }
-                    Err(err) if !decode_hot_path_generic_fallback_enabled_for_backend(&*self.backend) => {
+                    Err(err)
+                        if !decode_hot_path_generic_fallback_enabled_for_backend(
+                            &*self.backend,
+                        ) =>
+                    {
                         return Err(err).context(decode_hot_path_fallback_disabled_context(
                             &*self.backend,
                             "resident batched hidden decode declined",
@@ -3548,7 +3654,9 @@ impl ModelRunner {
             match sample_result {
                 Ok(Some(tokens)) => sampled = Some(tokens),
                 Ok(None) => {}
-                Err(err) if !decode_hot_path_generic_fallback_enabled_for_backend(&*self.backend) => {
+                Err(err)
+                    if !decode_hot_path_generic_fallback_enabled_for_backend(&*self.backend) =>
+                {
                     return Err(err).context(decode_hot_path_fallback_disabled_context(
                         &*self.backend,
                         "Metal sampled decode declined",
@@ -3562,7 +3670,9 @@ impl ModelRunner {
                     );
                 }
             }
-            if sampled.is_none() && !decode_hot_path_generic_fallback_enabled_for_backend(&*self.backend) {
+            if sampled.is_none()
+                && !decode_hot_path_generic_fallback_enabled_for_backend(&*self.backend)
+            {
                 anyhow::bail!(
                     "{}",
                     decode_hot_path_fallback_disabled_context(
@@ -8961,7 +9071,10 @@ mod tests {
                 name: backend_name,
                 device,
             };
-            assert_eq!(decode_hot_path_fallback_policy_for_backend(&backend), expected);
+            assert_eq!(
+                decode_hot_path_fallback_policy_for_backend(&backend),
+                expected
+            );
         }
 
         let vulkan_cpu_sentinel = NamedTestBackend {

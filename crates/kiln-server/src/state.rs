@@ -1129,6 +1129,16 @@ impl RealPrefixCache {
             .iter()
             .filter(|block_id| !self.block_refcounts.contains_key(block_id))
             .count();
+        if needed_new_blocks > self.max_blocks {
+            // This entry can never fit, even into an empty cache. Bail
+            // before the eviction loop below, which would otherwise evict
+            // every resident entry chasing an impossible target and still
+            // register nothing — destroying the whole cache for no gain.
+            return RealPrefixCacheRegisterOutcome {
+                retained_blocks: Vec::new(),
+                evicted_blocks: Vec::new(),
+            };
+        }
         while self.cached_blocks() + needed_new_blocks > self.max_blocks
             || self.entries.len() >= self.max_entries
         {
@@ -1406,7 +1416,6 @@ pub struct SelfImproveSchedulerStatus {
     pub next_run_unix_ms: u64,
 }
 
-
 #[derive(Clone)]
 pub struct AppState {
     pub model_config: ModelConfig,
@@ -1428,13 +1437,11 @@ pub struct AppState {
     /// serve path after each MTP generation; surfaced via /v1/stats so
     /// the draft head's alpha is measurable per adapter without the
     /// KILN_C1_ATTR_PATH CSV.
-    pub mtp_acceptance:
-        Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, u64)>>>,
+    pub mtp_acceptance: Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, u64)>>>,
     /// [agent] self_improve scheduler status — None when the scheduler
     /// isn't armed. Persisted to `<adapter_dir>/.self_improve_scheduler.json`
     /// so the cadence survives restarts; surfaced via /health.
-    pub self_improve_scheduler:
-        Arc<std::sync::RwLock<Option<SelfImproveSchedulerStatus>>>,
+    pub self_improve_scheduler: Arc<std::sync::RwLock<Option<SelfImproveSchedulerStatus>>>,
     /// Embedded pi agent runs — the server-driven rollout engine
     /// (`/v1/agent/runs`). Records persist under `<adapter_dir>/agent_runs/`.
     pub agent_runs: Arc<crate::agent_runs::AgentRunRegistry>,
@@ -1744,8 +1751,8 @@ impl AppState {
                 RECENT_REQUESTS_CAPACITY,
             ))),
             request_log: None,
-            request_log_max_capture_bytes:
-                crate::request_log::RequestLogConfig::default().max_capture_bytes,
+            request_log_max_capture_bytes: crate::request_log::RequestLogConfig::default()
+                .max_capture_bytes,
             completion_cache: Arc::new(std::sync::Mutex::new(DeterministicCompletionCache::new(
                 DETERMINISTIC_COMPLETION_CACHE_CAPACITY,
             ))),
@@ -2400,8 +2407,8 @@ impl AppState {
                 RECENT_REQUESTS_CAPACITY,
             ))),
             request_log: None,
-            request_log_max_capture_bytes:
-                crate::request_log::RequestLogConfig::default().max_capture_bytes,
+            request_log_max_capture_bytes: crate::request_log::RequestLogConfig::default()
+                .max_capture_bytes,
             completion_cache: Arc::new(std::sync::Mutex::new(DeterministicCompletionCache::new(
                 DETERMINISTIC_COMPLETION_CACHE_CAPACITY,
             ))),
@@ -3312,6 +3319,55 @@ mod tests {
             hit.cached_tokens, 8,
             "extended entry covers 8 tokens (prompt + decoded); prompt-only would only cover 5 \
              and additionally fails strict-prefix because 5 % 4 != 0"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn real_prefix_cache_unfittable_registration_does_not_evict_resident_entries()
+    -> anyhow::Result<()> {
+        // A registration that cannot fit even into an EMPTY cache (more new
+        // blocks than max_blocks) must bail before the eviction loop. The
+        // old behavior evicted every resident entry chasing the impossible
+        // target and still registered nothing — one oversized conversation
+        // wiped the cache for every other session.
+        let config = tiny_linear_config();
+        let device = cpu_device!();
+        let mut cache = RealPrefixCache::new(true, 4, 4, 8, 1024);
+
+        let resident_tokens = vec![10u32, 11, 12, 13, 14, 15, 16, 17];
+        let resident = PagedPrefixRegistration {
+            prompt_tokens: resident_tokens.clone(),
+            block_ids: vec![100, 101],
+            linear_state: LinearAttentionState::new(&config, &device)?,
+            next_token: None,
+        };
+        let outcome = cache.register(None, resident);
+        assert_eq!(outcome.retained_blocks, vec![100, 101]);
+
+        // 8 new blocks needed > max_blocks of 4: can never fit.
+        let oversized = PagedPrefixRegistration {
+            prompt_tokens: (0..32u32).collect(),
+            block_ids: (200..208u32).collect(),
+            linear_state: LinearAttentionState::new(&config, &device)?,
+            next_token: None,
+        };
+        let outcome = cache.register(None, oversized);
+        assert!(
+            outcome.retained_blocks.is_empty() && outcome.evicted_blocks.is_empty(),
+            "unfittable registration must be a no-op"
+        );
+
+        let stats = cache.stats();
+        assert_eq!(
+            stats.cached_entries, 1,
+            "resident entry must survive an unfittable registration attempt"
+        );
+        assert!(
+            cache
+                .lookup(&None, &[10u32, 11, 12, 13, 14, 15, 16, 17, 50, 51])?
+                .is_some(),
+            "resident entry must still be hittable after the unfittable attempt"
         );
         Ok(())
     }

@@ -344,10 +344,7 @@ impl MatmulRequest {
             self.rhs_shape[rank - 1],
             self.rhs_layout,
         );
-        Some((
-            [lhs.0, lhs.1],
-            [rhs.0, rhs.1],
-        ))
+        Some(([lhs.0, lhs.1], [rhs.0, rhs.1]))
     }
 
     pub fn rank(&self) -> Option<usize> {
@@ -377,7 +374,6 @@ impl MatmulRequest {
         }
         self.batch == MatmulBatchPolicy::from_leading_shape(&self.lhs_shape[..rank - 2])
     }
-
 }
 
 /// Attention operation family being queried.
@@ -1788,7 +1784,16 @@ impl DecodeBatcherPolicy {
                 direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate::EnabledUnlessOff(
                     "KILN_ROCM_PAGED_DECODE",
                 ),
-                allow_prefix_cache_split_snapshot: false,
+                // Must stay true on every backend that serves chat traffic:
+                // without the prefill-split snapshot no block-aligned prefix
+                // entry ever registers, and RealPrefixCache strict-prefix
+                // lookups (entry len % block_size == 0) can never hit — every
+                // multi-turn agent request re-prefills its full history.
+                // 002af558 set this false while optimizing ROCm long-context
+                // prefill, trading one extra forward boundary + one ~27 MiB
+                // linear-state snapshot per request for a full re-prefill
+                // (40s+ at 16K tokens) on EVERY turn of every conversation.
+                allow_prefix_cache_split_snapshot: true,
                 paged_decode_requires_contiguous_kv_chunks: true,
                 use_greedy_token_decode: false,
                 use_native_sampled_contiguous_decode: false,

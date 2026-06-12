@@ -4225,7 +4225,8 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     assert!(
         direct_paged_decode_attention_helper.contains("fn native_decode_attention_required(")
             && direct_paged_decode_attention_helper.contains("require_native_decode_attention")
-            && forward_source.contains("decode_hot_path_debug_fallback_enabled_for_backend(backend)")
+            && forward_source
+                .contains("decode_hot_path_debug_fallback_enabled_for_backend(backend)")
             && forward_source.contains("decode_hot_path_debug_fallback_env_for_backend(backend)"),
         "decode attention native-required routing should combine DecodeBatcherPolicy with BackendFallbackCapabilities"
     );
@@ -6962,10 +6963,9 @@ fn generated_capability_report_tracks_migration_phase_status() {
 
 #[test]
 fn cuda_graph_replay_hidden_routes_through_replay_plan_contract() {
-    let cuda_graph_source = fs::read_to_string(
-        workspace_root().join("crates/kiln-model/src/cuda_graph.rs"),
-    )
-    .expect("cuda_graph.rs should be readable");
+    let cuda_graph_source =
+        fs::read_to_string(workspace_root().join("crates/kiln-model/src/cuda_graph.rs"))
+            .expect("cuda_graph.rs should be readable");
     let replay_section = source_between(
         &cuda_graph_source,
         "if let Some(captured) = self.captured.get(&cache_key)",
@@ -7006,10 +7006,9 @@ fn cuda_graph_replay_hidden_routes_through_replay_plan_contract() {
 
 #[test]
 fn rocm_graph_replay_hidden_routes_through_replay_plan_contract() {
-    let rocm_graph_source = fs::read_to_string(
-        workspace_root().join("crates/kiln-model/src/rocm_graph.rs"),
-    )
-    .expect("rocm_graph.rs should be readable");
+    let rocm_graph_source =
+        fs::read_to_string(workspace_root().join("crates/kiln-model/src/rocm_graph.rs"))
+            .expect("rocm_graph.rs should be readable");
     let replay_hidden_section = source_between(
         &rocm_graph_source,
         "fn replay_hidden(",
@@ -7083,10 +7082,9 @@ fn metal_graph_icb_replay_routes_through_replay_plan_contract() {
 
 #[test]
 fn vulkan_resident_decode_routes_command_batch_through_replay_plan_contract() {
-    let vk_source = fs::read_to_string(
-        workspace_root().join("crates/kiln-model/src/vk_decode_resident.rs"),
-    )
-    .expect("vk_decode_resident.rs should be readable");
+    let vk_source =
+        fs::read_to_string(workspace_root().join("crates/kiln-model/src/vk_decode_resident.rs"))
+            .expect("vk_decode_resident.rs should be readable");
     let production = production_source_before_tests(&vk_source);
     let replay_plan_impl = source_between(
         production,
@@ -7224,10 +7222,7 @@ fn replay_plan_cpu_mock_parity_gate_runs_in_unification_contract() -> GraphContr
     };
 
     plan.validate_inputs(ReplayInputs::new(&key, &resources))?;
-    let outputs = kiln_graph::ReplayPlan::replay(
-        &mut plan,
-        ReplayInputs::new(&key, &resources),
-    )?;
+    let outputs = kiln_graph::ReplayPlan::replay(&mut plan, ReplayInputs::new(&key, &resources))?;
     assert_eq!(outputs.replay_count, 1);
     assert_eq!(outputs.resources, resources);
     let replayed = plan
@@ -7355,7 +7350,11 @@ fn generated_capability_report_check_mode_is_non_mutating_and_enforced() {
             "capability report generator should keep check-mode contract: {required}"
         );
     }
-    for forbidden in ["GITHUB_HEAD_REF", "GITHUB_REF_NAME", "branch\", \"--show-current"] {
+    for forbidden in [
+        "GITHUB_HEAD_REF",
+        "GITHUB_REF_NAME",
+        "branch\", \"--show-current",
+    ] {
         assert!(
             !script_source.contains(forbidden),
             "capability report generator should not depend on branch-specific metadata: {forbidden}"
@@ -7390,4 +7389,40 @@ fn generated_capability_report_check_mode_is_non_mutating_and_enforced() {
         evidence_present.contains(&"scripts/check_unification_gates.sh"),
         "generated dashboard gate should cite the local unification gate"
     );
+}
+
+/// Every backend must keep the prefix-cache split snapshot enabled.
+///
+/// The prefill-split snapshot is the ONLY producer of block-aligned
+/// strict-prefix cache entries, and `RealPrefixCache` can only serve a
+/// longer next-turn prompt from a block-aligned entry. A backend arm that
+/// sets `allow_prefix_cache_split_snapshot: false` therefore silently
+/// disables multi-turn prefix caching wholesale: every agent turn
+/// re-prefills its entire conversation history from scratch (40s+ per turn
+/// at 16K tokens on Strix Halo). Commit 002af558 did exactly that to ROCm
+/// while optimizing long-context prefill, and nothing caught it.
+///
+/// If a backend ever genuinely cannot capture a mid-prefill
+/// `LinearAttentionState` snapshot, gate it behind an env override with a
+/// startup warning — never a silent policy `false`.
+#[test]
+fn every_backend_allows_prefix_cache_split_snapshot() {
+    use kiln_model::backend::capability::DecodeBatcherPolicy;
+
+    let arms = [
+        ("cuda", kiln_tensor::Device::Cuda(0)),
+        ("rocm", kiln_tensor::Device::Rocm(0)),
+        ("metal", kiln_tensor::Device::Metal(0)),
+        ("vulkan", kiln_tensor::Device::Vulkan(0)),
+        ("cpu", kiln_tensor::Device::Cpu),
+    ];
+    for (name, device) in arms {
+        let policy = DecodeBatcherPolicy::for_backend(name, device);
+        assert!(
+            policy.allow_prefix_cache_split_snapshot,
+            "backend `{name}` disables the prefix-cache split snapshot, which kills \
+             multi-turn prefix caching (every turn fully re-prefills its history); \
+             see the field comment on allow_prefix_cache_split_snapshot"
+        );
+    }
 }
