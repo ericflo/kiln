@@ -936,8 +936,7 @@ fn tiny_gdn_weights_bf16(config: &ModelConfig, device: &Device) -> GpuWeights {
     let head_dim = config.head_dim;
 
     let bf16 = |t: &Tensor| kiln_tensor::ops::cast(t, DType::BF16).expect("cast bf16");
-    let rnd =
-        |shape: &[usize]| bf16(&Tensor::randn(0.0_f32, 0.02, shape, device).unwrap());
+    let rnd = |shape: &[usize]| bf16(&Tensor::randn(0.0_f32, 0.02, shape, device).unwrap());
     let rnd_t = |shape: &[usize]| {
         let w = Tensor::randn(0.0_f32, 0.02, shape, device).unwrap();
         let wt = w.t().unwrap().contiguous().unwrap();
@@ -1310,7 +1309,10 @@ fn test_real_model_grpo_metal() {
     assert_adapter_written(&out);
 
     let losses = losses.lock().unwrap();
-    assert!(!losses.is_empty(), "GRPO progress callback recorded no losses");
+    assert!(
+        !losses.is_empty(),
+        "GRPO progress callback recorded no losses"
+    );
     assert!(
         losses.iter().all(|l| l.is_finite()),
         "all GRPO training losses must be finite, got {losses:?}"
@@ -1456,7 +1458,10 @@ fn test_real_model_opd_metal() {
             // (adapter written + finite losses + grads flowed).
             assert_adapter_written(&out);
             let losses = losses.lock().unwrap();
-            assert!(!losses.is_empty(), "OPD progress callback recorded no losses");
+            assert!(
+                !losses.is_empty(),
+                "OPD progress callback recorded no losses"
+            );
             assert!(
                 losses.iter().all(|l| l.is_finite()),
                 "all OPD training losses must be finite, got {losses:?}"
@@ -1485,4 +1490,387 @@ fn test_real_model_opd_metal() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-turn prefix-cache reuse with a REAL ModelRunner (CPU).
+//
+// These are the regression tests for the 002af558 class of bug: the prefix
+// cache "worked" (entries registered, exact replays hit) while multi-turn
+// reuse — the entire point of the cache for agent traffic — was structurally
+// impossible because no block-aligned strict-prefix entry ever registered.
+// One test drives the batching-engine forward (CUDA/Vulkan/ROCm/CPU serve
+// path), one drives the non-batched generate path (Metal's default serve
+// path); both run on the CPU backend so they execute on every CI runner.
+// ---------------------------------------------------------------------------
+
+use std::sync::{Arc, Mutex, RwLock};
+
+use kiln_core::block::BlockManager;
+use kiln_core::sampling::SamplingParams;
+use kiln_core::token::TokenId;
+use kiln_model::{CancelHandle, FinishReason, PagedKvCacheKt, PagedPrefixReuse};
+use kiln_server::batching_engine::{DecodeForward, EngineRequest, RealDecodeForward};
+use kiln_server::state::RealPrefixCache;
+use uuid::Uuid;
+
+const PREFIX_TEST_BLOCK_SIZE: usize = 16;
+const PREFIX_TEST_NUM_BLOCKS: usize = 64;
+
+/// Tiny HYBRID config (one GDN layer + one full-attention layer) in FP32 for
+/// CPU prefix-cache tests. The GDN layer matters: prefix-cache resume must
+/// restore the linear-attention state snapshot exactly, and a full-attn-only
+/// model would never exercise that path.
+fn tiny_gdn_config_f32() -> ModelConfig {
+    ModelConfig {
+        hidden_size: 8,
+        num_layers: 2,
+        num_attention_heads: 2,
+        num_kv_heads: 1,
+        head_dim: 4,
+        intermediate_size: 16,
+        vocab_size: 32,
+        max_position_embeddings: 256,
+        rms_norm_eps: 1e-6,
+        rope_theta: 10_000.0,
+        dtype: kiln_core::config::DType::FP32,
+        // Layer 0 -> linear (GDN), layer 1 -> full attention.
+        num_full_attention_layers: 1,
+        full_attention_interval: 2,
+        attn_output_gate: false,
+        linear_num_key_heads: 1,
+        linear_key_head_dim: 4,
+        linear_num_value_heads: 1,
+        linear_value_head_dim: 4,
+        linear_conv_kernel_dim: 4,
+        partial_rotary_factor: 1.0,
+    }
+}
+
+/// FP32 GpuWeights for [`tiny_gdn_config_f32`]: layer 0 GDN, layer 1 full
+/// attention. Same literal as `tiny_gdn_weights_bf16` minus the BF16 casts.
+fn tiny_gdn_weights_f32(config: &ModelConfig, device: &Device) -> GpuWeights {
+    let h = config.hidden_size;
+    let inter = config.intermediate_size;
+    let vocab = config.vocab_size;
+    let num_heads = config.num_attention_heads;
+    let num_kv_heads = config.num_kv_heads;
+    let head_dim = config.head_dim;
+
+    let rnd = |shape: &[usize]| Tensor::randn(0.0_f32, 0.02, shape, device).unwrap();
+    let rnd_t = |shape: &[usize]| {
+        let w = Tensor::randn(0.0_f32, 0.02, shape, device).unwrap();
+        let wt = w.t().unwrap().contiguous().unwrap();
+        (w, wt)
+    };
+
+    let embed = Tensor::randn(0.0_f32, 0.02, (vocab, h), device).unwrap();
+    let embed_t = embed.t().unwrap().contiguous().unwrap();
+    let final_norm = Tensor::zeros((h,), DType::F32, device).unwrap();
+
+    let mk_mlp = || {
+        let (gate_proj, gate_proj_t) = rnd_t(&[inter, h]);
+        let (up_proj, up_proj_t) = rnd_t(&[inter, h]);
+        let (down_proj, down_proj_t) = rnd_t(&[h, inter]);
+        GpuFfnWeights {
+            gate_proj,
+            up_proj,
+            down_proj,
+            gate_proj_t,
+            up_proj_t,
+            down_proj_t,
+            gate_up_proj_t: None,
+            gate_up_proj_w8: None,
+            gate_proj_marlin: None,
+            up_proj_marlin: None,
+            down_proj_marlin: None,
+            down_proj_w8: None,
+        }
+    };
+
+    // --- Layer 0: GDN (linear attention). ---
+    let qkv_dim = config.linear_qkv_dim();
+    let v_dim = config.linear_v_dim();
+    let nv = config.linear_num_value_heads;
+    let (in_proj_qkv, in_proj_qkv_t) = rnd_t(&[qkv_dim, h]);
+    let (in_proj_z, in_proj_z_t) = rnd_t(&[v_dim, h]);
+    let (out_proj, out_proj_t) = rnd_t(&[h, v_dim]);
+    let (in_proj_a, in_proj_a_t) = rnd_t(&[nv, h]);
+    let (in_proj_b, in_proj_b_t) = rnd_t(&[nv, h]);
+    let a_log = Tensor::randn(0.0_f32, 0.5, (nv,), device).unwrap();
+    let gdn_layer = GpuLayerWeights {
+        input_layernorm: Tensor::zeros((h,), DType::F32, device).unwrap(),
+        post_attention_layernorm: Tensor::zeros((h,), DType::F32, device).unwrap(),
+        attention: GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
+            in_proj_qkv,
+            in_proj_z,
+            out_proj,
+            in_proj_a,
+            in_proj_b,
+            conv1d: rnd(&[qkv_dim, 1, config.linear_conv_kernel_dim]),
+            norm: Tensor::ones((config.linear_value_head_dim,), DType::F32, device).unwrap(),
+            a_log: a_log.clone(),
+            a_log_gates: a_log,
+            dt_bias: Tensor::zeros((nv,), DType::F32, device).unwrap(),
+            in_proj_qkv_t,
+            in_proj_z_t,
+            in_proj_a_t,
+            in_proj_b_t,
+            in_proj_ab_t: None,
+            out_proj_t,
+            out_proj_marlin: None,
+            in_proj_qkvzab_w8: None,
+        }),
+        mlp: mk_mlp(),
+    };
+
+    // --- Layer 1: full attention. ---
+    let (q_proj, q_proj_t) = rnd_t(&[num_heads * head_dim, h]);
+    let (k_proj, k_proj_t) = rnd_t(&[num_kv_heads * head_dim, h]);
+    let (v_proj, v_proj_t) = rnd_t(&[num_kv_heads * head_dim, h]);
+    let (o_proj, o_proj_t) = rnd_t(&[h, num_heads * head_dim]);
+    let full_layer = GpuLayerWeights {
+        input_layernorm: Tensor::zeros((h,), DType::F32, device).unwrap(),
+        post_attention_layernorm: Tensor::zeros((h,), DType::F32, device).unwrap(),
+        attention: GpuAttentionWeights::Full(GpuFullAttentionWeights {
+            q_proj,
+            k_proj,
+            v_proj,
+            o_proj,
+            q_norm: Tensor::zeros((head_dim,), DType::F32, device).unwrap(),
+            k_norm: Tensor::zeros((head_dim,), DType::F32, device).unwrap(),
+            q_proj_t,
+            k_proj_t,
+            v_proj_t,
+            qkv_proj_t: None,
+            qkv_proj_w8: None,
+            o_proj_t,
+            q_proj_marlin: None,
+            o_proj_w8: None,
+        }),
+        mlp: mk_mlp(),
+    };
+
+    let rotary_inv_freq = kiln_model::forward::compute_rotary_inv_freq(
+        config.rotary_dim(),
+        config.rope_theta,
+        device,
+    )
+    .unwrap();
+
+    GpuWeights {
+        embed_tokens: embed,
+        embed_tokens_t: embed_t,
+        layers: vec![gdn_layer, full_layer],
+        final_norm,
+        rotary_inv_freq,
+        mtp: None,
+        lm_head_w8: None,
+    }
+}
+
+fn prefix_test_paged_cache(config: &ModelConfig) -> PagedKvCacheKt {
+    PagedKvCacheKt::new(
+        config.num_full_attention_layers,
+        PREFIX_TEST_NUM_BLOCKS,
+        PREFIX_TEST_BLOCK_SIZE,
+        config.num_kv_heads,
+        config.head_dim,
+        DType::F32,
+        Device::Cpu,
+    )
+    .expect("paged KV cache")
+}
+
+/// 81 deterministic prompt tokens: long enough that the prefill-split entry
+/// (floor((81-1)/16)*16 = 80 tokens) clears the production-style
+/// min_register_tokens=64 gate, and non-block-aligned (81 % 16 != 0) like
+/// every real chat-template rendering.
+fn prefix_test_turn1_prompt() -> Vec<TokenId> {
+    (0..81u32).map(|i| (i % 17) + 1).collect()
+}
+
+/// Batching-engine serve path (CUDA / Vulkan / ROCm / CPU default): turn 1
+/// must register a block-aligned strict-prefix entry, and turn 2 (a superset
+/// prompt, as every multi-turn agent request is) must HIT it instead of
+/// re-prefilling the whole conversation.
+#[test]
+fn prefix_cache_multi_turn_hit_through_batching_engine_forward() {
+    let config = tiny_config();
+    let weights = tiny_weights(&config, &Device::Cpu);
+    let runner = ModelRunner::new(weights, test_tokenizer(), config.clone());
+
+    let prefix_cache = Arc::new(Mutex::new(RealPrefixCache::new_with_min_register_tokens(
+        true,
+        PREFIX_TEST_BLOCK_SIZE,
+        32,   // max_blocks
+        8,    // max_entries
+        1024, // state_bytes_per_entry (accounting only)
+        64,   // production REAL_PREFIX_CACHE_MIN_REGISTER_TOKENS
+    )));
+    let forward = RealDecodeForward::new(
+        Arc::new(RwLock::new(runner)),
+        Arc::new(Mutex::new(BlockManager::new(
+            PREFIX_TEST_NUM_BLOCKS,
+            PREFIX_TEST_BLOCK_SIZE,
+        ))),
+        Arc::new(prefix_test_paged_cache(&config)),
+        prefix_cache.clone(),
+        Arc::new(RwLock::new(())),
+    );
+
+    let sampling = SamplingParams {
+        max_tokens: 4,
+        ..SamplingParams::greedy()
+    };
+    let turn1 = prefix_test_turn1_prompt();
+    let req1 = EngineRequest {
+        request_id: Uuid::new_v4(),
+        prompt_tokens: turn1.clone(),
+        sampling: sampling.clone(),
+        adapter: None,
+        cancel: CancelHandle::new(),
+    };
+    let slot1 = forward.prepare_request(&req1).expect("turn-1 prepare");
+    forward
+        .finish_request(slot1, FinishReason::MaxTokens)
+        .expect("turn-1 finish");
+
+    let stats = prefix_cache.lock().unwrap().stats();
+    assert_eq!(stats.lookup_hits, 0);
+    assert_eq!(stats.lookup_misses, 1, "turn-1 lookup must miss (cold)");
+    assert!(
+        stats.cached_entries >= 2,
+        "turn-1 must register the prompt entry AND the block-aligned \
+         prefill-split entry; got {} entries — if this is 1, the split \
+         snapshot was not captured (the 002af558 regression)",
+        stats.cached_entries
+    );
+
+    // Turn 2: the conversation grew (assistant reply + new user message).
+    let mut turn2 = turn1.clone();
+    turn2.extend((0..9u32).map(|i| (i % 7) + 2));
+    let req2 = EngineRequest {
+        request_id: Uuid::new_v4(),
+        prompt_tokens: turn2,
+        sampling,
+        adapter: None,
+        cancel: CancelHandle::new(),
+    };
+    let slot2 = forward.prepare_request(&req2).expect("turn-2 prepare");
+    let stats = prefix_cache.lock().unwrap().stats();
+    assert_eq!(
+        stats.lookup_hits, 1,
+        "turn-2 must hit the block-aligned strict-prefix entry"
+    );
+    assert_eq!(
+        stats.hit_tokens, 80,
+        "the hit must cover the full split position (floor((81-1)/16)*16)"
+    );
+    forward
+        .finish_request(slot2, FinishReason::MaxTokens)
+        .expect("turn-2 finish");
+}
+
+/// Non-batched serve path (Metal's default): the non-streaming CPU prefill
+/// must register a block-aligned strict-prefix entry (the branch 002af558-era
+/// code only covered under streaming prefill), and resuming generation from
+/// that entry — paged KV blocks + the GDN linear-attention state snapshot —
+/// must produce tokens IDENTICAL to an uncached full prefill. Token
+/// equivalence on a hybrid GDN model is the correctness proof that the
+/// linear-state snapshot/restore is exact, not just that plumbing connects.
+#[test]
+fn prefix_cache_nonbatched_path_split_entry_replays_token_identical() {
+    let config = tiny_gdn_config_f32();
+    let weights = tiny_gdn_weights_f32(&config, &Device::Cpu);
+    let runner = ModelRunner::new(weights, test_tokenizer(), config.clone());
+
+    let sampling = SamplingParams {
+        max_tokens: 4,
+        ..SamplingParams::greedy()
+    };
+    let turn1 = prefix_test_turn1_prompt();
+
+    let block_manager = Mutex::new(BlockManager::new(
+        PREFIX_TEST_NUM_BLOCKS,
+        PREFIX_TEST_BLOCK_SIZE,
+    ));
+    let paged_cache = prefix_test_paged_cache(&config);
+    let out1 = runner
+        .generate_paged_shared_tokens_with_prefix_cache(
+            &turn1,
+            &sampling,
+            &block_manager,
+            &paged_cache,
+            None,
+            None,
+        )
+        .expect("turn-1 generation");
+
+    let split_reg = out1
+        .extra_registrations
+        .iter()
+        .find(|reg| {
+            reg.prompt_tokens.len() % PREFIX_TEST_BLOCK_SIZE == 0
+                && turn1.starts_with(&reg.prompt_tokens)
+        })
+        .expect(
+            "non-streaming CPU prefill must register a block-aligned strict-prefix \
+             entry — its absence means the non-batched path lost the split snapshot",
+        );
+    assert_eq!(split_reg.prompt_tokens.len(), 80);
+
+    // Turn 2 extends the transcript: turn-1 prompt + emitted tokens + new input.
+    let mut turn2 = turn1.clone();
+    turn2.extend(out1.output.token_ids.iter().copied());
+    turn2.extend([3u32, 5, 7, 2, 4]);
+
+    // Control: full prefill on a fresh KV pool, no cache involvement.
+    let control_bm = Mutex::new(BlockManager::new(
+        PREFIX_TEST_NUM_BLOCKS,
+        PREFIX_TEST_BLOCK_SIZE,
+    ));
+    let control_pc = prefix_test_paged_cache(&config);
+    let control = runner
+        .generate_paged_shared_tokens_with_prefix_cache(
+            &turn2,
+            &sampling,
+            &control_bm,
+            &control_pc,
+            None,
+            None,
+        )
+        .expect("control generation");
+
+    // Cached: resume from the split entry's KV blocks + linear-state snapshot
+    // (turn-1's blocks are still resident in `paged_cache`; nothing freed them).
+    let reuse = PagedPrefixReuse {
+        cached_tokens: split_reg.prompt_tokens.len(),
+        block_ids: split_reg.block_ids.clone(),
+        linear_state: split_reg
+            .linear_state
+            .snapshot()
+            .expect("snapshot registered linear state"),
+        next_token: None,
+    };
+    let cached = runner
+        .generate_paged_shared_tokens_with_prefix_cache(
+            &turn2,
+            &sampling,
+            &block_manager,
+            &paged_cache,
+            Some(reuse),
+            None,
+        )
+        .expect("cached generation");
+
+    assert!(
+        !control.output.token_ids.is_empty(),
+        "control run must generate at least one token for the equivalence check"
+    );
+    assert_eq!(
+        cached.output.token_ids, control.output.token_ids,
+        "generation resumed from the prefix-cache entry (KV blocks + GDN linear \
+         state) must be token-identical to an uncached full prefill"
+    );
 }
