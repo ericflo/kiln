@@ -44,8 +44,9 @@ pub struct KilnConfig {
     pub agent: Option<AgentConfig>,
 }
 
-/// `[agent]` — the self-improvement flywheel scheduler.
-#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+/// `[agent]` — the self-improvement flywheel scheduler and the
+/// embedded pi run engine.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentConfig {
     /// Run the §10.6.2 self_improve loop every N hours (168 = weekly).
@@ -61,6 +62,35 @@ pub struct AgentConfig {
     /// scheduled round gated (§8.7: auto-load defers; failures demote).
     #[serde(default)]
     pub self_improve: Option<serde_json::Value>,
+    /// Embedded pi runs executing at once (`POST /v1/agent/runs`).
+    /// Queued runs start FIFO as slots free up. Inference batching
+    /// interleaves the concurrent agents' requests.
+    #[serde(default = "default_max_concurrent_runs")]
+    pub max_concurrent_runs: usize,
+    /// Wall-clock cap per embedded run, after which pi is aborted and
+    /// the partial session is still indexed. Per-run `timeout_secs`
+    /// overrides this.
+    #[serde(default = "default_run_timeout_secs")]
+    pub run_timeout_secs: u64,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            self_improve_interval_hours: None,
+            self_improve: None,
+            max_concurrent_runs: default_max_concurrent_runs(),
+            run_timeout_secs: default_run_timeout_secs(),
+        }
+    }
+}
+
+fn default_max_concurrent_runs() -> usize {
+    2
+}
+
+fn default_run_timeout_secs() -> u64 {
+    900
 }
 
 /// Eval subsystem configuration.

@@ -187,14 +187,36 @@ fn scan_sessions_dir(dir: &Path, depth_left: usize, index: &mut AgentTraceIndex)
 /// shared by the explicit POST /v1/agent/traces/discover route and the
 /// self_improve/judge_distill auto-discovery below. Returns the number
 /// of indexed sessions.
+///
+/// Embedded-run sessions (`<adapter_dir>/agent_runs/sessions/`) are
+/// always swept in too: a rebuild from the user's `~/.pi` dir must not
+/// drop the rollouts kiln generated itself.
 pub(crate) fn discover_traces_into(
     sessions_dir: &Path,
     adapter_dir: &Path,
 ) -> std::io::Result<usize> {
     let mut index = AgentTraceIndex::default();
-    let count = scan_sessions_dir(sessions_dir, SESSIONS_SCAN_MAX_DEPTH, &mut index);
+    let mut count = scan_sessions_dir(sessions_dir, SESSIONS_SCAN_MAX_DEPTH, &mut index);
+    let embedded = adapter_dir.join("agent_runs").join("sessions");
+    if embedded.is_dir() && embedded != sessions_dir {
+        count += scan_sessions_dir(&embedded, SESSIONS_SCAN_MAX_DEPTH, &mut index);
+    }
     index.save_to_path(&adapter_dir.join("agent_traces.json"))?;
     Ok(count)
+}
+
+/// Merge one session JSONL into the persisted index — the embedded-run
+/// finalizer calls this so every run kiln drives lands in the trace
+/// layer immediately, without clobbering previously discovered traces.
+pub(crate) fn index_session_file(adapter_dir: &Path, session_path: &Path) -> Option<AgentTrace> {
+    let trace = parse_pi_session(session_path)?;
+    let index_path = adapter_dir.join("agent_traces.json");
+    let mut index = AgentTraceIndex::load_from_path(&index_path);
+    index.traces.insert(trace.id.clone(), trace.clone());
+    if let Err(e) = index.save_to_path(&index_path) {
+        tracing::warn!(error = %e, "agent_traces.json merge write failed");
+    }
+    Some(trace)
 }
 
 /// Auto-discovery for the §10.6 endpoints: when `agent_traces.json` is

@@ -6,6 +6,7 @@ use tracing::Span;
 use crate::state::AppState;
 
 mod adapters;
+pub mod agent_runs;
 pub mod agent_traces;
 pub(crate) mod cache;
 pub(crate) mod completions;
@@ -78,6 +79,7 @@ pub fn router(state: AppState) -> Router {
         .merge(recipes::routes())
         .merge(cache::routes())
         .merge(library::routes())
+        .merge(agent_runs::routes())
         .merge(agent_traces::routes())
         .merge(self_improve::routes())
         .merge(pit_of_success::routes())

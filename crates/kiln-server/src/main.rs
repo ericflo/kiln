@@ -230,6 +230,8 @@ async fn main() -> Result<()> {
     let host = &config.server.host;
     kiln_server::api::terminal::set_bind_host(host);
     let port = config.server.port;
+    // Embedded agent runs configure the spawned pi against this URL.
+    kiln_server::agent_runs::set_self_url(host, port);
 
     let model_config = ModelConfig::qwen3_5_4b();
     let model_path = config.model.path.as_deref();
@@ -607,6 +609,15 @@ async fn main() -> Result<()> {
                 tracing::warn!(error = %e, dir = %log_dir.display(), "request log disabled: could not initialize");
             }
         }
+    }
+
+    // Embedded pi run engine: capacity + timeout from [agent] (defaults
+    // apply when the section is omitted).
+    {
+        let agent_cfg = config.agent.clone().unwrap_or_default();
+        state
+            .agent_runs
+            .apply_config(agent_cfg.max_concurrent_runs, agent_cfg.run_timeout_secs);
     }
 
     // Spawn the background training queue worker
