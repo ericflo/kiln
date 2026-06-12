@@ -162,7 +162,7 @@ fn per_segment_activation_bytes(
     let h = cfg.hidden_size as u64;
     let i = cfg.intermediate_size as u64;
     let t = max_seq_len as u64;
-    let layers_per_seg = (cfg.num_layers / num_segments.max(1)).max(1) as u64;
+    let layers_per_seg = cfg.num_layers.div_ceil(num_segments.max(1)).max(1) as u64;
     // Per layer: 6 hidden-sized tensors + 2 intermediate-sized tensors.
     let per_layer = (6 * h + 2 * i) * t * elem;
     per_layer * layers_per_seg
@@ -788,6 +788,32 @@ mod tests {
     }
 
     #[test]
+    fn estimator_charges_largest_ceiling_segment() {
+        let cfg = qwen_4b();
+        let seq_len = 1024usize;
+        let segments = 5usize;
+        let estimate = estimate_step_working_set_with_options(
+            &cfg,
+            seq_len,
+            8,
+            segments,
+            WeightResidency::SingleCopy,
+            true,
+            EstimateOptions {
+                activation_bytes_per_elem: Some(1),
+                ..Default::default()
+            },
+        );
+        let expected_layers = cfg.num_layers.div_ceil(segments) as u64;
+        let per_layer =
+            (6 * cfg.hidden_size as u64 + 2 * cfg.intermediate_size as u64) * seq_len as u64;
+        assert_eq!(
+            estimate.breakdown.per_segment_activations,
+            per_layer * expected_layers
+        );
+    }
+
+    #[test]
     fn auto_fit_segments_raises_segments_until_long_context_fits() {
         let cfg = qwen_4b();
         let max_seq_len = 104_412;
@@ -831,6 +857,34 @@ mod tests {
         assert!(
             fit.total_bytes <= available,
             "auto-fit plan must fit: segments={segments}, estimate={}, available={available}",
+            fit.total_bytes
+        );
+    }
+
+    #[test]
+    fn auto_fit_long_gdn_context_rejects_when_even_one_layer_exceeds_available() {
+        let cfg = qwen_4b();
+        let max_seq_len = 104_412;
+        let available = 21 * BYTES_PER_GB;
+        let options = EstimateOptions {
+            max_supervised_tokens: Some(512),
+            recompute_boundaries: true,
+            activation_bytes_per_elem: Some(10),
+        };
+        let (segments, fit) = auto_fit_checkpoint_segments(
+            &cfg,
+            max_seq_len,
+            8,
+            cfg.num_layers,
+            WeightResidency::DualResidentCpuAndVulkan,
+            true,
+            options,
+            available,
+        );
+        assert_eq!(segments, cfg.num_layers);
+        assert!(
+            fit.total_bytes > available,
+            "auto-fit must reject instead of accepting a GDN long-context plan: estimate={}, available={available}",
             fit.total_bytes
         );
     }

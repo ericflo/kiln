@@ -395,7 +395,7 @@ impl ApiError {
             status: StatusCode::PAYLOAD_TOO_LARGE,
             code: "training_will_not_fit",
             message: detailed_message,
-            hint: "Lower the per-step memory by raising KILN_GRAD_CHECKPOINT_SEGMENTS, shrinking lora_rank, sending fewer/shorter examples, or — only if your host can spare RAM — overriding KILN_TRAINING_MEMORY_RESERVE_GB.",
+            hint: "Dynamic checkpointing already tried to fit the step. Lower per-step memory by shrinking lora_rank, sending fewer/shorter examples, or freeing memory from other processes.",
             retry_after_seconds: None,
         }
     }

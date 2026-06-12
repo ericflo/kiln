@@ -50,6 +50,23 @@ fn model_dtype_bytes(dtype: kiln_core::config::DType) -> usize {
     }
 }
 
+const GDN_TAPE_EFFECTIVE_BYTES_PER_ELEM: usize = 10;
+
+fn training_activation_bytes_per_elem(
+    base: usize,
+    uses_f32_activations: bool,
+    has_linear_attention: bool,
+) -> usize {
+    if uses_f32_activations {
+        return 4;
+    }
+    if has_linear_attention {
+        base.max(GDN_TAPE_EFFECTIVE_BYTES_PER_ELEM)
+    } else {
+        base
+    }
+}
+
 fn training_activation_bytes_per_elem_for_state(state: &AppState) -> usize {
     let base = model_dtype_bytes(state.model_config.dtype);
     let ModelBackend::Real { runner, .. } = state.backend.as_ref() else {
@@ -61,14 +78,19 @@ fn training_activation_bytes_per_elem_for_state(state: &AppState) -> usize {
         );
         return base;
     };
-    if runner
-        .training_precision_policy()
-        .uses_f32_activations_for_mixed_base_weights()
-    {
-        4
-    } else {
-        base
-    }
+    // Mirror kiln-train's GDN tape sizing. The server stamps resolved
+    // checkpoint segments at submission time, so an optimistic bf16-only
+    // preflight would bypass the trainer's more conservative auto-tuner.
+    training_activation_bytes_per_elem(
+        base,
+        runner
+            .training_precision_policy()
+            .uses_f32_activations_for_mixed_base_weights(),
+        runner
+            .weights
+            .linear_attention_layers_in_prefix(runner.config.num_layers)
+            > 0,
+    )
 }
 
 fn checkpoint_env_override_present() -> bool {
@@ -1831,6 +1853,13 @@ mod tests {
             config: GrpoConfig::default(),
             post_eval: None,
         }
+    }
+
+    #[test]
+    fn server_preflight_activation_width_matches_gdn_trainer_tape() {
+        assert_eq!(training_activation_bytes_per_elem(2, false, false), 2);
+        assert_eq!(training_activation_bytes_per_elem(2, false, true), 10);
+        assert_eq!(training_activation_bytes_per_elem(2, true, true), 4);
     }
 
     #[test]
