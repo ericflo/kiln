@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 pub fn cumsum(x: &Tensor, axis: usize) -> Result<Tensor> {
     if axis >= x.rank() {
@@ -73,17 +73,17 @@ pub fn cumsum(x: &Tensor, axis: usize) -> Result<Tensor> {
             for a in 0..axis_dim {
                 let idx = (o * axis_dim + a) * inner + i;
                 let v = match dtype {
-                    DType::F32 => f32::from_le_bytes(
-                        bytes[idx * 4..idx * 4 + 4].try_into().unwrap(),
-                    ),
-                    DType::BF16 => half::bf16::from_le_bytes(
-                        bytes[idx * 2..idx * 2 + 2].try_into().unwrap(),
-                    )
-                    .to_f32(),
-                    DType::F16 => half::f16::from_le_bytes(
-                        bytes[idx * 2..idx * 2 + 2].try_into().unwrap(),
-                    )
-                    .to_f32(),
+                    DType::F32 => {
+                        f32::from_le_bytes(bytes[idx * 4..idx * 4 + 4].try_into().unwrap())
+                    }
+                    DType::BF16 => {
+                        half::bf16::from_le_bytes(bytes[idx * 2..idx * 2 + 2].try_into().unwrap())
+                            .to_f32()
+                    }
+                    DType::F16 => {
+                        half::f16::from_le_bytes(bytes[idx * 2..idx * 2 + 2].try_into().unwrap())
+                            .to_f32()
+                    }
                     _ => unreachable!(),
                 };
                 acc += v;

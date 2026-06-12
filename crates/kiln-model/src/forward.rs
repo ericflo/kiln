@@ -9,11 +9,18 @@ use anyhow::{Context, Result};
 // CustomOp islands were removed (the kt tape is the sole grad producer).
 // Bare `Tensor`/`Device`/`DType`/`D` resolve to the kiln-native substrate.
 #[allow(unused_imports)]
-use kiln_tensor::{Tensor, Device, DType, D};
+use kiln_tensor::{D, DType, Device, Tensor};
 use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+use crate::backend::BackendIdentity;
 use crate::backend::capability::{
     BackendCapabilityQueries, InferenceRecurrentStatePolicy, MatmulRequest, ProjectionLoadPolicy,
     Support, decode_hot_path_debug_fallback_enabled_for_backend,
@@ -23,8 +30,6 @@ use crate::backend::{
     AttentionBackend, BackendRuntime, ConvBackend, GdnBackend, LinearBackend, PagedKvBackend,
     ReplayBackend, ResidencyBackend, SamplingBackend,
 };
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
-use crate::backend::BackendIdentity;
 use crate::kv_cache::KvCache;
 use crate::lora_loader::{
     LoraLayerWeights, LoraProjectionWeights, LoraWeights, compute_lora_delta, linear_with_lora_t,
@@ -42,7 +47,7 @@ use crate::transposed_weight_cache::{
 };
 use crate::weights::{DeferredMtpSource, ModelWeights, MtpWeights, TensorDType, WeightTensor};
 
-use kiln_core::block::{contiguous_slot_run_start, BlockTable};
+use kiln_core::block::{BlockTable, contiguous_slot_run_start};
 
 /// kt-tensor type alias (#1082). Bare `Tensor` in this file is
 /// `candle_core::Tensor`; `KtTensor` is the kiln-native
@@ -135,7 +140,9 @@ fn cuda_sigmoid(x: &Tensor) -> Result<Tensor> {
         && !x.track_op()
         && x.rank() > 0
     {
-        if let Some(out) = try_kt_sigmoid_composite(x).context("cuda_sigmoid try_kt_sigmoid_composite")? {
+        if let Some(out) =
+            try_kt_sigmoid_composite(x).context("cuda_sigmoid try_kt_sigmoid_composite")?
+        {
             return Ok(out);
         }
     }
@@ -421,8 +428,7 @@ fn cuda_use_kt_api_embedding() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     // #1082: flipped default ON. Bit-exact memcpy gather via
     // `cuda_index_select_dim0`. Escape hatch: `KILN_DISABLE_KT_API_EMBEDDING=1`.
-    let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_EMBEDDING").is_err());
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_EMBEDDING").is_err());
     !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
@@ -485,8 +491,7 @@ fn cuda_use_kt_api_lm_head() -> bool {
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 fn cuda_use_kt_api_swiglu_ffn() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SWIGLU_FFN").is_err());
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SWIGLU_FFN").is_err());
     !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
@@ -527,8 +532,7 @@ fn cuda_use_kt_api_swiglu_ffn() -> bool {
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_gqa_sdpa() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_GQA_SDPA").is_err());
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_GQA_SDPA").is_err());
     !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
@@ -772,8 +776,7 @@ fn cuda_use_kt_api_sum_last_dim() -> bool {
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_sum_axis() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SUM_AXIS").is_err());
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SUM_AXIS").is_err());
     !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
@@ -836,8 +839,7 @@ fn cuda_use_kt_api_min_last_dim() -> bool {
 fn cuda_use_kt_api_cat_dim0() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     // #1082: flipped default ON. Bit-exact memcpy concat axis=0.
-    let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_CAT_DIM0").is_err());
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_CAT_DIM0").is_err());
     !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
@@ -852,8 +854,7 @@ fn cuda_use_kt_api_cat_dim0() -> bool {
 fn cuda_use_kt_api_cat_dim2() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     // #1082: flipped default ON. Bit-exact memcpy concat axis=2.
-    let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_CAT_DIM2").is_err());
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_CAT_DIM2").is_err());
     !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
@@ -868,8 +869,7 @@ fn cuda_use_kt_api_cat_dim2() -> bool {
 fn cuda_use_kt_api_cat_dim1() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     // #1082: flipped default ON. Bit-exact memcpy concat axis=1.
-    let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_CAT_DIM1").is_err());
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_CAT_DIM1").is_err());
     !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
@@ -1025,8 +1025,7 @@ fn cuda_use_kt_api_max_binary() -> bool {
     // #1082: flipped default ON. Single-kernel `fmaxf` dispatch
     // (`cuda_binary_minmax` kind 1); bit-exact by construction.
     // Escape hatch: `KILN_DISABLE_KT_API_MAX_BINARY=1`.
-    let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MAX_BINARY").is_err());
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MAX_BINARY").is_err());
     !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
@@ -1050,8 +1049,7 @@ fn cuda_use_kt_api_max_binary() -> bool {
 #[allow(dead_code)]
 fn cuda_use_kt_api_min_binary() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MIN_BINARY").is_err());
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MIN_BINARY").is_err());
     !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
@@ -1185,8 +1183,7 @@ fn cuda_use_kt_api_pow() -> bool {
 #[allow(dead_code)]
 fn cuda_use_kt_api_div_scalar() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_DIV_SCALAR").is_err());
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_DIV_SCALAR").is_err());
     !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
@@ -1219,8 +1216,8 @@ fn cuda_use_kt_api_scalar_minus_tensor() -> bool {
     // via `cuda_scalar_op` kind 4; IEEE-equivalent to the candle
     // `(-x) + c` two-step composite. Escape hatch:
     // `KILN_DISABLE_KT_API_SCALAR_MINUS_TENSOR=1`.
-    let direct = *ENABLED
-        .get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SCALAR_MINUS_TENSOR").is_err());
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SCALAR_MINUS_TENSOR").is_err());
     !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
@@ -1248,8 +1245,8 @@ fn cuda_use_kt_api_scalar_minus_tensor() -> bool {
 #[allow(dead_code)]
 fn cuda_use_kt_api_scalar_div_tensor() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED
-        .get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SCALAR_DIV_TENSOR").is_err());
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SCALAR_DIV_TENSOR").is_err());
     !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
@@ -1279,8 +1276,8 @@ fn cuda_use_kt_api_scalar_div_tensor() -> bool {
 #[allow(dead_code)]
 fn cuda_use_kt_api_max_with_scalar() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED
-        .get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MAX_WITH_SCALAR").is_err());
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MAX_WITH_SCALAR").is_err());
     !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
@@ -1310,8 +1307,8 @@ fn cuda_use_kt_api_max_with_scalar() -> bool {
 #[allow(dead_code)]
 fn cuda_use_kt_api_min_with_scalar() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED
-        .get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MIN_WITH_SCALAR").is_err());
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MIN_WITH_SCALAR").is_err());
     !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
@@ -1688,8 +1685,7 @@ pub(crate) fn rocm_use_kt_api_matmul() -> bool {
 #[cfg(feature = "cuda")]
 pub fn cuda_use_kt_paged_kv_cache() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_PAGED_KV_CACHE").is_ok());
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_PAGED_KV_CACHE").is_ok());
     !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
@@ -2290,8 +2286,8 @@ fn cuda_silu(x: &Tensor) -> Result<Tensor> {
     // a tape scope — Vulkan inference falls through to the sigmoid·x composite.
     #[cfg(all(feature = "vulkan", not(feature = "cuda")))]
     if crate::tape_forward::tape_forward_enabled() {
-        if let Some(out) =
-            crate::tape_forward::try_tape_silu_kt(x).context("cuda_silu try_tape_silu_kt (vulkan)")?
+        if let Some(out) = crate::tape_forward::try_tape_silu_kt(x)
+            .context("cuda_silu try_tape_silu_kt (vulkan)")?
         {
             return Ok(out);
         }
@@ -2509,9 +2505,8 @@ fn finish_gdn_stage_profile(
 
 fn trace_tape_gdn_conv_decisions_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        kiln_core::env_flag::env_flag("KILN_TRACE_TAPE_GDN_CONV_DECISIONS", false)
-    })
+    *ENABLED
+        .get_or_init(|| kiln_core::env_flag::env_flag("KILN_TRACE_TAPE_GDN_CONV_DECISIONS", false))
 }
 
 fn log_tape_gdn_conv_decision(
@@ -2744,7 +2739,12 @@ fn add_lora_delta_to_base(
     // `LoraDeltaAddBackward` emitting grads for proj.a/proj.b (kt-keyed on their Var
     // ids), no kt->candle->kt round-trip.
     // (#1082) Vulkan added: device-agnostic pure-kt recorder.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    ))]
     if let Some(out) = crate::tape_forward::try_tape_lora_add_kt(&base, x, proj, lora_scale)
         .context("add_lora_delta_to_base try_tape_lora_add_kt")?
     {
@@ -2757,9 +2757,8 @@ fn add_lora_delta_to_base(
         // #1082 item 4: the BackendRuntime trait is kt-typed — pass kt
         // `base`/`x`/`proj.a`/`proj.b` directly (no candle bridge).
         #[cfg(feature = "cuda")]
-        if let Some(out) = LinearBackend::runtime_lora_decode_add(
-            backend, &base, x, &proj.a, &proj.b, lora_scale,
-        )?
+        if let Some(out) =
+            LinearBackend::runtime_lora_decode_add(backend, &base, x, &proj.a, &proj.b, lora_scale)?
         {
             return Ok(out);
         }
@@ -2877,7 +2876,12 @@ fn linear_with_lora_t_backend_decode_if(
         // the SOLE producer of the LoRA A/B backward. PR6 wired Vulkan into the
         // `tape_forward.rs` device-matches but missed this `cfg` gate, so LoRA
         // grads were never recorded on Vulkan → empty grad store.
-        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+        #[cfg(any(
+            feature = "cuda",
+            feature = "metal",
+            feature = "vulkan",
+            feature = "rocm"
+        ))]
         if crate::tape_forward::tape_forward_enabled() {
             if let Some(out) =
                 crate::tape_forward::try_tape_lora_linear_kt(x, weight_t, lora, lora_scale)
@@ -2902,9 +2906,7 @@ fn linear_with_lora_t_backend_decode_if(
                 return add_lora_delta_to_base(Some(backend), base, x, lora, lora_scale);
             }
             // Last-ditch: try the autograd-safe path even for non-tracked inputs.
-            if let Some(base) =
-                LinearBackend::runtime_linear_prefill_apply(backend, x, weight_t)?
-            {
+            if let Some(base) = LinearBackend::runtime_linear_prefill_apply(backend, x, weight_t)? {
                 return add_lora_delta_to_base(Some(backend), base, x, lora, lora_scale);
             }
         }
@@ -2952,10 +2954,7 @@ fn attention_output_gate_decode_if(
         // autograd branch: the kt tape records the sigmoid/mul gate via the
         // plain `cuda_sigmoid` + mul composite (kt ops record onto the active
         // tape), so the candle CustomOp island is dead.
-        if !cuda_fused_attn_sigmoid_mul_disabled()
-            && !attn_output.track_op()
-            && !gate.track_op()
-        {
+        if !cuda_fused_attn_sigmoid_mul_disabled() && !attn_output.track_op() && !gate.track_op() {
             if let (Some(x_kt), Some(g_kt)) =
                 (try_borrow_kt_cuda(&attn_output), try_borrow_kt_cuda(gate))
             {
@@ -4686,10 +4685,7 @@ impl LinearAttentionState {
     /// replay) still uses [`Self::scatter_batch_rows_replace_with_backend`]
     /// which is allowed to replace per-row tensors — only the batched
     /// slot's pointers must stay pinned.
-    pub fn refresh_batched_state_from_rows_in_place(
-        &mut self,
-        rows: &[&Self],
-    ) -> Result<()> {
+    pub fn refresh_batched_state_from_rows_in_place(&mut self, rows: &[&Self]) -> Result<()> {
         let batch = self.batch_size()?;
         anyhow::ensure!(
             rows.len() == batch,
@@ -4847,37 +4843,29 @@ impl LinearAttentionState {
     }
 
     pub fn has_any_gdn_recurrent_resident_state(&self, backend: &dyn BackendRuntime) -> bool {
-        self.recurrent_states.iter().any(|state| {
-            ResidencyBackend::runtime_has_gdn_recurrent_resident_state(backend, state)
-        })
+        self.recurrent_states
+            .iter()
+            .any(|state| ResidencyBackend::runtime_has_gdn_recurrent_resident_state(backend, state))
     }
 
     pub fn has_all_gdn_recurrent_resident_states(&self, backend: &dyn BackendRuntime) -> bool {
         !self.recurrent_states.is_empty()
-            && self
-                .recurrent_states
-                .iter()
-                .all(|state| {
-                    ResidencyBackend::runtime_has_gdn_recurrent_resident_state(backend, state)
-                })
+            && self.recurrent_states.iter().all(|state| {
+                ResidencyBackend::runtime_has_gdn_recurrent_resident_state(backend, state)
+            })
     }
 
     pub fn has_any_gdn_state_resident_kt(&self, backend: &dyn BackendRuntime) -> bool {
-        self.recurrent_states
-            .iter()
-            .any(|state| {
-                ResidencyBackend::runtime_has_linear_attn_gdn_state_kt(backend, state.id())
-            })
+        self.recurrent_states.iter().any(|state| {
+            ResidencyBackend::runtime_has_linear_attn_gdn_state_kt(backend, state.id())
+        })
     }
 
     pub fn has_all_gdn_state_resident_kt(&self, backend: &dyn BackendRuntime) -> bool {
         !self.recurrent_states.is_empty()
-            && self
-                .recurrent_states
-                .iter()
-                .all(|state| {
-                    ResidencyBackend::runtime_has_linear_attn_gdn_state_kt(backend, state.id())
-                })
+            && self.recurrent_states.iter().all(|state| {
+                ResidencyBackend::runtime_has_linear_attn_gdn_state_kt(backend, state.id())
+            })
     }
 
     pub fn ensure_gdn_state_resident_kt(&self, backend: &dyn BackendRuntime) -> Result<bool> {
@@ -5040,16 +5028,26 @@ impl LinearAttentionState {
 /// tensor and bridges it after the fact.
 #[cfg(feature = "cuda")]
 fn weight_to_tensor(w: &WeightTensor, device: &Device) -> Result<Tensor> {
-    Tensor::from_raw_bytes_on(*device, weight_dtype(w), w.as_bytes().to_vec(), w.shape.clone())
-        .map_err(|e| anyhow::anyhow!("weight_to_tensor (kt-native CUDA load): {e}"))
+    Tensor::from_raw_bytes_on(
+        *device,
+        weight_dtype(w),
+        w.as_bytes().to_vec(),
+        w.shape.clone(),
+    )
+    .map_err(|e| anyhow::anyhow!("weight_to_tensor (kt-native CUDA load): {e}"))
 }
 
 /// Non-CUDA sibling of [`weight_to_tensor`]: builds the kt tensor directly on
 /// the requested device.
 #[cfg(not(feature = "cuda"))]
 fn weight_to_tensor(w: &WeightTensor, device: &Device) -> Result<Tensor> {
-    Tensor::from_raw_bytes_on(*device, weight_dtype(w), w.as_bytes().to_vec(), w.shape.clone())
-        .map_err(|e| anyhow::anyhow!("weight_to_tensor (kt-native load): {e}"))
+    Tensor::from_raw_bytes_on(
+        *device,
+        weight_dtype(w),
+        w.as_bytes().to_vec(),
+        w.shape.clone(),
+    )
+    .map_err(|e| anyhow::anyhow!("weight_to_tensor (kt-native load): {e}"))
 }
 
 fn weight_dtype(w: &WeightTensor) -> DType {
@@ -5272,7 +5270,11 @@ fn dropped_weight_stub(w: &WeightTensor, device: &Device) -> Result<Tensor> {
     // kt `zeros` takes `Device` by value (kt Device is Copy) and shape as
     // `Into<Vec<usize>>` (#1082 forward-flip). On Vulkan the stub lands on
     // CPU-host like every other Vulkan weight (`loader_kt_device`).
-    Ok(Tensor::zeros(vec![1usize], weight_dtype(w), loader_kt_device(device))?)
+    Ok(Tensor::zeros(
+        vec![1usize],
+        weight_dtype(w),
+        loader_kt_device(device),
+    )?)
 }
 
 #[derive(Clone)]
@@ -5650,11 +5652,15 @@ fn gdn_in_proj_matmul(
     // dx-only `MatmulBf16wBackward`, so dx flows back to `x`/`normed` while the
     // weight stays frozen BF16. No-op (returns None) off the tape path or on the
     // equal-dtype path, falling through to the existing dispatch below.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    ))]
     if crate::tape_forward::tape_forward_enabled() {
-        if let Some(out) =
-            crate::tape_forward::try_tape_lora_linear_kt(x, weight_t, None, 0.0)
-                .context("gdn_in_proj_matmul try_tape_lora_linear_kt")?
+        if let Some(out) = crate::tape_forward::try_tape_lora_linear_kt(x, weight_t, None, 0.0)
+            .context("gdn_in_proj_matmul try_tape_lora_linear_kt")?
         {
             return Ok(out);
         }
@@ -5689,7 +5695,11 @@ fn promote_cpu_activation(t: Tensor) -> Result<Tensor> {
 fn dropped_bf16_stub(device: &Device) -> Result<Tensor> {
     // kt `zeros`: shape as `Into<Vec<usize>>`, `Device` by value (#1082).
     // Vulkan stubs are CPU-host (`loader_kt_device`).
-    Ok(Tensor::zeros(vec![1usize], DType::BF16, loader_kt_device(device))?)
+    Ok(Tensor::zeros(
+        vec![1usize],
+        DType::BF16,
+        loader_kt_device(device),
+    )?)
 }
 
 /// Kill switch for the Marlin BF16 residency cleanup. Setting
@@ -5737,10 +5747,10 @@ pub const STREAMING_PREFILL_METAL_DEFAULT_TILE: usize = 2048;
 pub const STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD: usize = 2048;
 pub const STREAMING_PREFILL_VULKAN_DEFAULT_TILE: usize = STREAMING_PREFILL_METAL_DEFAULT_TILE;
 pub const STREAMING_PREFILL_CUDA_TAPE_DEFAULT_TILE: usize = STREAMING_PREFILL_CUDA_DEFAULT_TILE;
-pub const STREAMING_PREFILL_ROCM_TAPE_DEFAULT_TILE: usize = STREAMING_PREFILL_CUDA_TAPE_DEFAULT_TILE;
+pub const STREAMING_PREFILL_ROCM_TAPE_DEFAULT_TILE: usize =
+    STREAMING_PREFILL_CUDA_TAPE_DEFAULT_TILE;
 pub const STREAMING_PREFILL_METAL_TAPE_DEFAULT_TILE: usize = STREAMING_PREFILL_METAL_DEFAULT_TILE;
-pub const STREAMING_PREFILL_VULKAN_TAPE_DEFAULT_TILE: usize =
-    STREAMING_PREFILL_VULKAN_DEFAULT_TILE;
+pub const STREAMING_PREFILL_VULKAN_TAPE_DEFAULT_TILE: usize = STREAMING_PREFILL_VULKAN_DEFAULT_TILE;
 const PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5944,9 +5954,7 @@ fn finish_linear_segment_stage_trace(
 
 fn trace_gdn_backward_timings_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        kiln_core::env_flag::env_flag("KILN_TRACE_GDN_BACKWARD_TIMINGS", false)
-    })
+    *ENABLED.get_or_init(|| kiln_core::env_flag::env_flag("KILN_TRACE_GDN_BACKWARD_TIMINGS", false))
 }
 
 fn start_gdn_backward_trace(
@@ -6152,22 +6160,24 @@ impl GpuWeights {
         };
         let mv_layer = |l: &GpuLayerWeights| -> Result<GpuLayerWeights> {
             let attention = match &l.attention {
-                GpuAttentionWeights::Full(a) => GpuAttentionWeights::Full(GpuFullAttentionWeights {
-                    q_proj: mv(&a.q_proj)?,
-                    k_proj: mv(&a.k_proj)?,
-                    v_proj: mv(&a.v_proj)?,
-                    o_proj: mv(&a.o_proj)?,
-                    q_norm: mv(&a.q_norm)?,
-                    k_norm: mv(&a.k_norm)?,
-                    q_proj_t: mv(&a.q_proj_t)?,
-                    k_proj_t: mv(&a.k_proj_t)?,
-                    v_proj_t: mv(&a.v_proj_t)?,
-                    qkv_proj_t: mv_opt(&a.qkv_proj_t)?,
-                    o_proj_t: mv(&a.o_proj_t)?,
-                    qkv_proj_w8: mv_w8(&a.qkv_proj_w8)?,
-                    o_proj_w8: mv_w8(&a.o_proj_w8)?,
-                    q_proj_marlin: mv_marlin(&a.q_proj_marlin)?,
-                }),
+                GpuAttentionWeights::Full(a) => {
+                    GpuAttentionWeights::Full(GpuFullAttentionWeights {
+                        q_proj: mv(&a.q_proj)?,
+                        k_proj: mv(&a.k_proj)?,
+                        v_proj: mv(&a.v_proj)?,
+                        o_proj: mv(&a.o_proj)?,
+                        q_norm: mv(&a.q_norm)?,
+                        k_norm: mv(&a.k_norm)?,
+                        q_proj_t: mv(&a.q_proj_t)?,
+                        k_proj_t: mv(&a.k_proj_t)?,
+                        v_proj_t: mv(&a.v_proj_t)?,
+                        qkv_proj_t: mv_opt(&a.qkv_proj_t)?,
+                        o_proj_t: mv(&a.o_proj_t)?,
+                        qkv_proj_w8: mv_w8(&a.qkv_proj_w8)?,
+                        o_proj_w8: mv_w8(&a.o_proj_w8)?,
+                        q_proj_marlin: mv_marlin(&a.q_proj_marlin)?,
+                    })
+                }
                 GpuAttentionWeights::Linear(a) => {
                     GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
                         in_proj_qkv: mv(&a.in_proj_qkv)?,
@@ -6403,12 +6413,9 @@ impl GpuWeights {
                         {
                             if projection_load_policy.cache_full_attention_qkv_transpose_concat {
                                 Some(
-                                    Tensor::cat(
-                                        &[&q_proj_t, &k_proj_t, &v_proj_t],
-                                        LAST_DIM,
-                                    )?
-                                    .contiguous()
-                                    .context(ctx("qkv_proj_t contiguous"))?,
+                                    Tensor::cat(&[&q_proj_t, &k_proj_t, &v_proj_t], LAST_DIM)?
+                                        .contiguous()
+                                        .context(ctx("qkv_proj_t contiguous"))?,
                                 )
                             } else {
                                 None
@@ -6544,12 +6551,9 @@ impl GpuWeights {
                         {
                             if projection_load_policy.cache_linear_attention_ab_transpose_concat {
                                 Some(
-                                    Tensor::cat(
-                                        &[&in_proj_a_t, &in_proj_b_t],
-                                        LAST_DIM,
-                                    )?
-                                    .contiguous()
-                                    .context(ctx("in_proj_ab_t contiguous"))?,
+                                    Tensor::cat(&[&in_proj_a_t, &in_proj_b_t], LAST_DIM)?
+                                        .contiguous()
+                                        .context(ctx("in_proj_ab_t contiguous"))?,
                                 )
                             } else {
                                 None
@@ -6564,10 +6568,12 @@ impl GpuWeights {
                         #[cfg(feature = "rocm")]
                         {
                             if w8a16_enabled && projection_load_policy.pack_w8a16_projection_rows {
-                                let rows =
-                                    Tensor::cat(&[&in_proj_qkv, &in_proj_z, &in_proj_a, &in_proj_b], 0)?
-                                        .contiguous()
-                                        .context(ctx("w8 gdn in-proj rows contiguous"))?;
+                                let rows = Tensor::cat(
+                                    &[&in_proj_qkv, &in_proj_z, &in_proj_a, &in_proj_b],
+                                    0,
+                                )?
+                                .contiguous()
+                                .context(ctx("w8 gdn in-proj rows contiguous"))?;
                                 crate::rocm_w8_proj::pack_from_bf16_rows(&rows)
                                     .context(ctx("w8 gdn in-proj pack"))?
                             } else {
@@ -6650,9 +6656,7 @@ impl GpuWeights {
             let gate_up_proj_t = {
                 #[cfg(any(feature = "cuda", feature = "rocm"))]
                 {
-                    if !w4a16_enabled
-                        && projection_load_policy.cache_mlp_gate_up_transpose_concat
-                    {
+                    if !w4a16_enabled && projection_load_policy.cache_mlp_gate_up_transpose_concat {
                         Some(
                             Tensor::cat(&[&gate_proj_t, &up_proj_t], LAST_DIM)?
                                 .contiguous()
@@ -6880,7 +6884,12 @@ pub fn embedding_lookup(token_ids: &[u32], embed_weights: &Tensor) -> Result<Ten
     // `try_kt_embedding_lookup` below.
     // #1082 seam flip: kt-native EmbeddingBackward recorder — no kt->candle->kt.
     // (#1082) Vulkan added: device-agnostic pure-kt recorder.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    ))]
     if crate::tape_forward::tape_forward_enabled() {
         if let Some(out) = crate::tape_forward::try_tape_embedding_kt(embed_weights, &index)
             .context("embedding_lookup try_tape_embedding_kt")?
@@ -6960,10 +6969,7 @@ fn kt_embedding_lookup_native(
 /// non-contiguous, unsupported dtype, indices not U32) so the
 /// caller falls through to candle's `index_select`.
 #[cfg(feature = "cuda")]
-fn try_kt_embedding_lookup(
-    embed_weights: &Tensor,
-    index: &Tensor,
-) -> Result<Option<Tensor>> {
+fn try_kt_embedding_lookup(embed_weights: &Tensor, index: &Tensor) -> Result<Option<Tensor>> {
     if !cuda_use_kt_api_embedding() {
         return Ok(None);
     }
@@ -6975,10 +6981,7 @@ fn try_kt_embedding_lookup(
     {
         return Ok(None);
     }
-    if !matches!(
-        embed_weights.dtype(),
-        DType::F32 | DType::BF16 | DType::F16
-    ) {
+    if !matches!(embed_weights.dtype(), DType::F32 | DType::BF16 | DType::F16) {
         return Ok(None);
     }
 
@@ -7276,9 +7279,8 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
         // empty (constant SFT loss). No-ops (returns None) outside a tape
         // scope — decode/inference falls through to the forward-only kernel.
         if crate::tape_forward::tape_forward_enabled() {
-            if let Some(out) =
-                crate::tape_forward::try_tape_rms_norm_kt(x, weight, eps as f32)
-                    .context("rms_norm try_tape_rms_norm_kt")?
+            if let Some(out) = crate::tape_forward::try_tape_rms_norm_kt(x, weight, eps as f32)
+                .context("rms_norm try_tape_rms_norm_kt")?
             {
                 return Ok(out);
             }
@@ -7439,15 +7441,10 @@ fn vk_tensor_to_f32_bytes_with_shape(tensor: &Tensor) -> Result<(Vec<u8>, Vec<us
 
 #[cfg(feature = "vulkan")]
 #[inline]
-fn vk_tensor_from_f32_bytes(
-    data: &[u8],
-    shape: &[usize],
-    dtype: DType,
-) -> Result<Tensor> {
+fn vk_tensor_from_f32_bytes(data: &[u8], shape: &[usize], dtype: DType) -> Result<Tensor> {
     let f32_data: &[f32] = bytemuck::cast_slice(data);
     // kt `from_vec` is CPU-resident and takes no device arg.
-    let tensor = Tensor::from_vec(f32_data.to_vec(), f32_data.len())?
-        .reshape(shape)?;
+    let tensor = Tensor::from_vec(f32_data.to_vec(), f32_data.len())?.reshape(shape)?;
     if dtype == DType::BF16 {
         Ok(tensor.to_dtype(DType::BF16)?)
     } else {
@@ -7493,11 +7490,7 @@ fn try_vulkan_rmsnorm_forward(x: &Tensor, weight: &Tensor, eps: f32) -> Result<O
         hidden,
         eps,
     )?;
-    let out_f32 = vk_tensor_from_f32_bytes(
-        &out_bytes,
-        &x_dims,
-        DType::F32,
-    )?;
+    let out_f32 = vk_tensor_from_f32_bytes(&out_bytes, &x_dims, DType::F32)?;
     let out = if out_f32.dtype() == in_dtype {
         out_f32
     } else {
@@ -8195,7 +8188,12 @@ fn residual_add(a: Tensor, b: Tensor) -> Result<Tensor> {
     // residual add is on the critical path between every attn/MLP subblock and
     // the residual stream; without recording it on Vulkan the tape severs at the
     // residual and the in-block LoRA grads never reach the loss.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    ))]
     {
         // #1082 seam flip: kt-native AddBackward recorder — no kt->candle->kt
         // round-trip (decode: tape off -> Ok(None) -> falls to the plain add below).
@@ -8227,7 +8225,12 @@ fn apply_rope(
     // recorder (`rope_split_half` + `RopeSplitHalfBackward`). Without it on
     // Vulkan the q/k RoPE severs the tape and `q_proj`/`k_proj` LoRA grads
     // never reach the loss.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    ))]
     {
         // CP-4 (#1082): route split-half RoPE through the kt Tape when
         // KILN_USE_TAPE_FORWARD is set and a tape scope is active. No-ops
@@ -8276,13 +8279,23 @@ fn apply_rope(
     // contiguous operands (candle handled strided). `.contiguous()` is an O(1)
     // no-op when already contiguous.
     let x1 = x_rot.narrow(x_rot_last, 0, half_rotary)?.contiguous()?; // [..., :half_rotary]
-    let x2 = x_rot.narrow(x_rot_last, half_rotary, half_rotary)?.contiguous()?; // [..., half_rotary:rotary_dim]
+    let x2 = x_rot
+        .narrow(x_rot_last, half_rotary, half_rotary)?
+        .contiguous()?; // [..., half_rotary:rotary_dim]
 
     // cos/sin are [seq_len, half_rotary], need to broadcast to [batch, seq_len, num_heads, half_rotary]
     // Reshape to [1, seq_len, 1, half_rotary]. #1082: unsqueeze yields a view →
     // contiguify before the broadcast-mul (kt elementwise needs contiguous).
-    let cos = cos.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(2)?.contiguous()?;
-    let sin = sin.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(2)?.contiguous()?;
+    let cos = cos
+        .to_dtype(DType::F32)?
+        .unsqueeze(0)?
+        .unsqueeze(2)?
+        .contiguous()?;
+    let sin = sin
+        .to_dtype(DType::F32)?
+        .unsqueeze(0)?
+        .unsqueeze(2)?
+        .contiguous()?;
 
     // The cos/sin tables are built from the request's CPU `positions`, so on a
     // GPU backend they arrive on CPU while `x` (q/k) is device-resident. Align
@@ -9740,10 +9753,7 @@ fn try_kt_to_dtype(x: &Tensor, target: DType) -> Result<Option<Tensor>> {
     if !cuda_use_kt_api_to_dtype() {
         return Ok(None);
     }
-    if !matches!(x.device(), Device::Cuda(_))
-        || !x.is_contiguous()
-        || x.rank() == 0
-    {
+    if !matches!(x.device(), Device::Cuda(_)) || !x.is_contiguous() || x.rank() == 0 {
         return Ok(None);
     }
     // Restrict to the {F32, BF16, F16} cast triangle that `cuda_cast`
@@ -9846,10 +9856,7 @@ pub fn swiglu_ffn_gated_hidden(
     }
     #[cfg(any(feature = "cuda", feature = "rocm"))]
     {
-        if !cuda_fused_mlp_silu_mul_disabled()
-            && !gate.track_op()
-            && !up.track_op()
-        {
+        if !cuda_fused_mlp_silu_mul_disabled() && !gate.track_op() && !up.track_op() {
             // Phase 6a/CP-4 (#1082) — experimental tape-forward path.
             // When `KILN_USE_TAPE_FORWARD` is set AND a thread-local
             // `Tape` is active, route SwiGLU's `silu(gate) * up` through
@@ -10439,15 +10446,13 @@ fn swiglu_ffn_impl_no_chunk(
     if !has_mlp_lora && !has_marlin {
         if let Some(backend) = backend {
             let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
-            if let Some(out) =
-                LinearBackend::runtime_mlp_decode(
-                    backend,
-                    x,
-                    &mlp.gate_proj_t,
-                    &mlp.up_proj_t,
-                    &mlp.down_proj_t,
-                )?
-            {
+            if let Some(out) = LinearBackend::runtime_mlp_decode(
+                backend,
+                x,
+                &mlp.gate_proj_t,
+                &mlp.up_proj_t,
+                &mlp.down_proj_t,
+            )? {
                 finish_mlp_stage_profile(
                     profile_device,
                     profile_context,
@@ -10558,9 +10563,7 @@ fn swiglu_ffn_impl_no_chunk(
                     && cuda_or_rocm_device(gate_up_proj_t.device())
                     && gate_up_proj_t.is_contiguous()
                 {
-                    if let (Ok(g_dim), Ok(u_dim)) =
-                        (mlp.gate_proj_t.dim(1), mlp.up_proj_t.dim(1))
-                    {
+                    if let (Ok(g_dim), Ok(u_dim)) = (mlp.gate_proj_t.dim(1), mlp.up_proj_t.dim(1)) {
                         let gu_dims = gate_up_proj_t.dims();
                         if gu_dims.len() == 2 && gu_dims[1] == g_dim + u_dim && g_dim == u_dim {
                             let stage_profile =
@@ -10574,14 +10577,12 @@ fn swiglu_ffn_impl_no_chunk(
                                     {
                                         out
                                     } else {
-                                        broadcast_matmul_cpu_compatible(x, gate_up_proj_t).context(
-                                            "cuda fused MLP gate+up prefill matmul",
-                                        )?
+                                        broadcast_matmul_cpu_compatible(x, gate_up_proj_t)
+                                            .context("cuda fused MLP gate+up prefill matmul")?
                                     }
                                 } else {
-                                    broadcast_matmul_cpu_compatible(x, gate_up_proj_t).context(
-                                        "cuda fused MLP gate+up prefill matmul",
-                                    )?
+                                    broadcast_matmul_cpu_compatible(x, gate_up_proj_t)
+                                        .context("cuda fused MLP gate+up prefill matmul")?
                                 }
                             };
                             finish_mlp_stage_profile(
@@ -10737,9 +10738,7 @@ fn swiglu_ffn_impl_no_chunk(
                             // output as kt — no candle copy-out (down-proj is kt).
                             let hidden =
                                 kiln_rmsnorm_kernel::fused_mlp_silu_mul_kt(&gate_kt, &up_kt)
-                                    .map_err(|e| {
-                                        anyhow::anyhow!("kt fused_mlp_silu_mul2: {e}")
-                                    })?;
+                                    .map_err(|e| anyhow::anyhow!("kt fused_mlp_silu_mul2: {e}"))?;
                             finish_mlp_stage_profile(
                                 profile_device,
                                 profile_context,
@@ -10761,8 +10760,7 @@ fn swiglu_ffn_impl_no_chunk(
                     hidden
                 } else {
                     // SiLU activation: x * sigmoid(x)
-                    let stage_profile =
-                        start_mlp_stage_profile(profile_device, profile_context)?;
+                    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
                     // CP-4 Increment 6 (#1082): wire SiLU(gate) onto the kt Tape so
                     // the gate-proj LoRA Vars chain through it. No-op + candle
                     // fallback unless KILN_USE_TAPE_FORWARD + a tape scope is active.
@@ -10779,8 +10777,7 @@ fn swiglu_ffn_impl_no_chunk(
                         stage_profile,
                     )?;
                     // Element-wise multiply
-                    let stage_profile =
-                        start_mlp_stage_profile(profile_device, profile_context)?;
+                    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
                     // CP-4 Increment 6 (#1082): the production SwiGLU mul. Wire it
                     // so SiLU(gate) and up chain back to the gate/up projections
                     // (down_proj reaches the loss via the FFN residual, but without
@@ -10969,8 +10966,8 @@ fn mlp_proj_forward_decode_if(
         let base = crate::marlin_proj::matmul_bf16_kt(x, packed)
             .context("mlp_proj_forward: kt-native marlin matmul")?;
         if let Some(proj) = lora {
-            if let Some(delta) = try_kt_lora_delta(x, proj, lora_scale)
-                .context("mlp_proj_forward: kt lora delta")?
+            if let Some(delta) =
+                try_kt_lora_delta(x, proj, lora_scale).context("mlp_proj_forward: kt lora delta")?
             {
                 let delta = if delta.dtype() == base.dtype() {
                     delta
@@ -10988,8 +10985,8 @@ fn mlp_proj_forward_decode_if(
             }
             // kt-native composite LoRA delta fallback (#1082: compute_lora_delta
             // is kt now — pass kt `x` directly).
-            let delta = compute_lora_delta(x, proj, lora_scale)
-                .context("mlp_proj_forward: lora delta")?;
+            let delta =
+                compute_lora_delta(x, proj, lora_scale).context("mlp_proj_forward: lora delta")?;
             return Ok((base + delta).context("mlp_proj_forward: add lora delta")?);
         }
         return Ok(base);
@@ -11581,7 +11578,10 @@ fn kt_lm_head_native(lhs_kt: &KtTensor, rhs_kt: &KtTensor) -> Result<KtTensor> {
 // Kept as a gated diagnostic so the next iteration doesn't re-test this path.
 #[cfg(feature = "cuda")]
 fn box102_lmhead_no_fastpath() -> bool {
-    std::env::var("KILN_BOX102_LMHEAD_NO_FASTPATH").ok().as_deref() == Some("1")
+    std::env::var("KILN_BOX102_LMHEAD_NO_FASTPATH")
+        .ok()
+        .as_deref()
+        == Some("1")
 }
 
 #[cfg(feature = "cuda")]
@@ -11681,7 +11681,12 @@ fn lm_head_forward_backend_decode_if(
     // (#1082) Vulkan added: `try_tape_lora_linear_kt` is device-agnostic and is
     // the producer that connects the CE loss back through the lm_head into the
     // model — without it on Vulkan the tape root dead-ends at the logits.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    ))]
     {
         // #1082 H4: `tape_forward_enabled()` DEFAULTS ON, but DECODE has no
         // active bridge scope, so the kt->candle copy of `x` + the full frozen
@@ -11712,8 +11717,7 @@ fn lm_head_forward_backend_decode_if(
                     return Ok(logits);
                 }
             }
-            if let Some(logits) =
-                LinearBackend::runtime_linear_decode(backend, x, embed_tokens_t)?
+            if let Some(logits) = LinearBackend::runtime_linear_decode(backend, x, embed_tokens_t)?
             {
                 return Ok(logits);
             }
@@ -12295,7 +12299,12 @@ fn gdn_qk_norm(q: &Tensor, k: &Tensor, input_dtype: DType, scale: f64) -> Result
     // Vulkan included: `try_tape_gdn_l2_norm_scale_kt` + `GdnL2NormScaleBackward`
     // are device-agnostic, and without the qk-norm node the recurrence's dq/dk
     // sever before the qkv_split → in_proj_qkv LoRA `Var` on Vulkan.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    ))]
     if crate::tape_forward::tape_forward_enabled() {
         let _ = crate::tape_forward::try_tape_gdn_l2_norm_scale_kt(q, scale, &q_out)?;
         let _ = crate::tape_forward::try_tape_gdn_l2_norm_scale_kt(k, 1.0, &k_out)?;
@@ -12330,10 +12339,7 @@ fn gdn_qk_norm_forward(
     #[cfg(feature = "cuda")]
     {
         let disabled = std::env::var("KILN_DISABLE_FUSED_L2_QK_NORM").is_ok();
-        if !disabled
-            && fused_forward_only_allowed
-            && input_dtype == DType::BF16
-        {
+        if !disabled && fused_forward_only_allowed && input_dtype == DType::BF16 {
             if let (Some(q_kt), Some(k_kt)) = (try_borrow_kt_cuda(q), try_borrow_kt_cuda(k)) {
                 if kiln_rmsnorm_kernel::supports_l2_qk_norm_kt(&q_kt, &k_kt) {
                     // Phase 7 (#1082): kt-only. Same closeout pattern as
@@ -12527,12 +12533,22 @@ fn gated_rms_norm(
     // Vulkan tape. CUDA/ROCm/Metal return resident kt tensors, so active tape
     // can still use their fused forward and then record the analytic
     // `GdnGatedRmsNormBackward` in the caller.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    ))]
     let skip_backend_for_active_tape = crate::tape_forward::tape_scope_active()
         && !BackendCapabilityQueries::backend_capabilities(backend)
             .gdn
             .gated_rms_norm_preserves_tape_residency;
-    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
+    #[cfg(not(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    )))]
     let skip_backend_for_active_tape = false;
     if !skip_backend_for_active_tape
         && !any_kt_tensor_tracks_op(&[x, z, weight])
@@ -13112,8 +13128,16 @@ fn gdn_chunkwise_recurrence(
         let beta_c = to_cpu(beta)?;
         let g_c = to_cpu(g)?;
         let mut state_c = to_cpu(state)?;
-        let out_c =
-            gdn_chunkwise_recurrence(backend, &q_c, &k_c, &v_c, &beta_c, &g_c, &mut state_c, chunk_size)?;
+        let out_c = gdn_chunkwise_recurrence(
+            backend,
+            &q_c,
+            &k_c,
+            &v_c,
+            &beta_c,
+            &g_c,
+            &mut state_c,
+            chunk_size,
+        )?;
         // Move the updated state + output back to the activation device so the
         // external F32-state invariant + the tape chain both stay on Vulkan.
         *state = state_c.to_device(dev)?;
@@ -13169,9 +13193,7 @@ fn gdn_chunkwise_recurrence(
                 // #1082 DoD-101/102: `gdn_recurrent_step` is now kt-typed and
                 // mutates `state` in place through the kt `&mut` — pass kt
                 // tensors directly, no candle bridge / write-back.
-                GdnBackend::runtime_gdn_recurrent_step(
-                    backend, &q1, &k1, &v1, &beta1, &g1, state,
-                )?
+                GdnBackend::runtime_gdn_recurrent_step(backend, &q1, &k1, &v1, &beta1, &g1, state)?
             };
             finish_gdn_recurrent_inner_profile(
                 device,
@@ -13224,11 +13246,22 @@ fn gdn_chunkwise_recurrence(
     // output on the activation device via the Vulkan op host-fallback, and the
     // `GdnRecurrentBackward` recorded by the caller flows dq/dk/dv back). Default
     // (inference, no tape scope) behaviour is unchanged.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    ))]
     let tape_recording_active = crate::tape_forward::tape_forward_enabled();
-    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
+    #[cfg(not(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    )))]
     let tape_recording_active = false;
-    if seq_len > 1 && !tape_recording_active && !any_kt_tensor_tracks_op(&[q, k, v, beta, g, state]) {
+    if seq_len > 1 && !tape_recording_active && !any_kt_tensor_tracks_op(&[q, k, v, beta, g, state])
+    {
         if let Some(out) =
             GdnBackend::runtime_gdn_chunkwise_forward(backend, q, k, v, beta, g, state, chunk_size)?
         {
@@ -13272,35 +13305,41 @@ fn gdn_chunkwise_recurrence(
             // `[B, num_chunks, nv, C, …]`. The `.contiguous()` pays one
             // memcpy per tensor — the same total bytes as the 32 per-chunk
             // contig copies it replaces, but with 1/32 the launch overhead.
-            let q_pre = q.narrow(2, 0, pre_t)?
+            let q_pre = q
+                .narrow(2, 0, pre_t)?
                 .reshape((batch, heads, full_chunks, chunk_size, dk))?
                 .transpose(1, 2)?
                 .contiguous()?;
-            let k_pre = k.narrow(2, 0, pre_t)?
+            let k_pre = k
+                .narrow(2, 0, pre_t)?
                 .reshape((batch, heads, full_chunks, chunk_size, dk))?
                 .transpose(1, 2)?
                 .contiguous()?;
-            let v_pre = v.narrow(2, 0, pre_t)?
+            let v_pre = v
+                .narrow(2, 0, pre_t)?
                 .reshape((batch, heads, full_chunks, chunk_size, dv))?
                 .transpose(1, 2)?
                 .contiguous()?;
-            let beta_pre = beta.narrow(2, 0, pre_t)?
+            let beta_pre = beta
+                .narrow(2, 0, pre_t)?
                 .reshape((batch, heads, full_chunks, chunk_size))?
                 .transpose(1, 2)?
                 .contiguous()?;
-            let g_pre = g.narrow(2, 0, pre_t)?
+            let g_pre = g
+                .narrow(2, 0, pre_t)?
                 .reshape((batch, heads, full_chunks, chunk_size))?
                 .transpose(1, 2)?
                 .contiguous()?;
             // K^T is only needed by the fused full-chunk backend API. Matmul
             // prep uses transposed-GEMM helpers and can consume K in native
             // chunk layout.
-            let k_t_pre =
-                if chunk_size == 64 && GdnBackend::runtime_supports_gdn_full_chunk_forward(backend) {
-                    Some(k_pre.transpose(3, 4)?.contiguous()?)
-                } else {
-                    None
-                };
+            let k_t_pre = if chunk_size == 64
+                && GdnBackend::runtime_supports_gdn_full_chunk_forward(backend)
+            {
+                Some(k_pre.transpose(3, 4)?.contiguous()?)
+            } else {
+                None
+            };
             Some((q_pre, k_pre, v_pre, beta_pre, g_pre, k_t_pre))
         } else {
             None
@@ -13323,7 +13362,8 @@ fn gdn_chunkwise_recurrence(
                 g.narrow(2, t_start, tail)?.contiguous()?,
                 None,
             )
-        } else if let Some((q_pre, k_pre, v_pre, beta_pre, g_pre, k_t_pre)) = pre_permuted.as_ref() {
+        } else if let Some((q_pre, k_pre, v_pre, beta_pre, g_pre, k_t_pre)) = pre_permuted.as_ref()
+        {
             // Slice along the chunk dimension: zero-copy view that's
             // contiguous because num_chunks is the slowest non-batch
             // dimension after the pre-permute.
@@ -13385,9 +13425,8 @@ fn gdn_chunkwise_recurrence(
             && GdnBackend::runtime_supports_gdn_full_chunk_forward(backend)
             && dtype == DType::BF16
         {
-            if !any_kt_tensor_tracks_op(&[
-                &g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s, &beta_c, state,
-            ]) {
+            if !any_kt_tensor_tracks_op(&[&g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s, &beta_c, state])
+            {
                 let k_t_mat = match k_t_mat_pre.as_ref() {
                     Some(t) => t.clone(),
                     None => k_c.transpose(2, 3)?.contiguous()?,
@@ -13450,14 +13489,7 @@ fn gdn_chunkwise_recurrence(
                 None
             };
             #[cfg(not(feature = "cuda"))]
-            let prep_out: Option<(
-                Tensor,
-                Tensor,
-                Tensor,
-                Tensor,
-                Tensor,
-                Tensor,
-            )> = None;
+            let prep_out: Option<(Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)> = None;
             match prep_out {
                 Some((a_strict, b_mask, v_prime, q_s_scaled, decay_last_col, p_last)) => {
                     let decay_last_col_u = decay_last_col.unsqueeze(3)?; // [B,nv,C,1]
@@ -13520,12 +13552,10 @@ fn gdn_chunkwise_recurrence(
                             Ok(t.exp()?.to_dtype(dtype)?)
                         }
                     };
-                    let strict_decay = exp_to_dtype(
-                        &strict_bool.where_cond(&decay_delta, &zero_delta)?,
-                    )?;
-                    let causal_decay = exp_to_dtype(
-                        &causal_bool.where_cond(&decay_delta, &zero_delta)?,
-                    )?;
+                    let strict_decay =
+                        exp_to_dtype(&strict_bool.where_cond(&decay_delta, &zero_delta)?)?;
+                    let causal_decay =
+                        exp_to_dtype(&causal_bool.where_cond(&decay_delta, &zero_delta)?)?;
 
                     // p[t] = exp(G[t]).
                     let p = exp_to_dtype(&big_g)?; // [B, nv, C]
@@ -13869,21 +13899,17 @@ fn gated_deltanet_gates_fallback(
         let a_log_exp = {
             #[cfg(feature = "cuda")]
             {
-                if let Some(out) = try_kt_exp(&a_log_f32)
-                    .context("gdn gates fallback try_kt_exp")?
+                if let Some(out) =
+                    try_kt_exp(&a_log_f32).context("gdn gates fallback try_kt_exp")?
                 {
                     out
                 } else {
-                    a_log_f32
-                        .exp()
-                        .context("gdn gates fallback a_log exp")?
+                    a_log_f32.exp().context("gdn gates fallback a_log exp")?
                 }
             }
             #[cfg(not(feature = "cuda"))]
             {
-                a_log_f32
-                    .exp()
-                    .context("gdn gates fallback a_log exp")?
+                a_log_f32.exp().context("gdn gates fallback a_log exp")?
             }
         };
         // Phase 7 (#1082): when `KILN_USE_KT_API_NEG=1` (or
@@ -13902,21 +13928,17 @@ fn gated_deltanet_gates_fallback(
         let neg_decay = {
             #[cfg(feature = "cuda")]
             {
-                if let Some(out) = try_kt_neg(&a_log_exp)
-                    .context("gdn gates fallback try_kt_neg")?
+                if let Some(out) =
+                    try_kt_neg(&a_log_exp).context("gdn gates fallback try_kt_neg")?
                 {
                     out
                 } else {
-                    a_log_exp
-                        .neg()
-                        .context("gdn gates fallback a_log neg")?
+                    a_log_exp.neg().context("gdn gates fallback a_log neg")?
                 }
             }
             #[cfg(not(feature = "cuda"))]
             {
-                a_log_exp
-                    .neg()
-                    .context("gdn gates fallback a_log neg")?
+                a_log_exp.neg().context("gdn gates fallback a_log neg")?
             }
         }; // -exp(A_log)
         sp.broadcast_mul(&neg_decay)
@@ -14295,8 +14317,7 @@ pub fn gdn_gated_rms_norm_backward_no_grad(
 
     let hidden = *x_f32.dims().last().unwrap() as f64;
     // S = Σⱼ d_normed_j * x_j * w_j  (keepdim over the trailing axis).
-    let s = (&d_normed * (&x_f32 * w_f32.broadcast_as(x_f32.shape())?)?)?
-        .sum_keepdim(LAST_DIM)?; // [..., 1]
+    let s = (&d_normed * (&x_f32 * w_f32.broadcast_as(x_f32.shape())?)?)?.sum_keepdim(LAST_DIM)?; // [..., 1]
     // dx_k = (d_normed_k * w_k) / r - x_k * S / (D * r^3).
     let inv_r3 = inv_r.powf(3.0)?;
     let term1 = d_normed.broadcast_mul(&w_f32)?.broadcast_mul(&inv_r)?;
@@ -14447,19 +14468,20 @@ pub fn cross_entropy_from_logits_grad_candle(
     let inv_n = grad_scalar / num_active as f64;
     let g_active_softmax = p.affine(inv_n, 0.0)?; // [A, V]
     let grad_shift_base = Tensor::zeros((seq_len - 1, vocab_size), DType::F32, device)?;
-    let grad_shift_softmax =
-        grad_shift_base.index_add(&active_indices, &g_active_softmax, 0)?; // [T-1, V]
+    let grad_shift_softmax = grad_shift_base.index_add(&active_indices, &g_active_softmax, 0)?; // [T-1, V]
 
     // Sparse one-hot term: subtract g/A at each active (row, label) cell.
-    let flat_dim = (seq_len - 1)
-        .checked_mul(vocab_size)
-        .ok_or_else(|| anyhow::anyhow!("cross_entropy_from_logits_grad_candle: flat grad size overflow"))?;
+    let flat_dim = (seq_len - 1).checked_mul(vocab_size).ok_or_else(|| {
+        anyhow::anyhow!("cross_entropy_from_logits_grad_candle: flat grad size overflow")
+    })?;
     let mut flat_indices = Vec::with_capacity(num_active);
     for (&row, &label) in active_positions.iter().zip(active_labels.iter()) {
         let flat = (row as usize)
             .checked_mul(vocab_size)
             .and_then(|base| base.checked_add(label as usize))
-            .ok_or_else(|| anyhow::anyhow!("cross_entropy_from_logits_grad_candle: flat label index overflow"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("cross_entropy_from_logits_grad_candle: flat label index overflow")
+            })?;
         flat_indices.push(u32::try_from(flat).with_context(|| {
             format!("cross_entropy_from_logits_grad_candle: flat label index {flat} exceeds u32")
         })?);
@@ -14674,14 +14696,11 @@ pub fn sdpa_fallback_backward_no_grad(
     let dscores = dscores.contiguous()?;
 
     // dq = (dscores @ k) * scale. [B, nq, T, T] @ [B, nq, T, hd].
-    let dq = dscores
-        .broadcast_matmul(&k_exp)?
-        .affine(scale, 0.0)?; // [B, nq, T, hd]
+    let dq = dscores.broadcast_matmul(&k_exp)?.affine(scale, 0.0)?; // [B, nq, T, hd]
 
     // dk_exp = (dscoresᵀ @ q) * scale. dscoresᵀ over (T_q, T_k):
     // [B, nq, T_k, T_q] @ [B, nq, T_q, hd] -> [B, nq, T_k, hd].
-    let dk_exp = kiln_tensor::ops::matmul_lhs_transposed(&dscores, &q_f32_c)?
-        .affine(scale, 0.0)?; // [B, nq, T, hd]
+    let dk_exp = kiln_tensor::ops::matmul_lhs_transposed(&dscores, &q_f32_c)?.affine(scale, 0.0)?; // [B, nq, T, hd]
 
     // GQA-collapse dk_exp / dv_exp from num_heads back to num_kv_heads by
     // summing each group of `gqa_ratio` query heads (the adjoint of the
@@ -14689,8 +14708,7 @@ pub fn sdpa_fallback_backward_no_grad(
     // group axis.
     let collapse = |dexp: &Tensor| -> Result<Tensor> {
         if gqa_ratio > 1 {
-            let grouped =
-                dexp.reshape((batch, num_kv_heads, gqa_ratio, seq_len, head_dim))?;
+            let grouped = dexp.reshape((batch, num_kv_heads, gqa_ratio, seq_len, head_dim))?;
             Ok(grouped.sum(2)?) // [B, nkv, T, hd]
         } else {
             Ok(dexp.clone())
@@ -15769,22 +15787,27 @@ pub fn gated_deltanet_forward_streaming(
     // adapter. Falls through to the candle composite when any
     // precondition fails.
     let out = {
-    #[cfg(feature = "cuda")]
-    {
-        if let Some(out) = try_kt_cat_dim1(&tile_refs)
-            .context("streaming GDN try_kt_cat_dim1")?
+        #[cfg(feature = "cuda")]
         {
-            out
-        } else {
+            if let Some(out) =
+                try_kt_cat_dim1(&tile_refs).context("streaming GDN try_kt_cat_dim1")?
+            {
+                out
+            } else {
+                Tensor::cat(&tile_refs, 1).context("streaming GDN cat tile outputs along T axis")?
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
             Tensor::cat(&tile_refs, 1).context("streaming GDN cat tile outputs along T axis")?
         }
-    }
-    #[cfg(not(feature = "cuda"))]
-    {
-        Tensor::cat(&tile_refs, 1).context("streaming GDN cat tile outputs along T axis")?
-    }
     };
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    ))]
     {
         if let Some(recorded) = crate::tape_forward::try_tape_concat_kt(&tile_refs, 1, &out)
             .context("streaming GDN tile concat try_tape_concat_kt")?
@@ -15924,9 +15947,17 @@ fn gated_deltanet_forward_decode_if_inner(
     // the kt-bridge scope (that's a CUDA/Metal candle-bridge construct). Gate on
     // an active tape scope so inference keeps the forward-only fused kernels even
     // though tape-forward defaults on.
-    #[cfg(all(any(feature = "vulkan", feature = "rocm"), not(any(feature = "cuda", feature = "metal"))))]
+    #[cfg(all(
+        any(feature = "vulkan", feature = "rocm"),
+        not(any(feature = "cuda", feature = "metal"))
+    ))]
     let tape_recording_active = crate::tape_forward::tape_scope_active();
-    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
+    #[cfg(not(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    )))]
     let tape_recording_active = false;
     let gdn_forward_only_fastpaths =
         allow_forward_only_fastpaths && !x.track_op() && !tape_recording_active;
@@ -16245,7 +16276,12 @@ fn gated_deltanet_forward_decode_if_inner(
                     // candle fallback unless the gate is on + a tape scope is
                     // active.
                     // #1082 seam flip: kt-native transpose recorder — no kt->candle->kt.
-                    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+                    #[cfg(any(
+                        feature = "cuda",
+                        feature = "metal",
+                        feature = "vulkan",
+                        feature = "rocm"
+                    ))]
                     {
                         match crate::tape_forward::try_tape_transpose_kt(&mixed_qkv, 1, 2)
                             .context("gdn conv transpose try_tape_transpose_kt")?
@@ -16254,7 +16290,12 @@ fn gated_deltanet_forward_decode_if_inner(
                             None => mixed_qkv.transpose(1, 2)?.contiguous()?,
                         }
                     }
-                    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
+                    #[cfg(not(any(
+                        feature = "cuda",
+                        feature = "metal",
+                        feature = "vulkan",
+                        feature = "rocm"
+                    )))]
                     {
                         mixed_qkv.transpose(1, 2)?.contiguous()?
                     }
@@ -16324,7 +16365,12 @@ fn gated_deltanet_forward_decode_if_inner(
                             // recomputes the pre-SiLU conv activation from the
                             // saved entry state. If the recorder declines, restore
                             // the state and fall back to the pre-SiLU recorded path.
-                            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+                            #[cfg(any(
+                                feature = "cuda",
+                                feature = "metal",
+                                feature = "vulkan",
+                                feature = "rocm"
+                            ))]
                             {
                                 if tape_recording_active {
                                     let recorded =
@@ -16357,12 +16403,13 @@ fn gated_deltanet_forward_decode_if_inner(
                                             conv_state,
                                             kernel_size,
                                         )?;
-                                        let _ = crate::tape_forward::try_tape_causal_conv1d_prefill_kt(
-                                            &mixed_qkv_ct,
-                                            &weights.conv1d,
-                                            &y,
-                                            kernel_size,
-                                        )?;
+                                        let _ =
+                                            crate::tape_forward::try_tape_causal_conv1d_prefill_kt(
+                                                &mixed_qkv_ct,
+                                                &weights.conv1d,
+                                                &y,
+                                                kernel_size,
+                                            )?;
                                         cuda_silu(&y)?
                                     }
                                 } else {
@@ -16375,7 +16422,12 @@ fn gated_deltanet_forward_decode_if_inner(
                                     out
                                 }
                             }
-                            #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
+                            #[cfg(not(any(
+                                feature = "cuda",
+                                feature = "metal",
+                                feature = "vulkan",
+                                feature = "rocm"
+                            )))]
                             {
                                 out
                             }
@@ -16397,7 +16449,12 @@ fn gated_deltanet_forward_decode_if_inner(
                             // CP-4 Increment 3 (#1082): wire the prefill conv +
                             // its SiLU onto the kt Tape. See the comment on the
                             // sibling fallback branch below.
-                            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+                            #[cfg(any(
+                                feature = "cuda",
+                                feature = "metal",
+                                feature = "vulkan",
+                                feature = "rocm"
+                            ))]
                             // #1082 seam flip: kt-native conv1d-prefill recorder — no kt->candle->kt.
                             // Device-agnostic backward (CUDA FFI / kt composite), so Vulkan is in.
                             if crate::tape_forward::tape_forward_enabled() {
@@ -16444,9 +16501,13 @@ fn gated_deltanet_forward_decode_if_inner(
                     // fallback unless `KILN_USE_TAPE_GDN_CONV` (+ FORWARD) is set
                     // AND a tape scope is active. This is the training path
                     // (track_op=true -> gdn_forward_only_fastpaths=false).
-                    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
-                    if crate::tape_forward::tape_forward_enabled()
-                    {
+                    #[cfg(any(
+                        feature = "cuda",
+                        feature = "metal",
+                        feature = "vulkan",
+                        feature = "rocm"
+                    ))]
+                    if crate::tape_forward::tape_forward_enabled() {
                         // #1082 seam flip: kt-native conv1d-prefill recorder — no kt->candle->kt.
                         // Device-agnostic backward (CUDA FFI / kt composite), so Vulkan is in.
                         let _ = crate::tape_forward::try_tape_causal_conv1d_prefill_kt(
@@ -16481,7 +16542,12 @@ fn gated_deltanet_forward_decode_if_inner(
             // the conv. No-op + candle fallback unless the gate is on + a tape
             // scope is active.
             // #1082 seam flip: kt-native transpose recorder — no kt->candle->kt.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+            #[cfg(any(
+                feature = "cuda",
+                feature = "metal",
+                feature = "vulkan",
+                feature = "rocm"
+            ))]
             {
                 match crate::tape_forward::try_tape_transpose_kt(&post_silu, 1, 2)
                     .context("gdn conv-out transpose try_tape_transpose_kt")?
@@ -16490,7 +16556,12 @@ fn gated_deltanet_forward_decode_if_inner(
                     None => post_silu.transpose(1, 2)?,
                 }
             }
-            #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
+            #[cfg(not(any(
+                feature = "cuda",
+                feature = "metal",
+                feature = "vulkan",
+                feature = "rocm"
+            )))]
             {
                 post_silu.transpose(1, 2)?
             }
@@ -16525,57 +16596,75 @@ fn gated_deltanet_forward_decode_if_inner(
             // The z reshape connects the in_proj_z keystone output to the
             // gated-RMSNorm gate input. No-op + candle fallback unless the gate is
             // on + a tape scope is active.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
-            let narrow_then_reshape =
-                |src: &Tensor, offset: usize, length: usize, shape: (usize, usize, usize, usize)| -> Result<Tensor> {
-                    // Materialise contiguous: `narrow` returns a strided view, but
-                    // the narrow adapter borrows `out` as a kt tensor (which
-                    // requires contiguous) and the downstream reshape needs it too.
-                    // Without this the narrow adapter declines (borrow fails) and
-                    // the q/k/v become fresh-borrow islands, severing in_proj_qkv
-                    // from the loss. Value-preserving. (#1082 CP-4 Increment 5)
-                    let nar = src.narrow(2, offset, length)?.contiguous()?;
-                    // #1082 seam flip: kt-native NarrowCompositeBackward recorder — no kt->candle->kt.
-                    let nar = match crate::tape_forward::try_tape_narrow_kt(
-                        src, 2, offset, length, &nar,
-                    )
-                    .context("gdn qkv narrow try_tape_narrow_kt")?
+            #[cfg(any(
+                feature = "cuda",
+                feature = "metal",
+                feature = "vulkan",
+                feature = "rocm"
+            ))]
+            let narrow_then_reshape = |src: &Tensor,
+                                       offset: usize,
+                                       length: usize,
+                                       shape: (usize, usize, usize, usize)|
+             -> Result<Tensor> {
+                // Materialise contiguous: `narrow` returns a strided view, but
+                // the narrow adapter borrows `out` as a kt tensor (which
+                // requires contiguous) and the downstream reshape needs it too.
+                // Without this the narrow adapter declines (borrow fails) and
+                // the q/k/v become fresh-borrow islands, severing in_proj_qkv
+                // from the loss. Value-preserving. (#1082 CP-4 Increment 5)
+                let nar = src.narrow(2, offset, length)?.contiguous()?;
+                // #1082 seam flip: kt-native NarrowCompositeBackward recorder — no kt->candle->kt.
+                let nar =
+                    match crate::tape_forward::try_tape_narrow_kt(src, 2, offset, length, &nar)
+                        .context("gdn qkv narrow try_tape_narrow_kt")?
                     {
                         Some(t) => t,
                         None => nar,
                     };
-                    let resh = nar.reshape(shape)?;
-                    // #1082 seam flip: kt-native reshape recorder — no kt->candle->kt.
-                    match crate::tape_forward::try_tape_reshape_kt(
-                        &nar,
-                        vec![shape.0, shape.1, shape.2, shape.3],
-                    )
-                    .context("gdn qkv reshape try_tape_reshape_kt")?
-                    {
-                        Some(t) => Ok(t),
-                        None => Ok(resh),
-                    }
-                };
-            #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
-            let narrow_then_reshape =
-                |src: &Tensor, offset: usize, length: usize, shape: (usize, usize, usize, usize)| -> Result<Tensor> {
-                    Ok(src.narrow(2, offset, length)?.reshape(shape)?)
-                };
+                let resh = nar.reshape(shape)?;
+                // #1082 seam flip: kt-native reshape recorder — no kt->candle->kt.
+                match crate::tape_forward::try_tape_reshape_kt(
+                    &nar,
+                    vec![shape.0, shape.1, shape.2, shape.3],
+                )
+                .context("gdn qkv reshape try_tape_reshape_kt")?
+                {
+                    Some(t) => Ok(t),
+                    None => Ok(resh),
+                }
+            };
+            #[cfg(not(any(
+                feature = "cuda",
+                feature = "metal",
+                feature = "vulkan",
+                feature = "rocm"
+            )))]
+            let narrow_then_reshape = |src: &Tensor,
+                                       offset: usize,
+                                       length: usize,
+                                       shape: (usize, usize, usize, usize)|
+             -> Result<Tensor> {
+                Ok(src.narrow(2, offset, length)?.reshape(shape)?)
+            };
             let q = narrow_then_reshape(&mixed_qkv, 0, qk_dim, (batch, seq_len, nk, dk))?;
             let k = narrow_then_reshape(&mixed_qkv, qk_dim, qk_dim, (batch, seq_len, nk, dk))?;
             let v = narrow_then_reshape(&mixed_qkv, 2 * qk_dim, v_dim, (batch, seq_len, nv, dv))?;
             let z_reshaped = z.reshape((batch, seq_len, nv, dv))?;
             // #1082 seam flip: kt-native reshape recorder — no kt->candle->kt.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
-            let z_reshaped = match crate::tape_forward::try_tape_reshape_kt(
-                &z,
-                vec![batch, seq_len, nv, dv],
-            )
-            .context("gdn z reshape try_tape_reshape_kt")?
-            {
-                Some(t) => t,
-                None => z_reshaped,
-            };
+            #[cfg(any(
+                feature = "cuda",
+                feature = "metal",
+                feature = "vulkan",
+                feature = "rocm"
+            ))]
+            let z_reshaped =
+                match crate::tape_forward::try_tape_reshape_kt(&z, vec![batch, seq_len, nv, dv])
+                    .context("gdn z reshape try_tape_reshape_kt")?
+                {
+                    Some(t) => t,
+                    None => z_reshaped,
+                };
             (q, k, v, z_reshaped)
         };
         finish_gdn_stage_profile(
@@ -16624,34 +16713,43 @@ fn gated_deltanet_forward_decode_if_inner(
             && input_dtype == DType::BF16
             && GdnBackend::runtime_supports_gdn_recurrent_qk_norm_prefill_native_head_last(backend);
         let normalize_before_gqa_expand_for_tape = tape_recording_active && gqa_ratio > 1;
-        let normalize_then_expand_qk_for_tape =
-            |q_src: &Tensor, k_src: &Tensor| -> Result<(Tensor, Tensor)> {
-                let (q_norm, k_norm) = gdn_qk_norm(q_src, k_src, input_dtype, scale)?;
-                let expand = |src: &Tensor, label: &'static str| -> Result<Tensor> {
-                    let expanded = src
-                        .unsqueeze(3)?
-                        .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
-                        .contiguous()?
-                        .reshape((batch, seq_len, nv, dk))?;
-                    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
-                    {
-                        match crate::tape_forward::try_tape_gqa_expand_kt(
-                            src, gqa_ratio, &expanded,
-                        )
+        let normalize_then_expand_qk_for_tape = |q_src: &Tensor,
+                                                 k_src: &Tensor|
+         -> Result<(Tensor, Tensor)> {
+            let (q_norm, k_norm) = gdn_qk_norm(q_src, k_src, input_dtype, scale)?;
+            let expand = |src: &Tensor, label: &'static str| -> Result<Tensor> {
+                let expanded = src
+                    .unsqueeze(3)?
+                    .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+                    .contiguous()?
+                    .reshape((batch, seq_len, nv, dk))?;
+                #[cfg(any(
+                    feature = "cuda",
+                    feature = "metal",
+                    feature = "vulkan",
+                    feature = "rocm"
+                ))]
+                {
+                    match crate::tape_forward::try_tape_gqa_expand_kt(src, gqa_ratio, &expanded)
                         .with_context(|| format!("gdn qk-norm-before-expand tape expand {label}"))?
-                        {
-                            Some(t) => Ok(t),
-                            None => Ok(expanded),
-                        }
-                    }
-                    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
                     {
-                        let _ = label;
-                        Ok(expanded)
+                        Some(t) => Ok(t),
+                        None => Ok(expanded),
                     }
-                };
-                Ok((expand(&q_norm, "q")?, expand(&k_norm, "k")?))
+                }
+                #[cfg(not(any(
+                    feature = "cuda",
+                    feature = "metal",
+                    feature = "vulkan",
+                    feature = "rocm"
+                )))]
+                {
+                    let _ = label;
+                    Ok(expanded)
+                }
             };
+            Ok((expand(&q_norm, "q")?, expand(&k_norm, "k")?))
+        };
         let (q, k, qk_expanded, qk_norm_deferred, qk_norm_deferred_to_native_recurrent) = {
             #[cfg(feature = "metal")]
             {
@@ -16719,24 +16817,20 @@ fn gated_deltanet_forward_decode_if_inner(
                             if let (Some(q_kt), Some(k_kt)) =
                                 (try_borrow_kt_cuda(&q_contig), try_borrow_kt_cuda(&k_contig))
                             {
-                                if kiln_rmsnorm_kernel::supports_l2_qk_norm_gqa_kt(
-                                    &q_kt, &k_kt, nv,
-                                ) {
+                                if kiln_rmsnorm_kernel::supports_l2_qk_norm_gqa_kt(&q_kt, &k_kt, nv)
+                                {
                                     kiln_nvtx::range!(c"kiln/gdn/qk_norm_gqa");
                                     // #1082: keep the fused L2-QK-norm output as kt —
                                     // the downstream qk_norm tuple arms are kt, so the
                                     // candle copy-out is gone.
-                                    let (q, k) =
-                                        kiln_rmsnorm_kernel::fused_l2_qk_norm_gqa_kt(
-                                            &q_kt,
-                                            &k_kt,
-                                            nv,
-                                            scale as f32,
-                                            1e-6,
-                                        )
-                                        .map_err(|e| {
-                                            anyhow::anyhow!("kt fused_l2_qk_norm_gqa: {e}")
-                                        })?;
+                                    let (q, k) = kiln_rmsnorm_kernel::fused_l2_qk_norm_gqa_kt(
+                                        &q_kt,
+                                        &k_kt,
+                                        nv,
+                                        scale as f32,
+                                        1e-6,
+                                    )
+                                    .map_err(|e| anyhow::anyhow!("kt fused_l2_qk_norm_gqa: {e}"))?;
                                     Some((q, k))
                                 } else {
                                     None
@@ -16794,7 +16888,12 @@ fn gated_deltanet_forward_decode_if_inner(
                             // candle fallback unless the gate is on + a tape
                             // scope is active.
                             // #1082 seam flip: kt-native GqaExpandBackward recorder — no kt->candle->kt.
-                            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+                            #[cfg(any(
+                                feature = "cuda",
+                                feature = "metal",
+                                feature = "vulkan",
+                                feature = "rocm"
+                            ))]
                             let q_exp = match crate::tape_forward::try_tape_gqa_expand_kt(
                                 &q, gqa_ratio, &q_exp,
                             )
@@ -16803,7 +16902,12 @@ fn gated_deltanet_forward_decode_if_inner(
                                 Some(t) => t,
                                 None => q_exp,
                             };
-                            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+                            #[cfg(any(
+                                feature = "cuda",
+                                feature = "metal",
+                                feature = "vulkan",
+                                feature = "rocm"
+                            ))]
                             let k_exp = match crate::tape_forward::try_tape_gqa_expand_kt(
                                 &k, gqa_ratio, &k_exp,
                             )
@@ -17202,14 +17306,24 @@ fn gated_deltanet_forward_decode_if_inner(
             // training path (which sets qk_expanded == true) but wired for
             // parity across configs.
             // #1082 seam flip: kt-native GqaExpandBackward recorder — no kt->candle->kt.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+            #[cfg(any(
+                feature = "cuda",
+                feature = "metal",
+                feature = "vulkan",
+                feature = "rocm"
+            ))]
             let q_exp = match crate::tape_forward::try_tape_gqa_expand_kt(&q, gqa_ratio, &q_exp)
                 .context("gdn gqa-expand-recur try_tape_gqa_expand_kt q")?
             {
                 Some(t) => t,
                 None => q_exp,
             };
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+            #[cfg(any(
+                feature = "cuda",
+                feature = "metal",
+                feature = "vulkan",
+                feature = "rocm"
+            ))]
             let k_exp = match crate::tape_forward::try_tape_gqa_expand_kt(&k, gqa_ratio, &k_exp)
                 .context("gdn gqa-expand-recur try_tape_gqa_expand_kt k")?
             {
@@ -17253,7 +17367,7 @@ fn gated_deltanet_forward_decode_if_inner(
                     &weights.a_log_gates,
                     &weights.dt_bias,
                 )
-                    .context("gdn decode gates fused backend")?
+                .context("gdn decode gates fused backend")?
                 {
                     (beta, g)
                 } else {
@@ -17345,7 +17459,12 @@ fn gated_deltanet_forward_decode_if_inner(
             // needs the entry state. Cheap clone (a Tensor handle); only the
             // CUDA tape path reads it, but we take it unconditionally so the
             // wiring stays a single no-op call below.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+            #[cfg(any(
+                feature = "cuda",
+                feature = "metal",
+                feature = "vulkan",
+                feature = "rocm"
+            ))]
             let gdn_entry_state = recurrent_state.clone();
 
             // Cast v back to input_dtype so the recurrence stays in bf16. The
@@ -17368,7 +17487,12 @@ fn gated_deltanet_forward_decode_if_inner(
                 // chained id on every input.
                 let v_cast = v.to_dtype(input_dtype)?;
                 // #1082 seam flip: kt-native CastCompositeBackward recorder — no kt->candle->kt.
-                #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+                #[cfg(any(
+                    feature = "cuda",
+                    feature = "metal",
+                    feature = "vulkan",
+                    feature = "rocm"
+                ))]
                 let v_cast = match crate::tape_forward::try_tape_cast_kt(&v, &v_cast)
                     .context("gdn recur v-cast try_tape_cast_kt")?
                 {
@@ -17379,7 +17503,12 @@ fn gated_deltanet_forward_decode_if_inner(
 
                 // Transpose to [B, nv, T, dim] for per-head processing.
                 // #1082 seam flip: kt-native transpose recorder — no kt->candle->kt.
-                #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+                #[cfg(any(
+                    feature = "cuda",
+                    feature = "metal",
+                    feature = "vulkan",
+                    feature = "rocm"
+                ))]
                 let transpose12 = |t: &Tensor| -> Result<Tensor> {
                     match crate::tape_forward::try_tape_transpose_kt(t, 1, 2)
                         .context("gdn recur transpose try_tape_transpose_kt")?
@@ -17388,7 +17517,12 @@ fn gated_deltanet_forward_decode_if_inner(
                         None => Ok(t.transpose(1, 2)?),
                     }
                 };
-                #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
+                #[cfg(not(any(
+                    feature = "cuda",
+                    feature = "metal",
+                    feature = "vulkan",
+                    feature = "rocm"
+                )))]
                 let transpose12 = |t: &Tensor| -> Result<Tensor> { Ok(t.transpose(1, 2)?) };
 
                 let q = transpose12(&q)?; // [B, nv, T, dk]
@@ -17408,8 +17542,7 @@ fn gated_deltanet_forward_decode_if_inner(
                     &beta,
                     &g,
                     recurrent_state,
-                )?
-            {
+                )? {
                 (attn_out, true, false) // [B, T, nv, dv], contiguous
             } else {
                 match gdn_chunkwise_recurrence_head_last_full_chunks(
@@ -17458,7 +17591,12 @@ fn gated_deltanet_forward_decode_if_inner(
             // output that flows downstream (the post-transpose's
             // `kt_logits_to_candle` retains it for chaining), so recording it
             // as the node output keeps the recurrence→transpose seam connected.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+            #[cfg(any(
+                feature = "cuda",
+                feature = "metal",
+                feature = "vulkan",
+                feature = "rocm"
+            ))]
             if crate::tape_forward::tape_forward_enabled() {
                 crate::tape_forward::tape_record_gdn_recurrent_kt(
                     &recurrent_result.0,
@@ -17508,7 +17646,12 @@ fn gated_deltanet_forward_decode_if_inner(
             // transpose unless `KILN_USE_TAPE_FORWARD` is set AND a tape scope is
             // active.
             // #1082 seam flip: kt-native transpose recorder — no kt->candle->kt.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+            #[cfg(any(
+                feature = "cuda",
+                feature = "metal",
+                feature = "vulkan",
+                feature = "rocm"
+            ))]
             {
                 match crate::tape_forward::try_tape_transpose_kt(&attn_out, 1, 2)
                     .context("gdn attn_out transpose try_tape_transpose_kt")?
@@ -17517,7 +17660,12 @@ fn gated_deltanet_forward_decode_if_inner(
                     None => attn_out.transpose(1, 2)?,
                 }
             }
-            #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
+            #[cfg(not(any(
+                feature = "cuda",
+                feature = "metal",
+                feature = "vulkan",
+                feature = "rocm"
+            )))]
             {
                 attn_out.transpose(1, 2)?
             }
@@ -17559,7 +17707,12 @@ fn gated_deltanet_forward_decode_if_inner(
             // `KILN_USE_TAPE_GDN_GATED_NORM` are set AND a tape scope is active;
             // the production output (`gated`) is untouched either way.
             // #1082 seam flip: kt-native GdnGatedRmsNormBackward recorder — no kt->candle->kt.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+            #[cfg(any(
+                feature = "cuda",
+                feature = "metal",
+                feature = "vulkan",
+                feature = "rocm"
+            ))]
             if crate::tape_forward::tape_forward_enabled() {
                 let _ = crate::tape_forward::try_tape_gdn_gated_rms_norm_kt(
                     &attn_out,
@@ -17582,16 +17735,19 @@ fn gated_deltanet_forward_decode_if_inner(
         // is active.
         let reshaped = attn_out.reshape((batch, seq_len, v_dim))?;
         // #1082 seam flip: kt-native reshape recorder — no kt->candle->kt.
-        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
-        let reshaped = match crate::tape_forward::try_tape_reshape_kt(
-            &attn_out,
-            vec![batch, seq_len, v_dim],
-        )
-        .context("gdn gated-norm reshape try_tape_reshape_kt")?
-        {
-            Some(t) => t,
-            None => reshaped,
-        };
+        #[cfg(any(
+            feature = "cuda",
+            feature = "metal",
+            feature = "vulkan",
+            feature = "rocm"
+        ))]
+        let reshaped =
+            match crate::tape_forward::try_tape_reshape_kt(&attn_out, vec![batch, seq_len, v_dim])
+                .context("gdn gated-norm reshape try_tape_reshape_kt")?
+            {
+                Some(t) => t,
+                None => reshaped,
+            };
         // (#1082) GDN-on-Vulkan: a same-dtype `to_dtype` is a kt no-op that still
         // mints a NEW tensor id, and the cast tape recorder skips no-op casts —
         // leaving `casted` an unrecorded island that severs out_proj's dx from the
@@ -17604,7 +17760,12 @@ fn gated_deltanet_forward_decode_if_inner(
         } else {
             let casted = reshaped.to_dtype(input_dtype)?;
             // #1082 seam flip: kt-native CastCompositeBackward recorder — no kt->candle->kt.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+            #[cfg(any(
+                feature = "cuda",
+                feature = "metal",
+                feature = "vulkan",
+                feature = "rocm"
+            ))]
             let casted = match crate::tape_forward::try_tape_cast_kt(&reshaped, &casted)
                 .context("gdn gated-norm cast try_tape_cast_kt")?
             {
@@ -17718,8 +17879,8 @@ fn q_proj_forward_decode_if(
         let base = crate::marlin_proj::matmul_bf16_kt(x, packed)
             .context("q_proj_forward: kt-native marlin matmul")?;
         if let Some(proj) = lora {
-            if let Some(delta) = try_kt_lora_delta(x, proj, lora_scale)
-                .context("q_proj_forward: kt lora delta")?
+            if let Some(delta) =
+                try_kt_lora_delta(x, proj, lora_scale).context("q_proj_forward: kt lora delta")?
             {
                 let delta = if delta.dtype() == base.dtype() {
                     delta
@@ -17737,8 +17898,8 @@ fn q_proj_forward_decode_if(
             }
             // kt-native composite LoRA delta fallback (#1082: compute_lora_delta
             // is kt now — pass kt `x` directly).
-            let delta = compute_lora_delta(x, proj, lora_scale)
-                .context("q_proj_forward: lora delta")?;
+            let delta =
+                compute_lora_delta(x, proj, lora_scale).context("q_proj_forward: lora delta")?;
             return Ok((base + delta).context("q_proj_forward: add lora delta")?);
         }
         return Ok(base);
@@ -18244,9 +18405,19 @@ pub fn gqa_attention_core_prefill(
         // `try_tape_sdpa_fallback_kt` below. Inference (no tape scope) keeps the
         // fast leaf kernel unchanged on every backend. On a default build
         // (no tape-feature) `tape_forward` is cfg'd out, so the leaf always runs.
-        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+        #[cfg(any(
+            feature = "cuda",
+            feature = "metal",
+            feature = "vulkan",
+            feature = "rocm"
+        ))]
         let skip_leaf_flash = crate::tape_forward::tape_scope_active();
-        #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
+        #[cfg(not(any(
+            feature = "cuda",
+            feature = "metal",
+            feature = "vulkan",
+            feature = "rocm"
+        )))]
         let skip_leaf_flash = false;
         if !skip_leaf_flash {
             if let Some(attn_output) =
@@ -18334,10 +18505,19 @@ pub fn gqa_attention_core_prefill(
     // so the device-agnostic `try_tape_sdpa_fallback_kt` is the attention
     // backward producer on Vulkan; without it, grads sever between v_proj and
     // o_proj.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    ))]
     if crate::tape_forward::tape_forward_enabled() {
         if let Some(tape_attn) = crate::tape_forward::try_tape_sdpa_fallback_kt(
-            &q, &k_he, &v_he, head_dim, &attn_output,
+            &q,
+            &k_he,
+            &v_he,
+            head_dim,
+            &attn_output,
         )? {
             let transposed = match crate::tape_forward::try_tape_transpose_kt(&tape_attn, 1, 2)? {
                 Some(t) => t,
@@ -18457,8 +18637,8 @@ pub fn gqa_attention_pre_o_chunked_prefill(
             format!("chunked full-attention pre-o q projection [{tile_start}, {tile_end})")
         })?;
         let (q_tile, gate_tile) = if attn_output_gate {
-            let q_raw = reshape_hole0_4(&q_raw, tile_len, num_heads, head_dim * 2)
-                .with_context(|| {
+            let q_raw =
+                reshape_hole0_4(&q_raw, tile_len, num_heads, head_dim * 2).with_context(|| {
                     format!(
                         "chunked full-attention pre-o q/gate reshape [{tile_start}, {tile_end})"
                     )
@@ -18545,7 +18725,12 @@ pub fn gqa_attention_pre_o_chunked_prefill(
 fn tape_reshape_full_attn(x: &Tensor, dims: &[ReshapeArg]) -> Result<Tensor> {
     // #1082 seam flip: kt-native reshape recorder — no kt->candle->kt.
     // (#1082) Vulkan added: device-agnostic pure-kt recorder.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    ))]
     {
         if let Some(concrete) = resolve_reshape_dims(x.elem_count(), dims) {
             if let Some(out) = crate::tape_forward::try_tape_reshape_kt(x, concrete)
@@ -18567,7 +18752,12 @@ fn tape_reshape_full_attn(x: &Tensor, dims: &[ReshapeArg]) -> Result<Tensor> {
 fn tape_transpose_contig_full_attn(x: &Tensor, axis_a: usize, axis_b: usize) -> Result<Tensor> {
     // #1082 seam flip: kt-native transpose recorder — no kt->candle->kt.
     // (#1082) Vulkan added: device-agnostic pure-kt recorder.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    ))]
     {
         if let Some(out) = crate::tape_forward::try_tape_transpose_kt(x, axis_a, axis_b)
             .context("tape_transpose_contig_full_attn try_tape_transpose_kt")?
@@ -18937,9 +19127,19 @@ pub fn gqa_attention_pre_o(
         // `try_tape_sdpa_fallback_kt` below. Inference (no tape scope) keeps the
         // fast leaf kernel unchanged on every backend. On a default build
         // (no tape-feature) `tape_forward` is cfg'd out, so the leaf always runs.
-        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+        #[cfg(any(
+            feature = "cuda",
+            feature = "metal",
+            feature = "vulkan",
+            feature = "rocm"
+        ))]
         let skip_leaf_flash = crate::tape_forward::tape_scope_active();
-        #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
+        #[cfg(not(any(
+            feature = "cuda",
+            feature = "metal",
+            feature = "vulkan",
+            feature = "rocm"
+        )))]
         let skip_leaf_flash = false;
         if !skip_leaf_flash {
             if let Some(attn_output) =
@@ -18989,7 +19189,12 @@ pub fn gqa_attention_pre_o(
     // (the tape-authoritative SFT path), so capture before the cache update.
     // (#1082) Vulkan added: the SDPA fallback is the attention backward producer
     // on Vulkan (the flash leaf is skipped under a tape scope above).
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    ))]
     let sdpa_pre_expand = if kv_cache.is_none() {
         Some((q.clone(), k.clone(), v.clone()))
     } else {
@@ -19147,18 +19352,27 @@ pub fn gqa_attention_pre_o(
     // None) in every other configuration; mirrors `gqa_attention_core_prefill`.
     // (#1082) Vulkan added: device-agnostic SDPA-fallback + transpose + reshape
     // recorders — the attention backward producer on Vulkan.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    ))]
     // #1082 seam flip: kt-native SDPA-fallback + transpose + reshape recorders.
     if crate::tape_forward::tape_forward_enabled() {
         if let Some((q_pe, k_pe, v_pe)) = sdpa_pre_expand.as_ref() {
             if let Some(tape_attn) = crate::tape_forward::try_tape_sdpa_fallback_kt(
-                q_pe, k_pe, v_pe, head_dim, &attn_output,
+                q_pe,
+                k_pe,
+                v_pe,
+                head_dim,
+                &attn_output,
             )? {
-                let transposed =
-                    match crate::tape_forward::try_tape_transpose_kt(&tape_attn, 1, 2)? {
-                        Some(t) => t,
-                        None => tape_attn.transpose(1, 2)?.contiguous()?,
-                    };
+                let transposed = match crate::tape_forward::try_tape_transpose_kt(&tape_attn, 1, 2)?
+                {
+                    Some(t) => t,
+                    None => tape_attn.transpose(1, 2)?.contiguous()?,
+                };
                 let (tb, tt, th, td) = transposed.dims4()?;
                 let flat = th * td;
                 let reshaped = match crate::tape_forward::try_tape_reshape_kt(
@@ -19388,7 +19602,9 @@ fn try_flash_attn_paged_decode(
     attn_weights: &GpuFullAttentionWeights,
     lora_layer: Option<&LoraLayerWeights>,
     lora_scale: f32,
-    #[cfg(any(feature = "cuda", feature = "rocm"))] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
+    #[cfg(any(feature = "cuda", feature = "rocm"))] graph_inputs: Option<
+        &PagedDecodeGraphInputs<'_>,
+    >,
     profile_context: Option<(usize, usize)>,
     // Phase 7 #1082: kt twin of `paged_cache` for parity-checked
     // accessor reads. When `Some` AND the env gate is on,
@@ -19397,16 +19613,13 @@ fn try_flash_attn_paged_decode(
     // since `PagedKvCacheKt` is CUDA-only. `None` on the default
     // path (caller not migrated yet or gate off) keeps every
     // accessor on the candle path unchanged.
-    #[cfg(feature = "cuda")] kt_paged_cache: Option<
-        &crate::paged_kv_cache_kt::PagedKvCacheKt,
-    >,
+    #[cfg(feature = "cuda")] kt_paged_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
 ) -> Result<Option<Tensor>> {
     // #1082: the real FA2 tile width for hdim256 (was a conservative 128).
     const K_BLOCK_N: usize = crate::generate::FA2_KBLOCK_N;
 
     #[cfg(feature = "cuda")]
-    let block_size =
-        try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache);
+    let block_size = try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache);
     #[cfg(not(feature = "cuda"))]
     let block_size = paged_cache.block_size();
     if block_size == 0 || K_BLOCK_N % block_size != 0 {
@@ -19428,11 +19641,7 @@ fn try_flash_attn_paged_decode(
 
     let kt_pools = paged_cache.pool_tensors(full_attn_layer_idx);
     #[cfg(feature = "cuda")]
-    try_kt_paged_kv_pool_tensors_present(
-        kt_pools.is_some(),
-        full_attn_layer_idx,
-        kt_paged_cache,
-    );
+    try_kt_paged_kv_pool_tensors_present(kt_pools.is_some(), full_attn_layer_idx, kt_paged_cache);
     let (k_pool, v_pool) = match kt_pools {
         Some(p) => p,
         None => return Ok(None),
@@ -19490,7 +19699,8 @@ fn try_flash_attn_paged_decode(
                         && PagedKvBackend::runtime_supports_paged_kv_head_major_read(backend);
                 let fast_head_major = if can_read_head_major {
                     kiln_nvtx::range!(c"kiln/kv/head_major_read_decode");
-                    let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
+                    let stage_profile =
+                        start_full_attn_stage_profile(&q.device(), profile_context)?;
                     let out = PagedKvBackend::runtime_paged_kv_head_major_read(
                         backend,
                         k_pool,
@@ -19527,7 +19737,8 @@ fn try_flash_attn_paged_decode(
                             )
                         }
                     };
-                    let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
+                    let stage_profile =
+                        start_full_attn_stage_profile(&q.device(), profile_context)?;
                     let out = flash_attention_forward_head_major(
                         backend, q, &k_head, &v_head, num_heads, head_dim,
                     )?;
@@ -19917,9 +20128,7 @@ impl CachedPagedDecodeMeta {
         paged_cache: &PagedKvCache,
         block_tables: &[&BlockTable],
         start_positions: &[usize],
-        #[cfg(feature = "cuda")] kt_paged_cache: Option<
-            &crate::paged_kv_cache_kt::PagedKvCacheKt,
-        >,
+        #[cfg(feature = "cuda")] kt_paged_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
     ) -> Result<Self> {
         let batch = start_positions.len();
         anyhow::ensure!(
@@ -19944,12 +20153,10 @@ impl CachedPagedDecodeMeta {
         let max_seqlen_k = max_start_pos + 1;
 
         #[cfg(feature = "cuda")]
-        let page_block_size =
-            try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache);
+        let page_block_size = try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache);
         #[cfg(not(feature = "cuda"))]
         let page_block_size = paged_cache.block_size();
-        let max_blocks_per_seq =
-            ((max_seqlen_k + page_block_size - 1) / page_block_size).max(1);
+        let max_blocks_per_seq = ((max_seqlen_k + page_block_size - 1) / page_block_size).max(1);
         let mut block_table_vec = Vec::<u32>::with_capacity(batch * max_blocks_per_seq);
         // #1082: kt flash-attn requires `seqused_k` U32 (see
         // kiln-flash-attn/src/kt_api.rs); the count is a non-negative
@@ -19992,9 +20199,8 @@ impl CachedPagedDecodeMeta {
                     let v: Result<Vec<u32>> = slots
                         .iter()
                         .map(|&slot| {
-                            u32::try_from(slot).context(
-                                "CachedPagedDecodeMeta: start slot exceeds u32 range",
-                            )
+                            u32::try_from(slot)
+                                .context("CachedPagedDecodeMeta: start slot exceeds u32 range")
                         })
                         .collect();
                     Some(v?)
@@ -20005,9 +20211,12 @@ impl CachedPagedDecodeMeta {
             None
         };
 
-        let block_table_tensor =
-            Tensor::from_vec_on(device.clone(), block_table_vec, vec![batch, max_blocks_per_seq])?
-                .contiguous()?;
+        let block_table_tensor = Tensor::from_vec_on(
+            device.clone(),
+            block_table_vec,
+            vec![batch, max_blocks_per_seq],
+        )?
+        .contiguous()?;
         let seqused_k_tensor =
             Tensor::from_vec_on(device.clone(), seqused_k_vec, vec![batch])?.contiguous()?;
 
@@ -20065,9 +20274,7 @@ impl CachedPagedDecodeMeta {
         // `paged_cache.block_size()` read inside this fn. `None` (default
         // path) keeps the accessor on the candle path unchanged. CUDA-only
         // since `PagedKvCacheKt` is `cfg(feature = "cuda")`.
-        #[cfg(feature = "cuda")] kt_paged_cache: Option<
-            &crate::paged_kv_cache_kt::PagedKvCacheKt,
-        >,
+        #[cfg(feature = "cuda")] kt_paged_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
     ) -> Result<Self> {
         let batch = start_positions.len();
         anyhow::ensure!(
@@ -20092,8 +20299,7 @@ impl CachedPagedDecodeMeta {
         let max_seqlen_k = max_start_pos + 1;
 
         #[cfg(feature = "cuda")]
-        let page_block_size =
-            try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache);
+        let page_block_size = try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache);
         #[cfg(not(feature = "cuda"))]
         let page_block_size = paged_cache.block_size();
 
@@ -20104,8 +20310,7 @@ impl CachedPagedDecodeMeta {
         // actual seqlen into garbage slots). Used for the struct's
         // public field consumed by both the strict and dyn_seqlen
         // dispatches below.
-        let max_blocks_per_seq =
-            ((max_seqlen_k + page_block_size - 1) / page_block_size).max(1);
+        let max_blocks_per_seq = ((max_seqlen_k + page_block_size - 1) / page_block_size).max(1);
 
         // The stable buffer is sized via the same bucketed formula as the
         // graph keys (`CudaBatchedGraphKey` / MetalGraphKey):
@@ -20129,8 +20334,7 @@ impl CachedPagedDecodeMeta {
         // above + the `flash_attn_paged_decode_contiguous_batch` use
         // at `forward.rs:~18265`).
         let stable_kblock_n = crate::generate::FA2_KBLOCK_N;
-        let stable_bucket_max_seqlen_k =
-            max_seqlen_k.div_ceil(stable_kblock_n) * stable_kblock_n;
+        let stable_bucket_max_seqlen_k = max_seqlen_k.div_ceil(stable_kblock_n) * stable_kblock_n;
         let stable_pages_per_chunk = stable_kblock_n / page_block_size;
         let stable_max_blocks_per_seq =
             ((stable_bucket_max_seqlen_k / stable_kblock_n) * stable_pages_per_chunk).max(1);
@@ -20184,9 +20388,8 @@ impl CachedPagedDecodeMeta {
                     let v: Result<Vec<u32>> = slots
                         .iter()
                         .map(|&slot| {
-                            u32::try_from(slot).context(
-                                "CachedPagedDecodeMeta: start slot exceeds u32 range",
-                            )
+                            u32::try_from(slot)
+                                .context("CachedPagedDecodeMeta: start slot exceeds u32 range")
                         })
                         .collect();
                     Some(v?)
@@ -20289,9 +20492,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     // calls (`is_fp8`, `num_layers`) are mirrored through
     // `try_kt_paged_kv_*` helpers. `None` keeps every accessor on
     // the candle path unchanged.
-    #[cfg(feature = "cuda")] kt_paged_cache: Option<
-        &crate::paged_kv_cache_kt::PagedKvCacheKt,
-    >,
+    #[cfg(feature = "cuda")] kt_paged_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
 ) -> Result<Tensor> {
     let (batch, seq_len, _hidden) = x.dims3()?;
     // #1082: kt `.device()` returns a `Device` by value; bind the owned value
@@ -20351,8 +20552,14 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         own_block_table_tensor,
         own_seqused_k_tensor,
         own_strict_start_slots,
-    ): (usize, bool, usize, Option<Tensor>, Option<Tensor>, Option<Vec<u32>>) = match cached_meta
-    {
+    ): (
+        usize,
+        bool,
+        usize,
+        Option<Tensor>,
+        Option<Tensor>,
+        Option<Vec<u32>>,
+    ) = match cached_meta {
         Some(meta) => (
             meta.max_seqlen_k,
             meta.uniform_start_pos,
@@ -20391,8 +20598,9 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
             for (row_idx, bt) in block_tables.iter().enumerate() {
                 let row_seqlen = start_positions[row_idx] + 1;
                 seqused_k_vec.push(
-                    u32::try_from(row_seqlen)
-                        .context("batched contiguous paged attention seqused_k exceeds u32 range")?,
+                    u32::try_from(row_seqlen).context(
+                        "batched contiguous paged attention seqused_k exceeds u32 range",
+                    )?,
                 );
                 let row_blocks = bt.blocks.as_slice();
                 anyhow::ensure!(
@@ -20439,12 +20647,9 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
                 None
             };
 
-            let block_table_tensor = Tensor::from_vec_on(
-                x.device(),
-                block_table_vec,
-                vec![batch, max_blocks_per_seq],
-            )?
-            .contiguous()?;
+            let block_table_tensor =
+                Tensor::from_vec_on(x.device(), block_table_vec, vec![batch, max_blocks_per_seq])?
+                    .contiguous()?;
             let seqused_k_tensor =
                 Tensor::from_vec_on(x.device(), seqused_k_vec, vec![batch])?.contiguous()?;
 
@@ -20590,8 +20795,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     // unchanged (owned tensors stay alive for this scope, pinning the storage).
     let (k_pool, v_pool) = (&k_pool, &v_pool);
     #[cfg(feature = "cuda")]
-    let page_block_size =
-        try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache);
+    let page_block_size = try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache);
     #[cfg(not(feature = "cuda"))]
     let page_block_size = paged_cache.block_size();
     let softmax_scale = 1.0f32 / (head_dim as f32).sqrt();
@@ -20772,8 +20976,8 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
             let strict_slots = strict_start_slots.context(
                 "batched contiguous paged attention requires uniform start_pos for the strict path",
             )?;
-            let start_slots =
-                Tensor::from_vec_on(x.device(), strict_slots.to_vec(), vec![batch])?.contiguous()?;
+            let start_slots = Tensor::from_vec_on(x.device(), strict_slots.to_vec(), vec![batch])?
+                .contiguous()?;
             let q_strict = {
                 let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
                 let q_strict = q.transpose(1, 2)?.contiguous()?;
@@ -20996,7 +21200,7 @@ fn try_metal_paged_decode_icb_attention(
         max_seqlen_k as u32,
         softmax_scale,
     )
-        .context("replay Metal paged decode ICB graph")?;
+    .context("replay Metal paged decode ICB graph")?;
     Ok(Some(attn_out.clone()))
 }
 
@@ -21074,16 +21278,16 @@ fn gqa_attention_paged_with_rope_tables(
     full_attn_layer_idx: usize,
     attn_output_gate: bool,
     lora: Option<(&LoraLayerWeights, f32)>,
-    #[cfg(any(feature = "cuda", feature = "rocm"))] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
+    #[cfg(any(feature = "cuda", feature = "rocm"))] graph_inputs: Option<
+        &PagedDecodeGraphInputs<'_>,
+    >,
     // Phase 7 #1082: kt twin of `paged_cache` used to mirror the
     // CUDA-graph paged-KV write to the kt cache when the env gate
     // `KILN_USE_KT_PAGED_KV_CACHE` is on. `None` means "gate off,
     // non-CUDA device, or caller hasn't been migrated yet" — the
     // candle writer below runs unchanged in that case. CUDA-gated
     // since `PagedKvCacheKt` itself is CUDA-only.
-    #[cfg(feature = "cuda")] kt_paged_cache: Option<
-        &crate::paged_kv_cache_kt::PagedKvCacheKt,
-    >,
+    #[cfg(feature = "cuda")] kt_paged_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
 ) -> Result<Tensor> {
     let (_batch, seq_len, _hidden) = x.dims3()?;
     // #1082: kt `.device()` returns a `Device` by value; bind the owned value
@@ -21205,9 +21409,7 @@ fn gqa_attention_paged_with_rope_tables(
                                     attn_output_gate,
                                     rms_norm_eps as f32,
                                 )
-                                .map_err(|e| {
-                                    anyhow::anyhow!("kt attn_decode_qkv_prep: {e}")
-                                })?;
+                                .map_err(|e| anyhow::anyhow!("kt attn_decode_qkv_prep: {e}"))?;
                             // #1082: keep the fused qkv-prep outputs as kt — the
                             // `fused_qkv_prep` consumer and the else-branch below are
                             // kt, so the candle copy-out is gone.
@@ -21312,10 +21514,8 @@ fn gqa_attention_paged_with_rope_tables(
         let (q, k) = {
             let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             kiln_nvtx::range!(c"kiln/attn/qk_norm");
-            let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)
-                .context("gqa paged q norm")?;
-            let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)
-                .context("gqa paged k norm")?;
+            let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps).context("gqa paged q norm")?;
+            let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps).context("gqa paged k norm")?;
             let out = (q, k);
             finish_full_attn_stage_profile(
                 profile_device,
@@ -21382,8 +21582,7 @@ fn gqa_attention_paged_with_rope_tables(
         (q, k, gate)
     };
 
-    let v = reshape_hole0_4(&v, seq_len, num_kv_heads, head_dim)
-        .context("gqa paged v reshape")?;
+    let v = reshape_hole0_4(&v, seq_len, num_kv_heads, head_dim).context("gqa paged v reshape")?;
 
     // Keep the cache-native token-major K/V views for paged writes. Attention
     // still wants head-major tensors, but the cache pool stores
@@ -21638,14 +21837,13 @@ fn gqa_attention_paged_with_rope_tables(
                     // `Ok(false)` and this branch is zero overhead — the
                     // legacy cache write above is the only thing that ran.
                     if done && kt_paged_cache.is_some() {
-                        let _kt_done =
-                            try_kt_paged_kv_write_token_major_native_graph_slot(
-                                kt_paged_cache,
-                                full_attn_layer_idx,
-                                &k_cache_token_major,
-                                &v_cache_token_major,
-                                inputs.kv_slot,
-                            )?;
+                        let _kt_done = try_kt_paged_kv_write_token_major_native_graph_slot(
+                            kt_paged_cache,
+                            full_attn_layer_idx,
+                            &k_cache_token_major,
+                            &v_cache_token_major,
+                            inputs.kv_slot,
+                        )?;
                     }
                     done
                 } else {
@@ -21734,16 +21932,23 @@ fn gqa_attention_paged_with_rope_tables(
         && !single_token_self_attn
         && {
             #[cfg(feature = "cuda")]
-            { !try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache) }
+            {
+                !try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache)
+            }
             // ROCm: the rocm SDPA paged-decode dequantizes U8 (FP8 E4M3FN) pool
             // slots to BF16 right after the gather, so FP8 caches take the fused
             // fast path here too — which is bucketed (max_seqlen_k) and therefore
             // HIP-graph-capturable, unlike the eager fallback's seq-len-dependent
             // broadcast attention. Other non-CUDA backends still exclude FP8.
             #[cfg(all(feature = "rocm", not(feature = "cuda")))]
-            { let _ = paged_cache.is_fp8(); true }
+            {
+                let _ = paged_cache.is_fp8();
+                true
+            }
             #[cfg(not(any(feature = "cuda", feature = "rocm")))]
-            { !paged_cache.is_fp8() }
+            {
+                !paged_cache.is_fp8()
+            }
         }
         && (num_heads / num_kv_heads) > 1
         && !fused_paged_decode_disabled()
@@ -21819,11 +22024,15 @@ fn gqa_attention_paged_with_rope_tables(
         let prefix_only_prefill = seq_len > 1
             && start_pos > 0
             && {
-            #[cfg(feature = "cuda")]
-            { !try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache) }
-            #[cfg(not(feature = "cuda"))]
-            { !paged_cache.is_fp8() }
-        }
+                #[cfg(feature = "cuda")]
+                {
+                    !try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache)
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    !paged_cache.is_fp8()
+                }
+            }
             && AttentionBackend::runtime_supports_flash_attn_prefill_head_major(backend)
             && !crate::mtp_debug::is_c7_sdpa_capture_armed();
         let append_head_major_read_supported =
@@ -21836,33 +22045,37 @@ fn gqa_attention_paged_with_rope_tables(
                 block_table,
                 {
                     #[cfg(feature = "cuda")]
-                    { try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache) }
+                    {
+                        try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache)
+                    }
                     #[cfg(not(feature = "cuda"))]
-                    { paged_cache.block_size() }
+                    {
+                        paged_cache.block_size()
+                    }
                 },
                 0,
                 start_pos,
             )
-                .and_then(|start_slot| {
-                    paged_cache
-                        .pool_tensors(full_attn_layer_idx)
-                        .map(|(k_pool, v_pool)| (start_slot, k_pool, v_pool))
-                })
-                .map(|(start_slot, k_pool, v_pool)| {
-                    // #1082: `PagedKvCacheKt::pool_tensors` already yields kt pool
-                    // references; pass them straight to the kt backend read.
-                    PagedKvBackend::runtime_paged_kv_head_major_read_append_token_major(
-                        backend,
-                        &k_pool,
-                        &v_pool,
-                        start_slot,
-                        start_pos,
-                        &k_cache_token_major,
-                        &v_cache_token_major,
-                    )
-                })
-                .transpose()?
-                .flatten()
+            .and_then(|start_slot| {
+                paged_cache
+                    .pool_tensors(full_attn_layer_idx)
+                    .map(|(k_pool, v_pool)| (start_slot, k_pool, v_pool))
+            })
+            .map(|(start_slot, k_pool, v_pool)| {
+                // #1082: `PagedKvCacheKt::pool_tensors` already yields kt pool
+                // references; pass them straight to the kt backend read.
+                PagedKvBackend::runtime_paged_kv_head_major_read_append_token_major(
+                    backend,
+                    &k_pool,
+                    &v_pool,
+                    start_slot,
+                    start_pos,
+                    &k_cache_token_major,
+                    &v_cache_token_major,
+                )
+            })
+            .transpose()?
+            .flatten()
         } else {
             None
         };
@@ -21874,11 +22087,15 @@ fn gqa_attention_paged_with_rope_tables(
         let fast_read = if seq_len > 1
             && fast_read_len >= PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS
             && {
-            #[cfg(feature = "cuda")]
-            { !try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache) }
-            #[cfg(not(feature = "cuda"))]
-            { !paged_cache.is_fp8() }
-        }
+                #[cfg(feature = "cuda")]
+                {
+                    !try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache)
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    !paged_cache.is_fp8()
+                }
+            }
             && PagedKvBackend::runtime_supports_paged_kv_head_major_read(backend)
             && AttentionBackend::runtime_supports_flash_attn_prefill_head_major(backend)
         {
@@ -21886,31 +22103,35 @@ fn gqa_attention_paged_with_rope_tables(
                 block_table,
                 {
                     #[cfg(feature = "cuda")]
-                    { try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache) }
+                    {
+                        try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache)
+                    }
                     #[cfg(not(feature = "cuda"))]
-                    { paged_cache.block_size() }
+                    {
+                        paged_cache.block_size()
+                    }
                 },
                 0,
                 fast_read_len,
             )
-                .and_then(|start_slot| {
-                    paged_cache
-                        .pool_tensors(full_attn_layer_idx)
-                        .map(|(k_pool, v_pool)| (start_slot, k_pool, v_pool))
-                })
-                .map(|(start_slot, k_pool, v_pool)| {
-                    // #1082: `PagedKvCacheKt::pool_tensors` already yields kt pool
-                    // references; pass them straight to the kt backend read.
-                    PagedKvBackend::runtime_paged_kv_head_major_read(
-                        backend,
-                        &k_pool,
-                        &v_pool,
-                        start_slot,
-                        fast_read_len,
-                    )
-                })
-                .transpose()?
-                .flatten()
+            .and_then(|start_slot| {
+                paged_cache
+                    .pool_tensors(full_attn_layer_idx)
+                    .map(|(k_pool, v_pool)| (start_slot, k_pool, v_pool))
+            })
+            .map(|(start_slot, k_pool, v_pool)| {
+                // #1082: `PagedKvCacheKt::pool_tensors` already yields kt pool
+                // references; pass them straight to the kt backend read.
+                PagedKvBackend::runtime_paged_kv_head_major_read(
+                    backend,
+                    &k_pool,
+                    &v_pool,
+                    start_slot,
+                    fast_read_len,
+                )
+            })
+            .transpose()?
+            .flatten()
         } else {
             None
         };
@@ -22615,7 +22836,12 @@ fn transformer_block_detached_prefill_chunked(
     full_attn_layer_idx: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Option<Tensor>> {
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    ))]
     if crate::tape_forward::tape_scope_active() {
         return Ok(None);
     }
@@ -22698,9 +22924,10 @@ fn transformer_block_detached_prefill_chunked(
             format!("chunked full-attention q projection [{tile_start}, {tile_end})")
         })?;
         let (q_tile, gate_tile) = if config.attn_output_gate {
-            let q_raw = reshape_hole0_4(&q_raw, tile_len, num_heads, head_dim * 2).with_context(
-                || format!("chunked full-attention q/gate reshape [{tile_start}, {tile_end})"),
-            )?;
+            let q_raw =
+                reshape_hole0_4(&q_raw, tile_len, num_heads, head_dim * 2).with_context(|| {
+                    format!("chunked full-attention q/gate reshape [{tile_start}, {tile_end})")
+                })?;
             let q = q_raw
                 .narrow(3, 0, head_dim)
                 .with_context(|| {
@@ -22866,15 +23093,15 @@ fn transformer_block_paged_with_rope_tables(
     block_table: &BlockTable,
     full_attn_layer_idx: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
-    #[cfg(any(feature = "cuda", feature = "rocm"))] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
+    #[cfg(any(feature = "cuda", feature = "rocm"))] graph_inputs: Option<
+        &PagedDecodeGraphInputs<'_>,
+    >,
     profile_mlp_context: Option<(usize, usize)>,
     // Phase 7 #1082: kt twin of `paged_cache`, plumbed through to the
     // GQA paged-attention call below so the kt cache can mirror the
     // CUDA-graph paged-KV write. `None` keeps the path on the candle
     // writer only; same migration playbook as `graph_inputs`.
-    #[cfg(feature = "cuda")] kt_paged_cache: Option<
-        &crate::paged_kv_cache_kt::PagedKvCacheKt,
-    >,
+    #[cfg(feature = "cuda")] kt_paged_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
 ) -> Result<Tensor> {
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(w) => w,
@@ -23076,9 +23303,7 @@ pub fn transformer_block_paged_decode_contiguous_batch(
     #[cfg(feature = "metal")] metal_icb_layer: Option<MetalPagedDecodeIcbLayer<'_>>,
     // Phase 7 #1082: kt twin of `paged_cache` forwarded as-is to the
     // GQA layer. `None` (default) keeps the candle accessor path.
-    #[cfg(feature = "cuda")] kt_paged_cache: Option<
-        &crate::paged_kv_cache_kt::PagedKvCacheKt,
-    >,
+    #[cfg(feature = "cuda")] kt_paged_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
 ) -> Result<Tensor> {
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(w) => w,
@@ -23226,13 +23451,8 @@ pub fn model_forward_paged_decode_contiguous_batch_hidden_with_ids(
             return Ok(hidden);
         }
 
-        if native_resident_decode_required(
-            backend,
-            token_ids,
-            start_positions,
-            config,
-            lora,
-        ) && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
+        if native_resident_decode_required(backend, token_ids, start_positions, config, lora)
+            && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
         {
             let fallback_env = decode_hot_path_debug_fallback_env_for_backend(backend);
             anyhow::bail!(
@@ -23573,8 +23793,11 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
     } else {
         None
     };
-    let positions: &Tensor = stable_positions_gpu
-        .unwrap_or_else(|| positions_owned.as_ref().expect("positions_owned built above when stable was None"));
+    let positions: &Tensor = stable_positions_gpu.unwrap_or_else(|| {
+        positions_owned
+            .as_ref()
+            .expect("positions_owned built above when stable was None")
+    });
     let use_metal_decode_ffn = start_positions.iter().all(|&p| p > 0)
         && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
     let profile_full_attn_stages = profile_full_attn_stages_enabled();
@@ -23616,9 +23839,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
                     #[cfg(feature = "cuda")]
                     None,
                 )
-                .context(
-                    "build cached paged decode metadata for batched step (stable buffers)",
-                )?,
+                .context("build cached paged decode metadata for batched step (stable buffers)")?,
             ),
             _ => Some(
                 CachedPagedDecodeMeta::build(
@@ -23684,16 +23905,24 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
                 let layer_metal_icb = match metal_icb_inputs.as_mut() {
                     Some(inputs) => {
                         let q = inputs.q.get(full_attn_idx).with_context(|| {
-                            format!("Metal ICB stable Q missing for full-attn layer {full_attn_idx}")
+                            format!(
+                                "Metal ICB stable Q missing for full-attn layer {full_attn_idx}"
+                            )
                         })?;
                         let k = inputs.k.get(full_attn_idx).with_context(|| {
-                            format!("Metal ICB stable K missing for full-attn layer {full_attn_idx}")
+                            format!(
+                                "Metal ICB stable K missing for full-attn layer {full_attn_idx}"
+                            )
                         })?;
                         let v = inputs.v.get(full_attn_idx).with_context(|| {
-                            format!("Metal ICB stable V missing for full-attn layer {full_attn_idx}")
+                            format!(
+                                "Metal ICB stable V missing for full-attn layer {full_attn_idx}"
+                            )
                         })?;
                         let graph = inputs.graphs.get_mut(full_attn_idx).with_context(|| {
-                            format!("Metal ICB graph slot missing for full-attn layer {full_attn_idx}")
+                            format!(
+                                "Metal ICB graph slot missing for full-attn layer {full_attn_idx}"
+                            )
                         })?;
                         Some(MetalPagedDecodeIcbLayer { q, k, v, graph })
                     }
@@ -24075,28 +24304,25 @@ fn try_vulkan_resident_batched_decode_hidden(
         }
     }
 
-    let Some(hidden_rows) = crate::vk_decode_resident::submit_transformer_stack_batched_hidden_from_tokens(
-        vk_backend,
-        vk_device,
-        token_ids,
-        block_tables,
-        start_positions,
-        paged_cache.block_size(),
-        weights,
-        config,
-        vk_kv_cache,
-        recurrent_states,
-        conv_states,
-    )?
+    let Some(hidden_rows) =
+        crate::vk_decode_resident::submit_transformer_stack_batched_hidden_from_tokens(
+            vk_backend,
+            vk_device,
+            token_ids,
+            block_tables,
+            start_positions,
+            paged_cache.block_size(),
+            weights,
+            config,
+            vk_kv_cache,
+            recurrent_states,
+            conv_states,
+        )?
     else {
         return Ok(None);
     };
     let device = weights.embed_tokens.device();
-    let out = Tensor::from_vec_on(
-        device,
-        hidden_rows,
-        vec![batch, 1usize, config.hidden_size],
-    )?;
+    let out = Tensor::from_vec_on(device, hidden_rows, vec![batch, 1usize, config.hidden_size])?;
     Ok(Some(out))
 }
 
@@ -24333,13 +24559,8 @@ pub fn model_forward_paged_decode_contiguous_batch_greedy_with_ids(
             return Ok(next_tokens);
         }
 
-        if native_resident_decode_required(
-            backend,
-            token_ids,
-            start_positions,
-            config,
-            lora,
-        ) && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
+        if native_resident_decode_required(backend, token_ids, start_positions, config, lora)
+            && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
         {
             let fallback_env = decode_hot_path_debug_fallback_env_for_backend(backend);
             anyhow::bail!(
@@ -24407,8 +24628,9 @@ pub fn model_forward_kt(
     // 1. Embedding lookup: [seq_len, hidden_size]
     // (#1443 step 3) Backend precision policy owns any embedding-output cast
     // needed before transformer-layer activations.
-    let mut hidden =
-        cast_embedding_output_to_policy_activation(embedding_lookup_from_weights(token_ids, weights)?)?;
+    let mut hidden = cast_embedding_output_to_policy_activation(embedding_lookup_from_weights(
+        token_ids, weights,
+    )?)?;
 
     // Add batch dimension: [1, seq_len, hidden_size]
     hidden = hidden.unsqueeze(0)?;
@@ -24523,13 +24745,11 @@ pub fn model_forward_kt(
 // (#1082) Deleted `model_forward_logits_kt_to_candle`: `model_forward_kt`
 //   returns kt logits directly now — no candle bridge.
 
-
 // (#1082, PR7 cleanup) Deleted the dead `kt_logits_to_candle` /
 //   `candle_to_kt_activation` kt-seam passthroughs. Their only caller was the
 //   legacy `vk_forward.rs`, deleted in PR7; the vulkan lane is now fully
 //   kt-native (no candle round-trip), so both helpers were unreferenced
 //   dead code (dead-code warnings since PR7).
-
 
 /// kt has no infer-from-hole reshape (candle's `((), d1, d2)`). These
 /// helpers reproduce a rank-3 / rank-4 reshape where the leading
@@ -24870,8 +25090,9 @@ pub fn model_forward_embed(token_ids: &[u32], weights: &GpuWeights) -> Result<(T
     let seq_len = token_ids.len();
     // (#1443 step 3) Backend precision policy owns any embedding-output cast
     // needed before transformer-layer activations.
-    let mut hidden =
-        cast_embedding_output_to_policy_activation(embedding_lookup_from_weights(token_ids, weights)?)?;
+    let mut hidden = cast_embedding_output_to_policy_activation(embedding_lookup_from_weights(
+        token_ids, weights,
+    )?)?;
     hidden = hidden.unsqueeze(0)?;
     let positions: Vec<u32> = (0..seq_len).map(|p| p as u32).collect();
     Ok((hidden, positions))
@@ -25028,13 +25249,8 @@ pub fn model_forward_paged(
             }
         }
 
-        if native_resident_decode_required(
-            backend,
-            token_ids,
-            &[start_pos],
-            config,
-            lora,
-        ) && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
+        if native_resident_decode_required(backend, token_ids, &[start_pos], config, lora)
+            && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
         {
             let fallback_env = decode_hot_path_debug_fallback_env_for_backend(backend);
             anyhow::bail!(
@@ -25113,9 +25329,7 @@ pub fn model_forward_paged_with_kt(
     // Phase 7 #1082: kt twin of `paged_cache`. `None` => behavior matches
     // `model_forward_paged` exactly; `Some(&kt)` => every paged-KV write
     // inside the full-attention layers mirrors into the kt cache.
-    #[cfg(feature = "cuda")] kt_paged_cache: Option<
-        &crate::paged_kv_cache_kt::PagedKvCacheKt,
-    >,
+    #[cfg(feature = "cuda")] kt_paged_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
 ) -> Result<Tensor> {
     let (logits, _hidden, _token) = model_forward_paged_inner(
         backend,
@@ -25284,13 +25498,8 @@ pub fn model_forward_paged_last_token(
             }
         }
 
-        if native_resident_decode_required(
-            backend,
-            token_ids,
-            &[start_pos],
-            config,
-            lora,
-        ) && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
+        if native_resident_decode_required(backend, token_ids, &[start_pos], config, lora)
+            && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
         {
             let fallback_env = decode_hot_path_debug_fallback_env_for_backend(backend);
             anyhow::bail!(
@@ -25380,18 +25589,16 @@ pub fn model_forward_paged_last_token_resident(
             if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
                 .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
             {
-                if let Some(logits) =
-                    model_forward_paged_last_token_resident_native_vk(
-                        vk_backend,
-                        token_ids,
-                        weights,
-                        config,
-                        paged_cache,
-                        block_table,
-                        start_pos,
-                        linear_state.as_deref(),
-                    )?
-                {
+                if let Some(logits) = model_forward_paged_last_token_resident_native_vk(
+                    vk_backend,
+                    token_ids,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    start_pos,
+                    linear_state.as_deref(),
+                )? {
                     return Ok(logits);
                 }
             }
@@ -25594,8 +25801,8 @@ fn model_forward_paged_last_token_resident_native_vk(
     if vocab_size == 0 {
         return Ok(None);
     }
-    let normed_final_buf = vk_backend
-        .acquire_resident_scratch("native_final_normed", (hidden_size * 4) as u64)?;
+    let normed_final_buf =
+        vk_backend.acquire_resident_scratch("native_final_normed", (hidden_size * 4) as u64)?;
     let logits_buf =
         vk_backend.acquire_resident_scratch("native_logits", (vocab_size * 4) as u64)?;
     // Final RMSNorm: from_buf → normed_final_buf
@@ -25606,7 +25813,11 @@ fn model_forward_paged_last_token_resident_native_vk(
             final_norm_buf.handle(),
             normed_final_buf.handle(),
         ],
-        &[1u32, hidden_size as u32, (config.rms_norm_eps as f32).to_bits()],
+        &[
+            1u32,
+            hidden_size as u32,
+            (config.rms_norm_eps as f32).to_bits(),
+        ],
         kiln_vulkan_kernel::Workgroups::OneD(1),
     )?;
     // LM head GEMM (bf16w b=1): normed_final_buf → logits_buf
@@ -25666,8 +25877,7 @@ fn model_forward_paged_last_token_resident_native_vk(
     // Logits are produced as f32 by the bf16w GEMM; keep them as f32
     // to avoid a wasteful to_dtype() conversion (the caller's argmax
     // / greedy_sample works in f32 either way).
-    let logits =
-        Tensor::from_vec_on(device, out_f32, vec![1usize, 1usize, vocab_size])?;
+    let logits = Tensor::from_vec_on(device, out_f32, vec![1usize, 1usize, vocab_size])?;
     if timing_enabled {
         READBACK_NS.fetch_add(t_readback.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
@@ -25884,13 +26094,8 @@ pub fn model_forward_paged_last_token_greedy(
             }
         }
 
-        if native_resident_decode_required(
-            backend,
-            token_ids,
-            &start_positions,
-            config,
-            lora,
-        ) && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
+        if native_resident_decode_required(backend, token_ids, &start_positions, config, lora)
+            && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
         {
             let fallback_env = decode_hot_path_debug_fallback_env_for_backend(backend);
             anyhow::bail!(
@@ -26086,7 +26291,9 @@ pub(crate) fn model_forward_paged_with_graph_inputs(
     lora: Option<&LoraWeights>,
     token_ids_gpu: &Tensor,
     positions_gpu: &Tensor,
-    #[cfg(any(feature = "cuda", feature = "rocm"))] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
+    #[cfg(any(feature = "cuda", feature = "rocm"))] graph_inputs: Option<
+        &PagedDecodeGraphInputs<'_>,
+    >,
 ) -> Result<Tensor> {
     let (logits, _hidden, _token) = model_forward_paged_inner(
         backend,
@@ -26507,7 +26714,8 @@ pub fn model_forward_paged_batched_decode_hidden(
                         if native_decode_attention_required(backend)
                             && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
                         {
-                            let fallback_env = decode_hot_path_debug_fallback_env_for_backend(backend);
+                            let fallback_env =
+                                decode_hot_path_debug_fallback_env_for_backend(backend);
                             return Err(err).with_context(|| {
                                 format!(
                                     "batched full-attention decode layer {layer_idx} declined; \
@@ -27223,8 +27431,7 @@ pub fn mtp_forward_step(
         // Bridge the kt activations to candle here — cold debug path only
         // (`should_log()` gate), so the copies don't touch production decode.
         // #1082: mtp_debug::tensor_l2_norm is kt-native now — no candle bridge.
-        let l2_kt =
-            |t: &Tensor| -> f32 { crate::mtp_debug::tensor_l2_norm(t).unwrap_or(f32::NAN) };
+        let l2_kt = |t: &Tensor| -> f32 { crate::mtp_debug::tensor_l2_norm(t).unwrap_or(f32::NAN) };
         let h_norm = l2_kt(h_prev);
         let norm_emb_l2 = l2_kt(&norm_emb);
         let norm_h_l2 = l2_kt(&norm_h);
@@ -27321,22 +27528,23 @@ fn model_forward_paged_inner(
     lora: Option<&LoraWeights>,
     token_ids_gpu: Option<&Tensor>,
     positions_gpu: Option<&Tensor>,
-    #[cfg(any(feature = "cuda", feature = "rocm"))] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
+    #[cfg(any(feature = "cuda", feature = "rocm"))] graph_inputs: Option<
+        &PagedDecodeGraphInputs<'_>,
+    >,
     // Phase 7 #1082: kt twin of `paged_cache` plumbed through to the
     // per-layer `transformer_block_paged_with_rope_tables` so the kt
     // cache can mirror the CUDA-graph paged-KV write performed inside
     // `gqa_attention_paged_with_rope_tables`. `None` keeps the candle
     // writer authoritative — same gating playbook as `graph_inputs`.
     // CUDA-gated since `PagedKvCacheKt` itself is CUDA-only.
-    #[cfg(feature = "cuda")] kt_paged_cache: Option<
-        &crate::paged_kv_cache_kt::PagedKvCacheKt,
-    >,
+    #[cfg(feature = "cuda")] kt_paged_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
     lm_head_mode: LmHeadMode,
 ) -> Result<(Option<Tensor>, Option<Tensor>, Option<u32>)> {
     let seq_len = token_ids.len();
     let device = weights.embed_tokens.device();
-    let _profile_sections =
-        std::env::var("KILN_PROFILE_PAGED_SECTIONS").is_ok().then(|| {
+    let _profile_sections = std::env::var("KILN_PROFILE_PAGED_SECTIONS")
+        .is_ok()
+        .then(|| {
             let _ = synchronize_for_profile(&device);
             (std::time::Instant::now(), seq_len, start_pos)
         });
@@ -27500,15 +27708,17 @@ fn model_forward_paged_inner(
                         && !crate::mtp_debug::should_capture_c43_layer1_preweight_tap_for_layer(i)
                         && !crate::mtp_debug::should_capture_c44_layer1_f32_row_tap_for_layer(i)
                         && !crate::mtp_debug::should_capture_c45_layer1_row_tap_for_layer(i)
-                        && !crate::mtp_debug::should_capture_c46_layer1_row_provenance_tap_for_layer(i)
+                        && !crate::mtp_debug::should_capture_c46_layer1_row_provenance_tap_for_layer(
+                            i,
+                        )
                         && kiln_core::env_flag::env_flag(
                             "KILN_VK_RESIDENT_DECODE_GDN_FULL_BLOCK",
                             true,
                         )
                     {
                         if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
-                            .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
-                        {
+                            .downcast_ref::<crate::backend::vulkan::VulkanBackend>(
+                        ) {
                             let recurrent_t = &state.recurrent_states[linear_attn_idx];
                             let conv_t = &state.conv_states[linear_attn_idx];
                             if let Some(out) =
@@ -27961,7 +28171,9 @@ pub fn model_forward_paged_streaming_last_token_hidden_with(
 ) -> Result<Tensor> {
     let total = token_ids.len();
     if total == 0 {
-        anyhow::bail!("model_forward_paged_streaming_last_token_hidden requires at least one token");
+        anyhow::bail!(
+            "model_forward_paged_streaming_last_token_hidden requires at least one token"
+        );
     }
     if tile_size == 0 || tile_size % GDN_CHUNK_SIZE != 0 {
         anyhow::bail!(
@@ -28235,11 +28447,15 @@ mod tests {
     #[test]
     fn test_cuda_sigmoid_kt_default_matches_host_formula() -> Result<()> {
         let Ok(device) = new_cuda_device(0) else {
-            eprintln!("CUDA unavailable, skipping test_cuda_sigmoid_kt_default_matches_host_formula");
+            eprintln!(
+                "CUDA unavailable, skipping test_cuda_sigmoid_kt_default_matches_host_formula"
+            );
             return Ok(());
         };
         let data = [-8.0_f32, -2.0, -0.5, 0.0, 0.5, 2.0, 8.0, 16.0];
-        let x = Tensor::from_slice(&data, (2usize, 4usize))?.to_device(device)?.contiguous()?;
+        let x = Tensor::from_slice(&data, (2usize, 4usize))?
+            .to_device(device)?
+            .contiguous()?;
         let out = cuda_sigmoid(&x)?;
         synchronize_for_profile(&device)?;
         let got = out.flatten_all()?.to_vec1::<f32>()?;
@@ -28261,7 +28477,9 @@ mod tests {
             return Ok(());
         };
         let data = [-8.0_f32, -2.0, -0.5, 0.0, 0.5, 2.0, 8.0, 16.0];
-        let x = Tensor::from_slice(&data, (2usize, 4usize))?.to_device(device)?.contiguous()?;
+        let x = Tensor::from_slice(&data, (2usize, 4usize))?
+            .to_device(device)?
+            .contiguous()?;
         let out = cuda_silu(&x)?;
         synchronize_for_profile(&device)?;
         let got = out.flatten_all()?.to_vec1::<f32>()?;
@@ -28289,7 +28507,9 @@ mod tests {
             1.0_f32, 2.0, 3.0, -1.0, //
             -4.0, -2.0, -2.0, 0.0,
         ];
-        let x = Tensor::from_slice(&data, (2usize, 4usize))?.to_device(device)?.contiguous()?;
+        let x = Tensor::from_slice(&data, (2usize, 4usize))?
+            .to_device(device)?
+            .contiguous()?;
         let direct = try_kt_softmax_last_dim(&x)?
             .context("expected CUDA kt softmax helper to accept contiguous F32 input")?;
         let out = cuda_softmax_last_dim(&x)?;
@@ -28333,7 +28553,9 @@ mod tests {
             return Ok(());
         };
         let data = [3.0_f32, 4.0, 0.0, -2.0, 1.0, 2.0];
-        let x = Tensor::from_slice(&data, (2usize, 3usize))?.to_device(device)?.contiguous()?;
+        let x = Tensor::from_slice(&data, (2usize, 3usize))?
+            .to_device(device)?
+            .contiguous()?;
         let x_f32 = x.to_dtype(DType::F32)?;
         let direct = try_kt_l2_normalize(&x_f32, 1e-6)?
             .context("expected CUDA kt l2_normalize helper to accept contiguous F32 input")?;
@@ -28378,8 +28600,12 @@ mod tests {
         };
         let base_data = [1.0_f32, -2.0, 3.5, 0.0, 0.25, -0.5];
         let delta_data = [0.1_f32, 0.2, -0.3, 4.0, -0.05, 0.5];
-        let base = Tensor::from_slice(&base_data, (2usize, 3usize))?.to_device(device)?.contiguous()?;
-        let delta = Tensor::from_slice(&delta_data, (2usize, 3usize))?.to_device(device)?.contiguous()?;
+        let base = Tensor::from_slice(&base_data, (2usize, 3usize))?
+            .to_device(device)?
+            .contiguous()?;
+        let delta = Tensor::from_slice(&delta_data, (2usize, 3usize))?
+            .to_device(device)?
+            .contiguous()?;
         let out = try_kt_lora_add(&base, &delta)?
             .context("expected CUDA kt lora_add helper to accept contiguous F32 input")?;
         synchronize_for_profile(&device)?;
@@ -28412,7 +28638,9 @@ mod tests {
             0.0_f32, 0.25, 0.5, 0.75, //
             1.0, -0.5, 2.0, -2.0,
         ];
-        let x = Tensor::from_slice(&data, (2usize, 4usize))?.to_device(device)?.contiguous()?;
+        let x = Tensor::from_slice(&data, (2usize, 4usize))?
+            .to_device(device)?
+            .contiguous()?;
         let c = 1.0_f64;
         let direct = try_kt_scalar_minus_tensor(&x, c)?.context(
             "expected CUDA kt scalar_minus_tensor helper to accept contiguous F32 input",
@@ -28515,11 +28743,7 @@ mod tests {
     impl crate::backend::ConvBackend for FixedLinearBackend {}
 
     impl crate::backend::LinearBackend for FixedLinearBackend {
-        fn runtime_linear_decode(
-            &self,
-            _x: &Tensor,
-            _weight_t: &Tensor,
-        ) -> Result<Option<Tensor>> {
+        fn runtime_linear_decode(&self, _x: &Tensor, _weight_t: &Tensor) -> Result<Option<Tensor>> {
             Ok(Some(
                 Tensor::from_vec(self.values.clone(), self.dims)?.to_device(self.device)?,
             ))
@@ -28681,8 +28905,8 @@ mod tests {
             gate_proj_marlin: None,
             up_proj_marlin: None,
             down_proj_marlin: None,
-                gate_up_proj_w8: None,
-                down_proj_w8: None,
+            gate_up_proj_w8: None,
+            down_proj_w8: None,
         };
         let backend = FixedMlpBackend {
             device: device.clone(),
@@ -28751,8 +28975,8 @@ mod tests {
             gate_proj_marlin: None,
             up_proj_marlin: None,
             down_proj_marlin: None,
-                gate_up_proj_w8: None,
-                down_proj_w8: None,
+            gate_up_proj_w8: None,
+            down_proj_w8: None,
         };
         let backend = FixedMlpBackend {
             device: device.clone(),
@@ -29414,31 +29638,23 @@ mod tests {
             .map(|_| rng.random_range(0.5f32..1.5f32))
             .collect();
 
-        let x = Tensor::from_slice(&x_data, (batch, seq_len, heads, hidden))?.to_device(device)?
+        let x = Tensor::from_slice(&x_data, (batch, seq_len, heads, hidden))?
+            .to_device(device)?
             .to_dtype(DType::BF16)?;
-        let z = Tensor::from_slice(&z_data, (batch, seq_len, heads, hidden))?.to_device(device)?
+        let z = Tensor::from_slice(&z_data, (batch, seq_len, heads, hidden))?
+            .to_device(device)?
             .to_dtype(DType::BF16)?;
         let weight_f32 = Tensor::from_slice(&w_data, (hidden,))?.to_device(device)?;
         let weight = weight_f32.to_dtype(DType::BF16)?;
 
         let fallback = gated_rms_norm_fallback(&x, &z, &weight, 1e-6)?;
-        let fused = GdnBackend::runtime_gdn_gated_rms_norm(
-            backend.as_ref(),
-            &x,
-            &z,
-            &weight,
-            1e-6,
-        )?
-            .context("CUDA backend declined gated RMSNorm test shape")?;
+        let fused =
+            GdnBackend::runtime_gdn_gated_rms_norm(backend.as_ref(), &x, &z, &weight, 1e-6)?
+                .context("CUDA backend declined gated RMSNorm test shape")?;
         let fallback_f32_weight = gated_rms_norm_fallback(&x, &z, &weight_f32, 1e-6)?;
-        let fused_f32_weight = GdnBackend::runtime_gdn_gated_rms_norm(
-            backend.as_ref(),
-            &x,
-            &z,
-            &weight_f32,
-            1e-6,
-        )?
-            .context("CUDA backend declined gated RMSNorm f32-weight test shape")?;
+        let fused_f32_weight =
+            GdnBackend::runtime_gdn_gated_rms_norm(backend.as_ref(), &x, &z, &weight_f32, 1e-6)?
+                .context("CUDA backend declined gated RMSNorm f32-weight test shape")?;
 
         assert_eq!(fused.dims(), fallback.dims());
         assert_eq!(fused.dtype(), DType::BF16);
@@ -29449,7 +29665,11 @@ mod tests {
             - fallback.to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
         let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
-        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs
+            .flatten_all()?
+            .mean(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         eprintln!("gated_rms_norm cuda vs fallback: max_abs_diff={max:e} mean_abs_diff={mean:e}");
         assert!(
             max < 5e-3,
@@ -29465,8 +29685,16 @@ mod tests {
                 .to_dtype(DType::BF16)?
                 .to_dtype(DType::F32)?)?;
         let abs_f32_weight = diff_f32_weight.abs()?;
-        let max_f32_weight = abs_f32_weight.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
-        let mean_f32_weight = abs_f32_weight.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let max_f32_weight = abs_f32_weight
+            .flatten_all()?
+            .max(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
+        let mean_f32_weight = abs_f32_weight
+            .flatten_all()?
+            .mean(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         eprintln!(
             "gated_rms_norm cuda f32-weight vs fallback: max_abs_diff={max_f32_weight:e} mean_abs_diff={mean_f32_weight:e}"
         );
@@ -29515,21 +29743,20 @@ mod tests {
             .map(|_| rng.random_range(0.5f32..1.5f32))
             .collect();
 
-        let x = Tensor::from_slice(&x_data, (batch, seq_len, heads, hidden))?.to_device(device)?
+        let x = Tensor::from_slice(&x_data, (batch, seq_len, heads, hidden))?
+            .to_device(device)?
             .to_dtype(DType::BF16)?;
-        let z = Tensor::from_slice(&z_data, (batch, seq_len, heads, hidden))?.to_device(device)?
+        let z = Tensor::from_slice(&z_data, (batch, seq_len, heads, hidden))?
+            .to_device(device)?
             .to_dtype(DType::BF16)?;
-        let weight = Tensor::from_slice(&w_data, (hidden,))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let weight = Tensor::from_slice(&w_data, (hidden,))?
+            .to_device(device)?
+            .to_dtype(DType::BF16)?;
 
         let fallback = gated_rms_norm_fallback(&x, &z, &weight, 1e-6)?;
-        let fused = GdnBackend::runtime_gdn_gated_rms_norm(
-            backend.as_ref(),
-            &x,
-            &z,
-            &weight,
-            1e-6,
-        )?
-            .context("Metal backend declined gated RMSNorm test shape")?;
+        let fused =
+            GdnBackend::runtime_gdn_gated_rms_norm(backend.as_ref(), &x, &z, &weight, 1e-6)?
+                .context("Metal backend declined gated RMSNorm test shape")?;
 
         assert_eq!(fused.dims(), fallback.dims());
         assert_eq!(fused.dtype(), DType::BF16);
@@ -29538,7 +29765,11 @@ mod tests {
             - fallback.to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
         let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
-        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs
+            .flatten_all()?
+            .mean(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         eprintln!("gated_rms_norm metal vs fallback: max_abs_diff={max:e} mean_abs_diff={mean:e}");
         assert!(
             max < 5e-3,
@@ -29576,9 +29807,12 @@ mod tests {
             .map(|_| rng.random_range(-0.2f32..0.2f32))
             .collect();
 
-        let x = Tensor::from_slice(&x_data, (batch, seq_len, hidden))?.to_device(device)?
+        let x = Tensor::from_slice(&x_data, (batch, seq_len, hidden))?
+            .to_device(device)?
             .to_dtype(DType::BF16)?;
-        let weight = Tensor::from_slice(&w_data, (hidden,))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let weight = Tensor::from_slice(&w_data, (hidden,))?
+            .to_device(device)?
+            .to_dtype(DType::BF16)?;
 
         assert!(crate::backend::metal::metal_rms_norm_supports(&x, &weight));
         let fallback = rms_norm_fallback(&x, &weight, 1e-6)?;
@@ -29591,7 +29825,11 @@ mod tests {
             - fallback.to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
         let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
-        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs
+            .flatten_all()?
+            .mean(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         eprintln!("rms_norm metal vs fallback: max_abs_diff={max:e} mean_abs_diff={mean:e}");
         // The Metal kernel computes the *identical* F32 math as the fallback
         // (F32 sum-of-squares, F32 rsqrt, F32 `(1+w)*x*rms_inv`, BF16 cast at
@@ -29638,10 +29876,12 @@ mod tests {
             .map(|i| ((i % 31) as f32 - 15.0) * 0.01953125)
             .collect();
 
-        let x = Tensor::from_slice(&x_data, (batch, 1usize, hidden))?.to_device(device)?
+        let x = Tensor::from_slice(&x_data, (batch, 1usize, hidden))?
+            .to_device(device)?
             .to_dtype(DType::BF16)?
             .contiguous()?;
-        let weight_t = Tensor::from_slice(&weight_data, (hidden, vocab))?.to_device(device)?
+        let weight_t = Tensor::from_slice(&weight_data, (hidden, vocab))?
+            .to_device(device)?
             .to_dtype(DType::BF16)?
             .contiguous()?;
 
@@ -29656,7 +29896,11 @@ mod tests {
             - reference.to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
         let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
-        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs
+            .flatten_all()?
+            .mean(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         assert!(
             max < 2e-2,
             "Metal batch LM-head max_abs_diff={max:e} exceeds 2e-2"
@@ -29693,9 +29937,11 @@ mod tests {
         let k_data: Vec<f32> = (0..batch * seq_len * k_heads * head_dim)
             .map(|_| rng.random_range(-1.0f32..1.0f32))
             .collect();
-        let q = Tensor::from_slice(&q_data, (batch, seq_len, q_heads, head_dim))?.to_device(device)?
+        let q = Tensor::from_slice(&q_data, (batch, seq_len, q_heads, head_dim))?
+            .to_device(device)?
             .to_dtype(DType::BF16)?;
-        let k = Tensor::from_slice(&k_data, (batch, seq_len, k_heads, head_dim))?.to_device(device)?
+        let k = Tensor::from_slice(&k_data, (batch, seq_len, k_heads, head_dim))?
+            .to_device(device)?
             .to_dtype(DType::BF16)?;
         let positions: Vec<f32> = (11..11 + seq_len).map(|p| p as f32).collect();
         let positions = Tensor::from_slice(&positions, (seq_len,))?.to_device(device)?;
@@ -29717,8 +29963,16 @@ mod tests {
         let k_diff = (k_fused.to_dtype(DType::F32)?
             - k_ref.to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?
         .abs()?;
-        let q_max = q_diff.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
-        let k_max = k_diff.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let q_max = q_diff
+            .flatten_all()?
+            .max(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
+        let k_max = k_diff
+            .flatten_all()?
+            .max(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         assert!(q_max < 1e-6, "Metal rotary Q max_abs_diff={q_max:e}");
         assert!(k_max < 1e-6, "Metal rotary K max_abs_diff={k_max:e}");
 
@@ -29890,8 +30144,8 @@ mod tests {
             gate_proj_marlin: None,
             up_proj_marlin: None,
             down_proj_marlin: None,
-                gate_up_proj_w8: None,
-                down_proj_w8: None,
+            gate_up_proj_w8: None,
+            down_proj_w8: None,
         };
         let result = swiglu_ffn(&x, &mlp, None)?;
         assert_eq!(result.dims(), &[batch, seq_len, hidden]);
@@ -29925,8 +30179,8 @@ mod tests {
             gate_proj_marlin: None,
             up_proj_marlin: None,
             down_proj_marlin: None,
-                gate_up_proj_w8: None,
-                down_proj_w8: None,
+            gate_up_proj_w8: None,
+            down_proj_w8: None,
         };
         let result = swiglu_ffn(&x, &mlp, None)?;
         let vals = result.to_vec3::<f32>()?;
@@ -29957,14 +30211,8 @@ mod tests {
     #[test]
     fn test_runtime_matmul_no_broadcast_copy_routes_cpu_backend() -> Result<()> {
         let backend = CpuBackend::new(Device::Cpu);
-        let x = Tensor::from_slice(
-            &[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0],
-            vec![1, 2, 3],
-        )?;
-        let weight_t = Tensor::from_slice(
-            &[7.0_f32, 8.0, 9.0, 10.0, 11.0, 12.0],
-            vec![3, 2],
-        )?;
+        let x = Tensor::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![1, 2, 3])?;
+        let weight_t = Tensor::from_slice(&[7.0_f32, 8.0, 9.0, 10.0, 11.0, 12.0], vec![3, 2])?;
 
         let routed = runtime_matmul_no_broadcast_copy(&backend, &x, &weight_t)?
             .expect("CPU backend should route flattened matmul request");
@@ -29991,12 +30239,9 @@ mod tests {
         // meaningful, the device-specific BF16 path is exercised by the
         // existing real-model integration tests.
         let x = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, hidden), &device)?;
-        let gate_t = Tensor::randn(0.0_f32, 0.05, (hidden, intermediate), &device)?
-            .contiguous()?;
-        let up_t = Tensor::randn(0.0_f32, 0.05, (hidden, intermediate), &device)?
-            .contiguous()?;
-        let gate_up_t = Tensor::cat(&[&gate_t, &up_t], LAST_DIM)?
-            .contiguous()?;
+        let gate_t = Tensor::randn(0.0_f32, 0.05, (hidden, intermediate), &device)?.contiguous()?;
+        let up_t = Tensor::randn(0.0_f32, 0.05, (hidden, intermediate), &device)?.contiguous()?;
+        let gate_up_t = Tensor::cat(&[&gate_t, &up_t], LAST_DIM)?.contiguous()?;
 
         let gate_split = broadcast_matmul_cpu_compatible(&x, &gate_t)?;
         let up_split = broadcast_matmul_cpu_compatible(&x, &up_t)?;
@@ -30013,11 +30258,7 @@ mod tests {
         let up_split_vec = up_split.flatten_all()?.to_vec1::<f32>()?;
         let up_fused_vec = up_fused.flatten_all()?.to_vec1::<f32>()?;
         assert_eq!(gate_split_vec.len(), gate_fused_vec.len());
-        for (i, (a, b)) in gate_split_vec
-            .iter()
-            .zip(gate_fused_vec.iter())
-            .enumerate()
-        {
+        for (i, (a, b)) in gate_split_vec.iter().zip(gate_fused_vec.iter()).enumerate() {
             assert_eq!(
                 a.to_bits(),
                 b.to_bits(),
@@ -30056,8 +30297,7 @@ mod tests {
         let gate_t = gate.t()?.contiguous()?;
         let up_t = up.t()?.contiguous()?;
         let down_t = down.t()?.contiguous()?;
-        let gate_up_t = Tensor::cat(&[&gate_t, &up_t], LAST_DIM)?
-            .contiguous()?;
+        let gate_up_t = Tensor::cat(&[&gate_t, &up_t], LAST_DIM)?.contiguous()?;
 
         let mlp_legacy = GpuFfnWeights {
             gate_proj: gate.clone(),
@@ -30070,8 +30310,8 @@ mod tests {
             gate_proj_marlin: None,
             up_proj_marlin: None,
             down_proj_marlin: None,
-                gate_up_proj_w8: None,
-                down_proj_w8: None,
+            gate_up_proj_w8: None,
+            down_proj_w8: None,
         };
         let mlp_fused = GpuFfnWeights {
             gate_proj: gate,
@@ -30084,8 +30324,8 @@ mod tests {
             gate_proj_marlin: None,
             up_proj_marlin: None,
             down_proj_marlin: None,
-                gate_up_proj_w8: None,
-                down_proj_w8: None,
+            gate_up_proj_w8: None,
+            down_proj_w8: None,
         };
 
         let legacy = swiglu_ffn(&x, &mlp_legacy, None)?;
@@ -30253,8 +30493,8 @@ mod tests {
             gate_proj_marlin: None,
             up_proj_marlin: None,
             down_proj_marlin: None,
-                gate_up_proj_w8: None,
-                down_proj_w8: None,
+            gate_up_proj_w8: None,
+            down_proj_w8: None,
         })
     }
 
@@ -30350,8 +30590,7 @@ mod tests {
         weights.final_norm = Tensor::ones(config.hidden_size, DType::F32, device)?;
         for layer in weights.layers.iter_mut() {
             layer.input_layernorm = Tensor::ones(config.hidden_size, DType::F32, device)?;
-            layer.post_attention_layernorm =
-                Tensor::ones(config.hidden_size, DType::F32, device)?;
+            layer.post_attention_layernorm = Tensor::ones(config.hidden_size, DType::F32, device)?;
             if let GpuAttentionWeights::Full(attn) = &mut layer.attention {
                 attn.q_norm = Tensor::ones(config.head_dim, DType::F32, device)?;
                 attn.k_norm = Tensor::ones(config.head_dim, DType::F32, device)?;
@@ -30463,7 +30702,7 @@ mod tests {
                     a_log_gates: Tensor::zeros(nv, DType::F32, device)?,
                     dt_bias: Tensor::zeros(nv, DType::BF16, device)?,
                     out_proj_marlin: None,
-                            in_proj_qkvzab_w8: None,
+                    in_proj_qkvzab_w8: None,
                 })
             };
 
@@ -30526,7 +30765,11 @@ mod tests {
         let diff = (left.to_dtype(DType::F32)? - right.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
         let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
-        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs
+            .flatten_all()?
+            .mean(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         Ok((max, mean))
     }
 
@@ -30598,14 +30841,7 @@ mod tests {
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
             let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
-            write_token_major_prefix_for_test(
-                &mut batch_cache,
-                0,
-                block_table,
-                0,
-                &row_k,
-                &row_v,
-            )?;
+            write_token_major_prefix_for_test(&mut batch_cache, 0, block_table, 0, &row_k, &row_v)?;
         }
 
         let batched = gqa_attention_paged_decode_contiguous_batch(
@@ -30651,14 +30887,7 @@ mod tests {
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
             let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
-            write_token_major_prefix_for_test(
-                &mut row_cache,
-                0,
-                &row_table,
-                0,
-                &row_k,
-                &row_v,
-            )?;
+            write_token_major_prefix_for_test(&mut row_cache, 0, &row_table, 0, &row_k, &row_v)?;
             let row_x = x.narrow(0, row, 1)?.contiguous()?;
             let rowwise = gqa_attention_paged(
                 &*backend,
@@ -30684,7 +30913,11 @@ mod tests {
             let diff = (batch_row.to_dtype(DType::F32)? - rowwise.to_dtype(DType::F32)?)?;
             let abs = diff.abs()?;
             let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
-            let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+            let mean = abs
+                .flatten_all()?
+                .mean(0)?
+                .flatten_all()?
+                .to_vec1::<f32>()?[0];
             eprintln!(
                 "batched contiguous paged decode row {row}: max_abs_diff={max:e} mean_abs_diff={mean:e}"
             );
@@ -30779,14 +31012,7 @@ mod tests {
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
             let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
-            write_token_major_prefix_for_test(
-                &mut batch_cache,
-                0,
-                block_table,
-                0,
-                &row_k,
-                &row_v,
-            )?;
+            write_token_major_prefix_for_test(&mut batch_cache, 0, block_table, 0, &row_k, &row_v)?;
         }
 
         let batched = transformer_block_paged_decode_contiguous_batch(
@@ -30828,14 +31054,7 @@ mod tests {
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
             let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
-            write_token_major_prefix_for_test(
-                &mut row_cache,
-                0,
-                &row_table,
-                0,
-                &row_k,
-                &row_v,
-            )?;
+            write_token_major_prefix_for_test(&mut row_cache, 0, &row_table, 0, &row_k, &row_v)?;
             let row_x = x.narrow(0, row, 1)?.contiguous()?;
             let rowwise = transformer_block_paged(
                 &*backend,
@@ -30861,7 +31080,11 @@ mod tests {
             let diff = (batch_row.to_dtype(DType::F32)? - rowwise.to_dtype(DType::F32)?)?;
             let abs = diff.abs()?;
             let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
-            let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+            let mean = abs
+                .flatten_all()?
+                .mean(0)?
+                .flatten_all()?
+                .to_vec1::<f32>()?[0];
             eprintln!(
                 "batched contiguous transformer block row {row}: max_abs_diff={max:e} mean_abs_diff={mean:e}"
             );
@@ -30953,14 +31176,7 @@ mod tests {
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
             let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
-            write_token_major_prefix_for_test(
-                &mut batch_cache,
-                0,
-                block_table,
-                0,
-                &row_k,
-                &row_v,
-            )?;
+            write_token_major_prefix_for_test(&mut batch_cache, 0, block_table, 0, &row_k, &row_v)?;
         }
 
         let batched = model_forward_paged_decode_contiguous_batch(
@@ -30991,14 +31207,7 @@ mod tests {
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
             let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
-            write_token_major_prefix_for_test(
-                &mut row_cache,
-                0,
-                &row_table,
-                0,
-                &row_k,
-                &row_v,
-            )?;
+            write_token_major_prefix_for_test(&mut row_cache, 0, &row_table, 0, &row_k, &row_v)?;
             let rowwise = model_forward_paged(
                 &*backend,
                 &token_ids[row..row + 1],
@@ -31017,7 +31226,11 @@ mod tests {
             let diff = (batch_row.to_dtype(DType::F32)? - rowwise.to_dtype(DType::F32)?)?;
             let abs = diff.abs()?;
             let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
-            let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+            let mean = abs
+                .flatten_all()?
+                .mean(0)?
+                .flatten_all()?
+                .to_vec1::<f32>()?[0];
             eprintln!(
                 "batched contiguous model decode row {row}: max_abs_diff={max:e} mean_abs_diff={mean:e}"
             );
@@ -31236,7 +31449,8 @@ mod tests {
                 (prefix_k_row1.clone(), prefix_v_row1.clone())
             };
             assert!(row_cache.write_token_major_native(0, &row_table, 0, &row_k, &row_v)?);
-            let positions = Tensor::from_slice(&[row_start_pos as f32], 1usize)?.to_device(device)?;
+            let positions =
+                Tensor::from_slice(&[row_start_pos as f32], 1usize)?.to_device(device)?;
             let rowwise = model_forward_paged(
                 &*backend,
                 &token_ids[row..row + 1],
@@ -31269,8 +31483,14 @@ mod tests {
             // So we gate on what decode actually depends on — token/argmax parity —
             // plus a bf16-realistic RELATIVE bound, NOT the old absolute bar.
             let batch_row = batched.narrow(0, row, 1)?;
-            let br = batch_row.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
-            let rw = rowwise.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let br = batch_row
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
+            let rw = rowwise
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
             let argmax = |v: &[f32]| {
                 v.iter()
                     .enumerate()
@@ -31956,13 +32176,10 @@ mod tests {
 
         // Prefix K/V written at the decode position's run so the paged
         // attention reads a real context. (Same pattern as C3.)
-        let prefix_k =
-            patterned_bf16(&[1, start_pos, num_kv_heads, head_dim], 0.002, &device)?;
-        let prefix_v =
-            patterned_bf16(&[1, start_pos, num_kv_heads, head_dim], 0.003, &device)?;
+        let prefix_k = patterned_bf16(&[1, start_pos, num_kv_heads, head_dim], 0.002, &device)?;
+        let prefix_v = patterned_bf16(&[1, start_pos, num_kv_heads, head_dim], 0.003, &device)?;
         let block_table = BlockTable { blocks: vec![0] };
-        let positions =
-            Tensor::from_slice(&[start_pos as f32], 1usize)?.to_device(device)?;
+        let positions = Tensor::from_slice(&[start_pos as f32], 1usize)?.to_device(device)?;
 
         // --- (1) Eager reference: fresh cache + fresh linear state. ---
         let mut ref_cache = crate::PagedKvCacheKt::new(
@@ -32130,7 +32347,11 @@ mod tests {
                 .map(|(a, b)| (a - b).abs())
                 .sum::<f32>()
                 / eager.len() as f32;
-            let max_abs_logit = eager.iter().map(|x| x.abs()).fold(0.0f32, f32::max).max(1e-6);
+            let max_abs_logit = eager
+                .iter()
+                .map(|x| x.abs())
+                .fold(0.0f32, f32::max)
+                .max(1e-6);
             eprintln!(
                 "cuda graph bs=1 decode parity (start_pos={start_pos}, token={token_id}): \
                  graph_token={ra} eager_token={ea} \
@@ -32229,14 +32450,7 @@ mod tests {
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
             let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
-            write_token_major_prefix_for_test(
-                &mut batch_cache,
-                0,
-                block_table,
-                0,
-                &row_k,
-                &row_v,
-            )?;
+            write_token_major_prefix_for_test(&mut batch_cache, 0, block_table, 0, &row_k, &row_v)?;
         }
 
         let mut row_states = Vec::with_capacity(batch);
@@ -32273,14 +32487,7 @@ mod tests {
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
             let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
-            write_token_major_prefix_for_test(
-                &mut row_cache,
-                0,
-                &row_table,
-                0,
-                &row_k,
-                &row_v,
-            )?;
+            write_token_major_prefix_for_test(&mut row_cache, 0, &row_table, 0, &row_k, &row_v)?;
             let rowwise = model_forward_paged(
                 &*backend,
                 &token_ids[row..row + 1],
@@ -32667,7 +32874,7 @@ mod tests {
                 in_proj_ab_t: None,
                 out_proj_t: Tensor::zeros((1, 1), DType::F32, &device)?,
                 out_proj_marlin: None,
-                            in_proj_qkvzab_w8: None,
+                in_proj_qkvzab_w8: None,
             }),
             mlp: GpuFfnWeights {
                 gate_proj: Tensor::zeros((1, hidden), DType::F32, &device)?,
@@ -33433,7 +33640,7 @@ mod tests {
                     in_proj_ab_t: None,
                     out_proj_t,
                     out_proj_marlin: None,
-                            in_proj_qkvzab_w8: None,
+                    in_proj_qkvzab_w8: None,
                 })
             };
 
@@ -33458,8 +33665,8 @@ mod tests {
                     gate_proj_marlin: None,
                     up_proj_marlin: None,
                     down_proj_marlin: None,
-                gate_up_proj_w8: None,
-                down_proj_w8: None,
+                    gate_up_proj_w8: None,
+                    down_proj_w8: None,
                 },
             });
         }
@@ -33937,16 +34144,12 @@ mod tests {
         let recurrent_values1: Vec<f32> = (0..64).map(|i| 1000.0 + i as f32).collect();
         let conv_values0: Vec<f32> = (0..96).map(|i| 2000.0 + i as f32).collect();
         let conv_values1: Vec<f32> = (0..96).map(|i| 3000.0 + i as f32).collect();
-        row0.recurrent_states[0] = Tensor::from_slice(
-            &recurrent_values0,
-            (1usize, 4usize, 4usize, 4usize),
-        )?
-        .to_device(device)?;
-        row1.recurrent_states[0] = Tensor::from_slice(
-            &recurrent_values1,
-            (1usize, 4usize, 4usize, 4usize),
-        )?
-        .to_device(device)?;
+        row0.recurrent_states[0] =
+            Tensor::from_slice(&recurrent_values0, (1usize, 4usize, 4usize, 4usize))?
+                .to_device(device)?;
+        row1.recurrent_states[0] =
+            Tensor::from_slice(&recurrent_values1, (1usize, 4usize, 4usize, 4usize))?
+                .to_device(device)?;
         row0.conv_states[0] =
             Tensor::from_slice(&conv_values0, (1usize, 32usize, 3usize))?.to_device(device)?;
         row1.conv_states[0] =
@@ -34298,12 +34501,14 @@ mod tests {
             .abs()?
             .flatten_all()?
             .max(0)?
-            .flatten_all()?.to_vec1::<f32>()?[0];
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         let state_diff = (&state_chunk - &state_seq)?
             .abs()?
             .flatten_all()?
             .max(0)?
-            .flatten_all()?.to_vec1::<f32>()?[0];
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
 
         // Task acceptance: max abs diff < 1e-3 in bf16. We run the test in
         // F32 so the actual tolerance is much tighter; guard against both
@@ -34329,12 +34534,14 @@ mod tests {
                 .abs()?
                 .flatten_all()?
                 .max(0)?
-                .flatten_all()?.to_vec1::<f32>()?[0];
+                .flatten_all()?
+                .to_vec1::<f32>()?[0];
             let sd = (&state_a - &state_b)?
                 .abs()?
                 .flatten_all()?
                 .max(0)?
-                .flatten_all()?.to_vec1::<f32>()?[0];
+                .flatten_all()?
+                .to_vec1::<f32>()?[0];
             assert!(d < 1e-3, "chunkwise(cs={cs}) output diff {d}");
             assert!(sd < 1e-3, "chunkwise(cs={cs}) state diff {sd}");
         }
@@ -34419,12 +34626,14 @@ mod tests {
             .abs()?
             .flatten_all()?
             .max(0)?
-            .flatten_all()?.to_vec1::<f32>()?[0];
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         let state_diff = (&state_fast - &state_seq)?
             .abs()?
             .flatten_all()?
             .max(0)?
-            .flatten_all()?.to_vec1::<f32>()?[0];
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
 
         assert!(
             out_diff < 1e-5,
@@ -34499,7 +34708,11 @@ mod tests {
         let diff = (w_kernel.to_dtype(DType::F32)? - w_fb.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
         let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
-        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs
+            .flatten_all()?
+            .mean(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
 
         eprintln!("gdn-kernel vs fallback: max_abs_diff={max:e}, mean_abs_diff={mean:e}");
 
@@ -34566,7 +34779,11 @@ mod tests {
         let diff = (w_kernel.to_dtype(DType::F32)? - w_fb.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
         let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
-        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs
+            .flatten_all()?
+            .mean(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
 
         eprintln!(
             "metal gdn-forward-sub vs fallback: max_abs_diff={max:e}, mean_abs_diff={mean:e}"
@@ -34681,11 +34898,23 @@ mod tests {
         let out_diff = (out_kernel.to_dtype(DType::F32)? - &out_ref)?;
         let abs = out_diff.abs()?;
         let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
-        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs
+            .flatten_all()?
+            .mean(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         let s_diff = (state_kernel.to_dtype(DType::F32)? - &state_ref)?;
         let s_abs = s_diff.abs()?;
-        let s_max = s_abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
-        let s_mean = s_abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let s_max = s_abs
+            .flatten_all()?
+            .max(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
+        let s_mean = s_abs
+            .flatten_all()?
+            .mean(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
 
         eprintln!(
             "gdn-recurrent vs reference: out max={max:e} mean={mean:e}, state max={s_max:e} mean={s_mean:e}"
@@ -34755,13 +34984,24 @@ mod tests {
             .map(|_| rng.random_range(-0.1f32..0.1f32))
             .collect();
 
-        let q = Tensor::from_slice(&q_data, (b, nv, t, dk))?.to_device(device)?.to_dtype(DType::BF16)?;
-        let k = Tensor::from_slice(&k_data, (b, nv, t, dk))?.to_device(device)?.to_dtype(DType::BF16)?;
-        let v = Tensor::from_slice(&v_data, (b, nv, t, dv))?.to_device(device)?.to_dtype(DType::BF16)?;
-        let beta = Tensor::from_slice(&beta_data, (b, nv, t))?.to_device(device)?.to_dtype(DType::BF16)?;
-        let g = Tensor::from_slice(&g_data, (b, nv, t))?.to_device(device)?.to_dtype(DType::BF16)?;
-        let state_bf16 =
-            Tensor::from_slice(&s_data, (b, nv, dk, dv))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let q = Tensor::from_slice(&q_data, (b, nv, t, dk))?
+            .to_device(device)?
+            .to_dtype(DType::BF16)?;
+        let k = Tensor::from_slice(&k_data, (b, nv, t, dk))?
+            .to_device(device)?
+            .to_dtype(DType::BF16)?;
+        let v = Tensor::from_slice(&v_data, (b, nv, t, dv))?
+            .to_device(device)?
+            .to_dtype(DType::BF16)?;
+        let beta = Tensor::from_slice(&beta_data, (b, nv, t))?
+            .to_device(device)?
+            .to_dtype(DType::BF16)?;
+        let g = Tensor::from_slice(&g_data, (b, nv, t))?
+            .to_device(device)?
+            .to_dtype(DType::BF16)?;
+        let state_bf16 = Tensor::from_slice(&s_data, (b, nv, dk, dv))?
+            .to_device(device)?
+            .to_dtype(DType::BF16)?;
 
         let q_ref = q.to_dtype(DType::F32)?;
         let k_ref = k.to_dtype(DType::F32)?;
@@ -34784,11 +35024,23 @@ mod tests {
         let out_diff = (out_kernel.to_dtype(DType::F32)? - &out_ref)?;
         let abs = out_diff.abs()?;
         let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
-        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs
+            .flatten_all()?
+            .mean(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         let s_diff = (state_kernel.to_dtype(DType::F32)? - &state_ref)?;
         let s_abs = s_diff.abs()?;
-        let s_max = s_abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
-        let s_mean = s_abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let s_max = s_abs
+            .flatten_all()?
+            .max(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
+        let s_mean = s_abs
+            .flatten_all()?
+            .mean(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
 
         eprintln!(
             "metal gdn-recurrent vs reference: out max={max:e} mean={mean:e}, state max={s_max:e} mean={s_mean:e}"
@@ -34908,7 +35160,11 @@ mod tests {
         let diff = (out_k.to_dtype(DType::F32)? - out_fb.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
         let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
-        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs
+            .flatten_all()?
+            .mean(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         eprintln!("conv1d_update vs fallback: max_abs_diff={max:e} mean_abs_diff={mean:e}");
         assert!(
             max < 2e-3,
@@ -34921,7 +35177,12 @@ mod tests {
 
         // State parity — both paths write the same K-1 previous inputs.
         let sdiff = (s_k.to_dtype(DType::F32)? - s_fb.to_dtype(DType::F32)?)?;
-        let smax = sdiff.abs()?.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let smax = sdiff
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         eprintln!("conv1d_update state parity: max_abs_diff={smax:e}");
         assert!(
             smax < 1e-5,
@@ -34970,11 +35231,14 @@ mod tests {
             .map(|_| rng.random_range(-0.3f32..0.3f32))
             .collect();
 
-        let x = Tensor::from_slice(&x_data, (batch, channels, seq_len))?.to_device(device)?
+        let x = Tensor::from_slice(&x_data, (batch, channels, seq_len))?
+            .to_device(device)?
             .to_dtype(DType::BF16)?;
-        let w = Tensor::from_slice(&w_data, (channels, 1, kernel_size))?.to_device(device)?
+        let w = Tensor::from_slice(&w_data, (channels, 1, kernel_size))?
+            .to_device(device)?
             .to_dtype(DType::BF16)?;
-        let s_init = Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1))?.to_device(device)?;
+        let s_init =
+            Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1))?.to_device(device)?;
 
         let mut s_fb = s_init.clone();
         let out_fb = causal_conv1d_prefill_with_dtype(&x, &w, &mut s_fb, kernel_size, DType::F32)?;
@@ -35005,7 +35269,11 @@ mod tests {
         let diff = (out_k.to_dtype(DType::F32)? - out_fb.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
         let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
-        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs
+            .flatten_all()?
+            .mean(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         eprintln!("conv1d_prefill vs fallback: max_abs_diff={max:e} mean_abs_diff={mean:e}");
         assert!(
             max < 2e-3,
@@ -35017,7 +35285,12 @@ mod tests {
         );
 
         let sdiff = (s_k.to_dtype(DType::F32)? - s_fb.to_dtype(DType::F32)?)?;
-        let smax = sdiff.abs()?.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let smax = sdiff
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         eprintln!("conv1d_prefill state parity: max_abs_diff={smax:e}");
         assert!(
             smax < 1e-5,
@@ -35108,7 +35381,11 @@ mod tests {
         let diff = (out_k.to_dtype(DType::F32)? - out_fb.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
         let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
-        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs
+            .flatten_all()?
+            .mean(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         eprintln!("metal conv1d_update vs fallback: max_abs_diff={max:e} mean_abs_diff={mean:e}");
         assert!(
             max < 2e-3,
@@ -35120,7 +35397,12 @@ mod tests {
         );
 
         let sdiff = (s_k.to_dtype(DType::F32)? - s_fb.to_dtype(DType::F32)?)?;
-        let smax = sdiff.abs()?.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let smax = sdiff
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         eprintln!("metal conv1d_update state parity: max_abs_diff={smax:e}");
         assert!(
             smax < 1e-5,
@@ -35163,11 +35445,14 @@ mod tests {
             .map(|_| rng.random_range(-0.3f32..0.3f32))
             .collect();
 
-        let x = Tensor::from_slice(&x_data, (batch, channels, seq_len))?.to_device(device)?
+        let x = Tensor::from_slice(&x_data, (batch, channels, seq_len))?
+            .to_device(device)?
             .to_dtype(DType::BF16)?;
-        let w = Tensor::from_slice(&w_data, (channels, 1, kernel_size))?.to_device(device)?
+        let w = Tensor::from_slice(&w_data, (channels, 1, kernel_size))?
+            .to_device(device)?
             .to_dtype(DType::BF16)?;
-        let s_init = Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1))?.to_device(device)?;
+        let s_init =
+            Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1))?.to_device(device)?;
 
         let mut s_ref = s_init.clone();
         let out_ref =
@@ -35187,7 +35472,11 @@ mod tests {
         let diff = (out_bf16.to_dtype(DType::F32)? - out_ref.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
         let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
-        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs
+            .flatten_all()?
+            .mean(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         eprintln!("conv1d_prefill bf16 vs f32: max_abs_diff={max:e} mean_abs_diff={mean:e}");
         assert!(
             max < 2e-2,
@@ -35199,7 +35488,12 @@ mod tests {
         );
 
         let sdiff = (s_bf16.to_dtype(DType::F32)? - s_ref.to_dtype(DType::F32)?)?;
-        let smax = sdiff.abs()?.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let smax = sdiff
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         eprintln!("conv1d_prefill bf16 state parity: max_abs_diff={smax:e}");
         assert!(
             smax < 1e-6,
@@ -35242,11 +35536,14 @@ mod tests {
             .map(|_| rng.random_range(-0.3f32..0.3f32))
             .collect();
 
-        let x = Tensor::from_slice(&x_data, (batch, channels, seq_len))?.to_device(device)?
+        let x = Tensor::from_slice(&x_data, (batch, channels, seq_len))?
+            .to_device(device)?
             .to_dtype(DType::BF16)?;
-        let w = Tensor::from_slice(&w_data, (channels, 1, kernel_size))?.to_device(device)?
+        let w = Tensor::from_slice(&w_data, (channels, 1, kernel_size))?
+            .to_device(device)?
             .to_dtype(DType::BF16)?;
-        let s_init = Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1))?.to_device(device)?;
+        let s_init =
+            Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1))?.to_device(device)?;
 
         let mut s_ref = s_init.clone();
         let out_ref =
@@ -35277,7 +35574,11 @@ mod tests {
         let diff = (out_kernel.to_dtype(DType::F32)? - out_ref.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
         let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
-        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs
+            .flatten_all()?
+            .mean(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         eprintln!(
             "metal conv1d_prefill kernel vs fallback: max_abs_diff={max:e} mean_abs_diff={mean:e}"
         );
@@ -35291,7 +35592,12 @@ mod tests {
         );
 
         let sdiff = (s_kernel.to_dtype(DType::F32)? - s_ref.to_dtype(DType::F32)?)?;
-        let smax = sdiff.abs()?.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let smax = sdiff
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         eprintln!("metal conv1d_prefill kernel state parity: max_abs_diff={smax:e}");
         assert!(
             smax < 1e-6,
@@ -35554,12 +35860,14 @@ mod tests {
             .abs()?
             .flatten_all()?
             .max(0)?
-            .flatten_all()?.to_vec1::<f32>()?[0];
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         let hidden_diff = (&mono_hidden - &stream_hidden)?
             .abs()?
             .flatten_all()?
             .max(0)?
-            .flatten_all()?.to_vec1::<f32>()?[0];
+            .flatten_all()?
+            .to_vec1::<f32>()?[0];
         assert!(
             logits_diff <= 1e-5,
             "streaming MTP prefill logits drifted: max_abs_diff={logits_diff:e}"
@@ -35775,12 +36083,15 @@ mod tests {
             weight_data[i * vocab + best] = x_data[i] * norm_weight_data[i];
         }
 
-        let x = Tensor::from_slice(&x_data, (1usize, 1usize, hidden))?.to_device(device)?
+        let x = Tensor::from_slice(&x_data, (1usize, 1usize, hidden))?
+            .to_device(device)?
             .to_dtype(DType::BF16)?;
-        let norm_weight =
-            Tensor::from_slice(&norm_weight_data, (hidden,))?.to_device(device)?.to_dtype(DType::BF16)?;
-        let weight_t =
-            Tensor::from_slice(&weight_data, (hidden, vocab))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let norm_weight = Tensor::from_slice(&norm_weight_data, (hidden,))?
+            .to_device(device)?
+            .to_dtype(DType::BF16)?;
+        let weight_t = Tensor::from_slice(&weight_data, (hidden, vocab))?
+            .to_device(device)?
+            .to_dtype(DType::BF16)?;
 
         let normed = rms_norm(&x, &norm_weight, 1e-6)?;
         let reference = lm_head_argmax(&normed, &weight_t)?;
@@ -36501,7 +36812,6 @@ mod tests {
     //   it exercised the deleted `fused_rotary_one_backward_via_kt_bridge` candle
     //   parity path. Rotary autograd is now `try_tape_rope_cuda` on the kt tape.
 }
-
 
 /// Read the `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED` env var.
 ///

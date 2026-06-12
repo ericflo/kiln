@@ -18,8 +18,8 @@
 #![cfg(feature = "rocm")]
 
 use kiln_opd_loss_kernel::kt_api::{
-    opd_top_k_reverse_kl_phase_b_bwd_composite_kt, opd_top_k_reverse_kl_phase_b_bwd_kt,
-    OpdLossOutputKt,
+    OpdLossOutputKt, opd_top_k_reverse_kl_phase_b_bwd_composite_kt,
+    opd_top_k_reverse_kl_phase_b_bwd_kt,
 };
 use kiln_tensor::{Device, Tensor};
 
@@ -64,7 +64,9 @@ fn build_fixture(
 ) -> Fixture {
     let mut s = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
 
-    let hidden: Vec<f32> = (0..seq_len * hidden_size).map(|_| next_val(&mut s)).collect();
+    let hidden: Vec<f32> = (0..seq_len * hidden_size)
+        .map(|_| next_val(&mut s))
+        .collect();
     let head_t: Vec<f32> = (0..hidden_size * vocab_size)
         .map(|_| next_val(&mut s))
         .collect();
@@ -136,10 +138,18 @@ fn check_parity(
     };
 
     // ---- CPU reference via the analytic kt-composite (FD-validated). ----
-    let h_cpu = Tensor::from_vec_on(Device::Cpu, fx.hidden.clone(), vec![1, seq_len, hidden_size])
-        .expect("cpu hidden");
-    let w_cpu = Tensor::from_vec_on(Device::Cpu, fx.head_t.clone(), vec![hidden_size, vocab_size])
-        .expect("cpu head_t");
+    let h_cpu = Tensor::from_vec_on(
+        Device::Cpu,
+        fx.hidden.clone(),
+        vec![1, seq_len, hidden_size],
+    )
+    .expect("cpu hidden");
+    let w_cpu = Tensor::from_vec_on(
+        Device::Cpu,
+        fx.head_t.clone(),
+        vec![hidden_size, vocab_size],
+    )
+    .expect("cpu head_t");
     let g_cpu =
         Tensor::from_vec_on(Device::Cpu, grad_vals.to_vec(), grad_shape.clone()).expect("cpu grad");
     let ref_d_hidden = opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
@@ -156,12 +166,18 @@ fn check_parity(
     let reference = host_f32(&ref_d_hidden);
 
     // ---- ROCm FFI backward. ----
-    let h_rocm =
-        Tensor::from_vec_on(Device::Rocm(0), fx.hidden.clone(), vec![1, seq_len, hidden_size])
-            .expect("rocm hidden");
-    let w_rocm =
-        Tensor::from_vec_on(Device::Rocm(0), fx.head_t.clone(), vec![hidden_size, vocab_size])
-            .expect("rocm head_t");
+    let h_rocm = Tensor::from_vec_on(
+        Device::Rocm(0),
+        fx.hidden.clone(),
+        vec![1, seq_len, hidden_size],
+    )
+    .expect("rocm hidden");
+    let w_rocm = Tensor::from_vec_on(
+        Device::Rocm(0),
+        fx.head_t.clone(),
+        vec![hidden_size, vocab_size],
+    )
+    .expect("rocm head_t");
     let g_rocm =
         Tensor::from_vec_on(Device::Rocm(0), grad_vals.to_vec(), grad_shape).expect("rocm grad");
     let rocm_d_hidden = opd_top_k_reverse_kl_phase_b_bwd_kt(

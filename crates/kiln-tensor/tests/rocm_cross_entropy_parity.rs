@@ -113,13 +113,13 @@ fn cross_entropy_parity_u32_targets_and_large_batch() {
 
     let reference = cpu_cross_entropy(&data, &targets_i64, n_rows, w);
 
-    let logits = Tensor::from_vec_on(Device::Rocm(0), data, vec![n_rows, w])
-        .expect("from_vec_on logits");
+    let logits =
+        Tensor::from_vec_on(Device::Rocm(0), data, vec![n_rows, w]).expect("from_vec_on logits");
     let tgt = Tensor::from_vec_on(Device::Rocm(0), targets_u32, vec![n_rows])
         .expect("from_vec_on u32 targets");
 
-    let loss = kiln_tensor::rocm_cross_entropy_loss(&logits, &tgt)
-        .expect("rocm_cross_entropy_loss u32");
+    let loss =
+        kiln_tensor::rocm_cross_entropy_loss(&logits, &tgt).expect("rocm_cross_entropy_loss u32");
     let host = kiln_tensor::rocm_to_host_copy(&loss).expect("rocm_to_host_copy");
     let got = host.to_vec::<f32>().expect("to_vec");
 

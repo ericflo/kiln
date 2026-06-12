@@ -61,7 +61,11 @@ impl EvalGenerator for OrderedMockGenerator {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<PreparedPrompt, String>> + Send + '_>,
     > {
-        Box::pin(async move { Ok(PreparedPrompt { tokens: vec![1, 2, 3] }) })
+        Box::pin(async move {
+            Ok(PreparedPrompt {
+                tokens: vec![1, 2, 3],
+            })
+        })
     }
 
     fn run(
@@ -116,8 +120,8 @@ async fn builtin_qwen3_agentic_core_validates_and_lists_tools() {
 #[tokio::test]
 async fn executor_e2e_with_realistic_qwen3_xml_replies() {
     // Use a custom suite so we can control the order of replies exactly.
-    use kiln_eval::scorers::{ArgsScoring, NameMatch, Scorer};
     use kiln_eval::EvalExample;
+    use kiln_eval::scorers::{ArgsScoring, NameMatch, Scorer};
 
     let suite = EvalSuite {
         name: "agentic-smoke".into(),
@@ -145,8 +149,7 @@ async fn executor_e2e_with_realistic_qwen3_xml_replies() {
                 id: Some("read-hosts".into()),
                 messages: vec![EvalChatMessage::new("user", "Read /etc/hosts.")],
                 target: Some(
-                    r#"{"tool_calls":[{"name":"Read","arguments":{"path":"/etc/hosts"}}]}"#
-                        .into(),
+                    r#"{"tool_calls":[{"name":"Read","arguments":{"path":"/etc/hosts"}}]}"#.into(),
                 ),
                 tags: vec!["agentic".into()],
                 ..Default::default()
@@ -155,18 +158,14 @@ async fn executor_e2e_with_realistic_qwen3_xml_replies() {
                 id: Some("read-fail-wrong-tool".into()),
                 messages: vec![EvalChatMessage::new("user", "Read /etc/hosts.")],
                 target: Some(
-                    r#"{"tool_calls":[{"name":"Read","arguments":{"path":"/etc/hosts"}}]}"#
-                        .into(),
+                    r#"{"tool_calls":[{"name":"Read","arguments":{"path":"/etc/hosts"}}]}"#.into(),
                 ),
                 tags: vec!["agentic".into()],
                 ..Default::default()
             },
             EvalExample {
                 id: Some("thinking-passthrough".into()),
-                messages: vec![EvalChatMessage::new(
-                    "user",
-                    "What's the weather in Tokyo?",
-                )],
+                messages: vec![EvalChatMessage::new("user", "What's the weather in Tokyo?")],
                 target: Some(
                     r#"{"tool_calls":[{"name":"get_weather","arguments":{"city":"Tokyo"}}]}"#
                         .into(),
@@ -191,8 +190,7 @@ async fn executor_e2e_with_realistic_qwen3_xml_replies() {
             xml_call("get_weather", &[("city", "Tokyo")])
         ),
     ];
-    let gen_ =
-        Arc::new(OrderedMockGenerator::new(replies)) as Arc<dyn EvalGenerator>;
+    let gen_ = Arc::new(OrderedMockGenerator::new(replies)) as Arc<dyn EvalGenerator>;
     let judge: Arc<dyn JudgeRunner> = Arc::new(NoopJudgeRunner);
     let result = run_suite_against_adapter(
         &suite,
@@ -253,8 +251,8 @@ async fn executor_e2e_with_realistic_qwen3_xml_replies() {
 
 #[tokio::test]
 async fn executor_runs_schema_validation_when_tools_declared() {
-    use kiln_eval::scorers::{ArgsScoring, NameMatch, Scorer};
     use kiln_eval::EvalExample;
+    use kiln_eval::scorers::{ArgsScoring, NameMatch, Scorer};
 
     let tools = vec![serde_json::json!({
         "type": "function",
@@ -316,10 +314,7 @@ async fn executor_runs_schema_validation_when_tools_declared() {
     assert_eq!(result.metrics.num_schema_extra_unknown, 1);
     // The outcome's detail string carries the schema diagnostic so dashboards
     // can show "missing=city, extra=zone" inline next to the failure.
-    let detail = result.outcomes[0]
-        .detail
-        .as_deref()
-        .unwrap_or_default();
+    let detail = result.outcomes[0].detail.as_deref().unwrap_or_default();
     assert!(
         detail.contains("missing=city"),
         "outcome detail missing schema note: {detail}"
@@ -332,8 +327,8 @@ async fn executor_runs_schema_validation_when_tools_declared() {
 
 #[tokio::test]
 async fn executor_flags_non_xml_tool_call_in_metrics() {
-    use kiln_eval::scorers::{ArgsScoring, NameMatch, Scorer};
     use kiln_eval::EvalExample;
+    use kiln_eval::scorers::{ArgsScoring, NameMatch, Scorer};
 
     let suite = EvalSuite {
         name: "format-probe".into(),
@@ -349,10 +344,7 @@ async fn executor_flags_non_xml_tool_call_in_metrics() {
         examples: vec![EvalExample {
             id: Some("json-output".into()),
             messages: vec![EvalChatMessage::new("user", "search for kiln")],
-            target: Some(
-                r#"{"tool_calls":[{"name":"search","arguments":{"q":"kiln"}}]}"#
-                    .into(),
-            ),
+            target: Some(r#"{"tool_calls":[{"name":"search","arguments":{"q":"kiln"}}]}"#.into()),
             ..Default::default()
         }],
         schema_version: 1,
@@ -381,8 +373,8 @@ async fn executor_flags_non_xml_tool_call_in_metrics() {
 
 #[tokio::test]
 async fn executor_marks_unclosed_thinking_as_invalid() {
-    use kiln_eval::scorers::Scorer;
     use kiln_eval::EvalExample;
+    use kiln_eval::scorers::Scorer;
 
     let suite = EvalSuite {
         name: "thinking-overrun".into(),
@@ -404,9 +396,7 @@ async fn executor_marks_unclosed_thinking_as_invalid() {
     };
 
     // Model opened `<think>` then ran into max_tokens before closing.
-    let replies = vec![
-        "<think>\nLet me work through this step by step... 2 plus 2 is".to_string(),
-    ];
+    let replies = vec!["<think>\nLet me work through this step by step... 2 plus 2 is".to_string()];
     let gen_ = Arc::new(OrderedMockGenerator::new(replies)) as Arc<dyn EvalGenerator>;
     let result = run_suite_against_adapter(
         &suite,

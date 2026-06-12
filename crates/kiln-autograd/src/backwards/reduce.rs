@@ -22,9 +22,7 @@
 
 use std::sync::Arc;
 
-use kiln_tensor::{
-    bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId,
-};
+use kiln_tensor::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 use crate::BackwardOp;
 
@@ -165,7 +163,11 @@ fn read_scalar_f32(t: &Tensor) -> Result<f32> {
         DType::F32 => f32::from_le_bytes(bytes[..4].try_into().unwrap()),
         DType::BF16 => half::bf16::from_le_bytes(bytes[..2].try_into().unwrap()).to_f32(),
         DType::F16 => half::f16::from_le_bytes(bytes[..2].try_into().unwrap()).to_f32(),
-        d => return Err(Error::Msg(format!("reduce_backward: unsupported dtype {d}"))),
+        d => {
+            return Err(Error::Msg(format!(
+                "reduce_backward: unsupported dtype {d}"
+            )));
+        }
     })
 }
 
@@ -182,11 +184,17 @@ fn load_f32(t: &Tensor) -> Result<Vec<f32>> {
     for i in 0..n {
         out.push(match dtype {
             DType::F32 => f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()),
-            DType::BF16 => half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
-            DType::F16 => half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
-            d => return Err(Error::Msg(format!("reduce_backward: unsupported dtype {d}"))),
+            DType::BF16 => {
+                half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
+            DType::F16 => {
+                half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
+            d => {
+                return Err(Error::Msg(format!(
+                    "reduce_backward: unsupported dtype {d}"
+                )));
+            }
         });
     }
     Ok(out)
@@ -215,7 +223,11 @@ fn store_f32(dtype: DType, shape: &[usize], data: &[f32]) -> Result<Tensor> {
     }
     let cpu = CpuStorage::from_bytes(dtype, bytes)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(shape.to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(shape.to_vec()),
+        TensorId::next(),
+    )
 }
 
 #[cfg(test)]
@@ -287,10 +299,7 @@ mod tests {
         let g = Tensor::from_slice(&[8.0f32, 16.0], vec![2]).unwrap();
         let dx = bo.apply(&g).unwrap()[0].as_ref().unwrap().clone();
         // First row entries = 8/4 = 2.0, second row = 16/4 = 4.0.
-        assert_eq!(
-            read_f32(&dx),
-            vec![2.0, 2.0, 2.0, 2.0, 4.0, 4.0, 4.0, 4.0]
-        );
+        assert_eq!(read_f32(&dx), vec![2.0, 2.0, 2.0, 2.0, 4.0, 4.0, 4.0, 4.0]);
     }
 
     #[test]

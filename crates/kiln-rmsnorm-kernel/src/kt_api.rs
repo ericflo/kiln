@@ -17,8 +17,7 @@ use crate::{
     kiln_fused_rmsnorm, kiln_fused_rmsnorm_bwd, kiln_fused_rotary_one, kiln_fused_rotary_one_bwd,
     kiln_fused_rotary_qk, kiln_fused_sigmoid_mul_bf16, kiln_lora_add_inplace_f32,
     kiln_lora_decode_add_bf16, kiln_lora_decode_hidden_bf16, kiln_muon_step_bf16,
-    kiln_muon_step_f32, kiln_sgd_step_bf16, kiln_sgd_step_f32,
-    kiln_silu_inplace_save_sigmoid_f32,
+    kiln_muon_step_f32, kiln_sgd_step_bf16, kiln_sgd_step_f32, kiln_silu_inplace_save_sigmoid_f32,
 };
 
 #[derive(Debug)]
@@ -55,11 +54,16 @@ fn alloc_like(
     dtype: KtDType,
     shape: Vec<usize>,
 ) -> Result<KtTensor, RmsNormError> {
-    Ok(kiln_kt_bridge::alloc_device_tensor_like(source, dtype, shape)?)
+    Ok(kiln_kt_bridge::alloc_device_tensor_like(
+        source, dtype, shape,
+    )?)
 }
 
 /// Raw GPU stream pointer for `t`'s storage (replaces `device_stream_raw(st, "st")?`).
-fn device_stream_raw(t: &KtTensor, name: &'static str) -> Result<*mut core::ffi::c_void, RmsNormError> {
+fn device_stream_raw(
+    t: &KtTensor,
+    name: &'static str,
+) -> Result<*mut core::ffi::c_void, RmsNormError> {
     Ok(kiln_kt_bridge::device_stream_raw_of(t, name)?)
 }
 
@@ -74,9 +78,9 @@ pub fn fused_rmsnorm_kt(
     eps: f32,
 ) -> Result<KtTensor, RmsNormError> {
     let x_shape = x.shape().to_vec();
-    let hidden = *x_shape.last().ok_or_else(|| {
-        RmsNormError::Msg("kt-rmsnorm: x must have rank >= 1".to_string())
-    })?;
+    let hidden = *x_shape
+        .last()
+        .ok_or_else(|| RmsNormError::Msg("kt-rmsnorm: x must have rank >= 1".to_string()))?;
     let weight_shape = weight.shape();
     if weight_shape != [hidden] {
         return Err(RmsNormError::Msg(format!(
@@ -152,9 +156,9 @@ pub fn fused_rmsnorm_backward_kt(
     eps: f32,
 ) -> Result<(KtTensor, KtTensor), RmsNormError> {
     let x_shape = x.shape().to_vec();
-    let hidden = *x_shape.last().ok_or_else(|| {
-        RmsNormError::Msg("kt-rmsnorm bwd: x must have rank >= 1".to_string())
-    })?;
+    let hidden = *x_shape
+        .last()
+        .ok_or_else(|| RmsNormError::Msg("kt-rmsnorm bwd: x must have rank >= 1".to_string()))?;
     if weight.shape() != [hidden] {
         return Err(RmsNormError::Msg(format!(
             "kt-rmsnorm bwd: weight {:?} != [{hidden}]",
@@ -261,9 +265,7 @@ pub fn fused_rotary_qk_kt(
     }
     let (batch, seq_len, q_heads, head_dim) = (q_shape[0], q_shape[1], q_shape[2], q_shape[3]);
     let k_shape = k.shape();
-    if k_shape.len() != 4
-        || (k_shape[0], k_shape[1], k_shape[3]) != (batch, seq_len, head_dim)
-    {
+    if k_shape.len() != 4 || (k_shape[0], k_shape[1], k_shape[3]) != (batch, seq_len, head_dim) {
         return Err(RmsNormError::Msg(format!(
             "kt-rotary: k {k_shape:?} != [{batch}, {seq_len}, k_heads, {head_dim}]"
         )));
@@ -337,10 +339,7 @@ pub fn fused_rotary_qk_kt(
 /// Element-wise: `out = silu(gate) * up`. Both inputs and output
 /// are BF16 of equal element count. Used by the MLP gate||up||silu
 /// fused path.
-pub fn fused_mlp_silu_mul_kt(
-    gate: &KtTensor,
-    up: &KtTensor,
-) -> Result<KtTensor, RmsNormError> {
+pub fn fused_mlp_silu_mul_kt(gate: &KtTensor, up: &KtTensor) -> Result<KtTensor, RmsNormError> {
     if gate.shape() != up.shape() {
         return Err(RmsNormError::Msg(format!(
             "kt-mlp-silu-mul: gate {:?} != up {:?}",
@@ -383,11 +382,7 @@ pub fn fused_mlp_silu_mul_kt(
 /// mutated in place through the raw device pointer; the caller must
 /// hold a unique reference (kt-Tensor borrow-check is at the
 /// version-counter layer, anti-pattern 16).
-pub fn sgd_step_f32_kt(
-    param: &KtTensor,
-    grad: &KtTensor,
-    lr: f32,
-) -> Result<(), RmsNormError> {
+pub fn sgd_step_f32_kt(param: &KtTensor, grad: &KtTensor, lr: f32) -> Result<(), RmsNormError> {
     if param.shape() != grad.shape() {
         return Err(RmsNormError::Msg(format!(
             "kt-sgd-step: param {:?} != grad {:?}",
@@ -407,9 +402,8 @@ pub fn sgd_step_f32_kt(
 
     let raw_stream = device_stream_raw(p_st, "p_st")?;
 
-    let status = unsafe {
-        kiln_sgd_step_f32(p_ptr as *mut f32, g_ptr as *const f32, lr, n, raw_stream)
-    };
+    let status =
+        unsafe { kiln_sgd_step_f32(p_ptr as *mut f32, g_ptr as *const f32, lr, n, raw_stream) };
     if status != 0 {
         return Err(RmsNormError::Msg(format!(
             "kt-sgd-step: FFI returned {status}"
@@ -456,10 +450,8 @@ pub fn adamw_step_f32_kt(
     // operands (param, first_moment, second_moment).
     let p_ptr = kiln_kt_bridge::device_input_ptr(param, KtDType::F32, "param")?;
     let g_ptr = kiln_kt_bridge::device_input_ptr(grad, KtDType::F32, "grad")?;
-    let m1_ptr =
-        kiln_kt_bridge::device_input_ptr(first_moment, KtDType::F32, "first_moment")?;
-    let m2_ptr =
-        kiln_kt_bridge::device_input_ptr(second_moment, KtDType::F32, "second_moment")?;
+    let m1_ptr = kiln_kt_bridge::device_input_ptr(first_moment, KtDType::F32, "first_moment")?;
+    let m2_ptr = kiln_kt_bridge::device_input_ptr(second_moment, KtDType::F32, "second_moment")?;
     let p_st = param;
 
     let raw_stream = device_stream_raw(p_st, "p_st")?;
@@ -669,10 +661,7 @@ pub fn muon_step_bf16_kt(
 /// Returns F32 `[batch, rank]` (the LoRA hidden state, in F32 for
 /// downstream numerical accuracy). Used by the multi-LoRA decode
 /// path (line 307 of #1082).
-pub fn lora_decode_hidden_kt(
-    x: &KtTensor,
-    a: &KtTensor,
-) -> Result<KtTensor, RmsNormError> {
+pub fn lora_decode_hidden_kt(x: &KtTensor, a: &KtTensor) -> Result<KtTensor, RmsNormError> {
     let x_shape = x.shape();
     if x_shape.len() != 2 {
         return Err(RmsNormError::Msg(format!(
@@ -1027,10 +1016,7 @@ pub fn fused_rotary_one_kt(
 /// Element-wise: `out = sigmoid(gate) * x`. Both BF16, same shape.
 /// Used by gated activation paths. Like `fused_mlp_silu_mul` but
 /// with sigmoid instead of silu.
-pub fn fused_sigmoid_mul_kt(
-    x: &KtTensor,
-    gate: &KtTensor,
-) -> Result<KtTensor, RmsNormError> {
+pub fn fused_sigmoid_mul_kt(x: &KtTensor, gate: &KtTensor) -> Result<KtTensor, RmsNormError> {
     if x.shape() != gate.shape() {
         return Err(RmsNormError::Msg(format!(
             "kt-sigmoid-mul: x {:?} != gate {:?}",
@@ -1454,9 +1440,8 @@ pub fn f32_to_bf16_kt(src: &KtTensor) -> Result<KtTensor, RmsNormError> {
 
     let raw_stream = device_stream_raw(s_st, "s_st")?;
 
-    let status = unsafe {
-        kiln_f32_to_bf16(s_ptr as *const f32, o_ptr as *mut _, n as i32, raw_stream)
-    };
+    let status =
+        unsafe { kiln_f32_to_bf16(s_ptr as *const f32, o_ptr as *mut _, n as i32, raw_stream) };
     if status != 0 {
         return Err(RmsNormError::Msg(format!(
             "kt-f32-to-bf16: FFI returned {status}"
@@ -1469,11 +1454,7 @@ pub fn f32_to_bf16_kt(src: &KtTensor) -> Result<KtTensor, RmsNormError> {
 ///
 /// BF16-master SGD step. `param` and `grad` both BF16; updated in
 /// place. See [`sgd_step_f32_kt`] for the F32-master variant.
-pub fn sgd_step_bf16_kt(
-    param: &KtTensor,
-    grad: &KtTensor,
-    lr: f32,
-) -> Result<(), RmsNormError> {
+pub fn sgd_step_bf16_kt(param: &KtTensor, grad: &KtTensor, lr: f32) -> Result<(), RmsNormError> {
     if param.shape() != grad.shape() {
         return Err(RmsNormError::Msg(format!(
             "kt-sgd-step-bf16: param {:?} != grad {:?}",
@@ -1488,9 +1469,8 @@ pub fn sgd_step_bf16_kt(
 
     let raw_stream = device_stream_raw(p_st, "p_st")?;
 
-    let status = unsafe {
-        kiln_sgd_step_bf16(p_ptr as *mut _, g_ptr as *const _, lr, n, raw_stream)
-    };
+    let status =
+        unsafe { kiln_sgd_step_bf16(p_ptr as *mut _, g_ptr as *const _, lr, n, raw_stream) };
     if status != 0 {
         return Err(RmsNormError::Msg(format!(
             "kt-sgd-step-bf16: FFI returned {status}"
@@ -1534,10 +1514,8 @@ pub fn adamw_step_bf16_kt(
 
     let p_ptr = kiln_kt_bridge::device_input_ptr(param, KtDType::BF16, "param")?;
     let g_ptr = kiln_kt_bridge::device_input_ptr(grad, KtDType::BF16, "grad")?;
-    let m1_ptr =
-        kiln_kt_bridge::device_input_ptr(first_moment, KtDType::BF16, "first_moment")?;
-    let m2_ptr =
-        kiln_kt_bridge::device_input_ptr(second_moment, KtDType::BF16, "second_moment")?;
+    let m1_ptr = kiln_kt_bridge::device_input_ptr(first_moment, KtDType::BF16, "first_moment")?;
+    let m2_ptr = kiln_kt_bridge::device_input_ptr(second_moment, KtDType::BF16, "second_moment")?;
     let p_st = param;
 
     let raw_stream = device_stream_raw(p_st, "p_st")?;
@@ -1654,8 +1632,7 @@ pub fn fused_mlp_silu_mul_packed_kt(
     let mut out_dims: Vec<usize> = dims[..dims.len() - 1].to_vec();
     out_dims.push(cols);
 
-    let gu_ptr =
-        kiln_kt_bridge::device_input_ptr(gate_up_packed, KtDType::BF16, "gate_up_packed")?;
+    let gu_ptr = kiln_kt_bridge::device_input_ptr(gate_up_packed, KtDType::BF16, "gate_up_packed")?;
     let gu_st = gate_up_packed;
     let out = alloc_like(gu_st, KtDType::BF16, out_dims)?;
     if rows == 0 {
@@ -1788,12 +1765,7 @@ pub fn silu_inplace_save_sigmoid_f32_kt(
     let raw_stream = device_stream_raw(i_st, "i_st")?;
 
     let status = unsafe {
-        kiln_silu_inplace_save_sigmoid_f32(
-            i_ptr as *mut f32,
-            s_ptr as *mut f32,
-            elems,
-            raw_stream,
-        )
+        kiln_silu_inplace_save_sigmoid_f32(i_ptr as *mut f32, s_ptr as *mut f32, elems, raw_stream)
     };
     if status != 0 {
         return Err(RmsNormError::Msg(format!(
@@ -2115,7 +2087,6 @@ pub fn supports_optimizer_step_kt(tensors: &[&KtTensor]) -> bool {
                 && t.is_contiguous()
         })
 }
-
 
 // Note: the candle-vs-kt regression test modules (kt_rotary_qk_regression,
 // kt_l2_qk_norm_gqa_regression, kt_lora_decode_regression,

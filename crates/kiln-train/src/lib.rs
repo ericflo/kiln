@@ -73,10 +73,9 @@ pub use remote_teacher::{CostTally, RemoteProvider, RemoteTeacher, RemoteTeacher
 pub use adapter_output::{
     ADAPTER_MANIFEST_FILENAME, ADAPTER_MANIFEST_SCHEMA_VERSION, ADAPTER_RECEIPT_FILENAME,
     AdapterManifest, AdapterManifestFiles, AdapterOutputReceipt, AdapterRestoreOptions,
-    AdapterRestoreReceipt, ResolvedSftOutputLayout, install_adapter_symlink,
-    read_adapter_manifest, read_adapter_manifest_from_adapter_dir,
-    resolve_sft_output_layout, restore_adapter_from_manifest,
-    validate_adapter_output_dir, validate_install_adapter_name,
+    AdapterRestoreReceipt, ResolvedSftOutputLayout, install_adapter_symlink, read_adapter_manifest,
+    read_adapter_manifest_from_adapter_dir, resolve_sft_output_layout,
+    restore_adapter_from_manifest, validate_adapter_output_dir, validate_install_adapter_name,
     write_adapter_manifest_from_train_receipt, write_adapter_output_receipt,
 };
 pub use adapter_shape::{
@@ -1461,7 +1460,10 @@ mod tests {
         // the fused GRPO tape node, so the paper default (λ=0.05) is the
         // out-of-the-box behavior again — and a default config with env
         // tokens VALIDATES.
-        let echo = cfg.echo.as_ref().expect("ECHO defaults ON post-resurrection");
+        let echo = cfg
+            .echo
+            .as_ref()
+            .expect("ECHO defaults ON post-resurrection");
         assert!((echo.lambda - 0.05).abs() < 1e-12, "paper §3.3 default λ");
         assert!(cfg.opd.is_none(), "OPD should be off by default");
         assert!(cfg.validate_for_kt_tape(true).is_ok());

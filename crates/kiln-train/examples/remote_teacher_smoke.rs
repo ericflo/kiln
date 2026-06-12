@@ -15,7 +15,9 @@ use kiln_train::{RemoteProvider, RemoteTeacher, RemoteTeacherConfig};
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
-    let url = args.next().unwrap_or_else(|| "http://localhost:8002".to_string());
+    let url = args
+        .next()
+        .unwrap_or_else(|| "http://localhost:8002".to_string());
     let model = args.next().unwrap_or_else(|| "qwen3.6-27b-fp8".to_string());
     let top_k: usize = args.next().unwrap_or_else(|| "8".to_string()).parse()?;
 

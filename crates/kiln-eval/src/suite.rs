@@ -316,9 +316,8 @@ impl EvalSuite {
         use std::io::{BufRead, BufReader};
         let reader = BufReader::new(file);
         for (idx, line) in reader.lines().enumerate() {
-            let line = line.map_err(|e| {
-                SuiteLoadError::Io(format!("examples line {}: {e}", idx + 1))
-            })?;
+            let line =
+                line.map_err(|e| SuiteLoadError::Io(format!("examples line {}: {e}", idx + 1)))?;
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -497,11 +496,7 @@ mod tests {
         }
     }
 
-    fn mk_suite(
-        name: &str,
-        scorer: Scorer,
-        examples: Vec<EvalExample>,
-    ) -> EvalSuite {
+    fn mk_suite(name: &str, scorer: Scorer, examples: Vec<EvalExample>) -> EvalSuite {
         EvalSuite {
             name: name.into(),
             description: None,
@@ -579,7 +574,9 @@ mod tests {
             "type": "function",
             "function": {"name": "search_web", "parameters": {"type": "object"}}
         })]);
-        suite.validate().expect("well-formed tool entry should pass");
+        suite
+            .validate()
+            .expect("well-formed tool entry should pass");
     }
 
     #[test]

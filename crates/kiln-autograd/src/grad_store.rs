@@ -3,8 +3,8 @@
 //! Lifted from `vk_autograd::VkGradStore` (Phase 0.1's audit shows 6
 //! candle `GradStore` references that point to this lift target).
 
-use std::collections::hash_map::Iter;
 use std::collections::HashMap;
+use std::collections::hash_map::Iter;
 
 use kiln_tensor::{Tensor, TensorId};
 

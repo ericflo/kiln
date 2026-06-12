@@ -104,7 +104,11 @@ fn dropout_different_seeds_diverge() {
     let x = Tensor::from_vec_on(Device::Rocm(0), vec![1.0f32; n], vec![n]).unwrap();
     let (_, m1) = dropout(&x, 0.5, 1).unwrap();
     let (_, m2) = dropout(&x, 0.5, 99).unwrap();
-    assert_ne!(host_u8(&m1), host_u8(&m2), "different seeds → different masks");
+    assert_ne!(
+        host_u8(&m1),
+        host_u8(&m2),
+        "different seeds → different masks"
+    );
 }
 
 #[test]

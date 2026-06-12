@@ -552,8 +552,16 @@ mod tests {
             tokenizer_hash,
             "tokenizer hash must not change when only the chat template changes"
         );
-        assert!(templated.chat_template_sha256().unwrap().starts_with("sha256:"));
-        assert_ne!(templated.config_sha256().unwrap(), combined_without_template);
+        assert!(
+            templated
+                .chat_template_sha256()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+        assert_ne!(
+            templated.config_sha256().unwrap(),
+            combined_without_template
+        );
     }
 
     #[test]

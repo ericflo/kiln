@@ -13,7 +13,7 @@
 //! to exercise both the full-rotary and partial-rotary (tail pass-through)
 //! paths.
 
-use kiln_tensor::{rocm_is_available, rocm_to_host_copy, Device, Tensor};
+use kiln_tensor::{Device, Tensor, rocm_is_available, rocm_to_host_copy};
 
 /// CPU reference for rope over a contiguous `[leading, seq, head_dim]` x with
 /// `[seq, rotary_dim/2]` cos/sin.
@@ -61,12 +61,12 @@ fn run_case(leading: usize, seq: usize, head_dim: usize, rotary_dim: usize) {
         .collect();
 
     let dev = Device::Rocm(0);
-    let x_g = Tensor::from_vec_on::<f32>(dev, x.clone(), vec![leading, seq, head_dim])
-        .expect("alloc x");
-    let cos_g = Tensor::from_vec_on::<f32>(dev, cos.clone(), vec![seq, pair_count])
-        .expect("alloc cos");
-    let sin_g = Tensor::from_vec_on::<f32>(dev, sin.clone(), vec![seq, pair_count])
-        .expect("alloc sin");
+    let x_g =
+        Tensor::from_vec_on::<f32>(dev, x.clone(), vec![leading, seq, head_dim]).expect("alloc x");
+    let cos_g =
+        Tensor::from_vec_on::<f32>(dev, cos.clone(), vec![seq, pair_count]).expect("alloc cos");
+    let sin_g =
+        Tensor::from_vec_on::<f32>(dev, sin.clone(), vec![seq, pair_count]).expect("alloc sin");
 
     let out_g = kiln_tensor::rocm_rope(&x_g, &cos_g, &sin_g, rotary_dim).expect("rocm_rope");
     let out_host = rocm_to_host_copy(&out_g).expect("copy back");

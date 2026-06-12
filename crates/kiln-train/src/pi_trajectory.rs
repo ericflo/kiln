@@ -293,13 +293,20 @@ mod tests {
             parsed.trajectory.iter().map(|s| s.kind).collect::<Vec<_>>(),
             vec![TurnKind::Action, TurnKind::Observation, TurnKind::Action]
         );
-        assert!(parsed.trajectory[0].content.contains("<think>I should use bash</think>"));
+        assert!(
+            parsed.trajectory[0]
+                .content
+                .contains("<think>I should use bash</think>")
+        );
         assert!(parsed.trajectory[0].content.contains("<tool_call>"));
         assert!(parsed.trajectory[0].content.contains("\"arguments\""));
         assert_eq!(parsed.trajectory[1].role, "tool");
         assert_eq!(parsed.trajectory[1].content, "42\n");
         assert_eq!(parsed.trajectory[1].tool_call_id.as_deref(), Some("c1"));
-        assert_eq!(parsed.trajectory[2].content, "Done - the program printed 42.");
+        assert_eq!(
+            parsed.trajectory[2].content,
+            "Done - the program printed 42."
+        );
     }
 
     #[test]
@@ -349,11 +356,17 @@ mod tests {
         let warning_prefix_len = parsed.trajectory[1].warning_prefix_len.unwrap();
         assert!(warning_prefix_len > 0);
         assert!(warning_prefix_len <= warning.find("actual output").unwrap());
-        assert_eq!(flatten_action_text(&parsed.trajectory), "first<TURN_BREAK>second");
+        assert_eq!(
+            flatten_action_text(&parsed.trajectory),
+            "first<TURN_BREAK>second"
+        );
         let rollout = scored_rollout_from_pi_session(&raw, 1.0, false);
         assert_eq!(rollout.text, "first<TURN_BREAK>second");
         assert_eq!(rollout.trajectory.len(), parsed.trajectory.len());
         assert_eq!(rollout.trajectory[0].content, parsed.trajectory[0].content);
-        assert_eq!(rollout.trajectory[1].warning_prefix_len, Some(warning_prefix_len));
+        assert_eq!(
+            rollout.trajectory[1].warning_prefix_len,
+            Some(warning_prefix_len)
+        );
     }
 }

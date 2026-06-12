@@ -10,7 +10,7 @@
 //! | `to_f16(x)`   | same |
 //! | `to_f32(x)`   | same |
 
-use kiln_tensor::{bail, DType, Result, Tensor};
+use kiln_tensor::{DType, Result, Tensor, bail};
 
 use crate::BackwardOp;
 

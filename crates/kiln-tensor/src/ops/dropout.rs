@@ -41,7 +41,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 /// Apply inverted dropout. Returns `(y, mask)` where `mask` is a U8
 /// tensor of the same shape with `0` at dropped positions and `1` at
@@ -102,10 +102,12 @@ fn dropout_cpu(x: &Tensor, p: f32, seed: u64) -> Result<(Tensor, Tensor)> {
         mask[i] = if keep { 1 } else { 0 };
         let x_v = match dtype {
             DType::F32 => f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()),
-            DType::BF16 => half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
-            DType::F16 => half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
+            DType::BF16 => {
+                half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
+            DType::F16 => {
+                half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
             _ => unreachable!(),
         };
         let y_v = if keep { x_v * inv_keep } else { 0.0 };
@@ -113,14 +115,19 @@ fn dropout_cpu(x: &Tensor, p: f32, seed: u64) -> Result<(Tensor, Tensor)> {
             DType::F32 => out_bytes[i * 4..i * 4 + 4].copy_from_slice(&y_v.to_le_bytes()),
             DType::BF16 => out_bytes[i * 2..i * 2 + 2]
                 .copy_from_slice(&half::bf16::from_f32(y_v).to_le_bytes()),
-            DType::F16 => out_bytes[i * 2..i * 2 + 2]
-                .copy_from_slice(&half::f16::from_f32(y_v).to_le_bytes()),
+            DType::F16 => {
+                out_bytes[i * 2..i * 2 + 2].copy_from_slice(&half::f16::from_f32(y_v).to_le_bytes())
+            }
             _ => unreachable!(),
         }
     }
     let y_cpu = CpuStorage::from_bytes(dtype, out_bytes)?;
     let y_storage: Storage = Arc::new(y_cpu);
-    let y = Tensor::from_parts(y_storage, Layout::contiguous(x.shape().to_vec()), TensorId::next())?;
+    let y = Tensor::from_parts(
+        y_storage,
+        Layout::contiguous(x.shape().to_vec()),
+        TensorId::next(),
+    )?;
 
     let mask_cpu = CpuStorage::from_bytes(DType::U8, mask)?;
     let mask_storage: Storage = Arc::new(mask_cpu);

@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId, bail};
 
 fn is_nonzero(dtype: DType, bytes: &[u8], i: usize) -> Result<bool> {
     let per = dtype.size_in_bytes();
@@ -91,11 +91,7 @@ pub fn nonzero(x: &Tensor) -> Result<Tensor> {
     }
     let cpu_out = CpuStorage::from_bytes(DType::I64, bytes)?;
     let storage: Storage = Arc::new(cpu_out);
-    Tensor::from_parts(
-        storage,
-        Layout::contiguous(vec![n, rank]),
-        TensorId::next(),
-    )
+    Tensor::from_parts(storage, Layout::contiguous(vec![n, rank]), TensorId::next())
 }
 
 #[cfg(test)]

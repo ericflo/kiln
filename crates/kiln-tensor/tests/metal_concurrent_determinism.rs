@@ -19,10 +19,12 @@
 use std::sync::Arc;
 use std::thread;
 
-use kiln_tensor::{ops, Device, Tensor};
+use kiln_tensor::{Device, Tensor, ops};
 
 fn metal() -> Option<Device> {
-    kiln_tensor::primary_metal_companion(0).ok().map(|_| Device::Metal(0))
+    kiln_tensor::primary_metal_companion(0)
+        .ok()
+        .map(|_| Device::Metal(0))
 }
 
 /// Deterministic pseudo-random f32 pattern in roughly [-1, 1].
@@ -30,7 +32,9 @@ fn pattern(n: usize, seed: u64) -> Vec<f32> {
     let mut out = Vec::with_capacity(n);
     let mut s = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     for _ in 0..n {
-        s = s.wrapping_add(0xDEAD_BEEF).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        s = s
+            .wrapping_add(0xDEAD_BEEF)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15);
         out.push(((s >> 33) as u32 % 2048) as f32 / 1024.0 - 1.0);
     }
     out
@@ -78,7 +82,10 @@ fn metal_compute(dev: Device) -> Vec<f32> {
 
 /// A deterministic strictly-positive weight row of length `n` for rmsnorm.
 fn b_row(dev: Device, n: usize, seed: u64) -> Tensor {
-    let w: Vec<f32> = pattern(n, 7 + seed).into_iter().map(|v| v.abs() + 0.25).collect();
+    let w: Vec<f32> = pattern(n, 7 + seed)
+        .into_iter()
+        .map(|v| v.abs() + 0.25)
+        .collect();
     Tensor::from_vec_on(dev, w, vec![n]).unwrap()
 }
 

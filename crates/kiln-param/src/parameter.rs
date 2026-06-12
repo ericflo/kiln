@@ -15,13 +15,13 @@
 //! `crates/kiln-train/src/trainer.rs:555,592`) get orphaned on
 //! weight-form transitions.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use kiln_tensor::{Result, Storage, Tensor, TensorId};
 
-use crate::content_hash::content_hash_storage;
 use crate::AmpPolicy;
+use crate::content_hash::content_hash_storage;
 
 /// Forward-storage variant. Drives the `forward()` dispatch.
 ///
@@ -40,20 +40,11 @@ pub enum ForwardStorage {
     /// Carries:
     /// - `packed`: the int4-packed weight tensor (DType::Int4Packed)
     /// - `scales`: per-channel BF16 scales
-    Marlin {
-        packed: Tensor,
-        scales: Tensor,
-    },
+    Marlin { packed: Tensor, scales: Tensor },
     /// FP8 E4M3 forward storage. Phase 8.4 training path.
-    Fp8 {
-        packed: Tensor,
-        scales: Tensor,
-    },
+    Fp8 { packed: Tensor, scales: Tensor },
     /// FP4-packed forward storage. **Phase 8.10 stub** — no impl yet.
-    Fp4Packed {
-        packed: Tensor,
-        scales: Tensor,
-    },
+    Fp4Packed { packed: Tensor, scales: Tensor },
 }
 
 impl ForwardStorage {
@@ -345,9 +336,11 @@ impl Parameter {
     pub fn bump_epoch(&self) {
         // Atomic saturating add via a CAS loop (`fetch_add` would wrap;
         // a version counter must stay monotonic — see above).
-        let _ = self.epoch.fetch_update(Ordering::Release, Ordering::Acquire, |v| {
-            Some(v.saturating_add(1))
-        });
+        let _ = self
+            .epoch
+            .fetch_update(Ordering::Release, Ordering::Acquire, |v| {
+                Some(v.saturating_add(1))
+            });
     }
 
     /// Lock-free reader handle on the live epoch counter (#1082 Phase
@@ -1155,7 +1148,10 @@ mod tests {
 
         let max_seen = reader.join().unwrap();
         assert_eq!(p.current_epoch(), 2000);
-        assert!(max_seen <= 2000, "reader saw an impossible epoch {max_seen}");
+        assert!(
+            max_seen <= 2000,
+            "reader saw an impossible epoch {max_seen}"
+        );
     }
 
     #[test]

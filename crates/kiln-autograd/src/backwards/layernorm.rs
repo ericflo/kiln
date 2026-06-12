@@ -24,9 +24,7 @@
 
 use std::sync::Arc;
 
-use kiln_tensor::{
-    bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId,
-};
+use kiln_tensor::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 use crate::BackwardOp;
 
@@ -64,9 +62,7 @@ impl BackwardOp for LayerNormBackward {
         }
         let dtype = self.x.dtype();
         if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
-            bail!(
-                "LayerNormBackward: dtype must be F32/BF16/F16, got {dtype}"
-            );
+            bail!("LayerNormBackward: dtype must be F32/BF16/F16, got {dtype}");
         }
         if grad_output.dtype() != dtype || self.weight.dtype() != dtype {
             bail!("LayerNormBackward: dtype mismatch");
@@ -104,8 +100,7 @@ impl BackwardOp for LayerNormBackward {
             }
             let inv_d = 1.0_f32 / hidden as f32;
             for i in 0..hidden {
-                dx[base + i] =
-                    inv_s * (w[i] * g[base + i] - s1 * inv_d - xhat[i] * s2 * inv_d);
+                dx[base + i] = inv_s * (w[i] * g[base + i] - s1 * inv_d - xhat[i] * s2 * inv_d);
                 dw[i] += xhat[i] * g[base + i];
                 db[i] += g[base + i];
             }
@@ -133,10 +128,12 @@ fn load_f32(t: &Tensor) -> Result<Vec<f32>> {
     for i in 0..n {
         out.push(match dtype {
             DType::F32 => f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()),
-            DType::BF16 => half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
-            DType::F16 => half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
+            DType::BF16 => {
+                half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
+            DType::F16 => {
+                half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
             _ => unreachable!(),
         });
     }
@@ -166,7 +163,11 @@ fn store_f32(dtype: DType, shape: &[usize], data: &[f32]) -> Result<Tensor> {
     }
     let cpu = CpuStorage::from_bytes(dtype, bytes)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(shape.to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(shape.to_vec()),
+        TensorId::next(),
+    )
 }
 
 #[cfg(test)]
@@ -275,9 +276,7 @@ mod tests {
 
     #[test]
     fn layernorm_backward_bf16_round_trip() {
-        let xv: Vec<half::bf16> = (0..4)
-            .map(|i| half::bf16::from_f32(i as f32))
-            .collect();
+        let xv: Vec<half::bf16> = (0..4).map(|i| half::bf16::from_f32(i as f32)).collect();
         let wv: Vec<half::bf16> = (0..4).map(|_| half::bf16::ONE).collect();
         let dyv: Vec<half::bf16> = (0..4).map(|_| half::bf16::ONE).collect();
         let x = Tensor::from_slice(&xv, vec![1, 4]).unwrap();

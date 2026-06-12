@@ -466,7 +466,10 @@ impl ApiError {
         }
     }
 
-    pub fn agent_run_not_active(run_id: impl std::fmt::Display, status: impl std::fmt::Display) -> Self {
+    pub fn agent_run_not_active(
+        run_id: impl std::fmt::Display,
+        status: impl std::fmt::Display,
+    ) -> Self {
         Self {
             status: StatusCode::CONFLICT,
             code: "agent_run_not_active",

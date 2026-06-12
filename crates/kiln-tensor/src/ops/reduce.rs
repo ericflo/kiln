@@ -20,8 +20,8 @@
 //! the same dtype.
 
 use crate::{
-    bail, dispatch1, BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result,
-    Storage, Tensor, TensorId,
+    BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result, Storage, Tensor,
+    TensorId, bail, dispatch1,
 };
 use std::sync::Arc;
 
@@ -332,16 +332,14 @@ fn load_all_f32(x: &Tensor) -> Result<Vec<f32>> {
         DType::BF16 => {
             for i in 0..n {
                 out.push(
-                    half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32(),
+                    half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32(),
                 );
             }
         }
         DType::F16 => {
             for i in 0..n {
                 out.push(
-                    half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32(),
+                    half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32(),
                 );
             }
         }
@@ -366,12 +364,7 @@ fn build_scalar_tensor(dtype: DType, value: f32) -> Result<Option<Tensor>> {
     )?))
 }
 
-fn reduce_axis(
-    x: &Tensor,
-    axis: usize,
-    kind: ReductionKind,
-    xv: &[f32],
-) -> Result<Tensor> {
+fn reduce_axis(x: &Tensor, axis: usize, kind: ReductionKind, xv: &[f32]) -> Result<Tensor> {
     let shape = x.shape();
     let rank = shape.len();
     let reduced_dim = shape[axis];
@@ -429,8 +422,7 @@ fn reduce_axis(
         }
         DType::F16 => {
             for (i, v) in out_f32.iter().enumerate() {
-                out_bytes[i * 2..i * 2 + 2]
-                    .copy_from_slice(&half::f16::from_f32(*v).to_le_bytes());
+                out_bytes[i * 2..i * 2 + 2].copy_from_slice(&half::f16::from_f32(*v).to_le_bytes());
             }
         }
         _ => unreachable!(),

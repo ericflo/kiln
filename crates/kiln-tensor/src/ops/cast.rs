@@ -26,8 +26,8 @@
 //! schedule.
 
 use crate::{
-    bail, BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result, Storage,
-    Tensor, TensorId,
+    BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result, Storage, Tensor,
+    TensorId, bail,
 };
 use std::sync::Arc;
 
@@ -527,7 +527,8 @@ mod tests {
         assert_eq!(yb.dtype(), DType::BF16);
         let cpu = yb.storage().as_any().downcast_ref::<CpuStorage>().unwrap();
         for (i, &e) in [0.0f32, 1.0, 1.0, 0.0].iter().enumerate() {
-            let v = half::bf16::from_le_bytes(cpu.as_bytes()[i * 2..i * 2 + 2].try_into().unwrap()).to_f32();
+            let v = half::bf16::from_le_bytes(cpu.as_bytes()[i * 2..i * 2 + 2].try_into().unwrap())
+                .to_f32();
             assert_eq!(v, e);
         }
         let yf = cast(&x, DType::F16).unwrap();

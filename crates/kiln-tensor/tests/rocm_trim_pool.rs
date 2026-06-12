@@ -13,7 +13,11 @@ fn mem_available_bytes() -> u64 {
     let raw = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
     for line in raw.lines() {
         if let Some(rest) = line.strip_prefix("MemAvailable:") {
-            if let Some(kib) = rest.split_whitespace().next().and_then(|s| s.parse::<u64>().ok()) {
+            if let Some(kib) = rest
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<u64>().ok())
+            {
                 return kib * 1024;
             }
         }
@@ -39,7 +43,11 @@ fn trim_pool_returns_memory_to_os() {
         return;
     }
     let gb = |b: u64| b as f64 / 1e9;
-    let dev_free = || kiln_tensor::rocm_mem_get_info(0).map(|(f, _)| f as u64).unwrap_or(0);
+    let dev_free = || {
+        kiln_tensor::rocm_mem_get_info(0)
+            .map(|(f, _)| f as u64)
+            .unwrap_or(0)
+    };
     let before = dev_free();
     let _ = mem_available_bytes; // keep the helper referenced
 

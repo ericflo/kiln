@@ -5,7 +5,7 @@
 //! config on Apple Silicon. `#[ignore]` — run explicitly:
 //!   cargo test -p kiln-tensor --features metal --test metal_gemm_sweep -- --ignored --nocapture
 
-use kiln_tensor::{bench_gemm_cfg, bench_steel_cfg, GemmCfg};
+use kiln_tensor::{GemmCfg, bench_gemm_cfg, bench_steel_cfg};
 
 #[test]
 #[ignore]
@@ -18,7 +18,9 @@ fn sweep_gemm_configs() {
     // of 8/16/32) so boundary handling never skews the comparison.
     let (m, k, n, iters) = (512usize, 2560usize, 4096usize, 30usize);
     let gflop = 2.0 * m as f64 * k as f64 * n as f64 / 1e9;
-    println!("\n=== Metal GEMM sweep  [{m}x{k}]@[{k}x{n}]  ({gflop:.2} GFLOP/iter, {iters} iters) ===");
+    println!(
+        "\n=== Metal GEMM sweep  [{m}x{k}]@[{k}x{n}]  ({gflop:.2} GFLOP/iter, {iters} iters) ==="
+    );
 
     // The live candle `call_mlx_gemm` reference comparison was removed
     // (#1082 final step) when the candle_metal_kernels dependency was
@@ -26,7 +28,14 @@ fn sweep_gemm_configs() {
 
     let cfgs = [
         // single naive baseline (established ~140 GFLOP/s, F32-staging plateau)
-        GemmCfg { bm: 32, bn: 64, bk: 16, wm: 1, wn: 2, stg: "float" },
+        GemmCfg {
+            bm: 32,
+            bn: 64,
+            bk: 16,
+            wm: 1,
+            wn: 2,
+            stg: "float",
+        },
     ];
 
     let mut results: Vec<(String, f64)> = Vec::new();
@@ -45,16 +54,72 @@ fn sweep_gemm_configs() {
     // thread count (128/256/512), and tile aspect ratio.
     let steel_cfgs = [
         // *** the exact config candle's MLX selects for BF16/nn on M1 ***
-        GemmCfg { bm: 64, bn: 64, bk: 16, wm: 1, wn: 2, stg: "bfloat" }, // TM*TN=32
-        GemmCfg { bm: 64, bn: 64, bk: 32, wm: 1, wn: 2, stg: "bfloat" },
-        GemmCfg { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, stg: "bfloat" }, // was 41 w/o fast-math
+        GemmCfg {
+            bm: 64,
+            bn: 64,
+            bk: 16,
+            wm: 1,
+            wn: 2,
+            stg: "bfloat",
+        }, // TM*TN=32
+        GemmCfg {
+            bm: 64,
+            bn: 64,
+            bk: 32,
+            wm: 1,
+            wn: 2,
+            stg: "bfloat",
+        },
+        GemmCfg {
+            bm: 64,
+            bn: 64,
+            bk: 16,
+            wm: 2,
+            wn: 2,
+            stg: "bfloat",
+        }, // was 41 w/o fast-math
         // prior best (re-measure with fast-math)
-        GemmCfg { bm: 64, bn: 32, bk: 32, wm: 4, wn: 2, stg: "bfloat" },
-        GemmCfg { bm: 32, bn: 32, bk: 64, wm: 2, wn: 2, stg: "bfloat" },
-        GemmCfg { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, stg: "bfloat" },
+        GemmCfg {
+            bm: 64,
+            bn: 32,
+            bk: 32,
+            wm: 4,
+            wn: 2,
+            stg: "bfloat",
+        },
+        GemmCfg {
+            bm: 32,
+            bn: 32,
+            bk: 64,
+            wm: 2,
+            wn: 2,
+            stg: "bfloat",
+        },
+        GemmCfg {
+            bm: 32,
+            bn: 32,
+            bk: 16,
+            wm: 2,
+            wn: 2,
+            stg: "bfloat",
+        },
         // other MLX tiles
-        GemmCfg { bm: 32, bn: 64, bk: 16, wm: 1, wn: 2, stg: "bfloat" }, // TILE_32_64_16_1_2
-        GemmCfg { bm: 64, bn: 32, bk: 32, wm: 2, wn: 2, stg: "bfloat" }, // TILE_64_32_32_2_2
+        GemmCfg {
+            bm: 32,
+            bn: 64,
+            bk: 16,
+            wm: 1,
+            wn: 2,
+            stg: "bfloat",
+        }, // TILE_32_64_16_1_2
+        GemmCfg {
+            bm: 64,
+            bn: 32,
+            bk: 32,
+            wm: 2,
+            wn: 2,
+            stg: "bfloat",
+        }, // TILE_64_32_32_2_2
     ];
     for c in &steel_cfgs {
         match bench_steel_cfg(c, m, k, n, iters) {

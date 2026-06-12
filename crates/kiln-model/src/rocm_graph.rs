@@ -249,12 +249,9 @@ impl ReplayPlan for RocmDecodeReplayPlan<'_> {
             .exec
             .launch(&self.captured.capture_stream)
             .map_err(|e| CaptureError::Backend(format!("ROCm graph launch: {e}")))?;
-        self.captured
-            .capture_stream
-            .synchronize()
-            .map_err(|e| {
-                CaptureError::Backend(format!("sync capture stream after replay launch: {e}"))
-            })?;
+        self.captured.capture_stream.synchronize().map_err(|e| {
+            CaptureError::Backend(format!("sync capture stream after replay launch: {e}"))
+        })?;
         Ok(ReplayOutputs::new(inputs.resources.to_vec(), 1))
     }
 
@@ -1467,11 +1464,7 @@ impl RocmGraphRunner {
                 .map(Self::stable_replay_resource),
         );
         resources.extend(paged_decode_lse.iter().map(Self::stable_replay_resource));
-        resources.extend(
-            gdn_decode_outputs
-                .iter()
-                .map(Self::stable_replay_resource),
-        );
+        resources.extend(gdn_decode_outputs.iter().map(Self::stable_replay_resource));
         ReplayState::new(replay_key, resources)
     }
 

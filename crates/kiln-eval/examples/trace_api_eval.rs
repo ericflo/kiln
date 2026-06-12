@@ -698,7 +698,12 @@ mod tests {
             &suite,
         )
         .unwrap();
-        assert_eq!(outcome.kind, EvalOutcomeKind::Invalid, "{:?}", outcome.detail);
+        assert_eq!(
+            outcome.kind,
+            EvalOutcomeKind::Invalid,
+            "{:?}",
+            outcome.detail
+        );
     }
 }
 

@@ -79,7 +79,10 @@ fn softmax_parity_wavefront_boundary_sweep() {
         // Each row must normalize to 1.
         for r in 0..n_rows {
             let s: f32 = got[r * w..(r + 1) * w].iter().sum();
-            assert!((s - 1.0).abs() < 1e-4, "row {r} of width {w} sums to {s}, not 1");
+            assert!(
+                (s - 1.0).abs() < 1e-4,
+                "row {r} of width {w} sums to {s}, not 1"
+            );
         }
     }
     eprintln!("softmax CPU-vs-ROCm parity passed across wavefront-boundary widths {widths:?}");

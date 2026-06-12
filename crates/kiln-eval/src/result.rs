@@ -776,7 +776,11 @@ mod tests {
         assert!(!t.significant());
         // b=15, c=3: n=18, k=3 -> 2 * (1+18+153+816)/2^18.
         let t = sign_test(15, 3);
-        assert!((t.p_value - 2.0 * 988.0 / 262144.0).abs() < 1e-12, "{}", t.p_value);
+        assert!(
+            (t.p_value - 2.0 * 988.0 / 262144.0).abs() < 1e-12,
+            "{}",
+            t.p_value
+        );
         assert!(t.significant());
         // No discordant pairs: no evidence.
         assert_eq!(sign_test(0, 0).p_value, 1.0);

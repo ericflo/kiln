@@ -28,7 +28,7 @@
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 use std::sync::Arc;
 
 use super::logit_processor::LogitProcessor;
@@ -39,7 +39,10 @@ use super::logit_processor::LogitProcessor;
 
 fn validate_logits(logits: &Tensor, name: &str) -> Result<()> {
     if logits.rank() != 2 {
-        bail!("{name}: logits must be rank-2 [batch, vocab], got {:?}", logits.shape());
+        bail!(
+            "{name}: logits must be rank-2 [batch, vocab], got {:?}",
+            logits.shape()
+        );
     }
     if !logits.is_contiguous() {
         bail!("{name}: logits must be contiguous");
@@ -90,15 +93,20 @@ fn store_rows(dtype: DType, shape: &[usize], rows: &[Vec<f32>]) -> Result<Tensor
                 DType::F32 => out[offset..offset + 4].copy_from_slice(&val.to_le_bytes()),
                 DType::BF16 => out[offset..offset + 2]
                     .copy_from_slice(&half::bf16::from_f32(val).to_le_bytes()),
-                DType::F16 => out[offset..offset + 2]
-                    .copy_from_slice(&half::f16::from_f32(val).to_le_bytes()),
+                DType::F16 => {
+                    out[offset..offset + 2].copy_from_slice(&half::f16::from_f32(val).to_le_bytes())
+                }
                 _ => unreachable!(),
             }
         }
     }
     let cpu = CpuStorage::from_bytes(dtype, out)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(shape.to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(shape.to_vec()),
+        TensorId::next(),
+    )
 }
 
 /// Tiny splitmix64. One step per call.
@@ -195,7 +203,11 @@ impl LogitProcessor for XtcProcessor {
                 continue; // need at least 2 above threshold to "exclude top choices"
             }
             // Sort by probability descending.
-            above.sort_by(|&a, &b| probs[b].partial_cmp(&probs[a]).unwrap_or(std::cmp::Ordering::Equal));
+            above.sort_by(|&a, &b| {
+                probs[b]
+                    .partial_cmp(&probs[a])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             // Mask everyone except the LAST (lowest probability above threshold).
             for &i in &above[..above.len() - 1] {
                 row[i] = f32::NEG_INFINITY;
@@ -313,18 +325,26 @@ mod tests {
     #[test]
     fn xtc_invalid_threshold_errors() {
         let logits = Tensor::from_slice(&[1.0f32], vec![1, 1]).unwrap();
-        let e = XtcProcessor::with_seed(1.0, 0.5, 1).apply(&logits).unwrap_err();
+        let e = XtcProcessor::with_seed(1.0, 0.5, 1)
+            .apply(&logits)
+            .unwrap_err();
         assert!(e.to_string().contains("threshold"));
-        let e = XtcProcessor::with_seed(-0.1, 0.5, 1).apply(&logits).unwrap_err();
+        let e = XtcProcessor::with_seed(-0.1, 0.5, 1)
+            .apply(&logits)
+            .unwrap_err();
         assert!(e.to_string().contains("threshold"));
     }
 
     #[test]
     fn xtc_invalid_probability_errors() {
         let logits = Tensor::from_slice(&[1.0f32], vec![1, 1]).unwrap();
-        let e = XtcProcessor::with_seed(0.1, 1.5, 1).apply(&logits).unwrap_err();
+        let e = XtcProcessor::with_seed(0.1, 1.5, 1)
+            .apply(&logits)
+            .unwrap_err();
         assert!(e.to_string().contains("probability"));
-        let e = XtcProcessor::with_seed(0.1, -0.1, 1).apply(&logits).unwrap_err();
+        let e = XtcProcessor::with_seed(0.1, -0.1, 1)
+            .apply(&logits)
+            .unwrap_err();
         assert!(e.to_string().contains("probability"));
     }
 

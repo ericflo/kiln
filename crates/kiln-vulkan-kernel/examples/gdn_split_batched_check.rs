@@ -1,6 +1,6 @@
 //! Verification probe for batched GDN split kernels.
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use kiln_vulkan_kernel::resident::{
     dispatch_gdn_in_proj_split_batched_resident, dispatch_gdn_qkv_split_batched_resident,
 };

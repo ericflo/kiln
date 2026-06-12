@@ -139,14 +139,8 @@ async fn publish_to_library(
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/library", get(list_library))
-        .route(
-            "/v1/library/install/{id}",
-            post(install_from_library),
-        )
-        .route(
-            "/v1/library/publish/{name}",
-            post(publish_to_library),
-        )
+        .route("/v1/library/install/{id}", post(install_from_library))
+        .route("/v1/library/publish/{name}", post(publish_to_library))
 }
 
 #[cfg(test)]
@@ -168,15 +162,21 @@ mod tests {
     #[test]
     fn default_library_url_when_env_unset() {
         let _g = env_test_lock();
-        unsafe { std::env::remove_var("KILN_ADAPTER_LIBRARY_URL"); }
+        unsafe {
+            std::env::remove_var("KILN_ADAPTER_LIBRARY_URL");
+        }
         assert_eq!(library_url(), DEFAULT_LIBRARY_URL);
     }
 
     #[test]
     fn env_var_override_takes_precedence() {
         let _g = env_test_lock();
-        unsafe { std::env::set_var("KILN_ADAPTER_LIBRARY_URL", "https://custom.example/"); }
+        unsafe {
+            std::env::set_var("KILN_ADAPTER_LIBRARY_URL", "https://custom.example/");
+        }
         assert_eq!(library_url(), "https://custom.example/");
-        unsafe { std::env::remove_var("KILN_ADAPTER_LIBRARY_URL"); }
+        unsafe {
+            std::env::remove_var("KILN_ADAPTER_LIBRARY_URL");
+        }
     }
 }

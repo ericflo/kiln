@@ -25,8 +25,8 @@
 use std::sync::Arc;
 
 use crate::{
-    bail, dispatch1, BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result,
-    Storage, Tensor, TensorId,
+    BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result, Storage, Tensor,
+    TensorId, bail, dispatch1,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,7 +107,10 @@ impl DeviceOp1 for UnaryArithOp {
         if !x.is_contiguous() {
             return Ok(None);
         }
-        Ok(Some(crate::cuda_activation_unary(x, self.kind.cuda_kind_tag())?))
+        Ok(Some(crate::cuda_activation_unary(
+            x,
+            self.kind.cuda_kind_tag(),
+        )?))
     }
 
     #[cfg(feature = "rocm")]
@@ -121,7 +124,10 @@ impl DeviceOp1 for UnaryArithOp {
         if !x.is_contiguous() {
             return Ok(None);
         }
-        Ok(Some(crate::rocm_activation_unary(x, self.kind.cuda_kind_tag())?))
+        Ok(Some(crate::rocm_activation_unary(
+            x,
+            self.kind.cuda_kind_tag(),
+        )?))
     }
 
     #[cfg(feature = "metal")]
@@ -219,41 +225,74 @@ fn cpu_apply(kind: UnaryArithKind, x: &Tensor) -> Result<Tensor> {
     for i in 0..n {
         let v = match dtype {
             DType::F32 => f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()),
-            DType::BF16 => half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
-            DType::F16 => half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
+            DType::BF16 => {
+                half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
+            DType::F16 => {
+                half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
             _ => unreachable!(),
         };
         let y = kind.apply_f32(v);
         match dtype {
             DType::F32 => out[i * 4..i * 4 + 4].copy_from_slice(&y.to_le_bytes()),
-            DType::BF16 => out[i * 2..i * 2 + 2]
-                .copy_from_slice(&half::bf16::from_f32(y).to_le_bytes()),
-            DType::F16 => out[i * 2..i * 2 + 2]
-                .copy_from_slice(&half::f16::from_f32(y).to_le_bytes()),
+            DType::BF16 => {
+                out[i * 2..i * 2 + 2].copy_from_slice(&half::bf16::from_f32(y).to_le_bytes())
+            }
+            DType::F16 => {
+                out[i * 2..i * 2 + 2].copy_from_slice(&half::f16::from_f32(y).to_le_bytes())
+            }
             _ => unreachable!(),
         }
     }
     let cpu_out = CpuStorage::from_bytes(dtype, out)?;
     let storage: Storage = Arc::new(cpu_out);
-    Tensor::from_parts(storage, Layout::contiguous(x.shape().to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(x.shape().to_vec()),
+        TensorId::next(),
+    )
 }
 
 pub fn abs(x: &Tensor) -> Result<Tensor> {
-    dispatch1(&UnaryArithOp { kind: UnaryArithKind::Abs }, x)
+    dispatch1(
+        &UnaryArithOp {
+            kind: UnaryArithKind::Abs,
+        },
+        x,
+    )
 }
 pub fn neg(x: &Tensor) -> Result<Tensor> {
-    dispatch1(&UnaryArithOp { kind: UnaryArithKind::Neg }, x)
+    dispatch1(
+        &UnaryArithOp {
+            kind: UnaryArithKind::Neg,
+        },
+        x,
+    )
 }
 pub fn exp(x: &Tensor) -> Result<Tensor> {
-    dispatch1(&UnaryArithOp { kind: UnaryArithKind::Exp }, x)
+    dispatch1(
+        &UnaryArithOp {
+            kind: UnaryArithKind::Exp,
+        },
+        x,
+    )
 }
 pub fn ln(x: &Tensor) -> Result<Tensor> {
-    dispatch1(&UnaryArithOp { kind: UnaryArithKind::Ln }, x)
+    dispatch1(
+        &UnaryArithOp {
+            kind: UnaryArithKind::Ln,
+        },
+        x,
+    )
 }
 pub fn sqrt(x: &Tensor) -> Result<Tensor> {
-    dispatch1(&UnaryArithOp { kind: UnaryArithKind::Sqrt }, x)
+    dispatch1(
+        &UnaryArithOp {
+            kind: UnaryArithKind::Sqrt,
+        },
+        x,
+    )
 }
 
 #[cfg(test)]
@@ -296,12 +335,24 @@ mod tests {
     fn exp_known_values() {
         let x = Tensor::from_slice(&[0.0f32, 1.0, -1.0], vec![3]).unwrap();
         let y = read_f32(&exp(&x).unwrap());
-        approx(&y, &[1.0, std::f32::consts::E, 1.0 / std::f32::consts::E], 1e-5);
+        approx(
+            &y,
+            &[1.0, std::f32::consts::E, 1.0 / std::f32::consts::E],
+            1e-5,
+        );
     }
 
     #[test]
     fn ln_known_values() {
-        let x = Tensor::from_slice(&[1.0f32, std::f32::consts::E, std::f32::consts::E * std::f32::consts::E], vec![3]).unwrap();
+        let x = Tensor::from_slice(
+            &[
+                1.0f32,
+                std::f32::consts::E,
+                std::f32::consts::E * std::f32::consts::E,
+            ],
+            vec![3],
+        )
+        .unwrap();
         let y = read_f32(&ln(&x).unwrap());
         approx(&y, &[0.0, 1.0, 2.0], 1e-5);
     }

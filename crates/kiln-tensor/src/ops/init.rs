@@ -13,7 +13,7 @@
 //!
 //! Wired on top of `rand_uniform` / `rand_normal`.
 
-use crate::{bail, DType, Result, Tensor};
+use crate::{DType, Result, Tensor, bail};
 
 use super::random::{rand_normal, rand_uniform};
 

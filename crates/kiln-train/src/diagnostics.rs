@@ -175,10 +175,7 @@ impl RolloutSummary {
         // need valid UTF-8 here, but `text` is `String`. Pre-2024,
         // `String::from_utf8_lossy` allocates a borrow; instead, hex-
         // encode so the compression test sees the same content.
-        let text = bytes
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
+        let text = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
         Self {
             text,
             generated_tokens: tokens.len(),
@@ -212,11 +209,7 @@ pub fn truncation_rate(rollouts: &[RolloutSummary]) -> f64 {
 /// dependency. Empirical match to zlib's ratio on Luo et al.'s
 /// repetitive-tail corpora is within ±15% at the threshold; the
 /// guardrail trigger (`τ = 10`) is well above that noise floor.
-pub fn repetition_rate(
-    rollouts: &[RolloutSummary],
-    tail_len: usize,
-    threshold: f64,
-) -> f64 {
+pub fn repetition_rate(rollouts: &[RolloutSummary], tail_len: usize, threshold: f64) -> f64 {
     if rollouts.is_empty() {
         return 0.0;
     }
@@ -314,15 +307,14 @@ pub fn build_snapshot(
     mean_kl: f64,
 ) -> OpdDiagnosticSnapshot {
     let trunc = truncation_rate(rollouts);
-    let rep = repetition_rate(
-        rollouts,
-        DEFAULT_REP_TAIL_LEN,
-        DEFAULT_REP_RATIO_THRESHOLD,
-    );
+    let rep = repetition_rate(rollouts, DEFAULT_REP_TAIL_LEN, DEFAULT_REP_RATIO_THRESHOLD);
     let mean_tokens = if rollouts.is_empty() {
         0.0
     } else {
-        rollouts.iter().map(|r| r.generated_tokens as f64).sum::<f64>()
+        rollouts
+            .iter()
+            .map(|r| r.generated_tokens as f64)
+            .sum::<f64>()
             / rollouts.len() as f64
     };
     let diversity = rollout_diversity(rollouts);
@@ -383,7 +375,10 @@ pub enum GuardrailDecision {
     PauseAndRecommendColdStart { reason: GuardrailTrigger },
     /// Entropy gap widening; reduce learning rate by 0.5×.
     /// §3.9 `EntropyGapWidening`.
-    ReduceLearningRate { factor: f64, reason: GuardrailTrigger },
+    ReduceLearningRate {
+        factor: f64,
+        reason: GuardrailTrigger,
+    },
     /// §11 `LongTailRewardDecay`: cap rollout length at the
     /// `last_healthy_position` before resuming. The trainer
     /// applies via `OpdConfig::max_tokens`.
@@ -641,10 +636,7 @@ impl LengthInflationGuardrail {
     /// Run the non-terminal guardrail priority. Called after the
     /// terminal-condition checks (ThinkingPatternMismatch /
     /// CapacityGap).
-    fn decide_no_terminal(
-        &mut self,
-        snapshot: &OpdDiagnosticSnapshot,
-    ) -> GuardrailDecision {
+    fn decide_no_terminal(&mut self, snapshot: &OpdDiagnosticSnapshot) -> GuardrailDecision {
         if snapshot.stable_opd_already_bumped && self.consecutive_high_trunc >= 1 {
             // §11 FlawedPrefixCollapse: bump didn't help, take
             // harsher action.
@@ -786,7 +778,10 @@ mod tests {
             s.push_str("the cat sat on the mat. ");
         }
         let r = compress_ratio(s.as_bytes());
-        assert!(r > 10.0, "expected >10x compression on repetitive input, got {r}");
+        assert!(
+            r > 10.0,
+            "expected >10x compression on repetitive input, got {r}"
+        );
     }
 
     #[test]
@@ -803,7 +798,10 @@ mod tests {
             s.push((x & 0xff) as u8);
         }
         let r = compress_ratio(&s);
-        assert!(r < 10.0, "expected <10x compression on diverse input, got {r}");
+        assert!(
+            r < 10.0,
+            "expected <10x compression on diverse input, got {r}"
+        );
     }
 
     #[test]
@@ -825,7 +823,10 @@ mod tests {
             make_rollout("clean text", 10, true),
         ];
         let r = repetition_rate(&rs, 1000, 10.0);
-        assert!(r > 0.0, "expected non-zero RepRate on repetitive tail, got {r}");
+        assert!(
+            r > 0.0,
+            "expected non-zero RepRate on repetitive tail, got {r}"
+        );
     }
 
     #[test]
@@ -1150,7 +1151,10 @@ mod tests {
         match g.observe(&snap) {
             GuardrailDecision::CapRolloutLength {
                 max_tokens,
-                reason: GuardrailTrigger::LongTailRewardDecay { last_healthy_position },
+                reason:
+                    GuardrailTrigger::LongTailRewardDecay {
+                        last_healthy_position,
+                    },
             } => {
                 assert_eq!(max_tokens, 7168);
                 assert_eq!(last_healthy_position, 7168);
@@ -1232,7 +1236,10 @@ mod tests {
         let repeated: Vec<u32> = (0..2000).map(|i| (i % 4) as u32).collect();
         let r = RolloutSummary::from_tokens(&repeated, true);
         let ratio = compress_ratio(r.text.as_bytes());
-        assert!(ratio > 10.0, "expected highly-compressible token stream, got {ratio}");
+        assert!(
+            ratio > 10.0,
+            "expected highly-compressible token stream, got {ratio}"
+        );
     }
 
     #[test]

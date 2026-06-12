@@ -59,11 +59,7 @@ impl Layout {
 
     /// Construct a layout from explicit `(shape, strides, start_offset)`.
     /// Returns an error if `shape.len() != strides.len()`.
-    pub fn from_parts(
-        shape: Vec<usize>,
-        strides: Vec<usize>,
-        start_offset: usize,
-    ) -> Result<Self> {
+    pub fn from_parts(shape: Vec<usize>, strides: Vec<usize>, start_offset: usize) -> Result<Self> {
         if shape.len() != strides.len() {
             return Err(Error::Msg(format!(
                 "Layout::from_parts: shape rank {} != strides rank {}",

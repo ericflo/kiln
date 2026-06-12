@@ -190,51 +190,40 @@ pub fn paged_attn_decode_splitk_chunks(batch_size: usize, max_blocks_per_seq: us
 
 fn paged_attn_single_submit_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_DISABLE_VULKAN_PAGED_ATTN_SINGLE_SUBMIT").is_err()
-    })
+    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_PAGED_ATTN_SINGLE_SUBMIT").is_err())
 }
 
 fn qwen_rmsnorm_single_submit_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_DISABLE_VULKAN_QWEN_RMSNORM_SINGLE_SUBMIT").is_err()
-    })
+    *ENABLED
+        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_QWEN_RMSNORM_SINGLE_SUBMIT").is_err())
 }
 
 fn gdn_gates_single_submit_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_DISABLE_VULKAN_GDN_GATES_SINGLE_SUBMIT").is_err()
-    })
+    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_GATES_SINGLE_SUBMIT").is_err())
 }
 
 fn gdn_gated_norm_single_submit_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_DISABLE_VULKAN_GDN_GATED_NORM_SINGLE_SUBMIT").is_err()
-    })
+    *ENABLED
+        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_GATED_NORM_SINGLE_SUBMIT").is_err())
 }
 
 fn mlp_gate_up_single_submit_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_DISABLE_VULKAN_MLP_GATE_UP_SINGLE_SUBMIT").is_err()
-    })
+    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_GATE_UP_SINGLE_SUBMIT").is_err())
 }
 
 fn causal_conv1d_single_submit_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_DISABLE_VULKAN_CAUSAL_CONV1D_SINGLE_SUBMIT").is_err()
-    })
+    *ENABLED
+        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_CAUSAL_CONV1D_SINGLE_SUBMIT").is_err())
 }
 
 pub(crate) fn full_attn_qkv_bf16w_rows4_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS4").is_err()
-    })
+    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS4").is_err())
 }
 
 fn mlp_chained_dispatch_enabled() -> bool {
@@ -255,8 +244,7 @@ fn profile_vulkan_gdn_in_proj_kernel_stages_enabled() -> bool {
 
 fn profile_vulkan_gdn_recurrent_kernel_stages_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| env_truthy("KILN_PROFILE_VULKAN_GDN_RECURRENT_KERNEL_STAGES"))
+    *ENABLED.get_or_init(|| env_truthy("KILN_PROFILE_VULKAN_GDN_RECURRENT_KERNEL_STAGES"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -599,11 +587,7 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         (crate::shaders::PAGED_KV_WRITE_SLOT, 4, 8),
         (crate::shaders::PAGED_KV_WRITE_SLOTS, 5, 12),
         (crate::shaders::PAGED_ATTN_DECODE_BATCH_PAGED, 6, 24),
-        (
-            crate::shaders::PAGED_ATTN_DECODE_BATCH_PAGED_SPLITK,
-            6,
-            28,
-        ),
+        (crate::shaders::PAGED_ATTN_DECODE_BATCH_PAGED_SPLITK, 6, 28),
         (
             crate::shaders::PAGED_ATTN_DECODE_BATCH_PAGED_SPLITK_REDUCE,
             2,
@@ -694,7 +678,10 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
 
     let chunkwise_prefill_paths = [
         (
-            concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/vk_narrow_lastdim_f32.comp"),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/vk_narrow_lastdim_f32.comp"
+            ),
             2usize,
             16u32,
         ),
@@ -723,22 +710,34 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
             24,
         ),
         (
-            concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/vk_matmul_batched_f32.comp"),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/vk_matmul_batched_f32.comp"
+            ),
             3,
             16,
         ),
         (
-            concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/vk_transpose_3d_f32.comp"),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/vk_transpose_3d_f32.comp"
+            ),
             2,
             12,
         ),
         (
-            concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/gdn_chunk_prep.comp"),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/gdn_chunk_prep.comp"
+            ),
             12,
             16,
         ),
         (
-            concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/vk_solve_tri_v2.comp"),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/vk_solve_tri_v2.comp"
+            ),
             4,
             16,
         ),
@@ -862,9 +861,7 @@ pub fn dispatch_kernel_bytes(
         .chunks_exact(4)
         .map(|c| u32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
-    let shader_module_info = vk::ShaderModuleCreateInfo::default()
-        .code(&spirv_words)
-        ;
+    let shader_module_info = vk::ShaderModuleCreateInfo::default().code(&spirv_words);
     let shader_module = unsafe {
         device
             .create_shader_module(&shader_module_info, None)
@@ -879,13 +876,10 @@ pub fn dispatch_kernel_bytes(
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                
         })
         .collect();
 
-    let set_layout_info = vk::DescriptorSetLayoutCreateInfo::default()
-        .bindings(&desc_bindings)
-        ;
+    let set_layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&desc_bindings);
     let set_layout = unsafe {
         device
             .create_descriptor_set_layout(&set_layout_info, None)
@@ -895,15 +889,13 @@ pub fn dispatch_kernel_bytes(
     // --- Pipeline layout ---
     let push_constant_range = vk::PushConstantRange::default()
         .stage_flags(vk::ShaderStageFlags::COMPUTE)
-        .size((push_constants.len() * 4) as u32)
-        ;
+        .size((push_constants.len() * 4) as u32);
     let pcr = vec![push_constant_range];
     let set_layouts = vec![set_layout];
 
     let layout_info = vk::PipelineLayoutCreateInfo::default()
         .set_layouts(&set_layouts)
-        .push_constant_ranges(&pcr)
-        ;
+        .push_constant_ranges(&pcr);
     let layout = unsafe {
         device
             .create_pipeline_layout(&layout_info, None)
@@ -914,13 +906,11 @@ pub fn dispatch_kernel_bytes(
     let stage_info = vk::PipelineShaderStageCreateInfo::default()
         .stage(vk::ShaderStageFlags::COMPUTE)
         .module(shader_module)
-        .name(std::ffi::CStr::from_bytes_with_nul(b"main\0").unwrap())
-        ;
+        .name(std::ffi::CStr::from_bytes_with_nul(b"main\0").unwrap());
 
     let pipeline_info = vk::ComputePipelineCreateInfo::default()
         .stage(stage_info)
-        .layout(layout)
-        ;
+        .layout(layout);
 
     let pipelines = unsafe {
         device
@@ -938,14 +928,12 @@ pub fn dispatch_kernel_bytes(
     // --- Descriptor pool + set (STORAGE_BUFFER) ---
     let pool_size = vk::DescriptorPoolSize::default()
         .ty(vk::DescriptorType::STORAGE_BUFFER)
-        .descriptor_count(total_bindings as u32)
-        ;
+        .descriptor_count(total_bindings as u32);
     let pool_sizes = vec![pool_size];
 
     let pool_info = vk::DescriptorPoolCreateInfo::default()
         .max_sets(1)
-        .pool_sizes(&pool_sizes)
-        ;
+        .pool_sizes(&pool_sizes);
     let pool = unsafe {
         device
             .create_descriptor_pool(&pool_info, None)
@@ -954,8 +942,7 @@ pub fn dispatch_kernel_bytes(
 
     let alloc_info = vk::DescriptorSetAllocateInfo::default()
         .descriptor_pool(pool)
-        .set_layouts(&set_layouts)
-        ;
+        .set_layouts(&set_layouts);
     let descriptor_sets = unsafe {
         device
             .allocate_descriptor_sets(&alloc_info)
@@ -973,7 +960,6 @@ pub fn dispatch_kernel_bytes(
                     .buffer(buf_handle)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    
             })
             .collect();
 
@@ -1247,10 +1233,7 @@ fn make_write_descriptor_set_buf(
 }
 
 /// Create a zero-init MemoryBarrier with fixed sType.
-fn make_memory_barrier(
-    src: vk::AccessFlags,
-    dst: vk::AccessFlags,
-) -> vk::MemoryBarrier<'static> {
+fn make_memory_barrier(src: vk::AccessFlags, dst: vk::AccessFlags) -> vk::MemoryBarrier<'static> {
     vk::MemoryBarrier::default()
         .src_access_mask(src)
         .dst_access_mask(dst)
@@ -1809,8 +1792,7 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
             .allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
-                    .set_layouts(&set_layouts)
-                    ,
+                    .set_layouts(&set_layouts),
             )
             .context("failed to allocate gdn_in_proj descriptor set")?[0]
     };
@@ -1821,7 +1803,6 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                
         })
         .collect();
     let descriptor_writes: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -2705,8 +2686,7 @@ fn dispatch_linear_decode_cached_single_submit_bytes(
             .allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
-                    .set_layouts(&set_layouts)
-                    ,
+                    .set_layouts(&set_layouts),
             )
             .context("failed to allocate descriptor sets")?[0]
     };
@@ -2717,7 +2697,6 @@ fn dispatch_linear_decode_cached_single_submit_bytes(
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                
         })
         .collect();
     let descriptor_writes: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -2825,12 +2804,7 @@ pub fn dispatch_linear_decode_argmax_cached_bytes(
     out_dim: usize,
 ) -> Result<u32> {
     dispatch_linear_decode_argmax_cached_impl_bytes(
-        vk_device,
-        x_data,
-        weight_t,
-        hidden,
-        out_dim,
-        false,
+        vk_device, x_data, weight_t, hidden, out_dim, false,
     )
 }
 
@@ -2842,12 +2816,7 @@ pub fn dispatch_linear_decode_argmax_cached_bf16_weights_bytes(
     out_dim: usize,
 ) -> Result<u32> {
     dispatch_linear_decode_argmax_cached_impl_bytes(
-        vk_device,
-        x_data,
-        weight_t,
-        hidden,
-        out_dim,
-        true,
+        vk_device, x_data, weight_t, hidden, out_dim, true,
     )
 }
 
@@ -3057,8 +3026,7 @@ fn dispatch_linear_decode_argmax_cached_single_submit(
             .allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
-                    .set_layouts(&block_set_layouts)
-                    ,
+                    .set_layouts(&block_set_layouts),
             )
             .context("failed to allocate linear argmax block descriptor set")?[0]
     };
@@ -3069,7 +3037,6 @@ fn dispatch_linear_decode_argmax_cached_single_submit(
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                
         })
         .collect();
     let block_descriptor_writes: Vec<vk::WriteDescriptorSet> = block_buf_infos
@@ -3084,8 +3051,7 @@ fn dispatch_linear_decode_argmax_cached_single_submit(
             .allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
-                    .set_layouts(&reduce_set_layouts)
-                    ,
+                    .set_layouts(&reduce_set_layouts),
             )
             .context("failed to allocate linear argmax reduce descriptor set")?[0]
     };
@@ -3096,7 +3062,6 @@ fn dispatch_linear_decode_argmax_cached_single_submit(
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                
         })
         .collect();
     let reduce_descriptor_writes: Vec<vk::WriteDescriptorSet> = reduce_buf_infos
@@ -3348,8 +3313,8 @@ pub fn dispatch_linear_decode_sample_bytes(
     } else {
         crate::shaders::LINEAR_DECODE
     };
-    let mut batch = crate::CommandBatch::new(vk_device)
-        .context("linear_decode_sample: create CommandBatch")?;
+    let mut batch =
+        crate::CommandBatch::new(vk_device).context("linear_decode_sample: create CommandBatch")?;
     let mut upload_copies = Vec::with_capacity(if penalties_active { 3 } else { 1 });
     upload_copies.push((
         &upload_stage,
@@ -3466,9 +3431,18 @@ pub fn dispatch_linear_decode_sample_batch_bytes(
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
 
-    anyhow::ensure!(batch > 0, "linear_decode_sample_batch: batch must be nonzero");
-    anyhow::ensure!(hidden > 0, "linear_decode_sample_batch: hidden must be nonzero");
-    anyhow::ensure!(out_dim > 0, "linear_decode_sample_batch: out_dim must be nonzero");
+    anyhow::ensure!(
+        batch > 0,
+        "linear_decode_sample_batch: batch must be nonzero"
+    );
+    anyhow::ensure!(
+        hidden > 0,
+        "linear_decode_sample_batch: hidden must be nonzero"
+    );
+    anyhow::ensure!(
+        out_dim > 0,
+        "linear_decode_sample_batch: out_dim must be nonzero"
+    );
     anyhow::ensure!(
         x_data.len() == batch * hidden * 4,
         "linear_decode_sample_batch: x buffer has {} bytes, expected {}",
@@ -3476,7 +3450,8 @@ pub fn dispatch_linear_decode_sample_batch_bytes(
         batch * hidden * 4
     );
     anyhow::ensure!(
-        history_rows.len() == history_indices.len() && history_indices.len() == history_counts.len(),
+        history_rows.len() == history_indices.len()
+            && history_indices.len() == history_counts.len(),
         "linear_decode_sample_batch: history row/index/count length mismatch"
     );
     anyhow::ensure!(
@@ -3509,7 +3484,10 @@ pub fn dispatch_linear_decode_sample_batch_bytes(
         );
     }
 
-    let seed_lo: Vec<u32> = seeds.iter().map(|seed| (*seed & 0xFFFF_FFFF) as u32).collect();
+    let seed_lo: Vec<u32> = seeds
+        .iter()
+        .map(|seed| (*seed & 0xFFFF_FFFF) as u32)
+        .collect();
     let seed_hi: Vec<u32> = seeds.iter().map(|seed| (*seed >> 32) as u32).collect();
 
     let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
@@ -3536,24 +3514,36 @@ pub fn dispatch_linear_decode_sample_batch_bytes(
     let penalties_active = !history_indices.is_empty();
     let history_row_buf = if penalties_active {
         Some(
-            VulkanBuffer::create_device_local(device, device_local_mt, (history_rows.len() * 4) as u64)
-                .context("failed to create batched penalty row buffer")?,
+            VulkanBuffer::create_device_local(
+                device,
+                device_local_mt,
+                (history_rows.len() * 4) as u64,
+            )
+            .context("failed to create batched penalty row buffer")?,
         )
     } else {
         None
     };
     let history_idx_buf = if penalties_active {
         Some(
-            VulkanBuffer::create_device_local(device, device_local_mt, (history_indices.len() * 4) as u64)
-                .context("failed to create batched penalty index buffer")?,
+            VulkanBuffer::create_device_local(
+                device,
+                device_local_mt,
+                (history_indices.len() * 4) as u64,
+            )
+            .context("failed to create batched penalty index buffer")?,
         )
     } else {
         None
     };
     let history_cnt_buf = if penalties_active {
         Some(
-            VulkanBuffer::create_device_local(device, device_local_mt, (history_counts.len() * 4) as u64)
-                .context("failed to create batched penalty count buffer")?,
+            VulkanBuffer::create_device_local(
+                device,
+                device_local_mt,
+                (history_counts.len() * 4) as u64,
+            )
+            .context("failed to create batched penalty count buffer")?,
         )
     } else {
         None
@@ -3661,7 +3651,13 @@ pub fn dispatch_linear_decode_sample_batch_bytes(
         .iter()
         .enumerate()
         .map(|(idx, (dst, bytes))| {
-            (&upload_stage, *dst, upload_offsets[idx], 0, bytes.len() as u64)
+            (
+                &upload_stage,
+                *dst,
+                upload_offsets[idx],
+                0,
+                bytes.len() as u64,
+            )
         })
         .collect();
     batch_rec
@@ -3682,9 +3678,18 @@ pub fn dispatch_linear_decode_sample_batch_bytes(
                 crate::shaders::APPLY_TOKEN_PENALTIES_BATCHED,
                 &[
                     logits_buf.handle(),
-                    history_idx_buf.as_ref().expect("history index buffer").handle(),
-                    history_cnt_buf.as_ref().expect("history count buffer").handle(),
-                    history_row_buf.as_ref().expect("history row buffer").handle(),
+                    history_idx_buf
+                        .as_ref()
+                        .expect("history index buffer")
+                        .handle(),
+                    history_cnt_buf
+                        .as_ref()
+                        .expect("history count buffer")
+                        .handle(),
+                    history_row_buf
+                        .as_ref()
+                        .expect("history row buffer")
+                        .handle(),
                     repetition_buf.as_ref().expect("repetition buffer").handle(),
                     presence_buf.as_ref().expect("presence buffer").handle(),
                     frequency_buf.as_ref().expect("frequency buffer").handle(),
@@ -3892,8 +3897,7 @@ fn dispatch_linear_decode_argmax_batched_cached_impl_bytes(
             .allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
-                    .set_layouts(&block_set_layouts)
-                    ,
+                    .set_layouts(&block_set_layouts),
             )
             .context("failed to allocate batched linear argmax block descriptor set")?[0]
     };
@@ -3904,7 +3908,6 @@ fn dispatch_linear_decode_argmax_batched_cached_impl_bytes(
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                
         })
         .collect();
     let block_descriptor_writes: Vec<vk::WriteDescriptorSet> = block_buf_infos
@@ -3919,8 +3922,7 @@ fn dispatch_linear_decode_argmax_batched_cached_impl_bytes(
             .allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
-                    .set_layouts(&reduce_set_layouts)
-                    ,
+                    .set_layouts(&reduce_set_layouts),
             )
             .context("failed to allocate batched linear argmax reduce descriptor set")?[0]
     };
@@ -3931,7 +3933,6 @@ fn dispatch_linear_decode_argmax_batched_cached_impl_bytes(
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                
         })
         .collect();
     let reduce_descriptor_writes: Vec<vk::WriteDescriptorSet> = reduce_buf_infos
@@ -4228,8 +4229,7 @@ fn dispatch_full_attn_qkv_decode_cached_single_submit(
             .allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
-                    .set_layouts(&set_layouts)
-                    ,
+                    .set_layouts(&set_layouts),
             )
             .context("failed to allocate full_attn_qkv_decode descriptor set")?[0]
     };
@@ -4240,7 +4240,6 @@ fn dispatch_full_attn_qkv_decode_cached_single_submit(
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                
         })
         .collect();
     let descriptor_writes: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -4414,7 +4413,8 @@ pub fn dispatch_full_attn_qkv_decode_cached_batched_bytes(
     v_dim: usize,
 ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     let out_data = dispatch_full_attn_qkv_decode_cached_batched_impl(
-        vk_device, x_data, q_weight_t, k_weight_t, v_weight_t, batch, hidden, q_dim, k_dim, v_dim, false,
+        vk_device, x_data, q_weight_t, k_weight_t, v_weight_t, batch, hidden, q_dim, k_dim, v_dim,
+        false,
     )?;
     split_batched_qkv_output(&out_data, batch, q_dim, k_dim, v_dim)
 }
@@ -4432,16 +4432,7 @@ pub fn dispatch_full_attn_qkv_decode_cached_batched_bf16_weights_bytes(
     v_dim: usize,
 ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     let out_data = dispatch_full_attn_qkv_decode_cached_batched_impl(
-        vk_device,
-        x_data,
-        q_weight_t,
-        k_weight_t,
-        v_weight_t,
-        batch,
-        hidden,
-        q_dim,
-        k_dim,
-        v_dim,
+        vk_device, x_data, q_weight_t, k_weight_t, v_weight_t, batch, hidden, q_dim, k_dim, v_dim,
         true,
     )?;
     split_batched_qkv_output(&out_data, batch, q_dim, k_dim, v_dim)
@@ -4485,7 +4476,10 @@ fn dispatch_full_attn_qkv_decode_cached_batched_impl(
         .checked_add(k_dim)
         .and_then(|n| n.checked_add(v_dim))
         .context("full_attn_qkv_decode_batched: total_out overflow")?;
-    anyhow::ensure!(total_out > 0, "full_attn_qkv_decode_batched: total_out is zero");
+    anyhow::ensure!(
+        total_out > 0,
+        "full_attn_qkv_decode_batched: total_out is zero"
+    );
     let full_attn_qkv_rows4 = bf16_weights
         && batch >= full_attn_qkv_bf16w_rows4_min_batch()
         && full_attn_qkv_bf16w_rows4_enabled();
@@ -4896,8 +4890,9 @@ pub fn dispatch_paged_attn_decode_batch_paged_f32_bytes(
     let seq_bytes: Vec<u8> = bytemuck::cast_slice(seq_lens).to_vec();
 
     let make_input = |data: &[u8], label: &str| -> Result<VulkanBuffer> {
-        VulkanBuffer::create_device_local(device, device_local_mt, data.len() as u64)
-            .with_context(|| format!("failed to create paged_attn_decode_batch_paged {label} buffer"))
+        VulkanBuffer::create_device_local(device, device_local_mt, data.len() as u64).with_context(
+            || format!("failed to create paged_attn_decode_batch_paged {label} buffer"),
+        )
     };
     let q_buf = make_input(&q_data, "q")?;
     let k_buf = make_input(&k_data, "k_pool")?;
@@ -5106,10 +5101,9 @@ pub fn dispatch_paged_attn_decode_batch_paged_splitk_f32_bytes(
     let seq_bytes: Vec<u8> = bytemuck::cast_slice(seq_lens).to_vec();
 
     let make_input = |data: &[u8], label: &str| -> Result<VulkanBuffer> {
-        VulkanBuffer::create_device_local(device, device_local_mt, data.len() as u64)
-            .with_context(|| {
-                format!("failed to create paged_attn_decode_batch_paged_splitk {label} buffer")
-            })
+        VulkanBuffer::create_device_local(device, device_local_mt, data.len() as u64).with_context(
+            || format!("failed to create paged_attn_decode_batch_paged_splitk {label} buffer"),
+        )
     };
     let q_buf = make_input(&q_data, "q")?;
     let k_buf = make_input(&k_data, "k_pool")?;
@@ -5537,11 +5531,10 @@ fn dispatch_mlp_decode_cached_impl(
         && batch >= mlp_bf16_gate_up_rows4_min_batch()
         && !rows8_path
         && mlp_bf16_gate_up_rows4_enabled();
-    let down_rows4 =
-        gate_up_bf16_weights
-            && !down_bf16_weights
-            && batch >= mlp_f32_down_rows4_min_batch()
-            && mlp_f32_down_rows4_enabled();
+    let down_rows4 = gate_up_bf16_weights
+        && !down_bf16_weights
+        && batch >= mlp_f32_down_rows4_min_batch()
+        && mlp_f32_down_rows4_enabled();
     let down_rows2 = !down_bf16_weights && !down_rows4 && use_prefill_row_pair_matmul(batch);
     let chained_dispatch = mlp_chained_dispatch_enabled();
     let chained_transfer_submit = chained_dispatch && mlp_chained_transfer_submit_enabled();
@@ -6206,8 +6199,7 @@ pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state_bytes(
             .allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
-                    .set_layouts(&set_layouts)
-                    ,
+                    .set_layouts(&set_layouts),
             )
             .context("failed to allocate gdn_decode fused resident descriptor set")?[0]
     };
@@ -6219,7 +6211,6 @@ pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state_bytes(
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                
         })
         .collect();
     let descriptor_writes: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -6266,9 +6257,7 @@ pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state_bytes(
                 cmd,
                 state_stage.handle(),
                 state_buf.handle(),
-                &[vk::BufferCopy::default()
-                    .size(state_data.len() as u64)
-                    ],
+                &[vk::BufferCopy::default().size(state_data.len() as u64)],
             );
         }
 
@@ -6408,8 +6397,7 @@ fn dispatch_gdn_decode_gates_recurrent_rmsnorm_single_submit_bytes(
             .allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
-                    .set_layouts(&set_layouts)
-                    ,
+                    .set_layouts(&set_layouts),
             )
             .context("failed to allocate descriptor sets")?[0]
     };
@@ -6421,7 +6409,6 @@ fn dispatch_gdn_decode_gates_recurrent_rmsnorm_single_submit_bytes(
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                
         })
         .collect();
     let descriptor_writes: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -6453,9 +6440,7 @@ fn dispatch_gdn_decode_gates_recurrent_rmsnorm_single_submit_bytes(
                 cmd,
                 stage.handle(),
                 buffers[idx].handle(),
-                &[vk::BufferCopy::default()
-                    .size(input_data[idx].len() as u64)
-                    ],
+                &[vk::BufferCopy::default().size(input_data[idx].len() as u64)],
             );
         }
 
@@ -6519,9 +6504,7 @@ fn dispatch_gdn_decode_gates_recurrent_rmsnorm_single_submit_bytes(
                 cmd,
                 buffers[7].handle(),
                 state_stage.handle(),
-                &[vk::BufferCopy::default()
-                    .size(input_data[7].len() as u64)
-                    ],
+                &[vk::BufferCopy::default().size(input_data[7].len() as u64)],
             );
         }
 
@@ -6575,9 +6558,7 @@ pub fn dispatch_gdn_gates_cached_bytes(
     nv: usize,
     out_shape: &[usize],
 ) -> Result<(Vec<u8>, Vec<u8>)> {
-    dispatch_gdn_gates_cached_bytes_core(
-        vk_device, a_data, b_data, a_log, dt_bias, nv, out_shape,
-    )
+    dispatch_gdn_gates_cached_bytes_core(vk_device, a_data, b_data, a_log, dt_bias, nv, out_shape)
 }
 
 fn dispatch_gdn_gates_cached_bytes_core(
@@ -7342,8 +7323,7 @@ pub fn run_compute_pipeline(
             .allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
-                    .set_layouts(&set_layouts)
-                    ,
+                    .set_layouts(&set_layouts),
             )
             .context("failed to allocate descriptor sets")?[0]
     };
@@ -7357,7 +7337,6 @@ pub fn run_compute_pipeline(
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    
             })
             .collect();
         let descriptor_write_infos: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -7468,8 +7447,7 @@ pub fn run_compute_pipeline_3d(
             .allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
-                    .set_layouts(&set_layouts)
-                    ,
+                    .set_layouts(&set_layouts),
             )
             .context("failed to allocate descriptor sets")?[0]
     };
@@ -7481,7 +7459,6 @@ pub fn run_compute_pipeline_3d(
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    
             })
             .collect();
         let descriptor_write_infos: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -7600,8 +7577,7 @@ fn run_compute_pipeline_with_transfer_readback(
             .allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
-                    .set_layouts(&set_layouts)
-                    ,
+                    .set_layouts(&set_layouts),
             )
             .context("failed to allocate transfer-readback descriptor set")?[0]
     };
@@ -7614,7 +7590,6 @@ fn run_compute_pipeline_with_transfer_readback(
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    
             })
             .collect();
         let writes: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -7642,9 +7617,7 @@ fn run_compute_pipeline_with_transfer_readback(
             cmd,
             upload_stage.handle(),
             upload_dst.handle(),
-            &[vk::BufferCopy::default()
-                .size(upload_data.len() as u64)
-                ],
+            &[vk::BufferCopy::default().size(upload_data.len() as u64)],
         );
         let upload_barrier = make_memory_barrier(
             vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::HOST_WRITE,
@@ -7755,12 +7728,8 @@ fn run_compute_pipeline_with_transfers_readbacks(
     let device = vk_device.device();
     let host_visible_mt = vk_device.host_visible_mem_type();
 
-    let (upload_stage, upload_offsets) = create_packed_upload_stage(
-        device,
-        host_visible_mt,
-        uploads,
-        "transfers-readbacks",
-    )?;
+    let (upload_stage, upload_offsets) =
+        create_packed_upload_stage(device, host_visible_mt, uploads, "transfers-readbacks")?;
     let mut readback_offsets = Vec::with_capacity(readbacks.len());
     let mut readback_total = 0u64;
     for (idx, (_, size)) in readbacks.iter().enumerate() {
@@ -7800,8 +7769,7 @@ fn run_compute_pipeline_with_transfers_readbacks(
             .allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
-                    .set_layouts(&set_layouts)
-                    ,
+                    .set_layouts(&set_layouts),
             )
             .context("failed to allocate transfers-readbacks descriptor set")?[0]
     };
@@ -7814,7 +7782,6 @@ fn run_compute_pipeline_with_transfers_readbacks(
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    
             })
             .collect();
         let writes: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -7959,12 +7926,8 @@ fn run_compute_pipeline_with_transfers_readback(
     let device = vk_device.device();
     let host_visible_mt = vk_device.host_visible_mem_type();
 
-    let (upload_stage, upload_offsets) = create_packed_upload_stage(
-        device,
-        host_visible_mt,
-        uploads,
-        "transfers-readback",
-    )?;
+    let (upload_stage, upload_offsets) =
+        create_packed_upload_stage(device, host_visible_mt, uploads, "transfers-readback")?;
     let readback_stage = VulkanBuffer::create_host_visible(device, host_visible_mt, readback_size)
         .context("failed to create transfers-readback readback staging buffer")?;
 
@@ -7986,8 +7949,7 @@ fn run_compute_pipeline_with_transfers_readback(
             .allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
-                    .set_layouts(&set_layouts)
-                    ,
+                    .set_layouts(&set_layouts),
             )
             .context("failed to allocate transfers-readback descriptor set")?[0]
     };
@@ -8000,7 +7962,6 @@ fn run_compute_pipeline_with_transfers_readback(
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    
             })
             .collect();
         let writes: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -8140,8 +8101,7 @@ fn run_two_stage_compute_pipeline(
             .allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
-                    .set_layouts(&set_layouts)
-                    ,
+                    .set_layouts(&set_layouts),
             )
             .context("failed to allocate two-stage descriptor sets")?
     };
@@ -8156,7 +8116,6 @@ fn run_two_stage_compute_pipeline(
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    
             })
             .collect();
         let second_buf_infos: Vec<vk::DescriptorBufferInfo> = second_handles
@@ -8166,7 +8125,6 @@ fn run_two_stage_compute_pipeline(
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    
             })
             .collect();
         let mut descriptor_write_infos: Vec<vk::WriteDescriptorSet> =
@@ -8324,8 +8282,7 @@ fn run_two_stage_compute_pipeline_with_transfer_readback(
             .allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
-                    .set_layouts(&set_layouts)
-                    ,
+                    .set_layouts(&set_layouts),
             )
             .context("failed to allocate transfer two-stage descriptor sets")?
     };
@@ -8340,7 +8297,6 @@ fn run_two_stage_compute_pipeline_with_transfer_readback(
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    
             })
             .collect();
         let second_buf_infos: Vec<vk::DescriptorBufferInfo> = second_handles
@@ -8350,7 +8306,6 @@ fn run_two_stage_compute_pipeline_with_transfer_readback(
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    
             })
             .collect();
         let mut descriptor_write_infos: Vec<vk::WriteDescriptorSet> =
@@ -8385,9 +8340,7 @@ fn run_two_stage_compute_pipeline_with_transfer_readback(
             cmd,
             upload_stage.handle(),
             upload_dst.handle(),
-            &[vk::BufferCopy::default()
-                .size(upload_data.len() as u64)
-                ],
+            &[vk::BufferCopy::default().size(upload_data.len() as u64)],
         );
         let upload_barrier = make_memory_barrier(
             vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::HOST_WRITE,
@@ -8553,8 +8506,7 @@ fn run_two_stage_compute_pipeline_with_transfers(
             .allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
-                    .set_layouts(&set_layouts)
-                    ,
+                    .set_layouts(&set_layouts),
             )
             .context("failed to allocate transfer two-stage descriptor sets")?
     };
@@ -8569,7 +8521,6 @@ fn run_two_stage_compute_pipeline_with_transfers(
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    
             })
             .collect();
         let second_buf_infos: Vec<vk::DescriptorBufferInfo> = second_handles
@@ -8579,7 +8530,6 @@ fn run_two_stage_compute_pipeline_with_transfers(
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    
             })
             .collect();
         let mut descriptor_write_infos: Vec<vk::WriteDescriptorSet> =
@@ -8913,8 +8863,7 @@ pub fn copy_device_buffer_rows_to_batch(
                 &[vk::BufferCopy::default()
                     .src_offset(0)
                     .dst_offset(row_size * row_idx as u64)
-                    .size(row_size)
-                    ],
+                    .size(row_size)],
             );
         }
         let copy_barrier = make_memory_barrier(
@@ -9012,8 +8961,7 @@ pub fn split_device_buffer_batch_rows(
                 &[vk::BufferCopy::default()
                     .src_offset(row_size * row_idx as u64)
                     .dst_offset(0)
-                    .size(row_size)
-                    ],
+                    .size(row_size)],
             );
         }
         let post_copy_barrier = make_memory_barrier(
@@ -9378,8 +9326,7 @@ pub fn dispatch_gdn_recurrent_step_resident_state_bytes(
             .allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
-                    .set_layouts(&set_layouts)
-                    ,
+                    .set_layouts(&set_layouts),
             )
             .context("failed to allocate descriptor sets")?[0]
     };
@@ -9391,7 +9338,6 @@ pub fn dispatch_gdn_recurrent_step_resident_state_bytes(
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                
         })
         .collect();
     let descriptor_writes: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -9434,9 +9380,7 @@ pub fn dispatch_gdn_recurrent_step_resident_state_bytes(
                 cmd,
                 state_stage.handle(),
                 state_buf.handle(),
-                &[vk::BufferCopy::default()
-                    .size(state_data.len() as u64)
-                    ],
+                &[vk::BufferCopy::default().size(state_data.len() as u64)],
             );
         }
 
@@ -9675,8 +9619,7 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_resident_state_bytes(
             .allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
-                    .set_layouts(&set_layouts)
-                    ,
+                    .set_layouts(&set_layouts),
             )
             .context("failed to allocate descriptor sets")?[0]
     };
@@ -9688,7 +9631,6 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_resident_state_bytes(
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                
         })
         .collect();
     let descriptor_writes: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -9731,9 +9673,7 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_resident_state_bytes(
                 cmd,
                 state_stage.handle(),
                 state_buf.handle(),
-                &[vk::BufferCopy::default()
-                    .size(state_data.len() as u64)
-                    ],
+                &[vk::BufferCopy::default().size(state_data.len() as u64)],
             );
         }
 
@@ -9948,8 +9888,7 @@ fn dispatch_gdn_recurrent_step_single_submit_bytes(
             .allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
-                    .set_layouts(&set_layouts)
-                    ,
+                    .set_layouts(&set_layouts),
             )
             .context("failed to allocate descriptor sets")?[0]
     };
@@ -9961,7 +9900,6 @@ fn dispatch_gdn_recurrent_step_single_submit_bytes(
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                
         })
         .collect();
     let descriptor_writes: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -10016,9 +9954,7 @@ fn dispatch_gdn_recurrent_step_single_submit_bytes(
                 cmd,
                 state_stage.handle(),
                 state_buf.handle(),
-                &[vk::BufferCopy::default()
-                    .size(state_data.len() as u64)
-                    ],
+                &[vk::BufferCopy::default().size(state_data.len() as u64)],
             );
         }
 
@@ -10079,9 +10015,7 @@ fn dispatch_gdn_recurrent_step_single_submit_bytes(
                 cmd,
                 state_buf.handle(),
                 state_stage.handle(),
-                &[vk::BufferCopy::default()
-                    .size(state_data.len() as u64)
-                    ],
+                &[vk::BufferCopy::default().size(state_data.len() as u64)],
             );
         }
 

@@ -1,15 +1,11 @@
 //! Verification probe for batched buffer uploads with destination offsets.
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use kiln_vulkan_kernel::{VulkanBuffer, VulkanDevice};
 
 fn main() -> Result<()> {
     let dev = VulkanDevice::new().context("create Vulkan device")?;
-    let dst = VulkanBuffer::create_device_local(
-        dev.device(),
-        dev.device_local_mem_type(),
-        48,
-    )?;
+    let dst = VulkanBuffer::create_device_local(dev.device(), dev.device_local_mem_type(), 48)?;
 
     let a = [1u8, 2, 3, 4, 5, 6, 7, 8];
     let b = [21u8, 22, 23, 24, 25];

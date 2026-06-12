@@ -37,7 +37,7 @@
 
 use std::sync::Mutex;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 use std::sync::Arc;
 
 use super::logit_processor::LogitProcessor;
@@ -48,7 +48,10 @@ use super::logit_processor::LogitProcessor;
 
 fn validate_logits(logits: &Tensor, name: &str) -> Result<()> {
     if logits.rank() != 2 {
-        bail!("{name}: logits must be rank-2 [batch, vocab], got {:?}", logits.shape());
+        bail!(
+            "{name}: logits must be rank-2 [batch, vocab], got {:?}",
+            logits.shape()
+        );
     }
     if !logits.is_contiguous() {
         bail!("{name}: logits must be contiguous");
@@ -99,15 +102,20 @@ fn store_rows(dtype: DType, shape: &[usize], rows: &[Vec<f32>]) -> Result<Tensor
                 DType::F32 => out[offset..offset + 4].copy_from_slice(&val.to_le_bytes()),
                 DType::BF16 => out[offset..offset + 2]
                     .copy_from_slice(&half::bf16::from_f32(val).to_le_bytes()),
-                DType::F16 => out[offset..offset + 2]
-                    .copy_from_slice(&half::f16::from_f32(val).to_le_bytes()),
+                DType::F16 => {
+                    out[offset..offset + 2].copy_from_slice(&half::f16::from_f32(val).to_le_bytes())
+                }
                 _ => unreachable!(),
             }
         }
     }
     let cpu = CpuStorage::from_bytes(dtype, out)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(shape.to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(shape.to_vec()),
+        TensorId::next(),
+    )
 }
 
 // ----------------------------------------------------------------------
@@ -146,7 +154,11 @@ impl Mirostat2Processor {
 
     /// Current threshold for a given batch row, if initialized.
     pub fn mu(&self, batch: usize) -> Option<f32> {
-        self.mu.lock().unwrap().as_ref().and_then(|v| v.get(batch).copied())
+        self.mu
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|v| v.get(batch).copied())
     }
 
     /// Called by the sampler after observing a token. `observed`
@@ -293,8 +305,7 @@ mod tests {
 
     #[test]
     fn mirostat_per_batch_independent_state() {
-        let logits =
-            Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], vec![2, 2]).unwrap();
+        let logits = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], vec![2, 2]).unwrap();
         let p = Mirostat2Processor::new(3.0, 0.1);
         p.apply(&logits).unwrap();
         p.update(0, 5.0).unwrap();
@@ -313,14 +324,18 @@ mod tests {
     #[test]
     fn mirostat_tau_must_be_positive() {
         let logits = Tensor::from_slice(&[1.0f32], vec![1, 1]).unwrap();
-        let e = Mirostat2Processor::new(0.0, 0.1).apply(&logits).unwrap_err();
+        let e = Mirostat2Processor::new(0.0, 0.1)
+            .apply(&logits)
+            .unwrap_err();
         assert!(e.to_string().contains("tau"));
     }
 
     #[test]
     fn mirostat_eta_must_be_positive() {
         let logits = Tensor::from_slice(&[1.0f32], vec![1, 1]).unwrap();
-        let e = Mirostat2Processor::new(3.0, 0.0).apply(&logits).unwrap_err();
+        let e = Mirostat2Processor::new(3.0, 0.0)
+            .apply(&logits)
+            .unwrap_err();
         assert!(e.to_string().contains("eta"));
     }
 

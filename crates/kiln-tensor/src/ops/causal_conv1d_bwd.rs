@@ -58,7 +58,7 @@
 //! `causal_conv1d_bwd_input_matches_finite_difference` unit test below (CPU,
 //! deterministic).
 
-use crate::{bail, DType, Result, Tensor};
+use crate::{DType, Result, Tensor, bail};
 
 /// CPU/Metal/CUDA composite for the depthwise causal conv1d input gradient.
 ///
@@ -182,7 +182,9 @@ mod tests {
         // Simple LCG for reproducible pseudo-random values in [-1, 1].
         let mut seed = 0x1234_5678_9abc_def0u64;
         let mut next = || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((seed >> 33) as f32 / (1u64 << 31) as f32) - 1.0
         };
 
@@ -193,8 +195,7 @@ mod tests {
         let grad_out_host: Vec<f32> = (0..rows * channels).map(|_| next()).collect();
 
         // Analytic gradient via the composite (CPU, f32 — exactly what ships).
-        let grad_out_t =
-            Tensor::from_vec(grad_out_host.clone(), vec![rows, channels]).unwrap();
+        let grad_out_t = Tensor::from_vec(grad_out_host.clone(), vec![rows, channels]).unwrap();
         let weight_t = Tensor::from_vec(weight.clone(), vec![channels, kernel]).unwrap();
         let din_t =
             causal_depthwise_conv1d_bwd_input_composite(&grad_out_t, &weight_t, kernel).unwrap();
@@ -256,7 +257,9 @@ mod tests {
 
         let mut seed = 0xdead_beef_cafe_babeu64;
         let mut next = || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((seed >> 33) as f32 / (1u64 << 31) as f32) - 1.0
         };
         let grad_out: Vec<f32> = (0..rows * channels).map(|_| next()).collect();

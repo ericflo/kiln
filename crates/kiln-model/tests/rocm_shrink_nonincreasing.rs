@@ -35,7 +35,13 @@ fn rocm_shrink_is_vram_nonincreasing() {
     }
     let dev = Device::Rocm(0);
     let cache = PagedKvCacheKt::new(
-        LAYERS, START_BLOCKS, BLOCK_SIZE, KV_HEADS, HEAD_DIM, DType::BF16, dev,
+        LAYERS,
+        START_BLOCKS,
+        BLOCK_SIZE,
+        KV_HEADS,
+        HEAD_DIM,
+        DType::BF16,
+        dev,
     )
     .expect("alloc cache");
     kiln_tensor::rocm_synchronize_default_stream(0).ok();
@@ -47,7 +53,9 @@ fn rocm_shrink_is_vram_nonincreasing() {
         "[shrink-noninc] reserved before shrink: {reserved_before:.0} MB (one k-pool ≈ {layer_pool_mb:.0} MB)"
     );
 
-    cache.physical_resize_to(SHRUNK_BLOCKS, dev).expect("shrink");
+    cache
+        .physical_resize_to(SHRUNK_BLOCKS, dev)
+        .expect("shrink");
     kiln_tensor::rocm_synchronize_default_stream(0).ok();
     let reserved_after = reserved_mb();
     let growth = reserved_after - reserved_before;

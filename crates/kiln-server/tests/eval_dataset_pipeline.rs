@@ -46,7 +46,12 @@ fn build_state() -> (AppState, TempDir) {
     (state, dir)
 }
 
-async fn json_call(router: &axum::Router, method: &str, path: &str, body: &serde_json::Value) -> (StatusCode, serde_json::Value) {
+async fn json_call(
+    router: &axum::Router,
+    method: &str,
+    path: &str,
+    body: &serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
     let req = Request::builder()
         .method(method)
         .uri(path)
@@ -55,7 +60,9 @@ async fn json_call(router: &axum::Router, method: &str, path: &str, body: &serde
         .unwrap();
     let res = router.clone().oneshot(req).await.unwrap();
     let status = res.status();
-    let bytes = axum::body::to_bytes(res.into_body(), 16 * 1024 * 1024).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), 16 * 1024 * 1024)
+        .await
+        .unwrap();
     let json: serde_json::Value = if bytes.is_empty() {
         serde_json::Value::Null
     } else {
@@ -68,7 +75,9 @@ async fn get_json(router: &axum::Router, path: &str) -> (StatusCode, serde_json:
     let req = Request::builder().uri(path).body(Body::empty()).unwrap();
     let res = router.clone().oneshot(req).await.unwrap();
     let status = res.status();
-    let bytes = axum::body::to_bytes(res.into_body(), 16 * 1024 * 1024).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), 16 * 1024 * 1024)
+        .await
+        .unwrap();
     let json: serde_json::Value = if bytes.is_empty() {
         serde_json::Value::Null
     } else {
@@ -150,10 +159,16 @@ async fn synthesis_preview_round_trip() {
     let (status, json) = json_call(&router, "POST", "/v1/eval/datasets/smoke/preview", &body).await;
     assert_eq!(status, StatusCode::OK, "body={json}");
     let examples = json["examples"].as_array().unwrap();
-    assert!(!examples.is_empty(), "expected preview examples, got {examples:?}");
+    assert!(
+        !examples.is_empty(),
+        "expected preview examples, got {examples:?}"
+    );
     let kind = examples[0]["scorer"]["kind"].as_str().unwrap();
     // First conversation has target "Paris" → exact_match auto-detect.
-    assert!(matches!(kind, "exact_match" | "contains"), "kind was {kind}");
+    assert!(
+        matches!(kind, "exact_match" | "contains"),
+        "kind was {kind}"
+    );
 }
 
 #[tokio::test]
@@ -168,7 +183,8 @@ async fn synthesize_persists_suite() {
         "sampling": {"max_examples": 10, "max_prompt_chars": 1000000, "max_target_chars": 100000, "seed": 7, "dedupe": true},
         "force": false,
     });
-    let (status, json) = json_call(&router, "POST", "/v1/eval/datasets/smoke/synthesize", &body).await;
+    let (status, json) =
+        json_call(&router, "POST", "/v1/eval/datasets/smoke/synthesize", &body).await;
     assert_eq!(status, StatusCode::OK, "body={json}");
     let suite_name = json["suite"]["name"].as_str().unwrap();
     assert_eq!(suite_name, "smoke-final");
@@ -176,7 +192,11 @@ async fn synthesize_persists_suite() {
     let (s2, list) = get_json(&router, "/v1/eval/suites").await;
     assert_eq!(s2, StatusCode::OK);
     let suites = list["suites"].as_array().unwrap();
-    assert!(suites.iter().any(|s| s["name"].as_str() == Some("smoke-final")));
+    assert!(
+        suites
+            .iter()
+            .any(|s| s["name"].as_str() == Some("smoke-final"))
+    );
 }
 
 #[tokio::test]
@@ -191,14 +211,23 @@ async fn tool_call_strategy_produces_tool_call_scorer() {
         "sampling": {"max_examples": 10, "max_prompt_chars": 1000000, "max_target_chars": 100000, "seed": 11, "dedupe": false},
         "head_n": 10,
     });
-    let (status, preview) = json_call(&router, "POST", "/v1/eval/datasets/agent/preview", &body).await;
+    let (status, preview) =
+        json_call(&router, "POST", "/v1/eval/datasets/agent/preview", &body).await;
     assert_eq!(status, StatusCode::OK, "{preview}");
     // We seeded 2 assistant tool-call turns; the strategy must produce ≥1.
     let examples = preview["examples"].as_array().unwrap();
-    assert!(!examples.is_empty(), "expected tool-call examples, got {examples:?}");
+    assert!(
+        !examples.is_empty(),
+        "expected tool-call examples, got {examples:?}"
+    );
     // Auto-detect should classify them as tool_call.
-    let has_tool_call_scorer = examples.iter().any(|ex| ex["scorer"]["kind"].as_str() == Some("tool_call"));
-    assert!(has_tool_call_scorer, "expected at least one tool_call scorer, got {examples:?}");
+    let has_tool_call_scorer = examples
+        .iter()
+        .any(|ex| ex["scorer"]["kind"].as_str() == Some("tool_call"));
+    assert!(
+        has_tool_call_scorer,
+        "expected at least one tool_call scorer, got {examples:?}"
+    );
 }
 
 #[tokio::test]
@@ -229,11 +258,16 @@ async fn judgment_flywheel_create_append_compile() {
             "note": "test",
             "tags": ["prose"],
         });
-        let (status, appended) = json_call(&router, "POST", "/v1/judgments/prose-judge/rows", &body).await;
+        let (status, appended) =
+            json_call(&router, "POST", "/v1/judgments/prose-judge/rows", &body).await;
         assert_eq!(status, StatusCode::OK, "winner={} {}", winner.0, body);
         // The POST response carries the appended row's id (the UI's Undo
         // DELETEs by it) alongside the pre-existing manifest fields.
-        assert_eq!(appended["judgment_id"].as_str().unwrap(), format!("j{i}"), "{appended}");
+        assert_eq!(
+            appended["judgment_id"].as_str().unwrap(),
+            format!("j{i}"),
+            "{appended}"
+        );
         assert_eq!(appended["name"], "prose-judge");
         assert_eq!(appended["num_rows"].as_u64().unwrap(), (i + 1) as u64);
     }
@@ -295,7 +329,8 @@ async fn judgment_flywheel_create_append_compile() {
         "response_b": "beta",
         "winner": "a",
     });
-    let (status, appended) = json_call(&router, "POST", "/v1/judgments/prose-judge/rows", &body).await;
+    let (status, appended) =
+        json_call(&router, "POST", "/v1/judgments/prose-judge/rows", &body).await;
     assert_eq!(status, StatusCode::OK, "body={appended}");
     let judgment_id = appended["judgment_id"]
         .as_str()

@@ -1,6 +1,6 @@
 //! Verification probe for device-local row/batch buffer copies.
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use kiln_vulkan_kernel::kernels::{
     copy_device_buffer_rows_to_batch, split_device_buffer_batch_rows,
 };

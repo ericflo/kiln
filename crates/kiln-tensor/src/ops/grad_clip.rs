@@ -10,9 +10,7 @@
 
 use std::sync::Arc;
 
-use crate::{
-    bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId,
-};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 /// Compute the joint L2 norm of all gradients and rescale them in-
 /// place if the norm exceeds `max_norm`. Returns
@@ -29,9 +27,7 @@ pub fn clip_grad_norm(grads: &[&Tensor], max_norm: f32) -> Result<(f32, Vec<Tens
     }
     let dtype = grads[0].dtype();
     if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
-        bail!(
-            "clip_grad_norm: dtype must be F32/BF16/F16, got {dtype}"
-        );
+        bail!("clip_grad_norm: dtype must be F32/BF16/F16, got {dtype}");
     }
     for (i, g) in grads.iter().enumerate() {
         if g.dtype() != dtype {
@@ -217,7 +213,8 @@ mod tests {
         let ca = read_f32(&clipped[0]);
         let cb = read_f32(&clipped[1]);
         // Post-clip norm should be ≤ max_norm (1.0).
-        let post = (ca.iter().map(|v| v * v).sum::<f32>() + cb.iter().map(|v| v * v).sum::<f32>()).sqrt();
+        let post =
+            (ca.iter().map(|v| v * v).sum::<f32>() + cb.iter().map(|v| v * v).sum::<f32>()).sqrt();
         assert!(post <= 1.001, "post-clip norm {post} > max 1.0");
         assert!((ca[0] - 0.6).abs() < 1e-3); // 3/5
         assert!((cb[0] - 0.8).abs() < 1e-3); // 4/5

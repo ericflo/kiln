@@ -344,9 +344,7 @@ pub(crate) fn is_shell_c_flag(token: &str) -> bool {
     let Some(cluster) = token.strip_prefix('-') else {
         return false;
     };
-    !cluster.is_empty()
-        && cluster.chars().all(|c| c.is_ascii_alphabetic())
-        && cluster.contains('c')
+    !cluster.is_empty() && cluster.chars().all(|c| c.is_ascii_alphabetic()) && cluster.contains('c')
 }
 
 fn is_inline_program_flag(lang: &str, token: &str) -> bool {

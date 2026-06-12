@@ -12,7 +12,7 @@
 //! `d_x = cast(grad_output, original_dtype)`.
 
 use kiln_tensor::ops::{cast, index_select, scatter_add};
-use kiln_tensor::{bail, DType, Result, Tensor};
+use kiln_tensor::{DType, Result, Tensor, bail};
 
 use crate::BackwardOp;
 
@@ -46,7 +46,10 @@ impl BackwardOp for IndexSelectBackward {
         }
         // scatter_add the gradient back into the source shape along axis.
         let d_source = scatter_add(grad_output, self.axis, &self.indices, self.source_axis_dim)?;
-        Ok(vec![Some(d_source), None /* indices non-differentiable */])
+        Ok(vec![
+            Some(d_source),
+            None, /* indices non-differentiable */
+        ])
     }
     fn requires_input(&self, idx: usize) -> bool {
         match idx {
@@ -156,10 +159,7 @@ mod tests {
         let grads = bo.apply(&grad).unwrap();
         let d = grads[0].as_ref().unwrap();
         assert_eq!(d.shape(), &[4, 2]);
-        assert_eq!(
-            read_f32(d),
-            vec![0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 3.0, 4.0]
-        );
+        assert_eq!(read_f32(d), vec![0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 3.0, 4.0]);
         assert!(grads[1].is_none());
     }
 
@@ -187,11 +187,8 @@ mod tests {
         // grad_output [3, 2] = [[10, 20], [30, 40], [50, 60]].
         // → d_values = grad_output[[2, 0]] = [[50, 60], [10, 20]].
         let indices = Tensor::from_slice(&[2i64, 0], vec![2]).unwrap();
-        let grad = Tensor::from_slice(
-            &[10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0],
-            vec![3, 2],
-        )
-        .unwrap();
+        let grad =
+            Tensor::from_slice(&[10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0], vec![3, 2]).unwrap();
         let bo = ScatterAddBackward { axis: 0, indices };
         let grads = bo.apply(&grad).unwrap();
         let d = grads[0].as_ref().unwrap();

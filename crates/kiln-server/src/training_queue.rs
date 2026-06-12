@@ -44,8 +44,7 @@ fn finalize_job(state: &AppState, job_id: &str, new_state: TrainingState, error:
     // intact so the hand-written ideals stay re-trainable.
     if new_state == TrainingState::Completed && !job.consumed_correction_ids.is_empty() {
         let store = crate::api::corrections::CorrectionsStore::for_state(state);
-        let marked =
-            store.mark_trained_into(&job.consumed_correction_ids, &job.adapter_name);
+        let marked = store.mark_trained_into(&job.consumed_correction_ids, &job.adapter_name);
         tracing::info!(
             job_id = %job_id,
             adapter = %job.adapter_name,
@@ -1134,13 +1133,13 @@ fn build_local_teacher_for(
             Some(
                 kiln_model::lora_loader::LoraWeights::load(&dir, model_config.num_layers, device)
                     .map_err(|e| {
-                        format!(
-                            "teacher '{}' is registered to wear adapter '{name}' but it \
+                    format!(
+                        "teacher '{}' is registered to wear adapter '{name}' but it \
                              failed to load from {}: {e}",
-                            spec.alias,
-                            dir.display()
-                        )
-                    })?,
+                        spec.alias,
+                        dir.display()
+                    )
+                })?,
             )
         }
         None => None,
@@ -2095,7 +2094,9 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 &state,
                 &job_id,
                 TrainingState::Failed,
-                Some("training requires real model weights (not available in mock mode)".to_string()),
+                Some(
+                    "training requires real model weights (not available in mock mode)".to_string(),
+                ),
             );
             tracing::error!(job_id = %job_id, "training requires real model weights");
             return;
@@ -2393,8 +2394,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             let promotion_gate_pending = post_eval
                 .as_ref()
                 .is_some_and(|cfg| cfg.min_accuracy.is_some());
-            let canary_ok =
-                adapter_canary_allows_auto_load(&adapter_path, &adapter_name, &job_id);
+            let canary_ok = adapter_canary_allows_auto_load(&adapter_path, &adapter_name, &job_id);
             if auto_load && canary_ok && !promotion_gate_pending {
                 if let Err(e) = auto_load_adapter(&state, &adapter_path, &adapter_name) {
                     tracing::error!(job_id = %job_id, "auto-load failed: {e}");
@@ -2482,7 +2482,9 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                         include_baseline: false,
                     };
                     match enqueue_post_training_eval(&state, &job_id, &adapter_name, &cfg, false) {
-                        Err(e) => tracing::warn!(job_id = %job_id, suite = %suite, error = %e, "distill_refresh {label} enqueue failed"),
+                        Err(e) => {
+                            tracing::warn!(job_id = %job_id, suite = %suite, error = %e, "distill_refresh {label} enqueue failed")
+                        }
                         Ok(()) => {
                             // Stamp the dual thresholds onto the gate the
                             // standard enqueue just installed.

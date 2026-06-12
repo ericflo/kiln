@@ -60,14 +60,11 @@ impl VulkanBuffer {
         mem_type_index: u32,
         size: u64,
     ) -> Result<Self> {
-        let buffer_info = vk::BufferCreateInfo::default()
-            .size(size)
-            .usage(
-                vk::BufferUsageFlags::STORAGE_BUFFER
-                    | vk::BufferUsageFlags::TRANSFER_SRC
-                    | vk::BufferUsageFlags::TRANSFER_DST,
-            )
-            ;
+        let buffer_info = vk::BufferCreateInfo::default().size(size).usage(
+            vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_SRC
+                | vk::BufferUsageFlags::TRANSFER_DST,
+        );
 
         let buffer = unsafe {
             device
@@ -79,8 +76,7 @@ impl VulkanBuffer {
 
         let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(mem_requirements.size)
-            .memory_type_index(mem_type_index)
-            ;
+            .memory_type_index(mem_type_index);
 
         let memory = unsafe {
             device
@@ -108,14 +104,11 @@ impl VulkanBuffer {
         mem_type_index: u32,
         size: u64,
     ) -> Result<Self> {
-        let buffer_info = vk::BufferCreateInfo::default()
-            .size(size)
-            .usage(
-                vk::BufferUsageFlags::TRANSFER_SRC
-                    | vk::BufferUsageFlags::TRANSFER_DST
-                    | vk::BufferUsageFlags::STORAGE_BUFFER,
-            )
-            ;
+        let buffer_info = vk::BufferCreateInfo::default().size(size).usage(
+            vk::BufferUsageFlags::TRANSFER_SRC
+                | vk::BufferUsageFlags::TRANSFER_DST
+                | vk::BufferUsageFlags::STORAGE_BUFFER,
+        );
 
         let buffer = unsafe {
             device
@@ -127,8 +120,7 @@ impl VulkanBuffer {
 
         let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(mem_requirements.size)
-            .memory_type_index(mem_type_index)
-            ;
+            .memory_type_index(mem_type_index);
 
         let memory = unsafe {
             device
@@ -253,7 +245,11 @@ impl VulkanBuffer {
                 .end_command_buffer(cmd)
                 .context("fill_zero: failed to end command buffer")?;
             device
-                .queue_submit(queue, &[make_submit_info(&command_buffers)], vk::Fence::null())
+                .queue_submit(
+                    queue,
+                    &[make_submit_info(&command_buffers)],
+                    vk::Fence::null(),
+                )
                 .context("fill_zero: failed to submit fill")?;
             device
                 .queue_wait_idle(queue)
@@ -377,7 +373,12 @@ impl VulkanBuffer {
             VulkanBuffer::create_host_visible(device, host_mem_type, total_staging_bytes)?;
         let mapped = unsafe {
             device
-                .map_memory(staging.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+                .map_memory(
+                    staging.memory,
+                    0,
+                    vk::WHOLE_SIZE,
+                    vk::MemoryMapFlags::empty(),
+                )
                 .map_err(|e| anyhow::anyhow!("upload_data_batch: map_memory failed: {:?}", e))?
         };
         let mut src_offsets = Vec::with_capacity(uploads.len());
@@ -452,14 +453,16 @@ impl VulkanBuffer {
         }
 
         let total_staging_bytes = uploads.iter().try_fold(0u64, |acc, (_, _, data)| {
-            acc.checked_add(data.len() as u64)
-                .ok_or_else(|| anyhow::anyhow!("upload_data_at_offset_batch: staging size overflow"))
+            acc.checked_add(data.len() as u64).ok_or_else(|| {
+                anyhow::anyhow!("upload_data_at_offset_batch: staging size overflow")
+            })
         })?;
         anyhow::ensure!(
             total_staging_bytes > 0,
             "upload_data_at_offset_batch: total payload size must be non-zero"
         );
-        let staging = VulkanBuffer::create_host_visible(device, host_mem_type, total_staging_bytes)?;
+        let staging =
+            VulkanBuffer::create_host_visible(device, host_mem_type, total_staging_bytes)?;
         let mapped = unsafe {
             device
                 .map_memory(
@@ -619,12 +622,16 @@ impl VulkanBuffer {
         anyhow::ensure!(
             src_byte_offset + size <= src.size,
             "copy_buffer_region: src range {}+{} exceeds buffer {}",
-            src_byte_offset, size, src.size
+            src_byte_offset,
+            size,
+            src.size
         );
         anyhow::ensure!(
             dst_byte_offset + size <= dst.size,
             "copy_buffer_region: dst range {}+{} exceeds buffer {}",
-            dst_byte_offset, size, dst.size
+            dst_byte_offset,
+            size,
+            dst.size
         );
         let pool_info = make_pool_info(queue_family_index);
         let pool = unsafe {
@@ -674,8 +681,7 @@ impl VulkanBuffer {
         // bucket-larger than `src.size`; we copy and read exactly
         // `src.size` bytes below, so behaviour is unchanged. When this
         // `Arc` drops at function end the buffer returns to the pool.
-        let staging =
-            crate::buffer_pool::pool_alloc_host_visible(device, host_mem_type, src.size)?;
+        let staging = crate::buffer_pool::pool_alloc_host_visible(device, host_mem_type, src.size)?;
 
         // Create command buffer
         let pool_info = make_pool_info(queue_family_index);
@@ -766,17 +772,20 @@ impl VulkanBuffer {
                 "read_back_batch[{idx}]: source buffer must be non-empty"
             );
             dst_offsets.push(total_staging_bytes);
-            total_staging_bytes = total_staging_bytes.checked_add(src.size).ok_or_else(|| {
-                anyhow::anyhow!("read_back_batch: staging size overflow")
-            })?;
+            total_staging_bytes = total_staging_bytes
+                .checked_add(src.size)
+                .ok_or_else(|| anyhow::anyhow!("read_back_batch: staging size overflow"))?;
         }
         let total_len = usize::try_from(total_staging_bytes)
             .context("read_back_batch: staging size exceeds usize")?;
         // Recycle the host-visible staging buffer (see `read_back`). The
         // pooled buffer may exceed `total_staging_bytes`; we copy into
         // `[0, total_staging_bytes)` and read only `total_len` bytes.
-        let staging =
-            crate::buffer_pool::pool_alloc_host_visible(device, host_mem_type, total_staging_bytes)?;
+        let staging = crate::buffer_pool::pool_alloc_host_visible(
+            device,
+            host_mem_type,
+            total_staging_bytes,
+        )?;
 
         let pool_info = make_pool_info(queue_family_index);
         let pool = unsafe {
@@ -821,15 +830,13 @@ impl VulkanBuffer {
                 )
                 .map_err(|e| anyhow::anyhow!("read_back_batch: map_memory failed: {:?}", e))?
         };
-        let mapped = unsafe {
-            std::slice::from_raw_parts(mapped_ptr as *const u8, total_len)
-        };
+        let mapped = unsafe { std::slice::from_raw_parts(mapped_ptr as *const u8, total_len) };
         let mut out = Vec::with_capacity(sources.len());
         for (idx, src) in sources.iter().enumerate() {
             let start = usize::try_from(dst_offsets[idx])
                 .context("read_back_batch: offset exceeds usize")?;
-            let len = usize::try_from(src.size)
-                .context("read_back_batch: source size exceeds usize")?;
+            let len =
+                usize::try_from(src.size).context("read_back_batch: source size exceeds usize")?;
             let end = start
                 .checked_add(len)
                 .ok_or_else(|| anyhow::anyhow!("read_back_batch[{idx}]: slice overflow"))?;
@@ -958,7 +965,12 @@ impl VulkanBuffer {
             .context("create_host_visible_with_segments: create host-visible buffer")?;
         let mapped_ptr = unsafe {
             device
-                .map_memory(buffer.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+                .map_memory(
+                    buffer.memory,
+                    0,
+                    vk::WHOLE_SIZE,
+                    vk::MemoryMapFlags::empty(),
+                )
                 .map_err(|e| {
                     anyhow::anyhow!(
                         "create_host_visible_with_segments: map_memory failed: {:?}",
@@ -1039,9 +1051,7 @@ impl VulkanBuffer {
                 .map_memory(self.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
                 .map_err(|e| anyhow::anyhow!("read_mapped: map_memory: {:?}", e))?
         };
-        let bytes = unsafe {
-            std::slice::from_raw_parts(mapped as *const u8, bytes_len).to_vec()
-        };
+        let bytes = unsafe { std::slice::from_raw_parts(mapped as *const u8, bytes_len).to_vec() };
         unsafe {
             self.device.unmap_memory(self.memory);
         }
@@ -1102,14 +1112,16 @@ mod tests {
         assert_eq!(batched[0], first);
         assert_eq!(batched[1], second);
         let empty: Vec<&VulkanBuffer> = Vec::new();
-        assert!(VulkanBuffer::read_back_batch(
-            vk_device.device(),
-            vk_device.host_visible_mem_type(),
-            vk_device.queue(),
-            vk_device.queue_family_index(),
-            &empty,
-        )?
-        .is_empty());
+        assert!(
+            VulkanBuffer::read_back_batch(
+                vk_device.device(),
+                vk_device.host_visible_mem_type(),
+                vk_device.queue(),
+                vk_device.queue_family_index(),
+                &empty,
+            )?
+            .is_empty()
+        );
         Ok(())
     }
 
@@ -1129,10 +1141,19 @@ mod tests {
             &[&first, &second, &third],
         )?;
 
-        assert_eq!(offsets, vec![0, first.len() as u64, (first.len() + second.len()) as u64]);
-        assert_eq!(buffer.size(), (first.len() + second.len() + third.len()) as u64);
+        assert_eq!(
+            offsets,
+            vec![0, first.len() as u64, (first.len() + second.len()) as u64]
+        );
+        assert_eq!(
+            buffer.size(),
+            (first.len() + second.len() + third.len()) as u64
+        );
         let bytes = VulkanBuffer::read_host_visible(vk_device.device(), &buffer)?;
-        assert_eq!(bytes, [first.as_slice(), second.as_slice(), third.as_slice()].concat());
+        assert_eq!(
+            bytes,
+            [first.as_slice(), second.as_slice(), third.as_slice()].concat()
+        );
         Ok(())
     }
 }

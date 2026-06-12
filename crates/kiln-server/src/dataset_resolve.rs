@@ -117,12 +117,9 @@ pub fn resolve_agent_trace_prompts(
         AgentTraceFilter::Successful => {
             scaffold_prompts(traces.iter().copied().filter(|t| trace_is_successful(t)))
         }
-        AgentTraceFilter::Weekly => scaffold_prompts(
-            traces
-                .iter()
-                .copied()
-                .filter(|t| trace_is_successful(t) && trace_within_ms(t, now_unix_ms, WEEKLY_WINDOW_MS)),
-        ),
+        AgentTraceFilter::Weekly => scaffold_prompts(traces.iter().copied().filter(|t| {
+            trace_is_successful(t) && trace_within_ms(t, now_unix_ms, WEEKLY_WINDOW_MS)
+        })),
         AgentTraceFilter::JudgeTurns => judge_turn_prompts(&traces),
         AgentTraceFilter::Crisp => {
             scaffold_prompts(traces.iter().copied().filter(|t| trace_is_successful(t)))
@@ -309,7 +306,10 @@ fn judge_turn_prompts(traces: &[&AgentTrace]) -> Vec<OpdPrompt> {
 }
 
 fn render_transcript_line(role: &str, content: &str) -> String {
-    format!("[{role}] {}", truncate_middle(content, JUDGE_SEGMENT_CHAR_CAP))
+    format!(
+        "[{role}] {}",
+        truncate_middle(content, JUDGE_SEGMENT_CHAR_CAP)
+    )
 }
 
 fn judge_prompt(transcript: &[String], action: &TurnSegment) -> OpdPrompt {
@@ -512,10 +512,13 @@ mod tests {
         let mut followup = trace("followup", &rfc3339_ms_ago(1000), true);
         followup.outcome.has_followup_attempt = Some(true);
         write_index(dir.path(), &[forked, followup]);
-        let err = resolve_agent_trace_prompts(dir.path(), "agent_traces:weekly", NOW_MS)
-            .unwrap_err();
+        let err =
+            resolve_agent_trace_prompts(dir.path(), "agent_traces:weekly", NOW_MS).unwrap_err();
         assert!(err.contains("none qualify"), "{err}");
-        assert!(err.contains("agent_traces:all"), "offers remediation: {err}");
+        assert!(
+            err.contains("agent_traces:all"),
+            "offers remediation: {err}"
+        );
     }
 
     #[test]
@@ -524,8 +527,7 @@ mod tests {
         let mut t = trace("old-format", &rfc3339_ms_ago(1000), true);
         t.prompt_messages.clear();
         write_index(dir.path(), &[t]);
-        let err =
-            resolve_agent_trace_prompts(dir.path(), "agent_traces:all", NOW_MS).unwrap_err();
+        let err = resolve_agent_trace_prompts(dir.path(), "agent_traces:all", NOW_MS).unwrap_err();
         assert!(err.contains("predates prompt capture"), "{err}");
     }
 
@@ -612,18 +614,17 @@ mod tests {
             )
             .unwrap();
 
-        let from_traces = resolve_opd_dataset_selector(
-            "agent_traces:all",
-            dir.path(),
-            Some(&registry),
-            NOW_MS,
-        )
-        .unwrap();
-        assert!(from_traces[0].messages[1].content.contains("Fix the failing test"));
+        let from_traces =
+            resolve_opd_dataset_selector("agent_traces:all", dir.path(), Some(&registry), NOW_MS)
+                .unwrap();
+        assert!(
+            from_traces[0].messages[1]
+                .content
+                .contains("Fix the failing test")
+        );
 
         let from_registry =
-            resolve_opd_dataset_selector("uploaded", dir.path(), Some(&registry), NOW_MS)
-                .unwrap();
+            resolve_opd_dataset_selector("uploaded", dir.path(), Some(&registry), NOW_MS).unwrap();
         assert_eq!(from_registry[0].messages[0].content, "from registry");
     }
 

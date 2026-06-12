@@ -289,12 +289,7 @@ fn tape_forward_short_circuits_without_active_scope() {
 // `Tape::backward` walk.
 // ----------------------------------------------------------------------
 
-fn build_matmul_inputs(
-    device: &Device,
-    m: usize,
-    k: usize,
-    n: usize,
-) -> (Tensor, Tensor) {
+fn build_matmul_inputs(device: &Device, m: usize, k: usize, n: usize) -> (Tensor, Tensor) {
     // BF16 contiguous CUDA tensors of shapes [M, K] and [K, N].
     let a_host = random_bf16_vec(m * k, 0xA1B2_C3D4_E5F6_0708, 0.25);
     let b_host = random_bf16_vec(k * n, 0x1122_3344_5566_7788, 0.25);
@@ -353,15 +348,13 @@ fn tape_forward_matmul_bit_exact_parity_with_baseline() {
 
     // Baseline forward via the kt-typed registry directly (matches
     // what `try_kt_matmul` calls when the tape path declines).
-    let baseline_kt = kiln_tensor::cuda_matmul(&a_kt, &b_kt)
-        .expect("cuda_matmul baseline");
+    let baseline_kt = kiln_tensor::cuda_matmul(&a_kt, &b_kt).expect("cuda_matmul baseline");
     let baseline_out = &baseline_kt.clone();
 
     // Path B — tape-forward inside an active scope (the kt twin).
-    let (tape_result, tape) =
-        kiln_model::tape_forward::with_thread_local_tape(|| {
-            kiln_model::tape_forward::try_tape_matmul_kt(&a_kt, &b_kt)
-        });
+    let (tape_result, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::tape_forward::try_tape_matmul_kt(&a_kt, &b_kt)
+    });
     let tape_out_kt = tape_result
         .expect("tape-forward try_tape_matmul_kt ok")
         .expect("tape-forward returned Some(out)");
@@ -468,8 +461,8 @@ fn tape_forward_silu_bit_exact_parity_with_baseline() {
     let x_kt = x.clone();
 
     // Baseline — no scope, twin short-circuits.
-    let none_out = kiln_model::tape_forward::try_tape_silu_kt(&x_kt)
-        .expect("baseline try_tape_silu_kt ok");
+    let none_out =
+        kiln_model::tape_forward::try_tape_silu_kt(&x_kt).expect("baseline try_tape_silu_kt ok");
     assert!(
         none_out.is_none(),
         "baseline path (no tape scope) must short-circuit to Ok(None)"
@@ -481,10 +474,9 @@ fn tape_forward_silu_bit_exact_parity_with_baseline() {
     let baseline_out = &baseline_kt.clone();
 
     // Tape-forward inside an active scope (the kt-native twin).
-    let (tape_result, tape) =
-        kiln_model::tape_forward::with_thread_local_tape(|| {
-            kiln_model::tape_forward::try_tape_silu_kt(&x_kt)
-        });
+    let (tape_result, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::tape_forward::try_tape_silu_kt(&x_kt)
+    });
     let tape_out_kt = tape_result
         .expect("tape-forward try_tape_silu_kt ok")
         .expect("tape-forward returned Some(out)");
@@ -527,8 +519,7 @@ fn tape_forward_silu_short_circuits_without_active_scope() {
     }
     // #1082: production uses the kt-native twin; validate IT short-circuits.
     let x_kt = x.clone();
-    let out = kiln_model::tape_forward::try_tape_silu_kt(&x_kt)
-        .expect("try_tape_silu_kt call ok");
+    let out = kiln_model::tape_forward::try_tape_silu_kt(&x_kt).expect("try_tape_silu_kt call ok");
     assert!(
         out.is_none(),
         "no active tape scope must short-circuit to Ok(None)"
@@ -623,15 +614,13 @@ fn tape_forward_embedding_bit_exact_parity_with_baseline() {
     );
 
     // Baseline forward via the kt op-registry directly.
-    let baseline_kt = kiln_tensor::ops::embedding(&w_kt, &ids_kt)
-        .expect("kt embedding baseline");
+    let baseline_kt = kiln_tensor::ops::embedding(&w_kt, &ids_kt).expect("kt embedding baseline");
     let baseline_out = &baseline_kt.clone();
 
     // Path B — tape-forward inside an active scope (the kt twin).
-    let (tape_result, tape) =
-        kiln_model::tape_forward::with_thread_local_tape(|| {
-            kiln_model::tape_forward::try_tape_embedding_kt(&w_kt, &ids_kt)
-        });
+    let (tape_result, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::tape_forward::try_tape_embedding_kt(&w_kt, &ids_kt)
+    });
     let tape_out_kt = tape_result
         .expect("tape-forward try_tape_embedding_kt ok")
         .expect("tape-forward returned Some(out)");
@@ -774,10 +763,9 @@ fn tape_forward_swiglu_bit_exact_parity_with_baseline() {
     let baseline_out = &baseline_kt.clone();
 
     // Path B — tape-forward inside an active scope.
-    let (tape_result, tape) =
-        kiln_model::tape_forward::with_thread_local_tape(|| {
-            kiln_model::tape_forward::try_tape_swiglu_kt(&gate_kt, &up_kt)
-        });
+    let (tape_result, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::tape_forward::try_tape_swiglu_kt(&gate_kt, &up_kt)
+    });
     let tape_out_kt = tape_result
         .expect("tape-forward try_tape_swiglu_kt ok")
         .expect("tape-forward returned Some(out)");
@@ -932,8 +920,7 @@ fn tape_backward_silu_matches_analytic_reference() {
 
     // Seed grad shaped like the output, borrowed zero-copy as kt.
     let seed = build_seed_grad(&device, &[rows, cols], 0x511E_0000_0001, 0.25);
-    let seed_kt =
-        seed.clone();
+    let seed_kt = seed.clone();
     let mut seeds = HashMap::new();
     seeds.insert(out_id, seed_kt);
 
@@ -1000,8 +987,7 @@ fn tape_backward_swiglu_matches_analytic_reference() {
     assert_eq!(input_ids.len(), 2, "swiglu records two inputs (gate, up)");
 
     let seed = build_seed_grad(&device, &[rows, cols], 0x5716_0000_0002, 0.25);
-    let seed_kt =
-        seed.clone();
+    let seed_kt = seed.clone();
     let mut seeds = HashMap::new();
     seeds.insert(out_id, seed_kt);
 
@@ -1085,8 +1071,7 @@ fn tape_backward_matmul_matches_analytic_reference() {
 
     // Output is [M, N]; seed grad matches.
     let seed = build_seed_grad(&device, &[m, n], 0x3A33_0000_0003, 0.25);
-    let seed_kt =
-        seed.clone();
+    let seed_kt = seed.clone();
     let mut seeds = HashMap::new();
     seeds.insert(out_id, seed_kt);
 
@@ -1157,12 +1142,14 @@ fn tape_backward_embedding_scatter_add_conserves_mass() {
     let node = &tape.nodes()[0];
     let out_id = node.output_id;
     let input_ids = node.input_ids.clone();
-    assert!(!input_ids.is_empty(), "embedding records at least one input");
+    assert!(
+        !input_ids.is_empty(),
+        "embedding records at least one input"
+    );
 
     // Output is [N, H]; seed grad matches.
     let seed = build_seed_grad(&device, &[n_tokens, hidden], 0xE9B0_0000_0004, 0.25);
-    let seed_kt =
-        seed.clone();
+    let seed_kt = seed.clone();
     let mut seeds = HashMap::new();
     seeds.insert(out_id, seed_kt);
 
@@ -1245,8 +1232,7 @@ fn tape_backward_rms_norm_produces_input_grads() {
     assert!(!input_ids.is_empty(), "rms_norm records at least one input");
 
     let seed = build_seed_grad(&device, &[rows, hidden], 0x12_0000_0005, 0.25);
-    let seed_kt =
-        seed.clone();
+    let seed_kt = seed.clone();
     let mut seeds = HashMap::new();
     seeds.insert(out_id, seed_kt);
 
@@ -1276,7 +1262,6 @@ fn tape_backward_rms_norm_produces_input_grads() {
         }
     }
 }
-
 
 // ----------------------------------------------------------------------
 // Split-half RoPE tape-forward parity (#1082 — CP-4 op #6).
@@ -1390,22 +1375,26 @@ fn tape_forward_rope_split_half_matches_f32_reference() {
         std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
     }
 
-    for (batch, seq, heads, head_dim, rotary_dim) in
-        [(2usize, 8usize, 4usize, 256usize, 64usize), (1, 6, 2, 64, 64)]
-    {
+    for (batch, seq, heads, head_dim, rotary_dim) in [
+        (2usize, 8usize, 4usize, 256usize, 64usize),
+        (1, 6, 2, 64, 64),
+    ] {
         let (x, cos, sin) =
             build_rope_split_half_inputs(&device, batch, seq, heads, head_dim, rotary_dim);
 
         let x_kt = kt_in(&x);
         let cos_kt = kt_in(&cos);
         let sin_kt = kt_in(&sin);
-        let none_out =
-            kiln_model::tape_forward::try_tape_rope_kt(&x_kt, &cos_kt, &sin_kt, head_dim, rotary_dim)
-                .expect("baseline ok");
+        let none_out = kiln_model::tape_forward::try_tape_rope_kt(
+            &x_kt, &cos_kt, &sin_kt, head_dim, rotary_dim,
+        )
+        .expect("baseline ok");
         assert!(none_out.is_none(), "no-scope path must be Ok(None)");
 
         let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
-            kiln_model::tape_forward::try_tape_rope_kt(&x_kt, &cos_kt, &sin_kt, head_dim, rotary_dim)
+            kiln_model::tape_forward::try_tape_rope_kt(
+                &x_kt, &cos_kt, &sin_kt, head_dim, rotary_dim,
+            )
         });
         let out_kt = res
             .expect("tape try_tape_rope_kt ok")
@@ -1456,7 +1445,10 @@ fn tape_forward_rope_split_half_short_circuits_without_scope() {
     let sin_kt = kt_in(&sin);
     let out = kiln_model::tape_forward::try_tape_rope_kt(&x_kt, &cos_kt, &sin_kt, 64, 64)
         .expect("call ok");
-    assert!(out.is_none(), "no active scope must short-circuit to Ok(None)");
+    assert!(
+        out.is_none(),
+        "no active scope must short-circuit to Ok(None)"
+    );
 }
 
 #[test]
@@ -1491,9 +1483,13 @@ fn tape_backward_rope_split_half_matches_analytic_adjoint() {
     let input_ids = node.input_ids.clone();
     assert_eq!(input_ids.len(), 1);
 
-    let seed = build_seed_grad(&device, &[batch, seq, heads, head_dim], 0x4090_0000_0007, 0.25);
-    let seed_kt =
-        seed.clone();
+    let seed = build_seed_grad(
+        &device,
+        &[batch, seq, heads, head_dim],
+        0x4090_0000_0007,
+        0.25,
+    );
+    let seed_kt = seed.clone();
     let mut seeds = HashMap::new();
     seeds.insert(out_id, seed_kt);
 
@@ -1540,7 +1536,6 @@ fn tape_backward_rope_split_half_matches_analytic_adjoint() {
         "rope_split_half backward diverges from analytic adjoint (max-abs-diff {diff} >= 3e-2)"
     );
 }
-
 
 // ----------------------------------------------------------------------
 // Residual `add` tape-forward parity (#1082 — CP-4 op #7).
@@ -1599,20 +1594,39 @@ fn tape_forward_add_matches_reference() {
     let out_kt = res.expect("tape ok").expect("Some(out)");
     let out = candle_out(&out_kt);
     assert_eq!(tape.len(), 1, "add must record exactly one node");
-    assert_eq!(tape.nodes()[0].input_ids.len(), 2, "add records two inputs (a, b)");
+    assert_eq!(
+        tape.nodes()[0].input_ids.len(),
+        2,
+        "add records two inputs (a, b)"
+    );
     assert_eq!(out.dims(), &[rows, cols]);
     assert_eq!(out.dtype(), DType::BF16);
 
     // Forward vs host f32 reference (BF16-rounded sum).
-    let af = a.to_dtype(DType::F32).expect("af").flatten_all().expect("f").to_vec1::<f32>().expect("v");
-    let bf = b.to_dtype(DType::F32).expect("bf").flatten_all().expect("f").to_vec1::<f32>().expect("v");
+    let af = a
+        .to_dtype(DType::F32)
+        .expect("af")
+        .flatten_all()
+        .expect("f")
+        .to_vec1::<f32>()
+        .expect("v");
+    let bf = b
+        .to_dtype(DType::F32)
+        .expect("bf")
+        .flatten_all()
+        .expect("f")
+        .to_vec1::<f32>()
+        .expect("v");
     let want: Vec<f32> = af.iter().zip(bf.iter()).map(|(x, y)| x + y).collect();
     let want_t = Tensor::from_vec(want, (rows, cols))
         .expect("ref cpu")
         .to_device(device)
         .expect("ref -> cuda");
     let diff = max_abs_diff(&out, &want_t);
-    assert!(diff < 3e-2, "add forward diverges from f32 reference (max-abs-diff {diff})");
+    assert!(
+        diff < 3e-2,
+        "add forward diverges from f32 reference (max-abs-diff {diff})"
+    );
 }
 
 #[test]
@@ -1629,7 +1643,10 @@ fn tape_forward_add_short_circuits_without_scope() {
     let a_kt = kt_in(&a);
     let b_kt = kt_in(&b);
     let out = kiln_model::tape_forward::try_tape_add_kt(&a_kt, &b_kt).expect("call ok");
-    assert!(out.is_none(), "no active scope must short-circuit to Ok(None)");
+    assert!(
+        out.is_none(),
+        "no active scope must short-circuit to Ok(None)"
+    );
 }
 
 #[test]
@@ -1667,8 +1684,7 @@ fn tape_backward_add_routes_grad_to_both_inputs() {
     // unchanged (da = db = dc), so a borrowed seed would surface as a
     // Borrowed-storage grad (which can't be `slice()`d); the bridge always
     // copies, producing owned grads.
-    let seed_kt =
-        seed.clone();
+    let seed_kt = seed.clone();
     let mut seeds = HashMap::new();
     seeds.insert(out_id, seed_kt);
 
@@ -1683,10 +1699,12 @@ fn tape_backward_add_routes_grad_to_both_inputs() {
         assert_eq!(g.dims(), &[rows, cols]);
         assert_eq!(g.dtype(), DType::BF16);
         let diff = max_abs_diff(&g, &seed);
-        assert!(diff == 0.0, "add backward must pass grad through unchanged (diff {diff})");
+        assert!(
+            diff == 0.0,
+            "add backward must pass grad through unchanged (diff {diff})"
+        );
     }
 }
-
 
 // ----------------------------------------------------------------------
 // Connected multi-op tape backward-walk parity (#1082 — CP-4 op #9).
@@ -1726,15 +1744,12 @@ fn tape_connected_chain_backward_walk_parity() {
 
     let (m, k, n) = (16usize, 32usize, 16usize);
     let (a, b) = build_matmul_inputs(&device, m, k, n); // [m,k], [k,n] BF16 CUDA
-    let c = Tensor::from_vec(
-        random_bf16_vec(m * n, 0x0C0C_2468_ACE0_1357, 0.25),
-        (m, n),
-    )
-    .expect("c cpu")
-    .to_device(device)
-    .expect("c -> cuda")
-    .contiguous()
-    .expect("c contig");
+    let c = Tensor::from_vec(random_bf16_vec(m * n, 0x0C0C_2468_ACE0_1357, 0.25), (m, n))
+        .expect("c cpu")
+        .to_device(device)
+        .expect("c -> cuda")
+        .contiguous()
+        .expect("c contig");
 
     // Borrow candle inputs as kt (zero-copy CUDA views).
     let a_kt = a.clone();
@@ -1814,7 +1829,6 @@ fn tape_connected_chain_backward_walk_parity() {
     );
 }
 
-
 // ----------------------------------------------------------------------
 // Connected ADAPTER-chain tape-authoritative walk (#1082 — CP-4 endgame).
 //
@@ -1846,15 +1860,12 @@ fn tape_bridge_connected_adapter_chain_walk_parity() {
 
     let (m, k, n) = (16usize, 32usize, 16usize);
     let (a, b) = build_matmul_inputs(&device, m, k, n);
-    let c = Tensor::from_vec(
-        random_bf16_vec(m * n, 0x0CAD_2468_ACE0_1357, 0.25),
-        (m, n),
-    )
-    .expect("c cpu")
-    .to_device(device)
-    .expect("c -> cuda")
-    .contiguous()
-    .expect("c contig");
+    let c = Tensor::from_vec(random_bf16_vec(m * n, 0x0CAD_2468_ACE0_1357, 0.25), (m, n))
+        .expect("c cpu")
+        .to_device(device)
+        .expect("c -> cuda")
+        .contiguous()
+        .expect("c contig");
 
     // #1082: matmul kt twin -> add kt twin (the production path). They chain via
     // kt tensor ids directly (add reuses the matmul kt output), so the
@@ -1930,7 +1941,6 @@ fn tape_bridge_connected_adapter_chain_walk_parity() {
     );
 }
 
-
 // ----------------------------------------------------------------------
 // Connected 3-op ADAPTER chain (matmul -> silu -> add) (#1082 CP-4 endgame).
 //
@@ -1960,15 +1970,12 @@ fn tape_bridge_connected_three_op_adapter_chain() {
 
     let (m, k, n) = (16usize, 32usize, 16usize);
     let (a, b) = build_matmul_inputs(&device, m, k, n);
-    let c = Tensor::from_vec(
-        random_bf16_vec(m * n, 0x3000_2468_ACE0_1357, 0.25),
-        (m, n),
-    )
-    .expect("c cpu")
-    .to_device(device)
-    .expect("c -> cuda")
-    .contiguous()
-    .expect("c contig");
+    let c = Tensor::from_vec(random_bf16_vec(m * n, 0x3000_2468_ACE0_1357, 0.25), (m, n))
+        .expect("c cpu")
+        .to_device(device)
+        .expect("c -> cuda")
+        .contiguous()
+        .expect("c contig");
 
     // #1082: migrate the chain to the kt-native twins (the production path). They
     // chain via kt tensor ids directly — no candle bridge / io-mapping scope — so
@@ -1991,7 +1998,11 @@ fn tape_bridge_connected_three_op_adapter_chain() {
         });
     let _s = res.expect("connected 3-op forward ok");
 
-    assert_eq!(tape.len(), 3, "chain records three nodes (matmul, silu, add)");
+    assert_eq!(
+        tape.len(),
+        3,
+        "chain records three nodes (matmul, silu, add)"
+    );
     // Full connectivity: silu consumes matmul's output, add consumes silu's.
     assert_eq!(
         tape.nodes()[1].input_ids[0],
@@ -2025,7 +2036,6 @@ fn tape_bridge_connected_three_op_adapter_chain() {
     );
     assert!(da_c.device().is_gpu(), "d_a stays on CUDA");
 }
-
 
 // ----------------------------------------------------------------------
 // with_tape_authoritative_scope end-to-end grad parity (#1082 CP-4 Step B).
@@ -2120,8 +2130,7 @@ fn tape_lora_add_records_fused_node_and_emits_var_grads() {
     let rank = 8usize;
     let out_features = 32usize;
     let lora_scale = 0.5_f32;
-    let (base, x, a, b) =
-        build_lora_f32_inputs(&device, rows, in_features, rank, out_features);
+    let (base, x, a, b) = build_lora_f32_inputs(&device, rows, in_features, rank, out_features);
 
     unsafe {
         std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
@@ -2148,11 +2157,7 @@ fn tape_lora_add_records_fused_node_and_emits_var_grads() {
     let out = candle_out(&out_kt);
     assert_eq!(out.dims(), &[rows, out_features], "out shape");
     assert!(out.device().is_gpu(), "out stays on CUDA");
-    assert_eq!(
-        out.dtype(),
-        DType::F32,
-        "F32 LoRA add produces F32 output"
-    );
+    assert_eq!(out.dtype(), DType::F32, "F32 LoRA add produces F32 output");
 
     // --- Tape recording assertion.
     //
@@ -2187,8 +2192,7 @@ fn tape_lora_add_records_fused_node_and_emits_var_grads() {
         .expect("seed -> cuda")
         .contiguous()
         .expect("seed contig");
-    let seed_kt =
-        seed.clone();
+    let seed_kt = seed.clone();
     let mut seeds = HashMap::new();
     seeds.insert(out_id, seed_kt);
 
@@ -2351,8 +2355,7 @@ fn add_lora_delta_to_base_routes_through_tape_when_gated() {
     let rank = 4usize;
     let out_features = 16usize;
     let lora_scale = 0.25_f32;
-    let (base, x, a, b) =
-        build_lora_f32_inputs(&device, rows, in_features, rank, out_features);
+    let (base, x, a, b) = build_lora_f32_inputs(&device, rows, in_features, rank, out_features);
 
     unsafe {
         std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
@@ -2504,8 +2507,7 @@ fn tape_flash_attn_records_node_and_emits_qkv_grads() {
         .expect("seed -> cuda")
         .contiguous()
         .expect("seed contig");
-    let seed_kt =
-        seed.clone();
+    let seed_kt = seed.clone();
     let mut seeds = HashMap::new();
     seeds.insert(out_id, seed_kt);
 
@@ -2547,9 +2549,18 @@ fn tape_flash_attn_records_node_and_emits_qkv_grads() {
             .expect("scalar")
     };
     // The exact CP-4 failure mode was "0 grads". Assert nonzero.
-    assert!(max_abs(&dq) > 1e-4, "dq is essentially zero — tape backward not reaching q");
-    assert!(max_abs(&dk) > 1e-4, "dk is essentially zero — tape backward not reaching k");
-    assert!(max_abs(&dv) > 1e-4, "dv is essentially zero — tape backward not reaching v");
+    assert!(
+        max_abs(&dq) > 1e-4,
+        "dq is essentially zero — tape backward not reaching q"
+    );
+    assert!(
+        max_abs(&dk) > 1e-4,
+        "dk is essentially zero — tape backward not reaching k"
+    );
+    assert!(
+        max_abs(&dv) > 1e-4,
+        "dv is essentially zero — tape backward not reaching v"
+    );
 
     // Numerical sanity: every routed grad must be finite. We deliberately
     // do NOT re-run flash here as a value oracle. The vendored FA2 forward
@@ -2690,8 +2701,7 @@ fn tape_reshape_records_node_and_passes_grad_through() {
         .expect("seed -> cuda")
         .contiguous()
         .expect("seed contig");
-    let seed_kt =
-        seed.clone();
+    let seed_kt = seed.clone();
     let mut seeds = HashMap::new();
     seeds.insert(out_id, seed_kt);
 
@@ -2781,7 +2791,13 @@ fn tape_gdn_recurrent_records_node_and_emits_5_grads() {
 
     let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
         kiln_model::tape_forward::try_tape_gdn_recurrent_kt(
-            &*backend, &q_kt, &k_kt, &v_kt, &beta_kt, &g_kt, &mut state_kt,
+            &*backend,
+            &q_kt,
+            &k_kt,
+            &v_kt,
+            &beta_kt,
+            &g_kt,
+            &mut state_kt,
         )
     });
     let out_kt = res
@@ -2790,7 +2806,11 @@ fn tape_gdn_recurrent_records_node_and_emits_5_grads() {
     let out = candle_out(&out_kt);
     // #1082: the kt twin returns a kt Tensor; copy to candle here so the
     // shape/device asserts below can keep candle idioms (`dims4`/`is_cpu`).
-    assert_eq!(out.dims4().unwrap(), (b, nv, t, dv), "gdn recurrence out shape");
+    assert_eq!(
+        out.dims4().unwrap(),
+        (b, nv, t, dv),
+        "gdn recurrence out shape"
+    );
     assert!(!out.device().is_cpu(), "out stays on GPU (CUDA)");
 
     assert_eq!(
@@ -2811,8 +2831,7 @@ fn tape_gdn_recurrent_records_node_and_emits_5_grads() {
 
     // Seed grad shaped like out; walk.
     let seed = det_f32(&device, &[b, nv, t, dv], 0.3, -0.009);
-    let seed_kt =
-        seed.clone();
+    let seed_kt = seed.clone();
     let mut seeds = HashMap::new();
     seeds.insert(out_id, seed_kt);
     let grads = tape
@@ -2966,8 +2985,7 @@ fn tape_record_gdn_recurrent_head_last_records_node_and_emits_5_grads() {
     // `apply` transposes this seed to head-first before the head-first-only
     // `gdn_recurrent_backward_no_grad`.
     let seed = det_f32(&device, &[b, t, nv, dv], 0.3, -0.009);
-    let seed_kt =
-        seed.clone();
+    let seed_kt = seed.clone();
     let mut seeds = HashMap::new();
     seeds.insert(out_id, seed_kt);
     let grads = tape
@@ -2991,7 +3009,11 @@ fn tape_record_gdn_recurrent_head_last_records_node_and_emits_5_grads() {
     assert_eq!(g_dq.dims(), &[b, nv, t, dk], "dq head-first shape == q");
     assert_eq!(g_dk.dims(), &[b, nv, t, dk], "dk head-first shape == k");
     assert_eq!(g_dv.dims(), &[b, nv, t, dv], "dv head-first shape == v");
-    assert_eq!(g_dbeta.dims(), &[b, nv, t], "dbeta head-first shape == beta");
+    assert_eq!(
+        g_dbeta.dims(),
+        &[b, nv, t],
+        "dbeta head-first shape == beta"
+    );
     assert_eq!(g_dg.dims(), &[b, nv, t], "dg head-first shape == g");
 
     let max_abs = |tt: &Tensor| {
@@ -3131,8 +3153,7 @@ fn tape_gdn_l2_norm_scale_records_node_and_emits_input_grad() {
     );
 
     let seed = det_f32(&device, &[b, t, nv, dk], 0.3, -0.009);
-    let seed_kt =
-        seed.clone();
+    let seed_kt = seed.clone();
     let mut seeds = HashMap::new();
     seeds.insert(out_id, seed_kt);
     let grads = tape
@@ -3214,8 +3235,7 @@ fn tape_gdn_gated_rms_norm_records_node_and_emits_3_grads() {
     );
 
     let seed = det_f32(&device, &[b, t, nv, dv], 0.3, -0.009);
-    let seed_kt =
-        seed.clone();
+    let seed_kt = seed.clone();
     let mut seeds = HashMap::new();
     seeds.insert(out_id, seed_kt);
     let grads = tape
@@ -3296,8 +3316,7 @@ fn tape_transpose_records_node_and_passes_grad_through_transposed() {
 
     // Seed a head-LAST grad; the adjoint transposes back to head-FIRST.
     let seed = det_f32(&device, &[b, t, nv, dv], 0.3, -0.009);
-    let seed_kt =
-        seed.clone();
+    let seed_kt = seed.clone();
     let mut seeds = HashMap::new();
     seeds.insert(out_id, seed_kt);
     let grads = tape
@@ -3305,13 +3324,18 @@ fn tape_transpose_records_node_and_passes_grad_through_transposed() {
         .expect("transpose tape backward walk");
 
     let g_x = {
-        let kt = grads.get(input_ids[0]).expect("transpose input grad present");
+        let kt = grads
+            .get(input_ids[0])
+            .expect("transpose input grad present");
         kt.clone()
     };
     // The adjoint re-applies transpose(1,2) so the grad shape matches the
     // head-FIRST input [b, nv, t, dv].
     assert_eq!(g_x.dims(), &[b, nv, t, dv], "d_input head-first shape == x");
-    assert!(cuda_all_finite(&g_x), "transpose grad has non-finite entries");
+    assert!(
+        cuda_all_finite(&g_x),
+        "transpose grad has non-finite entries"
+    );
     assert!(
         cuda_max_abs(&g_x) > 1e-6,
         "transpose grad is essentially zero — tape backward not reaching the input"
@@ -3408,8 +3432,7 @@ fn tape_sdpa_fallback_records_node_and_emits_qkv_grads() {
 
     // Backward walk: seed grad shaped like out.
     let seed = det_f32(&device, &[b, nq, t, hd], 0.3, -0.009);
-    let seed_kt =
-        seed.clone();
+    let seed_kt = seed.clone();
     let mut seeds = HashMap::new();
     seeds.insert(out_id, seed_kt);
     let grads = tape

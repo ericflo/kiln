@@ -48,10 +48,17 @@ fn write_in_place_roundtrip_and_pointer_stable() {
         .expect("dtoh")
         .to_vec::<f32>()
         .expect("to_vec f32");
-    assert_eq!(back, host.to_vec(), "in-place write must land the new contents");
+    assert_eq!(
+        back,
+        host.to_vec(),
+        "in-place write must land the new contents"
+    );
 
     let p1 = dev_ptr(&t);
-    assert_eq!(p0, p1, "device pointer MUST be stable across an in-place write");
+    assert_eq!(
+        p0, p1,
+        "device pointer MUST be stable across an in-place write"
+    );
 }
 
 #[test]
@@ -67,7 +74,11 @@ fn write_in_place_last_write_wins() {
         .expect("dtoh")
         .to_vec::<f32>()
         .expect("to_vec");
-    assert_eq!(back, vec![1.0, 2.0, 3.0, 4.0], "second write must win (same-stream ordering)");
+    assert_eq!(
+        back,
+        vec![1.0, 2.0, 3.0, 4.0],
+        "second write must win (same-stream ordering)"
+    );
 }
 
 #[test]
@@ -87,8 +98,12 @@ fn write_in_place_rejects_bad_inputs() {
         "mismatched element byte width must error"
     );
     // non-contiguous / start_offset != 0 (a narrow view)
-    let big = Tensor::from_vec_on(Device::Rocm(0), (0..16).map(|i| i as f32).collect(), vec![16])
-        .expect("from_vec_on big");
+    let big = Tensor::from_vec_on(
+        Device::Rocm(0),
+        (0..16).map(|i| i as f32).collect(),
+        vec![16],
+    )
+    .expect("from_vec_on big");
     let view = big.narrow(0, 4, 8).expect("narrow");
     assert!(
         kiln_tensor::rocm_write_host_in_place(&view, &[0f32; 8]).is_err(),

@@ -11,16 +11,12 @@
 use crate::ops::{
     causal_mask, masked_fill, matmul, matmul_rhs_transposed, mul_scalar, softmax_last_dim,
 };
-use crate::{bail, Result, Tensor};
+use crate::{Result, Tensor, bail};
 
 /// Causal variant of [`scaled_dot_product_attention`]. Applies a
 /// causal mask to the scores so each position only attends to itself
 /// and prior positions. Requires `Q.seq == K.seq` (self-attention).
-pub fn causal_scaled_dot_product_attention(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-) -> Result<Tensor> {
+pub fn causal_scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
     let qs = q.shape();
     let q_rank = qs.len();
     if q_rank < 2 {
@@ -29,9 +25,7 @@ pub fn causal_scaled_dot_product_attention(
     let seq_q = qs[q_rank - 2];
     let seq_k = k.shape()[q_rank - 2];
     if seq_q != seq_k {
-        bail!(
-            "causal_sdpa: Q.seq ({seq_q}) must equal K.seq ({seq_k}) for self-attention"
-        );
+        bail!("causal_sdpa: Q.seq ({seq_q}) must equal K.seq ({seq_k}) for self-attention");
     }
     let head_dim = qs[q_rank - 1];
     let scale = 1.0_f32 / (head_dim as f32).sqrt();
@@ -87,9 +81,7 @@ pub fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Resul
     let ks = k.shape();
     let vs = v.shape();
     if qs.len() != ks.len() || qs.len() != vs.len() {
-        bail!(
-            "sdpa: Q/K/V must share rank; got Q={qs:?}, K={ks:?}, V={vs:?}"
-        );
+        bail!("sdpa: Q/K/V must share rank; got Q={qs:?}, K={ks:?}, V={vs:?}");
     }
     if qs.len() < 2 {
         bail!("sdpa: rank must be ≥ 2");
@@ -139,7 +131,8 @@ mod tests {
         // Q, K, V each [B=1, M=2, D=4] → output [1, 2, 4].
         let q = Tensor::from_slice(&[0.0f32; 8], vec![1, 2, 4]).unwrap();
         let k = Tensor::from_slice(&[0.0f32; 8], vec![1, 2, 4]).unwrap();
-        let v = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], vec![1, 2, 4]).unwrap();
+        let v = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], vec![1, 2, 4])
+            .unwrap();
         let y = scaled_dot_product_attention(&q, &k, &v).unwrap();
         assert_eq!(y.shape(), &[1, 2, 4]);
     }

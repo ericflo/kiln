@@ -8,9 +8,7 @@
 use kiln_autograd::{
     AddBackward, CrossEntropyBackward, GeluBackward, LayerNormBackward, MatmulBackward, Tape,
 };
-use kiln_tensor::ops::{
-    add, cross_entropy, gelu, layer_norm, matmul, xavier_uniform,
-};
+use kiln_tensor::ops::{add, cross_entropy, gelu, layer_norm, matmul, xavier_uniform};
 use kiln_tensor::{CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId};
 use std::sync::Arc;
 
@@ -30,11 +28,19 @@ fn scalar_f32(t: &Tensor) -> f32 {
 fn sgd_step(param: &Tensor, grad: &Tensor, lr: f32) -> Result<Tensor> {
     let p = read_f32(param);
     let g = read_f32(grad);
-    let new: Vec<f32> = p.iter().zip(g.iter()).map(|(&pv, &gv)| pv - lr * gv).collect();
+    let new: Vec<f32> = p
+        .iter()
+        .zip(g.iter())
+        .map(|(&pv, &gv)| pv - lr * gv)
+        .collect();
     let bytes: Vec<u8> = new.iter().flat_map(|&v| v.to_le_bytes()).collect();
     let cpu = CpuStorage::from_bytes(DType::F32, bytes)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(param.shape().to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(param.shape().to_vec()),
+        TensorId::next(),
+    )
 }
 
 fn accumulator(a: &Tensor, b: &Tensor) -> Result<Tensor> {
@@ -92,11 +98,7 @@ fn train_block_descends() {
 
         // 3. h = gelu(h_pre)
         let h = gelu(&h_pre).unwrap();
-        tape.record(
-            &h,
-            &[&h_pre],
-            Box::new(GeluBackward { x: h_pre.clone() }),
-        );
+        tape.record(&h, &[&h_pre], Box::new(GeluBackward { x: h_pre.clone() }));
 
         // 4. logits = h @ w2
         let logits = matmul(&h, &w2).unwrap();
@@ -149,7 +151,10 @@ fn train_block_descends() {
 
     // Cross-entropy loss for 4 classes baseline (uniform) is ln(4) ≈ 1.386.
     // Trained should be well below that.
-    assert!(last < 1.3, "trained loss {last} should be < uniform baseline");
+    assert!(
+        last < 1.3,
+        "trained loss {last} should be < uniform baseline"
+    );
 }
 
 #[test]

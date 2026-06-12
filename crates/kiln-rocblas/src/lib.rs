@@ -11,8 +11,8 @@ mod backend_matmul;
 mod workspace_pool;
 
 pub use algo_cache::{
-    deserialize_from_json, load_from_path, save_to_path, serialize_to_json, AlgoCache,
-    AlgoCacheKey, AlgoCacheStats, AlgoCacheValue,
+    AlgoCache, AlgoCacheKey, AlgoCacheStats, AlgoCacheValue, deserialize_from_json, load_from_path,
+    save_to_path, serialize_to_json,
 };
 pub use backend_matmul::{BackendMatmul, Epilogue, MatmulLayout, MatmulOutcome, MatmulRequest};
 pub use workspace_pool::WorkspacePool;

@@ -1,9 +1,9 @@
 //! Kiln HTTP server — library interface for integration testing.
 
-pub mod agent_runs;
-pub mod api;
 pub mod adapter_swap;
 pub mod adapter_verify;
+pub mod agent_runs;
+pub mod api;
 pub mod batching_engine;
 pub mod cli;
 pub mod config;

@@ -309,7 +309,9 @@ pub fn auto_detect_scorer(target: &str) -> Scorer {
     }
 
     // 5. JSON-shaped (non-tool-call) — leading { or [ that parses cleanly.
-    if (t.starts_with('{') || t.starts_with('[')) && serde_json::from_str::<serde_json::Value>(t).is_ok() {
+    if (t.starts_with('{') || t.starts_with('['))
+        && serde_json::from_str::<serde_json::Value>(t).is_ok()
+    {
         return Scorer::JsonValidity {
             require_object: t.starts_with('{'),
             required_paths: Vec::new(),
@@ -396,7 +398,10 @@ fn is_mcq_label(s: &str) -> bool {
 }
 
 fn numeric_tolerance_for(s: &str) -> Option<NumericTolerance> {
-    let cleaned: String = s.chars().filter(|c| !c.is_whitespace() && *c != ',').collect();
+    let cleaned: String = s
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != ',')
+        .collect();
     let parsed: f64 = cleaned.parse().ok()?;
     let integer_only = parsed.fract() == 0.0;
     Some(NumericTolerance {
@@ -422,12 +427,8 @@ fn extract_key_phrases(text: &str, k: usize) -> Vec<String> {
     for line in text.lines() {
         let words: Vec<&str> = line
             .split_whitespace()
-            .map(|w| {
-                w.trim_matches(|c: char| !c.is_alphanumeric())
-            })
-            .filter(|w| {
-                w.chars().count() >= 4 && !stop.contains(&w.to_ascii_lowercase().as_str())
-            })
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+            .filter(|w| w.chars().count() >= 4 && !stop.contains(&w.to_ascii_lowercase().as_str()))
             .collect();
         for window in words.windows(3) {
             let phrase = window.join(" ").to_lowercase();
@@ -736,10 +737,7 @@ fn decompose(
 /// Build one example per `(assistant_with_tool_calls, tool_result(s), next_assistant)`
 /// triple. The eval prompt ends on a `tool`-role message, so the model is
 /// asked: "given this tool result, what do you do next?".
-fn tool_response_followup(
-    messages: &[SftMessage],
-    conv: &SftConversation,
-) -> Vec<EvalExample> {
+fn tool_response_followup(messages: &[SftMessage], conv: &SftConversation) -> Vec<EvalExample> {
     let mut out = Vec::new();
     let mut i = 0usize;
     while i < messages.len() {
@@ -812,10 +810,7 @@ fn tool_response_followup(
 /// exchange. Prompt = messages[0..last_assistant], target = last assistant
 /// turn. Empty when there's no tool turn or no assistant turn after the
 /// last tool response.
-fn end_of_trajectory_answer(
-    messages: &[SftMessage],
-    conv: &SftConversation,
-) -> Vec<EvalExample> {
+fn end_of_trajectory_answer(messages: &[SftMessage], conv: &SftConversation) -> Vec<EvalExample> {
     if !messages.iter().any(|m| m.role == "tool") {
         return Vec::new();
     }
@@ -937,10 +932,8 @@ fn assistant_target(m: &SftMessage) -> Option<(String, AssistantTargetKind)> {
     // tool_call scorer compares structurally.
     let qwen_calls = crate::qwen3::extract_tool_calls(content);
     if !qwen_calls.is_empty() {
-        let arr: Vec<serde_json::Value> = qwen_calls
-            .iter()
-            .map(|c| c.to_canonical_json())
-            .collect();
+        let arr: Vec<serde_json::Value> =
+            qwen_calls.iter().map(|c| c.to_canonical_json()).collect();
         let canonical = serde_json::json!({"tool_calls": arr});
         return Some((canonical.to_string(), AssistantTargetKind::ToolCall));
     }
@@ -1041,7 +1034,9 @@ fn extract_tool_call_from_content(content: &str) -> Option<String> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-            call.get("arguments").cloned().unwrap_or(serde_json::Value::Null),
+            call.get("arguments")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
         )
     } else if let Some(function) = obj.get("function").and_then(|v| v.as_object()) {
         (
@@ -1061,7 +1056,9 @@ fn extract_tool_call_from_content(content: &str) -> Option<String> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-            obj.get("arguments").cloned().unwrap_or(serde_json::Value::Null),
+            obj.get("arguments")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
         )
     };
     let canonical = serde_json::json!({
@@ -1091,7 +1088,11 @@ fn extract_first_code_block(content: &str) -> Option<(Option<String>, String)> {
         } else {
             Some(language.to_string())
         };
-        let body = body_with_close.split("```").next().unwrap_or("").to_string();
+        let body = body_with_close
+            .split("```")
+            .next()
+            .unwrap_or("")
+            .to_string();
         if body.trim().is_empty() {
             continue;
         }
@@ -1100,9 +1101,34 @@ fn extract_first_code_block(content: &str) -> Option<(Option<String>, String)> {
         let is_code = body.lines().count() >= 2
             || matches!(
                 language_opt.as_deref().unwrap_or(""),
-                "python" | "py" | "rust" | "rs" | "ts" | "tsx" | "js" | "go" | "java" | "c"
-                | "cpp" | "c++" | "cs" | "kt" | "swift" | "rb" | "php" | "scala" | "sh" | "bash"
-                | "zsh" | "html" | "css" | "json" | "yaml" | "yml" | "toml" | "sql"
+                "python"
+                    | "py"
+                    | "rust"
+                    | "rs"
+                    | "ts"
+                    | "tsx"
+                    | "js"
+                    | "go"
+                    | "java"
+                    | "c"
+                    | "cpp"
+                    | "c++"
+                    | "cs"
+                    | "kt"
+                    | "swift"
+                    | "rb"
+                    | "php"
+                    | "scala"
+                    | "sh"
+                    | "bash"
+                    | "zsh"
+                    | "html"
+                    | "css"
+                    | "json"
+                    | "yaml"
+                    | "yml"
+                    | "toml"
+                    | "sql"
             );
         if !is_code {
             return None;
@@ -1208,7 +1234,6 @@ pub enum SynthesisError {
     NoExamples,
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1225,10 +1250,7 @@ mod tests {
 
     fn conv(roles_and_content: &[(&str, &str)]) -> SftConversation {
         SftConversation {
-            messages: roles_and_content
-                .iter()
-                .map(|(r, c)| msg(r, c))
-                .collect(),
+            messages: roles_and_content.iter().map(|(r, c)| msg(r, c)).collect(),
             extra: Default::default(),
         }
     }
@@ -1357,10 +1379,12 @@ mod tests {
         let mut cfg = SynthesisConfig::new("test");
         cfg.strip_system_prompt = true;
         let (suite, _) = synthesize_suite(vec![c], &cfg).unwrap();
-        assert!(suite.examples[0]
-            .messages
-            .iter()
-            .all(|m| m.role != "system"));
+        assert!(
+            suite.examples[0]
+                .messages
+                .iter()
+                .all(|m| m.role != "system")
+        );
     }
 
     #[test]
@@ -1397,10 +1421,7 @@ mod tests {
     fn max_prompt_chars_filters_long_trajectories() {
         let huge = "x".repeat(100_000);
         let c = SftConversation {
-            messages: vec![
-                msg("user", &huge),
-                msg("assistant", "short"),
-            ],
+            messages: vec![msg("user", &huge), msg("assistant", "short")],
             extra: Default::default(),
         };
         let mut cfg = SynthesisConfig::new("test");
@@ -1412,12 +1433,7 @@ mod tests {
     #[test]
     fn max_examples_is_respected_via_reservoir() {
         let cs: Vec<_> = (0..50)
-            .map(|i| {
-                conv(&[
-                    ("user", &format!("q{i}")),
-                    ("assistant", &format!("a{i}")),
-                ])
-            })
+            .map(|i| conv(&[("user", &format!("q{i}")), ("assistant", &format!("a{i}"))]))
             .collect();
         let mut cfg = SynthesisConfig::new("cap");
         cfg.sampling.max_examples = Some(7);
@@ -1475,7 +1491,13 @@ mod tests {
         });
         let (suite, _) = synthesize_suite(vec![c], &cfg).unwrap();
         assert_eq!(suite.examples.len(), 1);
-        assert!(suite.examples[0].target.as_deref().unwrap().contains("tool_call"));
+        assert!(
+            suite.examples[0]
+                .target
+                .as_deref()
+                .unwrap()
+                .contains("tool_call")
+        );
     }
 
     #[test]
@@ -1617,7 +1639,10 @@ mod tests {
         c2.extra.insert("tools".into(), t2);
         let cfg = SynthesisConfig::new("mismatched");
         let (suite, _) = synthesize_suite(vec![c1, c2], &cfg).unwrap();
-        assert!(suite.tools.is_none(), "inconsistent extras should leave tools=None");
+        assert!(
+            suite.tools.is_none(),
+            "inconsistent extras should leave tools=None"
+        );
     }
 
     #[test]
@@ -1640,12 +1665,7 @@ mod tests {
     #[test]
     fn seed_determinism_makes_reservoir_stable() {
         let cs: Vec<_> = (0..30)
-            .map(|i| {
-                conv(&[
-                    ("user", &format!("q{i}")),
-                    ("assistant", &format!("a{i}")),
-                ])
-            })
+            .map(|i| conv(&[("user", &format!("q{i}")), ("assistant", &format!("a{i}"))]))
             .collect();
         let mut cfg = SynthesisConfig::new("test");
         cfg.sampling.max_examples = Some(5);

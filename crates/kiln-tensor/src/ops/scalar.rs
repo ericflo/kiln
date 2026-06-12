@@ -14,8 +14,8 @@
 use std::sync::Arc;
 
 use crate::{
-    bail, dispatch1, BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result,
-    Storage, Tensor, TensorId,
+    BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result, Storage, Tensor,
+    TensorId, bail, dispatch1,
 };
 
 /// Tensor-scalar elementwise op kind. Carried by [`ScalarOp`].
@@ -111,29 +111,33 @@ impl DeviceOp1 for ScalarOp {
         for i in 0..n {
             let v = match dtype {
                 DType::F32 => f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()),
-                DType::BF16 => half::bf16::from_le_bytes(
-                    bytes[i * 2..i * 2 + 2].try_into().unwrap(),
-                )
-                .to_f32(),
-                DType::F16 => half::f16::from_le_bytes(
-                    bytes[i * 2..i * 2 + 2].try_into().unwrap(),
-                )
-                .to_f32(),
+                DType::BF16 => {
+                    half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+                }
+                DType::F16 => {
+                    half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+                }
                 _ => unreachable!(),
             };
             let y = self.kind.apply_f32(v, c);
             match dtype {
                 DType::F32 => out[i * 4..i * 4 + 4].copy_from_slice(&y.to_le_bytes()),
-                DType::BF16 => out[i * 2..i * 2 + 2]
-                    .copy_from_slice(&half::bf16::from_f32(y).to_le_bytes()),
-                DType::F16 => out[i * 2..i * 2 + 2]
-                    .copy_from_slice(&half::f16::from_f32(y).to_le_bytes()),
+                DType::BF16 => {
+                    out[i * 2..i * 2 + 2].copy_from_slice(&half::bf16::from_f32(y).to_le_bytes())
+                }
+                DType::F16 => {
+                    out[i * 2..i * 2 + 2].copy_from_slice(&half::f16::from_f32(y).to_le_bytes())
+                }
                 _ => unreachable!(),
             }
         }
         let cpu_out = CpuStorage::from_bytes(dtype, out)?;
         let storage: Storage = Arc::new(cpu_out);
-        let t = Tensor::from_parts(storage, Layout::contiguous(x.shape().to_vec()), TensorId::next())?;
+        let t = Tensor::from_parts(
+            storage,
+            Layout::contiguous(x.shape().to_vec()),
+            TensorId::next(),
+        )?;
         Ok(Some(t))
     }
 
@@ -149,7 +153,11 @@ impl DeviceOp1 for ScalarOp {
         if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
             return Ok(None);
         }
-        Ok(Some(crate::cuda_scalar_op(x, self.kind.cuda_tag(), self.c)?))
+        Ok(Some(crate::cuda_scalar_op(
+            x,
+            self.kind.cuda_tag(),
+            self.c,
+        )?))
     }
 
     #[cfg(feature = "rocm")]
@@ -164,7 +172,11 @@ impl DeviceOp1 for ScalarOp {
         if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
             return Ok(None);
         }
-        Ok(Some(crate::rocm_scalar_op(x, self.kind.cuda_tag(), self.c)?))
+        Ok(Some(crate::rocm_scalar_op(
+            x,
+            self.kind.cuda_tag(),
+            self.c,
+        )?))
     }
 
     #[cfg(feature = "vulkan")]
@@ -310,7 +322,10 @@ mod tests {
 
     #[test]
     fn bf16_round_trips() {
-        let bf: Vec<half::bf16> = [1.0f32, 2.0].iter().map(|&v| half::bf16::from_f32(v)).collect();
+        let bf: Vec<half::bf16> = [1.0f32, 2.0]
+            .iter()
+            .map(|&v| half::bf16::from_f32(v))
+            .collect();
         let x = Tensor::from_slice(&bf, vec![2]).unwrap();
         assert_eq!(add_scalar(&x, 1.0).unwrap().dtype(), DType::BF16);
     }

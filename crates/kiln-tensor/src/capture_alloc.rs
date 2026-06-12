@@ -153,7 +153,8 @@ impl CaptureArena {
                 // buffer that the captured kernel does NOT fully overwrite — it
                 // reads the previous replay's value (stale) → the front-to-back
                 // freeze. Off by default; zero production cost.
-                let force_zero = std::env::var("KILN_ARENA_FORCE_ZERO").ok().as_deref() == Some("1");
+                let force_zero =
+                    std::env::var("KILN_ARENA_FORCE_ZERO").ok().as_deref() == Some("1");
                 if zero || force_zero {
                     // Captured memset on the active (capture) stream — recorded
                     // into the graph so every replay re-zeros the buffer.
@@ -170,7 +171,14 @@ impl CaptureArena {
     fn borrow_view(&self, dtype: DType, storage: &Arc<CudaStorage>) -> Result<CudaStorage> {
         let (ptr, byte_len) = storage.device_ptr_raw();
         let keep_alive: Arc<dyn Any + Send + Sync> = storage.clone();
-        CudaStorage::from_borrowed_ctx(&self.ctx, self.device_index, dtype, ptr, byte_len, keep_alive)
+        CudaStorage::from_borrowed_ctx(
+            &self.ctx,
+            self.device_index,
+            dtype,
+            ptr,
+            byte_len,
+            keep_alive,
+        )
     }
 
     /// Zero the buffer on the active CUDA stream (captured during the replay
@@ -184,11 +192,13 @@ impl CaptureArena {
         // the buffer was (re)used on. Stream-ordered zero-fill, recorded into
         // the graph during the replay (capture) pass.
         unsafe {
-            cudarc::driver::result::memset_d8_async(ptr, 0u8, byte_len, cu_stream).map_err(|e| {
-                Error::Msg(format!(
-                    "CaptureArena::memset_zero: memset_d8_async({byte_len}) failed: {e:?}"
-                ))
-            })?;
+            cudarc::driver::result::memset_d8_async(ptr, 0u8, byte_len, cu_stream).map_err(
+                |e| {
+                    Error::Msg(format!(
+                        "CaptureArena::memset_zero: memset_d8_async({byte_len}) failed: {e:?}"
+                    ))
+                },
+            )?;
         }
         Ok(())
     }

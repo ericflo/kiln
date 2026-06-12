@@ -49,8 +49,8 @@ use anyhow::Result;
 use kiln_autograd::BackwardOp;
 use kiln_model::vk_bwd_adapter::VkBwdAdapter;
 use kiln_tensor::{Device, Tensor};
-use kiln_vulkan_kernel::vk_tensor::{VkBackwardOp, VkDType, VkTensor};
 use kiln_vulkan_kernel::VulkanDevice;
+use kiln_vulkan_kernel::vk_tensor::{VkBackwardOp, VkDType, VkTensor};
 
 // ----------------------------------------------------------------------------
 // Gate + helpers.
@@ -112,7 +112,13 @@ fn kt_to_host(t: &Tensor) -> Result<Vec<f32>> {
 }
 
 fn max_abs_diff(got: &[f32], expected: &[f32]) -> f32 {
-    assert_eq!(got.len(), expected.len(), "len mismatch {} vs {}", got.len(), expected.len());
+    assert_eq!(
+        got.len(),
+        expected.len(),
+        "len mismatch {} vs {}",
+        got.len(),
+        expected.len()
+    );
     got.iter()
         .zip(expected.iter())
         .map(|(g, e)| (g - e).abs())
@@ -182,7 +188,11 @@ fn exact_vs_direct(
         grad_fn.input_refs().len(),
         "adapter input_count must equal inner.input_refs().len()"
     );
-    assert_eq!(adapter.name(), grad_fn.op_name(), "adapter name must equal op_name");
+    assert_eq!(
+        adapter.name(),
+        grad_fn.op_name(),
+        "adapter name must equal op_name"
+    );
     let via_adapter = adapter.apply(&grad_out_kt)?;
     let adapter_host: Vec<Option<Vec<f32>>> = via_adapter
         .iter()
@@ -207,7 +217,8 @@ fn exact_vs_direct(
                     grad_fn.op_name()
                 );
                 assert_eq!(
-                    err, 0.0,
+                    err,
+                    0.0,
                     "[{}] slot {i}: adapter grad must be byte-identical to direct (got {err:e})",
                     grad_fn.op_name()
                 );
@@ -240,13 +251,19 @@ fn vk_bwd_adapter_matmul_exact_vs_direct() -> Result<()> {
     let b = vk_param_f32(&b_data, &[k, n], &dev)?;
     // Real forward; the output's grad_fn IS MatmulBackward over [a, b].
     let out = kiln_vulkan_kernel::vk_ops::matmul::vk_matmul(&a, &b)?;
-    let grad_fn = out.grad_fn().expect("matmul forward must attach grad_fn").clone();
+    let grad_fn = out
+        .grad_fn()
+        .expect("matmul forward must attach grad_fn")
+        .clone();
 
     // grad_output dC = ones / (M*N)  (= d mean(A@B))
     let dc_data = vec![1.0_f32 / (m * n) as f32; m * n];
     let grads = exact_vs_direct(&grad_fn, &dc_data, &[m, n])?;
     assert_eq!(grads.len(), 2, "matmul backward returns 2 slots");
-    assert!(grads[0].is_some() && grads[1].is_some(), "matmul: both grads present");
+    assert!(
+        grads[0].is_some() && grads[1].is_some(),
+        "matmul: both grads present"
+    );
     Ok(())
 }
 
@@ -304,7 +321,9 @@ fn vk_bwd_adapter_rmsnorm_exact_vs_direct() -> Result<()> {
     };
     let (rows, hidden) = (2usize, 4usize);
     let eps = 1e-6_f32;
-    let x_data: Vec<f32> = (0..(rows * hidden)).map(|i| (i as f32) * 0.3 - 0.5).collect();
+    let x_data: Vec<f32> = (0..(rows * hidden))
+        .map(|i| (i as f32) * 0.3 - 0.5)
+        .collect();
     let w_data: Vec<f32> = vec![0.25, -0.5, 0.75, 1.0];
 
     let x = vk_param_f32(&x_data, &[rows, hidden], &dev)?;
@@ -314,9 +333,16 @@ fn vk_bwd_adapter_rmsnorm_exact_vs_direct() -> Result<()> {
 
     let dy_data = vec![1.0_f32 / (rows * hidden) as f32; rows * hidden];
     let grads = exact_vs_direct(&grad_fn, &dy_data, &[rows, hidden])?;
-    assert_eq!(grads.len(), 2, "rmsnorm backward returns 2 slots [Some, None]");
+    assert_eq!(
+        grads.len(),
+        2,
+        "rmsnorm backward returns 2 slots [Some, None]"
+    );
     assert!(grads[0].is_some(), "rmsnorm dx present (slot 0)");
-    assert!(grads[1].is_none(), "rmsnorm frozen-weight grad MUST be None (slot 1)");
+    assert!(
+        grads[1].is_none(),
+        "rmsnorm frozen-weight grad MUST be None (slot 1)"
+    );
     Ok(())
 }
 
@@ -327,7 +353,9 @@ fn vk_bwd_adapter_rmsnorm_fd() -> Result<()> {
     };
     let (rows, hidden) = (2usize, 4usize);
     let eps = 1e-6_f32;
-    let x_data: Vec<f32> = (0..(rows * hidden)).map(|i| (i as f32) * 0.3 - 0.5).collect();
+    let x_data: Vec<f32> = (0..(rows * hidden))
+        .map(|i| (i as f32) * 0.3 - 0.5)
+        .collect();
     let w_data: Vec<f32> = vec![0.25, -0.5, 0.75, 1.0];
 
     let x = vk_param_f32(&x_data, &[rows, hidden], &dev)?;
@@ -387,12 +415,20 @@ fn cpu_rope(
                     out[lin] = x[lin];
                     continue;
                 }
-                let (pair, is_low) = if d < half { (d, true) } else { (d - half, false) };
+                let (pair, is_low) = if d < half {
+                    (d, true)
+                } else {
+                    (d - half, false)
+                };
                 let low = x[base + pair];
                 let high = x[base + pair + half];
                 let c = cos[r * half + pair];
                 let s = sin[r * half + pair];
-                out[lin] = if is_low { low * c - high * s } else { low * s + high * c };
+                out[lin] = if is_low {
+                    low * c - high * s
+                } else {
+                    low * s + high * c
+                };
             }
         }
     }
@@ -479,7 +515,10 @@ fn vk_bwd_adapter_rope_fd() -> Result<()> {
     // Central FD of the SAME scalar loss on the CPU rope oracle.
     let loss = |xp: &[f32]| -> f32 {
         let y = cpu_rope(xp, &cos_data, &sin_data, rows, heads, head_dim, rotary_dim);
-        y.iter().zip(dy_data.iter()).map(|(yi, wi)| yi * wi).sum::<f32>()
+        y.iter()
+            .zip(dy_data.iter())
+            .map(|(yi, wi)| yi * wi)
+            .sum::<f32>()
     };
     let mut x_mut = x_data.clone();
     let fd_dx = fd_grad(&mut x_mut, 1e-3, loss);
@@ -500,13 +539,17 @@ fn vk_bwd_adapter_softmax_exact_vs_direct() -> Result<()> {
         return Ok(());
     };
     let (rows, cols) = (3usize, 4usize);
-    let x_data: Vec<f32> = (0..(rows * cols)).map(|i| (i as f32) * 0.17 - 0.6).collect();
+    let x_data: Vec<f32> = (0..(rows * cols))
+        .map(|i| (i as f32) * 0.17 - 0.6)
+        .collect();
 
     let x = vk_param_f32(&x_data, &[rows, cols], &dev)?;
     let out = kiln_vulkan_kernel::vk_ops::softmax::vk_softmax_lastdim(&x)?;
     let grad_fn = out.grad_fn().expect("softmax grad_fn").clone();
 
-    let dy_data: Vec<f32> = (0..(rows * cols)).map(|i| (i as f32) * 0.05 - 0.1).collect();
+    let dy_data: Vec<f32> = (0..(rows * cols))
+        .map(|i| (i as f32) * 0.05 - 0.1)
+        .collect();
     let grads = exact_vs_direct(&grad_fn, &dy_data, &[rows, cols])?;
     assert_eq!(grads.len(), 1, "softmax backward returns 1 slot");
     assert!(grads[0].is_some(), "softmax dx present");
@@ -519,7 +562,9 @@ fn vk_bwd_adapter_softmax_fd() -> Result<()> {
         return Ok(());
     };
     let (rows, cols) = (3usize, 4usize);
-    let x_data: Vec<f32> = (0..(rows * cols)).map(|i| (i as f32) * 0.17 - 0.6).collect();
+    let x_data: Vec<f32> = (0..(rows * cols))
+        .map(|i| (i as f32) * 0.17 - 0.6)
+        .collect();
 
     let x = vk_param_f32(&x_data, &[rows, cols], &dev)?;
     let out = kiln_vulkan_kernel::vk_ops::softmax::vk_softmax_lastdim(&x)?;
@@ -528,7 +573,9 @@ fn vk_bwd_adapter_softmax_fd() -> Result<()> {
     // Analytic dx via the adapter. Loss = sum(w_i * y_i) with a NON-uniform w
     // (= dy): a uniform dy would give a zero gradient (softmax rows sum to 1),
     // so the linear combo must vary across columns to exercise the kernel.
-    let dy_data: Vec<f32> = (0..(rows * cols)).map(|i| (i as f32) * 0.05 - 0.1).collect();
+    let dy_data: Vec<f32> = (0..(rows * cols))
+        .map(|i| (i as f32) * 0.05 - 0.1)
+        .collect();
     let adapter = VkBwdAdapter(Arc::clone(&grad_fn));
     let grads = adapter.apply(&kt_vk_f32(&dy_data, &[rows, cols])?)?;
     let dx = kt_to_host(grads[0].as_ref().expect("softmax dx"))?;
@@ -536,7 +583,10 @@ fn vk_bwd_adapter_softmax_fd() -> Result<()> {
     // Central FD of the SAME scalar loss on the CPU softmax oracle.
     let loss = |xp: &[f32]| -> f32 {
         let y = cpu_softmax_lastdim(xp, rows, cols);
-        y.iter().zip(dy_data.iter()).map(|(yi, wi)| yi * wi).sum::<f32>()
+        y.iter()
+            .zip(dy_data.iter())
+            .map(|(yi, wi)| yi * wi)
+            .sum::<f32>()
     };
     let mut x_mut = x_data.clone();
     let fd_dx = fd_grad(&mut x_mut, 1e-3, loss);
@@ -663,6 +713,9 @@ fn vk_bwd_adapter_rejects_non_vulkan_grad() -> Result<()> {
     // CPU grad — the adapter's vk_tensor_from_kt downcast to VulkanStorage fails.
     let cpu_grad = Tensor::from_vec(vec![1.0_f32; m * n], vec![m, n])?;
     let res = adapter.apply(&cpu_grad);
-    assert!(res.is_err(), "CPU grad must be rejected (not Vulkan-backed)");
+    assert!(
+        res.is_err(),
+        "CPU grad must be rejected (not Vulkan-backed)"
+    );
     Ok(())
 }

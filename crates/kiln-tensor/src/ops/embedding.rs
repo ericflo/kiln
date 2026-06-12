@@ -30,8 +30,8 @@
 //! in a follow-up.
 
 use crate::{
-    bail, dispatch2, BackwardOp, CpuStorage, DType, Determinism, DeviceOp2, Error, Layout, Result,
-    Storage, Tensor, TensorId,
+    BackwardOp, CpuStorage, DType, Determinism, DeviceOp2, Error, Layout, Result, Storage, Tensor,
+    TensorId, bail, dispatch2,
 };
 use std::sync::Arc;
 
@@ -83,7 +83,9 @@ impl DeviceOp2 for EmbeddingOp {
             .storage()
             .as_any()
             .downcast_ref::<CpuStorage>()
-            .ok_or_else(|| Error::from_str("EmbeddingOp::cpu_fwd: weights storage must be CpuStorage"))?;
+            .ok_or_else(|| {
+                Error::from_str("EmbeddingOp::cpu_fwd: weights storage must be CpuStorage")
+            })?;
         let w_bytes = w_cpu.as_bytes();
         if w_bytes.len() < vocab_size * row_bytes {
             bail!(

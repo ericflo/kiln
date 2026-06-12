@@ -13,9 +13,7 @@
 
 use std::sync::Arc;
 
-use kiln_tensor::{
-    bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId,
-};
+use kiln_tensor::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 use crate::BackwardOp;
 
@@ -50,9 +48,7 @@ impl BackwardOp for BroadcastToBackward {
         }
         let dtype = grad_output.dtype();
         if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
-            bail!(
-                "BroadcastToBackward: dtype must be F32/BF16/F16, got {dtype}"
-            );
+            bail!("BroadcastToBackward: dtype must be F32/BF16/F16, got {dtype}");
         }
         if !grad_output.is_contiguous() {
             bail!("BroadcastToBackward: grad must be contiguous");
@@ -92,9 +88,9 @@ impl BackwardOp for BroadcastToBackward {
                 in_offset += idx_in * in_strides[k];
             }
             let v = match dtype {
-                DType::F32 => f32::from_le_bytes(
-                    go_bytes[flat_out * 4..flat_out * 4 + 4].try_into().unwrap(),
-                ),
+                DType::F32 => {
+                    f32::from_le_bytes(go_bytes[flat_out * 4..flat_out * 4 + 4].try_into().unwrap())
+                }
                 DType::BF16 => half::bf16::from_le_bytes(
                     go_bytes[flat_out * 2..flat_out * 2 + 2].try_into().unwrap(),
                 )
@@ -196,11 +192,7 @@ mod tests {
         // Forward [2, 1] → [2, 3]. d_y [2, 3]:
         //   [[1, 2, 3], [4, 5, 6]]
         // d_x[r, 0] = sum_c d_y[r, c] = [6, 15]
-        let dy = Tensor::from_slice(
-            &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
-            vec![2, 3],
-        )
-        .unwrap();
+        let dy = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
         let bo = BroadcastToBackward {
             input_shape: vec![2, 1],
         };

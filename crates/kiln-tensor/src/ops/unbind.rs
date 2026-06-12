@@ -7,7 +7,7 @@
 //! Inverse of `stack` along the same axis. PyTorch parity:
 //! `tensor.unbind(dim)`.
 
-use crate::{bail, Result, Tensor};
+use crate::{Result, Tensor, bail};
 
 /// Split `axis` into `axis_len` views, each with the axis removed.
 ///
@@ -20,10 +20,7 @@ use crate::{bail, Result, Tensor};
 /// expose a strided view downstream consumers may not handle.
 pub fn unbind(t: &Tensor, axis: usize) -> Result<Vec<Tensor>> {
     if axis >= t.rank() {
-        bail!(
-            "unbind: axis {axis} out of bounds for rank {}",
-            t.rank()
-        );
+        bail!("unbind: axis {axis} out of bounds for rank {}", t.rank());
     }
     let axis_len = t.shape()[axis];
     let mut out = Vec::with_capacity(axis_len);
@@ -56,11 +53,8 @@ mod tests {
     #[test]
     fn unbind_axis1_drops_inner() {
         // [2, 4] → four [2] views.
-        let t = Tensor::from_slice(
-            &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-            vec![2, 4],
-        )
-        .unwrap();
+        let t =
+            Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], vec![2, 4]).unwrap();
         let out = unbind(&t, 1).unwrap();
         assert_eq!(out.len(), 4);
         for v in &out {

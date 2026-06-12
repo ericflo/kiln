@@ -21,7 +21,7 @@
 
 use std::sync::Arc;
 
-use kiln_tensor::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use kiln_tensor::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 use crate::BackwardOp;
 
@@ -61,9 +61,7 @@ impl BackwardOp for MaxAxisBackward {
         }
         let dtype = grad_output.dtype();
         if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
-            bail!(
-                "MaxAxisBackward: grad dtype must be F32/BF16/F16, got {dtype}"
-            );
+            bail!("MaxAxisBackward: grad dtype must be F32/BF16/F16, got {dtype}");
         }
         if dtype != self.input.dtype() {
             bail!(
@@ -132,11 +130,7 @@ impl BackwardOp for MaxAxisBackward {
 
         let cpu = CpuStorage::from_bytes(dtype, out_bytes)?;
         let storage: Storage = Arc::new(cpu);
-        let d_x = Tensor::from_parts(
-            storage,
-            Layout::contiguous(x_shape),
-            TensorId::next(),
-        )?;
+        let d_x = Tensor::from_parts(storage, Layout::contiguous(x_shape), TensorId::next())?;
         Ok(vec![Some(d_x)])
     }
     fn requires_input(&self, idx: usize) -> bool {

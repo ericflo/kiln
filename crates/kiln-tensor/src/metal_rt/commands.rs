@@ -50,10 +50,10 @@
 //! (`crate::metal::` -> `super::`, `MetalKernelError` -> `MetalRtError`).
 //! (#1082)
 
+use super::MetalRtError;
 use super::{
     BlitCommandEncoder, CommandBuffer, CommandSemaphore, CommandStatus, ComputeCommandEncoder,
 };
-use super::MetalRtError;
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{MTLCommandBufferStatus, MTLCommandQueue};
 use std::sync::atomic::{AtomicUsize, Ordering};

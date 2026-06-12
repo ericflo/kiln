@@ -206,10 +206,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(15));
         }
         prune_to_max(tmp.path(), 3);
-        let remaining: Vec<String> = load_all(tmp.path())
-            .into_iter()
-            .map(|j| j.job_id)
-            .collect();
+        let remaining: Vec<String> = load_all(tmp.path()).into_iter().map(|j| j.job_id).collect();
         assert_eq!(remaining.len(), 3);
         // The first two ("a", "b") should have been pruned as oldest.
         assert!(!remaining.contains(&"a".to_string()));

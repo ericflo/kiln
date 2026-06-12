@@ -133,8 +133,12 @@ pub async fn run_eval_adapter(options: EvalAdapterOptions) -> Result<EvalAdapter
     let scorer_sha256 = sha256_file(&options.scorer).ok();
     let tasks = parse_tasks_jsonl(&tasks_bytes)
         .with_context(|| format!("parsing tasks JSONL {}", options.tasks.display()))?;
-    let template: Value = serde_json::from_slice(&template_bytes)
-        .with_context(|| format!("parsing request template {}", options.request_template.display()))?;
+    let template: Value = serde_json::from_slice(&template_bytes).with_context(|| {
+        format!(
+            "parsing request template {}",
+            options.request_template.display()
+        )
+    })?;
 
     if tasks.is_empty() {
         anyhow::bail!("tasks JSONL contained no tasks");
@@ -156,10 +160,7 @@ pub async fn run_eval_adapter(options: EvalAdapterOptions) -> Result<EvalAdapter
             let base_response = post_chat_completion(&client, &options.url, &base_request)
                 .await
                 .with_context(|| {
-                    format!(
-                        "base completion failed for task {} seed {}",
-                        task.id, seed
-                    )
+                    format!("base completion failed for task {} seed {}", task.id, seed)
                 })?;
             let adapter_response = post_chat_completion(&client, &options.url, &adapter_request)
                 .await
@@ -485,10 +486,8 @@ fn parse_scorer_stdout(stdout: &str) -> Result<PairScore> {
         }
         Value::Object(map) => {
             let base_score = first_number(map, &["base_score", "score_base"]);
-            let adapter_score = first_number(
-                map,
-                &["adapter_score", "candidate_score", "score_adapter"],
-            );
+            let adapter_score =
+                first_number(map, &["adapter_score", "candidate_score", "score_adapter"]);
             let lift = first_number(map, &["lift", "delta", "score"])
                 .or_else(|| Some(adapter_score? - base_score?))
                 .ok_or_else(|| {
@@ -524,10 +523,7 @@ fn summarize_results(results: &[EvalAdapterPairResult], wall_clock_ms: f64) -> E
         .iter()
         .filter_map(|result| result.adapter_score)
         .collect();
-    let pair_times: Vec<f64> = results
-        .iter()
-        .map(|result| result.wall_clock_ms)
-        .collect();
+    let pair_times: Vec<f64> = results.iter().map(|result| result.wall_clock_ms).collect();
 
     EvalAdapterStats {
         mean_lift,
@@ -552,8 +548,11 @@ fn sample_stdev(values: &[f64], mean: f64) -> f64 {
     if values.len() < 2 {
         return 0.0;
     }
-    let variance =
-        values.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
+    let variance = values
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / (values.len() - 1) as f64;
     variance.sqrt()
 }
 
@@ -746,9 +745,15 @@ mod tests {
         #[derive(Clone, Default)]
         struct Calls(Arc<Mutex<Vec<Value>>>);
 
-        async fn chat(State(calls): State<Calls>, axum::Json(body): axum::Json<Value>) -> axum::Json<Value> {
+        async fn chat(
+            State(calls): State<Calls>,
+            axum::Json(body): axum::Json<Value>,
+        ) -> axum::Json<Value> {
             calls.0.lock().unwrap().push(body.clone());
-            let adapter = body.get("adapter").and_then(Value::as_str).unwrap_or("base");
+            let adapter = body
+                .get("adapter")
+                .and_then(Value::as_str)
+                .unwrap_or("base");
             axum::Json(json!({
                 "id": "chatcmpl-test",
                 "model": "Qwen3.5-4B",
@@ -837,7 +842,10 @@ mod tests {
 
         assert_eq!(summary.pair_count, 1);
         assert_eq!(summary.stats.mean_lift, 1.0);
-        assert_eq!(summary.adapter_hashes[0].adapter_model_sha256.as_deref(), Some("sha256:adapter"));
+        assert_eq!(
+            summary.adapter_hashes[0].adapter_model_sha256.as_deref(),
+            Some("sha256:adapter")
+        );
         assert!(output.exists());
         let observed = calls.0.lock().unwrap().clone();
         assert_eq!(observed.len(), 2);

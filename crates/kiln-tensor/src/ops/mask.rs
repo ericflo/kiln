@@ -28,8 +28,8 @@
 //! `Constructive`. Pointwise; no reduction.
 
 use crate::{
-    bail, dispatch2, BackwardOp, CpuStorage, DType, Determinism, DeviceOp2, Error, Layout, Result,
-    Storage, Tensor, TensorId,
+    BackwardOp, CpuStorage, DType, Determinism, DeviceOp2, Error, Layout, Result, Storage, Tensor,
+    TensorId, bail, dispatch2,
 };
 use std::sync::Arc;
 
@@ -66,13 +66,13 @@ impl DeviceOp2 for MaskedFillOp {
             );
         }
         if mask.dtype() != DType::U8 {
-            bail!(
-                "MaskedFillOp: mask dtype must be U8, got {}",
-                mask.dtype()
-            );
+            bail!("MaskedFillOp: mask dtype must be U8, got {}", mask.dtype());
         }
         if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
-            bail!("MaskedFillOp: x dtype must be F32/BF16/F16, got {}", x.dtype());
+            bail!(
+                "MaskedFillOp: x dtype must be F32/BF16/F16, got {}",
+                x.dtype()
+            );
         }
         if !x.is_contiguous() || !mask.is_contiguous() {
             bail!("MaskedFillOp: x and mask must be contiguous");
@@ -106,8 +106,7 @@ impl DeviceOp2 for MaskedFillOp {
                         half::bf16::from_le_bytes(x_bytes[i * 2..i * 2 + 2].try_into().unwrap())
                             .to_f32()
                     };
-                    out[i * 2..i * 2 + 2]
-                        .copy_from_slice(&half::bf16::from_f32(v).to_le_bytes());
+                    out[i * 2..i * 2 + 2].copy_from_slice(&half::bf16::from_f32(v).to_le_bytes());
                 }
             }
             DType::F16 => {
@@ -118,8 +117,7 @@ impl DeviceOp2 for MaskedFillOp {
                         half::f16::from_le_bytes(x_bytes[i * 2..i * 2 + 2].try_into().unwrap())
                             .to_f32()
                     };
-                    out[i * 2..i * 2 + 2]
-                        .copy_from_slice(&half::f16::from_f32(v).to_le_bytes());
+                    out[i * 2..i * 2 + 2].copy_from_slice(&half::f16::from_f32(v).to_le_bytes());
                 }
             }
             _ => unreachable!(),
@@ -148,10 +146,7 @@ impl DeviceOp2 for MaskedFillOp {
             );
         }
         if mask.dtype() != DType::U8 {
-            bail!(
-                "MaskedFillOp: mask dtype must be U8, got {}",
-                mask.dtype()
-            );
+            bail!("MaskedFillOp: mask dtype must be U8, got {}", mask.dtype());
         }
         if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
             return Ok(None);
@@ -185,10 +180,7 @@ impl DeviceOp2 for MaskedFillOp {
             );
         }
         if mask.dtype() != DType::U8 {
-            bail!(
-                "MaskedFillOp: mask dtype must be U8, got {}",
-                mask.dtype()
-            );
+            bail!("MaskedFillOp: mask dtype must be U8, got {}", mask.dtype());
         }
         if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
             return Ok(None);
@@ -219,10 +211,7 @@ impl DeviceOp2 for MaskedFillOp {
             );
         }
         if mask.dtype() != DType::U8 {
-            bail!(
-                "MaskedFillOp: mask dtype must be U8, got {}",
-                mask.dtype()
-            );
+            bail!("MaskedFillOp: mask dtype must be U8, got {}", mask.dtype());
         }
         if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
             return Ok(None);
@@ -329,10 +318,7 @@ mod tests {
         //   row 1: [0, 0, 1, 1]
         //   row 2: [0, 0, 0, 1]
         //   row 3: [0, 0, 0, 0]
-        assert_eq!(
-            bytes,
-            &[0, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0]
-        );
+        assert_eq!(bytes, &[0, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0]);
     }
 
     #[test]

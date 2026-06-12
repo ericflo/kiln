@@ -103,12 +103,9 @@ fn upload_bf16w(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Resul
     if needed % 4 != 0 {
         needed = ((needed + 3) / 4) * 4;
     }
-    let buf = VulkanBuffer::create_device_local(
-        dev.device(),
-        dev.device_local_mem_type(),
-        needed as u64,
-    )
-    .context("upload_bf16w: device-local buffer")?;
+    let buf =
+        VulkanBuffer::create_device_local(dev.device(), dev.device_local_mem_type(), needed as u64)
+            .context("upload_bf16w: device-local buffer")?;
     VulkanBuffer::upload_data(
         dev.device(),
         dev.host_visible_mem_type(),
@@ -278,12 +275,48 @@ fn main() -> Result<()> {
     println!("# columns: t (active tokens), h, v, k, dtype, fwd_ms, fwd_tok/s, bwd_ms, bwd_tok/s");
 
     let configs = [
-        BenchCfg { t: 256,  h: 2560, v: 32_000, k: 32, bf16w: false },
-        BenchCfg { t: 1024, h: 2560, v: 32_000, k: 32, bf16w: false },
-        BenchCfg { t: 4096, h: 2560, v: 32_000, k: 32, bf16w: false },
-        BenchCfg { t: 1024, h: 2560, v: 32_000, k: 16, bf16w: false },
-        BenchCfg { t: 1024, h: 2560, v: 32_000, k: 32, bf16w: true  },
-        BenchCfg { t: 4096, h: 2560, v: 32_000, k: 32, bf16w: true  },
+        BenchCfg {
+            t: 256,
+            h: 2560,
+            v: 32_000,
+            k: 32,
+            bf16w: false,
+        },
+        BenchCfg {
+            t: 1024,
+            h: 2560,
+            v: 32_000,
+            k: 32,
+            bf16w: false,
+        },
+        BenchCfg {
+            t: 4096,
+            h: 2560,
+            v: 32_000,
+            k: 32,
+            bf16w: false,
+        },
+        BenchCfg {
+            t: 1024,
+            h: 2560,
+            v: 32_000,
+            k: 16,
+            bf16w: false,
+        },
+        BenchCfg {
+            t: 1024,
+            h: 2560,
+            v: 32_000,
+            k: 32,
+            bf16w: true,
+        },
+        BenchCfg {
+            t: 4096,
+            h: 2560,
+            v: 32_000,
+            k: 32,
+            bf16w: true,
+        },
     ];
 
     for cfg in configs {

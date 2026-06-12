@@ -10,8 +10,8 @@
 use std::sync::Arc;
 
 use crate::{
-    bail, dispatch1, BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result,
-    Storage, Tensor, TensorId,
+    BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result, Storage, Tensor,
+    TensorId, bail, dispatch1,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,44 +223,82 @@ fn cpu_apply(kind: TrigKind, x: &Tensor) -> Result<Tensor> {
     for i in 0..n {
         let v = match dtype {
             DType::F32 => f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()),
-            DType::BF16 => half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
-            DType::F16 => half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
+            DType::BF16 => {
+                half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
+            DType::F16 => {
+                half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
             _ => unreachable!(),
         };
         let y = kind.apply_f32(v);
         match dtype {
             DType::F32 => out[i * 4..i * 4 + 4].copy_from_slice(&y.to_le_bytes()),
-            DType::BF16 => out[i * 2..i * 2 + 2]
-                .copy_from_slice(&half::bf16::from_f32(y).to_le_bytes()),
-            DType::F16 => out[i * 2..i * 2 + 2]
-                .copy_from_slice(&half::f16::from_f32(y).to_le_bytes()),
+            DType::BF16 => {
+                out[i * 2..i * 2 + 2].copy_from_slice(&half::bf16::from_f32(y).to_le_bytes())
+            }
+            DType::F16 => {
+                out[i * 2..i * 2 + 2].copy_from_slice(&half::f16::from_f32(y).to_le_bytes())
+            }
             _ => unreachable!(),
         }
     }
     let cpu_out = CpuStorage::from_bytes(dtype, out)?;
     let storage: Storage = Arc::new(cpu_out);
-    Tensor::from_parts(storage, Layout::contiguous(x.shape().to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(x.shape().to_vec()),
+        TensorId::next(),
+    )
 }
 
 pub fn sin(x: &Tensor) -> Result<Tensor> {
-    dispatch1(&TrigOp { kind: TrigKind::Sin }, x)
+    dispatch1(
+        &TrigOp {
+            kind: TrigKind::Sin,
+        },
+        x,
+    )
 }
 pub fn cos(x: &Tensor) -> Result<Tensor> {
-    dispatch1(&TrigOp { kind: TrigKind::Cos }, x)
+    dispatch1(
+        &TrigOp {
+            kind: TrigKind::Cos,
+        },
+        x,
+    )
 }
 pub fn tan(x: &Tensor) -> Result<Tensor> {
-    dispatch1(&TrigOp { kind: TrigKind::Tan }, x)
+    dispatch1(
+        &TrigOp {
+            kind: TrigKind::Tan,
+        },
+        x,
+    )
 }
 pub fn asin(x: &Tensor) -> Result<Tensor> {
-    dispatch1(&TrigOp { kind: TrigKind::Asin }, x)
+    dispatch1(
+        &TrigOp {
+            kind: TrigKind::Asin,
+        },
+        x,
+    )
 }
 pub fn acos(x: &Tensor) -> Result<Tensor> {
-    dispatch1(&TrigOp { kind: TrigKind::Acos }, x)
+    dispatch1(
+        &TrigOp {
+            kind: TrigKind::Acos,
+        },
+        x,
+    )
 }
 pub fn atan(x: &Tensor) -> Result<Tensor> {
-    dispatch1(&TrigOp { kind: TrigKind::Atan }, x)
+    dispatch1(
+        &TrigOp {
+            kind: TrigKind::Atan,
+        },
+        x,
+    )
 }
 
 #[cfg(test)]
@@ -323,7 +361,11 @@ mod tests {
     fn tan_known_values() {
         // tan(0)=0, tan(π/4)=1, tan(-π/4)=-1
         let x = Tensor::from_slice(
-            &[0.0_f32, std::f32::consts::FRAC_PI_4, -std::f32::consts::FRAC_PI_4],
+            &[
+                0.0_f32,
+                std::f32::consts::FRAC_PI_4,
+                -std::f32::consts::FRAC_PI_4,
+            ],
             vec![3],
         )
         .unwrap();

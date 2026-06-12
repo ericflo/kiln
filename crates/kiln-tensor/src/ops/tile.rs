@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, Layout, Result, Storage, Tensor, TensorId, bail};
 
 pub fn tile(x: &Tensor, reps: &[usize]) -> Result<Tensor> {
     if reps.is_empty() {

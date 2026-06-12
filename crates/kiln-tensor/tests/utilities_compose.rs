@@ -63,11 +63,7 @@ fn log_softmax_plus_nll_matches_cross_entropy_on_realistic_logits() {
     // Real-shape logits + targets — sanity check the
     // mathematical-equivalence chain holds beyond toy inputs.
     let logits = rand_normal(vec![8, 16], 0.0, 1.0, 7, DType::F32).unwrap();
-    let targets = Tensor::from_slice(
-        &[0i64, 5, 11, 2, 9, 14, 3, 7],
-        vec![8],
-    )
-    .unwrap();
+    let targets = Tensor::from_slice(&[0i64, 5, 11, 2, 9, 14, 3, 7], vec![8]).unwrap();
     let ce = scalar_f32(&cross_entropy(&logits, &targets).unwrap());
     let lp = log_softmax_last_dim(&logits).unwrap();
     let nll = scalar_f32(&nll_loss(&lp, &targets).unwrap());

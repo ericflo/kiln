@@ -42,10 +42,7 @@ const SHADERS: &[(&str, &str)] = &[
         "full_attn_qkv_gate_split_batched_rows8_bf16w",
         "SPIR_V_FULL_ATTN_QKV_GATE_SPLIT_BATCHED_ROWS8_BF16W",
     ),
-    (
-        "qkv_gate_split_batched",
-        "SPIR_V_QKV_GATE_SPLIT_BATCHED",
-    ),
+    ("qkv_gate_split_batched", "SPIR_V_QKV_GATE_SPLIT_BATCHED"),
     ("gdn_gates", "SPIR_V_GDN_GATES"),
     (
         "gdn_decode_gates_recurrent_rmsnorm",
@@ -138,7 +135,10 @@ const SHADERS: &[(&str, &str)] = &[
     ("gdn_chunk_scan", "SPIR_V_GDN_CHUNK_SCAN"),
     ("linear_decode", "SPIR_V_LINEAR_DECODE"),
     ("add_qwen_rmsnorm", "SPIR_V_ADD_QWEN_RMSNORM"),
-    ("add_qwen_rmsnorm_batched", "SPIR_V_ADD_QWEN_RMSNORM_BATCHED"),
+    (
+        "add_qwen_rmsnorm_batched",
+        "SPIR_V_ADD_QWEN_RMSNORM_BATCHED",
+    ),
     ("linear_decode_bf16w", "SPIR_V_LINEAR_DECODE_BF16W"),
     (
         "linear_decode_bf16w_add_residual",
@@ -231,10 +231,7 @@ const SHADERS: &[(&str, &str)] = &[
         "linear_decode_argmax_batched_reduce",
         "SPIR_V_LINEAR_DECODE_ARGMAX_BATCHED_REDUCE",
     ),
-    (
-        "apply_token_penalties",
-        "SPIR_V_APPLY_TOKEN_PENALTIES",
-    ),
+    ("apply_token_penalties", "SPIR_V_APPLY_TOKEN_PENALTIES"),
     (
         "apply_token_penalties_batched",
         "SPIR_V_APPLY_TOKEN_PENALTIES_BATCHED",
@@ -507,12 +504,21 @@ const SHADERS: &[(&str, &str)] = &[
     // CUDA kernel in crates/kiln-opd-loss-kernel/csrc/opd_topk_kl.cu.
     // §9.2 + §9.10 of docs/plans/grand-plan-for-extraordinarily-great-
     // on-policy-distillation-for-everyone.md.
-    ("vk_opd_topk_kl_fwd_f32",    "SPIR_V_VK_OPD_TOPK_KL_FWD_F32"),
-    ("vk_opd_topk_kl_fwd_bf16w",  "SPIR_V_VK_OPD_TOPK_KL_FWD_BF16W"),
-    ("vk_opd_topk_kl_bwd_f32",    "SPIR_V_VK_OPD_TOPK_KL_BWD_F32"),
-    ("vk_opd_topk_kl_bwd_bf16w",  "SPIR_V_VK_OPD_TOPK_KL_BWD_BF16W"),
-    ("vk_opd_topk_metrics_f32",   "SPIR_V_VK_OPD_TOPK_METRICS_F32"),
-    ("vk_opd_topk_metrics_bf16w", "SPIR_V_VK_OPD_TOPK_METRICS_BF16W"),
+    ("vk_opd_topk_kl_fwd_f32", "SPIR_V_VK_OPD_TOPK_KL_FWD_F32"),
+    (
+        "vk_opd_topk_kl_fwd_bf16w",
+        "SPIR_V_VK_OPD_TOPK_KL_FWD_BF16W",
+    ),
+    ("vk_opd_topk_kl_bwd_f32", "SPIR_V_VK_OPD_TOPK_KL_BWD_F32"),
+    (
+        "vk_opd_topk_kl_bwd_bf16w",
+        "SPIR_V_VK_OPD_TOPK_KL_BWD_BF16W",
+    ),
+    ("vk_opd_topk_metrics_f32", "SPIR_V_VK_OPD_TOPK_METRICS_F32"),
+    (
+        "vk_opd_topk_metrics_bf16w",
+        "SPIR_V_VK_OPD_TOPK_METRICS_BF16W",
+    ),
 ];
 
 fn compile_shader_command(

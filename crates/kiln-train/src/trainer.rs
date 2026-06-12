@@ -2714,7 +2714,10 @@ fn run_mtp_alignment_phase(
         mtp.layer.attention,
         kiln_model::forward::GpuAttentionWeights::Full(_)
     );
-    anyhow::ensure!(mtp_full_attention, "mtp alignment: MTP layer must be full attention");
+    anyhow::ensure!(
+        mtp_full_attention,
+        "mtp alignment: MTP layer must be full attention"
+    );
 
     // Move the draft-block pairs into a one-layer TrainableLoraParams so
     // the existing optimizer machinery (make_opt_state /
@@ -2793,15 +2796,11 @@ fn run_mtp_alignment_phase(
         let shifted_mask: Vec<bool> = label_mask[1..].to_vec();
         let positions: Vec<u32> = (0..seq_len as u32 - 1).collect();
         let result = kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(|| {
-            let to_err =
-                |e: anyhow::Error| kiln_kt_bridge::BridgeError::new(format!("{e:#}"));
+            let to_err = |e: anyhow::Error| kiln_kt_bridge::BridgeError::new(format!("{e:#}"));
             // emb rows for tok_{1..T} — frozen embedding, plain index_select.
-            let idx_t = kiln_tensor::Tensor::from_vec_on(
-                *device,
-                shifted_ids.clone(),
-                vec![seq_len - 1],
-            )
-            .map_err(|e| to_err(anyhow::anyhow!("mtp alignment: idx tensor: {e}")))?;
+            let idx_t =
+                kiln_tensor::Tensor::from_vec_on(*device, shifted_ids.clone(), vec![seq_len - 1])
+                    .map_err(|e| to_err(anyhow::anyhow!("mtp alignment: idx tensor: {e}")))?;
             let emb = weights
                 .embed_tokens
                 .index_select(&idx_t, 0)
@@ -4077,10 +4076,8 @@ pub fn grpo_train(
                     loss: avg_group_loss,
                     progress: global_step as f32 / total_steps as f32,
                 });
-                            if control == TrainControl::Stop {
-                    anyhow::bail!(
-                        "training cancelled by user (stop requested at step boundary)"
-                    );
+                if control == TrainControl::Stop {
+                    anyhow::bail!("training cancelled by user (stop requested at step boundary)");
                 }
             }
 
@@ -4946,10 +4943,8 @@ pub fn grpo_train_jsonl(
                     loss: avg_group_loss,
                     progress,
                 });
-                            if control == TrainControl::Stop {
-                    anyhow::bail!(
-                        "training cancelled by user (stop requested at step boundary)"
-                    );
+                if control == TrainControl::Stop {
+                    anyhow::bail!("training cancelled by user (stop requested at step boundary)");
                 }
             }
 
@@ -5993,18 +5988,16 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 // is enabled and this completion actually has env rows; the
                 // fused loss roots add λ·env_CE to the value and the matching
                 // constant-coefficient rows to the gradient.
-                let echo_env_spec = if config.loss.echo_enabled()
-                    && comp_env_count > 0
-                    && comp.total_obs_len > 0
-                {
-                    Some(crate::grpo_tape_shim::EchoEnvSpec {
-                        env_mask: comp.env_mask.clone(),
-                        total_obs_len: comp.total_obs_len,
-                        lambda: config.loss.echo_lambda(),
-                    })
-                } else {
-                    None
-                };
+                let echo_env_spec =
+                    if config.loss.echo_enabled() && comp_env_count > 0 && comp.total_obs_len > 0 {
+                        Some(crate::grpo_tape_shim::EchoEnvSpec {
+                            env_mask: comp.env_mask.clone(),
+                            total_obs_len: comp.total_obs_len,
+                            lambda: config.loss.echo_lambda(),
+                        })
+                    } else {
+                        None
+                    };
                 let (lv, env_ce, kt_grads) = if let Some(segs) = segments {
                     let step_started = Instant::now();
                     let out = checkpointed_grpo_forward_backward_tape_authoritative_kt(
@@ -7435,6 +7428,12 @@ fn log_sft_timing(enabled: bool, phase: &str, seq_len: usize, segments: usize, e
     }
 }
 
+fn log_sft_timing_begin(enabled: bool, phase: &str, seq_len: usize, segments: usize) {
+    if enabled {
+        eprintln!("kiln_sft_timing phase={phase} seq_len={seq_len} segments={segments} begin=1");
+    }
+}
+
 fn recompute_checkpoint_boundaries(seq_len: usize) -> bool {
     if let Some(forced) = kiln_core::env_flag::env_tristate("KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES")
     {
@@ -8813,11 +8812,26 @@ fn standard_forward_backward_tape_authoritative_kt(
     label_mask: &[bool],
     device: &Device,
 ) -> Result<(f64, kiln_autograd::GradStore)> {
+    let trace_timings = trace_sft_timings();
+    let total_start = Instant::now();
+    log_sft_timing_begin(
+        trace_timings,
+        "standard_tape_authoritative_total",
+        input_ids.len(),
+        1,
+    );
     let lora_weights = params.as_lora_weights();
     let mut linear_state = LinearAttentionState::new(model_config, device)?;
 
     let (loss_val, _loss_kt, grads_by_candle_raw) =
         kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(|| {
+            log_sft_timing_begin(
+                trace_timings,
+                "standard_tape_forward_closure",
+                input_ids.len(),
+                1,
+            );
+            let closure_start = Instant::now();
             let sft_flce_loss_route = if use_flce() {
                 TrainingLossBackend::runtime_sft_flce_loss_route(backend)
             } else {
@@ -8825,6 +8839,13 @@ fn standard_forward_backward_tape_authoritative_kt(
             };
             let loss_kt = match sft_flce_loss_route {
                 SftFlceLossRoute::KtTapeFlce => {
+                    log_sft_timing_begin(
+                        trace_timings,
+                        "standard_no_head_forward",
+                        input_ids.len(),
+                        1,
+                    );
+                    let no_head_start = Instant::now();
                     let normed = model_forward_no_head(
                         backend,
                         input_ids,
@@ -8835,11 +8856,20 @@ fn standard_forward_backward_tape_authoritative_kt(
                     )
                     .context("tape-authoritative(kt) no-head forward")
                     .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+                    log_sft_timing(
+                        trace_timings,
+                        "standard_no_head_forward",
+                        input_ids.len(),
+                        1,
+                        no_head_start.elapsed(),
+                    );
                     // Default SFT records the kt FLCE loss root against final normed hidden
                     // instead of materializing `[1, T, V]` logits. The frozen tied head
                     // receives no gradient; the FLCE tape node returns `dhidden`, keeping
                     // the LoRA path connected through `model_forward_no_head`.
-                    kiln_autograd::with_active_tape(|tape| {
+                    log_sft_timing_begin(trace_timings, "standard_flce_tape", input_ids.len(), 1);
+                    let flce_start = Instant::now();
+                    let loss = kiln_autograd::with_active_tape(|tape| {
                         kiln_flce_kernel::fused_linear_cross_entropy_phase_b_unit_grad_via_kt_tape(
                             &normed,
                             &weights.embed_tokens_t,
@@ -8858,7 +8888,15 @@ fn standard_forward_backward_tape_authoritative_kt(
                         kiln_kt_bridge::BridgeError::new(format!(
                             "tape-authoritative(kt) SFT FLCE kt-tape: {e}"
                         ))
-                    })?
+                    })?;
+                    log_sft_timing(
+                        trace_timings,
+                        "standard_flce_tape",
+                        input_ids.len(),
+                        1,
+                        flce_start.elapsed(),
+                    );
+                    loss
                 }
                 SftFlceLossRoute::VulkanActiveRows => {
                     #[cfg(feature = "vulkan")]
@@ -8926,13 +8964,36 @@ fn standard_forward_backward_tape_authoritative_kt(
                     })?
                 }
             };
+            log_sft_timing(
+                trace_timings,
+                "standard_tape_forward_closure",
+                input_ids.len(),
+                1,
+                closure_start.elapsed(),
+            );
+            log_sft_timing_begin(trace_timings, "standard_loss_to_scalar", input_ids.len(), 1);
+            let scalar_start = Instant::now();
             let loss_val = loss_kt
                 .to_scalar::<f32>()
                 .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("loss_kt.to_scalar: {e}")))?
                 as f64;
+            log_sft_timing(
+                trace_timings,
+                "standard_loss_to_scalar",
+                input_ids.len(),
+                1,
+                scalar_start.elapsed(),
+            );
             Ok((loss_val, loss_kt))
         })
         .map_err(|e| anyhow::anyhow!("tape-authoritative(kt) backward: {e}"))?;
+    log_sft_timing(
+        trace_timings,
+        "standard_tape_authoritative_total",
+        input_ids.len(),
+        1,
+        total_start.elapsed(),
+    );
 
     // (#1082) Build a kt-native GradStore from the tape grads, keyed by each
     // LoRA `Parameter::tensor_id()`. The tape's `out` map mixes candle-keyed
@@ -10566,7 +10627,11 @@ pub(crate) mod tests {
         config.loss.echo = Some(crate::EchoConfig::default());
         let receipt = grpo_echo_receipt(&config);
         assert!(receipt.enabled, "armed ECHO must record enabled: true");
-        assert!(receipt.dropped_reason.is_none(), "{:?}", receipt.dropped_reason);
+        assert!(
+            receipt.dropped_reason.is_none(),
+            "{:?}",
+            receipt.dropped_reason
+        );
         assert_eq!(receipt.lambda, Some(0.05));
 
         config.loss.echo = None;
@@ -10575,7 +10640,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-fn grpo_dry_run_accepts_echo_with_and_without_env_tokens() -> Result<()> {
+    fn grpo_dry_run_accepts_echo_with_and_without_env_tokens() -> Result<()> {
         let tmp = tempfile::tempdir()?;
         let tok = make_echo_smoke_tokenizer()?;
 
@@ -11578,16 +11643,10 @@ fn grpo_dry_run_accepts_echo_with_and_without_env_tokens() -> Result<()> {
             .expect("tiny fixture has a full-attention layer")
             .clone();
         let hidden = config.hidden_size;
-        let fc = kiln_tensor::Tensor::zeros(
-            vec![hidden, 2 * hidden],
-            kiln_tensor::DType::F32,
-            device,
-        )?;
-        let fc_t = kiln_tensor::Tensor::zeros(
-            vec![2 * hidden, hidden],
-            kiln_tensor::DType::F32,
-            device,
-        )?;
+        let fc =
+            kiln_tensor::Tensor::zeros(vec![hidden, 2 * hidden], kiln_tensor::DType::F32, device)?;
+        let fc_t =
+            kiln_tensor::Tensor::zeros(vec![2 * hidden, hidden], kiln_tensor::DType::F32, device)?;
         let norm = kiln_tensor::Tensor::ones(vec![hidden], kiln_tensor::DType::F32, device)?;
         let mtp_gpu = kiln_model::forward::MtpGpuWeights {
             fc,
@@ -11604,11 +11663,7 @@ fn grpo_dry_run_accepts_echo_with_and_without_env_tokens() -> Result<()> {
         let mut params = TrainableLoraParams::initialize(&config, &weights, 2, 4.0, &device)?;
         assert!(params.mtp.is_none());
         assert!(params.initialize_mtp_seeded(&weights, &device, Some(7))?);
-        assert_eq!(
-            params.mtp_params().len(),
-            14,
-            "7 modules × (A, B) pairs"
-        );
+        assert_eq!(params.mtp_params().len(), 14, "7 modules × (A, B) pairs");
         // The view exposes the draft-block LoRA for the serve/train paths.
         assert!(params.as_lora_weights().mtp.is_some());
 
@@ -11617,7 +11672,10 @@ fn grpo_dry_run_accepts_echo_with_and_without_env_tokens() -> Result<()> {
         params.save_peft(&out, config.num_layers)?;
 
         let loaded = LoraWeights::load(&out, config.num_layers, device)?;
-        let mtp = loaded.mtp.as_ref().expect("mtp.* keys load into the mtp slot");
+        let mtp = loaded
+            .mtp
+            .as_ref()
+            .expect("mtp.* keys load into the mtp slot");
         for (name, proj) in [
             ("q_proj", &mtp.q_proj),
             ("k_proj", &mtp.k_proj),
@@ -14242,12 +14300,11 @@ fn grpo_dry_run_accepts_echo_with_and_without_env_tokens() -> Result<()> {
         // 4 bytes; portable hosts (CI runners) keep the inflated GDN
         // replay width.
         #[cfg(feature = "vulkan")]
-        let expected_gdn_width =
-            if kiln_model::backend::vulkan_training_substrate_active() {
-                4
-            } else {
-                10
-            };
+        let expected_gdn_width = if kiln_model::backend::vulkan_training_substrate_active() {
+            4
+        } else {
+            10
+        };
         #[cfg(not(feature = "vulkan"))]
         let expected_gdn_width = 10;
         assert_eq!(
@@ -14261,12 +14318,11 @@ fn grpo_dry_run_accepts_echo_with_and_without_env_tokens() -> Result<()> {
         // Same substrate rule: Vulkan hosts plan F32 activations (4 bytes)
         // for CPU-device tensors; portable hosts keep BF16 (2 bytes).
         #[cfg(feature = "vulkan")]
-        let expected_full_attn_width =
-            if kiln_model::backend::vulkan_training_substrate_active() {
-                4
-            } else {
-                2
-            };
+        let expected_full_attn_width = if kiln_model::backend::vulkan_training_substrate_active() {
+            4
+        } else {
+            2
+        };
         #[cfg(not(feature = "vulkan"))]
         let expected_full_attn_width = 2;
         assert_eq!(
@@ -14874,7 +14930,7 @@ fn grpo_dry_run_accepts_echo_with_and_without_env_tokens() -> Result<()> {
             0,
             0,
             None,
-            None, // echo_env
+            None,  // echo_env
             false, // no_pg
         )
         .expect("grpo_step_forward_backward_tape_authoritative_kt (BF16 Vulkan GRPO)");

@@ -77,7 +77,11 @@ fn layernorm_parity_wavefront_boundary_sweep() {
                 var = 0.0;
             }
             let denom = var + eps;
-            let inv_std = if denom > 0.0 { denom.sqrt().recip() } else { 0.0 };
+            let inv_std = if denom > 0.0 {
+                denom.sqrt().recip()
+            } else {
+                0.0
+            };
             for (c, &x) in row.iter().enumerate() {
                 reference.push((x - mean) * inv_std * weight[c] + bias[c]);
             }
@@ -107,7 +111,5 @@ fn layernorm_parity_wavefront_boundary_sweep() {
             );
         }
     }
-    eprintln!(
-        "layernorm CPU-vs-ROCm parity passed across wavefront-boundary widths {widths:?}"
-    );
+    eprintln!("layernorm CPU-vs-ROCm parity passed across wavefront-boundary widths {widths:?}");
 }

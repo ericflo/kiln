@@ -89,7 +89,10 @@ pub struct PackedHost {
 /// shape doesn't fit Marlin's tile constraints (same semantics as
 /// [`pack_from_bf16`]) or the tensor doesn't live on a CUDA device.
 #[cfg(feature = "cuda")]
-pub fn prepare_pack_job(weight_t: &kiln_tensor::Tensor, groupsize: i32) -> Result<Option<PackJobHost>> {
+pub fn prepare_pack_job(
+    weight_t: &kiln_tensor::Tensor,
+    groupsize: i32,
+) -> Result<Option<PackJobHost>> {
     if !matches!(weight_t.device(), kiln_tensor::Device::Cuda(_)) {
         return Ok(None);
     }
@@ -212,7 +215,9 @@ pub fn upload_packed(packed: PackedHost, device: &kiln_tensor::Device) -> Result
 /// sequentially, reproducing the pre-change wall-clock (useful for A/B
 /// measurements or rollback).
 #[cfg(feature = "cuda")]
-pub fn pack_from_bf16_batch(inputs: &[(kiln_tensor::Tensor, i32)]) -> Result<Vec<Option<MarlinPackedProj>>> {
+pub fn pack_from_bf16_batch(
+    inputs: &[(kiln_tensor::Tensor, i32)],
+) -> Result<Vec<Option<MarlinPackedProj>>> {
     if inputs.is_empty() {
         return Ok(Vec::new());
     }
@@ -250,7 +255,9 @@ pub fn pack_from_bf16_batch(inputs: &[(kiln_tensor::Tensor, i32)]) -> Result<Vec
 /// Non-CUDA stub for [`pack_from_bf16_batch`]: the kernel is CUDA-only, so
 /// every entry is skipped.
 #[cfg(not(feature = "cuda"))]
-pub fn pack_from_bf16_batch(inputs: &[(kiln_tensor::Tensor, i32)]) -> Result<Vec<Option<MarlinPackedProj>>> {
+pub fn pack_from_bf16_batch(
+    inputs: &[(kiln_tensor::Tensor, i32)],
+) -> Result<Vec<Option<MarlinPackedProj>>> {
     Ok((0..inputs.len()).map(|_| None).collect())
 }
 
@@ -284,11 +291,17 @@ pub fn matmul_bf16_kt(
     // leading dims so we can restore the output rank.
     let (x2_kt, restore): (kiln_tensor::Tensor, Option<(usize, usize)>) = match rank {
         2 => {
-            let (_m, k) = x_kt.dims2().context("marlin_proj kt: x must be [m, k] when 2D")?;
+            let (_m, k) = x_kt
+                .dims2()
+                .context("marlin_proj kt: x must be [m, k] when 2D")?;
             if k != w.k {
                 anyhow::bail!("marlin_proj kt: x last-dim {k} != packed weight k {}", w.k);
             }
-            (x_kt.contiguous().context("marlin_proj kt: x contiguous (2D)")?, None)
+            (
+                x_kt.contiguous()
+                    .context("marlin_proj kt: x contiguous (2D)")?,
+                None,
+            )
         }
         3 => {
             let (batch, seq, k) = x_kt
@@ -324,8 +337,9 @@ pub fn matmul_bf16_kt(
     // pack time in `upload_packed`). Hand them straight to the kernel —
     // no per-call candle→kt bridge on the decode hot path. They were built
     // contiguous at pack time, so no `.contiguous()` is needed here.
-    let y_fp16 = kiln_marlin_gemm::marlin_w4a16_gemm_kt(&x_fp16, &w.b_packed, &w.scales, w.groupsize)
-        .map_err(|e| anyhow::anyhow!("marlin_proj kt: marlin_w4a16_gemm_kt: {e}"))?;
+    let y_fp16 =
+        kiln_marlin_gemm::marlin_w4a16_gemm_kt(&x_fp16, &w.b_packed, &w.scales, w.groupsize)
+            .map_err(|e| anyhow::anyhow!("marlin_proj kt: marlin_w4a16_gemm_kt: {e}"))?;
 
     // Cast result fp16 -> bf16 in kt-space (no candle detour).
     let y_bf16 = y_fp16

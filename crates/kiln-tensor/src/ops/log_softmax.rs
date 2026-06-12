@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 pub fn log_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
     if x.rank() == 0 {
@@ -98,14 +98,14 @@ pub fn log_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
             let idx = r * last + i;
             row.push(match dtype {
                 DType::F32 => f32::from_le_bytes(bytes[idx * 4..idx * 4 + 4].try_into().unwrap()),
-                DType::BF16 => half::bf16::from_le_bytes(
-                    bytes[idx * 2..idx * 2 + 2].try_into().unwrap(),
-                )
-                .to_f32(),
-                DType::F16 => half::f16::from_le_bytes(
-                    bytes[idx * 2..idx * 2 + 2].try_into().unwrap(),
-                )
-                .to_f32(),
+                DType::BF16 => {
+                    half::bf16::from_le_bytes(bytes[idx * 2..idx * 2 + 2].try_into().unwrap())
+                        .to_f32()
+                }
+                DType::F16 => {
+                    half::f16::from_le_bytes(bytes[idx * 2..idx * 2 + 2].try_into().unwrap())
+                        .to_f32()
+                }
                 _ => unreachable!(),
             });
         }
@@ -124,8 +124,9 @@ pub fn log_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
                 DType::F32 => out[idx * 4..idx * 4 + 4].copy_from_slice(&y.to_le_bytes()),
                 DType::BF16 => out[idx * 2..idx * 2 + 2]
                     .copy_from_slice(&half::bf16::from_f32(y).to_le_bytes()),
-                DType::F16 => out[idx * 2..idx * 2 + 2]
-                    .copy_from_slice(&half::f16::from_f32(y).to_le_bytes()),
+                DType::F16 => {
+                    out[idx * 2..idx * 2 + 2].copy_from_slice(&half::f16::from_f32(y).to_le_bytes())
+                }
                 _ => unreachable!(),
             }
         }

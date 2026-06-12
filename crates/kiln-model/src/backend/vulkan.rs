@@ -16,23 +16,23 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use super::vulkan_config::VulkanRuntimeConfig;
 use super::vulkan_residency::{
-    contains_recurrent_state_resident_buffer, enter_recurrent_state_resident_scope,
-    exit_recurrent_state_resident_scope, get_recurrent_state_resident_buffer,
-    insert_recurrent_state_resident_buffer, recurrent_state_resident_buffers_for,
-    recurrent_state_resident_scope_active, remove_recurrent_state_resident_buffer,
-    replace_recurrent_state_resident_buffer, take_recurrent_state_resident_buffer,
-    with_resident_registry, ResidentActivationEntry,
+    ResidentActivationEntry, contains_recurrent_state_resident_buffer,
+    enter_recurrent_state_resident_scope, exit_recurrent_state_resident_scope,
+    get_recurrent_state_resident_buffer, insert_recurrent_state_resident_buffer,
+    recurrent_state_resident_buffers_for, recurrent_state_resident_scope_active,
+    remove_recurrent_state_resident_buffer, replace_recurrent_state_resident_buffer,
+    take_recurrent_state_resident_buffer, with_resident_registry,
 };
 use super::vulkan_tensor_bridge::{
     kt_tensor_from_f32_bytes, kt_tensor_to_f32_bytes_with_shape,
     kt_tensor_to_packed_bf16_bytes_with_shape,
 };
 use super::{
-    vulkan_attention, vulkan_conv1d, vulkan_dense, vulkan_device, vulkan_gdn, vulkan_linear,
-    vulkan_training, vulkan_weights, AttentionBackend, BackendIdentity, BackendRuntime,
-    ConvBackend, GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend,
-    ResidencyBackend, SamplingBackend, StartupBackend, TrainingCapabilities, TrainingLossBackend,
-    TrainingPrecisionPolicy, matmul_request_support_rank, matmul_support_from_native,
+    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, GdnBackend, LinearBackend,
+    OptimizerBackend, PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend,
+    StartupBackend, TrainingCapabilities, TrainingLossBackend, TrainingPrecisionPolicy,
+    matmul_request_support_rank, matmul_support_from_native, vulkan_attention, vulkan_conv1d,
+    vulkan_dense, vulkan_device, vulkan_gdn, vulkan_linear, vulkan_training, vulkan_weights,
 };
 use crate::forward::GpuWeights;
 
@@ -190,7 +190,8 @@ impl VulkanBackend {
 
         Self {
             device_kt,
-            resident_activation_registry: super::vulkan_residency::new_resident_activation_registry(),
+            resident_activation_registry: super::vulkan_residency::new_resident_activation_registry(
+            ),
             gdn_enabled: config.gdn_enabled,
             gdn_prefill_in_proj_enabled: config.gdn_prefill_in_proj_enabled,
             gdn_gates_enabled: config.gdn_gates_enabled,
@@ -285,11 +286,7 @@ impl Drop for VulkanBackend {
 
 impl BackendIdentity for VulkanBackend {
     fn runtime_name(&self) -> &'static str {
-        if self.has_vulkan() {
-            "vulkan"
-        } else {
-            "cpu"
-        }
+        if self.has_vulkan() { "vulkan" } else { "cpu" }
     }
 
     fn runtime_device(&self) -> kiln_tensor::Device {
@@ -1420,10 +1417,8 @@ impl ResidencyBackend for VulkanBackend {
         }
 
         let mut staged_rows = Vec::with_capacity(destinations.len());
-        for (row_idx, (dst, row_buffer)) in destinations
-            .iter()
-            .zip(row_buffers.into_iter())
-            .enumerate()
+        for (row_idx, (dst, row_buffer)) in
+            destinations.iter().zip(row_buffers.into_iter()).enumerate()
         {
             // kt id of the current destination keys the cache eviction.
             let old_id = dst.id();
@@ -1439,9 +1434,8 @@ impl ResidencyBackend for VulkanBackend {
             staged_rows.push((old_id, new_id, placeholder, row_buffer));
         }
 
-        for (dst, (old_id, new_id, placeholder, row_buffer)) in destinations
-            .iter_mut()
-            .zip(staged_rows.into_iter())
+        for (dst, (old_id, new_id, placeholder, row_buffer)) in
+            destinations.iter_mut().zip(staged_rows.into_iter())
         {
             **dst = placeholder;
             replace_recurrent_state_resident_buffer(old_id, new_id, row_buffer);

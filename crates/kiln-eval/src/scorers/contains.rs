@@ -11,8 +11,8 @@ pub fn naive_key_phrases(text: &str, k: usize) -> Vec<String> {
     let stop: std::collections::HashSet<&str> = [
         "the", "and", "for", "with", "that", "this", "from", "you", "are", "not", "but", "have",
         "has", "had", "was", "were", "will", "would", "could", "should", "their", "your", "they",
-        "them", "than", "then", "into", "over", "also", "some", "such", "more", "most",
-        "much", "many", "very", "just", "like", "what", "which", "when", "where", "while",
+        "them", "than", "then", "into", "over", "also", "some", "such", "more", "most", "much",
+        "many", "very", "just", "like", "what", "which", "when", "where", "while",
     ]
     .into_iter()
     .collect();
@@ -21,9 +21,7 @@ pub fn naive_key_phrases(text: &str, k: usize) -> Vec<String> {
         let words: Vec<&str> = line
             .split_whitespace()
             .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
-            .filter(|w| {
-                w.chars().count() >= 4 && !stop.contains(&w.to_ascii_lowercase().as_str())
-            })
+            .filter(|w| w.chars().count() >= 4 && !stop.contains(&w.to_ascii_lowercase().as_str()))
             .collect();
         for window in words.windows(3) {
             let phrase = window.join(" ").to_lowercase();
@@ -58,7 +56,11 @@ pub(super) fn score(
     case_sensitive: bool,
 ) -> (f32, EvalOutcomeKind, Option<String>) {
     if phrases.is_empty() {
-        return (0.0, EvalOutcomeKind::Invalid, Some("no phrases configured".into()));
+        return (
+            0.0,
+            EvalOutcomeKind::Invalid,
+            Some("no phrases configured".into()),
+        );
     }
     let haystack = if case_sensitive {
         completion_text.to_string()
@@ -122,33 +124,38 @@ mod tests {
 
     #[test]
     fn any_mode_passes_on_any_hit() {
-        let (_, kind, _) =
-            score("hello world", &["world".into(), "missing".into()], ContainsMode::Any, true);
+        let (_, kind, _) = score(
+            "hello world",
+            &["world".into(), "missing".into()],
+            ContainsMode::Any,
+            true,
+        );
         assert_eq!(kind, EvalOutcomeKind::Pass);
     }
 
     #[test]
     fn all_mode_requires_every_hit() {
-        let (s, kind, _) =
-            score("hello world", &["hello".into(), "missing".into()], ContainsMode::All, true);
+        let (s, kind, _) = score(
+            "hello world",
+            &["hello".into(), "missing".into()],
+            ContainsMode::All,
+            true,
+        );
         assert!(matches!(kind, EvalOutcomeKind::Fail));
         assert!((s - 0.5).abs() < 1e-6);
     }
 
     #[test]
     fn none_mode_penalizes_disallowed_content() {
-        let (_, kind, _) =
-            score("safe text", &["unsafe".into()], ContainsMode::None, true);
+        let (_, kind, _) = score("safe text", &["unsafe".into()], ContainsMode::None, true);
         assert_eq!(kind, EvalOutcomeKind::Pass);
-        let (_, kind2, _) =
-            score("very unsafe", &["unsafe".into()], ContainsMode::None, true);
+        let (_, kind2, _) = score("very unsafe", &["unsafe".into()], ContainsMode::None, true);
         assert_eq!(kind2, EvalOutcomeKind::Fail);
     }
 
     #[test]
     fn case_insensitive_mode_lowercases_both_sides() {
-        let (_, kind, _) =
-            score("Hello WORLD", &["world".into()], ContainsMode::Any, false);
+        let (_, kind, _) = score("Hello WORLD", &["world".into()], ContainsMode::Any, false);
         assert_eq!(kind, EvalOutcomeKind::Pass);
     }
 

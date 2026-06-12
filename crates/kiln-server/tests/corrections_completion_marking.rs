@@ -22,7 +22,9 @@ use kiln_model::engine::MockEngine;
 use kiln_scheduler::{Scheduler, SchedulerConfig};
 use kiln_server::api;
 use kiln_server::state::{AppState, TrainingJobInfo, TrainingJobType};
-use kiln_server::training_queue::{QueueEntry, QueuedJob, new_shutdown_flag, spawn_training_worker};
+use kiln_server::training_queue::{
+    QueueEntry, QueuedJob, new_shutdown_flag, spawn_training_worker,
+};
 use kiln_train::{SftRequest, TrainingState};
 
 fn test_tokenizer() -> KilnTokenizer {
@@ -70,7 +72,12 @@ fn make_state() -> (AppState, tempfile::TempDir) {
     (state, dir)
 }
 
-async fn request(app: &axum::Router, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+async fn request(
+    app: &axum::Router,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
     let builder = Request::builder().method(method).uri(path);
     let request = match body {
         Some(v) => builder
@@ -84,7 +91,10 @@ async fn request(app: &axum::Router, method: &str, path: &str, body: Option<Valu
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 /// Register a queued SFT job carrying consumed correction ids directly on
@@ -168,7 +178,10 @@ async fn failed_job_leaves_corrections_basket_intact() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    assert_eq!(last["state"], "failed", "mock worker must fail the job: {last}");
+    assert_eq!(
+        last["state"], "failed",
+        "mock worker must fail the job: {last}"
+    );
 
     // The row is STILL active — visible in the default list, not marked.
     let (status, body) = request(&app, "GET", "/v1/corrections", None).await;

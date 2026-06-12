@@ -44,7 +44,7 @@ use std::sync::Arc;
 use crate::metal_rt::Device as MetalRawDevice;
 
 use crate::{
-    allocator_frozen_error, Allocator, AllocatorMode, DType, Device, MetalStorage, Result, Storage,
+    Allocator, AllocatorMode, DType, Device, MetalStorage, Result, Storage, allocator_frozen_error,
 };
 
 #[derive(Debug)]

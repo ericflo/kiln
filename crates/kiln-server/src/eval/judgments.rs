@@ -121,7 +121,11 @@ impl JudgmentStore {
         Ok(self.root.join(name))
     }
 
-    pub fn create(&self, name: &str, description: Option<String>) -> Result<JudgmentManifest, JudgmentError> {
+    pub fn create(
+        &self,
+        name: &str,
+        description: Option<String>,
+    ) -> Result<JudgmentManifest, JudgmentError> {
         self.ensure_root()?;
         let dir = self.dir(name)?;
         if dir.exists() {
@@ -159,7 +163,8 @@ impl JudgmentStore {
             .map_err(|e| JudgmentError::Io(format!("{e}")))?;
         let line = serde_json::to_string(row).map_err(|e| JudgmentError::Io(format!("{e}")))?;
         writeln!(f, "{line}").map_err(|e| JudgmentError::Io(format!("{e}")))?;
-        f.sync_all().map_err(|e| JudgmentError::Io(format!("{e}")))?;
+        f.sync_all()
+            .map_err(|e| JudgmentError::Io(format!("{e}")))?;
         let mut manifest = self.load_manifest(name)?;
         manifest.num_rows += 1;
         manifest.updated_at = chrono::Utc::now().to_rfc3339();
@@ -206,7 +211,8 @@ impl JudgmentStore {
             }
             writeln!(out, "{line}").map_err(|e| JudgmentError::Io(format!("{e}")))?;
         }
-        out.sync_all().map_err(|e| JudgmentError::Io(format!("{e}")))?;
+        out.sync_all()
+            .map_err(|e| JudgmentError::Io(format!("{e}")))?;
         drop(out);
         std::fs::rename(&tmp, &path).map_err(|e| JudgmentError::Io(format!("{e}")))?;
         if removed == 0 {
@@ -251,7 +257,8 @@ impl JudgmentStore {
     pub fn load_manifest(&self, name: &str) -> Result<JudgmentManifest, JudgmentError> {
         let path = self.dir(name)?.join("manifest.json");
         let bytes = std::fs::read(&path).map_err(|e| JudgmentError::Io(format!("{e}")))?;
-        serde_json::from_slice(&bytes).map_err(|e| JudgmentError::Io(format!("manifest parse: {e}")))
+        serde_json::from_slice(&bytes)
+            .map_err(|e| JudgmentError::Io(format!("manifest parse: {e}")))
     }
 
     fn write_manifest(&self, name: &str, manifest: &JudgmentManifest) -> Result<(), JudgmentError> {
@@ -451,7 +458,9 @@ pub fn format_judge_prompt(row: &JudgmentRow) -> String {
     prompt.push_str(&row.response_a);
     prompt.push_str("\n\n# Reply B\n");
     prompt.push_str(&row.response_b);
-    prompt.push_str("\n\nWhich reply is better? Reply with `Winner: A`, `Winner: B`, or `Winner: Tie`.");
+    prompt.push_str(
+        "\n\nWhich reply is better? Reply with `Winner: A`, `Winner: B`, or `Winner: Tie`.",
+    );
     prompt
 }
 
@@ -581,7 +590,9 @@ mod tests {
         let store = JudgmentStore::new(d.path().to_path_buf());
         let m = store.create("prose-judge", None).unwrap();
         assert_eq!(m.num_rows, 0);
-        let m = store.append("prose-judge", &row("j1", JudgmentWinner::A)).unwrap();
+        let m = store
+            .append("prose-judge", &row("j1", JudgmentWinner::A))
+            .unwrap();
         assert_eq!(m.num_rows, 1);
         assert_eq!(m.winner_histogram.get("a"), Some(&1));
     }
@@ -610,7 +621,8 @@ mod tests {
         store.append("p", &row("j3", JudgmentWinner::Tie)).unwrap();
         store.append("p", &row("j4", JudgmentWinner::Skip)).unwrap();
         // holdout_n = 0: every non-skip row compiles, swap-augmented (x2).
-        let (n, split) = compile_judgments_to_sft(&store, &datasets, "p", "p-sft", false, 0).unwrap();
+        let (n, split) =
+            compile_judgments_to_sft(&store, &datasets, "p", "p-sft", false, 0).unwrap();
         assert_eq!(n, 6);
         assert_eq!(split, 4);
         let listed = datasets.list();
@@ -649,14 +661,16 @@ mod tests {
         assert_eq!(n, 14);
         // The validation suite over the same holdout is exactly the last 3.
         let suite = build_validation_suite(&store2, "q", 3).unwrap();
-        let validation_ids: Vec<&str> =
-            suite.examples.iter().filter_map(|e| e.id.as_deref()).collect();
+        let validation_ids: Vec<&str> = suite
+            .examples
+            .iter()
+            .filter_map(|e| e.id.as_deref())
+            .collect();
         assert_eq!(validation_ids, ["j7", "j8", "j9"]);
         // Compiled dataset must not contain any holdout responses.
-        let compiled = std::fs::read_to_string(
-            d.path().join("datasets").join("q-sft").join("data.jsonl"),
-        )
-        .unwrap();
+        let compiled =
+            std::fs::read_to_string(d.path().join("datasets").join("q-sft").join("data.jsonl"))
+                .unwrap();
         for holdout_id in ["j7", "j8", "j9"] {
             assert!(
                 !compiled.contains(&format!("resp-a-{holdout_id}")),
@@ -674,7 +688,10 @@ mod tests {
         store.create("p", None).unwrap();
         store.append("p", &row("j1", JudgmentWinner::A)).unwrap();
         let err = compile_judgments_to_sft(&store, &datasets, "p", "p-sft", false, 5).unwrap_err();
-        assert!(format!("{err}").contains("leaves no training rows"), "{err}");
+        assert!(
+            format!("{err}").contains("leaves no training rows"),
+            "{err}"
+        );
     }
 
     #[test]

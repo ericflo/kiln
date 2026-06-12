@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 /// Materialize `t` on CPU. CUDA inputs are D2H-copied via
 /// `cuda_to_host_copy`; CPU inputs are cheap `Arc` bumps. `all` /
@@ -124,7 +124,11 @@ fn apply_all_axes(kind: BoolReduce, mask: &Tensor) -> Result<Tensor> {
     };
     let cpu_out = CpuStorage::from_bytes(DType::U8, vec![if result { 1u8 } else { 0u8 }])?;
     let storage: Storage = Arc::new(cpu_out);
-    Tensor::from_parts(storage, Layout::contiguous(Vec::<usize>::new()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(Vec::<usize>::new()),
+        TensorId::next(),
+    )
 }
 
 /// ROCm: correctness-first host round-trip for a boolean reduction. Stage the
@@ -132,10 +136,7 @@ fn apply_all_axes(kind: BoolReduce, mask: &Tensor) -> Result<Tensor> {
 /// to the input device so the op is transparent to ROCm callers. No-op (returns
 /// `None`) for non-ROCm inputs.
 #[cfg(feature = "rocm")]
-fn rocm_roundtrip(
-    mask: &Tensor,
-    f: impl Fn(&Tensor) -> Result<Tensor>,
-) -> Result<Option<Tensor>> {
+fn rocm_roundtrip(mask: &Tensor, f: impl Fn(&Tensor) -> Result<Tensor>) -> Result<Option<Tensor>> {
     if matches!(mask.device(), crate::Device::Rocm(_)) {
         let dev = mask.device();
         let host = crate::rocm_to_host_copy(mask)?;
@@ -279,9 +280,7 @@ mod tests {
 
         // [[1, 1, 1], [1, 0, 1]] — same pattern as all_axis_simple.
         let mask_cpu = Tensor::from_slice(&[1u8, 1, 1, 1, 0, 1], vec![2, 3]).unwrap();
-        let mask_cuda = mask_cpu
-            .to_device(crate::Device::Cuda(0))
-            .unwrap();
+        let mask_cuda = mask_cpu.to_device(crate::Device::Cuda(0)).unwrap();
 
         // Per-axis reductions.
         assert_eq!(
@@ -313,4 +312,3 @@ mod tests {
         );
     }
 }
-

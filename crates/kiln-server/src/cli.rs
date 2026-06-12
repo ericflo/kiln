@@ -2258,7 +2258,10 @@ pub async fn run_train_cancel(url: &str, job_id: &str) -> anyhow::Result<()> {
         );
         std::process::exit(1);
     }
-    let outcome = body.get("status").and_then(|v| v.as_str()).unwrap_or("cancelled");
+    let outcome = body
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("cancelled");
     let message = body
         .get("message")
         .and_then(|v| v.as_str())
@@ -2443,7 +2446,11 @@ fn print_job_line(job: &serde_json::Value) {
     );
     if state == "failed" {
         if let Some(err) = job.get("error").and_then(|v| v.as_str()) {
-            println!("      {} {}", style("error:").red().bold(), style(err).red());
+            println!(
+                "      {} {}",
+                style("error:").red().bold(),
+                style(err).red()
+            );
         }
     }
 }
@@ -2608,9 +2615,7 @@ pub async fn run_pi_setup(url: &str, out: Option<&str>) -> anyhow::Result<()> {
         pi_openai_base_url(url),
         model_id
     );
-    println!(
-        "  Next: just use pi normally — your sessions become training data."
-    );
+    println!("  Next: just use pi normally — your sessions become training data.");
     println!(
         "  Optional: {} (needs a teacher model) enables {} for weekly retraining.",
         style("kiln judge distill").cyan(),
@@ -2687,8 +2692,7 @@ fn write_json_pretty(path: &Path, value: &serde_json::Value) -> anyhow::Result<(
             .unwrap_or_else(|| "pi-config".into()),
         std::process::id()
     ));
-    std::fs::write(&tmp, bytes)
-        .map_err(|err| anyhow::anyhow!("write {}: {err}", tmp.display()))?;
+    std::fs::write(&tmp, bytes).map_err(|err| anyhow::anyhow!("write {}: {err}", tmp.display()))?;
     std::fs::rename(&tmp, path).map_err(|err| {
         let _ = std::fs::remove_file(&tmp);
         anyhow::anyhow!("rename {} -> {}: {err}", tmp.display(), path.display())
@@ -2878,8 +2882,8 @@ pub async fn run_eval_adapter(
     scorer: &Path,
     output: &Path,
 ) -> anyhow::Result<()> {
-    let summary = crate::eval_adapter_cli::run_eval_adapter(
-        crate::eval_adapter_cli::EvalAdapterOptions {
+    let summary =
+        crate::eval_adapter_cli::run_eval_adapter(crate::eval_adapter_cli::EvalAdapterOptions {
             url: url.to_string(),
             adapter: adapter.to_string(),
             tasks: tasks.to_path_buf(),
@@ -2887,9 +2891,8 @@ pub async fn run_eval_adapter(
             request_template: request_template.to_path_buf(),
             scorer: scorer.to_path_buf(),
             output: output.to_path_buf(),
-        },
-    )
-    .await?;
+        })
+        .await?;
 
     println!(
         "{} eval-adapter completed: {} pair(s), mean lift {:.6}, stdev {:.6}, zero_count {}, wrote {}",
@@ -3038,8 +3041,7 @@ mod tests {
 
     #[test]
     fn merge_pi_models_config_uses_probed_model_id() {
-        let merged =
-            merge_pi_models_config(None, "http://localhost:8420", "my-served-id").unwrap();
+        let merged = merge_pi_models_config(None, "http://localhost:8420", "my-served-id").unwrap();
         let provider = &merged["providers"][PI_PROVIDER_ID];
         assert_eq!(provider["baseUrl"], "http://localhost:8420/v1");
         assert_eq!(provider["models"][0]["id"], "my-served-id");
@@ -3050,8 +3052,7 @@ mod tests {
     fn merge_pi_models_config_keeps_existing_providers_and_default_display_name() {
         let existing = json!({"providers": {"other": {"baseUrl": "http://elsewhere"}}});
         let merged =
-            merge_pi_models_config(Some(existing), "http://localhost:8420/", "Qwen3.5-4B")
-                .unwrap();
+            merge_pi_models_config(Some(existing), "http://localhost:8420/", "Qwen3.5-4B").unwrap();
         assert!(merged["providers"]["other"].is_object());
         let provider = &merged["providers"][PI_PROVIDER_ID];
         assert_eq!(provider["models"][0]["id"], "Qwen3.5-4B");

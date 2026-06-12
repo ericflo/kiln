@@ -120,18 +120,19 @@ impl TeacherRegistry {
         let reg = Self::new();
         if path.exists() {
             match std::fs::read(path) {
-                Ok(bytes) => match serde_json::from_slice::<BTreeMap<String, TeacherSpec>>(&bytes)
-                {
-                    Ok(map) => {
-                        *reg.inner.write().unwrap() = map;
-                        tracing::info!(
-                            path = %path.display(),
-                            count = reg.inner.read().unwrap().len(),
-                            "loaded teacher registry"
-                        );
+                Ok(bytes) => {
+                    match serde_json::from_slice::<BTreeMap<String, TeacherSpec>>(&bytes) {
+                        Ok(map) => {
+                            *reg.inner.write().unwrap() = map;
+                            tracing::info!(
+                                path = %path.display(),
+                                count = reg.inner.read().unwrap().len(),
+                                "loaded teacher registry"
+                            );
+                        }
+                        Err(e) => tracing::warn!(error = %e, "failed to parse teachers.json"),
                     }
-                    Err(e) => tracing::warn!(error = %e, "failed to parse teachers.json"),
-                },
+                }
                 Err(e) => tracing::warn!(error = %e, "failed to read teachers.json"),
             }
         }
@@ -188,10 +189,7 @@ async fn list_teachers(State(state): State<AppState>) -> Json<TeachersListRespon
         .into_iter()
         .map(|spec| {
             let capabilities = resolve_caps_for(&spec);
-            TeacherEntry {
-                spec,
-                capabilities,
-            }
+            TeacherEntry { spec, capabilities }
         })
         .collect();
     Json(TeachersListResponse { teachers })
@@ -258,10 +256,7 @@ async fn register_teacher(
             "failed to persist teacher registry");
     }
     let capabilities = resolve_caps_for(&spec);
-    Ok(Json(TeacherEntry {
-        spec,
-        capabilities,
-    }))
+    Ok(Json(TeacherEntry { spec, capabilities }))
 }
 
 async fn delete_teacher(
@@ -306,11 +301,16 @@ fn resolve_caps_for(spec: &TeacherSpec) -> Option<LogitSourceCaps> {
 /// the registry entry. Returns a `LogitSourceError::Invalid` when
 /// the alias is unknown.
 #[allow(dead_code)]
-pub fn resolve_teacher(registry: &TeacherRegistry, alias: &str) -> Result<TeacherSpec, LogitSourceError> {
-    registry.get(alias).ok_or_else(|| LogitSourceError::Invalid {
-        teacher_id: alias.to_string(),
-        message: format!("teacher alias {alias:?} not registered (POST /v1/teachers first)"),
-    })
+pub fn resolve_teacher(
+    registry: &TeacherRegistry,
+    alias: &str,
+) -> Result<TeacherSpec, LogitSourceError> {
+    registry
+        .get(alias)
+        .ok_or_else(|| LogitSourceError::Invalid {
+            teacher_id: alias.to_string(),
+            message: format!("teacher alias {alias:?} not registered (POST /v1/teachers first)"),
+        })
 }
 
 /// Resolve a teacher alias against the registry, failing with the
@@ -427,7 +427,10 @@ mod tests {
         let reg = TeacherRegistry::new();
         let err = resolve_teacher(&reg, "nope").unwrap_err();
         match err {
-            LogitSourceError::Invalid { teacher_id, message } => {
+            LogitSourceError::Invalid {
+                teacher_id,
+                message,
+            } => {
                 assert_eq!(teacher_id, "nope");
                 assert!(message.contains("not registered"));
             }

@@ -88,9 +88,8 @@ pub fn rocm_is_finite(src: &Tensor) -> Result<bool> {
     let flag_ptr = flag_base as *mut core::ffi::c_void;
 
     let n_elements = src.element_count() as i64;
-    let status = unsafe {
-        kiln_is_finite_storage_async(x_ptr, flag_ptr, n_elements, dtype_tag, raw_stream)
-    };
+    let status =
+        unsafe { kiln_is_finite_storage_async(x_ptr, flag_ptr, n_elements, dtype_tag, raw_stream) };
     if status != 0 {
         return Err(Error::Msg(format!(
             "rocm_is_finite: FFI returned status {status}"

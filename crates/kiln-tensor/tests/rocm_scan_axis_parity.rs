@@ -65,8 +65,8 @@ fn cumsum_parity_wavefront_boundary_sweep() {
         let t = Tensor::from_vec_on(Device::Rocm(0), data, vec![n_rows, w])
             .unwrap_or_else(|e| panic!("from_vec_on (w={w}): {e}"));
         let y = cumsum(&t, 1).unwrap_or_else(|e| panic!("cumsum (w={w}): {e}"));
-        let host = kiln_tensor::rocm_to_host_copy(&y)
-            .unwrap_or_else(|e| panic!("to_host (w={w}): {e}"));
+        let host =
+            kiln_tensor::rocm_to_host_copy(&y).unwrap_or_else(|e| panic!("to_host (w={w}): {e}"));
         let got = host.to_vec::<f32>().expect("to_vec");
 
         assert_eq!(got.len(), reference.len(), "width {w}");
@@ -109,8 +109,8 @@ fn cumprod_parity_wavefront_boundary_sweep() {
         let t = Tensor::from_vec_on(Device::Rocm(0), data, vec![n_rows, w])
             .unwrap_or_else(|e| panic!("from_vec_on (w={w}): {e}"));
         let y = cumprod(&t, 1).unwrap_or_else(|e| panic!("cumprod (w={w}): {e}"));
-        let host = kiln_tensor::rocm_to_host_copy(&y)
-            .unwrap_or_else(|e| panic!("to_host (w={w}): {e}"));
+        let host =
+            kiln_tensor::rocm_to_host_copy(&y).unwrap_or_else(|e| panic!("to_host (w={w}): {e}"));
         let got = host.to_vec::<f32>().expect("to_vec");
 
         assert_eq!(got.len(), reference.len(), "width {w}");

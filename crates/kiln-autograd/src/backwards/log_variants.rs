@@ -11,9 +11,7 @@
 
 use std::sync::Arc;
 
-use kiln_tensor::{
-    bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId,
-};
+use kiln_tensor::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 use crate::BackwardOp;
 
@@ -69,21 +67,23 @@ fn store_f32(dtype: DType, shape: &[usize], values: &[f32]) -> Result<Tensor> {
         }
         DType::BF16 => {
             for (i, &v) in values.iter().enumerate() {
-                bytes[i * 2..i * 2 + 2]
-                    .copy_from_slice(&half::bf16::from_f32(v).to_le_bytes());
+                bytes[i * 2..i * 2 + 2].copy_from_slice(&half::bf16::from_f32(v).to_le_bytes());
             }
         }
         DType::F16 => {
             for (i, &v) in values.iter().enumerate() {
-                bytes[i * 2..i * 2 + 2]
-                    .copy_from_slice(&half::f16::from_f32(v).to_le_bytes());
+                bytes[i * 2..i * 2 + 2].copy_from_slice(&half::f16::from_f32(v).to_le_bytes());
             }
         }
         _ => unreachable!(),
     }
     let cpu = CpuStorage::from_bytes(dtype, bytes)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(shape.to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(shape.to_vec()),
+        TensorId::next(),
+    )
 }
 
 macro_rules! impl_log_variant_bwd {
@@ -104,7 +104,11 @@ macro_rules! impl_log_variant_bwd {
                 let x = load_f32(&self.x)?;
                 let dy = load_f32(grad_output)?;
                 let f = $closure;
-                let dx: Vec<f32> = x.iter().zip(dy.iter()).map(|(&xi, &dyi)| f(xi, dyi)).collect();
+                let dx: Vec<f32> = x
+                    .iter()
+                    .zip(dy.iter())
+                    .map(|(&xi, &dyi)| f(xi, dyi))
+                    .collect();
                 Ok(vec![Some(store_f32(self.x.dtype(), self.x.shape(), &dx)?)])
             }
         }

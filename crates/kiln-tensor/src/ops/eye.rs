@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId, bail};
 
 pub fn eye(n: usize, dtype: DType) -> Result<Tensor> {
     if n == 0 {
@@ -42,8 +42,6 @@ pub fn eye(n: usize, dtype: DType) -> Result<Tensor> {
     Tensor::from_parts(storage, Layout::contiguous(vec![n, n]), TensorId::next())
 }
 
-
-
 /// Build an identity matrix on the requested device.
 ///
 /// For CPU, this is identical to [`eye`]. For CUDA, the matrix is
@@ -54,11 +52,7 @@ pub fn eye(n: usize, dtype: DType) -> Result<Tensor> {
 /// `Arc<CudaDevice>`; the cudarc `CudaContext` is derived internally
 /// via `primary_cuda_device` inside `host_to_cuda_copy_ctx`.
 #[cfg(feature = "cuda")]
-pub fn eye_on_device(
-    n: usize,
-    dtype: DType,
-    device: crate::Device,
-) -> Result<Tensor> {
+pub fn eye_on_device(n: usize, dtype: DType, device: crate::Device) -> Result<Tensor> {
     let host = eye(n, dtype)?;
     match device {
         crate::Device::Cpu => Ok(host),
@@ -72,9 +66,7 @@ pub fn eye_on_device(
 pub fn eye_on_device(n: usize, dtype: DType, device: crate::Device) -> Result<Tensor> {
     match device {
         crate::Device::Cpu => eye(n, dtype),
-        other => bail!(
-            "eye_on_device: device {other} requires a GPU feature (cuda/metal/vulkan)"
-        ),
+        other => bail!("eye_on_device: device {other} requires a GPU feature (cuda/metal/vulkan)"),
     }
 }
 
@@ -112,7 +104,8 @@ mod tests {
         let i = eye(4, DType::F32).unwrap();
         let x = Tensor::from_slice(
             &[
-                1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+                1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
+                16.0,
             ],
             vec![4, 4],
         )

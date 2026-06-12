@@ -216,7 +216,11 @@ async fn run_events(
     let Some(page) = state.agent_runs.events_after(&id, q.after) else {
         return Err(ApiError::agent_run_not_found(&id));
     };
-    let next_after = page.events.last().map(|(seq, _)| seq + 1).unwrap_or(q.after);
+    let next_after = page
+        .events
+        .last()
+        .map(|(seq, _)| seq + 1)
+        .unwrap_or(q.after);
     let events: Vec<serde_json::Value> = page
         .events
         .into_iter()

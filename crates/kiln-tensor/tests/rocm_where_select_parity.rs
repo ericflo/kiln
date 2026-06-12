@@ -5,7 +5,7 @@
 //! Compares the ROCm result against a CPU reference. Skips entirely when no
 //! AMD device is present.
 
-use kiln_tensor::{rocm_where_select, Device, Tensor};
+use kiln_tensor::{Device, Tensor, rocm_where_select};
 
 /// CPU reference: out[i] = mask[i] != 0 ? t[i] : f[i].
 fn cpu_ref(mask: &[u8], t: &[f32], f: &[f32]) -> Vec<f32> {
@@ -32,7 +32,13 @@ fn run_case(shape: Vec<usize>) {
 
     // Deterministic, sign-varied inputs; mask alternates / mixes patterns.
     let mask: Vec<u8> = (0..n)
-        .map(|i| if (i % 3 == 0) || (i % 7 == 0) { 1u8 } else { 0u8 })
+        .map(|i| {
+            if (i % 3 == 0) || (i % 7 == 0) {
+                1u8
+            } else {
+                0u8
+            }
+        })
         .collect();
     let t: Vec<f32> = (0..n).map(|i| (i as f32) * 0.5 - 3.0).collect();
     let f: Vec<f32> = (0..n).map(|i| -(i as f32) * 0.25 + 1.0).collect();

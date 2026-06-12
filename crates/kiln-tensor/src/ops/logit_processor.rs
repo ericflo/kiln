@@ -55,9 +55,7 @@
 //! variant lands when `kiln_tensor::Tensor` exposes interior
 //! mutability (Phase 1.x version-counter story).
 
-use crate::{
-    bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId,
-};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 use std::sync::Arc;
 
 /// Stackable logit processor. Each impl applies a per-batch-row
@@ -85,7 +83,9 @@ impl LogitProcessorChain {
     }
 
     pub fn empty() -> Self {
-        LogitProcessorChain { processors: Vec::new() }
+        LogitProcessorChain {
+            processors: Vec::new(),
+        }
     }
 
     pub fn push(&mut self, p: Box<dyn LogitProcessor>) {
@@ -146,9 +146,7 @@ impl LogitProcessor for TemperatureProcessor {
             );
         }
         if self.temperature == 0.0 {
-            bail!(
-                "TemperatureProcessor: temperature=0 — use argmax_last_dim for greedy decoding"
-            );
+            bail!("TemperatureProcessor: temperature=0 — use argmax_last_dim for greedy decoding");
         }
         if self.temperature <= 0.0 {
             bail!(
@@ -264,7 +262,11 @@ impl LogitProcessor for TopPProcessor {
         for row in rows.iter_mut() {
             // 1. Sort descending with index tracking.
             let mut idx: Vec<usize> = (0..vocab).collect();
-            idx.sort_by(|&i, &j| row[j].partial_cmp(&row[i]).unwrap_or(std::cmp::Ordering::Equal));
+            idx.sort_by(|&i, &j| {
+                row[j]
+                    .partial_cmp(&row[i])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             // 2. Compute softmax over the sorted row.
             let max_v = idx.first().map(|&i| row[i]).unwrap_or(f32::NEG_INFINITY);
             let exps: Vec<f32> = idx.iter().map(|&i| (row[i] - max_v).exp()).collect();
@@ -309,8 +311,7 @@ fn scale_all(logits: &Tensor, scale: f32) -> Result<Tensor> {
     match dtype {
         DType::F32 => {
             for i in 0..n {
-                let v =
-                    f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()) * scale;
+                let v = f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()) * scale;
                 out[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
             }
         }
@@ -319,8 +320,7 @@ fn scale_all(logits: &Tensor, scale: f32) -> Result<Tensor> {
                 let v = half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
                     .to_f32()
                     * scale;
-                out[i * 2..i * 2 + 2]
-                    .copy_from_slice(&half::bf16::from_f32(v).to_le_bytes());
+                out[i * 2..i * 2 + 2].copy_from_slice(&half::bf16::from_f32(v).to_le_bytes());
             }
         }
         DType::F16 => {
@@ -328,15 +328,18 @@ fn scale_all(logits: &Tensor, scale: f32) -> Result<Tensor> {
                 let v = half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
                     .to_f32()
                     * scale;
-                out[i * 2..i * 2 + 2]
-                    .copy_from_slice(&half::f16::from_f32(v).to_le_bytes());
+                out[i * 2..i * 2 + 2].copy_from_slice(&half::f16::from_f32(v).to_le_bytes());
             }
         }
         _ => unreachable!(),
     }
     let cpu_out = CpuStorage::from_bytes(dtype, out)?;
     let storage: Storage = Arc::new(cpu_out);
-    Tensor::from_parts(storage, Layout::contiguous(logits.shape().to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(logits.shape().to_vec()),
+        TensorId::next(),
+    )
 }
 
 fn load_all_rows_f32(logits: &Tensor, batch: usize, vocab: usize) -> Result<Vec<Vec<f32>>> {
@@ -356,12 +359,8 @@ fn load_all_rows_f32(logits: &Tensor, batch: usize, vocab: usize) -> Result<Vec<
             let chunk = &bytes[start + v * per..start + (v + 1) * per];
             let val = match dtype {
                 DType::F32 => f32::from_le_bytes(chunk.try_into().unwrap()),
-                DType::BF16 => {
-                    half::bf16::from_le_bytes(chunk.try_into().unwrap()).to_f32()
-                }
-                DType::F16 => {
-                    half::f16::from_le_bytes(chunk.try_into().unwrap()).to_f32()
-                }
+                DType::BF16 => half::bf16::from_le_bytes(chunk.try_into().unwrap()).to_f32(),
+                DType::F16 => half::f16::from_le_bytes(chunk.try_into().unwrap()).to_f32(),
                 _ => unreachable!(),
             };
             row.push(val);
@@ -405,7 +404,11 @@ fn store_rows(dtype: DType, shape: &[usize], rows: &[Vec<f32>]) -> Result<Tensor
     }
     let cpu = CpuStorage::from_bytes(dtype, out)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(shape.to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(shape.to_vec()),
+        TensorId::next(),
+    )
 }
 
 #[cfg(test)]

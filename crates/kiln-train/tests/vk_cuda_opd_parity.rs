@@ -36,9 +36,9 @@ use anyhow::Result;
 // kernel up to f32 associativity; the cross-engine tolerance below
 // (`1e-4` abs / `1e-3` rel) accommodates that difference.
 use kiln_opd_loss_kernel::opd_top_k_reverse_kl_per_position_kt;
+use kiln_vulkan_kernel::VulkanDevice;
 use kiln_vulkan_kernel::vk_ops::opd::vk_opd_top_k_reverse_kl_per_position;
 use kiln_vulkan_kernel::vk_tensor::VkTensor;
-use kiln_vulkan_kernel::VulkanDevice;
 use std::sync::Arc;
 
 fn vk_dev() -> Option<Arc<VulkanDevice>> {
@@ -124,8 +124,9 @@ fn run_cuda_per_position(
     let head_vh_t = kiln_tensor::Tensor::from_vec(head_vh.to_vec(), (vocab_size, hidden_size))?
         .to_device(kiln_tensor::Device::Cuda(0))?;
     let head_t = head_vh_t.transpose(0, 1)?.contiguous()?; // [H, V]
-    let per_pos = opd_top_k_reverse_kl_per_position_kt(&hidden_t, &head_t, idx, lpq, label_mask, top_k)
-        .map_err(|e| anyhow::anyhow!("cuda kt per-position reverse-KL: {e}"))?;
+    let per_pos =
+        opd_top_k_reverse_kl_per_position_kt(&hidden_t, &head_t, idx, lpq, label_mask, top_k)
+            .map_err(|e| anyhow::anyhow!("cuda kt per-position reverse-KL: {e}"))?;
     let v: Vec<f32> = per_pos
         .to_dtype(kiln_tensor::DType::F32)?
         .flatten_all()?

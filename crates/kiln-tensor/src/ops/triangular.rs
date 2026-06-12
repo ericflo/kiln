@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 pub fn triu_mask(n: usize) -> Result<Tensor> {
     if n == 0 {
@@ -54,10 +54,7 @@ fn apply_triangle(t: &Tensor, keep_upper: bool, name: &str) -> Result<Tensor> {
     }
     let n = t.shape()[0];
     if t.shape()[1] != n {
-        bail!(
-            "{name}: input must be square, got {:?}",
-            t.shape()
-        );
+        bail!("{name}: input must be square, got {:?}", t.shape());
     }
     if !matches!(t.dtype(), DType::F32 | DType::BF16 | DType::F16) {
         bail!("{name}: dtype must be F32/BF16/F16, got {}", t.dtype());
@@ -154,17 +151,31 @@ mod tests {
 
     #[test]
     fn triu_zeros_lower_triangle() {
-        let x = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], vec![3, 3]).unwrap();
+        let x = Tensor::from_slice(
+            &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+            vec![3, 3],
+        )
+        .unwrap();
         let y = triu(&x).unwrap();
         // Upper-triangular form of [[1,2,3],[4,5,6],[7,8,9]] = [[1,2,3],[0,5,6],[0,0,9]]
-        assert_eq!(read_f32(&y), vec![1.0, 2.0, 3.0, 0.0, 5.0, 6.0, 0.0, 0.0, 9.0]);
+        assert_eq!(
+            read_f32(&y),
+            vec![1.0, 2.0, 3.0, 0.0, 5.0, 6.0, 0.0, 0.0, 9.0]
+        );
     }
 
     #[test]
     fn tril_zeros_upper_triangle() {
-        let x = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], vec![3, 3]).unwrap();
+        let x = Tensor::from_slice(
+            &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+            vec![3, 3],
+        )
+        .unwrap();
         let y = tril(&x).unwrap();
-        assert_eq!(read_f32(&y), vec![1.0, 0.0, 0.0, 4.0, 5.0, 0.0, 7.0, 8.0, 9.0]);
+        assert_eq!(
+            read_f32(&y),
+            vec![1.0, 0.0, 0.0, 4.0, 5.0, 0.0, 7.0, 8.0, 9.0]
+        );
     }
 
     #[test]
@@ -175,9 +186,27 @@ mod tests {
         let l = read_f32(&tril(&x).unwrap());
         // u + l - diag = orig
         // diag = [1, 0, 0, 4]; sum = [2, 2, 3, 8]; minus diag = [1, 2, 3, 4]
-        let orig: Vec<f32> = u.iter().zip(l.iter()).enumerate().map(|(i, (a, b))| {
-            a + b - if i == 0 || i == 3 { x.storage().as_any().downcast_ref::<CpuStorage>().unwrap().as_bytes().chunks(4).nth(i).map(|c| f32::from_le_bytes(c.try_into().unwrap())).unwrap() } else { 0.0 }
-        }).collect();
+        let orig: Vec<f32> = u
+            .iter()
+            .zip(l.iter())
+            .enumerate()
+            .map(|(i, (a, b))| {
+                a + b
+                    - if i == 0 || i == 3 {
+                        x.storage()
+                            .as_any()
+                            .downcast_ref::<CpuStorage>()
+                            .unwrap()
+                            .as_bytes()
+                            .chunks(4)
+                            .nth(i)
+                            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                            .unwrap()
+                    } else {
+                        0.0
+                    }
+            })
+            .collect();
         assert_eq!(orig, vec![1.0, 2.0, 3.0, 4.0]);
     }
 

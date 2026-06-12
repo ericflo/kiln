@@ -22,6 +22,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use kiln_tensor::ops::GumbelSampler;
 use kiln_tensor::ops::logit_dry::DryProcessor;
 use kiln_tensor::ops::logit_mirostat::Mirostat2Processor;
 use kiln_tensor::ops::logit_misc::{LogitBiasProcessor, NgramBlockProcessor};
@@ -33,7 +34,6 @@ use kiln_tensor::ops::logit_processor::{
     LogitProcessor, LogitProcessorChain, TemperatureProcessor, TopKProcessor, TopPProcessor,
 };
 use kiln_tensor::ops::logit_xtc::XtcProcessor;
-use kiln_tensor::ops::GumbelSampler;
 use kiln_tensor::{CpuStorage, DType, Tensor};
 
 fn read_i64(t: &Tensor) -> Vec<i64> {
@@ -53,16 +53,12 @@ fn make_full_chain(history: Vec<u32>) -> LogitProcessorChain {
 
     LogitProcessorChain::new(vec![
         // ── penalties ──
-        Box::new(RepetitionPenaltyProcessor::new(
-            1.05,
-            vec![history.clone()],
-        )),
+        Box::new(RepetitionPenaltyProcessor::new(1.05, vec![history.clone()])),
         Box::new(FrequencyPenaltyProcessor::new(0.1, vec![history.clone()])),
         Box::new(PresencePenaltyProcessor::new(0.1, vec![history.clone()])),
         // ── DRY ──
         Box::new(
-            DryProcessor::new(0.5, 1.75, 3, vec![history.clone()])
-                .with_sequence_breakers(breakers),
+            DryProcessor::new(0.5, 1.75, 3, vec![history.clone()]).with_sequence_breakers(breakers),
         ),
         // ── ngram-block ──
         Box::new(NgramBlockProcessor::new(2, vec![history])),

@@ -740,14 +740,8 @@ fn main() -> Result<()> {
 
     println!("\n=== Backend latency fixture metrics ===");
     print_latency_metric("t2048_flce_on_step_secs", t2048_on);
-    print_latency_metric(
-        "t8192_streaming_tile4096_step_secs",
-        t8192_on_stream_4096,
-    );
-    print_latency_metric(
-        "t16384_streaming_tile4096_step_secs",
-        t16384_on_stream_4096,
-    );
+    print_latency_metric("t8192_streaming_tile4096_step_secs", t8192_on_stream_4096);
+    print_latency_metric("t16384_streaming_tile4096_step_secs", t16384_on_stream_4096);
 
     let phase_a_unblocked = matches!(t8192_on.map(|r| &r.status), Some(Status::Ok))
         && matches!(t16384_on.map(|r| &r.status), Some(Status::Ok));

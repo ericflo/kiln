@@ -1879,7 +1879,10 @@ mod tests {
         let calls = target["tool_calls"].as_array().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0]["name"], serde_json::json!("Write"));
-        assert_eq!(calls[0]["arguments"]["content"], serde_json::json!(embedded));
+        assert_eq!(
+            calls[0]["arguments"]["content"],
+            serde_json::json!(embedded)
+        );
         assert_eq!(stats.sampled_tool_histogram.get("Write"), Some(&1));
         assert!(!stats.sampled_tool_histogram.contains_key("Foo"));
         assert!(suite.examples[0].tags.contains(&"tool:Write".to_string()));

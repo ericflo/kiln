@@ -85,8 +85,8 @@ async fn cache_import(
             .bytes()
             .await
             .map_err(|e| ApiError::training_invalid_request(format!("multipart body: {e}")))?;
-        let tmp = NamedTempFile::new()
-            .map_err(|e| ApiError::internal(format!("temp file: {e}")))?;
+        let tmp =
+            NamedTempFile::new().map_err(|e| ApiError::internal(format!("temp file: {e}")))?;
         std::fs::write(tmp.path(), &bytes)
             .map_err(|e| ApiError::internal(format!("temp write: {e}")))?;
         let written = cache
@@ -110,8 +110,7 @@ async fn cache_export(State(state): State<AppState>) -> Result<Response, ApiErro
             root.display()
         )));
     }
-    let tmp = NamedTempFile::new()
-        .map_err(|e| ApiError::internal(format!("temp file: {e}")))?;
+    let tmp = NamedTempFile::new().map_err(|e| ApiError::internal(format!("temp file: {e}")))?;
     cache
         .export_to_tar(tmp.path())
         .map_err(|e| ApiError::internal(format!("export_to_tar: {e:#}")))?;
@@ -150,13 +149,17 @@ mod tests {
     fn cache_root_honors_env_var() {
         // SAFETY: tests serialize through cargo test; we set/unset
         // around the assertion.
-        unsafe { std::env::set_var("KILN_LOGIT_CACHE_DIR", "/tmp/kiln-cache-test"); }
+        unsafe {
+            std::env::set_var("KILN_LOGIT_CACHE_DIR", "/tmp/kiln-cache-test");
+        }
         // Build a minimal AppState via the mock constructor; we just
         // need adapter_dir set so `cache_root` can hit the env-var path.
         // The mock construct is heavyweight; skip and assert directly
         // on the env-var resolution.
         let resolved = std::env::var("KILN_LOGIT_CACHE_DIR").ok();
         assert_eq!(resolved.as_deref(), Some("/tmp/kiln-cache-test"));
-        unsafe { std::env::remove_var("KILN_LOGIT_CACHE_DIR"); }
+        unsafe {
+            std::env::remove_var("KILN_LOGIT_CACHE_DIR");
+        }
     }
 }

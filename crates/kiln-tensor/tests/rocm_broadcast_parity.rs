@@ -5,7 +5,7 @@
 //! expanded across batch/head axes. The old ROCm path flattened these into very
 //! large `index_select_dim0` launches.
 
-use kiln_tensor::{ops::broadcast_to, rocm_is_available, rocm_to_host_copy, Device, Tensor};
+use kiln_tensor::{Device, Tensor, ops::broadcast_to, rocm_is_available, rocm_to_host_copy};
 
 fn to_host_f32(t: &Tensor) -> Vec<f32> {
     let host = rocm_to_host_copy(t).expect("rocm_to_host_copy");

@@ -14,10 +14,10 @@
 //! The fixtures are inlined verbatim so the test is hermetic — no DB
 //! connection required at test time.
 
+use kiln_eval::EvalOutcomeKind;
 use kiln_eval::qwen3::{ParsedToolCall, ToolCallFormat, extract_first_tool_call};
 use kiln_eval::scorers::{ArgsScoring, NameMatch, NoopJudgeRunner, Scorer, score_completion};
 use kiln_eval::suite::{EvalChatMessage, EvalExample};
-use kiln_eval::EvalOutcomeKind;
 
 fn ex(target_json: serde_json::Value) -> EvalExample {
     EvalExample {
@@ -97,13 +97,8 @@ fn bash_tool_with_command_arg_canonicalizes_correctly() {
     // verbatim.
     let xml = "<tool_call>\n<function=Bash>\n<parameter=command>\nhead -c 2000 /data/logs/capture/anthropic/2026-04-06/web-7cc48cb7df-vkwqt-001159.json\n</parameter>\n</function>\n</tool_call>";
 
-    let outcome = score_completion(
-        &tool_call_scorer(),
-        &ex(target),
-        xml,
-        &NoopJudgeRunner,
-    )
-    .unwrap();
+    let outcome =
+        score_completion(&tool_call_scorer(), &ex(target), xml, &NoopJudgeRunner).unwrap();
     assert_eq!(
         outcome.kind,
         EvalOutcomeKind::Pass,
@@ -133,8 +128,7 @@ fn boolean_arg_in_edit_tool_recovers_as_string_in_auto_mode() {
         weights: None,
         require_xml_format: false,
     };
-    let outcome =
-        score_completion(&auto_scorer, &ex(target), xml, &NoopJudgeRunner).unwrap();
+    let outcome = score_completion(&auto_scorer, &ex(target), xml, &NoopJudgeRunner).unwrap();
     // Auto mode: string "false" vs JSON bool false — partial credit on the
     // arg, but name + structure are perfect. We expect Pass under the
     // current pass threshold (0.8).
@@ -179,13 +173,8 @@ fn thinking_before_tool_call_in_real_trajectory_scores_correctly() {
     // Real Qwen3.5 emission with reasoning then a tool call.
     let raw = "<think>\nThe user is asking about a file. I should use the Read tool to fetch its contents at /etc/hosts.\n</think>\n\n<tool_call>\n<function=Read>\n<parameter=file_path>\n/etc/hosts\n</parameter>\n</function>\n</tool_call>";
     let target = anthropic_to_canonical("Read", serde_json::json!({"file_path": "/etc/hosts"}));
-    let outcome = score_completion(
-        &tool_call_scorer(),
-        &ex(target),
-        raw,
-        &NoopJudgeRunner,
-    )
-    .unwrap();
+    let outcome =
+        score_completion(&tool_call_scorer(), &ex(target), raw, &NoopJudgeRunner).unwrap();
     assert_eq!(outcome.kind, EvalOutcomeKind::Pass);
     // Reasoning was captured for dashboard display.
     assert!(outcome.reasoning_text.is_some());
@@ -196,13 +185,8 @@ fn wrong_tool_name_fails_even_with_correct_args() {
     let target = anthropic_to_canonical("Edit", serde_json::json!({"file_path": "/a"}));
     // Model picked Write instead of Edit.
     let raw = "<tool_call>\n<function=Write>\n<parameter=file_path>\n/a\n</parameter>\n</function>\n</tool_call>";
-    let outcome = score_completion(
-        &tool_call_scorer(),
-        &ex(target),
-        raw,
-        &NoopJudgeRunner,
-    )
-    .unwrap();
+    let outcome =
+        score_completion(&tool_call_scorer(), &ex(target), raw, &NoopJudgeRunner).unwrap();
     assert_eq!(outcome.kind, EvalOutcomeKind::Fail);
 }
 
@@ -211,13 +195,8 @@ fn extra_tool_call_in_real_trajectory_is_penalized() {
     // Two tool calls when only one was expected.
     let target = anthropic_to_canonical("Edit", serde_json::json!({"file_path": "/a"}));
     let raw = "<tool_call>\n<function=Edit>\n<parameter=file_path>\n/a\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=Bash>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>";
-    let outcome = score_completion(
-        &tool_call_scorer(),
-        &ex(target),
-        raw,
-        &NoopJudgeRunner,
-    )
-    .unwrap();
+    let outcome =
+        score_completion(&tool_call_scorer(), &ex(target), raw, &NoopJudgeRunner).unwrap();
     assert!(outcome.score < 1.0, "score was {}", outcome.score);
     assert!(
         outcome
@@ -233,13 +212,8 @@ fn json_response_when_xml_expected_still_scores_correctly() {
     // match against the JSON target — but note format mismatch in detail.
     let target = anthropic_to_canonical("Edit", serde_json::json!({"file_path": "/a"}));
     let raw = r#"{"tool_calls": [{"name": "Edit", "arguments": {"file_path": "/a"}}]}"#;
-    let outcome = score_completion(
-        &tool_call_scorer(),
-        &ex(target),
-        raw,
-        &NoopJudgeRunner,
-    )
-    .unwrap();
+    let outcome =
+        score_completion(&tool_call_scorer(), &ex(target), raw, &NoopJudgeRunner).unwrap();
     assert_eq!(outcome.kind, EvalOutcomeKind::Pass);
     // Format diagnostic present.
     assert!(
@@ -296,12 +270,7 @@ fn require_xml_format_still_passes_xml_emission() {
 fn refusal_when_tool_should_have_been_used_is_invalid() {
     let target = anthropic_to_canonical("Edit", serde_json::json!({"file_path": "/a"}));
     let raw = "I can't make that edit — the file looks dangerous.";
-    let outcome = score_completion(
-        &tool_call_scorer(),
-        &ex(target),
-        raw,
-        &NoopJudgeRunner,
-    )
-    .unwrap();
+    let outcome =
+        score_completion(&tool_call_scorer(), &ex(target), raw, &NoopJudgeRunner).unwrap();
     assert_eq!(outcome.kind, EvalOutcomeKind::Invalid);
 }

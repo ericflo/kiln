@@ -27,7 +27,7 @@ use kiln_gdn_kernel::{
     gdn_gated_rms_norm_supports_kt, gdn_l2_norm_scale_bwd_bf16_kt,
     gdn_l2_norm_scale_bwd_supports_kt,
 };
-use kiln_tensor::{cuda_to_host_copy, CpuStorage, DType, Tensor};
+use kiln_tensor::{CpuStorage, DType, Tensor, cuda_to_host_copy};
 
 fn cuda_available() -> bool {
     kiln_tensor::primary_cuda_context(0).is_ok()
@@ -342,8 +342,7 @@ fn run_bwd_case(batch: usize, seq_len: usize, heads: usize, hidden: usize, seed:
         "{label}: f32-weight backward envelope check failed"
     );
 
-    let grads =
-        gdn_gated_rms_norm_bwd_bf16_kt(&dout, &x, &z, &weight, 1e-6).expect("fused bwd");
+    let grads = gdn_gated_rms_norm_bwd_bf16_kt(&dout, &x, &z, &weight, 1e-6).expect("fused bwd");
     let grads_f32_weight =
         gdn_gated_rms_norm_bwd_bf16_f32_weight_kt(&dout, &x, &z, &weight_f32, 1e-6)
             .expect("fused bwd f32 weight");
@@ -370,9 +369,18 @@ fn run_bwd_case(batch: usize, seq_len: usize, heads: usize, hidden: usize, seed:
     println!(
         "[{label} bwd] shape=[{batch},{seq_len},{heads},{hidden}] dx_max={dx_max:.3e} dz_max={dz_max:.3e} dw_max={dw_max:.3e}"
     );
-    assert!(dx_max < 6e-3, "{label}: dx max_abs_diff {dx_max} exceeds tolerance");
-    assert!(dz_max < 6e-3, "{label}: dz max_abs_diff {dz_max} exceeds tolerance");
-    assert!(dw_max < 2e-2, "{label}: dw max_abs_diff {dw_max} exceeds tolerance");
+    assert!(
+        dx_max < 6e-3,
+        "{label}: dx max_abs_diff {dx_max} exceeds tolerance"
+    );
+    assert!(
+        dz_max < 6e-3,
+        "{label}: dz max_abs_diff {dz_max} exceeds tolerance"
+    );
+    assert!(
+        dw_max < 2e-2,
+        "{label}: dw max_abs_diff {dw_max} exceeds tolerance"
+    );
 
     let (ref_dx_f32_weight, ref_dz_f32_weight, ref_dw_f32_weight) =
         reference_bwd_host(&dout_ref, &x_ref, &z_ref, &w_host, rows, hidden, 1e-6);
@@ -437,8 +445,7 @@ fn run_l2_bwd_case(
         "{label}: l2 backward envelope check failed"
     );
 
-    let dx =
-        gdn_l2_norm_scale_bwd_bf16_kt(&dout, &x, scale, 1e-6).expect("fused l2 bwd");
+    let dx = gdn_l2_norm_scale_bwd_bf16_kt(&dout, &x, scale, 1e-6).expect("fused l2 bwd");
 
     let ref_dx = reference_l2_bwd_host(&dout_ref, &x_ref, rows, hidden, scale, 1e-6);
     let ref_dx_bf16: Vec<f32> = ref_dx.iter().map(|&v| bf16::from_f32(v).to_f32()).collect();

@@ -45,15 +45,11 @@ fn read_host_f32(t: &Tensor) -> Vec<f32> {
 
 fn build_lora_fixtures() -> (Tensor, Tensor, LoraProjectionWeights) {
     let x_data: Vec<f32> = (0..SEQ * HIDDEN).map(|i| (i as f32) * 0.1 - 0.3).collect();
-    let w_data: Vec<f32> = (0..HIDDEN * OUT)
-        .map(|i| 0.05 * (i as f32) - 0.2)
-        .collect();
+    let w_data: Vec<f32> = (0..HIDDEN * OUT).map(|i| 0.05 * (i as f32) - 0.2).collect();
     let a_data: Vec<f32> = (0..RANK * HIDDEN)
         .map(|i| 0.07 * (i as f32) - 0.1)
         .collect();
-    let b_data: Vec<f32> = (0..OUT * RANK)
-        .map(|i| 0.03 * (i as f32) + 0.02)
-        .collect();
+    let b_data: Vec<f32> = (0..OUT * RANK).map(|i| 0.03 * (i as f32) + 0.02).collect();
     let x = Tensor::from_vec_on(Device::Cuda(0), x_data, vec![SEQ, HIDDEN]).expect("x");
     let weight_t =
         Tensor::from_vec_on(Device::Cuda(0), w_data, vec![HIDDEN, OUT]).expect("weight_t");

@@ -16,7 +16,7 @@
 //! tolerance band; CPU iteration order is fixed and bit-stable.
 
 use kiln_tensor::ops::scatter_add;
-use kiln_tensor::{bail, DType, Result, Tensor};
+use kiln_tensor::{DType, Result, Tensor, bail};
 
 use crate::BackwardOp;
 
@@ -41,9 +41,7 @@ impl BackwardOp for EmbeddingBackward {
     fn apply(&self, grad_output: &Tensor) -> Result<Vec<Option<Tensor>>> {
         let go_shape = grad_output.shape();
         if go_shape.is_empty() {
-            bail!(
-                "EmbeddingBackward: grad_output must have rank ≥ 1 (got rank 0)"
-            );
+            bail!("EmbeddingBackward: grad_output must have rank ≥ 1 (got rank 0)");
         }
         let last = *go_shape.last().unwrap();
         if last != self.hidden {
@@ -65,9 +63,11 @@ impl BackwardOp for EmbeddingBackward {
             );
         }
         // scatter_add along axis 0: produces [vocab_size, hidden].
-        let d_weights =
-            scatter_add(grad_output, 0, &self.token_ids, self.vocab_size)?;
-        Ok(vec![Some(d_weights), None /* token_ids non-differentiable */])
+        let d_weights = scatter_add(grad_output, 0, &self.token_ids, self.vocab_size)?;
+        Ok(vec![
+            Some(d_weights),
+            None, /* token_ids non-differentiable */
+        ])
     }
     fn requires_input(&self, idx: usize) -> bool {
         // The backward needs token_ids (saved on the struct) but
@@ -100,8 +100,7 @@ mod tests {
         // d_weights = scatter_add: row 0 += [1, 2], row 2 += [3, 4].
         // Expected: [[1, 2], [0, 0], [3, 4], [0, 0]].
         let token_ids = Tensor::from_slice(&[0i64, 2], vec![2]).unwrap();
-        let grad_output =
-            Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], vec![2, 2]).unwrap();
+        let grad_output = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], vec![2, 2]).unwrap();
         let bo = EmbeddingBackward {
             vocab_size: 4,
             hidden: 2,
@@ -119,8 +118,7 @@ mod tests {
         // token_ids = [1, 1]. grad_output = [[1, 1], [2, 2]].
         // d_weights row 1 = [1+2, 1+2] = [3, 3]; others zero.
         let token_ids = Tensor::from_slice(&[1i64, 1], vec![2]).unwrap();
-        let grad_output =
-            Tensor::from_slice(&[1.0f32, 1.0, 2.0, 2.0], vec![2, 2]).unwrap();
+        let grad_output = Tensor::from_slice(&[1.0f32, 1.0, 2.0, 2.0], vec![2, 2]).unwrap();
         let bo = EmbeddingBackward {
             vocab_size: 2,
             hidden: 2,
@@ -135,11 +133,9 @@ mod tests {
         // token_ids shape [B=2, S=2], values [B, S, H=2]. Each (b,s)
         // scatters into d_weights[id].
         let token_ids = Tensor::from_slice(&[0i64, 1, 1, 0], vec![2, 2]).unwrap();
-        let grad_output = Tensor::from_slice(
-            &[1.0f32, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0],
-            vec![2, 2, 2],
-        )
-        .unwrap();
+        let grad_output =
+            Tensor::from_slice(&[1.0f32, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0], vec![2, 2, 2])
+                .unwrap();
         let bo = EmbeddingBackward {
             vocab_size: 2,
             hidden: 2,

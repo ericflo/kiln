@@ -18,8 +18,8 @@
 use std::sync::Arc;
 
 use crate::{
-    bail, dispatch1, BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result,
-    Storage, Tensor, TensorId,
+    BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result, Storage, Tensor,
+    TensorId, bail, dispatch1,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,7 +87,10 @@ impl DeviceOp1 for HyperOp {
         if !x.is_contiguous() {
             return Ok(None);
         }
-        Ok(Some(crate::cuda_activation_unary(x, self.kind.cuda_kind_tag())?))
+        Ok(Some(crate::cuda_activation_unary(
+            x,
+            self.kind.cuda_kind_tag(),
+        )?))
     }
 
     #[cfg(feature = "rocm")]
@@ -101,7 +104,10 @@ impl DeviceOp1 for HyperOp {
         if !x.is_contiguous() {
             return Ok(None);
         }
-        Ok(Some(crate::rocm_activation_unary(x, self.kind.cuda_kind_tag())?))
+        Ok(Some(crate::rocm_activation_unary(
+            x,
+            self.kind.cuda_kind_tag(),
+        )?))
     }
 
     #[cfg(feature = "metal")]
@@ -183,37 +189,60 @@ fn cpu_apply(kind: HyperKind, x: &Tensor) -> Result<Tensor> {
     for i in 0..n {
         let v = match dtype {
             DType::F32 => f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()),
-            DType::BF16 => half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
-            DType::F16 => half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
+            DType::BF16 => {
+                half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
+            DType::F16 => {
+                half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
             _ => unreachable!(),
         };
         let y = kind.apply_f32(v);
         match dtype {
             DType::F32 => out[i * 4..i * 4 + 4].copy_from_slice(&y.to_le_bytes()),
-            DType::BF16 => out[i * 2..i * 2 + 2]
-                .copy_from_slice(&half::bf16::from_f32(y).to_le_bytes()),
-            DType::F16 => out[i * 2..i * 2 + 2]
-                .copy_from_slice(&half::f16::from_f32(y).to_le_bytes()),
+            DType::BF16 => {
+                out[i * 2..i * 2 + 2].copy_from_slice(&half::bf16::from_f32(y).to_le_bytes())
+            }
+            DType::F16 => {
+                out[i * 2..i * 2 + 2].copy_from_slice(&half::f16::from_f32(y).to_le_bytes())
+            }
             _ => unreachable!(),
         }
     }
     let cpu_out = CpuStorage::from_bytes(dtype, out)?;
     let storage: Storage = Arc::new(cpu_out);
-    Tensor::from_parts(storage, Layout::contiguous(x.shape().to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(x.shape().to_vec()),
+        TensorId::next(),
+    )
 }
 
 pub fn sinh(x: &Tensor) -> Result<Tensor> {
-    dispatch1(&HyperOp { kind: HyperKind::Sinh }, x)
+    dispatch1(
+        &HyperOp {
+            kind: HyperKind::Sinh,
+        },
+        x,
+    )
 }
 
 pub fn cosh(x: &Tensor) -> Result<Tensor> {
-    dispatch1(&HyperOp { kind: HyperKind::Cosh }, x)
+    dispatch1(
+        &HyperOp {
+            kind: HyperKind::Cosh,
+        },
+        x,
+    )
 }
 
 pub fn atanh(x: &Tensor) -> Result<Tensor> {
-    dispatch1(&HyperOp { kind: HyperKind::Atanh }, x)
+    dispatch1(
+        &HyperOp {
+            kind: HyperKind::Atanh,
+        },
+        x,
+    )
 }
 
 #[cfg(test)]

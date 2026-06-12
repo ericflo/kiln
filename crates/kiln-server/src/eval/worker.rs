@@ -48,16 +48,16 @@ pub fn gc_eval_jobs(state: &AppState) -> usize {
     if jobs.len() <= cap {
         return 0;
     }
-    let mut candidates: Vec<(String, std::time::Instant)> = jobs
-        .iter()
-        .filter_map(|(id, j)| match (j.state, j.finished_at) {
-            (
-                EvalJobState::Completed | EvalJobState::Failed | EvalJobState::Cancelled,
-                Some(t),
-            ) if now.saturating_duration_since(t) >= ttl => Some((id.clone(), t)),
-            _ => None,
-        })
-        .collect();
+    let mut candidates: Vec<(String, std::time::Instant)> =
+        jobs.iter()
+            .filter_map(|(id, j)| match (j.state, j.finished_at) {
+                (
+                    EvalJobState::Completed | EvalJobState::Failed | EvalJobState::Cancelled,
+                    Some(t),
+                ) if now.saturating_duration_since(t) >= ttl => Some((id.clone(), t)),
+                _ => None,
+            })
+            .collect();
     candidates.sort_by_key(|(_, t)| *t);
     let want_to_remove = jobs.len().saturating_sub(cap);
     let mut removed = 0;
@@ -113,21 +113,20 @@ async fn run_one_job_with_generator(
     // blocking-thread scoring). Mock mode keeps the no-op runner — judge
     // scorers degrade to Invalid there, honestly.
     let judge_runner: Arc<dyn JudgeRunner> = match state.backend.as_ref() {
-        crate::state::ModelBackend::Real { .. } => Arc::new(
-            crate::eval::generator::LiveJudgeRunner::new(state.clone()),
-        ),
+        crate::state::ModelBackend::Real { .. } => {
+            Arc::new(crate::eval::generator::LiveJudgeRunner::new(state.clone()))
+        }
         crate::state::ModelBackend::Mock { .. } => noop_judge_runner(),
     };
 
     let progress_state = state.eval_jobs.clone();
     let progress_job_id = job_id.clone();
-    let progress_cb: crate::eval::executor::ProgressCallback =
-        Box::new(move |p: EvalProgress| {
-            let mut jobs = progress_state.write().unwrap();
-            if let Some(job) = jobs.get_mut(&progress_job_id) {
-                job.progress = p;
-            }
-        });
+    let progress_cb: crate::eval::executor::ProgressCallback = Box::new(move |p: EvalProgress| {
+        let mut jobs = progress_state.write().unwrap();
+        if let Some(job) = jobs.get_mut(&progress_job_id) {
+            job.progress = p;
+        }
+    });
 
     let result = run_job(
         &state,
@@ -194,14 +193,11 @@ async fn run_one_job_with_generator(
         // the gate so the payload carries the promotion verdict. The gate
         // stamps its verdict on the LINKED TRAINING job; re-read it here.
         if let Some(ref url) = state.eval_webhook_url {
-            let gate_verdict = snapshot
-                .post_eval_gate
-                .as_ref()
-                .and_then(|gate| {
-                    let jobs = state.training_jobs.read().unwrap();
-                    jobs.get(&gate.training_job_id)
-                        .and_then(|j| j.post_eval_verdict.clone())
-                });
+            let gate_verdict = snapshot.post_eval_gate.as_ref().and_then(|gate| {
+                let jobs = state.training_jobs.read().unwrap();
+                jobs.get(&gate.training_job_id)
+                    .and_then(|j| j.post_eval_verdict.clone())
+            });
             let event = serde_json::json!({
                 "event": "eval_completed",
                 "job_id": snapshot.job_id,
@@ -411,8 +407,7 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
             .await
             {
                 Ok(_) => {
-                    *state.active_adapter_name.write().unwrap() =
-                        Some(gate.adapter_name.clone());
+                    *state.active_adapter_name.write().unwrap() = Some(gate.adapter_name.clone());
                     stamp_verdict(
                         crate::state::GateOutcome::Promoted,
                         format!(
@@ -467,7 +462,9 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
     }
 
     let src = state.adapter_dir.join(&gate.adapter_name);
-    let mut dst = state.adapter_dir.join(format!("{}.failed", gate.adapter_name));
+    let mut dst = state
+        .adapter_dir
+        .join(format!("{}.failed", gate.adapter_name));
     if dst.exists() {
         dst = state.adapter_dir.join(format!(
             "{}.failed-{}",
@@ -476,7 +473,10 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
         ));
     }
     let rename_note = match std::fs::rename(&src, &dst) {
-        Ok(()) => format!("renamed to `{}`", dst.file_name().unwrap_or_default().to_string_lossy()),
+        Ok(()) => format!(
+            "renamed to `{}`",
+            dst.file_name().unwrap_or_default().to_string_lossy()
+        ),
         Err(e) => format!("rename to .failed failed: {e}"),
     };
     state.purge_adapter_caches(&Some(gate.adapter_name.clone()));
@@ -583,7 +583,6 @@ async fn run_job(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -668,7 +667,9 @@ mod tests {
             let call = self
                 .calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let fut = self.inner.run(prepared, params, completion_index, adapter_label);
+            let fut = self
+                .inner
+                .run(prepared, params, completion_index, adapter_label);
             let reached = self.reached.clone();
             let resume = self.resume.clone();
             Box::pin(async move {
@@ -776,7 +777,11 @@ mod tests {
             Some(gate.training_job_id.clone()),
         );
         info.post_eval_gate = Some(gate.clone());
-        state.eval_jobs.write().unwrap().insert(job_id.clone(), info);
+        state
+            .eval_jobs
+            .write()
+            .unwrap()
+            .insert(job_id.clone(), info);
         let entry = EvalQueueEntry {
             job_id,
             job: QueuedEvalJob::Inline {
@@ -785,9 +790,9 @@ mod tests {
                 generation_override: None,
             },
         };
-        let generator = Arc::new(
-            crate::eval::MockEvalGenerator::new().with_force_reply(reply.to_string()),
-        ) as Arc<dyn crate::eval::generator::EvalGenerator>;
+        let generator =
+            Arc::new(crate::eval::MockEvalGenerator::new().with_force_reply(reply.to_string()))
+                as Arc<dyn crate::eval::generator::EvalGenerator>;
         run_one_job_with_generator(state.clone(), entry, generator).await;
     }
 
@@ -910,7 +915,11 @@ mod tests {
             training_job_id: "train-3".into(),
             auto_load_on_pass: true,
         });
-        state.eval_jobs.write().unwrap().insert(job_id.clone(), info);
+        state
+            .eval_jobs
+            .write()
+            .unwrap()
+            .insert(job_id.clone(), info);
         let entry = EvalQueueEntry {
             job_id,
             job: QueuedEvalJob::Registered {
@@ -1058,11 +1067,7 @@ mod tests {
             calls: std::sync::atomic::AtomicUsize::new(0),
         }) as Arc<dyn crate::eval::generator::EvalGenerator>;
 
-        let worker = tokio::spawn(run_one_job_with_generator(
-            state.clone(),
-            entry,
-            generator,
-        ));
+        let worker = tokio::spawn(run_one_job_with_generator(state.clone(), entry, generator));
 
         // Deterministic: the gate fires after the first outcome landed and
         // the second example is mid-generation.
@@ -1105,6 +1110,9 @@ mod tests {
             "executor should stop early, got {outcomes}/{total_examples} outcomes"
         );
         assert!(job.finished_at_iso.is_some(), "terminal timestamps stamped");
-                assert!(job.cancel_flag.is_none(), "handle cleared at terminal state");
+        assert!(
+            job.cancel_flag.is_none(),
+            "handle cleared at terminal state"
+        );
     }
 }

@@ -265,12 +265,30 @@ async fn valid_output_name_proceeds_past_validation() {
 /// carrying `name` as the (eventual) output adapter name.
 fn front_door_bodies(name: &str) -> Vec<(&'static str, Value)> {
     vec![
-        ("sft", json!({"kind": "sft", "examples": sft_body(name)["examples"], "config": {"output_name": name}})),
-        ("grpo", json!({"kind": "grpo", "groups": grpo_body(name)["groups"], "config": {"output_name": name}})),
-        ("opd", json!({"kind": "opd", "teacher": "qwen3.6-27b@local", "prompts": opd_body(name)["prompts"], "config": {"output_name": name}})),
-        ("distill_refresh", json!({"kind": "distill_refresh", "name": name, "new_data": {"dataset": "q4"}, "behavioural_teacher": "t@v1"})),
-        ("distill_merge", json!({"kind": "distill_merge", "name": name, "sources": [{"adapter": "a"}, {"adapter": "b"}]})),
-        ("distill_pump", json!({"kind": "distill_pump", "name": name, "teacher": "t@v1", "mode": {"domain": "math_reasoning"}})),
+        (
+            "sft",
+            json!({"kind": "sft", "examples": sft_body(name)["examples"], "config": {"output_name": name}}),
+        ),
+        (
+            "grpo",
+            json!({"kind": "grpo", "groups": grpo_body(name)["groups"], "config": {"output_name": name}}),
+        ),
+        (
+            "opd",
+            json!({"kind": "opd", "teacher": "qwen3.6-27b@local", "prompts": opd_body(name)["prompts"], "config": {"output_name": name}}),
+        ),
+        (
+            "distill_refresh",
+            json!({"kind": "distill_refresh", "name": name, "new_data": {"dataset": "q4"}, "behavioural_teacher": "t@v1"}),
+        ),
+        (
+            "distill_merge",
+            json!({"kind": "distill_merge", "name": name, "sources": [{"adapter": "a"}, {"adapter": "b"}]}),
+        ),
+        (
+            "distill_pump",
+            json!({"kind": "distill_pump", "name": name, "teacher": "t@v1", "mode": {"domain": "math_reasoning"}}),
+        ),
     ]
 }
 
@@ -404,7 +422,10 @@ async fn missed_endpoints_reject_mock_mode() {
     for (variant, body) in front_door_bodies("ok-name") {
         let (status, response) = post(&app, "/v1/train", body).await;
         assert_eq!(status, unavailable, "{variant}: {response}");
-        assert_eq!(response["error"]["code"], "mock_mode", "{variant}: {response}");
+        assert_eq!(
+            response["error"]["code"], "mock_mode",
+            "{variant}: {response}"
+        );
     }
     assert_error_code(
         &app,

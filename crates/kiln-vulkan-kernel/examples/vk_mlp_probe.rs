@@ -75,9 +75,7 @@ fn make_x(batch: usize) -> Vec<f32> {
     // explicit `batch` + `hidden` (the shape is `[batch, 1, hidden]`).
     // (#1082)
     let n = batch * HIDDEN;
-    (0..n)
-        .map(|i| ((i % 31) as f32 - 15.0) * 0.01)
-        .collect()
+    (0..n).map(|i| ((i % 31) as f32 - 15.0) * 0.01).collect()
 }
 
 fn median(mut v: Vec<f64>) -> f64 {
@@ -96,14 +94,26 @@ fn time_one_shape(
     let x_bytes: &[u8] = bytemuck::cast_slice(&x);
     for _ in 0..WARMUP_ITERS {
         let _ = dispatch_mlp_gate_up_decode_cached_bytes(
-            vk_device, x_bytes, batch, HIDDEN, INTERMEDIATE, gate_buf, up_buf,
+            vk_device,
+            x_bytes,
+            batch,
+            HIDDEN,
+            INTERMEDIATE,
+            gate_buf,
+            up_buf,
         )?;
     }
     let mut times = Vec::with_capacity(iters);
     for _ in 0..iters {
         let t0 = Instant::now();
         let _ = dispatch_mlp_gate_up_decode_cached_bytes(
-            vk_device, x_bytes, batch, HIDDEN, INTERMEDIATE, gate_buf, up_buf,
+            vk_device,
+            x_bytes,
+            batch,
+            HIDDEN,
+            INTERMEDIATE,
+            gate_buf,
+            up_buf,
         )?;
         times.push(t0.elapsed().as_secs_f64() * 1000.0);
     }
@@ -124,11 +134,7 @@ fn gpu_name_via_vulkaninfo() -> String {
             for line in s.lines() {
                 let line = line.trim();
                 if let Some(rest) = line.strip_prefix("deviceName") {
-                    return Some(
-                        rest.trim_start_matches([' ', '=', '\t'])
-                            .trim()
-                            .to_string(),
-                    );
+                    return Some(rest.trim_start_matches([' ', '=', '\t']).trim().to_string());
                 }
             }
             None

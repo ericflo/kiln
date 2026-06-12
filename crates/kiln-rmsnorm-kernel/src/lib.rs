@@ -109,10 +109,8 @@ mod kt_api;
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 mod kt_tape;
 #[cfg(any(feature = "cuda", feature = "rocm"))]
-pub use kt_tape::{fused_rmsnorm_via_kt_tape, CudaFusedRmsNormBackward};
-#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub use kt_api::{
-    adamw_step_bf16_kt, adamw_step_f32_kt, attn_decode_qkv_split_qk_norm_rope_kt,
+    RmsNormError, adamw_step_bf16_kt, adamw_step_f32_kt, attn_decode_qkv_split_qk_norm_rope_kt,
     causal_depthwise_conv1d_bwd_input_kt, causal_depthwise_conv1d_bwd_state_kt,
     causal_depthwise_conv1d_bwd_weight_kt, causal_depthwise_conv1d_inplace_kt,
     causal_depthwise_conv1d_kt, f32_to_bf16_kt, fused_l2_qk_norm_gqa_kt, fused_l2_qk_norm_kt,
@@ -120,11 +118,13 @@ pub use kt_api::{
     fused_rmsnorm_kt, fused_rotary_one_bwd_kt, fused_rotary_one_kt, fused_rotary_qk_kt,
     fused_sigmoid_mul_kt, lora_add_inplace_f32_kt, lora_decode_add_full_kt, lora_decode_add_kt,
     lora_decode_hidden_kt, muon_step_bf16_kt, muon_step_f32_kt, sgd_step_bf16_kt, sgd_step_f32_kt,
-    silu_inplace_save_sigmoid_f32_kt, supports_attn_decode_qkv_prep_kt,
-    supports_l2_qk_norm_gqa_kt, supports_l2_qk_norm_kt, supports_lora_decode_add_kt,
-    supports_mlp_silu_mul_kt, supports_mlp_silu_mul_packed_kt, supports_optimizer_step_kt,
-    supports_rmsnorm_kt, supports_rotary_qk_kt, supports_sigmoid_mul_kt, RmsNormError,
+    silu_inplace_save_sigmoid_f32_kt, supports_attn_decode_qkv_prep_kt, supports_l2_qk_norm_gqa_kt,
+    supports_l2_qk_norm_kt, supports_lora_decode_add_kt, supports_mlp_silu_mul_kt,
+    supports_mlp_silu_mul_packed_kt, supports_optimizer_step_kt, supports_rmsnorm_kt,
+    supports_rotary_qk_kt, supports_sigmoid_mul_kt,
 };
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub use kt_tape::{CudaFusedRmsNormBackward, fused_rmsnorm_via_kt_tape};
 
 // The fused-kernel FFI symbols are provided by the backend lib built in
 // build.rs: nvcc-built under `cuda`, hipcc-built under `rocm`. Gate the
@@ -441,7 +441,6 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 }
-
 
 // All in-crate candle-typed parity tests were deleted in (#1082) alongside
 // the candle-typed entries they exercised. The kt-typed surface is covered

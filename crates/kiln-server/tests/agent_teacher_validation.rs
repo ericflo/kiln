@@ -121,11 +121,20 @@ async fn judge_distill_unregistered_teacher_fails_fast() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-    assert_eq!(response["error"]["code"], "teacher_not_registered", "{response}");
+    assert_eq!(
+        response["error"]["code"], "teacher_not_registered",
+        "{response}"
+    );
     let message = response["error"]["message"].as_str().unwrap();
-    assert!(message.contains("missing@alias"), "must name the alias: {message}");
+    assert!(
+        message.contains("missing@alias"),
+        "must name the alias: {message}"
+    );
     let hint = response["error"]["hint"].as_str().unwrap();
-    assert!(hint.contains("/v1/teachers"), "must show remediation: {hint}");
+    assert!(
+        hint.contains("/v1/teachers"),
+        "must show remediation: {hint}"
+    );
     assert_no_jobs(&state, "judge_distill unregistered teacher");
 }
 
@@ -190,9 +199,15 @@ async fn self_improve_unregistered_judge_fails_fast() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-    assert_eq!(response["error"]["code"], "teacher_not_registered", "{response}");
+    assert_eq!(
+        response["error"]["code"], "teacher_not_registered",
+        "{response}"
+    );
     let message = response["error"]["message"].as_str().unwrap();
-    assert!(message.contains("judge-nope"), "must name the judge: {message}");
+    assert!(
+        message.contains("judge-nope"),
+        "must name the judge: {message}"
+    );
     assert!(
         message.contains("must be registered as a teacher alias"),
         "must explain the judge-as-teacher requirement: {message}"
@@ -257,9 +272,15 @@ async fn drift_check_unregistered_teacher_is_400_with_remediation() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-    assert_eq!(response["error"]["code"], "teacher_not_registered", "{response}");
+    assert_eq!(
+        response["error"]["code"], "teacher_not_registered",
+        "{response}"
+    );
     let hint = response["error"]["hint"].as_str().unwrap();
-    assert!(hint.contains("/v1/teachers"), "must show remediation: {hint}");
+    assert!(
+        hint.contains("/v1/teachers"),
+        "must show remediation: {hint}"
+    );
 }
 
 #[tokio::test]
@@ -298,7 +319,10 @@ async fn drift_check_valid_inputs_return_honest_501() {
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{response}");
     assert_eq!(response["error"]["code"], "not_implemented", "{response}");
     let message = response["error"]["message"].as_str().unwrap();
-    assert!(message.contains("#31"), "must reference issue #31: {message}");
+    assert!(
+        message.contains("#31"),
+        "must reference issue #31: {message}"
+    );
 }
 
 /// Hostile judge names must be rejected before the filesystem probe —
@@ -314,7 +338,10 @@ async fn drift_check_rejects_path_traversal_judge_names() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-    assert_eq!(response["error"]["code"], "invalid_adapter_name", "{response}");
+    assert_eq!(
+        response["error"]["code"], "invalid_adapter_name",
+        "{response}"
+    );
 }
 
 // ── teacher registration honesty (adapter-wearing + provider gates) ──
@@ -351,7 +378,10 @@ async fn teacher_registration_validates_adapter_field() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
     assert!(
-        response["error"]["message"].as_str().unwrap().contains("ghost"),
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("ghost"),
         "{response}"
     );
 
@@ -383,7 +413,10 @@ async fn teacher_registration_rejects_unwired_remote_providers() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
     let message = response["error"]["message"].as_str().unwrap();
-    assert!(message.contains("vLLM"), "names the supported providers: {message}");
+    assert!(
+        message.contains("vLLM"),
+        "names the supported providers: {message}"
+    );
 
     // A vLLM-shaped URL registers fine.
     let (status, response) = post(
@@ -414,9 +447,15 @@ async fn opd_submission_rejects_unregistered_teacher() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-    assert_eq!(response["error"]["code"], "teacher_not_registered", "{response}");
+    assert_eq!(
+        response["error"]["code"], "teacher_not_registered",
+        "{response}"
+    );
     assert!(
-        response["error"]["message"].as_str().unwrap().contains("typo@t"),
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("typo@t"),
         "{response}"
     );
     assert_no_jobs(&state, "opd unregistered teacher");
@@ -442,7 +481,10 @@ async fn opd_submission_rejects_dataset_path_mode_mismatch() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
     let message = response["error"]["message"].as_str().unwrap();
     assert!(message.contains("off_policy"), "{message}");
-    assert!(message.contains("agent_traces"), "offers the on-policy path: {message}");
+    assert!(
+        message.contains("agent_traces"),
+        "offers the on-policy path: {message}"
+    );
     assert_no_jobs(&state, "opd mode mismatch");
 }
 
@@ -458,7 +500,10 @@ async fn distill_pump_rejects_unregistered_teacher() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-    assert_eq!(response["error"]["code"], "teacher_not_registered", "{response}");
+    assert_eq!(
+        response["error"]["code"], "teacher_not_registered",
+        "{response}"
+    );
     assert_no_jobs(&state, "pump unregistered teacher");
 }
 
@@ -484,7 +529,10 @@ async fn distill_merge_rejects_missing_source_adapters() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
     assert!(
-        response["error"]["message"].as_str().unwrap().contains("missing"),
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("missing"),
         "{response}"
     );
     assert_no_jobs(&state, "merge missing source");

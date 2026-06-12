@@ -59,7 +59,7 @@
 //! it just clones whatever it was handed. This keeps the apply path
 //! allocation-free (one Arc bump on the kt storage).
 
-use kiln_tensor::{bail, Result, Tensor};
+use kiln_tensor::{Result, Tensor, bail};
 
 use crate::BackwardOp;
 
@@ -153,8 +153,7 @@ mod tests {
     fn inject_gradient_ignores_upstream_returns_injected() {
         // Build the BackwardOp with an injected tensor of [1.0, 2.0, 3.0, 4.0].
         // Apply with arbitrary "grad_output" — the op MUST ignore it.
-        let injected =
-            Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], vec![2, 2]).unwrap();
+        let injected = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], vec![2, 2]).unwrap();
         let bo = InjectGradientBackward {
             injected: injected.clone(),
         };
@@ -199,8 +198,7 @@ mod tests {
     fn new_validated_rejects_shape_mismatch() {
         let arg = Tensor::from_slice(&[0.0f32; 6], vec![2, 3]).unwrap();
         let injected = Tensor::from_slice(&[0.0f32; 4], vec![4]).unwrap();
-        let e =
-            InjectGradientBackward::new_validated(&arg, injected).unwrap_err();
+        let e = InjectGradientBackward::new_validated(&arg, injected).unwrap_err();
         let msg = e.to_string();
         assert!(msg.contains("shape"), "expected shape mismatch, got: {msg}");
     }
@@ -220,8 +218,7 @@ mod tests {
         )
         .unwrap();
         assert_ne!(injected.dtype(), arg.dtype());
-        let e =
-            InjectGradientBackward::new_validated(&arg, injected).unwrap_err();
+        let e = InjectGradientBackward::new_validated(&arg, injected).unwrap_err();
         assert!(e.to_string().contains("dtype"));
     }
 

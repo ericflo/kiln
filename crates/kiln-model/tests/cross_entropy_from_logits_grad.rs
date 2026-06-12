@@ -57,7 +57,13 @@ fn max_abs_rel_err_kt(got: &KtTensor, want: &KtTensor) -> f32 {
 }
 
 fn max_abs_rel_err_slices(g: &[f32], w: &[f32]) -> f32 {
-    assert_eq!(g.len(), w.len(), "shape mismatch got {} want {}", g.len(), w.len());
+    assert_eq!(
+        g.len(),
+        w.len(),
+        "shape mismatch got {} want {}",
+        g.len(),
+        w.len()
+    );
     let mut max = 0.0f32;
     for (a, b) in g.iter().zip(w.iter()) {
         let denom = b.abs().max(1e-6);
@@ -241,12 +247,9 @@ fn cross_entropy_from_logits_grad_cuda_matches_cpu() {
     let input_ids: Vec<u32> = vec![1, 5, 2, 7, 3, 0];
     let label_mask: Vec<bool> = vec![false, true, false, true, true, false];
     let cpu_logits = KtTensor::from_vec(logits_data.clone(), vec![1, t, v]).expect("cpu logits");
-    let cuda_logits = KtTensor::from_vec_on(
-        kiln_tensor::Device::Cuda(0),
-        logits_data,
-        vec![1, t, v],
-    )
-    .expect("cuda logits");
+    let cuda_logits =
+        KtTensor::from_vec_on(kiln_tensor::Device::Cuda(0), logits_data, vec![1, t, v])
+            .expect("cuda logits");
 
     let cpu_grad = kiln_model::forward::cross_entropy_from_logits_grad_candle(
         &cpu_logits,

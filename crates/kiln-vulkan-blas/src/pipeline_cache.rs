@@ -38,12 +38,10 @@ impl VkPipelineCacheKey {
     pub fn cache_path(&self) -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         let uuid_hex = hex_lower(&self.device_uuid);
-        PathBuf::from(home)
-            .join(".cache/kiln/vulkan")
-            .join(format!(
-                "pipeline-cache-{uuid_hex}-{:016x}-v{}.bin",
-                self.shader_hash, self.kiln_version_major
-            ))
+        PathBuf::from(home).join(".cache/kiln/vulkan").join(format!(
+            "pipeline-cache-{uuid_hex}-{:016x}-v{}.bin",
+            self.shader_hash, self.kiln_version_major
+        ))
     }
 
     /// True iff this key's `kiln_version_major` matches `current`.

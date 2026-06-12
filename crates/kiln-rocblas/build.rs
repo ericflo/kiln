@@ -59,7 +59,10 @@ fn main() {
     for src_name in &sources {
         let src = csrc_dir.join(src_name);
         if !src.exists() {
-            println!("cargo:warning=kiln-rocblas: {} not found, skipping.", src.display());
+            println!(
+                "cargo:warning=kiln-rocblas: {} not found, skipping.",
+                src.display()
+            );
             continue;
         }
         let obj = out_dir.join(format!("{src_name}.o"));

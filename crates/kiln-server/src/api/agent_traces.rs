@@ -143,7 +143,10 @@ fn default_pi_sessions_dir() -> PathBuf {
         }
     }
     if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".pi").join("agent").join("sessions")
+        PathBuf::from(home)
+            .join(".pi")
+            .join("agent")
+            .join("sessions")
     } else {
         PathBuf::from("/tmp/pi/agent/sessions")
     }
@@ -382,8 +385,7 @@ fn parse_pi_session(path: &Path) -> Option<AgentTrace> {
                             num_tool_calls += blocks
                                 .iter()
                                 .filter(|block| {
-                                    block.get("type").and_then(|x| x.as_str())
-                                        == Some("toolCall")
+                                    block.get("type").and_then(|x| x.as_str()) == Some("toolCall")
                                 })
                                 .count();
                         }
@@ -420,7 +422,10 @@ fn parse_pi_session(path: &Path) -> Option<AgentTrace> {
 
     let id = id.or_else(|| {
         saw_pi_message_event
-            .then(|| path.file_stem().map(|stem| stem.to_string_lossy().to_string()))
+            .then(|| {
+                path.file_stem()
+                    .map(|stem| stem.to_string_lossy().to_string())
+            })
             .flatten()
     })?;
     let working_dir = cwd.unwrap_or_else(|| {
@@ -510,7 +515,10 @@ mod tests {
         assert_eq!(trace.num_tool_calls, 1);
         assert_eq!(trace.outcome.ended_with_exit_0, Some(true));
         assert!(!trace.forked);
-        assert_eq!(trace.first_event_at.as_deref(), Some("2026-05-15T10:00:00Z"));
+        assert_eq!(
+            trace.first_event_at.as_deref(),
+            Some("2026-05-15T10:00:00Z")
+        );
         assert!(trace.trajectory.is_empty());
     }
 
@@ -540,8 +548,15 @@ mod tests {
         assert_eq!(trace.prompt_messages[0].content, "Print 42");
         assert_eq!(trace.trajectory.len(), 3);
         assert_eq!(trace.trajectory[0].role, "assistant");
-        assert_eq!(trace.trajectory[0].kind, kiln_train::trajectory::TurnKind::Action);
-        assert!(trace.trajectory[0].content.contains("<think>use bash</think>"));
+        assert_eq!(
+            trace.trajectory[0].kind,
+            kiln_train::trajectory::TurnKind::Action
+        );
+        assert!(
+            trace.trajectory[0]
+                .content
+                .contains("<think>use bash</think>")
+        );
         assert!(trace.trajectory[0].content.contains("\"arguments\""));
         assert_eq!(trace.trajectory[1].role, "tool");
         assert_eq!(
@@ -629,7 +644,9 @@ mod tests {
         // A flat file at the root must still be picked up.
         write_jsonl(
             &dir.path().join("flat.jsonl"),
-            &[json!({"id":"flat-session","at":"2026-06-01T11:00:00Z","messages":[{"role":"user","content":"hi"}]})],
+            &[
+                json!({"id":"flat-session","at":"2026-06-01T11:00:00Z","messages":[{"role":"user","content":"hi"}]}),
+            ],
         );
         // Non-jsonl files and too-deep nesting are ignored.
         std::fs::write(slug_dir.join("notes.txt"), "ignore me").unwrap();
@@ -679,7 +696,10 @@ mod tests {
         );
         let t = parse_pi_session(&p).unwrap();
         assert_eq!(t.working_dir, "/tmp/rlm-agentic-test");
-        assert_eq!(t.first_event_at.as_deref(), Some("2026-05-30T21:35:00.144Z"));
+        assert_eq!(
+            t.first_event_at.as_deref(),
+            Some("2026-05-30T21:35:00.144Z")
+        );
         assert_eq!(t.last_event_at.as_deref(), Some("2026-05-30T21:36:00.000Z"));
     }
 
@@ -689,7 +709,9 @@ mod tests {
         let p = dir.path().join("legacy.jsonl");
         write_jsonl(
             &p,
-            &[json!({"id":"legacy","at":"2026-05-15T10:00:00Z","messages":[{"role":"user","content":"hi"}]})],
+            &[
+                json!({"id":"legacy","at":"2026-05-15T10:00:00Z","messages":[{"role":"user","content":"hi"}]}),
+            ],
         );
         let t = parse_pi_session(&p).unwrap();
         assert_eq!(t.working_dir, dir.path().display().to_string());
@@ -767,8 +789,10 @@ mod tests {
         let adapters = tempfile::tempdir().unwrap();
         write_jsonl(
             &sessions.path().join("s.jsonl"),
-            &[serde_json::json!({"type":"session","id":"s1","timestamp":"2026-06-01T10:00:00Z","cwd":"/p"}),
-              serde_json::json!({"type":"message","timestamp":"2026-06-01T10:00:05Z","message":{"role":"user","content":[{"type":"text","text":"hi"}]}})],
+            &[
+                serde_json::json!({"type":"session","id":"s1","timestamp":"2026-06-01T10:00:00Z","cwd":"/p"}),
+                serde_json::json!({"type":"message","timestamp":"2026-06-01T10:00:05Z","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}),
+            ],
         );
         let count = discover_traces_into(sessions.path(), adapters.path()).unwrap();
         assert_eq!(count, 1);

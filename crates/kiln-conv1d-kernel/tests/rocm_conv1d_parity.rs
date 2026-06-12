@@ -93,9 +93,7 @@ fn conv1d_update_parity_channel_sweep() {
     }
     // Serialize device work against the sibling prefill test (see module docs).
     let _gpu = gpu_guard();
-    let channel_widths = [
-        1usize, 7, 31, 32, 33, 63, 64, 65, 127, 128, 129, 256, 1024,
-    ];
+    let channel_widths = [1usize, 7, 31, 32, 33, 63, 64, 65, 127, 128, 129, 256, 1024];
     let batch = 2usize;
 
     for &c in &channel_widths {
@@ -110,12 +108,8 @@ fn conv1d_update_parity_channel_sweep() {
             .unwrap_or_else(|e| panic!("x from_vec_on (C={c}): {e}"));
         let w = Tensor::from_vec_on(Device::Rocm(0), w_h.clone(), vec![c, KW])
             .unwrap_or_else(|e| panic!("w from_vec_on (C={c}): {e}"));
-        let cs = Tensor::from_vec_on(
-            Device::Rocm(0),
-            cs_h.clone(),
-            vec![batch, c, KW - 1],
-        )
-        .unwrap_or_else(|e| panic!("cs from_vec_on (C={c}): {e}"));
+        let cs = Tensor::from_vec_on(Device::Rocm(0), cs_h.clone(), vec![batch, c, KW - 1])
+            .unwrap_or_else(|e| panic!("cs from_vec_on (C={c}): {e}"));
 
         let out = causal_conv1d_update_kt(&x, &w, &cs, KW)
             .unwrap_or_else(|e| panic!("causal_conv1d_update_kt (C={c}): {e}"));
@@ -180,27 +174,23 @@ fn conv1d_prefill_parity_seqlen_sweep() {
     }
     // Serialize device work against the sibling update test (see module docs).
     let _gpu = gpu_guard();
-    let seq_lens = [
-        2usize, 3, 31, 32, 33, 63, 64, 65, 127, 128, 129, 256, 1024,
-    ];
+    let seq_lens = [2usize, 3, 31, 32, 33, 63, 64, 65, 127, 128, 129, 256, 1024];
     let batch = 2usize;
     let channels = 5usize;
 
     for &t in &seq_lens {
         let x_h = bf16_vec(batch * channels * t, 101);
         let w_h = bf16_vec(channels * KW, 202);
-        let cs_h: Vec<f32> = (0..batch * channels * (KW - 1)).map(|i| val(i, 303)).collect();
+        let cs_h: Vec<f32> = (0..batch * channels * (KW - 1))
+            .map(|i| val(i, 303))
+            .collect();
 
         let x = Tensor::from_vec_on(Device::Rocm(0), x_h.clone(), vec![batch, channels, t])
             .unwrap_or_else(|e| panic!("x from_vec_on (T={t}): {e}"));
         let w = Tensor::from_vec_on(Device::Rocm(0), w_h.clone(), vec![channels, KW])
             .unwrap_or_else(|e| panic!("w from_vec_on (T={t}): {e}"));
-        let cs = Tensor::from_vec_on(
-            Device::Rocm(0),
-            cs_h.clone(),
-            vec![batch, channels, KW - 1],
-        )
-        .unwrap_or_else(|e| panic!("cs from_vec_on (T={t}): {e}"));
+        let cs = Tensor::from_vec_on(Device::Rocm(0), cs_h.clone(), vec![batch, channels, KW - 1])
+            .unwrap_or_else(|e| panic!("cs from_vec_on (T={t}): {e}"));
 
         let out = causal_conv1d_prefill_kt(&x, &w, &cs, KW)
             .unwrap_or_else(|e| panic!("causal_conv1d_prefill_kt (T={t}): {e}"));

@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use kiln_tensor::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use kiln_tensor::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 use crate::BackwardOp;
 
@@ -58,14 +58,10 @@ fn read_indices(t: &Tensor) -> Result<Vec<i64>> {
         }
         DType::U32 => {
             for i in 0..n {
-                out.push(u32::from_le_bytes(
-                    bytes[i * 4..i * 4 + 4].try_into().unwrap(),
-                ) as i64);
+                out.push(u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()) as i64);
             }
         }
-        other => bail!(
-            "GatherBackward: indices dtype must be I64 or U32, got {other}"
-        ),
+        other => bail!("GatherBackward: indices dtype must be I64 or U32, got {other}"),
     }
     Ok(out)
 }
@@ -102,9 +98,7 @@ impl BackwardOp for GatherBackward {
         }
         let dtype = grad_output.dtype();
         if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
-            bail!(
-                "GatherBackward: grad dtype must be F32/BF16/F16, got {dtype}"
-            );
+            bail!("GatherBackward: grad dtype must be F32/BF16/F16, got {dtype}");
         }
         if !grad_output.is_contiguous() {
             bail!("GatherBackward: grad must be contiguous");
@@ -170,9 +164,9 @@ impl BackwardOp for GatherBackward {
                 dst_off += c * x_strides[d];
             }
             let v = match dtype {
-                DType::F32 => f32::from_le_bytes(
-                    go_bytes[out_idx * 4..out_idx * 4 + 4].try_into().unwrap(),
-                ),
+                DType::F32 => {
+                    f32::from_le_bytes(go_bytes[out_idx * 4..out_idx * 4 + 4].try_into().unwrap())
+                }
                 DType::BF16 => half::bf16::from_le_bytes(
                     go_bytes[out_idx * 2..out_idx * 2 + 2].try_into().unwrap(),
                 )
@@ -266,11 +260,8 @@ mod tests {
         // d_x[r=1, idx[1,k]] += grad[1,k]:
         //   d_x[1, 1] += 40, d_x[1, 1] += 50, d_x[1, 0] += 60 -> [60, 90, 0]
         let indices = Tensor::from_slice(&[2i64, 0, 1, 1, 1, 0], vec![2, 3]).unwrap();
-        let grad = Tensor::from_slice(
-            &[10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0],
-            vec![2, 3],
-        )
-        .unwrap();
+        let grad =
+            Tensor::from_slice(&[10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0], vec![2, 3]).unwrap();
         let bo = GatherBackward {
             axis: 1,
             source_shape: vec![2, 3],
@@ -278,10 +269,7 @@ mod tests {
         };
         let d = bo.apply(&grad).unwrap()[0].as_ref().unwrap().clone();
         assert_eq!(d.shape(), &[2, 3]);
-        assert_eq!(
-            read_f32(&d),
-            vec![20.0, 30.0, 10.0, 60.0, 90.0, 0.0]
-        );
+        assert_eq!(read_f32(&d), vec![20.0, 30.0, 10.0, 60.0, 90.0, 0.0]);
     }
 
     #[test]
@@ -313,10 +301,7 @@ mod tests {
         };
         let d = bo.apply(&grad).unwrap()[0].as_ref().unwrap().clone();
         assert_eq!(d.shape(), &[2, 4]);
-        assert_eq!(
-            read_f32(&d),
-            vec![0.0, 0.0, 0.0, 7.0, 0.0, 11.0, 0.0, 0.0]
-        );
+        assert_eq!(read_f32(&d), vec![0.0, 0.0, 0.0, 7.0, 0.0, 11.0, 0.0, 0.0]);
     }
 
     #[test]

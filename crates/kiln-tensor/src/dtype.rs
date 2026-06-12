@@ -135,13 +135,21 @@ impl DType {
     pub const fn is_float(self) -> bool {
         matches!(
             self,
-            DType::F32 | DType::BF16 | DType::F16 | DType::F8E4M3 | DType::F8E5M2 | DType::Fp4Packed
+            DType::F32
+                | DType::BF16
+                | DType::F16
+                | DType::F8E4M3
+                | DType::F8E5M2
+                | DType::Fp4Packed
         )
     }
 
     /// Is this dtype an integer type (signed or unsigned)?
     pub const fn is_int(self) -> bool {
-        matches!(self, DType::U32 | DType::U8 | DType::I64 | DType::Int4Packed)
+        matches!(
+            self,
+            DType::U32 | DType::U8 | DType::I64 | DType::Int4Packed
+        )
     }
 
     /// Conventional short name. Stable across releases — it's how

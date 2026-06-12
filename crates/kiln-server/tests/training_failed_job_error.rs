@@ -131,7 +131,10 @@ async fn get_status(app: &axum::Router, job_id: &str) -> (StatusCode, Value) {
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -247,7 +250,11 @@ async fn cancelling_running_job_sets_flag_without_terminal_transition() {
 
     let jobs = state.training_jobs.read().unwrap();
     let job = jobs.get("job-running").unwrap();
-    assert_eq!(job.state, TrainingState::Running, "stays Running until the trainer stops");
+    assert_eq!(
+        job.state,
+        TrainingState::Running,
+        "stays Running until the trainer stops"
+    );
     assert!(
         job.cancel_requested
             .load(std::sync::atomic::Ordering::Relaxed),

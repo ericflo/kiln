@@ -20,8 +20,8 @@
 //! `Constructive`. Single-pass max-scan with deterministic tie-break.
 
 use crate::{
-    bail, dispatch1, BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result,
-    Storage, Tensor, TensorId,
+    BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result, Storage, Tensor,
+    TensorId, bail, dispatch1,
 };
 use std::sync::Arc;
 
@@ -81,10 +81,7 @@ impl DeviceOp1 for ArgmaxLastDimOp {
 
         // Output shape: drop the trailing axis.
         let out_shape: Vec<usize> = shape[..shape.len() - 1].to_vec();
-        let bytes: Vec<u8> = out
-            .iter()
-            .flat_map(|&v| v.to_le_bytes())
-            .collect();
+        let bytes: Vec<u8> = out.iter().flat_map(|&v| v.to_le_bytes()).collect();
         let cpu = CpuStorage::from_bytes(DType::I64, bytes)?;
         let storage: Storage = Arc::new(cpu);
         // For rank-1 input the output is a scalar (rank-0).

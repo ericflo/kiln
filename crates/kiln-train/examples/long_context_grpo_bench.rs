@@ -380,12 +380,9 @@ fn load_cuda_state(model_path: &Path, model_config: &ModelConfig) -> Result<Cuda
         kiln_model::LoadModelOptions { load_mtp: false },
     )
     .context("load model weights")?;
-    let weights = kiln_model::forward::GpuWeights::from_model_weights(
-        &model_weights,
-        model_config,
-        &device,
-    )
-    .context("transfer model weights to CUDA")?;
+    let weights =
+        kiln_model::forward::GpuWeights::from_model_weights(&model_weights, model_config, &device)
+            .context("transfer model weights to CUDA")?;
     drop(model_weights);
     let backend = kiln_model::backend::for_device_kt(&device);
     Ok(CudaState {

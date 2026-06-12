@@ -5,8 +5,8 @@
 //! mask + select" workloads.
 
 use kiln_tensor::ops::{
-    all_axis, all_reduce, any_axis, any_reduce, eq, ge, gt, le, lt, masked_fill, maximum,
-    minimum, ne, where_select,
+    all_axis, all_reduce, any_axis, any_reduce, eq, ge, gt, le, lt, masked_fill, maximum, minimum,
+    ne, where_select,
 };
 use kiln_tensor::{CpuStorage, Tensor};
 

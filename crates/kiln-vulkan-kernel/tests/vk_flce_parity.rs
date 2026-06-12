@@ -15,9 +15,9 @@ use half::bf16;
 use kiln_vulkan_kernel::VulkanDevice;
 use kiln_vulkan_kernel::vk_autograd::vk_backward;
 use kiln_vulkan_kernel::vk_ops::flce::{
-    flce_recommended_chunk_len_from_limits, vk_flce_loss,
-    vk_grpo_backward_with_saved_state, vk_grpo_loss, vk_grpo_loss_with_saved_state_ext,
-    vk_selected_log_probs, VK_GRPO_IS_MODE_CISPO, VK_GRPO_KL_MODE_K3,
+    VK_GRPO_IS_MODE_CISPO, VK_GRPO_KL_MODE_K3, flce_recommended_chunk_len_from_limits,
+    vk_flce_loss, vk_grpo_backward_with_saved_state, vk_grpo_loss,
+    vk_grpo_loss_with_saved_state_ext, vk_selected_log_probs,
 };
 use kiln_vulkan_kernel::vk_tensor::VkTensor;
 use std::sync::Arc;
@@ -56,11 +56,7 @@ fn flce_recommended_chunk_len_is_dynamic() {
     );
 }
 
-fn upload_param_f32(
-    dev: &Arc<VulkanDevice>,
-    data: &[f32],
-    shape: &[usize],
-) -> Result<VkTensor> {
+fn upload_param_f32(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
     VkTensor::parameter_from_f32_slice(data, shape.to_vec(), Arc::clone(dev))
 }
 

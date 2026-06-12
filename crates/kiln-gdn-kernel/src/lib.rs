@@ -66,12 +66,11 @@ mod kt_api;
 // Pure shape/dtype predicates + the error type carry no FFI and compile on any
 // configuration (including with neither GPU backend enabled).
 pub use kt_api::{
-    gdn_chunk_prep_supports_kt, gdn_chunk_scan_supports_kt,
-    gdn_decode_gates_recurrent_supports_kt,
-    gdn_decode_qk_norm_gates_recurrent_rmsnorm_supports_kt,
+    GdnError, gdn_chunk_prep_supports_kt, gdn_chunk_scan_supports_kt,
+    gdn_decode_gates_recurrent_supports_kt, gdn_decode_qk_norm_gates_recurrent_rmsnorm_supports_kt,
     gdn_decode_qk_norm_gates_recurrent_supports_kt, gdn_full_chunk_forward_multiblock_supports_kt,
     gdn_full_chunk_forward_supports_kt, gdn_gated_rms_norm_f32_weight_supports_kt,
-    gdn_gated_rms_norm_supports_kt, gdn_gates_supports_kt, GdnError,
+    gdn_gated_rms_norm_supports_kt, gdn_gates_supports_kt,
 };
 
 // The device-launching `_kt` entry points bottom out in the FFI symbols and the
@@ -81,7 +80,7 @@ pub use kt_api::{
 // kernels).
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 pub use kt_api::{
-    gdn_chunk_prep_kt, gdn_chunk_scan_kt, gdn_decode_gates_recurrent_bf16_kt,
+    GdnGatedRmsNormBwdKt, gdn_chunk_prep_kt, gdn_chunk_scan_kt, gdn_decode_gates_recurrent_bf16_kt,
     gdn_decode_gates_recurrent_vf32_bf16_kt, gdn_decode_qk_norm_gates_recurrent_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_qf32_vbf16_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_qf32_vf32_bf16_kt,
@@ -90,12 +89,12 @@ pub use kt_api::{
     gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_vf32_bf16_kt, gdn_forward_substitution_kt,
-    gdn_full_chunk_forward_kt, gdn_full_chunk_forward_multiblock_kt, gdn_gated_rms_norm_bf16_kt,
-    gdn_gated_rms_norm_bf16_f32_weight_kt, gdn_gated_rms_norm_bwd_bf16_kt,
-    gdn_gated_rms_norm_bwd_bf16_f32_weight_kt, gdn_gated_rms_norm_bwd_supports_kt,
-    gdn_gates_bf16_f32_bf16_params_kt, gdn_gates_bf16_f32_params_kt, gdn_gates_bf16_kt,
-    gdn_l2_norm_scale_bwd_bf16_kt, gdn_l2_norm_scale_bwd_supports_kt,
-    gdn_recurrent_forward_kt, GdnGatedRmsNormBwdKt,
+    gdn_full_chunk_forward_kt, gdn_full_chunk_forward_multiblock_kt,
+    gdn_gated_rms_norm_bf16_f32_weight_kt, gdn_gated_rms_norm_bf16_kt,
+    gdn_gated_rms_norm_bwd_bf16_f32_weight_kt, gdn_gated_rms_norm_bwd_bf16_kt,
+    gdn_gated_rms_norm_bwd_supports_kt, gdn_gates_bf16_f32_bf16_params_kt,
+    gdn_gates_bf16_f32_params_kt, gdn_gates_bf16_kt, gdn_l2_norm_scale_bwd_bf16_kt,
+    gdn_l2_norm_scale_bwd_supports_kt, gdn_recurrent_forward_kt,
 };
 
 // The device-launching FFI symbols are provided by build.rs (nvcc under

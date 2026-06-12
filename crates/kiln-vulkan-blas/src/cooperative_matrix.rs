@@ -76,10 +76,16 @@ mod tests {
 
     #[test]
     fn name_strings() {
-        assert_eq!(VkCooperativeMatrixSupport::Unavailable.name(), "unavailable");
+        assert_eq!(
+            VkCooperativeMatrixSupport::Unavailable.name(),
+            "unavailable"
+        );
         assert_eq!(VkCooperativeMatrixSupport::Bf16Fp32.name(), "bf16_fp32");
         assert_eq!(VkCooperativeMatrixSupport::Fp16Fp32.name(), "fp16_fp32");
-        assert_eq!(VkCooperativeMatrixSupport::Bf16AndFp16.name(), "bf16_and_fp16");
+        assert_eq!(
+            VkCooperativeMatrixSupport::Bf16AndFp16.name(),
+            "bf16_and_fp16"
+        );
     }
 
     #[test]

@@ -17,8 +17,8 @@
 //! GradStore — not two separate entries that the optimizer might double-
 //! count.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use kiln_autograd::{BackwardOp, Tape};
 use kiln_optim::{AdamW, OptimStep};
@@ -54,11 +54,7 @@ fn tied_weight_two_consumers_one_accumulated_grad() {
     // weight tying) and a hypothetical MTP head. Two forward ops each
     // record the embedding tensor as an input, and their gradients
     // must accumulate into ONE entry in the GradStore.
-    let embed_fwd = kt::Tensor::from_slice(
-        &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
-        vec![3, 2],
-    )
-    .unwrap();
+    let embed_fwd = kt::Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![3, 2]).unwrap();
     let embed_id = embed_fwd.id();
 
     let mut tape = Tape::new();

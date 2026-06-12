@@ -112,7 +112,9 @@ fn run_case(
     .expect("sdpa_prefill_f32 dispatch");
     let out_vk: &[f32] = bytemuck::cast_slice(&out_bytes);
 
-    let out_cpu = cpu_sdpa(&q, &k, &v, batch, seq_len, num_heads, head_dim, scale, causal);
+    let out_cpu = cpu_sdpa(
+        &q, &k, &v, batch, seq_len, num_heads, head_dim, scale, causal,
+    );
 
     assert_eq!(out_vk.len(), out_cpu.len());
     let mut max_abs = 0.0_f32;

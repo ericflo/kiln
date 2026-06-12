@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId, bail};
 
 fn splitmix64_step(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E3779B97F4A7C15u64);
@@ -41,7 +41,13 @@ fn box_muller(state: &mut u64) -> f32 {
 }
 
 /// Seedable uniform `[lo, hi)` tensor.
-pub fn rand_uniform(shape: Vec<usize>, lo: f32, hi: f32, seed: u64, dtype: DType) -> Result<Tensor> {
+pub fn rand_uniform(
+    shape: Vec<usize>,
+    lo: f32,
+    hi: f32,
+    seed: u64,
+    dtype: DType,
+) -> Result<Tensor> {
     if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
         bail!("rand_uniform: dtype must be F32/BF16/F16, got {dtype}");
     }
@@ -58,7 +64,13 @@ pub fn rand_uniform(shape: Vec<usize>, lo: f32, hi: f32, seed: u64, dtype: DType
 }
 
 /// Seedable standard normal — `N(mean, std²)` after the scale/shift.
-pub fn rand_normal(shape: Vec<usize>, mean: f32, std: f32, seed: u64, dtype: DType) -> Result<Tensor> {
+pub fn rand_normal(
+    shape: Vec<usize>,
+    mean: f32,
+    std: f32,
+    seed: u64,
+    dtype: DType,
+) -> Result<Tensor> {
     if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
         bail!("rand_normal: dtype must be F32/BF16/F16, got {dtype}");
     }

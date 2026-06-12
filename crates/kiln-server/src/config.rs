@@ -630,9 +630,7 @@ impl SpeculativeDecodingConfig {
                 // which cost an operator-validation cycle to discover.
                 // An explicit KILN_SPEC_ENABLED still wins (it is read
                 // first above and re-checked here for ordering safety).
-                if !matches!(m, SpecMethod::Off)
-                    && std::env::var("KILN_SPEC_ENABLED").is_err()
-                {
+                if !matches!(m, SpecMethod::Off) && std::env::var("KILN_SPEC_ENABLED").is_err() {
                     self.enabled = true;
                 }
             } else {

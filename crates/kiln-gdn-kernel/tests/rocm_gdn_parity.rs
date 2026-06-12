@@ -159,7 +159,12 @@ fn run_fwd_sub(batch: usize, heads: usize, c: usize, dv: usize, seed: u64) {
     let want = fwd_sub_ref(&a_host, &v_host, &beta_host, bh, c, dv);
     // The feedback chain accumulates error across `c` sequential rows; widen the
     // absolute floor accordingly.
-    assert_close(&got, &want, 2e-2 + 1e-3 * c as f32, &format!("fwd_sub bh={bh} c={c} dv={dv}"));
+    assert_close(
+        &got,
+        &want,
+        2e-2 + 1e-3 * c as f32,
+        &format!("fwd_sub bh={bh} c={c} dv={dv}"),
+    );
 }
 
 #[test]
@@ -243,6 +248,11 @@ fn rocm_gdn_gated_rms_norm_parity_sweep() {
 
         let got = read_bf16_f32(&out);
         let want = gated_rms_ref(&x_host, &z_host, &w_host, rows, hidden, eps);
-        assert_close(&got, &want, 5e-3, &format!("gated_rms rows={rows} hidden={hidden}"));
+        assert_close(
+            &got,
+            &want,
+            5e-3,
+            &format!("gated_rms rows={rows} hidden={hidden}"),
+        );
     }
 }

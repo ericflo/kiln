@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MinMaxKind {
@@ -88,17 +88,17 @@ fn apply(kind: MinMaxKind, x: &Tensor, axis: usize) -> Result<Tensor> {
             for a in 0..axis_dim {
                 let idx = (o * axis_dim + a) * inner + i;
                 let v = match dtype {
-                    DType::F32 => f32::from_le_bytes(
-                        bytes[idx * 4..idx * 4 + 4].try_into().unwrap(),
-                    ),
-                    DType::BF16 => half::bf16::from_le_bytes(
-                        bytes[idx * 2..idx * 2 + 2].try_into().unwrap(),
-                    )
-                    .to_f32(),
-                    DType::F16 => half::f16::from_le_bytes(
-                        bytes[idx * 2..idx * 2 + 2].try_into().unwrap(),
-                    )
-                    .to_f32(),
+                    DType::F32 => {
+                        f32::from_le_bytes(bytes[idx * 4..idx * 4 + 4].try_into().unwrap())
+                    }
+                    DType::BF16 => {
+                        half::bf16::from_le_bytes(bytes[idx * 2..idx * 2 + 2].try_into().unwrap())
+                            .to_f32()
+                    }
+                    DType::F16 => {
+                        half::f16::from_le_bytes(bytes[idx * 2..idx * 2 + 2].try_into().unwrap())
+                            .to_f32()
+                    }
                     _ => unreachable!(),
                 };
                 acc = Some(match (acc, kind) {
@@ -186,11 +186,8 @@ mod tests {
     #[test]
     fn max_axis_rank3_middle() {
         // [B=2, M=2, D=2] max axis 1 → [B=2, D=2]
-        let x = Tensor::from_slice(
-            &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-            vec![2, 2, 2],
-        )
-        .unwrap();
+        let x = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], vec![2, 2, 2])
+            .unwrap();
         let y = max_axis(&x, 1).unwrap();
         assert_eq!(y.shape(), &[2, 2]);
         // batch 0: max([[1,2],[3,4]], axis=0) = [3, 4]

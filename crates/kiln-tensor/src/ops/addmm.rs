@@ -11,7 +11,7 @@
 //! directly), attention output projection with bias, debug/eval
 //! receipts.
 
-use crate::{bail, ops::matmul, Result, Tensor};
+use crate::{Result, Tensor, bail, ops::matmul};
 
 /// `out = beta * c + alpha * (a @ b)`.
 ///
@@ -33,9 +33,7 @@ pub fn addmm(c: &Tensor, a: &Tensor, b: &Tensor, alpha: f32, beta: f32) -> Resul
     let k_b = b.shape()[0];
     let n = b.shape()[1];
     if k_a != k_b {
-        bail!(
-            "addmm: inner dim mismatch — a is [{m}, {k_a}], b is [{k_b}, {n}]"
-        );
+        bail!("addmm: inner dim mismatch — a is [{m}, {k_a}], b is [{k_b}, {n}]");
     }
 
     // CUDA fused fast path: when alpha == 1.0, beta == 1.0, c is rank-1 [N],
@@ -50,7 +48,10 @@ pub fn addmm(c: &Tensor, a: &Tensor, b: &Tensor, alpha: f32, beta: f32) -> Resul
         && matches!(a.device(), crate::Device::Cuda(_))
         && matches!(b.device(), crate::Device::Cuda(_))
         && matches!(c.device(), crate::Device::Cuda(_))
-        && matches!(a.dtype(), crate::DType::F32 | crate::DType::BF16 | crate::DType::F16)
+        && matches!(
+            a.dtype(),
+            crate::DType::F32 | crate::DType::BF16 | crate::DType::F16
+        )
         && a.dtype() == b.dtype()
         && a.dtype() == c.dtype()
         && a.is_contiguous()
@@ -69,7 +70,10 @@ pub fn addmm(c: &Tensor, a: &Tensor, b: &Tensor, alpha: f32, beta: f32) -> Resul
         && matches!(a.device(), crate::Device::Rocm(_))
         && matches!(b.device(), crate::Device::Rocm(_))
         && matches!(c.device(), crate::Device::Rocm(_))
-        && matches!(a.dtype(), crate::DType::F32 | crate::DType::BF16 | crate::DType::F16)
+        && matches!(
+            a.dtype(),
+            crate::DType::F32 | crate::DType::BF16 | crate::DType::F16
+        )
         && a.dtype() == b.dtype()
         && a.dtype() == c.dtype()
         && a.is_contiguous()
@@ -91,19 +95,13 @@ pub fn addmm(c: &Tensor, a: &Tensor, b: &Tensor, alpha: f32, beta: f32) -> Resul
     let c_bn: Tensor = match c.rank() {
         2 => {
             if c.shape() != [m, n] {
-                bail!(
-                    "addmm: c shape {:?} does not match [{m}, {n}]",
-                    c.shape()
-                );
+                bail!("addmm: c shape {:?} does not match [{m}, {n}]", c.shape());
             }
             c.clone()
         }
         1 => {
             if c.shape() != [n] {
-                bail!(
-                    "addmm: rank-1 c must have shape [{n}], got {:?}",
-                    c.shape()
-                );
+                bail!("addmm: rank-1 c must have shape [{n}], got {:?}", c.shape());
             }
             // Broadcast [N] → [M, N] via repeat axis 0.
             crate::ops::repeat(&c.reshape(vec![1, n])?, 0, m)?

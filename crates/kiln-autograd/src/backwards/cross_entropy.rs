@@ -20,9 +20,7 @@
 
 use std::sync::Arc;
 
-use kiln_tensor::{
-    bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId,
-};
+use kiln_tensor::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 use crate::BackwardOp;
 
@@ -78,7 +76,9 @@ impl BackwardOp for CrossEntropyBackward {
             .storage()
             .as_any()
             .downcast_ref::<CpuStorage>()
-            .ok_or_else(|| Error::from_str("CrossEntropyBackward: logits storage must be CpuStorage"))?;
+            .ok_or_else(|| {
+                Error::from_str("CrossEntropyBackward: logits storage must be CpuStorage")
+            })?;
         let logits_bytes = logits_cpu.as_bytes();
         let dtype = self.logits.dtype();
         let per = dtype.size_in_bytes();
@@ -88,7 +88,9 @@ impl BackwardOp for CrossEntropyBackward {
             .storage()
             .as_any()
             .downcast_ref::<CpuStorage>()
-            .ok_or_else(|| Error::from_str("CrossEntropyBackward: grad_output storage must be CpuStorage"))?;
+            .ok_or_else(|| {
+                Error::from_str("CrossEntropyBackward: grad_output storage must be CpuStorage")
+            })?;
         let go_bytes = go_cpu.as_bytes();
         if grad_output.dtype() != dtype {
             bail!(
@@ -110,18 +112,16 @@ impl BackwardOp for CrossEntropyBackward {
             .storage()
             .as_any()
             .downcast_ref::<CpuStorage>()
-            .ok_or_else(|| Error::from_str("CrossEntropyBackward: targets storage must be CpuStorage"))?;
+            .ok_or_else(|| {
+                Error::from_str("CrossEntropyBackward: targets storage must be CpuStorage")
+            })?;
         let t_bytes = t_cpu.as_bytes();
         let targets: Vec<u64> = match self.targets.dtype() {
             DType::I64 => (0..batch)
-                .map(|i| {
-                    i64::from_le_bytes(t_bytes[i * 8..i * 8 + 8].try_into().unwrap()) as u64
-                })
+                .map(|i| i64::from_le_bytes(t_bytes[i * 8..i * 8 + 8].try_into().unwrap()) as u64)
                 .collect(),
             DType::U32 => (0..batch)
-                .map(|i| {
-                    u32::from_le_bytes(t_bytes[i * 4..i * 4 + 4].try_into().unwrap()) as u64
-                })
+                .map(|i| u32::from_le_bytes(t_bytes[i * 4..i * 4 + 4].try_into().unwrap()) as u64)
                 .collect(),
             _ => unreachable!(),
         };
@@ -136,14 +136,20 @@ impl BackwardOp for CrossEntropyBackward {
             for v in 0..vocab {
                 row.push(match dtype {
                     DType::F32 => f32::from_le_bytes(
-                        logits_bytes[start + v * 4..start + v * 4 + 4].try_into().unwrap(),
+                        logits_bytes[start + v * 4..start + v * 4 + 4]
+                            .try_into()
+                            .unwrap(),
                     ),
                     DType::BF16 => half::bf16::from_le_bytes(
-                        logits_bytes[start + v * 2..start + v * 2 + 2].try_into().unwrap(),
+                        logits_bytes[start + v * 2..start + v * 2 + 2]
+                            .try_into()
+                            .unwrap(),
                     )
                     .to_f32(),
                     DType::F16 => half::f16::from_le_bytes(
-                        logits_bytes[start + v * 2..start + v * 2 + 2].try_into().unwrap(),
+                        logits_bytes[start + v * 2..start + v * 2 + 2]
+                            .try_into()
+                            .unwrap(),
                     )
                     .to_f32(),
                     _ => unreachable!(),
@@ -155,9 +161,7 @@ impl BackwardOp for CrossEntropyBackward {
             let sum_e: f32 = exps.iter().sum();
             let target = targets[b];
             if target as usize >= vocab {
-                bail!(
-                    "CrossEntropyBackward: target {target} out of range (vocab={vocab})"
-                );
+                bail!("CrossEntropyBackward: target {target} out of range (vocab={vocab})");
             }
             for v in 0..vocab {
                 let p = exps[v] / sum_e;
@@ -176,14 +180,12 @@ impl BackwardOp for CrossEntropyBackward {
             }
             DType::BF16 => {
                 for (i, v) in dx.iter().enumerate() {
-                    out[i * 2..i * 2 + 2]
-                        .copy_from_slice(&half::bf16::from_f32(*v).to_le_bytes());
+                    out[i * 2..i * 2 + 2].copy_from_slice(&half::bf16::from_f32(*v).to_le_bytes());
                 }
             }
             DType::F16 => {
                 for (i, v) in dx.iter().enumerate() {
-                    out[i * 2..i * 2 + 2]
-                        .copy_from_slice(&half::f16::from_f32(*v).to_le_bytes());
+                    out[i * 2..i * 2 + 2].copy_from_slice(&half::f16::from_f32(*v).to_le_bytes());
                 }
             }
             _ => unreachable!(),
@@ -196,7 +198,10 @@ impl BackwardOp for CrossEntropyBackward {
             TensorId::next(),
         )?;
 
-        Ok(vec![Some(d_logits), None /* targets non-differentiable */])
+        Ok(vec![
+            Some(d_logits),
+            None, /* targets non-differentiable */
+        ])
     }
     fn requires_input(&self, idx: usize) -> bool {
         // logits and targets are both saved on the struct; the tape
@@ -234,10 +239,7 @@ mod tests {
         let logits = Tensor::from_slice(&[0.0f32, 0.0, 0.0], vec![1, 3]).unwrap();
         let targets = Tensor::from_slice(&[0i64], vec![1]).unwrap();
         let grad = Tensor::from_slice(&[1.0f32], vec![]).unwrap();
-        let bo = CrossEntropyBackward {
-            logits,
-            targets,
-        };
+        let bo = CrossEntropyBackward { logits, targets };
         let grads = bo.apply(&grad).unwrap();
         let d = read_f32(grads[0].as_ref().unwrap());
         assert!((d[0] - (-2.0 / 3.0)).abs() < 1e-6);

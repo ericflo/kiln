@@ -86,7 +86,5 @@ fn rmsnorm_parity_wavefront_boundary_sweep() {
             );
         }
     }
-    eprintln!(
-        "rmsnorm CPU-vs-ROCm parity passed across wavefront-boundary widths {widths:?}"
-    );
+    eprintln!("rmsnorm CPU-vs-ROCm parity passed across wavefront-boundary widths {widths:?}");
 }

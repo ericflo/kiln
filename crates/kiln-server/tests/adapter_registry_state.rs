@@ -130,10 +130,12 @@ async fn adapters_registry_reports_adapter_manifest_when_present() {
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let entry = entry_by_name(&body, "manifested");
 
-    assert!(entry["adapter_manifest_path"]
-        .as_str()
-        .unwrap()
-        .ends_with("adapter_manifest.json"));
+    assert!(
+        entry["adapter_manifest_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("adapter_manifest.json")
+    );
     assert!(entry["adapter_manifest_error"].is_null());
     assert_eq!(entry["adapter_manifest"]["adapter_name"], "manifested");
     assert_eq!(entry["adapter_manifest"]["parent_adapter"], "parent-v1");

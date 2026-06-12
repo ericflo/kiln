@@ -27,7 +27,10 @@ fn zeros_on_rocm_then_host() {
     assert_eq!(host.device(), Device::Cpu);
     let v = host.to_vec::<f32>().expect("to_vec");
     assert_eq!(v.len(), 32);
-    assert!(v.iter().all(|&x| x == 0.0), "zeros_on must produce all zeros");
+    assert!(
+        v.iter().all(|&x| x == 0.0),
+        "zeros_on must produce all zeros"
+    );
 }
 
 #[test]
@@ -36,7 +39,8 @@ fn from_vec_on_rocm_roundtrip() {
         return;
     }
     let data: Vec<f32> = (0..32).map(|i| i as f32 * 0.5).collect();
-    let t = Tensor::from_vec_on(Device::Rocm(0), data.clone(), vec![4, 8]).expect("from_vec_on rocm");
+    let t =
+        Tensor::from_vec_on(Device::Rocm(0), data.clone(), vec![4, 8]).expect("from_vec_on rocm");
     assert_eq!(t.device(), Device::Rocm(0));
     let host = kiln_tensor::rocm_to_host_copy(&t).expect("rocm_to_host_copy");
     let got = host.to_vec::<f32>().expect("to_vec");

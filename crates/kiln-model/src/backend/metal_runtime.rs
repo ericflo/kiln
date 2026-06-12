@@ -820,7 +820,13 @@ impl GdnBackend for MetalBackend {
         in_proj_ab_t: &kiln_tensor::Tensor,
         nv: usize,
         _seq_len: usize,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+    ) -> Result<
+        Option<(
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+        )>,
+    > {
         // #1082: kt-native — helpers take kt directly, no candle bridge.
         if !metal_gdn_prefill_ab_in_proj_supports(x, in_proj_ab_t, nv) {
             return Ok(None);

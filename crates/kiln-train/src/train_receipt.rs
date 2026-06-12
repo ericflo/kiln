@@ -2084,8 +2084,7 @@ mod tests {
             + (5.0_f64).powi(2))
         .sqrt();
 
-        let kt_t = kt::Tensor::from_vec(xs, vec![5])
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let kt_t = kt::Tensor::from_vec(xs, vec![5]).map_err(|e| anyhow::anyhow!("{e}"))?;
         let kt_norm = tensor_l2_norm_kt(&kt_t)?;
         assert!(
             (kt_norm - expected).abs() < 1e-5,

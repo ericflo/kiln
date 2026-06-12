@@ -2,10 +2,10 @@
 //!
 //! Standard fully-connected layer. Supports optional bias.
 
-use crate::ops::{add, broadcast_to, matmul};
-use crate::{bail, Result, Tensor};
 #[cfg(feature = "cuda")]
 use crate::DType;
+use crate::ops::{add, broadcast_to, matmul};
+use crate::{Result, Tensor, bail};
 
 /// `y = x @ w + b` (b is optional).
 ///
@@ -22,9 +22,7 @@ pub fn linear(x: &Tensor, w: &Tensor, b: Option<&Tensor>) -> Result<Tensor> {
     let out_dim = w.shape()[1];
     let x_last = *x.shape().last().unwrap();
     if x_last != in_dim {
-        bail!(
-            "linear: x trailing axis {x_last} != w.in {in_dim}"
-        );
+        bail!("linear: x trailing axis {x_last} != w.in {in_dim}");
     }
     // Reshape x to [N, in_dim] for matmul; reshape back to original
     // shape with last axis = out_dim.
@@ -125,12 +123,9 @@ mod tests {
     #[test]
     fn linear_3d_input() {
         // x: [B=2, S=2, in=2]; w: [2, 3] → y: [2, 2, 3].
-        let x = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], vec![2, 2, 2]).unwrap();
-        let w = Tensor::from_slice(
-            &[1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0],
-            vec![2, 3],
-        )
-        .unwrap();
+        let x = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], vec![2, 2, 2])
+            .unwrap();
+        let w = Tensor::from_slice(&[1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0], vec![2, 3]).unwrap();
         let y = linear(&x, &w, None).unwrap();
         assert_eq!(y.shape(), &[2, 2, 3]);
     }

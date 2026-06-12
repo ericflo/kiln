@@ -74,8 +74,11 @@ pub fn load_cpu(filename: impl AsRef<Path>) -> Result<HashMap<String, Tensor>> {
 /// Same semantics as [`load_cpu`] but takes an already-read buffer.
 /// Useful for HTTP body / mmap / embedded-asset workflows.
 pub fn load_buffer_cpu(buffer: &[u8]) -> Result<HashMap<String, Tensor>> {
-    let st = SafeTensors::deserialize(buffer)
-        .map_err(|e| Error::Msg(format!("safetensors::load_buffer_cpu: deserialize failed: {e}")))?;
+    let st = SafeTensors::deserialize(buffer).map_err(|e| {
+        Error::Msg(format!(
+            "safetensors::load_buffer_cpu: deserialize failed: {e}"
+        ))
+    })?;
     let mut out = HashMap::new();
     for (name, view) in st.tensors() {
         let tensor = tensor_from_view(&view)?;
@@ -299,11 +302,7 @@ mod tests {
 
     #[test]
     fn save_then_load_round_trip_f32() {
-        let t = crate::Tensor::from_slice(
-            &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
-            vec![2, 3],
-        )
-        .unwrap();
+        let t = crate::Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
         let mut to_save: HashMap<String, &crate::Tensor> = HashMap::new();
         to_save.insert("weight".to_string(), &t);
         let tmp = std::env::temp_dir().join("kiln_save_round_trip_f32.safetensors");

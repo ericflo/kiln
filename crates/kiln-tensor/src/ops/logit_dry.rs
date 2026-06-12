@@ -32,7 +32,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 use super::logit_processor::LogitProcessor;
 
@@ -42,7 +42,10 @@ use super::logit_processor::LogitProcessor;
 
 fn validate_logits(logits: &Tensor, name: &str) -> Result<()> {
     if logits.rank() != 2 {
-        bail!("{name}: logits must be rank-2 [batch, vocab], got {:?}", logits.shape());
+        bail!(
+            "{name}: logits must be rank-2 [batch, vocab], got {:?}",
+            logits.shape()
+        );
     }
     if !logits.is_contiguous() {
         bail!("{name}: logits must be contiguous");
@@ -93,15 +96,20 @@ fn store_rows(dtype: DType, shape: &[usize], rows: &[Vec<f32>]) -> Result<Tensor
                 DType::F32 => out[offset..offset + 4].copy_from_slice(&val.to_le_bytes()),
                 DType::BF16 => out[offset..offset + 2]
                     .copy_from_slice(&half::bf16::from_f32(val).to_le_bytes()),
-                DType::F16 => out[offset..offset + 2]
-                    .copy_from_slice(&half::f16::from_f32(val).to_le_bytes()),
+                DType::F16 => {
+                    out[offset..offset + 2].copy_from_slice(&half::f16::from_f32(val).to_le_bytes())
+                }
                 _ => unreachable!(),
             }
         }
     }
     let cpu = CpuStorage::from_bytes(dtype, out)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(shape.to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(shape.to_vec()),
+        TensorId::next(),
+    )
 }
 
 // ----------------------------------------------------------------------
@@ -123,12 +131,7 @@ pub struct DryProcessor {
 }
 
 impl DryProcessor {
-    pub fn new(
-        multiplier: f32,
-        base: f32,
-        allowed_length: usize,
-        history: Vec<Vec<u32>>,
-    ) -> Self {
+    pub fn new(multiplier: f32, base: f32, allowed_length: usize, history: Vec<Vec<u32>>) -> Self {
         DryProcessor {
             multiplier,
             base,
@@ -173,7 +176,9 @@ impl DryProcessor {
                 k += 1;
             }
             let m = k + 1; // +1 for tok itself
-            best.entry(tok).and_modify(|v| *v = (*v).max(m)).or_insert(m);
+            best.entry(tok)
+                .and_modify(|v| *v = (*v).max(m))
+                .or_insert(m);
         }
         best
     }
@@ -328,21 +333,27 @@ mod tests {
     #[test]
     fn dry_negative_multiplier_errors() {
         let logits = Tensor::from_slice(&[1.0f32], vec![1, 1]).unwrap();
-        let e = DryProcessor::new(-1.0, 2.0, 0, vec![vec![]]).apply(&logits).unwrap_err();
+        let e = DryProcessor::new(-1.0, 2.0, 0, vec![vec![]])
+            .apply(&logits)
+            .unwrap_err();
         assert!(e.to_string().contains("multiplier"));
     }
 
     #[test]
     fn dry_base_le_one_errors() {
         let logits = Tensor::from_slice(&[1.0f32], vec![1, 1]).unwrap();
-        let e = DryProcessor::new(1.0, 1.0, 0, vec![vec![]]).apply(&logits).unwrap_err();
+        let e = DryProcessor::new(1.0, 1.0, 0, vec![vec![]])
+            .apply(&logits)
+            .unwrap_err();
         assert!(e.to_string().contains("base"));
     }
 
     #[test]
     fn dry_history_batch_mismatch_errors() {
         let logits = Tensor::from_slice(&[1.0f32, 2.0], vec![2, 1]).unwrap();
-        let e = DryProcessor::new(1.0, 2.0, 0, vec![vec![]]).apply(&logits).unwrap_err();
+        let e = DryProcessor::new(1.0, 2.0, 0, vec![vec![]])
+            .apply(&logits)
+            .unwrap_err();
         assert!(e.to_string().contains("history.len"));
     }
 

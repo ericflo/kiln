@@ -4,7 +4,7 @@
 //! inputs[i]`. The gradient slices `d_out` along the concat axis back
 //! into per-input contiguous gradients of the original shapes.
 
-use kiln_tensor::{bail, DType, Result, Tensor};
+use kiln_tensor::{DType, Result, Tensor, bail};
 
 use crate::BackwardOp;
 
@@ -72,7 +72,9 @@ impl BackwardOp for ConcatBackward {
         let mut grads: Vec<Option<Tensor>> = Vec::with_capacity(n);
         let mut axis_offset = 0usize;
         for &size_i in &self.input_axis_sizes {
-            let g = grad_output.narrow(self.axis, axis_offset, size_i)?.contiguous()?;
+            let g = grad_output
+                .narrow(self.axis, axis_offset, size_i)?
+                .contiguous()?;
             grads.push(Some(g));
             axis_offset += size_i;
         }

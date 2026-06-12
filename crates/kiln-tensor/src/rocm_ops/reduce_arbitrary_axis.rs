@@ -110,9 +110,7 @@ fn rocm_reduce_arbitrary_axis_impl(
         )
     };
     if status != 0 {
-        return Err(Error::Msg(format!(
-            "{label}: FFI returned status {status}"
-        )));
+        return Err(Error::Msg(format!("{label}: FFI returned status {status}")));
     }
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
@@ -226,9 +224,7 @@ fn rocm_minmax_arbitrary_axis_impl(
         )
     };
     if status != 0 {
-        return Err(Error::Msg(format!(
-            "{label}: FFI returned status {status}"
-        )));
+        return Err(Error::Msg(format!("{label}: FFI returned status {status}")));
     }
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
@@ -297,8 +293,7 @@ pub fn rocm_bool_reduce_axis(mask: &Tensor, axis: usize, kind: u8) -> Result<Ten
     let mut out_shape: Vec<usize> = shape.to_vec();
     out_shape.remove(axis);
     let out_elem_count: usize = (outer as usize) * (inner as usize);
-    let out_storage =
-        RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::U8, out_elem_count)?;
+    let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::U8, out_elem_count)?;
 
     let raw_stream = x_storage.rocm_stream_raw();
     let (x_base, _) = x_storage.device_ptr_raw();
@@ -319,9 +314,7 @@ pub fn rocm_bool_reduce_axis(mask: &Tensor, axis: usize, kind: u8) -> Result<Ten
         )
     };
     if status != 0 {
-        return Err(Error::Msg(format!(
-            "{label}: FFI returned status {status}"
-        )));
+        return Err(Error::Msg(format!("{label}: FFI returned status {status}")));
     }
 
     let storage_arc: crate::Storage = Arc::new(out_storage);

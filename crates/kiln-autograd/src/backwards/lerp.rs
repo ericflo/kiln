@@ -12,9 +12,7 @@
 
 use std::sync::Arc;
 
-use kiln_tensor::{
-    bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId,
-};
+use kiln_tensor::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 use crate::BackwardOp;
 
@@ -72,7 +70,11 @@ fn scale_tensor(t: &Tensor, factor: f32) -> Result<Tensor> {
     }
     let cpu_out = CpuStorage::from_bytes(dtype, out_bytes)?;
     let storage: Storage = Arc::new(cpu_out);
-    Tensor::from_parts(storage, Layout::contiguous(t.shape().to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(t.shape().to_vec()),
+        TensorId::next(),
+    )
 }
 
 #[derive(Debug)]

@@ -125,9 +125,8 @@ fn rocm_paged_attn_gqa4_d256_split_matches_fallback() {
         .collect();
     let block_table = Tensor::from_vec_on(Device::Rocm(0), block_table, vec![b, max_blocks])
         .expect("block table");
-    let seqused_k =
-        Tensor::from_vec_on(Device::Rocm(0), vec![max_seqlen_k as u32], vec![b])
-            .expect("seqused_k");
+    let seqused_k = Tensor::from_vec_on(Device::Rocm(0), vec![max_seqlen_k as u32], vec![b])
+        .expect("seqused_k");
     let scale = 1.0f32 / (d as f32).sqrt();
 
     // SAFETY: guarded by ENV_LOCK; the original value is restored by _restore.

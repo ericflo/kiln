@@ -65,7 +65,12 @@ fn make_state() -> (AppState, tempfile::TempDir) {
     (state, dir)
 }
 
-async fn req(app: &axum::Router, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+async fn req(
+    app: &axum::Router,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
     let builder = Request::builder().method(method).uri(path);
     let request = match body {
         Some(v) => builder
@@ -125,7 +130,10 @@ async fn corrections_crud_round_trip_persists_on_disk() {
     assert_eq!(status, StatusCode::OK);
     let rows = list["corrections"].as_array().unwrap();
     assert_eq!(rows.len(), 1, "upsert must not duplicate: {list}");
-    assert_eq!(rows[0]["ideal"], "renamed TokenStore and updated 3 call sites");
+    assert_eq!(
+        rows[0]["ideal"],
+        "renamed TokenStore and updated 3 call sites"
+    );
 
     // The store is a real file under the adapter dir.
     assert!(

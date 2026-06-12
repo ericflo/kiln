@@ -83,11 +83,7 @@ fn fp8_roundtrip_within_e4m3_precision() {
         .map(|i| {
             let x = (i as f32 / 511.0) * 20.0 - 10.0; // [-10, 10]
             // avoid the exact-zero bucket dominating the relative-error check
-            if x.abs() < 1e-3 {
-                0.137
-            } else {
-                x
-            }
+            if x.abs() < 1e-3 { 0.137 } else { x }
         })
         .collect();
     let got = quantize_dequantize_roundtrip(&vals);
@@ -113,8 +109,7 @@ fn fp8_quantize_accepts_bf16_and_f16_sources() {
         let src = f32_t.to_dtype(src_dtype).expect("cast to src dtype");
         let q = kiln_tensor::rocm_fp8_quantize_direct(&src)
             .unwrap_or_else(|e| panic!("rocm_fp8_quantize_direct ({src_dtype:?}): {e}"));
-        let deq = kiln_tensor::rocm_fp8_dequantize_direct(&q, DType::F32)
-            .expect("dequantize");
+        let deq = kiln_tensor::rocm_fp8_dequantize_direct(&q, DType::F32).expect("dequantize");
         let got = deq.to_vec::<f32>().expect("to_vec");
         for (&w, &g) in base.iter().zip(got.iter()) {
             // These are all exactly E4M3-representable; bf16/f16 of them is exact too.

@@ -24,15 +24,59 @@
 //! deposits are tagged with [`KT_PARAM_DEPOSIT_TAG`] (see [`register_input_mapping_kt`])
 //! so producers can distinguish them via [`decode_kt_param_deposit`].
 
-#![cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+#![cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use kiln_autograd::{with_thread_local_tape, Tape};
+use kiln_autograd::{Tape, with_thread_local_tape};
 use kiln_tensor::TensorId as KtTensorId;
 
 use crate::BridgeError;
+
+fn trace_tape_bridge_timings() -> bool {
+    fn flag(name: &str) -> bool {
+        std::env::var(name)
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                !(v.is_empty() || v == "0" || v == "false" || v == "no" || v == "off")
+            })
+            .unwrap_or(false)
+    }
+
+    flag("KILN_TRACE_TAPE_BRIDGE_TIMINGS") || flag("KILN_TRACE_SFT_TIMINGS")
+}
+
+fn log_tape_bridge_timing(
+    enabled: bool,
+    phase: &str,
+    tape_nodes: Option<usize>,
+    elapsed: std::time::Duration,
+) {
+    if enabled {
+        match tape_nodes {
+            Some(tape_nodes) => eprintln!(
+                "kiln_tape_bridge_timing phase={phase} tape_nodes={tape_nodes} elapsed_ms={:.3}",
+                elapsed.as_secs_f64() * 1000.0
+            ),
+            None => eprintln!(
+                "kiln_tape_bridge_timing phase={phase} elapsed_ms={:.3}",
+                elapsed.as_secs_f64() * 1000.0
+            ),
+        }
+    }
+}
+
+fn log_tape_bridge_begin(enabled: bool, phase: &str) {
+    if enabled {
+        eprintln!("kiln_tape_bridge_timing phase={phase} begin=1");
+    }
+}
 
 /// One side of the bridge's per-thread mapping state.
 ///
@@ -202,25 +246,54 @@ where
     F: FnOnce() -> Result<(T, kiln_tensor::Tensor), BridgeError>,
 {
     with_io_mapping_scope(|| {
+        let trace_timings = trace_tape_bridge_timings();
+        let total_start = std::time::Instant::now();
+        log_tape_bridge_begin(trace_timings, "authoritative_scope");
+        let forward_start = std::time::Instant::now();
         let (forward_res, tape): (Result<(T, kiln_tensor::Tensor), BridgeError>, Tape) =
             with_thread_local_tape(forward);
+        let tape_nodes = tape.len();
+        log_tape_bridge_timing(
+            trace_timings,
+            "authoritative_forward",
+            Some(tape_nodes),
+            forward_start.elapsed(),
+        );
         let (payload, loss_kt) = forward_res?;
 
         // The kt loss IS the tape root — seed dL/dL = 1 directly (no candle
         // round-trip, no `candle_output_kt` resolution).
+        let seed_start = std::time::Instant::now();
         let seed = kiln_tensor::ops::ones_like(&loss_kt)
             .map_err(|e| BridgeError::new(format!("tape_bridge: ones_like(loss_kt): {e}")))?;
         let mut seeds: HashMap<KtTensorId, kiln_tensor::Tensor> = HashMap::new();
         seeds.insert(loss_kt.id(), seed);
+        log_tape_bridge_timing(
+            trace_timings,
+            "authoritative_seed",
+            Some(tape_nodes),
+            seed_start.elapsed(),
+        );
+        log_tape_bridge_begin(trace_timings, "authoritative_backward");
+        let backward_start = std::time::Instant::now();
         let kt_grads = tape
             .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
             .map_err(|e| {
-                BridgeError::new(format!("tape_bridge: tape-authoritative(kt) backward walk: {e}"))
+                BridgeError::new(format!(
+                    "tape_bridge: tape-authoritative(kt) backward walk: {e}"
+                ))
             })?;
+        log_tape_bridge_timing(
+            trace_timings,
+            "authoritative_backward",
+            Some(tape_nodes),
+            backward_start.elapsed(),
+        );
 
         // Same grad-map build as the candle variant: deposit each recorded kt
         // input grad under every mapped key (the LoRA-Parameter deposits are
         // KT_PARAM_DEPOSIT_TAG-tagged via `register_input_mapping_kt`).
+        let map_start = std::time::Instant::now();
         let input_map: Vec<(u64, usize)> = BRIDGE_SCOPE.with(|cell| {
             cell.borrow()
                 .as_ref()
@@ -238,6 +311,18 @@ where
                 out.insert(mapped_raw, g.clone());
             }
         }
+        log_tape_bridge_timing(
+            trace_timings,
+            "authoritative_grad_map",
+            Some(tape_nodes),
+            map_start.elapsed(),
+        );
+        log_tape_bridge_timing(
+            trace_timings,
+            "authoritative_scope",
+            Some(tape_nodes),
+            total_start.elapsed(),
+        );
         Ok((payload, loss_kt, out))
     })
 }
@@ -272,7 +357,13 @@ where
 pub fn with_tape_segment_backward_scope<F>(
     upstream_grad: kiln_tensor::Tensor,
     forward: F,
-) -> Result<(kiln_autograd::GradStore, HashMap<usize, kiln_tensor::Tensor>), BridgeError>
+) -> Result<
+    (
+        kiln_autograd::GradStore,
+        HashMap<usize, kiln_tensor::Tensor>,
+    ),
+    BridgeError,
+>
 where
     F: FnOnce() -> Result<kiln_tensor::Tensor, BridgeError>,
 {
@@ -326,8 +417,6 @@ where
 pub fn bridge_scope_active() -> bool {
     BRIDGE_SCOPE.with(|cell| cell.borrow().is_some())
 }
-
-
 
 #[cfg(test)]
 mod tests {

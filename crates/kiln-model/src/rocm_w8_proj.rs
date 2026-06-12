@@ -76,7 +76,11 @@ pub fn pack_from_bf16_rows(weight: &kiln_tensor::Tensor) -> Result<Option<RocmW8
         for &v in row {
             max_abs = max_abs.max(v.abs());
         }
-        let scale = if max_abs <= 1.0e-12 { 1.0 } else { max_abs / 127.0 };
+        let scale = if max_abs <= 1.0e-12 {
+            1.0
+        } else {
+            max_abs / 127.0
+        };
         scales.push(scale);
         let inv = 1.0 / scale;
         for &v in row {
@@ -115,10 +119,7 @@ pub fn matmul_bf16(x: &kiln_tensor::Tensor, w: &RocmW8Proj) -> Result<kiln_tenso
 }
 
 #[cfg(feature = "rocm")]
-pub fn swiglu_bf16(
-    x: &kiln_tensor::Tensor,
-    w: &RocmW8Proj,
-) -> Result<Option<kiln_tensor::Tensor>> {
+pub fn swiglu_bf16(x: &kiln_tensor::Tensor, w: &RocmW8Proj) -> Result<Option<kiln_tensor::Tensor>> {
     if !swiglu_bf16_enabled(w) {
         return Ok(None);
     }

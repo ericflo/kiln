@@ -43,10 +43,10 @@
 
 use kiln_autograd::{BackwardOp, Tape};
 use kiln_tensor::{
-    bail, DType as KtDType, Device as KtDevice, Result as KtResult, Tensor as KtTensor,
+    DType as KtDType, Device as KtDevice, Result as KtResult, Tensor as KtTensor, bail,
 };
 
-use crate::kt_api::{fused_rmsnorm_backward_kt, fused_rmsnorm_kt, RmsNormError};
+use crate::kt_api::{RmsNormError, fused_rmsnorm_backward_kt, fused_rmsnorm_kt};
 
 /// True when `t` lives on a GPU backend the fused RMSNorm kernel runs on.
 /// Phase R.7: accepts `Device::Rocm` (under the `rocm` feature) as well as
@@ -161,10 +161,11 @@ impl BackwardOp for CudaFusedRmsNormBackward {
 
         // Run the CUDA backward kernel: produces (grad_x: BF16, grad_w_partial: F32).
         let (grad_x, grad_w_partial) =
-            fused_rmsnorm_backward_kt(&self.x, &self.weight, grad_output, self.eps)
-                .map_err(|e: RmsNormError| {
+            fused_rmsnorm_backward_kt(&self.x, &self.weight, grad_output, self.eps).map_err(
+                |e: RmsNormError| {
                     kiln_tensor::Error::Msg(format!("rmsnorm kt-tape bwd: kt call: {e}"))
-                })?;
+                },
+            )?;
 
         // Cast the first `hidden` F32 slots of the partial buffer to
         // BF16 to produce the final `grad_w`. See module docs and the
@@ -189,10 +190,7 @@ impl BackwardOp for CudaFusedRmsNormBackward {
 /// [`crate::kt_forward_op`]. Lives here so the kt-tape backward
 /// doesn't have to pull `kiln_kt_bridge::cuda_*` plumbing into its
 /// public surface.
-fn cast_partial_hidden_f32_to_bf16(
-    partial: &KtTensor,
-    hidden: usize,
-) -> KtResult<KtTensor> {
+fn cast_partial_hidden_f32_to_bf16(partial: &KtTensor, hidden: usize) -> KtResult<KtTensor> {
     // Backend-neutral seam (Phase R.7): the `device_*` dispatchers route
     // `Device::Cuda` tensors to the same CUDA helpers (behavior-identical) and
     // `Device::Rocm` tensors to the ROCm ones.
@@ -201,9 +199,7 @@ fn cast_partial_hidden_f32_to_bf16(
         .map_err(|e| kiln_tensor::Error::Msg(format!("rmsnorm kt-tape bwd: stream: {e}")))?;
     let dst = kiln_kt_bridge::alloc_device_tensor_like(partial, KtDType::BF16, vec![hidden])
         .map_err(|e| {
-            kiln_tensor::Error::Msg(format!(
-                "rmsnorm kt-tape bwd: alloc grad_w BF16: {e}"
-            ))
+            kiln_tensor::Error::Msg(format!("rmsnorm kt-tape bwd: alloc grad_w BF16: {e}"))
         })?;
     let dst_ptr = kiln_kt_bridge::device_output_ptr(&dst);
 
@@ -222,9 +218,7 @@ fn cast_partial_hidden_f32_to_bf16(
         )
     };
     if status != 0 {
-        bail!(
-            "rmsnorm kt-tape bwd: kiln_f32_to_bf16 failed (status {status})"
-        );
+        bail!("rmsnorm kt-tape bwd: kiln_f32_to_bf16 failed (status {status})");
     }
     Ok(dst)
 }
@@ -319,9 +313,7 @@ mod tests {
         let mut s = seed.wrapping_mul(0x9E3779B97F4A7C15);
         for _ in 0..n {
             s = s.wrapping_add(0xDEADBEEF).wrapping_mul(0x9E3779B97F4A7C15);
-            out.push(bf16::from_f32(
-                ((s as u32 % 1024) as f32 - 512.0) / 512.0,
-            ));
+            out.push(bf16::from_f32(((s as u32 % 1024) as f32 - 512.0) / 512.0));
         }
         out
     }
@@ -360,25 +352,16 @@ mod tests {
 
         let rows = 2usize;
         let hidden = 16usize;
-        let x = KtTensor::cuda_from_slice(
-            &pattern_bf16(rows * hidden, 1),
-            vec![rows, hidden],
-            0,
-        )
-        .expect("x cuda");
-        let w = KtTensor::cuda_from_slice(
-            &pattern_bf16(hidden, 2),
-            vec![hidden],
-            0,
-        )
-        .expect("w cuda");
+        let x = KtTensor::cuda_from_slice(&pattern_bf16(rows * hidden, 1), vec![rows, hidden], 0)
+            .expect("x cuda");
+        let w =
+            KtTensor::cuda_from_slice(&pattern_bf16(hidden, 2), vec![hidden], 0).expect("w cuda");
 
         // Envelope must report OK for real CUDA BF16 inputs.
         assert!(envelope_ok(&x, &w));
 
         let mut tape = Tape::new();
-        let y = fused_rmsnorm_via_kt_tape(&x, &w, 1e-6, &mut tape)
-            .expect("forward + record");
+        let y = fused_rmsnorm_via_kt_tape(&x, &w, 1e-6, &mut tape).expect("forward + record");
         assert_eq!(y.shape(), &[rows, hidden]);
         assert_eq!(y.dtype(), KtDType::BF16);
         assert_eq!(tape.len(), 1);
@@ -404,24 +387,12 @@ mod tests {
 
         let rows = 2usize;
         let hidden = 16usize;
-        let x = KtTensor::cuda_from_slice(
-            &pattern_bf16(rows * hidden, 3),
-            vec![rows, hidden],
-            0,
-        )
-        .expect("x cuda");
-        let w = KtTensor::cuda_from_slice(
-            &pattern_bf16(hidden, 4),
-            vec![hidden],
-            0,
-        )
-        .expect("w cuda");
-        let dy = KtTensor::cuda_from_slice(
-            &pattern_bf16(rows * hidden, 5),
-            vec![rows, hidden],
-            0,
-        )
-        .expect("dy cuda");
+        let x = KtTensor::cuda_from_slice(&pattern_bf16(rows * hidden, 3), vec![rows, hidden], 0)
+            .expect("x cuda");
+        let w =
+            KtTensor::cuda_from_slice(&pattern_bf16(hidden, 4), vec![hidden], 0).expect("w cuda");
+        let dy = KtTensor::cuda_from_slice(&pattern_bf16(rows * hidden, 5), vec![rows, hidden], 0)
+            .expect("dy cuda");
 
         let bwd = CudaFusedRmsNormBackward {
             x: x.clone(),

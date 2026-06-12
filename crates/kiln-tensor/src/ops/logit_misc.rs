@@ -12,9 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::{
-    bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId,
-};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 use std::sync::Arc;
 
 use super::logit_processor::LogitProcessor;
@@ -26,7 +24,10 @@ use super::logit_processor::LogitProcessor;
 
 fn validate_logits(logits: &Tensor, name: &str) -> Result<()> {
     if logits.rank() != 2 {
-        bail!("{name}: logits must be rank-2 [batch, vocab], got {:?}", logits.shape());
+        bail!(
+            "{name}: logits must be rank-2 [batch, vocab], got {:?}",
+            logits.shape()
+        );
     }
     if !logits.is_contiguous() {
         bail!("{name}: logits must be contiguous");
@@ -77,15 +78,20 @@ fn store_rows(dtype: DType, shape: &[usize], rows: &[Vec<f32>]) -> Result<Tensor
                 DType::F32 => out[offset..offset + 4].copy_from_slice(&val.to_le_bytes()),
                 DType::BF16 => out[offset..offset + 2]
                     .copy_from_slice(&half::bf16::from_f32(val).to_le_bytes()),
-                DType::F16 => out[offset..offset + 2]
-                    .copy_from_slice(&half::f16::from_f32(val).to_le_bytes()),
+                DType::F16 => {
+                    out[offset..offset + 2].copy_from_slice(&half::f16::from_f32(val).to_le_bytes())
+                }
                 _ => unreachable!(),
             }
         }
     }
     let cpu = CpuStorage::from_bytes(dtype, out)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(shape.to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(shape.to_vec()),
+        TensorId::next(),
+    )
 }
 
 // ----------------------------------------------------------------------
@@ -255,7 +261,9 @@ mod tests {
     #[test]
     fn ngram_block_n_less_than_2_errors() {
         let logits = Tensor::from_slice(&[1.0f32], vec![1, 1]).unwrap();
-        let e = NgramBlockProcessor::new(1, vec![vec![]]).apply(&logits).unwrap_err();
+        let e = NgramBlockProcessor::new(1, vec![vec![]])
+            .apply(&logits)
+            .unwrap_err();
         assert!(e.to_string().contains("n must be ≥ 2"));
     }
 

@@ -24,7 +24,10 @@
 //! kernel micro-optimizations.
 
 use kiln_tensor as kt;
-use kt::ops::{add, argmax_last_dim, cast, embedding, l2_norm, matmul, mul_sigmoid_gate, rms_norm, rope, silu, softmax_last_dim};
+use kt::ops::{
+    add, argmax_last_dim, cast, embedding, l2_norm, matmul, mul_sigmoid_gate, rms_norm, rope, silu,
+    softmax_last_dim,
+};
 
 #[test]
 fn mini_block_runs_end_to_end_cpu() {
@@ -42,12 +45,20 @@ fn mini_block_runs_end_to_end_cpu() {
 
     // RMSNorm weight + linear projection weights.
     let norm_w = kt::Tensor::from_slice(&[1.0f32, 1.0, 1.0, 1.0], vec![hidden]).unwrap();
-    let proj_w =
-        kt::Tensor::from_slice(&(0..hidden * hidden).map(|i| (i as f32) * 0.01).collect::<Vec<_>>(), vec![hidden, hidden])
-            .unwrap();
-    let value_w =
-        kt::Tensor::from_slice(&(0..hidden * hidden).map(|i| (i as f32) * 0.05 - 0.1).collect::<Vec<_>>(), vec![hidden, hidden])
-            .unwrap();
+    let proj_w = kt::Tensor::from_slice(
+        &(0..hidden * hidden)
+            .map(|i| (i as f32) * 0.01)
+            .collect::<Vec<_>>(),
+        vec![hidden, hidden],
+    )
+    .unwrap();
+    let value_w = kt::Tensor::from_slice(
+        &(0..hidden * hidden)
+            .map(|i| (i as f32) * 0.05 - 0.1)
+            .collect::<Vec<_>>(),
+        vec![hidden, hidden],
+    )
+    .unwrap();
 
     // RoPE cos/sin tables: [seq=2, rotary_dim/2 = 1]
     let cos = kt::Tensor::from_slice(&[1.0f32, 0.5_f32.sqrt()], vec![seq, 1]).unwrap();
@@ -134,11 +145,7 @@ fn mini_block_runs_end_to_end_cpu() {
 #[test]
 fn cast_round_trip_through_bf16_preserves_finiteness() {
     // Exercise the cast op in a flow: F32 -> BF16 -> RMSNorm -> F32.
-    let x = kt::Tensor::from_slice(
-        &[1.0f32, -2.0, 3.0, -4.0, 5.0, -6.0],
-        vec![2, 3],
-    )
-    .unwrap();
+    let x = kt::Tensor::from_slice(&[1.0f32, -2.0, 3.0, -4.0, 5.0, -6.0], vec![2, 3]).unwrap();
     let w = kt::Tensor::from_slice(&[1.0f32, 1.0, 1.0], vec![3]).unwrap();
 
     let x_bf = cast(&x, kt::DType::BF16).unwrap();

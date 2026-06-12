@@ -526,8 +526,8 @@ pub fn try_tape_opd_echo_env_compose_kt(
     let weighted = env_ce_kt
         .affine(spec.lambda, 0.0)
         .map_err(|e| anyhow::anyhow!("opd echo compose: λ scale: {e}"))?;
-    let composed = (opd_loss_kt + &weighted)
-        .map_err(|e| anyhow::anyhow!("opd echo compose: add: {e}"))?;
+    let composed =
+        (opd_loss_kt + &weighted).map_err(|e| anyhow::anyhow!("opd echo compose: add: {e}"))?;
 
     let recorded = with_active_tape(|tape: &mut Tape| {
         tape.record(

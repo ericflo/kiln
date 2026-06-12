@@ -396,20 +396,10 @@ pub(crate) fn metal_paged_decode_replay_state(
         batch,
         true,
     );
-    let resources = [
-        q,
-        k_pool,
-        v_pool,
-        block_table,
-        seqused_k,
-        out,
-        k,
-        v,
-        slots,
-    ]
-    .into_iter()
-    .map(metal_stable_replay_ref)
-    .collect();
+    let resources = [q, k_pool, v_pool, block_table, seqused_k, out, k, v, slots]
+        .into_iter()
+        .map(metal_stable_replay_ref)
+        .collect();
     Ok(ReplayState::new(replay_key, resources))
 }
 

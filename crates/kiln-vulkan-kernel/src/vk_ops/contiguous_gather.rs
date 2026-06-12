@@ -25,7 +25,13 @@ pub const MAX_RANK: usize = 8;
 
 /// Build the `[rank, n, start_offset, shape[8], strides[8]]` push-constant
 /// vector shared by the F32 and BF16 gather shaders.
-fn gather_push(rank: usize, n: usize, start_offset: usize, shape: &[usize], strides: &[usize]) -> Vec<u32> {
+fn gather_push(
+    rank: usize,
+    n: usize,
+    start_offset: usize,
+    shape: &[usize],
+    strides: &[usize],
+) -> Vec<u32> {
     let mut push: Vec<u32> = Vec::with_capacity(3 + 2 * MAX_RANK);
     push.push(rank as u32);
     push.push(n as u32);

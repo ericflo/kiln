@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 /// Kind tag for the CUDA kernel. Must match `KIND_CLAMP` / `KIND_POW`
 /// in `csrc/clamp_pow.cu`.
@@ -119,25 +119,33 @@ fn apply_unary(x: &Tensor, f: impl Fn(f32) -> f32, name: &str) -> Result<Tensor>
     for i in 0..n {
         let v = match dtype {
             DType::F32 => f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()),
-            DType::BF16 => half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
-            DType::F16 => half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
+            DType::BF16 => {
+                half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
+            DType::F16 => {
+                half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
             _ => unreachable!(),
         };
         let y = f(v);
         match dtype {
             DType::F32 => out[i * 4..i * 4 + 4].copy_from_slice(&y.to_le_bytes()),
-            DType::BF16 => out[i * 2..i * 2 + 2]
-                .copy_from_slice(&half::bf16::from_f32(y).to_le_bytes()),
-            DType::F16 => out[i * 2..i * 2 + 2]
-                .copy_from_slice(&half::f16::from_f32(y).to_le_bytes()),
+            DType::BF16 => {
+                out[i * 2..i * 2 + 2].copy_from_slice(&half::bf16::from_f32(y).to_le_bytes())
+            }
+            DType::F16 => {
+                out[i * 2..i * 2 + 2].copy_from_slice(&half::f16::from_f32(y).to_le_bytes())
+            }
             _ => unreachable!(),
         }
     }
     let cpu_out = CpuStorage::from_bytes(dtype, out)?;
     let storage: Storage = Arc::new(cpu_out);
-    Tensor::from_parts(storage, Layout::contiguous(x.shape().to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(x.shape().to_vec()),
+        TensorId::next(),
+    )
 }
 
 #[cfg(test)]

@@ -31,12 +31,12 @@
 //! plus `BackendRuntime::dispatch`; this PR ships only the
 //! Tensor + view-op surface.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
-    cpu_zeros, profile, CpuStorage, DType, Device, Element, Error, Layout, Result, Shape, Storage,
-    StorageBackend, TensorId,
+    CpuStorage, DType, Device, Element, Error, Layout, Result, Shape, Storage, StorageBackend,
+    TensorId, cpu_zeros, profile,
 };
 
 /// kiln-tensor's production tensor handle.
@@ -790,7 +790,9 @@ impl Tensor {
             .storage
             .as_any()
             .downcast_ref::<CpuStorage>()
-            .ok_or_else(|| Error::from_str("Tensor::contiguous: CPU device must hold CpuStorage"))?;
+            .ok_or_else(|| {
+                Error::from_str("Tensor::contiguous: CPU device must hold CpuStorage")
+            })?;
 
         let per = self.dtype().size_in_bytes();
         debug_assert!(per > 0);
@@ -904,11 +906,7 @@ impl Tensor {
                     // dtypes the kernel doesn't cover.
                     let supported = matches!(
                         self.dtype(),
-                        DType::F32
-                            | DType::BF16
-                            | DType::F16
-                            | DType::F8E4M3
-                            | DType::F8E5M2
+                        DType::F32 | DType::BF16 | DType::F16 | DType::F8E4M3 | DType::F8E5M2
                     );
                     if supported {
                         return crate::cuda_is_finite(self);
@@ -947,7 +945,9 @@ impl Tensor {
             .as_any()
             .downcast_ref::<CpuStorage>()
             .ok_or_else(|| {
-                Error::Msg("Tensor::all_finite: CPU device but storage isn't CpuStorage".to_string())
+                Error::Msg(
+                    "Tensor::all_finite: CPU device but storage isn't CpuStorage".to_string(),
+                )
             })?;
         let per = self.dtype().size_in_bytes();
         let shape = self.layout.shape();
@@ -1786,7 +1786,11 @@ mod tests {
         assert_eq!(t.element_count(), 12);
         // Round-trip via D2H readback.
         let host = crate::cuda_to_host_copy(&t).unwrap();
-        let cpu = host.storage().as_any().downcast_ref::<CpuStorage>().unwrap();
+        let cpu = host
+            .storage()
+            .as_any()
+            .downcast_ref::<CpuStorage>()
+            .unwrap();
         let back: Vec<f32> = bytemuck::cast_slice::<u8, f32>(cpu.as_bytes()).to_vec();
         assert_eq!(back, vec![0.0f32; 12]);
     }
@@ -1805,7 +1809,11 @@ mod tests {
         assert_eq!(t.dtype(), DType::F32);
         // Round-trip via D2H readback.
         let host = crate::cuda_to_host_copy(&t).unwrap();
-        let cpu = host.storage().as_any().downcast_ref::<CpuStorage>().unwrap();
+        let cpu = host
+            .storage()
+            .as_any()
+            .downcast_ref::<CpuStorage>()
+            .unwrap();
         let back: Vec<f32> = bytemuck::cast_slice::<u8, f32>(cpu.as_bytes()).to_vec();
         assert_eq!(back, v);
     }

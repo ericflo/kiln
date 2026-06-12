@@ -194,8 +194,8 @@ fn bool_reduce_arbitrary_axis_wavefront_sweep() {
                 for r in 0..axis_dim {
                     let idx = (o * axis_dim + r) * inner + i;
                     let v = match pattern {
-                        0 => 1u8,                                  // all true
-                        1 => 0u8,                                  // all false
+                        0 => 1u8, // all true
+                        1 => 0u8, // all false
                         _ => {
                             if r == special {
                                 0u8

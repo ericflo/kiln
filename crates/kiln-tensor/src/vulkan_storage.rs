@@ -99,7 +99,9 @@ impl VulkanStorage {
                 &buffer,
                 &zeros,
             )
-            .map_err(|e| Error::Msg(format!("VulkanStorage::zeros: H2D zero upload failed: {e}")))?;
+            .map_err(|e| {
+                Error::Msg(format!("VulkanStorage::zeros: H2D zero upload failed: {e}"))
+            })?;
         }
         Ok(VulkanStorage {
             device: Device::Vulkan(device_index),
@@ -288,17 +290,13 @@ fn vk_dtype_to_kt(dtype: kiln_vulkan_kernel::vk_tensor::VkDType) -> DType {
 ///
 /// Returns [`Error::Msg`] on non-Vulkan storage, non-contiguous / offset
 /// layout, or unsupported dtype.
-pub fn vk_tensor_from_kt(
-    t: &crate::Tensor,
-) -> Result<kiln_vulkan_kernel::vk_tensor::VkTensor> {
+pub fn vk_tensor_from_kt(t: &crate::Tensor) -> Result<kiln_vulkan_kernel::vk_tensor::VkTensor> {
     use kiln_vulkan_kernel::vk_tensor::VkTensor;
     let kt_vk = t
         .storage()
         .as_any()
         .downcast_ref::<VulkanStorage>()
-        .ok_or_else(|| {
-            Error::Msg("vk_tensor_from_kt: tensor must be Vulkan-backed".to_string())
-        })?;
+        .ok_or_else(|| Error::Msg("vk_tensor_from_kt: tensor must be Vulkan-backed".to_string()))?;
     if !t.is_contiguous() {
         return Err(Error::Msg(
             "vk_tensor_from_kt: tensor must be contiguous".to_string(),
@@ -358,13 +356,8 @@ pub fn kt_tensor_from_vk(
     let device = Arc::clone(vk.device());
     // Zero-copy: clone the Arc handle (refcount bump, no device copy).
     let buffer = Arc::clone(vk.buffer());
-    let storage = VulkanStorage::from_arc_buffer(
-        device,
-        device_index,
-        dtype,
-        buffer,
-        byte_len as u64,
-    )?;
+    let storage =
+        VulkanStorage::from_arc_buffer(device, device_index, dtype, buffer, byte_len as u64)?;
     let storage_arc: crate::Storage = Arc::new(storage);
     crate::Tensor::from_parts(
         storage_arc,
@@ -565,7 +558,11 @@ pub fn vulkan_matmul_batched(a: &crate::Tensor, b: &crate::Tensor) -> Result<cra
         DType::BF16 => vk_matmul_batched_bf16_no_grad(&vk_a, &vk_b),
         _ => unreachable!("dtype gated to F32/BF16 above"),
     }
-    .map_err(|e| Error::Msg(format!("vulkan_matmul_batched: kernel dispatch failed: {e}")))?;
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_matmul_batched: kernel dispatch failed: {e}"
+        ))
+    })?;
     // vk_out is F32 [batch, m, n]; restore the caller's leading axes.
     let mut out_shape: Vec<usize> = a_shape[..ar - 2].to_vec();
     out_shape.push(m);
@@ -631,12 +628,16 @@ pub fn vulkan_matmul_lhs_transposed(a: &crate::Tensor, b: &crate::Tensor) -> Res
         .storage()
         .as_any()
         .downcast_ref::<VulkanStorage>()
-        .ok_or_else(|| Error::Msg("vulkan_matmul_lhs_transposed: a must be Vulkan-backed".to_string()))?;
+        .ok_or_else(|| {
+            Error::Msg("vulkan_matmul_lhs_transposed: a must be Vulkan-backed".to_string())
+        })?;
     let b_vk = b
         .storage()
         .as_any()
         .downcast_ref::<VulkanStorage>()
-        .ok_or_else(|| Error::Msg("vulkan_matmul_lhs_transposed: b must be Vulkan-backed".to_string()))?;
+        .ok_or_else(|| {
+            Error::Msg("vulkan_matmul_lhs_transposed: b must be Vulkan-backed".to_string())
+        })?;
 
     let a_shape = a.shape();
     let b_shape = b.shape();
@@ -681,7 +682,11 @@ pub fn vulkan_matmul_lhs_transposed(a: &crate::Tensor, b: &crate::Tensor) -> Res
         DType::BF16 => vk_matmul_lhs_t_batched_bf16_no_grad(&vk_a, &vk_b),
         _ => unreachable!("dtype gated to F32/BF16 above"),
     }
-    .map_err(|e| Error::Msg(format!("vulkan_matmul_lhs_transposed: kernel dispatch failed: {e}")))?;
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_matmul_lhs_transposed: kernel dispatch failed: {e}"
+        ))
+    })?;
 
     let mut out_shape: Vec<usize> = a_shape[..ar - 2].to_vec();
     out_shape.push(m);
@@ -746,12 +751,16 @@ pub fn vulkan_matmul_rhs_transposed(a: &crate::Tensor, b: &crate::Tensor) -> Res
         .storage()
         .as_any()
         .downcast_ref::<VulkanStorage>()
-        .ok_or_else(|| Error::Msg("vulkan_matmul_rhs_transposed: a must be Vulkan-backed".to_string()))?;
+        .ok_or_else(|| {
+            Error::Msg("vulkan_matmul_rhs_transposed: a must be Vulkan-backed".to_string())
+        })?;
     let b_vk = b
         .storage()
         .as_any()
         .downcast_ref::<VulkanStorage>()
-        .ok_or_else(|| Error::Msg("vulkan_matmul_rhs_transposed: b must be Vulkan-backed".to_string()))?;
+        .ok_or_else(|| {
+            Error::Msg("vulkan_matmul_rhs_transposed: b must be Vulkan-backed".to_string())
+        })?;
 
     let a_shape = a.shape();
     let b_shape = b.shape();
@@ -796,7 +805,11 @@ pub fn vulkan_matmul_rhs_transposed(a: &crate::Tensor, b: &crate::Tensor) -> Res
         DType::BF16 => vk_matmul_rhs_t_batched_bf16_no_grad(&vk_a, &vk_b),
         _ => unreachable!("dtype gated to F32/BF16 above"),
     }
-    .map_err(|e| Error::Msg(format!("vulkan_matmul_rhs_transposed: kernel dispatch failed: {e}")))?;
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_matmul_rhs_transposed: kernel dispatch failed: {e}"
+        ))
+    })?;
 
     let mut out_shape: Vec<usize> = a_shape[..ar - 2].to_vec();
     out_shape.push(m);
@@ -836,7 +849,7 @@ pub fn vulkan_matmul_rhs_transposed(a: &crate::Tensor, b: &crate::Tensor) -> Res
 /// input, or kernel dispatch failure.
 pub fn vulkan_contiguous(t: &crate::Tensor) -> Result<crate::Tensor> {
     use kiln_vulkan_kernel::vk_ops::contiguous_gather::{
-        vk_gather_contiguous_bf16, vk_gather_contiguous_f32, MAX_RANK,
+        MAX_RANK, vk_gather_contiguous_bf16, vk_gather_contiguous_f32,
     };
 
     if !matches!(t.dtype(), DType::F32 | DType::BF16) {
@@ -881,10 +894,12 @@ pub fn vulkan_contiguous(t: &crate::Tensor) -> Result<crate::Tensor> {
 // vulkan_matmul_bf16w — #1443 step1: F32-act × BF16-weight mixed-precision GEMM
 // ----------------------------------------------------------------------
 
-
 /// Whether `t` is backed by [`VulkanStorage`] (resident on the GPU pool).
 fn is_vulkan_backed(t: &crate::Tensor) -> bool {
-    t.storage().as_any().downcast_ref::<VulkanStorage>().is_some()
+    t.storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .is_some()
 }
 
 /// One-shot WARN for the non-resident mixed-precision fallback so hybrid
@@ -1052,8 +1067,11 @@ pub fn vulkan_matmul_bf16w_bwd(
 
     let vk_grad = vk_tensor_from_kt(grad_out)?;
     let vk_w = vk_tensor_from_kt(weight_t)?;
-    let vk_dx = vk_matmul_bf16w_bwd_no_grad(&vk_grad, &vk_w)
-        .map_err(|e| Error::Msg(format!("vulkan_matmul_bf16w_bwd: kernel dispatch failed: {e}")))?;
+    let vk_dx = vk_matmul_bf16w_bwd_no_grad(&vk_grad, &vk_w).map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_matmul_bf16w_bwd: kernel dispatch failed: {e}"
+        ))
+    })?;
     kt_tensor_from_vk(&vk_dx, device_index)
 }
 
@@ -1145,9 +1163,16 @@ pub fn vulkan_scale(x: &crate::Tensor, scale: f32) -> Result<crate::Tensor> {
 fn vulkan_reduce_all(x: &crate::Tensor, mean: bool) -> Result<crate::Tensor> {
     use kiln_vulkan_kernel::vk_ops::reduce::{vk_mean_all, vk_sum_all_no_grad};
 
-    let op = if mean { "vulkan_mean_all" } else { "vulkan_sum_all" };
+    let op = if mean {
+        "vulkan_mean_all"
+    } else {
+        "vulkan_sum_all"
+    };
     if x.dtype() != DType::F32 {
-        return Err(Error::Msg(format!("{op}: F32-only kernel (got {})", x.dtype())));
+        return Err(Error::Msg(format!(
+            "{op}: F32-only kernel (got {})",
+            x.dtype()
+        )));
     }
     if x.element_count() == 0 {
         return Err(Error::Msg(format!("{op}: empty tensor")));
@@ -1234,9 +1259,9 @@ pub fn primary_vulkan_device(device_index: usize) -> Result<Arc<VulkanDevice>> {
     static DEVICES: OnceLock<Mutex<std::collections::HashMap<usize, Arc<VulkanDevice>>>> =
         OnceLock::new();
     let map_mutex = DEVICES.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
-    let mut map = map_mutex
-        .lock()
-        .map_err(|_| Error::Msg("primary_vulkan_device: device cache mutex poisoned".to_string()))?;
+    let mut map = map_mutex.lock().map_err(|_| {
+        Error::Msg("primary_vulkan_device: device cache mutex poisoned".to_string())
+    })?;
     if let Some(dev) = map.get(&device_index) {
         return Ok(Arc::clone(dev));
     }
@@ -1324,18 +1349,11 @@ pub fn host_to_vulkan_copy(cpu: &crate::Tensor, device_index: usize) -> Result<c
             &buffer,
             src,
         )
-        .map_err(|e| {
-            Error::Msg(format!("host_to_vulkan_copy: H2D upload failed: {e}"))
-        })?;
+        .map_err(|e| Error::Msg(format!("host_to_vulkan_copy: H2D upload failed: {e}")))?;
     }
 
-    let storage = VulkanStorage::from_buffer(
-        vulkan_device,
-        device_index,
-        dtype,
-        buffer,
-        byte_len as u64,
-    )?;
+    let storage =
+        VulkanStorage::from_buffer(vulkan_device, device_index, dtype, buffer, byte_len as u64)?;
     crate::Tensor::from_parts(
         Arc::new(storage),
         crate::Layout::contiguous(contig.shape().to_vec()),
@@ -1378,9 +1396,7 @@ pub fn vulkan_to_host_copy(t: &crate::Tensor) -> Result<crate::Tensor> {
         vulkan_device.queue_family_index(),
         vk.buffer(),
     )
-    .map_err(|e| {
-        Error::Msg(format!("vulkan_to_host_copy: D2H read_back failed: {e}"))
-    })?;
+    .map_err(|e| Error::Msg(format!("vulkan_to_host_copy: D2H read_back failed: {e}")))?;
     let buf_len = backing.len();
 
     let dtype = t.dtype();
@@ -1896,12 +1912,16 @@ pub fn vulkan_slice_set_dim0(
         .storage()
         .as_any()
         .downcast_ref::<VulkanStorage>()
-        .ok_or_else(|| Error::Msg("vulkan_slice_set_dim0: dst must be Vulkan-backed".to_string()))?;
+        .ok_or_else(|| {
+            Error::Msg("vulkan_slice_set_dim0: dst must be Vulkan-backed".to_string())
+        })?;
     let src_vk = src
         .storage()
         .as_any()
         .downcast_ref::<VulkanStorage>()
-        .ok_or_else(|| Error::Msg("vulkan_slice_set_dim0: src must be Vulkan-backed".to_string()))?;
+        .ok_or_else(|| {
+            Error::Msg("vulkan_slice_set_dim0: src must be Vulkan-backed".to_string())
+        })?;
     let vulkan_device = dst_vk.vulkan_device();
     let bpe = dst.dtype().size_in_bytes() as u64;
     // `inner` = product of all dims except dim 0 (row size in elements).
@@ -2299,7 +2319,11 @@ pub fn vulkan_cast(x: &crate::Tensor, to: DType) -> Result<crate::Tensor> {
         vulkan_device.device_local_mem_type(),
         in_byte_len.max(1) as u64,
     )
-    .map_err(|e| Error::Msg(format!("vulkan_cast: device-local alloc for VkTensor failed: {e}")))?;
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_cast: device-local alloc for VkTensor failed: {e}"
+        ))
+    })?;
     // Pool-overflow guard: `read_back` returns the buffer's *physical*
     // (bucket-rounded) byte image, which is >= the logical `in_byte_len` if the
     // input is a zero-copy kernel output (PR3b bridge). `vk_in_buffer` is sized
@@ -2313,7 +2337,11 @@ pub fn vulkan_cast(x: &crate::Tensor, to: DType) -> Result<crate::Tensor> {
         &vk_in_buffer,
         &in_bytes[..in_byte_len.min(in_bytes.len())],
     )
-    .map_err(|e| Error::Msg(format!("vulkan_cast: H2D upload of VkTensor input failed: {e}")))?;
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_cast: H2D upload of VkTensor input failed: {e}"
+        ))
+    })?;
     let vk_in = VkTensor::from_buffer(
         Arc::new(vk_in_buffer),
         shape.clone(),
@@ -2360,7 +2388,11 @@ pub fn vulkan_cast(x: &crate::Tensor, to: DType) -> Result<crate::Tensor> {
         vulkan_device.device_local_mem_type(),
         out_byte_len.max(1) as u64,
     )
-    .map_err(|e| Error::Msg(format!("vulkan_cast: device-local alloc for kt output failed: {e}")))?;
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_cast: device-local alloc for kt output failed: {e}"
+        ))
+    })?;
     kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
         vulkan_device.device(),
         vulkan_device.host_visible_mem_type(),
@@ -2600,10 +2632,7 @@ pub fn vulkan_argmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
         }
         out_indices.push(best_idx as i64);
     }
-    let out_bytes: Vec<u8> = out_indices
-        .iter()
-        .flat_map(|&v| v.to_le_bytes())
-        .collect();
+    let out_bytes: Vec<u8> = out_indices.iter().flat_map(|&v| v.to_le_bytes()).collect();
     let out_byte_len = out_bytes.len();
 
     // ---- H2D: upload I64 result bytes into a fresh kt VulkanStorage ----
@@ -2750,16 +2779,12 @@ pub fn vulkan_masked_fill(
         .storage()
         .as_any()
         .downcast_ref::<VulkanStorage>()
-        .ok_or_else(|| {
-            Error::Msg("vulkan_masked_fill: x must be Vulkan-backed".to_string())
-        })?;
+        .ok_or_else(|| Error::Msg("vulkan_masked_fill: x must be Vulkan-backed".to_string()))?;
     let kt_mask = mask
         .storage()
         .as_any()
         .downcast_ref::<VulkanStorage>()
-        .ok_or_else(|| {
-            Error::Msg("vulkan_masked_fill: mask must be Vulkan-backed".to_string())
-        })?;
+        .ok_or_else(|| Error::Msg("vulkan_masked_fill: mask must be Vulkan-backed".to_string()))?;
 
     let vulkan_device = Arc::clone(kt_x.vulkan_device());
     let device_index = match kt_x.device() {
@@ -2820,8 +2845,7 @@ pub fn vulkan_masked_fill(
                     half::bf16::from_le_bytes(x_bytes[i * 2..i * 2 + 2].try_into().unwrap())
                         .to_f32()
                 };
-                out_bytes[i * 2..i * 2 + 2]
-                    .copy_from_slice(&half::bf16::from_f32(v).to_le_bytes());
+                out_bytes[i * 2..i * 2 + 2].copy_from_slice(&half::bf16::from_f32(v).to_le_bytes());
             }
         }
         DType::F16 => {
@@ -2829,11 +2853,9 @@ pub fn vulkan_masked_fill(
                 let v = if m_bytes[i] != 0 {
                     fill_value
                 } else {
-                    half::f16::from_le_bytes(x_bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32()
+                    half::f16::from_le_bytes(x_bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
                 };
-                out_bytes[i * 2..i * 2 + 2]
-                    .copy_from_slice(&half::f16::from_f32(v).to_le_bytes());
+                out_bytes[i * 2..i * 2 + 2].copy_from_slice(&half::f16::from_f32(v).to_le_bytes());
             }
         }
         _ => unreachable!("vulkan_masked_fill: dtype gated above"),
@@ -2961,9 +2983,13 @@ mod tests {
         // Two bf16 elements: 1.0 = 0x3F80, -2.0 = 0xC000 (LE byte order).
         let bf16_bytes: Vec<u8> = vec![0x80, 0x3F, 0x00, 0xC0];
         let bf16_shape = vec![2usize];
-        let vk_bf16 =
-            crate::Tensor::from_raw_bytes_on(dev, DType::BF16, bf16_bytes.clone(), bf16_shape.clone())
-                .expect("from_raw_bytes_on(Vulkan, BF16) should construct a Vulkan tensor");
+        let vk_bf16 = crate::Tensor::from_raw_bytes_on(
+            dev,
+            DType::BF16,
+            bf16_bytes.clone(),
+            bf16_shape.clone(),
+        )
+        .expect("from_raw_bytes_on(Vulkan, BF16) should construct a Vulkan tensor");
         assert_eq!(vk_bf16.device(), dev);
         assert_eq!(vk_bf16.dtype(), DType::BF16);
         assert_eq!(vk_bf16.shape(), bf16_shape.as_slice());
@@ -3041,10 +3067,16 @@ mod tests {
                 want[r * hidden + i] = exps[i] / sum;
             }
         }
-        assert!(got.iter().all(|v| v.is_finite()), "softmax output not finite: {got:?}");
+        assert!(
+            got.iter().all(|v| v.is_finite()),
+            "softmax output not finite: {got:?}"
+        );
         let err = max_abs_err(&got, &want);
         eprintln!("vulkan_softmax_pool_overflow_parity: max_abs_err = {err:e}");
-        assert!(err < 1e-5, "softmax max_abs_err {err} too large; got={got:?} want={want:?}");
+        assert!(
+            err < 1e-5,
+            "softmax max_abs_err {err} too large; got={got:?} want={want:?}"
+        );
     }
 
     /// PR3b zero-copy invariant (#1082): a wrapper that bridged its result
@@ -3070,7 +3102,10 @@ mod tests {
         let out = super::vulkan_softmax_last_axis(&x).expect("vulkan_softmax_last_axis");
 
         // The result is whole-buffer C-contiguous (zero-copy bridge invariant).
-        assert!(out.is_contiguous(), "zero-copy softmax output must be contiguous");
+        assert!(
+            out.is_contiguous(),
+            "zero-copy softmax output must be contiguous"
+        );
         assert_eq!(
             out.layout().start_offset(),
             0,
@@ -3094,8 +3129,15 @@ mod tests {
 
         // And the readback through the logical-slicing consumer is exact.
         let got = read_vk_f32(&out);
-        assert_eq!(got.len(), rows * hidden, "readback length must be logical, not bucketed");
-        assert!(got.iter().all(|v| v.is_finite()), "softmax output not finite: {got:?}");
+        assert_eq!(
+            got.len(),
+            rows * hidden,
+            "readback length must be logical, not bucketed"
+        );
+        assert!(
+            got.iter().all(|v| v.is_finite()),
+            "softmax output not finite: {got:?}"
+        );
     }
 
     #[test]
@@ -3122,10 +3164,16 @@ mod tests {
                 want[r * hidden + i] = row[i] * inv;
             }
         }
-        assert!(got.iter().all(|v| v.is_finite()), "l2norm output not finite: {got:?}");
+        assert!(
+            got.iter().all(|v| v.is_finite()),
+            "l2norm output not finite: {got:?}"
+        );
         let err = max_abs_err(&got, &want);
         eprintln!("vulkan_l2norm_pool_overflow_parity: max_abs_err = {err:e}");
-        assert!(err < 1e-5, "l2norm max_abs_err {err} too large; got={got:?} want={want:?}");
+        assert!(
+            err < 1e-5,
+            "l2norm max_abs_err {err} too large; got={got:?} want={want:?}"
+        );
     }
 
     #[test]
@@ -3141,10 +3189,16 @@ mod tests {
         let got = read_vk_f32(&out);
         // CPU reference: silu(x) = x * sigmoid(x).
         let want: Vec<f32> = data.iter().map(|&v| v / (1.0 + (-v).exp())).collect();
-        assert!(got.iter().all(|v| v.is_finite()), "silu output not finite: {got:?}");
+        assert!(
+            got.iter().all(|v| v.is_finite()),
+            "silu output not finite: {got:?}"
+        );
         let err = max_abs_err(&got, &want);
         eprintln!("vulkan_activation_silu_pool_overflow_parity: max_abs_err = {err:e}");
-        assert!(err < 1e-5, "silu max_abs_err {err} too large; got={got:?} want={want:?}");
+        assert!(
+            err < 1e-5,
+            "silu max_abs_err {err} too large; got={got:?} want={want:?}"
+        );
     }
 
     #[test]
@@ -3158,14 +3212,24 @@ mod tests {
         let a = vk_f32(a_data.clone(), vec![2, 3]);
         let b = vk_f32(b_data.clone(), vec![2, 3]);
         // kind_tag 0 = Add
-        let out = super::vulkan_elementwise_binary(&a, &b, 0)
-            .expect("vulkan_elementwise_binary(add)");
+        let out =
+            super::vulkan_elementwise_binary(&a, &b, 0).expect("vulkan_elementwise_binary(add)");
         let got = read_vk_f32(&out);
-        let want: Vec<f32> = a_data.iter().zip(b_data.iter()).map(|(x, y)| x + y).collect();
-        assert!(got.iter().all(|v| v.is_finite()), "add output not finite: {got:?}");
+        let want: Vec<f32> = a_data
+            .iter()
+            .zip(b_data.iter())
+            .map(|(x, y)| x + y)
+            .collect();
+        assert!(
+            got.iter().all(|v| v.is_finite()),
+            "add output not finite: {got:?}"
+        );
         let err = max_abs_err(&got, &want);
         eprintln!("vulkan_elementwise_add_pool_overflow_parity: max_abs_err = {err:e}");
-        assert!(err < 1e-5, "add max_abs_err {err} too large; got={got:?} want={want:?}");
+        assert!(
+            err < 1e-5,
+            "add max_abs_err {err} too large; got={got:?} want={want:?}"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -3204,7 +3268,11 @@ mod tests {
         let out = super::vulkan_matmul_bf16w(&x, &w_bf16).expect("vulkan_matmul_bf16w");
         assert_eq!(out.shape(), &[rows, n]);
         assert_eq!(out.dtype(), DType::F32);
-        assert_eq!(out.device(), Device::Vulkan(0), "result must stay on Vulkan");
+        assert_eq!(
+            out.device(),
+            Device::Vulkan(0),
+            "result must stay on Vulkan"
+        );
         let got = read_vk_f32(&out);
 
         // Reference: same BF16 weight cast back to F32, transposed to [K, N],
@@ -3219,7 +3287,10 @@ mod tests {
         let ref_out = super::vulkan_matmul(&x, &w_t_ref).expect("vulkan_matmul reference");
         let want = read_vk_f32(&ref_out);
 
-        assert!(got.iter().all(|v| v.is_finite()), "bf16w out not finite: {got:?}");
+        assert!(
+            got.iter().all(|v| v.is_finite()),
+            "bf16w out not finite: {got:?}"
+        );
         let err = max_abs_err(&got, &want);
         eprintln!("vulkan_matmul_bf16w_parity_2d: max_abs_err = {err:e}");
         assert!(
@@ -3246,7 +3317,8 @@ mod tests {
 
         // Analytic dx via the backward kernel. loss = sum(out) => grad_out = ones.
         let grad_out = vk_f32(vec![1.0f32; rows * n], vec![rows, n]);
-        let dx = super::vulkan_matmul_bf16w_bwd(&grad_out, &w_bf16).expect("vulkan_matmul_bf16w_bwd");
+        let dx =
+            super::vulkan_matmul_bf16w_bwd(&grad_out, &w_bf16).expect("vulkan_matmul_bf16w_bwd");
         assert_eq!(dx.shape(), &[rows, k]);
         assert_eq!(dx.device(), Device::Vulkan(0));
         let dx_v = read_vk_f32(&dx);
@@ -3269,7 +3341,10 @@ mod tests {
 
         let err = max_abs_err(&dx_v, &fd);
         eprintln!("vulkan_matmul_bf16w_fd_dx: max_abs_err = {err:e}");
-        assert!(dx_v.iter().all(|v| v.is_finite()), "dx not finite: {dx_v:?}");
+        assert!(
+            dx_v.iter().all(|v| v.is_finite()),
+            "dx not finite: {dx_v:?}"
+        );
         assert!(
             err < 2e-2,
             "bf16w dx diverges from finite-difference: max_abs_err={err}; analytic={dx_v:?} fd={fd:?}"
@@ -3410,8 +3485,15 @@ mod tests {
                 "{label}: view should be non-contiguous to exercise the gather"
             );
             let vk_contig = vk_view.contiguous().unwrap();
-            assert_eq!(vk_contig.device(), dev, "{label}: result must stay on Vulkan");
-            assert!(vk_contig.is_contiguous(), "{label}: result must be contiguous");
+            assert_eq!(
+                vk_contig.device(),
+                dev,
+                "{label}: result must stay on Vulkan"
+            );
+            assert!(
+                vk_contig.is_contiguous(),
+                "{label}: result must be contiguous"
+            );
             let got: Vec<f32> = vk_contig.to_device(Device::Cpu).unwrap().to_vec().unwrap();
             assert_eq!(got.len(), cpu_ref.len(), "{label}: element count mismatch");
             let mut max_abs = 0.0f32;
@@ -3419,7 +3501,10 @@ mod tests {
                 max_abs = max_abs.max((g - r).abs());
             }
             eprintln!("vulkan_contiguous[{label}]: max_abs_err = {max_abs:e}");
-            assert!(max_abs == 0.0, "{label}: gather diverges from CPU ref (max_abs={max_abs})");
+            assert!(
+                max_abs == 0.0,
+                "{label}: gather diverges from CPU ref (max_abs={max_abs})"
+            );
         }
 
         // rank-2 transpose: [3,4] -> view [4,3]
@@ -3427,7 +3512,9 @@ mod tests {
         check(dev, &d2, &[3, 4], "transpose_2d", |t| t.t().unwrap());
 
         // rank-4 attention k.t(): [2,3,5,4] -> [2,3,4,5]
-        let d4: Vec<f32> = (0..2 * 3 * 5 * 4).map(|i| (i % 13) as f32 * 0.25 - 1.0).collect();
+        let d4: Vec<f32> = (0..2 * 3 * 5 * 4)
+            .map(|i| (i % 13) as f32 * 0.25 - 1.0)
+            .collect();
         check(dev, &d4, &[2, 3, 5, 4], "transpose_last2_rank4", |t| {
             t.transpose(2, 3).unwrap()
         });
@@ -3490,9 +3577,20 @@ mod tests {
                 "{label}: view should be non-contiguous to exercise the gather"
             );
             let vk_contig = vk_view.contiguous().unwrap();
-            assert_eq!(vk_contig.device(), dev, "{label}: result must stay on Vulkan");
-            assert_eq!(vk_contig.dtype(), DType::BF16, "{label}: dtype must be BF16");
-            assert!(vk_contig.is_contiguous(), "{label}: result must be contiguous");
+            assert_eq!(
+                vk_contig.device(),
+                dev,
+                "{label}: result must stay on Vulkan"
+            );
+            assert_eq!(
+                vk_contig.dtype(),
+                DType::BF16,
+                "{label}: dtype must be BF16"
+            );
+            assert!(
+                vk_contig.is_contiguous(),
+                "{label}: result must be contiguous"
+            );
             let got: Vec<f32> = vk_contig
                 .to_device(Device::Cpu)
                 .unwrap()
@@ -3506,13 +3604,18 @@ mod tests {
                 max_abs = max_abs.max((g - r).abs());
             }
             eprintln!("vulkan_contiguous_bf16[{label}]: max_abs_err = {max_abs:e}");
-            assert!(max_abs == 0.0, "{label}: bf16 gather diverges from CPU ref (max_abs={max_abs})");
+            assert!(
+                max_abs == 0.0,
+                "{label}: bf16 gather diverges from CPU ref (max_abs={max_abs})"
+            );
         }
 
         // BF16-exact integer values.
         // rank-2 transpose with ODD element count per word boundary: [3,5]->[5,3]
         let d2: Vec<f32> = (0..15).map(|i| i as f32).collect();
-        check_bf16(dev, &d2, &[3, 5], "bf16_transpose_2d_odd", |t| t.t().unwrap());
+        check_bf16(dev, &d2, &[3, 5], "bf16_transpose_2d_odd", |t| {
+            t.t().unwrap()
+        });
 
         // rank-4 last-two transpose (attention k.t()): [2,3,5,4]->[2,3,4,5]
         let d4: Vec<f32> = (0..2 * 3 * 5 * 4).map(|i| (i % 64) as f32).collect();

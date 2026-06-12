@@ -1142,7 +1142,13 @@ pub trait GdnBackend: Send + Sync + std::fmt::Debug {
         _in_proj_ab_t: &kiln_tensor::Tensor,
         _nv: usize,
         _seq_len: usize,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+    ) -> Result<
+        Option<(
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+        )>,
+    > {
         Ok(None)
     }
 
@@ -1224,22 +1230,18 @@ pub(crate) fn requested_matmul_layout(
     }
 
     match (req.lhs_layout, req.rhs_layout) {
-        (
-            capability::MatmulOperandLayout::RowMajor,
-            capability::MatmulOperandLayout::RowMajor,
-        ) => Some(BackendMatmulLayout::Plain),
-        (
-            capability::MatmulOperandLayout::ColMajor,
-            capability::MatmulOperandLayout::RowMajor,
-        ) => Some(BackendMatmulLayout::LhsTransposed),
-        (
-            capability::MatmulOperandLayout::RowMajor,
-            capability::MatmulOperandLayout::ColMajor,
-        ) => Some(BackendMatmulLayout::RhsTransposed),
-        (
-            capability::MatmulOperandLayout::ColMajor,
-            capability::MatmulOperandLayout::ColMajor,
-        ) => Some(BackendMatmulLayout::BothTransposed),
+        (capability::MatmulOperandLayout::RowMajor, capability::MatmulOperandLayout::RowMajor) => {
+            Some(BackendMatmulLayout::Plain)
+        }
+        (capability::MatmulOperandLayout::ColMajor, capability::MatmulOperandLayout::RowMajor) => {
+            Some(BackendMatmulLayout::LhsTransposed)
+        }
+        (capability::MatmulOperandLayout::RowMajor, capability::MatmulOperandLayout::ColMajor) => {
+            Some(BackendMatmulLayout::RhsTransposed)
+        }
+        (capability::MatmulOperandLayout::ColMajor, capability::MatmulOperandLayout::ColMajor) => {
+            Some(BackendMatmulLayout::BothTransposed)
+        }
     }
 }
 
@@ -2681,14 +2683,9 @@ mod tests {
     #[test]
     fn linear_backend_runtime_matmul_routes_cpu_request() -> Result<()> {
         let cpu = cpu::CpuBackend::new(kiln_tensor::Device::Cpu);
-        let lhs = kiln_tensor::Tensor::from_slice(
-            &[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0],
-            vec![2, 3],
-        )?;
-        let rhs = kiln_tensor::Tensor::from_slice(
-            &[7.0_f32, 8.0, 9.0, 10.0, 11.0, 12.0],
-            vec![3, 2],
-        )?;
+        let lhs = kiln_tensor::Tensor::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3])?;
+        let rhs =
+            kiln_tensor::Tensor::from_slice(&[7.0_f32, 8.0, 9.0, 10.0, 11.0, 12.0], vec![3, 2])?;
         let req = capability::MatmulRequest::plain(
             lhs.dims().to_vec(),
             rhs.dims().to_vec(),
@@ -2700,10 +2697,8 @@ mod tests {
         assert_eq!(out.dims(), &[2, 2]);
         assert_eq!(out.to_vec::<f32>()?, vec![58.0, 64.0, 139.0, 154.0]);
 
-        let rhs_t = kiln_tensor::Tensor::from_slice(
-            &[7.0_f32, 9.0, 11.0, 8.0, 10.0, 12.0],
-            vec![2, 3],
-        )?;
+        let rhs_t =
+            kiln_tensor::Tensor::from_slice(&[7.0_f32, 9.0, 11.0, 8.0, 10.0, 12.0], vec![2, 3])?;
         let transposed_req = capability::MatmulRequest::plain(
             lhs.dims().to_vec(),
             rhs_t.dims().to_vec(),
@@ -2715,9 +2710,8 @@ mod tests {
             capability::MatmulOperandLayout::ColMajor,
             capability::MatmulOperandLayout::RowMajor,
         );
-        let transposed_out =
-            LinearBackend::runtime_matmul(&cpu, &transposed_req, &lhs, &rhs_t)?
-                .expect("cpu backend should route rhs-transposed matmul request");
+        let transposed_out = LinearBackend::runtime_matmul(&cpu, &transposed_req, &lhs, &rhs_t)?
+            .expect("cpu backend should route rhs-transposed matmul request");
         assert_eq!(
             transposed_out.to_vec::<f32>()?,
             vec![58.0, 64.0, 139.0, 154.0]
@@ -2751,9 +2745,11 @@ mod tests {
         );
 
         let rhs_bf16 = rhs.to_dtype(kiln_tensor::DType::BF16)?;
-        let mixed_req = req
-            .clone()
-            .with_dtypes(kiln_tensor::DType::F32, kiln_tensor::DType::BF16, kiln_tensor::DType::F32);
+        let mixed_req = req.clone().with_dtypes(
+            kiln_tensor::DType::F32,
+            kiln_tensor::DType::BF16,
+            kiln_tensor::DType::F32,
+        );
         assert_eq!(
             capability::BackendCapabilityQueries::supports_matmul_request(&cpu, &mixed_req),
             capability::Support::NativeWithConstraints,
@@ -2766,9 +2762,11 @@ mod tests {
             vec![58.0, 64.0, 139.0, 154.0]
         );
 
-        let mixed_decline = req
-            .clone()
-            .with_dtypes(kiln_tensor::DType::F32, kiln_tensor::DType::F32, kiln_tensor::DType::BF16);
+        let mixed_decline = req.clone().with_dtypes(
+            kiln_tensor::DType::F32,
+            kiln_tensor::DType::F32,
+            kiln_tensor::DType::BF16,
+        );
         let bf16_out = LinearBackend::runtime_matmul(&cpu, &mixed_decline, &lhs, &rhs)?
             .expect("CPU runtime_matmul should honor requested output dtype");
         assert_eq!(

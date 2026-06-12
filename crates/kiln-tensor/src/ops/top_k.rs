@@ -34,7 +34,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 /// Compute the top-`k` values + indices along the trailing axis.
 pub fn top_k(x: &Tensor, k: usize) -> Result<(Tensor, Tensor)> {
@@ -81,14 +81,20 @@ pub fn top_k(x: &Tensor, k: usize) -> Result<(Tensor, Tensor)> {
         for i in 0..last {
             let v = match dtype {
                 DType::F32 => f32::from_le_bytes(
-                    bytes[(r * last + i) * 4..(r * last + i) * 4 + 4].try_into().unwrap(),
+                    bytes[(r * last + i) * 4..(r * last + i) * 4 + 4]
+                        .try_into()
+                        .unwrap(),
                 ),
                 DType::BF16 => half::bf16::from_le_bytes(
-                    bytes[(r * last + i) * 2..(r * last + i) * 2 + 2].try_into().unwrap(),
+                    bytes[(r * last + i) * 2..(r * last + i) * 2 + 2]
+                        .try_into()
+                        .unwrap(),
                 )
                 .to_f32(),
                 DType::F16 => half::f16::from_le_bytes(
-                    bytes[(r * last + i) * 2..(r * last + i) * 2 + 2].try_into().unwrap(),
+                    bytes[(r * last + i) * 2..(r * last + i) * 2 + 2]
+                        .try_into()
+                        .unwrap(),
                 )
                 .to_f32(),
                 _ => unreachable!(),
@@ -99,7 +105,9 @@ pub fn top_k(x: &Tensor, k: usize) -> Result<(Tensor, Tensor)> {
         // sort + descending key keeps the lower-index entry first
         // when values are equal).
         row.sort_by(|(va, ia), (vb, ib)| {
-            vb.partial_cmp(va).unwrap_or(std::cmp::Ordering::Equal).then_with(|| ia.cmp(ib))
+            vb.partial_cmp(va)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| ia.cmp(ib))
         });
         // Write the first k.
         for j in 0..k {
@@ -120,7 +128,11 @@ pub fn top_k(x: &Tensor, k: usize) -> Result<(Tensor, Tensor)> {
 
     let v_cpu = CpuStorage::from_bytes(dtype, values_bytes)?;
     let v_storage: Storage = Arc::new(v_cpu);
-    let values = Tensor::from_parts(v_storage, Layout::contiguous(out_shape.clone()), TensorId::next())?;
+    let values = Tensor::from_parts(
+        v_storage,
+        Layout::contiguous(out_shape.clone()),
+        TensorId::next(),
+    )?;
 
     let i_cpu = CpuStorage::from_bytes(DType::I64, indices_bytes)?;
     let i_storage: Storage = Arc::new(i_cpu);
@@ -175,11 +187,8 @@ mod tests {
         // [[1, 5, 3, 2], [9, 2, 7, 4]] top-2 along trailing axis
         // Row 0: [5, 3], indices [1, 2]
         // Row 1: [9, 7], indices [0, 2]
-        let x = Tensor::from_slice(
-            &[1.0f32, 5.0, 3.0, 2.0, 9.0, 2.0, 7.0, 4.0],
-            vec![2, 4],
-        )
-        .unwrap();
+        let x =
+            Tensor::from_slice(&[1.0f32, 5.0, 3.0, 2.0, 9.0, 2.0, 7.0, 4.0], vec![2, 4]).unwrap();
         let (v, i) = top_k(&x, 2).unwrap();
         assert_eq!(v.shape(), &[2, 2]);
         assert_eq!(i.shape(), &[2, 2]);

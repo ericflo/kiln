@@ -157,12 +157,9 @@ impl DeterministicCache {
                 let encoded = if on { 2 } else { 1 };
                 // Best-effort CAS — race-tolerant since both racers
                 // read the same env var and write the same value.
-                let _ = self.state.compare_exchange(
-                    0,
-                    encoded,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                );
+                let _ =
+                    self.state
+                        .compare_exchange(0, encoded, Ordering::Relaxed, Ordering::Relaxed);
                 on
             }
             1 => false,

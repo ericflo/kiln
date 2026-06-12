@@ -62,13 +62,21 @@ pub fn rocm_index_copy_dim0(dst: &Tensor, indices: &Tensor, src: &Tensor) -> Res
         )));
     }
     let n_indices = indices.element_count();
-    let src_rows = if src.dims().is_empty() { 1 } else { src.dims()[0] };
+    let src_rows = if src.dims().is_empty() {
+        1
+    } else {
+        src.dims()[0]
+    };
     if src_rows != n_indices {
         return Err(Error::Msg(format!(
             "rocm_index_copy_dim0: src rows {src_rows} != indices len {n_indices}"
         )));
     }
-    let dst_n_rows = if dst.dims().is_empty() { 1 } else { dst.dims()[0] };
+    let dst_n_rows = if dst.dims().is_empty() {
+        1
+    } else {
+        dst.dims()[0]
+    };
     let bpe = dst.dtype().size_in_bytes();
     let row_bytes = (dst_inner * bpe) as i64;
     if row_bytes == 0 || n_indices == 0 {
@@ -97,8 +105,7 @@ pub fn rocm_index_copy_dim0(dst: &Tensor, indices: &Tensor, src: &Tensor) -> Res
     let (dst_base, _) = dst_storage.device_ptr_raw();
     let (src_base, _) = src_storage.device_ptr_raw();
     let (idx_base, _) = idx_storage.device_ptr_raw();
-    let dst_ptr =
-        (dst_base + (dst.layout().start_offset() * bpe) as u64) as *mut core::ffi::c_void;
+    let dst_ptr = (dst_base + (dst.layout().start_offset() * bpe) as u64) as *mut core::ffi::c_void;
     let src_ptr =
         (src_base + (src.layout().start_offset() * bpe) as u64) as *const core::ffi::c_void;
     let idx_ptr = (idx_base

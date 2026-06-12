@@ -12,7 +12,7 @@
 //!     --seq-len 128 --iters 10 --warmup 3
 //! ```
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use kiln_vulkan_kernel::vk_ops::gdn_chunkwise::{
     vk_gdn_chunkwise_forward_no_grad, vk_gdn_chunkwise_forward_no_grad_single_submit,
 };

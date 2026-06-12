@@ -83,8 +83,7 @@ pub fn rocm_diagonal_extract(x: &Tensor) -> Result<Tensor> {
     let x_ptr = (x_base + x_off) as *const core::ffi::c_void;
     let out_ptr = out_base as *mut core::ffi::c_void;
 
-    let status =
-        unsafe { kiln_diagonal_extract_async(x_ptr, out_ptr, n as i64, tag, raw_stream) };
+    let status = unsafe { kiln_diagonal_extract_async(x_ptr, out_ptr, n as i64, tag, raw_stream) };
     if status != 0 {
         return Err(Error::Msg(format!(
             "rocm_diagonal_extract: FFI returned status {status}"
@@ -145,6 +144,10 @@ pub fn rocm_diag_build(v: &Tensor) -> Result<Tensor> {
     }
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
-    Tensor::from_parts(storage_arc, Layout::contiguous(vec![n, n]), TensorId::next())
-        .map_err(|e| Error::Msg(format!("rocm_diag_build: wrap: {e}")))
+    Tensor::from_parts(
+        storage_arc,
+        Layout::contiguous(vec![n, n]),
+        TensorId::next(),
+    )
+    .map_err(|e| Error::Msg(format!("rocm_diag_build: wrap: {e}")))
 }

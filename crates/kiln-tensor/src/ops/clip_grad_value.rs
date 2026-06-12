@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId, bail};
 
 fn clip_one(g: &Tensor, c: f32) -> Result<Tensor> {
     let dtype = g.dtype();
@@ -57,27 +57,29 @@ fn clip_one(g: &Tensor, c: f32) -> Result<Tensor> {
         }
         DType::BF16 => {
             for i in 0..n {
-                let v = half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                    .to_f32();
+                let v =
+                    half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32();
                 let cv = v.clamp(lo, hi);
-                out[i * 2..i * 2 + 2]
-                    .copy_from_slice(&half::bf16::from_f32(cv).to_le_bytes());
+                out[i * 2..i * 2 + 2].copy_from_slice(&half::bf16::from_f32(cv).to_le_bytes());
             }
         }
         DType::F16 => {
             for i in 0..n {
-                let v = half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                    .to_f32();
+                let v =
+                    half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32();
                 let cv = v.clamp(lo, hi);
-                out[i * 2..i * 2 + 2]
-                    .copy_from_slice(&half::f16::from_f32(cv).to_le_bytes());
+                out[i * 2..i * 2 + 2].copy_from_slice(&half::f16::from_f32(cv).to_le_bytes());
             }
         }
         _ => unreachable!(),
     }
     let cpu_out = CpuStorage::from_bytes(dtype, out)?;
     let storage: Storage = Arc::new(cpu_out);
-    Tensor::from_parts(storage, Layout::contiguous(g.shape().to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(g.shape().to_vec()),
+        TensorId::next(),
+    )
 }
 
 /// Clip every element of every gradient into `[-clip_value,
@@ -87,9 +89,7 @@ pub fn clip_grad_value(grads: &[&Tensor], clip_value: f32) -> Result<Vec<Tensor>
         bail!("clip_grad_value: at least one gradient required");
     }
     if clip_value <= 0.0 {
-        bail!(
-            "clip_grad_value: clip_value must be > 0, got {clip_value}"
-        );
+        bail!("clip_grad_value: clip_value must be > 0, got {clip_value}");
     }
     let mut out = Vec::with_capacity(grads.len());
     for g in grads {

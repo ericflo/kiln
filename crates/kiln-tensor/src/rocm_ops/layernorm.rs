@@ -124,15 +124,7 @@ pub fn rocm_layernorm_last_axis(
 
     let status = unsafe {
         kiln_layernorm_last_axis_async(
-            x_ptr,
-            weight_ptr,
-            bias_ptr,
-            out_ptr,
-            n_rows,
-            n_cols,
-            eps,
-            dtype_tag,
-            raw_stream,
+            x_ptr, weight_ptr, bias_ptr, out_ptr, n_rows, n_cols, eps, dtype_tag, raw_stream,
         )
     };
     if status != 0 {

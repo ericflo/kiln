@@ -34,7 +34,7 @@
 use half::bf16;
 
 use kiln_gdn_kernel::{gdn_gates_bf16_kt, gdn_gates_supports_kt};
-use kiln_tensor::{cuda_to_host_copy, CpuStorage, DType, Tensor};
+use kiln_tensor::{CpuStorage, DType, Tensor, cuda_to_host_copy};
 
 fn cuda_available() -> bool {
     kiln_tensor::primary_cuda_context(0).is_ok()
@@ -140,8 +140,7 @@ fn run_case(b: usize, t: usize, nv: usize, seed: u64, label: &str) {
     let a = Tensor::cuda_from_slice(&a_bf16, vec![b, t, nv], 0).expect("upload a");
     let b_in = Tensor::cuda_from_slice(&b_bf16, vec![b, t, nv], 0).expect("upload b");
     let a_log = Tensor::cuda_from_slice(&a_log_bf16, vec![nv], 0).expect("upload a_log");
-    let dt_bias =
-        Tensor::cuda_from_slice(&dt_bias_bf16, vec![nv], 0).expect("upload dt_bias");
+    let dt_bias = Tensor::cuda_from_slice(&dt_bias_bf16, vec![nv], 0).expect("upload dt_bias");
 
     assert!(
         gdn_gates_supports_kt(&a, &b_in, &a_log, &dt_bias),

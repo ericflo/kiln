@@ -48,7 +48,10 @@ pub(super) fn score(
         return Ok((
             0.0,
             EvalOutcomeKind::Invalid,
-            Some(format!("score not found in judge reply: `{}`", truncate(&reply, 80))),
+            Some(format!(
+                "score not found in judge reply: `{}`",
+                truncate(&reply, 80)
+            )),
         ));
     };
     let group = caps.get(1).ok_or(ScorerError::InvalidRegex {
@@ -115,7 +118,10 @@ mod tests {
 
     fn ex() -> EvalExample {
         EvalExample {
-            messages: vec![EvalChatMessage::new("user", "What is the capital of France?")],
+            messages: vec![EvalChatMessage::new(
+                "user",
+                "What is the capital of France?",
+            )],
             target: Some("Paris".into()),
             ..Default::default()
         }

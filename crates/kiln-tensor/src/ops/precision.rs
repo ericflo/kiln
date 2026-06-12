@@ -26,7 +26,10 @@ mod tests {
 
     #[test]
     fn to_f32_from_bf16() {
-        let bf: Vec<half::bf16> = [1.0f32, 2.0].iter().map(|&v| half::bf16::from_f32(v)).collect();
+        let bf: Vec<half::bf16> = [1.0f32, 2.0]
+            .iter()
+            .map(|&v| half::bf16::from_f32(v))
+            .collect();
         let x = Tensor::from_slice(&bf, vec![2]).unwrap();
         let y = to_f32(&x).unwrap();
         assert_eq!(y.dtype(), DType::F32);

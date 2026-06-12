@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 use crate::DeviceOp3;
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 #[derive(Debug, Clone, Copy)]
 pub struct LayerNormOp {
@@ -36,7 +36,12 @@ impl LayerNormOp {
     }
 }
 
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
 impl crate::DeviceOp3 for LayerNormOp {
     fn name(&self) -> &'static str {
         "layernorm"
@@ -206,14 +211,24 @@ impl crate::DeviceOp3 for LayerNormOp {
 ///
 /// `x: [..., D]`, `weight: [D]`, `bias: [D]`. All F32/BF16/F16; dtypes
 /// must match across the three inputs.
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
 pub fn layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> Result<Tensor> {
     crate::dispatch3(&LayerNormOp::new(eps), x, weight, bias)
 }
 
 /// CPU-only build: no DeviceOp3 dispatch needed; `layer_norm` lowers
 /// directly to the CPU path.
-#[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
+#[cfg(not(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+)))]
 pub fn layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> Result<Tensor> {
     layer_norm_cpu(x, weight, bias, eps)
 }
@@ -252,7 +267,11 @@ fn layer_norm_cpu(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> Resul
 
     let cpu = CpuStorage::from_bytes(dtype, out)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(shape.to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(shape.to_vec()),
+        TensorId::next(),
+    )
 }
 
 // ----------------------------------------------------------------------
@@ -334,10 +353,10 @@ fn read_one_f32(dtype: DType, bytes: &[u8], i: usize) -> f32 {
 fn write_out_f32(dtype: DType, out: &mut [u8], i: usize, v: f32) {
     match dtype {
         DType::F32 => out[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes()),
-        DType::BF16 => out[i * 2..i * 2 + 2]
-            .copy_from_slice(&half::bf16::from_f32(v).to_le_bytes()),
-        DType::F16 => out[i * 2..i * 2 + 2]
-            .copy_from_slice(&half::f16::from_f32(v).to_le_bytes()),
+        DType::BF16 => {
+            out[i * 2..i * 2 + 2].copy_from_slice(&half::bf16::from_f32(v).to_le_bytes())
+        }
+        DType::F16 => out[i * 2..i * 2 + 2].copy_from_slice(&half::f16::from_f32(v).to_le_bytes()),
         _ => unreachable!(),
     }
 }
@@ -398,7 +417,11 @@ mod tests {
         let b = Tensor::from_slice(&[0.0f32; 4], vec![4]).unwrap();
         let y = read_f32(&layer_norm(&x, &w, &b, 0.0).unwrap());
         let sigma = (1.25_f32).sqrt();
-        approx(&y, &[-1.5 / sigma, -0.5 / sigma, 0.5 / sigma, 1.5 / sigma], 1e-5);
+        approx(
+            &y,
+            &[-1.5 / sigma, -0.5 / sigma, 0.5 / sigma, 1.5 / sigma],
+            1e-5,
+        );
     }
 
     #[test]

@@ -279,7 +279,11 @@ impl AgentRunRegistry {
 
     pub fn list(&self) -> Vec<AgentRunRecord> {
         let mut all: Vec<_> = self.runs.read().unwrap().values().cloned().collect();
-        all.sort_by(|a, b| b.created_unix_ms.cmp(&a.created_unix_ms).then(b.id.cmp(&a.id)));
+        all.sort_by(|a, b| {
+            b.created_unix_ms
+                .cmp(&a.created_unix_ms)
+                .then(b.id.cmp(&a.id))
+        });
         all
     }
 
@@ -639,7 +643,11 @@ async fn drive_run(
     let prompt = serde_json::json!({"id": "prompt-1", "type": "prompt", "message": params.task});
     let state_probe = serde_json::json!({"id": "state-1", "type": "get_state"});
     if let Err(e) = process.send(&prompt).await {
-        reg.finish(&id, RunStatus::Failed, Some(format!("prompt write failed: {e}")));
+        reg.finish(
+            &id,
+            RunStatus::Failed,
+            Some(format!("prompt write failed: {e}")),
+        );
         process.shutdown(std::time::Duration::from_secs(3)).await;
         return;
     }
@@ -839,9 +847,10 @@ fn observe_line(reg: &AgentRunRegistry, id: &str, value: &serde_json::Value) {
                 reg.update(id, |run| {
                     run.num_turns += 1;
                     if turn_errored {
-                        run.error = Some(turn_error_message.unwrap_or_else(|| {
-                            "assistant turn ended with an error".to_string()
-                        }));
+                        run.error =
+                            Some(turn_error_message.unwrap_or_else(|| {
+                                "assistant turn ended with an error".to_string()
+                            }));
                     } else {
                         run.error = None;
                     }
@@ -905,7 +914,8 @@ fn find_session_file(
     started_unix_ms: Option<u64>,
 ) -> Option<PathBuf> {
     let not_before = started_unix_ms.map(|ms| {
-        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(ms.saturating_sub(1000))
+        std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_millis(ms.saturating_sub(1000))
     });
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
     let mut stack = vec![sessions_dir.to_path_buf()];
@@ -924,7 +934,9 @@ fn find_session_file(
                 stack.push(p);
             } else if p.extension().is_some_and(|e| e == "jsonl") {
                 if let Some(sid) = session_id {
-                    if p.file_stem().is_some_and(|stem| stem.to_string_lossy().contains(sid)) {
+                    if p.file_stem()
+                        .is_some_and(|stem| stem.to_string_lossy().contains(sid))
+                    {
                         return Some(p);
                     }
                     continue;
@@ -1032,7 +1044,9 @@ for line in sys.stdin:
         let pi_bin = write_fake_pi(adapter_dir.path());
         let reg = Arc::new(AgentRunRegistry::new(adapter_dir.path().to_path_buf()));
 
-        let rec = reg.start_run(params(pi_bin, workdir.path().to_path_buf(), "say hi")).unwrap();
+        let rec = reg
+            .start_run(params(pi_bin, workdir.path().to_path_buf(), "say hi"))
+            .unwrap();
         assert_eq!(rec.status, RunStatus::Queued);
 
         let done = wait_terminal(&reg, &rec.id).await;
@@ -1041,7 +1055,10 @@ for line in sys.stdin:
         assert_eq!(done.num_tool_calls, 1);
         assert_eq!(done.last_assistant_text.as_deref(), Some("All done"));
         assert_eq!(done.session_id.as_deref(), Some("embedded-test-session"));
-        assert!(done.trace_indexed, "session must be merged into agent_traces.json");
+        assert!(
+            done.trace_indexed,
+            "session must be merged into agent_traces.json"
+        );
 
         // The event feed captured the full trajectory.
         let page = reg.events_after(&rec.id, 0).unwrap();
@@ -1061,15 +1078,17 @@ for line in sys.stdin:
         let index = crate::api::agent_traces::AgentTraceIndex::load_from_path(
             &adapter_dir.path().join("agent_traces.json"),
         );
-        let trace = index.traces.get("embedded-test-session").expect("trace indexed");
+        let trace = index
+            .traces
+            .get("embedded-test-session")
+            .expect("trace indexed");
         assert_eq!(trace.prompt_messages.len(), 1);
         assert_eq!(trace.prompt_messages[0].content, "say hi");
 
         // Records persist for restart recovery.
-        let persisted = std::fs::read_to_string(
-            adapter_dir.path().join("agent_runs").join("runs.json"),
-        )
-        .unwrap();
+        let persisted =
+            std::fs::read_to_string(adapter_dir.path().join("agent_runs").join("runs.json"))
+                .unwrap();
         assert!(persisted.contains(&rec.id));
     }
 
@@ -1092,8 +1111,12 @@ for line in sys.stdin:
         let reg = Arc::new(AgentRunRegistry::new(adapter_dir.path().to_path_buf()));
         reg.apply_config(1, 900);
 
-        let a = reg.start_run(params(slow_pi.clone(), workdir.path().to_path_buf(), "a")).unwrap();
-        let b = reg.start_run(params(slow_pi, workdir.path().to_path_buf(), "b")).unwrap();
+        let a = reg
+            .start_run(params(slow_pi.clone(), workdir.path().to_path_buf(), "a"))
+            .unwrap();
+        let b = reg
+            .start_run(params(slow_pi, workdir.path().to_path_buf(), "b"))
+            .unwrap();
 
         // Give the first driver time to claim the only slot.
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
@@ -1141,7 +1164,10 @@ for line in sys.stdin:
         // produced http://::1:8420, which pi cannot parse.
         assert_eq!(format_self_url("::1", 8420), "http://[::1]:8420");
         assert_eq!(format_self_url("[::1]", 8420), "http://[::1]:8420");
-        assert_eq!(format_self_url("office-kiln", 9000), "http://office-kiln:9000");
+        assert_eq!(
+            format_self_url("office-kiln", 9000),
+            "http://office-kiln:9000"
+        );
     }
 
     #[tokio::test]

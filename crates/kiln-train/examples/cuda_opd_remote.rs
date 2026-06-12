@@ -116,11 +116,12 @@ impl Args {
                 "--data" => data = args.next().map(PathBuf::from),
                 "--model-path" => model_path = args.next().map(PathBuf::from),
                 "--output-dir" => {
-                    output_dir = args.next().map(PathBuf::from).context("--output-dir value")?
+                    output_dir = args
+                        .next()
+                        .map(PathBuf::from)
+                        .context("--output-dir value")?
                 }
-                "--adapter-name" => {
-                    adapter_name = args.next().context("--adapter-name value")?
-                }
+                "--adapter-name" => adapter_name = args.next().context("--adapter-name value")?,
                 "--teacher-url" => teacher_url = args.next().context("--teacher-url value")?,
                 "--teacher-model" => {
                     teacher_model = args.next().context("--teacher-model value")?
@@ -138,12 +139,12 @@ impl Args {
                     temperature = args.next().context("--temperature value")?.parse()?
                 }
                 "--top-p" => top_p = args.next().context("--top-p value")?.parse()?,
-                "--max-tokens" => max_tokens = args.next().context("--max-tokens value")?.parse()?,
+                "--max-tokens" => {
+                    max_tokens = args.next().context("--max-tokens value")?.parse()?
+                }
                 "--samples-per-prompt" => {
-                    samples_per_prompt = args
-                        .next()
-                        .context("--samples-per-prompt value")?
-                        .parse()?
+                    samples_per_prompt =
+                        args.next().context("--samples-per-prompt value")?.parse()?
                 }
                 "--checkpoint-interval" => {
                     let v: usize = args
@@ -207,7 +208,8 @@ impl Args {
 
 #[cfg(feature = "cuda")]
 fn load_prompts(path: &PathBuf, max: Option<usize>) -> Result<Vec<OpdPrompt>> {
-    let raw = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let mut out = Vec::new();
     for (i, line) in raw.lines().enumerate() {
         if line.trim().is_empty() {
@@ -228,10 +230,9 @@ fn load_prompts(path: &PathBuf, max: Option<usize>) -> Result<Vec<OpdPrompt>> {
 #[cfg(feature = "cuda")]
 fn load_tokenizer(model_path: &PathBuf) -> Result<KilnTokenizer> {
     let tok_path = model_path.join("tokenizer.json");
-    let mut tokenizer = KilnTokenizer::from_file(
-        tok_path.to_str().context("tokenizer path utf-8")?,
-    )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut tokenizer =
+        KilnTokenizer::from_file(tok_path.to_str().context("tokenizer path utf-8")?)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
     let tpl = model_path.join("chat_template.jinja");
     if tpl.exists() {
         let template = std::fs::read_to_string(&tpl)?;
@@ -262,10 +263,7 @@ fn main() -> Result<()> {
     println!("prompts={}", prompts.len());
 
     let tokenizer = load_tokenizer(&args.model_path)?;
-    anyhow::ensure!(
-        kiln_tensor::cuda_is_available(),
-        "CUDA not available"
-    );
+    anyhow::ensure!(kiln_tensor::cuda_is_available(), "CUDA not available");
     let device = kiln_tensor::Device::Cuda(0);
     let model_config = ModelConfig::qwen3_5_4b();
 
@@ -277,11 +275,7 @@ fn main() -> Result<()> {
     )
     .context("load student weights")?;
     // #1082: kt-native — `device` is a kt `Device::Cuda(0)`, passed directly.
-    let gpu_weights = GpuWeights::from_model_weights(
-        &weights,
-        &model_config,
-        &device,
-    )?;
+    let gpu_weights = GpuWeights::from_model_weights(&weights, &model_config, &device)?;
     drop(weights);
     println!("student_loaded_vram_mib={}", current_vram_mib());
 

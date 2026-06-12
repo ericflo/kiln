@@ -150,7 +150,11 @@ fn mean_all_summary_stat_after_attention() {
     let out = matmul(&attn, &v).unwrap();
     let mean = mean_all(&out).unwrap();
     assert_eq!(mean.rank(), 0);
-    let cpu = mean.storage().as_any().downcast_ref::<kt::CpuStorage>().unwrap();
+    let cpu = mean
+        .storage()
+        .as_any()
+        .downcast_ref::<kt::CpuStorage>()
+        .unwrap();
     let v = f32::from_le_bytes(cpu.as_bytes()[0..4].try_into().unwrap());
     assert!(v.is_finite());
 }

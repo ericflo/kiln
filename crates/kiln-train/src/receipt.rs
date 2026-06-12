@@ -281,17 +281,11 @@ impl AdapterReceipt {
     /// The directory is created if it does not exist. Replaces any
     /// existing file at that path.
     pub fn write_to_adapter_dir(&self, adapter_dir: &Path) -> Result<std::path::PathBuf> {
-        std::fs::create_dir_all(adapter_dir).with_context(|| {
-            format!(
-                "create adapter dir {} for receipt",
-                adapter_dir.display()
-            )
-        })?;
+        std::fs::create_dir_all(adapter_dir)
+            .with_context(|| format!("create adapter dir {} for receipt", adapter_dir.display()))?;
         let path = adapter_dir.join("receipt.json");
         let json = serde_json::to_string_pretty(self).context("serialize receipt")?;
-        std::fs::write(&path, json).with_context(|| {
-            format!("write receipt {}", path.display())
-        })?;
+        std::fs::write(&path, json).with_context(|| format!("write receipt {}", path.display()))?;
         Ok(path)
     }
 
@@ -302,12 +296,10 @@ impl AdapterReceipt {
         if !path.exists() {
             return Ok(None);
         }
-        let bytes = std::fs::read(&path).with_context(|| {
-            format!("read receipt {}", path.display())
-        })?;
-        let receipt: AdapterReceipt = serde_json::from_slice(&bytes).with_context(|| {
-            format!("deserialize receipt {}", path.display())
-        })?;
+        let bytes =
+            std::fs::read(&path).with_context(|| format!("read receipt {}", path.display()))?;
+        let receipt: AdapterReceipt = serde_json::from_slice(&bytes)
+            .with_context(|| format!("deserialize receipt {}", path.display()))?;
         Ok(Some(receipt))
     }
 }
@@ -343,10 +335,7 @@ mod tests {
         assert_eq!(parsed.schema_version, RECEIPT_SCHEMA_VERSION);
         assert_eq!(parsed.adapter, r.adapter);
         assert_eq!(parsed.seed, r.seed);
-        assert_eq!(
-            parsed.teacher.unwrap().alias,
-            "qwen3.6-27b@openrouter"
-        );
+        assert_eq!(parsed.teacher.unwrap().alias, "qwen3.6-27b@openrouter");
         let p = parsed.prompts.unwrap();
         assert_eq!(p.count, 100_000);
         assert_eq!(parsed.post_eval.get("math-frontier-eval"), Some(&0.71));
@@ -358,8 +347,8 @@ mod tests {
         let r = AdapterReceipt::new("test-adapter", "sft", 17);
         let path = r.write_to_adapter_dir(dir.path())?;
         assert!(path.exists());
-        let loaded = AdapterReceipt::read_from_adapter_dir(dir.path())?
-            .expect("receipt exists after write");
+        let loaded =
+            AdapterReceipt::read_from_adapter_dir(dir.path())?.expect("receipt exists after write");
         assert_eq!(loaded.adapter, r.adapter);
         assert_eq!(loaded.source_kind, "sft");
         Ok(())
@@ -412,13 +401,34 @@ mod tests {
         // Every non-Option field should be present; every populated
         // Option should be present (skipped only when None).
         assert!(json.contains("\"lambda\":0.05"), "lambda missing: {json}");
-        assert!(json.contains("\"env_ce_initial\":4.21"), "env_ce_initial missing: {json}");
-        assert!(json.contains("\"env_ce_final\":0.83"), "env_ce_final missing: {json}");
-        assert!(json.contains("\"env_ce_drop_pct\":80.3"), "drop_pct missing: {json}");
-        assert!(json.contains("\"lambda_effective_final\":0.07"), "lambda_effective missing: {json}");
-        assert!(json.contains("\"env_tokens_supervised\":24576"), "env_tokens_supervised missing: {json}");
-        assert!(json.contains("\"dynamics_holdout_ce_initial\":3.96"), "dynamics_holdout_ce_initial missing: {json}");
-        assert!(json.contains("\"dynamics_holdout_ce_final\":1.12"), "dynamics_holdout_ce_final missing: {json}");
+        assert!(
+            json.contains("\"env_ce_initial\":4.21"),
+            "env_ce_initial missing: {json}"
+        );
+        assert!(
+            json.contains("\"env_ce_final\":0.83"),
+            "env_ce_final missing: {json}"
+        );
+        assert!(
+            json.contains("\"env_ce_drop_pct\":80.3"),
+            "drop_pct missing: {json}"
+        );
+        assert!(
+            json.contains("\"lambda_effective_final\":0.07"),
+            "lambda_effective missing: {json}"
+        );
+        assert!(
+            json.contains("\"env_tokens_supervised\":24576"),
+            "env_tokens_supervised missing: {json}"
+        );
+        assert!(
+            json.contains("\"dynamics_holdout_ce_initial\":3.96"),
+            "dynamics_holdout_ce_initial missing: {json}"
+        );
+        assert!(
+            json.contains("\"dynamics_holdout_ce_final\":1.12"),
+            "dynamics_holdout_ce_final missing: {json}"
+        );
 
         let parsed: EchoDiagnosticSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, summary);
@@ -466,8 +476,8 @@ mod tests {
         };
         let mut summary = DiagnosticSummary::default();
         summary.echo = Some(echo.clone());
-        let receipt = AdapterReceipt::new("echo-adapter", "grpo", 4218)
-            .with_diagnostic_summary(summary);
+        let receipt =
+            AdapterReceipt::new("echo-adapter", "grpo", 4218).with_diagnostic_summary(summary);
         let s = serde_json::to_string(&receipt).unwrap();
         assert!(s.contains("\"echo\""), "echo summary missing: {s}");
         let parsed: AdapterReceipt = serde_json::from_str(&s).unwrap();

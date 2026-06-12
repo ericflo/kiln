@@ -145,7 +145,11 @@ pub fn pool_alloc_host_visible(
 
     let buf = VulkanBuffer::create_host_visible(device, host_mem_type, bucket)
         .context("pool_alloc_host_visible: vkAllocateMemory")?;
-    debug_assert!(buf.size() >= bytes, "fresh host buffer {} < requested {bytes}", buf.size());
+    debug_assert!(
+        buf.size() >= bytes,
+        "fresh host buffer {} < requested {bytes}",
+        buf.size()
+    );
     let arc = Arc::new(buf);
 
     let mut inner = pool().lock().unwrap();

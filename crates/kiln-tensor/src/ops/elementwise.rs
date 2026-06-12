@@ -18,8 +18,8 @@
 //! `Constructive`. Pointwise; no reduction.
 
 use crate::{
-    bail, dispatch2, BackwardOp, CpuStorage, DType, Determinism, DeviceOp2, Error, Layout, Result,
-    Storage, Tensor, TensorId,
+    BackwardOp, CpuStorage, DType, Determinism, DeviceOp2, Error, Layout, Result, Storage, Tensor,
+    TensorId, bail, dispatch2,
 };
 use std::sync::Arc;
 
@@ -200,8 +200,7 @@ impl DeviceOp2 for ElementwiseOp {
         if !matches!(a.dtype(), DType::F32 | DType::BF16 | DType::F16) {
             return Ok(None);
         }
-        if a
-            .storage()
+        if a.storage()
             .as_any()
             .downcast_ref::<crate::MetalStorage>()
             .is_none()
@@ -248,8 +247,7 @@ impl DeviceOp2 for ElementwiseOp {
         if !matches!(a.dtype(), DType::F32) {
             return Ok(None);
         }
-        if a
-            .storage()
+        if a.storage()
             .as_any()
             .downcast_ref::<crate::VulkanStorage>()
             .is_none()
@@ -335,10 +333,7 @@ fn validate(a: &Tensor, b: &Tensor, kind: BinaryKind) -> Result<()> {
         );
     }
     if !b.is_contiguous() {
-        bail!(
-            "ElementwiseOp({}): b must be contiguous",
-            kind.name()
-        );
+        bail!("ElementwiseOp({}): b must be contiguous", kind.name());
     }
     Ok(())
 }
@@ -423,7 +418,12 @@ mod tests {
         for (i, &expected) in [1.5f32, 3.5, 5.5].iter().enumerate() {
             let v = half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap());
             // BF16 ULP tolerance per parity-tolerance.csv elementwise row.
-            assert!((v.to_f32() - expected).abs() < 1e-2, "{} vs {}", v.to_f32(), expected);
+            assert!(
+                (v.to_f32() - expected).abs() < 1e-2,
+                "{} vs {}",
+                v.to_f32(),
+                expected
+            );
         }
     }
 
@@ -438,7 +438,10 @@ mod tests {
     #[test]
     fn add_rejects_dtype_mismatch() {
         let a = Tensor::from_slice(&[1.0f32, 2.0], vec![2]).unwrap();
-        let bv: Vec<half::bf16> = [1.0f32, 2.0].iter().map(|&v| half::bf16::from_f32(v)).collect();
+        let bv: Vec<half::bf16> = [1.0f32, 2.0]
+            .iter()
+            .map(|&v| half::bf16::from_f32(v))
+            .collect();
         let b = Tensor::from_slice(&bv, vec![2]).unwrap();
         let e = add(&a, &b).unwrap_err();
         assert!(e.to_string().contains("dtype mismatch"));

@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId, bail};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AlignCorners {
@@ -91,18 +91,14 @@ pub fn interpolate_1d(x: &Tensor, target_len: usize, align: AlignCorners) -> Res
         }
         DType::BF16 => {
             for i in 0..n_in {
-                input[i] = half::bf16::from_le_bytes(
-                    bytes[i * 2..i * 2 + 2].try_into().unwrap(),
-                )
-                .to_f32();
+                input[i] =
+                    half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32();
             }
         }
         DType::F16 => {
             for i in 0..n_in {
-                input[i] = half::f16::from_le_bytes(
-                    bytes[i * 2..i * 2 + 2].try_into().unwrap(),
-                )
-                .to_f32();
+                input[i] =
+                    half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32();
             }
         }
         _ => unreachable!(),
@@ -152,14 +148,12 @@ pub fn interpolate_1d(x: &Tensor, target_len: usize, align: AlignCorners) -> Res
         }
         DType::BF16 => {
             for (i, &v) in output.iter().enumerate() {
-                out_bytes[i * 2..i * 2 + 2]
-                    .copy_from_slice(&half::bf16::from_f32(v).to_le_bytes());
+                out_bytes[i * 2..i * 2 + 2].copy_from_slice(&half::bf16::from_f32(v).to_le_bytes());
             }
         }
         DType::F16 => {
             for (i, &v) in output.iter().enumerate() {
-                out_bytes[i * 2..i * 2 + 2]
-                    .copy_from_slice(&half::f16::from_f32(v).to_le_bytes());
+                out_bytes[i * 2..i * 2 + 2].copy_from_slice(&half::f16::from_f32(v).to_le_bytes());
             }
         }
         _ => unreachable!(),
@@ -221,11 +215,7 @@ mod tests {
     #[test]
     fn preserves_leading_axes() {
         // shape [2, 3] → [2, 6]; each row interpolated independently.
-        let x = Tensor::from_slice(
-            &[0.0f32, 1.0, 2.0, 10.0, 11.0, 12.0],
-            vec![2, 3],
-        )
-        .unwrap();
+        let x = Tensor::from_slice(&[0.0f32, 1.0, 2.0, 10.0, 11.0, 12.0], vec![2, 3]).unwrap();
         let y = interpolate_1d(&x, 6, AlignCorners::Yes).unwrap();
         assert_eq!(y.shape(), &[2, 6]);
         let v = read_f32(&y);

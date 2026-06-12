@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 fn load_to_f32(t: &Tensor) -> Result<Vec<f32>> {
     let bytes = t
@@ -20,10 +20,12 @@ fn load_to_f32(t: &Tensor) -> Result<Vec<f32>> {
     for i in 0..n {
         out.push(match dtype {
             DType::F32 => f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()),
-            DType::BF16 => half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
-            DType::F16 => half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
+            DType::BF16 => {
+                half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
+            DType::F16 => {
+                half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
             other => bail!("norms: unsupported dtype {other}"),
         });
     }
@@ -39,13 +41,20 @@ fn scalar(dtype: DType, v: f32) -> Result<Tensor> {
     };
     let cpu = CpuStorage::from_bytes(dtype, bytes)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(Vec::<usize>::new()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(Vec::<usize>::new()),
+        TensorId::next(),
+    )
 }
 
 /// Frobenius norm: `‖t‖_F = √(Σ t_i²)`. Scalar output.
 pub fn frobenius_norm(t: &Tensor) -> Result<Tensor> {
     if !matches!(t.dtype(), DType::F32 | DType::BF16 | DType::F16) {
-        bail!("frobenius_norm: dtype must be F32/BF16/F16, got {}", t.dtype());
+        bail!(
+            "frobenius_norm: dtype must be F32/BF16/F16, got {}",
+            t.dtype()
+        );
     }
     let v = load_to_f32(t)?;
     let sq_sum: f32 = v.iter().map(|&x| x * x).sum();
@@ -68,7 +77,10 @@ pub fn vector_norm(t: &Tensor, p: f32) -> Result<Tensor> {
 /// Mean of squares: `Σ t_i² / N`. Scalar output.
 pub fn mean_squared(t: &Tensor) -> Result<Tensor> {
     if !matches!(t.dtype(), DType::F32 | DType::BF16 | DType::F16) {
-        bail!("mean_squared: dtype must be F32/BF16/F16, got {}", t.dtype());
+        bail!(
+            "mean_squared: dtype must be F32/BF16/F16, got {}",
+            t.dtype()
+        );
     }
     let v = load_to_f32(t)?;
     let sq_sum: f32 = v.iter().map(|&x| x * x).sum();

@@ -1026,16 +1026,31 @@ impl Metrics {
                     "# HELP kiln_gpu_memory_bytes Live GPU memory by kind (all-process driver view).\n",
                 );
                 out.push_str("# TYPE kiln_gpu_memory_bytes gauge\n");
-                push_line(&mut out, &format!("kiln_gpu_memory_bytes{{kind=\"total\"}} {}", s.total_bytes));
-                push_line(&mut out, &format!("kiln_gpu_memory_bytes{{kind=\"used\"}} {}", s.used_bytes));
-                push_line(&mut out, &format!("kiln_gpu_memory_bytes{{kind=\"free\"}} {}", s.free_bytes));
                 push_line(
                     &mut out,
-                    &format!("kiln_gpu_memory_bytes{{kind=\"available\"}} {}", g.available_bytes()),
+                    &format!("kiln_gpu_memory_bytes{{kind=\"total\"}} {}", s.total_bytes),
                 );
                 push_line(
                     &mut out,
-                    &format!("kiln_gpu_memory_bytes{{kind=\"soft_reserved\"}} {}", g.soft_reserved_bytes()),
+                    &format!("kiln_gpu_memory_bytes{{kind=\"used\"}} {}", s.used_bytes),
+                );
+                push_line(
+                    &mut out,
+                    &format!("kiln_gpu_memory_bytes{{kind=\"free\"}} {}", s.free_bytes),
+                );
+                push_line(
+                    &mut out,
+                    &format!(
+                        "kiln_gpu_memory_bytes{{kind=\"available\"}} {}",
+                        g.available_bytes()
+                    ),
+                );
+                push_line(
+                    &mut out,
+                    &format!(
+                        "kiln_gpu_memory_bytes{{kind=\"soft_reserved\"}} {}",
+                        g.soft_reserved_bytes()
+                    ),
                 );
                 out.push_str(
                     "# HELP kiln_gpu_memory_pressure GPU memory pressure (0=Comfortable 1=Moderate 2=Tight 3=Critical).\n",
@@ -1278,9 +1293,7 @@ mod tests {
         assert!(output.contains("kiln_batching_engine_last_forward_ms 12.500000"));
         assert!(output.contains("kiln_batching_engine_last_prefill_ms 250.000000"));
         assert!(output.contains("kiln_batching_engine_decode_forwards_total 17"));
-        assert!(output.contains(
-            "kiln_batching_engine_batched_decode_forwards_total 15"
-        ));
+        assert!(output.contains("kiln_batching_engine_batched_decode_forwards_total 15"));
         assert!(output.contains("kiln_batching_engine_decode_rows_total 48"));
         assert!(output.contains("kiln_decode_batcher_runner_calls_total 2"));
         assert!(output.contains("kiln_decode_batcher_runner_calls_per_token 0.500000"));

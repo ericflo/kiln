@@ -29,7 +29,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
 
-
 static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
 static SUBOP_CAPTURE_ARMED_THREADS: AtomicUsize = AtomicUsize::new(0);
 static B12_GQA_CAPTURE_ARMED_THREADS: AtomicUsize = AtomicUsize::new(0);
@@ -369,7 +368,10 @@ pub fn top_k_logits(logits: &kiln_tensor::Tensor, k: usize) -> Result<Vec<(u32, 
 /// tensor magnitudes — useful for catching the "all zeros" or "explosion"
 /// failure modes that would silently kill draft accuracy.
 pub fn tensor_l2_norm(t: &kiln_tensor::Tensor) -> Result<f32> {
-    let v = t.flatten_all()?.to_dtype(kiln_tensor::DType::F32)?.to_vec1::<f32>()?;
+    let v = t
+        .flatten_all()?
+        .to_dtype(kiln_tensor::DType::F32)?
+        .to_vec1::<f32>()?;
     Ok(v.iter().map(|x| x * x).sum::<f32>().sqrt())
 }
 
@@ -2434,7 +2436,11 @@ mod tests {
 
     #[test]
     fn top_k_picks_largest_in_descending_order() {
-        let t = kiln_tensor::Tensor::new(&[1.0_f32, 5.0, 3.0, 4.0, 2.0][..], &kiln_tensor::Device::Cpu).unwrap();
+        let t = kiln_tensor::Tensor::new(
+            &[1.0_f32, 5.0, 3.0, 4.0, 2.0][..],
+            &kiln_tensor::Device::Cpu,
+        )
+        .unwrap();
         let top = top_k_logits(&t, 3).unwrap();
         assert_eq!(top.len(), 3);
         assert_eq!(top[0].0, 1); // logit 5.0
@@ -2686,7 +2692,8 @@ mod tests {
 
     #[test]
     fn subop_capture_records_then_drains() {
-        let a = kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
+        let a =
+            kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
         let b = kiln_tensor::Tensor::new(&[10.0_f32, 20.0][..], &kiln_tensor::Device::Cpu).unwrap();
         // Disarmed: capture is a silent no-op.
         capture_subop("post_q_proj", &a).unwrap();
@@ -2731,7 +2738,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_HIDDEN_STATES", "1");
         }
-        let a = kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
+        let a =
+            kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
         let b = kiln_tensor::Tensor::new(&[10.0_f32, 20.0][..], &kiln_tensor::Device::Cpu).unwrap();
         // Disarmed: capture is a silent no-op.
         capture_h_main_tap("h_layer_0", &a).unwrap();
@@ -2946,7 +2954,8 @@ mod tests {
     fn write_and_reparse_mtp_dump_round_trips() {
         use safetensors::SafeTensors;
 
-        let a = kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0, 4.0][..], &kiln_tensor::Device::Cpu).unwrap();
+        let a = kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0, 4.0][..], &kiln_tensor::Device::Cpu)
+            .unwrap();
         let b = kiln_tensor::Tensor::new(&[0.5_f32, -0.25][..], &kiln_tensor::Device::Cpu).unwrap();
         let tmp = std::env::temp_dir().join("kiln_mtp_dump_round_trip.safetensors");
         let tmp_s = tmp.to_string_lossy().into_owned();
@@ -3031,7 +3040,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_B11_TAPS", "1");
         }
-        let a = kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
+        let a =
+            kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
         let b = kiln_tensor::Tensor::new(&[10.0_f32, 20.0][..], &kiln_tensor::Device::Cpu).unwrap();
         // Disarmed: capture is a silent no-op.
         capture_b11_layer0_tap("tok_embed", &a).unwrap();
@@ -3249,7 +3259,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_C41_LAYER1_TAPS", "1");
         }
-        let a = kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
+        let a =
+            kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
         let b = kiln_tensor::Tensor::new(&[10.0_f32, 20.0][..], &kiln_tensor::Device::Cpu).unwrap();
 
         capture_c41_layer1_tap("layer_1_post_input_norm", &a).unwrap();
@@ -3300,7 +3311,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_C42_LAYER1_NORM_TAPS", "1");
         }
-        let a = kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
+        let a =
+            kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
         let b = kiln_tensor::Tensor::new(&[10.0_f32][..], &kiln_tensor::Device::Cpu).unwrap();
 
         capture_c42_layer1_norm_tap("layer_1_residual_input", &a).unwrap();
@@ -3351,7 +3363,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_C43_LAYER1_PREWEIGHT_TAPS", "1");
         }
-        let a = kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
+        let a =
+            kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
         let b = kiln_tensor::Tensor::new(&[10.0_f32][..], &kiln_tensor::Device::Cpu).unwrap();
 
         capture_c43_layer1_preweight_tap("layer_1_residual_input", &a).unwrap();
@@ -3402,7 +3415,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_C44_LAYER1_F32_ROW_TAPS", "1");
         }
-        let a = kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
+        let a =
+            kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
         let b = kiln_tensor::Tensor::new(&[10.0_f32][..], &kiln_tensor::Device::Cpu).unwrap();
 
         capture_c44_layer1_f32_row_tap("layer_1_residual_input_f32_row", &a).unwrap();
@@ -3454,7 +3468,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS", "1");
         }
-        let a = kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
+        let a =
+            kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
         let b = kiln_tensor::Tensor::new(&[10.0_f32][..], &kiln_tensor::Device::Cpu).unwrap();
 
         capture_c45_layer1_row_tap("layer_1_input_norm_rms_inv_scalar", &a).unwrap();
@@ -3509,7 +3524,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_C46_ROW_PROVENANCE", "1");
         }
-        let a = kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
+        let a =
+            kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
         let b = kiln_tensor::Tensor::new(&[10.0_f32][..], &kiln_tensor::Device::Cpu).unwrap();
 
         capture_c46_layer1_row_provenance_tap("layer_1_input_norm_selected_row_before_rmsnorm", &a)
@@ -3569,7 +3585,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_B12_GQA_TAPS", "1");
         }
-        let a = kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
+        let a =
+            kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
         let b = kiln_tensor::Tensor::new(&[10.0_f32, 20.0][..], &kiln_tensor::Device::Cpu).unwrap();
         // Disarmed: capture is a silent no-op.
         capture_b12_gqa_tap("post_input_norm", &a).unwrap();
@@ -4196,7 +4213,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_PRE_ROPE", "1");
         }
-        let a = kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
+        let a =
+            kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
         let b = kiln_tensor::Tensor::new(&[10.0_f32, 20.0][..], &kiln_tensor::Device::Cpu).unwrap();
         // Disarmed: capture is a silent no-op.
         capture_pre_rope_tap("token_emb", &a).unwrap();
@@ -4326,7 +4344,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_C7_SDPA", "1");
         }
-        let a = kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
+        let a =
+            kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
         let b = kiln_tensor::Tensor::new(&[10.0_f32, 20.0][..], &kiln_tensor::Device::Cpu).unwrap();
         // Disarmed: capture is a silent no-op.
         capture_c7_sdpa_tap("pre_sdpa_q", &a).unwrap();
@@ -4457,7 +4476,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_C14_POST_BLOCK", "1");
         }
-        let a = kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
+        let a =
+            kiln_tensor::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &kiln_tensor::Device::Cpu).unwrap();
         let b = kiln_tensor::Tensor::new(&[10.0_f32, 20.0][..], &kiln_tensor::Device::Cpu).unwrap();
         // Disarmed: capture is a silent no-op.
         capture_c14_post_block_tap("post_block", &a).unwrap();

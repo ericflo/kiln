@@ -73,8 +73,9 @@ fn binary_minmax_parity_all_kinds() {
         let b_data: Vec<f32> = (0..w).map(val_b).collect();
 
         for &kind in &kinds {
-            let reference: Vec<f32> =
-                (0..w).map(|i| cpu_minmax(kind, a_data[i], b_data[i])).collect();
+            let reference: Vec<f32> = (0..w)
+                .map(|i| cpu_minmax(kind, a_data[i], b_data[i]))
+                .collect();
 
             let a = Tensor::from_vec_on(Device::Rocm(0), a_data.clone(), vec![w])
                 .unwrap_or_else(|e| panic!("from_vec_on a (w={w}): {e}"));
@@ -114,8 +115,9 @@ fn binary_minmax_parity_2d_shape() {
     let b_data: Vec<f32> = (0..n).map(val_b).collect();
 
     for &kind in &[KIND_MINIMUM, KIND_MAXIMUM] {
-        let reference: Vec<f32> =
-            (0..n).map(|i| cpu_minmax(kind, a_data[i], b_data[i])).collect();
+        let reference: Vec<f32> = (0..n)
+            .map(|i| cpu_minmax(kind, a_data[i], b_data[i]))
+            .collect();
 
         let a = Tensor::from_vec_on(Device::Rocm(0), a_data.clone(), vec![rows, cols])
             .unwrap_or_else(|e| panic!("from_vec_on a 2d: {e}"));

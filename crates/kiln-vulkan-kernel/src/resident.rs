@@ -20,15 +20,13 @@
 use anyhow::{Context, Result};
 use ash::vk;
 
-use crate::kernels::{
-    run_compute_pipeline, run_compute_pipeline_3d, PAGED_ATTN_SPLITK_MAX_CHUNKS,
-};
+use crate::kernels::{PAGED_ATTN_SPLITK_MAX_CHUNKS, run_compute_pipeline, run_compute_pipeline_3d};
 use crate::pipeline::ShaderPipeline;
-use crate::{shaders, CommandBatch, VulkanBuffer, VulkanDevice, Workgroups};
+use crate::{CommandBatch, VulkanBuffer, VulkanDevice, Workgroups, shaders};
 
 use crate::kernels::{
-    linear_decode_bf16w_rows4_enabled, linear_decode_bf16w_rows8_enabled,
-    linear_decode_bf16w_rows4_min_batch, linear_decode_bf16w_rows8_min_batch,
+    linear_decode_bf16w_rows4_enabled, linear_decode_bf16w_rows4_min_batch,
+    linear_decode_bf16w_rows8_enabled, linear_decode_bf16w_rows8_min_batch,
     mlp_bf16_down_rows4_min_batch, mlp_bf16_rows8_min_batch,
 };
 
@@ -487,10 +485,9 @@ fn mlp_decode_shader_plan(
     down_bf16_weights: bool,
 ) -> (&'static str, &'static str, Vec<u32>, u32, Vec<u32>, u32) {
     use crate::kernels::{
-        mlp_bf16_down_rows4_enabled, mlp_bf16_down_rows4_min_batch,
-        mlp_bf16_gate_up_rows4_enabled, mlp_bf16_gate_up_rows4_min_batch,
-        mlp_bf16_rows8_enabled, mlp_f32_down_rows4_enabled, mlp_f32_down_rows4_min_batch,
-        use_prefill_row_pair_matmul,
+        mlp_bf16_down_rows4_enabled, mlp_bf16_down_rows4_min_batch, mlp_bf16_gate_up_rows4_enabled,
+        mlp_bf16_gate_up_rows4_min_batch, mlp_bf16_rows8_enabled, mlp_f32_down_rows4_enabled,
+        mlp_f32_down_rows4_min_batch, use_prefill_row_pair_matmul,
     };
     let gate_up_rows2 = !gate_up_bf16_weights && use_prefill_row_pair_matmul(batch);
     let rows8_path = gate_up_bf16_weights
@@ -683,15 +680,21 @@ pub fn dispatch_mlp_decode_cached_resident(
         out.size()
     );
 
-    let (gate_up_glsl, linear_glsl, gate_up_push, gate_up_workgroups, linear_push, linear_workgroups) =
-        mlp_decode_shader_plan(
-            batch,
-            hidden,
-            intermediate,
-            out_dim,
-            gate_up_bf16_weights,
-            down_bf16_weights,
-        );
+    let (
+        gate_up_glsl,
+        linear_glsl,
+        gate_up_push,
+        gate_up_workgroups,
+        linear_push,
+        linear_workgroups,
+    ) = mlp_decode_shader_plan(
+        batch,
+        hidden,
+        intermediate,
+        out_dim,
+        gate_up_bf16_weights,
+        down_bf16_weights,
+    );
 
     let gate_up_spirv = ShaderPipeline::compile_shader(gate_up_glsl)?;
     let gate_up_handles: [vk::Buffer; 4] = [
@@ -1158,9 +1161,18 @@ pub fn dispatch_gdn_gated_rms_norm_cached_resident(
 ) -> Result<()> {
     let elem_count = rows * hidden;
     let need = (elem_count * 4) as u64;
-    anyhow::ensure!(x.size() >= need, "gdn_gated_rms_norm_resident: x buffer too small");
-    anyhow::ensure!(z.size() >= need, "gdn_gated_rms_norm_resident: z buffer too small");
-    anyhow::ensure!(out.size() >= need, "gdn_gated_rms_norm_resident: out buffer too small");
+    anyhow::ensure!(
+        x.size() >= need,
+        "gdn_gated_rms_norm_resident: x buffer too small"
+    );
+    anyhow::ensure!(
+        z.size() >= need,
+        "gdn_gated_rms_norm_resident: z buffer too small"
+    );
+    anyhow::ensure!(
+        out.size() >= need,
+        "gdn_gated_rms_norm_resident: out buffer too small"
+    );
     anyhow::ensure!(
         weight.size() >= (hidden * 4) as u64,
         "gdn_gated_rms_norm_resident: weight buffer too small"
@@ -1223,13 +1235,7 @@ pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident(
         "/csrc/shaders/gdn_decode_gates_recurrent_rmsnorm.comp"
     );
     let spirv = ShaderPipeline::compile_shader(glsl_path)?;
-    let push_constants: [u32; 5] = [
-        nv as u32,
-        dk as u32,
-        dv as u32,
-        eps.to_bits(),
-        batch as u32,
-    ];
+    let push_constants: [u32; 5] = [nv as u32, dk as u32, dv as u32, eps.to_bits(), batch as u32];
     let handles: [vk::Buffer; 11] = [
         q.handle(),
         k.handle(),
@@ -1284,12 +1290,8 @@ pub fn dispatch_causal_conv1d_update_resident(
         "/csrc/shaders/causal_conv1d.comp"
     );
     let spirv_output = ShaderPipeline::compile_shader(glsl_output)?;
-    let output_handles: [vk::Buffer; 4] = [
-        x.handle(),
-        weight.handle(),
-        state.handle(),
-        out.handle(),
-    ];
+    let output_handles: [vk::Buffer; 4] =
+        [x.handle(), weight.handle(), state.handle(), out.handle()];
     let output_push: [u32; 4] = [
         batch as u32,
         channels as u32,
@@ -1433,10 +1435,7 @@ pub fn dispatch_rotary_one_resident(
         "rotary_one_resident: out buffer too small"
     );
 
-    let glsl_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/vk_rope_f32.comp"
-    );
+    let glsl_path = concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/vk_rope_f32.comp");
     let spirv = ShaderPipeline::compile_shader(glsl_path)?;
     let push_constants: [u32; 4] = [
         rows as u32,
@@ -1763,7 +1762,10 @@ pub fn dispatch_paged_attn_decode_batch_f32_resident(
     max_seqlen: usize,
     softmax_scale: f32,
 ) -> Result<()> {
-    anyhow::ensure!(head_dim <= 256, "paged_attn_resident: head_dim {head_dim} > 256");
+    anyhow::ensure!(
+        head_dim <= 256,
+        "paged_attn_resident: head_dim {head_dim} > 256"
+    );
     anyhow::ensure!(
         num_heads % num_kv_heads == 0,
         "paged_attn_resident: num_heads {num_heads} not divisible by num_kv_heads {num_kv_heads}"
@@ -1820,7 +1822,10 @@ pub fn dispatch_paged_attn_decode_batch_paged_f32_resident(
     page_block_size: usize,
     softmax_scale: f32,
 ) -> Result<()> {
-    anyhow::ensure!(head_dim <= 256, "paged_attn_paged_resident: head_dim {head_dim} > 256");
+    anyhow::ensure!(
+        head_dim <= 256,
+        "paged_attn_paged_resident: head_dim {head_dim} > 256"
+    );
     anyhow::ensure!(
         num_heads % num_kv_heads == 0,
         "paged_attn_paged_resident: num_heads not divisible by num_kv_heads"
@@ -2105,11 +2110,7 @@ pub fn dispatch_qkv_gate_split_resident(
         "/csrc/shaders/qkv_gate_split.comp"
     );
     let spirv = ShaderPipeline::compile_shader(glsl_path)?;
-    let push_constants: [u32; 3] = [
-        num_heads as u32,
-        num_kv_heads as u32,
-        head_dim as u32,
-    ];
+    let push_constants: [u32; 3] = [num_heads as u32, num_kv_heads as u32, head_dim as u32];
     let handles: [vk::Buffer; 5] = [
         combined.handle(),
         q_out.handle(),
@@ -2170,9 +2171,11 @@ pub fn dispatch_qkv_gate_split_batched_resident(
         .and_then(|x| x.checked_add(kv_heads_total.checked_mul(2)?))
         .context("qkv_gate_split_batched_resident: combined row stride overflow")?;
     let per_row_split = full_heads_total
-        .checked_add(kv_heads_total.checked_mul(2).context(
-            "qkv_gate_split_batched_resident: per-row split element count overflow",
-        )?)
+        .checked_add(
+            kv_heads_total
+                .checked_mul(2)
+                .context("qkv_gate_split_batched_resident: per-row split element count overflow")?,
+        )
         .context("qkv_gate_split_batched_resident: per-row split element count overflow")?;
     let combined_elems = batch
         .checked_mul(combined_stride)
@@ -2314,12 +2317,7 @@ pub fn dispatch_gdn_in_proj_split_resident(
         "/csrc/shaders/gdn_in_proj_split.comp"
     );
     let spirv = ShaderPipeline::compile_shader(glsl_path)?;
-    let push_constants: [u32; 4] = [
-        qkv_dim as u32,
-        z_dim as u32,
-        a_dim as u32,
-        b_dim as u32,
-    ];
+    let push_constants: [u32; 4] = [qkv_dim as u32, z_dim as u32, a_dim as u32, b_dim as u32];
     let handles: [vk::Buffer; 5] = [
         combined.handle(),
         mixed_qkv_out.handle(),
@@ -2751,11 +2749,7 @@ pub fn dispatch_paged_kv_write_slots_resident(
         "/csrc/shaders/paged_kv_write_slots.comp"
     );
     let spirv = ShaderPipeline::compile_shader(glsl_path)?;
-    let push_constants: [u32; 3] = [
-        batch as u32,
-        elements_per_slot as u32,
-        total_slots as u32,
-    ];
+    let push_constants: [u32; 3] = [batch as u32, elements_per_slot as u32, total_slots as u32];
     let handles: [vk::Buffer; 5] = [
         k_in.handle(),
         v_in.handle(),
@@ -2801,18 +2795,16 @@ mod tests {
             .collect()
     }
 
-    fn upload_f32_slice(
-        vk_device: &VulkanDevice,
-        data: &[f32],
-    ) -> anyhow::Result<VulkanBuffer> {
-        Ok(crate::kernels::upload_f32_buffer_from_slice(vk_device, data)?)
+    fn upload_f32_slice(vk_device: &VulkanDevice, data: &[f32]) -> anyhow::Result<VulkanBuffer> {
+        Ok(crate::kernels::upload_f32_buffer_from_slice(
+            vk_device, data,
+        )?)
     }
 
-    fn upload_bf16_slice(
-        vk_device: &VulkanDevice,
-        data: &[bf16],
-    ) -> anyhow::Result<VulkanBuffer> {
-        Ok(crate::kernels::upload_bf16_packed_buffer_from_slice(vk_device, data)?)
+    fn upload_bf16_slice(vk_device: &VulkanDevice, data: &[bf16]) -> anyhow::Result<VulkanBuffer> {
+        Ok(crate::kernels::upload_bf16_packed_buffer_from_slice(
+            vk_device, data,
+        )?)
     }
 
     fn upload_u32_buffer(vk_device: &VulkanDevice, data: &[u32]) -> anyhow::Result<VulkanBuffer> {
@@ -2852,9 +2844,7 @@ mod tests {
 
     fn make_x_f32(batch: usize, hidden: usize) -> Vec<f32> {
         let n = batch * hidden;
-        (0..n)
-            .map(|i| ((i % 17) as f32 - 8.0) * 0.025)
-            .collect()
+        (0..n).map(|i| ((i % 17) as f32 - 8.0) * 0.025).collect()
     }
 
     fn make_bf16_weight(rows: usize, cols: usize) -> Vec<bf16> {
@@ -2916,7 +2906,11 @@ mod tests {
 
         assert_eq!(baseline.len(), resident.len());
         for (i, (b, r)) in baseline.iter().zip(resident.iter()).enumerate() {
-            assert_eq!(b.to_bits(), r.to_bits(), "row {i}: baseline {b} vs resident {r}");
+            assert_eq!(
+                b.to_bits(),
+                r.to_bits(),
+                "row {i}: baseline {b} vs resident {r}"
+            );
         }
     }
 
@@ -2946,7 +2940,11 @@ mod tests {
         let resident = read_back_f32(&dev, &out_buf);
 
         for (i, (b, r)) in baseline.iter().zip(resident.iter()).enumerate() {
-            assert_eq!(b.to_bits(), r.to_bits(), "row {i}: baseline {b} vs resident {r}");
+            assert_eq!(
+                b.to_bits(),
+                r.to_bits(),
+                "row {i}: baseline {b} vs resident {r}"
+            );
         }
     }
 
@@ -2977,7 +2975,11 @@ mod tests {
 
         assert_eq!(baseline.len(), resident.len());
         for (i, (b, r)) in baseline.iter().zip(resident.iter()).enumerate() {
-            assert_eq!(b.to_bits(), r.to_bits(), "row {i}: baseline {b} vs resident {r}");
+            assert_eq!(
+                b.to_bits(),
+                r.to_bits(),
+                "row {i}: baseline {b} vs resident {r}"
+            );
         }
     }
 
@@ -2994,9 +2996,10 @@ mod tests {
         let w_buf = upload_f32_slice(&dev, &w_f32).unwrap();
 
         let x_bytes = f32_to_bytes(&x);
-        let baseline_bytes =
-            dispatch_linear_decode_cached_bytes(&dev, &x_bytes, &w_buf, batch, hidden, out_dim, false)
-                .unwrap();
+        let baseline_bytes = dispatch_linear_decode_cached_bytes(
+            &dev, &x_bytes, &w_buf, batch, hidden, out_dim, false,
+        )
+        .unwrap();
         let baseline = bytes_to_f32(&baseline_bytes);
 
         let x_buf = upload_x(&dev, &x);
@@ -3008,7 +3011,11 @@ mod tests {
         let resident = read_back_f32(&dev, &out_buf);
 
         for (i, (b, r)) in baseline.iter().zip(resident.iter()).enumerate() {
-            assert_eq!(b.to_bits(), r.to_bits(), "row {i}: baseline {b} vs resident {r}");
+            assert_eq!(
+                b.to_bits(),
+                r.to_bits(),
+                "row {i}: baseline {b} vs resident {r}"
+            );
         }
     }
 
@@ -3067,7 +3074,11 @@ mod tests {
 
         assert_eq!(baseline.len(), resident.len());
         for (i, (b, r)) in baseline.iter().zip(resident.iter()).enumerate() {
-            assert_eq!(b.to_bits(), r.to_bits(), "row {i}: baseline {b} vs resident {r}");
+            assert_eq!(
+                b.to_bits(),
+                r.to_bits(),
+                "row {i}: baseline {b} vs resident {r}"
+            );
         }
     }
 
@@ -3125,7 +3136,11 @@ mod tests {
         let resident = read_back_f32(&dev, &out_buf);
 
         for (i, (b, r)) in baseline.iter().zip(resident.iter()).enumerate() {
-            assert_eq!(b.to_bits(), r.to_bits(), "row {i}: baseline {b} vs resident {r}");
+            assert_eq!(
+                b.to_bits(),
+                r.to_bits(),
+                "row {i}: baseline {b} vs resident {r}"
+            );
         }
     }
 
@@ -3184,7 +3199,11 @@ mod tests {
 
         assert_eq!(baseline.len(), resident.len());
         for (i, (b, r)) in baseline.iter().zip(resident.iter()).enumerate() {
-            assert_eq!(b.to_bits(), r.to_bits(), "row {i}: baseline {b} vs resident {r}");
+            assert_eq!(
+                b.to_bits(),
+                r.to_bits(),
+                "row {i}: baseline {b} vs resident {r}"
+            );
         }
     }
 
@@ -3221,7 +3240,11 @@ mod tests {
         .unwrap();
         let resident = read_back_f32(&dev, &qkv_out);
         for (i, (e, r)) in expected.iter().zip(resident.iter()).enumerate() {
-            assert_eq!(e.to_bits(), r.to_bits(), "idx {i}: expected {e} vs resident {r}");
+            assert_eq!(
+                e.to_bits(),
+                r.to_bits(),
+                "idx {i}: expected {e} vs resident {r}"
+            );
         }
     }
 
@@ -3243,10 +3266,11 @@ mod tests {
         let v_buf = upload_bf16_slice(&dev, &v_w).unwrap();
 
         let x_bytes = f32_to_bytes(&x);
-        let (q_bytes, k_bytes, v_bytes) = dispatch_full_attn_qkv_decode_cached_batched_bf16_weights_bytes(
-            &dev, &x_bytes, &q_buf, &k_buf, &v_buf, batch, hidden, q_dim, k_dim, v_dim,
-        )
-        .unwrap();
+        let (q_bytes, k_bytes, v_bytes) =
+            dispatch_full_attn_qkv_decode_cached_batched_bf16_weights_bytes(
+                &dev, &x_bytes, &q_buf, &k_buf, &v_buf, batch, hidden, q_dim, k_dim, v_dim,
+            )
+            .unwrap();
         let q_v: Vec<f32> = bytes_to_f32(&q_bytes);
         let k_v: Vec<f32> = bytes_to_f32(&k_bytes);
         let v_v: Vec<f32> = bytes_to_f32(&v_bytes);
@@ -3267,7 +3291,11 @@ mod tests {
         .unwrap();
         let resident = read_back_f32(&dev, &qkv_out);
         for (i, (e, r)) in expected.iter().zip(resident.iter()).enumerate() {
-            assert_eq!(e.to_bits(), r.to_bits(), "idx {i}: expected {e} vs resident {r}");
+            assert_eq!(
+                e.to_bits(),
+                r.to_bits(),
+                "idx {i}: expected {e} vs resident {r}"
+            );
         }
     }
 
@@ -3293,7 +3321,8 @@ mod tests {
 
         let x_bytes = f32_to_bytes(&x);
         let (qkv_b, z_b, a_b, b_b) = dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes(
-            &dev, &x_bytes, 1, &qkv_buf, &z_buf, &a_buf, &b_buf, hidden, qkv_dim, z_dim, a_dim, b_dim,
+            &dev, &x_bytes, 1, &qkv_buf, &z_buf, &a_buf, &b_buf, hidden, qkv_dim, z_dim, a_dim,
+            b_dim,
         )
         .unwrap();
         let mut expected: Vec<f32> = bytes_to_f32(&qkv_b);
@@ -3310,7 +3339,11 @@ mod tests {
         .unwrap();
         let resident = read_back_f32(&dev, &out_buf);
         for (i, (e, r)) in expected.iter().zip(resident.iter()).enumerate() {
-            assert_eq!(e.to_bits(), r.to_bits(), "idx {i}: expected {e} vs resident {r}");
+            assert_eq!(
+                e.to_bits(),
+                r.to_bits(),
+                "idx {i}: expected {e} vs resident {r}"
+            );
         }
     }
 
@@ -3337,8 +3370,8 @@ mod tests {
 
         let x_bytes = f32_to_bytes(&x);
         let (qkv_b, z_b, a_b, b_b) = dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes(
-            &dev, &x_bytes, batch, &qkv_buf, &z_buf, &a_buf, &b_buf, hidden, qkv_dim, z_dim,
-            a_dim, b_dim,
+            &dev, &x_bytes, batch, &qkv_buf, &z_buf, &a_buf, &b_buf, hidden, qkv_dim, z_dim, a_dim,
+            b_dim,
         )
         .unwrap();
         let qkv_v = bytes_to_f32(&qkv_b);
@@ -3431,8 +3464,12 @@ mod tests {
         let rows = 6;
         let hidden = 64;
         let eps = 1e-6f32;
-        let x: Vec<f32> = (0..rows * hidden).map(|i| (i as f32 * 0.013) - 0.5).collect();
-        let z: Vec<f32> = (0..rows * hidden).map(|i| (i as f32 * 0.017) - 0.3).collect();
+        let x: Vec<f32> = (0..rows * hidden)
+            .map(|i| (i as f32 * 0.013) - 0.5)
+            .collect();
+        let z: Vec<f32> = (0..rows * hidden)
+            .map(|i| (i as f32 * 0.017) - 0.3)
+            .collect();
         let weight: Vec<f32> = (0..hidden).map(|i| (i as f32) * 0.02 + 1.0).collect();
         let weight_buf = upload_f32_slice(&dev, &weight).unwrap();
 
@@ -3454,7 +3491,14 @@ mod tests {
         let z_buf = upload_f32_slice(&dev, &z).unwrap();
         let out_buf = alloc_out(&dev, (rows * hidden * 4) as u64);
         dispatch_gdn_gated_rms_norm_cached_resident(
-            &dev, &x_buf, &z_buf, &weight_buf, &out_buf, rows, hidden, eps,
+            &dev,
+            &x_buf,
+            &z_buf,
+            &weight_buf,
+            &out_buf,
+            rows,
+            hidden,
+            eps,
         )
         .unwrap();
         let resident = read_back_f32(&dev, &out_buf);
@@ -3529,8 +3573,18 @@ mod tests {
         };
         let out_buf = alloc_out(&dev, (batch * num_heads * head_dim * 4) as u64);
         dispatch_paged_attn_decode_batch_f32_resident(
-            &dev, &q_buf, &k_buf, &v_buf, &seq_buf, &out_buf, batch, num_heads, num_kv_heads,
-            head_dim, max_seqlen, softmax_scale,
+            &dev,
+            &q_buf,
+            &k_buf,
+            &v_buf,
+            &seq_buf,
+            &out_buf,
+            batch,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            max_seqlen,
+            softmax_scale,
         )
         .unwrap();
         let resident = read_back_f32(&dev, &out_buf);
@@ -3640,7 +3694,11 @@ mod tests {
                     let high = x_data[base + pair + half_r];
                     let c = cos_data[r * half_r + pair];
                     let s = sin_data[r * half_r + pair];
-                    expected[idx] = if is_low { low * c - high * s } else { low * s + high * c };
+                    expected[idx] = if is_low {
+                        low * c - high * s
+                    } else {
+                        low * s + high * c
+                    };
                 }
             }
         }
@@ -3705,12 +3763,20 @@ mod tests {
                             out[idx] = data[idx];
                             continue;
                         }
-                        let (pair, is_low) = if d < half { (d, true) } else { (d - half, false) };
+                        let (pair, is_low) = if d < half {
+                            (d, true)
+                        } else {
+                            (d - half, false)
+                        };
                         let low = data[base + pair];
                         let high = data[base + pair + half];
                         let c = cos_data[r * half + pair];
                         let s = sin_data[r * half + pair];
-                        out[idx] = if is_low { low * c - high * s } else { low * s + high * c };
+                        out[idx] = if is_low {
+                            low * c - high * s
+                        } else {
+                            low * s + high * c
+                        };
                     }
                 }
             }
@@ -3719,10 +3785,18 @@ mod tests {
 
         let got_q = read_back_f32(&dev, &q_out);
         let got_k = read_back_f32(&dev, &k_out);
-        for (i, (e, g)) in cpu_rope(&q_data, num_q_heads).iter().zip(got_q.iter()).enumerate() {
+        for (i, (e, g)) in cpu_rope(&q_data, num_q_heads)
+            .iter()
+            .zip(got_q.iter())
+            .enumerate()
+        {
             assert!((e - g).abs() <= 1e-5, "q idx {i}: cpu {e} vs gpu {g}");
         }
-        for (i, (e, g)) in cpu_rope(&k_data, num_kv_heads).iter().zip(got_k.iter()).enumerate() {
+        for (i, (e, g)) in cpu_rope(&k_data, num_kv_heads)
+            .iter()
+            .zip(got_k.iter())
+            .enumerate()
+        {
             assert!((e - g).abs() <= 1e-5, "k idx {i}: cpu {e} vs gpu {g}");
         }
     }
@@ -3794,12 +3868,20 @@ mod tests {
                             out[idx] = data[idx];
                             continue;
                         }
-                        let (pair, is_low) = if d < half { (d, true) } else { (d - half, false) };
+                        let (pair, is_low) = if d < half {
+                            (d, true)
+                        } else {
+                            (d - half, false)
+                        };
                         let low = data[base + pair];
                         let high = data[base + pair + half];
                         let c = cos_data[r * half + pair];
                         let s = sin_data[r * half + pair];
-                        out[idx] = if is_low { low * c - high * s } else { low * s + high * c };
+                        out[idx] = if is_low {
+                            low * c - high * s
+                        } else {
+                            low * s + high * c
+                        };
                     }
                 }
             }
@@ -3842,12 +3924,24 @@ mod tests {
         let heads = 4;
         let dk = 32;
         let dv = 16;
-        let q: Vec<f32> = (0..batch * heads * dk).map(|i| (i as f32 * 0.013) - 0.5).collect();
-        let k: Vec<f32> = (0..batch * heads * dk).map(|i| (i as f32 * 0.017) - 0.3).collect();
-        let v: Vec<f32> = (0..batch * heads * dv).map(|i| (i as f32 * 0.019) + 0.2).collect();
-        let beta: Vec<f32> = (0..batch * heads).map(|i| (i as f32 * 0.05) + 0.1).collect();
-        let g: Vec<f32> = (0..batch * heads).map(|i| ((i as f32) * 0.03 - 0.1).tanh()).collect();
-        let state: Vec<f32> = (0..batch * heads * dk * dv).map(|i| (i as f32 * 0.0017) - 0.05).collect();
+        let q: Vec<f32> = (0..batch * heads * dk)
+            .map(|i| (i as f32 * 0.013) - 0.5)
+            .collect();
+        let k: Vec<f32> = (0..batch * heads * dk)
+            .map(|i| (i as f32 * 0.017) - 0.3)
+            .collect();
+        let v: Vec<f32> = (0..batch * heads * dv)
+            .map(|i| (i as f32 * 0.019) + 0.2)
+            .collect();
+        let beta: Vec<f32> = (0..batch * heads)
+            .map(|i| (i as f32 * 0.05) + 0.1)
+            .collect();
+        let g: Vec<f32> = (0..batch * heads)
+            .map(|i| ((i as f32) * 0.03 - 0.1).tanh())
+            .collect();
+        let state: Vec<f32> = (0..batch * heads * dk * dv)
+            .map(|i| (i as f32 * 0.0017) - 0.05)
+            .collect();
 
         let q_bytes_ref = f32_to_bytes(&q);
         let k_bytes_ref = f32_to_bytes(&k);
@@ -3882,13 +3976,17 @@ mod tests {
         let state_buf = upload_f32_slice(&dev, &state).unwrap();
         let out_buf = alloc_out(&dev, (batch * heads * dv * 4) as u64);
         dispatch_gdn_recurrent_step_resident(
-            &dev, &q_buf, &k_buf, &v_buf, &beta_buf, &g_buf, &state_buf, &out_buf, batch, heads, dk,
-            dv,
+            &dev, &q_buf, &k_buf, &v_buf, &beta_buf, &g_buf, &state_buf, &out_buf, batch, heads,
+            dk, dv,
         )
         .unwrap();
         let resident = read_back_f32(&dev, &out_buf);
         for (i, (e, r)) in expected.iter().zip(resident.iter()).enumerate() {
-            assert_eq!(e.to_bits(), r.to_bits(), "idx {i}: expected {e} vs resident {r}");
+            assert_eq!(
+                e.to_bits(),
+                r.to_bits(),
+                "idx {i}: expected {e} vs resident {r}"
+            );
         }
     }
 
@@ -3926,7 +4024,11 @@ mod tests {
         let resident = read_back_f32(&dev, &out_buf);
 
         for (i, (b, r)) in baseline.iter().zip(resident.iter()).enumerate() {
-            assert_eq!(b.to_bits(), r.to_bits(), "row {i}: baseline {b} vs resident {r}");
+            assert_eq!(
+                b.to_bits(),
+                r.to_bits(),
+                "row {i}: baseline {b} vs resident {r}"
+            );
         }
     }
 
@@ -4054,11 +4156,13 @@ mod tests {
             } else {
                 for i in 0..elements_per_slot {
                     assert_eq!(
-                        k_pool_back[base + i], 0.0,
+                        k_pool_back[base + i],
+                        0.0,
                         "K slot {slot} idx {i} must be untouched (= 0.0)"
                     );
                     assert_eq!(
-                        v_pool_back[base + i], 0.0,
+                        v_pool_back[base + i],
+                        0.0,
                         "V slot {slot} idx {i} must be untouched (= 0.0)"
                     );
                 }
@@ -4148,16 +4252,7 @@ mod tests {
         let b_buf = alloc_out(&dev, (b_dim * 4) as u64);
 
         dispatch_gdn_in_proj_split_resident(
-            &dev,
-            &comb_buf,
-            &qkv_buf,
-            &z_buf,
-            &a_buf,
-            &b_buf,
-            qkv_dim,
-            z_dim,
-            a_dim,
-            b_dim,
+            &dev, &comb_buf, &qkv_buf, &z_buf, &a_buf, &b_buf, qkv_dim, z_dim, a_dim, b_dim,
         )
         .unwrap();
 
@@ -4179,7 +4274,10 @@ mod tests {
             assert_eq!(a[i].to_bits(), comb_data[qkv_dim + z_dim + i].to_bits());
         }
         for i in 0..b_dim {
-            assert_eq!(b[i].to_bits(), comb_data[qkv_dim + z_dim + a_dim + i].to_bits());
+            assert_eq!(
+                b[i].to_bits(),
+                comb_data[qkv_dim + z_dim + a_dim + i].to_bits()
+            );
         }
     }
 
@@ -4199,10 +4297,8 @@ mod tests {
         let k_buf = alloc_out(&dev, (qk_dim * 4) as u64);
         let v_buf = alloc_out(&dev, (v_dim * 4) as u64);
 
-        dispatch_gdn_qkv_split_resident(
-            &dev, &qkv_buf, &q_buf, &k_buf, &v_buf, qk_dim, v_dim,
-        )
-        .unwrap();
+        dispatch_gdn_qkv_split_resident(&dev, &qkv_buf, &q_buf, &k_buf, &v_buf, qk_dim, v_dim)
+            .unwrap();
 
         let q = read_back_f32(&dev, &q_buf);
         let k = read_back_f32(&dev, &k_buf);
@@ -4250,15 +4346,9 @@ mod tests {
             .collect();
 
         let dev_arc = Arc::clone(&dev);
-        let cache = VkPagedKvCache::new(
-            &dev_arc,
-            1,
-            num_blocks,
-            block_size,
-            num_kv_heads,
-            head_dim,
-        )
-        .expect("VkPagedKvCache should allocate");
+        let cache =
+            VkPagedKvCache::new(&dev_arc, 1, num_blocks, block_size, num_kv_heads, head_dim)
+                .expect("VkPagedKvCache should allocate");
 
         // Block table maps logical position p → physical slot. We use
         // a non-trivial mapping (blocks 2, 0 — chosen so the read
@@ -4281,12 +4371,10 @@ mod tests {
         let v_pool_buf = cache.v_buffer(0).unwrap();
 
         for p in 0..seq_len {
-            let k_token: Vec<f32> = k_data[p * num_kv_heads * head_dim
-                ..(p + 1) * num_kv_heads * head_dim]
-                .to_vec();
-            let v_token: Vec<f32> = v_data[p * num_kv_heads * head_dim
-                ..(p + 1) * num_kv_heads * head_dim]
-                .to_vec();
+            let k_token: Vec<f32> =
+                k_data[p * num_kv_heads * head_dim..(p + 1) * num_kv_heads * head_dim].to_vec();
+            let v_token: Vec<f32> =
+                v_data[p * num_kv_heads * head_dim..(p + 1) * num_kv_heads * head_dim].to_vec();
             let k_buf = upload_f32_slice(&dev, &k_token).unwrap();
             let v_buf = upload_f32_slice(&dev, &v_token).unwrap();
             let slot = slot_for(p);

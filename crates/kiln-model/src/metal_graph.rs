@@ -1241,11 +1241,8 @@ impl MetalStableDecodeBuffers {
         // not host CPU cos/sin. CPU cos != GPU cos perturbs only the RoPE
         // full-attention layers on replay. Same root cause + fix as CUDA/ROCm.
         let dev = self.rotary_cos.device();
-        let inv_freq = crate::forward::compute_rotary_inv_freq(
-            config.rotary_dim(),
-            config.rope_theta,
-            &dev,
-        )?;
+        let inv_freq =
+            crate::forward::compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, &dev)?;
         let pos_f32: Vec<f32> = seq_lens.iter().map(|&p| p as f32).collect();
         let n = pos_f32.len();
         let pos = kiln_tensor::Tensor::from_vec_on(dev, pos_f32, vec![n])?;

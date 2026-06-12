@@ -49,11 +49,7 @@ fn apply_scalar(kind: i32, x: f32, c: f32) -> f32 {
 /// stay well-conditioned.
 fn val(i: usize) -> f32 {
     let v = (((i * 37 + 11) % 1000) as f32) / 100.0 - 5.0;
-    if v.abs() < 0.5 {
-        v + 1.0
-    } else {
-        v
-    }
+    if v.abs() < 0.5 { v + 1.0 } else { v }
 }
 
 #[test]
@@ -79,17 +75,25 @@ fn scalar_op_parity_all_kinds() {
         let data: Vec<f32> = (0..n).map(val).collect();
 
         for &kind in &kinds {
-            let reference: Vec<f32> = data.iter().map(|&x| apply_scalar(kind, x, scalar)).collect();
+            let reference: Vec<f32> = data
+                .iter()
+                .map(|&x| apply_scalar(kind, x, scalar))
+                .collect();
 
             let t = Tensor::from_vec_on(Device::Rocm(0), data.clone(), shape.clone())
                 .unwrap_or_else(|e| panic!("from_vec_on (shape={shape:?}): {e}"));
             let y = kiln_tensor::rocm_scalar_op(&t, kind, scalar)
                 .unwrap_or_else(|e| panic!("rocm_scalar_op (kind={kind}, shape={shape:?}): {e}"));
-            let host = kiln_tensor::rocm_to_host_copy(&y)
-                .unwrap_or_else(|e| panic!("rocm_to_host_copy (kind={kind}, shape={shape:?}): {e}"));
+            let host = kiln_tensor::rocm_to_host_copy(&y).unwrap_or_else(|e| {
+                panic!("rocm_to_host_copy (kind={kind}, shape={shape:?}): {e}")
+            });
             let got = host.to_vec::<f32>().expect("to_vec");
 
-            assert_eq!(got.len(), reference.len(), "len (kind={kind}, shape={shape:?})");
+            assert_eq!(
+                got.len(),
+                reference.len(),
+                "len (kind={kind}, shape={shape:?})"
+            );
             for (i, (g, rf)) in got.iter().zip(reference.iter()).enumerate() {
                 let diff = (g - rf).abs();
                 assert!(

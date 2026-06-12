@@ -31,12 +31,7 @@ unsafe extern "C" {
 /// passed through unchanged (partial-rotary support). F32 / BF16 / F16; all
 /// arithmetic promoted to F32. The kernel writes every output element, so the
 /// output buffer is allocated uninitialized.
-pub fn rocm_rope(
-    x: &Tensor,
-    cos: &Tensor,
-    sin: &Tensor,
-    rotary_dim: usize,
-) -> Result<Tensor> {
+pub fn rocm_rope(x: &Tensor, cos: &Tensor, sin: &Tensor, rotary_dim: usize) -> Result<Tensor> {
     // Shape / dtype validation (mirrors `cuda_rope` / ops/rope.rs::validate).
     if x.rank() < 2 {
         return Err(Error::Msg(format!(

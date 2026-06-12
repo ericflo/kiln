@@ -92,9 +92,7 @@ fn assert_close(got: &[f32], want: &[f32], ctx: &str) {
         let diff = (g - w).abs();
         let tol = 3e-2 * w.abs().max(1.0) + 3e-2;
         if diff > tol {
-            panic!(
-                "{ctx}: element {i} got {g} want {w} (|diff| {diff} > tol {tol})"
-            );
+            panic!("{ctx}: element {i} got {g} want {w} (|diff| {diff} > tol {tol})");
         }
         max_abs = max_abs.max(diff);
     }
@@ -163,16 +161,23 @@ fn rocm_fused_rmsnorm_backward_parity_sweep() {
         //   c       = (1/H) * rms_inv^2 * sum_j((1+w_j) x_ij g_ij)
         //   grad_x  = rms_inv * ((1+w) g - x c)
         //   grad_w  = sum_i x_ij rms_inv_i g_ij
-        let (want_gx, want_gw) =
-            rmsnorm_bwd_ref(&x_host, &w_host, &dy_host, rows, hidden, eps);
-        assert_close(&got_gx, &want_gx, &format!("backward grad_x hidden={hidden}"));
+        let (want_gx, want_gw) = rmsnorm_bwd_ref(&x_host, &w_host, &dy_host, rows, hidden, eps);
+        assert_close(
+            &got_gx,
+            &want_gx,
+            &format!("backward grad_x hidden={hidden}"),
+        );
 
         // grad_w lives in the first `hidden` F32 slots of the partial buffer.
         let gw_partial_host = kiln_tensor::rocm_to_host_copy(&grad_w_partial)
             .expect("rocm_to_host_copy grad_w_partial");
         let gw_partial = gw_partial_host.to_vec::<f32>().expect("to_vec f32");
         let got_gw = &gw_partial[..hidden];
-        assert_close(got_gw, &want_gw, &format!("backward grad_w hidden={hidden}"));
+        assert_close(
+            got_gw,
+            &want_gw,
+            &format!("backward grad_w hidden={hidden}"),
+        );
     }
 }
 

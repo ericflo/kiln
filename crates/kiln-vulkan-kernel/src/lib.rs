@@ -50,8 +50,7 @@ pub mod shaders {
     pub const FULL_ATTN_QKV_DECODE_BF16W: &str = shader_path!("full_attn_qkv_decode_bf16w");
     pub const FULL_ATTN_QKV_DECODE_BF16W_WIDE: &str =
         shader_path!("full_attn_qkv_decode_bf16w_wide");
-    pub const FULL_ATTN_QKV_DECODE_BATCHED: &str =
-        shader_path!("full_attn_qkv_decode_batched");
+    pub const FULL_ATTN_QKV_DECODE_BATCHED: &str = shader_path!("full_attn_qkv_decode_batched");
     pub const FULL_ATTN_QKV_DECODE_BATCHED_BF16W: &str =
         shader_path!("full_attn_qkv_decode_batched_bf16w");
     pub const FULL_ATTN_QKV_DECODE_BATCHED_ROWS4_BF16W: &str =
@@ -66,8 +65,7 @@ pub mod shaders {
     pub const QKV_GATE_SPLIT_BATCHED: &str = shader_path!("qkv_gate_split_batched");
     pub const VK_ROPE_F32: &str = shader_path!("vk_rope_f32");
     pub const VK_ROPE_QK_F32: &str = shader_path!("vk_rope_qk_f32");
-    pub const VK_ROPE_Q_KV_WRITE_SLOTS_F32: &str =
-        shader_path!("vk_rope_q_kv_write_slots_f32");
+    pub const VK_ROPE_Q_KV_WRITE_SLOTS_F32: &str = shader_path!("vk_rope_q_kv_write_slots_f32");
     pub const VK_ROPE_TABLES_FROM_SEQ_LENS_F32: &str =
         shader_path!("vk_rope_tables_from_seq_lens_f32");
     pub const PAGED_KV_WRITE_SLOT: &str = shader_path!("paged_kv_write_slot");
@@ -108,8 +106,7 @@ pub mod shaders {
     pub const TOPK_SAMPLE: &str = shader_path!("topk_sample");
     pub const TOPK_SAMPLE_BATCHED: &str = shader_path!("topk_sample_batched");
     pub const VK_EMBEDDING_LOOKUP_F32: &str = shader_path!("vk_embedding_lookup_f32");
-    pub const VK_EMBEDDING_LOOKUP_BF16W_F32: &str =
-        shader_path!("vk_embedding_lookup_bf16w_f32");
+    pub const VK_EMBEDDING_LOOKUP_BF16W_F32: &str = shader_path!("vk_embedding_lookup_bf16w_f32");
     pub const VK_EMBEDDING_LOOKUP_T_F32: &str = shader_path!("vk_embedding_lookup_t_f32");
     pub const VK_EMBEDDING_LOOKUP_T_BF16W_F32: &str =
         shader_path!("vk_embedding_lookup_t_bf16w_f32");
@@ -125,13 +122,11 @@ pub mod shaders {
         shader_path!("mlp_gate_up_decode_batched_rows8_bf16w");
     pub const GDN_IN_PROJ_SPLIT: &str = shader_path!("gdn_in_proj_split");
     pub const GDN_IN_PROJ_SPLIT_BATCHED: &str = shader_path!("gdn_in_proj_split_batched");
-    pub const GDN_DECODE_CONV_SPLIT_BATCHED: &str =
-        shader_path!("gdn_decode_conv_split_batched");
+    pub const GDN_DECODE_CONV_SPLIT_BATCHED: &str = shader_path!("gdn_decode_conv_split_batched");
     pub const GDN_QKV_SPLIT: &str = shader_path!("gdn_qkv_split");
     pub const GDN_QKV_SPLIT_BATCHED: &str = shader_path!("gdn_qkv_split_batched");
     pub const GDN_IN_PROJ_DECODE_BF16W: &str = shader_path!("gdn_in_proj_decode_bf16w");
-    pub const GDN_IN_PROJ_DECODE_BF16W_WIDE: &str =
-        shader_path!("gdn_in_proj_decode_bf16w_wide");
+    pub const GDN_IN_PROJ_DECODE_BF16W_WIDE: &str = shader_path!("gdn_in_proj_decode_bf16w_wide");
     pub const GDN_IN_PROJ_DECODE_BATCHED_BF16W: &str =
         shader_path!("gdn_in_proj_decode_batched_bf16w");
     pub const GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_BF16W: &str =

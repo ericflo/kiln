@@ -16,9 +16,7 @@
 
 use std::sync::Arc;
 
-use kiln_tensor::{
-    bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId,
-};
+use kiln_tensor::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 use crate::BackwardOp;
 
@@ -79,7 +77,11 @@ impl BackwardOp for DropoutBackward {
             .ok_or_else(|| Error::from_str("DropoutBackward: mask storage must be CpuStorage"))?;
         let g_bytes = g_cpu.as_bytes();
         let m_bytes = m_cpu.as_bytes();
-        let inv_keep = if self.p == 0.0 { 1.0 } else { 1.0 / (1.0 - self.p) };
+        let inv_keep = if self.p == 0.0 {
+            1.0
+        } else {
+            1.0 / (1.0 - self.p)
+        };
         let mut out = vec![0u8; n * per];
         match dtype {
             DType::F32 => {
@@ -94,8 +96,10 @@ impl BackwardOp for DropoutBackward {
             DType::BF16 => {
                 for i in 0..n {
                     if m_bytes[i] != 0 {
-                        let g = half::bf16::from_le_bytes(g_bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                            .to_f32();
+                        let g = half::bf16::from_le_bytes(
+                            g_bytes[i * 2..i * 2 + 2].try_into().unwrap(),
+                        )
+                        .to_f32();
                         let v = g * inv_keep;
                         out[i * 2..i * 2 + 2]
                             .copy_from_slice(&half::bf16::from_f32(v).to_le_bytes());
@@ -105,8 +109,9 @@ impl BackwardOp for DropoutBackward {
             DType::F16 => {
                 for i in 0..n {
                     if m_bytes[i] != 0 {
-                        let g = half::f16::from_le_bytes(g_bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                            .to_f32();
+                        let g =
+                            half::f16::from_le_bytes(g_bytes[i * 2..i * 2 + 2].try_into().unwrap())
+                                .to_f32();
                         let v = g * inv_keep;
                         out[i * 2..i * 2 + 2]
                             .copy_from_slice(&half::f16::from_f32(v).to_le_bytes());

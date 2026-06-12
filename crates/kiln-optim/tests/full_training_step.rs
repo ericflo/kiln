@@ -11,8 +11,8 @@
 //! Anti-pattern 11 (stable TensorId) + anti-pattern 16 (in-place
 //! version detection) compose end-to-end without per-impl awareness.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use kiln_autograd::{BackwardOp, Tape};
 use kiln_optim::{AdamW, OptimStep};
@@ -57,10 +57,8 @@ impl BackwardOp for PassthroughBwd {
 fn full_training_step_substrate_composes_end_to_end() {
     // ── Setup ──────────────────────────────────────────────────────
     // Parameter: a `[2, 2]` weight matrix; master = forward (fp32_ref).
-    let weight_fwd =
-        kt::Tensor::from_slice(&[1.0f32, 0.5, 0.5, 1.0], vec![2, 2]).unwrap();
-    let weight_master =
-        kt::Tensor::from_slice(&[1.0f32, 0.5, 0.5, 1.0], vec![2, 2]).unwrap();
+    let weight_fwd = kt::Tensor::from_slice(&[1.0f32, 0.5, 0.5, 1.0], vec![2, 2]).unwrap();
+    let weight_master = kt::Tensor::from_slice(&[1.0f32, 0.5, 0.5, 1.0], vec![2, 2]).unwrap();
     let mut param = Parameter::trainable(
         ForwardStorage::Plain(weight_fwd.clone()),
         weight_master,

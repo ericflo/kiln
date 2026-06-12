@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 /// the allocator layer; invoked by the governor under memory pressure.
 pub type Reclaimer = Box<dyn Fn(u64) -> u64 + Send + Sync>;
 
-use crate::vram::{current_memory_snapshot, MemorySnapshot};
+use crate::vram::{MemorySnapshot, current_memory_snapshot};
 
 /// Source of [`MemorySnapshot`]s. Abstracted so tests can drive the governor
 /// with synthetic memory states (no GPU required) and so an integration could
@@ -341,19 +341,21 @@ impl MemoryGovernor {
         let interval = self.cfg.ttl.max(Duration::from_secs(2));
         std::thread::Builder::new()
             .name("kiln-mem-governor".into())
-            .spawn(move || loop {
-                std::thread::sleep(interval);
-                let pressure = self.pressure();
-                if pressure.should_reclaim() {
-                    let freed = self.maybe_reclaim();
-                    let s = self.snapshot();
-                    tracing::info!(
-                        ?pressure,
-                        freed_mb = freed / (1024 * 1024),
-                        free_gb = s.free_bytes as f64 / 1e9,
-                        total_gb = s.total_bytes as f64 / 1e9,
-                        "memory governor: reclaimed under pressure"
-                    );
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(interval);
+                    let pressure = self.pressure();
+                    if pressure.should_reclaim() {
+                        let freed = self.maybe_reclaim();
+                        let s = self.snapshot();
+                        tracing::info!(
+                            ?pressure,
+                            freed_mb = freed / (1024 * 1024),
+                            free_gb = s.free_bytes as f64 / 1e9,
+                            total_gb = s.total_bytes as f64 / 1e9,
+                            "memory governor: reclaimed under pressure"
+                        );
+                    }
                 }
             })
             .ok();
@@ -444,7 +446,10 @@ mod tests {
     #[test]
     fn pressure_tracks_free_fraction() {
         // 24 GiB total, default thresholds (crit 5%, tight 10%, comfy 25%).
-        assert_eq!(gov(24 * GB, 12 * GB).pressure(), MemoryPressure::Comfortable);
+        assert_eq!(
+            gov(24 * GB, 12 * GB).pressure(),
+            MemoryPressure::Comfortable
+        );
         assert_eq!(gov(24 * GB, 4 * GB).pressure(), MemoryPressure::Moderate); // ~17%
         assert_eq!(gov(24 * GB, 2 * GB).pressure(), MemoryPressure::Tight); // ~8%
         assert_eq!(gov(24 * GB, GB).pressure(), MemoryPressure::Critical); // ~4%
@@ -504,8 +509,14 @@ mod tests {
         let start = Instant::now();
         g.wait_for_change(Duration::from_millis(120)); // no notify -> returns ~timeout
         let waited = start.elapsed();
-        assert!(waited >= Duration::from_millis(100), "returned too early: {waited:?}");
-        assert!(waited < Duration::from_secs(2), "timeout overshot: {waited:?}");
+        assert!(
+            waited >= Duration::from_millis(100),
+            "returned too early: {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(2),
+            "timeout overshot: {waited:?}"
+        );
     }
 
     /// Manual on-hardware smoke (`cargo test -p kiln-memory --

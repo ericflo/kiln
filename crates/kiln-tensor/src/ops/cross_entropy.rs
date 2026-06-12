@@ -32,8 +32,8 @@
 //! same input dtype.
 
 use crate::{
-    bail, dispatch2, BackwardOp, CpuStorage, DType, Determinism, DeviceOp2, Error, Layout, Result,
-    Storage, Tensor, TensorId,
+    BackwardOp, CpuStorage, DType, Determinism, DeviceOp2, Error, Layout, Result, Storage, Tensor,
+    TensorId, bail, dispatch2,
 };
 use std::sync::Arc;
 
@@ -146,8 +146,8 @@ impl DeviceOp2 for CrossEntropyOp {
                      loss is undefined"
                 );
             }
-            let log_sum_exp = max_logit
-                + row.iter().map(|&v| (v - max_logit).exp()).sum::<f32>().ln();
+            let log_sum_exp =
+                max_logit + row.iter().map(|&v| (v - max_logit).exp()).sum::<f32>().ln();
             let target = target_ids[b];
             if target >= vocab as u64 {
                 bail!(
@@ -235,7 +235,11 @@ fn downcast_cpu<'a>(t: &'a Tensor, label: &str) -> Result<&'a CpuStorage> {
     t.storage()
         .as_any()
         .downcast_ref::<CpuStorage>()
-        .ok_or_else(|| Error::Msg(format!("CrossEntropyOp: {label} storage must be CpuStorage")))
+        .ok_or_else(|| {
+            Error::Msg(format!(
+                "CrossEntropyOp: {label} storage must be CpuStorage"
+            ))
+        })
 }
 
 fn read_target_ids(targets: &Tensor, cpu: &CpuStorage, batch: usize) -> Result<Vec<u64>> {
@@ -297,22 +301,22 @@ fn load_logits_row_f32(
     match dtype {
         DType::F32 => {
             for i in 0..vocab {
-                out.push(f32::from_le_bytes(raw[i * 4..i * 4 + 4].try_into().unwrap()));
+                out.push(f32::from_le_bytes(
+                    raw[i * 4..i * 4 + 4].try_into().unwrap(),
+                ));
             }
         }
         DType::BF16 => {
             for i in 0..vocab {
                 out.push(
-                    half::bf16::from_le_bytes(raw[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32(),
+                    half::bf16::from_le_bytes(raw[i * 2..i * 2 + 2].try_into().unwrap()).to_f32(),
                 );
             }
         }
         DType::F16 => {
             for i in 0..vocab {
                 out.push(
-                    half::f16::from_le_bytes(raw[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32(),
+                    half::f16::from_le_bytes(raw[i * 2..i * 2 + 2].try_into().unwrap()).to_f32(),
                 );
             }
         }
@@ -338,11 +342,7 @@ mod tests {
     fn ce_perfect_prediction_is_close_to_zero() {
         // Logits with a single +∞-ish peak at the target → log P ≈ 0
         // → loss ≈ 0.
-        let logits = Tensor::from_slice(
-            &[100.0f32, 0.0, 0.0, 100.0],
-            vec![2, 2],
-        )
-        .unwrap();
+        let logits = Tensor::from_slice(&[100.0f32, 0.0, 0.0, 100.0], vec![2, 2]).unwrap();
         let targets = Tensor::from_slice(&[0i64, 1], vec![2]).unwrap();
         let loss = cross_entropy(&logits, &targets).unwrap();
         assert!(loss.rank() == 0);
@@ -355,8 +355,7 @@ mod tests {
         // Uniform logits → P = 1/vocab → -log(1/vocab) = log(vocab).
         let vocab = 4;
         let batch = 3;
-        let logits =
-            Tensor::from_slice(&vec![0.0f32; batch * vocab], vec![batch, vocab]).unwrap();
+        let logits = Tensor::from_slice(&vec![0.0f32; batch * vocab], vec![batch, vocab]).unwrap();
         let targets = Tensor::from_slice(&[0i64, 1, 2], vec![batch]).unwrap();
         let loss = cross_entropy(&logits, &targets).unwrap();
         let v = read_scalar_f32(&loss);

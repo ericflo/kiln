@@ -3783,8 +3783,8 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
                         512,
                     )
                     .context("checkpointed OPD: echo env grad")?;
-                    let grad_normed = (&grad_normed + &env_grad)
-                        .context("checkpointed OPD: echo grad add")?;
+                    let grad_normed =
+                        (&grad_normed + &env_grad).context("checkpointed OPD: echo grad add")?;
                     (
                         loss_val + spec.lambda * env_ce_val,
                         grad_normed,
@@ -4911,7 +4911,7 @@ mod tests {
                 None,
                 None,
             )
-        .expect("tape-authoritative OPD step");
+            .expect("tape-authoritative OPD step");
 
         // The active count must match the supervised positions.
         assert_eq!(
@@ -5163,7 +5163,7 @@ mod tests {
                 None,
                 None,
             )
-        .expect("opd_step_forward_backward_tape_authoritative (F32 Vulkan OPD)");
+            .expect("opd_step_forward_backward_tape_authoritative (F32 Vulkan OPD)");
 
         assert_eq!(active_count, active_positions.len());
         assert!(
@@ -5304,7 +5304,7 @@ mod tests {
                 None,
                 None,
             )
-        .expect("opd_step_forward_backward_tape_authoritative (BF16 Vulkan OPD)");
+            .expect("opd_step_forward_backward_tape_authoritative (BF16 Vulkan OPD)");
 
         assert_eq!(active_count, active_positions.len());
         assert!(

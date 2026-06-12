@@ -33,12 +33,7 @@ fn no_rocm() -> bool {
 
 /// CPU reference: zero an `[target_dim, inner]` buffer, then add each updates
 /// row into the target row named by `indices`. F32 accumulation.
-fn cpu_scatter_add(
-    updates: &[f32],
-    indices: &[u32],
-    target_dim: usize,
-    inner: usize,
-) -> Vec<f32> {
+fn cpu_scatter_add(updates: &[f32], indices: &[u32], target_dim: usize, inner: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; target_dim * inner];
     for (i, &id) in indices.iter().enumerate() {
         let id = id as usize;
@@ -64,7 +59,7 @@ fn scatter_add_f32_collisions_parity() {
         (8usize, 3usize, 1usize),
         (64, 4, 1),
         (128, 5, 7),
-        (256, 8, 33),  // inner straddles the 32-lane boundary
+        (256, 8, 33), // inner straddles the 32-lane boundary
         (1000, 16, 64),
         (2048, 7, 65),
     ];
@@ -167,7 +162,10 @@ fn scatter_add_f32_known_small() {
     let upd_t = Tensor::from_vec_on(Device::Rocm(0), updates, vec![3, 2]).unwrap();
     let idx_t = Tensor::from_vec_on(Device::Rocm(0), indices, vec![3]).unwrap();
     let out = scatter_add(&upd_t, 0, &idx_t, 2).unwrap();
-    let got = kiln_tensor::rocm_to_host_copy(&out).unwrap().to_vec::<f32>().unwrap();
+    let got = kiln_tensor::rocm_to_host_copy(&out)
+        .unwrap()
+        .to_vec::<f32>()
+        .unwrap();
     // row0 = [1+10, 2+20] = [11, 22]; row1 = [3, 4].
     assert_eq!(got, vec![11.0, 22.0, 3.0, 4.0]);
 }

@@ -158,9 +158,5 @@ pub fn rocm_concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
     }
 
     let storage_arc: crate::Storage = Arc::new(dst_storage);
-    Tensor::from_parts(
-        storage_arc,
-        Layout::contiguous(out_shape),
-        TensorId::next(),
-    )
+    Tensor::from_parts(storage_arc, Layout::contiguous(out_shape), TensorId::next())
 }

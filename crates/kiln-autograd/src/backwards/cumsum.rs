@@ -8,9 +8,7 @@
 
 use std::sync::Arc;
 
-use kiln_tensor::{
-    bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId,
-};
+use kiln_tensor::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 use crate::BackwardOp;
 
@@ -46,7 +44,10 @@ impl BackwardOp for CumsumBackward {
             bail!("CumsumBackward: grad must be contiguous");
         }
         let dtype = self.dtype;
-        let outer: usize = self.input_shape[..self.axis].iter().product::<usize>().max(1);
+        let outer: usize = self.input_shape[..self.axis]
+            .iter()
+            .product::<usize>()
+            .max(1);
         let axis_dim = self.input_shape[self.axis];
         let inner: usize = self.input_shape[self.axis + 1..]
             .iter()
@@ -68,9 +69,9 @@ impl BackwardOp for CumsumBackward {
                 for a in (0..axis_dim).rev() {
                     let idx = (o * axis_dim + a) * inner + i;
                     let v = match dtype {
-                        DType::F32 => f32::from_le_bytes(
-                            bytes[idx * 4..idx * 4 + 4].try_into().unwrap(),
-                        ),
+                        DType::F32 => {
+                            f32::from_le_bytes(bytes[idx * 4..idx * 4 + 4].try_into().unwrap())
+                        }
                         DType::BF16 => half::bf16::from_le_bytes(
                             bytes[idx * 2..idx * 2 + 2].try_into().unwrap(),
                         )

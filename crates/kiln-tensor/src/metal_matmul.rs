@@ -32,7 +32,7 @@
 
 use std::sync::Arc;
 
-use crate::metal_types::{buffer_o_kt, ComputePipeline};
+use crate::metal_types::{ComputePipeline, buffer_o_kt};
 use crate::{DType, Error, MetalStorage, Result};
 
 /// Compile options matching candle's GEMM path: fast math + fast FP
@@ -247,14 +247,22 @@ fn gemm_pipeline(metal: &MetalStorage) -> Result<ComputePipeline> {
     let lib = companion
         .device()
         .new_library_with_source(KILN_GEMM_MSL, None)
-        .map_err(|e| Error::Msg(format!("metal_matmul: compile kiln_gemm_bf16 library: {e:?}")))?;
+        .map_err(|e| {
+            Error::Msg(format!(
+                "metal_matmul: compile kiln_gemm_bf16 library: {e:?}"
+            ))
+        })?;
     let func = lib
         .get_function("kiln_gemm_bf16", None)
         .map_err(|e| Error::Msg(format!("metal_matmul: load kiln_gemm_bf16 function: {e:?}")))?;
     let pipeline = companion
         .device()
         .new_compute_pipeline_state_with_function(&func)
-        .map_err(|e| Error::Msg(format!("metal_matmul: build kiln_gemm_bf16 pipeline: {e:?}")))?;
+        .map_err(|e| {
+            Error::Msg(format!(
+                "metal_matmul: build kiln_gemm_bf16 pipeline: {e:?}"
+            ))
+        })?;
     let mut map = cache
         .lock()
         .map_err(|e| Error::Msg(format!("metal_matmul: pipeline cache poisoned: {e}")))?;
@@ -329,7 +337,13 @@ pub fn metal_matmul(a: &crate::Tensor, b: &crate::Tensor) -> Result<crate::Tenso
             "kiln_gemm",
         )
     } else {
-        (gemm_pipeline(a_metal)?, TILE, TILE, TG_THREADS, "kiln_gemm_bf16")
+        (
+            gemm_pipeline(a_metal)?,
+            TILE,
+            TILE,
+            TG_THREADS,
+            "kiln_gemm_bf16",
+        )
     };
 
     let out_metal = kt_metal(&out, "out")?;
@@ -390,7 +404,9 @@ pub fn metal_matmul_lhs_transposed(a: &crate::Tensor, b: &crate::Tensor) -> Resu
     let ar = a.rank();
     let br = b.rank();
     if ar < 2 || br < 2 {
-        return Err(Error::Msg(format!("{OP}: rank must be >= 2, got a={ar} b={br}")));
+        return Err(Error::Msg(format!(
+            "{OP}: rank must be >= 2, got a={ar} b={br}"
+        )));
     }
     if ar != br {
         return Err(Error::Msg(format!("{OP}: rank mismatch a={ar} b={br}")));
@@ -421,7 +437,9 @@ pub fn metal_matmul_lhs_transposed(a: &crate::Tensor, b: &crate::Tensor) -> Resu
     let k_b = b_shape[br - 2];
     let n = b_shape[br - 1];
     if k != k_b {
-        return Err(Error::Msg(format!("{OP}: contraction mismatch a.K={k} vs b.K={k_b}")));
+        return Err(Error::Msg(format!(
+            "{OP}: contraction mismatch a.K={k} vs b.K={k_b}"
+        )));
     }
     for &d in &[m, n, k] {
         if d > u32::MAX as usize {
@@ -509,7 +527,9 @@ pub fn metal_matmul_rhs_transposed(a: &crate::Tensor, b: &crate::Tensor) -> Resu
     let ar = a.rank();
     let br = b.rank();
     if ar < 2 || br < 2 {
-        return Err(Error::Msg(format!("{OP}: rank must be >= 2, got a={ar} b={br}")));
+        return Err(Error::Msg(format!(
+            "{OP}: rank must be >= 2, got a={ar} b={br}"
+        )));
     }
     if ar != br {
         return Err(Error::Msg(format!("{OP}: rank mismatch a={ar} b={br}")));
@@ -540,7 +560,9 @@ pub fn metal_matmul_rhs_transposed(a: &crate::Tensor, b: &crate::Tensor) -> Resu
     let n = b_shape[br - 2];
     let k_b = b_shape[br - 1];
     if k != k_b {
-        return Err(Error::Msg(format!("{OP}: contraction mismatch a.K={k} vs b.K={k_b}")));
+        return Err(Error::Msg(format!(
+            "{OP}: contraction mismatch a.K={k} vs b.K={k_b}"
+        )));
     }
     for &d in &[m, n, k] {
         if d > u32::MAX as usize {

@@ -35,13 +35,7 @@ fn masked_fill_parity() {
     }
     let fill_value = -1.0e30f32;
     // A handful of shapes including a non-multiple-of-block size and a 2D shape.
-    let shapes: [Vec<usize>; 5] = [
-        vec![1],
-        vec![257],
-        vec![6, 64],
-        vec![5, 333],
-        vec![4, 7, 9],
-    ];
+    let shapes: [Vec<usize>; 5] = [vec![1], vec![257], vec![6, 64], vec![5, 333], vec![4, 7, 9]];
 
     for shape in &shapes {
         let n: usize = shape.iter().product();
@@ -51,7 +45,13 @@ fn masked_fill_parity() {
 
         // CPU reference.
         let reference: Vec<f32> = (0..n)
-            .map(|i| if mask_data[i] != 0 { fill_value } else { x_data[i] })
+            .map(|i| {
+                if mask_data[i] != 0 {
+                    fill_value
+                } else {
+                    x_data[i]
+                }
+            })
             .collect();
 
         // Device path.

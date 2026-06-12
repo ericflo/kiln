@@ -256,6 +256,15 @@ impl Tape {
             } else {
                 None
             };
+            if trace_node_timings {
+                eprintln!(
+                    "kiln_tape_backward_begin node_index={} op={} grad_shape={:?} grad_dtype={:?}",
+                    node_index,
+                    node.op.name(),
+                    grad_shape.as_ref().cloned().unwrap_or_default(),
+                    grad_dtype,
+                );
+            }
             let per_input = node.op.apply(&grad_output)?;
             if let Some(started) = node_started {
                 eprintln!(

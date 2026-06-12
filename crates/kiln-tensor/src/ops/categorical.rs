@@ -8,7 +8,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 /// Materialize `t` on CPU. CUDA inputs are D2H-copied via
 /// `cuda_to_host_copy`; CPU inputs are cheap `Arc` bumps.
@@ -74,7 +74,10 @@ impl Multinomial {
             bail!("Multinomial: probs must be contiguous");
         }
         if !matches!(probs.dtype(), DType::F32 | DType::BF16 | DType::F16) {
-            bail!("Multinomial: dtype must be F32/BF16/F16, got {}", probs.dtype());
+            bail!(
+                "Multinomial: dtype must be F32/BF16/F16, got {}",
+                probs.dtype()
+            );
         }
         let batch = probs.shape()[0];
         let vocab = probs.shape()[1];
@@ -96,15 +99,17 @@ impl Multinomial {
             for v in 0..vocab {
                 let idx = b * vocab + v;
                 let p = match dtype {
-                    DType::F32 => f32::from_le_bytes(bytes[idx * 4..idx * 4 + 4].try_into().unwrap()),
-                    DType::BF16 => half::bf16::from_le_bytes(
-                        bytes[idx * 2..idx * 2 + 2].try_into().unwrap(),
-                    )
-                    .to_f32(),
-                    DType::F16 => half::f16::from_le_bytes(
-                        bytes[idx * 2..idx * 2 + 2].try_into().unwrap(),
-                    )
-                    .to_f32(),
+                    DType::F32 => {
+                        f32::from_le_bytes(bytes[idx * 4..idx * 4 + 4].try_into().unwrap())
+                    }
+                    DType::BF16 => {
+                        half::bf16::from_le_bytes(bytes[idx * 2..idx * 2 + 2].try_into().unwrap())
+                            .to_f32()
+                    }
+                    DType::F16 => {
+                        half::f16::from_le_bytes(bytes[idx * 2..idx * 2 + 2].try_into().unwrap())
+                            .to_f32()
+                    }
                     _ => unreachable!(),
                 };
                 if p < 0.0 {
@@ -172,7 +177,10 @@ mod tests {
         let probs = Tensor::from_slice(&[0.7f32, 0.2, 0.1], vec![1, 3]).unwrap();
         let m1 = Multinomial::with_seed(42);
         let m2 = Multinomial::with_seed(42);
-        assert_eq!(read_i64(&m1.sample(&probs).unwrap()), read_i64(&m2.sample(&probs).unwrap()));
+        assert_eq!(
+            read_i64(&m1.sample(&probs).unwrap()),
+            read_i64(&m2.sample(&probs).unwrap())
+        );
     }
 
     #[test]
@@ -234,14 +242,8 @@ mod tests {
             return;
         }
 
-        let probs_cpu = Tensor::from_slice(
-            &[0.5f32, 0.3, 0.2, 0.1, 0.6, 0.3],
-            vec![2, 3],
-        )
-        .unwrap();
-        let probs_cuda = probs_cpu
-            .to_device(crate::Device::Cuda(0))
-            .unwrap();
+        let probs_cpu = Tensor::from_slice(&[0.5f32, 0.3, 0.2, 0.1, 0.6, 0.3], vec![2, 3]).unwrap();
+        let probs_cuda = probs_cpu.to_device(crate::Device::Cuda(0)).unwrap();
 
         // Same RNG seed → same draws on either device.
         let m_cpu = Multinomial::with_seed(12345);
@@ -253,4 +255,3 @@ mod tests {
         }
     }
 }
-

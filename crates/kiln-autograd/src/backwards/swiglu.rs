@@ -24,9 +24,7 @@
 
 use std::sync::Arc;
 
-use kiln_tensor::{
-    bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId,
-};
+use kiln_tensor::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 use crate::BackwardOp;
 
@@ -62,9 +60,7 @@ impl BackwardOp for MulSigmoidGateBackward {
         }
         let dtype = self.gate.dtype();
         if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
-            bail!(
-                "MulSigmoidGateBackward: dtype must be F32/BF16/F16, got {dtype}"
-            );
+            bail!("MulSigmoidGateBackward: dtype must be F32/BF16/F16, got {dtype}");
         }
         if self.up.dtype() != dtype || grad_output.dtype() != dtype {
             bail!("MulSigmoidGateBackward: dtype mismatch among saved tensors and grad");
@@ -151,10 +147,12 @@ fn load_f32(t: &Tensor) -> Result<Vec<f32>> {
     for i in 0..n {
         out.push(match dtype {
             DType::F32 => f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()),
-            DType::BF16 => half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
-            DType::F16 => half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
+            DType::BF16 => {
+                half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
+            DType::F16 => {
+                half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
             _ => unreachable!(),
         });
     }
@@ -184,7 +182,11 @@ fn store_f32(dtype: DType, shape: &[usize], data: &[f32]) -> Result<Tensor> {
     }
     let cpu = CpuStorage::from_bytes(dtype, bytes)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(shape.to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(shape.to_vec()),
+        TensorId::next(),
+    )
 }
 
 #[cfg(test)]
@@ -215,8 +217,16 @@ mod tests {
             up: up.clone(),
         };
         let grads = bo.apply(&dy).unwrap();
-        approx(&load_f32(grads[0].as_ref().unwrap()).unwrap(), &[1.0, 2.0], 1e-6);
-        approx(&load_f32(grads[1].as_ref().unwrap()).unwrap(), &[0.0, 0.0], 1e-6);
+        approx(
+            &load_f32(grads[0].as_ref().unwrap()).unwrap(),
+            &[1.0, 2.0],
+            1e-6,
+        );
+        approx(
+            &load_f32(grads[1].as_ref().unwrap()).unwrap(),
+            &[0.0, 0.0],
+            1e-6,
+        );
     }
 
     #[test]

@@ -97,9 +97,7 @@ async fn list_suites(State(state): State<AppState>) -> Result<Json<SuiteListResp
         // so dashboards have something to render in mock mode.
         return Ok(Json(SuiteListResponse { suites: vec![] }));
     };
-    Ok(Json(SuiteListResponse {
-        suites: reg.list(),
-    }))
+    Ok(Json(SuiteListResponse { suites: reg.list() }))
 }
 
 async fn get_suite(
@@ -110,13 +108,11 @@ async fn get_suite(
         .suite_registry
         .as_ref()
         .ok_or_else(ApiError::eval_registry_unavailable)?;
-    let suite = reg
-        .load(&name)
-        .map_err(|e| match e {
-            crate::eval::SuiteRegistryError::NotFound(_) => ApiError::eval_suite_not_found(&name),
-            crate::eval::SuiteRegistryError::InvalidName(n) => ApiError::invalid_suite_name(n),
-            other => ApiError::eval_invalid_request(format!("{other}")),
-        })?;
+    let suite = reg.load(&name).map_err(|e| match e {
+        crate::eval::SuiteRegistryError::NotFound(_) => ApiError::eval_suite_not_found(&name),
+        crate::eval::SuiteRegistryError::InvalidName(n) => ApiError::invalid_suite_name(n),
+        other => ApiError::eval_invalid_request(format!("{other}")),
+    })?;
     Ok(Json(suite))
 }
 
@@ -184,7 +180,9 @@ async fn submit_eval(
     }
 
     // Normalize the adapter selection: empty string means base model.
-    let adapter = req.adapter.and_then(|s| if s.is_empty() { None } else { Some(s) });
+    let adapter = req
+        .adapter
+        .and_then(|s| if s.is_empty() { None } else { Some(s) });
     let adapters = vec![adapter.clone()];
 
     let (suite_name, queued_job) = if let Some(name) = req.suite {
@@ -376,13 +374,14 @@ async fn rerun_job(
             "no matching outcomes to re-run",
         ));
     }
-    let inline = crate::eval::rerun_filtered_suite(suites, &suite_name, &example_ids)
-        .map_err(|e| match e {
+    let inline = crate::eval::rerun_filtered_suite(suites, &suite_name, &example_ids).map_err(
+        |e| match e {
             crate::eval::rerun::RerunError::Registry(
                 crate::eval::SuiteRegistryError::NotFound(_),
             ) => ApiError::eval_suite_not_found(&suite_name),
             other => ApiError::eval_invalid_request(format!("{other}")),
-        })?;
+        },
+    )?;
     let suite_label = inline.name.clone();
     let new_job_id = state.enqueue_eval(
         suite_label.clone(),
@@ -452,16 +451,14 @@ async fn cancel_job(
                 "note": "running job will exit at the next example boundary",
             })))
         }
-        Some(
-            EvalJobState::Cancelled | EvalJobState::Completed | EvalJobState::Failed,
-        ) => {
+        Some(EvalJobState::Cancelled | EvalJobState::Completed | EvalJobState::Failed) => {
             // Terminal — DELETE means "remove from tracking + archive".
             {
                 let mut jobs = state.eval_jobs.write().unwrap();
                 jobs.remove(&job_id);
             }
-            let archive_path = crate::eval_history::archive_dir(&state.adapter_dir)
-                .join(format!("{job_id}.json"));
+            let archive_path =
+                crate::eval_history::archive_dir(&state.adapter_dir).join(format!("{job_id}.json"));
             let removed_file = match std::fs::remove_file(&archive_path) {
                 Ok(_) => true,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
@@ -699,14 +696,13 @@ async fn synthesize_dataset_preview(
         .dataset_registry
         .as_ref()
         .ok_or_else(ApiError::dataset_registry_unavailable)?;
-    let preview = preview_synthesis(datasets, &name, &body.config, body.head_n).map_err(|e| {
-        match e {
+    let preview =
+        preview_synthesis(datasets, &name, &body.config, body.head_n).map_err(|e| match e {
             crate::eval::SynthesisDriverError::Dataset(crate::eval::DatasetError::NotFound(_)) => {
                 ApiError::dataset_not_found(&name)
             }
             other => ApiError::dataset_invalid(format!("{other}")),
-        }
-    })?;
+        })?;
     Ok(Json(serde_json::to_value(&preview).unwrap_or_default()))
 }
 
@@ -747,7 +743,11 @@ async fn synthesize_dataset(
         .unwrap_or_default()
         .into_iter()
         .map(|adapter| {
-            let adapter_opt = if adapter.is_empty() { None } else { Some(adapter) };
+            let adapter_opt = if adapter.is_empty() {
+                None
+            } else {
+                Some(adapter)
+            };
             state.enqueue_eval(
                 outcome.suite.name.clone(),
                 vec![adapter_opt.clone()],
@@ -799,11 +799,13 @@ async fn create_judgment_dataset(
         .judgment_store
         .as_ref()
         .ok_or_else(ApiError::judgment_store_unavailable)?;
-    let m = store.create(&body.name, body.description).map_err(|e| match e {
-        crate::eval::JudgmentError::AlreadyExists(_) => ApiError::dataset_exists(&body.name),
-        crate::eval::JudgmentError::InvalidName(n) => ApiError::dataset_invalid(n),
-        other => ApiError::judgment_invalid(format!("{other}")),
-    })?;
+    let m = store
+        .create(&body.name, body.description)
+        .map_err(|e| match e {
+            crate::eval::JudgmentError::AlreadyExists(_) => ApiError::dataset_exists(&body.name),
+            crate::eval::JudgmentError::InvalidName(n) => ApiError::dataset_invalid(n),
+            other => ApiError::judgment_invalid(format!("{other}")),
+        })?;
     Ok(Json(m))
 }
 
@@ -1037,9 +1039,7 @@ async fn validate_judgment_adapter(
 /// replies, render the judging prompt string the way the SFT compiler
 /// would. Lets the UI display the exact text that the judge LoRA will
 /// see, before the user commits a judgment.
-async fn render_judgment_prompt(
-    Json(body): Json<AppendJudgmentBody>,
-) -> Json<serde_json::Value> {
+async fn render_judgment_prompt(Json(body): Json<AppendJudgmentBody>) -> Json<serde_json::Value> {
     let row = JudgmentRow {
         id: body.id.unwrap_or_default(),
         prompt: body.prompt,
@@ -1062,7 +1062,10 @@ pub fn routes() -> Router<AppState> {
             "/v1/eval/suites",
             post(save_suite).layer(DefaultBodyLimit::max(SUITE_BODY_LIMIT)),
         )
-        .route("/v1/eval/suites/{name}", get(get_suite).delete(delete_suite))
+        .route(
+            "/v1/eval/suites/{name}",
+            get(get_suite).delete(delete_suite),
+        )
         .route(
             "/v1/eval/run",
             post(submit_eval).layer(DefaultBodyLimit::max(EVAL_BODY_LIMIT)),
@@ -1094,19 +1097,22 @@ pub fn routes() -> Router<AppState> {
             post(synthesize_dataset).layer(DefaultBodyLimit::max(EVAL_BODY_LIMIT)),
         )
         // Judgments — the flywheel
-        .route("/v1/judgments", get(list_judgments).post(create_judgment_dataset))
-        .route("/v1/judgments/render_prompt", post(render_judgment_prompt))
         .route(
-            "/v1/judgments/{name}",
-            delete(delete_judgment_dataset),
+            "/v1/judgments",
+            get(list_judgments).post(create_judgment_dataset),
         )
+        .route("/v1/judgments/render_prompt", post(render_judgment_prompt))
+        .route("/v1/judgments/{name}", delete(delete_judgment_dataset))
         .route("/v1/judgments/{name}/rows", post(append_judgment))
         .route(
             "/v1/judgments/{name}/rows/{judgment_id}",
             delete(remove_judgment_row),
         )
         .route("/v1/judgments/{name}/compile", post(compile_judgment))
-        .route("/v1/judgments/{name}/validate", post(validate_judgment_adapter))
+        .route(
+            "/v1/judgments/{name}/validate",
+            post(validate_judgment_adapter),
+        )
 }
 
 #[cfg(test)]
@@ -1190,7 +1196,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        let body_bytes = axum::body::to_bytes(res.into_body(), 1 << 16).await.unwrap();
+        let body_bytes = axum::body::to_bytes(res.into_body(), 1 << 16)
+            .await
+            .unwrap();
         let resp: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
         assert!(resp["job_id"].as_str().is_some());
         assert_eq!(resp["state"], "queued");
@@ -1296,7 +1304,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let bytes = axum::body::to_bytes(res.into_body(), 1 << 16).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 16)
+            .await
+            .unwrap();
         let resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(resp["jobs"].as_array().unwrap().len(), 1);
     }
@@ -1318,7 +1328,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let bytes = axum::body::to_bytes(res.into_body(), 1 << 16).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 16)
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let job_id = v["job_id"].as_str().unwrap().to_string();
 
@@ -1333,7 +1345,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(res.into_body(), 1 << 16).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 16)
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["status"], "cancelled");
     }

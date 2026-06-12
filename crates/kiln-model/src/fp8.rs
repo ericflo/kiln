@@ -369,9 +369,7 @@ mod tests {
     fn test_quantize_preserves_shape() -> Result<()> {
         // Deterministic pseudo-random values (no candle `randn` dependency).
         let n = 2 * 4 * 8 * 16;
-        let data: Vec<f32> = (0..n)
-            .map(|i| ((i as f32 * 0.31).sin()))
-            .collect();
+        let data: Vec<f32> = (0..n).map(|i| ((i as f32 * 0.31).sin())).collect();
         let tensor = Tensor::from_vec_on(Device::Cpu, data, vec![2, 4, 8, 16])?;
         let (quantized, _scale) = quantize_to_fp8(&tensor)?;
         assert_eq!(quantized.dims(), tensor.dims());

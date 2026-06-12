@@ -1465,7 +1465,13 @@ impl GdnBackend for CudaBackend {
         in_proj_ab_t: &kiln_tensor::Tensor,
         nv: usize,
         seq_len: usize,
-    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+    ) -> Result<
+        Option<(
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+            kiln_tensor::Tensor,
+        )>,
+    > {
         let Ok((_, actual_seq_len, hidden)) = x.dims3() else {
             return Ok(None);
         };

@@ -74,8 +74,7 @@ fn causal_conv1d_update_kt_dispatches_on_qwen_decode_shape() {
     )
     .expect("cs");
 
-    let out =
-        causal_conv1d_update_kt(&x, &w, &cs, kernel_size).expect("causal_conv1d_update_kt");
+    let out = causal_conv1d_update_kt(&x, &w, &cs, kernel_size).expect("causal_conv1d_update_kt");
     assert_eq!(out.shape(), &[batch, channels, 1]);
 }
 
@@ -112,8 +111,7 @@ fn causal_conv1d_prefill_kt_dispatches_on_qwen_prefill_shape() {
     )
     .expect("cs");
 
-    let out = causal_conv1d_prefill_kt(&x, &w, &cs, kernel_size)
-        .expect("causal_conv1d_prefill_kt");
+    let out = causal_conv1d_prefill_kt(&x, &w, &cs, kernel_size).expect("causal_conv1d_prefill_kt");
     assert_eq!(out.shape(), &[batch, channels, seq_len]);
 }
 

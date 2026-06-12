@@ -250,7 +250,11 @@ fn format_xml_param_value(v: &serde_json::Value) -> String {
 /// output.
 pub fn extract_tool_calls(raw: &str) -> Vec<ParsedToolCall> {
     let split = split_thinking(raw);
-    let scan = if split.had_thinking { split.answer } else { raw };
+    let scan = if split.had_thinking {
+        split.answer
+    } else {
+        raw
+    };
 
     let xml = extract_qwen3_xml_tool_calls(scan);
     if !xml.is_empty() {
@@ -666,9 +670,7 @@ pub fn validate_against_schema(
     tools: &[serde_json::Value],
 ) -> Option<SchemaCheck> {
     let parameters = lookup_tool_parameters(tools, &call.name)?;
-    let properties = parameters
-        .get("properties")
-        .and_then(|v| v.as_object());
+    let properties = parameters.get("properties").and_then(|v| v.as_object());
     let required: Vec<String> = parameters
         .get("required")
         .and_then(|v| v.as_array())
@@ -808,8 +810,7 @@ mod tests {
 
     #[test]
     fn extract_qwen3_xml_with_thinking_prefix() {
-        let raw =
-            "<think>\nI should call the weather API.\n</think>\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nTokyo\n</parameter>\n</function>\n</tool_call>";
+        let raw = "<think>\nI should call the weather API.\n</think>\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nTokyo\n</parameter>\n</function>\n</tool_call>";
         let calls = extract_tool_calls(raw);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "get_weather");
@@ -978,10 +979,7 @@ mod tests {
         })];
         let call = ParsedToolCall {
             name: "read".into(),
-            arguments: serde_json::Map::from_iter([(
-                "path".to_string(),
-                serde_json::json!("/x"),
-            )]),
+            arguments: serde_json::Map::from_iter([("path".to_string(), serde_json::json!("/x"))]),
             format: ToolCallFormat::Qwen3Xml,
         };
         let check = validate_against_schema(&call, &tools).unwrap();

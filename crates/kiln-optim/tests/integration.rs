@@ -11,7 +11,11 @@ use kiln_tensor as kt;
 fn fresh_param(values: &[f32]) -> Parameter {
     let fwd = kt::Tensor::from_slice(values, vec![values.len()]).unwrap();
     let master = kt::Tensor::from_slice(values, vec![values.len()]).unwrap();
-    Parameter::trainable(ForwardStorage::Plain(fwd), master, AmpPolicy::fp32_reference())
+    Parameter::trainable(
+        ForwardStorage::Plain(fwd),
+        master,
+        AmpPolicy::fp32_reference(),
+    )
 }
 
 #[test]
@@ -161,10 +165,8 @@ fn optim_step_dispatch_works_via_trait_object() {
 #[test]
 fn optim_step_rejects_grad_shape_mismatch_under_trait_dispatch() {
     // Same error surface for both AdamW and Sgd.
-    let cases: Vec<Box<dyn OptimStep>> = vec![
-        Box::new(AdamW::default_hp()),
-        Box::new(Sgd::default_hp()),
-    ];
+    let cases: Vec<Box<dyn OptimStep>> =
+        vec![Box::new(AdamW::default_hp()), Box::new(Sgd::default_hp())];
     for mut opt in cases.into_iter() {
         let mut p = fresh_param(&[1.0f32, 2.0, 3.0]);
         let g = kt::Tensor::from_slice(&[0.1f32, 0.2], vec![2]).unwrap();

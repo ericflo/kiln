@@ -107,7 +107,10 @@ pub fn vk_matmul_lhs_t_no_grad(a: &VkTensor, b: &VkTensor) -> Result<VkTensor> {
     let m = a.shape()[1];
     let kk = b.shape()[0];
     let n = b.shape()[1];
-    anyhow::ensure!(k == kk, "vk_matmul_lhs_t: inner-dim mismatch: a.K={k}, b.K={kk}");
+    anyhow::ensure!(
+        k == kk,
+        "vk_matmul_lhs_t: inner-dim mismatch: a.K={k}, b.K={kk}"
+    );
 
     let a3 = VkTensor::from_buffer(
         Arc::clone(a.buffer()),
@@ -149,7 +152,10 @@ pub fn vk_matmul_rhs_t_no_grad(a: &VkTensor, b: &VkTensor) -> Result<VkTensor> {
     let k = a.shape()[1];
     let n = b.shape()[0];
     let kk = b.shape()[1];
-    anyhow::ensure!(k == kk, "vk_matmul_rhs_t: inner-dim mismatch: a.K={k}, b.K={kk}");
+    anyhow::ensure!(
+        k == kk,
+        "vk_matmul_rhs_t: inner-dim mismatch: a.K={k}, b.K={kk}"
+    );
 
     let a3 = VkTensor::from_buffer(
         Arc::clone(a.buffer()),

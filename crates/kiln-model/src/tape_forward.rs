@@ -420,8 +420,7 @@ pub fn try_tape_rms_norm_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !tape_forward_device_supported(x.device())
-        || !tape_forward_device_supported(weight.device())
+    if !tape_forward_device_supported(x.device()) || !tape_forward_device_supported(weight.device())
     {
         return Ok(None);
     }
@@ -3381,9 +3380,7 @@ pub fn try_tape_cast_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !tape_forward_device_supported(x.device())
-        || !tape_forward_device_supported(out.device())
-    {
+    if !tape_forward_device_supported(x.device()) || !tape_forward_device_supported(out.device()) {
         return Ok(None);
     }
     if x.dims() != out.dims() {
@@ -3501,9 +3498,7 @@ pub fn try_tape_narrow_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !tape_forward_device_supported(x.device())
-        || !tape_forward_device_supported(out.device())
-    {
+    if !tape_forward_device_supported(x.device()) || !tape_forward_device_supported(out.device()) {
         return Ok(None);
     }
     let x_dims = x.dims().to_vec();
@@ -3611,9 +3606,7 @@ pub fn try_tape_gqa_expand_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !tape_forward_device_supported(x.device())
-        || !tape_forward_device_supported(out.device())
-    {
+    if !tape_forward_device_supported(x.device()) || !tape_forward_device_supported(out.device()) {
         return Ok(None);
     }
     if gqa_ratio <= 1 {

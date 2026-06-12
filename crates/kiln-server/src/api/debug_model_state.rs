@@ -269,7 +269,10 @@ fn sha256_file(path: &Path) -> std::io::Result<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(format!("sha256:{}", hex_digest(hasher.finalize().as_slice())))
+    Ok(format!(
+        "sha256:{}",
+        hex_digest(hasher.finalize().as_slice())
+    ))
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -522,18 +525,21 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let adapter_dir = tmp.path().join("eval-adapter");
         std::fs::create_dir_all(&adapter_dir).unwrap();
-        std::fs::write(adapter_dir.join("adapter_model.safetensors"), b"adapter bytes").unwrap();
+        std::fs::write(
+            adapter_dir.join("adapter_model.safetensors"),
+            b"adapter bytes",
+        )
+        .unwrap();
 
         let mut state = make_test_state(tmp.path().to_path_buf());
         state.eval_mode = true;
         state.default_thinking_enabled = Some(false);
         *state.active_adapter_name.write().unwrap() = Some("eval-adapter".to_string());
         *state.loaded_adapter_name.write().unwrap() = Some("eval-adapter".to_string());
-        state
-            .adapter_load_errors
-            .write()
-            .unwrap()
-            .insert("bad-adapter".to_string(), "missing adapter_config.json".to_string());
+        state.adapter_load_errors.write().unwrap().insert(
+            "bad-adapter".to_string(),
+            "missing adapter_config.json".to_string(),
+        );
         {
             let mut recent = state.recent_requests.lock().unwrap();
             recent.record(crate::recent_requests::RequestRecord {
@@ -571,18 +577,28 @@ mod tests {
             json["adapters"]["load_errors"]["bad-adapter"],
             "missing adapter_config.json"
         );
-        assert_eq!(json["adapters"]["loaded_adapters"][0]["name"], "eval-adapter");
-        assert!(json["adapters"]["loaded_adapters"][0]["adapter_model_sha256"]
-            .as_str()
-            .unwrap()
-            .starts_with("sha256:"));
-        assert!(json["config_hashes"]["model_config_hash"]
-            .as_str()
-            .unwrap()
-            .starts_with("sha256:"));
+        assert_eq!(
+            json["adapters"]["loaded_adapters"][0]["name"],
+            "eval-adapter"
+        );
+        assert!(
+            json["adapters"]["loaded_adapters"][0]["adapter_model_sha256"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+        assert!(
+            json["config_hashes"]["model_config_hash"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
         assert_eq!(json["thinking"]["eval_mode"], true);
         assert_eq!(json["thinking"]["default_thinking_enabled"], false);
-        assert_eq!(json["thinking"]["eval_mode_default_thinking_enabled"], false);
+        assert_eq!(
+            json["thinking"]["eval_mode_default_thinking_enabled"],
+            false
+        );
         assert_eq!(json["batching_engine"]["backend"], "mock");
         assert_eq!(json["batching_engine"]["enabled"], false);
         assert!(json["caches"]["rendered_prompt"].is_object());

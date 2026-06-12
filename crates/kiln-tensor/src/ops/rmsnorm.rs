@@ -29,8 +29,8 @@
 //! `grad_w` cross-row accumulation in the bwd, not the fwd here.)
 
 use crate::{
-    bail, dispatch2, BackwardOp, CpuStorage, DType, Determinism, DeviceOp2, Error, Layout, Result,
-    Storage, Tensor, TensorId,
+    BackwardOp, CpuStorage, DType, Determinism, DeviceOp2, Error, Layout, Result, Storage, Tensor,
+    TensorId, bail, dispatch2,
 };
 use std::sync::Arc;
 
@@ -105,7 +105,11 @@ impl DeviceOp2 for RmsNormOp {
 
         let cpu = CpuStorage::from_bytes(dtype, out_bytes)?;
         let storage: Storage = Arc::new(cpu);
-        let out = Tensor::from_parts(storage, Layout::contiguous(shape.to_vec()), TensorId::next())?;
+        let out = Tensor::from_parts(
+            storage,
+            Layout::contiguous(shape.to_vec()),
+            TensorId::next(),
+        )?;
         Ok(Some(out))
     }
 
@@ -301,15 +305,10 @@ fn validate(x: &Tensor, weight: &Tensor) -> Result<()> {
     let last_x = *x.shape().last().unwrap();
     let last_w = weight.shape()[0];
     if last_x != last_w {
-        bail!(
-            "RmsNormOp: x last-axis {last_x} != weight len {last_w}"
-        );
+        bail!("RmsNormOp: x last-axis {last_x} != weight len {last_w}");
     }
     if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
-        bail!(
-            "RmsNormOp: x dtype must be F32/BF16/F16, got {}",
-            x.dtype()
-        );
+        bail!("RmsNormOp: x dtype must be F32/BF16/F16, got {}", x.dtype());
     }
     if !matches!(weight.dtype(), DType::F32 | DType::BF16 | DType::F16) {
         bail!(
@@ -330,7 +329,11 @@ fn downcast_cpu<'a>(t: &'a Tensor, label: &str) -> Result<&'a CpuStorage> {
     t.storage()
         .as_any()
         .downcast_ref::<CpuStorage>()
-        .ok_or_else(|| Error::Msg(format!("RmsNormOp: {label} storage must be CpuStorage on CPU device")))
+        .ok_or_else(|| {
+            Error::Msg(format!(
+                "RmsNormOp: {label} storage must be CpuStorage on CPU device"
+            ))
+        })
 }
 
 fn load_row_f32(dtype: DType, bytes: &[u8], row: usize, hidden: usize) -> Result<Vec<f32>> {

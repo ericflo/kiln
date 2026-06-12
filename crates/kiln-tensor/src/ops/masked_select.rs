@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId, bail};
 
 pub fn masked_select(x: &Tensor, mask: &Tensor) -> Result<Tensor> {
     if mask.dtype() != DType::U8 {
@@ -99,8 +99,7 @@ mod tests {
     #[test]
     fn masked_select_2d_row_major() {
         // x = [[1,2,3],[4,5,6]], mask picks (0,0), (1,1), (1,2) → [1, 5, 6]
-        let x =
-            Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
+        let x = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
         let mask = Tensor::from_slice(&[1u8, 0, 0, 0, 1, 1], vec![2, 3]).unwrap();
         let y = masked_select(&x, &mask).unwrap();
         assert_eq!(read_f32(&y), vec![1.0, 5.0, 6.0]);

@@ -151,7 +151,8 @@ impl RocmCaptureArena {
                 // late layers on replay, an uninitialized (`zero=false`) arena
                 // buffer is being read stale by a kernel that doesn't fully
                 // overwrite it. Off by default; zero production cost.
-                let force_zero = std::env::var("KILN_ARENA_FORCE_ZERO").ok().as_deref() == Some("1");
+                let force_zero =
+                    std::env::var("KILN_ARENA_FORCE_ZERO").ok().as_deref() == Some("1");
                 if zero || force_zero {
                     // Captured memset on the active (capture) stream — recorded
                     // into the graph so every replay re-zeros the buffer.
@@ -168,7 +169,14 @@ impl RocmCaptureArena {
     fn borrow_view(&self, dtype: DType, storage: &Arc<RocmStorage>) -> Result<RocmStorage> {
         let (ptr, byte_len) = storage.device_ptr_raw();
         let keep_alive: Arc<dyn Any + Send + Sync> = storage.clone();
-        RocmStorage::from_borrowed_ctx(&self.ctx, self.device_index, dtype, ptr, byte_len, keep_alive)
+        RocmStorage::from_borrowed_ctx(
+            &self.ctx,
+            self.device_index,
+            dtype,
+            ptr,
+            byte_len,
+            keep_alive,
+        )
     }
 
     /// Zero the buffer on the active ROCm stream (captured during the replay

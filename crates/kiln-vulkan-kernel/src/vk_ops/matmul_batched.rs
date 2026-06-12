@@ -247,7 +247,11 @@ fn check_batched_matmul_bf16(a: &VkTensor, b: &VkTensor) -> Result<(usize, usize
     Ok((ba, m, n, k))
 }
 
-fn check_batched_lhs_t(a: &VkTensor, b: &VkTensor, dtype: VkDType) -> Result<(usize, usize, usize, usize)> {
+fn check_batched_lhs_t(
+    a: &VkTensor,
+    b: &VkTensor,
+    dtype: VkDType,
+) -> Result<(usize, usize, usize, usize)> {
     anyhow::ensure!(
         a.shape().len() == 3 && b.shape().len() == 3,
         "vk_matmul_lhs_t_batched: rank-3 required, got {:?}/{:?}",

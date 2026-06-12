@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 #[derive(Debug, Clone, Copy)]
 enum GluKind {
@@ -170,37 +170,43 @@ fn apply(kind: GluKind, x: &Tensor) -> Result<Tensor> {
             let a_idx = o * last + i;
             let b_idx = o * last + i + half;
             let av = match dtype {
-                DType::F32 => f32::from_le_bytes(bytes[a_idx * 4..a_idx * 4 + 4].try_into().unwrap()),
-                DType::BF16 => half::bf16::from_le_bytes(
-                    bytes[a_idx * 2..a_idx * 2 + 2].try_into().unwrap(),
-                )
-                .to_f32(),
-                DType::F16 => half::f16::from_le_bytes(
-                    bytes[a_idx * 2..a_idx * 2 + 2].try_into().unwrap(),
-                )
-                .to_f32(),
+                DType::F32 => {
+                    f32::from_le_bytes(bytes[a_idx * 4..a_idx * 4 + 4].try_into().unwrap())
+                }
+                DType::BF16 => {
+                    half::bf16::from_le_bytes(bytes[a_idx * 2..a_idx * 2 + 2].try_into().unwrap())
+                        .to_f32()
+                }
+                DType::F16 => {
+                    half::f16::from_le_bytes(bytes[a_idx * 2..a_idx * 2 + 2].try_into().unwrap())
+                        .to_f32()
+                }
                 _ => unreachable!(),
             };
             let bv = match dtype {
-                DType::F32 => f32::from_le_bytes(bytes[b_idx * 4..b_idx * 4 + 4].try_into().unwrap()),
-                DType::BF16 => half::bf16::from_le_bytes(
-                    bytes[b_idx * 2..b_idx * 2 + 2].try_into().unwrap(),
-                )
-                .to_f32(),
-                DType::F16 => half::f16::from_le_bytes(
-                    bytes[b_idx * 2..b_idx * 2 + 2].try_into().unwrap(),
-                )
-                .to_f32(),
+                DType::F32 => {
+                    f32::from_le_bytes(bytes[b_idx * 4..b_idx * 4 + 4].try_into().unwrap())
+                }
+                DType::BF16 => {
+                    half::bf16::from_le_bytes(bytes[b_idx * 2..b_idx * 2 + 2].try_into().unwrap())
+                        .to_f32()
+                }
+                DType::F16 => {
+                    half::f16::from_le_bytes(bytes[b_idx * 2..b_idx * 2 + 2].try_into().unwrap())
+                        .to_f32()
+                }
                 _ => unreachable!(),
             };
             let y = av * kind.activate(bv);
             let dst = (o * half + i) * per;
             match dtype {
                 DType::F32 => out[dst..dst + 4].copy_from_slice(&y.to_le_bytes()),
-                DType::BF16 => out[dst..dst + 2]
-                    .copy_from_slice(&half::bf16::from_f32(y).to_le_bytes()),
-                DType::F16 => out[dst..dst + 2]
-                    .copy_from_slice(&half::f16::from_f32(y).to_le_bytes()),
+                DType::BF16 => {
+                    out[dst..dst + 2].copy_from_slice(&half::bf16::from_f32(y).to_le_bytes())
+                }
+                DType::F16 => {
+                    out[dst..dst + 2].copy_from_slice(&half::f16::from_f32(y).to_le_bytes())
+                }
                 _ => unreachable!(),
             }
         }
@@ -279,7 +285,8 @@ mod tests {
     #[test]
     fn glu_rank2_per_row() {
         // [B=2, D=4] → [B=2, D=2]; per-row halving.
-        let x = Tensor::from_slice(&[1.0f32, 2.0, 0.0, 100.0, 5.0, 5.0, 100.0, 0.0], vec![2, 4]).unwrap();
+        let x = Tensor::from_slice(&[1.0f32, 2.0, 0.0, 100.0, 5.0, 5.0, 100.0, 0.0], vec![2, 4])
+            .unwrap();
         let y = glu(&x).unwrap();
         assert_eq!(y.shape(), &[2, 2]);
     }

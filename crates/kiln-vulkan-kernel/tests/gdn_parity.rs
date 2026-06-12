@@ -216,11 +216,7 @@ fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state_tensor(
             eps,
             resident_state,
         )?;
-    let out = create_tensor_from_data(
-        &out_data,
-        &[batch, 1, nv, dv],
-        q_dtype,
-    )?;
+    let out = create_tensor_from_data(&out_data, &[batch, 1, nv, dv], q_dtype)?;
     Ok((out, resident_state))
 }
 
@@ -264,11 +260,7 @@ fn dispatch_gdn_decode_gates_recurrent_rmsnorm_tensor(
             eps,
             skip_state_readback,
         )?;
-    let out = create_tensor_from_data(
-        &out_data,
-        &[batch, 1, nv, dv],
-        q_dtype,
-    )?;
+    let out = create_tensor_from_data(&out_data, &[batch, 1, nv, dv], q_dtype)?;
     let new_state = if let Some(sd) = new_state_data {
         create_tensor_from_data(&sd, &state_dims, state_dtype)?
     } else {
@@ -318,16 +310,10 @@ fn dispatch_gdn_recurrent_step_with_options_tensor(
             dv,
             skip_state_readback,
         )?;
-    let out = create_tensor_from_data(
-        &out_data,
-        &[batch, heads, dv],
-        q_dtype,
-    )?;
+    let out = create_tensor_from_data(&out_data, &[batch, heads, dv], q_dtype)?;
     let new_state = new_state_data
         .as_ref()
-        .map(|sd| {
-            create_tensor_from_data(sd, &state_dims, state_dtype)
-        })
+        .map(|sd| create_tensor_from_data(sd, &state_dims, state_dtype))
         .transpose()?;
     Ok((out, new_state))
 }
@@ -373,17 +359,10 @@ fn dispatch_gdn_recurrent_step_native_head_last_with_options_tensor(
             dv,
             skip_state_readback,
         )?;
-    let out = create_tensor_from_data(
-        &out_data,
-        &[batch, heads, dv],
-        q_dtype,
-    )?
-    .unsqueeze(1)?;
+    let out = create_tensor_from_data(&out_data, &[batch, heads, dv], q_dtype)?.unsqueeze(1)?;
     let new_state = new_state_data
         .as_ref()
-        .map(|sd| {
-            create_tensor_from_data(sd, &state_dims, state_dtype)
-        })
+        .map(|sd| create_tensor_from_data(sd, &state_dims, state_dtype))
         .transpose()?;
     Ok((out, new_state))
 }
@@ -420,11 +399,7 @@ fn linear_decode_matches_cpu_reference() -> Result<()> {
         false,
     )
     .context("dispatch_linear_decode_cached_bytes")?;
-    let got = create_tensor_from_data(
-        &got_bytes,
-        &[1, 1, out_dim],
-        DType::F32,
-    )?;
+    let got = create_tensor_from_data(&got_bytes, &[1, 1, out_dim], DType::F32)?;
     assert_close("linear decode", &got, &x.broadcast_matmul(&weight)?, 1e-5)?;
     Ok(())
 }
@@ -461,11 +436,7 @@ fn linear_decode_batched_matches_cpu_reference() -> Result<()> {
         false,
     )
     .context("dispatch_linear_decode_cached_bytes batched")?;
-    let got = create_tensor_from_data(
-        &got_bytes,
-        &[batch, 1, out_dim],
-        DType::F32,
-    )?;
+    let got = create_tensor_from_data(&got_bytes, &[batch, 1, out_dim], DType::F32)?;
     assert_close(
         "linear decode batched",
         &got,
@@ -493,9 +464,7 @@ fn gdn_gates_cached_bytes_matches_cpu_reference() -> Result<()> {
     let a_log_data = (0..nv)
         .map(|i| -0.35 * (i as f32 + 1.0))
         .collect::<Vec<_>>();
-    let dt_bias_data = (0..nv)
-        .map(|i| (i as f32 - 1.5) * 0.07)
-        .collect::<Vec<_>>();
+    let dt_bias_data = (0..nv).map(|i| (i as f32 - 1.5) * 0.07).collect::<Vec<_>>();
 
     let a = cpu_f32(a_data.clone(), (batch, seq_len, nv))?;
     let b = cpu_f32(b_data.clone(), (batch, seq_len, nv))?;
@@ -568,11 +537,8 @@ fn causal_conv1d_prefill_matches_stateful_cpu_reference() -> Result<()> {
                 kernel_size,
             )
             .with_context(|| format!("dispatch_causal_conv1d_prefill_bytes seq_len={seq_len}"))?;
-        let got_out = create_tensor_from_data(
-            &got_out_bytes,
-            &[batch, channels, seq_len],
-            DType::F32,
-        )?;
+        let got_out =
+            create_tensor_from_data(&got_out_bytes, &[batch, channels, seq_len], DType::F32)?;
         let got_state = create_tensor_from_data(
             &got_state_bytes,
             &[batch, channels, kernel_size - 1],
@@ -845,7 +811,10 @@ fn gdn_recurrent_step_parallel_reduce_matches_f32_cpu_reference() -> Result<()> 
             &vk, &q, &k, &v, &beta, &g, &state, false,
         )
         .context("dispatch_gdn_recurrent_step parallel reduce f32")?;
-        (out, state.context("dispatch_gdn_recurrent_step parallel reduce f32")?)
+        (
+            out,
+            state.context("dispatch_gdn_recurrent_step parallel reduce f32")?,
+        )
     };
 
     let qd = tensor_data_f32(&q)?;
@@ -962,21 +931,24 @@ fn gdn_recurrent_step_native_head_last_matches_expanded_reference() -> Result<()
     let (expected_out, expected_state) = {
         let (out, state) = dispatch_gdn_recurrent_step_with_options_tensor(
             &vk,
-        &q_expanded,
-        &k_expanded,
-        &v_expanded,
-        &beta_expanded,
-        &g_expanded,
-        &state, false,
+            &q_expanded,
+            &k_expanded,
+            &v_expanded,
+            &beta_expanded,
+            &g_expanded,
+            &state,
+            false,
         )
         .context("dispatch_gdn_recurrent_step expanded reference")?;
-        (out, state.context("dispatch_gdn_recurrent_step expanded reference")?)
-    };
-    let (got_out, got_state) =
-        dispatch_gdn_recurrent_step_native_head_last_with_options_tensor(
-            &vk, &q, &k, &v, &beta, &g, &state, false,
+        (
+            out,
+            state.context("dispatch_gdn_recurrent_step expanded reference")?,
         )
-        .context("dispatch_gdn_recurrent_step_native_head_last_with_options")?;
+    };
+    let (got_out, got_state) = dispatch_gdn_recurrent_step_native_head_last_with_options_tensor(
+        &vk, &q, &k, &v, &beta, &g, &state, false,
+    )
+    .context("dispatch_gdn_recurrent_step_native_head_last_with_options")?;
 
     assert_close(
         "native-head recurrent out",
@@ -1039,14 +1011,8 @@ fn gdn_recurrent_qk_norm_native_head_last_matches_split_path() -> Result<()> {
         (batch, heads, dk, dv),
     )?;
 
-    let q_sq = q
-        .to_dtype(DType::F32)?
-        .sqr()?
-        .sum_keepdim(D::Minus1)?;
-    let k_sq = k
-        .to_dtype(DType::F32)?
-        .sqr()?
-        .sum_keepdim(D::Minus1)?;
+    let q_sq = q.to_dtype(DType::F32)?.sqr()?.sum_keepdim(D::Minus1)?;
+    let k_sq = k.to_dtype(DType::F32)?.sqr()?.sum_keepdim(D::Minus1)?;
     let q_norm = (q
         .to_dtype(DType::F32)?
         .broadcast_div(&(q_sq + 1e-6)?.sqrt()?)?
@@ -1086,21 +1052,11 @@ fn gdn_recurrent_qk_norm_native_head_last_matches_split_path() -> Result<()> {
             false,
         )
         .context("native-head fused qk_norm recurrent")?;
-    let got_out = create_tensor_from_data(
-        &got_out_bytes,
-        &[batch, heads, dv],
-        state.dtype(),
-    )?
-    .unsqueeze(1)?;
+    let got_out = create_tensor_from_data(&got_out_bytes, &[batch, heads, dv], state.dtype())?
+        .unsqueeze(1)?;
     let got_state = got_state_bytes
         .as_ref()
-        .map(|sd| {
-            create_tensor_from_data(
-                sd,
-                state.dims(),
-                state.dtype(),
-            )
-        })
+        .map(|sd| create_tensor_from_data(sd, state.dims(), state.dtype()))
         .transpose()?;
 
     assert_close(
@@ -1223,10 +1179,7 @@ fn gdn_recurrent_step_native_head_last_resident_state_matches_readback_path() ->
                 None,
             )
             .context("native-head resident step 1")?;
-        let out_t = create_tensor_from_data(
-            &out_b, &[b1, h1, dv1], q1.dtype(),
-        )?
-        .unsqueeze(1)?;
+        let out_t = create_tensor_from_data(&out_b, &[b1, h1, dv1], q1.dtype())?.unsqueeze(1)?;
         (out_t, st_buf)
     };
     let (resident_out2, resident_state) = {
@@ -1246,10 +1199,7 @@ fn gdn_recurrent_step_native_head_last_resident_state_matches_readback_path() ->
                 Some(resident_state),
             )
             .context("native-head resident step 2")?;
-        let out_t = create_tensor_from_data(
-            &out_b, &[b2, h2, dv2], q2.dtype(),
-        )?
-        .unsqueeze(1)?;
+        let out_t = create_tensor_from_data(&out_b, &[b2, h2, dv2], q2.dtype())?.unsqueeze(1)?;
         (out_t, st_buf)
     };
     let resident_state_data = kiln_vulkan_kernel::VulkanBuffer::read_back(
@@ -1260,11 +1210,8 @@ fn gdn_recurrent_step_native_head_last_resident_state_matches_readback_path() ->
         &resident_state,
     )
     .context("read back resident native-head state")?;
-    let resident_state = create_tensor_from_data(
-        &resident_state_data,
-        state0.dims(),
-        state0.dtype(),
-    )?;
+    let resident_state =
+        create_tensor_from_data(&resident_state_data, state0.dims(), state0.dtype())?;
 
     assert_close(
         "resident native-head out step1",
@@ -1330,10 +1277,8 @@ fn gdn_recurrent_step_can_skip_state_readback() -> Result<()> {
         (out, state.context("dispatch_gdn_recurrent_step reference")?)
     };
     let (got_out, got_state) =
-        dispatch_gdn_recurrent_step_with_options_tensor(
-            &vk, &q, &k, &v, &beta, &g, &state, true,
-        )
-        .context("dispatch_gdn_recurrent_step skip state readback")?;
+        dispatch_gdn_recurrent_step_with_options_tensor(&vk, &q, &k, &v, &beta, &g, &state, true)
+            .context("dispatch_gdn_recurrent_step skip state readback")?;
 
     assert!(
         got_state.is_none(),
@@ -1368,81 +1313,93 @@ fn gdn_recurrent_resident_state_matches_two_step_reference() -> Result<()> {
         (batch, heads, dk, dv),
     )?;
 
-    let (expected_out1, expected_state1) =
-        {
+    let (expected_out1, expected_state1) = {
         let (out, state) = dispatch_gdn_recurrent_step_with_options_tensor(
-                &vk, &q1, &k1, &v1, &beta1, &g1, &state, false,
+            &vk, &q1, &k1, &v1, &beta1, &g1, &state, false,
         )
         .context("dispatch_gdn_recurrent_step reference step 1")?;
-        (out, state.context("dispatch_gdn_recurrent_step reference step 1")?)
+        (
+            out,
+            state.context("dispatch_gdn_recurrent_step reference step 1")?,
+        )
     };
-    let (expected_out2, _expected_state2) =
-        {
+    let (expected_out2, _expected_state2) = {
         let (out, state) = dispatch_gdn_recurrent_step_with_options_tensor(
-                &vk,
+            &vk,
             &q2,
             &k2,
             &v2,
             &beta2,
             &g2,
-            &expected_state1, false,
+            &expected_state1,
+            false,
         )
         .context("dispatch_gdn_recurrent_step reference step 2")?;
-        (out, state.context("dispatch_gdn_recurrent_step reference step 2")?)
+        (
+            out,
+            state.context("dispatch_gdn_recurrent_step reference step 2")?,
+        )
     };
 
-    let (got_out1, resident_state) =
-        {
-            let q_data_b = extract_tensor_bytes(&q1)?.0;
-            let k_data_b = extract_tensor_bytes(&k1)?.0;
-            let v_data_b = extract_tensor_bytes(&v1)?.0;
-            let beta_data_b = extract_tensor_bytes(&beta1)?.0;
-            let g_data_b = extract_tensor_bytes(&g1)?.0;
-            let state_data_b =
-                Some(extract_tensor_bytes(&state)?.0);
-            let q_dims_b = q1.dims();
-            let (b_b, h_b, dk_b) = (q_dims_b[0], q_dims_b[1], q_dims_b[2]);
-            let dv_b = v1.dims()[2];
-            let q_dtype_b = q1.dtype();
-            let (out_bytes, resident_buf) =
-                kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state_bytes(
-                    &vk,
-                    &q_data_b, &k_data_b, &v_data_b, &beta_data_b, &g_data_b,
-                    state_data_b.as_deref(),
-                    b_b, h_b, dk_b, dv_b,
-                    None,
-                )
-                .context("dispatch_gdn_recurrent_step_resident_state step 1")?;
-            let out_t = create_tensor_from_data(
-                &out_bytes, &[b_b, h_b, dv_b], q_dtype_b,
-            )?;
-            (out_t, resident_buf)
-        };
-    let (got_out2, _resident_state) =
-        {
-            let q_data_b = extract_tensor_bytes(&q2)?.0;
-            let k_data_b = extract_tensor_bytes(&k2)?.0;
-            let v_data_b = extract_tensor_bytes(&v2)?.0;
-            let beta_data_b = extract_tensor_bytes(&beta2)?.0;
-            let g_data_b = extract_tensor_bytes(&g2)?.0;
-            let q_dims_b = q2.dims();
-            let (b_b, h_b, dk_b) = (q_dims_b[0], q_dims_b[1], q_dims_b[2]);
-            let dv_b = v2.dims()[2];
-            let q_dtype_b = q2.dtype();
-            let (out_bytes, resident_buf) =
-                kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state_bytes(
-                    &vk,
-                    &q_data_b, &k_data_b, &v_data_b, &beta_data_b, &g_data_b,
-                    None,
-                    b_b, h_b, dk_b, dv_b,
-                    Some(resident_state),
-                )
-                .context("dispatch_gdn_recurrent_step_resident_state step 2")?;
-            let out_t = create_tensor_from_data(
-                &out_bytes, &[b_b, h_b, dv_b], q_dtype_b,
-            )?;
-            (out_t, resident_buf)
-        };
+    let (got_out1, resident_state) = {
+        let q_data_b = extract_tensor_bytes(&q1)?.0;
+        let k_data_b = extract_tensor_bytes(&k1)?.0;
+        let v_data_b = extract_tensor_bytes(&v1)?.0;
+        let beta_data_b = extract_tensor_bytes(&beta1)?.0;
+        let g_data_b = extract_tensor_bytes(&g1)?.0;
+        let state_data_b = Some(extract_tensor_bytes(&state)?.0);
+        let q_dims_b = q1.dims();
+        let (b_b, h_b, dk_b) = (q_dims_b[0], q_dims_b[1], q_dims_b[2]);
+        let dv_b = v1.dims()[2];
+        let q_dtype_b = q1.dtype();
+        let (out_bytes, resident_buf) =
+            kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state_bytes(
+                &vk,
+                &q_data_b,
+                &k_data_b,
+                &v_data_b,
+                &beta_data_b,
+                &g_data_b,
+                state_data_b.as_deref(),
+                b_b,
+                h_b,
+                dk_b,
+                dv_b,
+                None,
+            )
+            .context("dispatch_gdn_recurrent_step_resident_state step 1")?;
+        let out_t = create_tensor_from_data(&out_bytes, &[b_b, h_b, dv_b], q_dtype_b)?;
+        (out_t, resident_buf)
+    };
+    let (got_out2, _resident_state) = {
+        let q_data_b = extract_tensor_bytes(&q2)?.0;
+        let k_data_b = extract_tensor_bytes(&k2)?.0;
+        let v_data_b = extract_tensor_bytes(&v2)?.0;
+        let beta_data_b = extract_tensor_bytes(&beta2)?.0;
+        let g_data_b = extract_tensor_bytes(&g2)?.0;
+        let q_dims_b = q2.dims();
+        let (b_b, h_b, dk_b) = (q_dims_b[0], q_dims_b[1], q_dims_b[2]);
+        let dv_b = v2.dims()[2];
+        let q_dtype_b = q2.dtype();
+        let (out_bytes, resident_buf) =
+            kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state_bytes(
+                &vk,
+                &q_data_b,
+                &k_data_b,
+                &v_data_b,
+                &beta_data_b,
+                &g_data_b,
+                None,
+                b_b,
+                h_b,
+                dk_b,
+                dv_b,
+                Some(resident_state),
+            )
+            .context("dispatch_gdn_recurrent_step_resident_state step 2")?;
+        let out_t = create_tensor_from_data(&out_bytes, &[b_b, h_b, dv_b], q_dtype_b)?;
+        (out_t, resident_buf)
+    };
 
     assert_close(
         "resident recurrent out step 1",
@@ -1513,11 +1470,10 @@ fn gdn_decode_gates_recurrent_rmsnorm_matches_f32_cpu_reference() -> Result<()> 
     )?;
     let weight = cpu_f32(vec![0.7, -1.1, 0.9], (dv,))?;
 
-    let (got_out, got_state) =
-        dispatch_gdn_decode_gates_recurrent_rmsnorm_tensor(
-            &vk, &q, &k, &v, &a, &b, &a_log, &dt_bias, &state, &z, &weight, 1e-6, false,
-        )
-        .context("dispatch_gdn_decode_gates_recurrent_rmsnorm")?;
+    let (got_out, got_state) = dispatch_gdn_decode_gates_recurrent_rmsnorm_tensor(
+        &vk, &q, &k, &v, &a, &b, &a_log, &dt_bias, &state, &z, &weight, 1e-6, false,
+    )
+    .context("dispatch_gdn_decode_gates_recurrent_rmsnorm")?;
 
     let qd = tensor_data_f32(&q)?;
     let kd = tensor_data_f32(&k)?;
@@ -1579,11 +1535,10 @@ fn gdn_decode_gates_recurrent_rmsnorm_matches_f32_cpu_reference() -> Result<()> 
         }
     }
 
-    let (skip_out, skip_state) =
-        dispatch_gdn_decode_gates_recurrent_rmsnorm_tensor(
-            &vk, &q, &k, &v, &a, &b, &a_log, &dt_bias, &state, &z, &weight, 1e-6, true,
-        )
-        .context("dispatch_gdn_decode_gates_recurrent_rmsnorm skip state readback")?;
+    let (skip_out, skip_state) = dispatch_gdn_decode_gates_recurrent_rmsnorm_tensor(
+        &vk, &q, &k, &v, &a, &b, &a_log, &dt_bias, &state, &z, &weight, 1e-6, true,
+    )
+    .context("dispatch_gdn_decode_gates_recurrent_rmsnorm skip state readback")?;
 
     assert_close(
         "decode gates recurrent rmsnorm out",
@@ -1687,81 +1642,93 @@ fn gdn_recurrent_resident_state_parallel_reduce_matches_two_step_reference() -> 
         (batch, heads, dk, dv),
     )?;
 
-    let (expected_out1, expected_state1) =
-        {
+    let (expected_out1, expected_state1) = {
         let (out, state) = dispatch_gdn_recurrent_step_with_options_tensor(
-                &vk, &q1, &k1, &v1, &beta1, &g1, &state, false,
+            &vk, &q1, &k1, &v1, &beta1, &g1, &state, false,
         )
         .context("dispatch_gdn_recurrent_step parallel reference step 1")?;
-        (out, state.context("dispatch_gdn_recurrent_step parallel reference step 1")?)
+        (
+            out,
+            state.context("dispatch_gdn_recurrent_step parallel reference step 1")?,
+        )
     };
-    let (expected_out2, _expected_state2) =
-        {
+    let (expected_out2, _expected_state2) = {
         let (out, state) = dispatch_gdn_recurrent_step_with_options_tensor(
-                &vk,
+            &vk,
             &q2,
             &k2,
             &v2,
             &beta2,
             &g2,
-            &expected_state1, false,
+            &expected_state1,
+            false,
         )
         .context("dispatch_gdn_recurrent_step parallel reference step 2")?;
-        (out, state.context("dispatch_gdn_recurrent_step parallel reference step 2")?)
+        (
+            out,
+            state.context("dispatch_gdn_recurrent_step parallel reference step 2")?,
+        )
     };
 
-    let (got_out1, resident_state) =
-        {
-            let q_data_b = extract_tensor_bytes(&q1)?.0;
-            let k_data_b = extract_tensor_bytes(&k1)?.0;
-            let v_data_b = extract_tensor_bytes(&v1)?.0;
-            let beta_data_b = extract_tensor_bytes(&beta1)?.0;
-            let g_data_b = extract_tensor_bytes(&g1)?.0;
-            let state_data_b =
-                Some(extract_tensor_bytes(&state)?.0);
-            let q_dims_b = q1.dims();
-            let (b_b, h_b, dk_b) = (q_dims_b[0], q_dims_b[1], q_dims_b[2]);
-            let dv_b = v1.dims()[2];
-            let q_dtype_b = q1.dtype();
-            let (out_bytes, resident_buf) =
-                kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state_bytes(
-                    &vk,
-                    &q_data_b, &k_data_b, &v_data_b, &beta_data_b, &g_data_b,
-                    state_data_b.as_deref(),
-                    b_b, h_b, dk_b, dv_b,
-                    None,
-                )
-                .context("dispatch_gdn_recurrent_step_resident_state parallel step 1")?;
-            let out_t = create_tensor_from_data(
-                &out_bytes, &[b_b, h_b, dv_b], q_dtype_b,
-            )?;
-            (out_t, resident_buf)
-        };
-    let (got_out2, _resident_state) =
-        {
-            let q_data_b = extract_tensor_bytes(&q2)?.0;
-            let k_data_b = extract_tensor_bytes(&k2)?.0;
-            let v_data_b = extract_tensor_bytes(&v2)?.0;
-            let beta_data_b = extract_tensor_bytes(&beta2)?.0;
-            let g_data_b = extract_tensor_bytes(&g2)?.0;
-            let q_dims_b = q2.dims();
-            let (b_b, h_b, dk_b) = (q_dims_b[0], q_dims_b[1], q_dims_b[2]);
-            let dv_b = v2.dims()[2];
-            let q_dtype_b = q2.dtype();
-            let (out_bytes, resident_buf) =
-                kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state_bytes(
-                    &vk,
-                    &q_data_b, &k_data_b, &v_data_b, &beta_data_b, &g_data_b,
-                    None,
-                    b_b, h_b, dk_b, dv_b,
-                    Some(resident_state),
-                )
-                .context("dispatch_gdn_recurrent_step_resident_state parallel step 2")?;
-            let out_t = create_tensor_from_data(
-                &out_bytes, &[b_b, h_b, dv_b], q_dtype_b,
-            )?;
-            (out_t, resident_buf)
-        };
+    let (got_out1, resident_state) = {
+        let q_data_b = extract_tensor_bytes(&q1)?.0;
+        let k_data_b = extract_tensor_bytes(&k1)?.0;
+        let v_data_b = extract_tensor_bytes(&v1)?.0;
+        let beta_data_b = extract_tensor_bytes(&beta1)?.0;
+        let g_data_b = extract_tensor_bytes(&g1)?.0;
+        let state_data_b = Some(extract_tensor_bytes(&state)?.0);
+        let q_dims_b = q1.dims();
+        let (b_b, h_b, dk_b) = (q_dims_b[0], q_dims_b[1], q_dims_b[2]);
+        let dv_b = v1.dims()[2];
+        let q_dtype_b = q1.dtype();
+        let (out_bytes, resident_buf) =
+            kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state_bytes(
+                &vk,
+                &q_data_b,
+                &k_data_b,
+                &v_data_b,
+                &beta_data_b,
+                &g_data_b,
+                state_data_b.as_deref(),
+                b_b,
+                h_b,
+                dk_b,
+                dv_b,
+                None,
+            )
+            .context("dispatch_gdn_recurrent_step_resident_state parallel step 1")?;
+        let out_t = create_tensor_from_data(&out_bytes, &[b_b, h_b, dv_b], q_dtype_b)?;
+        (out_t, resident_buf)
+    };
+    let (got_out2, _resident_state) = {
+        let q_data_b = extract_tensor_bytes(&q2)?.0;
+        let k_data_b = extract_tensor_bytes(&k2)?.0;
+        let v_data_b = extract_tensor_bytes(&v2)?.0;
+        let beta_data_b = extract_tensor_bytes(&beta2)?.0;
+        let g_data_b = extract_tensor_bytes(&g2)?.0;
+        let q_dims_b = q2.dims();
+        let (b_b, h_b, dk_b) = (q_dims_b[0], q_dims_b[1], q_dims_b[2]);
+        let dv_b = v2.dims()[2];
+        let q_dtype_b = q2.dtype();
+        let (out_bytes, resident_buf) =
+            kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state_bytes(
+                &vk,
+                &q_data_b,
+                &k_data_b,
+                &v_data_b,
+                &beta_data_b,
+                &g_data_b,
+                None,
+                b_b,
+                h_b,
+                dk_b,
+                dv_b,
+                Some(resident_state),
+            )
+            .context("dispatch_gdn_recurrent_step_resident_state parallel step 2")?;
+        let out_t = create_tensor_from_data(&out_bytes, &[b_b, h_b, dv_b], q_dtype_b)?;
+        (out_t, resident_buf)
+    };
 
     assert_close(
         "resident parallel recurrent out step 1",
@@ -1844,28 +1811,26 @@ fn gdn_decode_gates_recurrent_rmsnorm_resident_state_matches_two_step_reference(
     )?;
     let weight = cpu_f32(vec![0.7, -1.1, 0.9], (dv,))?;
 
-    let (expected_out1, expected_state1) =
-        dispatch_gdn_decode_gates_recurrent_rmsnorm_tensor(
-            &vk, &q1, &k1, &v1, &a1, &b1, &a_log, &dt_bias, &state, &z1, &weight, 1e-6, false,
-        )
-        .context("dispatch_gdn_decode_gates_recurrent_rmsnorm reference step 1")?;
-    let (expected_out2, _expected_state2) =
-        dispatch_gdn_decode_gates_recurrent_rmsnorm_tensor(
-            &vk,
-            &q2,
-            &k2,
-            &v2,
-            &a2,
-            &b2,
-            &a_log,
-            &dt_bias,
-            &expected_state1,
-            &z2,
-            &weight,
-            1e-6,
-            false,
-        )
-        .context("dispatch_gdn_decode_gates_recurrent_rmsnorm reference step 2")?;
+    let (expected_out1, expected_state1) = dispatch_gdn_decode_gates_recurrent_rmsnorm_tensor(
+        &vk, &q1, &k1, &v1, &a1, &b1, &a_log, &dt_bias, &state, &z1, &weight, 1e-6, false,
+    )
+    .context("dispatch_gdn_decode_gates_recurrent_rmsnorm reference step 1")?;
+    let (expected_out2, _expected_state2) = dispatch_gdn_decode_gates_recurrent_rmsnorm_tensor(
+        &vk,
+        &q2,
+        &k2,
+        &v2,
+        &a2,
+        &b2,
+        &a_log,
+        &dt_bias,
+        &expected_state1,
+        &z2,
+        &weight,
+        1e-6,
+        false,
+    )
+    .context("dispatch_gdn_decode_gates_recurrent_rmsnorm reference step 2")?;
 
     let (got_out1, resident_state) =
         dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state_tensor(
@@ -1955,35 +1920,38 @@ fn gdn_chunk_prep_and_scan_match_cpu_reference() -> Result<()> {
     let g_dims_p = g.dims();
     let (b_p, h_p, c_p) = (g_dims_p[0], g_dims_p[1], g_dims_p[2]);
     let dv_p = v.dims()[3];
-    let (a_strict_bytes, b_mask_bytes, v_prime_bytes, q_s_scaled_bytes, decay_last_col_bytes, p_last_bytes) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_chunk_prep_bytes(
-            &vk,
-            &g_data_p, &v_data_p, &kkt_data_p, &qkt_data_p, &ks_entry_data_p, &q_s_data_p,
-            b_p, h_p, c_p, dv_p,
-        )
-        .context("dispatch_gdn_chunk_prep_bytes")?;
+    let (
+        a_strict_bytes,
+        b_mask_bytes,
+        v_prime_bytes,
+        q_s_scaled_bytes,
+        decay_last_col_bytes,
+        p_last_bytes,
+    ) = kiln_vulkan_kernel::kernels::dispatch_gdn_chunk_prep_bytes(
+        &vk,
+        &g_data_p,
+        &v_data_p,
+        &kkt_data_p,
+        &qkt_data_p,
+        &ks_entry_data_p,
+        &q_s_data_p,
+        b_p,
+        h_p,
+        c_p,
+        dv_p,
+    )
+    .context("dispatch_gdn_chunk_prep_bytes")?;
     let cc_shape_p = [b_p, h_p, c_p, c_p];
     let cv_shape_p = [b_p, h_p, c_p, dv_p];
     let decay_shape_p = [b_p, h_p, c_p];
     let p_last_shape_p = [b_p, h_p];
-    let a_strict = create_tensor_from_data(
-        &a_strict_bytes, &cc_shape_p, DType::BF16,
-    )?;
-    let b_mask = create_tensor_from_data(
-        &b_mask_bytes, &cc_shape_p, DType::BF16,
-    )?;
-    let v_prime = create_tensor_from_data(
-        &v_prime_bytes, &cv_shape_p, DType::BF16,
-    )?;
-    let q_s_scaled = create_tensor_from_data(
-        &q_s_scaled_bytes, &cv_shape_p, DType::BF16,
-    )?;
-    let decay_last_col = create_tensor_from_data(
-        &decay_last_col_bytes, &decay_shape_p, DType::BF16,
-    )?;
-    let p_last = create_tensor_from_data(
-        &p_last_bytes, &p_last_shape_p, DType::BF16,
-    )?;
+    let a_strict = create_tensor_from_data(&a_strict_bytes, &cc_shape_p, DType::BF16)?;
+    let b_mask = create_tensor_from_data(&b_mask_bytes, &cc_shape_p, DType::BF16)?;
+    let v_prime = create_tensor_from_data(&v_prime_bytes, &cv_shape_p, DType::BF16)?;
+    let q_s_scaled = create_tensor_from_data(&q_s_scaled_bytes, &cv_shape_p, DType::BF16)?;
+    let decay_last_col =
+        create_tensor_from_data(&decay_last_col_bytes, &decay_shape_p, DType::BF16)?;
+    let p_last = create_tensor_from_data(&p_last_bytes, &p_last_shape_p, DType::BF16)?;
 
     let gd = tensor_data_f32(&g)?;
     let vd = tensor_data_f32(&v)?;
@@ -2042,8 +2010,12 @@ fn gdn_chunk_prep_and_scan_match_cpu_reference() -> Result<()> {
     let beta_data_b = extract_tensor_bytes(&beta)?.0;
     let decay_last_col_data = extract_tensor_bytes(&decay_last_col)?.0;
     let v_prime_dims = v_prime.dims();
-    let (vp_b, vp_h, vp_c, vp_dv) =
-        (v_prime_dims[0], v_prime_dims[1], v_prime_dims[2], v_prime_dims[3]);
+    let (vp_b, vp_h, vp_c, vp_dv) = (
+        v_prime_dims[0],
+        v_prime_dims[1],
+        v_prime_dims[2],
+        v_prime_dims[3],
+    );
     let (got_out_bytes_a, got_w_weighted_bytes) =
         kiln_vulkan_kernel::kernels::dispatch_gdn_chunk_scan_bytes(
             &vk,
@@ -2053,14 +2025,14 @@ fn gdn_chunk_prep_and_scan_match_cpu_reference() -> Result<()> {
             &q_s_scaled_data,
             &beta_data_b,
             &decay_last_col_data,
-            vp_b, vp_h, vp_c, vp_dv,
+            vp_b,
+            vp_h,
+            vp_c,
+            vp_dv,
         )
         .context("dispatch_gdn_chunk_scan_bytes")?;
-    let got_out = create_tensor_from_data(
-        &got_out_bytes_a,
-        &[vp_b, vp_h, vp_c, vp_dv],
-        DType::BF16,
-    )?;
+    let got_out =
+        create_tensor_from_data(&got_out_bytes_a, &[vp_b, vp_h, vp_c, vp_dv], DType::BF16)?;
     let got_w_weighted = create_tensor_from_data(
         &got_w_weighted_bytes,
         &[vp_b, vp_h, vp_c, vp_dv],
@@ -2177,35 +2149,38 @@ fn gdn_full_chunk_forward_matches_split_vulkan_path() -> Result<()> {
     let g_dims_p = g.dims();
     let (b_p, h_p, c_p) = (g_dims_p[0], g_dims_p[1], g_dims_p[2]);
     let dv_p = v.dims()[3];
-    let (a_strict_bytes, b_mask_bytes, v_prime_bytes, q_s_scaled_bytes, decay_last_col_bytes, p_last_bytes) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_chunk_prep_bytes(
-            &vk,
-            &g_data_p, &v_data_p, &kkt_data_p, &qkt_data_p, &ks_entry_data_p, &q_s_data_p,
-            b_p, h_p, c_p, dv_p,
-        )
-        .context("dispatch_gdn_chunk_prep_bytes")?;
+    let (
+        a_strict_bytes,
+        b_mask_bytes,
+        v_prime_bytes,
+        q_s_scaled_bytes,
+        decay_last_col_bytes,
+        p_last_bytes,
+    ) = kiln_vulkan_kernel::kernels::dispatch_gdn_chunk_prep_bytes(
+        &vk,
+        &g_data_p,
+        &v_data_p,
+        &kkt_data_p,
+        &qkt_data_p,
+        &ks_entry_data_p,
+        &q_s_data_p,
+        b_p,
+        h_p,
+        c_p,
+        dv_p,
+    )
+    .context("dispatch_gdn_chunk_prep_bytes")?;
     let cc_shape_p = [b_p, h_p, c_p, c_p];
     let cv_shape_p = [b_p, h_p, c_p, dv_p];
     let decay_shape_p = [b_p, h_p, c_p];
     let p_last_shape_p = [b_p, h_p];
-    let a_strict = create_tensor_from_data(
-        &a_strict_bytes, &cc_shape_p, DType::BF16,
-    )?;
-    let b_mask = create_tensor_from_data(
-        &b_mask_bytes, &cc_shape_p, DType::BF16,
-    )?;
-    let v_prime = create_tensor_from_data(
-        &v_prime_bytes, &cv_shape_p, DType::BF16,
-    )?;
-    let q_s_scaled = create_tensor_from_data(
-        &q_s_scaled_bytes, &cv_shape_p, DType::BF16,
-    )?;
-    let decay_last_col = create_tensor_from_data(
-        &decay_last_col_bytes, &decay_shape_p, DType::BF16,
-    )?;
-    let p_last = create_tensor_from_data(
-        &p_last_bytes, &p_last_shape_p, DType::BF16,
-    )?;
+    let a_strict = create_tensor_from_data(&a_strict_bytes, &cc_shape_p, DType::BF16)?;
+    let b_mask = create_tensor_from_data(&b_mask_bytes, &cc_shape_p, DType::BF16)?;
+    let v_prime = create_tensor_from_data(&v_prime_bytes, &cv_shape_p, DType::BF16)?;
+    let q_s_scaled = create_tensor_from_data(&q_s_scaled_bytes, &cv_shape_p, DType::BF16)?;
+    let decay_last_col =
+        create_tensor_from_data(&decay_last_col_bytes, &decay_shape_p, DType::BF16)?;
+    let p_last = create_tensor_from_data(&p_last_bytes, &p_last_shape_p, DType::BF16)?;
     let a_strict_data_b = extract_tensor_bytes(&a_strict)?.0;
     let b_mask_data_b = extract_tensor_bytes(&b_mask)?.0;
     let v_prime_data_b = extract_tensor_bytes(&v_prime)?.0;
@@ -2214,7 +2189,10 @@ fn gdn_full_chunk_forward_matches_split_vulkan_path() -> Result<()> {
     let decay_last_col_data_b = extract_tensor_bytes(&decay_last_col)?.0;
     let v_prime_dims_b = v_prime.dims();
     let (vp_b2, vp_h2, vp_c2, vp_dv2) = (
-        v_prime_dims_b[0], v_prime_dims_b[1], v_prime_dims_b[2], v_prime_dims_b[3],
+        v_prime_dims_b[0],
+        v_prime_dims_b[1],
+        v_prime_dims_b[2],
+        v_prime_dims_b[3],
     );
     let (expected_out_bytes, w_weighted_bytes) =
         kiln_vulkan_kernel::kernels::dispatch_gdn_chunk_scan_bytes(
@@ -2225,7 +2203,10 @@ fn gdn_full_chunk_forward_matches_split_vulkan_path() -> Result<()> {
             &q_s_scaled_data_b,
             &beta_data_bb,
             &decay_last_col_data_b,
-            vp_b2, vp_h2, vp_c2, vp_dv2,
+            vp_b2,
+            vp_h2,
+            vp_c2,
+            vp_dv2,
         )
         .context("dispatch_gdn_chunk_scan_bytes")?;
     let expected_out = create_tensor_from_data(
@@ -2251,21 +2232,25 @@ fn gdn_full_chunk_forward_matches_split_vulkan_path() -> Result<()> {
     let state_dims = state.dims().as_ref().to_vec();
     let (got_out_bytes, got_state_bytes) =
         kiln_vulkan_kernel::kernels::dispatch_gdn_full_chunk_forward_bytes(
-            &vk, &g_data_b, &v_data_b, &kkt_data_b, &qkt_data_b, &ks_entry_data_b,
-            &q_s_data_b, &beta_data_b, &k_t_data_b, &state_data_b,
-            batch, heads, chunk, dk, dv,
+            &vk,
+            &g_data_b,
+            &v_data_b,
+            &kkt_data_b,
+            &qkt_data_b,
+            &ks_entry_data_b,
+            &q_s_data_b,
+            &beta_data_b,
+            &k_t_data_b,
+            &state_data_b,
+            batch,
+            heads,
+            chunk,
+            dk,
+            dv,
         )
         .context("dispatch_gdn_full_chunk_forward_bytes")?;
-    let got_out = create_tensor_from_data(
-        &got_out_bytes,
-        &[batch, heads, chunk, dv],
-        DType::BF16,
-    )?;
-    let got_state = create_tensor_from_data(
-        &got_state_bytes,
-        &state_dims,
-        DType::BF16,
-    )?;
+    let got_out = create_tensor_from_data(&got_out_bytes, &[batch, heads, chunk, dv], DType::BF16)?;
+    let got_state = create_tensor_from_data(&got_state_bytes, &state_dims, DType::BF16)?;
 
     let p_last = tensor_data_f32(&p_last)?;
     let state_data = tensor_data_f32(&state)?;

@@ -322,7 +322,11 @@ mod tests {
         let mut g = StopTailGate::new(&["ZZ".to_string(), "B".to_string()]);
         let s = g.push("A B then ZZ");
         assert_eq!(s.emit, "A ");
-        assert_eq!(s.matched_stop.as_deref(), Some("B"), "earliest position wins");
+        assert_eq!(
+            s.matched_stop.as_deref(),
+            Some("B"),
+            "earliest position wins"
+        );
 
         // Multi-byte stop: holdback never splits a char boundary.
         let mut g = StopTailGate::new(&["。end".to_string()]);

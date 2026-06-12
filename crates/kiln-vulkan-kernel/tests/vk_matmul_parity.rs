@@ -43,11 +43,7 @@ fn upload_bf16(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result
     VkTensor::from_f32_slice_as_bf16(data, shape.to_vec(), Arc::clone(dev))
 }
 
-fn upload_param_f32(
-    dev: &Arc<VulkanDevice>,
-    data: &[f32],
-    shape: &[usize],
-) -> Result<VkTensor> {
+fn upload_param_f32(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
     VkTensor::parameter_from_f32_slice(data, shape.to_vec(), Arc::clone(dev))
 }
 
@@ -279,8 +275,12 @@ fn vk_matmul_rhs_t_forward_tile_boundary() -> Result<()> {
 fn vk_matmul_lhs_t_batched_bf16_forward() -> Result<()> {
     let Some(dev) = vk_dev() else { return Ok(()) };
     let (batch, k, m, n) = (3usize, 21usize, 7usize, 11usize);
-    let a_data: Vec<f32> = (0..(batch * k * m)).map(|i| ((i as f32) * 0.031).sin()).collect();
-    let b_data: Vec<f32> = (0..(batch * k * n)).map(|i| ((i as f32) * 0.017).cos()).collect();
+    let a_data: Vec<f32> = (0..(batch * k * m))
+        .map(|i| ((i as f32) * 0.031).sin())
+        .collect();
+    let b_data: Vec<f32> = (0..(batch * k * n))
+        .map(|i| ((i as f32) * 0.017).cos())
+        .collect();
     let a = upload_bf16(&dev, &a_data, &[batch, k, m])?;
     let b = upload_bf16(&dev, &b_data, &[batch, k, n])?;
     let c = vk_matmul_lhs_t_batched_bf16_no_grad(&a, &b)?;
@@ -310,8 +310,12 @@ fn vk_matmul_lhs_t_batched_bf16_forward() -> Result<()> {
 fn vk_matmul_rhs_t_batched_bf16_forward() -> Result<()> {
     let Some(dev) = vk_dev() else { return Ok(()) };
     let (batch, m, k, n) = (3usize, 7usize, 21usize, 11usize);
-    let a_data: Vec<f32> = (0..(batch * m * k)).map(|i| ((i as f32) * 0.031).sin()).collect();
-    let b_data: Vec<f32> = (0..(batch * n * k)).map(|i| ((i as f32) * 0.017).cos()).collect();
+    let a_data: Vec<f32> = (0..(batch * m * k))
+        .map(|i| ((i as f32) * 0.031).sin())
+        .collect();
+    let b_data: Vec<f32> = (0..(batch * n * k))
+        .map(|i| ((i as f32) * 0.017).cos())
+        .collect();
     let a = upload_bf16(&dev, &a_data, &[batch, m, k])?;
     let b = upload_bf16(&dev, &b_data, &[batch, n, k])?;
     let c = vk_matmul_rhs_t_batched_bf16_no_grad(&a, &b)?;

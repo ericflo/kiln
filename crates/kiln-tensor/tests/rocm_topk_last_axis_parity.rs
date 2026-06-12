@@ -88,5 +88,9 @@ fn topk_breaks_ties_to_lowest_index() {
     let t = Tensor::from_vec_on(Device::Rocm(0), data, vec![w]).expect("from_vec_on tie");
     let (_values, indices) = kiln_tensor::rocm_topk_last_axis(&t, 8).expect("rocm_topk tie");
     let got: Vec<u32> = indices;
-    assert_eq!(got, vec![0, 1, 2, 3, 4, 5, 6, 7], "ties must pick lowest indices in order");
+    assert_eq!(
+        got,
+        vec![0, 1, 2, 3, 4, 5, 6, 7],
+        "ties must pick lowest indices in order"
+    );
 }

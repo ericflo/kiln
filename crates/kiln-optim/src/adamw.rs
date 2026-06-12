@@ -55,9 +55,9 @@ impl Default for AdamWHyperparameters {
 /// master dtype.
 #[derive(Debug, Clone)]
 pub struct AdamWMoments {
-    pub m: Vec<f32>,     // first-moment estimate
-    pub v: Vec<f32>,     // second-moment estimate
-    pub step: u64,       // step counter for bias correction
+    pub m: Vec<f32>, // first-moment estimate
+    pub v: Vec<f32>, // second-moment estimate
+    pub step: u64,   // step counter for bias correction
     pub location: MomentLocation,
 }
 
@@ -297,27 +297,29 @@ fn build_master_tensor(
             }
             StochasticRoundingPolicy::RoundToNearest => {
                 for (i, &v) in values.iter().enumerate() {
-                    bytes[i * 2..i * 2 + 2]
-                        .copy_from_slice(&half::bf16::from_f32(v).to_le_bytes());
+                    bytes[i * 2..i * 2 + 2].copy_from_slice(&half::bf16::from_f32(v).to_le_bytes());
                 }
             }
         },
         DType::F16 => {
             for (i, &v) in values.iter().enumerate() {
-                bytes[i * 2..i * 2 + 2]
-                    .copy_from_slice(&half::f16::from_f32(v).to_le_bytes());
+                bytes[i * 2..i * 2 + 2].copy_from_slice(&half::f16::from_f32(v).to_le_bytes());
             }
         }
         other => {
             return Err(StepError::Tensor(kiln_tensor::Error::Msg(format!(
                 "AdamW CPU: unsupported master dtype {other}"
-            ))))
+            ))));
         }
     }
     let cpu = CpuStorage::from_bytes(dtype, bytes).map_err(StepError::Tensor)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(shape.to_vec()), TensorId::next())
-        .map_err(StepError::Tensor)
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(shape.to_vec()),
+        TensorId::next(),
+    )
+    .map_err(StepError::Tensor)
 }
 
 fn read_to_f32(t: &Tensor) -> Result<Vec<f32>, StepError> {
@@ -355,23 +357,21 @@ fn read_to_f32(t: &Tensor) -> Result<Vec<f32>, StepError> {
         DType::BF16 => {
             for i in 0..n {
                 out.push(
-                    half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32(),
+                    half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32(),
                 );
             }
         }
         DType::F16 => {
             for i in 0..n {
                 out.push(
-                    half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32(),
+                    half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32(),
                 );
             }
         }
         other => {
             return Err(StepError::Tensor(kiln_tensor::Error::Msg(format!(
                 "AdamW CPU: unsupported dtype {other}"
-            ))))
+            ))));
         }
     }
     Ok(out)
@@ -447,7 +447,8 @@ mod tests {
     fn stochastic_bf16_passes_through_nan_and_inf() {
         let nan = half::bf16::from_bits(f32_to_bf16_stochastic_bits(f32::NAN, 0x1234)).to_f32();
         assert!(nan.is_nan());
-        let inf = half::bf16::from_bits(f32_to_bf16_stochastic_bits(f32::INFINITY, 0xffff)).to_f32();
+        let inf =
+            half::bf16::from_bits(f32_to_bf16_stochastic_bits(f32::INFINITY, 0xffff)).to_f32();
         assert!(inf.is_infinite() && inf > 0.0);
     }
 
@@ -471,9 +472,14 @@ mod tests {
         // round-to-nearest is constant. P(no variation) = 2^-256.
         let v = 1.00390625f32;
         let vals = vec![v; 256];
-        let rtn =
-            build_master_tensor(DType::BF16, &[256], &vals, StochasticRoundingPolicy::RoundToNearest, 0)
-                .unwrap();
+        let rtn = build_master_tensor(
+            DType::BF16,
+            &[256],
+            &vals,
+            StochasticRoundingPolicy::RoundToNearest,
+            0,
+        )
+        .unwrap();
         let sto = build_master_tensor(
             DType::BF16,
             &[256],
@@ -484,7 +490,10 @@ mod tests {
         .unwrap();
         let rtn_v = read_to_f32(&rtn).unwrap();
         let sto_v = read_to_f32(&sto).unwrap();
-        assert!(rtn_v.iter().all(|&x| x == rtn_v[0]), "round-to-nearest not constant");
+        assert!(
+            rtn_v.iter().all(|&x| x == rtn_v[0]),
+            "round-to-nearest not constant"
+        );
         let (down, up) = bf16_neighbors(v);
         assert!(
             sto_v.iter().any(|&x| x == down) && sto_v.iter().any(|&x| x == up),
@@ -539,10 +548,7 @@ mod tests {
             .collect();
         let expected = [1.0f32 - 1e-3, 2.0 - 1e-3, 3.0 - 1e-3, 4.0 - 1e-3];
         for (i, (got, want)) in values.iter().zip(expected.iter()).enumerate() {
-            assert!(
-                (got - want).abs() < 1e-4,
-                "idx {i}: got {got}, want {want}"
-            );
+            assert!((got - want).abs() < 1e-4, "idx {i}: got {got}, want {want}");
         }
     }
 
@@ -651,7 +657,9 @@ mod tests {
         // pass a BF16 grad -> mismatch.
         let mut opt = AdamW::default_hp();
         let mut p = fresh_param();
-        let g_bf16: Vec<half::bf16> = (0..4).map(|i| half::bf16::from_f32(i as f32 * 0.1)).collect();
+        let g_bf16: Vec<half::bf16> = (0..4)
+            .map(|i| half::bf16::from_f32(i as f32 * 0.1))
+            .collect();
         let g = Tensor::from_slice(&g_bf16, vec![4]).unwrap();
         let e = opt.step(&mut p, &g).unwrap_err();
         match e {

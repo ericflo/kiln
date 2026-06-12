@@ -9,9 +9,7 @@
 
 use std::sync::Arc;
 
-use kiln_tensor::{
-    bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId,
-};
+use kiln_tensor::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 use crate::BackwardOp;
 
@@ -44,10 +42,12 @@ fn load_f32(t: &Tensor) -> Result<Vec<f32>> {
     for i in 0..n {
         out.push(match dtype {
             DType::F32 => f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()),
-            DType::BF16 => half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
-            DType::F16 => half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
+            DType::BF16 => {
+                half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
+            DType::F16 => {
+                half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
             _ => unreachable!(),
         });
     }
@@ -77,7 +77,11 @@ fn store_f32(dtype: DType, shape: &[usize], data: &[f32]) -> Result<Tensor> {
     }
     let cpu = CpuStorage::from_bytes(dtype, bytes)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(shape.to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(shape.to_vec()),
+        TensorId::next(),
+    )
 }
 
 #[derive(Debug)]
@@ -164,7 +168,11 @@ mod tests {
         // x = [0.5, -0.5]; lo=-1, hi=1 → both in range → dx = dy.
         let x = Tensor::from_slice(&[0.5f32, -0.5], vec![2]).unwrap();
         let dy = Tensor::from_slice(&[10.0f32, 20.0], vec![2]).unwrap();
-        let bo = ClampBackward { x, lo: -1.0, hi: 1.0 };
+        let bo = ClampBackward {
+            x,
+            lo: -1.0,
+            hi: 1.0,
+        };
         let dx = load_f32(bo.apply(&dy).unwrap()[0].as_ref().unwrap()).unwrap();
         assert_eq!(dx, vec![10.0, 20.0]);
     }
@@ -175,7 +183,11 @@ mod tests {
         // -5 < lo → 0; -1 == lo → 0; 0 in range → dy; 1 == hi → 0; 5 > hi → 0.
         let x = Tensor::from_slice(&[-5.0f32, -1.0, 0.0, 1.0, 5.0], vec![5]).unwrap();
         let dy = Tensor::from_slice(&[1.0f32, 1.0, 1.0, 1.0, 1.0], vec![5]).unwrap();
-        let bo = ClampBackward { x, lo: -1.0, hi: 1.0 };
+        let bo = ClampBackward {
+            x,
+            lo: -1.0,
+            hi: 1.0,
+        };
         let dx = load_f32(bo.apply(&dy).unwrap()[0].as_ref().unwrap()).unwrap();
         assert_eq!(dx, vec![0.0, 0.0, 1.0, 0.0, 0.0]);
     }
@@ -216,7 +228,10 @@ mod tests {
         let x_data = vec![1.5f32, -0.7, 2.3];
         let x = Tensor::from_slice(&x_data, vec![3]).unwrap();
         let dy = Tensor::from_slice(&[1.0f32; 3], vec![3]).unwrap();
-        let bo = PowBackward { x: x.clone(), p: 2.0 };
+        let bo = PowBackward {
+            x: x.clone(),
+            p: 2.0,
+        };
         let dx = load_f32(bo.apply(&dy).unwrap()[0].as_ref().unwrap()).unwrap();
         let loss = |x_vec: &[f32]| -> f32 {
             let xt = Tensor::from_slice(x_vec, vec![3]).unwrap();

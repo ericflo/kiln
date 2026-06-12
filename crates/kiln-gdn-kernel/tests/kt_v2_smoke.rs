@@ -54,33 +54,13 @@ fn gdn_gates_bf16_kt_dispatches_on_kt_inputs() {
 
     // gates_bf16 inputs: a [rows, nv], b [rows, nv], a_log [nv],
     // dt_bias [nv]. All BF16.
-    let a = Tensor::cuda_from_slice(
-        &pattern_bf16(rows * nv, 1),
-        vec![rows, nv],
-        0,
-    )
-    .expect("a");
-    let b_in = Tensor::cuda_from_slice(
-        &pattern_bf16(rows * nv, 2),
-        vec![rows, nv],
-        0,
-    )
-    .expect("b");
-    let a_log = Tensor::cuda_from_slice(
-        &pattern_bf16(nv, 3),
-        vec![nv],
-        0,
-    )
-    .expect("a_log");
-    let dt_bias = Tensor::cuda_from_slice(
-        &pattern_bf16(nv, 4),
-        vec![nv],
-        0,
-    )
-    .expect("dt_bias");
+    let a = Tensor::cuda_from_slice(&pattern_bf16(rows * nv, 1), vec![rows, nv], 0).expect("a");
+    let b_in = Tensor::cuda_from_slice(&pattern_bf16(rows * nv, 2), vec![rows, nv], 0).expect("b");
+    let a_log = Tensor::cuda_from_slice(&pattern_bf16(nv, 3), vec![nv], 0).expect("a_log");
+    let dt_bias = Tensor::cuda_from_slice(&pattern_bf16(nv, 4), vec![nv], 0).expect("dt_bias");
 
-    let (beta, g) = gdn_gates_bf16_kt(&a, &b_in, &a_log, &dt_bias)
-        .expect("gdn_gates_bf16_kt on kt inputs");
+    let (beta, g) =
+        gdn_gates_bf16_kt(&a, &b_in, &a_log, &dt_bias).expect("gdn_gates_bf16_kt on kt inputs");
 
     assert_eq!(beta.shape(), &[rows, nv]);
     assert_eq!(g.shape(), &[rows, nv]);

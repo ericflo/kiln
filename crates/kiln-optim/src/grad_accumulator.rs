@@ -27,10 +27,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use kiln_tensor::{
-    CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId,
-};
 use kiln_tensor::bail;
+use kiln_tensor::{CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId};
 
 #[derive(Debug, Default)]
 pub struct GradAccumulator {
@@ -107,14 +105,18 @@ fn clone_tensor(t: &Tensor) -> Result<Tensor> {
         .storage()
         .as_any()
         .downcast_ref::<CpuStorage>()
-        .ok_or_else(|| kiln_tensor::Error::from_str(
-            "GradAccumulator: storage must be CpuStorage",
-        ))?;
+        .ok_or_else(|| {
+            kiln_tensor::Error::from_str("GradAccumulator: storage must be CpuStorage")
+        })?;
     let bytes = cpu.as_bytes().to_vec();
     let dtype = t.dtype();
     let cpu_out = CpuStorage::from_bytes(dtype, bytes)?;
     let storage: Storage = Arc::new(cpu_out);
-    Tensor::from_parts(storage, Layout::contiguous(t.shape().to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(t.shape().to_vec()),
+        TensorId::next(),
+    )
 }
 
 fn add_inplace_clone(a: &Tensor, b: &Tensor) -> Result<Tensor> {
@@ -151,21 +153,19 @@ fn add_inplace_clone(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         DType::BF16 => {
             for i in 0..n {
                 let va =
-                    half::bf16::from_le_bytes(ab[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32();
+                    half::bf16::from_le_bytes(ab[i * 2..i * 2 + 2].try_into().unwrap()).to_f32();
                 let vb =
-                    half::bf16::from_le_bytes(bb[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32();
+                    half::bf16::from_le_bytes(bb[i * 2..i * 2 + 2].try_into().unwrap()).to_f32();
                 let sum = half::bf16::from_f32(va + vb);
                 out_bytes[i * 2..i * 2 + 2].copy_from_slice(&sum.to_le_bytes());
             }
         }
         DType::F16 => {
             for i in 0..n {
-                let va = half::f16::from_le_bytes(ab[i * 2..i * 2 + 2].try_into().unwrap())
-                    .to_f32();
-                let vb = half::f16::from_le_bytes(bb[i * 2..i * 2 + 2].try_into().unwrap())
-                    .to_f32();
+                let va =
+                    half::f16::from_le_bytes(ab[i * 2..i * 2 + 2].try_into().unwrap()).to_f32();
+                let vb =
+                    half::f16::from_le_bytes(bb[i * 2..i * 2 + 2].try_into().unwrap()).to_f32();
                 let sum = half::f16::from_f32(va + vb);
                 out_bytes[i * 2..i * 2 + 2].copy_from_slice(&sum.to_le_bytes());
             }
@@ -174,7 +174,11 @@ fn add_inplace_clone(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     }
     let cpu_out = CpuStorage::from_bytes(dtype, out_bytes)?;
     let storage: Storage = Arc::new(cpu_out);
-    Tensor::from_parts(storage, Layout::contiguous(a.shape().to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(a.shape().to_vec()),
+        TensorId::next(),
+    )
 }
 
 #[cfg(test)]

@@ -771,8 +771,9 @@ async fn submit_opd(
         opd_max_seq_len,
         EstimateOptions {
             max_supervised_tokens: None,
-            recompute_boundaries:
-                training_preflight::recompute_checkpoint_boundaries_for_seq_len(opd_max_seq_len),
+            recompute_boundaries: training_preflight::recompute_checkpoint_boundaries_for_seq_len(
+                opd_max_seq_len,
+            ),
         },
         req.config.lora_rank,
         false,
@@ -1035,7 +1036,10 @@ async fn submit_distill_pump(
     super::teachers::require_registered_teacher(
         &state,
         &req.teacher,
-        format!("distill/pump: teacher alias '{}' is not registered", req.teacher),
+        format!(
+            "distill/pump: teacher alias '{}' is not registered",
+            req.teacher
+        ),
     )?;
     super::adapters::validate_adapter_name(&req.name)?;
     // The worker overrides config.lora_rank with the request's top-level
@@ -1139,11 +1143,7 @@ pub(crate) fn validate_post_eval_suite(
         return Ok(());
     };
     if registry.load(&cfg.suite).is_err() {
-        let available: Vec<String> = registry
-            .list()
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
+        let available: Vec<String> = registry.list().into_iter().map(|s| s.name).collect();
         return Err(ApiError::training_invalid_request(format!(
             "post_eval.suite '{}' is not an installed eval suite — available: [{}]",
             cfg.suite,

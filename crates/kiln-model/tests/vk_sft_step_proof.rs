@@ -36,7 +36,7 @@ use kiln_model::lora_loader::LoraProjectionWeights;
 use kiln_model::tape_forward::{
     try_tape_cross_entropy_from_logits_kt, try_tape_lora_linear_kt, with_thread_local_tape,
 };
-use kiln_tensor::{ops, Device, Tensor, VulkanStorage};
+use kiln_tensor::{Device, Tensor, VulkanStorage, ops};
 use kiln_vulkan_kernel::VulkanDevice;
 
 // ----------------------------------------------------------------------------
@@ -79,7 +79,9 @@ fn build_lora_fixtures() -> (Tensor, Tensor, LoraProjectionWeights) {
     let x_data: Vec<f32> = (0..SEQ * HIDDEN).map(|i| (i as f32) * 0.1 - 0.3).collect();
     let w_data: Vec<f32> = (0..HIDDEN * OUT).map(|i| 0.05 * (i as f32) - 0.2).collect();
     // LoRA A nonzero so the (x@Aᵀ) inner activation is nonzero.
-    let a_data: Vec<f32> = (0..RANK * HIDDEN).map(|i| 0.07 * (i as f32) - 0.1).collect();
+    let a_data: Vec<f32> = (0..RANK * HIDDEN)
+        .map(|i| 0.07 * (i as f32) - 0.1)
+        .collect();
     // LoRA B nonzero (real adapters init B=0, but a nonzero B exercises the full
     // delta path and gives a nonzero dA as well as dB).
     let b_data: Vec<f32> = (0..OUT * RANK).map(|i| 0.03 * (i as f32) + 0.02).collect();
@@ -87,7 +89,8 @@ fn build_lora_fixtures() -> (Tensor, Tensor, LoraProjectionWeights) {
     let x = Tensor::from_vec_on(Device::Vulkan(0), x_data, vec![SEQ, HIDDEN]).expect("x on Vulkan");
     let weight_t = Tensor::from_vec_on(Device::Vulkan(0), w_data, vec![HIDDEN, OUT])
         .expect("weight_t on Vulkan");
-    let a = Tensor::from_vec_on(Device::Vulkan(0), a_data, vec![RANK, HIDDEN]).expect("a on Vulkan");
+    let a =
+        Tensor::from_vec_on(Device::Vulkan(0), a_data, vec![RANK, HIDDEN]).expect("a on Vulkan");
     let b = Tensor::from_vec_on(Device::Vulkan(0), b_data, vec![OUT, RANK]).expect("b on Vulkan");
     (x, weight_t, LoraProjectionWeights { a, b })
 }
@@ -137,7 +140,11 @@ fn vk_sft_lora_linear_backprops() {
         "LoRA-linear recorded {} nodes on Vulkan, expected 4",
         tape.len()
     );
-    assert_eq!(out.device(), Device::Vulkan(0), "forward output left Vulkan");
+    assert_eq!(
+        out.device(),
+        Device::Vulkan(0),
+        "forward output left Vulkan"
+    );
     assert_eq!(out.shape(), &[SEQ, OUT], "LoRA-linear output wrong shape");
     let out_v = read_host_f32(&out);
     assert!(
@@ -279,12 +286,12 @@ fn adamw_one_step_in_place(param: &Tensor, grad: &Tensor, before: &[f32]) -> Vec
         m_store.buffer(),
         v_store.buffer(),
         n,
-        1e-2, // lr — large enough to move the bytes in one step
-        0.9,  // beta1
+        1e-2,  // lr — large enough to move the bytes in one step
+        0.9,   // beta1
         0.999, // beta2
-        1e-8, // eps
-        0.0,  // weight_decay
-        1,    // step
+        1e-8,  // eps
+        0.0,   // weight_decay
+        1,     // step
     )
     .expect("dispatch_adamw_step_buffers failed");
 

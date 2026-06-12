@@ -14,7 +14,7 @@ use std::sync::Arc;
 use kiln_vulkan_kernel::device::VulkanDevice;
 
 use crate::{
-    allocator_frozen_error, Allocator, AllocatorMode, DType, Device, Result, Storage, VulkanStorage,
+    Allocator, AllocatorMode, DType, Device, Result, Storage, VulkanStorage, allocator_frozen_error,
 };
 
 #[derive(Debug)]

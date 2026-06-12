@@ -163,16 +163,13 @@ impl PrioritizedCudaStream {
 ///
 /// Returns `Err(DriverError)` if `cuCtxGetStreamPriorityRange` fails
 /// (e.g., no CUDA device present or driver not initialised).
-pub fn cuda_stream_priority_range(
-    ctx: &Arc<CudaContext>,
-) -> Result<(i32, i32), DriverError> {
+pub fn cuda_stream_priority_range(ctx: &Arc<CudaContext>) -> Result<(i32, i32), DriverError> {
     ctx.bind_to_thread()?;
     let mut least = MaybeUninit::<i32>::uninit();
     let mut greatest = MaybeUninit::<i32>::uninit();
     // SAFETY: both output pointers are valid MaybeUninit<i32> allocations.
     unsafe {
-        sys::cuCtxGetStreamPriorityRange(least.as_mut_ptr(), greatest.as_mut_ptr())
-            .result()?;
+        sys::cuCtxGetStreamPriorityRange(least.as_mut_ptr(), greatest.as_mut_ptr()).result()?;
         Ok((least.assume_init(), greatest.assume_init()))
     }
 }
@@ -244,8 +241,8 @@ mod tests {
             eprintln!("CUDA device not available; skipping priority_range_is_well_formed");
             return;
         };
-        let (least, greatest) = cuda_stream_priority_range(&ctx)
-            .expect("cuCtxGetStreamPriorityRange");
+        let (least, greatest) =
+            cuda_stream_priority_range(&ctx).expect("cuCtxGetStreamPriorityRange");
         // NVIDIA convention: greatest_priority <= least_priority.
         // On devices without priority support both are 0 — still valid.
         assert!(

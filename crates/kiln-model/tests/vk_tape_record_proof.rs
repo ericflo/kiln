@@ -55,7 +55,7 @@
 use kiln_model::tape_forward::{
     try_tape_add_kt, try_tape_matmul_bf16w_kt, try_tape_rms_norm_kt, with_thread_local_tape,
 };
-use kiln_tensor::{ops, DType, Device, Tensor};
+use kiln_tensor::{DType, Device, Tensor, ops};
 use kiln_vulkan_kernel::VulkanDevice;
 
 // ----------------------------------------------------------------------------
@@ -153,8 +153,12 @@ fn vk_tape_add_records_and_backprops() {
 
     // (3) BACKWARD over Vulkan storage: seed dL/dy = ones; AddBackward adjoint
     //     is dL/da = dL/db = grad_output, so both leaf grads must equal ones.
-    let seed = Tensor::from_vec_on(Device::Vulkan(0), vec![1.0_f32; ROWS * COLS], vec![ROWS, COLS])
-        .expect("build seed on Vulkan");
+    let seed = Tensor::from_vec_on(
+        Device::Vulkan(0),
+        vec![1.0_f32; ROWS * COLS],
+        vec![ROWS, COLS],
+    )
+    .expect("build seed on Vulkan");
     let grads = tape
         .backward(y.id(), seed, |x, z| ops::add(x, z))
         .expect("Tape::backward errored on Vulkan storage");
@@ -230,7 +234,12 @@ fn vk_tape_matmul_bf16w_records_and_backprops() {
     });
 
     // (1) ANTI-SILENT-DROP: exactly one node recorded.
-    assert_eq!(tape.len(), 1, "bf16w recorder recorded {} nodes, expected 1", tape.len());
+    assert_eq!(
+        tape.len(),
+        1,
+        "bf16w recorder recorded {} nodes, expected 1",
+        tape.len()
+    );
     assert_eq!(y.device(), Device::Vulkan(0), "forward output left Vulkan");
     assert_eq!(y.shape(), &[rows, n]);
     assert_eq!(y.dtype(), DType::F32);
@@ -241,7 +250,10 @@ fn vk_tape_matmul_bf16w_records_and_backprops() {
     let ref_fwd = read_host_f32(&kiln_tensor::vulkan_matmul(&x, &w_t_ref).expect("ref matmul"));
     let vk_fwd = read_host_f32(&y);
     let fwd_err = max_abs_err(&vk_fwd, &ref_fwd);
-    assert!(fwd_err < 2e-2, "forward parity FAILED: max_abs_err={fwd_err}");
+    assert!(
+        fwd_err < 2e-2,
+        "forward parity FAILED: max_abs_err={fwd_err}"
+    );
 
     // (3) BACKWARD: seed dL/dy = ones. dx = grad_out @ W (frozen weight).
     let seed = Tensor::from_vec_on(Device::Vulkan(0), vec![1.0_f32; rows * n], vec![rows, n])
@@ -262,14 +274,21 @@ fn vk_tape_matmul_bf16w_records_and_backprops() {
     let dx_v = read_host_f32(dx);
     let analytic = read_host_f32(
         &kiln_tensor::vulkan_matmul_bf16w_bwd(
-            &Tensor::from_vec_on(Device::Vulkan(0), vec![1.0_f32; rows * n], vec![rows, n]).unwrap(),
+            &Tensor::from_vec_on(Device::Vulkan(0), vec![1.0_f32; rows * n], vec![rows, n])
+                .unwrap(),
             &w_bf16,
         )
         .expect("analytic dx"),
     );
-    assert!(dx_v.iter().all(|v| v.is_finite()), "non-finite dx: {dx_v:?}");
+    assert!(
+        dx_v.iter().all(|v| v.is_finite()),
+        "non-finite dx: {dx_v:?}"
+    );
     let dx_err = max_abs_err(&dx_v, &analytic);
-    assert!(dx_err < 2e-2, "recorded dx != analytic dx: max_abs_err={dx_err}");
+    assert!(
+        dx_err < 2e-2,
+        "recorded dx != analytic dx: max_abs_err={dx_err}"
+    );
 
     eprintln!(
         "[#1443 step1 PROOF] Device::Vulkan(0): tape.len()={} | fwd max_abs_err vs F32-cast ref={:.3e} | \
@@ -331,7 +350,11 @@ fn vk_tape_rms_norm_records_on_vulkan() {
         y_opt.is_some(),
         "try_tape_rms_norm_kt returned None on Vulkan — PR5a gate gap"
     );
-    assert_eq!(tape.len(), 1, "rms_norm did not record exactly 1 node on Vulkan");
+    assert_eq!(
+        tape.len(),
+        1,
+        "rms_norm did not record exactly 1 node on Vulkan"
+    );
 }
 
 /// BISECT PROBE: isolate `ops::rms_norm` on Vulkan (no recorder, no cast, no
@@ -390,14 +413,21 @@ fn vk_tape_rms_norm_backprops_on_vulkan() {
             .expect("try_tape_rms_norm_kt returned None on Vulkan");
         (y, x.id(), weight.id())
     });
-    assert_eq!(tape.len(), 1, "rms_norm did not record exactly 1 node on Vulkan");
+    assert_eq!(
+        tape.len(),
+        1,
+        "rms_norm did not record exactly 1 node on Vulkan"
+    );
     assert_eq!(y.device(), Device::Vulkan(0), "forward output left Vulkan");
 
     // The frontier: walk the tape (seed dL/dy = ones). If the native rmsnorm
     // backward composite GPUVM-faults on Vulkan storage, this is where it hangs.
-    let seed =
-        Tensor::from_vec_on(Device::Vulkan(0), vec![1.0_f32; rows * HIDDEN], vec![rows, HIDDEN])
-            .expect("seed on Vulkan");
+    let seed = Tensor::from_vec_on(
+        Device::Vulkan(0),
+        vec![1.0_f32; rows * HIDDEN],
+        vec![rows, HIDDEN],
+    )
+    .expect("seed on Vulkan");
     let grads = tape
         .backward(y.id(), seed, |g, z| ops::add(g, z))
         .expect("Tape::backward errored on the rms_norm Vulkan graph");

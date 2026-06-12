@@ -134,9 +134,7 @@ pub enum LogitSourceError {
 
     /// Tokenizer hash mismatch detected. Critical guardrail (§3.9
     /// `TokenizerDrift` rule).
-    #[error(
-        "tokenizer drift: source {teacher_id:?} expected hash {expected:?}, got {actual:?}"
-    )]
+    #[error("tokenizer drift: source {teacher_id:?} expected hash {expected:?}, got {actual:?}")]
     TokenizerDrift {
         teacher_id: String,
         expected: String,
@@ -256,11 +254,7 @@ impl FixtureLogitSource {
     /// Build a fixture source where every (tokens, position) query
     /// returns the same uniform-over-K top-K. Useful as a smoke fixture
     /// for the trainer wiring.
-    pub fn uniform_topk(
-        teacher_id: impl Into<String>,
-        vocab_size: usize,
-        top_k: usize,
-    ) -> Self {
+    pub fn uniform_topk(teacher_id: impl Into<String>, vocab_size: usize, top_k: usize) -> Self {
         Self {
             caps: LogitSourceCaps {
                 teacher_id: teacher_id.into(),
@@ -277,13 +271,7 @@ impl FixtureLogitSource {
 
     /// Insert an entry: at position `pos` of any tokens whose hash is
     /// `tokens_hash`, return the given top-K indices and logprobs.
-    pub fn insert(
-        &mut self,
-        tokens_hash: u64,
-        pos: usize,
-        indices: Vec<u32>,
-        logprobs: Vec<f32>,
-    ) {
+    pub fn insert(&mut self, tokens_hash: u64, pos: usize, indices: Vec<u32>, logprobs: Vec<f32>) {
         assert_eq!(indices.len(), self.top_k);
         assert_eq!(logprobs.len(), self.top_k);
         self.entries.insert((tokens_hash, pos), (indices, logprobs));
@@ -469,15 +457,9 @@ mod tests {
     #[test]
     fn fixture_rejects_overlarge_k() {
         let src = FixtureLogitSource::uniform_topk("test-teacher", 64, 4);
-        let err = src
-            .fetch_logprobs(&[1, 2, 3], &[1], Some(8))
-            .unwrap_err();
+        let err = src.fetch_logprobs(&[1, 2, 3], &[1], Some(8)).unwrap_err();
         match err {
-            LogitSourceError::TopKExceedsCap {
-                requested,
-                cap,
-                ..
-            } => {
+            LogitSourceError::TopKExceedsCap { requested, cap, .. } => {
                 assert_eq!(requested, 8);
                 assert_eq!(cap, 4);
             }
@@ -488,9 +470,7 @@ mod tests {
     #[test]
     fn deterministic_uniform_returns_kunique_indices_per_position() {
         let src = DeterministicUniformLogitSource::new("test-det", 256, 8);
-        let batch = src
-            .fetch_logprobs(&[1, 2, 3, 4], &[0, 3], Some(8))
-            .unwrap();
+        let batch = src.fetch_logprobs(&[1, 2, 3, 4], &[0, 3], Some(8)).unwrap();
         match batch {
             LogprobBatch::TopK(t) => {
                 assert_eq!(t.top_k, 8);
@@ -522,8 +502,12 @@ mod tests {
     fn deterministic_uniform_is_deterministic() {
         let src_a = DeterministicUniformLogitSource::new("det", 256, 4);
         let src_b = DeterministicUniformLogitSource::new("det", 256, 4);
-        let a = src_a.fetch_logprobs(&[7, 11, 13], &[1, 2], Some(4)).unwrap();
-        let b = src_b.fetch_logprobs(&[7, 11, 13], &[1, 2], Some(4)).unwrap();
+        let a = src_a
+            .fetch_logprobs(&[7, 11, 13], &[1, 2], Some(4))
+            .unwrap();
+        let b = src_b
+            .fetch_logprobs(&[7, 11, 13], &[1, 2], Some(4))
+            .unwrap();
         match (a, b) {
             (LogprobBatch::TopK(ta), LogprobBatch::TopK(tb)) => {
                 assert_eq!(ta.indices, tb.indices);

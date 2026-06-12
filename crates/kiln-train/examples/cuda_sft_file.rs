@@ -349,12 +349,8 @@ fn main() -> Result<()> {
     )
     .context("load model weights")?;
     // #1082: kt-native — `device` is a kt `Device::Cuda(0)`, passed directly.
-    let gpu_weights = GpuWeights::from_model_weights(
-        &model_weights,
-        &model_config,
-        &device,
-    )
-    .context("transfer weights to CUDA")?;
+    let gpu_weights = GpuWeights::from_model_weights(&model_weights, &model_config, &device)
+        .context("transfer weights to CUDA")?;
     drop(model_weights);
     println!("model_loaded_vram_mib={}", current_vram_mib());
 
@@ -364,8 +360,7 @@ fn main() -> Result<()> {
     // by `kiln serve`) instead of `/foo/foo/` (nested, rejected). Registry
     // usage (`--output-dir /workspace/adapters --adapter-name foo`) is
     // unchanged. See issue #1065.
-    let layout =
-        kiln_train::resolve_sft_output_layout(&args.output_dir, &args.adapter_name);
+    let layout = kiln_train::resolve_sft_output_layout(&args.output_dir, &args.adapter_name);
     std::fs::create_dir_all(&layout.adapter_dir)
         .with_context(|| format!("creating {}", layout.adapter_dir.display()))?;
     let config = SftConfig {

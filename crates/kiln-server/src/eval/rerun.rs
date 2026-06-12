@@ -106,7 +106,11 @@ mod tests {
         let ids: Vec<_> = r.examples.iter().map(|e| e.id.clone().unwrap()).collect();
         assert_eq!(ids, vec!["e1", "e3"]);
         assert_eq!(r.name, "math-rerun");
-        assert!(r.examples.iter().all(|e| e.tags.contains(&"synth:rerun".to_string())));
+        assert!(
+            r.examples
+                .iter()
+                .all(|e| e.tags.contains(&"synth:rerun".to_string()))
+        );
     }
 
     #[test]

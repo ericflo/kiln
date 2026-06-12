@@ -80,8 +80,7 @@ fn split_then_concat_is_identity() {
     assert_eq!(chunks.len(), 2);
     // narrow views aren't contiguous along axis 1; concat requires
     // contiguous inputs. Materialize each chunk before concatenating.
-    let chunks_contig: Vec<Tensor> =
-        chunks.iter().map(|c| c.contiguous().unwrap()).collect();
+    let chunks_contig: Vec<Tensor> = chunks.iter().map(|c| c.contiguous().unwrap()).collect();
     let chunk_refs: Vec<&Tensor> = chunks_contig.iter().collect();
     let back = ops::concat(&chunk_refs, 1).unwrap();
     assert_eq!(back.shape(), x.shape());
@@ -102,11 +101,7 @@ fn unbind_then_stack_is_identity() {
 
 #[test]
 fn flip_twice_is_identity() {
-    let x = Tensor::from_slice(
-        &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
-        vec![2, 3],
-    )
-    .unwrap();
+    let x = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
     let once = ops::flip(&x, &[1]).unwrap();
     let twice = ops::flip(&once, &[1]).unwrap();
     assert_eq!(read_f32(&twice), read_f32(&x));
@@ -213,7 +208,10 @@ fn pad_unpad_via_narrow_recovers_original() {
     let padded = ops::pad(&x, &[(1, 2)], 0.0).unwrap();
     // Strip the pad via narrow.
     let recovered = padded.narrow(0, 1, 3).unwrap();
-    assert_eq!(read_f32(&recovered.contiguous().unwrap()), vec![1.0, 2.0, 3.0]);
+    assert_eq!(
+        read_f32(&recovered.contiguous().unwrap()),
+        vec![1.0, 2.0, 3.0]
+    );
 }
 
 #[test]
@@ -280,8 +278,7 @@ fn interpolate_1d_then_back_is_close_to_identity_for_smooth_signals() {
     let x_data: Vec<f32> = (0..8).map(|i| i as f32).collect();
     let x = Tensor::from_slice(&x_data, vec![8]).unwrap();
     let up = ops::interpolate_1d(&x, 16, ops::AlignCorners::Yes).unwrap();
-    let back =
-        ops::interpolate_1d(&up, 8, ops::AlignCorners::Yes).unwrap();
+    let back = ops::interpolate_1d(&up, 8, ops::AlignCorners::Yes).unwrap();
     let v = read_f32(&back);
     for (a, b) in v.iter().zip(x_data.iter()) {
         assert!(

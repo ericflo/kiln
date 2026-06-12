@@ -111,8 +111,8 @@ use kiln_autograd::{
     AddBackward, BackwardOp, CrossEntropyBackward, GradStore, MatmulBackward, MulBackward,
     ReduceBackward, ReduceKind, ReduceScope, RmsNormBackward, SiluBackward, SubBackward, Tape,
 };
-use kiln_tensor::{CpuStorage, DType, Layout, Storage, Tensor, TensorId};
 use kiln_tensor::ops::{add, cross_entropy, matmul, mul, rms_norm, silu, sub, sum_all};
+use kiln_tensor::{CpuStorage, DType, Layout, Storage, Tensor, TensorId};
 use std::sync::Arc;
 
 /// Inputs to [`linear_step_via_tape`].
@@ -431,8 +431,7 @@ pub fn mlp_step_via_tape(inputs: MlpStepInputs<'_>) -> Result<MlpStepOutput> {
     let h = silu_via_tape(&h_pre, &mut tape).context("mlp_step: silu(h_pre) forward")?;
 
     // pred = h @ w2 — recorded via the standalone matmul primitive.
-    let pred =
-        matmul_via_tape(&h, w2, &mut tape).context("mlp_step: matmul(h, w2) forward")?;
+    let pred = matmul_via_tape(&h, w2, &mut tape).context("mlp_step: matmul(h, w2) forward")?;
 
     // err = pred - target
     let err = sub(&pred, target).context("mlp_step: sub(pred, target) forward")?;
@@ -465,8 +464,8 @@ pub fn mlp_step_via_tape(inputs: MlpStepInputs<'_>) -> Result<MlpStepOutput> {
     let loss_value = scalar_f32(&loss).context("mlp_step: read pre-update loss scalar")?;
 
     // Backward.
-    let seed = Tensor::from_slice(&[1.0_f32], vec![])
-        .context("mlp_step: build scalar seed gradient")?;
+    let seed =
+        Tensor::from_slice(&[1.0_f32], vec![]).context("mlp_step: build scalar seed gradient")?;
     let grads = tape
         .backward(loss.id(), seed, |a, b| add(a, b))
         .context("mlp_step: Tape::backward walk")?;
@@ -575,12 +574,7 @@ pub fn matmul_via_tape(a: &Tensor, b: &Tensor, tape: &mut Tape) -> Result<Tensor
 /// (CUDA fast path) and the rest through this entry — same tape, same
 /// `BackwardOp` trait, no caller-side branching needed for the
 /// substrate type.
-pub fn rms_norm_via_tape(
-    x: &Tensor,
-    weight: &Tensor,
-    eps: f32,
-    tape: &mut Tape,
-) -> Result<Tensor> {
+pub fn rms_norm_via_tape(x: &Tensor, weight: &Tensor, eps: f32, tape: &mut Tape) -> Result<Tensor> {
     let y = rms_norm(x, weight, eps).context("rms_norm_via_tape: rms_norm forward")?;
     tape.record(
         &y,
@@ -822,7 +816,6 @@ pub fn transformer_block_step_via_tape(
     })
 }
 
-
 // ---------------------------------------------------------------------------
 // CPU F32 helpers — keep this file self-contained so the substrate proof
 // doesn't depend on Parameter / optimizer wiring landing first.
@@ -905,10 +898,7 @@ fn sgd_step_cpu(param: &Tensor, grad: &Tensor, lr: f32) -> Result<Tensor> {
         .zip(g.iter())
         .map(|(&pv, &gv)| pv - lr * gv)
         .collect();
-    let bytes: Vec<u8> = updated
-        .iter()
-        .flat_map(|&v| v.to_le_bytes())
-        .collect();
+    let bytes: Vec<u8> = updated.iter().flat_map(|&v| v.to_le_bytes()).collect();
     let cpu = CpuStorage::from_bytes(DType::F32, bytes)
         .context("sgd_step_cpu: build CpuStorage for new tensor")?;
     let storage: Storage = Arc::new(cpu);
@@ -1343,8 +1333,7 @@ mod tests {
     /// non-trivial `dx` keyed on the original input id.
     #[test]
     fn silu_via_tape_records_backward() {
-        let x =
-            Tensor::from_slice(&[-1.0_f32, 0.5, 2.0, -0.5, 1.0, -2.0], vec![2, 3]).unwrap();
+        let x = Tensor::from_slice(&[-1.0_f32, 0.5, 2.0, -0.5, 1.0, -2.0], vec![2, 3]).unwrap();
         let mut tape = Tape::new();
         let y = silu_via_tape(&x, &mut tape).expect("silu_via_tape forward");
         assert_eq!(y.shape(), &[2, 3], "silu preserves shape");
@@ -1418,8 +1407,7 @@ mod tests {
         .unwrap();
         let weight = Tensor::from_slice(&[1.0_f32, 1.0, 1.0, 1.0], vec![4]).unwrap();
         let mut tape = Tape::new();
-        let y = rms_norm_via_tape(&x, &weight, 1e-6, &mut tape)
-            .expect("rms_norm_via_tape forward");
+        let y = rms_norm_via_tape(&x, &weight, 1e-6, &mut tape).expect("rms_norm_via_tape forward");
         assert_eq!(y.shape(), &[2, 4]);
 
         let loss = sum_all(&y).unwrap();
@@ -1438,9 +1426,9 @@ mod tests {
         let dx = grads
             .get(x.id())
             .expect("rms_norm_via_tape did not key d_x on the original x.id()");
-        let dweight = grads.get(weight.id()).expect(
-            "rms_norm_via_tape did not key d_weight on the original weight.id()",
-        );
+        let dweight = grads
+            .get(weight.id())
+            .expect("rms_norm_via_tape did not key d_weight on the original weight.id()");
         let dx_vec = read_f32_vec(dx).unwrap();
         let dweight_vec = read_f32_vec(dweight).unwrap();
         assert_eq!(dx_vec.len(), 8, "d_x shape");
@@ -1459,9 +1447,7 @@ mod tests {
     fn cross_entropy_via_tape_records_backward() {
         let logits = Tensor::from_slice(
             &[
-                2.0_f32, 0.5, -1.0, 0.3,
-                -0.5, 1.5, 0.1, 0.2,
-                0.0, 0.0, 0.0, 1.0,
+                2.0_f32, 0.5, -1.0, 0.3, -0.5, 1.5, 0.1, 0.2, 0.0, 0.0, 0.0, 1.0,
             ],
             vec![3, 4],
         )
@@ -1671,5 +1657,4 @@ mod tests {
         })
         .unwrap();
     }
-
 }

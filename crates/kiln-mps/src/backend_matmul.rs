@@ -14,9 +14,7 @@
 //! "give me a plan for this matmul"; this adapter answers it
 //! Metal-side.
 
-use kiln_blas::{
-    AlgoCacheValue, BackendMatmul, MatmulOutcome, MatmulRequest,
-};
+use kiln_blas::{AlgoCacheValue, BackendMatmul, MatmulOutcome, MatmulRequest};
 
 use crate::{MpsTilePolicy, MpsUmaHint};
 

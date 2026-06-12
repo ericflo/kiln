@@ -22,8 +22,7 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::state::{
-    GpuCoordinationLock, RealPrefixCache, gpu_coordination_read_guard,
-    gpu_coordination_write_guard,
+    GpuCoordinationLock, RealPrefixCache, gpu_coordination_read_guard, gpu_coordination_write_guard,
 };
 
 const DEFAULT_ENGINE_CHANNEL: usize = 1024;
@@ -416,7 +415,8 @@ impl RealDecodeForward {
         // strict superset of the original on disjoint prompts, but the
         // outcome filters out blocks already refcounted by an earlier
         // entry, so dedup matters here for correctness of the freed set).
-        let retained_set: std::collections::HashSet<u32> = retained_blocks.iter().copied().collect();
+        let retained_set: std::collections::HashSet<u32> =
+            retained_blocks.iter().copied().collect();
 
         let mut blocks_to_free: Vec<u32> = allocated_blocks
             .into_iter()
@@ -428,9 +428,7 @@ impl RealDecodeForward {
         evicted_blocks.retain(|block_id| !retained_set.contains(block_id));
         blocks_to_free.extend(evicted_blocks);
         debug_assert!(
-            blocks_to_free
-                .iter()
-                .all(|id| !retained_set.contains(id)),
+            blocks_to_free.iter().all(|id| !retained_set.contains(id)),
             "blocks_to_free overlaps retained_blocks: free={blocks_to_free:?} retained={retained_set:?}",
         );
         debug_assert!({
@@ -1102,8 +1100,7 @@ impl BatchingEngineActor {
             // just-finished batch doesn't wait for the next command.
             self.run_pending_swaps_at_barrier();
 
-            if self.active.is_empty() && self.waiting.is_empty() && self.pending_swaps.is_empty()
-            {
+            if self.active.is_empty() && self.waiting.is_empty() && self.pending_swaps.is_empty() {
                 match self.rx.blocking_recv() {
                     Some(cmd) => self.handle_command(cmd),
                     None => break,
@@ -1198,7 +1195,8 @@ impl BatchingEngineActor {
                 // active batch to DRAIN (KV computed under the old weights
                 // can't continue under new ones), so it queues here and the
                 // run loop executes it at the between-requests barrier.
-                self.pending_swaps.push_back(PendingAdapterSwap { swap, reply });
+                self.pending_swaps
+                    .push_back(PendingAdapterSwap { swap, reply });
             }
         }
     }
@@ -1320,9 +1318,7 @@ impl BatchingEngineActor {
                         break;
                     }
                     self.snapshot.total_errors += 1;
-                    let _ = queued
-                        .response_tx
-                        .blocking_send(EngineEvent::Error(msg));
+                    let _ = queued.response_tx.blocking_send(EngineEvent::Error(msg));
                 }
             }
         }
@@ -1444,9 +1440,9 @@ impl BatchingEngineActor {
                         self.snapshot.total_errors += 1;
                         // Best-effort: the channel is full, so the error
                         // event only lands if the client drains later.
-                        let _ = active
-                            .response_tx
-                            .try_send(EngineEvent::Error("stream stalled: client stopped reading".into()));
+                        let _ = active.response_tx.try_send(EngineEvent::Error(
+                            "stream stalled: client stopped reading".into(),
+                        ));
                         return false;
                     }
                     event = e;
@@ -1536,8 +1532,10 @@ impl BatchingEngineActor {
             .total_decode_rows
             .saturating_add(batch_len as u64);
         if batch_len > 1 {
-            self.snapshot.total_batched_decode_forwards =
-                self.snapshot.total_batched_decode_forwards.saturating_add(1);
+            self.snapshot.total_batched_decode_forwards = self
+                .snapshot
+                .total_batched_decode_forwards
+                .saturating_add(1);
         }
         let started = Instant::now();
         let result = self.forward.forward_decode(&mut slots, &sampling);
@@ -2240,12 +2238,18 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(10), outcome(rx_a)),
             tokio::time::timeout(Duration::from_secs(10), outcome(rx_b)),
         );
-        let a = a.unwrap().expect("victim finishes cleanly, not with an engine error");
+        let a = a
+            .unwrap()
+            .expect("victim finishes cleanly, not with an engine error");
         let b = b.unwrap().expect("survivor completes");
         // One of the two was starved (admission order isn't pinned);
         // whichever it was finished early as `length`, the other decoded
         // all 5 tokens.
-        let (victim, survivor) = if a.completion_tokens < 5 { (a, b) } else { (b, a) };
+        let (victim, survivor) = if a.completion_tokens < 5 {
+            (a, b)
+        } else {
+            (b, a)
+        };
         assert!(victim.completion_tokens < 5, "victim was cut short");
         assert_eq!(survivor.completion_tokens, 5, "survivor unaffected");
         handle.stop().await.unwrap();
@@ -2332,10 +2336,7 @@ mod tests {
         // ENGINE width must be the engine default — the policy-routing
         // change that reused max_batch serialized all concurrent CUDA
         // requests.
-        let cuda_policy = DecodeBatcherPolicy::for_backend(
-            "cuda",
-            kiln_tensor::Device::Cuda(0),
-        );
+        let cuda_policy = DecodeBatcherPolicy::for_backend("cuda", kiln_tensor::Device::Cuda(0));
         assert_eq!(cuda_policy.max_batch, 1);
         assert_eq!(env_max_decode_batch_for_policy(Some(cuda_policy)), 8);
         assert_eq!(env_max_decode_batch_for_policy(Some(vulkan_policy)), 64);

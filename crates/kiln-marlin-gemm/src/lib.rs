@@ -84,7 +84,7 @@ pub(crate) const WORKSPACE_TILE_N: usize = 128;
 
 /// kt-typed dispatch surface — the only public matmul entry.
 mod kt_api;
-pub use kt_api::{marlin_w4a16_gemm_kt, MarlinError};
+pub use kt_api::{MarlinError, marlin_w4a16_gemm_kt};
 
 /// Pure-Rust port of the upstream Marlin Python packer
 /// (`marlin/__init__.py::_get_perms` and `Layer.pack`).
@@ -479,7 +479,11 @@ pub mod pack {
         }
 
         // 4) De-permute the scales back to natural `[num_groups, n]` layout.
-        let g = if groupsize == -1 { k } else { groupsize as usize };
+        let g = if groupsize == -1 {
+            k
+        } else {
+            groupsize as usize
+        };
         assert!(k % g == 0, "k={k} must be divisible by groupsize={g}");
         let num_groups = k / g;
         assert_eq!(

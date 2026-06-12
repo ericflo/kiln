@@ -206,7 +206,11 @@ fn tape_clear_lets_subsequent_step_record_fresh() {
     assert_eq!(tape.len(), 1);
 
     let _ = tape
-        .backward(y.id(), kt::Tensor::from_slice(&[1.0f32], vec![1]).unwrap(), accumulate)
+        .backward(
+            y.id(),
+            kt::Tensor::from_slice(&[1.0f32], vec![1]).unwrap(),
+            accumulate,
+        )
         .unwrap();
     tape.clear();
     assert_eq!(tape.len(), 0);
@@ -222,7 +226,11 @@ fn tape_clear_lets_subsequent_step_record_fresh() {
         }),
     );
     let _ = tape
-        .backward(z.id(), kt::Tensor::from_slice(&[1.0f32], vec![1]).unwrap(), accumulate)
+        .backward(
+            z.id(),
+            kt::Tensor::from_slice(&[1.0f32], vec![1]).unwrap(),
+            accumulate,
+        )
         .unwrap();
 }
 
@@ -235,11 +243,7 @@ fn reachable_from_walks_the_full_chain() {
     let b = kt::Tensor::from_slice(&[0.0f32], vec![1]).unwrap();
     let c = kt::Tensor::from_slice(&[0.0f32], vec![1]).unwrap();
     let d = kt::Tensor::from_slice(&[0.0f32], vec![1]).unwrap();
-    for (out, inp, name) in [
-        (&b, &a, "op1"),
-        (&c, &b, "op2"),
-        (&d, &c, "op3"),
-    ] {
+    for (out, inp, name) in [(&b, &a, "op1"), (&c, &b, "op2"), (&d, &c, "op3")] {
         tape.record(
             out,
             &[inp],

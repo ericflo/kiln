@@ -42,7 +42,9 @@ pub fn rocm_dropout(x: &Tensor, p: f32, seed: u64) -> Result<(Tensor, Tensor)> {
         DType::BF16 => 1,
         DType::F16 => 2,
         other => {
-            return Err(Error::Msg(format!("rocm_dropout: unsupported dtype {other}")));
+            return Err(Error::Msg(format!(
+                "rocm_dropout: unsupported dtype {other}"
+            )));
         }
     };
     if !x.is_contiguous() {
@@ -84,15 +86,7 @@ pub fn rocm_dropout(x: &Tensor, p: f32, seed: u64) -> Result<(Tensor, Tensor)> {
 
     let status = unsafe {
         kiln_dropout_async(
-            x_ptr,
-            y_ptr,
-            mask_ptr,
-            n as i64,
-            p,
-            inv_keep,
-            seed,
-            dtype_tag,
-            raw_stream,
+            x_ptr, y_ptr, mask_ptr, n as i64, p, inv_keep, seed, dtype_tag, raw_stream,
         )
     };
     if status != 0 {

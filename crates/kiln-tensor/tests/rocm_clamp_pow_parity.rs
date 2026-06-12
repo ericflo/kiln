@@ -38,11 +38,7 @@ fn ref_pow(x: f32, p: f32) -> f32 {
         for _ in 0..e {
             r *= x;
         }
-        if p_int < 0 {
-            1.0 / r
-        } else {
-            r
-        }
+        if p_int < 0 { 1.0 / r } else { r }
     } else {
         x.powf(p)
     }

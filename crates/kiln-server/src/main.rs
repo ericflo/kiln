@@ -694,10 +694,8 @@ async fn main() -> Result<()> {
                     };
                     let ran_at = kiln_server::recent_requests::now_unix_ms();
                     status.last_run_unix_ms = Some(ran_at);
-                    match kiln_server::api::self_improve::submit_self_improve(
-                        &scheduler_state,
-                        req,
-                    ) {
+                    match kiln_server::api::self_improve::submit_self_improve(&scheduler_state, req)
+                    {
                         Ok(resp) => {
                             tracing::info!(
                                 jobs = resp.job_ids.len(),
@@ -718,8 +716,7 @@ async fn main() -> Result<()> {
                     }
                     status.next_run_unix_ms = ran_at + interval_ms;
                     persist(&status);
-                    *scheduler_state.self_improve_scheduler.write().unwrap() =
-                        Some(status.clone());
+                    *scheduler_state.self_improve_scheduler.write().unwrap() = Some(status.clone());
                 }
             });
         }

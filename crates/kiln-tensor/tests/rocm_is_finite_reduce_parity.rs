@@ -103,7 +103,5 @@ fn is_finite_parity_wavefront_boundary_sweep() {
         }
     }
 
-    eprintln!(
-        "is_finite CPU-vs-ROCm parity passed across wavefront-boundary widths {widths:?}"
-    );
+    eprintln!("is_finite CPU-vs-ROCm parity passed across wavefront-boundary widths {widths:?}");
 }

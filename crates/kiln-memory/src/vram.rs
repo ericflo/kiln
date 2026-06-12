@@ -388,7 +388,9 @@ pub struct MemorySnapshot {
 pub fn current_memory_snapshot() -> MemorySnapshot {
     // 1. NVIDIA: nvidia-smi reports authoritative, all-process total + used.
     if let Some(total) = query_nvidia_smi() {
-        let used = query_nvidia_smi_field("memory.used").unwrap_or(0).min(total);
+        let used = query_nvidia_smi_field("memory.used")
+            .unwrap_or(0)
+            .min(total);
         return MemorySnapshot {
             total_bytes: total,
             used_bytes: used,
@@ -781,10 +783,11 @@ pub fn estimate_base_model_bytes(
     vocab_size: usize,
     bytes_per_param: usize,
 ) -> u64 {
-    let per_layer_params =
-        (4 * hidden_size * hidden_size) + (3 * hidden_size * intermediate_size);
+    let per_layer_params = (4 * hidden_size * hidden_size) + (3 * hidden_size * intermediate_size);
     let layer_total = per_layer_params.saturating_mul(num_layers);
-    let head_total = 2usize.saturating_mul(vocab_size).saturating_mul(hidden_size);
+    let head_total = 2usize
+        .saturating_mul(vocab_size)
+        .saturating_mul(hidden_size);
     let total_params = layer_total.saturating_add(head_total);
     let raw_bytes = (total_params as u64).saturating_mul(bytes_per_param as u64);
     // 1.2× working-buffer overhead. Implemented as (raw * 6) / 5 to stay
@@ -1048,10 +1051,7 @@ mod tests {
     }
 
     fn act_gib(num_layers: usize, max_seq_len: usize, hidden_size: usize) -> f64 {
-        let bytes = (num_layers as u64)
-            * (max_seq_len as u64)
-            * (hidden_size as u64)
-            * 4;
+        let bytes = (num_layers as u64) * (max_seq_len as u64) * (hidden_size as u64) * 4;
         (bytes as f64) / (1024.0 * 1024.0 * 1024.0)
     }
 
@@ -1176,7 +1176,9 @@ mod tests {
 
     #[test]
     fn recommended_checkpoint_plan_respects_user_override() {
-        let _g = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var("KILN_GRAD_CHECKPOINT_SEGMENTS", "12");
         }
@@ -1195,7 +1197,9 @@ mod tests {
 
     #[test]
     fn recommended_checkpoint_plan_respects_disable_env() {
-        let _g = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var("KILN_NO_GRAD_CHECKPOINT", "1");
         }
@@ -1250,13 +1254,7 @@ mod tests {
             std::env::remove_var("KILN_GRAD_CHECKPOINT_SEGMENTS");
             std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
         }
-        let plan = recommended_checkpoint_plan(
-            &vram(12),
-            32,
-            1024,
-            2560,
-            10 * 1024 * 1024 * 1024,
-        );
+        let plan = recommended_checkpoint_plan(&vram(12), 32, 1024, 2560, 10 * 1024 * 1024 * 1024);
         assert!(matches!(plan, Some(CheckpointPlan::UserOverride)));
     }
 
@@ -1325,13 +1323,8 @@ mod tests {
         let base_bytes = estimate_base_model_bytes(32, 2560, 10240, 151936, 2);
         let mut failures: Vec<String> = Vec::new();
         for &(vram_gb, max_seq_len, ref expected) in cases {
-            let plan = recommended_checkpoint_plan(
-                &vram(vram_gb),
-                32,
-                max_seq_len,
-                2560,
-                base_bytes,
-            );
+            let plan =
+                recommended_checkpoint_plan(&vram(vram_gb), 32, max_seq_len, 2560, base_bytes);
             let cell_ok = match (expected, plan.as_ref()) {
                 (Disabled, Some(CheckpointPlan::Disabled { .. })) => true,
                 (EnabledMin(n), Some(CheckpointPlan::Enabled { num_segments, .. })) => {
@@ -1391,13 +1384,8 @@ mod tests {
         let base_bytes = estimate_base_model_bytes(32, 4096, 14336, 128000, 2);
         let mut failures: Vec<String> = Vec::new();
         for &(vram_gb, max_seq_len, ref expected) in cases {
-            let plan = recommended_checkpoint_plan(
-                &vram(vram_gb),
-                32,
-                max_seq_len,
-                4096,
-                base_bytes,
-            );
+            let plan =
+                recommended_checkpoint_plan(&vram(vram_gb), 32, max_seq_len, 4096, base_bytes);
             let cell_ok = match (expected, plan.as_ref()) {
                 (Disabled, Some(CheckpointPlan::Disabled { .. })) => true,
                 (EnabledMin(n), Some(CheckpointPlan::Enabled { num_segments, .. })) => {

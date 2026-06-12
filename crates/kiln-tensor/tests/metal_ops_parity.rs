@@ -17,12 +17,14 @@
 //! Skips gracefully (prints + returns) when no Metal device is present,
 //! so the suite is a no-op on CI runners without a GPU.
 
-use kiln_tensor::{ops, DType, Device, Tensor};
+use kiln_tensor::{DType, Device, Tensor, ops};
 
 /// `Device::Metal(0)` if a Metal device is reachable, else `None`.
 fn metal() -> Option<Device> {
     // `primary_metal_companion` enumerates `Device::all()`; Ok ⇒ present.
-    kiln_tensor::primary_metal_companion(0).ok().map(|_| Device::Metal(0))
+    kiln_tensor::primary_metal_companion(0)
+        .ok()
+        .map(|_| Device::Metal(0))
 }
 
 /// Deterministic pseudo-random f32 pattern in roughly [-1, 1].
@@ -30,7 +32,9 @@ fn pattern(n: usize, seed: u64) -> Vec<f32> {
     let mut out = Vec::with_capacity(n);
     let mut s = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     for _ in 0..n {
-        s = s.wrapping_add(0xDEAD_BEEF).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        s = s
+            .wrapping_add(0xDEAD_BEEF)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15);
         out.push(((s >> 33) as u32 % 2048) as f32 / 1024.0 - 1.0);
     }
     out
@@ -38,12 +42,23 @@ fn pattern(n: usize, seed: u64) -> Vec<f32> {
 
 /// Strictly-positive f32 pattern (for weights / rmsnorm scale).
 fn pattern_pos(n: usize, seed: u64) -> Vec<f32> {
-    pattern(n, seed).into_iter().map(|v| v.abs() + 0.25).collect()
+    pattern(n, seed)
+        .into_iter()
+        .map(|v| v.abs() + 0.25)
+        .collect()
 }
 
 fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(a.len(), b.len(), "length mismatch {} vs {}", a.len(), b.len());
-    a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()))
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "length mismatch {} vs {}",
+        a.len(),
+        b.len()
+    );
+    a.iter()
+        .zip(b)
+        .fold(0.0f32, |m, (x, y)| m.max((x - y).abs()))
 }
 
 fn bf16_to_f32_vec(t: &Tensor) -> Vec<f32> {
@@ -128,7 +143,10 @@ fn softmax_last_axis_f32() {
     for (rows, cols, seed) in [(8usize, 128usize, 10u64), (1, 2560, 11), (32, 64, 12)] {
         let data = pattern(rows * cols, seed);
         let (cpu, met) = pair(&data, &[rows, cols], dev);
-        let want = ops::softmax_last_dim(&cpu).unwrap().to_vec::<f32>().unwrap();
+        let want = ops::softmax_last_dim(&cpu)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
         let got = kiln_tensor::metal_softmax_last_axis(&met)
             .unwrap()
             .to_vec::<f32>()
@@ -150,7 +168,10 @@ fn log_softmax_last_axis_f32() {
         // CPU reference (canonical) vs Metal kernel via the same op
         // entry point — ops::log_softmax_last_dim routes Metal storage
         // through the kiln-owned MSL kernel.
-        let want = ops::log_softmax_last_dim(&cpu).unwrap().to_vec::<f32>().unwrap();
+        let want = ops::log_softmax_last_dim(&cpu)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
         let got = kiln_tensor::metal_log_softmax_last_axis(&met)
             .unwrap()
             .to_vec::<f32>()
@@ -159,9 +180,15 @@ fn log_softmax_last_axis_f32() {
         assert!(d < 1e-5, "log_softmax f32 [{rows},{cols}] max|Δ|={d}");
         // Also exercise the dispatch path (ops::log_softmax_last_dim on
         // Metal storage must produce the same numbers).
-        let got_dispatch = ops::log_softmax_last_dim(&met).unwrap().to_vec::<f32>().unwrap();
+        let got_dispatch = ops::log_softmax_last_dim(&met)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
         let dd = max_abs_diff(&want, &got_dispatch);
-        assert!(dd < 1e-5, "log_softmax f32 dispatch [{rows},{cols}] max|Δ|={dd}");
+        assert!(
+            dd < 1e-5,
+            "log_softmax f32 dispatch [{rows},{cols}] max|Δ|={dd}"
+        );
     }
 }
 
@@ -208,7 +235,10 @@ fn cumsum_axis_f32() {
         let got = ops::cumsum(&met, axis).unwrap().to_vec::<f32>().unwrap();
         let d = max_abs_diff(&want, &got);
         // Identical sequential F32 accumulation on both sides ⇒ ~bit-exact.
-        assert!(d < 1e-3, "cumsum f32 [{rows},{cols}] axis {axis} max|Δ|={d}");
+        assert!(
+            d < 1e-3,
+            "cumsum f32 [{rows},{cols}] axis {axis} max|Δ|={d}"
+        );
     }
 }
 
@@ -225,7 +255,13 @@ fn compare_all_kinds_f32() {
     let b: Vec<f32> = a
         .iter()
         .enumerate()
-        .map(|(i, &v)| if i % 3 == 0 { v } else { (v * 4.0).round() / 4.0 })
+        .map(|(i, &v)| {
+            if i % 3 == 0 {
+                v
+            } else {
+                (v * 4.0).round() / 4.0
+            }
+        })
         .collect();
     let (cpu_a, met_a) = pair(&a, &[rows, cols], dev);
     let (cpu_b, met_b) = pair(&b, &[rows, cols], dev);
@@ -272,15 +308,23 @@ fn where_select_f32() {
     let t = pattern(rows * cols, 41);
     let f = pattern(rows * cols, 42);
     // Deterministic U8 mask exercising both branches (some 0, some 1).
-    let mask: Vec<u8> = (0..rows * cols).map(|i| if (i * 7 + 3) % 5 < 2 { 1 } else { 0 }).collect();
+    let mask: Vec<u8> = (0..rows * cols)
+        .map(|i| if (i * 7 + 3) % 5 < 2 { 1 } else { 0 })
+        .collect();
     let (cpu_t, met_t) = pair(&t, &[rows, cols], dev);
     let (cpu_f, met_f) = pair(&f, &[rows, cols], dev);
     let cpu_m = Tensor::from_vec(mask.clone(), vec![rows, cols]).unwrap();
     let met_m = Tensor::from_vec_on(dev, mask.clone(), vec![rows, cols]).unwrap();
     // CPU reference vs the Metal kernel through the same `ops::where_select`
     // entry point (Metal storage → kiln-owned MSL byte-wise select).
-    let want = ops::where_select(&cpu_m, &cpu_t, &cpu_f).unwrap().to_vec::<f32>().unwrap();
-    let got = ops::where_select(&met_m, &met_t, &met_f).unwrap().to_vec::<f32>().unwrap();
+    let want = ops::where_select(&cpu_m, &cpu_t, &cpu_f)
+        .unwrap()
+        .to_vec::<f32>()
+        .unwrap();
+    let got = ops::where_select(&met_m, &met_t, &met_f)
+        .unwrap()
+        .to_vec::<f32>()
+        .unwrap();
     let d = max_abs_diff(&want, &got);
     // Byte-wise select copies the chosen operand bit-for-bit ⇒ exact.
     assert!(d == 0.0, "where_select f32 [{rows},{cols}] max|Δ|={d}");
@@ -300,7 +344,10 @@ fn rmsnorm_last_axis_f32() {
     let (cpu_x, met_x) = pair(&x, &[rows, hidden], dev);
     let (cpu_w, met_w) = pair(&w, &[hidden], dev);
     let eps = 1e-6f32;
-    let want = ops::rms_norm(&cpu_x, &cpu_w, eps).unwrap().to_vec::<f32>().unwrap();
+    let want = ops::rms_norm(&cpu_x, &cpu_w, eps)
+        .unwrap()
+        .to_vec::<f32>()
+        .unwrap();
     let got = kiln_tensor::metal_rmsnorm_last_axis(&met_x, &met_w, eps)
         .unwrap()
         .to_vec::<f32>()
@@ -362,7 +409,9 @@ fn cast_u8_mask_to_float_triple_and_back() {
     };
     // Boolean-style mask (the GDN triangular mask shape): some 0, some 1.
     let n = 1024usize;
-    let mask: Vec<u8> = (0..n).map(|i| if (i * 7 + 3) % 5 < 2 { 1 } else { 0 }).collect();
+    let mask: Vec<u8> = (0..n)
+        .map(|i| if (i * 7 + 3) % 5 < 2 { 1 } else { 0 })
+        .collect();
     let cpu_u8 = Tensor::from_vec(mask.clone(), vec![n]).unwrap();
     let met_u8 = Tensor::from_vec_on(dev, mask.clone(), vec![n]).unwrap();
     assert_eq!(met_u8.dtype(), DType::U8);
@@ -380,12 +429,32 @@ fn cast_u8_mask_to_float_triple_and_back() {
                 got_f.to_vec::<f32>().unwrap(),
             ),
             DType::BF16 => (
-                want_f.to_vec::<half::bf16>().unwrap().into_iter().map(|v| v.to_f32()).collect(),
-                got_f.to_vec::<half::bf16>().unwrap().into_iter().map(|v| v.to_f32()).collect(),
+                want_f
+                    .to_vec::<half::bf16>()
+                    .unwrap()
+                    .into_iter()
+                    .map(|v| v.to_f32())
+                    .collect(),
+                got_f
+                    .to_vec::<half::bf16>()
+                    .unwrap()
+                    .into_iter()
+                    .map(|v| v.to_f32())
+                    .collect(),
             ),
             DType::F16 => (
-                want_f.to_vec::<half::f16>().unwrap().into_iter().map(|v| v.to_f32()).collect(),
-                got_f.to_vec::<half::f16>().unwrap().into_iter().map(|v| v.to_f32()).collect(),
+                want_f
+                    .to_vec::<half::f16>()
+                    .unwrap()
+                    .into_iter()
+                    .map(|v| v.to_f32())
+                    .collect(),
+                got_f
+                    .to_vec::<half::f16>()
+                    .unwrap()
+                    .into_iter()
+                    .map(|v| v.to_f32())
+                    .collect(),
             ),
             _ => unreachable!(),
         };
@@ -399,7 +468,10 @@ fn cast_u8_mask_to_float_triple_and_back() {
     // F32 -> U8 round-trip: the {0,1} mask must come back exactly.
     let f32_mask = ops::cast(&cpu_u8, DType::F32).unwrap();
     let met_f32 = f32_mask.to_device(dev).unwrap();
-    let want_back = ops::cast(&f32_mask, DType::U8).unwrap().to_vec::<u8>().unwrap();
+    let want_back = ops::cast(&f32_mask, DType::U8)
+        .unwrap()
+        .to_vec::<u8>()
+        .unwrap();
     let got_back = kiln_tensor::metal_cast(&met_f32, DType::U8)
         .unwrap()
         .to_device(Device::Cpu)
@@ -520,7 +592,10 @@ fn sdpa_last_axis_f32() {
             .to_vec::<f32>()
             .unwrap();
         let d = max_abs_diff(&want, &got);
-        assert!(d < 1e-3, "vector sdpa f32 (q_seq=1 decode, non-causal) max|Δ|={d}");
+        assert!(
+            d < 1e-3,
+            "vector sdpa f32 (q_seq=1 decode, non-causal) max|Δ|={d}"
+        );
     }
 }
 
@@ -700,7 +775,10 @@ fn sdpa_gqa_decode_parity() {
             .unwrap();
 
         let d = max_abs_diff(&want, &got);
-        assert!(d < 2e-3, "gqa-decode sdpa [{label}] (causal={causal}) max|Δ|={d}");
+        assert!(
+            d < 2e-3,
+            "gqa-decode sdpa [{label}] (causal={causal}) max|Δ|={d}"
+        );
     }
 }
 
@@ -711,28 +789,47 @@ fn sdpa_gqa_decode_parity() {
 /// kiln_gemm_bf16 MSL on the real Metal compiler.
 #[test]
 fn matmul_matrix_core_f32_parity() {
-    let Some(dev) = metal() else { eprintln!("no Metal device; skipping"); return; };
+    let Some(dev) = metal() else {
+        eprintln!("no Metal device; skipping");
+        return;
+    };
     // (M, K, N): Qwen projections/MLP + M-tail (not mult of tile=64) + M=1.
     let cases = [
-        (16usize, 256usize, 256usize),   // small, clean
-        (17, 2560, 256),                 // M-tail (17 % 64 != 0), Qwen K
-        (64, 2560, 4096),                // prefill QKV-ish
-        (8, 2560, 18432),                // gate||up wide-N
-        (1, 2560, 4096),                 // M=1 through the GEMM
-        (100, 512, 2560),                // M not mult of 64, down-proj-ish
-        (16, 256, 100),                  // N-tail (100 % 64 != 0): b_full=false, store_safe
-        (33, 2560, 130),                 // M-tail + N-tail together
-        (64, 100, 128),                  // K=100 % 16 != 0: naive-kernel fallback path
-        (40, 130, 96),                   // K-tail + N-tail through the fallback
+        (16usize, 256usize, 256usize), // small, clean
+        (17, 2560, 256),               // M-tail (17 % 64 != 0), Qwen K
+        (64, 2560, 4096),              // prefill QKV-ish
+        (8, 2560, 18432),              // gate||up wide-N
+        (1, 2560, 4096),               // M=1 through the GEMM
+        (100, 512, 2560),              // M not mult of 64, down-proj-ish
+        (16, 256, 100),                // N-tail (100 % 64 != 0): b_full=false, store_safe
+        (33, 2560, 130),               // M-tail + N-tail together
+        (64, 100, 128),                // K=100 % 16 != 0: naive-kernel fallback path
+        (40, 130, 96),                 // K-tail + N-tail through the fallback
     ];
     for (m, k, n) in cases {
         let a = pattern(m * k, 100 + m as u64);
         let b = pattern(k * n, 200 + n as u64);
         // BF16 on both CPU and Metal from identical data.
-        let a_cpu = ops::cast(&Tensor::from_vec(a.clone(), vec![m, k]).unwrap(), DType::BF16).unwrap();
-        let b_cpu = ops::cast(&Tensor::from_vec(b.clone(), vec![k, n]).unwrap(), DType::BF16).unwrap();
-        let a_met = ops::cast(&Tensor::from_vec_on(dev, a, vec![m, k]).unwrap(), DType::BF16).unwrap();
-        let b_met = ops::cast(&Tensor::from_vec_on(dev, b, vec![k, n]).unwrap(), DType::BF16).unwrap();
+        let a_cpu = ops::cast(
+            &Tensor::from_vec(a.clone(), vec![m, k]).unwrap(),
+            DType::BF16,
+        )
+        .unwrap();
+        let b_cpu = ops::cast(
+            &Tensor::from_vec(b.clone(), vec![k, n]).unwrap(),
+            DType::BF16,
+        )
+        .unwrap();
+        let a_met = ops::cast(
+            &Tensor::from_vec_on(dev, a, vec![m, k]).unwrap(),
+            DType::BF16,
+        )
+        .unwrap();
+        let b_met = ops::cast(
+            &Tensor::from_vec_on(dev, b, vec![k, n]).unwrap(),
+            DType::BF16,
+        )
+        .unwrap();
 
         // CPU reference (matmul cpu_fwd) and Metal (matmul metal_fwd -> kiln GEMM).
         let want_t = ops::matmul(&a_cpu, &b_cpu).unwrap();
@@ -740,15 +837,28 @@ fn matmul_matrix_core_f32_parity() {
         assert_eq!(got_t.device(), dev, "metal matmul must stay on Metal");
         assert_eq!(got_t.shape().to_vec(), vec![m, n], "output shape");
 
-        let want: Vec<f32> = ops::cast(&want_t, DType::F32).unwrap().to_vec::<f32>().unwrap();
-        let got: Vec<f32> = ops::cast(&got_t, DType::F32).unwrap().to_vec::<f32>().unwrap();
+        let want: Vec<f32> = ops::cast(&want_t, DType::F32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let got: Vec<f32> = ops::cast(&got_t, DType::F32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
         let (d, mref) = {
-            let mut md = 0.0f32; let mut mr = 0.0f32;
-            for (g, w) in got.iter().zip(&want) { md = md.max((g - w).abs()); mr = mr.max(w.abs()); }
+            let mut md = 0.0f32;
+            let mut mr = 0.0f32;
+            for (g, w) in got.iter().zip(&want) {
+                md = md.max((g - w).abs());
+                mr = mr.max(w.abs());
+            }
             (md, mr)
         };
         // BF16 inputs + F32 accumulate over K; bound relative to result magnitude.
-        assert!(d < 0.02 * mref.max(1.0), "matmul [{m},{k}]x[{k},{n}] max|Δ|={d} (ref max {mref})");
+        assert!(
+            d < 0.02 * mref.max(1.0),
+            "matmul [{m},{k}]x[{k},{n}] max|Δ|={d} (ref max {mref})"
+        );
     }
 }
 
@@ -757,12 +867,15 @@ fn matmul_matrix_core_f32_parity() {
 /// cases above never touch. `[B,M,K] @ [B,K,N] -> [B,M,N]`.
 #[test]
 fn matmul_matrix_core_batched_parity() {
-    let Some(dev) = metal() else { eprintln!("no Metal device; skipping"); return; };
+    let Some(dev) = metal() else {
+        eprintln!("no Metal device; skipping");
+        return;
+    };
     // (B, M, K, N): full tiles, M/N-tail, and a 3-leading-dim batch.
     let cases = [
         (vec![4usize], 64usize, 256usize, 128usize), // clean batch
-        (vec![3], 17, 512, 100),                      // batched + M-tail + N-tail
-        (vec![2, 2], 8, 256, 64),                     // 2 leading batch dims
+        (vec![3], 17, 512, 100),                     // batched + M-tail + N-tail
+        (vec![2, 2], 8, 256, 64),                    // 2 leading batch dims
     ];
     for (bdims, m, k, n) in cases {
         let batch: usize = bdims.iter().product();
@@ -773,23 +886,44 @@ fn matmul_matrix_core_batched_parity() {
         let mut b_shape = bdims.clone();
         b_shape.extend_from_slice(&[k, n]);
 
-        let a_cpu = ops::cast(&Tensor::from_vec(a.clone(), a_shape.clone()).unwrap(), DType::BF16).unwrap();
-        let b_cpu = ops::cast(&Tensor::from_vec(b.clone(), b_shape.clone()).unwrap(), DType::BF16).unwrap();
+        let a_cpu = ops::cast(
+            &Tensor::from_vec(a.clone(), a_shape.clone()).unwrap(),
+            DType::BF16,
+        )
+        .unwrap();
+        let b_cpu = ops::cast(
+            &Tensor::from_vec(b.clone(), b_shape.clone()).unwrap(),
+            DType::BF16,
+        )
+        .unwrap();
         let a_met = ops::cast(&Tensor::from_vec_on(dev, a, a_shape).unwrap(), DType::BF16).unwrap();
         let b_met = ops::cast(&Tensor::from_vec_on(dev, b, b_shape).unwrap(), DType::BF16).unwrap();
 
         let want_t = ops::matmul(&a_cpu, &b_cpu).unwrap();
         let got_t = ops::matmul(&a_met, &b_met).unwrap();
-        assert_eq!(got_t.device(), dev, "metal batched matmul must stay on Metal");
+        assert_eq!(
+            got_t.device(),
+            dev,
+            "metal batched matmul must stay on Metal"
+        );
         let mut out_shape = bdims.clone();
         out_shape.extend_from_slice(&[m, n]);
         assert_eq!(got_t.shape().to_vec(), out_shape, "batched output shape");
 
-        let want: Vec<f32> = ops::cast(&want_t, DType::F32).unwrap().to_vec::<f32>().unwrap();
-        let got: Vec<f32> = ops::cast(&got_t, DType::F32).unwrap().to_vec::<f32>().unwrap();
+        let want: Vec<f32> = ops::cast(&want_t, DType::F32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let got: Vec<f32> = ops::cast(&got_t, DType::F32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
         let d = max_abs_diff(&got, &want);
         let mref = want.iter().fold(0.0f32, |m, &w| m.max(w.abs()));
-        assert!(d < 0.02 * mref.max(1.0), "batched matmul {bdims:?} [{m},{k}]x[{k},{n}] max|Δ|={d} (ref {mref})");
+        assert!(
+            d < 0.02 * mref.max(1.0),
+            "batched matmul {bdims:?} [{m},{k}]x[{k},{n}] max|Δ|={d} (ref {mref})"
+        );
     }
 }
 
@@ -798,7 +932,10 @@ fn matmul_matrix_core_batched_parity() {
 /// `a.transpose(-2, -1).contiguous()` on Metal.
 #[test]
 fn matmul_lhs_transposed_matrix_core_parity() {
-    let Some(dev) = metal() else { eprintln!("no Metal device; skipping"); return; };
+    let Some(dev) = metal() else {
+        eprintln!("no Metal device; skipping");
+        return;
+    };
     // (batch dims, K, M, N): 2D, batched, and tail dimensions.
     let cases = [
         (vec![], 257usize, 19usize, 23usize),
@@ -814,20 +951,42 @@ fn matmul_lhs_transposed_matrix_core_parity() {
         let mut b_shape = bdims.clone();
         b_shape.extend_from_slice(&[k, n]);
 
-        let a_cpu = ops::cast(&Tensor::from_vec(a.clone(), a_shape.clone()).unwrap(), DType::BF16).unwrap();
-        let b_cpu = ops::cast(&Tensor::from_vec(b.clone(), b_shape.clone()).unwrap(), DType::BF16).unwrap();
+        let a_cpu = ops::cast(
+            &Tensor::from_vec(a.clone(), a_shape.clone()).unwrap(),
+            DType::BF16,
+        )
+        .unwrap();
+        let b_cpu = ops::cast(
+            &Tensor::from_vec(b.clone(), b_shape.clone()).unwrap(),
+            DType::BF16,
+        )
+        .unwrap();
         let a_met = ops::cast(&Tensor::from_vec_on(dev, a, a_shape).unwrap(), DType::BF16).unwrap();
         let b_met = ops::cast(&Tensor::from_vec_on(dev, b, b_shape).unwrap(), DType::BF16).unwrap();
 
         let want_t = ops::matmul_lhs_transposed(&a_cpu, &b_cpu).unwrap();
         let got_t = ops::matmul_lhs_transposed(&a_met, &b_met).unwrap();
-        assert_eq!(got_t.device(), dev, "metal lhs-transposed matmul must stay on Metal");
+        assert_eq!(
+            got_t.device(),
+            dev,
+            "metal lhs-transposed matmul must stay on Metal"
+        );
         let mut out_shape = bdims.clone();
         out_shape.extend_from_slice(&[m, n]);
-        assert_eq!(got_t.shape().to_vec(), out_shape, "lhs-transposed output shape");
+        assert_eq!(
+            got_t.shape().to_vec(),
+            out_shape,
+            "lhs-transposed output shape"
+        );
 
-        let want: Vec<f32> = ops::cast(&want_t, DType::F32).unwrap().to_vec::<f32>().unwrap();
-        let got: Vec<f32> = ops::cast(&got_t, DType::F32).unwrap().to_vec::<f32>().unwrap();
+        let want: Vec<f32> = ops::cast(&want_t, DType::F32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let got: Vec<f32> = ops::cast(&got_t, DType::F32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
         let d = max_abs_diff(&got, &want);
         let mref = want.iter().fold(0.0f32, |m, &w| m.max(w.abs()));
         assert!(
@@ -842,7 +1001,10 @@ fn matmul_lhs_transposed_matrix_core_parity() {
 /// reference without materializing `b.transpose(-2, -1).contiguous()` on Metal.
 #[test]
 fn matmul_rhs_transposed_matrix_core_parity() {
-    let Some(dev) = metal() else { eprintln!("no Metal device; skipping"); return; };
+    let Some(dev) = metal() else {
+        eprintln!("no Metal device; skipping");
+        return;
+    };
     // (batch dims, M, K, N): 2D, batched, and tail dimensions.
     let cases = [
         (vec![], 19usize, 257usize, 23usize),
@@ -858,20 +1020,42 @@ fn matmul_rhs_transposed_matrix_core_parity() {
         let mut b_shape = bdims.clone();
         b_shape.extend_from_slice(&[n, k]);
 
-        let a_cpu = ops::cast(&Tensor::from_vec(a.clone(), a_shape.clone()).unwrap(), DType::BF16).unwrap();
-        let b_cpu = ops::cast(&Tensor::from_vec(b.clone(), b_shape.clone()).unwrap(), DType::BF16).unwrap();
+        let a_cpu = ops::cast(
+            &Tensor::from_vec(a.clone(), a_shape.clone()).unwrap(),
+            DType::BF16,
+        )
+        .unwrap();
+        let b_cpu = ops::cast(
+            &Tensor::from_vec(b.clone(), b_shape.clone()).unwrap(),
+            DType::BF16,
+        )
+        .unwrap();
         let a_met = ops::cast(&Tensor::from_vec_on(dev, a, a_shape).unwrap(), DType::BF16).unwrap();
         let b_met = ops::cast(&Tensor::from_vec_on(dev, b, b_shape).unwrap(), DType::BF16).unwrap();
 
         let want_t = ops::matmul_rhs_transposed(&a_cpu, &b_cpu).unwrap();
         let got_t = ops::matmul_rhs_transposed(&a_met, &b_met).unwrap();
-        assert_eq!(got_t.device(), dev, "metal rhs-transposed matmul must stay on Metal");
+        assert_eq!(
+            got_t.device(),
+            dev,
+            "metal rhs-transposed matmul must stay on Metal"
+        );
         let mut out_shape = bdims.clone();
         out_shape.extend_from_slice(&[m, n]);
-        assert_eq!(got_t.shape().to_vec(), out_shape, "rhs-transposed output shape");
+        assert_eq!(
+            got_t.shape().to_vec(),
+            out_shape,
+            "rhs-transposed output shape"
+        );
 
-        let want: Vec<f32> = ops::cast(&want_t, DType::F32).unwrap().to_vec::<f32>().unwrap();
-        let got: Vec<f32> = ops::cast(&got_t, DType::F32).unwrap().to_vec::<f32>().unwrap();
+        let want: Vec<f32> = ops::cast(&want_t, DType::F32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let got: Vec<f32> = ops::cast(&got_t, DType::F32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
         let d = max_abs_diff(&got, &want);
         let mref = want.iter().fold(0.0f32, |m, &w| m.max(w.abs()));
         assert!(
@@ -886,13 +1070,16 @@ fn matmul_rhs_transposed_matrix_core_parity() {
 /// `call_index_select`). Gather is an exact copy → demand bit-exact equality.
 #[test]
 fn index_select_dim0_parity() {
-    let Some(dev) = metal() else { eprintln!("no Metal device; skipping"); return; };
+    let Some(dev) = metal() else {
+        eprintln!("no Metal device; skipping");
+        return;
+    };
     // (vocab, hidden, ids): repeats, last-row, row_len=1, multi-row.
     let cases: [(usize, usize, Vec<u32>); 4] = [
-        (32, 64, vec![0, 5, 31, 5, 12, 0]),  // repeats + last valid row
-        (10, 1, vec![3, 3, 9, 0]),           // row_len == 1
-        (100, 128, vec![99, 0, 50, 50, 1]),  // embedding-ish wide row
-        (152064, 8, vec![151000, 0, 42]),    // Qwen vocab scale
+        (32, 64, vec![0, 5, 31, 5, 12, 0]), // repeats + last valid row
+        (10, 1, vec![3, 3, 9, 0]),          // row_len == 1
+        (100, 128, vec![99, 0, 50, 50, 1]), // embedding-ish wide row
+        (152064, 8, vec![151000, 0, 42]),   // Qwen vocab scale
     ];
     for (vocab, hidden, ids) in cases {
         let w = pattern(vocab * hidden, 700 + vocab as u64);
@@ -904,7 +1091,11 @@ fn index_select_dim0_parity() {
         let want = ops::index_select(&w_cpu, 0, &ids_cpu).unwrap();
         let got = ops::index_select(&w_met, 0, &ids_met).unwrap();
         assert_eq!(got.device(), dev, "index_select must stay on Metal");
-        assert_eq!(got.shape().to_vec(), vec![ids.len(), hidden], "output shape");
+        assert_eq!(
+            got.shape().to_vec(),
+            vec![ids.len(), hidden],
+            "output shape"
+        );
 
         let want_v: Vec<f32> = want.to_vec::<f32>().unwrap();
         let got_v: Vec<f32> = got.to_vec::<f32>().unwrap();

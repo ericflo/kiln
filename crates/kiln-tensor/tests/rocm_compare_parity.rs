@@ -38,11 +38,7 @@ fn cpu_cmp(kind: i32, a: f32, b: f32) -> u8 {
         KIND_GE => a >= b,
         _ => unreachable!(),
     };
-    if r {
-        1
-    } else {
-        0
-    }
+    if r { 1 } else { 0 }
 }
 
 /// Deterministic pseudo-random value in ~[-3, 3) for index `i`. Tuned to
@@ -71,7 +67,9 @@ fn compare_parity_all_kinds() {
         let b_data: Vec<f32> = (0..w).map(val_b).collect();
 
         for &kind in &kinds {
-            let reference: Vec<u8> = (0..w).map(|i| cpu_cmp(kind, a_data[i], b_data[i])).collect();
+            let reference: Vec<u8> = (0..w)
+                .map(|i| cpu_cmp(kind, a_data[i], b_data[i]))
+                .collect();
 
             let a = Tensor::from_vec_on(Device::Rocm(0), a_data.clone(), vec![w])
                 .unwrap_or_else(|e| panic!("from_vec_on a (w={w}): {e}"));
@@ -111,7 +109,9 @@ fn compare_parity_2d_shape() {
     let b_data: Vec<f32> = (0..n).map(val_b).collect();
 
     for &kind in &[KIND_LT, KIND_GE, KIND_EQ] {
-        let reference: Vec<u8> = (0..n).map(|i| cpu_cmp(kind, a_data[i], b_data[i])).collect();
+        let reference: Vec<u8> = (0..n)
+            .map(|i| cpu_cmp(kind, a_data[i], b_data[i]))
+            .collect();
 
         let a = Tensor::from_vec_on(Device::Rocm(0), a_data.clone(), vec![rows, cols])
             .unwrap_or_else(|e| panic!("from_vec_on a 2d: {e}"));

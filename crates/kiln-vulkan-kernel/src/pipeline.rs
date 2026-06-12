@@ -167,10 +167,7 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
         SPIR_V_LINEAR_DECODE_BF16W_ADD_RESIDUAL,
     ),
     ("qwen_rmsnorm_forward", SPIR_V_QWEN_RMSNORM_FORWARD),
-    (
-        "qwen_rmsnorm_qk_combined",
-        SPIR_V_QWEN_RMSNORM_QK_COMBINED,
-    ),
+    ("qwen_rmsnorm_qk_combined", SPIR_V_QWEN_RMSNORM_QK_COMBINED),
     ("linear_decode_batched", SPIR_V_LINEAR_DECODE_BATCHED),
     (
         "linear_decode_batched_bf16w",
@@ -238,10 +235,7 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
         "linear_decode_argmax_batched_reduce",
         SPIR_V_LINEAR_DECODE_ARGMAX_BATCHED_REDUCE,
     ),
-    (
-        "apply_token_penalties",
-        SPIR_V_APPLY_TOKEN_PENALTIES,
-    ),
+    ("apply_token_penalties", SPIR_V_APPLY_TOKEN_PENALTIES),
     (
         "apply_token_penalties_batched",
         SPIR_V_APPLY_TOKEN_PENALTIES_BATCHED,
@@ -357,10 +351,7 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
     ),
     ("vk_silu_f32", SPIR_V_VK_SILU_F32),
     ("vk_silu_f32_offset", SPIR_V_VK_SILU_F32_OFFSET),
-    (
-        "vk_unary_elementwise_f32",
-        SPIR_V_VK_UNARY_ELEMENTWISE_F32,
-    ),
+    ("vk_unary_elementwise_f32", SPIR_V_VK_UNARY_ELEMENTWISE_F32),
     (
         "vk_unary_elementwise_f32_offset",
         SPIR_V_VK_UNARY_ELEMENTWISE_F32_OFFSET,
@@ -400,7 +391,10 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
     ),
     ("vk_transpose_3d_f32", SPIR_V_VK_TRANSPOSE_3D_F32),
     ("vk_gather_contiguous_f32", SPIR_V_VK_GATHER_CONTIGUOUS_F32),
-    ("vk_gather_contiguous_bf16", SPIR_V_VK_GATHER_CONTIGUOUS_BF16),
+    (
+        "vk_gather_contiguous_bf16",
+        SPIR_V_VK_GATHER_CONTIGUOUS_BF16,
+    ),
     ("vk_permute_rh_to_hr_f32", SPIR_V_VK_PERMUTE_RH_TO_HR_F32),
     (
         "vk_permute_rh_to_hr_f32_offset",
@@ -493,12 +487,15 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
         "vk_index_select_rows_bwd_f32",
         SPIR_V_VK_INDEX_SELECT_ROWS_BWD_F32,
     ),
-    ("vk_opd_topk_kl_fwd_f32",    SPIR_V_VK_OPD_TOPK_KL_FWD_F32),
-    ("vk_opd_topk_kl_fwd_bf16w",  SPIR_V_VK_OPD_TOPK_KL_FWD_BF16W),
-    ("vk_opd_topk_kl_bwd_f32",    SPIR_V_VK_OPD_TOPK_KL_BWD_F32),
-    ("vk_opd_topk_kl_bwd_bf16w",  SPIR_V_VK_OPD_TOPK_KL_BWD_BF16W),
-    ("vk_opd_topk_metrics_f32",   SPIR_V_VK_OPD_TOPK_METRICS_F32),
-    ("vk_opd_topk_metrics_bf16w", SPIR_V_VK_OPD_TOPK_METRICS_BF16W),
+    ("vk_opd_topk_kl_fwd_f32", SPIR_V_VK_OPD_TOPK_KL_FWD_F32),
+    ("vk_opd_topk_kl_fwd_bf16w", SPIR_V_VK_OPD_TOPK_KL_FWD_BF16W),
+    ("vk_opd_topk_kl_bwd_f32", SPIR_V_VK_OPD_TOPK_KL_BWD_F32),
+    ("vk_opd_topk_kl_bwd_bf16w", SPIR_V_VK_OPD_TOPK_KL_BWD_BF16W),
+    ("vk_opd_topk_metrics_f32", SPIR_V_VK_OPD_TOPK_METRICS_F32),
+    (
+        "vk_opd_topk_metrics_bf16w",
+        SPIR_V_VK_OPD_TOPK_METRICS_BF16W,
+    ),
 ];
 
 // Re-export the spirv_modules for use in SHADER_SPIRVS
@@ -597,9 +594,7 @@ impl ShaderPipeline {
 
         // Create shader module
         let spirv_words: &[u32] = bytemuck::cast_slice(spirv);
-        let shader_module_info = vk::ShaderModuleCreateInfo::default()
-            .code(spirv_words)
-            ;
+        let shader_module_info = vk::ShaderModuleCreateInfo::default().code(spirv_words);
 
         let shader_module = unsafe {
             self.device
@@ -610,13 +605,10 @@ impl ShaderPipeline {
         // Create pipeline layout
         let push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
-            .size(push_constant_size)
-            ;
+            .size(push_constant_size);
         let pcr = vec![push_constant_range];
 
-        let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .push_constant_ranges(&pcr)
-            ;
+        let layout_info = vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&pcr);
 
         let layout = unsafe {
             self.device
@@ -628,14 +620,12 @@ impl ShaderPipeline {
         let stage_info = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(shader_module)
-            .name(std::ffi::CStr::from_bytes_with_nul(b"main\0").unwrap())
-            ;
+            .name(std::ffi::CStr::from_bytes_with_nul(b"main\0").unwrap());
 
         let pipeline_info = vk::ComputePipelineCreateInfo::default()
             .stage(stage_info)
             .base_pipeline_handle(vk::Pipeline::null())
-            .base_pipeline_index(-1)
-            ;
+            .base_pipeline_index(-1);
 
         let pipelines = unsafe {
             self.device

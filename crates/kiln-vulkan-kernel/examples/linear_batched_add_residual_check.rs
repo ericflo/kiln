@@ -1,6 +1,6 @@
 //! Verification probe for batched BF16 linear + residual fusion.
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use half::bf16;
 use kiln_vulkan_kernel::resident::dispatch_linear_decode_batched_bf16w_add_residual_resident;
 use kiln_vulkan_kernel::{VulkanBuffer, VulkanDevice};

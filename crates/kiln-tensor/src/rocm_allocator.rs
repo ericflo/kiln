@@ -29,7 +29,7 @@ use std::sync::Arc;
 use kiln_hip::RocmContext;
 
 use crate::{
-    allocator_frozen_error, Allocator, AllocatorMode, DType, Device, Result, RocmStorage, Storage,
+    Allocator, AllocatorMode, DType, Device, Result, RocmStorage, Storage, allocator_frozen_error,
 };
 
 #[derive(Debug)]
@@ -70,11 +70,7 @@ impl RocmAllocator {
 
     /// Construct directly in a given mode (tests, capture session) —
     /// **candle-free** entry.
-    pub fn with_mode_ctx(
-        ctx: Arc<RocmContext>,
-        device_index: usize,
-        mode: AllocatorMode,
-    ) -> Self {
+    pub fn with_mode_ctx(ctx: Arc<RocmContext>, device_index: usize, mode: AllocatorMode) -> Self {
         let mut a = Self::new_ctx(ctx, device_index);
         a.mode = mode;
         a
@@ -97,8 +93,7 @@ impl RocmAllocator {
         let bytes_per = dtype.packed_buffer_bytes(n_elements);
         let slot = self.cache.entry((dtype, n_elements)).or_default();
         for _ in 0..count {
-            let rocm =
-                RocmStorage::zeros_ctx(&self.ctx, self.device_index, dtype, n_elements)?;
+            let rocm = RocmStorage::zeros_ctx(&self.ctx, self.device_index, dtype, n_elements)?;
             let storage: Storage = Arc::new(rocm);
             slot.push(storage);
             self.reserved_bytes += bytes_per;
@@ -164,12 +159,7 @@ impl Allocator for RocmAllocator {
                 // Route through the candle-free zeros_ctx entry — the
                 // actual kiln-hip allocation skips any candle wrapper
                 // entirely.
-                let rocm = RocmStorage::zeros_ctx(
-                    &self.ctx,
-                    self.device_index,
-                    dtype,
-                    n_elements,
-                )?;
+                let rocm = RocmStorage::zeros_ctx(&self.ctx, self.device_index, dtype, n_elements)?;
                 let storage: Storage = Arc::new(rocm);
                 let bytes = dtype.packed_buffer_bytes(n_elements);
                 self.reserved_bytes += bytes;
@@ -254,10 +244,7 @@ mod tests {
         };
         let mut a = RocmAllocator::with_mode_ctx(ctx, 0, AllocatorMode::Frozen);
         let e = a.alloc(DType::F32, 4).unwrap_err();
-        assert!(
-            e.to_string().contains("RocmAllocator::alloc"),
-            "got: {e}"
-        );
+        assert!(e.to_string().contains("RocmAllocator::alloc"), "got: {e}");
     }
 
     #[test]

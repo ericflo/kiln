@@ -25,7 +25,7 @@
 //! `Tensor::contiguous()`, which on CUDA routes through
 //! `cuda_contiguous`.
 
-use crate::{bail, Result, Tensor};
+use crate::{Result, Tensor, bail};
 
 /// Split `axis` into `n_chunks` near-equal pieces, returning views.
 ///
@@ -312,11 +312,8 @@ mod tests {
     #[test]
     fn chunk_along_inner_axis() {
         // [2, 4] split inner into 2 → two [2, 2] views.
-        let t = Tensor::from_slice(
-            &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-            vec![2, 4],
-        )
-        .unwrap();
+        let t =
+            Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], vec![2, 4]).unwrap();
         let out = chunk(&t, 2, 1).unwrap();
         assert_eq!(out.len(), 2);
         for c in &out {

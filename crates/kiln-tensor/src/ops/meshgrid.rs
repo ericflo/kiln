@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, Layout, Result, Storage, Tensor, TensorId, bail};
 
 pub fn meshgrid(axes: &[&Tensor]) -> Result<Vec<Tensor>> {
     if axes.is_empty() {
@@ -26,10 +26,7 @@ pub fn meshgrid(axes: &[&Tensor]) -> Result<Vec<Tensor>> {
     }
     for a in axes {
         if a.rank() != 1 {
-            bail!(
-                "meshgrid: every axis must be rank-1, got rank {}",
-                a.rank()
-            );
+            bail!("meshgrid: every axis must be rank-1, got rank {}", a.rank());
         }
         if a.dtype() != dtype {
             bail!(

@@ -69,18 +69,12 @@ fn marlin_w4a16_gemm_kt_dispatches_on_minimal_shape() {
     // opaque 32-bit words). The bridge's I32→U32 mapping
     // (`668b0847`) lets the kernel consume the U32 surface.
     let b_packed_u32: Vec<u32> = b_packed_i32.iter().map(|&x| x as u32).collect();
-    let b_kt =
-        Tensor::cuda_from_slice(&b_packed_u32, vec![k / 16, n * 16 / 8], 0).expect("b");
+    let b_kt = Tensor::cuda_from_slice(&b_packed_u32, vec![k / 16, n * 16 / 8], 0).expect("b");
 
-    let s_kt = Tensor::cuda_from_slice(
-        &scales_f16,
-        vec![k / groupsize as usize, n],
-        0,
-    )
-    .expect("s");
+    let s_kt = Tensor::cuda_from_slice(&scales_f16, vec![k / groupsize as usize, n], 0).expect("s");
 
-    let c_kt = marlin_w4a16_gemm_kt(&a_kt, &b_kt, &s_kt, groupsize as i32)
-        .expect("marlin_w4a16_gemm_kt");
+    let c_kt =
+        marlin_w4a16_gemm_kt(&a_kt, &b_kt, &s_kt, groupsize as i32).expect("marlin_w4a16_gemm_kt");
 
     assert_eq!(c_kt.shape(), &[m, n]);
     assert_eq!(c_kt.dtype(), DType::F16);

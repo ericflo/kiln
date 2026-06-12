@@ -243,7 +243,9 @@ async fn delete_correction(
         .remove(&request_id)
         .map_err(|e| ApiError::internal(format!("corrections store: {e}")))?;
     if removed {
-        Ok(Json(serde_json::json!({ "status": "deleted", "request_id": request_id })))
+        Ok(Json(
+            serde_json::json!({ "status": "deleted", "request_id": request_id }),
+        ))
     } else {
         Err(ApiError::training_invalid_request(format!(
             "no correction with request_id {request_id:?}"
@@ -257,7 +259,9 @@ async fn clear_corrections(
     let removed = CorrectionsStore::for_state(&state)
         .clear_active()
         .map_err(|e| ApiError::internal(format!("corrections store: {e}")))?;
-    Ok(Json(serde_json::json!({ "status": "cleared", "removed": removed })))
+    Ok(Json(
+        serde_json::json!({ "status": "cleared", "removed": removed }),
+    ))
 }
 
 /// Mark a set of rows as trained into `adapter`. Called by the dashboard
@@ -336,7 +340,9 @@ async fn mark_trained(
     // Locked RMW — this route races the training worker's
     // completion-time marking and dashboard upserts.
     let marked = store.mark_trained_into(&req.request_ids, &req.adapter);
-    Ok(Json(serde_json::json!({ "status": "marked", "marked": marked })))
+    Ok(Json(
+        serde_json::json!({ "status": "marked", "marked": marked }),
+    ))
 }
 
 pub fn routes() -> Router<AppState> {
@@ -466,7 +472,9 @@ mod tests {
             trained_into: None,
             trained_at: None,
         };
-        store.upsert(row("a", "fix the bug", "wrong", "right")).unwrap();
+        store
+            .upsert(row("a", "fix the bug", "wrong", "right"))
+            .unwrap();
         store.upsert(row("b", "explain", "same", "same")).unwrap(); // ideal == original
         store.upsert(row("c", "write docs", "meh", "")).unwrap(); // no ideal yet
 

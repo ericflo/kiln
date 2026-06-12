@@ -140,7 +140,9 @@ mod tests {
 
     #[test]
     fn falsy_values_disable() {
-        for v in ["", "0", "false", "FALSE", "False", "no", "off", "OFF", "random"] {
+        for v in [
+            "", "0", "false", "FALSE", "False", "no", "off", "OFF", "random",
+        ] {
             assert!(!is_truthy(v), "expected {v:?} to be falsy");
         }
     }

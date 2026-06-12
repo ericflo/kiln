@@ -47,9 +47,9 @@
 // the shared `csrc/fp8.cu` via `fp8_quantize_direct_dev` / `..dequantize..`).
 // Native BF16 writes and reads are device-parametric kt paths; Metal also has a
 // batched decode writer wired through `backend::metal`.
-use anyhow::Result;
 #[cfg(feature = "cuda")]
 use anyhow::Context;
+use anyhow::Result;
 
 // #1082: cudarc imported directly instead of through
 // candle_core::cuda_backend::cudarc::*. The candle re-export is a pure
@@ -72,7 +72,7 @@ use kiln_core::block::contiguous_slot_run_start;
 use kiln_core::block::contiguous_slot_run_starts;
 #[cfg(feature = "cuda")]
 use kiln_tensor::{
-    cuda_fp8_dequantize_direct, cuda_fp8_quantize_direct, cuda_zeros_ctx, CudaStorage,
+    CudaStorage, cuda_fp8_dequantize_direct, cuda_fp8_quantize_direct, cuda_zeros_ctx,
 };
 use kiln_tensor::{DType as KtDType, Layout, Tensor as KtTensor, TensorId};
 
@@ -181,9 +181,13 @@ fn alloc_pool_pair(
         kiln_tensor::Device::Metal(i) => {
             let _ = n_elements;
             let k = KtTensor::zeros_on(kiln_tensor::Device::Metal(i), shape.clone(), storage_dtype)
-                .map_err(|e| anyhow::anyhow!("kt paged-kv: alloc k_pool (metal) layer {_i}: {e}"))?;
+                .map_err(|e| {
+                    anyhow::anyhow!("kt paged-kv: alloc k_pool (metal) layer {_i}: {e}")
+                })?;
             let v = KtTensor::zeros_on(kiln_tensor::Device::Metal(i), shape.clone(), storage_dtype)
-                .map_err(|e| anyhow::anyhow!("kt paged-kv: alloc v_pool (metal) layer {_i}: {e}"))?;
+                .map_err(|e| {
+                    anyhow::anyhow!("kt paged-kv: alloc v_pool (metal) layer {_i}: {e}")
+                })?;
             (k, v)
         }
         // Vulkan and any backend whose feature isn't compiled in → host-resident
@@ -759,9 +763,7 @@ impl PagedKvCacheKt {
         v: &KtTensor,
     ) -> Result<()> {
         if k.dtype() != KtDType::BF16 || v.dtype() != KtDType::BF16 {
-            anyhow::bail!(
-                "kt PagedKvCacheKt::write_contiguous_slot_run requires BF16 inputs"
-            );
+            anyhow::bail!("kt PagedKvCacheKt::write_contiguous_slot_run requires BF16 inputs");
         }
         let pools = self.layers_read();
         let (k_pool, v_pool) = &pools[layer_idx];
@@ -770,15 +772,18 @@ impl PagedKvCacheKt {
             pool_shape.len() == 3,
             "kt PagedKvCacheKt: k_pool must be rank-3 [total_slots, num_kv_heads, head_dim]"
         );
-        let (total_slots, num_kv_heads, head_dim) =
-            (pool_shape[0], pool_shape[1], pool_shape[2]);
+        let (total_slots, num_kv_heads, head_dim) = (pool_shape[0], pool_shape[1], pool_shape[2]);
         anyhow::ensure!(
-            start_slot.checked_add(len).map_or(false, |e| e <= total_slots),
+            start_slot
+                .checked_add(len)
+                .map_or(false, |e| e <= total_slots),
             "kt PagedKvCacheKt: slot range [{start_slot}..{}] exceeds total_slots {total_slots}",
             start_slot + len
         );
         let row_elems = num_kv_heads * head_dim;
-        let expected_elems = len.checked_mul(row_elems).context("len * row_elems overflow")?;
+        let expected_elems = len
+            .checked_mul(row_elems)
+            .context("len * row_elems overflow")?;
         anyhow::ensure!(
             k.element_count() == expected_elems && v.element_count() == expected_elems,
             "kt PagedKvCacheKt: k/v must have {expected_elems} elements; got k={}, v={}",
@@ -833,8 +838,7 @@ impl PagedKvCacheKt {
             // cuda_stream_raw() returns the same underlying CUstream cast as
             // *mut c_void; we re-cast back to sys::CUstream for cudarc's API.
             // CUstream cast uses the direct cudarc dep (no candle indirection).
-            let raw_stream = k_dst_cuda.cuda_stream_raw()
-                as cudarc::driver::sys::CUstream;
+            let raw_stream = k_dst_cuda.cuda_stream_raw() as cudarc::driver::sys::CUstream;
             unsafe {
                 cudarc_result::memcpy_dtod_async(
                     k_dst_base + dst_byte_off as u64,
@@ -889,8 +893,7 @@ impl PagedKvCacheKt {
         // #1082: prefer cuda_stream_raw() over candle_device().cuda_stream()
         // to avoid touching the candle device wrapper from kernel-crate FFI.
         // CUstream cast uses the direct cudarc dep (no candle indirection).
-        let raw_stream = k_dst_cuda.cuda_stream_raw()
-            as cudarc::driver::sys::CUstream;
+        let raw_stream = k_dst_cuda.cuda_stream_raw() as cudarc::driver::sys::CUstream;
 
         unsafe {
             cudarc_result::memcpy_dtod_async(
@@ -1349,12 +1352,16 @@ impl PagedKvCacheKt {
                     .narrow(0, idx, 1)
                     .map_err(|e| anyhow::anyhow!("kt pkv rocm batch: narrow k row {idx}: {e}"))?
                     .contiguous()
-                    .map_err(|e| anyhow::anyhow!("kt pkv rocm batch: contiguous k row {idx}: {e}"))?;
+                    .map_err(|e| {
+                        anyhow::anyhow!("kt pkv rocm batch: contiguous k row {idx}: {e}")
+                    })?;
                 let v_row = v
                     .narrow(0, idx, 1)
                     .map_err(|e| anyhow::anyhow!("kt pkv rocm batch: narrow v row {idx}: {e}"))?
                     .contiguous()
-                    .map_err(|e| anyhow::anyhow!("kt pkv rocm batch: contiguous v row {idx}: {e}"))?;
+                    .map_err(|e| {
+                        anyhow::anyhow!("kt pkv rocm batch: contiguous v row {idx}: {e}")
+                    })?;
                 self.write_token_major_native(
                     layer_idx,
                     block_tables[idx],
@@ -1881,7 +1888,11 @@ mod tests {
         let (k_pool, _) = cache.pool_tensors(0).unwrap();
         assert_eq!(k_pool.dims(), &[10, kv_heads, head_dim]);
         let k_grown: Vec<f32> = k_pool.to_vec().unwrap();
-        assert_eq!(&k_grown[..k_vals.len()], &k_vals[..], "grow preserves prefix");
+        assert_eq!(
+            &k_grown[..k_vals.len()],
+            &k_vals[..],
+            "grow preserves prefix"
+        );
         assert!(
             k_grown[k_vals.len()..].iter().all(|&x| x == 0.0),
             "grown tail must be zero-filled"
@@ -1972,15 +1983,16 @@ mod tests {
     #[test]
     fn metal_batch_graph_slot_writer_uses_device_slots() -> Result<()> {
         let Some(dev) = crate::backend::metal::try_new_metal() else {
-            eprintln!("Metal unavailable, skipping metal_batch_graph_slot_writer_uses_device_slots");
+            eprintln!(
+                "Metal unavailable, skipping metal_batch_graph_slot_writer_uses_device_slots"
+            );
             return Ok(());
         };
 
         let block_size = 4usize;
         let kv_heads = 2usize;
         let head_dim = 4usize;
-        let cache =
-            PagedKvCacheKt::new(1, 4, block_size, kv_heads, head_dim, KtDType::BF16, dev)?;
+        let cache = PagedKvCacheKt::new(1, 4, block_size, kv_heads, head_dim, KtDType::BF16, dev)?;
 
         let mk = |v: f32| half::bf16::from_f32(v);
         let row_elems = kv_heads * head_dim;

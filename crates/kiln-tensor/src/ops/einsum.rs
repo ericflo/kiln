@@ -27,7 +27,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId, bail};
 
 #[derive(Debug)]
 struct ParsedSpec {
@@ -48,7 +48,10 @@ fn parse_spec(spec: &str) -> Result<ParsedSpec> {
     for term in inputs.iter().chain(std::iter::once(&output)) {
         for &b in term {
             if !(b.is_ascii_lowercase()) {
-                bail!("einsum: only lowercase ASCII axis letters allowed (got byte 0x{:02x})", b);
+                bail!(
+                    "einsum: only lowercase ASCII axis letters allowed (got byte 0x{:02x})",
+                    b
+                );
             }
         }
     }
@@ -93,16 +96,14 @@ fn read_f32_flat(t: &Tensor) -> Result<Vec<f32>> {
         DType::BF16 => {
             for i in 0..n {
                 out.push(
-                    half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32(),
+                    half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32(),
                 );
             }
         }
         DType::F16 => {
             for i in 0..n {
                 out.push(
-                    half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32(),
+                    half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32(),
                 );
             }
         }
@@ -139,8 +140,7 @@ pub fn einsum(spec: &str, operands: &[&Tensor]) -> Result<Tensor> {
     }
     // Resolve each axis letter to its size by looking at the
     // operands.
-    let mut sizes: std::collections::HashMap<u8, usize> =
-        std::collections::HashMap::new();
+    let mut sizes: std::collections::HashMap<u8, usize> = std::collections::HashMap::new();
     for (term, op) in parsed.inputs.iter().zip(operands.iter()) {
         if term.len() != op.rank() {
             bail!(
@@ -244,8 +244,7 @@ pub fn einsum(spec: &str, operands: &[&Tensor]) -> Result<Tensor> {
             out_coord.push(rem / out_strides[d]);
             rem %= out_strides[d];
         }
-        let mut letter_val: std::collections::HashMap<u8, usize> =
-            std::collections::HashMap::new();
+        let mut letter_val: std::collections::HashMap<u8, usize> = std::collections::HashMap::new();
         for (i, &b) in parsed.output.iter().enumerate() {
             letter_val.insert(b, out_coord[i]);
         }
@@ -282,11 +281,7 @@ pub fn einsum(spec: &str, operands: &[&Tensor]) -> Result<Tensor> {
     let out_bytes = write_f32_into(dtype, &output);
     let cpu_out = CpuStorage::from_bytes(dtype, out_bytes)?;
     let storage: Storage = Arc::new(cpu_out);
-    Tensor::from_parts(
-        storage,
-        Layout::contiguous(out_shape),
-        TensorId::next(),
-    )
+    Tensor::from_parts(storage, Layout::contiguous(out_shape), TensorId::next())
 }
 
 #[cfg(test)]
@@ -304,16 +299,8 @@ mod tests {
     #[test]
     fn einsum_matmul() {
         // A [2, 3] @ B [3, 2] = C [2, 2]
-        let a = Tensor::from_slice(
-            &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
-            vec![2, 3],
-        )
-        .unwrap();
-        let b = Tensor::from_slice(
-            &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
-            vec![3, 2],
-        )
-        .unwrap();
+        let a = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
+        let b = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![3, 2]).unwrap();
         let c = einsum("ij,jk->ik", &[&a, &b]).unwrap();
         assert_eq!(c.shape(), &[2, 2]);
         // C = [[1*1+2*3+3*5, 1*2+2*4+3*6], [4*1+5*3+6*5, 4*2+5*4+6*6]]

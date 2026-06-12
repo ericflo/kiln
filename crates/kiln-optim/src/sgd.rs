@@ -185,11 +185,7 @@ impl OptimStep for Sgd {
 // shared module once we have a third optimizer that needs them).
 // ----------------------------------------------------------------------
 
-fn write_f32_to_tensor(
-    dtype: DType,
-    shape: &[usize],
-    values: &[f32],
-) -> Result<Tensor, StepError> {
+fn write_f32_to_tensor(dtype: DType, shape: &[usize], values: &[f32]) -> Result<Tensor, StepError> {
     use kiln_tensor::{CpuStorage, Layout, Storage, TensorId};
     use std::sync::Arc;
     let per = dtype.size_in_bytes();
@@ -202,27 +198,28 @@ fn write_f32_to_tensor(
         }
         DType::BF16 => {
             for (i, &v) in values.iter().enumerate() {
-                bytes[i * 2..i * 2 + 2]
-                    .copy_from_slice(&half::bf16::from_f32(v).to_le_bytes());
+                bytes[i * 2..i * 2 + 2].copy_from_slice(&half::bf16::from_f32(v).to_le_bytes());
             }
         }
         DType::F16 => {
             for (i, &v) in values.iter().enumerate() {
-                bytes[i * 2..i * 2 + 2]
-                    .copy_from_slice(&half::f16::from_f32(v).to_le_bytes());
+                bytes[i * 2..i * 2 + 2].copy_from_slice(&half::f16::from_f32(v).to_le_bytes());
             }
         }
         other => {
             return Err(StepError::Tensor(kiln_tensor::Error::Msg(format!(
                 "Sgd CPU: unsupported master dtype {other}"
-            ))))
+            ))));
         }
     }
-    let cpu = CpuStorage::from_bytes(dtype, bytes)
-        .map_err(StepError::Tensor)?;
+    let cpu = CpuStorage::from_bytes(dtype, bytes).map_err(StepError::Tensor)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(shape.to_vec()), TensorId::next())
-        .map_err(StepError::Tensor)
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(shape.to_vec()),
+        TensorId::next(),
+    )
+    .map_err(StepError::Tensor)
 }
 
 fn read_to_f32(t: &Tensor) -> Result<Vec<f32>, StepError> {
@@ -249,23 +246,21 @@ fn read_to_f32(t: &Tensor) -> Result<Vec<f32>, StepError> {
         DType::BF16 => {
             for i in 0..n {
                 out.push(
-                    half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32(),
+                    half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32(),
                 );
             }
         }
         DType::F16 => {
             for i in 0..n {
                 out.push(
-                    half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32(),
+                    half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32(),
                 );
             }
         }
         other => {
             return Err(StepError::Tensor(kiln_tensor::Error::Msg(format!(
                 "Sgd CPU: unsupported dtype {other}"
-            ))))
+            ))));
         }
     }
     Ok(out)
@@ -279,7 +274,11 @@ mod tests {
     fn fresh_param() -> Parameter {
         let fwd = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], vec![4]).unwrap();
         let master = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], vec![4]).unwrap();
-        Parameter::trainable(ForwardStorage::Plain(fwd), master, AmpPolicy::fp32_reference())
+        Parameter::trainable(
+            ForwardStorage::Plain(fwd),
+            master,
+            AmpPolicy::fp32_reference(),
+        )
     }
 
     #[test]

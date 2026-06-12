@@ -129,8 +129,7 @@ impl BlockManager {
             return None;
         }
         let free: std::collections::HashSet<u32> = self.free_blocks.iter().copied().collect();
-        let retired: std::collections::HashSet<u32> =
-            self.retired_blocks.iter().copied().collect();
+        let retired: std::collections::HashSet<u32> = self.retired_blocks.iter().copied().collect();
         (0..self.num_blocks as u32)
             .rev()
             .find(|id| !free.contains(id) && !retired.contains(id))

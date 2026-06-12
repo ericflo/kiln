@@ -45,7 +45,7 @@
 //! `kiln_autograd::backwards::rope_split_half::RopeSplitHalfBackward`.
 
 use crate::ops::{add, broadcast_to, cast, concat, mul, sub};
-use crate::{bail, DType, Result, Tensor};
+use crate::{DType, Result, Tensor, bail};
 
 /// Split-half (GPT-NeoX-style) rotary position embedding. See module docs.
 ///
@@ -94,7 +94,9 @@ pub fn rope_split_half(
     let r2 = add(&mul(&x1, &sin_b)?, &mul(&x2, &cos_b)?)?;
 
     let out_f32 = if rotary_dim < head_dim {
-        let pass = xf.narrow(3, rotary_dim, head_dim - rotary_dim)?.contiguous()?;
+        let pass = xf
+            .narrow(3, rotary_dim, head_dim - rotary_dim)?
+            .contiguous()?;
         concat(&[&r1, &r2, &pass], 3)?
     } else {
         concat(&[&r1, &r2], 3)?

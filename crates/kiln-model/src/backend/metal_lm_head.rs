@@ -901,7 +901,7 @@ mod metal_lm_head_sample_tests {
             0.1,
             0xCAFE_F00D_DEAD_BEEF,
         )?
-            .context("Metal backend declined top_k=1 sampled decode")?;
+        .context("Metal backend declined top_k=1 sampled decode")?;
         assert_eq!(got, want);
         Ok(())
     }

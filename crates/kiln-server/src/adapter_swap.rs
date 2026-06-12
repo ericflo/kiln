@@ -103,7 +103,13 @@ pub async fn swap_runtime_adapter(
         None => None,
     };
 
-    let closure = swap_closure(state, runner, lora, target_name.clone(), req.content_changed);
+    let closure = swap_closure(
+        state,
+        runner,
+        lora,
+        target_name.clone(),
+        req.content_changed,
+    );
     match engine {
         Some(engine) => engine
             .swap_adapter(closure)
@@ -148,7 +154,13 @@ pub fn swap_runtime_adapter_blocking(
         None => None,
     };
 
-    let closure = swap_closure(state, runner, lora, target_name.clone(), req.content_changed);
+    let closure = swap_closure(
+        state,
+        runner,
+        lora,
+        target_name.clone(),
+        req.content_changed,
+    );
     match engine {
         Some(engine) => engine
             .swap_adapter_blocking(closure)

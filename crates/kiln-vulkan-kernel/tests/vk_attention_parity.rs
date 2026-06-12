@@ -25,11 +25,7 @@ fn upload_f32(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<
     VkTensor::from_f32_slice(data, shape.to_vec(), Arc::clone(dev))
 }
 
-fn upload_param_f32(
-    dev: &Arc<VulkanDevice>,
-    data: &[f32],
-    shape: &[usize],
-) -> Result<VkTensor> {
+fn upload_param_f32(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
     VkTensor::parameter_from_f32_slice(data, shape.to_vec(), Arc::clone(dev))
 }
 

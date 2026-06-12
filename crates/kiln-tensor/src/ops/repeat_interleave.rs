@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 pub fn repeat_interleave(x: &Tensor, axis: usize, n: usize) -> Result<Tensor> {
     if x.rank() == 0 {
@@ -146,7 +146,10 @@ mod tests {
     #[test]
     fn repeat_interleave_n_one_is_identity() {
         let x = Tensor::from_slice(&[1.0f32, 2.0, 3.0], vec![3]).unwrap();
-        assert_eq!(read_f32(&repeat_interleave(&x, 0, 1).unwrap()), vec![1.0, 2.0, 3.0]);
+        assert_eq!(
+            read_f32(&repeat_interleave(&x, 0, 1).unwrap()),
+            vec![1.0, 2.0, 3.0]
+        );
     }
 
     #[test]

@@ -7,9 +7,7 @@
 
 use std::sync::Arc;
 
-use kiln_tensor::{
-    bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId,
-};
+use kiln_tensor::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 use crate::BackwardOp;
 
@@ -65,7 +63,10 @@ impl BackwardOp for StackBackward {
             bail!("StackBackward: grad must be contiguous");
         }
         let per = self.dtype.size_in_bytes();
-        let outer: usize = self.input_shape[..self.axis].iter().product::<usize>().max(1);
+        let outer: usize = self.input_shape[..self.axis]
+            .iter()
+            .product::<usize>()
+            .max(1);
         let inner: usize = self.input_shape[self.axis..]
             .iter()
             .product::<usize>()
@@ -153,11 +154,7 @@ mod tests {
     #[test]
     fn stack_backward_three_inputs() {
         // 3 inputs of shape [2] stacked at axis 0 → [3, 2].
-        let dy = Tensor::from_slice(
-            &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
-            vec![3, 2],
-        )
-        .unwrap();
+        let dy = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![3, 2]).unwrap();
         let bo = StackBackward {
             axis: 0,
             n_inputs: 3,

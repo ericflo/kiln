@@ -8,11 +8,11 @@
 
 use std::sync::Arc;
 
+use kiln_eval::scorers::Scorer;
 use kiln_eval::{
     EvalChatMessage, EvalExample, EvalGenerationParams, EvalJobState, EvalProgress, EvalSuite,
     PostEvalConfig,
 };
-use kiln_eval::scorers::Scorer;
 use kiln_server::eval::queue::{EvalJobInfo, EvalSubmissionKind, QueuedEvalJob};
 
 fn mk_suite() -> EvalSuite {
@@ -107,9 +107,8 @@ async fn worker_runs_inline_suite_with_mock_generator() {
 
     // Use a MockEvalGenerator that always returns "pong" so e1 passes and
     // e2 fails.
-    let generator = Arc::new(
-        kiln_server::eval::MockEvalGenerator::new().with_force_reply("pong"),
-    ) as Arc<dyn kiln_server::eval::EvalGenerator>;
+    let generator = Arc::new(kiln_server::eval::MockEvalGenerator::new().with_force_reply("pong"))
+        as Arc<dyn kiln_server::eval::EvalGenerator>;
     let judge_runner = kiln_server::eval::executor::noop_judge_runner();
 
     let queued = QueuedEvalJob::Inline {
@@ -129,7 +128,13 @@ async fn worker_runs_inline_suite_with_mock_generator() {
         });
 
     // Mark as Running so we exercise the same transition order as the worker.
-    state.eval_jobs.write().unwrap().get_mut(&job_id).unwrap().state = EvalJobState::Running;
+    state
+        .eval_jobs
+        .write()
+        .unwrap()
+        .get_mut(&job_id)
+        .unwrap()
+        .state = EvalJobState::Running;
 
     // Drive the executor directly with the inline-suite payload.
     let runs = match queued {

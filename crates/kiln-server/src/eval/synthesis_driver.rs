@@ -15,9 +15,7 @@
 
 use std::sync::Arc;
 
-use kiln_eval::synthesis::{
-    SynthesisConfig, SynthesisError, SynthesisStats, synthesize_suite,
-};
+use kiln_eval::synthesis::{SynthesisConfig, SynthesisError, SynthesisStats, synthesize_suite};
 use kiln_eval::{EvalExample, EvalSuiteSummary};
 use serde::Serialize;
 
@@ -108,9 +106,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn rows() -> String {
-        let r = |role: &str, content: &str| {
-            serde_json::json!({"role": role, "content": content})
-        };
+        let r = |role: &str, content: &str| serde_json::json!({"role": role, "content": content});
         let convs = vec![
             serde_json::json!({"messages": [r("user", "1+1?"), r("assistant", "2")]}),
             serde_json::json!({"messages": [r("user", "2+2?"), r("assistant", "4")]}),
@@ -172,7 +168,8 @@ mod tests {
         datasets
             .create("math", DatasetFormat::SftChat, None, rows().as_bytes())
             .unwrap();
-        let outcome = synthesize_and_save(&datasets, &suites, "math", &cfg("real-suite"), false).unwrap();
+        let outcome =
+            synthesize_and_save(&datasets, &suites, "math", &cfg("real-suite"), false).unwrap();
         assert_eq!(outcome.suite.name, "real-suite");
         assert!(outcome.stats.examples_generated >= 1);
         let listed = suites.list();

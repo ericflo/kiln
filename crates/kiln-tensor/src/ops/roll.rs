@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, Layout, Result, Storage, Tensor, TensorId, bail};
 
 pub fn roll(x: &Tensor, shift: i64, axis: usize) -> Result<Tensor> {
     if axis >= x.rank() {
@@ -84,8 +84,7 @@ fn roll_cpu(x: &Tensor, s: usize, axis: usize) -> Result<Tensor> {
             let j = (i + s) % axis_len;
             let src_off = slab_off + i * row_bytes;
             let dst_off = slab_off + j * row_bytes;
-            out[dst_off..dst_off + row_bytes]
-                .copy_from_slice(&src[src_off..src_off + row_bytes]);
+            out[dst_off..dst_off + row_bytes].copy_from_slice(&src[src_off..src_off + row_bytes]);
         }
     }
 
@@ -156,8 +155,7 @@ mod tests {
     #[test]
     fn roll_2d_axis_0() {
         // [[1,2],[3,4],[5,6]] roll +1 axis=0 → [[5,6],[1,2],[3,4]]
-        let x =
-            Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![3, 2]).unwrap();
+        let x = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![3, 2]).unwrap();
         let y = roll(&x, 1, 0).unwrap();
         assert_eq!(read_f32(&y), vec![5.0, 6.0, 1.0, 2.0, 3.0, 4.0]);
     }

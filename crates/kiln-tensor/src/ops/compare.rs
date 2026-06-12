@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CmpKind {
@@ -121,7 +121,11 @@ fn apply(kind: CmpKind, a: &Tensor, b: &Tensor) -> Result<Tensor> {
     #[cfg(feature = "rocm")]
     if matches!(a.device(), crate::Device::Rocm(_)) || matches!(b.device(), crate::Device::Rocm(_))
     {
-        let dev = if a.device().is_cpu() { b.device() } else { a.device() };
+        let dev = if a.device().is_cpu() {
+            b.device()
+        } else {
+            a.device()
+        };
         let a_host = a.to_device(crate::Device::Cpu)?;
         let b_host = b.to_device(crate::Device::Cpu)?;
         let out_host = apply(kind, &a_host, &b_host)?;
@@ -186,7 +190,11 @@ fn apply(kind: CmpKind, a: &Tensor, b: &Tensor) -> Result<Tensor> {
     }
     let cpu = CpuStorage::from_bytes(DType::U8, out)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(a.shape().to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(a.shape().to_vec()),
+        TensorId::next(),
+    )
 }
 
 pub fn eq(a: &Tensor, b: &Tensor) -> Result<Tensor> {

@@ -107,8 +107,7 @@ async fn judge_distill(
     // the queue/mock gates, so data problems surface with their
     // remediation first). Before this, the corpus silently fell through
     // to generic seed prompts and reported success.
-    let (pump_req, num_pairs) =
-        build_judge_pump_request(&state.adapter_dir, &req)?;
+    let (pump_req, num_pairs) = build_judge_pump_request(&state.adapter_dir, &req)?;
     super::training::validate_post_eval_suite(&state, req.post_eval.as_ref())?;
     super::training::enforce_queue_caps(&state)?;
 
@@ -217,8 +216,7 @@ pub fn submit_self_improve(
     // problems surface first. (The worker re-resolves the same selector
     // at run time so sessions captured between submission and dequeue
     // are included.)
-    let (opd_phase, crisp_pump, num_tasks) =
-        build_self_improve_jobs(&state.adapter_dir, &req)?;
+    let (opd_phase, crisp_pump, num_tasks) = build_self_improve_jobs(&state.adapter_dir, &req)?;
     super::training::enforce_queue_caps(state)?;
 
     // §10.6.2: score with judge → GRPO → CRISP pass. Each phase
@@ -451,12 +449,7 @@ fn build_self_improve_jobs(
 
 use super::teachers::require_registered_teacher;
 
-fn register_agent_job(
-    state: &AppState,
-    job_id: &str,
-    adapter_name: &str,
-    job: QueuedJob,
-) {
+fn register_agent_job(state: &AppState, job_id: &str, adapter_name: &str, job: QueuedJob) {
     let info = TrainingJobInfo {
         job_id: job_id.to_string(),
         adapter_name: adapter_name.to_string(),
@@ -548,8 +541,7 @@ mod tests {
 
     #[test]
     fn self_improve_can_disable_crisp() {
-        let req: SelfImproveRequest =
-            serde_json::from_str(r#"{"crisp": false}"#).unwrap();
+        let req: SelfImproveRequest = serde_json::from_str(r#"{"crisp": false}"#).unwrap();
         assert!(!req.crisp);
     }
 
@@ -639,7 +631,9 @@ mod tests {
         };
         assert!(examples[0].messages[0].content.contains("tool_correctness"));
         assert!(
-            examples[1].messages[1].content.contains("FAILED tests/flaky.rs"),
+            examples[1].messages[1]
+                .content
+                .contains("FAILED tests/flaky.rs"),
             "later turns see the observations that preceded them"
         );
     }
@@ -679,10 +673,16 @@ mod tests {
         };
         assert_eq!(examples.len(), 1);
         assert!(
-            examples[0].messages[0].content.contains("maximally concise"),
+            examples[0].messages[0]
+                .content
+                .contains("maximally concise"),
             "conciseness pressure folded into the system turn"
         );
-        assert!(examples[0].messages[1].content.contains("Fix the flaky test"));
+        assert!(
+            examples[0].messages[1]
+                .content
+                .contains("Fix the flaky test")
+        );
     }
 
     /// The flywheel must COMPOUND: when the agent's adapter already
@@ -726,10 +726,8 @@ mod tests {
         );
 
         // Explicit base_adapter wins over the warm-start default.
-        let req: SelfImproveRequest = serde_json::from_str(
-            r#"{"config": {"base_adapter": "my-pinned-base"}}"#,
-        )
-        .unwrap();
+        let req: SelfImproveRequest =
+            serde_json::from_str(r#"{"config": {"base_adapter": "my-pinned-base"}}"#).unwrap();
         let (opd, _, _) = build_self_improve_jobs(dir.path(), &req).unwrap();
         assert_eq!(opd.config.base_adapter.as_deref(), Some("my-pinned-base"));
     }
@@ -745,7 +743,10 @@ mod tests {
         )
         .unwrap();
         let (opd, crisp, _) = build_self_improve_jobs(dir.path(), &req).unwrap();
-        assert_eq!(opd.post_eval.as_ref().unwrap().suite, "qwen3.5-agentic-core");
+        assert_eq!(
+            opd.post_eval.as_ref().unwrap().suite,
+            "qwen3.5-agentic-core"
+        );
         assert_eq!(opd.post_eval.as_ref().unwrap().min_accuracy, Some(0.7));
         assert_eq!(
             crisp.unwrap().post_eval.as_ref().unwrap().suite,

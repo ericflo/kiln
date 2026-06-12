@@ -21,7 +21,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 /// Encode `indices` as one-hot vectors along a new trailing axis of
 /// size `depth`. Returns a tensor with `dtype` (default F32) and
@@ -34,9 +34,7 @@ pub fn one_hot(indices: &Tensor, depth: usize, dtype: DType) -> Result<Tensor> {
         );
     }
     if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
-        bail!(
-            "one_hot: output dtype must be F32/BF16/F16, got {dtype}"
-        );
+        bail!("one_hot: output dtype must be F32/BF16/F16, got {dtype}");
     }
     if depth == 0 {
         bail!("one_hot: depth must be > 0");
@@ -85,9 +83,7 @@ pub fn one_hot(indices: &Tensor, depth: usize, dtype: DType) -> Result<Tensor> {
             })
             .collect::<Result<_>>()?,
         DType::U32 => (0..n)
-            .map(|i| {
-                u32::from_le_bytes(in_bytes[i * 4..i * 4 + 4].try_into().unwrap()) as u64
-            })
+            .map(|i| u32::from_le_bytes(in_bytes[i * 4..i * 4 + 4].try_into().unwrap()) as u64)
             .collect(),
         _ => unreachable!(),
     };
@@ -102,9 +98,7 @@ pub fn one_hot(indices: &Tensor, depth: usize, dtype: DType) -> Result<Tensor> {
     let mut out = vec![0u8; n * depth * per];
     for (i, &id) in ids.iter().enumerate() {
         if id as usize >= depth {
-            bail!(
-                "one_hot: index {id} out of range (depth={depth}) at position {i}"
-            );
+            bail!("one_hot: index {id} out of range (depth={depth}) at position {i}");
         }
         let off = (i * depth + id as usize) * per;
         out[off..off + per].copy_from_slice(&one_bytes);

@@ -69,10 +69,7 @@ pub(crate) enum SliceOwner {
 impl std::fmt::Debug for SliceOwner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Owned(s) => f
-                .debug_struct("Owned")
-                .field("len", &s.len())
-                .finish(),
+            Self::Owned(s) => f.debug_struct("Owned").field("len", &s.len()).finish(),
             Self::Borrowed { ptr, byte_len, .. } => f
                 .debug_struct("Borrowed")
                 .field("ptr", &format_args!("0x{ptr:x}"))
@@ -522,7 +519,9 @@ pub fn cuda_set_pool_release_threshold(device_index: usize, threshold_bytes: u64
     use cudarc::driver::sys;
     let ctx = primary_cuda_context(device_index)?;
     ctx.bind_to_thread().map_err(|e| {
-        Error::Msg(format!("cuda_set_pool_release_threshold bind({device_index}): {e}"))
+        Error::Msg(format!(
+            "cuda_set_pool_release_threshold bind({device_index}): {e}"
+        ))
     })?;
     let dev = ctx.cu_device();
     let mut pool: sys::CUmemoryPool = std::ptr::null_mut();
@@ -1033,11 +1032,7 @@ pub fn cuda_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
         crate::Device::Cuda(i) => i,
         _ => unreachable!("CudaStorage::device is always Cuda"),
     };
-    let dst_storage = CudaStorage::zeros_ctx(&ctx,
-        device_index,
-        src.dtype(),
-        n_elements,
-    )?;
+    let dst_storage = CudaStorage::zeros_ctx(&ctx, device_index, src.dtype(), n_elements)?;
 
     // Extract raw device pointers. Source base + start_offset; dst
     // base.
@@ -1203,10 +1198,7 @@ pub fn cuda_slice_set_dim0(dst: &crate::Tensor, src: &crate::Tensor, offset: usi
 /// A stream synchronize follows so the write completes before the
 /// subsequent graph launch reads it (mirrors the old candle path).
 #[cfg(feature = "cuda")]
-pub fn cuda_write_host_in_place<E: crate::Element>(
-    dst: &crate::Tensor,
-    host: &[E],
-) -> Result<()> {
+pub fn cuda_write_host_in_place<E: crate::Element>(dst: &crate::Tensor, host: &[E]) -> Result<()> {
     if dst.dtype().is_packed() {
         return Err(crate::Error::Msg(
             "cuda_write_host_in_place: packed dtype not supported".to_string(),
@@ -1253,12 +1245,13 @@ pub fn cuda_write_host_in_place<E: crate::Element>(
     // between this write and the graph launch. The synchronize below
     // ensures completion before any subsequent launch reads the buffer.
     unsafe {
-        cudarc::driver::result::memcpy_htod_async(dst_ptr, host, stream.cu_stream())
-            .map_err(|e| {
+        cudarc::driver::result::memcpy_htod_async(dst_ptr, host, stream.cu_stream()).map_err(
+            |e| {
                 crate::Error::Msg(format!(
                     "cuda_write_host_in_place: memcpy_htod_async: {e:?}"
                 ))
-            })?;
+            },
+        )?;
     }
     stream.synchronize().map_err(|e| {
         crate::Error::Msg(format!(
@@ -1364,9 +1357,7 @@ pub fn cuda_index_select_dim0(
         .as_any()
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| {
-            crate::Error::Msg(
-                "cuda_index_select_dim0: indices must be CUDA storage".to_string(),
-            )
+            crate::Error::Msg("cuda_index_select_dim0: indices must be CUDA storage".to_string())
         })?;
 
     let ctx = src_storage.context();
@@ -1374,11 +1365,7 @@ pub fn cuda_index_select_dim0(
         crate::Device::Cuda(i) => i,
         _ => unreachable!("CudaStorage::device is always Cuda"),
     };
-    let dst_storage = CudaStorage::zeros_ctx(&ctx,
-        device_index,
-        src.dtype(),
-        n_out_elements,
-    )?;
+    let dst_storage = CudaStorage::zeros_ctx(&ctx, device_index, src.dtype(), n_out_elements)?;
 
     let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -1522,9 +1509,7 @@ pub fn cuda_index_select_axis_n(
         .as_any()
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| {
-            crate::Error::Msg(
-                "cuda_index_select_axis_n: indices must be CUDA storage".to_string(),
-            )
+            crate::Error::Msg("cuda_index_select_axis_n: indices must be CUDA storage".to_string())
         })?;
 
     let ctx = src_storage.context();
@@ -1532,11 +1517,7 @@ pub fn cuda_index_select_axis_n(
         crate::Device::Cuda(i) => i,
         _ => unreachable!("CudaStorage::device is always Cuda"),
     };
-    let dst_storage = CudaStorage::zeros_ctx(&ctx,
-        device_index,
-        src.dtype(),
-        n_out_elements,
-    )?;
+    let dst_storage = CudaStorage::zeros_ctx(&ctx, device_index, src.dtype(), n_out_elements)?;
 
     let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -1666,11 +1647,7 @@ pub fn cuda_elementwise_binary(
     };
     // #1082 (perf, Pattern A): elementwise binary writes the full output
     // (out[i] = op(a[i], b[i]) for all n); uninit skips the memset.
-    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx,
-        device_index,
-        dtype,
-        n,
-    )?;
+    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n)?;
 
     let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -1705,15 +1682,7 @@ pub fn cuda_elementwise_binary(
     let out_ptr = out_base as *mut core::ffi::c_void;
 
     let status = unsafe {
-        kiln_elementwise_binary_async(
-            a_ptr,
-            b_ptr,
-            out_ptr,
-            n as i64,
-            kind,
-            dtype_tag,
-            raw_stream,
-        )
+        kiln_elementwise_binary_async(a_ptr, b_ptr, out_ptr, n as i64, kind, dtype_tag, raw_stream)
     };
     if status != 0 {
         return Err(crate::Error::Msg(format!(
@@ -1835,15 +1804,7 @@ pub fn cuda_binary_minmax(
     let out_ptr = out_base as *mut core::ffi::c_void;
 
     let status = unsafe {
-        kiln_binary_minmax_async(
-            a_ptr,
-            b_ptr,
-            out_ptr,
-            n as i64,
-            kind,
-            dtype_tag,
-            raw_stream,
-        )
+        kiln_binary_minmax_async(a_ptr, b_ptr, out_ptr, n as i64, kind, dtype_tag, raw_stream)
     };
     if status != 0 {
         return Err(crate::Error::Msg(format!(
@@ -1956,13 +1917,7 @@ pub fn cuda_lerp(a: &crate::Tensor, b: &crate::Tensor, weight: f32) -> Result<cr
 
     let status = unsafe {
         kiln_lerp_async(
-            a_ptr,
-            b_ptr,
-            out_ptr,
-            n as i64,
-            weight,
-            dtype_tag,
-            raw_stream,
+            a_ptr, b_ptr, out_ptr, n as i64, weight, dtype_tag, raw_stream,
         )
     };
     if status != 0 {
@@ -2026,11 +1981,7 @@ pub fn cuda_activation_unary(x: &crate::Tensor, kind: i32) -> Result<crate::Tens
     };
     // #1082 (perf, Pattern A): unary activation writes the full output
     // (out[i] = f(x[i]) for all n); uninit skips the memset.
-    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx,
-        device_index,
-        dtype,
-        n,
-    )?;
+    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n)?;
 
     let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -2055,14 +2006,7 @@ pub fn cuda_activation_unary(x: &crate::Tensor, kind: i32) -> Result<crate::Tens
     let out_ptr = out_base as *mut core::ffi::c_void;
 
     let status = unsafe {
-        kiln_activation_unary_async(
-            x_ptr,
-            out_ptr,
-            n as i64,
-            kind,
-            dtype_tag,
-            raw_stream,
-        )
+        kiln_activation_unary_async(x_ptr, out_ptr, n as i64, kind, dtype_tag, raw_stream)
     };
     if status != 0 {
         return Err(crate::Error::Msg(format!(
@@ -2159,9 +2103,7 @@ pub fn cuda_cast(src: &crate::Tensor, target: crate::DType) -> Result<crate::Ten
     let src_ptr = (src_base + src_off) as *const core::ffi::c_void;
     let dst_ptr = dst_base as *mut core::ffi::c_void;
 
-    let status = unsafe {
-        kiln_cast_async(src_ptr, dst_ptr, n as i64, cast_tag, raw_stream)
-    };
+    let status = unsafe { kiln_cast_async(src_ptr, dst_ptr, n as i64, cast_tag, raw_stream) };
     if status != 0 {
         return Err(crate::Error::Msg(format!(
             "cuda_cast: FFI returned status {status}"
@@ -2182,7 +2124,6 @@ pub fn cuda_cast(src: &crate::Tensor, target: crate::DType) -> Result<crate::Ten
 // cudarc + candle's cuda feature compiled in but no actual GPU doesn't
 // spuriously fail.
 // ----------------------------------------------------------------------
-
 
 /// CUDA-side `scatter_add(updates, axis=0, indices, target_dim)` — inverse
 /// of [`cuda_index_select_dim0`]. Mutates a pre-zeroed `out` tensor in
@@ -2405,7 +2346,10 @@ mod tests {
         let dst2 = crate::Tensor::from_vec_on(dev, vec![9f32; 4], vec![2, 2]).unwrap();
         let src2 = crate::Tensor::from_vec_on(dev, vec![1f32, 2.0, 3.0, 4.0], vec![2, 2]).unwrap();
         dst2.slice_set(&src2, 0usize, 0).unwrap();
-        assert_eq!(dst2.to_vec2::<f32>().unwrap(), vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
+        assert_eq!(
+            dst2.to_vec2::<f32>().unwrap(),
+            vec![vec![1.0, 2.0], vec![3.0, 4.0]]
+        );
     }
 
     /// #1082: dim>0 and shape-overflow are rejected (only dim 0 is wired).
@@ -2419,7 +2363,10 @@ mod tests {
         let dst = crate::Tensor::from_vec_on(dev, vec![0f32; 6], vec![3, 2]).unwrap();
         let src = crate::Tensor::from_vec_on(dev, vec![1f32, 2.0], vec![1, 2]).unwrap();
         assert!(dst.slice_set(&src, 1usize, 0).is_err(), "dim 1 must error");
-        assert!(dst.slice_set(&src, 0usize, 3).is_err(), "offset overflow must error");
+        assert!(
+            dst.slice_set(&src, 0usize, 3).is_err(),
+            "offset overflow must error"
+        );
     }
 
     #[test]
@@ -2527,8 +2474,7 @@ mod tests {
         };
         let _ = dev;
         // Build BF16 by casting an F32 with a NaN.
-        let cpu_f32 =
-            crate::Tensor::from_slice(&[1.0f32, f32::NAN, 2.0], vec![3]).unwrap();
+        let cpu_f32 = crate::Tensor::from_slice(&[1.0f32, f32::NAN, 2.0], vec![3]).unwrap();
         let cuda_f32 = crate::host_to_cuda_copy(&cpu_f32, 0).unwrap();
         let bf16 = crate::cuda_cast(&cuda_f32, DType::BF16).unwrap();
         assert_eq!(bf16.dtype(), DType::BF16);
@@ -2548,8 +2494,7 @@ mod tests {
             return;
         };
         let _ = dev;
-        let cpu_f32 =
-            crate::Tensor::from_slice(&[1.0f32, f32::INFINITY, 2.0], vec![3]).unwrap();
+        let cpu_f32 = crate::Tensor::from_slice(&[1.0f32, f32::INFINITY, 2.0], vec![3]).unwrap();
         let cuda_f32 = crate::host_to_cuda_copy(&cpu_f32, 0).unwrap();
         let f16 = crate::cuda_cast(&cuda_f32, DType::F16).unwrap();
         assert_eq!(f16.dtype(), DType::F16);
@@ -2586,11 +2531,7 @@ mod tests {
         // 2x2 with one NaN at logical [1, 0]; transpose to make it
         // non-contiguous. cuda_is_finite contiguifies internally.
         let _ = dev;
-        let cpu_f32 = crate::Tensor::from_slice(
-            &[1.0f32, 2.0, f32::NAN, 4.0],
-            vec![2, 2],
-        )
-        .unwrap();
+        let cpu_f32 = crate::Tensor::from_slice(&[1.0f32, 2.0, f32::NAN, 4.0], vec![2, 2]).unwrap();
         let cuda_f32 = crate::host_to_cuda_copy(&cpu_f32, 0).unwrap();
         let tt = cuda_f32.transpose(0, 1).unwrap();
         assert!(!super::cuda_is_finite(&tt).unwrap());
@@ -2634,9 +2575,13 @@ pub fn cuda_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     let n_cols = shape[rank - 1] as i64;
     let n_rows = (x.element_count() / shape[rank - 1]) as i64;
 
-    let x_storage = x.storage().as_any().downcast_ref::<CudaStorage>().ok_or_else(
-        || crate::Error::Msg("cuda_softmax_last_axis: input must be CUDA".to_string()),
-    )?;
+    let x_storage = x
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg("cuda_softmax_last_axis: input must be CUDA".to_string())
+        })?;
     let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
@@ -2645,8 +2590,7 @@ pub fn cuda_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     // #1082 (perf, Pattern A): softmax writes every element of the
     // last-axis output (Pass 3 stores out[row, c] for all rows × cols);
     // uninit skips the memset.
-    let out_storage =
-        CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
+    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
 
     let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -2686,7 +2630,6 @@ pub fn cuda_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
         crate::TensorId::next(),
     )
 }
-
 
 /// CUDA-side D2H copy: copy a CUDA-backed kt-Tensor's bytes into a
 /// freshly-allocated CPU-backed kt-Tensor.
@@ -2750,9 +2693,7 @@ pub fn cuda_to_host_copy(src: &crate::Tensor) -> Result<crate::Tensor> {
     let stream = crate::active_cuda_stream(&ctx);
     stream
         .memcpy_dtoh(slice, &mut host_bytes)
-        .map_err(|e| {
-            crate::Error::Msg(format!("cuda_to_host_copy: memcpy_dtoh failed: {e:?}"))
-        })?;
+        .map_err(|e| crate::Error::Msg(format!("cuda_to_host_copy: memcpy_dtoh failed: {e:?}")))?;
 
     let cpu_storage = crate::CpuStorage::from_bytes(dtype, host_bytes)?;
     let storage_arc: crate::Storage = Arc::new(cpu_storage);
@@ -2792,8 +2733,8 @@ pub fn cuda_to_host_copy(src: &crate::Tensor) -> Result<crate::Tensor> {
 /// [`cuda_to_host_copy`]).
 #[cfg(feature = "cuda")]
 pub fn cuda_is_finite(src: &crate::Tensor) -> Result<bool> {
-    use cudarc::driver::DevicePtr;
     use crate::DType;
+    use cudarc::driver::DevicePtr;
 
     let dtype = src.dtype();
     // Integer + packed dtypes have no NaN/Inf — vacuously finite.
@@ -2841,11 +2782,7 @@ pub fn cuda_is_finite(src: &crate::Tensor) -> Result<bool> {
 
     // 1-element U32 device buffer (4 bytes, zero-init). Kernel
     // atomic-ORs a `1` into it on first non-finite hit.
-    let flag_storage = CudaStorage::zeros_ctx(&ctx,
-        device_index,
-        DType::U32,
-        1,
-    )?;
+    let flag_storage = CudaStorage::zeros_ctx(&ctx, device_index, DType::U32, 1)?;
 
     let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -2870,9 +2807,8 @@ pub fn cuda_is_finite(src: &crate::Tensor) -> Result<bool> {
     let flag_ptr = flag_base as *mut core::ffi::c_void;
 
     let n_elements = src.element_count() as i64;
-    let status = unsafe {
-        kiln_is_finite_storage_async(x_ptr, flag_ptr, n_elements, dtype_tag, raw_stream)
-    };
+    let status =
+        unsafe { kiln_is_finite_storage_async(x_ptr, flag_ptr, n_elements, dtype_tag, raw_stream) };
     if status != 0 {
         return Err(crate::Error::Msg(format!(
             "cuda_is_finite: FFI returned status {status}"
@@ -2888,13 +2824,10 @@ pub fn cuda_is_finite(src: &crate::Tensor) -> Result<bool> {
     let mut flag_host = [0u8; 4];
     stream
         .memcpy_dtoh(flag_slice, &mut flag_host)
-        .map_err(|e| {
-            crate::Error::Msg(format!("cuda_is_finite: flag D2H failed: {e:?}"))
-        })?;
+        .map_err(|e| crate::Error::Msg(format!("cuda_is_finite: flag D2H failed: {e:?}")))?;
     let flag = u32::from_le_bytes(flag_host);
     Ok(flag == 0)
 }
-
 
 /// Host → CUDA copy: copy a CPU-backed kt-Tensor's bytes onto a
 /// CUDA device, returning a new CUDA-backed kt-Tensor.
@@ -2919,10 +2852,7 @@ pub fn cuda_is_finite(src: &crate::Tensor) -> Result<bool> {
 /// - Source must be CPU storage.
 /// - Packed dtypes (Marlin / Int4 / Fp4) are not supported.
 #[cfg(feature = "cuda")]
-pub fn host_to_cuda_copy(
-    src: &crate::Tensor,
-    device_index: usize,
-) -> Result<crate::Tensor> {
+pub fn host_to_cuda_copy(src: &crate::Tensor, device_index: usize) -> Result<crate::Tensor> {
     if src.dtype().is_packed() {
         return Err(crate::Error::Msg(format!(
             "host_to_cuda_copy: packed dtype {} not supported",
@@ -2979,11 +2909,8 @@ pub fn host_to_cuda_copy(
     let stream = crate::active_cuda_stream(&ctx);
     let device_slice = stream
         .clone_htod(bytes)
-        .map_err(|e| {
-            crate::Error::Msg(format!("host_to_cuda_copy: clone_htod failed: {e:?}"))
-        })?;
-    let cuda_storage =
-        CudaStorage::from_slice_ctx(&ctx, device_index, dtype, device_slice)?;
+        .map_err(|e| crate::Error::Msg(format!("host_to_cuda_copy: clone_htod failed: {e:?}")))?;
+    let cuda_storage = CudaStorage::from_slice_ctx(&ctx, device_index, dtype, device_slice)?;
 
     let storage_arc: crate::Storage = Arc::new(cuda_storage);
     crate::Tensor::from_parts(
@@ -3003,10 +2930,7 @@ pub fn host_to_cuda_copy(
 /// to work unchanged; new code should call `host_to_cuda_copy`
 /// directly.
 #[cfg(feature = "cuda")]
-pub fn host_to_cuda_copy_ctx(
-    src: &crate::Tensor,
-    device_index: usize,
-) -> Result<crate::Tensor> {
+pub fn host_to_cuda_copy_ctx(src: &crate::Tensor, device_index: usize) -> Result<crate::Tensor> {
     host_to_cuda_copy(src, device_index)
 }
 
@@ -3050,9 +2974,13 @@ pub fn cuda_sum_squared_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     let n_cols = shape[rank - 1] as i64;
     let n_rows = (x.element_count() / shape[rank - 1]) as i64;
 
-    let x_storage = x.storage().as_any().downcast_ref::<CudaStorage>().ok_or_else(
-        || crate::Error::Msg("cuda_sum_squared_last_axis: input must be CUDA".to_string()),
-    )?;
+    let x_storage = x
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg("cuda_sum_squared_last_axis: input must be CUDA".to_string())
+        })?;
     let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
@@ -3063,11 +2991,8 @@ pub fn cuda_sum_squared_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     // output row (out[row] = Σ_c x[row,c]^2 for all n_rows rows; lane 0
     // of each per-row block stores unconditionally) and the output is
     // exactly n_rows elements; uninit skips the memset.
-    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx,
-        device_index,
-        crate::DType::F32,
-        n_rows as usize,
-    )?;
+    let out_storage =
+        CudaStorage::alloc_uninit_ctx(&ctx, device_index, crate::DType::F32, n_rows as usize)?;
 
     let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -3156,9 +3081,13 @@ pub fn cuda_l2norm_last_axis(x: &crate::Tensor, eps: f32) -> Result<crate::Tenso
     // Phase 1: produce per-row sum-of-squares (F32, shape [..rows]).
     let sum_sq = cuda_sum_squared_last_axis(x)?;
 
-    let x_storage = x.storage().as_any().downcast_ref::<CudaStorage>().ok_or_else(
-        || crate::Error::Msg("cuda_l2norm_last_axis: input must be CUDA".to_string()),
-    )?;
+    let x_storage = x
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg("cuda_l2norm_last_axis: input must be CUDA".to_string())
+        })?;
     let sum_sq_storage = sum_sq
         .storage()
         .as_any()
@@ -3177,8 +3106,7 @@ pub fn cuda_l2norm_last_axis(x: &crate::Tensor, eps: f32) -> Result<crate::Tenso
     // element of the output (out[row, c] = x[row,c] * inv_norm for all
     // rows × cols) and the output is exactly x.element_count(); uninit
     // skips the memset.
-    let out_storage =
-        CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
+    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
 
     let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -3214,14 +3142,7 @@ pub fn cuda_l2norm_last_axis(x: &crate::Tensor, eps: f32) -> Result<crate::Tenso
 
     let status = unsafe {
         kiln_l2norm_apply_async(
-            x_ptr,
-            sum_sq_ptr,
-            out_ptr,
-            n_rows,
-            n_cols,
-            eps,
-            dtype_tag,
-            raw_stream,
+            x_ptr, sum_sq_ptr, out_ptr, n_rows, n_cols, eps, dtype_tag, raw_stream,
         )
     };
     if status != 0 {
@@ -3315,9 +3236,11 @@ pub fn cuda_rmsnorm_last_axis(
     }
     let n_rows = (x.element_count() / shape[rank - 1]) as i64;
 
-    let x_storage = x.storage().as_any().downcast_ref::<CudaStorage>().ok_or_else(
-        || crate::Error::Msg("cuda_rmsnorm_last_axis: x must be CUDA".to_string()),
-    )?;
+    let x_storage = x
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg("cuda_rmsnorm_last_axis: x must be CUDA".to_string()))?;
     let weight_storage = weight
         .storage()
         .as_any()
@@ -3333,8 +3256,7 @@ pub fn cuda_rmsnorm_last_axis(
     // #1082 (perf, Pattern A): rmsnorm writes every element of the
     // last-axis output (Pass 2 stores out[row, c] for all rows × cols);
     // uninit skips the memset.
-    let out_storage =
-        CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
+    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
 
     let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -3370,14 +3292,7 @@ pub fn cuda_rmsnorm_last_axis(
 
     let status = unsafe {
         kiln_rmsnorm_last_axis_async(
-            x_ptr,
-            weight_ptr,
-            out_ptr,
-            n_rows,
-            n_cols,
-            eps,
-            dtype_tag,
-            raw_stream,
+            x_ptr, weight_ptr, out_ptr, n_rows, n_cols, eps, dtype_tag, raw_stream,
         )
     };
     if status != 0 {
@@ -3472,9 +3387,11 @@ pub fn cuda_layernorm_last_axis(
     }
     let n_rows = (x.element_count() / shape[rank - 1]) as i64;
 
-    let x_storage = x.storage().as_any().downcast_ref::<CudaStorage>().ok_or_else(
-        || crate::Error::Msg("cuda_layernorm_last_axis: x must be CUDA".to_string()),
-    )?;
+    let x_storage = x
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg("cuda_layernorm_last_axis: x must be CUDA".to_string()))?;
     let weight_storage = weight
         .storage()
         .as_any()
@@ -3497,8 +3414,7 @@ pub fn cuda_layernorm_last_axis(
     // #1082 (perf, Pattern A): layernorm writes every element of the
     // last-axis output (Pass 2 stores out[row, c] for all rows × cols);
     // uninit skips the memset.
-    let out_storage =
-        CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
+    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
 
     let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -3543,15 +3459,7 @@ pub fn cuda_layernorm_last_axis(
 
     let status = unsafe {
         kiln_layernorm_last_axis_async(
-            x_ptr,
-            weight_ptr,
-            bias_ptr,
-            out_ptr,
-            n_rows,
-            n_cols,
-            eps,
-            dtype_tag,
-            raw_stream,
+            x_ptr, weight_ptr, bias_ptr, out_ptr, n_rows, n_cols, eps, dtype_tag, raw_stream,
         )
     };
     if status != 0 {
@@ -3672,13 +3580,7 @@ pub fn cuda_masked_fill(
 
     let status = unsafe {
         kiln_masked_fill_u8_async(
-            x_ptr,
-            mask_ptr,
-            out_ptr,
-            n as i64,
-            fill_value,
-            dtype_tag,
-            raw_stream,
+            x_ptr, mask_ptr, out_ptr, n as i64, fill_value, dtype_tag, raw_stream,
         )
     };
     if status != 0 {
@@ -3810,10 +3712,7 @@ pub fn cuda_flce_grad_logits_chunk_inplace(
     {
         return Err(crate::Error::Msg(format!(
             "cuda_flce_grad_logits_chunk_inplace: device mismatch logits={} labels={} max={} sumexp={}",
-            logits_storage.device,
-            labels_storage.device,
-            max_storage.device,
-            sumexp_storage.device
+            logits_storage.device, labels_storage.device, max_storage.device, sumexp_storage.device
         )));
     }
 
@@ -3827,8 +3726,8 @@ pub fn cuda_flce_grad_logits_chunk_inplace(
     let (sumexp_base, _) = sumexp_storage.device_ptr_raw();
 
     let f32_bpe = crate::DType::F32.size_in_bytes();
-    let logits_ptr = (logits_base + (logits.layout().start_offset() * f32_bpe) as u64)
-        as *mut core::ffi::c_void;
+    let logits_ptr =
+        (logits_base + (logits.layout().start_offset() * f32_bpe) as u64) as *mut core::ffi::c_void;
     let labels_ptr = (labels_base
         + (labels.layout().start_offset() * crate::DType::U32.size_in_bytes()) as u64)
         as *const core::ffi::c_void;
@@ -3974,9 +3873,7 @@ pub fn cuda_grpo_grad_logits_chunk_inplace(
         .as_any()
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| {
-            crate::Error::Msg(
-                "cuda_grpo_grad_logits_chunk_inplace: coeff must be CUDA".to_string(),
-            )
+            crate::Error::Msg("cuda_grpo_grad_logits_chunk_inplace: coeff must be CUDA".to_string())
         })?;
 
     if matches!(&logits_storage.slice, SliceOwner::Borrowed { .. }) {
@@ -4011,8 +3908,8 @@ pub fn cuda_grpo_grad_logits_chunk_inplace(
     let (coeff_base, _) = coeff_storage.device_ptr_raw();
 
     let f32_bpe = crate::DType::F32.size_in_bytes();
-    let logits_ptr = (logits_base + (logits.layout().start_offset() * f32_bpe) as u64)
-        as *mut core::ffi::c_void;
+    let logits_ptr =
+        (logits_base + (logits.layout().start_offset() * f32_bpe) as u64) as *mut core::ffi::c_void;
     let labels_ptr = (labels_base
         + (labels.layout().start_offset() * crate::DType::U32.size_in_bytes()) as u64)
         as *const core::ffi::c_void;
@@ -4020,8 +3917,8 @@ pub fn cuda_grpo_grad_logits_chunk_inplace(
         as *const core::ffi::c_void;
     let sumexp_ptr = (sumexp_base + (global_sumexp.layout().start_offset() * f32_bpe) as u64)
         as *const core::ffi::c_void;
-    let coeff_ptr = (coeff_base + (coeff.layout().start_offset() * f32_bpe) as u64)
-        as *const core::ffi::c_void;
+    let coeff_ptr =
+        (coeff_base + (coeff.layout().start_offset() * f32_bpe) as u64) as *const core::ffi::c_void;
 
     let status = unsafe {
         kiln_grpo_grad_logits_chunk_f32_async(
@@ -4043,7 +3940,6 @@ pub fn cuda_grpo_grad_logits_chunk_inplace(
     }
     Ok(())
 }
-
 
 /// CUDA argmax over the trailing axis (Phase 4 substrate op).
 ///
@@ -4085,9 +3981,13 @@ pub fn cuda_argmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     let n_cols = shape[rank - 1] as i64;
     let n_rows = (x.element_count() / shape[rank - 1]) as i64;
 
-    let x_storage = x.storage().as_any().downcast_ref::<CudaStorage>().ok_or_else(
-        || crate::Error::Msg("cuda_argmax_last_axis: input must be CUDA".to_string()),
-    )?;
+    let x_storage = x
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg("cuda_argmax_last_axis: input must be CUDA".to_string())
+        })?;
     let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
@@ -4097,11 +3997,8 @@ pub fn cuda_argmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     // Output: shape = leading axes, dtype = I64.
     let out_shape: Vec<usize> = shape[..rank - 1].to_vec();
     let out_elem_count: usize = out_shape.iter().product::<usize>().max(1);
-    let out_storage = CudaStorage::zeros_ctx(&ctx,
-        device_index,
-        crate::DType::I64,
-        out_elem_count,
-    )?;
+    let out_storage =
+        CudaStorage::zeros_ctx(&ctx, device_index, crate::DType::I64, out_elem_count)?;
 
     let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -4202,9 +4099,11 @@ pub fn cuda_topk_last_axis(x: &crate::Tensor, k: usize) -> Result<(Vec<f32>, Vec
     let n_cols = vocab as i64;
     let n_rows = 1_i64;
 
-    let x_storage = x.storage().as_any().downcast_ref::<CudaStorage>().ok_or_else(
-        || crate::Error::Msg("cuda_topk_last_axis: input must be CUDA".to_string()),
-    )?;
+    let x_storage = x
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg("cuda_topk_last_axis: input must be CUDA".to_string()))?;
     let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
@@ -4250,14 +4149,7 @@ pub fn cuda_topk_last_axis(x: &crate::Tensor, k: usize) -> Result<(Vec<f32>, Vec
 
     let status = unsafe {
         kiln_topk_last_axis_async(
-            x_ptr,
-            vals_ptr,
-            idx_ptr,
-            n_rows,
-            n_cols,
-            k as i32,
-            dtype_tag,
-            raw_stream,
+            x_ptr, vals_ptr, idx_ptr, n_rows, n_cols, k as i32, dtype_tag, raw_stream,
         )
     };
     if status != 0 {
@@ -4279,9 +4171,9 @@ pub fn cuda_topk_last_axis(x: &crate::Tensor, k: usize) -> Result<(Vec<f32>, Vec
     };
 
     let mut vals_bytes = vec![0u8; k * 4];
-    stream.memcpy_dtoh(vals_slice, &mut vals_bytes).map_err(|e| {
-        crate::Error::Msg(format!("cuda_topk_last_axis: values D2H failed: {e:?}"))
-    })?;
+    stream
+        .memcpy_dtoh(vals_slice, &mut vals_bytes)
+        .map_err(|e| crate::Error::Msg(format!("cuda_topk_last_axis: values D2H failed: {e:?}")))?;
     let mut idx_bytes = vec![0u8; k * 8];
     stream.memcpy_dtoh(idx_slice, &mut idx_bytes).map_err(|e| {
         crate::Error::Msg(format!("cuda_topk_last_axis: indices D2H failed: {e:?}"))
@@ -4399,9 +4291,7 @@ pub fn cuda_cross_entropy_loss(
         .as_any()
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| {
-            crate::Error::Msg(
-                "cuda_cross_entropy_loss: targets must be CUDA storage".to_string(),
-            )
+            crate::Error::Msg("cuda_cross_entropy_loss: targets must be CUDA storage".to_string())
         })?;
 
     let ctx = logits_storage.context();
@@ -4412,17 +4302,9 @@ pub fn cuda_cross_entropy_loss(
 
     // Allocate per-row F32 scratch and a 4-byte error flag. Both
     // start zeroed.
-    let row_loss_storage = CudaStorage::zeros_ctx(&ctx,
-        device_index,
-        crate::DType::F32,
-        batch,
-    )?;
+    let row_loss_storage = CudaStorage::zeros_ctx(&ctx, device_index, crate::DType::F32, batch)?;
     // For row_err we use a 1-element U32 buffer (4 bytes, zero-init).
-    let row_err_storage = CudaStorage::zeros_ctx(&ctx,
-        device_index,
-        crate::DType::U32,
-        1,
-    )?;
+    let row_err_storage = CudaStorage::zeros_ctx(&ctx, device_index, crate::DType::U32, 1)?;
 
     // Scalar output buffer (1 element at the input dtype). Reusing
     // `CudaStorage::zeros` to get a zero-initialized buffer; the
@@ -4551,7 +4433,11 @@ pub fn cuda_cross_entropy_loss(
 /// `csrc/reduce_last_axis.cu`. `divisor` is applied in F32 before
 /// the cast (so the mean path passes `1.0 / n_cols` and gets bit-
 /// identical results to a separate divide kernel).
-fn cuda_reduce_last_axis_impl(x: &crate::Tensor, divisor: f32, label: &str) -> Result<crate::Tensor> {
+fn cuda_reduce_last_axis_impl(
+    x: &crate::Tensor,
+    divisor: f32,
+    label: &str,
+) -> Result<crate::Tensor> {
     use cudarc::driver::DevicePtr;
 
     let dtype = x.dtype();
@@ -4580,9 +4466,11 @@ fn cuda_reduce_last_axis_impl(x: &crate::Tensor, divisor: f32, label: &str) -> R
     let n_cols = shape[rank - 1] as i64;
     let n_rows = (x.element_count() / shape[rank - 1]) as i64;
 
-    let x_storage = x.storage().as_any().downcast_ref::<CudaStorage>().ok_or_else(
-        || crate::Error::Msg(format!("{label}: input must be CUDA")),
-    )?;
+    let x_storage = x
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg(format!("{label}: input must be CUDA")))?;
     let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
@@ -4591,8 +4479,7 @@ fn cuda_reduce_last_axis_impl(x: &crate::Tensor, divisor: f32, label: &str) -> R
     // Output: same dtype as input, shape = leading axes.
     let out_shape: Vec<usize> = shape[..rank - 1].to_vec();
     let out_elem_count: usize = out_shape.iter().product::<usize>().max(1);
-    let out_storage =
-        CudaStorage::zeros_ctx(&ctx, device_index, dtype, out_elem_count)?;
+    let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, out_elem_count)?;
 
     let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -4617,7 +4504,9 @@ fn cuda_reduce_last_axis_impl(x: &crate::Tensor, divisor: f32, label: &str) -> R
     let out_ptr = out_base as *mut core::ffi::c_void;
 
     let status = unsafe {
-        kiln_sum_last_axis_async(x_ptr, out_ptr, n_rows, n_cols, divisor, dtype_tag, raw_stream)
+        kiln_sum_last_axis_async(
+            x_ptr, out_ptr, n_rows, n_cols, divisor, dtype_tag, raw_stream,
+        )
     };
     if status != 0 {
         return Err(crate::Error::Msg(format!(
@@ -4714,13 +4603,11 @@ fn cuda_reduce_arbitrary_axis_impl(
     let outer = outer.max(1);
     let inner = inner.max(1);
 
-    let x_storage =
-        x.storage()
-            .as_any()
-            .downcast_ref::<CudaStorage>()
-            .ok_or_else(|| {
-                crate::Error::Msg(format!("{label}: input must be CUDA"))
-            })?;
+    let x_storage = x
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg(format!("{label}: input must be CUDA")))?;
     let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
@@ -4730,8 +4617,7 @@ fn cuda_reduce_arbitrary_axis_impl(
     let mut out_shape: Vec<usize> = shape.to_vec();
     out_shape.remove(axis);
     let out_elem_count: usize = (outer as usize) * (inner as usize);
-    let out_storage =
-        CudaStorage::zeros_ctx(&ctx, device_index, dtype, out_elem_count)?;
+    let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, out_elem_count)?;
 
     let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -4757,14 +4643,7 @@ fn cuda_reduce_arbitrary_axis_impl(
 
     let status = unsafe {
         kiln_sum_arbitrary_axis_async(
-            x_ptr,
-            out_ptr,
-            outer,
-            axis_dim,
-            inner,
-            divisor,
-            dtype_tag,
-            raw_stream,
+            x_ptr, out_ptr, outer, axis_dim, inner, divisor, dtype_tag, raw_stream,
         )
     };
     if status != 0 {
@@ -4882,13 +4761,11 @@ fn cuda_minmax_arbitrary_axis_impl(
     let outer = outer.max(1);
     let inner = inner.max(1);
 
-    let x_storage =
-        x.storage()
-            .as_any()
-            .downcast_ref::<CudaStorage>()
-            .ok_or_else(|| {
-                crate::Error::Msg(format!("{label}: input must be CUDA"))
-            })?;
+    let x_storage = x
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg(format!("{label}: input must be CUDA")))?;
     let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
@@ -4897,8 +4774,7 @@ fn cuda_minmax_arbitrary_axis_impl(
     let mut out_shape: Vec<usize> = shape.to_vec();
     out_shape.remove(axis);
     let out_elem_count: usize = (outer as usize) * (inner as usize);
-    let out_storage =
-        CudaStorage::zeros_ctx(&ctx, device_index, dtype, out_elem_count)?;
+    let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, out_elem_count)?;
 
     let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -4924,14 +4800,7 @@ fn cuda_minmax_arbitrary_axis_impl(
 
     let status = unsafe {
         kiln_minmax_arbitrary_axis_async(
-            x_ptr,
-            out_ptr,
-            outer,
-            axis_dim,
-            inner,
-            kind,
-            dtype_tag,
-            raw_stream,
+            x_ptr, out_ptr, outer, axis_dim, inner, kind, dtype_tag, raw_stream,
         )
     };
     if status != 0 {
@@ -5023,11 +4892,7 @@ pub fn cuda_bool_reduce_axis(
     let mut out_shape: Vec<usize> = shape.to_vec();
     out_shape.remove(axis);
     let out_elem_count: usize = (outer as usize) * (inner as usize);
-    let out_storage = CudaStorage::zeros_ctx(&ctx,
-        device_index,
-        crate::DType::U8,
-        out_elem_count,
-    )?;
+    let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, crate::DType::U8, out_elem_count)?;
 
     let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -5180,8 +5045,7 @@ pub fn cuda_concat(inputs: &[&crate::Tensor], axis: usize) -> Result<crate::Tens
 
     // Allocate destination — same device, same dtype, total elements.
     let n_out_elements: usize = out_shape.iter().product();
-    let dst_storage =
-        CudaStorage::zeros_ctx(&ctx, device_index, dtype, n_out_elements)?;
+    let dst_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, n_out_elements)?;
 
     // Collect per-input source pointers (base + start_offset bytes).
     let stream = crate::active_cuda_stream(&ctx);
@@ -5244,7 +5108,6 @@ pub fn cuda_concat(inputs: &[&crate::Tensor], axis: usize) -> Result<crate::Tens
         crate::TensorId::next(),
     )
 }
-
 
 /// CUDA-side rotary position embedding (RoPE) — applies a per-position
 /// 2-D rotation to the first `rotary_dim` of each row's `head_dim`,
@@ -5364,10 +5227,7 @@ pub fn cuda_rope(
     };
 
     let pair_count = rotary_dim / 2;
-    let leading: usize = x.shape()[..x.rank() - 2]
-        .iter()
-        .product::<usize>()
-        .max(1);
+    let leading: usize = x.shape()[..x.rank() - 2].iter().product::<usize>().max(1);
     let n = x.element_count();
     let x_bpe = x_dtype.size_in_bytes();
 
@@ -5471,8 +5331,6 @@ pub fn cuda_rope(
     .map_err(|e| crate::Error::Msg(format!("cuda_rope: wrap: {e}")))
 }
 
-
-
 /// CUDA inverted dropout (training-time).
 ///
 /// Produces `(y, mask)` where `y[i] = (rand_i >= p) ? x[i] / (1 - p) : 0`
@@ -5533,8 +5391,7 @@ pub fn cuda_dropout(
     };
 
     let y_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, n)?;
-    let mask_storage =
-        CudaStorage::zeros_ctx(&ctx, device_index, crate::DType::U8, n)?;
+    let mask_storage = CudaStorage::zeros_ctx(&ctx, device_index, crate::DType::U8, n)?;
 
     let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -5568,15 +5425,7 @@ pub fn cuda_dropout(
 
     let status = unsafe {
         kiln_dropout_async(
-            x_ptr,
-            y_ptr,
-            mask_ptr,
-            n as i64,
-            p,
-            inv_keep,
-            seed,
-            dtype_tag,
-            raw_stream,
+            x_ptr, y_ptr, mask_ptr, n as i64, p, inv_keep, seed, dtype_tag, raw_stream,
         )
     };
     if status != 0 {
@@ -5662,11 +5511,7 @@ pub fn cuda_scalar_op(x: &crate::Tensor, kind: i32, c: f32) -> Result<crate::Ten
     };
     // #1082 (perf, Pattern A): scalar op writes the full output
     // (out[i] = f(x[i], c) for all n); uninit skips the memset.
-    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx,
-        device_index,
-        dtype,
-        n,
-    )?;
+    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n)?;
 
     let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -5690,17 +5535,8 @@ pub fn cuda_scalar_op(x: &crate::Tensor, kind: i32, c: f32) -> Result<crate::Ten
     let x_ptr = (x_base + x_off) as *const core::ffi::c_void;
     let out_ptr = out_base as *mut core::ffi::c_void;
 
-    let status = unsafe {
-        kiln_scalar_op_async(
-            x_ptr,
-            out_ptr,
-            n as i64,
-            kind,
-            dtype_tag,
-            c,
-            raw_stream,
-        )
-    };
+    let status =
+        unsafe { kiln_scalar_op_async(x_ptr, out_ptr, n as i64, kind, dtype_tag, c, raw_stream) };
     if status != 0 {
         return Err(crate::Error::Msg(format!(
             "cuda_scalar_op: FFI returned status {status}"
@@ -5726,12 +5562,7 @@ pub fn cuda_scalar_op(x: &crate::Tensor, kind: i32, c: f32) -> Result<crate::Ten
 /// narrowed back to storage dtype, matching the kt-tensor numerical
 /// reference. (#1082)
 #[cfg(feature = "cuda")]
-pub fn cuda_clamp_pow(
-    x: &crate::Tensor,
-    kind: i32,
-    a: f32,
-    b: f32,
-) -> Result<crate::Tensor> {
+pub fn cuda_clamp_pow(x: &crate::Tensor, kind: i32, a: f32, b: f32) -> Result<crate::Tensor> {
     use cudarc::driver::DevicePtr;
     use std::any::Any as _;
 
@@ -5793,16 +5624,7 @@ pub fn cuda_clamp_pow(
     let out_ptr = out_base as *mut core::ffi::c_void;
 
     let status = unsafe {
-        kiln_clamp_pow_async(
-            x_ptr,
-            out_ptr,
-            n as i64,
-            kind,
-            a,
-            b,
-            dtype_tag,
-            raw_stream,
-        )
+        kiln_clamp_pow_async(x_ptr, out_ptr, n as i64, kind, a, b, dtype_tag, raw_stream)
     };
     if status != 0 {
         return Err(crate::Error::Msg(format!(
@@ -5828,11 +5650,7 @@ pub fn cuda_clamp_pow(
 /// Returns a fresh contiguous U8 tensor of the same shape — useful
 /// as a mask for `masked_fill` / `where_select`. (#1082)
 #[cfg(feature = "cuda")]
-pub fn cuda_compare(
-    a: &crate::Tensor,
-    b: &crate::Tensor,
-    kind: i32,
-) -> Result<crate::Tensor> {
+pub fn cuda_compare(a: &crate::Tensor, b: &crate::Tensor, kind: i32) -> Result<crate::Tensor> {
     use cudarc::driver::DevicePtr;
     use std::any::Any as _;
 
@@ -5889,11 +5707,7 @@ pub fn cuda_compare(
     // Output is U8 (one byte per element).
     // #1082 (perf, Pattern A): compare writes the full output
     // (out[i] = cmp(a[i], b[i]) ? 1 : 0 for all n); uninit skips the memset.
-    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx,
-        device_index,
-        crate::DType::U8,
-        n,
-    )?;
+    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx, device_index, crate::DType::U8, n)?;
 
     let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -5927,9 +5741,8 @@ pub fn cuda_compare(
     let b_ptr = (b_base + b_off) as *const core::ffi::c_void;
     let out_ptr = out_base as *mut core::ffi::c_void;
 
-    let status = unsafe {
-        kiln_compare_async(a_ptr, b_ptr, out_ptr, n as i64, kind, dtype_tag, raw_stream)
-    };
+    let status =
+        unsafe { kiln_compare_async(a_ptr, b_ptr, out_ptr, n as i64, kind, dtype_tag, raw_stream) };
     if status != 0 {
         return Err(crate::Error::Msg(format!(
             "cuda_compare: FFI returned status {status}"
@@ -6021,8 +5834,7 @@ pub fn cuda_where_select(
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
-    let out_storage =
-        CudaStorage::zeros_ctx(&ctx, device_index, dtype, n)?;
+    let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, n)?;
 
     let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -6067,7 +5879,9 @@ pub fn cuda_where_select(
     let out_ptr = out_base as *mut core::ffi::c_void;
 
     let status = unsafe {
-        kiln_where_select_async(mask_ptr, t_ptr, f_ptr, out_ptr, n as i64, dtype_tag, raw_stream)
+        kiln_where_select_async(
+            mask_ptr, t_ptr, f_ptr, out_ptr, n as i64, dtype_tag, raw_stream,
+        )
     };
     if status != 0 {
         return Err(crate::Error::Msg(format!(
@@ -6134,8 +5948,7 @@ pub fn cuda_diagonal_extract(x: &crate::Tensor) -> Result<crate::Tensor> {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
-    let out_storage =
-        CudaStorage::zeros_ctx(&ctx, device_index, dtype, n)?;
+    let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, n)?;
 
     let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -6159,9 +5972,8 @@ pub fn cuda_diagonal_extract(x: &crate::Tensor) -> Result<crate::Tensor> {
     let x_ptr = (x_base + x_off) as *const core::ffi::c_void;
     let out_ptr = out_base as *mut core::ffi::c_void;
 
-    let status = unsafe {
-        kiln_diagonal_extract_async(x_ptr, out_ptr, n as i64, dtype_tag, raw_stream)
-    };
+    let status =
+        unsafe { kiln_diagonal_extract_async(x_ptr, out_ptr, n as i64, dtype_tag, raw_stream) };
     if status != 0 {
         return Err(crate::Error::Msg(format!(
             "cuda_diagonal_extract: FFI returned status {status}"
@@ -6222,8 +6034,7 @@ pub fn cuda_diag_build(v: &crate::Tensor) -> Result<crate::Tensor> {
         _ => unreachable!(),
     };
     // Pre-zero the output; the kernel only writes the n diagonal entries.
-    let out_storage =
-        CudaStorage::zeros_ctx(&ctx, device_index, dtype, n * n)?;
+    let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, n * n)?;
 
     let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -6247,9 +6058,7 @@ pub fn cuda_diag_build(v: &crate::Tensor) -> Result<crate::Tensor> {
     let v_ptr = (v_base + v_off) as *const core::ffi::c_void;
     let out_ptr = out_base as *mut core::ffi::c_void;
 
-    let status = unsafe {
-        kiln_diag_build_async(v_ptr, out_ptr, n as i64, dtype_tag, raw_stream)
-    };
+    let status = unsafe { kiln_diag_build_async(v_ptr, out_ptr, n as i64, dtype_tag, raw_stream) };
     if status != 0 {
         return Err(crate::Error::Msg(format!(
             "cuda_diag_build: FFI returned status {status}"
@@ -6264,7 +6073,6 @@ pub fn cuda_diag_build(v: &crate::Tensor) -> Result<crate::Tensor> {
     )
     .map_err(|e| crate::Error::Msg(format!("cuda_diag_build: wrap: {e}")))
 }
-
 
 /// CUDA cumulative sum along the trailing axis (Phase 6 scan kernel,
 /// #1082).
@@ -6348,8 +6156,7 @@ fn cuda_scan_axis_impl(
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
-    let out_storage =
-        CudaStorage::zeros_ctx(&ctx, device_index, dtype, x.element_count())?;
+    let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, x.element_count())?;
 
     let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;

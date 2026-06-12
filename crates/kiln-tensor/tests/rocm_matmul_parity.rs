@@ -82,15 +82,26 @@ fn matmul_f32_shapes() {
         return;
     }
     // (m, k, n) — decode-skinny M=1, square, tall, wide-K.
-    for &(m, k, n) in &[(1, 64, 64), (1, 2560, 4096), (16, 16, 16), (32, 128, 64), (128, 256, 512), (7, 65, 33)] {
+    for &(m, k, n) in &[
+        (1, 64, 64),
+        (1, 2560, 4096),
+        (16, 16, 16),
+        (32, 128, 64),
+        (128, 256, 512),
+        (7, 65, 33),
+    ] {
         let a: Vec<f32> = (0..m * k).map(|i| val(i, 1.0)).collect();
         let b: Vec<f32> = (0..k * n).map(|i| val(i + 5, 1.0)).collect();
         let want = cpu_matmul(&a, &b, m, k, n);
 
         let ta = Tensor::from_vec_on(Device::Rocm(0), a, vec![m, k]).expect("a");
         let tb = Tensor::from_vec_on(Device::Rocm(0), b, vec![k, n]).expect("b");
-        let tc = kiln_tensor::rocm_matmul(&ta, &tb).unwrap_or_else(|e| panic!("matmul {m}x{k}x{n}: {e}"));
-        let got = kiln_tensor::rocm_to_host_copy(&tc).unwrap().to_vec::<f32>().unwrap();
+        let tc = kiln_tensor::rocm_matmul(&ta, &tb)
+            .unwrap_or_else(|e| panic!("matmul {m}x{k}x{n}: {e}"));
+        let got = kiln_tensor::rocm_to_host_copy(&tc)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
         check_close(&got, &want, 1e-4, 1e-4, &format!("f32 {m}x{k}x{n}"));
     }
 }
@@ -113,11 +124,21 @@ fn matmul_bf16_shapes() {
 
         let ta = Tensor::from_vec_on(Device::Rocm(0), a_bf, vec![m, k]).expect("a");
         let tb = Tensor::from_vec_on(Device::Rocm(0), b_bf, vec![k, n]).expect("b");
-        let tc = kiln_tensor::rocm_matmul(&ta, &tb).unwrap_or_else(|e| panic!("bf16 matmul {m}x{k}x{n}: {e}"));
-        let got_bf = kiln_tensor::rocm_to_host_copy(&tc).unwrap().to_vec::<bf16>().unwrap();
+        let tc = kiln_tensor::rocm_matmul(&ta, &tb)
+            .unwrap_or_else(|e| panic!("bf16 matmul {m}x{k}x{n}: {e}"));
+        let got_bf = kiln_tensor::rocm_to_host_copy(&tc)
+            .unwrap()
+            .to_vec::<bf16>()
+            .unwrap();
         let got: Vec<f32> = got_bf.iter().map(|x| x.to_f32()).collect();
         // bf16 GEMM tolerance scales with K (accumulation rounding).
-        check_close(&got, &want, 3e-2, (k as f32) * 1e-3, &format!("bf16 {m}x{k}x{n}"));
+        check_close(
+            &got,
+            &want,
+            3e-2,
+            (k as f32) * 1e-3,
+            &format!("bf16 {m}x{k}x{n}"),
+        );
     }
 }
 
@@ -140,7 +161,10 @@ fn matmul_with_bias_f32() {
     let tb = Tensor::from_vec_on(Device::Rocm(0), b, vec![k, n]).expect("b");
     let tbias = Tensor::from_vec_on(Device::Rocm(0), bias, vec![n]).expect("bias");
     let tc = kiln_tensor::rocm_matmul_with_bias(&ta, &tb, &tbias).expect("matmul_with_bias");
-    let got = kiln_tensor::rocm_to_host_copy(&tc).unwrap().to_vec::<f32>().unwrap();
+    let got = kiln_tensor::rocm_to_host_copy(&tc)
+        .unwrap()
+        .to_vec::<f32>()
+        .unwrap();
     check_close(&got, &want, 1e-4, 1e-4, "f32 matmul+bias");
 }
 
@@ -154,13 +178,22 @@ fn matmul_batched_f32() {
     let b: Vec<f32> = (0..batch * k * n).map(|i| val(i + 5, 1.0)).collect();
     let mut want = vec![0.0f32; batch * m * n];
     for bi in 0..batch {
-        let ca = cpu_matmul(&a[bi * m * k..(bi + 1) * m * k], &b[bi * k * n..(bi + 1) * k * n], m, k, n);
+        let ca = cpu_matmul(
+            &a[bi * m * k..(bi + 1) * m * k],
+            &b[bi * k * n..(bi + 1) * k * n],
+            m,
+            k,
+            n,
+        );
         want[bi * m * n..(bi + 1) * m * n].copy_from_slice(&ca);
     }
     let ta = Tensor::from_vec_on(Device::Rocm(0), a, vec![batch, m, k]).expect("a");
     let tb = Tensor::from_vec_on(Device::Rocm(0), b, vec![batch, k, n]).expect("b");
     let tc = kiln_tensor::rocm_matmul(&ta, &tb).expect("batched matmul");
-    let got = kiln_tensor::rocm_to_host_copy(&tc).unwrap().to_vec::<f32>().unwrap();
+    let got = kiln_tensor::rocm_to_host_copy(&tc)
+        .unwrap()
+        .to_vec::<f32>()
+        .unwrap();
     check_close(&got, &want, 1e-4, 1e-4, "f32 batched");
 }
 

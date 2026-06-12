@@ -3,7 +3,7 @@
 //! `Tensor::unsqueeze(axis)` handles a single position; `expand_dims`
 //! handles a sorted list of positions in one batched call.
 
-use crate::{bail, Result, Tensor};
+use crate::{Result, Tensor, bail};
 
 pub fn expand_dims(t: &Tensor, axes: &[usize]) -> Result<Tensor> {
     let mut sorted: Vec<usize> = axes.to_vec();

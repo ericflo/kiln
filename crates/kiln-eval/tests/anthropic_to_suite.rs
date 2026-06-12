@@ -8,8 +8,8 @@
 
 use kiln_eval::scorers::{ArgsScoring, NameMatch, NoopJudgeRunner, Scorer, score_completion};
 use kiln_eval::{
-    AnthropicBlock, AnthropicContent, AnthropicMessage, EvalOutcomeKind,
-    SynthesisConfig, SynthesisStrategy, anthropic_turn_to_sft_conversation, synthesize_suite,
+    AnthropicBlock, AnthropicContent, AnthropicMessage, EvalOutcomeKind, SynthesisConfig,
+    SynthesisStrategy, anthropic_turn_to_sft_conversation, synthesize_suite,
 };
 
 /// Build a realistic agentic turn taken straight from the production
@@ -40,7 +40,9 @@ fn realistic_edit_trajectory() -> (
     let messages = vec![
         AnthropicMessage {
             role: "user".into(),
-            content: AnthropicContent::Text("Rename `dpo-data` to `kto-data` in run_experiment.py.".into()),
+            content: AnthropicContent::Text(
+                "Rename `dpo-data` to `kto-data` in run_experiment.py.".into(),
+            ),
         },
         AnthropicMessage {
             role: "assistant".into(),
@@ -102,10 +104,7 @@ fn anthropic_turn_to_synthesized_suite_endtoend() {
     assert_eq!(stats.examples_generated, 1);
     assert_eq!(suite.examples.len(), 1);
     // Tool catalogue was auto-promoted from `extra`.
-    assert!(suite
-        .tools
-        .as_ref()
-        .map_or(false, |t| !t.is_empty()));
+    assert!(suite.tools.as_ref().map_or(false, |t| !t.is_empty()));
     let example = &suite.examples[0];
     let target = example.target.as_deref().unwrap();
     // Compact JSON, no space after the colon.

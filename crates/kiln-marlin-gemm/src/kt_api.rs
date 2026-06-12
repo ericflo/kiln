@@ -26,7 +26,7 @@ use kiln_tensor::{CudaStorage, DType as KtDType, Tensor as KtTensor};
 use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
 
 #[cfg(feature = "cuda")]
-use crate::{kiln_marlin_w4a16_gemm, DEFAULT_MAX_PAR, WORKSPACE_TILE_N};
+use crate::{DEFAULT_MAX_PAR, WORKSPACE_TILE_N, kiln_marlin_w4a16_gemm};
 
 #[derive(Debug)]
 pub enum MarlinError {
@@ -62,7 +62,9 @@ fn cuda_storage_and_byte_offset<'a>(
     expected: KtDType,
     name: &'static str,
 ) -> Result<(&'a CudaStorage, usize), MarlinError> {
-    Ok(kiln_kt_bridge::cuda_storage_and_byte_offset(t, expected, name)?)
+    Ok(kiln_kt_bridge::cuda_storage_and_byte_offset(
+        t, expected, name,
+    )?)
 }
 
 #[cfg(feature = "cuda")]
@@ -270,7 +272,11 @@ pub fn marlin_w4a16_gemm_kt(
             "kt-marlin(rocm): groupsize must be -1 or 128, got {groupsize}"
         )));
     }
-    let groupsize_for_dims = if groupsize == -1 { k } else { groupsize as usize };
+    let groupsize_for_dims = if groupsize == -1 {
+        k
+    } else {
+        groupsize as usize
+    };
     let expected_s_rows = k / groupsize_for_dims;
     if s_rows != expected_s_rows {
         return Err(MarlinError::Msg(format!(
@@ -303,7 +309,7 @@ pub fn marlin_w4a16_gemm_kt(
         other => {
             return Err(MarlinError::Msg(format!(
                 "kt-marlin(rocm): a must be on a ROCm device, got {other}"
-            )))
+            )));
         }
     };
     if b_packed.device() != device || scales.device() != device {

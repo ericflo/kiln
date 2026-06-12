@@ -97,9 +97,8 @@ pub fn rocm_compare(a: &Tensor, b: &Tensor, kind: i32) -> Result<Tensor> {
     let b_ptr = (b_base + b_off) as *const core::ffi::c_void;
     let out_ptr = out_base as *mut core::ffi::c_void;
 
-    let status = unsafe {
-        kiln_compare_async(a_ptr, b_ptr, out_ptr, n as i64, kind, dtype_tag, raw_stream)
-    };
+    let status =
+        unsafe { kiln_compare_async(a_ptr, b_ptr, out_ptr, n as i64, kind, dtype_tag, raw_stream) };
     if status != 0 {
         return Err(Error::Msg(format!(
             "rocm_compare: FFI returned status {status}"

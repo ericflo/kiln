@@ -22,8 +22,8 @@
 //! ergonomics + a slightly faster inner loop.
 
 use crate::{
-    bail, dispatch2, BackwardOp, CpuStorage, DType, Determinism, DeviceOp2, Error, Layout, Result,
-    Storage, Tensor, TensorId,
+    BackwardOp, CpuStorage, DType, Determinism, DeviceOp2, Error, Layout, Result, Storage, Tensor,
+    TensorId, bail, dispatch2,
 };
 use std::sync::Arc;
 
@@ -57,9 +57,7 @@ impl DeviceOp2 for IndexSelectOp {
         let dtype = input.dtype();
         let per = dtype.size_in_bytes();
         if per == 0 || dtype.is_packed() {
-            bail!(
-                "IndexSelectOp: packed dtype {dtype} for input is not supported"
-            );
+            bail!("IndexSelectOp: packed dtype {dtype} for input is not supported");
         }
 
         let shape = input.shape();
@@ -99,7 +97,8 @@ impl DeviceOp2 for IndexSelectOp {
                 }
                 let src = (o * axis_dim + id as usize) * block_bytes;
                 let dst = (o * n_indices + out_pos) * block_bytes;
-                out_bytes[dst..dst + block_bytes].copy_from_slice(&in_bytes[src..src + block_bytes]);
+                out_bytes[dst..dst + block_bytes]
+                    .copy_from_slice(&in_bytes[src..src + block_bytes]);
             }
         }
 
@@ -166,9 +165,7 @@ impl DeviceOp2 for IndexSelectOp {
             // multi-D indices case directly (output shape is
             // `src.shape[..axis] ++ indices.shape ++ src.shape[axis+1..]`).
             Ok(Some(crate::cuda_index_select_axis_n(
-                input,
-                self.axis,
-                indices,
+                input, self.axis, indices,
             )?))
         }
     }
@@ -213,9 +210,7 @@ impl DeviceOp2 for IndexSelectOp {
             }
         } else {
             Ok(Some(crate::rocm_index_select_axis_n(
-                input,
-                self.axis,
-                indices,
+                input, self.axis, indices,
             )?))
         }
     }
@@ -466,10 +461,7 @@ mod tests {
         assert_eq!(out.shape(), &[2, 2, 2]);
         // Row 0 (orig [1,2,3]) at indices [[0,2],[1,1]] -> [[1,3],[2,2]]
         // Row 1 (orig [4,5,6]) at indices [[0,2],[1,1]] -> [[4,6],[5,5]]
-        assert_eq!(
-            read_f32(&out),
-            vec![1.0, 3.0, 2.0, 2.0, 4.0, 6.0, 5.0, 5.0]
-        );
+        assert_eq!(read_f32(&out), vec![1.0, 3.0, 2.0, 2.0, 4.0, 6.0, 5.0, 5.0]);
     }
 
     #[test]
@@ -533,9 +525,7 @@ mod tests {
         let n = a * b * c * d;
         let values: Vec<f32> = (0..n).map(|i| (i as f32) * 0.5 - 7.0).collect();
         let cpu_x = Tensor::from_slice(&values, vec![a, b, c, d]).unwrap();
-        let cuda_x = cpu_x
-            .to_device(crate::Device::Cuda(0))
-            .unwrap();
+        let cuda_x = cpu_x.to_device(crate::Device::Cuda(0)).unwrap();
 
         let dims = [a, b, c, d];
         // For each axis pick a few interesting indices (out-of-order +
@@ -549,9 +539,7 @@ mod tests {
 
         for (axis, idx_vec) in test_cases.iter() {
             let cpu_ids = Tensor::from_slice(idx_vec.as_slice(), vec![idx_vec.len()]).unwrap();
-            let cuda_ids = cpu_ids
-                .to_device(crate::Device::Cuda(0))
-                .unwrap();
+            let cuda_ids = cpu_ids.to_device(crate::Device::Cuda(0)).unwrap();
 
             let cpu_out = index_select(&cpu_x, *axis, &cpu_ids).unwrap();
             let cuda_out = index_select(&cuda_x, *axis, &cuda_ids).unwrap();
@@ -575,9 +563,7 @@ mod tests {
             );
 
             // Value parity: D2H-copy the CUDA output and compare bytes.
-            let cuda_out_cpu = cuda_out
-                .to_device(crate::Device::Cpu)
-                .unwrap();
+            let cuda_out_cpu = cuda_out.to_device(crate::Device::Cpu).unwrap();
             let cpu_vec = read_f32(&cpu_out);
             let cuda_vec = read_f32(&cuda_out_cpu);
             assert_eq!(
@@ -610,18 +596,12 @@ mod tests {
         // Expected output shape `[2, 2, 2]` (matches the CPU test
         // `multi_dim_indices_broadcast_into_axis`).
         let cpu_x = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
-        let cuda_x = cpu_x
-            .to_device(crate::Device::Cuda(0))
-            .unwrap();
+        let cuda_x = cpu_x.to_device(crate::Device::Cuda(0)).unwrap();
         let cpu_ids = Tensor::from_slice(&[0u32, 2, 1, 1], vec![2, 2]).unwrap();
-        let cuda_ids = cpu_ids
-            .to_device(crate::Device::Cuda(0))
-            .unwrap();
+        let cuda_ids = cpu_ids.to_device(crate::Device::Cuda(0)).unwrap();
 
         let cuda_out = index_select(&cuda_x, 1, &cuda_ids).unwrap();
-        let cuda_out_cpu = cuda_out
-            .to_device(crate::Device::Cpu)
-            .unwrap();
+        let cuda_out_cpu = cuda_out.to_device(crate::Device::Cpu).unwrap();
         assert_eq!(cuda_out.shape(), &[2, 2, 2]);
         // Row 0 (orig [1,2,3]) at indices [[0,2],[1,1]] -> [[1,3],[2,2]]
         // Row 1 (orig [4,5,6]) at indices [[0,2],[1,1]] -> [[4,6],[5,5]]
@@ -647,18 +627,16 @@ mod tests {
         let h = 4usize;
         let k = 6usize;
         let n = bdim * h * k;
-        let values: Vec<bf16> = (0..n).map(|i| bf16::from_f32(i as f32 * 0.25 - 1.0)).collect();
+        let values: Vec<bf16> = (0..n)
+            .map(|i| bf16::from_f32(i as f32 * 0.25 - 1.0))
+            .collect();
         let cpu_x = Tensor::from_slice(&values, vec![bdim, h, k]).unwrap();
-        let cuda_x = cpu_x
-            .to_device(crate::Device::Cuda(0))
-            .unwrap();
+        let cuda_x = cpu_x.to_device(crate::Device::Cuda(0)).unwrap();
 
         // Gather along axis 1 (heads).
         let ids_vec = vec![3u32, 0, 2, 1];
         let cpu_ids = Tensor::from_slice(ids_vec.as_slice(), vec![ids_vec.len()]).unwrap();
-        let cuda_ids = cpu_ids
-            .to_device(crate::Device::Cuda(0))
-            .unwrap();
+        let cuda_ids = cpu_ids.to_device(crate::Device::Cuda(0)).unwrap();
 
         let cpu_out = index_select(&cpu_x, 1, &cpu_ids).unwrap();
         let cuda_out = index_select(&cuda_x, 1, &cuda_ids).unwrap();
@@ -666,9 +644,7 @@ mod tests {
         assert_eq!(cpu_out.shape(), &[bdim, ids_vec.len(), k]);
         assert_eq!(cuda_out.shape(), &[bdim, ids_vec.len(), k]);
 
-        let cuda_out_cpu = cuda_out
-            .to_device(crate::Device::Cpu)
-            .unwrap();
+        let cuda_out_cpu = cuda_out.to_device(crate::Device::Cpu).unwrap();
         let cpu_bytes = cpu_out
             .storage()
             .as_any()

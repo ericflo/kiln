@@ -1738,9 +1738,7 @@ pub fn vk_gdn_chunkwise(
             );
         }
 
-        match vk_gdn_chunkwise_forward_no_grad_single_submit(
-            q, k, v, beta, g, state, chunk_size,
-        ) {
+        match vk_gdn_chunkwise_forward_no_grad_single_submit(q, k, v, beta, g, state, chunk_size) {
             Ok(out) => return Ok(out),
             Err(err) => {
                 if gdn_chunkwise_fallback_enabled() {

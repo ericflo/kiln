@@ -101,10 +101,7 @@ pub fn anthropic_turn_to_sft_conversation(
 
     let mut extra = serde_json::Map::new();
     if let Some(tools) = tools.filter(|t| !t.is_empty()) {
-        extra.insert(
-            "tools".into(),
-            serde_json::Value::Array(tools.to_vec()),
-        );
+        extra.insert("tools".into(), serde_json::Value::Array(tools.to_vec()));
     }
 
     SftConversation {
@@ -315,14 +312,9 @@ mod tests {
         assert!(conv.messages[1].tool_calls.is_some());
         assert_eq!(conv.messages[2].role, "tool");
         assert_eq!(conv.messages[2].content, "hosts\nresolv.conf");
-        assert_eq!(
-            conv.messages[2].tool_call_id.as_deref(),
-            Some("toolu_99")
-        );
+        assert_eq!(conv.messages[2].tool_call_id.as_deref(), Some("toolu_99"));
         assert_eq!(conv.messages[3].role, "assistant");
-        assert!(conv.messages[3]
-            .content
-            .contains("hosts and resolv.conf"));
+        assert!(conv.messages[3].content.contains("hosts and resolv.conf"));
     }
 
     #[test]
@@ -363,12 +355,7 @@ mod tests {
         // Untagged enum variant with `#[serde(other)]` requires no fields.
         let raw = r#"[{"type": "future_image_thing"}, {"type": "text", "text": "ok"}]"#;
         let blocks: Vec<AnthropicBlock> = serde_json::from_str(raw).unwrap();
-        let conv = anthropic_turn_to_sft_conversation(
-            &[user_text("x")],
-            &blocks,
-            None,
-            None,
-        );
+        let conv = anthropic_turn_to_sft_conversation(&[user_text("x")], &blocks, None, None);
         assert_eq!(conv.messages.len(), 2);
         assert_eq!(conv.messages[1].content, "ok");
     }

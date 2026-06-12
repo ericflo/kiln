@@ -124,8 +124,12 @@ pub enum PromptsSource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ExamplesSource {
-    Dataset { dataset: String },
-    Inline { examples: Vec<kiln_train::SftExample> },
+    Dataset {
+        dataset: String,
+    },
+    Inline {
+        examples: Vec<kiln_train::SftExample>,
+    },
 }
 
 /// A complete recipe — a sequence of steps + optional metadata.
@@ -182,22 +186,22 @@ const RECIPE_RECOVER_IF: &str = include_str!("recipes/recover-instruction-follow
 const RECIPE_FRONTIER_PUMP: &str = include_str!("recipes/frontier-pump.yaml");
 const RECIPE_MERGE_LORAS: &str = include_str!("recipes/merge-my-loras.yaml");
 const RECIPE_UPDATE_DOCS: &str = include_str!("recipes/update-with-new-docs.yaml");
-const RECIPE_CODING_FROM_REPO: &str =
-    include_str!("recipes/coding-assistant-from-repo.yaml");
-const RECIPE_JUDGE_FROM_PICKS: &str =
-    include_str!("recipes/make-a-judge-lora-from-my-picks.yaml");
+const RECIPE_CODING_FROM_REPO: &str = include_str!("recipes/coding-assistant-from-repo.yaml");
+const RECIPE_JUDGE_FROM_PICKS: &str = include_str!("recipes/make-a-judge-lora-from-my-picks.yaml");
 
 // §10.8 agentic recipes.
 const RECIPE_LEARN_PI_HISTORY: &str = include_str!("recipes/learn-from-my-pi-history.yaml");
 const RECIPE_MERGE_AGENT_LORAS: &str = include_str!("recipes/merge-my-agent-loras.yaml");
-const RECIPE_RECOVER_TOOL_FOLLOWING: &str =
-    include_str!("recipes/recover-tool-following.yaml");
+const RECIPE_RECOVER_TOOL_FOLLOWING: &str = include_str!("recipes/recover-tool-following.yaml");
 const RECIPE_PI_SHARE_THEN_PUMP: &str = include_str!("recipes/pi-share-then-pump.yaml");
 
 /// Load all day-one recipes baked into the server binary.
 pub fn builtin_recipes() -> Vec<(String, &'static str)> {
     vec![
-        ("recover-instruction-following".to_string(), RECIPE_RECOVER_IF),
+        (
+            "recover-instruction-following".to_string(),
+            RECIPE_RECOVER_IF,
+        ),
         ("frontier-pump".to_string(), RECIPE_FRONTIER_PUMP),
         ("merge-my-loras".to_string(), RECIPE_MERGE_LORAS),
         ("update-with-new-docs".to_string(), RECIPE_UPDATE_DOCS),
@@ -214,18 +218,12 @@ pub fn builtin_recipes() -> Vec<(String, &'static str)> {
             "learn-from-my-pi-history".to_string(),
             RECIPE_LEARN_PI_HISTORY,
         ),
-        (
-            "merge-my-agent-loras".to_string(),
-            RECIPE_MERGE_AGENT_LORAS,
-        ),
+        ("merge-my-agent-loras".to_string(), RECIPE_MERGE_AGENT_LORAS),
         (
             "recover-tool-following".to_string(),
             RECIPE_RECOVER_TOOL_FOLLOWING,
         ),
-        (
-            "pi-share-then-pump".to_string(),
-            RECIPE_PI_SHARE_THEN_PUMP,
-        ),
+        ("pi-share-then-pump".to_string(), RECIPE_PI_SHARE_THEN_PUMP),
     ]
 }
 
@@ -270,9 +268,8 @@ async fn run_recipe(
                         "unknown recipe: {recipe}. List available with GET /v1/recipes"
                     ))
                 })?;
-            let parsed: Recipe = serde_yaml::from_str(yaml).map_err(|e| {
-                ApiError::internal(format!("bundled recipe YAML invalid: {e}"))
-            })?;
+            let parsed: Recipe = serde_yaml::from_str(yaml)
+                .map_err(|e| ApiError::internal(format!("bundled recipe YAML invalid: {e}")))?;
             (recipe, parsed)
         }
         RecipeRunRequest::Inline { body, .. } => (body.name.clone(), body),
@@ -335,8 +332,13 @@ async fn run_recipe(
             _ => None,
         };
         let job_id = uuid::Uuid::new_v4().to_string();
-        let (adapter_name, queued) =
-            step_to_queued_job(&state, step, previous_adapter.as_deref(), &job_id, post_eval)?;
+        let (adapter_name, queued) = step_to_queued_job(
+            &state,
+            step,
+            previous_adapter.as_deref(),
+            &job_id,
+            post_eval,
+        )?;
         previous_adapter = Some(adapter_name.clone());
         prepared.push((job_id, adapter_name, queued));
     }
@@ -640,10 +642,7 @@ mod tests {
                 "recipe `name` field {} doesn't match file slug {}",
                 recipe.name, name
             );
-            assert!(
-                !recipe.steps.is_empty(),
-                "recipe {name} has no steps"
-            );
+            assert!(!recipe.steps.is_empty(), "recipe {name} has no steps");
         }
     }
 

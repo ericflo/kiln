@@ -30,7 +30,10 @@ fn no_rocm() -> bool {
 
 /// Deterministic pseudo-random value in roughly [-0.5, 0.5].
 fn val(i: usize, seed: usize) -> f32 {
-    let x = (i.wrapping_mul(2654435761).wrapping_add(seed.wrapping_mul(40503))) % 1000;
+    let x = (i
+        .wrapping_mul(2654435761)
+        .wrapping_add(seed.wrapping_mul(40503)))
+        % 1000;
     (x as f32) / 1000.0 - 0.5
 }
 
@@ -58,15 +61,11 @@ fn cpu_sdpa(
 ) -> Vec<f32> {
     let group = h / hk;
     let mut out = vec![0.0f32; b * sq * h * d];
-    let q_at = |bi: usize, si: usize, hi: usize, di: usize| {
-        q[((bi * sq + si) * h + hi) * d + di]
-    };
-    let k_at = |bi: usize, si: usize, hki: usize, di: usize| {
-        k[((bi * sk + si) * hk + hki) * d + di]
-    };
-    let v_at = |bi: usize, si: usize, hki: usize, di: usize| {
-        v[((bi * sk + si) * hk + hki) * d + di]
-    };
+    let q_at = |bi: usize, si: usize, hi: usize, di: usize| q[((bi * sq + si) * h + hi) * d + di];
+    let k_at =
+        |bi: usize, si: usize, hki: usize, di: usize| k[((bi * sk + si) * hk + hki) * d + di];
+    let v_at =
+        |bi: usize, si: usize, hki: usize, di: usize| v[((bi * sk + si) * hk + hki) * d + di];
     let offset = sk as isize - sq as isize;
     for bi in 0..b {
         for hi in 0..h {
@@ -282,7 +281,14 @@ fn flash_attn_paged_decode_parity() {
             let block_table = kiln_tensor::host_to_rocm_copy(&bt_cpu, 0).unwrap();
 
             let out_t = flash_attn_paged_decode_kt(
-                &q, &k_pool, &v_pool, &block_table, seqlen_k, page_block_size, scale, false,
+                &q,
+                &k_pool,
+                &v_pool,
+                &block_table,
+                seqlen_k,
+                page_block_size,
+                scale,
+                false,
             )
             .unwrap_or_else(|e| panic!("paged_decode hk={hk} seqlen_k={seqlen_k}: {e}"));
             assert_eq!(out_t.shape(), &[b, 1, h, d]);
@@ -361,7 +367,15 @@ fn flash_attn_paged_decode_dyn_seqlen_parity() {
     let seqused_k = kiln_tensor::host_to_rocm_copy(&su_cpu, 0).unwrap();
 
     let out_t = flash_attn_paged_decode_dyn_seqlen_kt(
-        &q, &k_pool, &v_pool, &block_table, &seqused_k, max_seqlen_k, page_block_size, scale, false,
+        &q,
+        &k_pool,
+        &v_pool,
+        &block_table,
+        &seqused_k,
+        max_seqlen_k,
+        page_block_size,
+        scale,
+        false,
     )
     .expect("dyn_seqlen decode");
     assert_eq!(out_t.shape(), &[b, 1, h, d]);

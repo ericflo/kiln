@@ -18,7 +18,7 @@
 //! physical trailing-axis transposes first.
 
 use kiln_tensor::ops::{matmul_lhs_transposed, matmul_rhs_transposed};
-use kiln_tensor::{bail, Result, Tensor};
+use kiln_tensor::{Result, Tensor, bail};
 
 use crate::BackwardOp;
 
@@ -76,8 +76,8 @@ impl BackwardOp for MatmulBackward {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kiln_tensor::ops::matmul;
     use kiln_tensor::CpuStorage;
+    use kiln_tensor::ops::matmul;
 
     fn read_f32(t: &Tensor) -> Vec<f32> {
         let cpu = t.storage().as_any().downcast_ref::<CpuStorage>().unwrap();

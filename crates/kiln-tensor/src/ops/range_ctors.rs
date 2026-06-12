@@ -12,13 +12,11 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId, bail};
 
 fn build(dtype: DType, values: &[f32]) -> Result<Tensor> {
     if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16 | DType::U32) {
-        bail!(
-            "range constructor: dtype must be F32/BF16/F16/U32, got {dtype}"
-        );
+        bail!("range constructor: dtype must be F32/BF16/F16/U32, got {dtype}");
     }
     let per = dtype.size_in_bytes();
     let mut bytes = vec![0u8; values.len() * per];
@@ -50,7 +48,11 @@ fn build(dtype: DType, values: &[f32]) -> Result<Tensor> {
     }
     let cpu = CpuStorage::from_bytes(dtype, bytes)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(vec![values.len()]), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(vec![values.len()]),
+        TensorId::next(),
+    )
 }
 
 /// `n` evenly-spaced values from `start` to `stop` (inclusive).

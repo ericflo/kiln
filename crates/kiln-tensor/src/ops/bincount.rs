@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId, bail};
 
 pub fn bincount(x: &Tensor, min_length: usize) -> Result<Tensor> {
     if x.rank() != 1 {
@@ -61,9 +61,7 @@ pub fn bincount(x: &Tensor, min_length: usize) -> Result<Tensor> {
             .map(|i| i64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap()))
             .collect(),
         DType::U32 => (0..n)
-            .map(|i| {
-                u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()) as i64
-            })
+            .map(|i| u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()) as i64)
             .collect(),
         other => bail!("bincount: input dtype must be I64 or U32, got {other}"),
     };

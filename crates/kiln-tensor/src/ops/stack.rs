@@ -32,7 +32,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 pub fn stack(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
     if inputs.is_empty() {
@@ -40,9 +40,7 @@ pub fn stack(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
     }
     let rank = inputs[0].rank();
     if axis > rank {
-        bail!(
-            "stack: axis {axis} > input rank {rank} (axis can be 0..=rank inclusive)"
-        );
+        bail!("stack: axis {axis} > input rank {rank} (axis can be 0..=rank inclusive)");
     }
     let dtype = inputs[0].dtype();
     if dtype.is_packed() {
@@ -183,7 +181,9 @@ mod tests {
         assert_eq!(out.shape(), &[3, 2, 2]);
         assert_eq!(
             read_f32(&out),
-            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
+            vec![
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0
+            ]
         );
     }
 
@@ -191,18 +191,16 @@ mod tests {
     fn stack_rank2_axis_middle() {
         // 2 inputs of shape [2, 3] stacked at axis 1 → [2, 2, 3].
         let a = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
-        let b = Tensor::from_slice(
-            &[10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0],
-            vec![2, 3],
-        )
-        .unwrap();
+        let b = Tensor::from_slice(&[10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0], vec![2, 3]).unwrap();
         let out = stack(&[&a, &b], 1).unwrap();
         assert_eq!(out.shape(), &[2, 2, 3]);
         // out[b, 0, :] = a[b, :]; out[b, 1, :] = b[b, :]
         // → [1, 2, 3, 10, 20, 30, 4, 5, 6, 40, 50, 60]
         assert_eq!(
             read_f32(&out),
-            vec![1.0, 2.0, 3.0, 10.0, 20.0, 30.0, 4.0, 5.0, 6.0, 40.0, 50.0, 60.0]
+            vec![
+                1.0, 2.0, 3.0, 10.0, 20.0, 30.0, 4.0, 5.0, 6.0, 40.0, 50.0, 60.0
+            ]
         );
     }
 

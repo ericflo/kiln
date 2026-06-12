@@ -11,9 +11,7 @@ use kiln_autograd::{
     AddBackward, BroadcastToBackward, ConcatBackward, DropoutBackward, GeluBackward,
     LayerNormBackward, MatmulBackward, ReduceBackward, ReduceKind, ReduceScope, Tape,
 };
-use kiln_tensor::ops::{
-    add, broadcast_to, concat, dropout, gelu, layer_norm, matmul, sum_all,
-};
+use kiln_tensor::ops::{add, broadcast_to, concat, dropout, gelu, layer_norm, matmul, sum_all};
 use kiln_tensor::{CpuStorage, DType, Tensor};
 
 fn read_f32(t: &Tensor) -> Vec<f32> {
@@ -35,7 +33,8 @@ fn layernorm_gelu_matmul_compose_through_tape() {
     let x = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], vec![1, 4]).unwrap();
     let ln_w = Tensor::from_slice(&[1.0f32, 1.0, 1.0, 1.0], vec![4]).unwrap();
     let ln_b = Tensor::from_slice(&[0.0f32, 0.0, 0.0, 0.0], vec![4]).unwrap();
-    let proj = Tensor::from_slice(&[0.5f32, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5], vec![4, 2]).unwrap();
+    let proj =
+        Tensor::from_slice(&[0.5f32, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5], vec![4, 2]).unwrap();
     let bias_scalar = Tensor::from_slice(&[0.1f32], vec![1, 1]).unwrap();
     let eps = 1e-6_f32;
 

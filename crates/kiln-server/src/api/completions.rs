@@ -1213,8 +1213,7 @@ fn assistant_output_from_model_output_stop_aware(
     wire_finish: &str,
     engine_finish: &kiln_model::FinishReason,
 ) -> AssistantOutputParts {
-    let parsed =
-        assistant_output_from_model_output(req, model_output, prompt_text, wire_finish);
+    let parsed = assistant_output_from_model_output(req, model_output, prompt_text, wire_finish);
     if parsed.tool_calls.is_some() {
         return parsed;
     }
@@ -5382,10 +5381,7 @@ async fn generate_real_batched_streaming(
     let prompt_starts_in_reasoning = prompt_starts_in_reasoning(prompt_text);
     let buffer_tool_content = request_allows_tool_call_parsing(req);
     let mut tool_gate = ToolCallGate::new(buffer_tool_content);
-    let include_usage = req
-        .stream_options
-        .as_ref()
-        .is_some_and(|o| o.include_usage);
+    let include_usage = req.stream_options.as_ref().is_some_and(|o| o.include_usage);
     let batching_engine = batching_engine.clone();
     let stop_sequences = sampling.stop.clone();
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
@@ -6051,9 +6047,7 @@ async fn generate_real(
                 // draft head's alpha visible per serving adapter.
                 if output.total_draft_attempts > 0 {
                     if let Ok(mut counters) = mtp_acceptance.lock() {
-                        let entry = counters
-                            .entry(acceptance_adapter.clone())
-                            .or_insert((0, 0));
+                        let entry = counters.entry(acceptance_adapter.clone()).or_insert((0, 0));
                         entry.0 += output.draft_accepted_count as u64;
                         entry.1 += output.total_draft_attempts as u64;
                     }
@@ -6286,10 +6280,7 @@ async fn generate_real_streaming(
     let req_max_tokens = Some(chat_request_max_tokens(req).min(u32::MAX as usize) as u32);
     let buffer_tool_content = request_allows_tool_call_parsing(req);
     let mut tool_gate = ToolCallGate::new(buffer_tool_content);
-    let include_usage = req
-        .stream_options
-        .as_ref()
-        .is_some_and(|o| o.include_usage);
+    let include_usage = req.stream_options.as_ref().is_some_and(|o| o.include_usage);
     let thinking_mode = thinking_mode_for_prompt(&prompt).to_string();
     let prefix_cache_diagnostic = std::sync::Arc::new(std::sync::Mutex::new("unknown"));
 
@@ -8801,9 +8792,7 @@ pub(crate) fn requested_or_default_repetition_penalty(v: Option<f32>) -> f32 {
 /// (pi ALWAYS sends tools) was getting it. Explicit per-field values on
 /// the request still override the profile either way.
 fn preset_or_default_for_request(req: &ChatCompletionRequest) -> SamplingParams {
-    if req.sampling_preset.is_none()
-        && req.tools.as_ref().is_some_and(|tools| !tools.is_empty())
-    {
+    if req.sampling_preset.is_none() && req.tools.as_ref().is_some_and(|tools| !tools.is_empty()) {
         return SamplingParams::qwen3_thinking_coding();
     }
     preset_or_default(req.sampling_preset.as_deref())
@@ -9237,7 +9226,8 @@ mod tests {
     /// leak back into content.
     #[test]
     fn stream_stop_reconstruction_preserves_tool_calls_without_leaking() {
-        let xml = "<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n";
+        let xml =
+            "<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n";
         let out = stream_assistant_output_with_stop_reconstruction(
             true,
             None,
@@ -9378,8 +9368,7 @@ mod tests {
         assert_eq!(sampling.max_tokens, 4096);
 
         // Prompt alone over the ceiling → the 400 with the exact code.
-        let err = enforce_context_window_with_ceiling(Some(8192), &mut sampling, 9000)
-            .unwrap_err();
+        let err = enforce_context_window_with_ceiling(Some(8192), &mut sampling, 9000).unwrap_err();
         assert_eq!(err.code, "context_length_exceeded");
         assert!(err.message.contains("8192"), "{}", err.message);
         assert!(err.message.contains("9000"), "{}", err.message);
@@ -11541,7 +11530,10 @@ mod tests {
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(json["error"]["code"], "completion_invalid_request");
         assert!(
-            json["error"]["message"].as_str().unwrap().contains("capped"),
+            json["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("capped"),
             "{json}"
         );
     }

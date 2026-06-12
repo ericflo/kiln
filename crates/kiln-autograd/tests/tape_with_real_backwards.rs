@@ -197,11 +197,7 @@ fn softmax_sum_loss_through_tape() {
     let mut tape = Tape::new();
 
     let y = softmax_last_dim(&x).unwrap();
-    tape.record(
-        &y,
-        &[&x],
-        Box::new(SoftmaxLastDimBackward { y: y.clone() }),
-    );
+    tape.record(&y, &[&x], Box::new(SoftmaxLastDimBackward { y: y.clone() }));
 
     let loss = sum_all(&y).unwrap();
     tape.record(

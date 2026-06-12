@@ -49,21 +49,11 @@ fn fused_rmsnorm_kt_dispatches_on_kt_inputs() {
 
     // fused_rmsnorm_kt: x [rows, hidden] BF16, weight [hidden] BF16,
     // returns [rows, hidden] BF16.
-    let x = Tensor::cuda_from_slice(
-        &pattern_bf16(rows * hidden, 1),
-        vec![rows, hidden],
-        0,
-    )
-    .expect("x");
-    let w = Tensor::cuda_from_slice(
-        &pattern_bf16(hidden, 2),
-        vec![hidden],
-        0,
-    )
-    .expect("w");
+    let x =
+        Tensor::cuda_from_slice(&pattern_bf16(rows * hidden, 1), vec![rows, hidden], 0).expect("x");
+    let w = Tensor::cuda_from_slice(&pattern_bf16(hidden, 2), vec![hidden], 0).expect("w");
 
-    let out = fused_rmsnorm_kt(&x, &w, 1e-6)
-        .expect("fused_rmsnorm_kt on kt inputs");
+    let out = fused_rmsnorm_kt(&x, &w, 1e-6).expect("fused_rmsnorm_kt on kt inputs");
 
     assert_eq!(out.shape(), &[rows, hidden]);
 }

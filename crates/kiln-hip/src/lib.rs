@@ -44,13 +44,21 @@ pub struct HipError {
 
 impl fmt::Debug for HipError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "HipError({} from {}: {})", self.code, self.api, self.message)
+        write!(
+            f,
+            "HipError({} from {}: {})",
+            self.code, self.api, self.message
+        )
     }
 }
 
 impl fmt::Display for HipError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} failed: {} (hipError {})", self.api, self.message, self.code)
+        write!(
+            f,
+            "{} failed: {} (hipError {})",
+            self.api, self.message, self.code
+        )
     }
 }
 
@@ -80,7 +88,11 @@ fn check(code: sys::hipError_t, api: &'static str) -> Result<()> {
             CStr::from_ptr(ptr).to_string_lossy().into_owned()
         }
     };
-    Err(HipError { code: code as i32, api, message })
+    Err(HipError {
+        code: code as i32,
+        api,
+        message,
+    })
 }
 
 /// The HIP runtime version (`hipRuntimeGetVersion`), or an error if no runtime
@@ -88,7 +100,10 @@ fn check(code: sys::hipError_t, api: &'static str) -> Result<()> {
 /// in recent ROCm.
 pub fn runtime_version() -> Result<i32> {
     let mut v: c_int = 0;
-    check(unsafe { sys::hipRuntimeGetVersion(&mut v) }, "hipRuntimeGetVersion")?;
+    check(
+        unsafe { sys::hipRuntimeGetVersion(&mut v) },
+        "hipRuntimeGetVersion",
+    )?;
     Ok(v)
 }
 
@@ -98,7 +113,10 @@ pub fn runtime_version() -> Result<i32> {
 /// underlying `hipError_t` so callers can distinguish "no GPU" from "no driver".
 pub fn device_count() -> Result<i32> {
     let mut n: c_int = 0;
-    check(unsafe { sys::hipGetDeviceCount(&mut n) }, "hipGetDeviceCount")?;
+    check(
+        unsafe { sys::hipGetDeviceCount(&mut n) },
+        "hipGetDeviceCount",
+    )?;
     Ok(n)
 }
 
@@ -170,7 +188,10 @@ impl RocmContext {
             };
         }
         let default_stream = RocmStream::create(ordinal, None)?;
-        Ok(Arc::new(RocmContext { ordinal, default_stream }))
+        Ok(Arc::new(RocmContext {
+            ordinal,
+            default_stream,
+        }))
     }
 
     /// The device ordinal this context targets.
@@ -202,7 +223,10 @@ impl RocmContext {
     pub fn trim_pool(&self, min_keep_bytes: usize) -> Result<()> {
         self.bind_to_thread()?;
         // Drain in-flight work so freed pages aren't yanked from under a kernel.
-        check(unsafe { sys::hipDeviceSynchronize() }, "hipDeviceSynchronize")?;
+        check(
+            unsafe { sys::hipDeviceSynchronize() },
+            "hipDeviceSynchronize",
+        )?;
         let mut pool: *mut c_void = ptr::null_mut();
         if unsafe { sys::hipDeviceGetDefaultMemPool(&mut pool, self.ordinal) } == sys::HIP_SUCCESS
             && !pool.is_null()
@@ -283,7 +307,10 @@ impl RocmContext {
     /// Block until all work on the device completes (`hipDeviceSynchronize`).
     pub fn synchronize(&self) -> Result<()> {
         self.bind_to_thread()?;
-        check(unsafe { sys::hipDeviceSynchronize() }, "hipDeviceSynchronize")
+        check(
+            unsafe { sys::hipDeviceSynchronize() },
+            "hipDeviceSynchronize",
+        )
     }
 }
 
@@ -328,9 +355,7 @@ impl RocmStream {
         let mut handle: sys::hipStream_t = ptr::null_mut();
         match priority {
             None => check(
-                unsafe {
-                    sys::hipStreamCreateWithFlags(&mut handle, sys::HIP_STREAM_NON_BLOCKING)
-                },
+                unsafe { sys::hipStreamCreateWithFlags(&mut handle, sys::HIP_STREAM_NON_BLOCKING) },
                 "hipStreamCreateWithFlags",
             )?,
             Some(p) => check(
@@ -367,7 +392,10 @@ impl RocmStream {
     /// Block until all work queued on this stream completes.
     pub fn synchronize(&self) -> Result<()> {
         self.bind()?;
-        check(unsafe { sys::hipStreamSynchronize(self.handle) }, "hipStreamSynchronize")
+        check(
+            unsafe { sys::hipStreamSynchronize(self.handle) },
+            "hipStreamSynchronize",
+        )
     }
 
     /// Allocate `len` bytes on the device, zeroed. Stream-ordered
@@ -391,7 +419,12 @@ impl RocmStream {
         self.bind()?;
         // A zero-length allocation is legal and yields a null/!owned slice.
         if len == 0 {
-            return Ok(RocmSlice { ptr: ptr::null_mut(), len: 0, async_alloc: false, stream: self.clone() });
+            return Ok(RocmSlice {
+                ptr: ptr::null_mut(),
+                len: 0,
+                async_alloc: false,
+                stream: self.clone(),
+            });
         }
         let mut ptr: *mut c_void = ptr::null_mut();
         // Prefer the stream-ordered allocator (needed for HIP-graph capture in
@@ -404,7 +437,12 @@ impl RocmStream {
             check(unsafe { sys::hipMalloc(&mut ptr, len) }, "hipMalloc")?;
             false
         };
-        Ok(RocmSlice { ptr, len, async_alloc, stream: self.clone() })
+        Ok(RocmSlice {
+            ptr,
+            len,
+            async_alloc,
+            stream: self.clone(),
+        })
     }
 
     /// Copy host bytes into a device slice, then synchronize (the host buffer is
@@ -661,7 +699,9 @@ impl RocmStream {
     pub fn begin_capture(&self) -> Result<()> {
         self.bind()?;
         check(
-            unsafe { sys::hipStreamBeginCapture(self.handle, sys::HIP_STREAM_CAPTURE_MODE_RELAXED) },
+            unsafe {
+                sys::hipStreamBeginCapture(self.handle, sys::HIP_STREAM_CAPTURE_MODE_RELAXED)
+            },
             "hipStreamBeginCapture",
         )
     }
@@ -765,7 +805,10 @@ mod tests {
     fn priority_range_well_formed() {
         let Some(_ctx) = try_ctx() else { return };
         let (least, greatest) = stream_priority_range().expect("priority range");
-        assert!(greatest <= least, "greatest {greatest} should be <= least {least}");
+        assert!(
+            greatest <= least,
+            "greatest {greatest} should be <= least {least}"
+        );
     }
 
     #[test]
@@ -777,7 +820,10 @@ mod tests {
         assert_eq!(z.len(), 256);
         assert!(!z.device_ptr().is_null());
         let host = stream.memcpy_dtoh(&z).expect("dtoh");
-        assert!(host.iter().all(|&b| b == 0), "alloc_zeros must zero the buffer");
+        assert!(
+            host.iter().all(|&b| b == 0),
+            "alloc_zeros must zero the buffer"
+        );
     }
 
     #[test]
@@ -809,8 +855,12 @@ mod tests {
     fn new_stream_with_priority_creates() {
         let Some(ctx) = try_ctx() else { return };
         let (least, greatest) = stream_priority_range().expect("range");
-        let hi = ctx.new_stream_with_priority(greatest).expect("high-priority stream");
-        let lo = ctx.new_stream_with_priority(least).expect("low-priority stream");
+        let hi = ctx
+            .new_stream_with_priority(greatest)
+            .expect("high-priority stream");
+        let lo = ctx
+            .new_stream_with_priority(least)
+            .expect("low-priority stream");
         assert!(!hi.hip_stream().is_null());
         assert!(!lo.hip_stream().is_null());
     }

@@ -36,15 +36,15 @@ use kiln_core::sampling::SamplingParams;
 #[cfg(feature = "cuda")]
 use kiln_core::tokenizer::KilnTokenizer;
 #[cfg(feature = "cuda")]
-use kiln_model::forward::GpuWeights;
-#[cfg(feature = "cuda")]
-use kiln_model::generate::{FinishReason, ModelRunner};
-#[cfg(feature = "cuda")]
 use kiln_eval::result::EvalOutcomeKind;
 #[cfg(feature = "cuda")]
 use kiln_eval::scorers::{NoopJudgeRunner, Scorer, score_completion};
 #[cfg(feature = "cuda")]
 use kiln_eval::suite::{EvalChatMessage, EvalExample};
+#[cfg(feature = "cuda")]
+use kiln_model::forward::GpuWeights;
+#[cfg(feature = "cuda")]
+use kiln_model::generate::{FinishReason, ModelRunner};
 #[cfg(feature = "cuda")]
 use kiln_train::{ChatMessage, GrpoGroup};
 
@@ -192,8 +192,8 @@ fn load_tokenizer(model_path: &PathBuf) -> Result<KilnTokenizer> {
 
 #[cfg(feature = "cuda")]
 fn load_groups(path: &PathBuf, limit: Option<usize>) -> Result<Vec<GrpoGroup>> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let mut out = Vec::new();
     for line in raw.lines() {
         if line.trim().is_empty() {
@@ -295,10 +295,7 @@ fn main() -> Result<()> {
     let groups = load_groups(&args.data, args.max_prompts)?;
     anyhow::ensure!(!groups.is_empty(), "no prompts loaded");
 
-    anyhow::ensure!(
-        kiln_tensor::cuda_is_available(),
-        "CUDA not available"
-    );
+    anyhow::ensure!(kiln_tensor::cuda_is_available(), "CUDA not available");
     let device = kiln_tensor::Device::Cuda(0);
     let model_config = ModelConfig::qwen3_5_4b();
     let model_weights = kiln_model::load_model_with_options(
@@ -308,12 +305,8 @@ fn main() -> Result<()> {
     )
     .context("load model weights")?;
     // #1082: kt-native — `device` is a kt `Device::Cuda(0)`, passed directly.
-    let gpu_weights = GpuWeights::from_model_weights(
-        &model_weights,
-        &model_config,
-        &device,
-    )
-    .context("transfer weights to CUDA")?;
+    let gpu_weights = GpuWeights::from_model_weights(&model_weights, &model_config, &device)
+        .context("transfer weights to CUDA")?;
     drop(model_weights);
 
     // ModelRunner takes ownership of weights + tokenizer + config.
@@ -356,9 +349,13 @@ fn main() -> Result<()> {
             sp.temperature = args.temperature;
             sp.top_p = args.top_p;
             sp.max_tokens = args.max_tokens;
-            sp.seed = Some(args.seed_base.wrapping_add(
-                (prompt_idx as u64).wrapping_mul(1_000_003).wrapping_add(s as u64),
-            ));
+            sp.seed = Some(
+                args.seed_base.wrapping_add(
+                    (prompt_idx as u64)
+                        .wrapping_mul(1_000_003)
+                        .wrapping_add(s as u64),
+                ),
+            );
             let out = runner
                 .generate(&pt, &sp)
                 .with_context(|| format!("generate prompt={prompt_idx} sample={s}"))?;

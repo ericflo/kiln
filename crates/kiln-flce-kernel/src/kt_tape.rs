@@ -72,14 +72,14 @@
 
 use kiln_autograd::{BackwardOp, Tape};
 use kiln_tensor::{
-    bail, DType as KtDType, Device as KtDevice, Result as KtResult, Tensor as KtTensor,
+    DType as KtDType, Device as KtDevice, Result as KtResult, Tensor as KtTensor, bail,
 };
 
 use crate::kt_api::{
-    fused_linear_cross_entropy_phase_b_backward_kt,
+    FlceActiveMetadata, FlceError, fused_linear_cross_entropy_phase_b_backward_kt,
     fused_linear_cross_entropy_phase_b_backward_unit_grad_kt,
     fused_linear_cross_entropy_phase_b_backward_unit_grad_with_metadata_kt,
-    fused_linear_cross_entropy_phase_b_with_metadata_kt, FlceActiveMetadata, FlceError,
+    fused_linear_cross_entropy_phase_b_with_metadata_kt,
 };
 
 /// Returns `true` when `(hidden, head_t)` is inside the kt-tape FLCE
@@ -370,7 +370,11 @@ fn fused_linear_cross_entropy_phase_b_via_kt_tape_impl(
         active_metadata,
         unit_root_grad,
     };
-    tape.record(&loss, &[hidden, head_t], Box::new(bwd) as Box<dyn BackwardOp>);
+    tape.record(
+        &loss,
+        &[hidden, head_t],
+        Box::new(bwd) as Box<dyn BackwardOp>,
+    );
 
     Ok(loss)
 }
@@ -391,8 +395,7 @@ mod tests {
     fn envelope_rejects_cpu() {
         let hidden =
             KtTensor::from_vec(vec![0.0f32; 1 * 4 * 8], vec![1, 4, 8]).expect("cpu hidden");
-        let head =
-            KtTensor::from_vec(vec![0.0f32; 8 * 16], vec![8, 16]).expect("cpu head");
+        let head = KtTensor::from_vec(vec![0.0f32; 8 * 16], vec![8, 16]).expect("cpu head");
         assert!(!envelope_ok(&hidden, &head));
     }
 
@@ -402,8 +405,7 @@ mod tests {
         // 2-D hidden — should fail (3-D required even before the
         // CUDA gate, but on CPU the device check short-circuits
         // first — this exercises the predicate path).
-        let hidden =
-            KtTensor::from_vec(vec![0.0f32; 4 * 8], vec![4, 8]).expect("2d hidden");
+        let hidden = KtTensor::from_vec(vec![0.0f32; 4 * 8], vec![4, 8]).expect("2d hidden");
         let head = KtTensor::from_vec(vec![0.0f32; 8 * 16], vec![8, 16]).expect("head");
         assert!(!envelope_ok(&hidden, &head));
     }
@@ -411,8 +413,7 @@ mod tests {
     /// Envelope rejects head_t with mismatched hidden_size axis.
     #[test]
     fn envelope_rejects_head_hidden_mismatch() {
-        let hidden =
-            KtTensor::from_vec(vec![0.0f32; 1 * 4 * 8], vec![1, 4, 8]).expect("hidden");
+        let hidden = KtTensor::from_vec(vec![0.0f32; 1 * 4 * 8], vec![1, 4, 8]).expect("hidden");
         // head_t hidden_size (12) != hidden hidden_size (8).
         let head = KtTensor::from_vec(vec![0.0f32; 12 * 16], vec![12, 16]).expect("head");
         assert!(!envelope_ok(&hidden, &head));
@@ -471,18 +472,10 @@ mod tests {
         let h_data = pattern_f32(1 * seq * hidden_size, 1);
         let w_data = pattern_f32(hidden_size * vocab, 2);
 
-        let hidden = KtTensor::cuda_from_slice(
-            &h_data,
-            vec![1, seq, hidden_size],
-            0,
-        )
-        .expect("hidden cuda");
-        let head = KtTensor::cuda_from_slice(
-            &w_data,
-            vec![hidden_size, vocab],
-            0,
-        )
-        .expect("head cuda");
+        let hidden =
+            KtTensor::cuda_from_slice(&h_data, vec![1, seq, hidden_size], 0).expect("hidden cuda");
+        let head =
+            KtTensor::cuda_from_slice(&w_data, vec![hidden_size, vocab], 0).expect("head cuda");
 
         // Envelope must report OK for matching-dtype CUDA inputs.
         assert!(envelope_ok(&hidden, &head));
@@ -540,18 +533,10 @@ mod tests {
         let h_data = pattern_f32(1 * seq * hidden_size, 3);
         let w_data = pattern_f32(hidden_size * vocab, 4);
 
-        let hidden = KtTensor::cuda_from_slice(
-            &h_data,
-            vec![1, seq, hidden_size],
-            0,
-        )
-        .expect("hidden cuda");
-        let head = KtTensor::cuda_from_slice(
-            &w_data,
-            vec![hidden_size, vocab],
-            0,
-        )
-        .expect("head cuda");
+        let hidden =
+            KtTensor::cuda_from_slice(&h_data, vec![1, seq, hidden_size], 0).expect("hidden cuda");
+        let head =
+            KtTensor::cuda_from_slice(&w_data, vec![hidden_size, vocab], 0).expect("head cuda");
 
         let ids: Vec<u32> = (0..seq as u32).collect();
         let mask = vec![true; seq];

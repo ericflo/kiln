@@ -14,7 +14,7 @@
 //!
 //! No saved tensors are required — only the inserted-axis position.
 
-use kiln_tensor::{bail, Result, Tensor};
+use kiln_tensor::{Result, Tensor, bail};
 
 use crate::BackwardOp;
 
@@ -82,11 +82,7 @@ mod tests {
     #[test]
     fn unsqueeze_backward_removes_axis_1() {
         // Forward: [2, 3] → unsqueeze(1) → [2, 1, 3]. Backward squeezes axis 1.
-        let grad = Tensor::from_slice(
-            &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
-            vec![2, 1, 3],
-        )
-        .unwrap();
+        let grad = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 1, 3]).unwrap();
         let bo = UnsqueezeBackward { axis: 1 };
         let d = bo.apply(&grad).unwrap()[0].as_ref().unwrap().clone();
         assert_eq!(d.shape(), &[2, 3]);

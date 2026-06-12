@@ -43,9 +43,10 @@ pub(super) fn score(
             Some(format!("capture group {group_idx} did not bind")),
         ));
     };
-    let target = example.target.as_deref().ok_or(ScorerError::MissingTarget {
-        kind: "regex",
-    })?;
+    let target = example
+        .target
+        .as_deref()
+        .ok_or(ScorerError::MissingTarget { kind: "regex" })?;
     let actual = matched.as_str();
     let mut candidates: Vec<&str> = std::iter::once(target).collect();
     for a in &example.aliases {
@@ -54,9 +55,7 @@ pub(super) fn score(
     let matched_target = if case_sensitive {
         candidates.iter().any(|c| *c == actual)
     } else {
-        candidates
-            .iter()
-            .any(|c| c.eq_ignore_ascii_case(actual))
+        candidates.iter().any(|c| c.eq_ignore_ascii_case(actual))
     };
     if matched_target {
         Ok((1.0, EvalOutcomeKind::Pass, None))
@@ -91,18 +90,36 @@ mod tests {
 
     #[test]
     fn capture_group_compares_to_target() {
-        let (_, kind, _) =
-            score(&ex(Some("42")), "answer: 42", r"answer:\s*(\d+)", Some(1), true).unwrap();
+        let (_, kind, _) = score(
+            &ex(Some("42")),
+            "answer: 42",
+            r"answer:\s*(\d+)",
+            Some(1),
+            true,
+        )
+        .unwrap();
         assert_eq!(kind, EvalOutcomeKind::Pass);
-        let (_, kind, _) =
-            score(&ex(Some("43")), "answer: 42", r"answer:\s*(\d+)", Some(1), true).unwrap();
+        let (_, kind, _) = score(
+            &ex(Some("43")),
+            "answer: 42",
+            r"answer:\s*(\d+)",
+            Some(1),
+            true,
+        )
+        .unwrap();
         assert_eq!(kind, EvalOutcomeKind::Fail);
     }
 
     #[test]
     fn missing_group_is_invalid() {
-        let (_, kind, _) =
-            score(&ex(Some("x")), "answer: 42", r"answer:\s*\d+", Some(1), true).unwrap();
+        let (_, kind, _) = score(
+            &ex(Some("x")),
+            "answer: 42",
+            r"answer:\s*\d+",
+            Some(1),
+            true,
+        )
+        .unwrap();
         assert_eq!(kind, EvalOutcomeKind::Invalid);
     }
 

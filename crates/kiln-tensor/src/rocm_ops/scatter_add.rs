@@ -31,11 +31,7 @@ unsafe extern "C" {
 /// In-place ROCm scatter-add into a pre-zeroed `out`:
 /// `out[indices[i], j] += updates[i, j]`. F32 native atomicAdd; BF16 via the
 /// CAS-on-dword helper. ROCm analog of `cuda_scatter_add_dim0`.
-pub fn rocm_scatter_add_dim0(
-    out: &Tensor,
-    indices: &Tensor,
-    updates: &Tensor,
-) -> Result<()> {
+pub fn rocm_scatter_add_dim0(out: &Tensor, indices: &Tensor, updates: &Tensor) -> Result<()> {
     // ---- dtype + shape validation (mirrors cuda_scatter_add_dim0) ----
     if out.dtype() != updates.dtype() {
         return Err(Error::Msg(format!(
@@ -92,9 +88,7 @@ pub fn rocm_scatter_add_dim0(
         .storage()
         .as_any()
         .downcast_ref::<RocmStorage>()
-        .ok_or_else(|| {
-            Error::Msg("rocm_scatter_add_dim0: out must be ROCm storage".to_string())
-        })?;
+        .ok_or_else(|| Error::Msg("rocm_scatter_add_dim0: out must be ROCm storage".to_string()))?;
     let upd_storage = updates
         .storage()
         .as_any()

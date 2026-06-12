@@ -13,7 +13,7 @@
 //! CUDA path plus the existing kt → CUDA H2D, so no candle imports
 //! remain on this test file.
 
-use kiln_tensor::{cuda_to_host_copy, host_to_cuda_copy, primary_cuda_context, CpuStorage, Tensor};
+use kiln_tensor::{CpuStorage, Tensor, cuda_to_host_copy, host_to_cuda_copy, primary_cuda_context};
 
 fn cuda_available() -> bool {
     primary_cuda_context(0).is_ok()
@@ -66,8 +66,7 @@ fn host_to_cuda_copy_validates_input_device() {
     // Build a CUDA-side tensor (not CPU) via the kt H2D path itself,
     // then feed it back into host_to_cuda_copy. The function must
     // reject the non-CPU source.
-    let cpu_seed =
-        Tensor::from_slice(&[1.0f32, 2.0, 3.0], vec![3]).expect("cpu seed");
+    let cpu_seed = Tensor::from_slice(&[1.0f32, 2.0, 3.0], vec![3]).expect("cpu seed");
     let kt_cuda = host_to_cuda_copy(&cpu_seed, 0).expect("seed H2D");
     assert!(matches!(kt_cuda.device(), kiln_tensor::Device::Cuda(_)));
 

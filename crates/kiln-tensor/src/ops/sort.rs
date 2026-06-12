@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId, bail};
 
 fn read_f32_rows(t: &Tensor) -> Result<(Vec<Vec<f32>>, Vec<usize>)> {
     if t.rank() < 1 {
@@ -39,17 +39,13 @@ fn read_f32_rows(t: &Tensor) -> Result<(Vec<Vec<f32>>, Vec<usize>)> {
         for c in 0..last {
             let i = r * last + c;
             let v = match dtype {
-                DType::F32 => {
-                    f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())
+                DType::F32 => f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()),
+                DType::BF16 => {
+                    half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
                 }
-                DType::BF16 => half::bf16::from_le_bytes(
-                    bytes[i * 2..i * 2 + 2].try_into().unwrap(),
-                )
-                .to_f32(),
-                DType::F16 => half::f16::from_le_bytes(
-                    bytes[i * 2..i * 2 + 2].try_into().unwrap(),
-                )
-                .to_f32(),
+                DType::F16 => {
+                    half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+                }
                 _ => unreachable!(),
             };
             row.push(v);
@@ -59,10 +55,7 @@ fn read_f32_rows(t: &Tensor) -> Result<(Vec<Vec<f32>>, Vec<usize>)> {
     Ok((out, shape))
 }
 
-fn sort_rows(
-    rows: Vec<Vec<f32>>,
-    descending: bool,
-) -> (Vec<Vec<f32>>, Vec<Vec<i64>>) {
+fn sort_rows(rows: Vec<Vec<f32>>, descending: bool) -> (Vec<Vec<f32>>, Vec<Vec<i64>>) {
     let mut sorted_vals = Vec::with_capacity(rows.len());
     let mut sorted_idx = Vec::with_capacity(rows.len());
     for row in rows {
@@ -89,18 +82,13 @@ fn sort_rows(
     (sorted_vals, sorted_idx)
 }
 
-fn build_value_tensor(
-    rows: &[Vec<f32>],
-    dtype: DType,
-    shape: Vec<usize>,
-) -> Result<Tensor> {
+fn build_value_tensor(rows: &[Vec<f32>], dtype: DType, shape: Vec<usize>) -> Result<Tensor> {
     let mut bytes = Vec::with_capacity(rows.len() * rows[0].len() * dtype.size_in_bytes());
     for row in rows {
         for &v in row {
             match dtype {
                 DType::F32 => bytes.extend_from_slice(&v.to_le_bytes()),
-                DType::BF16 => bytes
-                    .extend_from_slice(&half::bf16::from_f32(v).to_le_bytes()),
+                DType::BF16 => bytes.extend_from_slice(&half::bf16::from_f32(v).to_le_bytes()),
                 DType::F16 => bytes.extend_from_slice(&half::f16::from_f32(v).to_le_bytes()),
                 _ => unreachable!(),
             }

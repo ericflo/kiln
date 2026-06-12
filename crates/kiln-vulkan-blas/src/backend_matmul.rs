@@ -132,9 +132,7 @@ mod tests {
 
     #[test]
     fn coop_matrix_supported_uses_it_for_large_bf16_shapes() {
-        let h = VulkanBackendMatmul::with_coop_matrix(
-            VkCooperativeMatrixSupport::Bf16Fp32,
-        );
+        let h = VulkanBackendMatmul::with_coop_matrix(VkCooperativeMatrixSupport::Bf16Fp32);
         let outcome = h.plan(&req(2048, 18432, 2560));
         let cfg = VkWorkgroupConfig::from_blob(&outcome.algo_blob.algo_blob).unwrap();
         assert!(cfg.uses_cooperative_matrix);
@@ -142,9 +140,7 @@ mod tests {
 
     #[test]
     fn coop_matrix_supported_skips_coop_for_small_shapes() {
-        let h = VulkanBackendMatmul::with_coop_matrix(
-            VkCooperativeMatrixSupport::Bf16Fp32,
-        );
+        let h = VulkanBackendMatmul::with_coop_matrix(VkCooperativeMatrixSupport::Bf16Fp32);
         let outcome = h.plan(&req(32, 32, 64));
         let cfg = VkWorkgroupConfig::from_blob(&outcome.algo_blob.algo_blob).unwrap();
         assert!(!cfg.uses_cooperative_matrix);
@@ -152,9 +148,7 @@ mod tests {
 
     #[test]
     fn coop_matrix_bf16_only_rejects_f16_request() {
-        let h = VulkanBackendMatmul::with_coop_matrix(
-            VkCooperativeMatrixSupport::Bf16Fp32,
-        );
+        let h = VulkanBackendMatmul::with_coop_matrix(VkCooperativeMatrixSupport::Bf16Fp32);
         let mut r = req(2048, 18432, 2560);
         r.dtype = "f16".to_string();
         let outcome = h.plan(&r);

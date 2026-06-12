@@ -38,9 +38,12 @@ pub(super) fn score(
     completion_text: &str,
     tol: &NumericTolerance,
 ) -> Result<(f32, EvalOutcomeKind, Option<String>), ScorerError> {
-    let target_raw = example.target.as_deref().ok_or(ScorerError::MissingTarget {
-        kind: "numeric_tolerance",
-    })?;
+    let target_raw = example
+        .target
+        .as_deref()
+        .ok_or(ScorerError::MissingTarget {
+            kind: "numeric_tolerance",
+        })?;
     // The target must contain exactly ONE number. The old char-filter
     // parser silently fused multi-number targets ("3 of 10" -> 310),
     // turning authoring mistakes into wrong-but-passing examples.
@@ -266,8 +269,7 @@ mod tests {
 
     #[test]
     fn no_number_is_invalid() {
-        let (_, kind, _) =
-            score(&ex("42"), "I don't know", &NumericTolerance::default()).unwrap();
+        let (_, kind, _) = score(&ex("42"), "I don't know", &NumericTolerance::default()).unwrap();
         assert_eq!(kind, EvalOutcomeKind::Invalid);
     }
 

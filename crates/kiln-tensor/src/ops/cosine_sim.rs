@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 /// Materialize `t` on CPU. CUDA inputs are D2H-copied via
 /// `cuda_to_host_copy`; CPU inputs are cheap `Arc` bumps. Cosine
@@ -102,26 +102,26 @@ pub fn cosine_similarity(a: &Tensor, b: &Tensor, eps: f32) -> Result<Tensor> {
             let idx = r * last + i;
             let av = match dtype {
                 DType::F32 => f32::from_le_bytes(a_bytes[idx * 4..idx * 4 + 4].try_into().unwrap()),
-                DType::BF16 => half::bf16::from_le_bytes(
-                    a_bytes[idx * 2..idx * 2 + 2].try_into().unwrap(),
-                )
-                .to_f32(),
-                DType::F16 => half::f16::from_le_bytes(
-                    a_bytes[idx * 2..idx * 2 + 2].try_into().unwrap(),
-                )
-                .to_f32(),
+                DType::BF16 => {
+                    half::bf16::from_le_bytes(a_bytes[idx * 2..idx * 2 + 2].try_into().unwrap())
+                        .to_f32()
+                }
+                DType::F16 => {
+                    half::f16::from_le_bytes(a_bytes[idx * 2..idx * 2 + 2].try_into().unwrap())
+                        .to_f32()
+                }
                 _ => unreachable!(),
             };
             let bv = match dtype {
                 DType::F32 => f32::from_le_bytes(b_bytes[idx * 4..idx * 4 + 4].try_into().unwrap()),
-                DType::BF16 => half::bf16::from_le_bytes(
-                    b_bytes[idx * 2..idx * 2 + 2].try_into().unwrap(),
-                )
-                .to_f32(),
-                DType::F16 => half::f16::from_le_bytes(
-                    b_bytes[idx * 2..idx * 2 + 2].try_into().unwrap(),
-                )
-                .to_f32(),
+                DType::BF16 => {
+                    half::bf16::from_le_bytes(b_bytes[idx * 2..idx * 2 + 2].try_into().unwrap())
+                        .to_f32()
+                }
+                DType::F16 => {
+                    half::f16::from_le_bytes(b_bytes[idx * 2..idx * 2 + 2].try_into().unwrap())
+                        .to_f32()
+                }
                 _ => unreachable!(),
             };
             dot += av * bv;
@@ -131,10 +131,12 @@ pub fn cosine_similarity(a: &Tensor, b: &Tensor, eps: f32) -> Result<Tensor> {
         let y = dot / ((na.sqrt() * nb.sqrt()).max(eps));
         match dtype {
             DType::F32 => out_bytes[r * 4..r * 4 + 4].copy_from_slice(&y.to_le_bytes()),
-            DType::BF16 => out_bytes[r * 2..r * 2 + 2]
-                .copy_from_slice(&half::bf16::from_f32(y).to_le_bytes()),
-            DType::F16 => out_bytes[r * 2..r * 2 + 2]
-                .copy_from_slice(&half::f16::from_f32(y).to_le_bytes()),
+            DType::BF16 => {
+                out_bytes[r * 2..r * 2 + 2].copy_from_slice(&half::bf16::from_f32(y).to_le_bytes())
+            }
+            DType::F16 => {
+                out_bytes[r * 2..r * 2 + 2].copy_from_slice(&half::f16::from_f32(y).to_le_bytes())
+            }
             _ => unreachable!(),
         }
     }
@@ -226,12 +228,8 @@ mod tests {
         // Two rows: parallel + anti-parallel.
         let a_cpu = Tensor::from_slice(&[1.0f32, 2.0, 1.0, 2.0], vec![2, 2]).unwrap();
         let b_cpu = Tensor::from_slice(&[2.0f32, 4.0, -1.0, -2.0], vec![2, 2]).unwrap();
-        let a_cuda = a_cpu
-            .to_device(crate::Device::Cuda(0))
-            .unwrap();
-        let b_cuda = b_cpu
-            .to_device(crate::Device::Cuda(0))
-            .unwrap();
+        let a_cuda = a_cpu.to_device(crate::Device::Cuda(0)).unwrap();
+        let b_cuda = b_cpu.to_device(crate::Device::Cuda(0)).unwrap();
 
         let cpu_out = cosine_similarity(&a_cpu, &b_cpu, 1e-8).unwrap();
         let cuda_out = cosine_similarity(&a_cuda, &b_cuda, 1e-8).unwrap();

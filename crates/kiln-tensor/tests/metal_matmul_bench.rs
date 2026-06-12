@@ -5,20 +5,33 @@
 //! the baseline the kiln GEMM must beat. `#[ignore]` — run explicitly:
 //!   cargo test -p kiln-tensor --features metal --test metal_matmul_bench -- --ignored --nocapture
 
+use kiln_tensor::{DType, Device, Tensor, ops};
 use std::time::Instant;
-use kiln_tensor::{ops, DType, Device, Tensor};
 
 fn metal() -> Option<Device> {
-    kiln_tensor::primary_metal_companion(0).ok().map(|_| Device::Metal(0))
+    kiln_tensor::primary_metal_companion(0)
+        .ok()
+        .map(|_| Device::Metal(0))
 }
 
 fn pat(n: usize, seed: u64) -> Vec<f32> {
     let mut s = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    (0..n).map(|_| { s = s.wrapping_add(0xDEADBEEF).wrapping_mul(0x9E37_79B9_7F4A_7C15); ((s >> 40) as u32 % 256) as f32 / 256.0 - 0.5 }).collect()
+    (0..n)
+        .map(|_| {
+            s = s
+                .wrapping_add(0xDEADBEEF)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            ((s >> 40) as u32 % 256) as f32 / 256.0 - 0.5
+        })
+        .collect()
 }
 
 fn bf16_metal(data: &[f32], shape: &[usize], dev: Device) -> Tensor {
-    ops::cast(&Tensor::from_vec_on(dev, data.to_vec(), shape.to_vec()).unwrap(), DType::BF16).unwrap()
+    ops::cast(
+        &Tensor::from_vec_on(dev, data.to_vec(), shape.to_vec()).unwrap(),
+        DType::BF16,
+    )
+    .unwrap()
 }
 
 fn time_matmul(m: usize, k: usize, n: usize, iters: usize, dev: Device) -> f64 {
@@ -32,7 +45,9 @@ fn time_matmul(m: usize, k: usize, n: usize, iters: usize, dev: Device) -> f64 {
     // per-call debug-mode host gather.
     let t = Instant::now();
     let mut last = None;
-    for _ in 0..iters { last = Some(ops::matmul(&a, &b).unwrap()); }
+    for _ in 0..iters {
+        last = Some(ops::matmul(&a, &b).unwrap());
+    }
     let _ = last.unwrap().to_vec::<half::bf16>().unwrap();
     t.elapsed().as_secs_f64() * 1000.0 / iters as f64
 }
@@ -40,7 +55,10 @@ fn time_matmul(m: usize, k: usize, n: usize, iters: usize, dev: Device) -> f64 {
 #[test]
 #[ignore]
 fn bench_matmul_qwen_shapes() {
-    let Some(dev) = metal() else { eprintln!("no Metal device; skipping"); return; };
+    let Some(dev) = metal() else {
+        eprintln!("no Metal device; skipping");
+        return;
+    };
     // (metric, label, M, K, N, iters) — small iters for the (slow) CPU-fallback baseline.
     let cases = [
         (
@@ -89,6 +107,9 @@ fn bench_matmul_qwen_shapes() {
         let ms = time_matmul(m, k, n, iters, dev);
         let gflop = 2.0 * m as f64 * k as f64 * n as f64 / 1e9;
         println!("KILN_LATENCY_METRIC {metric} {ms:.6} ms");
-        println!("{label:38} {ms:9.3} ms   {:8.1} GFLOP/s", gflop / (ms / 1000.0));
+        println!(
+            "{label:38} {ms:9.3} ms   {:8.1} GFLOP/s",
+            gflop / (ms / 1000.0)
+        );
     }
 }

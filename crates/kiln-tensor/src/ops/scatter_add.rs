@@ -31,8 +31,8 @@
 //! backends use `atomicAdd` and pick up the tolerance band.
 
 use crate::{
-    bail, dispatch2, BackwardOp, CpuStorage, DType, Determinism, DeviceOp2, Error, Layout, Result,
-    Storage, Tensor, TensorId,
+    BackwardOp, CpuStorage, DType, Determinism, DeviceOp2, Error, Layout, Result, Storage, Tensor,
+    TensorId, bail, dispatch2,
 };
 use std::sync::Arc;
 
@@ -76,9 +76,7 @@ impl DeviceOp2 for ScatterAddOp {
         let dtype = values.dtype();
         let per = dtype.size_in_bytes();
         if per == 0 || dtype.is_packed() {
-            bail!(
-                "ScatterAddOp: packed dtype {dtype} for values is not supported"
-            );
+            bail!("ScatterAddOp: packed dtype {dtype} for values is not supported");
         }
 
         // Source shape is: prefix(values.shape[..axis]) ++ indices.shape ++ suffix(values.shape[axis+indices.rank..]).
@@ -363,7 +361,12 @@ impl DeviceOp2 for ScatterAddOp {
 }
 
 /// Dispatch `ScatterAddOp` with the given axis + target_dim.
-pub fn scatter_add(values: &Tensor, axis: usize, indices: &Tensor, target_dim: usize) -> Result<Tensor> {
+pub fn scatter_add(
+    values: &Tensor,
+    axis: usize,
+    indices: &Tensor,
+    target_dim: usize,
+) -> Result<Tensor> {
     dispatch2(&ScatterAddOp::new(axis, target_dim), values, indices)
 }
 
@@ -379,10 +382,16 @@ fn validate(values: &Tensor, indices: &Tensor, axis: usize, target_dim: usize) -
         bail!("ScatterAddOp: indices must have rank ≥ 1");
     }
     if !matches!(values.dtype(), DType::F32 | DType::BF16 | DType::F16) {
-        bail!("ScatterAddOp: values dtype must be F32/BF16/F16, got {}", values.dtype());
+        bail!(
+            "ScatterAddOp: values dtype must be F32/BF16/F16, got {}",
+            values.dtype()
+        );
     }
     if !matches!(indices.dtype(), DType::I64 | DType::U32) {
-        bail!("ScatterAddOp: indices dtype must be I64/U32, got {}", indices.dtype());
+        bail!(
+            "ScatterAddOp: indices dtype must be I64/U32, got {}",
+            indices.dtype()
+        );
     }
     if axis >= values.rank() {
         bail!(
@@ -457,12 +466,8 @@ fn read_one_f32(dtype: DType, bytes: &[u8], i: usize, per: usize) -> f32 {
     let off = i * per;
     match dtype {
         DType::F32 => f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()),
-        DType::BF16 => {
-            half::bf16::from_le_bytes(bytes[off..off + 2].try_into().unwrap()).to_f32()
-        }
-        DType::F16 => {
-            half::f16::from_le_bytes(bytes[off..off + 2].try_into().unwrap()).to_f32()
-        }
+        DType::BF16 => half::bf16::from_le_bytes(bytes[off..off + 2].try_into().unwrap()).to_f32(),
+        DType::F16 => half::f16::from_le_bytes(bytes[off..off + 2].try_into().unwrap()).to_f32(),
         _ => unreachable!(),
     }
 }
@@ -501,18 +506,12 @@ mod tests {
     fn scatter_2d_inner_dim_preserved() {
         // values shape [3, 2] at indices [1, 0, 2] target_dim=3 axis=0
         // -> output shape [3, 2], rearranged by index.
-        let values = Tensor::from_slice(
-            &[10.0f32, 11.0, 20.0, 21.0, 30.0, 31.0],
-            vec![3, 2],
-        )
-        .unwrap();
+        let values =
+            Tensor::from_slice(&[10.0f32, 11.0, 20.0, 21.0, 30.0, 31.0], vec![3, 2]).unwrap();
         let indices = Tensor::from_slice(&[1i64, 0, 2], vec![3]).unwrap();
         let out = scatter_add(&values, 0, &indices, 3).unwrap();
         assert_eq!(out.shape(), &[3, 2]);
-        assert_eq!(
-            read_f32(&out),
-            vec![20.0, 21.0, 10.0, 11.0, 30.0, 31.0]
-        );
+        assert_eq!(read_f32(&out), vec![20.0, 21.0, 10.0, 11.0, 30.0, 31.0]);
     }
 
     #[test]
@@ -521,18 +520,11 @@ mod tests {
         // sub-batches), indices [1, 0, 2] target_dim=3.
         // Batch 0: values [1, 2, 3] → output [2, 1, 3]
         // Batch 1: values [10, 20, 30] → output [20, 10, 30]
-        let values = Tensor::from_slice(
-            &[1.0f32, 2.0, 3.0, 10.0, 20.0, 30.0],
-            vec![2, 3],
-        )
-        .unwrap();
+        let values = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 10.0, 20.0, 30.0], vec![2, 3]).unwrap();
         let indices = Tensor::from_slice(&[1i64, 0, 2], vec![3]).unwrap();
         let out = scatter_add(&values, 1, &indices, 3).unwrap();
         assert_eq!(out.shape(), &[2, 3]);
-        assert_eq!(
-            read_f32(&out),
-            vec![2.0, 1.0, 3.0, 20.0, 10.0, 30.0]
-        );
+        assert_eq!(read_f32(&out), vec![2.0, 1.0, 3.0, 20.0, 10.0, 30.0]);
     }
 
     #[test]
@@ -570,8 +562,7 @@ mod tests {
     fn shape_mismatch_errors() {
         // values [3, 2]; indices [2] but axis=0 — values.shape[0..1]=[3]
         // doesn't match indices.shape=[2].
-        let values =
-            Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![3, 2]).unwrap();
+        let values = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![3, 2]).unwrap();
         let indices = Tensor::from_slice(&[0i64, 1], vec![2]).unwrap();
         let e = scatter_add(&values, 0, &indices, 4).unwrap_err();
         assert!(e.to_string().contains("must match"));

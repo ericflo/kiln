@@ -331,11 +331,7 @@ impl Tensor {
             )));
         }
         // Broadcast the batch (leading) dims.
-        let batch = broadcast_shape(
-            &l[..l.len() - 2],
-            &r[..r.len() - 2],
-            "broadcast_matmul",
-        )?;
+        let batch = broadcast_shape(&l[..l.len() - 2], &r[..r.len() - 2], "broadcast_matmul")?;
         let mut lhs_shape = batch.clone();
         lhs_shape.extend_from_slice(&[m, lk]);
         let mut rhs_shape = batch;
@@ -956,14 +952,18 @@ impl Tensor {
                     .as_any()
                     .downcast_ref::<crate::MetalStorage>()
                     .ok_or_else(|| {
-                        crate::Error::Msg("Tensor::slice_set: dst must be Metal storage".to_string())
+                        crate::Error::Msg(
+                            "Tensor::slice_set: dst must be Metal storage".to_string(),
+                        )
                     })?;
                 let src_m = src
                     .storage()
                     .as_any()
                     .downcast_ref::<crate::MetalStorage>()
                     .ok_or_else(|| {
-                        crate::Error::Msg("Tensor::slice_set: src must be Metal storage".to_string())
+                        crate::Error::Msg(
+                            "Tensor::slice_set: src must be Metal storage".to_string(),
+                        )
                     })?;
                 src_m.companion()?.wait_until_completed()?;
                 let dst_byte_off = offset * inner * bpe;
@@ -1348,11 +1348,7 @@ impl Tensor {
     /// both type-check; the produced tensor's dtype follows the scalar
     /// type, mirroring candle's `WithDType`. `device` is any
     /// [`Borrow<Device>`](Borrow) (`&Device` or owned).
-    pub fn arange<S: ArangeScalar>(
-        start: S,
-        end: S,
-        device: impl Borrow<Device>,
-    ) -> Result<Self> {
+    pub fn arange<S: ArangeScalar>(start: S, end: S, device: impl Borrow<Device>) -> Result<Self> {
         let cpu = ops::arange(start.to_f32(), end.to_f32(), 1.0, S::DTYPE)?;
         cpu.to_device(*device.borrow())
     }
@@ -1472,8 +1468,14 @@ mod tests {
     fn maximum_minimum_match_ops() {
         let a = t(&[1.0, 9.0, 3.0, 2.0], &[2, 2]);
         let b = t(&[5.0, 6.0, 1.0, 8.0], &[2, 2]);
-        assert_eq!(v(&a.maximum(&b).unwrap()), v(&ops::maximum(&a, &b).unwrap()));
-        assert_eq!(v(&a.minimum(&b).unwrap()), v(&ops::minimum(&a, &b).unwrap()));
+        assert_eq!(
+            v(&a.maximum(&b).unwrap()),
+            v(&ops::maximum(&a, &b).unwrap())
+        );
+        assert_eq!(
+            v(&a.minimum(&b).unwrap()),
+            v(&ops::minimum(&a, &b).unwrap())
+        );
     }
 
     // --- broadcasting binary ------------------------------------------
@@ -1723,7 +1725,10 @@ mod tests {
             v(&x.cumsum(D::Minus1).unwrap()),
             v(&ops::cumsum(&x, 1).unwrap())
         );
-        assert_eq!(v(&x.cumsum(1usize).unwrap()), vec![1.0, 3.0, 6.0, 4.0, 9.0, 15.0]);
+        assert_eq!(
+            v(&x.cumsum(1usize).unwrap()),
+            vec![1.0, 3.0, 6.0, 4.0, 9.0, 15.0]
+        );
     }
 
     // --- index_select --------------------------------------------------
@@ -1826,16 +1831,8 @@ mod tests {
     #[test]
     fn to_vec3_round_trips_non_cubic() {
         // [1,2,3] exercises distinct d0/d1/d2 strides.
-        let known = vec![vec![
-            vec![1.0f32, 2.0, 3.0],
-            vec![4.0, 5.0, 6.0],
-        ]];
-        let flat: Vec<f32> = known
-            .iter()
-            .flatten()
-            .flatten()
-            .copied()
-            .collect();
+        let known = vec![vec![vec![1.0f32, 2.0, 3.0], vec![4.0, 5.0, 6.0]]];
+        let flat: Vec<f32> = known.iter().flatten().flatten().copied().collect();
         let x = Tensor::from_vec(flat, vec![1, 2, 3]).unwrap();
         assert_eq!(x.to_vec3::<f32>().unwrap(), known);
     }
@@ -1914,7 +1911,10 @@ mod tests {
     #[test]
     fn zeros_like_ones_like_match_ops() {
         let x = t(&[5.0, 6.0, 7.0, 8.0], &[2, 2]);
-        assert_eq!(v(&x.zeros_like().unwrap()), v(&ops::zeros_like(&x).unwrap()));
+        assert_eq!(
+            v(&x.zeros_like().unwrap()),
+            v(&ops::zeros_like(&x).unwrap())
+        );
         assert_eq!(v(&x.ones_like().unwrap()), v(&ops::ones_like(&x).unwrap()));
     }
 

@@ -45,7 +45,7 @@
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 use std::sync::Arc;
 
 /// Materialize `t` on CPU. CUDA inputs are D2H-copied via
@@ -145,10 +145,14 @@ impl GumbelSampler {
                 let i = b * vocab + v;
                 let logit = match dtype {
                     DType::F32 => f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()),
-                    DType::BF16 => half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32(),
-                    DType::F16 => half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32(),
+                    DType::BF16 => {
+                        half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
+                            .to_f32()
+                    }
+                    DType::F16 => {
+                        half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
+                            .to_f32()
+                    }
                     _ => unreachable!(),
                 };
                 let g = gumbel_sample(&mut rng);
@@ -327,9 +331,11 @@ mod tests {
 
     #[test]
     fn gumbel_deterministic_with_same_seed() {
-        let logits =
-            Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 1.0, 1.5, 2.0, 2.5, 3.0], vec![2, 5])
-                .unwrap();
+        let logits = Tensor::from_slice(
+            &[1.0f32, 2.0, 3.0, 4.0, 5.0, 1.0, 1.5, 2.0, 2.5, 3.0],
+            vec![2, 5],
+        )
+        .unwrap();
         let s1 = GumbelSampler::with_seed(99);
         let s2 = GumbelSampler::with_seed(99);
         let r1 = read_i64(&s1.sample(&logits).unwrap());
@@ -359,11 +365,8 @@ mod tests {
     fn gumbel_distribution_approximates_softmax() {
         // Logits [ln(0.7), ln(0.2), ln(0.1)] → softmax = [0.7, 0.2, 0.1].
         // Sample 10000 times; empirical frequencies should be close.
-        let logits = Tensor::from_slice(
-            &[0.7f32.ln(), 0.2f32.ln(), 0.1f32.ln()],
-            vec![1, 3],
-        )
-        .unwrap();
+        let logits =
+            Tensor::from_slice(&[0.7f32.ln(), 0.2f32.ln(), 0.1f32.ln()], vec![1, 3]).unwrap();
         let s = GumbelSampler::with_seed(123);
         let mut counts = [0usize; 3];
         for _ in 0..10_000 {
@@ -458,9 +461,7 @@ mod tests {
             vec![2, 5],
         )
         .unwrap();
-        let logits_cuda = logits_cpu
-            .to_device(crate::Device::Cuda(0))
-            .unwrap();
+        let logits_cuda = logits_cpu.to_device(crate::Device::Cuda(0)).unwrap();
 
         let s_cpu = GumbelSampler::with_seed(0xABCDEF);
         let s_cuda = GumbelSampler::with_seed(0xABCDEF);
@@ -488,9 +489,7 @@ mod tests {
             vec![1, 4],
         )
         .unwrap();
-        let logits_cuda = logits_cpu
-            .to_device(crate::Device::Cuda(0))
-            .unwrap();
+        let logits_cuda = logits_cpu.to_device(crate::Device::Cuda(0)).unwrap();
 
         for seed in 1..10 {
             let s = GumbelSampler::with_seed(seed);
@@ -499,4 +498,3 @@ mod tests {
         }
     }
 }
-

@@ -21,8 +21,8 @@
 //! `Constructive`. Pointwise; no reduction.
 
 use crate::{
-    bail, dispatch1, BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result,
-    Storage, Tensor, TensorId,
+    BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result, Storage, Tensor,
+    TensorId, bail, dispatch1,
 };
 use std::sync::Arc;
 
@@ -112,11 +112,11 @@ impl DeviceOp1 for ActivationOp {
             }
             DType::BF16 => {
                 for i in 0..n {
-                    let v = half::bf16::from_le_bytes(x_bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32();
+                    let v =
+                        half::bf16::from_le_bytes(x_bytes[i * 2..i * 2 + 2].try_into().unwrap())
+                            .to_f32();
                     let y = self.kind.apply_f32(v);
-                    out[i * 2..i * 2 + 2]
-                        .copy_from_slice(&half::bf16::from_f32(y).to_le_bytes());
+                    out[i * 2..i * 2 + 2].copy_from_slice(&half::bf16::from_f32(y).to_le_bytes());
                 }
             }
             DType::F16 => {
@@ -124,11 +124,13 @@ impl DeviceOp1 for ActivationOp {
                     let v = half::f16::from_le_bytes(x_bytes[i * 2..i * 2 + 2].try_into().unwrap())
                         .to_f32();
                     let y = self.kind.apply_f32(v);
-                    out[i * 2..i * 2 + 2]
-                        .copy_from_slice(&half::f16::from_f32(y).to_le_bytes());
+                    out[i * 2..i * 2 + 2].copy_from_slice(&half::f16::from_f32(y).to_le_bytes());
                 }
             }
-            other => bail!("ActivationOp({}): dtype {other} not supported", self.kind.name()),
+            other => bail!(
+                "ActivationOp({}): dtype {other} not supported",
+                self.kind.name()
+            ),
         }
         let cpu = CpuStorage::from_bytes(dtype, out)?;
         let storage: Storage = Arc::new(cpu);
@@ -440,10 +442,7 @@ mod tests {
         let got = read_f32(&y);
         let expected = [0.0_f32, 0.8412, -0.1588, 1.9546, -0.0454];
         for (i, (g, e)) in got.iter().zip(expected.iter()).enumerate() {
-            assert!(
-                (g - e).abs() < 1e-3,
-                "gelu[{i}]={g}, expected {e}"
-            );
+            assert!((g - e).abs() < 1e-3, "gelu[{i}]={g}, expected {e}");
         }
     }
 

@@ -71,9 +71,8 @@ pub fn rocm_scalar_op(x: &Tensor, kind: i32, c: f32) -> Result<Tensor> {
     let x_ptr = (x_base + x_off) as *const core::ffi::c_void;
     let out_ptr = out_base as *mut core::ffi::c_void;
 
-    let status = unsafe {
-        kiln_scalar_op_async(x_ptr, out_ptr, n as i64, kind, dtype_tag, c, raw_stream)
-    };
+    let status =
+        unsafe { kiln_scalar_op_async(x_ptr, out_ptr, n as i64, kind, dtype_tag, c, raw_stream) };
     if status != 0 {
         return Err(Error::Msg(format!(
             "rocm_scalar_op: FFI returned status {status}"

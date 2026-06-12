@@ -68,9 +68,7 @@ pub fn causal_conv1d_update_kt(
     let weight_shape = weight.shape();
     let weight_flat = match weight_shape.len() {
         3 => {
-            if weight_shape[0] != channels
-                || weight_shape[1] != 1
-                || weight_shape[2] != kernel_size
+            if weight_shape[0] != channels || weight_shape[1] != 1 || weight_shape[2] != kernel_size
             {
                 return Err(Conv1dError::Msg(format!(
                     "kt-conv1d: weight shape {weight_shape:?} does not match [{channels}, 1, {kernel_size}]"
@@ -170,9 +168,7 @@ pub fn causal_conv1d_prefill_kt(
     let weight_shape = weight.shape();
     let weight_flat = match weight_shape.len() {
         3 => {
-            if weight_shape[0] != channels
-                || weight_shape[1] != 1
-                || weight_shape[2] != kernel_size
+            if weight_shape[0] != channels || weight_shape[1] != 1 || weight_shape[2] != kernel_size
             {
                 return Err(Conv1dError::Msg(format!(
                     "kt-conv1d: weight shape {weight_shape:?} != [{channels}, 1, {kernel_size}]"

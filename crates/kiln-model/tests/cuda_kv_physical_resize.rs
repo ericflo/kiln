@@ -27,7 +27,13 @@ fn cuda_physical_resize_preserves_kv() {
     let dev = Device::Cuda(0);
 
     let cache = PagedKvCacheKt::new(
-        LAYERS, NUM_BLOCKS, BLOCK_SIZE, KV_HEADS, HEAD_DIM, DType::BF16, dev,
+        LAYERS,
+        NUM_BLOCKS,
+        BLOCK_SIZE,
+        KV_HEADS,
+        HEAD_DIM,
+        DType::BF16,
+        dev,
     )
     .expect("alloc cuda kv cache");
     {
@@ -40,34 +46,55 @@ fn cuda_physical_resize_preserves_kv() {
     }
 
     // Marker into slot 7 of layer 0's K pool; reference = bytes as stored.
-    let marker: Vec<f32> = (0..(KV_HEADS * HEAD_DIM)).map(|i| (i % 17) as f32 + 1.0).collect();
+    let marker: Vec<f32> = (0..(KV_HEADS * HEAD_DIM))
+        .map(|i| (i % 17) as f32 + 1.0)
+        .collect();
     let marker_t = Tensor::from_vec(marker.clone(), vec![1, KV_HEADS, HEAD_DIM])
         .unwrap()
         .to_dtype(DType::BF16)
         .unwrap()
         .to_device(dev)
         .unwrap();
-    cache.pool_tensors(0).unwrap().0.slice_set(&marker_t, 0, 7).expect("write marker");
+    cache
+        .pool_tensors(0)
+        .unwrap()
+        .0
+        .slice_set(&marker_t, 0, 7)
+        .expect("write marker");
 
     let read_marker = |c: &PagedKvCacheKt| -> Vec<f32> {
-        c.pool_tensors(0).unwrap().0
-            .narrow(0, 7, 1).unwrap()
-            .to_dtype(DType::F32).unwrap()
-            .flatten_all().unwrap()
-            .to_vec().unwrap()
+        c.pool_tensors(0)
+            .unwrap()
+            .0
+            .narrow(0, 7, 1)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec()
+            .unwrap()
     };
     let reference = read_marker(&cache);
     let assert_marker = |got: &[f32], when: &str| {
-        assert_eq!(got, &reference[..], "marker slot 7 not preserved byte-for-byte {when}");
+        assert_eq!(
+            got,
+            &reference[..],
+            "marker slot 7 not preserved byte-for-byte {when}"
+        );
     };
 
     // SHRINK (data preserved) then GROW (prefix preserved).
-    cache.physical_resize_to(SHRUNK_BLOCKS, dev).expect("shrink");
+    cache
+        .physical_resize_to(SHRUNK_BLOCKS, dev)
+        .expect("shrink");
     assert_eq!(cache.num_blocks(), SHRUNK_BLOCKS);
     assert_marker(&read_marker(&cache), "across cuda shrink");
 
     cache.physical_resize_to(NUM_BLOCKS, dev).expect("grow");
     assert_eq!(cache.num_blocks(), NUM_BLOCKS);
     assert_marker(&read_marker(&cache), "across cuda grow");
-    eprintln!("[cuda-resize] OK: marker preserved across shrink {NUM_BLOCKS}->{SHRUNK_BLOCKS}->{NUM_BLOCKS}");
+    eprintln!(
+        "[cuda-resize] OK: marker preserved across shrink {NUM_BLOCKS}->{SHRUNK_BLOCKS}->{NUM_BLOCKS}"
+    );
 }

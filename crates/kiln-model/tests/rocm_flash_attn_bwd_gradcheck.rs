@@ -24,7 +24,12 @@ fn bf16_round(x: f32) -> f32 {
     half::bf16::from_f32(x).to_f32()
 }
 fn host_f32(t: &Tensor) -> Vec<f32> {
-    t.to_dtype(DType::F32).unwrap().flatten_all().unwrap().to_vec().unwrap()
+    t.to_dtype(DType::F32)
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec()
+        .unwrap()
 }
 
 /// Independent host-scalar F32 causal-GQA attention backward (b=1).
@@ -100,7 +105,10 @@ fn ref_backward(
 
 fn compare(name: &str, reference: &[f32], got: &[f32]) -> (f32, usize) {
     assert_eq!(reference.len(), got.len(), "{name}: length mismatch");
-    assert!(got.iter().all(|x| x.is_finite()), "{name}: non-finite grads from kernel");
+    assert!(
+        got.iter().all(|x| x.is_finite()),
+        "{name}: non-finite grads from kernel"
+    );
     let scale = reference.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
     let thresh = scale * 0.02;
     let mut max_rel = 0.0f32;
@@ -131,12 +139,21 @@ fn run_gradcheck(sq: usize, sk: usize, hq: usize, hkv: usize, hd: usize) {
         std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
     }
     let scale = 1.0 / (hd as f32).sqrt();
-    let q_f: Vec<f32> = (0..sq * hq * hd).map(|i| bf16_round((((i * 17) % 23) as f32 - 11.0) * 0.05)).collect();
-    let k_f: Vec<f32> = (0..sk * hkv * hd).map(|i| bf16_round((((i * 13) % 29) as f32 - 14.0) * 0.04)).collect();
-    let v_f: Vec<f32> = (0..sk * hkv * hd).map(|i| bf16_round((((i * 7) % 19) as f32 - 9.0) * 0.06)).collect();
-    let seed_f: Vec<f32> = (0..sq * hq * hd).map(|i| bf16_round((((i * 5) % 11) as f32 - 5.0) * 0.1)).collect();
+    let q_f: Vec<f32> = (0..sq * hq * hd)
+        .map(|i| bf16_round((((i * 17) % 23) as f32 - 11.0) * 0.05))
+        .collect();
+    let k_f: Vec<f32> = (0..sk * hkv * hd)
+        .map(|i| bf16_round((((i * 13) % 29) as f32 - 14.0) * 0.04))
+        .collect();
+    let v_f: Vec<f32> = (0..sk * hkv * hd)
+        .map(|i| bf16_round((((i * 7) % 19) as f32 - 9.0) * 0.06))
+        .collect();
+    let seed_f: Vec<f32> = (0..sq * hq * hd)
+        .map(|i| bf16_round((((i * 5) % 11) as f32 - 5.0) * 0.1))
+        .collect();
 
-    let (ref_dq, ref_dk, ref_dv) = ref_backward(&q_f, &k_f, &v_f, &seed_f, sq, sk, hq, hkv, hd, scale);
+    let (ref_dq, ref_dk, ref_dv) =
+        ref_backward(&q_f, &k_f, &v_f, &seed_f, sq, sk, hq, hkv, hd, scale);
 
     let mk = |data: &[f32], shape: Vec<usize>| {
         Tensor::from_vec(data.to_vec(), shape)
@@ -159,7 +176,11 @@ fn run_gradcheck(sq: usize, sk: usize, hq: usize, hkv: usize, hd: usize) {
     let out = out
         .expect("try_tape_flash_attn_kt errored")
         .expect("returned None — flash-attn did NOT record on ROCm (gate rejected)");
-    assert_eq!(tape.len(), 1, "flash-attn must record exactly one tape node");
+    assert_eq!(
+        tape.len(),
+        1,
+        "flash-attn must record exactly one tape node"
+    );
     let grads = tape
         .backward(out.id(), seed, |a, b| kiln_tensor::ops::add(a, b))
         .expect("tape backward on ROCm flash-attn graph");
@@ -173,10 +194,22 @@ fn run_gradcheck(sq: usize, sk: usize, hq: usize, hkv: usize, hd: usize) {
     let (rq, nq) = compare("dq", &ref_dq, &got_dq);
     let (rk, nk) = compare("dk", &ref_dk, &got_dk);
     let (rv, nv) = compare("dv", &ref_dv, &got_dv);
-    assert!(nq > 5 && nk > 5 && nv > 5, "too few significant grads to be a real check");
-    assert!(rq < TOL, "dq disagrees with F32 reference (max_rel {rq:.4} > {TOL}) — ROCm flash-attn dq WRONG");
-    assert!(rk < TOL, "dk disagrees with F32 reference (max_rel {rk:.4} > {TOL}) — ROCm flash-attn dk WRONG");
-    assert!(rv < TOL, "dv disagrees with F32 reference (max_rel {rv:.4} > {TOL}) — ROCm flash-attn dv WRONG");
+    assert!(
+        nq > 5 && nk > 5 && nv > 5,
+        "too few significant grads to be a real check"
+    );
+    assert!(
+        rq < TOL,
+        "dq disagrees with F32 reference (max_rel {rq:.4} > {TOL}) — ROCm flash-attn dq WRONG"
+    );
+    assert!(
+        rk < TOL,
+        "dk disagrees with F32 reference (max_rel {rk:.4} > {TOL}) — ROCm flash-attn dk WRONG"
+    );
+    assert!(
+        rv < TOL,
+        "dv disagrees with F32 reference (max_rel {rv:.4} > {TOL}) — ROCm flash-attn dv WRONG"
+    );
     eprintln!("[rocm-flash-bwd hd={hd}] OK: dq/dk/dv match the independent F32 analytic reference");
 }
 

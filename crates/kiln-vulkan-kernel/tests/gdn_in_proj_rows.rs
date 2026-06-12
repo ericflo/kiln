@@ -16,13 +16,7 @@ fn cpu_linear(x: &[f32], w: &[bf16], batch: usize, hidden: usize, out_dim: usize
     out
 }
 
-fn append_projection(
-    out: &mut [f32],
-    offset: usize,
-    projection: &[f32],
-    batch: usize,
-    dim: usize,
-) {
+fn append_projection(out: &mut [f32], offset: usize, projection: &[f32], batch: usize, dim: usize) {
     for row in 0..batch {
         let dst = offset + row * dim;
         let src = row * dim;
@@ -66,7 +60,15 @@ fn cpu_conv_split(
     a_dim: usize,
     b_dim: usize,
     kernel_size: usize,
-) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+) -> (
+    Vec<f32>,
+    Vec<f32>,
+    Vec<f32>,
+    Vec<f32>,
+    Vec<f32>,
+    Vec<f32>,
+    Vec<f32>,
+) {
     let state_len = kernel_size - 1;
     let mut state = conv_state.to_vec();
     let mut q_out = vec![0.0f32; batch * qk_dim];
@@ -106,12 +108,9 @@ fn cpu_conv_split(
             }
         }
 
-        z_out[row * z_dim..(row + 1) * z_dim]
-            .copy_from_slice(&z[row * z_dim..(row + 1) * z_dim]);
-        a_out[row * a_dim..(row + 1) * a_dim]
-            .copy_from_slice(&a[row * a_dim..(row + 1) * a_dim]);
-        b_out[row * b_dim..(row + 1) * b_dim]
-            .copy_from_slice(&b[row * b_dim..(row + 1) * b_dim]);
+        z_out[row * z_dim..(row + 1) * z_dim].copy_from_slice(&z[row * z_dim..(row + 1) * z_dim]);
+        a_out[row * a_dim..(row + 1) * a_dim].copy_from_slice(&a[row * a_dim..(row + 1) * a_dim]);
+        b_out[row * b_dim..(row + 1) * b_dim].copy_from_slice(&b[row * b_dim..(row + 1) * b_dim]);
     }
 
     (q_out, k_out, v_out, z_out, a_out, b_out, state)
@@ -207,13 +206,7 @@ fn run_gdn_in_proj_case(shader: &'static str, row_group_size: usize, batch: usiz
     let mut expected = vec![0.0f32; batch * total_out];
     append_projection(&mut expected, 0, &qkv, batch, qkv_dim);
     append_projection(&mut expected, batch * qkv_dim, &z, batch, z_dim);
-    append_projection(
-        &mut expected,
-        batch * (qkv_dim + z_dim),
-        &a,
-        batch,
-        a_dim,
-    );
+    append_projection(&mut expected, batch * (qkv_dim + z_dim), &a, batch, a_dim);
     append_projection(
         &mut expected,
         batch * (qkv_dim + z_dim + a_dim),

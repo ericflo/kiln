@@ -23,8 +23,8 @@
 //! `Constructive`. Pointwise; no reduction.
 
 use crate::{
-    bail, dispatch2, BackwardOp, CpuStorage, DType, Determinism, DeviceOp2, Error, Layout, Result,
-    Storage, Tensor, TensorId,
+    BackwardOp, CpuStorage, DType, Determinism, DeviceOp2, Error, Layout, Result, Storage, Tensor,
+    TensorId, bail, dispatch2,
 };
 use std::sync::Arc;
 
@@ -86,13 +86,14 @@ impl DeviceOp2 for MulSigmoidGateOp {
             }
             DType::BF16 => {
                 for i in 0..n {
-                    let g = half::bf16::from_le_bytes(g_bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32();
-                    let u = half::bf16::from_le_bytes(u_bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32();
+                    let g =
+                        half::bf16::from_le_bytes(g_bytes[i * 2..i * 2 + 2].try_into().unwrap())
+                            .to_f32();
+                    let u =
+                        half::bf16::from_le_bytes(u_bytes[i * 2..i * 2 + 2].try_into().unwrap())
+                            .to_f32();
                     let y = silu(g) * u;
-                    out[i * 2..i * 2 + 2]
-                        .copy_from_slice(&half::bf16::from_f32(y).to_le_bytes());
+                    out[i * 2..i * 2 + 2].copy_from_slice(&half::bf16::from_f32(y).to_le_bytes());
                 }
             }
             DType::F16 => {
@@ -102,8 +103,7 @@ impl DeviceOp2 for MulSigmoidGateOp {
                     let u = half::f16::from_le_bytes(u_bytes[i * 2..i * 2 + 2].try_into().unwrap())
                         .to_f32();
                     let y = silu(g) * u;
-                    out[i * 2..i * 2 + 2]
-                        .copy_from_slice(&half::f16::from_f32(y).to_le_bytes());
+                    out[i * 2..i * 2 + 2].copy_from_slice(&half::f16::from_f32(y).to_le_bytes());
                 }
             }
             _ => unreachable!(),
@@ -205,7 +205,11 @@ fn downcast_cpu<'a>(t: &'a Tensor, label: &str) -> Result<&'a CpuStorage> {
     t.storage()
         .as_any()
         .downcast_ref::<CpuStorage>()
-        .ok_or_else(|| Error::Msg(format!("MulSigmoidGateOp: {label} storage must be CpuStorage")))
+        .ok_or_else(|| {
+            Error::Msg(format!(
+                "MulSigmoidGateOp: {label} storage must be CpuStorage"
+            ))
+        })
 }
 
 #[cfg(test)]

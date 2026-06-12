@@ -3,12 +3,12 @@
 //! The timed region includes transient buffer allocation, host uploads,
 //! command recording/submission, and output readback for both wrappers.
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
+use kiln_vulkan_kernel::VulkanDevice;
 use kiln_vulkan_kernel::kernels::{
     dispatch_paged_attn_decode_batch_paged_f32_bytes,
     dispatch_paged_attn_decode_batch_paged_splitk_f32_bytes, paged_attn_decode_splitk_chunks,
 };
-use kiln_vulkan_kernel::VulkanDevice;
 use std::env;
 use std::time::{Duration, Instant};
 
@@ -62,9 +62,7 @@ fn parse_args() -> Result<Args> {
         match argv[idx].as_str() {
             "--batch" => cfg.batch = parse_usize_flag(&argv, &mut idx, "--batch")?,
             "--heads" => cfg.num_heads = parse_usize_flag(&argv, &mut idx, "--heads")?,
-            "--kv-heads" => {
-                cfg.num_kv_heads = parse_usize_flag(&argv, &mut idx, "--kv-heads")?
-            }
+            "--kv-heads" => cfg.num_kv_heads = parse_usize_flag(&argv, &mut idx, "--kv-heads")?,
             "--head-dim" => cfg.head_dim = parse_usize_flag(&argv, &mut idx, "--head-dim")?,
             "--blocks" => cfg.blocks_per_seq = parse_usize_flag(&argv, &mut idx, "--blocks")?,
             "--block-size" => cfg.block_size = parse_usize_flag(&argv, &mut idx, "--block-size")?,
@@ -208,10 +206,7 @@ fn run_split(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn time_path<F>(
-    cfg: Args,
-    mut f: F,
-) -> Result<Duration>
+fn time_path<F>(cfg: Args, mut f: F) -> Result<Duration>
 where
     F: FnMut() -> Result<Vec<u8>>,
 {

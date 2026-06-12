@@ -78,8 +78,7 @@ fn rocm_scan_axis_impl(x: &Tensor, axis: usize, kind: i32, label: &str) -> Resul
         _ => unreachable!("RocmStorage::device is always Rocm"),
     };
     // Scan writes every output element, so an uninitialized buffer is fine.
-    let out_storage =
-        RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
+    let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
 
     let raw_stream = x_storage.rocm_stream_raw();
     let (x_base, _) = x_storage.device_ptr_raw();
@@ -96,6 +95,10 @@ fn rocm_scan_axis_impl(x: &Tensor, axis: usize, kind: i32, label: &str) -> Resul
     }
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
-    Tensor::from_parts(storage_arc, Layout::contiguous(shape.to_vec()), TensorId::next())
-        .map_err(|e| Error::Msg(format!("{label}: wrap: {e}")))
+    Tensor::from_parts(
+        storage_arc,
+        Layout::contiguous(shape.to_vec()),
+        TensorId::next(),
+    )
+    .map_err(|e| Error::Msg(format!("{label}: wrap: {e}")))
 }

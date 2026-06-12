@@ -107,9 +107,7 @@ pub(super) fn resident_activation_resource(
     registry: &ResidentActivationRegistry,
     tensor: &Tensor,
 ) -> Option<super::residency::ResidentResource> {
-    with_metal_resident_registry(registry, |resources| {
-        resources.get(&tensor.id()).cloned()
-    })
+    with_metal_resident_registry(registry, |resources| resources.get(&tensor.id()).cloned())
 }
 
 pub(super) fn resolve_resident_activation(

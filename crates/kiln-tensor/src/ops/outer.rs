@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 pub fn outer(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     if a.rank() != 1 || b.rank() != 1 {
@@ -100,8 +100,7 @@ pub fn outer(a: &Tensor, b: &Tensor) -> Result<Tensor> {
                         .to_f32()
                 }
                 DType::F16 => {
-                    half::f16::from_le_bytes(b_bytes[j * 2..j * 2 + 2].try_into().unwrap())
-                        .to_f32()
+                    half::f16::from_le_bytes(b_bytes[j * 2..j * 2 + 2].try_into().unwrap()).to_f32()
                 }
                 _ => unreachable!(),
             };
@@ -109,10 +108,12 @@ pub fn outer(a: &Tensor, b: &Tensor) -> Result<Tensor> {
             let off = (i * n + j) * per;
             match dtype {
                 DType::F32 => out[off..off + 4].copy_from_slice(&y.to_le_bytes()),
-                DType::BF16 => out[off..off + 2]
-                    .copy_from_slice(&half::bf16::from_f32(y).to_le_bytes()),
-                DType::F16 => out[off..off + 2]
-                    .copy_from_slice(&half::f16::from_f32(y).to_le_bytes()),
+                DType::BF16 => {
+                    out[off..off + 2].copy_from_slice(&half::bf16::from_f32(y).to_le_bytes())
+                }
+                DType::F16 => {
+                    out[off..off + 2].copy_from_slice(&half::f16::from_f32(y).to_le_bytes())
+                }
                 _ => unreachable!(),
             }
         }

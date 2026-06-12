@@ -32,7 +32,6 @@
 //! id), the bridge is the identity function and every call site keys on
 //! kt ids natively.
 
-
 // ---------------------------------------------------------------------------
 // (#1082) Wave E4 — bare type aliases now resolve to kt, matching the
 // workspace-wide post-flip convention (`Tensor`/`Device`/`DType` = kt).
@@ -45,7 +44,6 @@ pub(crate) type Tensor = kiln_tensor::Tensor;
 pub(crate) type Device = kiln_tensor::Device;
 pub(crate) type DType = kiln_tensor::DType;
 pub(crate) type TensorId = kiln_tensor::TensorId;
-
 
 /// candle `Shape` / `D` — candle island (#1082). Still named in the
 /// candle-authoritative helper signatures in `trainer.rs` (e.g.
@@ -61,4 +59,3 @@ pub(crate) type D = kiln_tensor::D;
 // `kiln_autograd::GradStore`, which is referenced fully-qualified at all
 // call sites. No bare `GradStore` resolves to this facade anymore, so the
 // alias had zero callers and was removed.
-

@@ -12,11 +12,11 @@ use super::metal_config::{
 };
 use super::metal_core::{kt_metal, kt_metal_alloc};
 use super::metal_icb::{
-    metal_paged_decode_replay_state,
     MetalGraphResourceRef, MetalPagedAttnDecodeDynSeqlenIcbArgs,
     MetalPagedAttnDecodeDynSeqlenScalars, MetalPagedDecodeIcbGraph,
     MetalPagedKvWriteTokenMajorBatchIcbArgs, MetalPagedKvWriteTokenMajorIcbArgs,
     MetalSingleTokenPagedDecodeIcbGraph, merge_metal_graph_resources,
+    metal_paged_decode_replay_state,
 };
 use super::metal_pipeline::{
     metal_paged_attn_decode_contiguous_batch_dyn_seqlen_pipeline,

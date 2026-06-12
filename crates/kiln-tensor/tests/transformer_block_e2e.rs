@@ -19,8 +19,8 @@
 //! cleanly across all the new ops.
 
 use kiln_tensor::ops::{
-    add, layer_norm, linear, multi_head_attention, precompute_rope_freqs, rms_norm, rope,
-    swiglu, xavier_uniform,
+    add, layer_norm, linear, multi_head_attention, precompute_rope_freqs, rms_norm, rope, swiglu,
+    xavier_uniform,
 };
 use kiln_tensor::{CpuStorage, DType, Tensor};
 
@@ -79,8 +79,20 @@ fn transformer_block_full_forward_runs_e2e() {
     let q = rope(&q, &cos, &sin, HEAD_DIM).unwrap();
     let k = rope(&k, &cos, &sin, HEAD_DIM).unwrap();
     // Permute back to [B, S, n_heads, head_dim] → reshape to [B, S, hidden].
-    let q = q.transpose(1, 2).unwrap().contiguous().unwrap().reshape(vec![BATCH, SEQ, HIDDEN]).unwrap();
-    let k = k.transpose(1, 2).unwrap().contiguous().unwrap().reshape(vec![BATCH, SEQ, HIDDEN]).unwrap();
+    let q = q
+        .transpose(1, 2)
+        .unwrap()
+        .contiguous()
+        .unwrap()
+        .reshape(vec![BATCH, SEQ, HIDDEN])
+        .unwrap();
+    let k = k
+        .transpose(1, 2)
+        .unwrap()
+        .contiguous()
+        .unwrap()
+        .reshape(vec![BATCH, SEQ, HIDDEN])
+        .unwrap();
 
     let attn_out = multi_head_attention(&q, &k, &v, N_HEADS, /*causal=*/ true).unwrap();
     let attn_out_proj = linear(&attn_out, &w_o, None).unwrap();

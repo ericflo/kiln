@@ -26,7 +26,7 @@ use rand::{RngExt, SeedableRng};
 
 // #1082: bare `Tensor`/`Device`/`DType`/`D` resolve to `kiln_tensor` —
 // candle has been removed from the sampler. Mirrors `forward.rs`.
-use kiln_tensor::{Tensor, Device, DType, D};
+use kiln_tensor::{D, DType, Device, Tensor};
 
 /// Extract the last-position logits from a `[..., vocab_size]` tensor and flatten
 /// them to a 1-D `[vocab_size]` tensor that still lives on the original device.
@@ -116,7 +116,10 @@ pub fn greedy_sample_rows(logits: &Tensor) -> Result<Vec<u32>> {
     }
     // kt `argmax` yields an I64 index tensor; cast to U32 to preserve the
     // `to_vec1::<u32>()` host read path (candle's `argmax` returned U32).
-    let ids = logits.argmax(vocab_dim)?.flatten_all()?.to_dtype(DType::U32)?;
+    let ids = logits
+        .argmax(vocab_dim)?
+        .flatten_all()?
+        .to_dtype(DType::U32)?;
     Ok(ids.to_vec1::<u32>()?)
 }
 
@@ -734,8 +737,11 @@ pub fn try_topk_on_device(scaled: &Tensor, top_k: usize) -> Result<Vec<(u32, f32
         {
             kiln_nvtx::range!(c"kiln/sampling_topk_kt");
             let (values, indices) = kiln_tensor::cuda_topk_last_axis(scaled, top_k)?;
-            let pairs: Vec<(u32, f32)> =
-                indices.into_iter().zip(values).map(|(i, v)| (i, v)).collect();
+            let pairs: Vec<(u32, f32)> = indices
+                .into_iter()
+                .zip(values)
+                .map(|(i, v)| (i, v))
+                .collect();
             return Ok(pairs);
         }
     }
@@ -751,8 +757,11 @@ pub fn try_topk_on_device(scaled: &Tensor, top_k: usize) -> Result<Vec<(u32, f32
             && matches!(scaled.dtype(), DType::F32 | DType::BF16 | DType::F16)
         {
             let (values, indices) = kiln_tensor::rocm_topk_last_axis(scaled, top_k)?;
-            let pairs: Vec<(u32, f32)> =
-                indices.into_iter().zip(values).map(|(i, v)| (i, v)).collect();
+            let pairs: Vec<(u32, f32)> = indices
+                .into_iter()
+                .zip(values)
+                .map(|(i, v)| (i, v))
+                .collect();
             return Ok(pairs);
         }
     }
@@ -788,7 +797,9 @@ fn topk_via_host_sort(scaled: &Tensor, top_k: Option<usize>) -> Result<Vec<(u32,
         #[derive(Copy, Clone)]
         struct MinEntry(f32, u32);
         impl PartialEq for MinEntry {
-            fn eq(&self, o: &Self) -> bool { self.0 == o.0 && self.1 == o.1 }
+            fn eq(&self, o: &Self) -> bool {
+                self.0 == o.0 && self.1 == o.1
+            }
         }
         impl Eq for MinEntry {}
         // BinaryHeap is a max-heap; invert ordering so we get a min-heap.
@@ -915,7 +926,10 @@ mod tests {
 
         // #1082: `flat` is already a kt CUDA tensor — pass it straight to the
         // kt helper, no candle->kt bridge.
-        assert_eq!(crate::forward::try_kt_argmax_1d(&flat.contiguous()?)?, Some(2));
+        assert_eq!(
+            crate::forward::try_kt_argmax_1d(&flat.contiguous()?)?,
+            Some(2)
+        );
         assert_eq!(greedy_sample(&logits)?, 2);
 
         let bf16_logits = logits.to_dtype(DType::BF16)?;
@@ -939,8 +953,7 @@ mod tests {
 
         // Includes a tie (two 4.0s at idx 6 and 11) to exercise the
         // lowest-index tie-break, matching the host fallback.
-        let values: Vec<f32> =
-            vec![1.0, 5.0, 3.0, 8.0, 2.0, 7.0, 4.0, 9.0, 0.5, 6.0, 2.5, 4.0];
+        let values: Vec<f32> = vec![1.0, 5.0, 3.0, 8.0, 2.0, 7.0, 4.0, 9.0, 0.5, 6.0, 2.5, 4.0];
         let logits = Tensor::new(values.as_slice(), &device)?;
 
         for k in [1usize, 3, 7, 12] {
@@ -955,15 +968,14 @@ mod tests {
                 .enumerate()
                 .map(|(i, v)| (i as u32, v))
                 .collect();
-            expected.sort_by(|a, b| {
-                b.1.partial_cmp(&a.1)
-                    .unwrap()
-                    .then_with(|| a.0.cmp(&b.0))
-            });
+            expected.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then_with(|| a.0.cmp(&b.0)));
             expected.truncate(k);
 
-            for (slot, ((gi, gv), (ei, ev))) in
-                idxs.iter().zip(&vals).zip(expected.iter().map(|&(i, v)| (i, v))).enumerate()
+            for (slot, ((gi, gv), (ei, ev))) in idxs
+                .iter()
+                .zip(&vals)
+                .zip(expected.iter().map(|&(i, v)| (i, v)))
+                .enumerate()
             {
                 assert_eq!(*gi, ei, "k={k} slot={slot}: index mismatch");
                 assert!(
@@ -1252,9 +1264,7 @@ mod tests {
 
     // ---- sample_with_full_params + penalty tests ---------------------------
 
-    fn full_params_with_seed(
-        seed: u64,
-    ) -> kiln_core::sampling::SamplingParams {
+    fn full_params_with_seed(seed: u64) -> kiln_core::sampling::SamplingParams {
         kiln_core::sampling::SamplingParams {
             seed: Some(seed),
             ..kiln_core::sampling::SamplingParams::greedy()
@@ -1314,32 +1324,18 @@ mod tests {
         let frequency = 0.25;
 
         let cuda_logits = Tensor::new(&values, &cuda)?.reshape((2, 6))?;
-        let got = apply_penalties_on_device(
-            &cuda_logits,
-            &history,
-            repetition,
-            presence,
-            frequency,
-        )?;
+        let got =
+            apply_penalties_on_device(&cuda_logits, &history, repetition, presence, frequency)?;
 
         let cuda_flat = last_position_logits(&cuda_logits)?.to_dtype(DType::F32)?;
         let got_direct = try_kt_apply_penalties_on_device(
-            &cuda_flat,
-            &history,
-            repetition,
-            presence,
-            frequency,
+            &cuda_flat, &history, repetition, presence, frequency,
         )?
         .context("expected CUDA kt penalty path to run")?;
 
         let cpu_logits = Tensor::new(&values, &cpu)?.reshape((2, 6))?;
-        let expected = apply_penalties_on_device(
-            &cpu_logits,
-            &history,
-            repetition,
-            presence,
-            frequency,
-        )?;
+        let expected =
+            apply_penalties_on_device(&cpu_logits, &history, repetition, presence, frequency)?;
 
         let got = got.to_vec1::<f32>()?;
         let got_direct = got_direct.to_vec1::<f32>()?;
@@ -1390,8 +1386,7 @@ mod tests {
 
         let fallback_idx = (values.len() - 1) as u32;
         let got_token = sample_from_distribution_weights(&got, Some(123), fallback_idx)?;
-        let expected_token =
-            sample_from_distribution_weights(&expected, Some(123), fallback_idx)?;
+        let expected_token = sample_from_distribution_weights(&expected, Some(123), fallback_idx)?;
         assert_eq!(got_token, expected_token);
         Ok(())
     }
@@ -1579,9 +1574,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, &v)| (i as u32, v))
                 .collect();
-            full.sort_by(|a, b| {
-                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-            });
+            full.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             full.truncate(k);
             assert_eq!(
                 heap.len(),
@@ -1590,10 +1583,8 @@ mod tests {
             );
             // Compare only the *set* of indices since equal-value
             // ties can break either direction across the two paths.
-            let heap_set: std::collections::BTreeSet<u32> =
-                heap.iter().map(|&(i, _)| i).collect();
-            let full_set: std::collections::BTreeSet<u32> =
-                full.iter().map(|&(i, _)| i).collect();
+            let heap_set: std::collections::BTreeSet<u32> = heap.iter().map(|&(i, _)| i).collect();
+            let full_set: std::collections::BTreeSet<u32> = full.iter().map(|&(i, _)| i).collect();
             assert_eq!(
                 heap_set, full_set,
                 "heap top-k disagrees with full-sort top-k at k={k}"

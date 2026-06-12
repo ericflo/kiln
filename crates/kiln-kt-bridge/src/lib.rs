@@ -47,20 +47,25 @@
 /// backward machinery used by the `_kt` training adapters. Device-agnostic
 /// scope plumbing; the CUDA-specific kt helpers stay
 /// `#[cfg(feature = "cuda")]` inside this crate's other modules.
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
 pub mod tape_bridge;
 
 // `KtDType` + the kt-Tensor/StorageBackend types are shared by the CUDA and
 // ROCm device-pointer helpers. `CudaStorage` / `RocmStorage` are each gated to
 // their own backend feature. (#1082 / R.4)
-#[cfg(any(feature = "cuda", feature = "rocm"))]
-use kiln_tensor::DType as KtDType;
-#[cfg(any(feature = "cuda", feature = "rocm"))]
-use kiln_tensor::{StorageBackend, Tensor as KtTensor};
 #[cfg(feature = "cuda")]
 use kiln_tensor::CudaStorage;
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+use kiln_tensor::DType as KtDType;
 #[cfg(feature = "rocm")]
 use kiln_tensor::RocmStorage;
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+use kiln_tensor::{StorageBackend, Tensor as KtTensor};
 
 /// Generic error for kt-API bridge operations.
 ///
@@ -241,7 +246,9 @@ pub fn rocm_storage_and_byte_offset<'a>(
         )));
     }
     if !t.is_contiguous() {
-        return Err(BridgeError::new(format!("kt-bridge: {name} must be contiguous")));
+        return Err(BridgeError::new(format!(
+            "kt-bridge: {name} must be contiguous"
+        )));
     }
     let st = t
         .storage()
@@ -311,7 +318,10 @@ pub fn rocm_output_device_ptr(t: &KtTensor) -> u64 {
 /// — the FFI `stream` argument kernel launchers expect. Mirrors how the CUDA
 /// kt-APIs reach `CudaStorage::cuda_stream_raw`.
 #[cfg(feature = "rocm")]
-pub fn rocm_stream_raw_of(t: &KtTensor, name: &'static str) -> Result<*mut core::ffi::c_void, BridgeError> {
+pub fn rocm_stream_raw_of(
+    t: &KtTensor,
+    name: &'static str,
+) -> Result<*mut core::ffi::c_void, BridgeError> {
     let st = t
         .storage()
         .as_any()
@@ -418,7 +428,6 @@ pub fn device_stream_raw_of(
         ))),
     }
 }
-
 
 #[cfg(test)]
 mod tests {

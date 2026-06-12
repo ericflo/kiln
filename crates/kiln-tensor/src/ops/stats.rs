@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 fn load_f32(t: &Tensor) -> Result<Vec<f32>> {
     if !matches!(t.dtype(), DType::F32 | DType::BF16 | DType::F16) {
@@ -26,10 +26,12 @@ fn load_f32(t: &Tensor) -> Result<Vec<f32>> {
     for i in 0..n {
         out.push(match dtype {
             DType::F32 => f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()),
-            DType::BF16 => half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
-            DType::F16 => half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
+            DType::BF16 => {
+                half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
+            DType::F16 => {
+                half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
             _ => unreachable!(),
         });
     }
@@ -45,7 +47,11 @@ fn scalar_tensor(dtype: DType, v: f32) -> Result<Tensor> {
     };
     let cpu = CpuStorage::from_bytes(dtype, bytes)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(Vec::<usize>::new()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(Vec::<usize>::new()),
+        TensorId::next(),
+    )
 }
 
 /// Population variance: `Σ (x - μ)² / N`.
@@ -121,7 +127,10 @@ pub fn mean_variance(t: &Tensor) -> Result<(Tensor, Tensor)> {
     let n = v.len() as f32;
     let mean = v.iter().sum::<f32>() / n;
     let var = v.iter().map(|&x| (x - mean) * (x - mean)).sum::<f32>() / n;
-    Ok((scalar_tensor(t.dtype(), mean)?, scalar_tensor(t.dtype(), var)?))
+    Ok((
+        scalar_tensor(t.dtype(), mean)?,
+        scalar_tensor(t.dtype(), var)?,
+    ))
 }
 
 #[cfg(test)]

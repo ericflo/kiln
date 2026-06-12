@@ -94,7 +94,10 @@ fn htod_bf16(ctx: &Arc<CudaContext>, host: &[bf16]) -> cudarc::driver::CudaSlice
     // slice as `&[u8]` of length `host.len() * 2` to hand to cudarc's
     // `clone_htod`. The pointer is valid for `len * 2` bytes.
     let bytes: &[u8] = unsafe {
-        std::slice::from_raw_parts(host.as_ptr() as *const u8, host.len() * std::mem::size_of::<bf16>())
+        std::slice::from_raw_parts(
+            host.as_ptr() as *const u8,
+            host.len() * std::mem::size_of::<bf16>(),
+        )
     };
     let stream = ctx.default_stream();
     stream
@@ -103,7 +106,11 @@ fn htod_bf16(ctx: &Arc<CudaContext>, host: &[bf16]) -> cudarc::driver::CudaSlice
 }
 
 /// Copy a device `CudaSlice<u8>` back to host as a `Vec<bf16>`.
-fn dtoh_bf16(ctx: &Arc<CudaContext>, slice: &cudarc::driver::CudaSlice<u8>, count: usize) -> Vec<bf16> {
+fn dtoh_bf16(
+    ctx: &Arc<CudaContext>,
+    slice: &cudarc::driver::CudaSlice<u8>,
+    count: usize,
+) -> Vec<bf16> {
     let stream = ctx.default_stream();
     let mut host = vec![0u8; count * std::mem::size_of::<bf16>()];
     stream
@@ -112,9 +119,8 @@ fn dtoh_bf16(ctx: &Arc<CudaContext>, slice: &cudarc::driver::CudaSlice<u8>, coun
     // SAFETY: same layout reinterpret as in `htod_bf16` — `host.len()`
     // is `count * 2` by construction, so the bf16 slice has exactly
     // `count` elements.
-    let bf16_slice: &[bf16] = unsafe {
-        std::slice::from_raw_parts(host.as_ptr() as *const bf16, count)
-    };
+    let bf16_slice: &[bf16] =
+        unsafe { std::slice::from_raw_parts(host.as_ptr() as *const bf16, count) };
     bf16_slice.to_vec()
 }
 

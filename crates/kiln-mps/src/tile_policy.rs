@@ -184,7 +184,12 @@ mod tests {
         assert!(mlp.tile_n > mlp.tile_m); // Elongated.
         assert!(square.tile_m == square.tile_n);
         // Three distinct policies → three distinct blobs.
-        let blobs = [gemv.to_blob(), small.to_blob(), mlp.to_blob(), square.to_blob()];
+        let blobs = [
+            gemv.to_blob(),
+            small.to_blob(),
+            mlp.to_blob(),
+            square.to_blob(),
+        ];
         for i in 0..blobs.len() {
             for j in i + 1..blobs.len() {
                 assert_ne!(blobs[i], blobs[j], "blob {i} == blob {j}");

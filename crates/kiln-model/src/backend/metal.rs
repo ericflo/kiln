@@ -72,8 +72,8 @@ impl MetalBackend {
         Self {
             device_kt: device,
             disable: MetalKernelDisables::from_env(),
-            resident_activation_registry:
-                super::metal_residency::new_resident_activation_registry(),
+            resident_activation_registry: super::metal_residency::new_resident_activation_registry(
+            ),
         }
     }
 

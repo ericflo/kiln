@@ -37,8 +37,8 @@
 //! `forward.rs:3454,3517` F32-promotion idiom.
 
 use crate::{
-    bail, dispatch2, BackwardOp, CpuStorage, DType, Determinism, DeviceOp2, Error, Layout, Result,
-    Storage, Tensor, TensorId,
+    BackwardOp, CpuStorage, DType, Determinism, DeviceOp2, Error, Layout, Result, Storage, Tensor,
+    TensorId, bail, dispatch2,
 };
 use std::sync::Arc;
 
@@ -285,10 +285,7 @@ impl DeviceOp2 for MatmulLhsTransposedOp {
 
     #[cfg(feature = "vulkan")]
     fn vulkan_fwd(&self, a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
-        if a.is_contiguous()
-            && b.is_contiguous()
-            && matches!(a.dtype(), DType::F32 | DType::BF16)
-        {
+        if a.is_contiguous() && b.is_contiguous() && matches!(a.dtype(), DType::F32 | DType::BF16) {
             return Ok(Some(crate::vulkan_matmul_lhs_transposed(a, b)?));
         }
         Ok(Some(matmul_lhs_transposed_fallback(a, b)?))
@@ -345,10 +342,7 @@ impl DeviceOp2 for MatmulRhsTransposedOp {
 
     #[cfg(feature = "vulkan")]
     fn vulkan_fwd(&self, a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
-        if a.is_contiguous()
-            && b.is_contiguous()
-            && matches!(a.dtype(), DType::F32 | DType::BF16)
-        {
+        if a.is_contiguous() && b.is_contiguous() && matches!(a.dtype(), DType::F32 | DType::BF16) {
             return Ok(Some(crate::vulkan_matmul_rhs_transposed(a, b)?));
         }
         Ok(Some(matmul_rhs_transposed_fallback(a, b)?))

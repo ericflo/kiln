@@ -160,9 +160,11 @@ pub fn rocm_cross_entropy_loss(logits: &Tensor, targets: &Tensor) -> Result<Tens
     // a sync via the D2H copy but is the only way to surface a Result-level
     // error from on-device checks.
     let stream = crate::active_rocm_stream(&ctx);
-    let err_host = stream
-        .memcpy_dtoh(row_err_storage.slice())
-        .map_err(|e| Error::Msg(format!("rocm_cross_entropy_loss: row_err D2H failed: {e:?}")))?;
+    let err_host = stream.memcpy_dtoh(row_err_storage.slice()).map_err(|e| {
+        Error::Msg(format!(
+            "rocm_cross_entropy_loss: row_err D2H failed: {e:?}"
+        ))
+    })?;
     if err_host.len() < 4 {
         return Err(Error::Msg(format!(
             "rocm_cross_entropy_loss: row_err D2H returned {} bytes, expected 4",

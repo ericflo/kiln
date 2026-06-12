@@ -4,10 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-#[cfg(test)]
-use kiln_tensor as kt;
 use kiln_core::config::ModelConfig;
 use kiln_model::lora_loader::AdapterConfig;
+#[cfg(test)]
+use kiln_tensor as kt;
 
 pub const ALLOW_ADAPTER_SHAPE_CONVERSION_FLAG: &str = "--allow-adapter-shape-conversion";
 
@@ -321,10 +321,8 @@ mod tests {
         for (name, shape) in shapes {
             tensors_owned.insert(name, kt::Tensor::zeros_cpu(shape, kt::DType::F32));
         }
-        let tensors_borrow: std::collections::HashMap<&str, &kt::Tensor> = tensors_owned
-            .iter()
-            .map(|(k, v)| (k.as_str(), v))
-            .collect();
+        let tensors_borrow: std::collections::HashMap<&str, &kt::Tensor> =
+            tensors_owned.iter().map(|(k, v)| (k.as_str(), v)).collect();
         kt::safetensors::save_cpu(&tensors_borrow, dir.join("adapter_model.safetensors"))
             .map_err(|e| anyhow::anyhow!("kt::safetensors::save_cpu: {e}"))?;
         Ok(())

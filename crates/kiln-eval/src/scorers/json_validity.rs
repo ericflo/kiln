@@ -203,12 +203,7 @@ mod tests {
 
     #[test]
     fn target_compared_canonicalized() {
-        let (_, kind, _) = score(
-            &ex(Some(r#"{"b":2,"a":1}"#)),
-            r#"{"a":1,"b":2}"#,
-            true,
-            &[],
-        );
+        let (_, kind, _) = score(&ex(Some(r#"{"b":2,"a":1}"#)), r#"{"a":1,"b":2}"#, true, &[]);
         assert_eq!(kind, EvalOutcomeKind::Pass);
     }
 

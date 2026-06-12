@@ -18,9 +18,12 @@ pub(super) fn score(
     completion_text: &str,
     choices: &[String],
 ) -> Result<(f32, EvalOutcomeKind, Option<String>), ScorerError> {
-    let target = example.target.as_deref().ok_or(ScorerError::MissingTarget {
-        kind: "multiple_choice",
-    })?;
+    let target = example
+        .target
+        .as_deref()
+        .ok_or(ScorerError::MissingTarget {
+            kind: "multiple_choice",
+        })?;
     let target_norm = target.trim().to_uppercase();
     let mut valid: Vec<String> = choices.iter().map(|c| c.trim().to_uppercase()).collect();
     if !valid.contains(&target_norm) {
@@ -138,10 +141,7 @@ fn next_letter_from_end(s: &str, valid: &[String]) -> Option<String> {
 /// The first alphanumeric run only — for leading-pattern detection.
 fn first_token(s: &str, valid: &[String]) -> Option<String> {
     let (token, _) = tokens(s).next()?;
-    valid
-        .iter()
-        .any(|c| c == token)
-        .then(|| token.to_string())
+    valid.iter().any(|c| c == token).then(|| token.to_string())
 }
 
 /// Iterator over (token, end_byte_offset) alphanumeric runs.

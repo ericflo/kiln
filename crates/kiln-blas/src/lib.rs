@@ -34,12 +34,10 @@ mod backend_matmul;
 mod workspace_pool;
 
 pub use algo_cache::{
-    deserialize_from_json, load_from_path, save_to_path, serialize_to_json, AlgoCache,
-    AlgoCacheKey, AlgoCacheStats, AlgoCacheValue,
+    AlgoCache, AlgoCacheKey, AlgoCacheStats, AlgoCacheValue, deserialize_from_json, load_from_path,
+    save_to_path, serialize_to_json,
 };
-pub use backend_matmul::{
-    BackendMatmul, Epilogue, MatmulLayout, MatmulOutcome, MatmulRequest,
-};
+pub use backend_matmul::{BackendMatmul, Epilogue, MatmulLayout, MatmulOutcome, MatmulRequest};
 pub use workspace_pool::WorkspacePool;
 
 /// FFI declarations for the Phase 0 probe.
@@ -104,14 +102,8 @@ pub mod probe_ffi {
             ok: 0,
             err_code: 0,
         };
-        let rc = unsafe {
-            kiln_blas_cublaslt_mlp_probe(bt, k, n, iters, &mut out as *mut _)
-        };
-        if rc == 0 {
-            Ok(out)
-        } else {
-            Err(rc)
-        }
+        let rc = unsafe { kiln_blas_cublaslt_mlp_probe(bt, k, n, iters, &mut out as *mut _) };
+        if rc == 0 { Ok(out) } else { Err(rc) }
     }
 }
 

@@ -95,13 +95,7 @@ pub fn rocm_lerp(a: &Tensor, b: &Tensor, weight: f32) -> Result<Tensor> {
 
     let status = unsafe {
         kiln_lerp_async(
-            a_ptr,
-            b_ptr,
-            out_ptr,
-            n as i64,
-            weight,
-            dtype_tag,
-            raw_stream,
+            a_ptr, b_ptr, out_ptr, n as i64, weight, dtype_tag, raw_stream,
         )
     };
     if status != 0 {

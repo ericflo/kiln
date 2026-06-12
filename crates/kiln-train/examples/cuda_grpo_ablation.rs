@@ -863,12 +863,8 @@ fn main() -> Result<()> {
     )
     .context("load model weights")?;
     // #1082: kt-native — `device` is a kt `Device::Cuda(0)`, passed directly.
-    let gpu_weights = GpuWeights::from_model_weights(
-        &model_weights,
-        &model_config,
-        &device,
-    )
-    .context("transfer weights to CUDA")?;
+    let gpu_weights = GpuWeights::from_model_weights(&model_weights, &model_config, &device)
+        .context("transfer weights to CUDA")?;
     drop(model_weights);
     println!("model_loaded_vram_mib={}", current_vram_mib());
 

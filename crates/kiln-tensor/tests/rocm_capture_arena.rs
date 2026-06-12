@@ -18,8 +18,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use kiln_tensor::{
-    primary_rocm_context, rocm_capture_arena_active, with_rocm_capture_arena, DType, Device,
-    RocmCaptureArena, RocmStorage, Tensor,
+    DType, Device, RocmCaptureArena, RocmStorage, Tensor, primary_rocm_context,
+    rocm_capture_arena_active, with_rocm_capture_arena,
 };
 
 fn no_rocm() -> bool {
@@ -76,7 +76,11 @@ fn freeze_pointers_and_replay_memset() {
         }
         (ptrs, first.unwrap())
     });
-    assert_eq!(arena.borrow().buffer_count(), 3, "3 distinct buffers recorded");
+    assert_eq!(
+        arena.borrow().buffer_count(),
+        3,
+        "3 distinct buffers recorded"
+    );
 
     // Dirty the first frozen buffer with a non-zero sentinel (writes through the
     // stable pointer). On replay the arena's captured memset must re-zero it.
@@ -88,10 +92,15 @@ fn freeze_pointers_and_replay_memset() {
     let replayed: Vec<u64> = with_rocm_capture_arena(arena.clone(), || {
         shapes
             .iter()
-            .map(|&(n, dt)| tptr(&Tensor::zeros_on(Device::Rocm(0), vec![n], dt).expect("zeros_on replay")))
+            .map(|&(n, dt)| {
+                tptr(&Tensor::zeros_on(Device::Rocm(0), vec![n], dt).expect("zeros_on replay"))
+            })
             .collect()
     });
-    assert_eq!(recorded, replayed, "FREEZE-POINTERS: replay must reuse the recorded device pointers");
+    assert_eq!(
+        recorded, replayed,
+        "FREEZE-POINTERS: replay must reuse the recorded device pointers"
+    );
 
     // The replay memset ran on the (default) active stream; sync then read back.
     kiln_tensor::rocm_synchronize_default_stream(0).expect("sync default");
@@ -99,7 +108,11 @@ fn freeze_pointers_and_replay_memset() {
         .expect("dtoh")
         .to_vec::<f32>()
         .expect("to_vec");
-    assert_eq!(back, vec![0.0f32; 8], "replay memset must re-zero the dirtied zero=true buffer");
+    assert_eq!(
+        back,
+        vec![0.0f32; 8],
+        "replay memset must re-zero the dirtied zero=true buffer"
+    );
 }
 
 #[test]
@@ -116,7 +129,10 @@ fn replay_shape_mismatch_errors() {
         // Different element count than recorded → the arena must reject it.
         Tensor::zeros_on(Device::Rocm(0), vec![16], DType::F32)
     });
-    assert!(err.is_err(), "replay with a different shape must error (non-determinism guard)");
+    assert!(
+        err.is_err(),
+        "replay with a different shape must error (non-determinism guard)"
+    );
 }
 
 #[test]
@@ -135,7 +151,10 @@ fn replay_overrun_errors() {
         (a, b)
     });
     assert!(ok.is_ok(), "first replay alloc reuses the recorded buffer");
-    assert!(overrun.is_err(), "replaying more allocs than recorded must error");
+    assert!(
+        overrun.is_err(),
+        "replaying more allocs than recorded must error"
+    );
 }
 
 #[test]
@@ -143,7 +162,10 @@ fn hook_is_noop_outside_scope() {
     if no_rocm() {
         return;
     }
-    assert!(!rocm_capture_arena_active(), "no arena active outside a scope");
+    assert!(
+        !rocm_capture_arena_active(),
+        "no arena active outside a scope"
+    );
     // Outside any scope: a normal Owned allocation, zero behavior change.
     let t = Tensor::zeros_on(Device::Rocm(0), vec![8], DType::F32).expect("zeros_on");
     assert!(
@@ -160,7 +182,10 @@ fn hook_is_noop_outside_scope() {
     with_rocm_capture_arena(arena, || {
         assert!(rocm_capture_arena_active(), "arena active inside the scope");
         let t = Tensor::zeros_on(Device::Rocm(0), vec![8], DType::F32).expect("zeros_on in-scope");
-        assert!(t_is_borrowed(&t), "inside the arena, allocations are Borrowed");
+        assert!(
+            t_is_borrowed(&t),
+            "inside the arena, allocations are Borrowed"
+        );
     });
     assert!(!rocm_capture_arena_active(), "scope restored on exit");
 }
@@ -176,5 +201,9 @@ fn record_single_alloc_pushes_one_buffer() {
     with_rocm_capture_arena(arena.clone(), || {
         let _ = Tensor::zeros_on(Device::Rocm(0), vec![8], DType::F32).expect("zeros_on");
     });
-    assert_eq!(arena.borrow().buffer_count(), 1, "exactly one buffer per zeros_on (no recursion)");
+    assert_eq!(
+        arena.borrow().buffer_count(),
+        1,
+        "exactly one buffer per zeros_on (no recursion)"
+    );
 }

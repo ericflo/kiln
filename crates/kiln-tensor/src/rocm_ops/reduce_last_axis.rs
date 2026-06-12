@@ -82,7 +82,8 @@ pub fn rocm_sum_squared_last_axis(x: &Tensor) -> Result<Tensor> {
     };
     // Output is always F32; the kernel writes every output row (lane 0 of each
     // per-row block stores unconditionally), so skip the zero-fill.
-    let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, n_rows as usize)?;
+    let out_storage =
+        RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, n_rows as usize)?;
 
     let raw_stream = x_storage.rocm_stream_raw();
     let (x_base, _) = x_storage.device_ptr_raw();
@@ -91,8 +92,9 @@ pub fn rocm_sum_squared_last_axis(x: &Tensor) -> Result<Tensor> {
     let x_ptr = (x_base + x_off) as *const core::ffi::c_void;
     let out_ptr = out_base as *mut core::ffi::c_void;
 
-    let status =
-        unsafe { kiln_sum_squared_last_axis_async(x_ptr, out_ptr, n_rows, n_cols, tag, raw_stream) };
+    let status = unsafe {
+        kiln_sum_squared_last_axis_async(x_ptr, out_ptr, n_rows, n_cols, tag, raw_stream)
+    };
     if status != 0 {
         return Err(Error::Msg(format!("{label}: FFI returned status {status}")));
     }
@@ -137,9 +139,7 @@ pub fn rocm_l2norm_last_axis(x: &Tensor, eps: f32) -> Result<Tensor> {
         .storage()
         .as_any()
         .downcast_ref::<RocmStorage>()
-        .ok_or_else(|| {
-            Error::Msg(format!("{label}: sum_sq must be ROCm (internal invariant)"))
-        })?;
+        .ok_or_else(|| Error::Msg(format!("{label}: sum_sq must be ROCm (internal invariant)")))?;
     let ctx = x_storage.context();
     let device_index = match x.device() {
         Device::Rocm(i) => i,
@@ -147,8 +147,7 @@ pub fn rocm_l2norm_last_axis(x: &Tensor, eps: f32) -> Result<Tensor> {
     };
     // The apply kernel writes every element of the output, so skip the
     // zero-fill.
-    let out_storage =
-        RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
+    let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
 
     let raw_stream = x_storage.rocm_stream_raw();
     let (x_base, _) = x_storage.device_ptr_raw();
@@ -171,7 +170,11 @@ pub fn rocm_l2norm_last_axis(x: &Tensor, eps: f32) -> Result<Tensor> {
     }
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
-    Tensor::from_parts(storage_arc, Layout::contiguous(shape.to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage_arc,
+        Layout::contiguous(shape.to_vec()),
+        TensorId::next(),
+    )
 }
 
 /// Shared implementation behind [`rocm_sum_last_axis`] / [`rocm_mean_last_axis`].
@@ -218,8 +221,9 @@ fn rocm_reduce_last_axis_impl(x: &Tensor, divisor: f32, label: &str) -> Result<T
     let x_ptr = (x_base + x_off) as *const core::ffi::c_void;
     let out_ptr = out_base as *mut core::ffi::c_void;
 
-    let status =
-        unsafe { kiln_sum_last_axis_async(x_ptr, out_ptr, n_rows, n_cols, divisor, tag, raw_stream) };
+    let status = unsafe {
+        kiln_sum_last_axis_async(x_ptr, out_ptr, n_rows, n_cols, divisor, tag, raw_stream)
+    };
     if status != 0 {
         return Err(Error::Msg(format!("{label}: FFI returned status {status}")));
     }

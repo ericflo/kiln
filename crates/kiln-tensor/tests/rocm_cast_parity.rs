@@ -92,7 +92,11 @@ fn cast_parity_full_matrix() {
             .unwrap_or_else(|e| panic!("rocm_cast f32->bf16 (n={n}): {e}"));
         assert_eq!(to_bf16.dtype(), DType::BF16);
         let ref_bf16: Vec<f32> = f32_host.iter().map(|&x| ref_to_bf16(x)).collect();
-        assert_close(&dev_to_f32(&to_bf16), &ref_bf16, &format!("f32->bf16 n={n}"));
+        assert_close(
+            &dev_to_f32(&to_bf16),
+            &ref_bf16,
+            &format!("f32->bf16 n={n}"),
+        );
 
         // F32 -> F16
         let to_f16 = kiln_tensor::rocm_cast(&f32_dev, DType::F16)
@@ -105,13 +109,21 @@ fn cast_parity_full_matrix() {
         let bf16_to_f32 = kiln_tensor::rocm_cast(&to_bf16, DType::F32)
             .unwrap_or_else(|e| panic!("rocm_cast bf16->f32 (n={n}): {e}"));
         assert_eq!(bf16_to_f32.dtype(), DType::F32);
-        assert_close(&dev_to_f32(&bf16_to_f32), &ref_bf16, &format!("bf16->f32 n={n}"));
+        assert_close(
+            &dev_to_f32(&bf16_to_f32),
+            &ref_bf16,
+            &format!("bf16->f32 n={n}"),
+        );
 
         // F16 -> F32
         let f16_to_f32 = kiln_tensor::rocm_cast(&to_f16, DType::F32)
             .unwrap_or_else(|e| panic!("rocm_cast f16->f32 (n={n}): {e}"));
         assert_eq!(f16_to_f32.dtype(), DType::F32);
-        assert_close(&dev_to_f32(&f16_to_f32), &ref_f16, &format!("f16->f32 n={n}"));
+        assert_close(
+            &dev_to_f32(&f16_to_f32),
+            &ref_f16,
+            &format!("f16->f32 n={n}"),
+        );
 
         // BF16 -> F16: kernel widens bf16 to f32 then narrows to f16. Reference
         // mirrors that exact two-step path.
@@ -119,14 +131,22 @@ fn cast_parity_full_matrix() {
             .unwrap_or_else(|e| panic!("rocm_cast bf16->f16 (n={n}): {e}"));
         assert_eq!(bf16_to_f16.dtype(), DType::F16);
         let ref_bf16_f16: Vec<f32> = ref_bf16.iter().map(|&x| ref_to_f16(x)).collect();
-        assert_close(&dev_to_f32(&bf16_to_f16), &ref_bf16_f16, &format!("bf16->f16 n={n}"));
+        assert_close(
+            &dev_to_f32(&bf16_to_f16),
+            &ref_bf16_f16,
+            &format!("bf16->f16 n={n}"),
+        );
 
         // F16 -> BF16: widen f16 to f32 then narrow to bf16.
         let f16_to_bf16 = kiln_tensor::rocm_cast(&to_f16, DType::BF16)
             .unwrap_or_else(|e| panic!("rocm_cast f16->bf16 (n={n}): {e}"));
         assert_eq!(f16_to_bf16.dtype(), DType::BF16);
         let ref_f16_bf16: Vec<f32> = ref_f16.iter().map(|&x| ref_to_bf16(x)).collect();
-        assert_close(&dev_to_f32(&f16_to_bf16), &ref_f16_bf16, &format!("f16->bf16 n={n}"));
+        assert_close(
+            &dev_to_f32(&f16_to_bf16),
+            &ref_f16_bf16,
+            &format!("f16->bf16 n={n}"),
+        );
     }
     eprintln!("cast CPU-vs-ROCm parity passed across the F32<->BF16<->F16 matrix");
 }

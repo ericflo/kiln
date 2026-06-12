@@ -106,14 +106,7 @@ pub fn rocm_rmsnorm_last_axis(x: &Tensor, weight: &Tensor, eps: f32) -> Result<T
 
     let status = unsafe {
         kiln_rmsnorm_last_axis_async(
-            x_ptr,
-            weight_ptr,
-            out_ptr,
-            n_rows,
-            n_cols,
-            eps,
-            dtype_tag,
-            raw_stream,
+            x_ptr, weight_ptr, out_ptr, n_rows, n_cols, eps, dtype_tag, raw_stream,
         )
     };
     if status != 0 {
@@ -123,5 +116,9 @@ pub fn rocm_rmsnorm_last_axis(x: &Tensor, weight: &Tensor, eps: f32) -> Result<T
     }
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
-    Tensor::from_parts(storage_arc, Layout::contiguous(shape.to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage_arc,
+        Layout::contiguous(shape.to_vec()),
+        TensorId::next(),
+    )
 }

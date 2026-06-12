@@ -166,7 +166,12 @@ fn build_rocm() {
         if env::var("KILN_ROCM_WAVE64").is_ok() {
             cmd.arg("-mwavefrontsize64");
         }
-        cmd.arg("-I").arg(&kt_compat).arg("-I").arg(&kt_csrc).arg("-I").arg(&csrc_dir);
+        cmd.arg("-I")
+            .arg(&kt_compat)
+            .arg("-I")
+            .arg(&kt_csrc)
+            .arg("-I")
+            .arg(&csrc_dir);
         cmd.arg(&src).arg("-o").arg(&obj);
         let status = cmd
             .status()

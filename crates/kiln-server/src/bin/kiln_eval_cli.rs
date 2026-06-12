@@ -1453,11 +1453,15 @@ fn print_compare(result: &EvalResultPayload) {
             test.improved, test.regressed, test.p_value
         );
         if test.improved + test.regressed == 0 {
-            println!("  verdict: no discordant examples — the adapters are indistinguishable on this suite");
+            println!(
+                "  verdict: no discordant examples — the adapters are indistinguishable on this suite"
+            );
         } else if test.significant() {
             println!("  verdict: significant at p<0.05");
         } else {
-            println!("  verdict: NOT significant at p<0.05 — the delta could be noise; add examples or rerun");
+            println!(
+                "  verdict: NOT significant at p<0.05 — the delta could be noise; add examples or rerun"
+            );
         }
     }
 }
@@ -1520,8 +1524,7 @@ mod tests {
             stdout: true,
         };
         cmd_trace_suite(args).unwrap();
-        let suite: EvalSuite =
-            serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
+        let suite: EvalSuite = serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
         assert_eq!(suite.examples.len(), 1);
     }
 }

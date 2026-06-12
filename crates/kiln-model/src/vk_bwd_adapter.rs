@@ -89,16 +89,14 @@ impl BackwardOp for VkBwdAdapter {
                 return Err(Error::Msg(format!(
                     "VkBwdAdapter[{}]: grad_output is not on a Vulkan device (got {other})",
                     self.0.op_name()
-                )))
+                )));
             }
         };
 
-        let vk_grads = self.0.backward(&vk_grad).map_err(|e| {
-            Error::Msg(format!(
-                "VkBwdAdapter[{}] backward: {e}",
-                self.0.op_name()
-            ))
-        })?;
+        let vk_grads = self
+            .0
+            .backward(&vk_grad)
+            .map_err(|e| Error::Msg(format!("VkBwdAdapter[{}] backward: {e}", self.0.op_name())))?;
 
         // Preserve length + slot order + None positions EXACTLY. The tape
         // walker binds the i-th returned grad to node.input_ids[i]; a dropped
@@ -147,9 +145,8 @@ pub fn family_ported(op_name: &str) -> bool {
     matches!(
         op_name,
         // Wave 1 — the core training path. F32-only families, FD-validated.
-        "matmul" | "rms_norm" | "rope" | "softmax_lastdim"
-        // Pending BF16 grad-validation (see doc above): "matmul_bf16w"
-        // Wave 2 appended here as each family's FD test goes green:
-        // | "flce" | "grpo" | "gdn_chunkwise" | "opd_topk_kl"
+        "matmul" | "rms_norm" | "rope" | "softmax_lastdim" // Pending BF16 grad-validation (see doc above): "matmul_bf16w"
+                                                           // Wave 2 appended here as each family's FD test goes green:
+                                                           // | "flce" | "grpo" | "gdn_chunkwise" | "opd_topk_kl"
     )
 }

@@ -175,7 +175,11 @@ fn zeros_like(t: &Tensor) -> Result<Tensor> {
     let bytes = vec![0u8; n_bytes];
     let cpu = CpuStorage::from_bytes(t.dtype(), bytes)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(t.shape().to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(t.shape().to_vec()),
+        TensorId::next(),
+    )
 }
 
 #[cfg(test)]
@@ -266,12 +270,18 @@ mod tests {
         assert_eq!(SubBackward.input_count(), 2);
 
         let one = Tensor::from_slice(&[1.0f32], vec![1]).unwrap();
-        let m = MulBackward { a: one.clone(), b: one.clone() };
+        let m = MulBackward {
+            a: one.clone(),
+            b: one.clone(),
+        };
         assert_eq!(m.name(), "mul_backward");
         assert_eq!(m.input_count(), 2);
         assert!(m.requires_input(0));
 
-        let d = DivBackward { a: one.clone(), b: one };
+        let d = DivBackward {
+            a: one.clone(),
+            b: one,
+        };
         assert_eq!(d.name(), "div_backward");
         assert_eq!(d.input_count(), 2);
 

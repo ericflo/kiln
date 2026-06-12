@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use kiln_tensor::{bail, CpuStorage, Error, Layout, Result, Storage, Tensor, TensorId};
+use kiln_tensor::{CpuStorage, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 use crate::BackwardOp;
 
@@ -181,11 +181,7 @@ mod tests {
     fn narrow_backward_2d_axis_0() {
         // Forward: x.shape=[4, 3], narrow(0, 1, 2) -> [2, 3].
         // Grad [[1,2,3],[4,5,6]] -> d_x rows 1 and 2 are set.
-        let grad = Tensor::from_slice(
-            &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
-            vec![2, 3],
-        )
-        .unwrap();
+        let grad = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
         let bo = NarrowBackward {
             axis: 0,
             offset: 1,
@@ -209,11 +205,7 @@ mod tests {
     fn narrow_backward_2d_axis_1_chunk() {
         // FLCE chunk pattern: x.shape=[B=2, V=6], narrow(1, 2, 3) -> [2, 3].
         // Grad [[1,2,3],[4,5,6]] -> middle cols of d_x.
-        let grad = Tensor::from_slice(
-            &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
-            vec![2, 3],
-        )
-        .unwrap();
+        let grad = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
         let bo = NarrowBackward {
             axis: 1,
             offset: 2,

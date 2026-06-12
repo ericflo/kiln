@@ -72,7 +72,9 @@ pub(crate) fn msl_ty(dt: DType) -> Result<&'static str> {
         DType::F32 => Ok("float"),
         DType::BF16 => Ok("bfloat"),
         DType::F16 => Ok("half"),
-        other => Err(Error::Msg(format!("metal_kernels: unsupported dtype {other}"))),
+        other => Err(Error::Msg(format!(
+            "metal_kernels: unsupported dtype {other}"
+        ))),
     }
 }
 
@@ -93,13 +95,18 @@ pub(crate) fn cast_msl_ty(dt: DType) -> Result<&'static str> {
 
 /// 1-D dispatch covering exactly `n` threads (non-uniform threadgroups —
 /// Apple4+; the M1 is Apple7).
-fn dispatch_1d(
-    encoder: &crate::metal_rt::ComputeCommandEncoder,
-    n: usize,
-) {
+fn dispatch_1d(encoder: &crate::metal_rt::ComputeCommandEncoder, n: usize) {
     let tg = 256usize.min(n.max(1));
-    let grid = objc2_metal::MTLSize { width: n, height: 1, depth: 1 };
-    let tgs = objc2_metal::MTLSize { width: tg, height: 1, depth: 1 };
+    let grid = objc2_metal::MTLSize {
+        width: n,
+        height: 1,
+        depth: 1,
+    };
+    let tgs = objc2_metal::MTLSize {
+        width: tg,
+        height: 1,
+        depth: 1,
+    };
     encoder.dispatch_threads(grid, tgs);
 }
 
@@ -1071,8 +1078,16 @@ pub(crate) fn softmax_last_axis(
     // shared[width] of MD_t; sizeof(MD_t) == 8 for the float triple.
     encoder.set_threadgroup_memory_length(0, width * 8);
 
-    let groups = objc2_metal::MTLSize { width: rows, height: 1, depth: 1 };
-    let tg = objc2_metal::MTLSize { width, height: 1, depth: 1 };
+    let groups = objc2_metal::MTLSize {
+        width: rows,
+        height: 1,
+        depth: 1,
+    };
+    let tg = objc2_metal::MTLSize {
+        width,
+        height: 1,
+        depth: 1,
+    };
     encoder.dispatch_thread_groups(groups, tg);
     drop(encoder);
     Ok(())
@@ -1194,9 +1209,11 @@ pub(crate) fn log_softmax_last_axis(
         .max_total_threads_per_threadgroup()
         .min((cols / 2).next_power_of_two().max(1));
 
-    let encoder = companion
-        .command_encoder()
-        .map_err(|e| Error::Msg(format!("metal_kernels::log_softmax_last_axis: encoder: {e:?}")))?;
+    let encoder = companion.command_encoder().map_err(|e| {
+        Error::Msg(format!(
+            "metal_kernels::log_softmax_last_axis: encoder: {e:?}"
+        ))
+    })?;
     encoder.set_label("kt_log_softmax_last_axis");
     encoder.set_compute_pipeline_state(&pipeline);
 
@@ -1209,8 +1226,16 @@ pub(crate) fn log_softmax_last_axis(
     // shared[width] of MD_t; sizeof(MD_t) == 8 for the float triple.
     encoder.set_threadgroup_memory_length(0, width * 8);
 
-    let groups = objc2_metal::MTLSize { width: rows, height: 1, depth: 1 };
-    let tg = objc2_metal::MTLSize { width, height: 1, depth: 1 };
+    let groups = objc2_metal::MTLSize {
+        width: rows,
+        height: 1,
+        depth: 1,
+    };
+    let tg = objc2_metal::MTLSize {
+        width,
+        height: 1,
+        depth: 1,
+    };
     encoder.dispatch_thread_groups(groups, tg);
     drop(encoder);
     Ok(())
@@ -1317,8 +1342,16 @@ KT_RMSNORM_IMPL({entry}, {ty})
     encoder.set_bytes(5, &eps);
     encoder.set_threadgroup_memory_length(0, shared_bytes);
 
-    let groups = objc2_metal::MTLSize { width: rows.max(1), height: 1, depth: 1 };
-    let threads = objc2_metal::MTLSize { width: tg, height: 1, depth: 1 };
+    let groups = objc2_metal::MTLSize {
+        width: rows.max(1),
+        height: 1,
+        depth: 1,
+    };
+    let threads = objc2_metal::MTLSize {
+        width: tg,
+        height: 1,
+        depth: 1,
+    };
     encoder.dispatch_thread_groups(groups, threads);
     drop(encoder);
     Ok(())
@@ -1435,8 +1468,16 @@ pub(crate) fn layer_norm(
     .max(1);
     encoder.set_threadgroup_memory_length(0, tg * std::mem::size_of::<f32>());
 
-    let groups = objc2_metal::MTLSize { width: n_rows, height: 1, depth: 1 };
-    let tgs = objc2_metal::MTLSize { width: tg, height: 1, depth: 1 };
+    let groups = objc2_metal::MTLSize {
+        width: n_rows,
+        height: 1,
+        depth: 1,
+    };
+    let tgs = objc2_metal::MTLSize {
+        width: tg,
+        height: 1,
+        depth: 1,
+    };
     encoder.dispatch_thread_groups(groups, tgs);
     drop(encoder);
     Ok(())
@@ -1792,7 +1833,14 @@ kernel void {entry}(
 /// the per-row causal limit are skipped at block granularity, the boundary
 /// block is masked per element. `D` is baked per-variant (`d{D}`); a non-
 /// multiple-of-8 `D` rounds the staged head-dim up to `TD*8` and zero-pads.
-fn sdpa_steel_src(ty: &str, head_dim: usize, bq: usize, bk: usize, wm: usize, entry: &str) -> String {
+fn sdpa_steel_src(
+    ty: &str,
+    head_dim: usize,
+    bq: usize,
+    bk: usize,
+    wm: usize,
+    entry: &str,
+) -> String {
     let td = head_dim.div_ceil(8); // head-dim fragments (zero-padded if D%8!=0)
     let dpad = td * 8; // staged/padded head dim
     let tk = bk / 8; // key fragments per block
@@ -2286,8 +2334,16 @@ pub(crate) fn sdpa(
 
     // W simdgroups (W*32 lanes) per (qi, kv-head, batch); each handles the GF
     // q-heads kv_h*GF .. kv_h*GF+GF-1.
-    let groups = objc2_metal::MTLSize { width: sq, height: hkv, depth: b };
-    let threads = objc2_metal::MTLSize { width: split_w * 32, height: 1, depth: 1 };
+    let groups = objc2_metal::MTLSize {
+        width: sq,
+        height: hkv,
+        depth: b,
+    };
+    let threads = objc2_metal::MTLSize {
+        width: split_w * 32,
+        height: 1,
+        depth: 1,
+    };
     encoder.dispatch_thread_groups(groups, threads);
     drop(encoder);
     Ok(())
@@ -2336,7 +2392,11 @@ fn sdpa_dispatch_steel(
         height: hq,
         depth: b,
     };
-    let threads = objc2_metal::MTLSize { width: wm * 32, height: 1, depth: 1 };
+    let threads = objc2_metal::MTLSize {
+        width: wm * 32,
+        height: 1,
+        depth: 1,
+    };
     encoder.dispatch_thread_groups(groups, threads);
     drop(encoder);
     Ok(())

@@ -27,9 +27,7 @@
 //! All three are designed to compose: a typical chain runs
 //! `repetition → frequency → presence → temperature → top_k → top_p`.
 
-use crate::{
-    bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId,
-};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 use std::sync::Arc;
 
 use super::logit_processor::LogitProcessor;
@@ -50,10 +48,7 @@ fn validate_logits(logits: &Tensor, history: &[Vec<u32>], name: &str) -> Result<
         bail!("{name}: logits must be contiguous");
     }
     if !matches!(logits.dtype(), DType::F32 | DType::BF16 | DType::F16) {
-        bail!(
-            "{name}: dtype must be F32/BF16/F16, got {}",
-            logits.dtype()
-        );
+        bail!("{name}: dtype must be F32/BF16/F16, got {}", logits.dtype());
     }
     let batch = logits.shape()[0];
     if history.len() != batch {
@@ -82,12 +77,8 @@ fn load_all_rows_f32(logits: &Tensor, batch: usize, vocab: usize) -> Result<Vec<
             let chunk = &bytes[start + v * per..start + (v + 1) * per];
             let val = match dtype {
                 DType::F32 => f32::from_le_bytes(chunk.try_into().unwrap()),
-                DType::BF16 => {
-                    half::bf16::from_le_bytes(chunk.try_into().unwrap()).to_f32()
-                }
-                DType::F16 => {
-                    half::f16::from_le_bytes(chunk.try_into().unwrap()).to_f32()
-                }
+                DType::BF16 => half::bf16::from_le_bytes(chunk.try_into().unwrap()).to_f32(),
+                DType::F16 => half::f16::from_le_bytes(chunk.try_into().unwrap()).to_f32(),
                 _ => unreachable!(),
             };
             row.push(val);
@@ -109,15 +100,20 @@ fn store_rows(dtype: DType, shape: &[usize], rows: &[Vec<f32>]) -> Result<Tensor
                 DType::F32 => out[offset..offset + 4].copy_from_slice(&val.to_le_bytes()),
                 DType::BF16 => out[offset..offset + 2]
                     .copy_from_slice(&half::bf16::from_f32(val).to_le_bytes()),
-                DType::F16 => out[offset..offset + 2]
-                    .copy_from_slice(&half::f16::from_f32(val).to_le_bytes()),
+                DType::F16 => {
+                    out[offset..offset + 2].copy_from_slice(&half::f16::from_f32(val).to_le_bytes())
+                }
                 _ => unreachable!(),
             }
         }
     }
     let cpu = CpuStorage::from_bytes(dtype, out)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(shape.to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(shape.to_vec()),
+        TensorId::next(),
+    )
 }
 
 // ----------------------------------------------------------------------
@@ -207,8 +203,7 @@ impl LogitProcessor for FrequencyPenaltyProcessor {
         let mut rows = load_all_rows_f32(logits, batch, vocab)?;
         for (b, row) in rows.iter_mut().enumerate() {
             // Count occurrences in this batch row's history.
-            let mut counts: std::collections::HashMap<u32, u32> =
-                std::collections::HashMap::new();
+            let mut counts: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
             for &id in &self.history[b] {
                 *counts.entry(id).or_insert(0) += 1;
             }
@@ -340,11 +335,7 @@ mod tests {
     #[test]
     fn multi_batch_independent_histories() {
         // Two batches with different histories.
-        let logits = Tensor::from_slice(
-            &[1.0f32, 2.0, 3.0, 10.0, 20.0, 30.0],
-            vec![2, 3],
-        )
-        .unwrap();
+        let logits = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 10.0, 20.0, 30.0], vec![2, 3]).unwrap();
         let p = RepetitionPenaltyProcessor::new(2.0, vec![vec![0], vec![2]]);
         let out = p.apply(&logits).unwrap();
         let rows = read_rows(&out, 2, 3);

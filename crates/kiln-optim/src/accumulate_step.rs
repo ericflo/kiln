@@ -85,7 +85,10 @@ mod tests {
         assert!(acc.contains(p.tensor_id()));
         let stepped = accumulate_then_step(&mut adam, &mut [&mut p], &mut acc).unwrap();
         assert_eq!(stepped, 1);
-        assert!(!acc.contains(p.tensor_id()), "accumulator entry should be cleared after step");
+        assert!(
+            !acc.contains(p.tensor_id()),
+            "accumulator entry should be cleared after step"
+        );
     }
 
     #[test]
@@ -98,10 +101,12 @@ mod tests {
         acc.accumulate(p1.tensor_id(), &g).unwrap();
         acc.accumulate(p2.tensor_id(), &g).unwrap();
         assert_eq!(acc.len(), 2);
-        let stepped =
-            accumulate_then_step(&mut adam, &mut [&mut p1, &mut p2], &mut acc).unwrap();
+        let stepped = accumulate_then_step(&mut adam, &mut [&mut p1, &mut p2], &mut acc).unwrap();
         assert_eq!(stepped, 2);
-        assert!(acc.is_empty(), "accumulator should be empty after stepping all");
+        assert!(
+            acc.is_empty(),
+            "accumulator should be empty after stepping all"
+        );
     }
 
     #[test]
@@ -113,8 +118,7 @@ mod tests {
         let g = Tensor::from_slice(&[0.1f32], vec![1]).unwrap();
         // Only p1 has a grad.
         acc.accumulate(p1.tensor_id(), &g).unwrap();
-        let stepped =
-            accumulate_then_step(&mut adam, &mut [&mut p1, &mut p2], &mut acc).unwrap();
+        let stepped = accumulate_then_step(&mut adam, &mut [&mut p1, &mut p2], &mut acc).unwrap();
         assert_eq!(stepped, 1);
         assert!(acc.is_empty());
     }

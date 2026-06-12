@@ -62,7 +62,7 @@ pub fn content_hash_storage(storage: &Storage) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kiln_tensor::{cpu_zeros, DType};
+    use kiln_tensor::{DType, cpu_zeros};
     use std::sync::Arc;
 
     fn make_storage(dtype: DType, bytes: Vec<u8>) -> Storage {

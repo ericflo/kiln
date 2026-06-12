@@ -6,25 +6,33 @@
 //! `#[ignore]` — run explicitly:
 //!   cargo test -p kiln-tensor --features metal --test metal_sdpa_bench -- --ignored --nocapture
 
+use kiln_tensor::{DType, Device, Tensor, ops};
 use std::time::Instant;
-use kiln_tensor::{ops, DType, Device, Tensor};
 
 fn metal() -> Option<Device> {
-    kiln_tensor::primary_metal_companion(0).ok().map(|_| Device::Metal(0))
+    kiln_tensor::primary_metal_companion(0)
+        .ok()
+        .map(|_| Device::Metal(0))
 }
 
 fn pat(n: usize, seed: u64) -> Vec<f32> {
     let mut s = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     (0..n)
         .map(|_| {
-            s = s.wrapping_add(0xDEADBEEF).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            s = s
+                .wrapping_add(0xDEADBEEF)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15);
             ((s >> 40) as u32 % 256) as f32 / 256.0 - 0.5
         })
         .collect()
 }
 
 fn bf16(data: Vec<f32>, shape: &[usize], dev: Device) -> Tensor {
-    ops::cast(&Tensor::from_vec_on(dev, data, shape.to_vec()).unwrap(), DType::BF16).unwrap()
+    ops::cast(
+        &Tensor::from_vec_on(dev, data, shape.to_vec()).unwrap(),
+        DType::BF16,
+    )
+    .unwrap()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -67,7 +75,9 @@ fn bench_sdpa_qwen_shapes() {
     };
     // Qwen3.5-4B-ish attention: Hq=32, Hkv=8 (GQA 4:1), head_dim=128.
     let (hq, hkv, d) = (32usize, 8usize, 128usize);
-    println!("\n=== Metal SDPA microbench (metal_sdpa_last_axis, BF16, Hq={hq} Hkv={hkv} D={d}) ===");
+    println!(
+        "\n=== Metal SDPA microbench (metal_sdpa_last_axis, BF16, Hq={hq} Hkv={hkv} D={d}) ==="
+    );
     // (metric, label, bs, sq, sk, causal, iters)
     let cases = [
         (

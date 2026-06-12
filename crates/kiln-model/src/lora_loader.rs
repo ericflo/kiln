@@ -307,9 +307,7 @@ impl LoraWeights {
                                 || mtp_layer.gate_proj.is_some()
                                 || mtp_layer.up_proj.is_some()
                                 || mtp_layer.down_proj.is_some());
-                        tracing::warn!(
-                            "unsupported MTP LoRA target module: {module}, skipping"
-                        );
+                        tracing::warn!("unsupported MTP LoRA target module: {module}, skipping");
                     }
                 }
             }

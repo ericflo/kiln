@@ -21,9 +21,7 @@
 //! Both produce a mask that's intersected with the logits (mask
 //! out-of-set entries with -inf).
 
-use crate::{
-    bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId,
-};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 use std::sync::Arc;
 
 use super::logit_processor::LogitProcessor;
@@ -34,7 +32,10 @@ use super::logit_processor::LogitProcessor;
 
 fn validate_logits(logits: &Tensor, name: &str) -> Result<()> {
     if logits.rank() != 2 {
-        bail!("{name}: logits must be rank-2 [batch, vocab], got {:?}", logits.shape());
+        bail!(
+            "{name}: logits must be rank-2 [batch, vocab], got {:?}",
+            logits.shape()
+        );
     }
     if !logits.is_contiguous() {
         bail!("{name}: logits must be contiguous");
@@ -85,15 +86,20 @@ fn store_rows(dtype: DType, shape: &[usize], rows: &[Vec<f32>]) -> Result<Tensor
                 DType::F32 => out[offset..offset + 4].copy_from_slice(&val.to_le_bytes()),
                 DType::BF16 => out[offset..offset + 2]
                     .copy_from_slice(&half::bf16::from_f32(val).to_le_bytes()),
-                DType::F16 => out[offset..offset + 2]
-                    .copy_from_slice(&half::f16::from_f32(val).to_le_bytes()),
+                DType::F16 => {
+                    out[offset..offset + 2].copy_from_slice(&half::f16::from_f32(val).to_le_bytes())
+                }
                 _ => unreachable!(),
             }
         }
     }
     let cpu = CpuStorage::from_bytes(dtype, out)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(shape.to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(shape.to_vec()),
+        TensorId::next(),
+    )
 }
 
 /// Compute softmax probabilities of a single row (max-subtracted for
@@ -197,7 +203,11 @@ impl LogitProcessor for TypicalPProcessor {
             let dist: Vec<f32> = surprisals.iter().map(|&s| (s - entropy).abs()).collect();
             // Sort indices by dist ascending
             let mut idx: Vec<usize> = (0..vocab).collect();
-            idx.sort_by(|&a, &b| dist[a].partial_cmp(&dist[b]).unwrap_or(std::cmp::Ordering::Equal));
+            idx.sort_by(|&a, &b| {
+                dist[a]
+                    .partial_cmp(&dist[b])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             // Walk sorted indices, accumulate probability, keep while
             // cumulative < p; then keep the one that crosses p (so we
             // always select at least one token).

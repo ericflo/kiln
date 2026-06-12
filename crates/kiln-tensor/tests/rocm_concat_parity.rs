@@ -6,7 +6,7 @@
 //! is a byte-wise copy (not a reduction), so a handful of representative
 //! shapes/axes/arities cover it — no wavefront-boundary sweep needed.
 
-use kiln_tensor::{rocm_concat, rocm_is_available, rocm_to_host_copy, Device, Tensor};
+use kiln_tensor::{Device, Tensor, rocm_concat, rocm_is_available, rocm_to_host_copy};
 
 /// Read a ROCm tensor back to a host `Vec<f32>`.
 fn to_host_f32(t: &Tensor) -> Vec<f32> {
@@ -24,10 +24,7 @@ fn to_host_f32(t: &Tensor) -> Vec<f32> {
 
 /// CPU reference concat over f32 vectors of given shapes along `axis`.
 /// Mirrors the per-outer-slab copy in `ops/concat.rs`.
-fn cpu_concat_ref(
-    inputs: &[(Vec<f32>, Vec<usize>)],
-    axis: usize,
-) -> (Vec<f32>, Vec<usize>) {
+fn cpu_concat_ref(inputs: &[(Vec<f32>, Vec<usize>)], axis: usize) -> (Vec<f32>, Vec<usize>) {
     let rank = inputs[0].1.len();
     let mut out_shape = inputs[0].1.clone();
     let axis_total: usize = inputs.iter().map(|(_, s)| s[axis]).sum();
@@ -45,8 +42,7 @@ fn cpu_concat_ref(
             let src_start = o * t_axis * inner;
             let dst_start = (o * axis_total + axis_off) * inner;
             let len = t_axis * inner;
-            out[dst_start..dst_start + len]
-                .copy_from_slice(&vals[src_start..src_start + len]);
+            out[dst_start..dst_start + len].copy_from_slice(&vals[src_start..src_start + len]);
             axis_off += t_axis;
         }
     }
@@ -98,10 +94,7 @@ fn concat_rank1_axis0_two_inputs() {
         eprintln!("skip: no ROCm device");
         return;
     }
-    run_case(
-        &[(iota(3, 1.0), vec![3]), (iota(2, 100.0), vec![2])],
-        0,
-    );
+    run_case(&[(iota(3, 1.0), vec![3]), (iota(2, 100.0), vec![2])], 0);
 }
 
 #[test]
@@ -112,10 +105,7 @@ fn concat_rank2_axis0() {
     }
     // [2,2] + [1,2] along axis 0 = [3,2]
     run_case(
-        &[
-            (iota(4, 1.0), vec![2, 2]),
-            (iota(2, 100.0), vec![1, 2]),
-        ],
+        &[(iota(4, 1.0), vec![2, 2]), (iota(2, 100.0), vec![1, 2])],
         0,
     );
 }
@@ -128,10 +118,7 @@ fn concat_rank2_axis1() {
     }
     // [2,2] + [2,1] along axis 1 = [2,3]  (exercises inner-byte offsets)
     run_case(
-        &[
-            (iota(4, 1.0), vec![2, 2]),
-            (iota(2, 100.0), vec![2, 1]),
-        ],
+        &[(iota(4, 1.0), vec![2, 2]), (iota(2, 100.0), vec![2, 1])],
         1,
     );
 }

@@ -147,7 +147,7 @@ pub fn rocm_w8a16_gemv_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Result
         other => {
             return Err(Error::Msg(format!(
                 "rocm_w8a16_gemv_bf16: x must be ROCm, got {other}"
-            )))
+            )));
         }
     };
     if w_q.device() != device || scales.device() != device {
@@ -224,14 +224,7 @@ pub fn rocm_w8a16_gemv_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Result
 
     let status = unsafe {
         kiln_w8a16_gemv_bf16_async(
-            x_ptr,
-            w_ptr,
-            s_ptr,
-            out_ptr,
-            m as i64,
-            n as i64,
-            k as i64,
-            raw_stream,
+            x_ptr, w_ptr, s_ptr, out_ptr, m as i64, n as i64, k as i64, raw_stream,
         )
     };
     if status != 0 {
@@ -282,7 +275,7 @@ pub fn rocm_w8a16_swiglu_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Resu
         other => {
             return Err(Error::Msg(format!(
                 "rocm_w8a16_swiglu_bf16: x must be ROCm, got {other}"
-            )))
+            )));
         }
     };
     if w_q.device() != device || scales.device() != device {
@@ -423,7 +416,7 @@ pub fn rocm_w8a8_gemv_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Result<
         other => {
             return Err(Error::Msg(format!(
                 "rocm_w8a8_gemv_bf16: x must be ROCm, got {other}"
-            )))
+            )));
         }
     };
     if w_q.device() != device || scales.device() != device {
@@ -505,14 +498,7 @@ pub fn rocm_w8a8_gemv_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Result<
     let out_ptr = out_base as *mut core::ffi::c_void;
 
     let status = unsafe {
-        kiln_w8a8_quantize_bf16_async(
-            x_ptr,
-            x_q_ptr,
-            x_scales_ptr,
-            m as i64,
-            k as i64,
-            raw_stream,
-        )
+        kiln_w8a8_quantize_bf16_async(x_ptr, x_q_ptr, x_scales_ptr, m as i64, k as i64, raw_stream)
     };
     if status != 0 {
         return Err(Error::Msg(format!(
@@ -580,7 +566,7 @@ pub fn rocm_w8a8_swiglu_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Resul
         other => {
             return Err(Error::Msg(format!(
                 "rocm_w8a8_swiglu_bf16: x must be ROCm, got {other}"
-            )))
+            )));
         }
     };
     if w_q.device() != device || scales.device() != device {
@@ -668,14 +654,7 @@ pub fn rocm_w8a8_swiglu_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Resul
     let out_ptr = out_base as *mut core::ffi::c_void;
 
     let status = unsafe {
-        kiln_w8a8_quantize_bf16_async(
-            x_ptr,
-            x_q_ptr,
-            x_scales_ptr,
-            m as i64,
-            k as i64,
-            raw_stream,
-        )
+        kiln_w8a8_quantize_bf16_async(x_ptr, x_q_ptr, x_scales_ptr, m as i64, k as i64, raw_stream)
     };
     if status != 0 {
         return Err(Error::Msg(format!(
@@ -714,11 +693,7 @@ pub fn rocm_w8a8_swiglu_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Resul
 /// `x` must flatten to exactly one `[k]` row. The kernel computes
 /// `argmax(x @ dequant(w_q)^T)` and returns a rank-1 I64 tensor `[1]`, avoiding
 /// materialization of the full vocabulary logits tensor.
-pub fn rocm_w8a16_gemv_argmax_bf16(
-    x: &Tensor,
-    w_q: &Tensor,
-    scales: &Tensor,
-) -> Result<Tensor> {
+pub fn rocm_w8a16_gemv_argmax_bf16(x: &Tensor, w_q: &Tensor, scales: &Tensor) -> Result<Tensor> {
     if x.dtype() != DType::BF16 {
         return Err(Error::Msg(format!(
             "rocm_w8a16_gemv_argmax_bf16: x must be BF16, got {}",
@@ -747,7 +722,7 @@ pub fn rocm_w8a16_gemv_argmax_bf16(
         other => {
             return Err(Error::Msg(format!(
                 "rocm_w8a16_gemv_argmax_bf16: x must be ROCm, got {other}"
-            )))
+            )));
         }
     };
     if w_q.device() != device || scales.device() != device {
@@ -805,7 +780,9 @@ pub fn rocm_w8a16_gemv_argmax_bf16(
         .storage()
         .as_any()
         .downcast_ref::<RocmStorage>()
-        .ok_or_else(|| Error::Msg("rocm_w8a16_gemv_argmax_bf16: scales must be ROCm".to_string()))?;
+        .ok_or_else(|| {
+            Error::Msg("rocm_w8a16_gemv_argmax_bf16: scales must be ROCm".to_string())
+        })?;
 
     let ctx = x_storage.context();
     let device_index = match device {
@@ -832,14 +809,7 @@ pub fn rocm_w8a16_gemv_argmax_bf16(
 
     let status = unsafe {
         kiln_w8a16_gemv_argmax_bf16_async(
-            x_ptr,
-            w_ptr,
-            s_ptr,
-            scores_ptr,
-            out_ptr,
-            n as i64,
-            k as i64,
-            raw_stream,
+            x_ptr, w_ptr, s_ptr, scores_ptr, out_ptr, n as i64, k as i64, raw_stream,
         )
     };
     if status != 0 {
@@ -913,7 +883,7 @@ pub fn rocm_w8a16_gemv_gumbel_sample_bf16(
         other => {
             return Err(Error::Msg(format!(
                 "rocm_w8a16_gemv_gumbel_sample_bf16: x must be ROCm, got {other}"
-            )))
+            )));
         }
     };
     if w_q.device() != device || scales.device() != device {
@@ -960,29 +930,61 @@ pub fn rocm_w8a16_gemv_gumbel_sample_bf16(
     let history_indices_t = if history_indices.is_empty() {
         None
     } else {
-        Some(Tensor::from_vec(history_indices.to_vec(), (history_indices.len(),))
-            .map_err(|e| Error::Msg(format!("rocm_w8a16_gemv_gumbel_sample_bf16: history indices tensor: {e}")))?
-            .to_device(device)
-            .map_err(|e| Error::Msg(format!("rocm_w8a16_gemv_gumbel_sample_bf16: history indices upload: {e}")))?)
+        Some(
+            Tensor::from_vec(history_indices.to_vec(), (history_indices.len(),))
+                .map_err(|e| {
+                    Error::Msg(format!(
+                        "rocm_w8a16_gemv_gumbel_sample_bf16: history indices tensor: {e}"
+                    ))
+                })?
+                .to_device(device)
+                .map_err(|e| {
+                    Error::Msg(format!(
+                        "rocm_w8a16_gemv_gumbel_sample_bf16: history indices upload: {e}"
+                    ))
+                })?,
+        )
     };
     let history_counts_t = if history_counts.is_empty() {
         None
     } else {
-        Some(Tensor::from_vec(history_counts.to_vec(), (history_counts.len(),))
-            .map_err(|e| Error::Msg(format!("rocm_w8a16_gemv_gumbel_sample_bf16: history counts tensor: {e}")))?
-            .to_device(device)
-            .map_err(|e| Error::Msg(format!("rocm_w8a16_gemv_gumbel_sample_bf16: history counts upload: {e}")))?)
+        Some(
+            Tensor::from_vec(history_counts.to_vec(), (history_counts.len(),))
+                .map_err(|e| {
+                    Error::Msg(format!(
+                        "rocm_w8a16_gemv_gumbel_sample_bf16: history counts tensor: {e}"
+                    ))
+                })?
+                .to_device(device)
+                .map_err(|e| {
+                    Error::Msg(format!(
+                        "rocm_w8a16_gemv_gumbel_sample_bf16: history counts upload: {e}"
+                    ))
+                })?,
+        )
     };
 
-    let x_storage = x.storage().as_any().downcast_ref::<RocmStorage>().ok_or_else(|| {
-        Error::Msg("rocm_w8a16_gemv_gumbel_sample_bf16: x must be ROCm".to_string())
-    })?;
-    let w_storage = w_q.storage().as_any().downcast_ref::<RocmStorage>().ok_or_else(|| {
-        Error::Msg("rocm_w8a16_gemv_gumbel_sample_bf16: w_q must be ROCm".to_string())
-    })?;
-    let s_storage = scales.storage().as_any().downcast_ref::<RocmStorage>().ok_or_else(|| {
-        Error::Msg("rocm_w8a16_gemv_gumbel_sample_bf16: scales must be ROCm".to_string())
-    })?;
+    let x_storage = x
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| {
+            Error::Msg("rocm_w8a16_gemv_gumbel_sample_bf16: x must be ROCm".to_string())
+        })?;
+    let w_storage = w_q
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| {
+            Error::Msg("rocm_w8a16_gemv_gumbel_sample_bf16: w_q must be ROCm".to_string())
+        })?;
+    let s_storage = scales
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| {
+            Error::Msg("rocm_w8a16_gemv_gumbel_sample_bf16: scales must be ROCm".to_string())
+        })?;
 
     let ctx = x_storage.context();
     let device_index = match device {
@@ -1008,9 +1010,15 @@ pub fn rocm_w8a16_gemv_gumbel_sample_bf16(
     let out_ptr = out_base as *mut core::ffi::c_void;
 
     let history_indices_ptr = if let Some(t) = history_indices_t.as_ref() {
-        let storage = t.storage().as_any().downcast_ref::<RocmStorage>().ok_or_else(|| {
-            Error::Msg("rocm_w8a16_gemv_gumbel_sample_bf16: history indices must be ROCm".to_string())
-        })?;
+        let storage = t
+            .storage()
+            .as_any()
+            .downcast_ref::<RocmStorage>()
+            .ok_or_else(|| {
+                Error::Msg(
+                    "rocm_w8a16_gemv_gumbel_sample_bf16: history indices must be ROCm".to_string(),
+                )
+            })?;
         let (base, _) = storage.device_ptr_raw();
         (base + (t.layout().start_offset() * DType::U32.size_in_bytes()) as u64)
             as *const core::ffi::c_void
@@ -1018,9 +1026,15 @@ pub fn rocm_w8a16_gemv_gumbel_sample_bf16(
         core::ptr::null()
     };
     let history_counts_ptr = if let Some(t) = history_counts_t.as_ref() {
-        let storage = t.storage().as_any().downcast_ref::<RocmStorage>().ok_or_else(|| {
-            Error::Msg("rocm_w8a16_gemv_gumbel_sample_bf16: history counts must be ROCm".to_string())
-        })?;
+        let storage = t
+            .storage()
+            .as_any()
+            .downcast_ref::<RocmStorage>()
+            .ok_or_else(|| {
+                Error::Msg(
+                    "rocm_w8a16_gemv_gumbel_sample_bf16: history counts must be ROCm".to_string(),
+                )
+            })?;
         let (base, _) = storage.device_ptr_raw();
         (base + (t.layout().start_offset() * DType::U32.size_in_bytes()) as u64)
             as *const core::ffi::c_void
@@ -1119,7 +1133,7 @@ pub fn rocm_w8a8_gemv_gumbel_sample_bf16(
         other => {
             return Err(Error::Msg(format!(
                 "rocm_w8a8_gemv_gumbel_sample_bf16: x must be ROCm, got {other}"
-            )))
+            )));
         }
     };
     if w_q.device() != device || scales.device() != device {
@@ -1200,15 +1214,27 @@ pub fn rocm_w8a8_gemv_gumbel_sample_bf16(
         )
     };
 
-    let x_storage = x.storage().as_any().downcast_ref::<RocmStorage>().ok_or_else(|| {
-        Error::Msg("rocm_w8a8_gemv_gumbel_sample_bf16: x must be ROCm".to_string())
-    })?;
-    let w_storage = w_q.storage().as_any().downcast_ref::<RocmStorage>().ok_or_else(|| {
-        Error::Msg("rocm_w8a8_gemv_gumbel_sample_bf16: w_q must be ROCm".to_string())
-    })?;
-    let s_storage = scales.storage().as_any().downcast_ref::<RocmStorage>().ok_or_else(|| {
-        Error::Msg("rocm_w8a8_gemv_gumbel_sample_bf16: scales must be ROCm".to_string())
-    })?;
+    let x_storage = x
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| {
+            Error::Msg("rocm_w8a8_gemv_gumbel_sample_bf16: x must be ROCm".to_string())
+        })?;
+    let w_storage = w_q
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| {
+            Error::Msg("rocm_w8a8_gemv_gumbel_sample_bf16: w_q must be ROCm".to_string())
+        })?;
+    let s_storage = scales
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| {
+            Error::Msg("rocm_w8a8_gemv_gumbel_sample_bf16: scales must be ROCm".to_string())
+        })?;
 
     let ctx = x_storage.context();
     let device_index = match device {
@@ -1240,11 +1266,15 @@ pub fn rocm_w8a8_gemv_gumbel_sample_bf16(
     let out_ptr = out_base as *mut core::ffi::c_void;
 
     let history_indices_ptr = if let Some(t) = history_indices_t.as_ref() {
-        let storage = t.storage().as_any().downcast_ref::<RocmStorage>().ok_or_else(|| {
-            Error::Msg(
-                "rocm_w8a8_gemv_gumbel_sample_bf16: history indices must be ROCm".to_string(),
-            )
-        })?;
+        let storage = t
+            .storage()
+            .as_any()
+            .downcast_ref::<RocmStorage>()
+            .ok_or_else(|| {
+                Error::Msg(
+                    "rocm_w8a8_gemv_gumbel_sample_bf16: history indices must be ROCm".to_string(),
+                )
+            })?;
         let (base, _) = storage.device_ptr_raw();
         (base + (t.layout().start_offset() * DType::U32.size_in_bytes()) as u64)
             as *const core::ffi::c_void
@@ -1252,11 +1282,15 @@ pub fn rocm_w8a8_gemv_gumbel_sample_bf16(
         core::ptr::null()
     };
     let history_counts_ptr = if let Some(t) = history_counts_t.as_ref() {
-        let storage = t.storage().as_any().downcast_ref::<RocmStorage>().ok_or_else(|| {
-            Error::Msg(
-                "rocm_w8a8_gemv_gumbel_sample_bf16: history counts must be ROCm".to_string(),
-            )
-        })?;
+        let storage = t
+            .storage()
+            .as_any()
+            .downcast_ref::<RocmStorage>()
+            .ok_or_else(|| {
+                Error::Msg(
+                    "rocm_w8a8_gemv_gumbel_sample_bf16: history counts must be ROCm".to_string(),
+                )
+            })?;
         let (base, _) = storage.device_ptr_raw();
         (base + (t.layout().start_offset() * DType::U32.size_in_bytes()) as u64)
             as *const core::ffi::c_void

@@ -38,7 +38,10 @@ fn no_rocm() -> bool {
 
 /// Deterministic pseudo-random f32 in ~[-1, 1) from a linear index.
 fn val(i: usize, seed: usize) -> f32 {
-    let x = ((i.wrapping_mul(2654435761).wrapping_add(seed.wrapping_mul(40503))) % 2000) as f32;
+    let x = ((i
+        .wrapping_mul(2654435761)
+        .wrapping_add(seed.wrapping_mul(40503)))
+        % 2000) as f32;
     x / 1000.0 - 1.0
 }
 
@@ -112,10 +115,12 @@ fn flce_forward_parity_wavefront_boundary_sweep() {
         let (h_cpu, w_cpu) = build_inputs(Device::Cpu, seq_len, hidden_size, vocab);
         let (h_roc, w_roc) = build_inputs(Device::Rocm(0), seq_len, hidden_size, vocab);
 
-        let loss_cpu = fused_linear_cross_entropy_phase_b_kt(&h_cpu, &w_cpu, &ids, &mask, chunk_size)
-            .unwrap_or_else(|e| panic!("cpu forward (vocab={vocab}): {e}"));
-        let loss_roc = fused_linear_cross_entropy_phase_b_kt(&h_roc, &w_roc, &ids, &mask, chunk_size)
-            .unwrap_or_else(|e| panic!("rocm forward (vocab={vocab}): {e}"));
+        let loss_cpu =
+            fused_linear_cross_entropy_phase_b_kt(&h_cpu, &w_cpu, &ids, &mask, chunk_size)
+                .unwrap_or_else(|e| panic!("cpu forward (vocab={vocab}): {e}"));
+        let loss_roc =
+            fused_linear_cross_entropy_phase_b_kt(&h_roc, &w_roc, &ids, &mask, chunk_size)
+                .unwrap_or_else(|e| panic!("rocm forward (vocab={vocab}): {e}"));
 
         assert!(loss_cpu.shape().is_empty(), "cpu loss must be rank-0");
         assert!(loss_roc.shape().is_empty(), "rocm loss must be rank-0");
@@ -199,7 +204,11 @@ fn flce_backward_parity_wavefront_boundary_sweep() {
             max_abs = max_abs.max((a - b).abs());
             max_mag = max_mag.max(a.abs());
         }
-        let rel = if max_mag > 1e-6 { max_abs / max_mag } else { max_abs };
+        let rel = if max_mag > 1e-6 {
+            max_abs / max_mag
+        } else {
+            max_abs
+        };
         assert!(
             max_abs < 2e-4 || rel < 2e-4,
             "FLCE backward mismatch at vocab={vocab} chunk={chunk_size}: \

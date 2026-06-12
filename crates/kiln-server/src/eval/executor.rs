@@ -308,9 +308,10 @@ async fn run_suite_inner(
                         o.completion_tokens = Some(completion.completion_tokens);
                         o.latency_ms = Some(completion.latency_ms);
                         if let Some(note) = schema_note.as_ref() {
-                            o.detail = Some(o.detail.map(|d| d + note).unwrap_or_else(|| {
-                                note.trim_start_matches(" || ").to_string()
-                            }));
+                            o.detail =
+                                Some(o.detail.map(|d| d + note).unwrap_or_else(|| {
+                                    note.trim_start_matches(" || ").to_string()
+                                }));
                         }
                         o
                     }
@@ -387,18 +388,21 @@ async fn run_suite_inner(
                 }
                 continue;
             }
-            let batch: Vec<(DeferredJudgeScore, kiln_eval::scorers::Scorer, kiln_eval::EvalExample)> =
-                items
-                    .into_iter()
-                    .map(|item| {
-                        let example = suite.examples[item.example_index].clone();
-                        let scorer = example
-                            .scorer
-                            .clone()
-                            .unwrap_or_else(|| suite.default_scorer.clone());
-                        (item, scorer, example)
-                    })
-                    .collect();
+            let batch: Vec<(
+                DeferredJudgeScore,
+                kiln_eval::scorers::Scorer,
+                kiln_eval::EvalExample,
+            )> = items
+                .into_iter()
+                .map(|item| {
+                    let example = suite.examples[item.example_index].clone();
+                    let scorer = example
+                        .scorer
+                        .clone()
+                        .unwrap_or_else(|| suite.default_scorer.clone());
+                    (item, scorer, example)
+                })
+                .collect();
             let judge = judge_runner.clone();
             let cancel_flag = cancelled.clone();
             let scored = tokio::task::spawn_blocking(move || {
@@ -408,8 +412,12 @@ async fn run_suite_inner(
                         if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
                             return (item, None);
                         }
-                        let result =
-                            score_completion(&scorer, &example, &item.completion_text, judge.as_ref());
+                        let result = score_completion(
+                            &scorer,
+                            &example,
+                            &item.completion_text,
+                            judge.as_ref(),
+                        );
                         (item, Some(result))
                     })
                     .collect::<Vec<_>>()
@@ -427,9 +435,10 @@ async fn run_suite_inner(
                         o.completion_tokens = Some(item.completion_tokens);
                         o.latency_ms = Some(item.latency_ms);
                         if let Some(note) = item.schema_note.as_ref() {
-                            o.detail = Some(o.detail.map(|d| d + note).unwrap_or_else(|| {
-                                note.trim_start_matches(" || ").to_string()
-                            }));
+                            o.detail =
+                                Some(o.detail.map(|d| d + note).unwrap_or_else(|| {
+                                    note.trim_start_matches(" || ").to_string()
+                                }));
                         }
                         if matches!(o.kind, EvalOutcomeKind::Pass) {
                             running_pass += 1;
@@ -638,10 +647,7 @@ mod tests {
 
     impl kiln_eval::scorers::JudgeRunner for ScriptedJudge {
         fn judge(&self, adapter: Option<&str>, _prompt: &str) -> Option<String> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(adapter.map(str::to_string));
+            self.calls.lock().unwrap().push(adapter.map(str::to_string));
             Some(self.reply.to_string())
         }
     }

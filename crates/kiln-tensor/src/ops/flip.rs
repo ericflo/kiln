@@ -14,8 +14,8 @@
 use std::sync::Arc;
 
 use crate::{
-    bail, dispatch1, BackwardOp, CpuStorage, Determinism, DeviceOp1, Layout, Result, Storage,
-    Tensor, TensorId,
+    BackwardOp, CpuStorage, Determinism, DeviceOp1, Layout, Result, Storage, Tensor, TensorId,
+    bail, dispatch1,
 };
 
 /// Flip op — reverses element order along each axis in `axes`.
@@ -26,7 +26,9 @@ pub struct FlipOp {
 
 impl FlipOp {
     pub fn new(axes: &[usize]) -> Self {
-        FlipOp { axes: axes.to_vec() }
+        FlipOp {
+            axes: axes.to_vec(),
+        }
     }
     pub fn axes(&self) -> &[usize] {
         &self.axes
@@ -297,11 +299,7 @@ mod tests {
     #[test]
     fn flip_axis_0_2d() {
         // [[1,2],[3,4],[5,6]] flip axis=0 → [[5,6],[3,4],[1,2]]
-        let x = Tensor::from_slice(
-            &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
-            vec![3, 2],
-        )
-        .unwrap();
+        let x = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![3, 2]).unwrap();
         let y = flip(&x, &[0]).unwrap();
         assert_eq!(read_f32(&y), vec![5.0, 6.0, 3.0, 4.0, 1.0, 2.0]);
     }

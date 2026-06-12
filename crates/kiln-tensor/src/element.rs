@@ -155,9 +155,7 @@ impl Element for i64 {
             Ok(s) => s.to_vec(),
             Err(_) => bytes
                 .chunks_exact(8)
-                .map(|c| {
-                    i64::from_ne_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])
-                })
+                .map(|c| i64::from_ne_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
                 .collect(),
         }
     }
@@ -235,16 +233,28 @@ mod tests {
     fn from_bytes_inverts_to_bytes() {
         // f32
         let f = vec![1.0_f32, -2.5, 3.14, 0.0];
-        assert_eq!(<f32 as Element>::from_bytes(&<f32 as Element>::to_bytes(&f)), f);
+        assert_eq!(
+            <f32 as Element>::from_bytes(&<f32 as Element>::to_bytes(&f)),
+            f
+        );
         // u32
         let u = vec![0_u32, 7, 4_000_000_000];
-        assert_eq!(<u32 as Element>::from_bytes(&<u32 as Element>::to_bytes(&u)), u);
+        assert_eq!(
+            <u32 as Element>::from_bytes(&<u32 as Element>::to_bytes(&u)),
+            u
+        );
         // u8
         let b = vec![0_u8, 255, 17];
-        assert_eq!(<u8 as Element>::from_bytes(&<u8 as Element>::to_bytes(&b)), b);
+        assert_eq!(
+            <u8 as Element>::from_bytes(&<u8 as Element>::to_bytes(&b)),
+            b
+        );
         // i64
         let i = vec![-1_i64, 0, 9_000_000_000];
-        assert_eq!(<i64 as Element>::from_bytes(&<i64 as Element>::to_bytes(&i)), i);
+        assert_eq!(
+            <i64 as Element>::from_bytes(&<i64 as Element>::to_bytes(&i)),
+            i
+        );
         // bf16 / f16 (exactly-representable values round-trip)
         let bf = vec![half::bf16::from_f32(1.0), half::bf16::from_f32(-0.5)];
         assert_eq!(

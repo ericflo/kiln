@@ -91,8 +91,7 @@ fn run_case(m: usize, k: usize, n: usize, groupsize: i64) {
 
     // Host pack — the exact packer the model uses. `dequant_f32` is the
     // round-tripped weight the GEMM effectively multiplies against.
-    let (b_packed_i32, scales_f16, dequant_f32) =
-        pack::quantize_and_pack(&weight, k, n, groupsize);
+    let (b_packed_i32, scales_f16, dequant_f32) = pack::quantize_and_pack(&weight, k, n, groupsize);
     let b_packed_u32: Vec<u32> = b_packed_i32.iter().map(|&x| x as u32).collect();
 
     // Activations as F16 (the kernel's native dtype).
@@ -104,9 +103,8 @@ fn run_case(m: usize, k: usize, n: usize, groupsize: i64) {
     // Upload operands to the ROCm device.
     let a_kt = Tensor::from_vec_on(Device::Rocm(0), acts_f16.clone(), vec![m, k])
         .unwrap_or_else(|e| panic!("a from_vec_on (g={groupsize}): {e}"));
-    let b_kt =
-        Tensor::from_vec_on(Device::Rocm(0), b_packed_u32, vec![k / 16, n * 16 / 8])
-            .unwrap_or_else(|e| panic!("b from_vec_on (g={groupsize}): {e}"));
+    let b_kt = Tensor::from_vec_on(Device::Rocm(0), b_packed_u32, vec![k / 16, n * 16 / 8])
+        .unwrap_or_else(|e| panic!("b from_vec_on (g={groupsize}): {e}"));
     let s_rows = if groupsize == -1 {
         1
     } else {

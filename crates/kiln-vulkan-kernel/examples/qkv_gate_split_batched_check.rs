@@ -1,6 +1,6 @@
 //! Verification probe for the batched full-attention QKV/gate split.
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use kiln_vulkan_kernel::resident::dispatch_qkv_gate_split_batched_resident;
 use kiln_vulkan_kernel::{VulkanBuffer, VulkanDevice};
 

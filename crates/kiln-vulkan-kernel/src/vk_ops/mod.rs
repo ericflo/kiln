@@ -12,6 +12,7 @@
 
 pub mod attention;
 pub mod cast;
+pub mod contiguous_gather;
 pub mod conv1d;
 pub mod elementwise;
 pub mod embedding;
@@ -22,7 +23,6 @@ pub mod gdn_chunkwise;
 pub mod gdn_gated_rms_norm;
 pub mod gdn_gates;
 pub mod gdn_state;
-pub mod contiguous_gather;
 pub mod index_select;
 pub mod l2norm;
 pub mod mask;

@@ -24,9 +24,7 @@
 
 use std::sync::Arc;
 
-use kiln_tensor::{
-    bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId,
-};
+use kiln_tensor::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 use crate::BackwardOp;
 
@@ -36,18 +34,10 @@ use crate::BackwardOp;
 
 fn validate_same(a: &Tensor, b: &Tensor, name: &str) -> Result<()> {
     if a.shape() != b.shape() {
-        bail!(
-            "{name}: shape mismatch: {:?} vs {:?}",
-            a.shape(),
-            b.shape()
-        );
+        bail!("{name}: shape mismatch: {:?} vs {:?}", a.shape(), b.shape());
     }
     if a.dtype() != b.dtype() {
-        bail!(
-            "{name}: dtype mismatch: {} vs {}",
-            a.dtype(),
-            b.dtype()
-        );
+        bail!("{name}: dtype mismatch: {} vs {}", a.dtype(), b.dtype());
     }
     if !a.is_contiguous() || !b.is_contiguous() {
         bail!("{name}: inputs must be contiguous");
@@ -71,10 +61,12 @@ fn load_f32(t: &Tensor) -> Result<Vec<f32>> {
     for i in 0..n {
         out.push(match dtype {
             DType::F32 => f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()),
-            DType::BF16 => half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
-            DType::F16 => half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                .to_f32(),
+            DType::BF16 => {
+                half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
+            DType::F16 => {
+                half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+            }
             _ => unreachable!(),
         });
     }
@@ -104,7 +96,11 @@ fn store_f32(dtype: DType, shape: &[usize], data: &[f32]) -> Result<Tensor> {
     }
     let cpu = CpuStorage::from_bytes(dtype, bytes)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(shape.to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(shape.to_vec()),
+        TensorId::next(),
+    )
 }
 
 fn sigmoid(x: f32) -> f32 {
@@ -250,8 +246,8 @@ impl BackwardOp for GeluBackward {
             .map(|(&xi, &dyi)| {
                 let arg = C * (xi + 0.044715 * xi * xi * xi);
                 let t = arg.tanh();
-                let dgdx =
-                    0.5 * (1.0 + t) + 0.5 * xi * (1.0 - t * t) * C * (1.0 + 3.0 * 0.044715 * xi * xi);
+                let dgdx = 0.5 * (1.0 + t)
+                    + 0.5 * xi * (1.0 - t * t) * C * (1.0 + 3.0 * 0.044715 * xi * xi);
                 dyi * dgdx
             })
             .collect();
@@ -412,7 +408,11 @@ mod tests {
         let dy = Tensor::from_slice(&[1.0f32], vec![1]).unwrap();
         let bo = SigmoidBackward { y };
         let grads = bo.apply(&dy).unwrap();
-        approx(&load_f32(grads[0].as_ref().unwrap()).unwrap(), &[0.1875], 1e-6);
+        approx(
+            &load_f32(grads[0].as_ref().unwrap()).unwrap(),
+            &[0.1875],
+            1e-6,
+        );
     }
 
     #[test]
@@ -588,7 +588,10 @@ mod tests {
     #[test]
     fn op_metadata() {
         let one = Tensor::from_slice(&[0.5f32], vec![1]).unwrap();
-        assert_eq!(SigmoidBackward { y: one.clone() }.name(), "sigmoid_backward");
+        assert_eq!(
+            SigmoidBackward { y: one.clone() }.name(),
+            "sigmoid_backward"
+        );
         assert_eq!(SiluBackward { x: one.clone() }.name(), "silu_backward");
         assert_eq!(GeluBackward { x: one.clone() }.name(), "gelu_backward");
         assert_eq!(TanhBackward { y: one.clone() }.name(), "tanh_backward");

@@ -76,7 +76,7 @@
 //! a separate PR), so this file cannot regress anything. Correctness is
 //! proven by the `#[cfg(test)]` block below.
 
-use crate::{ops, Result, Tensor};
+use crate::{Result, Tensor, ops};
 use std::borrow::Borrow;
 
 // ----------------------------------------------------------------------
@@ -247,8 +247,8 @@ impl std::ops::Div<&Tensor> for f64 {
 
 #[cfg(test)]
 mod tests {
-    use crate::ops;
     use crate::Tensor;
+    use crate::ops;
 
     fn t(data: &[f32], shape: &[usize]) -> Tensor {
         Tensor::from_slice(data, shape.to_vec()).unwrap()

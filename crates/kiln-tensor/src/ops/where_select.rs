@@ -32,7 +32,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 /// Ternary mask-based select.
 pub fn where_select(mask: &Tensor, t: &Tensor, f: &Tensor) -> Result<Tensor> {
@@ -132,7 +132,11 @@ pub fn where_select(mask: &Tensor, t: &Tensor, f: &Tensor) -> Result<Tensor> {
     }
     let cpu = CpuStorage::from_bytes(dtype, out)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(t.shape().to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(t.shape().to_vec()),
+        TensorId::next(),
+    )
 }
 
 fn validate(mask: &Tensor, t: &Tensor, f: &Tensor) -> Result<()> {
@@ -155,7 +159,10 @@ fn validate(mask: &Tensor, t: &Tensor, f: &Tensor) -> Result<()> {
         );
     }
     if !matches!(t.dtype(), DType::F32 | DType::BF16 | DType::F16) {
-        bail!("where_select: dtype must be F32/BF16/F16, got {}", t.dtype());
+        bail!(
+            "where_select: dtype must be F32/BF16/F16, got {}",
+            t.dtype()
+        );
     }
     if !mask.is_contiguous() || !t.is_contiguous() || !f.is_contiguous() {
         bail!("where_select: all inputs must be contiguous");

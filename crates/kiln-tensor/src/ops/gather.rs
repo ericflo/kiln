@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId, bail};
 
 fn read_indices(t: &Tensor) -> Result<Vec<i64>> {
     if !t.is_contiguous() {
@@ -33,7 +33,9 @@ fn read_indices(t: &Tensor) -> Result<Vec<i64>> {
     match t.dtype() {
         DType::I64 => {
             for i in 0..n {
-                out.push(i64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap()));
+                out.push(i64::from_le_bytes(
+                    bytes[i * 8..i * 8 + 8].try_into().unwrap(),
+                ));
             }
         }
         DType::U32 => {
@@ -48,10 +50,7 @@ fn read_indices(t: &Tensor) -> Result<Vec<i64>> {
 
 pub fn gather(x: &Tensor, axis: usize, indices: &Tensor) -> Result<Tensor> {
     if axis >= x.rank() {
-        bail!(
-            "gather: axis {axis} out of bounds for rank {}",
-            x.rank()
-        );
+        bail!("gather: axis {axis} out of bounds for rank {}", x.rank());
     }
     if x.rank() != indices.rank() {
         bail!(
@@ -115,14 +114,16 @@ pub fn gather(x: &Tensor, axis: usize, indices: &Tensor) -> Result<Tensor> {
         // Look up the index value at this position.
         let idx_val = idx_flat[out_idx];
         if idx_val < 0 || (idx_val as usize) >= x_axis_len {
-            bail!(
-                "gather: index {idx_val} out of bounds for axis {axis} of length {x_axis_len}"
-            );
+            bail!("gather: index {idx_val} out of bounds for axis {axis} of length {x_axis_len}");
         }
         // Compute source offset in x: same coord but axis replaced.
         let mut src_off = 0usize;
         for d in 0..rank {
-            let c = if d == axis { idx_val as usize } else { coord[d] };
+            let c = if d == axis {
+                idx_val as usize
+            } else {
+                coord[d]
+            };
             src_off += c * x_strides[d];
         }
         let src_byte = src_off * per;
@@ -150,8 +151,7 @@ mod tests {
     #[test]
     fn gather_1d() {
         // x = [10, 20, 30, 40, 50], idx = [4, 0, 2] → [50, 10, 30]
-        let x =
-            Tensor::from_slice(&[10.0f32, 20.0, 30.0, 40.0, 50.0], vec![5]).unwrap();
+        let x = Tensor::from_slice(&[10.0f32, 20.0, 30.0, 40.0, 50.0], vec![5]).unwrap();
         let idx = Tensor::from_slice(&[4i64, 0, 2], vec![3]).unwrap();
         let y = gather(&x, 0, &idx).unwrap();
         assert_eq!(y.shape(), &[3]);
@@ -162,8 +162,7 @@ mod tests {
     fn gather_2d_axis_1() {
         // x = [[1,2,3],[4,5,6]], idx = [[2,0,1],[1,1,0]]
         // y = [[3,1,2],[5,5,4]]
-        let x =
-            Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
+        let x = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
         let idx = Tensor::from_slice(&[2i64, 0, 1, 1, 1, 0], vec![2, 3]).unwrap();
         let y = gather(&x, 1, &idx).unwrap();
         assert_eq!(read_f32(&y), vec![3.0, 1.0, 2.0, 5.0, 5.0, 4.0]);
@@ -173,11 +172,7 @@ mod tests {
     fn gather_2d_axis_0() {
         // x = [[1,2],[3,4],[5,6]], idx along axis 0 = [[2,0],[1,1]] (shape [2,2])
         // y[0,0] = x[2,0] = 5; y[0,1] = x[0,1] = 2; y[1,0] = x[1,0] = 3; y[1,1] = x[1,1] = 4
-        let x = Tensor::from_slice(
-            &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
-            vec![3, 2],
-        )
-        .unwrap();
+        let x = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![3, 2]).unwrap();
         let idx = Tensor::from_slice(&[2i64, 0, 1, 1], vec![2, 2]).unwrap();
         let y = gather(&x, 0, &idx).unwrap();
         assert_eq!(read_f32(&y), vec![5.0, 2.0, 3.0, 4.0]);
@@ -210,13 +205,8 @@ mod tests {
     #[test]
     fn gather_shape_mismatch_errors() {
         // x [2, 3] but indices [3, 3] (mismatched axis 0).
-        let x =
-            Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
-        let idx = Tensor::from_slice(
-            &[0i64, 0, 0, 1, 1, 1, 0, 0, 0],
-            vec![3, 3],
-        )
-        .unwrap();
+        let x = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
+        let idx = Tensor::from_slice(&[0i64, 0, 0, 1, 1, 1, 0, 0, 0], vec![3, 3]).unwrap();
         let e = gather(&x, 1, &idx).unwrap_err();
         assert!(e.to_string().contains("shape mismatch"));
     }

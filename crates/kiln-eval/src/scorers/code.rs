@@ -69,9 +69,10 @@ pub(super) fn score(
     language: Option<&str>,
     style: &CodeStyle,
 ) -> Result<(f32, EvalOutcomeKind, Option<String>), ScorerError> {
-    let target = example.target.as_deref().ok_or(ScorerError::MissingTarget {
-        kind: "code",
-    })?;
+    let target = example
+        .target
+        .as_deref()
+        .ok_or(ScorerError::MissingTarget { kind: "code" })?;
     let target_block = extract_block(target, language);
     let completion_block = extract_block(completion_text, language);
 
@@ -92,7 +93,11 @@ pub(super) fn score(
         }
         CodeStyle::ExactBlock { strip_comments } => {
             let lang_for_strip = language;
-            let t = normalize(target_block.as_deref().unwrap_or(target), *strip_comments, lang_for_strip);
+            let t = normalize(
+                target_block.as_deref().unwrap_or(target),
+                *strip_comments,
+                lang_for_strip,
+            );
             let p = normalize(
                 completion_block.as_deref().unwrap_or(completion_text),
                 *strip_comments,
@@ -120,14 +125,14 @@ pub(super) fn score(
             Ok((
                 score,
                 kind,
-                Some(format!(
-                    "jaccard={score:.2} (threshold {min_jaccard:.2})"
-                )),
+                Some(format!("jaccard={score:.2} (threshold {min_jaccard:.2})")),
             ))
         }
         CodeStyle::LineCoverage { min_coverage } => {
-            let t_lines: BTreeSet<String> = significant_lines(target_block.as_deref().unwrap_or(target));
-            let p_lines: BTreeSet<String> = significant_lines(completion_block.as_deref().unwrap_or(completion_text));
+            let t_lines: BTreeSet<String> =
+                significant_lines(target_block.as_deref().unwrap_or(target));
+            let p_lines: BTreeSet<String> =
+                significant_lines(completion_block.as_deref().unwrap_or(completion_text));
             if t_lines.is_empty() {
                 return Ok((
                     1.0,
@@ -209,14 +214,33 @@ fn looks_like_code(text: &str) -> bool {
         return false;
     }
     let keywords = [
-        "def ", "fn ", "function ", "class ", "import ", "from ", "return ", "let ", "const ",
-        "var ", "if ", "else", "for ", "while ", "use ", "pub ", "package ", "struct ",
+        "def ",
+        "fn ",
+        "function ",
+        "class ",
+        "import ",
+        "from ",
+        "return ",
+        "let ",
+        "const ",
+        "var ",
+        "if ",
+        "else",
+        "for ",
+        "while ",
+        "use ",
+        "pub ",
+        "package ",
+        "struct ",
     ];
     let hits = lines
         .iter()
         .filter(|l| keywords.iter().any(|k| l.contains(k)))
         .count();
-    hits >= 1 && lines.iter().any(|l| l.starts_with(' ') || l.contains('{') || l.contains(';'))
+    hits >= 1
+        && lines
+            .iter()
+            .any(|l| l.starts_with(' ') || l.contains('{') || l.contains(';'))
 }
 
 fn normalize(code: &str, strip_comments: bool, language: Option<&str>) -> String {
@@ -239,8 +263,17 @@ fn normalize(code: &str, strip_comments: bool, language: Option<&str>) -> String
 fn strip_line_comment(line: &str, language: Option<&str>) -> String {
     let marker = match language.map(normalize_lang) {
         Some(ref l) if l == "python" || l == "ruby" || l == "bash" || l == "yaml" => "#",
-        Some(ref l) if l == "rust" || l == "javascript" || l == "typescript"
-            || l == "go" || l == "java" || l == "c" || l == "cpp" => "//",
+        Some(ref l)
+            if l == "rust"
+                || l == "javascript"
+                || l == "typescript"
+                || l == "go"
+                || l == "java"
+                || l == "c"
+                || l == "cpp" =>
+        {
+            "//"
+        }
         _ => return line.to_string(),
     };
     if let Some(idx) = line.find(marker) {
@@ -304,7 +337,8 @@ mod tests {
 
     #[test]
     fn extract_block_with_language_filters() {
-        let text = "Here's some code:\n```python\nprint(1)\n```\nand also\n```rust\nfn main() {}\n```";
+        let text =
+            "Here's some code:\n```python\nprint(1)\n```\nand also\n```rust\nfn main() {}\n```";
         let py = extract_block(text, Some("python")).unwrap();
         assert!(py.contains("print(1)"));
         let rs = extract_block(text, Some("rust")).unwrap();

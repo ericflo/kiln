@@ -122,8 +122,9 @@ impl<T: DecodeDType> DecodeBuffer<T> {
             "decode buffer {kind:?} dimensions must be non-zero: {dims:?}"
         );
         // (#1082) kt-native allocation — no candle.
-        let tensor = kiln_tensor::Tensor::zeros_on(*device, dims.clone(), T::ELEMENT_TYPE.kt_dtype())
-            .with_context(|| format!("allocate decode buffer {kind:?} {dims:?}"))?;
+        let tensor =
+            kiln_tensor::Tensor::zeros_on(*device, dims.clone(), T::ELEMENT_TYPE.kt_dtype())
+                .with_context(|| format!("allocate decode buffer {kind:?} {dims:?}"))?;
         ensure!(
             tensor.is_contiguous(),
             "decode buffer {kind:?} allocation must be contiguous"

@@ -27,7 +27,7 @@
 
 use anyhow::{Context, Result};
 
-use kiln_core::block::{unique_physical_blocks, BlockTable};
+use kiln_core::block::{BlockTable, unique_physical_blocks};
 use kiln_core::config::ModelConfig;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
@@ -38,12 +38,12 @@ use kiln_graph::{
 };
 use kiln_tensor::{Backend, DType};
 use kiln_vulkan_kernel::kernels::paged_attn_decode_splitk_chunks as paged_attn_splitk_chunks;
-use kiln_vulkan_kernel::shaders as shaders;
+use kiln_vulkan_kernel::shaders;
 use kiln_vulkan_kernel::{CommandBatch, VkPagedKvCache, VulkanBuffer, VulkanDevice, Workgroups};
 
+use crate::PagedKvCacheKt;
 use crate::backend::vulkan::VulkanBackend;
 use crate::forward::GpuLayerWeights;
-use crate::PagedKvCacheKt;
 
 const DEFAULT_MLP_BF16_DOWN_ROWS4_MIN_BATCH: usize = 16;
 const DEFAULT_MLP_BF16_GATE_UP_ROWS4_MIN_BATCH: usize = 8;
@@ -693,9 +693,7 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
     let block_size = paged_cache.block_size();
     let slot = block_table
         .slot_for(start_pos, block_size)
-        .ok_or_else(|| {
-            anyhow::anyhow!("no slot for start_pos {start_pos} in block table")
-        })?;
+        .ok_or_else(|| anyhow::anyhow!("no slot for start_pos {start_pos} in block table"))?;
 
     // --- weight buffer lookups (cached on backend) -------------------
     // Q/K/V/O projections + MLP gate/up/down: bf16-packed
@@ -726,28 +724,25 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
     //     resident decode calls on the same backend) -----------------
     let x_buf = backend.acquire_resident_scratch("fa_x", (hidden * 4) as u64)?;
     let normed_buf = backend.acquire_resident_scratch("fa_normed", (hidden * 4) as u64)?;
-    let qkv_combined = backend.acquire_resident_scratch(
-        "fa_qkv_combined",
-        ((q_dim + k_dim + v_dim) * 4) as u64,
-    )?;
+    let qkv_combined = backend
+        .acquire_resident_scratch("fa_qkv_combined", ((q_dim + k_dim + v_dim) * 4) as u64)?;
     let q_buf = backend.acquire_resident_scratch("fa_q", (num_heads * head_dim * 4) as u64)?;
     let q_rot_buf =
         backend.acquire_resident_scratch("fa_q_rot", (num_heads * head_dim * 4) as u64)?;
-    let gate_buf = backend.acquire_resident_scratch("fa_gate", (num_heads * head_dim * 4) as u64)?;
+    let gate_buf =
+        backend.acquire_resident_scratch("fa_gate", (num_heads * head_dim * 4) as u64)?;
     let k_buf = backend.acquire_resident_scratch("fa_k", (kv_elems * 4) as u64)?;
     let k_rot_buf = backend.acquire_resident_scratch("fa_k_rot", (kv_elems * 4) as u64)?;
     let v_buf = backend.acquire_resident_scratch("fa_v", (kv_elems * 4) as u64)?;
-    let attn_pre_gate = backend.acquire_resident_scratch(
-        "fa_attn_pre_gate",
-        (num_heads * head_dim * 4) as u64,
-    )?;
-    let attn_post_gate = backend.acquire_resident_scratch(
-        "fa_attn_post_gate",
-        (num_heads * head_dim * 4) as u64,
-    )?;
+    let attn_pre_gate =
+        backend.acquire_resident_scratch("fa_attn_pre_gate", (num_heads * head_dim * 4) as u64)?;
+    let attn_post_gate =
+        backend.acquire_resident_scratch("fa_attn_post_gate", (num_heads * head_dim * 4) as u64)?;
     let attn_out_buf = backend.acquire_resident_scratch("fa_attn_out", (hidden * 4) as u64)?;
-    let attn_residual = backend.acquire_resident_scratch("fa_attn_residual", (hidden * 4) as u64)?;
-    let mlp_scratch = backend.acquire_resident_scratch("fa_mlp_scratch", (intermediate * 4) as u64)?;
+    let attn_residual =
+        backend.acquire_resident_scratch("fa_attn_residual", (hidden * 4) as u64)?;
+    let mlp_scratch =
+        backend.acquire_resident_scratch("fa_mlp_scratch", (intermediate * 4) as u64)?;
     let mlp_out_buf = backend.acquire_resident_scratch("fa_mlp_out", (hidden * 4) as u64)?;
     let final_out = backend.acquire_resident_scratch("fa_final_out", (hidden * 4) as u64)?;
 
@@ -758,7 +753,11 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
     let seq_lens: [u32; 1] = [(start_pos + 1) as u32];
     let seq_lens_buf = upload_u32_slice(vk_device, &seq_lens)?;
 
-    let fa_t0 = if timing_enabled() { Some(Instant::now()) } else { None };
+    let fa_t0 = if timing_enabled() {
+        Some(Instant::now())
+    } else {
+        None
+    };
 
     // --- upload x ----------------------------------------------------
     let upload_t0 = fa_t0.map(|_| Instant::now());
@@ -779,12 +778,12 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
     }
 
     // --- chain all 15 dispatches into one CommandBatch + one submit ---
-    let k_pool = vk_kv_cache.k_buffer(full_attn_layer_idx).ok_or_else(|| {
-        anyhow::anyhow!("VkPagedKvCache missing layer {full_attn_layer_idx}")
-    })?;
-    let v_pool = vk_kv_cache.v_buffer(full_attn_layer_idx).ok_or_else(|| {
-        anyhow::anyhow!("VkPagedKvCache missing layer {full_attn_layer_idx}")
-    })?;
+    let k_pool = vk_kv_cache
+        .k_buffer(full_attn_layer_idx)
+        .ok_or_else(|| anyhow::anyhow!("VkPagedKvCache missing layer {full_attn_layer_idx}"))?;
+    let v_pool = vk_kv_cache
+        .v_buffer(full_attn_layer_idx)
+        .ok_or_else(|| anyhow::anyhow!("VkPagedKvCache missing layer {full_attn_layer_idx}"))?;
     let elements_per_slot = num_kv_heads * head_dim;
     let total_qkv_out = q_dim + k_dim + v_dim;
     let q_h_d = num_heads * head_dim;
@@ -938,7 +937,11 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
     // 13) Pre-MLP norm
     batch.record_shader(
         shaders::QWEN_RMSNORM_FORWARD,
-        &[attn_residual.handle(), post_norm_buf.handle(), normed_buf.handle()],
+        &[
+            attn_residual.handle(),
+            post_norm_buf.handle(),
+            normed_buf.handle(),
+        ],
         &[1u32, hidden as u32, eps.to_bits()],
         Workgroups::OneD(1),
     )?;
@@ -958,7 +961,11 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
     // 15) MLP down: linear_decode_bf16w(scratch, down_w, mlp_out).
     batch.record_shader(
         shaders::LINEAR_DECODE_BF16W,
-        &[mlp_scratch.handle(), down_w_buf.handle(), mlp_out_buf.handle()],
+        &[
+            mlp_scratch.handle(),
+            down_w_buf.handle(),
+            mlp_out_buf.handle(),
+        ],
         &[intermediate as u32, hidden as u32],
         Workgroups::OneD(hidden.div_ceil(16) as u32),
     )?;
@@ -1044,7 +1051,11 @@ pub fn transformer_block_paged_decode_gdn_resident_b1_kt(
         return Ok(None);
     };
 
-    let gdn_t0 = if timing_enabled() { Some(Instant::now()) } else { None };
+    let gdn_t0 = if timing_enabled() {
+        Some(Instant::now())
+    } else {
+        None
+    };
     let x_dtype = x.dtype();
     let x_buf = backend.acquire_resident_scratch("gdn_kt_x", (hidden * 4) as u64)?;
     let out_buf = backend.acquire_resident_scratch("gdn_kt_out", (hidden * 4) as u64)?;
@@ -1126,8 +1137,7 @@ fn kt_tensor_to_f32_vec(tensor: &kiln_tensor::Tensor) -> Result<Vec<f32>> {
     } else {
         tensor.to_dtype(kiln_tensor::DType::F32)?.flatten_all()?
     };
-    flat.to_vec1::<f32>()
-        .context("extract kt tensor f32 data")
+    flat.to_vec1::<f32>().context("extract kt tensor f32 data")
 }
 
 fn f32_slice_to_bytes(data: &[f32]) -> Vec<u8> {
@@ -1243,7 +1253,11 @@ pub fn transformer_block_paged_decode_gdn_resident_b1(
     let intermediate = config.intermediate_size;
     let eps = config.rms_norm_eps as f32;
 
-    let fb_t0 = if timing_enabled() { Some(Instant::now()) } else { None };
+    let fb_t0 = if timing_enabled() {
+        Some(Instant::now())
+    } else {
+        None
+    };
 
     // --- weight buffer lookups (cached on backend) -------------------
     let qkv_w = backend.cached_bf16_packed_weight_buffer_kt(&lin_weights.in_proj_qkv_t)?;
@@ -1290,18 +1304,14 @@ pub fn transformer_block_paged_decode_gdn_resident_b1(
     // The gates_recurrent kernel indexes Q/K with (bidx*nv + h)*dk, so
     // its input must be sized for nv heads (not just nk).
     let qkv_expanded_bytes = (nv * dk * 4) as u64;
-    let q_expanded =
-        backend.acquire_resident_scratch("gdnfb_q_expanded", qkv_expanded_bytes)?;
-    let k_expanded =
-        backend.acquire_resident_scratch("gdnfb_k_expanded", qkv_expanded_bytes)?;
+    let q_expanded = backend.acquire_resident_scratch("gdnfb_q_expanded", qkv_expanded_bytes)?;
+    let k_expanded = backend.acquire_resident_scratch("gdnfb_k_expanded", qkv_expanded_bytes)?;
     let v_buf = backend.acquire_resident_scratch("gdnfb_v", (v_dim * 4) as u64)?;
-    let gated_norm =
-        backend.acquire_resident_scratch("gdnfb_gated_norm", (v_dim * 4) as u64)?;
+    let gated_norm = backend.acquire_resident_scratch("gdnfb_gated_norm", (v_dim * 4) as u64)?;
     let gdn_out = backend.acquire_resident_scratch("gdnfb_gdn_out", (hidden * 4) as u64)?;
     let attn_residual =
         backend.acquire_resident_scratch("gdnfb_attn_residual", (hidden * 4) as u64)?;
-    let normed_post =
-        backend.acquire_resident_scratch("gdnfb_normed_post", (hidden * 4) as u64)?;
+    let normed_post = backend.acquire_resident_scratch("gdnfb_normed_post", (hidden * 4) as u64)?;
     let mlp_scratch =
         backend.acquire_resident_scratch("gdnfb_mlp_scratch", (intermediate * 4) as u64)?;
     let mlp_out = backend.acquire_resident_scratch("gdnfb_mlp_out", (hidden * 4) as u64)?;
@@ -1456,13 +1466,7 @@ pub fn transformer_block_paged_decode_gdn_resident_b1(
             qk_norm.handle(),
             gated_norm.handle(),
         ],
-        &[
-            nv as u32,
-            dk as u32,
-            dv as u32,
-            eps.to_bits(),
-            1u32,
-        ],
+        &[nv as u32, dk as u32, dv as u32, eps.to_bits(), 1u32],
         Workgroups::OneD(nv as u32),
     )?;
     // 9) GDN out_proj (bf16w b=1) → gdn_out
@@ -1507,11 +1511,7 @@ pub fn transformer_block_paged_decode_gdn_resident_b1(
     // 14) Final residual: final_out = attn_residual + mlp_out
     batch.record_shader(
         shaders::ADD,
-        &[
-            attn_residual.handle(),
-            mlp_out.handle(),
-            final_out.handle(),
-        ],
+        &[attn_residual.handle(), mlp_out.handle(), final_out.handle()],
         &[hidden as u32],
         Workgroups::OneD(hidden.div_ceil(256) as u32),
     )?;
@@ -1524,7 +1524,11 @@ pub fn transformer_block_paged_decode_gdn_resident_b1(
         vec![
             vk_replay_resource(&x_buf, DType::F32, vec![1, 1, hidden]),
             vk_replay_resource(&final_out, DType::F32, vec![1, 1, hidden]),
-            vk_replay_resource(&recurrent_buf, DType::F32, vec![recurrent_bytes as usize / 4]),
+            vk_replay_resource(
+                &recurrent_buf,
+                DType::F32,
+                vec![recurrent_bytes as usize / 4],
+            ),
             vk_replay_resource(&conv_buf, DType::F32, vec![conv_state_bytes as usize / 4]),
         ],
     )
@@ -1645,15 +1649,17 @@ pub fn gated_deltanet_forward_decode_resident_b1_kt(
     let k_buf = backend.acquire_resident_scratch("gdn_k", (qk_dim * 4) as u64)?;
     // GQA-expanded Q/K for the recurrent kernel (sized nv*dk, not nk*dk).
     let qkv_expanded_bytes = (nv * dk * 4) as u64;
-    let q_expanded =
-        backend.acquire_resident_scratch("gdn_q_expanded", qkv_expanded_bytes)?;
-    let k_expanded =
-        backend.acquire_resident_scratch("gdn_k_expanded", qkv_expanded_bytes)?;
+    let q_expanded = backend.acquire_resident_scratch("gdn_q_expanded", qkv_expanded_bytes)?;
+    let k_expanded = backend.acquire_resident_scratch("gdn_k_expanded", qkv_expanded_bytes)?;
     let v_buf = backend.acquire_resident_scratch("gdn_v", (v_dim * 4) as u64)?;
     let gated_norm = backend.acquire_resident_scratch("gdn_gated_norm", (v_dim * 4) as u64)?;
     let out_buf = backend.acquire_resident_scratch("gdn_out", (hidden * 4) as u64)?;
 
-    let gdn_t0 = if timing_enabled() { Some(Instant::now()) } else { None };
+    let gdn_t0 = if timing_enabled() {
+        Some(Instant::now())
+    } else {
+        None
+    };
 
     // --- upload x -----------------------------------------------
     let gdn_upload_t0 = gdn_t0.map(|_| Instant::now());
@@ -1818,7 +1824,11 @@ pub fn gated_deltanet_forward_decode_resident_b1_kt(
         vec![
             vk_replay_resource(&x_buf, DType::F32, vec![1, 1, hidden]),
             vk_replay_resource(&out_buf, DType::F32, vec![1, 1, hidden]),
-            vk_replay_resource(&recurrent_buf, DType::F32, vec![recurrent_bytes as usize / 4]),
+            vk_replay_resource(
+                &recurrent_buf,
+                DType::F32,
+                vec![recurrent_bytes as usize / 4],
+            ),
             vk_replay_resource(&conv_buf, DType::F32, vec![conv_state_bytes as usize / 4]),
         ],
     )
@@ -1853,7 +1863,6 @@ pub fn gated_deltanet_forward_decode_resident_b1_kt(
     }
     Ok(Some(out_tensor))
 }
-
 
 pub(crate) fn seed_recurrent_state_kt(
     vk_device: &VulkanDevice,
@@ -1976,13 +1985,7 @@ pub fn seed_vk_kv_cache_layer_blocks_from_batched_tables(
 ) -> Result<usize> {
     let block_ids = unique_physical_blocks(block_tables);
     let seeded = block_ids.len();
-    seed_vk_kv_cache_layer_blocks_from_kt(
-        vk_device,
-        vk_cache,
-        paged_cache,
-        layer_idx,
-        &block_ids,
-    )?;
+    seed_vk_kv_cache_layer_blocks_from_kt(vk_device, vk_cache, paged_cache, layer_idx, &block_ids)?;
     Ok(seeded)
 }
 
@@ -2112,27 +2115,19 @@ pub fn record_full_attn_block_into(
     // a compute→compute barrier between, and dispatches are recorded
     // and executed in strict program order.
     let normed = backend.acquire_resident_scratch("nfa_normed", (hidden * 4) as u64)?;
-    let qkv_combined = backend.acquire_resident_scratch(
-        "nfa_qkv_combined",
-        ((q_dim + k_dim + v_dim) * 4) as u64,
-    )?;
-    let q_buf =
-        backend.acquire_resident_scratch("nfa_q", (num_heads * head_dim * 4) as u64)?;
+    let qkv_combined = backend
+        .acquire_resident_scratch("nfa_qkv_combined", ((q_dim + k_dim + v_dim) * 4) as u64)?;
+    let q_buf = backend.acquire_resident_scratch("nfa_q", (num_heads * head_dim * 4) as u64)?;
     let gate_buf =
         backend.acquire_resident_scratch("nfa_gate", (num_heads * head_dim * 4) as u64)?;
     let k_buf = backend.acquire_resident_scratch("nfa_k", (k_dim * 4) as u64)?;
     let v_buf = backend.acquire_resident_scratch("nfa_v", (v_dim * 4) as u64)?;
-    let q_rot =
-        backend.acquire_resident_scratch("nfa_q_rot", (num_heads * head_dim * 4) as u64)?;
+    let q_rot = backend.acquire_resident_scratch("nfa_q_rot", (num_heads * head_dim * 4) as u64)?;
     let k_rot = backend.acquire_resident_scratch("nfa_k_rot", (k_dim * 4) as u64)?;
-    let attn_pre_gate = backend.acquire_resident_scratch(
-        "nfa_attn_pre_gate",
-        (num_heads * head_dim * 4) as u64,
-    )?;
-    let attn_post_gate = backend.acquire_resident_scratch(
-        "nfa_attn_post_gate",
-        (num_heads * head_dim * 4) as u64,
-    )?;
+    let attn_pre_gate =
+        backend.acquire_resident_scratch("nfa_attn_pre_gate", (num_heads * head_dim * 4) as u64)?;
+    let attn_post_gate = backend
+        .acquire_resident_scratch("nfa_attn_post_gate", (num_heads * head_dim * 4) as u64)?;
     let attn_out = backend.acquire_resident_scratch("nfa_attn_out", (hidden * 4) as u64)?;
     let attn_residual =
         backend.acquire_resident_scratch("nfa_attn_residual", (hidden * 4) as u64)?;
@@ -2246,8 +2241,7 @@ pub fn record_full_attn_block_into(
     let num_chunks = paged_attn_splitk_chunks(1, max_blocks_per_seq);
     let partials_stride = 2 + head_dim;
     let partials_bytes = (1 * num_heads * num_chunks * partials_stride * 4) as u64;
-    let attn_partials =
-        backend.acquire_resident_scratch("nfa_attn_partials", partials_bytes)?;
+    let attn_partials = backend.acquire_resident_scratch("nfa_attn_partials", partials_bytes)?;
     kiln_vulkan_kernel::resident::record_paged_attn_decode_batch_paged_splitk_resident(
         batch,
         q_rot.as_ref(),
@@ -2278,11 +2272,7 @@ pub fn record_full_attn_block_into(
     )?;
     batch.record_shader(
         shaders::LINEAR_DECODE_BF16W,
-        &[
-            attn_post_gate.handle(),
-            o_w.handle(),
-            attn_out.handle(),
-        ],
+        &[attn_post_gate.handle(), o_w.handle(), attn_out.handle()],
         &[q_h_d as u32, hidden as u32],
         Workgroups::OneD(hidden.div_ceil(16) as u32),
     )?;
@@ -2669,16 +2659,16 @@ pub fn record_gdn_block_into(
     let k_buf = backend.acquire_resident_scratch("ngd_k", (qk_dim * 4) as u64)?;
     // GQA-expanded Q/K for the recurrent kernel (sized nv*dk, not nk*dk).
     let qkv_expanded_bytes = (nv * dk * 4) as u64;
-    let q_expanded =
-        backend.acquire_resident_scratch("ngd_q_expanded", qkv_expanded_bytes)?;
-    let k_expanded =
-        backend.acquire_resident_scratch("ngd_k_expanded", qkv_expanded_bytes)?;
+    let q_expanded = backend.acquire_resident_scratch("ngd_q_expanded", qkv_expanded_bytes)?;
+    let k_expanded = backend.acquire_resident_scratch("ngd_k_expanded", qkv_expanded_bytes)?;
     let v_buf = backend.acquire_resident_scratch("ngd_v", (v_dim * 4) as u64)?;
     let gated_norm = backend.acquire_resident_scratch("ngd_gated_norm", (v_dim * 4) as u64)?;
     let gdn_out = backend.acquire_resident_scratch("ngd_gdn_out", (hidden * 4) as u64)?;
-    let attn_residual = backend.acquire_resident_scratch("ngd_attn_residual", (hidden * 4) as u64)?;
+    let attn_residual =
+        backend.acquire_resident_scratch("ngd_attn_residual", (hidden * 4) as u64)?;
     let normed_post = backend.acquire_resident_scratch("ngd_normed_post", (hidden * 4) as u64)?;
-    let mlp_scratch = backend.acquire_resident_scratch("ngd_mlp_scratch", (intermediate * 4) as u64)?;
+    let mlp_scratch =
+        backend.acquire_resident_scratch("ngd_mlp_scratch", (intermediate * 4) as u64)?;
 
     // Dispatch sequence (mirrors transformer_block_paged_decode_gdn_resident_b1 body)
     batch.record_shader(
@@ -2856,10 +2846,7 @@ pub fn record_gdn_block_batched_into(
         crate::forward::GpuAttentionWeights::Linear(w) => w,
         _ => return Ok(false),
     };
-    anyhow::ensure!(
-        batch_size > 0,
-        "batched GDN block: batch_size must be > 0"
-    );
+    anyhow::ensure!(batch_size > 0, "batched GDN block: batch_size must be > 0");
 
     let hidden = config.hidden_size;
     let nk = config.linear_num_key_heads;
@@ -2896,8 +2883,7 @@ pub fn record_gdn_block_batched_into(
     let recurrent_bytes = (batch_size * nv * dk * dv * 4) as u64;
     let recurrent_buf =
         backend.linear_attn_recurrent_state_buffer_kt(state_key, recurrent_bytes)?;
-    let conv_state_bytes =
-        (batch_size * qkv_dim * (conv_kernel.saturating_sub(1)) * 4) as u64;
+    let conv_state_bytes = (batch_size * qkv_dim * (conv_kernel.saturating_sub(1)) * 4) as u64;
     let conv_buf = backend.linear_attn_conv_state_buffer_kt(state_key, conv_state_bytes)?;
 
     if !backend.linear_attn_layer_seeded_kt(state_key) {
@@ -2909,18 +2895,12 @@ pub fn record_gdn_block_batched_into(
         backend.mark_linear_attn_layer_seeded_kt(state_key);
     }
 
-    let (gdn_in_proj_shader, gdn_in_proj_workgroups) = gdn_in_proj_bf16w_batched_plan(
-        batch_size,
-        qkv_dim,
-        z_dim,
-        a_dim,
-        b_dim,
-        in_proj_total,
-    );
-    let fuse_gdn_in_proj_conv_split =
-        gdn_in_proj_shader == shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W
-            && env_truthy("KILN_ENABLE_VULKAN_GDN_IN_PROJ_CONV_SPLIT_FUSION")
-            && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_CONV_SPLIT_FUSION");
+    let (gdn_in_proj_shader, gdn_in_proj_workgroups) =
+        gdn_in_proj_bf16w_batched_plan(batch_size, qkv_dim, z_dim, a_dim, b_dim, in_proj_total);
+    let fuse_gdn_in_proj_conv_split = gdn_in_proj_shader
+        == shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W
+        && env_truthy("KILN_ENABLE_VULKAN_GDN_IN_PROJ_CONV_SPLIT_FUSION")
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_CONV_SPLIT_FUSION");
     let gqa_ratio = nv / nk;
     debug_assert!(gqa_ratio * nk == nv, "GDN nv must be a multiple of nk");
     let fuse_qk_norm_recurrent =
@@ -2962,8 +2942,8 @@ pub fn record_gdn_block_batched_into(
         backend.acquire_resident_scratch("ngd_b_gated_norm", (batch_size * v_dim * 4) as u64)?;
     let gdn_out =
         backend.acquire_resident_scratch("ngd_b_gdn_out", (batch_size * hidden * 4) as u64)?;
-    let attn_residual =
-        backend.acquire_resident_scratch("ngd_b_attn_residual", (batch_size * hidden * 4) as u64)?;
+    let attn_residual = backend
+        .acquire_resident_scratch("ngd_b_attn_residual", (batch_size * hidden * 4) as u64)?;
     let normed_post =
         backend.acquire_resident_scratch("ngd_b_normed_post", (batch_size * hidden * 4) as u64)?;
     let mlp_scratch = backend
@@ -3131,7 +3111,13 @@ pub fn record_gdn_block_batched_into(
                 qk_norm.handle(),
                 gated_norm.handle(),
             ],
-            &[nv as u32, dk as u32, dv as u32, eps.to_bits(), batch_size as u32],
+            &[
+                nv as u32,
+                dk as u32,
+                dv as u32,
+                eps.to_bits(),
+                batch_size as u32,
+            ],
             Workgroups::OneD((batch_size * nv) as u32),
         )?;
     }
@@ -3378,7 +3364,11 @@ pub fn record_final_norm_lm_head_sample_batched_into(
                 presences.handle(),
                 frequencies.handle(),
             ],
-            &[sample.history_items as u32, vocab_size as u32, batch_size as u32],
+            &[
+                sample.history_items as u32,
+                vocab_size as u32,
+                batch_size as u32,
+            ],
             Workgroups::OneD((sample.history_items as u32).div_ceil(64)),
         )?;
     }
@@ -3616,10 +3606,15 @@ pub fn record_transformer_stack_batched_argmax_into(
         slots_buf,
         recurrent_states,
         conv_states,
-    )? else {
+    )?
+    else {
         return Ok(false);
     };
-    let hidden_buf = if final_in_input { x_in_buf } else { x_scratch_buf };
+    let hidden_buf = if final_in_input {
+        x_in_buf
+    } else {
+        x_scratch_buf
+    };
     record_final_norm_lm_head_argmax_batched_into(
         backend,
         batch,
@@ -3673,10 +3668,15 @@ pub fn record_transformer_stack_batched_sample_into(
         slots_buf,
         recurrent_states,
         conv_states,
-    )? else {
+    )?
+    else {
         return Ok(false);
     };
-    let hidden_buf = if final_in_input { x_in_buf } else { x_scratch_buf };
+    let hidden_buf = if final_in_input {
+        x_in_buf
+    } else {
+        x_scratch_buf
+    };
     record_final_norm_lm_head_sample_batched_into(
         backend,
         batch,
@@ -3718,8 +3718,8 @@ pub fn submit_transformer_stack_batched_argmax(
         "batched transformer submit: batch_size must be > 0"
     );
     let out_bytes = (batch_size * 4) as u64;
-    let out_staging = backend
-        .acquire_resident_scratch_host_visible("native_b_out_tokens_staging", out_bytes)?;
+    let out_staging =
+        backend.acquire_resident_scratch_host_visible("native_b_out_tokens_staging", out_bytes)?;
 
     let mut batch = CommandBatch::new(vk_device)?;
     let ok = record_transformer_stack_batched_argmax_into(
@@ -3910,8 +3910,8 @@ pub fn submit_transformer_stack_batched_hidden(
         "batched transformer hidden submit: batch_size must be > 0"
     );
     let hidden_bytes = (batch_size * config.hidden_size * 4) as u64;
-    let out_staging = backend
-        .acquire_resident_scratch_host_visible("native_b_hidden_staging", hidden_bytes)?;
+    let out_staging =
+        backend.acquire_resident_scratch_host_visible("native_b_hidden_staging", hidden_bytes)?;
 
     let mut batch = CommandBatch::new(vk_device)?;
     let Some(final_in_input) = record_transformer_stack_batched_hidden_into(
@@ -3932,10 +3932,15 @@ pub fn submit_transformer_stack_batched_hidden(
         slots_buf,
         recurrent_states,
         conv_states,
-    )? else {
+    )?
+    else {
         return Ok(None);
     };
-    let hidden_src = if final_in_input { x_in_buf } else { x_scratch_buf };
+    let hidden_src = if final_in_input {
+        x_in_buf
+    } else {
+        x_scratch_buf
+    };
     batch
         .record_copy_buffer(hidden_src, &out_staging, hidden_bytes)
         .context("batched transformer hidden submit: record hidden readback")?;
@@ -4018,8 +4023,8 @@ pub fn submit_transformer_stack_batched_argmax_from_tokens(
         block_size,
     )?;
     let out_bytes = (batch_size * 4) as u64;
-    let out_staging = backend
-        .acquire_resident_scratch_host_visible("native_b_out_tokens_staging", out_bytes)?;
+    let out_staging =
+        backend.acquire_resident_scratch_host_visible("native_b_out_tokens_staging", out_bytes)?;
 
     let mut batch = CommandBatch::new(vk_device)?;
     if !record_resident_decode_rope_tables_into(
@@ -4306,8 +4311,8 @@ pub fn submit_transformer_stack_batched_hidden_from_tokens(
         block_size,
     )?;
     let hidden_bytes = (batch_size * config.hidden_size * 4) as u64;
-    let out_staging = backend
-        .acquire_resident_scratch_host_visible("native_b_hidden_staging", hidden_bytes)?;
+    let out_staging =
+        backend.acquire_resident_scratch_host_visible("native_b_hidden_staging", hidden_bytes)?;
 
     let mut batch = CommandBatch::new(vk_device)?;
     if !record_resident_decode_rope_tables_into(
@@ -4347,7 +4352,8 @@ pub fn submit_transformer_stack_batched_hidden_from_tokens(
         &meta.slots,
         recurrent_states,
         conv_states,
-    )? else {
+    )?
+    else {
         return Ok(None);
     };
     let hidden_src = if final_in_input {
@@ -4626,8 +4632,7 @@ pub fn prepare_batched_resident_decode_step_buffers(
 
     let hidden_bytes = (hidden_rows.len().max(1) * 4) as u64;
     let rope_bytes = (rope_cos.len().max(1) * 4) as u64;
-    let input =
-        backend.acquire_resident_scratch_host_visible("native_b_io_a_hv", hidden_bytes)?;
+    let input = backend.acquire_resident_scratch_host_visible("native_b_io_a_hv", hidden_bytes)?;
     let scratch = backend.acquire_resident_scratch("native_b_io_b", hidden_bytes)?;
     let rope_cos_buf =
         backend.acquire_resident_scratch_host_visible("native_b_rope_cos_hv", rope_bytes)?;
@@ -4728,10 +4733,8 @@ pub fn prepare_batched_resident_decode_meta_buffers(
     let mut block_table_flat = Vec::<u32>::with_capacity(batch_size * max_blocks_per_seq);
     let mut seq_lens = Vec::<u32>::with_capacity(batch_size);
     let mut slots = Vec::<u32>::with_capacity(batch_size);
-    for (row, (&block_table, &start_pos)) in block_tables
-        .iter()
-        .zip(start_positions.iter())
-        .enumerate()
+    for (row, (&block_table, &start_pos)) in
+        block_tables.iter().zip(start_positions.iter()).enumerate()
     {
         let seq_len = start_pos
             .checked_add(1)
@@ -4741,16 +4744,17 @@ pub fn prepare_batched_resident_decode_meta_buffers(
             "batched resident decode metadata row {row}: block table capacity {} < seq_len {seq_len}",
             block_table.capacity(block_size),
         );
-        let slot = block_table
-            .slot_for(start_pos, block_size)
-            .ok_or_else(|| anyhow::anyhow!("batched resident decode metadata row {row}: no slot for start_pos {start_pos}"))?;
+        let slot = block_table.slot_for(start_pos, block_size).ok_or_else(|| {
+            anyhow::anyhow!(
+                "batched resident decode metadata row {row}: no slot for start_pos {start_pos}"
+            )
+        })?;
         seq_lens.push(
             u32::try_from(seq_len)
                 .context("batched resident decode metadata: seq_len exceeds u32")?,
         );
         slots.push(
-            u32::try_from(slot)
-                .context("batched resident decode metadata: slot exceeds u32")?,
+            u32::try_from(slot).context("batched resident decode metadata: slot exceeds u32")?,
         );
 
         let pad_block = *block_table.blocks.last().unwrap_or(&0);
@@ -4805,7 +4809,8 @@ pub fn prepare_batched_resident_sample_buffers(
         "batched resident sampler: batch_size must be > 0"
     );
     anyhow::ensure!(
-        history_rows.len() == history_indices.len() && history_indices.len() == history_counts.len(),
+        history_rows.len() == history_indices.len()
+            && history_indices.len() == history_counts.len(),
         "batched resident sampler: history row/index/count length mismatch"
     );
     anyhow::ensure!(
@@ -4832,8 +4837,7 @@ pub fn prepare_batched_resident_sample_buffers(
             "batched resident sampler: row {row} invalid temperature {temp}"
         );
         anyhow::ensure!(
-            greedy
-                || (k > 0 && k <= kiln_vulkan_kernel::kernels::TOPK_SAMPLE_KERNEL_K_MAX),
+            greedy || (k > 0 && k <= kiln_vulkan_kernel::kernels::TOPK_SAMPLE_KERNEL_K_MAX),
             "batched resident sampler: row {row} top_k {k} out of supported range"
         );
     }
@@ -4844,20 +4848,30 @@ pub fn prepare_batched_resident_sample_buffers(
         .collect();
     let seed_hi: Vec<u32> = seeds.iter().map(|seed| (*seed >> 32) as u32).collect();
 
-    let top_k_buf =
-        backend.acquire_resident_scratch_host_visible("native_b_sample_top_k_hv", (batch_size * 4) as u64)?;
+    let top_k_buf = backend.acquire_resident_scratch_host_visible(
+        "native_b_sample_top_k_hv",
+        (batch_size * 4) as u64,
+    )?;
     let temperatures_buf = backend.acquire_resident_scratch_host_visible(
         "native_b_sample_temperatures_hv",
         (batch_size * 4) as u64,
     )?;
-    let top_p_buf =
-        backend.acquire_resident_scratch_host_visible("native_b_sample_top_p_hv", (batch_size * 4) as u64)?;
-    let min_p_buf =
-        backend.acquire_resident_scratch_host_visible("native_b_sample_min_p_hv", (batch_size * 4) as u64)?;
-    let seed_lo_buf =
-        backend.acquire_resident_scratch_host_visible("native_b_sample_seed_lo_hv", (batch_size * 4) as u64)?;
-    let seed_hi_buf =
-        backend.acquire_resident_scratch_host_visible("native_b_sample_seed_hi_hv", (batch_size * 4) as u64)?;
+    let top_p_buf = backend.acquire_resident_scratch_host_visible(
+        "native_b_sample_top_p_hv",
+        (batch_size * 4) as u64,
+    )?;
+    let min_p_buf = backend.acquire_resident_scratch_host_visible(
+        "native_b_sample_min_p_hv",
+        (batch_size * 4) as u64,
+    )?;
+    let seed_lo_buf = backend.acquire_resident_scratch_host_visible(
+        "native_b_sample_seed_lo_hv",
+        (batch_size * 4) as u64,
+    )?;
+    let seed_hi_buf = backend.acquire_resident_scratch_host_visible(
+        "native_b_sample_seed_hi_hv",
+        (batch_size * 4) as u64,
+    )?;
 
     top_k_buf.write_mapped(bytemuck::cast_slice(top_k))?;
     temperatures_buf.write_mapped(bytemuck::cast_slice(temperatures))?;

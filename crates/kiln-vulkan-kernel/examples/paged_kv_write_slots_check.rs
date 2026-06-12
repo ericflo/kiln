@@ -1,6 +1,6 @@
 //! Verification probe for the batched resident paged K/V slot write.
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use kiln_vulkan_kernel::resident::dispatch_paged_kv_write_slots_resident;
 use kiln_vulkan_kernel::{VulkanBuffer, VulkanDevice};
 

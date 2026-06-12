@@ -204,7 +204,8 @@ impl DatasetRegistry {
                 .map_err(|e| DatasetError::Io(format!("{e}")))?;
             kept += 1;
         }
-        out.sync_all().map_err(|e| DatasetError::Io(format!("{e}")))?;
+        out.sync_all()
+            .map_err(|e| DatasetError::Io(format!("{e}")))?;
         drop(out);
         std::fs::rename(&tmp, &path).map_err(|e| DatasetError::Io(format!("{e}")))?;
         let mut manifest = self.load_manifest(name)?;
@@ -284,9 +285,8 @@ impl DatasetRegistry {
             if line.trim().is_empty() {
                 continue;
             }
-            let conv: SftConversation = serde_json::from_str(&line).map_err(|e| {
-                DatasetError::InvalidJsonl(format!("line {}: {e}", idx + 1))
-            })?;
+            let conv: SftConversation = serde_json::from_str(&line)
+                .map_err(|e| DatasetError::InvalidJsonl(format!("line {}: {e}", idx + 1)))?;
             out.push(conv);
         }
         Ok(out)
@@ -294,10 +294,7 @@ impl DatasetRegistry {
 
     /// Stream every SFT conversation from a dataset (no buffering past one
     /// line at a time). Used by the synthesizer.
-    pub fn iter_sft<'a>(
-        &'a self,
-        name: &str,
-    ) -> Result<DatasetSftIter<'a>, DatasetError> {
+    pub fn iter_sft<'a>(&'a self, name: &str) -> Result<DatasetSftIter<'a>, DatasetError> {
         let path = self.dataset_dir(name)?.join("data.jsonl");
         let f = std::fs::File::open(&path).map_err(|e| DatasetError::Io(format!("{e}")))?;
         Ok(DatasetSftIter {
@@ -380,7 +377,11 @@ fn analyze_jsonl(path: &Path, format: DatasetFormat) -> Result<(u64, DatasetStat
                     for m in msgs {
                         if m.role == "assistant" {
                             stats.num_assistant_turns += 1;
-                            if m.tool_calls.as_ref().map(|v| !v.is_empty()).unwrap_or(false) {
+                            if m.tool_calls
+                                .as_ref()
+                                .map(|v| !v.is_empty())
+                                .unwrap_or(false)
+                            {
                                 stats.num_with_tool_calls += 1;
                             }
                         }
@@ -437,9 +438,7 @@ mod tests {
     use super::*;
 
     fn rows() -> String {
-        let r = |role: &str, content: &str| {
-            serde_json::json!({"role": role, "content": content})
-        };
+        let r = |role: &str, content: &str| serde_json::json!({"role": role, "content": content});
         let convs = vec![
             serde_json::json!({"messages": [r("user", "1+1?"), r("assistant", "2")]}),
             serde_json::json!({"messages": [r("user", "hello"), r("assistant", "hi")]}),
@@ -456,7 +455,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let reg = DatasetRegistry::new(dir.path().to_path_buf());
         let m = reg
-            .create("smoke", DatasetFormat::SftChat, Some("desc".into()), rows().as_bytes())
+            .create(
+                "smoke",
+                DatasetFormat::SftChat,
+                Some("desc".into()),
+                rows().as_bytes(),
+            )
             .unwrap();
         assert_eq!(m.num_rows, 2);
         assert_eq!(m.format, DatasetFormat::SftChat);
@@ -508,7 +512,8 @@ mod tests {
         let reg = DatasetRegistry::new(dir.path().to_path_buf());
         reg.create("a", DatasetFormat::SftChat, None, rows().as_bytes())
             .unwrap();
-        let new_row = r#"{"messages":[{"role":"user","content":"x"},{"role":"assistant","content":"y"}]}"#;
+        let new_row =
+            r#"{"messages":[{"role":"user","content":"x"},{"role":"assistant","content":"y"}]}"#;
         let m = reg.append_row("a", new_row).unwrap();
         assert_eq!(m.num_rows, 3);
     }
@@ -523,9 +528,10 @@ mod tests {
         assert_eq!(m.num_rows, 1);
         let head = reg.head_sft("a", 99).unwrap();
         // First row's content was "hello"/"hi"; "1+1?" was at index 0.
-        assert!(head.iter().all(|c| {
-            c.messages.iter().all(|msg| msg.content != "1+1?")
-        }));
+        assert!(
+            head.iter()
+                .all(|c| { c.messages.iter().all(|msg| msg.content != "1+1?") })
+        );
     }
 
     #[test]
@@ -533,7 +539,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let reg = DatasetRegistry::new(dir.path().to_path_buf());
         for bad in &["", "..", "a/b", "a\\b"] {
-            let err = reg.create(bad, DatasetFormat::SftChat, None, rows().as_bytes()).unwrap_err();
+            let err = reg
+                .create(bad, DatasetFormat::SftChat, None, rows().as_bytes())
+                .unwrap_err();
             assert!(matches!(err, DatasetError::InvalidName(_)));
         }
     }
@@ -543,5 +551,4 @@ mod tests {
         let pattern = compress_pattern(&["assistant", "tool", "tool", "tool", "assistant"]);
         assert_eq!(pattern, "assistant tool×3 assistant");
     }
-
 }

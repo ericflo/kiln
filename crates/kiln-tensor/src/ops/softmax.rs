@@ -25,8 +25,8 @@
 //! over a single row's D elements. Bit-identical at the same dtype.
 
 use crate::{
-    bail, dispatch1, BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result,
-    Storage, Tensor, TensorId,
+    BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result, Storage, Tensor,
+    TensorId, bail, dispatch1,
 };
 use std::sync::Arc;
 
@@ -101,7 +101,11 @@ impl DeviceOp1 for SoftmaxLastDimOp {
 
         let cpu = CpuStorage::from_bytes(dtype, out_bytes)?;
         let storage: Storage = Arc::new(cpu);
-        let out = Tensor::from_parts(storage, Layout::contiguous(shape.to_vec()), TensorId::next())?;
+        let out = Tensor::from_parts(
+            storage,
+            Layout::contiguous(shape.to_vec()),
+            TensorId::next(),
+        )?;
         Ok(Some(out))
     }
 

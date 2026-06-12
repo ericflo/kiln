@@ -144,9 +144,7 @@ fn build_harness(user_code: &str, doctests: &[Doctest]) -> String {
     // We test by `repr(actual) == expected` after a strip. Python's stdlib
     // doctest does the same thing under "no special doctest directives"
     // mode. We catch user exceptions per-test and report them as failures.
-    let mut harness = String::from(
-        "import sys, json, traceback\n_kdt_results = []\n",
-    );
+    let mut harness = String::from("import sys, json, traceback\n_kdt_results = []\n");
     harness.push_str("try:\n");
     for line in user_code.lines() {
         harness.push_str("    ");
@@ -351,11 +349,7 @@ pub(super) fn score(
         return Ok((0.0, EvalOutcomeKind::Error, Some(err)));
     }
     if outcome.timed_out {
-        return Ok((
-            0.0,
-            EvalOutcomeKind::Error,
-            outcome.first_failure_detail,
-        ));
+        return Ok((0.0, EvalOutcomeKind::Error, outcome.first_failure_detail));
     }
     let score = if outcome.total == 0 {
         0.0
@@ -368,7 +362,10 @@ pub(super) fn score(
         EvalOutcomeKind::Fail
     };
     let detail = if matches!(kind, EvalOutcomeKind::Pass) {
-        Some(format!("{}/{} doctests passed", outcome.passed, outcome.total))
+        Some(format!(
+            "{}/{} doctests passed",
+            outcome.passed, outcome.total
+        ))
     } else {
         Some(format!(
             "{}/{} doctests passed{}",
@@ -477,9 +474,7 @@ mod tests {
     #[test]
     #[ignore = "requires python3 on PATH"]
     fn score_returns_error_on_runaway_loop() {
-        let example = user(
-            "```python\ndef f():\n    \"\"\"\n    >>> f()\n    1\n    \"\"\"\n```",
-        );
+        let example = user("```python\ndef f():\n    \"\"\"\n    >>> f()\n    1\n    \"\"\"\n```");
         let completion = "```python\ndef f():\n    while True:\n        pass\n```";
         let (score, kind, _) = score(&example, completion, 0.5, "python3").unwrap();
         assert_eq!(score, 0.0);

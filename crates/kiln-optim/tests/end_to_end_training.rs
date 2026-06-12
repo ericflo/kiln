@@ -17,8 +17,8 @@
 //! Trains a 2-input linear regression to recover `y = 2*x1 + 3*x2 + 1`.
 
 use kiln_autograd::{
-    AddBackward, MatmulBackward, MulBackward, ReduceBackward, ReduceKind, ReduceScope,
-    SubBackward, Tape,
+    AddBackward, MatmulBackward, MulBackward, ReduceBackward, ReduceKind, ReduceScope, SubBackward,
+    Tape,
 };
 use kiln_optim::{OptimStep, Sgd, SgdHyperparameters};
 use kiln_param::{AmpPolicy, ForwardStorage, Parameter};

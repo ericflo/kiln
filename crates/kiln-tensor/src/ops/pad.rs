@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId, bail};
 
 fn fill_bytes(dtype: DType, value: f32) -> Vec<u8> {
     match dtype {
@@ -158,10 +158,7 @@ mod tests {
         let x = Tensor::from_slice(&[1.0f32, 2.0], vec![1, 1, 2]).unwrap();
         let y = pad(&x, &[(0, 1), (0, 0), (1, 1)], 7.0).unwrap();
         assert_eq!(y.shape(), &[2, 1, 4]);
-        assert_eq!(
-            read_f32(&y),
-            vec![7.0, 1.0, 2.0, 7.0, 7.0, 7.0, 7.0, 7.0]
-        );
+        assert_eq!(read_f32(&y), vec![7.0, 1.0, 2.0, 7.0, 7.0, 7.0, 7.0, 7.0]);
     }
 
     #[test]

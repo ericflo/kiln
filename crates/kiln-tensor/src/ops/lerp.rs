@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId, bail};
 
 pub fn lerp(a: &Tensor, b: &Tensor, weight: f32) -> Result<Tensor> {
     if a.shape() != b.shape() {
@@ -20,11 +20,7 @@ pub fn lerp(a: &Tensor, b: &Tensor, weight: f32) -> Result<Tensor> {
         );
     }
     if a.dtype() != b.dtype() {
-        bail!(
-            "lerp: dtype mismatch — a {} vs b {}",
-            a.dtype(),
-            b.dtype()
-        );
+        bail!("lerp: dtype mismatch — a {} vs b {}", a.dtype(), b.dtype());
     }
     let dtype = a.dtype();
     if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
@@ -70,32 +66,32 @@ pub fn lerp(a: &Tensor, b: &Tensor, weight: f32) -> Result<Tensor> {
         DType::BF16 => {
             for i in 0..n {
                 let va =
-                    half::bf16::from_le_bytes(ab[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32();
+                    half::bf16::from_le_bytes(ab[i * 2..i * 2 + 2].try_into().unwrap()).to_f32();
                 let vb =
-                    half::bf16::from_le_bytes(bb[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32();
+                    half::bf16::from_le_bytes(bb[i * 2..i * 2 + 2].try_into().unwrap()).to_f32();
                 let r = va + weight * (vb - va);
-                out[i * 2..i * 2 + 2]
-                    .copy_from_slice(&half::bf16::from_f32(r).to_le_bytes());
+                out[i * 2..i * 2 + 2].copy_from_slice(&half::bf16::from_f32(r).to_le_bytes());
             }
         }
         DType::F16 => {
             for i in 0..n {
-                let va = half::f16::from_le_bytes(ab[i * 2..i * 2 + 2].try_into().unwrap())
-                    .to_f32();
-                let vb = half::f16::from_le_bytes(bb[i * 2..i * 2 + 2].try_into().unwrap())
-                    .to_f32();
+                let va =
+                    half::f16::from_le_bytes(ab[i * 2..i * 2 + 2].try_into().unwrap()).to_f32();
+                let vb =
+                    half::f16::from_le_bytes(bb[i * 2..i * 2 + 2].try_into().unwrap()).to_f32();
                 let r = va + weight * (vb - va);
-                out[i * 2..i * 2 + 2]
-                    .copy_from_slice(&half::f16::from_f32(r).to_le_bytes());
+                out[i * 2..i * 2 + 2].copy_from_slice(&half::f16::from_f32(r).to_le_bytes());
             }
         }
         _ => unreachable!(),
     }
     let cpu_out = CpuStorage::from_bytes(dtype, out)?;
     let storage: Storage = Arc::new(cpu_out);
-    Tensor::from_parts(storage, Layout::contiguous(a.shape().to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(a.shape().to_vec()),
+        TensorId::next(),
+    )
 }
 
 #[cfg(test)]

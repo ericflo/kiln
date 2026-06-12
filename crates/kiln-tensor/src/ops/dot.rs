@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 pub fn dot(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     if a.rank() != 1 || b.rank() != 1 {
@@ -22,11 +22,7 @@ pub fn dot(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         );
     }
     if a.shape() != b.shape() {
-        bail!(
-            "dot: shape mismatch: a={:?}, b={:?}",
-            a.shape(),
-            b.shape()
-        );
+        bail!("dot: shape mismatch: a={:?}, b={:?}", a.shape(), b.shape());
     }
     if a.dtype() != b.dtype() {
         bail!("dot: dtype mismatch");
@@ -110,7 +106,11 @@ pub fn dot(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     };
     let cpu = CpuStorage::from_bytes(dtype, bytes)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(Vec::<usize>::new()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(Vec::<usize>::new()),
+        TensorId::next(),
+    )
 }
 
 #[cfg(test)]

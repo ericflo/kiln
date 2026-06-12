@@ -329,9 +329,10 @@ mod tests {
     #[test]
     fn sample_on_empty_returns_none() {
         let mut b = ReplayBuffer::new(100, 1000);
-        assert!(b
-            .sample_indices(1, SamplingStrategy::Uniform { seed: 0 })
-            .is_none());
+        assert!(
+            b.sample_indices(1, SamplingStrategy::Uniform { seed: 0 })
+                .is_none()
+        );
     }
 
     #[test]

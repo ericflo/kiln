@@ -138,7 +138,7 @@ use std::sync::Arc;
 use cudarc::driver::CudaContext;
 
 use crate::{
-    allocator_frozen_error, Allocator, AllocatorMode, CudaStorage, DType, Device, Result, Storage,
+    Allocator, AllocatorMode, CudaStorage, DType, Device, Result, Storage, allocator_frozen_error,
 };
 
 #[derive(Debug)]
@@ -195,11 +195,7 @@ impl CudaAllocator {
 
     /// Construct directly in a given mode (tests, capture session) —
     /// **candle-free** entry.
-    pub fn with_mode_ctx(
-        ctx: Arc<CudaContext>,
-        device_index: usize,
-        mode: AllocatorMode,
-    ) -> Self {
+    pub fn with_mode_ctx(ctx: Arc<CudaContext>, device_index: usize, mode: AllocatorMode) -> Self {
         let mut a = Self::new_ctx(ctx, device_index);
         a.mode = mode;
         a
@@ -226,8 +222,7 @@ impl CudaAllocator {
         let bytes_per = dtype.packed_buffer_bytes(n_elements);
         let slot = self.cache.entry((dtype, n_elements)).or_default();
         for _ in 0..count {
-            let cuda =
-                CudaStorage::zeros_ctx(&self.ctx, self.device_index, dtype, n_elements)?;
+            let cuda = CudaStorage::zeros_ctx(&self.ctx, self.device_index, dtype, n_elements)?;
             let storage: Storage = Arc::new(cuda);
             slot.push(storage);
             self.reserved_bytes += bytes_per;
@@ -295,12 +290,7 @@ impl Allocator for CudaAllocator {
                 // Route through the candle-free zeros_ctx entry
                 // (d3caf46b) — the actual cudarc allocation skips the
                 // candle `CudaDevice::alloc_zeros` wrapper entirely.
-                let cuda = CudaStorage::zeros_ctx(
-                    &self.ctx,
-                    self.device_index,
-                    dtype,
-                    n_elements,
-                )?;
+                let cuda = CudaStorage::zeros_ctx(&self.ctx, self.device_index, dtype, n_elements)?;
                 let storage: Storage = Arc::new(cuda);
                 let bytes = dtype.packed_buffer_bytes(n_elements);
                 self.reserved_bytes += bytes;
@@ -385,10 +375,7 @@ mod tests {
         };
         let mut a = CudaAllocator::with_mode_ctx(ctx, 0, AllocatorMode::Frozen);
         let e = a.alloc(DType::F32, 4).unwrap_err();
-        assert!(
-            e.to_string().contains("CudaAllocator::alloc"),
-            "got: {e}"
-        );
+        assert!(e.to_string().contains("CudaAllocator::alloc"), "got: {e}");
     }
 
     #[test]

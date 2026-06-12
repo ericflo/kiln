@@ -27,7 +27,7 @@
 //! the kt op surface, so we read the scalar and fold it into `mul_scalar`.
 
 use kiln_tensor::ops::{mul_scalar, one_hot, softmax_last_dim, sub};
-use kiln_tensor::{bail, CpuStorage, DType, Device, Error, Result, Tensor};
+use kiln_tensor::{CpuStorage, DType, Device, Error, Result, Tensor, bail};
 
 use crate::BackwardOp;
 
@@ -119,9 +119,9 @@ fn read_scalar_f32(t: &Tensor) -> Result<f32> {
         DType::F32 => f32::from_le_bytes(bytes[0..4].try_into().unwrap()),
         DType::BF16 => half::bf16::from_le_bytes(bytes[0..2].try_into().unwrap()).to_f32(),
         DType::F16 => half::f16::from_le_bytes(bytes[0..2].try_into().unwrap()).to_f32(),
-        other => bail!(
-            "CrossEntropyKtBackward: grad_output dtype must be F32/BF16/F16, got {other}"
-        ),
+        other => {
+            bail!("CrossEntropyKtBackward: grad_output dtype must be F32/BF16/F16, got {other}")
+        }
     })
 }
 
@@ -157,7 +157,9 @@ mod tests {
     #[test]
     fn matches_analytic_gradient() {
         let (batch, vocab) = (4usize, 8usize);
-        let logits: Vec<f32> = (0..batch * vocab).map(|i| ((i % 5) as f32) * 0.5 - 1.0).collect();
+        let logits: Vec<f32> = (0..batch * vocab)
+            .map(|i| ((i % 5) as f32) * 0.5 - 1.0)
+            .collect();
         let targets: Vec<u32> = (0..batch).map(|b| ((b * 3 + 1) % vocab) as u32).collect();
         let lt = Tensor::from_slice(&logits, vec![batch, vocab]).unwrap();
         let tt = Tensor::from_slice(&targets, vec![batch]).unwrap();
@@ -203,7 +205,11 @@ mod tests {
             let mut dn = logits.clone();
             dn[j] -= step;
             let fd = (loss(&up) - loss(&dn)) / (2.0 * step);
-            assert!((dx[j] - fd).abs() < 2e-3, "idx {j}: analytic {} vs fd {fd}", dx[j]);
+            assert!(
+                (dx[j] - fd).abs() < 2e-3,
+                "idx {j}: analytic {} vs fd {fd}",
+                dx[j]
+            );
         }
     }
 

@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use kiln_tensor::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use kiln_tensor::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 use crate::BackwardOp;
 
@@ -198,8 +198,14 @@ mod tests {
         let grads = bo.apply(&grad).unwrap();
         assert_eq!(grads[0].as_ref().unwrap().shape(), &[2, 2]);
         // a < b at [0,0], a > b at [0,1], a < b at [1,0], a > b at [1,1].
-        assert_eq!(read_f32(grads[0].as_ref().unwrap()), vec![0.0, 20.0, 0.0, 40.0]);
-        assert_eq!(read_f32(grads[1].as_ref().unwrap()), vec![10.0, 0.0, 30.0, 0.0]);
+        assert_eq!(
+            read_f32(grads[0].as_ref().unwrap()),
+            vec![0.0, 20.0, 0.0, 40.0]
+        );
+        assert_eq!(
+            read_f32(grads[1].as_ref().unwrap()),
+            vec![10.0, 0.0, 30.0, 0.0]
+        );
     }
 
     #[test]

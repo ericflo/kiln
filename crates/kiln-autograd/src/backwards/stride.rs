@@ -16,7 +16,7 @@
 //! contiguous(x)        -> d_x = d_y                       (value identity)
 //! ```
 
-use kiln_tensor::{bail, Result, Tensor};
+use kiln_tensor::{Result, Tensor, bail};
 
 use crate::BackwardOp;
 
@@ -46,7 +46,9 @@ impl BackwardOp for ReshapeBackward {
         }
         // reshape requires a contiguous source; the upstream grad may be a
         // strided view (e.g. from a transpose adjoint), so materialise first.
-        let dx = grad_output.contiguous()?.reshape(self.input_shape.clone())?;
+        let dx = grad_output
+            .contiguous()?
+            .reshape(self.input_shape.clone())?;
         Ok(vec![Some(dx)])
     }
     fn requires_input(&self, _idx: usize) -> bool {
@@ -120,7 +122,10 @@ impl BackwardOp for PermuteBackward {
         let mut inv = vec![usize::MAX; n];
         for (i, &a) in self.axes.iter().enumerate() {
             if a >= n || inv[a] != usize::MAX {
-                bail!("PermuteBackward: axes {:?} is not a permutation of 0..{n}", self.axes);
+                bail!(
+                    "PermuteBackward: axes {:?} is not a permutation of 0..{n}",
+                    self.axes
+                );
             }
             inv[a] = i;
         }
@@ -177,7 +182,9 @@ mod tests {
     #[test]
     fn reshape_backward_reshapes_grad_to_input_shape() {
         let dy = arange(24, vec![4, 6]);
-        let bo = ReshapeBackward { input_shape: vec![2, 3, 4] };
+        let bo = ReshapeBackward {
+            input_shape: vec![2, 3, 4],
+        };
         let dx = bo.apply(&dy).unwrap()[0].clone().unwrap();
         assert_eq!(dx.shape(), &[2, 3, 4]);
         // reshape preserves flat order, so values are identical.
@@ -187,7 +194,9 @@ mod tests {
     #[test]
     fn reshape_backward_elem_count_mismatch_errors() {
         let dy = arange(6, vec![6]);
-        let bo = ReshapeBackward { input_shape: vec![2, 4] };
+        let bo = ReshapeBackward {
+            input_shape: vec![2, 4],
+        };
         assert!(bo.apply(&dy).unwrap_err().to_string().contains("elems"));
     }
 
@@ -198,7 +207,10 @@ mod tests {
         let x = arange(6, vec![2, 3]);
         let y = x.transpose(0, 1).unwrap();
         let dy = arange(6, vec![3, 2]); // grad has y's shape
-        let bo = TransposeBackward { axis_a: 0, axis_b: 1 };
+        let bo = TransposeBackward {
+            axis_a: 0,
+            axis_b: 1,
+        };
         let dx = bo.apply(&dy).unwrap()[0].clone().unwrap();
         assert_eq!(dx.shape(), x.shape());
         // Re-applying the forward transpose to d_x must recover d_y.
@@ -209,8 +221,16 @@ mod tests {
     #[test]
     fn transpose_backward_oob_errors() {
         let dy = arange(6, vec![3, 2]);
-        let bo = TransposeBackward { axis_a: 0, axis_b: 5 };
-        assert!(bo.apply(&dy).unwrap_err().to_string().contains("out of bounds"));
+        let bo = TransposeBackward {
+            axis_a: 0,
+            axis_b: 5,
+        };
+        assert!(
+            bo.apply(&dy)
+                .unwrap_err()
+                .to_string()
+                .contains("out of bounds")
+        );
     }
 
     // ---- permute ----
@@ -232,8 +252,15 @@ mod tests {
     #[test]
     fn permute_backward_rejects_non_permutation() {
         let dy = arange(24, vec![4, 2, 3]);
-        let bo = PermuteBackward { axes: vec![0, 0, 1] };
-        assert!(bo.apply(&dy).unwrap_err().to_string().contains("permutation"));
+        let bo = PermuteBackward {
+            axes: vec![0, 0, 1],
+        };
+        assert!(
+            bo.apply(&dy)
+                .unwrap_err()
+                .to_string()
+                .contains("permutation")
+        );
     }
 
     // ---- contiguous ----
@@ -251,16 +278,34 @@ mod tests {
         // A strided (transposed) grad should pass through unchanged in value.
         let base = arange(6, vec![2, 3]);
         let strided = base.transpose(0, 1).unwrap(); // [3,2] view
-        let dx = ContiguousBackward.apply(&strided).unwrap()[0].clone().unwrap();
+        let dx = ContiguousBackward.apply(&strided).unwrap()[0]
+            .clone()
+            .unwrap();
         assert_eq!(dx.shape(), &[3, 2]);
         assert_eq!(read_f32(&dx), read_f32(&strided));
     }
 
     #[test]
     fn op_metadata() {
-        assert_eq!((ReshapeBackward { input_shape: vec![1] }).name(), "reshape_backward");
-        assert_eq!((TransposeBackward { axis_a: 0, axis_b: 1 }).name(), "transpose_backward");
-        assert_eq!((PermuteBackward { axes: vec![0] }).name(), "permute_backward");
+        assert_eq!(
+            (ReshapeBackward {
+                input_shape: vec![1]
+            })
+            .name(),
+            "reshape_backward"
+        );
+        assert_eq!(
+            (TransposeBackward {
+                axis_a: 0,
+                axis_b: 1
+            })
+            .name(),
+            "transpose_backward"
+        );
+        assert_eq!(
+            (PermuteBackward { axes: vec![0] }).name(),
+            "permute_backward"
+        );
         assert_eq!(ContiguousBackward.name(), "contiguous_backward");
         assert_eq!(ContiguousBackward.input_count(), 1);
         assert!(!ContiguousBackward.requires_input(0));

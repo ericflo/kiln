@@ -125,9 +125,8 @@ pub use cuda_allocator::CudaAllocator;
 #[cfg(feature = "cuda")]
 pub use cuda_matmul::{
     cublaslt_cache_path, cuda_matmul, cuda_matmul_into, cuda_matmul_lhs_transposed,
-    cuda_matmul_rhs_transposed,
-    cuda_matmul_with_bias, flush_algo_cache_to_disk, load_algo_cache_from_disk,
-    restore_into_shared_cache, snapshot_algo_cache,
+    cuda_matmul_rhs_transposed, cuda_matmul_with_bias, flush_algo_cache_to_disk,
+    load_algo_cache_from_disk, restore_into_shared_cache, snapshot_algo_cache,
 };
 #[cfg(feature = "cuda")]
 pub use cuda_storage::{
@@ -157,14 +156,14 @@ pub use fp8::{
 };
 #[cfg(feature = "metal")]
 pub use metal_allocator::MetalAllocator;
-#[cfg(feature = "metal")]
-pub use metal_matmul::{metal_matmul, metal_matmul_lhs_transposed, metal_matmul_rhs_transposed};
 #[doc(hidden)]
 #[cfg(feature = "metal")]
 pub use metal_matmul::{
     GemmCfg, bench_gemm_cfg, bench_steel_cfg, gemm_pool_bytes, gen_gemm_msl, gen_steel_msl,
     steel_cfg_valid,
 };
+#[cfg(feature = "metal")]
+pub use metal_matmul::{metal_matmul, metal_matmul_lhs_transposed, metal_matmul_rhs_transposed};
 #[cfg(feature = "metal")]
 pub use metal_storage::{
     MetalStorage, host_to_metal_copy, metal_activation_unary, metal_adamw_step, metal_cast,

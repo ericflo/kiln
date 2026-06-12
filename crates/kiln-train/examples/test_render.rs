@@ -10,15 +10,27 @@ fn main() {
     tok = tok.with_chat_template(tpl);
 
     let msgs = vec![
-        ChatMessage { role: "system".to_string(), content: "You are helpful.".to_string(), ..Default::default() },
-        ChatMessage { role: "user".to_string(), content: "Say hi".to_string(), ..Default::default() },
+        ChatMessage {
+            role: "system".to_string(),
+            content: "You are helpful.".to_string(),
+            ..Default::default()
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: "Say hi".to_string(),
+            ..Default::default()
+        },
     ];
 
     let mut kwargs = serde_json::Map::new();
     kwargs.insert("enable_thinking".to_string(), Value::Bool(false));
-    let opts = ChatTemplateOptions { template_kwargs: kwargs };
+    let opts = ChatTemplateOptions {
+        template_kwargs: kwargs,
+    };
 
-    let text = tok.apply_chat_template_full_with_options(msgs.as_slice(), None, None, opts).unwrap();
+    let text = tok
+        .apply_chat_template_full_with_options(msgs.as_slice(), None, None, opts)
+        .unwrap();
     println!("RENDERED TEXT:\n{}", text);
     println!("---END---\n");
     let ids = tok.encode(&text).unwrap();

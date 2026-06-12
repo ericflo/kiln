@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId, bail};
 
 /// Materialize `t` on CPU. If `t` already lives on CPU this is a
 /// cheap `Arc` bump; if it lives on CUDA we do a D2H copy. The norm
@@ -58,22 +58,22 @@ fn read_f32_flat(t: &Tensor) -> Result<Vec<f32>> {
     match t.dtype() {
         DType::F32 => {
             for i in 0..n {
-                out.push(f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()));
+                out.push(f32::from_le_bytes(
+                    bytes[i * 4..i * 4 + 4].try_into().unwrap(),
+                ));
             }
         }
         DType::BF16 => {
             for i in 0..n {
                 out.push(
-                    half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32(),
+                    half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32(),
                 );
             }
         }
         DType::F16 => {
             for i in 0..n {
                 out.push(
-                    half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32(),
+                    half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32(),
                 );
             }
         }
@@ -91,7 +91,11 @@ fn scalar_tensor(dtype: DType, v: f32) -> Result<Tensor> {
     };
     let cpu = CpuStorage::from_bytes(dtype, bytes)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(Vec::<usize>::new()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(Vec::<usize>::new()),
+        TensorId::next(),
+    )
 }
 
 /// L1 norm: `Σ |x_i|`.

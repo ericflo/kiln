@@ -14,13 +14,13 @@
 //! validate the full Phase 4 sampler design from the #1082 issue.
 
 use kiln_tensor as kt;
-use kt::ops::{argmax_last_dim, softmax_last_dim};
 use kt::ops::logit_penalties::{
     FrequencyPenaltyProcessor, PresencePenaltyProcessor, RepetitionPenaltyProcessor,
 };
 use kt::ops::logit_processor::{
     LogitProcessorChain, TemperatureProcessor, TopKProcessor, TopPProcessor,
 };
+use kt::ops::{argmax_last_dim, softmax_last_dim};
 
 fn read_rows(t: &kt::Tensor, batch: usize, vocab: usize) -> Vec<Vec<f32>> {
     let cpu = t
@@ -56,8 +56,7 @@ fn greedy_chain_picks_unmasked_top_logit() {
     // [1.0, 5.0, 3.0, 5.5, 2.0] with top-K(2) keeps only [5.0, 5.5]
     // (indices 1 and 3). argmax picks index 3 (the larger).
     let logits = kt::Tensor::from_slice(&[1.0f32, 5.0, 3.0, 5.5, 2.0], vec![1, 5]).unwrap();
-    let chain =
-        LogitProcessorChain::new(vec![Box::new(TopKProcessor::new(2))]);
+    let chain = LogitProcessorChain::new(vec![Box::new(TopKProcessor::new(2))]);
     let post = chain.apply(&logits).unwrap();
     let ids = read_i64(&argmax_last_dim(&post).unwrap());
     assert_eq!(ids, vec![3]);
@@ -83,8 +82,7 @@ fn full_chain_pipeline_produces_finite_softmax() {
     let logits = kt::Tensor::from_slice(
         &[
             // batch 0: ascending
-            1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0,
-            // batch 1: peaked at index 2
+            1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, // batch 1: peaked at index 2
             0.5, 0.5, 8.0, 0.5, 0.5, 0.5,
         ],
         vec![batch, vocab],
@@ -125,9 +123,10 @@ fn repetition_penalty_changes_argmax_when_strong_enough() {
     // logits [10.0, 11.0]; history [1] with penalty 2.0 →
     // logits[1] = 11.0 / 2.0 = 5.5; argmax now index 0 (10.0 > 5.5).
     let logits = kt::Tensor::from_slice(&[10.0f32, 11.0], vec![1, 2]).unwrap();
-    let chain = LogitProcessorChain::new(vec![Box::new(
-        RepetitionPenaltyProcessor::new(2.0, vec![vec![1]]),
-    )]);
+    let chain = LogitProcessorChain::new(vec![Box::new(RepetitionPenaltyProcessor::new(
+        2.0,
+        vec![vec![1]],
+    ))]);
     let post = chain.apply(&logits).unwrap();
     let ids = read_i64(&argmax_last_dim(&post).unwrap());
     assert_eq!(ids, vec![0], "rep penalty should flip argmax 1 → 0");
@@ -152,9 +151,7 @@ fn top_p_then_softmax_concentrates_probability() {
     // After top_p(0.5), the max probability should be strictly higher
     // (the mass that was on masked indices is redistributed onto the
     // remaining ones).
-    let max_baseline = baseline[0]
-        .iter()
-        .fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+    let max_baseline = baseline[0].iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
     let max_filtered = rows[0].iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
     assert!(
         max_filtered > max_baseline,
@@ -202,14 +199,11 @@ fn empty_chain_softmax_argmax_path() {
 fn chain_with_multi_batch_independent_decisions() {
     // Multi-batch: penalties only affect the row they're configured
     // for. Verifies independent histories produce independent argmax.
-    let logits = kt::Tensor::from_slice(
-        &[10.0f32, 11.0, 11.0, 10.0],
-        vec![2, 2],
-    )
-    .unwrap();
-    let chain = LogitProcessorChain::new(vec![Box::new(
-        RepetitionPenaltyProcessor::new(2.0, vec![vec![1], vec![0]]),
-    )]);
+    let logits = kt::Tensor::from_slice(&[10.0f32, 11.0, 11.0, 10.0], vec![2, 2]).unwrap();
+    let chain = LogitProcessorChain::new(vec![Box::new(RepetitionPenaltyProcessor::new(
+        2.0,
+        vec![vec![1], vec![0]],
+    ))]);
     let post = chain.apply(&logits).unwrap();
     let ids = read_i64(&argmax_last_dim(&post).unwrap());
     // Batch 0: history [1] → logits[0,1] /= 2 → [10.0, 5.5] → argmax 0

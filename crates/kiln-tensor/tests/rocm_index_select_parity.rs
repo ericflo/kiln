@@ -58,8 +58,7 @@ fn cpu_axis_n(
             }
             let src_off = (left * src_dim + id) * right_size;
             let dst_off = (left * ids_dim + o) * right_size;
-            out[dst_off..dst_off + right_size]
-                .copy_from_slice(&src[src_off..src_off + right_size]);
+            out[dst_off..dst_off + right_size].copy_from_slice(&src[src_off..src_off + right_size]);
         }
     }
     out
@@ -82,13 +81,7 @@ fn index_select_dim0_parity() {
         return;
     }
     // (src_n_rows, inner) shapes — inner=1 (pure row vector) up to a wide slice.
-    let cases = [
-        (4usize, 1usize),
-        (5, 3),
-        (8, 16),
-        (10, 64),
-        (3, 1000),
-    ];
+    let cases = [(4usize, 1usize), (5, 3), (8, 16), (10, 64), (3, 1000)];
     // Index lists exercise: identity, repeats, reverse, and one out-of-range id.
     for &(src_n_rows, inner) in &cases {
         let src: Vec<f32> = (0..src_n_rows * inner).map(val).collect();
@@ -105,9 +98,8 @@ fn index_select_dim0_parity() {
 
             let src_t = Tensor::from_vec_on(Device::Rocm(0), src.clone(), vec![src_n_rows, inner])
                 .unwrap_or_else(|e| panic!("from_vec_on src: {e}"));
-            let idx_t =
-                Tensor::from_vec_on(Device::Rocm(0), indices.clone(), vec![indices.len()])
-                    .unwrap_or_else(|e| panic!("from_vec_on indices: {e}"));
+            let idx_t = Tensor::from_vec_on(Device::Rocm(0), indices.clone(), vec![indices.len()])
+                .unwrap_or_else(|e| panic!("from_vec_on indices: {e}"));
 
             let out = kiln_tensor::rocm_index_select_dim0(&src_t, &idx_t)
                 .unwrap_or_else(|e| panic!("rocm_index_select_dim0: {e}"));
@@ -160,9 +152,8 @@ fn index_select_axis_n_parity() {
                 vec![left_size, src_dim, right_size],
             )
             .unwrap_or_else(|e| panic!("from_vec_on src: {e}"));
-            let idx_t =
-                Tensor::from_vec_on(Device::Rocm(0), indices.clone(), vec![indices.len()])
-                    .unwrap_or_else(|e| panic!("from_vec_on indices: {e}"));
+            let idx_t = Tensor::from_vec_on(Device::Rocm(0), indices.clone(), vec![indices.len()])
+                .unwrap_or_else(|e| panic!("from_vec_on indices: {e}"));
 
             let out = kiln_tensor::rocm_index_select_axis_n(&src_t, 1, &idx_t)
                 .unwrap_or_else(|e| panic!("rocm_index_select_axis_n: {e}"));

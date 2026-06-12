@@ -17,9 +17,7 @@
 
 use std::sync::Arc;
 
-use kiln_tensor::{
-    bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId,
-};
+use kiln_tensor::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 use crate::BackwardOp;
 
@@ -67,13 +65,17 @@ impl BackwardOp for MaskedFillBackward {
             .storage()
             .as_any()
             .downcast_ref::<CpuStorage>()
-            .ok_or_else(|| Error::from_str("MaskedFillBackward: grad storage must be CpuStorage"))?;
+            .ok_or_else(|| {
+                Error::from_str("MaskedFillBackward: grad storage must be CpuStorage")
+            })?;
         let m_cpu = self
             .mask
             .storage()
             .as_any()
             .downcast_ref::<CpuStorage>()
-            .ok_or_else(|| Error::from_str("MaskedFillBackward: mask storage must be CpuStorage"))?;
+            .ok_or_else(|| {
+                Error::from_str("MaskedFillBackward: mask storage must be CpuStorage")
+            })?;
         let g_bytes = g_cpu.as_bytes();
         let m_bytes = m_cpu.as_bytes();
         let mut out = vec![0u8; n * per];
@@ -82,8 +84,7 @@ impl BackwardOp for MaskedFillBackward {
             DType::F32 => {
                 for i in 0..n {
                     if m_bytes[i] == 0 {
-                        out[i * 4..i * 4 + 4]
-                            .copy_from_slice(&g_bytes[i * 4..i * 4 + 4]);
+                        out[i * 4..i * 4 + 4].copy_from_slice(&g_bytes[i * 4..i * 4 + 4]);
                     }
                     // else: zero, already initialized.
                 }
@@ -91,16 +92,14 @@ impl BackwardOp for MaskedFillBackward {
             DType::BF16 => {
                 for i in 0..n {
                     if m_bytes[i] == 0 {
-                        out[i * 2..i * 2 + 2]
-                            .copy_from_slice(&g_bytes[i * 2..i * 2 + 2]);
+                        out[i * 2..i * 2 + 2].copy_from_slice(&g_bytes[i * 2..i * 2 + 2]);
                     }
                 }
             }
             DType::F16 => {
                 for i in 0..n {
                     if m_bytes[i] == 0 {
-                        out[i * 2..i * 2 + 2]
-                            .copy_from_slice(&g_bytes[i * 2..i * 2 + 2]);
+                        out[i * 2..i * 2 + 2].copy_from_slice(&g_bytes[i * 2..i * 2 + 2]);
                     }
                 }
             }

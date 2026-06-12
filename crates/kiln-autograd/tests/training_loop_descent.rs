@@ -10,7 +10,10 @@
 //! in `kiln_optim`'s own integration tests; this test focuses on the
 //! autograd half.
 
-use kiln_autograd::{AddBackward, MatmulBackward, MulBackward, ReduceBackward, ReduceKind, ReduceScope, SubBackward, Tape};
+use kiln_autograd::{
+    AddBackward, MatmulBackward, MulBackward, ReduceBackward, ReduceKind, ReduceScope, SubBackward,
+    Tape,
+};
 use kiln_tensor::ops::{add, matmul, mul, sub, sum_all};
 use kiln_tensor::{CpuStorage, Layout, Result, Storage, Tensor, TensorId};
 use std::sync::Arc;
@@ -211,10 +214,7 @@ fn linear_regression_descent() {
     // first) is the actual convergence test.
     let w_f = read_f32(&w);
     for (i, &v) in w_f.iter().enumerate() {
-        assert!(
-            v.abs() > 0.1,
-            "w[{i}]={v} didn't move off zero init",
-        );
+        assert!(v.abs() > 0.1, "w[{i}]={v} didn't move off zero init",);
     }
     // Sign and rough magnitude band: each weight is positive and
     // within an order of magnitude of the target.

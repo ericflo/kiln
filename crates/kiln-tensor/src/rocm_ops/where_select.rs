@@ -107,7 +107,9 @@ pub fn rocm_where_select(mask: &Tensor, t: &Tensor, f: &Tensor) -> Result<Tensor
     let out_ptr = out_base as *mut core::ffi::c_void;
 
     let status = unsafe {
-        kiln_where_select_async(mask_ptr, t_ptr, f_ptr, out_ptr, n as i64, dtype_tag, raw_stream)
+        kiln_where_select_async(
+            mask_ptr, t_ptr, f_ptr, out_ptr, n as i64, dtype_tag, raw_stream,
+        )
     };
     if status != 0 {
         return Err(Error::Msg(format!(

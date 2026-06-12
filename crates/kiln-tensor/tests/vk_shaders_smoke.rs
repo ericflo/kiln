@@ -31,8 +31,11 @@ fn identity_f32_shader_is_embedded_or_explicitly_unavailable() {
     // placeholder. Either outcome must agree with
     // `identity_f32_available()`.
     let available = vk_shaders::identity_f32_available();
-    assert_eq!(available, !bytes.is_empty(),
-        "vk_shaders::identity_f32_available() and SPIR_V_KT_IDENTITY_F32.is_empty() must agree");
+    assert_eq!(
+        available,
+        !bytes.is_empty(),
+        "vk_shaders::identity_f32_available() and SPIR_V_KT_IDENTITY_F32.is_empty() must agree"
+    );
 
     if !available {
         // glslc/glslangValidator was unavailable at build time.

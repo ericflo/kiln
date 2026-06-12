@@ -43,11 +43,19 @@ fn accumulator(a: &Tensor, b: &Tensor) -> Result<Tensor> {
 fn sgd_step(param: &Tensor, grad: &Tensor, lr: f32) -> Result<Tensor> {
     let p = read_f32(param);
     let g = read_f32(grad);
-    let new: Vec<f32> = p.iter().zip(g.iter()).map(|(&pv, &gv)| pv - lr * gv).collect();
+    let new: Vec<f32> = p
+        .iter()
+        .zip(g.iter())
+        .map(|(&pv, &gv)| pv - lr * gv)
+        .collect();
     let bytes: Vec<u8> = new.iter().flat_map(|&v| v.to_le_bytes()).collect();
     let cpu = CpuStorage::from_bytes(DType::F32, bytes)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(param.shape().to_vec()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(param.shape().to_vec()),
+        TensorId::next(),
+    )
 }
 
 /// One forward + backward + SGD pass over the FFN block.
@@ -79,9 +87,7 @@ fn train_step(
     tape.record(
         &h_gelu,
         &[&h_pre],
-        Box::new(GeluBackward {
-            x: h_pre.clone(),
-        }),
+        Box::new(GeluBackward { x: h_pre.clone() }),
     );
 
     // 3. h_drop = dropout(h_gelu)
@@ -148,7 +154,11 @@ fn accuracy(x: &Tensor, target: &Tensor, w1: &Tensor, w2: &Tensor) -> Result<f32
     let vals = read_f32(&logits);
     let batch = target.shape()[0];
     let vocab = logits.shape()[1];
-    let target_cpu = target.storage().as_any().downcast_ref::<CpuStorage>().unwrap();
+    let target_cpu = target
+        .storage()
+        .as_any()
+        .downcast_ref::<CpuStorage>()
+        .unwrap();
     let target_bytes = target_cpu.as_bytes();
     let targets: Vec<i64> = (0..batch)
         .map(|i| i64::from_le_bytes(target_bytes[i * 8..i * 8 + 8].try_into().unwrap()))

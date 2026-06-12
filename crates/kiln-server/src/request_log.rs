@@ -323,8 +323,7 @@ impl LogWriter {
             })
             .collect();
         rotated.sort();
-        let mut total: u64 =
-            rotated.iter().map(|(_, len)| len).sum::<u64>() + self.current_bytes;
+        let mut total: u64 = rotated.iter().map(|(_, len)| len).sum::<u64>() + self.current_bytes;
         for (path, len) in rotated {
             if total <= self.config.max_total_bytes {
                 break;
@@ -343,10 +342,8 @@ fn gzip_file(path: &Path) -> std::io::Result<()> {
     let gz_path = path.with_extension("jsonl.gz");
     let input = fs::File::open(path)?;
     let output = fs::File::create(&gz_path)?;
-    let mut encoder = flate2::write::GzEncoder::new(
-        BufWriter::new(output),
-        flate2::Compression::default(),
-    );
+    let mut encoder =
+        flate2::write::GzEncoder::new(BufWriter::new(output), flate2::Compression::default());
     let mut reader = std::io::BufReader::new(input);
     std::io::copy(&mut reader, &mut encoder)?;
     encoder.finish()?.flush()?;
@@ -389,9 +386,7 @@ pub async fn tap(State(state): State<AppState>, req: Request<Body>, next: Next) 
         Err(_) => {
             // Over-limit or aborted body: forward an empty body so the
             // handler produces its normal error; nothing useful to log.
-            return next
-                .run(Request::from_parts(parts, Body::empty()))
-                .await;
+            return next.run(Request::from_parts(parts, Body::empty())).await;
         }
     };
     let (request_value, request_truncated) = capture_json(&body_bytes, max_capture);
@@ -744,10 +739,7 @@ mod tests {
         assert_eq!(row["route"], "/v1/chat/completions");
         assert_eq!(row["status"], 200);
         assert_eq!(row["request"]["messages"][0]["role"], "user");
-        assert_eq!(
-            row["response"]["choices"][0]["message"]["content"],
-            "y"
-        );
+        assert_eq!(row["response"]["choices"][0]["message"]["content"], "y");
     }
 
     #[test]
@@ -803,8 +795,7 @@ mod tests {
         flate2::read::GzDecoder::new(gz)
             .read_to_string(&mut text)
             .unwrap();
-        let first: serde_json::Value =
-            serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        let first: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
         assert_eq!(first["route"], "/v1/chat/completions");
     }
 
@@ -817,7 +808,10 @@ mod tests {
         headers.insert("x-kiln-loaded-adapter", "invalid".parse().unwrap());
         assert_eq!(adapter_from_headers(&headers), None);
         headers.insert("x-kiln-loaded-adapter", "my-adapter".parse().unwrap());
-        assert_eq!(adapter_from_headers(&headers), Some("my-adapter".to_string()));
+        assert_eq!(
+            adapter_from_headers(&headers),
+            Some("my-adapter".to_string())
+        );
     }
 
     #[test]

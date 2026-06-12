@@ -251,9 +251,7 @@ pub enum RecomputeRecommendation {
 /// Per-kind default recompute recommendation. Phase 6.5's
 /// auto-tuner can override on a per-Activation basis if memory
 /// pressure on a 16 GiB tier requires a more aggressive policy.
-pub const fn selective_recompute_recommendation(
-    kind: ActivationKind,
-) -> RecomputeRecommendation {
+pub const fn selective_recompute_recommendation(kind: ActivationKind) -> RecomputeRecommendation {
     match kind {
         // KV cache + sampler scratch must persist; they're not on the
         // tape's recompute path.
@@ -281,7 +279,10 @@ mod tests {
 
     #[test]
     fn kind_name_strings() {
-        assert_eq!(ActivationKind::ForwardActivation.name(), "forward_activation");
+        assert_eq!(
+            ActivationKind::ForwardActivation.name(),
+            "forward_activation"
+        );
         assert_eq!(ActivationKind::Checkpoint.name(), "checkpoint");
         assert_eq!(ActivationKind::KvCacheSlot.name(), "kv_cache_slot");
         assert_eq!(ActivationKind::SamplerScratch.name(), "sampler_scratch");

@@ -11,8 +11,7 @@
 //!   truth; Parameter::tensor_id never drifts (anti-pattern 11).
 
 use kiln_optim::{
-    accumulate_then_step, AdamW, AdamWHyperparameters, GradAccumulator, Sgd,
-    SgdHyperparameters,
+    AdamW, AdamWHyperparameters, GradAccumulator, Sgd, SgdHyperparameters, accumulate_then_step,
 };
 use kiln_param::{AmpPolicy, ForwardStorage, Parameter};
 use kiln_tensor::{CpuStorage, Tensor};
@@ -37,10 +36,7 @@ fn loss_and_grads(
     let pred = kiln_tensor::ops::matmul(x, w)?;
     let pred_shape = pred.shape().to_vec();
     // b is shape [1, 1]; broadcast to pred's [N, 1] shape.
-    let pred = kiln_tensor::ops::add(
-        &pred,
-        &kiln_tensor::ops::broadcast_to(b, &pred_shape)?,
-    )?;
+    let pred = kiln_tensor::ops::add(&pred, &kiln_tensor::ops::broadcast_to(b, &pred_shape)?)?;
     // diff = pred - target
     let diff = kiln_tensor::ops::sub(&pred, target)?;
     // grad_pred = 2 * diff / N
@@ -86,16 +82,8 @@ fn microbatch_grad_accum_converges_via_accumulate_then_step() {
     let w_init = Tensor::from_slice(&[0.0f32, 0.0], vec![2, 1]).unwrap();
     let b_init = Tensor::from_slice(&[0.0f32], vec![1, 1]).unwrap();
     let policy = AmpPolicy::fp32_reference();
-    let mut w_param = Parameter::trainable(
-        ForwardStorage::Plain(w_init.clone()),
-        w_init,
-        policy,
-    );
-    let mut b_param = Parameter::trainable(
-        ForwardStorage::Plain(b_init.clone()),
-        b_init,
-        policy,
-    );
+    let mut w_param = Parameter::trainable(ForwardStorage::Plain(w_init.clone()), w_init, policy);
+    let mut b_param = Parameter::trainable(ForwardStorage::Plain(b_init.clone()), b_init, policy);
     let w_id = w_param.tensor_id();
     let b_id = b_param.tensor_id();
 
@@ -116,12 +104,17 @@ fn microbatch_grad_accum_converges_via_accumulate_then_step() {
         let mut epoch_loss = 0.0;
         for mi in 0..n_micro {
             // Extract the micro-batch via narrow + contiguous.
-            let x_mb = x_full.narrow(0, mi * micro_size, micro_size).unwrap()
-                .contiguous().unwrap();
-            let y_mb = y_full.narrow(0, mi * micro_size, micro_size).unwrap()
-                .contiguous().unwrap();
-            let (loss, dw, db) =
-                loss_and_grads(&x_mb, &y_mb, &w_param, &b_param).unwrap();
+            let x_mb = x_full
+                .narrow(0, mi * micro_size, micro_size)
+                .unwrap()
+                .contiguous()
+                .unwrap();
+            let y_mb = y_full
+                .narrow(0, mi * micro_size, micro_size)
+                .unwrap()
+                .contiguous()
+                .unwrap();
+            let (loss, dw, db) = loss_and_grads(&x_mb, &y_mb, &w_param, &b_param).unwrap();
             epoch_loss += loss;
             acc.accumulate(w_id, &dw).unwrap();
             acc.accumulate(b_id, &db).unwrap();
@@ -130,12 +123,8 @@ fn microbatch_grad_accum_converges_via_accumulate_then_step() {
         losses.push(epoch_loss);
 
         // One step per epoch, draining the accumulator.
-        let stepped = accumulate_then_step(
-            &mut opt,
-            &mut [&mut w_param, &mut b_param],
-            &mut acc,
-        )
-        .unwrap();
+        let stepped =
+            accumulate_then_step(&mut opt, &mut [&mut w_param, &mut b_param], &mut acc).unwrap();
         assert_eq!(stepped, 2);
         assert!(acc.is_empty(), "accumulator should be empty after step");
 
@@ -181,10 +170,8 @@ fn accumulate_then_step_with_skipped_param_does_not_corrupt_others() {
     let w_init = Tensor::from_slice(&[3.0f32, -1.0], vec![2, 1]).unwrap();
     let b_init = Tensor::from_slice(&[7.0f32], vec![1, 1]).unwrap();
     let policy = AmpPolicy::fp32_reference();
-    let mut w_param =
-        Parameter::trainable(ForwardStorage::Plain(w_init.clone()), w_init, policy);
-    let mut b_param =
-        Parameter::trainable(ForwardStorage::Plain(b_init.clone()), b_init, policy);
+    let mut w_param = Parameter::trainable(ForwardStorage::Plain(w_init.clone()), w_init, policy);
+    let mut b_param = Parameter::trainable(ForwardStorage::Plain(b_init.clone()), b_init, policy);
 
     let mut opt = AdamW::new(AdamWHyperparameters::default());
     let mut acc = GradAccumulator::new();
@@ -195,8 +182,7 @@ fn accumulate_then_step_with_skipped_param_does_not_corrupt_others() {
     // b_param gets no grad — it should be skipped.
 
     let stepped =
-        accumulate_then_step(&mut opt, &mut [&mut w_param, &mut b_param], &mut acc)
-            .unwrap();
+        accumulate_then_step(&mut opt, &mut [&mut w_param, &mut b_param], &mut acc).unwrap();
     assert_eq!(stepped, 1);
 
     let b_after = read_f32(b_param.backward_storage().unwrap());

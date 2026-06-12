@@ -7,9 +7,7 @@
 
 use std::sync::Arc;
 
-use kiln_tensor::{
-    bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId,
-};
+use kiln_tensor::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 use crate::BackwardOp;
 
@@ -56,7 +54,10 @@ impl BackwardOp for RepeatBackward {
             bail!("RepeatBackward: grad must be contiguous");
         }
         let dtype = self.dtype;
-        let outer: usize = self.input_shape[..self.axis].iter().product::<usize>().max(1);
+        let outer: usize = self.input_shape[..self.axis]
+            .iter()
+            .product::<usize>()
+            .max(1);
         let axis_in = self.input_shape[self.axis];
         let inner: usize = self.input_shape[self.axis + 1..]
             .iter()
@@ -170,11 +171,8 @@ mod tests {
         // Forward [2, 2] repeated 2x at axis 0 → [4, 2].
         // d_y rows: [a, b], [c, d], [e, f], [g, h]
         // d_x[0] = [a+e, b+f]; d_x[1] = [c+g, d+h]
-        let dy = Tensor::from_slice(
-            &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-            vec![4, 2],
-        )
-        .unwrap();
+        let dy =
+            Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], vec![4, 2]).unwrap();
         let bo = RepeatBackward {
             axis: 0,
             n: 2,
@@ -203,11 +201,8 @@ mod tests {
         // [[1,2],[3,4]] repeated 2x at axis 1 → [[1,2,1,2],[3,4,3,4]].
         // d_y = [[a,b,c,d],[e,f,g,h]] (8 values)
         // d_x[0,:] = [a+c, b+d]; d_x[1,:] = [e+g, f+h]
-        let dy = Tensor::from_slice(
-            &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-            vec![2, 4],
-        )
-        .unwrap();
+        let dy =
+            Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], vec![2, 4]).unwrap();
         let bo = RepeatBackward {
             axis: 1,
             n: 2,

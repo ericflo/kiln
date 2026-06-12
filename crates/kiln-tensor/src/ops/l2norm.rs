@@ -22,8 +22,8 @@
 //! the same input dtype.
 
 use crate::{
-    bail, dispatch1, BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result,
-    Storage, Tensor, TensorId,
+    BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result, Storage, Tensor,
+    TensorId, bail, dispatch1,
 };
 use std::sync::Arc;
 
@@ -62,10 +62,7 @@ impl DeviceOp1 for L2NormOp {
             bail!("L2NormOp: input must have rank ≥ 1");
         }
         if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
-            bail!(
-                "L2NormOp: dtype must be F32/BF16/F16, got {}",
-                x.dtype()
-            );
+            bail!("L2NormOp: dtype must be F32/BF16/F16, got {}", x.dtype());
         }
         if !x.is_contiguous() {
             bail!("L2NormOp: input must be contiguous");
@@ -94,7 +91,11 @@ impl DeviceOp1 for L2NormOp {
 
         let cpu = CpuStorage::from_bytes(dtype, out)?;
         let storage: Storage = Arc::new(cpu);
-        let t = Tensor::from_parts(storage, Layout::contiguous(shape.to_vec()), TensorId::next())?;
+        let t = Tensor::from_parts(
+            storage,
+            Layout::contiguous(shape.to_vec()),
+            TensorId::next(),
+        )?;
         Ok(Some(t))
     }
 

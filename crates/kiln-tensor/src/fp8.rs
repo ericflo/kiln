@@ -75,10 +75,7 @@ fn dtype_tag(dtype: DType) -> Result<i32> {
 ///
 /// Returns a U8 tensor with the same shape as `src`. The caller must
 /// preserve `scale` alongside the buffer for later dequantization.
-pub fn cuda_fp8_quantize_with_scale(
-    src: &crate::Tensor,
-    scale: f32,
-) -> Result<crate::Tensor> {
+pub fn cuda_fp8_quantize_with_scale(src: &crate::Tensor, scale: f32) -> Result<crate::Tensor> {
     use cudarc::driver::DevicePtr;
 
     if !scale.is_finite() || scale == 0.0 {
@@ -138,9 +135,8 @@ pub fn cuda_fp8_quantize_with_scale(
     let src_ptr = (src_base + src_off) as *const core::ffi::c_void;
     let out_ptr = out_base as *mut core::ffi::c_void;
 
-    let status = unsafe {
-        kiln_fp8_quantize_async(src_ptr, out_ptr, n as i64, scale, src_tag, raw_stream)
-    };
+    let status =
+        unsafe { kiln_fp8_quantize_async(src_ptr, out_ptr, n as i64, scale, src_tag, raw_stream) };
     if status != 0 {
         return Err(crate::Error::Msg(format!(
             "cuda_fp8_quantize_with_scale: FFI returned status {status}"
@@ -245,7 +241,11 @@ pub fn cuda_fp8_quantize(src: &crate::Tensor) -> Result<(crate::Tensor, f32)> {
     };
 
     // Same zero-guard as the candle reference.
-    let scale = if abs_max < 1e-12 { 1.0 } else { abs_max / E4M3_MAX };
+    let scale = if abs_max < 1e-12 {
+        1.0
+    } else {
+        abs_max / E4M3_MAX
+    };
 
     let quantized = cuda_fp8_quantize_with_scale(src, scale)?;
     Ok((quantized, scale))

@@ -10,8 +10,8 @@ pub mod agent_runs;
 pub mod agent_traces;
 pub(crate) mod cache;
 pub(crate) mod completions;
-pub mod corrections;
 mod config;
+pub mod corrections;
 mod debug_model_state;
 mod eval;
 mod health;
@@ -69,10 +69,12 @@ pub fn router(state: AppState) -> Router {
         .merge(models::routes())
         // Inference routes get the durable request/response tap (no-op when
         // [request_log] is disabled or unset on this AppState).
-        .merge(completions::routes().layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            crate::request_log::tap,
-        )))
+        .merge(
+            completions::routes().layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::request_log::tap,
+            )),
+        )
         .merge(adapters::routes())
         .merge(corrections::routes())
         .merge(teachers::routes())

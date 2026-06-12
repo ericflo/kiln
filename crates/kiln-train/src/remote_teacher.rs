@@ -26,12 +26,14 @@
 //! `spawn_blocking`, this is the same pattern kiln-eval already
 //! uses for HTTP scorers.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::logit_source::{LogitSource, LogitSourceCaps, LogitSourceError, LogprobBatch, TopKLogprobs};
+use crate::logit_source::{
+    LogitSource, LogitSourceCaps, LogitSourceError, LogprobBatch, TopKLogprobs,
+};
 
 /// Provider variations on the OpenAI `top_logprobs` schema. Most
 /// fields are URL/header conventions; the protocol body is the
@@ -301,7 +303,12 @@ fn fetch_logprobs_vllm(
     if !status.is_success() {
         return Err(LogitSourceError::invalid(
             &cfg.teacher_id,
-            format!("vllm {} → {}: {}", url, status, &body_text[..body_text.len().min(400)]),
+            format!(
+                "vllm {} → {}: {}",
+                url,
+                status,
+                &body_text[..body_text.len().min(400)]
+            ),
         ));
     }
     let parsed: Value = serde_json::from_str(&body_text)
@@ -318,7 +325,8 @@ fn fetch_logprobs_vllm(
         .ok_or_else(|| {
             LogitSourceError::invalid(
                 &cfg.teacher_id,
-                "missing `prompt_logprobs` in vllm response (neither top-level nor choices[0])".to_string(),
+                "missing `prompt_logprobs` in vllm response (neither top-level nor choices[0])"
+                    .to_string(),
             )
         })?;
     if prompt_logprobs.len() != tokens.len() {
@@ -337,7 +345,10 @@ fn fetch_logprobs_vllm(
         let entry = prompt_logprobs.get(pos).ok_or_else(|| {
             LogitSourceError::invalid(
                 &cfg.teacher_id,
-                format!("position {pos} out of range (len={})", prompt_logprobs.len()),
+                format!(
+                    "position {pos} out of range (len={})",
+                    prompt_logprobs.len()
+                ),
             )
         })?;
         // vllm returns null for the first token (no preceding context).
@@ -362,9 +373,7 @@ fn fetch_logprobs_vllm(
                 Some((id, lp))
             })
             .collect();
-        pairs.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         pairs.truncate(top_k);
         if pairs.len() < top_k {
             return Err(LogitSourceError::invalid(
@@ -495,7 +504,10 @@ mod tests {
         t.cost_tally.add_usd(1.50);
         let err = t.fetch_logprobs(&[1, 2, 3], &[1], Some(8)).unwrap_err();
         match err {
-            LogitSourceError::Invalid { teacher_id, message } => {
+            LogitSourceError::Invalid {
+                teacher_id,
+                message,
+            } => {
                 assert_eq!(teacher_id, "or@costtest");
                 assert!(message.contains("cost cap reached"));
             }

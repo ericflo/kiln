@@ -32,7 +32,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 /// Concat op handle. Carries the concat axis. Convenience for naming
 /// + future per-backend dispatch.
@@ -199,10 +199,7 @@ pub fn concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
     }
     for (i, t) in inputs.iter().enumerate() {
         if t.rank() != rank {
-            bail!(
-                "concat: input {i} rank {} != input 0 rank {rank}",
-                t.rank()
-            );
+            bail!("concat: input {i} rank {} != input 0 rank {rank}", t.rank());
         }
         if t.dtype() != dtype {
             bail!(
@@ -378,8 +375,14 @@ mod tests {
 
     #[test]
     fn concat_bf16_round_trips() {
-        let av: Vec<half::bf16> = [1.0f32, 2.0].iter().map(|&v| half::bf16::from_f32(v)).collect();
-        let bv: Vec<half::bf16> = [3.0f32, 4.0].iter().map(|&v| half::bf16::from_f32(v)).collect();
+        let av: Vec<half::bf16> = [1.0f32, 2.0]
+            .iter()
+            .map(|&v| half::bf16::from_f32(v))
+            .collect();
+        let bv: Vec<half::bf16> = [3.0f32, 4.0]
+            .iter()
+            .map(|&v| half::bf16::from_f32(v))
+            .collect();
         let a = Tensor::from_slice(&av, vec![2]).unwrap();
         let b = Tensor::from_slice(&bv, vec![2]).unwrap();
         let out = concat(&[&a, &b], 0).unwrap();

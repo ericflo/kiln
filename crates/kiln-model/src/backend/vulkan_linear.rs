@@ -92,7 +92,10 @@ pub(super) fn matmul(
         && lhs.is_contiguous()
         && rhs.is_contiguous()
         && lhs.dtype() == kiln_tensor::DType::F32
-        && matches!(rhs.dtype(), kiln_tensor::DType::F32 | kiln_tensor::DType::BF16)
+        && matches!(
+            rhs.dtype(),
+            kiln_tensor::DType::F32 | kiln_tensor::DType::BF16
+        )
         && req.out_dtype == kiln_tensor::DType::F32
     {
         return cached_linear_matmul(backend, lhs, rhs);
@@ -111,7 +114,10 @@ fn resident_matmul(
         || !rhs.is_contiguous()
         || req.out_dtype != lhs.dtype()
         || req.lhs_dtype != req.rhs_dtype
-        || !matches!(lhs.dtype(), kiln_tensor::DType::F32 | kiln_tensor::DType::BF16)
+        || !matches!(
+            lhs.dtype(),
+            kiln_tensor::DType::F32 | kiln_tensor::DType::BF16
+        )
     {
         return Ok(None);
     }

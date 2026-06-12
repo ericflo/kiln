@@ -103,11 +103,14 @@ use tracing;
 
 use kiln_core::config::ModelConfig;
 
+use crate::PagedKvCacheKt;
 use crate::backend::BackendRuntime;
 #[cfg(feature = "cuda")]
 use crate::forward::PagedDecodeGraphInputs;
 #[cfg(feature = "cuda")]
 use crate::forward::model_forward_paged_hidden_with_graph_inputs;
+use crate::forward::{GpuWeights, LinearAttentionState, model_forward_paged};
+use crate::lora_loader::LoraWeights;
 #[cfg(feature = "cuda")]
 use kiln_graph::{
     CaptureError, InvalidateReason, ReplayInputs, ReplayKey, ReplayOutputs, ReplayPlan,
@@ -115,9 +118,6 @@ use kiln_graph::{
 };
 #[cfg(feature = "cuda")]
 use kiln_tensor::Backend;
-use crate::forward::{GpuWeights, LinearAttentionState, model_forward_paged};
-use crate::lora_loader::LoraWeights;
-use crate::PagedKvCacheKt;
 
 // #1082: the CUDA-graph stable device buffers are now kt-native
 // `kiln_tensor::Tensor`s (post-flip convention: bare `Tensor` = kt).
@@ -306,11 +306,7 @@ impl CudaBatchedGraphKey {
     /// batch (rounded up to the 128 K/V chunk). Bucketing all rows to
     /// the same `max_seqlen_k` lets one captured graph serve every
     /// row at that decode step.
-    fn new(
-        batch_size: usize,
-        max_seq_len: usize,
-        paged_cache: &PagedKvCacheKt,
-    ) -> Self {
+    fn new(batch_size: usize, max_seq_len: usize, paged_cache: &PagedKvCacheKt) -> Self {
         let stable_metadata = CudaGraphKey::stable_paged_metadata_enabled();
         let attention_len = max_seq_len + 1;
         // #1082: bucket + size by FA2_KBLOCK_N (=64 for hdim256), NOT a hardcoded
@@ -454,12 +450,9 @@ impl ReplayPlan for CudaDecodeReplayPlan<'_> {
             .graph
             .launch()
             .map_err(|e| CaptureError::Backend(format!("CUDA graph launch: {e}")))?;
-        self.captured
-            .capture_stream
-            .synchronize()
-            .map_err(|e| {
-                CaptureError::Backend(format!("sync capture stream after replay launch: {e}"))
-            })?;
+        self.captured.capture_stream.synchronize().map_err(|e| {
+            CaptureError::Backend(format!("sync capture stream after replay launch: {e}"))
+        })?;
         Ok(ReplayOutputs::new(inputs.resources.to_vec(), 1))
     }
 
@@ -679,16 +672,15 @@ impl CudaGraphRunner {
         );
         if !self.batched_state_pool.contains_key(&batch_size) {
             // (#1082) kt-native — the device is already kt.
-            let state =
-                crate::forward::LinearAttentionState::new_with_batch_for_inference_backend(
-                    config,
-                    batch_size,
-                    device,
-                    Some("cuda"),
-                )
-                .with_context(|| {
-                    format!("allocate persistent batched LinearAttentionState for bucket {batch_size}")
-                })?;
+            let state = crate::forward::LinearAttentionState::new_with_batch_for_inference_backend(
+                config,
+                batch_size,
+                device,
+                Some("cuda"),
+            )
+            .with_context(|| {
+                format!("allocate persistent batched LinearAttentionState for bucket {batch_size}")
+            })?;
             self.batched_state_pool.insert(batch_size, state);
         }
         Ok(self.batched_state_pool.get_mut(&batch_size))
@@ -764,9 +756,7 @@ impl CudaGraphRunner {
         // Gate batched on it so the feature only activates in its correct
         // configuration; without it we fall back to the eager batched path
         // (correct, just no graph). Leaves the bs=1 default untouched.
-        self.enabled
-            && batched_graph_enabled()
-            && CudaGraphKey::stable_paged_metadata_enabled()
+        self.enabled && batched_graph_enabled() && CudaGraphKey::stable_paged_metadata_enabled()
     }
 
     #[cfg(not(feature = "cuda"))]
@@ -1148,9 +1138,7 @@ impl CudaGraphRunner {
         // (the graph would just be faithfully replaying a buggy forward). The
         // coherent baseline (graphs off, server) uses a DIFFERENT batched
         // forward, so it would not reveal a bs=1-forward bug.
-        if !self.enabled
-            || std::env::var("KILN_FORCE_EAGER_DECODE").ok().as_deref() == Some("1")
-        {
+        if !self.enabled || std::env::var("KILN_FORCE_EAGER_DECODE").ok().as_deref() == Some("1") {
             return Self::eager_forward(
                 backend,
                 token_id,
@@ -1319,9 +1307,8 @@ impl CudaGraphRunner {
                     // and the decode diverges into garbage. Sync the default
                     // stream so those writes are visible before launch.
                     if let Some(idx) = captured.token_buffer.device().index() {
-                        kiln_tensor::cuda_synchronize_default_stream(idx).context(
-                            "sync per-replay input writes before CUDA graph launch",
-                        )?;
+                        kiln_tensor::cuda_synchronize_default_stream(idx)
+                            .context("sync per-replay input writes before CUDA graph launch")?;
                     }
 
                     // #1082 box-102 TOKPROBE (KILN_BOX102_TOKPROBE=1): after the
@@ -1355,8 +1342,15 @@ impl CudaGraphRunner {
                     if crate::forward::read_layer_norm_debug().is_some() {
                         if let Ok(snap) = linear_state.snapshot() {
                             let elog = Self::eager_forward(
-                                backend, token_id, weights, config, paged_cache,
-                                block_table, seq_len, linear_state, lora,
+                                backend,
+                                token_id,
+                                weights,
+                                config,
+                                paged_cache,
+                                block_table,
+                                seq_len,
+                                linear_state,
+                                lora,
                             );
                             if let Some(n) = crate::forward::read_layer_norm_debug() {
                                 eprintln!("SAMESTEP EAGER step={seq_len} {n:?}");
@@ -1373,9 +1367,20 @@ impl CudaGraphRunner {
                             // probe stops at the blocks, so this catches a stale
                             // final_norm/lm_head/output_logits on the replay side.
                             if let Ok(el) = &elog {
-                                let ess = el.sqr().and_then(|s| s.sum_all()).and_then(|s| s.to_dtype(kiln_tensor::DType::F32)).and_then(|s| s.to_vec::<f32>()).ok();
-                                let esum = el.to_dtype(kiln_tensor::DType::F32).and_then(|s| s.sum_all()).and_then(|s| s.to_vec::<f32>()).ok();
-                                eprintln!("SAMESTEP EAGER_LOGITS step={seq_len} sumsq={ess:?} sum={esum:?}");
+                                let ess = el
+                                    .sqr()
+                                    .and_then(|s| s.sum_all())
+                                    .and_then(|s| s.to_dtype(kiln_tensor::DType::F32))
+                                    .and_then(|s| s.to_vec::<f32>())
+                                    .ok();
+                                let esum = el
+                                    .to_dtype(kiln_tensor::DType::F32)
+                                    .and_then(|s| s.sum_all())
+                                    .and_then(|s| s.to_vec::<f32>())
+                                    .ok();
+                                eprintln!(
+                                    "SAMESTEP EAGER_LOGITS step={seq_len} sumsq={ess:?} sum={esum:?}"
+                                );
                             }
                             *linear_state = snap;
                         }
@@ -1383,7 +1388,8 @@ impl CudaGraphRunner {
 
                     let mut plan = CudaDecodeReplayPlan::new(captured);
                     let replay_key = kiln_graph::ReplayPlan::key(&plan);
-                    let replay_inputs = ReplayInputs::new(&replay_key, &captured.replay_state.inputs);
+                    let replay_inputs =
+                        ReplayInputs::new(&replay_key, &captured.replay_state.inputs);
                     match kiln_graph::ReplayPlan::replay(&mut plan, replay_inputs) {
                         Ok(_) => {
                             tracing::debug!(
@@ -1429,13 +1435,17 @@ impl CudaGraphRunner {
                                     .and_then(|s| s.sum_all())
                                     .and_then(|s| s.to_vec::<f32>())
                                     .ok();
-                                eprintln!("SAMESTEP REPLAY_LOGITS step={seq_len} sumsq={rss:?} sum={rsum:?}");
+                                eprintln!(
+                                    "SAMESTEP REPLAY_LOGITS step={seq_len} sumsq={rss:?} sum={rsum:?}"
+                                );
                             }
                             Self::debug_dump_gdn_state("replay", seq_len, linear_state);
                             return Ok(replay_logits);
                         }
                         Err(e) => {
-                            tracing::warn!("CUDA graph ReplayPlan replay failed: {e}, falling back to eager");
+                            tracing::warn!(
+                                "CUDA graph ReplayPlan replay failed: {e}, falling back to eager"
+                            );
                             self.captured.remove(&cache_key);
                             return Self::eager_forward(
                                 backend,
@@ -1574,11 +1584,8 @@ impl CudaGraphRunner {
         // bit-identical), propagating to ~1% logit drift that flipped close-call
         // tokens. Computing on-device makes graph replay bit-identical to eager.
         let dev = rotary_cos_buffer.device();
-        let inv_freq = crate::forward::compute_rotary_inv_freq(
-            config.rotary_dim(),
-            config.rope_theta,
-            &dev,
-        )?;
+        let inv_freq =
+            crate::forward::compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, &dev)?;
         let pos = Tensor::from_vec_on(dev, vec![position as f32], vec![1])?;
         let (cos, sin) = crate::forward::rotary_tables_from_tensor(&pos, &inv_freq)?;
         let cos = cos
@@ -1670,11 +1677,7 @@ impl CudaGraphRunner {
                 .map(Self::stable_replay_resource),
         );
         resources.extend(paged_decode_lse.iter().map(Self::stable_replay_resource));
-        resources.extend(
-            gdn_decode_outputs
-                .iter()
-                .map(Self::stable_replay_resource),
-        );
+        resources.extend(gdn_decode_outputs.iter().map(Self::stable_replay_resource));
         ReplayState::new(replay_key, resources)
     }
 
@@ -1692,10 +1695,7 @@ impl CudaGraphRunner {
     /// replay.
     #[cfg(feature = "cuda")]
     #[allow(dead_code)]
-    fn update_batched_token_buffer(
-        token_buffer: &Tensor,
-        token_ids: &[u32],
-    ) -> Result<()> {
+    fn update_batched_token_buffer(token_buffer: &Tensor, token_ids: &[u32]) -> Result<()> {
         anyhow::ensure!(
             !token_ids.is_empty(),
             "update_batched_token_buffer requires a non-empty batch"
@@ -1758,8 +1758,7 @@ impl CudaGraphRunner {
         let seqused: Vec<u32> = start_positions
             .iter()
             .map(|&p| {
-                u32::try_from(p + 1)
-                    .context("batched seqused_k buffer: value exceeds u32 range")
+                u32::try_from(p + 1).context("batched seqused_k buffer: value exceeds u32 range")
             })
             .collect::<Result<Vec<_>>>()?;
         kiln_tensor::cuda_write_host_in_place(seqused_k_buffer, seqused.as_slice())
@@ -1798,11 +1797,8 @@ impl CudaGraphRunner {
         // cause + fix as the bs=1 path (`update_rotary_buffers`): CPU cos != GPU
         // cos perturbs only the RoPE full-attention layers on replay.
         let dev = rotary_cos_buffer.device();
-        let inv_freq = crate::forward::compute_rotary_inv_freq(
-            config.rotary_dim(),
-            config.rope_theta,
-            &dev,
-        )?;
+        let inv_freq =
+            crate::forward::compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, &dev)?;
         let pos_f32: Vec<f32> = start_positions.iter().map(|&p| p as f32).collect();
         let n = pos_f32.len();
         let pos = Tensor::from_vec_on(dev, pos_f32, vec![n])?;
@@ -2366,9 +2362,7 @@ impl CudaGraphRunner {
                     linear_states.iter().map(|s| &**s).collect();
                 persistent_state
                     .refresh_batched_state_from_rows_in_place(&row_refs)
-                    .context(
-                        "bs>1 capture: seed persistent GDN slot from caller per-row states",
-                    )?;
+                    .context("bs>1 capture: seed persistent GDN slot from caller per-row states")?;
             }
             Self::prepare_gdn_recurrent_state_for_capture(persistent_state)?;
             // Snapshot the persistent GDN slot before the warm pass advances it.
@@ -2438,9 +2432,8 @@ impl CudaGraphRunner {
                     .iter()
                     .zip(gdn_snapshot.recurrent_states.iter())
                 {
-                    dst.slice_set(src, 0, 0).context(
-                        "freeze-pointers (batched): restore recurrent state in place",
-                    )?;
+                    dst.slice_set(src, 0, 0)
+                        .context("freeze-pointers (batched): restore recurrent state in place")?;
                 }
                 for (dst, src) in ls.conv_states.iter().zip(gdn_snapshot.conv_states.iter()) {
                     dst.slice_set(src, 0, 0)
@@ -2456,9 +2449,8 @@ impl CudaGraphRunner {
             // fills (and the in-place GDN restore above) are visible to the
             // captured forward.
             if let Some(idx) = device.index() {
-                kiln_tensor::cuda_synchronize_default_stream(idx).context(
-                    "batched CUDA graph capture: sync kt default stream before capture",
-                )?;
+                kiln_tensor::cuda_synchronize_default_stream(idx)
+                    .context("batched CUDA graph capture: sync kt default stream before capture")?;
             }
 
             // Synchronize before capture — the capture window must not
@@ -2674,7 +2666,11 @@ impl CudaGraphRunner {
                     Err(_) => -1.0,
                 }
             }
-            let r = linear_state.recurrent_states.first().map(sumsq).unwrap_or(-1.0);
+            let r = linear_state
+                .recurrent_states
+                .first()
+                .map(sumsq)
+                .unwrap_or(-1.0);
             let c = linear_state.conv_states.first().map(sumsq).unwrap_or(-1.0);
             eprintln!("GDNSTATE [{tag}] step={seq_len} rs0_sumsq={r:.6} conv0_sumsq={c:.6}");
         }
@@ -2844,8 +2840,7 @@ impl CudaGraphRunner {
             .slot_for(seq_len, paged_cache.block_size())
             .with_context(|| format!("no slot for decode position {seq_len}"))?
             as u32;
-        Tensor::from_vec_on(device, vec![slot], vec![1])
-            .context("create CUDA graph KV slot buffer")
+        Tensor::from_vec_on(device, vec![slot], vec![1]).context("create CUDA graph KV slot buffer")
     }
 
     /// Allocate a `[batch, max_blocks_per_seq]` u32 padded block-table
@@ -2888,10 +2883,7 @@ impl CudaGraphRunner {
     /// each row's `start_pos + 1`. #1082: U32 (kt flash-attn contract).
     #[cfg(feature = "cuda")]
     #[allow(dead_code)]
-    fn new_batched_seqused_k_buffer(
-        device: Device,
-        start_positions: &[usize],
-    ) -> Result<Tensor> {
+    fn new_batched_seqused_k_buffer(device: Device, start_positions: &[usize]) -> Result<Tensor> {
         anyhow::ensure!(
             !start_positions.is_empty(),
             "new_batched_seqused_k_buffer requires a non-empty batch"

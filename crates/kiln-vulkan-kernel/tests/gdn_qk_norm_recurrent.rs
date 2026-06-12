@@ -1,5 +1,5 @@
 use anyhow::Result;
-use kiln_vulkan_kernel::{shaders, CommandBatch, VulkanBuffer, VulkanDevice, Workgroups};
+use kiln_vulkan_kernel::{CommandBatch, VulkanBuffer, VulkanDevice, Workgroups, shaders};
 
 fn upload_f32(dev: &VulkanDevice, data: &[f32]) -> Result<VulkanBuffer> {
     let bytes = bytemuck::cast_slice(data);

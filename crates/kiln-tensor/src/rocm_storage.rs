@@ -54,7 +54,10 @@ fn rocm_bt_once(dir: &str, shape: &[usize], total: u64) {
     }
     static SEEN: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
     let key = format!("{dir}{shape:?}");
-    let mut seen = SEEN.get_or_init(|| Mutex::new(std::collections::HashSet::new())).lock().unwrap();
+    let mut seen = SEEN
+        .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .unwrap();
     if seen.len() < 16 && seen.insert(key) {
         eprintln!(
             "[rocm-bt] {dir} {shape:?}:\n{}",
@@ -74,7 +77,10 @@ pub fn rocm_log_host_fallback(op_name: &str, shape: &[usize]) {
     static TALLY: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
     static TOTAL: AtomicU64 = AtomicU64::new(0);
     let n = TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
-    let mut map = TALLY.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    let mut map = TALLY
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
     *map.entry(op_name.to_string()).or_insert(0) += 1;
     if n % 100 == 0 {
         let mut v: Vec<(String, u64)> = map.iter().map(|(k, c)| (k.clone(), *c)).collect();
@@ -209,12 +215,14 @@ impl RocmStorage {
             return result;
         }
         let byte_len = dtype.packed_buffer_bytes(n_elements);
-        let slice = crate::active_rocm_stream(ctx).alloc(byte_len).map_err(|e| {
-            Error::Msg(format!(
-                "RocmStorage::alloc_uninit_ctx: active_rocm_stream(ctx).alloc({byte_len}) \
+        let slice = crate::active_rocm_stream(ctx)
+            .alloc(byte_len)
+            .map_err(|e| {
+                Error::Msg(format!(
+                    "RocmStorage::alloc_uninit_ctx: active_rocm_stream(ctx).alloc({byte_len}) \
                  failed: {e:?}"
-            ))
-        })?;
+                ))
+            })?;
         Ok(RocmStorage {
             device: Device::Rocm(device_index),
             dtype,
@@ -401,7 +409,11 @@ impl StorageBackend for RocmStorage {
 
 /// Construct a fresh [`crate::Storage`] holding a zeroed [`RocmStorage`].
 /// The ROCm analog of `cuda_zeros_ctx`.
-pub fn rocm_zeros_ctx(device_index: usize, dtype: DType, n_elements: usize) -> Result<crate::Storage> {
+pub fn rocm_zeros_ctx(
+    device_index: usize,
+    dtype: DType,
+    n_elements: usize,
+) -> Result<crate::Storage> {
     let ctx = primary_rocm_context(device_index)?;
     let storage = RocmStorage::zeros_ctx(&ctx, device_index, dtype, n_elements)?;
     Ok(Arc::new(storage))
@@ -411,8 +423,11 @@ pub fn rocm_zeros_ctx(device_index: usize, dtype: DType, n_elements: usize) -> R
 /// `cuda_synchronize_default_stream`.
 pub fn rocm_synchronize_default_stream(device_index: usize) -> Result<()> {
     let ctx = primary_rocm_context(device_index)?;
-    ctx.synchronize()
-        .map_err(|e| Error::Msg(format!("rocm_synchronize_default_stream({device_index}): {e:?}")))
+    ctx.synchronize().map_err(|e| {
+        Error::Msg(format!(
+            "rocm_synchronize_default_stream({device_index}): {e:?}"
+        ))
+    })
 }
 
 /// `(reserved, used)` bytes of device `device_index`'s stream-ordered memory
@@ -454,9 +469,11 @@ pub fn rocm_trim_pool(device_index: usize, min_keep_bytes: usize) -> Result<()> 
 /// streams have pending work we don't need to wait on.
 pub fn rocm_synchronize_compute_stream(device_index: usize) -> Result<()> {
     let ctx = primary_rocm_context(device_index)?;
-    crate::active_rocm_stream(&ctx)
-        .synchronize()
-        .map_err(|e| Error::Msg(format!("rocm_synchronize_compute_stream({device_index}): {e:?}")))
+    crate::active_rocm_stream(&ctx).synchronize().map_err(|e| {
+        Error::Msg(format!(
+            "rocm_synchronize_compute_stream({device_index}): {e:?}"
+        ))
+    })
 }
 
 /// Refresh `dst`'s contents in place from a host slice WITHOUT reallocating —
@@ -484,10 +501,7 @@ pub fn rocm_synchronize_compute_stream(device_index: usize) -> Result<()> {
 /// the local buffer is fully consumed by the time this function returns — only
 /// the device-side write remains queued. No dangling host read.
 #[cfg(feature = "rocm")]
-pub fn rocm_write_host_in_place<E: crate::Element>(
-    dst: &crate::Tensor,
-    host: &[E],
-) -> Result<()> {
+pub fn rocm_write_host_in_place<E: crate::Element>(dst: &crate::Tensor, host: &[E]) -> Result<()> {
     if dst.dtype().is_packed() {
         return Err(Error::Msg(
             "rocm_write_host_in_place: packed dtype not supported".to_string(),
@@ -759,7 +773,9 @@ pub fn host_to_rocm_copy(src: &crate::Tensor, device_index: usize) -> Result<cra
         .storage()
         .as_any()
         .downcast_ref::<crate::CpuStorage>()
-        .ok_or_else(|| Error::Msg("host_to_rocm_copy: contig src must be CPU storage".to_string()))?;
+        .ok_or_else(|| {
+            Error::Msg("host_to_rocm_copy: contig src must be CPU storage".to_string())
+        })?;
     let bytes = contig_cpu.as_bytes();
     if bytes.len() != byte_len {
         return Err(Error::Msg(format!(

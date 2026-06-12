@@ -116,10 +116,7 @@ pub struct ResolvedSftOutputLayout {
 /// This is a pure function on the user-facing arguments; it does not look at
 /// the filesystem and so behaves identically whether `output_dir` exists or
 /// not.
-pub fn resolve_sft_output_layout(
-    output_dir: &Path,
-    adapter_name: &str,
-) -> ResolvedSftOutputLayout {
+pub fn resolve_sft_output_layout(output_dir: &Path, adapter_name: &str) -> ResolvedSftOutputLayout {
     let basename_matches = output_dir
         .file_name()
         .and_then(|name| name.to_str())
@@ -156,7 +153,10 @@ pub fn resolve_sft_output_layout(
 
 pub fn validate_adapter_output_dir(adapter_dir: &Path) -> Result<PathBuf> {
     if !adapter_dir.exists() || !adapter_dir.is_dir() {
-        bail!("adapter directory does not exist: {}", adapter_dir.display());
+        bail!(
+            "adapter directory does not exist: {}",
+            adapter_dir.display()
+        );
     }
     let resolved = adapter_dir
         .canonicalize()
@@ -215,7 +215,8 @@ pub fn write_adapter_output_receipt(
         installed_adapter_dir: installed,
     };
     let path = resolved.join(ADAPTER_RECEIPT_FILENAME);
-    let json = serde_json::to_string_pretty(&receipt).context("serialize adapter output receipt")?;
+    let json =
+        serde_json::to_string_pretty(&receipt).context("serialize adapter output receipt")?;
     std::fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
     Ok(path)
 }
@@ -508,12 +509,7 @@ pub fn install_adapter_symlink(
 }
 
 pub fn validate_install_adapter_name(name: &str) -> Result<()> {
-    if name.is_empty()
-        || name == "."
-        || name == ".."
-        || name.contains('/')
-        || name.contains('\\')
-    {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\\') {
         bail!(
             "install adapter name must be non-empty, path-safe, and contain no separators; got {name:?}"
         );
@@ -740,8 +736,9 @@ mod tests {
         let receipt = manifest_test_receipt("actual");
         write_train_receipt(&adapter, &receipt);
 
-        let manifest_path =
-            write_adapter_manifest_from_train_receipt(&adapter, &receipt).unwrap().unwrap();
+        let manifest_path = write_adapter_manifest_from_train_receipt(&adapter, &receipt)
+            .unwrap()
+            .unwrap();
         let manifest = read_adapter_manifest(&manifest_path).unwrap();
 
         assert_eq!(manifest.schema_version, ADAPTER_MANIFEST_SCHEMA_VERSION);
@@ -749,8 +746,14 @@ mod tests {
         assert_eq!(manifest.adapter_name, "actual");
         assert_eq!(manifest.parent_adapter.as_deref(), Some("parent-v1"));
         assert_eq!(manifest.kiln_commit.as_deref(), Some("abc123"));
-        assert_eq!(manifest.model_config_hash.as_deref(), Some("sha256:model-config"));
-        assert_eq!(manifest.training_data_hash.as_deref(), Some("sha256:training-data"));
+        assert_eq!(
+            manifest.model_config_hash.as_deref(),
+            Some("sha256:model-config")
+        );
+        assert_eq!(
+            manifest.training_data_hash.as_deref(),
+            Some("sha256:training-data")
+        );
         assert_eq!(manifest.files.adapter_model, "adapter_model.safetensors");
         assert_eq!(manifest.files.adapter_config, "adapter_config.json");
         assert_eq!(
@@ -759,7 +762,13 @@ mod tests {
         );
         assert!(manifest.safetensors_hash.starts_with("sha256:"));
         assert!(manifest.config_hash.starts_with("sha256:"));
-        assert!(manifest.receipt_hash.as_deref().unwrap().starts_with("sha256:"));
+        assert!(
+            manifest
+                .receipt_hash
+                .as_deref()
+                .unwrap()
+                .starts_with("sha256:")
+        );
     }
 
     #[test]
@@ -770,8 +779,9 @@ mod tests {
         write_minimal_adapter(&source);
         let receipt = manifest_test_receipt("source-adapter");
         write_train_receipt(&source, &receipt);
-        let manifest_path =
-            write_adapter_manifest_from_train_receipt(&source, &receipt).unwrap().unwrap();
+        let manifest_path = write_adapter_manifest_from_train_receipt(&source, &receipt)
+            .unwrap()
+            .unwrap();
 
         let restore = restore_adapter_from_manifest(AdapterRestoreOptions {
             manifest_path,
@@ -786,7 +796,11 @@ mod tests {
         assert_eq!(restore.adapter_name, "restored");
         assert!(restored.join("adapter_config.json").is_file());
         assert!(restored.join("adapter_model.safetensors").is_file());
-        assert!(restored.join(crate::train_receipt::TRAIN_RECEIPT_FILENAME).is_file());
+        assert!(
+            restored
+                .join(crate::train_receipt::TRAIN_RECEIPT_FILENAME)
+                .is_file()
+        );
         assert!(restored.join(ADAPTER_MANIFEST_FILENAME).is_file());
         assert!(restore.verified_hashes.contains_key("config_hash"));
         assert!(restore.verified_hashes.contains_key("safetensors_hash"));
@@ -801,8 +815,9 @@ mod tests {
         write_minimal_adapter(&source);
         let receipt = manifest_test_receipt("source-adapter");
         write_train_receipt(&source, &receipt);
-        let manifest_path =
-            write_adapter_manifest_from_train_receipt(&source, &receipt).unwrap().unwrap();
+        let manifest_path = write_adapter_manifest_from_train_receipt(&source, &receipt)
+            .unwrap()
+            .unwrap();
         std::fs::write(source.join("adapter_model.safetensors"), "corrupt").unwrap();
 
         let err = restore_adapter_from_manifest(AdapterRestoreOptions {
@@ -821,8 +836,7 @@ mod tests {
     fn resolve_sft_output_layout_flattens_when_basename_matches_adapter_name() {
         // The pi-faithful-completion repro from the issue:
         // `--output-dir /workspace/adapters/foo --adapter-name foo`.
-        let layout =
-            resolve_sft_output_layout(Path::new("/workspace/adapters/foo"), "foo");
+        let layout = resolve_sft_output_layout(Path::new("/workspace/adapters/foo"), "foo");
         assert!(layout.flattened);
         assert_eq!(layout.adapter_dir, PathBuf::from("/workspace/adapters"));
         assert_eq!(layout.adapter_name, "foo");
@@ -878,8 +892,7 @@ mod tests {
     fn resolve_sft_output_layout_handles_trailing_slash_in_output_dir() {
         // Path::file_name strips a trailing slash, so "/workspace/adapters/foo/"
         // still matches adapter-name "foo" and is flattened correctly.
-        let layout =
-            resolve_sft_output_layout(Path::new("/workspace/adapters/foo/"), "foo");
+        let layout = resolve_sft_output_layout(Path::new("/workspace/adapters/foo/"), "foo");
         assert!(layout.flattened);
         assert_eq!(layout.adapter_dir, PathBuf::from("/workspace/adapters"));
         assert_eq!(
@@ -891,8 +904,7 @@ mod tests {
     #[test]
     fn resolve_sft_output_layout_preserves_layout_when_basename_is_partial_match() {
         // `foo-bar` is not equal to `foo` — registry layout preserved.
-        let layout =
-            resolve_sft_output_layout(Path::new("/workspace/adapters/foo-bar"), "foo");
+        let layout = resolve_sft_output_layout(Path::new("/workspace/adapters/foo-bar"), "foo");
         assert!(!layout.flattened);
         assert_eq!(
             layout.adapter_dir,
@@ -935,7 +947,9 @@ mod tests {
         let parent = tmp.path().join("parent");
         write_minimal_adapter(&parent.join("child"));
 
-        let err = validate_adapter_output_dir(&parent).unwrap_err().to_string();
+        let err = validate_adapter_output_dir(&parent)
+            .unwrap_err()
+            .to_string();
 
         assert!(err.contains("adapter_config.json"));
         assert!(err.contains("adapter_model.safetensors"));

@@ -149,8 +149,7 @@ impl AmpPolicy {
     /// to forward — e.g. forward BF16 / backward F32 (rare here).
     pub fn backward_is_widened(self) -> bool {
         // F32 > BF16, F16. Order: F32 > BF16, F16; FP8 etc < BF16.
-        backward_rank(self.backward_compute_dtype)
-            > backward_rank(self.forward_compute_dtype)
+        backward_rank(self.backward_compute_dtype) > backward_rank(self.forward_compute_dtype)
     }
 
     /// Sanity check: the four dtypes form a coherent policy.

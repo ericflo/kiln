@@ -227,7 +227,12 @@ mod tests {
     fn is_cpu_is_gpu() {
         assert!(Device::Cpu.is_cpu());
         assert!(!Device::Cpu.is_gpu());
-        for d in [Device::Cuda(0), Device::Metal(0), Device::Vulkan(0), Device::Rocm(0)] {
+        for d in [
+            Device::Cuda(0),
+            Device::Metal(0),
+            Device::Vulkan(0),
+            Device::Rocm(0),
+        ] {
             assert!(!d.is_cpu());
             assert!(d.is_gpu());
         }
@@ -270,14 +275,26 @@ mod tests {
     #[test]
     fn location_maps_each_variant() {
         assert_eq!(Device::Cpu.location(), DeviceLocation::Cpu);
-        assert_eq!(Device::Cuda(0).location(), DeviceLocation::Cuda { gpu_id: 0 });
-        assert_eq!(Device::Cuda(3).location(), DeviceLocation::Cuda { gpu_id: 3 });
-        assert_eq!(Device::Metal(1).location(), DeviceLocation::Metal { gpu_id: 1 });
+        assert_eq!(
+            Device::Cuda(0).location(),
+            DeviceLocation::Cuda { gpu_id: 0 }
+        );
+        assert_eq!(
+            Device::Cuda(3).location(),
+            DeviceLocation::Cuda { gpu_id: 3 }
+        );
+        assert_eq!(
+            Device::Metal(1).location(),
+            DeviceLocation::Metal { gpu_id: 1 }
+        );
         assert_eq!(
             Device::Vulkan(2).location(),
             DeviceLocation::Vulkan { gpu_id: 2 }
         );
-        assert_eq!(Device::Rocm(1).location(), DeviceLocation::Rocm { gpu_id: 1 });
+        assert_eq!(
+            Device::Rocm(1).location(),
+            DeviceLocation::Rocm { gpu_id: 1 }
+        );
     }
 
     #[test]

@@ -58,7 +58,7 @@ mod tape;
 // import the flat names. (#1082)
 pub mod tape_scope;
 
-pub use anomaly::{anomaly_detection_enabled, anomaly_panic, ENV_DETECT_ANOMALY};
+pub use anomaly::{ENV_DETECT_ANOMALY, anomaly_detection_enabled, anomaly_panic};
 pub use backward_op::{BackwardOp, BoxedBackwardOp};
 pub use backwards::activation::{
     GeluBackward, ReluBackward, SigmoidBackward, SiluBackward, SoftmaxLastDimBackward, TanhBackward,

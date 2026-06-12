@@ -40,7 +40,13 @@ fn rocm_physical_resize_preserves_kv_and_reclaims_for_reuse() {
     let dev = Device::Rocm(0);
 
     let mut cache = PagedKvCacheKt::new(
-        LAYERS, NUM_BLOCKS, BLOCK_SIZE, KV_HEADS, HEAD_DIM, DType::BF16, dev,
+        LAYERS,
+        NUM_BLOCKS,
+        BLOCK_SIZE,
+        KV_HEADS,
+        HEAD_DIM,
+        DType::BF16,
+        dev,
     )
     .expect("alloc rocm kv cache");
     {
@@ -55,33 +61,55 @@ fn rocm_physical_resize_preserves_kv_and_reclaims_for_reuse() {
     // Marker into slot 7 of layer 0's K pool; reference read = bytes as stored
     // (BF16-rounded). A physical resize copies bytes verbatim, so later reads
     // must equal this EXACTLY.
-    let marker: Vec<f32> = (0..(KV_HEADS * HEAD_DIM)).map(|i| (i as f32) * 0.5 + 1.0).collect();
+    let marker: Vec<f32> = (0..(KV_HEADS * HEAD_DIM))
+        .map(|i| (i as f32) * 0.5 + 1.0)
+        .collect();
     let marker_t = Tensor::from_vec(marker.clone(), vec![1, KV_HEADS, HEAD_DIM])
         .unwrap()
         .to_dtype(DType::BF16)
         .unwrap()
         .to_device(dev)
         .unwrap();
-    cache.pool_tensors(0).unwrap().0.slice_set(&marker_t, 0, 7).expect("write marker");
+    cache
+        .pool_tensors(0)
+        .unwrap()
+        .0
+        .slice_set(&marker_t, 0, 7)
+        .expect("write marker");
     let read_marker = |c: &PagedKvCacheKt| -> Vec<f32> {
-        c.pool_tensors(0).unwrap().0
-            .narrow(0, 7, 1).unwrap()
-            .to_dtype(DType::F32).unwrap()
-            .flatten_all().unwrap()
-            .to_vec().unwrap()
+        c.pool_tensors(0)
+            .unwrap()
+            .0
+            .narrow(0, 7, 1)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec()
+            .unwrap()
     };
     let reference = read_marker(&cache);
     let assert_marker = |got: &[f32], when: &str| {
-        assert_eq!(got, &reference[..], "marker slot 7 not preserved byte-for-byte {when}");
+        assert_eq!(
+            got,
+            &reference[..],
+            "marker slot 7 not preserved byte-for-byte {when}"
+        );
     };
 
     kiln_tensor::rocm_synchronize_default_stream(0).ok();
     let (res_full, used_full) = pool_mb();
     eprintln!("[resize] full cache: reserved={res_full:.0} used={used_full:.0} MB");
-    assert!(used_full > 1500.0, "full cache should use ~2GB (got {used_full:.0})");
+    assert!(
+        used_full > 1500.0,
+        "full cache should use ~2GB (got {used_full:.0})"
+    );
 
     // SHRINK: realloc each layer's pool down to SHRUNK_BLOCKS → frees ~94% of KV.
-    cache.physical_resize_to(SHRUNK_BLOCKS, dev).expect("shrink");
+    cache
+        .physical_resize_to(SHRUNK_BLOCKS, dev)
+        .expect("shrink");
     assert_eq!(cache.num_blocks(), SHRUNK_BLOCKS);
     kiln_tensor::rocm_synchronize_default_stream(0).ok();
     let (_res_shrunk, used_shrunk) = pool_mb();
@@ -98,7 +126,8 @@ fn rocm_physical_resize_preserves_kv_and_reclaims_for_reuse() {
     let chunk_elems = (200usize * 1024 * 1024) / 2;
     let mut training = Vec::new();
     for _ in 0..9 {
-        training.push(kiln_tensor::rocm_zeros_ctx(0, DType::BF16, chunk_elems).expect("train chunk"));
+        training
+            .push(kiln_tensor::rocm_zeros_ctx(0, DType::BF16, chunk_elems).expect("train chunk"));
     }
     kiln_tensor::rocm_synchronize_default_stream(0).ok();
     let (res_train, used_train) = pool_mb();
@@ -123,5 +152,8 @@ fn rocm_physical_resize_preserves_kv_and_reclaims_for_reuse() {
     cache.physical_resize_to(NUM_BLOCKS, dev).expect("grow");
     assert_eq!(cache.num_blocks(), NUM_BLOCKS);
     assert_marker(&read_marker(&cache), "across grow");
-    eprintln!("[resize] grow OK; marker intact; num_blocks={}", cache.num_blocks());
+    eprintln!(
+        "[resize] grow OK; marker intact; num_blocks={}",
+        cache.num_blocks()
+    );
 }

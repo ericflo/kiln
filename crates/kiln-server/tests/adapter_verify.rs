@@ -53,12 +53,8 @@ fn write_tiny_adapter(path: &std::path::Path, rank: u64, tensor_rank: usize, zer
         .map(|(name, shape, bytes)| {
             (
                 name.clone(),
-                safetensors::tensor::TensorView::new(
-                    safetensors::Dtype::F32,
-                    shape.clone(),
-                    bytes,
-                )
-                .unwrap(),
+                safetensors::tensor::TensorView::new(safetensors::Dtype::F32, shape.clone(), bytes)
+                    .unwrap(),
             )
         })
         .collect();

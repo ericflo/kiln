@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId, bail};
 
 pub fn unique(x: &Tensor) -> Result<(Tensor, Tensor)> {
     if x.rank() != 1 {

@@ -56,9 +56,7 @@ impl SuiteRegistry {
         let header = dir.join("suite.json");
         let jsonl = dir.join("examples.jsonl");
         if !header.exists() {
-            return Err(SuiteRegistryError::NotFound(format!(
-                "{name}/suite.json"
-            )));
+            return Err(SuiteRegistryError::NotFound(format!("{name}/suite.json")));
         }
         if jsonl.exists() {
             Ok(EvalSuite::load_jsonl(&header, &jsonl)?)

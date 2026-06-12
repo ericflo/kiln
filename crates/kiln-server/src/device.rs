@@ -91,10 +91,20 @@ pub fn select_device_with_options_kt(cuda_graphs: bool) -> Result<kiln_tensor::D
         return Ok(kiln_tensor::Device::Metal(0));
     }
 
-    #[cfg(any(feature = "cuda", feature = "vulkan", feature = "metal", feature = "rocm"))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "vulkan",
+        feature = "metal",
+        feature = "rocm"
+    ))]
     tracing::info!("no compiled GPU backend found an available device — using CPU");
 
-    #[cfg(not(any(feature = "cuda", feature = "vulkan", feature = "metal", feature = "rocm")))]
+    #[cfg(not(any(
+        feature = "cuda",
+        feature = "vulkan",
+        feature = "metal",
+        feature = "rocm"
+    )))]
     tracing::info!("no GPU feature active — using CPU");
     Ok(kiln_tensor::Device::Cpu)
 }

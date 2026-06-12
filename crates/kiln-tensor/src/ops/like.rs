@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 pub fn zeros_like(t: &Tensor) -> Result<Tensor> {
     full_like(t, 0.0)
@@ -18,10 +18,7 @@ pub fn ones_like(t: &Tensor) -> Result<Tensor> {
 
 pub fn full_like(t: &Tensor, value: f32) -> Result<Tensor> {
     if !matches!(t.dtype(), DType::F32 | DType::BF16 | DType::F16) {
-        bail!(
-            "full_like: dtype must be F32/BF16/F16, got {}",
-            t.dtype()
-        );
+        bail!("full_like: dtype must be F32/BF16/F16, got {}", t.dtype());
     }
 
     // CUDA fast path: build on host, copy to the same CUDA device.
@@ -107,8 +104,11 @@ pub fn full_like(t: &Tensor, value: f32) -> Result<Tensor> {
     let _ = Error::from_str;
     let cpu = CpuStorage::from_bytes(dtype, bytes)?;
     let storage: Storage = Arc::new(cpu);
-    let cpu_t =
-        Tensor::from_parts(storage, Layout::contiguous(t.shape().to_vec()), TensorId::next())?;
+    let cpu_t = Tensor::from_parts(
+        storage,
+        Layout::contiguous(t.shape().to_vec()),
+        TensorId::next(),
+    )?;
     // Honor the source device: a same-shape placeholder must live where the
     // source tensor lives, or downstream elementwise ops hit a cross-device
     // mismatch (#1082 — `ones_like` on a Metal weight must be Metal). CUDA is

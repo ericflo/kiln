@@ -490,12 +490,8 @@ mod tests {
     #[test]
     fn vk_tensor_f32_roundtrip() {
         let Some(dev) = vk_dev() else { return };
-        let vt = VkTensor::from_f32_slice(
-            &[1.0_f32, 2.0, 3.0, 4.0],
-            vec![2, 2],
-            Arc::clone(&dev),
-        )
-        .unwrap();
+        let vt = VkTensor::from_f32_slice(&[1.0_f32, 2.0, 3.0, 4.0], vec![2, 2], Arc::clone(&dev))
+            .unwrap();
         assert_eq!(vt.shape(), &[2, 2]);
         assert_eq!(vt.dtype(), VkDType::F32);
         let back = vt.to_vec_f32().unwrap();
@@ -506,8 +502,7 @@ mod tests {
     fn vk_tensor_bf16_roundtrip() {
         let Some(dev) = vk_dev() else { return };
         let data: Vec<f32> = vec![1.0, 2.5, -3.25, 0.125];
-        let vt =
-            VkTensor::from_f32_slice_as_bf16(&data, vec![4], Arc::clone(&dev)).unwrap();
+        let vt = VkTensor::from_f32_slice_as_bf16(&data, vec![4], Arc::clone(&dev)).unwrap();
         let back = vt.to_vec_f32().unwrap();
         for (i, expected) in data.iter().enumerate() {
             // BF16 round-trip via host `bf16::from_f32` introduces the
@@ -539,15 +534,9 @@ mod tests {
         for v in &data {
             bytes.extend_from_slice(&v.to_le_bytes());
         }
-        let vt_bytes = VkTensor::from_bytes(
-            &bytes,
-            vec![data.len()],
-            VkDType::F32,
-            Arc::clone(&dev),
-        )
-        .unwrap();
-        let vt_slice =
-            VkTensor::from_f32_slice(&data, vec![data.len()], Arc::clone(&dev)).unwrap();
+        let vt_bytes =
+            VkTensor::from_bytes(&bytes, vec![data.len()], VkDType::F32, Arc::clone(&dev)).unwrap();
+        let vt_slice = VkTensor::from_f32_slice(&data, vec![data.len()], Arc::clone(&dev)).unwrap();
         let from_bytes = vt_bytes.to_vec_f32().unwrap();
         let from_slice = vt_slice.to_vec_f32().unwrap();
         assert_eq!(from_bytes, from_slice);

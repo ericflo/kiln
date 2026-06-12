@@ -89,13 +89,7 @@ pub fn rocm_masked_fill(x: &Tensor, mask: &Tensor, fill_value: f32) -> Result<Te
 
     let status = unsafe {
         kiln_masked_fill_u8_async(
-            x_ptr,
-            mask_ptr,
-            out_ptr,
-            n as i64,
-            fill_value,
-            dtype_tag,
-            raw_stream,
+            x_ptr, mask_ptr, out_ptr, n as i64, fill_value, dtype_tag, raw_stream,
         )
     };
     if status != 0 {

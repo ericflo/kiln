@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId, bail};
 
 fn read_f32_flat(t: &Tensor) -> Result<Vec<f32>> {
     if !t.is_contiguous() {
@@ -37,16 +37,14 @@ fn read_f32_flat(t: &Tensor) -> Result<Vec<f32>> {
         DType::BF16 => {
             for i in 0..n {
                 out.push(
-                    half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32(),
+                    half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32(),
                 );
             }
         }
         DType::F16 => {
             for i in 0..n {
                 out.push(
-                    half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap())
-                        .to_f32(),
+                    half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32(),
                 );
             }
         }
@@ -58,11 +56,7 @@ fn read_f32_flat(t: &Tensor) -> Result<Vec<f32>> {
 /// Search a sorted 1-D `sorted_seq` for insertion points of each
 /// element in `values`. `right`: if true, returns the last valid
 /// insertion point; if false, returns the first.
-pub fn searchsorted(
-    sorted_seq: &Tensor,
-    values: &Tensor,
-    right: bool,
-) -> Result<Tensor> {
+pub fn searchsorted(sorted_seq: &Tensor, values: &Tensor, right: bool) -> Result<Tensor> {
     if sorted_seq.rank() != 1 {
         bail!(
             "searchsorted: sorted_seq must be rank-1, got {}",

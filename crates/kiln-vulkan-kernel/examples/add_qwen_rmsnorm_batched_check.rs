@@ -1,6 +1,6 @@
 //! Verification probe for batched fused residual add + Qwen RMSNorm.
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use kiln_vulkan_kernel::resident::dispatch_add_qwen_rmsnorm_batched_resident;
 use kiln_vulkan_kernel::{VulkanBuffer, VulkanDevice};
 

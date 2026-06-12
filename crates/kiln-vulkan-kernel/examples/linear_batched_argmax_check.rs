@@ -1,6 +1,6 @@
 //! Verification probe for batched BF16 linear argmax.
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use half::bf16;
 use kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_batched_cached_bf16_weights_bytes;
 use kiln_vulkan_kernel::{VulkanBuffer, VulkanDevice};

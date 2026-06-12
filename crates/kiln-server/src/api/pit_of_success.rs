@@ -99,7 +99,11 @@ async fn submit_front_door(
                 .clone()
                 .unwrap_or_else(|| format!("{}-refresh", r.name)),
             r.config.auto_load,
-            (r.config.lora_rank, r.config.lora_alpha, r.config.allow_high_lora_scale),
+            (
+                r.config.lora_rank,
+                r.config.lora_alpha,
+                r.config.allow_high_lora_scale,
+            ),
             QueuedJob::DistillRefresh(r),
         ),
         FrontDoorRequest::DistillMerge(r) => (
@@ -107,7 +111,11 @@ async fn submit_front_door(
             TrainingJobType::Opd,
             r.name.clone(),
             r.config.auto_load,
-            (r.config.lora_rank, r.config.lora_alpha, r.config.allow_high_lora_scale),
+            (
+                r.config.lora_rank,
+                r.config.lora_alpha,
+                r.config.allow_high_lora_scale,
+            ),
             QueuedJob::DistillMerge(r),
         ),
         FrontDoorRequest::DistillPump(r) => (
@@ -115,7 +123,11 @@ async fn submit_front_door(
             TrainingJobType::Opd,
             r.name.clone(),
             r.config.auto_load,
-            (r.rank.unwrap_or(r.config.lora_rank), r.config.lora_alpha, r.config.allow_high_lora_scale),
+            (
+                r.rank.unwrap_or(r.config.lora_rank),
+                r.config.lora_alpha,
+                r.config.allow_high_lora_scale,
+            ),
             QueuedJob::DistillPump(r),
         ),
         FrontDoorRequest::Opd(r) => (
@@ -126,7 +138,11 @@ async fn submit_front_door(
                 .clone()
                 .unwrap_or_else(|| format!("opd-{}", uuid::Uuid::new_v4())),
             r.config.auto_load,
-            (r.config.lora_rank, r.config.lora_alpha, r.config.allow_high_lora_scale),
+            (
+                r.config.lora_rank,
+                r.config.lora_alpha,
+                r.config.allow_high_lora_scale,
+            ),
             QueuedJob::Opd(r),
         ),
         FrontDoorRequest::Grpo(r) => (
@@ -137,7 +153,11 @@ async fn submit_front_door(
                 .clone()
                 .unwrap_or_else(|| format!("grpo-{}", uuid::Uuid::new_v4())),
             r.config.auto_load,
-            (r.config.lora_rank, r.config.lora_alpha, r.config.allow_high_lora_scale),
+            (
+                r.config.lora_rank,
+                r.config.lora_alpha,
+                r.config.allow_high_lora_scale,
+            ),
             QueuedJob::Grpo(r),
         ),
         FrontDoorRequest::Sft(r) => (
@@ -148,7 +168,11 @@ async fn submit_front_door(
                 .clone()
                 .unwrap_or_else(|| format!("sft-{}", uuid::Uuid::new_v4())),
             r.config.auto_load,
-            (r.config.lora_rank, r.config.lora_alpha, r.config.allow_high_lora_scale),
+            (
+                r.config.lora_rank,
+                r.config.lora_alpha,
+                r.config.allow_high_lora_scale,
+            ),
             QueuedJob::Sft(r),
         ),
     };

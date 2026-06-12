@@ -738,14 +738,12 @@ pub fn rocm_paged_attn_decode_bf16(
 
     let split_count = paged_attn_split_count(max_seqlen_k);
     let group = h / hk;
-    let use_gqa4 = (2..=4).contains(&group)
-        && std::env::var("KILN_DISABLE_ROCM_GQA_PAGED_ATTN").is_err();
+    let use_gqa4 =
+        (2..=4).contains(&group) && std::env::var("KILN_DISABLE_ROCM_GQA_PAGED_ATTN").is_err();
     let status = if split_count > 1 {
         let partials = b * h * split_count;
-        let partial_m =
-            RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, partials)?;
-        let partial_l =
-            RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, partials)?;
+        let partial_m = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, partials)?;
+        let partial_l = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, partials)?;
         let partial_acc =
             RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, partials * d)?;
         let (partial_m_base, _) = partial_m.device_ptr_raw();

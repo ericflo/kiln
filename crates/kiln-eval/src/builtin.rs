@@ -101,10 +101,7 @@ pub fn qwen3_agentic_core() -> EvalSuite {
             "What's the temperature in Tokyo in celsius?",
             ParsedToolCall {
                 name: "get_weather".into(),
-                arguments: arg_obj([
-                    ("city", json!("Tokyo")),
-                    ("units", json!("celsius")),
-                ]),
+                arguments: arg_obj([("city", json!("Tokyo")), ("units", json!("celsius"))]),
                 format: ToolCallFormat::Qwen3Xml,
             },
             &["tool_call", "weather", "two_args"],
@@ -156,10 +153,7 @@ pub fn qwen3_agentic_core() -> EvalSuite {
             "Find me articles about climate change in California.",
             ParsedToolCall {
                 name: "search_web".into(),
-                arguments: arg_obj([(
-                    "query",
-                    json!("climate change California articles"),
-                )]),
+                arguments: arg_obj([("query", json!("climate change California articles"))]),
                 format: ToolCallFormat::Qwen3Xml,
             },
             &[(
@@ -276,10 +270,7 @@ pub fn qwen3_agentic_core() -> EvalSuite {
             "Find recent papers about LoRA fine-tuning of language models.",
             ParsedToolCall {
                 name: "search_web".into(),
-                arguments: arg_obj([(
-                    "query",
-                    json!("LoRA fine-tuning language models papers"),
-                )]),
+                arguments: arg_obj([("query", json!("LoRA fine-tuning language models papers"))]),
                 format: ToolCallFormat::Qwen3Xml,
             },
             &[(
@@ -438,12 +429,7 @@ fn ex_contains(
     ex
 }
 
-fn ex_text_not_contains(
-    id: &str,
-    prompt: &str,
-    forbidden: &[&str],
-    tags: &[&str],
-) -> EvalExample {
+fn ex_text_not_contains(id: &str, prompt: &str, forbidden: &[&str], tags: &[&str]) -> EvalExample {
     let mut ex = base_example(id, prompt, tags);
     ex.target = Some(format!("should not contain: {}", forbidden.join(", ")));
     ex.scorer = Some(Scorer::Contains {
@@ -499,12 +485,7 @@ fn ex_code_python(id: &str, prompt: &str, reference: &str, tags: &[&str]) -> Eva
     ex
 }
 
-fn ex_tool_call(
-    id: &str,
-    prompt: &str,
-    target: ParsedToolCall,
-    tags: &[&str],
-) -> EvalExample {
+fn ex_tool_call(id: &str, prompt: &str, target: ParsedToolCall, tags: &[&str]) -> EvalExample {
     let mut ex = base_example(id, prompt, tags);
     let canonical = serde_json::json!({
         "tool_calls": [target.to_canonical_json()],
@@ -666,10 +647,7 @@ fn ex_agentic_followup(
         target: Some(phrases_in_followup.join(" | ")),
         tags: tags.iter().map(|s| s.to_string()).collect(),
         scorer: Some(Scorer::Contains {
-            phrases: phrases_in_followup
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+            phrases: phrases_in_followup.iter().map(|s| s.to_string()).collect(),
             mode: ContainsMode::All,
             case_sensitive: false,
         }),
@@ -734,11 +712,7 @@ mod tests {
     fn tool_calls_use_qwen3_format_in_target_envelope() {
         let suite = qwen3_agentic_core();
         for ex in &suite.examples {
-            if !ex
-                .tags
-                .iter()
-                .any(|t| t == "tool_call" || t == "agentic")
-            {
+            if !ex.tags.iter().any(|t| t == "tool_call" || t == "agentic") {
                 continue;
             }
             let Some(target) = ex.target.as_deref() else {

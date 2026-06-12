@@ -37,7 +37,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::logit_source::{LogitSource, LogitSourceCaps, LogitSourceError, LogprobBatch, TopKLogprobs};
+use crate::logit_source::{
+    LogitSource, LogitSourceCaps, LogitSourceError, LogprobBatch, TopKLogprobs,
+};
 
 /// One on-disk cache entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,8 +111,7 @@ impl LogitCache {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create cache parent {}", parent.display()))?;
         }
-        let bytes =
-            serde_json::to_vec(entry).context("serialize cache entry")?;
+        let bytes = serde_json::to_vec(entry).context("serialize cache entry")?;
         std::fs::write(&path, bytes)
             .with_context(|| format!("write cache entry {}", path.display()))?;
         Ok(())
@@ -128,12 +129,11 @@ impl LogitCache {
         if !path.exists() {
             return Ok(None);
         }
-        let bytes = std::fs::read(&path)
-            .with_context(|| format!("read cache entry {}", path.display()))?;
-        Ok(Some(
-            serde_json::from_slice(&bytes)
-                .with_context(|| format!("parse cache entry {}", path.display()))?,
-        ))
+        let bytes =
+            std::fs::read(&path).with_context(|| format!("read cache entry {}", path.display()))?;
+        Ok(Some(serde_json::from_slice(&bytes).with_context(|| {
+            format!("parse cache entry {}", path.display())
+        })?))
     }
 
     /// Walk the cache and compute size statistics.
@@ -180,17 +180,13 @@ impl LogitCache {
         }
         let file = std::fs::File::create(output)
             .with_context(|| format!("create tar output {}", output.display()))?;
-        let gz =
-            flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let gz = flate2::write::GzEncoder::new(file, flate2::Compression::default());
         let mut tb = tar::Builder::new(gz);
         tb.append_dir_all("logit-cache", &self.root)
             .context("append cache root to tar")?;
         let writer = tb.into_inner().context("finalize tar")?;
         let written_compressed = writer.finish().context("finish gz")?;
-        let bytes = written_compressed
-            .metadata()
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let bytes = written_compressed.metadata().map(|m| m.len()).unwrap_or(0);
         Ok(bytes)
     }
 
@@ -354,9 +350,7 @@ fn walkdir(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(p) = stack.pop() {
-        for entry in std::fs::read_dir(&p)
-            .with_context(|| format!("read_dir {}", p.display()))?
-        {
+        for entry in std::fs::read_dir(&p).with_context(|| format!("read_dir {}", p.display()))? {
             let entry = entry?;
             let path = entry.path();
             if path.is_dir() {

@@ -1210,12 +1210,8 @@ fn run_full_token_resident_mixed_batched(
                     }
                     let l2_eps = 1e-6f32;
                     let q_scale = 1.0f32 / (GDN_HEAD_DIM as f32).sqrt();
-                    if gdn_qk_norm_recurrent_fused(
-                        batch,
-                        gdn_gqa_ratio,
-                        GDN_HEAD_DIM,
-                        GDN_HEAD_DIM,
-                    ) {
+                    if gdn_qk_norm_recurrent_fused(batch, gdn_gqa_ratio, GDN_HEAD_DIM, GDN_HEAD_DIM)
+                    {
                         b.record_shader(
                             shaders::GDN_DECODE_QK_NORM_GATES_RECURRENT_RMSNORM,
                             &[

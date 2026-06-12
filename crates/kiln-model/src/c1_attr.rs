@@ -188,7 +188,9 @@ pub fn drain_to_csv(path: &str) -> Result<usize> {
     if n == 0 {
         return Ok(0);
     }
-    let needs_header = std::fs::metadata(path).map(|m| m.len() == 0).unwrap_or(true);
+    let needs_header = std::fs::metadata(path)
+        .map(|m| m.len() == 0)
+        .unwrap_or(true);
     let mut out = String::with_capacity(128 + n * 64);
     if needs_header {
         out.push_str(CSV_HEADER);

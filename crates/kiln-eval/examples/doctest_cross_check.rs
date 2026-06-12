@@ -61,8 +61,8 @@ fn main() -> Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        let g: GrpoGroup = serde_json::from_str(&line)
-            .with_context(|| format!("parsing line {}", i + 1))?;
+        let g: GrpoGroup =
+            serde_json::from_str(&line).with_context(|| format!("parsing line {}", i + 1))?;
         let example = EvalExample {
             id: Some(format!("group_{i}")),
             messages: g

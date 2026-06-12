@@ -113,8 +113,7 @@ pub fn cosine_with_restarts(
         if s < p_u {
             // Within the current cycle. Compute cosine of progress.
             let progress = s as f32 / period;
-            let coefficient =
-                0.5 * (1.0 + (std::f32::consts::PI * progress).cos());
+            let coefficient = 0.5 * (1.0 + (std::f32::consts::PI * progress).cos());
             return min_lr + (peak_lr - min_lr) * coefficient;
         }
         s -= p_u;
@@ -130,13 +129,7 @@ pub fn cosine_with_restarts(
 /// clamped at `min_lr`. With `power = 1.0` this equals `linear`;
 /// `power = 0.5` produces a softer (square-root) descent; `power =
 /// 2.0` is quadratic.
-pub fn polynomial(
-    step: u64,
-    total: u64,
-    power: f32,
-    peak_lr: f32,
-    min_lr: f32,
-) -> f32 {
+pub fn polynomial(step: u64, total: u64, power: f32, peak_lr: f32, min_lr: f32) -> f32 {
     if total == 0 {
         return min_lr;
     }

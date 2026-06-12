@@ -1508,38 +1508,38 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
         c.clone()
     } else {
         match grpo_loss_coeff_col_device_fast_path_kt(
-        grpo_kl_auxiliary_route,
-        policy_log_probs_kt,
-        ref_log_probs_kt,
-        loss_params,
-        num_active,
-        grad_scalar,
-        device,
-    )
-    .context("grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: coeff fast path")?
-    {
-        Some(coeff_col) => coeff_col,
-        None => {
-            let coeff = grpo_loss_coeff_from_policy_log_probs_kt(
-                policy_log_probs_kt,
-                ref_log_probs_kt,
-                loss_params,
-                num_active,
-            )
-            .context("grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: coeff")?;
-            anyhow::ensure!(
-                coeff.len() == num_active,
-                "grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: coeff len {} != num_active {num_active}",
-                coeff.len()
-            );
-            let coeff_scaled: Vec<f32> = coeff
-                .iter()
-                .map(|c| (*c as f64 * grad_scalar) as f32)
-                .collect();
-            KtTensor::from_vec_on(*device, coeff_scaled, vec![num_active, 1])
-                .context("grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: coeff_col")?
+            grpo_kl_auxiliary_route,
+            policy_log_probs_kt,
+            ref_log_probs_kt,
+            loss_params,
+            num_active,
+            grad_scalar,
+            device,
+        )
+        .context("grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: coeff fast path")?
+        {
+            Some(coeff_col) => coeff_col,
+            None => {
+                let coeff = grpo_loss_coeff_from_policy_log_probs_kt(
+                    policy_log_probs_kt,
+                    ref_log_probs_kt,
+                    loss_params,
+                    num_active,
+                )
+                .context("grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: coeff")?;
+                anyhow::ensure!(
+                    coeff.len() == num_active,
+                    "grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: coeff len {} != num_active {num_active}",
+                    coeff.len()
+                );
+                let coeff_scaled: Vec<f32> = coeff
+                    .iter()
+                    .map(|c| (*c as f64 * grad_scalar) as f32)
+                    .collect();
+                KtTensor::from_vec_on(*device, coeff_scaled, vec![num_active, 1])
+                    .context("grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: coeff_col")?
+            }
         }
-    }
     };
     let mut grad_active_hidden =
         KtTensor::zeros(vec![num_active, hidden_size], KtDType::F32, *device).context(
@@ -1706,15 +1706,10 @@ pub(crate) fn grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
     // the PG hidden grad. Contributes exactly nothing when the rollout has
     // no env rows.
     let echo_state = match echo_env {
-        Some(spec) => echo_env_state_and_value_kt(
-            normed_hidden,
-            head_t,
-            input_ids,
-            spec,
-            chunk_size,
-            device,
-        )
-        .context("grpo_pg_loss_from_normed_hidden_loss_and_grad_kt: env state")?,
+        Some(spec) => {
+            echo_env_state_and_value_kt(normed_hidden, head_t, input_ids, spec, chunk_size, device)
+                .context("grpo_pg_loss_from_normed_hidden_loss_and_grad_kt: env state")?
+        }
         None => None,
     };
     anyhow::ensure!(
@@ -1727,9 +1722,7 @@ pub(crate) fn grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
         Some((node_state, env_ce_kt, env_ce_val)) => {
             let lambda = echo_env.map(|s| s.lambda).unwrap_or(0.0);
             let weighted = env_ce_kt.affine(lambda, 0.0).map_err(|e| {
-                anyhow::anyhow!(
-                    "grpo_pg_loss_from_normed_hidden_loss_and_grad_kt: echo scale: {e}"
-                )
+                anyhow::anyhow!("grpo_pg_loss_from_normed_hidden_loss_and_grad_kt: echo scale: {e}")
             })?;
             let loss_kt = if no_pg {
                 weighted
@@ -2152,15 +2145,10 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_kt(
     // scalar BEFORE tape.record so the node output id IS the composite
     // loss; the backward adds the matching constant-coefficient env rows.
     let echo_state = match echo_env {
-        Some(spec) => echo_env_state_and_value_kt(
-            normed_hidden,
-            head_t,
-            input_ids,
-            spec,
-            chunk_size,
-            device,
-        )
-        .context("try_tape_grpo_pg_loss_from_normed_hidden_kt: env state")?,
+        Some(spec) => {
+            echo_env_state_and_value_kt(normed_hidden, head_t, input_ids, spec, chunk_size, device)
+                .context("try_tape_grpo_pg_loss_from_normed_hidden_kt: env state")?
+        }
         None => None,
     };
     anyhow::ensure!(
@@ -2459,8 +2447,7 @@ mod tests {
             .collect();
         let hidden =
             KtTensor::from_vec_on(device, hidden_host, vec![1, seq_len, hidden_size]).unwrap();
-        let head_t =
-            KtTensor::from_vec_on(device, head_host, vec![hidden_size, vocab]).unwrap();
+        let head_t = KtTensor::from_vec_on(device, head_host, vec![hidden_size, vocab]).unwrap();
 
         let (node_state, _env_ce_kt, env_ce_val) =
             super::echo_env_state_and_value_kt(&hidden, &head_t, &input_ids, &spec, 3, &device)
@@ -2507,7 +2494,14 @@ mod tests {
         let grads = node.apply(&seed).unwrap();
         assert_eq!(grads.len(), 2);
         let passthrough = grads[0].as_ref().expect("opd seed passthrough");
-        assert_eq!(passthrough.to_dtype(KtDType::F32).unwrap().to_scalar::<f32>().unwrap(), 1.0);
+        assert_eq!(
+            passthrough
+                .to_dtype(KtDType::F32)
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap(),
+            1.0
+        );
         let env_grad = grads[1].as_ref().expect("env grad");
         let read = |t: &KtTensor| -> Vec<f32> {
             t.to_dtype(KtDType::F32)
@@ -2552,8 +2546,7 @@ mod tests {
             .collect();
         let normed_hidden =
             KtTensor::from_vec_on(device, hidden_host, vec![1, seq_len, hidden_size]).unwrap();
-        let head_t =
-            KtTensor::from_vec_on(device, head_host, vec![hidden_size, vocab]).unwrap();
+        let head_t = KtTensor::from_vec_on(device, head_host, vec![hidden_size, vocab]).unwrap();
         let read = |t: &KtTensor| -> Vec<f32> {
             t.to_dtype(KtDType::F32)
                 .unwrap()
@@ -2563,7 +2556,12 @@ mod tests {
                 .unwrap()
         };
         let plp = super::selected_log_probs_from_normed_hidden_chunked_kt(
-            &normed_hidden, &head_t, &input_ids, &action_mask, 3, &device,
+            &normed_hidden,
+            &head_t,
+            &input_ids,
+            &action_mask,
+            3,
+            &device,
         )
         .unwrap();
         let ref_host: Vec<f32> = read(&plp).iter().map(|&p| p - 0.1).collect();
@@ -2587,18 +2585,41 @@ mod tests {
         // Echo WITH the PG term (reference) and the no_pg variant.
         let (loss_full, _grad_full, env_ce_full) =
             super::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
-                &normed_hidden, &head_t, &input_ids, &action_mask, &ref_kt, params,
-                GrpoKlAuxiliaryRoute::HostComposite, 1.0, &device, 3, Some(&spec), false,
+                &normed_hidden,
+                &head_t,
+                &input_ids,
+                &action_mask,
+                &ref_kt,
+                params,
+                GrpoKlAuxiliaryRoute::HostComposite,
+                1.0,
+                &device,
+                3,
+                Some(&spec),
+                false,
             )
             .unwrap();
         let (loss_np, grad_np, env_ce_np) =
             super::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
-                &normed_hidden, &head_t, &input_ids, &action_mask, &ref_kt, params,
-                GrpoKlAuxiliaryRoute::HostComposite, 1.0, &device, 3, Some(&spec), true,
+                &normed_hidden,
+                &head_t,
+                &input_ids,
+                &action_mask,
+                &ref_kt,
+                params,
+                GrpoKlAuxiliaryRoute::HostComposite,
+                1.0,
+                &device,
+                3,
+                Some(&spec),
+                true,
             )
             .unwrap();
         let env_ce = env_ce_np.expect("env rows present");
-        assert!((env_ce - env_ce_full.unwrap()).abs() < 1e-9, "same env term");
+        assert!(
+            (env_ce - env_ce_full.unwrap()).abs() < 1e-9,
+            "same env term"
+        );
         // Loss == λ·env_CE exactly (no PG contribution).
         let loss_np_v = read(&loss_np)[0] as f64;
         assert!(
@@ -2612,18 +2633,36 @@ mod tests {
         );
         // Gradient: equals the env-only delta from the echo closed-form
         // test = (echo grad) − (no-echo grad). Compute both references.
-        let (_l0, grad_no_echo, _e0) =
-            super::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
-                &normed_hidden, &head_t, &input_ids, &action_mask, &ref_kt, params,
-                GrpoKlAuxiliaryRoute::HostComposite, 1.0, &device, 3, None, false,
-            )
-            .unwrap();
-        let (_l1, grad_echo, _e1) =
-            super::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
-                &normed_hidden, &head_t, &input_ids, &action_mask, &ref_kt, params,
-                GrpoKlAuxiliaryRoute::HostComposite, 1.0, &device, 3, Some(&spec), false,
-            )
-            .unwrap();
+        let (_l0, grad_no_echo, _e0) = super::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
+            &normed_hidden,
+            &head_t,
+            &input_ids,
+            &action_mask,
+            &ref_kt,
+            params,
+            GrpoKlAuxiliaryRoute::HostComposite,
+            1.0,
+            &device,
+            3,
+            None,
+            false,
+        )
+        .unwrap();
+        let (_l1, grad_echo, _e1) = super::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
+            &normed_hidden,
+            &head_t,
+            &input_ids,
+            &action_mask,
+            &ref_kt,
+            params,
+            GrpoKlAuxiliaryRoute::HostComposite,
+            1.0,
+            &device,
+            3,
+            Some(&spec),
+            false,
+        )
+        .unwrap();
         let g_np = read(&grad_np);
         let g_ne = read(&grad_no_echo);
         let g_e = read(&grad_echo);
@@ -2665,9 +2704,8 @@ mod tests {
         let normed_hidden =
             KtTensor::from_vec_on(device, hidden_host.clone(), vec![1, seq_len, hidden_size])
                 .expect("hidden");
-        let head_t =
-            KtTensor::from_vec_on(device, head_host.clone(), vec![hidden_size, vocab])
-                .expect("head");
+        let head_t = KtTensor::from_vec_on(device, head_host.clone(), vec![hidden_size, vocab])
+            .expect("head");
         let read = |t: &KtTensor| -> Vec<f32> {
             t.to_dtype(KtDType::F32)
                 .unwrap()
@@ -2795,8 +2833,7 @@ mod tests {
                     let label = input_ids[p + 1] as usize;
                     (0..vocab)
                         .map(|v| {
-                            let sm_minus_onehot =
-                                probs[v] - if v == label { 1.0 } else { 0.0 };
+                            let sm_minus_onehot = probs[v] - if v == label { 1.0 } else { 0.0 };
                             coeff * sm_minus_onehot * head_host[h * vocab + v]
                         })
                         .sum::<f32>()

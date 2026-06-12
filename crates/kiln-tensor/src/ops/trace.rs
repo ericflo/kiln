@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 pub fn trace(t: &Tensor) -> Result<Tensor> {
     if t.rank() != 2 {
@@ -54,10 +54,12 @@ pub fn trace(t: &Tensor) -> Result<Tensor> {
         let idx = i * n + i;
         let v = match dtype {
             DType::F32 => f32::from_le_bytes(bytes[idx * 4..idx * 4 + 4].try_into().unwrap()),
-            DType::BF16 => half::bf16::from_le_bytes(bytes[idx * 2..idx * 2 + 2].try_into().unwrap())
-                .to_f32(),
-            DType::F16 => half::f16::from_le_bytes(bytes[idx * 2..idx * 2 + 2].try_into().unwrap())
-                .to_f32(),
+            DType::BF16 => {
+                half::bf16::from_le_bytes(bytes[idx * 2..idx * 2 + 2].try_into().unwrap()).to_f32()
+            }
+            DType::F16 => {
+                half::f16::from_le_bytes(bytes[idx * 2..idx * 2 + 2].try_into().unwrap()).to_f32()
+            }
             _ => unreachable!(),
         };
         sum += v;
@@ -70,7 +72,11 @@ pub fn trace(t: &Tensor) -> Result<Tensor> {
     };
     let cpu = CpuStorage::from_bytes(dtype, out_bytes)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(Vec::<usize>::new()), TensorId::next())
+    Tensor::from_parts(
+        storage,
+        Layout::contiguous(Vec::<usize>::new()),
+        TensorId::next(),
+    )
 }
 
 #[cfg(test)]
@@ -94,7 +100,11 @@ mod tests {
     #[test]
     fn trace_arbitrary() {
         // [[1, 0, 0], [0, 5, 0], [0, 0, 9]] → 15
-        let t = Tensor::from_slice(&[1.0f32, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 9.0], vec![3, 3]).unwrap();
+        let t = Tensor::from_slice(
+            &[1.0f32, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 9.0],
+            vec![3, 3],
+        )
+        .unwrap();
         assert!((scalar_f32(&trace(&t).unwrap()) - 15.0).abs() < 1e-5);
     }
 

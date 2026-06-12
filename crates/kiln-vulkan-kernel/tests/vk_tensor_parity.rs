@@ -37,11 +37,7 @@ fn upload_bf16(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result
     VkTensor::from_f32_slice_as_bf16(data, shape.to_vec(), Arc::clone(dev))
 }
 
-fn upload_param_f32(
-    dev: &Arc<VulkanDevice>,
-    data: &[f32],
-    shape: &[usize],
-) -> Result<VkTensor> {
+fn upload_param_f32(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
     VkTensor::parameter_from_f32_slice(data, shape.to_vec(), Arc::clone(dev))
 }
 
@@ -355,10 +351,7 @@ fn vk_transpose_2d_bf16_forward_parity() -> Result<()> {
     let data: Vec<f32> = (0..(rows * cols))
         .map(|i| ((i as f32) * 0.17).sin() * 0.25)
         .collect();
-    let rounded: Vec<f32> = data
-        .iter()
-        .map(|&v| bf16::from_f32(v).to_f32())
-        .collect();
+    let rounded: Vec<f32> = data.iter().map(|&v| bf16::from_f32(v).to_f32()).collect();
     let t = upload_bf16(&dev, &data, &[rows, cols])?;
     let tt = vk_transpose_2d_no_grad(&t)?;
     assert_eq!(tt.dtype(), VkDType::Bf16);

@@ -194,8 +194,7 @@ impl VulkanDevice {
         let app_info = vk::ApplicationInfo::default()
             .application_name(CStr::from_bytes_with_nul(b"Kiln Vulkan Backend\0").unwrap())
             .engine_name(CStr::from_bytes_with_nul(b"Kiln\0").unwrap())
-            .api_version(vk::make_api_version(0, 1, 2, 0))
-            ;
+            .api_version(vk::make_api_version(0, 1, 2, 0));
 
         // Optional: enable Vulkan validation layers when KILN_VULKAN_VALIDATION
         // is set (truthy values: 1, true, on, yes). Useful for diagnosing
@@ -307,13 +306,10 @@ impl VulkanDevice {
         // Create logical device
         let queue_info = vk::DeviceQueueCreateInfo::default()
             .queue_family_index(compute_family)
-            .queue_priorities(&[1.0])
-            ;
+            .queue_priorities(&[1.0]);
         let queue_infos = vec![queue_info];
 
-        let device_info = vk::DeviceCreateInfo::default()
-            .queue_create_infos(&queue_infos)
-            ;
+        let device_info = vk::DeviceCreateInfo::default().queue_create_infos(&queue_infos);
 
         let device = unsafe {
             Arc::new(
@@ -329,8 +325,7 @@ impl VulkanDevice {
             device.create_command_pool(
                 &vk::CommandPoolCreateInfo::default()
                     .queue_family_index(compute_family)
-                    .flags(vk::CommandPoolCreateFlags::TRANSIENT)
-                    ,
+                    .flags(vk::CommandPoolCreateFlags::TRANSIENT),
                 None,
             )
         }
@@ -342,9 +337,7 @@ impl VulkanDevice {
                     .max_sets(4)
                     .pool_sizes(&[vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::STORAGE_BUFFER)
-                        .descriptor_count(64)
-                        ])
-                    ,
+                        .descriptor_count(64)]),
                 None,
             )
         }
@@ -356,15 +349,13 @@ impl VulkanDevice {
             device.create_command_pool(
                 &vk::CommandPoolCreateInfo::default()
                     .queue_family_index(compute_family)
-                    .flags(vk::CommandPoolCreateFlags::TRANSIENT)
-                    ,
+                    .flags(vk::CommandPoolCreateFlags::TRANSIENT),
                 None,
             )
         }
         .context("failed to create Vulkan batch command pool")?;
-        let batch_descriptor_pool =
-            Self::create_batch_descriptor_pool(&device)
-                .context("failed to create Vulkan batch descriptor pool")?;
+        let batch_descriptor_pool = Self::create_batch_descriptor_pool(&device)
+            .context("failed to create Vulkan batch descriptor pool")?;
 
         Ok(Self {
             entry,
@@ -569,14 +560,11 @@ impl VulkanDevice {
                     .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                     .descriptor_count(1)
                     .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                    
             })
             .collect();
         let set_layout = unsafe {
             self.device.create_descriptor_set_layout(
-                &vk::DescriptorSetLayoutCreateInfo::default()
-                    .bindings(&desc_bindings)
-                    ,
+                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&desc_bindings),
                 None,
             )
         }
@@ -584,15 +572,13 @@ impl VulkanDevice {
 
         let push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
-            .size(push_constant_size)
-            ;
+            .size(push_constant_size);
         let set_layouts = [set_layout];
         let layout = unsafe {
             self.device.create_pipeline_layout(
                 &vk::PipelineLayoutCreateInfo::default()
                     .set_layouts(&set_layouts)
-                    .push_constant_ranges(&[push_constant_range])
-                    ,
+                    .push_constant_ranges(&[push_constant_range]),
                 None,
             )
         }
@@ -612,9 +598,7 @@ impl VulkanDevice {
             .collect();
         let shader_module = unsafe {
             self.device.create_shader_module(
-                &vk::ShaderModuleCreateInfo::default()
-                    .code(&spirv_words)
-                    ,
+                &vk::ShaderModuleCreateInfo::default().code(&spirv_words),
                 None,
             )
         }
@@ -623,15 +607,13 @@ impl VulkanDevice {
         let stage_info = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(shader_module)
-            .name(CStr::from_bytes_with_nul(b"main\0").unwrap())
-            ;
+            .name(CStr::from_bytes_with_nul(b"main\0").unwrap());
         let pipeline = unsafe {
             self.device.create_compute_pipelines(
                 vk::PipelineCache::null(),
                 &[vk::ComputePipelineCreateInfo::default()
                     .stage(stage_info)
-                    .layout(layout)
-                    ],
+                    .layout(layout)],
                 None,
             )
         }
@@ -758,28 +740,25 @@ impl VulkanDevice {
             .batch_descriptor_pools
             .lock()
             .map_err(|_| anyhow!("Vulkan batch descriptor pool mutex poisoned"))?;
-        let alloc_from = |pool: vk::DescriptorPool| -> ash::prelude::VkResult<Vec<vk::DescriptorSet>> {
-            unsafe {
-                device.allocate_descriptor_sets(
-                    &vk::DescriptorSetAllocateInfo::default()
-                        .descriptor_pool(pool)
-                        .set_layouts(&set_layouts),
-                )
-            }
-        };
+        let alloc_from =
+            |pool: vk::DescriptorPool| -> ash::prelude::VkResult<Vec<vk::DescriptorSet>> {
+                unsafe {
+                    device.allocate_descriptor_sets(
+                        &vk::DescriptorSetAllocateInfo::default()
+                            .descriptor_pool(pool)
+                            .set_layouts(&set_layouts),
+                    )
+                }
+            };
         let current = *pools.last().expect("at least one batch descriptor pool");
         let descriptor_set = match alloc_from(current) {
             Ok(sets) => sets[0],
             Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY) | Err(vk::Result::ERROR_FRAGMENTED_POOL) => {
                 let fresh = Self::create_batch_descriptor_pool(device)?;
                 pools.push(fresh);
-                alloc_from(fresh)
-                    .context("alloc_descriptor_set: allocate from fresh pool")?[0]
+                alloc_from(fresh).context("alloc_descriptor_set: allocate from fresh pool")?[0]
             }
-            Err(e) => {
-                return Err(anyhow::Error::from(e))
-                    .context("alloc_descriptor_set: allocate")
-            }
+            Err(e) => return Err(anyhow::Error::from(e)).context("alloc_descriptor_set: allocate"),
         };
         drop(pools);
         let buf_infos: Vec<vk::DescriptorBufferInfo> = handles
@@ -789,7 +768,6 @@ impl VulkanDevice {
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    
             })
             .collect();
         let writes: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -801,7 +779,6 @@ impl VulkanDevice {
                     .dst_binding(i as u32)
                     .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                     .buffer_info(std::slice::from_ref(info))
-                    
             })
             .collect();
         unsafe {

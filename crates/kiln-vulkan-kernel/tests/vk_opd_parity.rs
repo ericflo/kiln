@@ -11,13 +11,13 @@
 
 use anyhow::Result;
 use half::bf16;
+use kiln_vulkan_kernel::VulkanDevice;
 use kiln_vulkan_kernel::vk_autograd::vk_backward;
 use kiln_vulkan_kernel::vk_ops::opd::{
     vk_opd_top_k_metrics, vk_opd_top_k_reverse_kl_loss, vk_opd_top_k_reverse_kl_per_position,
 };
 use kiln_vulkan_kernel::vk_ops::reduce::vk_sum_all;
 use kiln_vulkan_kernel::vk_tensor::{VkDType, VkTensor};
-use kiln_vulkan_kernel::VulkanDevice;
 use std::sync::Arc;
 
 fn vk_dev() -> Option<Arc<VulkanDevice>> {
@@ -43,10 +43,7 @@ fn upload_param_f32(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> R
 }
 
 fn bf16_round_trip(data: &[f32]) -> Result<Vec<f32>> {
-    Ok(data
-        .iter()
-        .map(|&v| bf16::from_f32(v).to_f32())
-        .collect())
+    Ok(data.iter().map(|&v| bf16::from_f32(v).to_f32()).collect())
 }
 
 /// CPU f64 oracle. For each active position computes
@@ -58,12 +55,12 @@ fn bf16_round_trip(data: &[f32]) -> Result<Vec<f32>> {
 ///
 /// `weight` is `[V, H]` row-major (column c = weight[c*H + h]).
 fn cpu_oracle(
-    hidden: &[f32],          // [T_active * H]
-    weight: &[f32],          // [V * H]
-    topk_idx: &[u32],        // [T_active * K]
-    topk_lpq: &[f32],        // [T_active * K]
-    upstream: &[f32],        // [T_active] (or length 1 with scalar broadcast applied externally)
-    upstream_scalar: f32,    // multiplied with upstream[t]
+    hidden: &[f32],       // [T_active * H]
+    weight: &[f32],       // [V * H]
+    topk_idx: &[u32],     // [T_active * K]
+    topk_lpq: &[f32],     // [T_active * K]
+    upstream: &[f32],     // [T_active] (or length 1 with scalar broadcast applied externally)
+    upstream_scalar: f32, // multiplied with upstream[t]
     num_active: usize,
     hidden_size: usize,
     top_k: usize,
@@ -184,15 +181,18 @@ fn run_fwd_parity(top_k: usize, weight_bf16: bool) -> Result<()> {
         upload_f32(&dev, &weight, &[vocab, hidden_size])?
     };
 
-    let per_pos_t =
-        vk_opd_top_k_reverse_kl_per_position(&hidden_t, &weight_t, &idx, &lpq, top_k)?;
+    let per_pos_t = vk_opd_top_k_reverse_kl_per_position(&hidden_t, &weight_t, &idx, &lpq, top_k)?;
     assert_eq!(per_pos_t.shape(), &[num_active]);
     assert_eq!(per_pos_t.dtype(), VkDType::F32);
     let per_pos = per_pos_t.to_vec_f32()?;
 
     // Build the oracle. For bf16 weight, round-trip the weights through bf16
     // first so we compare like-for-like.
-    let oracle_weight = if weight_bf16 { bf16_round_trip(&weight)? } else { weight.clone() };
+    let oracle_weight = if weight_bf16 {
+        bf16_round_trip(&weight)?
+    } else {
+        weight.clone()
+    };
     let upstream = vec![0.0_f32; num_active]; // not used by forward
     let (oracle_per_pos, _) = cpu_oracle(
         &hidden,
@@ -270,8 +270,7 @@ fn run_bwd_parity(top_k: usize, weight_bf16: bool, per_position: bool) -> Result
     // with `grad_loss = [1, …, 1]` and `scale = 1.0` — matching the
     // CPU-oracle upstream/scale below.
     let scalar = if per_position {
-        let pp =
-            vk_opd_top_k_reverse_kl_per_position(&hidden_param, &weight_t, &idx, &lpq, top_k)?;
+        let pp = vk_opd_top_k_reverse_kl_per_position(&hidden_param, &weight_t, &idx, &lpq, top_k)?;
         vk_sum_all(&pp)?
     } else {
         vk_opd_top_k_reverse_kl_loss(&hidden_param, &weight_t, &idx, &lpq, top_k)?
@@ -301,7 +300,11 @@ fn run_bwd_parity(top_k: usize, weight_bf16: bool, per_position: bool) -> Result
         (vec![1.0_f32; num_active], 1.0_f32 / (num_active as f32))
     };
 
-    let oracle_weight = if weight_bf16 { bf16_round_trip(&weight)? } else { weight.clone() };
+    let oracle_weight = if weight_bf16 {
+        bf16_round_trip(&weight)?
+    } else {
+        weight.clone()
+    };
     let (_, oracle_dh) = cpu_oracle(
         &hidden,
         &oracle_weight,
@@ -388,8 +391,7 @@ fn vk_opd_metrics_parity_f32_k32() -> Result<()> {
             let col = idx[t * top_k + k] as usize;
             let mut acc = 0.0_f64;
             for h in 0..hidden_size {
-                acc += hidden[t * hidden_size + h] as f64
-                    * weight[col * hidden_size + h] as f64;
+                acc += hidden[t * hidden_size + h] as f64 * weight[col * hidden_size + h] as f64;
             }
             s_logits[k] = acc;
         }
@@ -400,8 +402,7 @@ fn vk_opd_metrics_parity_f32_k32() -> Result<()> {
         let log_p: Vec<f64> = s_logits.iter().map(|x| (x - m_p) - log_z_p).collect();
         let p_hat: Vec<f64> = exp_p.iter().map(|e| e / z_p).collect();
 
-        let lpq_row: Vec<f64> =
-            (0..top_k).map(|k| lpq[t * top_k + k] as f64).collect();
+        let lpq_row: Vec<f64> = (0..top_k).map(|k| lpq[t * top_k + k] as f64).collect();
         let m_q = lpq_row.iter().cloned().fold(f64::MIN, f64::max);
         let exp_q: Vec<f64> = lpq_row.iter().map(|x| (x - m_q).exp()).collect();
         let z_q: f64 = exp_q.iter().sum();

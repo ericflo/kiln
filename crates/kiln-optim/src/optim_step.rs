@@ -47,9 +47,7 @@ pub enum StepError {
     NoBackwardStorage,
 
     /// Gradient shape doesn't match master shape.
-    #[error(
-        "OptimStep: grad shape {grad_shape:?} != master shape {master_shape:?}"
-    )]
+    #[error("OptimStep: grad shape {grad_shape:?} != master shape {master_shape:?}")]
     GradShapeMismatch {
         grad_shape: Vec<usize>,
         master_shape: Vec<usize>,

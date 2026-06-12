@@ -124,18 +124,13 @@ impl LiveEvalGenerator {
     /// `render_prompt_text` consumes. Carries the optional agentic fields
     /// (`tool_calls`, `name`, `tool_call_id`) through so multi-turn tool
     /// trajectories render correctly via Qwen3.5's chat template.
-    fn to_api_messages(
-        messages: &[EvalChatMessage],
-        system_prompt: Option<&str>,
-    ) -> Vec<Message> {
+    fn to_api_messages(messages: &[EvalChatMessage], system_prompt: Option<&str>) -> Vec<Message> {
         let mut out = Vec::with_capacity(messages.len() + 1);
         let has_system = messages
             .first()
             .map(|m| m.role.eq_ignore_ascii_case("system"))
             .unwrap_or(false);
-        if !has_system
-            && let Some(sp) = system_prompt
-        {
+        if !has_system && let Some(sp) = system_prompt {
             out.push(Message {
                 role: "system".into(),
                 content: sp.to_string(),
@@ -535,7 +530,9 @@ impl EvalGenerator for MockEvalGenerator {
         // into the metrics.
         let approx_tokens: Vec<TokenId> = messages
             .iter()
-            .flat_map(|m| std::iter::once(m.role.len() as u32).chain(std::iter::once(m.content.len() as u32)))
+            .flat_map(|m| {
+                std::iter::once(m.role.len() as u32).chain(std::iter::once(m.content.len() as u32))
+            })
             .collect();
         Box::pin(async move {
             Ok(PreparedPrompt {

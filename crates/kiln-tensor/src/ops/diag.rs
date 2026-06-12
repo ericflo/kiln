@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 /// `diagonal(t)` returns a rank-1 tensor with the main diagonal of `t`.
 /// Input must be square rank-2.
@@ -137,7 +137,11 @@ mod tests {
     #[test]
     fn diagonal_extracts_diagonal() {
         // [[1, 2, 3], [4, 5, 6], [7, 8, 9]] → [1, 5, 9]
-        let t = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], vec![3, 3]).unwrap();
+        let t = Tensor::from_slice(
+            &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+            vec![3, 3],
+        )
+        .unwrap();
         let d = diagonal(&t).unwrap();
         assert_eq!(d.shape(), &[3]);
         assert_eq!(read_f32(&d), vec![1.0, 5.0, 9.0]);
@@ -149,7 +153,10 @@ mod tests {
         let m = diag(&v).unwrap();
         assert_eq!(m.shape(), &[3, 3]);
         // [[1, 0, 0], [0, 2, 0], [0, 0, 3]]
-        assert_eq!(read_f32(&m), vec![1.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0]);
+        assert_eq!(
+            read_f32(&m),
+            vec![1.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0]
+        );
     }
 
     #[test]

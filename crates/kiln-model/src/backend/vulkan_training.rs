@@ -490,13 +490,12 @@ mod tests {
         );
 
         // Read back the updated param buffer from the registry.
-        let param_buf =
-            with_resident_registry(&backend.resident_activation_registry, |cache| {
-                cache
-                    .get(&param.id())
-                    .map(|entry| Arc::clone(&entry.buffer))
-            })
-            .expect("param must still be in registry");
+        let param_buf = with_resident_registry(&backend.resident_activation_registry, |cache| {
+            cache
+                .get(&param.id())
+                .map(|entry| Arc::clone(&entry.buffer))
+        })
+        .expect("param must still be in registry");
         let device = backend.vulkan_device.as_ref().unwrap();
         let updated_bytes = kiln_vulkan_kernel::VulkanBuffer::read_back(
             device.device(),

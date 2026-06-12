@@ -34,8 +34,8 @@
 //! `Constructive`. Pointwise per (position, pair); no reduction.
 
 use crate::{
-    bail, dispatch3, BackwardOp, CpuStorage, DType, Determinism, DeviceOp3, Error, Layout, Result,
-    Storage, Tensor, TensorId,
+    BackwardOp, CpuStorage, DType, Determinism, DeviceOp3, Error, Layout, Result, Storage, Tensor,
+    TensorId, bail, dispatch3,
 };
 use std::sync::Arc;
 
@@ -96,8 +96,18 @@ impl DeviceOp3 for RopeOp {
 
         for l in 0..leading {
             for s in 0..seq {
-                let cos_row = read_f32_row(cos.dtype(), cos_cpu.as_bytes(), s * cos_row_bytes, pair_count);
-                let sin_row = read_f32_row(sin.dtype(), sin_cpu.as_bytes(), s * sin_row_bytes, pair_count);
+                let cos_row = read_f32_row(
+                    cos.dtype(),
+                    cos_cpu.as_bytes(),
+                    s * cos_row_bytes,
+                    pair_count,
+                );
+                let sin_row = read_f32_row(
+                    sin.dtype(),
+                    sin_cpu.as_bytes(),
+                    s * sin_row_bytes,
+                    pair_count,
+                );
                 for i in 0..pair_count {
                     let two_i = l * row_bytes + (s * head_dim + 2 * i) * per;
                     let two_ip1 = l * row_bytes + (s * head_dim + 2 * i + 1) * per;
@@ -118,7 +128,11 @@ impl DeviceOp3 for RopeOp {
 
         let cpu = CpuStorage::from_bytes(dtype, out_bytes)?;
         let storage: Storage = Arc::new(cpu);
-        let out = Tensor::from_parts(storage, Layout::contiguous(shape.to_vec()), TensorId::next())?;
+        let out = Tensor::from_parts(
+            storage,
+            Layout::contiguous(shape.to_vec()),
+            TensorId::next(),
+        )?;
         Ok(Some(out))
     }
 
@@ -301,14 +315,10 @@ fn validate(x: &Tensor, cos: &Tensor, sin: &Tensor, rotary_dim: usize) -> Result
         );
     }
     if rotary_dim == 0 || !rotary_dim.is_multiple_of(2) {
-        bail!(
-            "RopeOp: rotary_dim must be positive and even, got {rotary_dim}"
-        );
+        bail!("RopeOp: rotary_dim must be positive and even, got {rotary_dim}");
     }
     if rotary_dim > head_dim {
-        bail!(
-            "RopeOp: rotary_dim ({rotary_dim}) > head_dim ({head_dim})"
-        );
+        bail!("RopeOp: rotary_dim ({rotary_dim}) > head_dim ({head_dim})");
     }
     if cos.shape()[1] * 2 != rotary_dim {
         bail!(
@@ -317,10 +327,7 @@ fn validate(x: &Tensor, cos: &Tensor, sin: &Tensor, rotary_dim: usize) -> Result
         );
     }
     if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
-        bail!(
-            "RopeOp: x dtype must be F32/BF16/F16, got {}",
-            x.dtype()
-        );
+        bail!("RopeOp: x dtype must be F32/BF16/F16, got {}", x.dtype());
     }
     if !matches!(cos.dtype(), DType::F32 | DType::BF16 | DType::F16) {
         bail!(

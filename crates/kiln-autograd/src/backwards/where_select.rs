@@ -11,9 +11,7 @@
 
 use std::sync::Arc;
 
-use kiln_tensor::{
-    bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId,
-};
+use kiln_tensor::{CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId, bail};
 
 use crate::BackwardOp;
 
@@ -60,13 +58,17 @@ impl BackwardOp for WhereSelectBackward {
             .storage()
             .as_any()
             .downcast_ref::<CpuStorage>()
-            .ok_or_else(|| Error::from_str("WhereSelectBackward: grad storage must be CpuStorage"))?;
+            .ok_or_else(|| {
+                Error::from_str("WhereSelectBackward: grad storage must be CpuStorage")
+            })?;
         let m_cpu = self
             .mask
             .storage()
             .as_any()
             .downcast_ref::<CpuStorage>()
-            .ok_or_else(|| Error::from_str("WhereSelectBackward: mask storage must be CpuStorage"))?;
+            .ok_or_else(|| {
+                Error::from_str("WhereSelectBackward: mask storage must be CpuStorage")
+            })?;
         let g_bytes = g_cpu.as_bytes();
         let m_bytes = m_cpu.as_bytes();
 
@@ -85,7 +87,11 @@ impl BackwardOp for WhereSelectBackward {
         let f_cpu = CpuStorage::from_bytes(dtype, df)?;
         let t_storage: Storage = Arc::new(t_cpu);
         let f_storage: Storage = Arc::new(f_cpu);
-        let d_t = Tensor::from_parts(t_storage, Layout::contiguous(shape.clone()), TensorId::next())?;
+        let d_t = Tensor::from_parts(
+            t_storage,
+            Layout::contiguous(shape.clone()),
+            TensorId::next(),
+        )?;
         let d_f = Tensor::from_parts(f_storage, Layout::contiguous(shape), TensorId::next())?;
         Ok(vec![None, Some(d_t), Some(d_f)])
     }
@@ -134,8 +140,14 @@ mod tests {
         let grads = bo.apply(&grad).unwrap();
         assert_eq!(grads[1].as_ref().unwrap().shape(), &[2, 2]);
         assert_eq!(grads[2].as_ref().unwrap().shape(), &[2, 2]);
-        assert_eq!(read_f32(grads[1].as_ref().unwrap()), vec![1.0, 0.0, 0.0, 4.0]);
-        assert_eq!(read_f32(grads[2].as_ref().unwrap()), vec![0.0, 2.0, 3.0, 0.0]);
+        assert_eq!(
+            read_f32(grads[1].as_ref().unwrap()),
+            vec![1.0, 0.0, 0.0, 4.0]
+        );
+        assert_eq!(
+            read_f32(grads[2].as_ref().unwrap()),
+            vec![0.0, 2.0, 3.0, 0.0]
+        );
     }
 
     #[test]

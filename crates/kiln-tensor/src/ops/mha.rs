@@ -10,7 +10,7 @@
 //! Reference CPU path; Phase 6.x fuses into a single GPU kernel.
 
 use crate::ops::{causal_scaled_dot_product_attention, scaled_dot_product_attention};
-use crate::{bail, Result, Tensor};
+use crate::{Result, Tensor, bail};
 
 pub fn multi_head_attention(
     q: &Tensor,
@@ -31,9 +31,7 @@ pub fn multi_head_attention(
     let qs = q.shape();
     let hidden = qs[2];
     if !hidden.is_multiple_of(n_heads) {
-        bail!(
-            "multi_head_attention: hidden ({hidden}) must be a multiple of n_heads ({n_heads})"
-        );
+        bail!("multi_head_attention: hidden ({hidden}) must be a multiple of n_heads ({n_heads})");
     }
     let head_dim = hidden / n_heads;
     let b = qs[0];

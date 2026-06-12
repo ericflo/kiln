@@ -230,8 +230,9 @@ pub fn rocm_fp8_dequantize(src: &Tensor, scale: f32, target_dtype: DType) -> Res
     let src_ptr = (src_base + src_off) as *const core::ffi::c_void;
     let out_ptr = out_base as *mut core::ffi::c_void;
 
-    let status =
-        unsafe { kiln_fp8_dequantize_async(src_ptr, out_ptr, n as i64, scale, dst_tag, raw_stream) };
+    let status = unsafe {
+        kiln_fp8_dequantize_async(src_ptr, out_ptr, n as i64, scale, dst_tag, raw_stream)
+    };
     if status != 0 {
         return Err(Error::Msg(format!(
             "rocm_fp8_dequantize: FFI returned status {status}"
