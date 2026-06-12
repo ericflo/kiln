@@ -2428,7 +2428,7 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     }));
     if (connectHomeState.selected !== 'true' || !connectHomeState.paneActive) fail('Home should return the connect tabs to pi with its pane visible');
 
-    // Distill: the headline fix. Its 11 sub-tabs were completely
+    // Distill: the headline fix. Its 12 sub-tabs were completely
     // unreachable by keyboard (roving tabindex=-1 with no arrow-key
     // handler). Arrows now activate them, the decorative group
     // labels/separators inside the tablist are skipped, and — per the
@@ -2467,13 +2467,13 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await page.keyboard.press('ArrowRight');
     await expectActivePageAndHash(page, 'distill', 'ArrowRight from Merge should skip the group label/separator spans and land on Teachers', '#distill/teachers');
     await page.keyboard.press('End');
-    await expectActivePageAndHash(page, 'distill', 'End should jump to the last distill tab (Agent traces)', '#distill/traces');
-    const tracesPaneVisible = await page.evaluate(() => {
-      const pane = document.getElementById('distill-tab-traces-pane');
+    await expectActivePageAndHash(page, 'distill', 'End should jump to the last distill tab (Agent runs)', '#distill/runs');
+    const runsPaneVisible = await page.evaluate(() => {
+      const pane = document.getElementById('distill-tab-runs-pane');
       const rect = pane?.getBoundingClientRect();
       return Boolean(pane && !pane.hidden && rect && rect.width > 0 && rect.height > 0);
     });
-    if (!tracesPaneVisible) fail('End should reveal the Agent traces pane');
+    if (!runsPaneVisible) fail('End should reveal the Agent runs pane');
     await page.keyboard.press('Home');
     await expectActivePageAndHash(page, 'distill', 'Home should jump back to the first distill tab', '#distill/opd');
 
