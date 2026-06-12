@@ -1,5 +1,34 @@
 # Kiln Server Changelog
 
+## kiln-v0.4.1 — 2026-06-12 — multi-turn prefix caching actually caches
+
+Every pi / terminal turn was silently re-prefilling its entire conversation
+history on ROCm — 40-55s per turn at 16-18K tokens on Strix Halo, with
+`lookup_hits=0` across whole sessions while the cache faithfully stored
+entries nothing could ever match. Multi-turn agent traffic now resumes from
+the prefill-split prefix entry and only prefills the new suffix. (#1573)
+
+- prefix-cache: ROCm re-enables the prefill-split linear-state snapshot —
+  the only producer of the block-aligned entries that strict-prefix lookups
+  can serve. `002af558` had set `allow_prefix_cache_split_snapshot: false`
+  for ROCm while optimizing long-context prefill, which turned off
+  multi-turn reuse wholesale; a new backend-capability contract test pins
+  the flag `true` for every backend arm so this class of regression cannot
+  land silently again.
+- prefix-cache: the non-batched serve path (Metal's default) captures the
+  split snapshot in its non-streaming and greedy prefill branches too;
+  previously only streaming prefill captured it, so prompts under the
+  streaming threshold never registered a multi-turn-reusable entry.
+- prefix-cache: `register()` bails before evicting when an entry can never
+  fit (`needed blocks > max_blocks`) instead of destroying every resident
+  entry and still registering nothing.
+- tests: two real-`ModelRunner` CPU integration tests prove the full loop —
+  a batching-engine turn-2 strict-prefix HIT, and a non-batched-path replay
+  from the split entry on a hybrid GDN model that asserts token-identical
+  output (exact linear-attention state snapshot/restore). Live-validated on
+  Strix Halo ROCm: turn-2/3 each hit with ~3.3K of ~3.3K prompt tokens
+  cached, 1.85s vs 6.4s predicted full re-prefill.
+
 ## kiln-v0.4.0 — 2026-06-11 — embedded pi agent: the server drives its own rollouts
 
 The flywheel closes by itself: kiln now spawns and drives pi as a managed
