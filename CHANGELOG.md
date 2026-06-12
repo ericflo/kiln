@@ -1,7 +1,44 @@
 # Kiln Server Changelog
 
-## Unreleased
+## kiln-v0.4.0 — 2026-06-11 — embedded pi agent: the server drives its own rollouts
 
+The flywheel closes by itself: kiln now spawns and drives pi as a managed
+child process — submit a task over HTTP, watch the trajectory stream, and the
+finished session lands in the agent-trace layer the self-improvement loop
+trains on. Plus Muon becomes the default optimizer across every training mode.
+
+- agent: **embedded pi runs** (`POST /v1/agent/runs`) — the server spawns
+  `pi --mode rpc` against its own OpenAI-compatible endpoint (same
+  non-destructive `pi-setup` config merge as the embedded terminal, now
+  serialized + atomic + skip-if-unchanged), streams the full agent event
+  trajectory, and auto-merges the finished session JSONL into
+  `agent_traces.json` under a cross-process file lock. Runs queue FIFO
+  (`[agent].max_concurrent_runs`, default 2; `run_timeout_secs`, default 900;
+  32-active backstop enforced atomically), persist to
+  `<adapter_dir>/agent_runs/runs.json` across restarts (in-flight runs come
+  back `interrupted`), and write sessions to per-run directories so a run
+  that dies before flushing can never adopt a sibling's session.
+- agent: mid-run control — `POST /v1/agent/runs/{id}/steer`, `/follow_up`,
+  and `/abort`. Messages sent while a run is still queued are buffered and
+  delivered the moment it starts. The live feed is
+  `GET /v1/agent/runs/{id}/events?after=<seq>` (inclusive cursor; pass the
+  response's `next_after` back; `truncated`/`first_available_seq` flag replay
+  gaps after ring-buffer prunes or restarts).
+- agent: honest outcomes — a run whose final assistant turn ended in an error
+  reports `failed` with the error text, never a hollow `completed`; sessions
+  from aborted/timed-out runs still index (partial trajectories are data).
+- agent: security posture matches the embedded terminal — enabled on loopback
+  binds only, `KILN_AGENT_RUNS=1` opts in on network binds, `=0`
+  force-disables — and the gate covers the read endpoints too, since run
+  records and event feeds carry task prompts, server paths, and raw tool
+  output. `KILN_PI_BIN` overrides pi discovery for non-PATH installs.
+- dashboard: new **Distill → Agent runs** tab — launch form (task / cwd /
+  label), live run list, and a drill modal with a 1s-polled event feed
+  (assistant text, tool calls and results, errors), steer/follow-up/abort,
+  and `#distill/runs/{id}` deep links on the shared modal conventions.
+- traces: `POST /v1/agent/traces/discover` also sweeps
+  `<adapter_dir>/agent_runs/sessions/`, so rebuilding the index from
+  `~/.pi` never drops the rollouts kiln generated itself.
 - training: **learning rates now resolve per optimizer**. `learning_rate` is
   optional in the SFT/GRPO/OPD configs; when omitted, the trainer picks the
   selected optimizer's band — Muon (the default): SFT 2e-2, GRPO/OPD 2e-3;
