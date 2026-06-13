@@ -99,6 +99,7 @@ pub struct EstimateOptions {
     pub max_supervised_tokens: Option<usize>,
     pub recompute_boundaries: bool,
     pub activation_bytes_per_elem: Option<usize>,
+    pub streaming_gdn_tile_tokens: Option<usize>,
 }
 
 const BYTES_PER_GB: u64 = 1024 * 1024 * 1024;
@@ -307,14 +308,18 @@ pub fn estimate_step_working_set_with_options(
     };
     let activation_bytes_per_elem = estimate_activation_bytes_per_elem(cfg, options);
     let flce_tokens = options.max_supervised_tokens.unwrap_or(max_seq_len).max(1);
+    let per_segment_activations = options
+        .streaming_gdn_tile_tokens
+        .filter(|&tile| tile > 0 && tile < max_seq_len)
+        .map(|tile| {
+            checkpointed_layerwise_streaming_activation_bytes(cfg, max_seq_len, num_segments, tile)
+        })
+        .unwrap_or_else(|| {
+            per_segment_activation_bytes(cfg, max_seq_len, num_segments, activation_bytes_per_elem)
+        });
     let bd = Breakdown {
         base_weights,
-        per_segment_activations: per_segment_activation_bytes(
-            cfg,
-            max_seq_len,
-            num_segments,
-            activation_bytes_per_elem,
-        ),
+        per_segment_activations,
         boundary_states: boundary_state_bytes(
             cfg,
             max_seq_len,
@@ -382,11 +387,9 @@ fn ceil_div_u64(n: u64, d: u64) -> u64 {
     if d == 0 { 0 } else { (n + d - 1) / d }
 }
 
-/// Peak activation estimate for the vk-native exact layerwise
-/// reverse-recompute trainer.
+/// Peak activation estimate for one replayed layer/subblock.
 ///
-/// This mode does not hold segment boundary states. It replays one
-/// subgraph at a time:
+/// This shape model replays one subgraph at a time:
 ///   - Full-attention layers split attention, MLP gate/up, and MLP down.
 ///   - GDN chunkwise backward saves recurrent state snapshots and
 ///     recomputes per-chunk intermediates during backward.
@@ -394,7 +397,11 @@ fn ceil_div_u64(n: u64, d: u64) -> u64 {
 /// The estimate is intentionally shape-based rather than layer-count
 /// based: peak memory is dominated by one replayed layer/subblock, not
 /// by the number of layers in a segment.
-fn vk_native_recompute_activation_bytes(cfg: &ModelConfig, max_seq_len: usize) -> u64 {
+fn layerwise_recompute_activation_bytes(
+    cfg: &ModelConfig,
+    max_seq_len: usize,
+    streaming_gdn_tile_tokens: Option<usize>,
+) -> u64 {
     let t = max_seq_len;
     let h = cfg.hidden_size;
     let i = cfg.intermediate_size;
@@ -420,10 +427,14 @@ fn vk_native_recompute_activation_bytes(cfg: &ModelConfig, max_seq_len: usize) -
     let mlp_gate_up_peak = 4 * hidden + 4 * intermediate;
     let mlp_down_peak = 4 * hidden + 3 * intermediate;
 
-    let linear_qkv = f32_matrix_bytes(t, cfg.linear_qkv_dim());
-    let linear_qk = f32_matrix_bytes(t, cfg.linear_qk_dim());
-    let linear_v = f32_matrix_bytes(t, cfg.linear_v_dim());
-    let gdn_chunks = ceil_div_u64(t as u64, 64);
+    let gdn_t = streaming_gdn_tile_tokens
+        .filter(|&tile| tile > 0 && tile < t)
+        .unwrap_or(t);
+    let hidden_tile = f32_matrix_bytes(gdn_t, h);
+    let linear_qkv = f32_matrix_bytes(gdn_t, cfg.linear_qkv_dim());
+    let linear_qk = f32_matrix_bytes(gdn_t, cfg.linear_qk_dim());
+    let linear_v = f32_matrix_bytes(gdn_t, cfg.linear_v_dim());
+    let gdn_chunks = ceil_div_u64(gdn_t as u64, 64);
     let gdn_state_snapshots = gdn_chunks
         * cfg.linear_num_value_heads as u64
         * cfg.linear_key_head_dim as u64
@@ -434,10 +445,12 @@ fn vk_native_recompute_activation_bytes(cfg: &ModelConfig, max_seq_len: usize) -
     // no-grad normed recompute for frozen out-proj, chunkwise backward
     // with recurrent snapshots, and conv/split/repeat backward from
     // q/k/v to mixed_qkv.
-    let gdn_normed_recompute_peak = 4 * hidden + 2 * linear_qkv + 3 * linear_v + 2 * linear_qk;
+    let gdn_normed_recompute_peak =
+        4 * hidden + hidden_tile + 2 * linear_qkv + 3 * linear_v + 2 * linear_qk;
     let gdn_chunkwise_split_peak =
-        gdn_state_snapshots + hidden + linear_qkv + 3 * linear_v + 2 * linear_qk;
-    let gdn_conv_split_peak = 2 * linear_qkv + 3 * linear_v + 2 * linear_qk;
+        gdn_state_snapshots + 2 * hidden + hidden_tile + linear_qkv + 3 * linear_v + 2 * linear_qk;
+    let gdn_conv_split_peak =
+        2 * hidden + hidden_tile + 2 * linear_qkv + 3 * linear_v + 2 * linear_qk;
     let gdn_peak = gdn_normed_recompute_peak
         .max(gdn_chunkwise_split_peak)
         .max(gdn_conv_split_peak);
@@ -446,6 +459,31 @@ fn vk_native_recompute_activation_bytes(cfg: &ModelConfig, max_seq_len: usize) -
         .max(mlp_gate_up_peak)
         .max(mlp_down_peak)
         .max(gdn_peak)
+}
+
+/// Peak activation estimate for segment-checkpointed kt tape when GDN
+/// replay is time-tiled by the active backend policy.
+///
+/// Unlike the generic GDN tape fallback, this mirrors the production
+/// long-context path: full-attention and MLP subgraphs still scale with the
+/// full sequence, while GDN's q/k/v/recurrent intermediates scale with the
+/// tape tile. When a checkpoint segment spans multiple layers, multiply the
+/// layer/subblock peak by the largest possible layer count in a segment.
+fn checkpointed_layerwise_streaming_activation_bytes(
+    cfg: &ModelConfig,
+    max_seq_len: usize,
+    num_segments: usize,
+    streaming_gdn_tile_tokens: usize,
+) -> u64 {
+    let layers_per_seg = cfg.num_layers.div_ceil(num_segments.max(1)).max(1) as u64;
+    layerwise_recompute_activation_bytes(cfg, max_seq_len, Some(streaming_gdn_tile_tokens))
+        .saturating_mul(layers_per_seg)
+}
+
+/// Peak activation estimate for the vk-native exact layerwise
+/// reverse-recompute trainer.
+fn vk_native_recompute_activation_bytes(cfg: &ModelConfig, max_seq_len: usize) -> u64 {
+    layerwise_recompute_activation_bytes(cfg, max_seq_len, None)
 }
 
 /// Closed-form working-set estimate for the vk-native exact
@@ -825,6 +863,7 @@ mod tests {
                 max_supervised_tokens: Some(512),
                 recompute_boundaries: true,
                 activation_bytes_per_elem: Some(2),
+                ..Default::default()
             },
         );
         assert!(
@@ -843,6 +882,7 @@ mod tests {
                 max_supervised_tokens: Some(512),
                 recompute_boundaries: true,
                 activation_bytes_per_elem: Some(2),
+                ..Default::default()
             },
             available,
         );
@@ -866,6 +906,7 @@ mod tests {
             max_supervised_tokens: Some(512),
             recompute_boundaries: true,
             activation_bytes_per_elem: Some(10),
+            ..Default::default()
         };
         let (segments, fit) = auto_fit_checkpoint_segments(
             &cfg,
@@ -882,6 +923,42 @@ mod tests {
             fit.total_bytes > available,
             "auto-fit must reject instead of accepting a GDN long-context plan: estimate={}, available={available}",
             fit.total_bytes
+        );
+    }
+
+    #[test]
+    fn streaming_gdn_long_context_fits_uma_budget_at_one_layer_segments() {
+        let cfg = qwen_4b();
+        let max_seq_len = 104_412;
+        let available = 29 * BYTES_PER_GB;
+        let options = EstimateOptions {
+            max_supervised_tokens: Some(512),
+            recompute_boundaries: true,
+            activation_bytes_per_elem: Some(10),
+            streaming_gdn_tile_tokens: Some(1024),
+        };
+        let (segments, fit) = auto_fit_checkpoint_segments(
+            &cfg,
+            max_seq_len,
+            8,
+            cfg.num_layers,
+            WeightResidency::DualResidentCpuAndVulkan,
+            true,
+            options,
+            available,
+        );
+        assert_eq!(segments, cfg.num_layers);
+        assert!(
+            fit.total_bytes <= available,
+            "streaming GDN estimate should accept the 104k-token rank-8 repro at a 29 GiB live budget: estimate={} ({:.2} GiB), available={} ({:.2} GiB)",
+            fit.total_bytes,
+            fit.total_bytes as f64 / BYTES_PER_GB as f64,
+            available,
+            available as f64 / BYTES_PER_GB as f64
+        );
+        assert!(
+            fit.breakdown.per_segment_activations < 30 * BYTES_PER_GB,
+            "streaming GDN should not charge full-sequence GDN intermediates"
         );
     }
 

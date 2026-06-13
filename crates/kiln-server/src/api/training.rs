@@ -52,6 +52,12 @@ struct TrainingMemoryAvailability {
     reclaimable_kv_bytes: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TrainingActivationEstimate {
+    bytes_per_elem: usize,
+    streaming_gdn_tile_tokens: Option<usize>,
+}
+
 fn model_dtype_bytes(dtype: kiln_core::config::DType) -> usize {
     match dtype {
         kiln_core::config::DType::BF16 | kiln_core::config::DType::FP16 => 2,
@@ -76,30 +82,52 @@ fn training_activation_bytes_per_elem(
     }
 }
 
-fn training_activation_bytes_per_elem_for_state(state: &AppState) -> usize {
+fn training_activation_estimate_for_state(
+    state: &AppState,
+    max_seq_len: usize,
+) -> TrainingActivationEstimate {
     let base = model_dtype_bytes(state.model_config.dtype);
     let ModelBackend::Real { runner, .. } = state.backend.as_ref() else {
-        return base;
+        return TrainingActivationEstimate {
+            bytes_per_elem: base,
+            streaming_gdn_tile_tokens: None,
+        };
     };
     let Ok(runner) = runner.read() else {
         tracing::warn!(
             "model runner lock poisoned while sizing training preflight; using model dtype width"
         );
-        return base;
+        return TrainingActivationEstimate {
+            bytes_per_elem: base,
+            streaming_gdn_tile_tokens: None,
+        };
     };
+    let has_linear_attention = runner
+        .weights
+        .linear_attention_layers_in_prefix(runner.config.num_layers)
+        > 0;
     // Mirror kiln-train's GDN tape sizing. The server stamps resolved
     // checkpoint segments at submission time, so an optimistic bf16-only
     // preflight would bypass the trainer's more conservative auto-tuner.
-    training_activation_bytes_per_elem(
+    let bytes_per_elem = training_activation_bytes_per_elem(
         base,
         runner
             .training_precision_policy()
             .uses_f32_activations_for_mixed_base_weights(),
-        runner
-            .weights
-            .linear_attention_layers_in_prefix(runner.config.num_layers)
-            > 0,
-    )
+        has_linear_attention,
+    );
+    let streaming_gdn_tile_tokens = if has_linear_attention {
+        let device = runner.weights.device_kt();
+        kiln_model::forward::streaming_prefill_enabled_for(&device, max_seq_len)
+            .then(|| kiln_model::forward::tape_streaming_tile_tokens_for(&device))
+            .filter(|&tile| tile > 0 && tile < max_seq_len)
+    } else {
+        None
+    };
+    TrainingActivationEstimate {
+        bytes_per_elem,
+        streaming_gdn_tile_tokens,
+    }
 }
 
 fn checkpoint_env_override_present() -> bool {
@@ -278,9 +306,12 @@ fn enforce_training_preflight(
             checkpoint_segments: None,
         });
     }
+    let activation_estimate = training_activation_estimate_for_state(state, max_seq_len);
     if options.activation_bytes_per_elem.is_none() {
-        options.activation_bytes_per_elem =
-            Some(training_activation_bytes_per_elem_for_state(state));
+        options.activation_bytes_per_elem = Some(activation_estimate.bytes_per_elem);
+    }
+    if options.streaming_gdn_tile_tokens.is_none() {
+        options.streaming_gdn_tile_tokens = activation_estimate.streaming_gdn_tile_tokens;
     }
     let vram = kiln_memory::vram::detect_vram();
     let live_available = available_for_training_bytes(&vram);
