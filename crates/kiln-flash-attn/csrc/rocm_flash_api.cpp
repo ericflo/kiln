@@ -1067,41 +1067,37 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
 #pragma unroll
         for(int i = 0; i < lane_pairs; ++i)
         {
-            const int dim_pair = dim_pair_vals[i];
-            float weighted0_lo = 0.0f;
-            float weighted0_hi = 0.0f;
-            float weighted1_lo = 0.0f;
-            float weighted1_hi = 0.0f;
-            float weighted2_lo = 0.0f;
-            float weighted2_hi = 0.0f;
-            float weighted3_lo = 0.0f;
-            float weighted3_hi = 0.0f;
-            for(int col = 0; col < tile_count; ++col)
+            acc_vals0_lo[i] *= alpha0;
+            acc_vals0_hi[i] *= alpha0;
+            acc_vals1_lo[i] *= alpha1;
+            acc_vals1_hi[i] *= alpha1;
+            acc_vals2_lo[i] *= alpha2;
+            acc_vals2_hi[i] *= alpha2;
+            acc_vals3_lo[i] *= alpha3;
+            acc_vals3_hi[i] *= alpha3;
+        }
+        for(int col = 0; col < tile_count; ++col)
+        {
+            const float score0 = scores[row0][col];
+            const float score1 = scores[row1][col];
+            const float score2 = scores[row2][col];
+            const float score3 = scores[row3][col];
+#pragma unroll
+            for(int i = 0; i < lane_pairs; ++i)
             {
                 float vv_lo;
                 float vv_hi;
+                const int dim_pair = dim_pair_vals[i];
                 kiln_bf16_pair_to_f32(v_tile_u32[col * HeadDimPairs + dim_pair], vv_lo, vv_hi);
-                const float score0 = scores[row0][col];
-                const float score1 = scores[row1][col];
-                const float score2 = scores[row2][col];
-                const float score3 = scores[row3][col];
-                weighted0_lo += score0 * vv_lo;
-                weighted0_hi += score0 * vv_hi;
-                weighted1_lo += score1 * vv_lo;
-                weighted1_hi += score1 * vv_hi;
-                weighted2_lo += score2 * vv_lo;
-                weighted2_hi += score2 * vv_hi;
-                weighted3_lo += score3 * vv_lo;
-                weighted3_hi += score3 * vv_hi;
+                acc_vals0_lo[i] += score0 * vv_lo;
+                acc_vals0_hi[i] += score0 * vv_hi;
+                acc_vals1_lo[i] += score1 * vv_lo;
+                acc_vals1_hi[i] += score1 * vv_hi;
+                acc_vals2_lo[i] += score2 * vv_lo;
+                acc_vals2_hi[i] += score2 * vv_hi;
+                acc_vals3_lo[i] += score3 * vv_lo;
+                acc_vals3_hi[i] += score3 * vv_hi;
             }
-            acc_vals0_lo[i] = acc_vals0_lo[i] * alpha0 + weighted0_lo;
-            acc_vals0_hi[i] = acc_vals0_hi[i] * alpha0 + weighted0_hi;
-            acc_vals1_lo[i] = acc_vals1_lo[i] * alpha1 + weighted1_lo;
-            acc_vals1_hi[i] = acc_vals1_hi[i] * alpha1 + weighted1_hi;
-            acc_vals2_lo[i] = acc_vals2_lo[i] * alpha2 + weighted2_lo;
-            acc_vals2_hi[i] = acc_vals2_hi[i] * alpha2 + weighted2_hi;
-            acc_vals3_lo[i] = acc_vals3_lo[i] * alpha3 + weighted3_lo;
-            acc_vals3_hi[i] = acc_vals3_hi[i] * alpha3 + weighted3_hi;
         }
         __syncthreads();
     }
