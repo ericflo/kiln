@@ -14,8 +14,8 @@
 
 use half::bf16;
 use kiln_flash_attn::{
-    flash_attn_bwd_kt, flash_attn_fwd_kt, flash_attn_fwd_no_lse_kt,
-    flash_attn_paged_decode_dyn_seqlen_kt, flash_attn_paged_decode_kt,
+    flash_attn_bwd_collapsed_gqa_kt, flash_attn_bwd_kt, flash_attn_fwd_kt,
+    flash_attn_fwd_no_lse_kt, flash_attn_paged_decode_dyn_seqlen_kt, flash_attn_paged_decode_kt,
     paged_kv_write_token_major_bf16_kt,
 };
 use kiln_tensor::{DType, Device, Tensor};
@@ -221,6 +221,36 @@ fn cpu_sdpa_bwd_expanded_gqa(
     }
 
     (dq, dk, dv)
+}
+
+fn collapse_expanded_gqa_host(
+    expanded: &[f32],
+    b: usize,
+    sk: usize,
+    h: usize,
+    hk: usize,
+    d: usize,
+) -> Vec<f32> {
+    if h == hk {
+        return expanded.to_vec();
+    }
+    let group = h / hk;
+    let mut collapsed = vec![0.0f32; b * sk * hk * d];
+    for bi in 0..b {
+        for si in 0..sk {
+            for hki in 0..hk {
+                for gi in 0..group {
+                    let hi = hki * group + gi;
+                    for di in 0..d {
+                        let src = ((bi * sk + si) * h + hi) * d + di;
+                        let dst = ((bi * sk + si) * hk + hki) * d + di;
+                        collapsed[dst] += expanded[src];
+                    }
+                }
+            }
+        }
+    }
+    collapsed
 }
 
 fn check_close(got: &[f32], want: &[f32], rtol: f32, atol: f32, label: &str) {
@@ -774,17 +804,37 @@ fn flash_attn_rocm_long_shape_bench() {
         fwd_start.elapsed().as_secs_f64() * 1000.0
     );
 
+    let collapsed_bwd = std::env::var("KILN_ROCM_FLASH_BENCH_COLLAPSED_BWD")
+        .ok()
+        .map(|s| {
+            matches!(
+                s.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
     let bwd_start = std::time::Instant::now();
-    let (dq, dk, dv) = flash_attn_bwd_kt(&dout, &q, &k, &v, &out_t, &lse_t, scale, causal)
-        .unwrap_or_else(|e| panic!("long bench bwd seq={seq}: {e}"));
+    let (dq, dk, dv) = if collapsed_bwd {
+        flash_attn_bwd_collapsed_gqa_kt(&dout, &q, &k, &v, &out_t, &lse_t, scale, causal)
+            .unwrap_or_else(|e| panic!("long bench collapsed bwd seq={seq}: {e}"))
+    } else {
+        flash_attn_bwd_kt(&dout, &q, &k, &v, &out_t, &lse_t, scale, causal)
+            .unwrap_or_else(|e| panic!("long bench bwd seq={seq}: {e}"))
+    };
     rocm_sync();
     eprintln!(
-        "kiln_flash_bench phase=bwd seq={seq} heads={h} kv_heads={hk} head_dim={d} elapsed_ms={:.3}",
+        "kiln_flash_bench phase=bwd seq={seq} heads={h} kv_heads={hk} head_dim={d} collapsed_gqa={} elapsed_ms={:.3}",
+        collapsed_bwd,
         bwd_start.elapsed().as_secs_f64() * 1000.0
     );
     assert_eq!(dq.shape(), &[b, seq, h, d]);
-    assert_eq!(dk.shape(), &[b, seq, h, d]);
-    assert_eq!(dv.shape(), &[b, seq, h, d]);
+    if collapsed_bwd {
+        assert_eq!(dk.shape(), &[b, seq, hk, d]);
+        assert_eq!(dv.shape(), &[b, seq, hk, d]);
+    } else {
+        assert_eq!(dk.shape(), &[b, seq, h, d]);
+        assert_eq!(dv.shape(), &[b, seq, h, d]);
+    }
 }
 
 #[test]
@@ -863,6 +913,77 @@ fn flash_attn_bwd_online_tiled_parity() {
             }
         },
     );
+}
+
+#[test]
+fn flash_attn_bwd_collapsed_gqa_parity() {
+    if no_rocm() {
+        return;
+    }
+    let b = 1usize;
+    let h = 4usize;
+    let hk = 1usize;
+    let d = 128usize;
+    let sq = 11usize;
+    let sk = 19usize;
+    let scale = 1.0 / (d as f32).sqrt();
+
+    with_env_vars(&[("KILN_ROCM_FLASH_MATMUL_BWD", "1")], || {
+        for &causal in &[false, true] {
+            let qd = fill_bf16(b * sq * h * d, 2101 + causal as usize);
+            let kd = fill_bf16(b * sk * hk * d, 2203 + causal as usize);
+            let vd = fill_bf16(b * sk * hk * d, 2309 + causal as usize);
+            let dod = fill_bf16(b * sq * h * d, 2411 + causal as usize);
+
+            let q = rocm_bf16(&qd, vec![b, sq, h, d]);
+            let k = rocm_bf16(&kd, vec![b, sk, hk, d]);
+            let v = rocm_bf16(&vd, vec![b, sk, hk, d]);
+            let dout = rocm_bf16(&dod, vec![b, sq, h, d]);
+
+            let (out_t, lse_t) = flash_attn_fwd_kt(&q, &k, &v, scale, causal)
+                .unwrap_or_else(|e| panic!("collapsed bwd fwd causal={causal}: {e}"));
+            let (dq_t, dk_t, dv_t) =
+                flash_attn_bwd_collapsed_gqa_kt(&dout, &q, &k, &v, &out_t, &lse_t, scale, causal)
+                    .unwrap_or_else(|e| panic!("collapsed bwd causal={causal}: {e}"));
+
+            assert_eq!(dq_t.shape(), &[b, sq, h, d]);
+            assert_eq!(dk_t.shape(), &[b, sk, hk, d]);
+            assert_eq!(dv_t.shape(), &[b, sk, hk, d]);
+
+            let qf: Vec<f32> = qd.iter().map(|x| x.to_f32()).collect();
+            let kf: Vec<f32> = kd.iter().map(|x| x.to_f32()).collect();
+            let vf: Vec<f32> = vd.iter().map(|x| x.to_f32()).collect();
+            let dof: Vec<f32> = dod.iter().map(|x| x.to_f32()).collect();
+            let outf = bf16_to_f32(&out_t);
+            let (want_dq, want_dk_exp, want_dv_exp) = cpu_sdpa_bwd_expanded_gqa(
+                &dof, &qf, &kf, &vf, &outf, b, sq, sk, h, hk, d, scale, causal,
+            );
+            let want_dk = collapse_expanded_gqa_host(&want_dk_exp, b, sk, h, hk, d);
+            let want_dv = collapse_expanded_gqa_host(&want_dv_exp, b, sk, h, hk, d);
+
+            check_close(
+                &bf16_to_f32(&dq_t),
+                &want_dq,
+                4e-2,
+                4e-2,
+                &format!("collapsed bwd dq causal={causal}"),
+            );
+            check_close(
+                &bf16_to_f32(&dk_t),
+                &want_dk,
+                5e-2,
+                5e-2,
+                &format!("collapsed bwd dk causal={causal}"),
+            );
+            check_close(
+                &bf16_to_f32(&dv_t),
+                &want_dv,
+                5e-2,
+                5e-2,
+                &format!("collapsed bwd dv causal={causal}"),
+            );
+        }
+    });
 }
 
 #[test]

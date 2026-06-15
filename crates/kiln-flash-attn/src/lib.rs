@@ -35,8 +35,9 @@ pub fn with_rocm_online_fwd_disabled<T>(f: impl FnOnce() -> T) -> T {
     f()
 }
 pub use kt_api::{
-    FlashAttnError, flash_attn_bwd_kt, flash_attn_fwd_head_major_kt, flash_attn_fwd_kt,
-    flash_attn_fwd_no_lse_kt, flash_attn_paged_decode_dyn_seqlen_kt,
+    FlashAttnError, flash_attn_bwd_collapsed_gqa_kt, flash_attn_bwd_kt,
+    flash_attn_fwd_head_major_kt, flash_attn_fwd_kt, flash_attn_fwd_no_lse_kt,
+    flash_attn_paged_decode_dyn_seqlen_kt,
     flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs, flash_attn_paged_decode_kt,
     paged_kv_write_token_major_bf16_batch_slot_kt, paged_kv_write_token_major_bf16_kt,
     paged_kv_write_token_major_bf16_slot_kt,

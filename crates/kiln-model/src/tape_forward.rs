@@ -1816,14 +1816,10 @@ pub fn tape_flash_attn_enabled() -> bool {
 ///
 /// # Backward
 ///
-/// `flash_attn_bwd_kt(dout, q, k, v, out, lse, scale, causal)` returns
-/// `(dq, dk, dv)` where `dk`/`dv` come back EXPANDED to `heads_q` (the
-/// kernel internally broadcasts grouped K/V). When `heads_kv != heads_q`
-/// we collapse them to `heads_kv` by reshaping to `[b, sk, heads_kv,
-/// groups, hd]` and summing the group axis — mirroring the
-/// `CudaFlashAttentionTrainingBf16::bwd` candle path exactly. The collapse
-/// runs in F32 (cast → sum → cast back to BF16) so the group reduction
-/// doesn't lose precision in BF16.
+/// `flash_attn_bwd_collapsed_gqa_kt(dout, q, k, v, out, lse, scale, causal)`
+/// returns `(dq, dk, dv)` where `dk`/`dv` are already collapsed to the grouped
+/// K/V head count. The collapse runs in F32 (cast/sum/cast, or the backend's
+/// equivalent) so the group reduction doesn't lose precision in BF16.
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 #[derive(Debug)]
 pub(crate) struct FlashAttnBackward {
@@ -1851,7 +1847,7 @@ impl BackwardOp for FlashAttnBackward {
         &self,
         grad_output: &kiln_tensor::Tensor,
     ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
-        use kiln_tensor::{DType, bail};
+        use kiln_tensor::DType;
 
         // FA bwd needs a BF16, compact-contiguous dout shaped like `out`.
         let dout = if grad_output.dtype() == DType::BF16 {
@@ -1886,7 +1882,7 @@ impl BackwardOp for FlashAttnBackward {
             None
         };
 
-        let (dq, dk_exp, dv_exp) = kiln_flash_attn::flash_attn_bwd_kt(
+        let (dq, dk, dv) = kiln_flash_attn::flash_attn_bwd_collapsed_gqa_kt(
             &dout,
             &self.q,
             &self.k,
@@ -1897,13 +1893,15 @@ impl BackwardOp for FlashAttnBackward {
             self.causal,
         )
         .map_err(|e| {
-            kiln_tensor::Error::Msg(format!("FlashAttnBackward: flash_attn_bwd_kt: {e:?}"))
+            kiln_tensor::Error::Msg(format!(
+                "FlashAttnBackward: flash_attn_bwd_collapsed_gqa_kt: {e:?}"
+            ))
         })?;
         ensure_tape_debug_finite("flash_attn_bwd dq raw", &dq)
             .map_err(|e| kiln_tensor::Error::Msg(format!("{e:#}")))?;
-        ensure_tape_debug_finite("flash_attn_bwd dk raw expanded", &dk_exp)
+        ensure_tape_debug_finite("flash_attn_bwd dk collapsed", &dk)
             .map_err(|e| kiln_tensor::Error::Msg(format!("{e:#}")))?;
-        ensure_tape_debug_finite("flash_attn_bwd dv raw expanded", &dv_exp)
+        ensure_tape_debug_finite("flash_attn_bwd dv collapsed", &dv)
             .map_err(|e| kiln_tensor::Error::Msg(format!("{e:#}")))?;
 
         #[cfg(any(feature = "cuda", feature = "rocm"))]
@@ -1934,100 +1932,6 @@ impl BackwardOp for FlashAttnBackward {
                     self.heads_kv,
                     q_shape[3],
                     self.causal,
-                    started.elapsed().as_secs_f64() * 1000.0,
-                );
-            }
-        }
-
-        #[cfg(any(feature = "cuda", feature = "rocm"))]
-        let collapse_started = if trace_timings && self.heads_kv != self.heads_q {
-            match self.q.device() {
-                #[cfg(feature = "cuda")]
-                kiln_tensor::Device::Cuda(i) => {
-                    kiln_tensor::cuda_synchronize_default_stream(i)?;
-                }
-                #[cfg(feature = "rocm")]
-                kiln_tensor::Device::Rocm(i) => {
-                    kiln_tensor::rocm_synchronize_default_stream(i)?;
-                }
-                _ => {}
-            }
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
-
-        // GQA collapse: dk/dv come back expanded to heads_q.
-        let (dk, dv) = if self.heads_kv != self.heads_q {
-            if self.heads_kv == 0 || self.heads_q % self.heads_kv != 0 {
-                bail!(
-                    "FlashAttnBackward: invalid GQA heads_q={} heads_kv={}",
-                    self.heads_q,
-                    self.heads_kv
-                );
-            }
-            let groups = self.heads_q / self.heads_kv;
-            let collapse =
-                |dexp: &kiln_tensor::Tensor| -> kiln_tensor::Result<kiln_tensor::Tensor> {
-                    let s = dexp.shape();
-                    if s.len() != 4 {
-                        bail!(
-                            "FlashAttnBackward: expanded grad must be rank-4 \
-                             [b,sk,heads_q,hd], got {s:?}"
-                        );
-                    }
-                    let (b, sk, hq, hd) = (s[0], s[1], s[2], s[3]);
-                    if hq != self.heads_q {
-                        bail!(
-                            "FlashAttnBackward: expanded grad heads {hq} != heads_q {}",
-                            self.heads_q
-                        );
-                    }
-                    // Reduce groups in F32 (BF16 group-sum loses precision).
-                    let f32g = kiln_tensor::ops::cast(dexp, DType::F32)?;
-                    let grouped = f32g.reshape(vec![b, sk, self.heads_kv, groups, hd])?;
-                    let grouped = if grouped.is_contiguous() {
-                        grouped
-                    } else {
-                        grouped.contiguous()?
-                    };
-                    let summed = kiln_tensor::ops::sum_axis(&grouped, 3)?; // [b,sk,heads_kv,hd]
-                    kiln_tensor::ops::cast(&summed, DType::BF16)
-                };
-            (collapse(&dk_exp)?, collapse(&dv_exp)?)
-        } else {
-            (dk_exp, dv_exp)
-        };
-        ensure_tape_debug_finite("flash_attn_bwd dk collapsed", &dk)
-            .map_err(|e| kiln_tensor::Error::Msg(format!("{e:#}")))?;
-        ensure_tape_debug_finite("flash_attn_bwd dv collapsed", &dv)
-            .map_err(|e| kiln_tensor::Error::Msg(format!("{e:#}")))?;
-
-        #[cfg(any(feature = "cuda", feature = "rocm"))]
-        if let Some(started) = collapse_started {
-            let is_gpu = match self.q.device() {
-                #[cfg(feature = "cuda")]
-                kiln_tensor::Device::Cuda(i) => {
-                    kiln_tensor::cuda_synchronize_default_stream(i)?;
-                    true
-                }
-                #[cfg(feature = "rocm")]
-                kiln_tensor::Device::Rocm(i) => {
-                    kiln_tensor::rocm_synchronize_default_stream(i)?;
-                    true
-                }
-                _ => false,
-            };
-            if is_gpu {
-                let k_shape = self.k.shape();
-                eprintln!(
-                    "kiln_flash_attn_bwd_timing phase=gqa_collapse batch={} seq_len_k={} \
-                     heads_q={} heads_kv={} head_dim={} elapsed_ms={:.3}",
-                    k_shape[0],
-                    k_shape[1],
-                    self.heads_q,
-                    self.heads_kv,
-                    k_shape[3],
                     started.elapsed().as_secs_f64() * 1000.0,
                 );
             }

@@ -9,6 +9,8 @@
 //! Surface coverage:
 //! - [`flash_attn_fwd_kt`] — dense forward
 //! - [`flash_attn_bwd_kt`] — dense backward (expanded GQA dk/dv)
+//! - [`flash_attn_bwd_collapsed_gqa_kt`] — dense backward (dk/dv shaped like
+//!   grouped K/V inputs)
 //! - [`flash_attn_paged_decode_kt`] — single-step paged decode
 //! - [`flash_attn_paged_decode_dyn_seqlen_kt`] — graph-stable dyn-seqlen paged decode
 //! - [`flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs`] — caller-owned
@@ -61,6 +63,10 @@ impl From<BridgeError> for FlashAttnError {
     fn from(e: BridgeError) -> Self {
         FlashAttnError::Msg(e.message)
     }
+}
+
+fn map_tensor_err(context: &str, e: kiln_tensor::Error) -> FlashAttnError {
+    FlashAttnError::Msg(format!("kt-flash-attn: {context}: {e}"))
 }
 
 // `cuda_storage_of` helper was dead code post-338b1b88 — every
@@ -1240,6 +1246,110 @@ pub fn flash_attn_bwd_kt(
          (cuda feature off; only Device::Rocm is supported in this build)",
         q.device()
     )))
+}
+
+/// Backward over `kiln_tensor::Tensor` operands returning `dk`/`dv` collapsed
+/// to the grouped K/V head count.
+///
+/// This is the shape production training wants: `dq` matches `q`
+/// `[b, seqlen_q, num_heads, head_dim]`, while `dk`/`dv` match the grouped
+/// `k`/`v` inputs `[b, seqlen_k, num_heads_k, head_dim]`. CUDA still goes
+/// through the FA2 expanded-buffer contract and collapses afterward. ROCm can
+/// use a native collapsed path to avoid emitting expanded K/V gradients solely
+/// for the model tape to sum them again.
+#[allow(clippy::too_many_arguments)]
+pub fn flash_attn_bwd_collapsed_gqa_kt(
+    dout: &KtTensor,
+    q: &KtTensor,
+    k: &KtTensor,
+    v: &KtTensor,
+    out: &KtTensor,
+    softmax_lse: &KtTensor,
+    softmax_scale: f32,
+    causal: bool,
+) -> Result<(KtTensor, KtTensor, KtTensor), FlashAttnError> {
+    let q_shape = q.shape();
+    if q_shape.len() != 4 {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn: collapsed bwd q must be rank-4, got {q_shape:?}"
+        )));
+    }
+    let (b, seqlen_q, num_heads, head_dim) = (q_shape[0], q_shape[1], q_shape[2], q_shape[3]);
+    let k_shape = k.shape();
+    if k_shape.len() != 4 {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn: collapsed bwd k must be rank-4, got {k_shape:?}"
+        )));
+    }
+    let (kb, seqlen_k, num_heads_k, khd) = (k_shape[0], k_shape[1], k_shape[2], k_shape[3]);
+    if kb != b || khd != head_dim {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn: collapsed bwd k shape {k_shape:?} incompatible with q {q_shape:?}"
+        )));
+    }
+    let _ = seqlen_q;
+
+    #[cfg(feature = "rocm")]
+    if matches!(q.device(), KtDevice::Rocm(_)) {
+        return crate::rocm_sdpa::flash_attn_bwd_rocm_collapsed_gqa(
+            dout,
+            q,
+            k,
+            v,
+            out,
+            softmax_lse,
+            softmax_scale,
+            causal,
+        );
+    }
+
+    let (dq, dk_exp, dv_exp) =
+        flash_attn_bwd_kt(dout, q, k, v, out, softmax_lse, softmax_scale, causal)?;
+    let dk = collapse_expanded_gqa_grad_kt(&dk_exp, b, seqlen_k, num_heads, num_heads_k, head_dim)?;
+    let dv = collapse_expanded_gqa_grad_kt(&dv_exp, b, seqlen_k, num_heads, num_heads_k, head_dim)?;
+    Ok((dq, dk, dv))
+}
+
+fn collapse_expanded_gqa_grad_kt(
+    expanded: &KtTensor,
+    b: usize,
+    seqlen_k: usize,
+    num_heads: usize,
+    num_heads_k: usize,
+    head_dim: usize,
+) -> Result<KtTensor, FlashAttnError> {
+    if num_heads_k == num_heads {
+        return Ok(expanded.clone());
+    }
+    if num_heads_k == 0 || num_heads % num_heads_k != 0 {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn: invalid GQA heads num_heads={num_heads} num_heads_k={num_heads_k}"
+        )));
+    }
+    if expanded.shape() != [b, seqlen_k, num_heads, head_dim] {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn: expanded GQA grad must have shape [{b}, {seqlen_k}, {num_heads}, {head_dim}], got {:?}",
+            expanded.shape()
+        )));
+    }
+
+    let groups = num_heads / num_heads_k;
+    let f32_grad = kiln_tensor::ops::cast(expanded, KtDType::F32)
+        .map_err(|e| map_tensor_err("cast expanded GQA grad to f32", e))?;
+    let grouped = f32_grad
+        .reshape(vec![b, seqlen_k, num_heads_k, groups, head_dim])
+        .map_err(|e| map_tensor_err("reshape expanded GQA grad", e))?;
+    let grouped = if grouped.is_contiguous() {
+        grouped
+    } else {
+        grouped
+            .contiguous()
+            .map_err(|e| map_tensor_err("contiguous expanded GQA grad", e))?
+    };
+    let summed =
+        kiln_tensor::ops::sum_axis(&grouped, 3).map_err(|e| map_tensor_err("sum GQA groups", e))?;
+    kiln_tensor::ops::cast(&summed, KtDType::BF16)
+        .map_err(|e| map_tensor_err("cast collapsed GQA grad to bf16", e))
 }
 
 // Note: the previous `kt_flash_attn_regression` parity tests against the

@@ -50,6 +50,7 @@ const DEFAULT_NATIVE_FWD_MAX_SEQ: usize = 4096;
 const DEFAULT_NATIVE_FWD_QUERY_TILE: usize = 2048;
 const DEFAULT_NATIVE_STREAMING_FWD_MIN_SEQ: usize = 8192;
 const DEFAULT_NATIVE_STREAMING_FWD_KEY_TILE: usize = 4096;
+const DEFAULT_NATIVE_BWD_MAX_SEQ: usize = 512;
 const DEFAULT_ONLINE_QUERY_TILE: usize = 2048;
 const DEFAULT_ONLINE_KEY_TILE: usize = 4096;
 const DEFAULT_ONLINE_MATMUL_BATCH_GROUP: usize = 4;
@@ -597,6 +598,29 @@ fn rocm_materialized_bwd_enabled(b: usize, h: usize, sq: usize, sk: usize) -> bo
     materialized_bwd_working_set_bytes(b, h, sq, sk)
         .map(|bytes| bytes <= materialized_score_budget_bytes())
         .unwrap_or(false)
+}
+
+fn rocm_native_bwd_preferred(sq: usize, sk: usize, d: usize) -> bool {
+    if env_bool("KILN_ROCM_FLASH_NATIVE_BWD_FORCE").unwrap_or(false) {
+        return true;
+    }
+    if matches!(env_bool("KILN_ROCM_FLASH_MATMUL_BWD"), Some(true)) {
+        return false;
+    }
+    if let Some(force) = env_bool("KILN_ROCM_FLASH_NATIVE_BWD") {
+        return force;
+    }
+    if d != 256 {
+        return false;
+    }
+    let max_seq = env_usize("KILN_ROCM_FLASH_NATIVE_BWD_MAX_SEQ")
+        .unwrap_or(DEFAULT_NATIVE_BWD_MAX_SEQ)
+        .max(1);
+    sq.max(sk) <= max_seq
+}
+
+fn rocm_collapsed_gqa_bwd_enabled() -> bool {
+    env_bool("KILN_ROCM_FLASH_COLLAPSED_GQA_BWD").unwrap_or(true)
 }
 
 fn query_tile_len_for_budget(
@@ -2614,6 +2638,27 @@ pub fn flash_attn_bwd_rocm(
     let (b, sq, h, d) = (q.shape()[0], q.shape()[1], q.shape()[2], q.shape()[3]);
     let (sk, hk) = (k.shape()[1], k.shape()[2]);
 
+    if rocm_native_bwd_preferred(sq, sk, d) {
+        if let Some(result) = try_native_bwd_bf16(
+            dout,
+            q,
+            k,
+            v,
+            out,
+            softmax_lse,
+            b,
+            sq,
+            sk,
+            h,
+            hk,
+            d,
+            softmax_scale,
+            causal,
+        )? {
+            return Ok(result);
+        }
+    }
+
     // The native HIP backward is memory-bounded and exact, but scalar. For
     // tiles that fit the materialized score budget, the BLASLt composite is
     // much faster on long-context training. If hipBLASLt has no algorithm for a
@@ -2724,6 +2769,66 @@ pub fn flash_attn_bwd_rocm(
     }
 }
 
+/// ROCm backward variant for production training.
+///
+/// `flash_attn_bwd_kt` mirrors CUDA's historical expanded-GQA buffer contract:
+/// `dk`/`dv` are returned at `h` query heads. The model tape immediately
+/// collapses those buffers back to `hk` K/V heads. For ROCm, avoid that extra
+/// expanded BF16 materialization when the exact materialized composite is used;
+/// otherwise fall back to the expanded path and collapse on-device.
+#[allow(clippy::too_many_arguments)]
+pub fn flash_attn_bwd_rocm_collapsed_gqa(
+    dout: &KtTensor,
+    q: &KtTensor,
+    k: &KtTensor,
+    v: &KtTensor,
+    out: &KtTensor,
+    softmax_lse: &KtTensor,
+    softmax_scale: f32,
+    causal: bool,
+) -> Result<(KtTensor, KtTensor, KtTensor), FlashAttnError> {
+    let (b, sq, h, d) = (q.shape()[0], q.shape()[1], q.shape()[2], q.shape()[3]);
+    let (sk, hk) = (k.shape()[1], k.shape()[2]);
+    if hk == h || !rocm_collapsed_gqa_bwd_enabled() {
+        return flash_attn_bwd_rocm(dout, q, k, v, out, softmax_lse, softmax_scale, causal);
+    }
+    if hk == 0 || h % hk != 0 {
+        return Err(FlashAttnError::Msg(format!(
+            "rocm-sdpa collapsed bwd: invalid GQA heads h={h} hk={hk}"
+        )));
+    }
+
+    if !rocm_native_bwd_preferred(sq, sk, d) && rocm_materialized_bwd_enabled(b, h, sq, sk) {
+        match materialized_bwd_composite_rocm_impl(
+            dout,
+            q,
+            k,
+            v,
+            softmax_scale,
+            causal,
+            b,
+            sq,
+            sk,
+            h,
+            hk,
+            d,
+            true,
+        ) {
+            Ok(result) => return Ok(result),
+            Err(_) => {
+                // Fall through to the general ROCm backward below. It has the
+                // native fallback logic for shapes hipBLASLt cannot handle.
+            }
+        }
+    }
+
+    let (dq, dk_exp, dv_exp) =
+        flash_attn_bwd_rocm(dout, q, k, v, out, softmax_lse, softmax_scale, causal)?;
+    let dk = collapse_expanded_bshd_gqa_grad_bf16(&dk_exp, b, sk, h, hk, d)?;
+    let dv = collapse_expanded_bshd_gqa_grad_bf16(&dv_exp, b, sk, h, hk, d)?;
+    Ok((dq, dk, dv))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn materialized_bwd_composite_rocm(
     dout: &KtTensor,
@@ -2739,9 +2844,52 @@ fn materialized_bwd_composite_rocm(
     hk: usize,
     d: usize,
 ) -> Result<(KtTensor, KtTensor, KtTensor), FlashAttnError> {
+    materialized_bwd_composite_rocm_impl(
+        dout,
+        q,
+        k,
+        v,
+        softmax_scale,
+        causal,
+        b,
+        sq,
+        sk,
+        h,
+        hk,
+        d,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialized_bwd_composite_rocm_impl(
+    dout: &KtTensor,
+    q: &KtTensor,
+    k: &KtTensor,
+    v: &KtTensor,
+    softmax_scale: f32,
+    causal: bool,
+    b: usize,
+    sq: usize,
+    sk: usize,
+    h: usize,
+    hk: usize,
+    d: usize,
+    collapse_gqa: bool,
+) -> Result<(KtTensor, KtTensor, KtTensor), FlashAttnError> {
     let device = q.device();
     let debug_finite = debug_rocm_flash_finite_checks();
     let bh = b * h;
+    let trace = env_bool("KILN_TRACE_ROCM_FLASH_BWD").unwrap_or(false);
+    let total_started = std::time::Instant::now();
+    let mut prep_ms = 0.0;
+    let mut prob_ms = 0.0;
+    let mut dv_ms = 0.0;
+    let mut dp_ms = 0.0;
+    let mut softmax_ms = 0.0;
+    let mut dq_ms = 0.0;
+    let mut dk_ms = 0.0;
+    let mut out_ms = 0.0;
 
     // `softmax_lse` is the saved forward log-sum-exp. The composite recomputes
     // `scores` and the softmax `p` directly from q/k below (softmax is fully
@@ -2764,11 +2912,13 @@ fn materialized_bwd_composite_rocm(
     let k3 = rocm_cast_to(&k3_bf, KtDType::F32)?;
     let v3 = rocm_cast_to(&map_kt(v_bhsd.reshape(vec![bh, sk, d]))?, KtDType::F32)?;
     let do3 = rocm_cast_to(&map_kt(do_bhsd.reshape(vec![bh, sq, d]))?, KtDType::F32)?;
+    rocm_timed_finish(trace, device, &mut prep_ms, total_started)?;
 
     // Recompute scores + softmax p (same as forward). Keep score-sized
     // temporaries scoped tightly; long-context replay relies on these drops to
     // stay under the live materialized-score budget.
     let p = {
+        let started = std::time::Instant::now();
         let kt3_bf = rocm_contig(&map_kt(k3_bf.transpose(1, 2))?)?; // [b*h, d, sk]
         let qk = map_kt(kiln_tensor::rocm_matmul_to_dtype(
             &q3_bf,
@@ -2783,54 +2933,92 @@ fn materialized_bwd_composite_rocm(
         } else {
             scores
         };
-        map_kt(kiln_tensor::rocm_softmax_last_axis(&scores))? // [b*h, sq, sk]
+        let p = map_kt(kiln_tensor::rocm_softmax_last_axis(&scores))?; // [b*h, sq, sk]
+        rocm_timed_finish(trace, device, &mut prob_ms, started)?;
+        p
     };
 
     // dv = p^T @ dout   -> [b*h, sk, d]
     let dv3 = {
+        let started = std::time::Instant::now();
         let pt = rocm_contig(&map_kt(p.transpose(1, 2))?)?; // [b*h, sk, sq]
         let dv3 = rocm_matmul_split_inner_f32(&pt, &do3, device, debug_finite, "bwd dv3")?; // [b*h, sk, d]
         drop(pt);
+        rocm_timed_finish(trace, device, &mut dv_ms, started)?;
         dv3
     };
 
     // dp = dout @ v^T   -> [b*h, sq, sk]
     let dp = {
+        let started = std::time::Instant::now();
         let vt3 = rocm_contig(&map_kt(v3.transpose(1, 2))?)?; // [b*h, d, sk]
         let dp = map_kt(kiln_tensor::rocm_matmul(&do3, &vt3))?; // [b*h, sq, sk]
         drop(vt3);
+        rocm_timed_finish(trace, device, &mut dp_ms, started)?;
         dp
     };
 
     // ds = p * (dp - rowsum(dp * p))
     // rowsum over last axis: rocm_sum_axis(dp*p, 2) -> [b*h, sq]; subtract via
     // ROCm broadcast. All score-sized elementwise work stays on-device.
-    let dpp = elementwise_mul_f32(&dp, &p, device)?; // [b*h, sq, sk]
-    let rowsum = map_kt(kiln_tensor::rocm_sum_axis(&dpp, 2))?; // [b*h, sq]
-    drop(dpp);
-    // Broadcast rowsum [b*h, sq] -> [b*h, sq, sk] (stride-0 last axis), contiguous.
-    let dp_minus = row_broadcast_sub_last_axis_f32(&dp, &rowsum, sk)?; // [b*h, sq, sk]
-    drop(rowsum);
-    drop(dp);
-    let ds = elementwise_mul_f32(&p, &dp_minus, device)?; // [b*h, sq, sk]
-    drop(p);
-    drop(dp_minus);
+    let ds = {
+        let started = std::time::Instant::now();
+        let dpp = elementwise_mul_f32(&dp, &p, device)?; // [b*h, sq, sk]
+        let rowsum = map_kt(kiln_tensor::rocm_sum_axis(&dpp, 2))?; // [b*h, sq]
+        drop(dpp);
+        // Broadcast rowsum [b*h, sq] -> [b*h, sq, sk] (stride-0 last axis), contiguous.
+        let dp_minus = row_broadcast_sub_last_axis_f32(&dp, &rowsum, sk)?; // [b*h, sq, sk]
+        drop(rowsum);
+        drop(dp);
+        let ds = elementwise_mul_f32(&p, &dp_minus, device)?; // [b*h, sq, sk]
+        drop(p);
+        drop(dp_minus);
+        rocm_timed_finish(trace, device, &mut softmax_ms, started)?;
+        ds
+    };
 
     // dq = ds @ k * scale   -> [b*h, sq, d]
+    let started = std::time::Instant::now();
     let dq3 = rocm_matmul_split_inner_f32(&ds, &k3, device, debug_finite, "bwd dq3")?; // [b*h, sq, d]
     let dq3 = map_kt(kiln_tensor::rocm_scalar_op(&dq3, SCALAR_MUL, softmax_scale))?;
+    rocm_timed_finish(trace, device, &mut dq_ms, started)?;
 
     // dk = ds^T @ q * scale -> [b*h, sk, d]
+    let started = std::time::Instant::now();
     let dst = rocm_contig(&map_kt(ds.transpose(1, 2))?)?; // [b*h, sk, sq]
     drop(ds);
     let dk3 = rocm_matmul_split_inner_f32(&dst, &q3, device, debug_finite, "bwd dk3")?; // [b*h, sk, d]
     drop(dst);
     let dk3 = map_kt(kiln_tensor::rocm_scalar_op(&dk3, SCALAR_MUL, softmax_scale))?;
+    rocm_timed_finish(trace, device, &mut dk_ms, started)?;
 
-    // Reshape back to [b, s, h, d] BF16.
+    // Reshape back to BF16. The collapsed path keeps the exact same F32
+    // arithmetic for each query head, then sums query-head groups before the
+    // BF16 cast so it matches the model tape's previous F32 collapse.
+    let started = std::time::Instant::now();
     let dq = bhsd3_to_bshd_bf16(&dq3, b, h, sq, d)?;
-    let dk = bhsd3_to_bshd_bf16(&dk3, b, h, sk, d)?;
-    let dv = bhsd3_to_bshd_bf16(&dv3, b, h, sk, d)?;
+    let (dk, dv) = if collapse_gqa && hk != h {
+        (
+            collapse_bhsd3_gqa_grad_to_bshd_bf16(&dk3, b, h, hk, sk, d)?,
+            collapse_bhsd3_gqa_grad_to_bshd_bf16(&dv3, b, h, hk, sk, d)?,
+        )
+    } else {
+        (
+            bhsd3_to_bshd_bf16(&dk3, b, h, sk, d)?,
+            bhsd3_to_bshd_bf16(&dv3, b, h, sk, d)?,
+        )
+    };
+    rocm_timed_finish(trace, device, &mut out_ms, started)?;
+    if trace {
+        eprintln!(
+            "kiln_rocm_flash_bwd_timing path=materialized batch={b} seq_q={sq} seq_k={sk} \
+             heads={h} kv_heads={hk} head_dim={d} collapsed_gqa={collapse_gqa} \
+             prep_ms={prep_ms:.3} prob_ms={prob_ms:.3} dv_ms={dv_ms:.3} \
+             dp_ms={dp_ms:.3} softmax_ms={softmax_ms:.3} dq_ms={dq_ms:.3} \
+             dk_ms={dk_ms:.3} out_ms={out_ms:.3} total_ms={:.3}",
+            total_started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
 
     Ok((dq, dk, dv))
 }
@@ -3355,6 +3543,75 @@ fn bhsd3_to_bshd_bf16(
     let t_bhsd = map_kt(t3.reshape(vec![b, h, s, d]))?; // [b, h, s, d]
     let t_bshd = rocm_contig(&map_kt(t_bhsd.transpose(1, 2))?)?; // [b, s, h, d]
     rocm_cast_to(&t_bshd, KtDType::BF16)
+}
+
+/// Collapse an expanded `[b*h, s, d]` F32 GQA gradient to `[b, s, hk, d]` BF16.
+/// The input head order is `[kv0 group0..groupN, kv1 group0..groupN, ...]`,
+/// matching [`gqa_expand_heads`].
+fn collapse_bhsd3_gqa_grad_to_bshd_bf16(
+    t3: &KtTensor,
+    b: usize,
+    h: usize,
+    hk: usize,
+    s: usize,
+    d: usize,
+) -> Result<KtTensor, FlashAttnError> {
+    if hk == h {
+        return bhsd3_to_bshd_bf16(t3, b, h, s, d);
+    }
+    if hk == 0 || h % hk != 0 {
+        return Err(FlashAttnError::Msg(format!(
+            "collapse_bhsd3_gqa_grad_to_bshd_bf16: invalid GQA heads h={h} hk={hk}"
+        )));
+    }
+    if t3.dtype() != KtDType::F32 || t3.shape() != [b * h, s, d] {
+        return Err(FlashAttnError::Msg(format!(
+            "collapse_bhsd3_gqa_grad_to_bshd_bf16: expected f32 [{}, {s}, {d}], got {:?} {}",
+            b * h,
+            t3.shape(),
+            t3.dtype()
+        )));
+    }
+
+    let groups = h / hk;
+    let grouped = map_kt(t3.reshape(vec![b, hk, groups, s, d]))?;
+    let grouped = rocm_contig(&grouped)?;
+    let summed = map_kt(kiln_tensor::rocm_sum_axis(&grouped, 2))?; // [b,hk,s,d]
+    let summed3 = map_kt(summed.reshape(vec![b * hk, s, d]))?;
+    bhsd3_to_bshd_bf16(&summed3, b, hk, s, d)
+}
+
+/// Collapse an expanded `[b, s, h, d]` BF16 GQA gradient to `[b, s, hk, d]`
+/// BF16, preserving the existing F32 reduction semantics.
+fn collapse_expanded_bshd_gqa_grad_bf16(
+    expanded: &KtTensor,
+    b: usize,
+    s: usize,
+    h: usize,
+    hk: usize,
+    d: usize,
+) -> Result<KtTensor, FlashAttnError> {
+    if hk == h {
+        return Ok(expanded.clone());
+    }
+    if hk == 0 || h % hk != 0 {
+        return Err(FlashAttnError::Msg(format!(
+            "collapse_expanded_bshd_gqa_grad_bf16: invalid GQA heads h={h} hk={hk}"
+        )));
+    }
+    if expanded.shape() != [b, s, h, d] {
+        return Err(FlashAttnError::Msg(format!(
+            "collapse_expanded_bshd_gqa_grad_bf16: expected [{b}, {s}, {h}, {d}], got {:?}",
+            expanded.shape()
+        )));
+    }
+
+    let groups = h / hk;
+    let expanded_f32 = rocm_cast_to(expanded, KtDType::F32)?;
+    let grouped = map_kt(expanded_f32.reshape(vec![b, s, hk, groups, d]))?;
+    let grouped = rocm_contig(&grouped)?;
+    let summed = map_kt(kiln_tensor::rocm_sum_axis(&grouped, 3))?; // [b,s,hk,d]
+    rocm_cast_to(&summed, KtDType::BF16)
 }
 
 fn causal_mask_fill_offset_f32(
