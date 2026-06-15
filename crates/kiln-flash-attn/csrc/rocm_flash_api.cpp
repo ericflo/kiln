@@ -122,7 +122,7 @@ bool wmma_gqa_r64k16_enabled(int seqlen_q, int seqlen_k)
     {
         return true;
     }
-    const int threshold = env_i32_or("KILN_ROCM_FLASH_WMMA_GQA_R64K16_MIN_SEQ", 8192);
+    const int threshold = env_i32_or("KILN_ROCM_FLASH_WMMA_GQA_R64K16_MIN_SEQ", 256);
     return std::max(seqlen_q, seqlen_k) >= threshold;
 }
 
