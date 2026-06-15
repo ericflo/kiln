@@ -824,6 +824,12 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
 
     const int groups_per_kv_head = num_heads / num_heads_k;
     const int kv_head = head / groups_per_kv_head;
+    const size_t q_head_pair_base =
+        (static_cast<size_t>(batch) * seqlen_q * num_heads + head) * HeadDimPairs;
+    const size_t q_seq_stride_pairs = static_cast<size_t>(num_heads) * HeadDimPairs;
+    const size_t kv_head_pair_base =
+        (static_cast<size_t>(batch) * seqlen_k * num_heads_k + kv_head) * HeadDimPairs;
+    const size_t kv_seq_stride_pairs = static_cast<size_t>(num_heads_k) * HeadDimPairs;
     const bool valid_q0 = q_idx0 < seqlen_q;
     const bool valid_q1 = q_idx1 < seqlen_q;
     const bool valid_q2 = q_idx2 < seqlen_q;
@@ -868,9 +874,9 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
         const int load_q = q_block + q_row;
         if(load_q < seqlen_q)
         {
-            const size_t load_q_base =
-                ((static_cast<size_t>(batch) * seqlen_q + load_q) * num_heads + head) * HeadDim;
-            q_tile_u32[pair] = q_u32[load_q_base / Bf16PerU32 + dim_pair];
+            q_tile_u32[pair] =
+                q_u32[q_head_pair_base + static_cast<size_t>(load_q) * q_seq_stride_pairs +
+                      dim_pair];
         }
         else
         {
@@ -912,10 +918,9 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
             const int key_offset = pair / HeadDimPairs;
             const int dim_pair = pair - key_offset * HeadDimPairs;
             const int key_idx = key_base + key_offset;
-            const size_t kv_base =
-                ((static_cast<size_t>(batch) * seqlen_k + key_idx) * num_heads_k + kv_head) *
-                HeadDim;
-            v_tile_u32[pair] = v_u32[kv_base / Bf16PerU32 + dim_pair];
+            v_tile_u32[pair] =
+                v_u32[kv_head_pair_base + static_cast<size_t>(key_idx) * kv_seq_stride_pairs +
+                      dim_pair];
         }
         __syncthreads();
 
@@ -930,10 +935,9 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
                 if(key_offset < tile_count)
                 {
                     const int key_idx = key_base + key_offset;
-                    const size_t kv_base =
-                        ((static_cast<size_t>(batch) * seqlen_k + key_idx) * num_heads_k + kv_head) *
-                        HeadDim;
-                    k_tile_u32[pair] = k_u32[kv_base / Bf16PerU32 + dim_pair];
+                    k_tile_u32[pair] =
+                        k_u32[kv_head_pair_base +
+                              static_cast<size_t>(key_idx) * kv_seq_stride_pairs + dim_pair];
                 }
                 else
                 {
