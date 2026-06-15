@@ -781,7 +781,6 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
     __shared__ hip_bfloat16 k_tile[KeyBlock][HeadDim];
     __shared__ hip_bfloat16 v_tile[KeyBlock][HeadDim];
     __shared__ float scores[Rows][KeyBlock];
-    __shared__ float row_inv_l[Rows];
 
     constexpr int MaxLaneDims = (HeadDim + 31) / 32;
     float acc_vals0[MaxLaneDims];
@@ -1039,10 +1038,6 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
 
     if(lane == 0)
     {
-        row_inv_l[row0] = l0 > 0.0f ? 1.0f / l0 : 0.0f;
-        row_inv_l[row1] = l1 > 0.0f ? 1.0f / l1 : 0.0f;
-        row_inv_l[row2] = l2 > 0.0f ? 1.0f / l2 : 0.0f;
-        row_inv_l[row3] = l3 > 0.0f ? 1.0f / l3 : 0.0f;
         if(valid_q0 && lse != nullptr)
         {
             lse[(static_cast<size_t>(batch) * num_heads + head) * seqlen_q + q_idx0] =
@@ -1064,11 +1059,10 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
                 l3 > 0.0f ? m3 + logf(l3) : -INFINITY;
         }
     }
-    __syncthreads();
 
     if(valid_q0)
     {
-        const float inv_l = row_inv_l[row0];
+        const float inv_l = l0 > 0.0f ? 1.0f / l0 : 0.0f;
         for(int i = 0; i < lane_dims; ++i)
         {
             out[q_base0 + dim_vals[i]] = hip_bfloat16(acc_vals0[i] * inv_l);
@@ -1076,7 +1070,7 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
     }
     if(valid_q1)
     {
-        const float inv_l = row_inv_l[row1];
+        const float inv_l = l1 > 0.0f ? 1.0f / l1 : 0.0f;
         for(int i = 0; i < lane_dims; ++i)
         {
             out[q_base1 + dim_vals[i]] = hip_bfloat16(acc_vals1[i] * inv_l);
@@ -1084,7 +1078,7 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
     }
     if(valid_q2)
     {
-        const float inv_l = row_inv_l[row2];
+        const float inv_l = l2 > 0.0f ? 1.0f / l2 : 0.0f;
         for(int i = 0; i < lane_dims; ++i)
         {
             out[q_base2 + dim_vals[i]] = hip_bfloat16(acc_vals2[i] * inv_l);
@@ -1092,7 +1086,7 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
     }
     if(valid_q3)
     {
-        const float inv_l = row_inv_l[row3];
+        const float inv_l = l3 > 0.0f ? 1.0f / l3 : 0.0f;
         for(int i = 0; i < lane_dims; ++i)
         {
             out[q_base3 + dim_vals[i]] = hip_bfloat16(acc_vals3[i] * inv_l);
