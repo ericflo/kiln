@@ -77,6 +77,29 @@ bool native_wmma_qblock_enabled(int head_dim, int seqlen_q, int seqlen_k)
     return std::max(seqlen_q, seqlen_k) >= threshold;
 }
 
+bool native_gqa_qblock_enabled(int head_dim,
+                               int seqlen_q,
+                               int seqlen_k,
+                               int num_heads,
+                               int num_heads_k)
+{
+    if(head_dim != 256 || num_heads_k <= 0 || num_heads % num_heads_k != 0)
+    {
+        return false;
+    }
+    const int groups_per_kv_head = num_heads / num_heads_k;
+    if(groups_per_kv_head != 4)
+    {
+        return false;
+    }
+    if(env_truthy("KILN_ROCM_FLASH_NATIVE_GQA_QBLOCK"))
+    {
+        return true;
+    }
+    const int threshold = env_i32_or("KILN_ROCM_FLASH_NATIVE_GQA_QBLOCK_MIN_SEQ", 256);
+    return std::max(seqlen_q, seqlen_k) >= threshold;
+}
+
 bool current_device_supports_gfx11_wmma()
 {
     int device = 0;
@@ -215,40 +238,71 @@ __global__ void kiln_rocm_flash_fwd_wmma_qblock256_bf16_kernel(
 {
     constexpr int HeadDim = 256;
     constexpr int Rows = 16;
-    constexpr int KeyBlock = 16;
+    constexpr int KeyBlock = 32;
+    constexpr int WmmaRows = 16;
+    constexpr int WmmaCols = 16;
     const int tid = static_cast<int>(threadIdx.x);
     const int lane = tid & 31;
+    const int row = tid / KilnLogicalWarpSize;
     const int q_block = static_cast<int>(blockIdx.x) * Rows;
+    const int q_idx = q_block + row;
     const int head = static_cast<int>(blockIdx.y);
     const int batch = static_cast<int>(blockIdx.z);
 
-    if(batch >= batch_size || head >= num_heads)
+    if(batch >= batch_size || head >= num_heads || row >= Rows)
     {
         return;
     }
 
-    __shared__ float scores[Rows][KeyBlock];
+    __shared__ hip_bfloat16 q_tile[Rows][HeadDim];
+    __shared__ hip_bfloat16 k_tile[KeyBlock][HeadDim];
     __shared__ hip_bfloat16 v_tile[KeyBlock][HeadDim];
-    __shared__ float acc[Rows][HeadDim];
-    __shared__ float row_m[Rows];
-    __shared__ float row_l[Rows];
-    __shared__ float row_new_m[Rows];
+    __shared__ float scores[Rows][KeyBlock];
     __shared__ float row_alpha[Rows];
-    __shared__ float row_beta_sum[Rows];
+    __shared__ float row_inv_l[Rows];
 
-    for(int idx = tid; idx < Rows * HeadDim; idx += static_cast<int>(blockDim.x))
-    {
-        acc[idx / HeadDim][idx % HeadDim] = 0.0f;
-    }
-    if(tid < Rows)
-    {
-        row_m[tid] = -INFINITY;
-        row_l[tid] = 0.0f;
-    }
-    __syncthreads();
+    constexpr int MaxLaneDims = (HeadDim + 31) / 32;
+    float acc_vals[MaxLaneDims];
+    int dim_vals[MaxLaneDims];
+    int lane_dims = 0;
 
     const int groups_per_kv_head = num_heads / num_heads_k;
     const int kv_head = head / groups_per_kv_head;
+    const bool valid_q = q_idx < seqlen_q;
+    const size_t q_base =
+        ((static_cast<size_t>(batch) * seqlen_q + (valid_q ? q_idx : 0)) * num_heads + head) *
+        HeadDim;
+
+    for(int dim = lane; dim < HeadDim; dim += KilnLogicalWarpSize)
+    {
+        dim_vals[lane_dims] = dim;
+        acc_vals[lane_dims] = 0.0f;
+        ++lane_dims;
+    }
+
+    for(int idx = tid; idx < Rows * HeadDim; idx += static_cast<int>(blockDim.x))
+    {
+        const int q_row = idx / HeadDim;
+        const int dim = idx - q_row * HeadDim;
+        const int load_q = q_block + q_row;
+        if(load_q < seqlen_q)
+        {
+            const size_t load_q_base =
+                ((static_cast<size_t>(batch) * seqlen_q + load_q) * num_heads + head) * HeadDim;
+            q_tile[q_row][dim] = q[load_q_base + dim];
+        }
+        else
+        {
+            q_tile[q_row][dim] = hip_bfloat16(0.0f);
+        }
+    }
+    __syncthreads();
+
+    float m = -INFINITY;
+    float l = 0.0f;
+    const int key_limit = valid_q ? (is_causal ? causal_key_limit(q_idx, seqlen_q, seqlen_k)
+                                               : seqlen_k)
+                                  : 0;
     const int last_q = min(seqlen_q - 1, q_block + Rows - 1);
     const int max_key_limit =
         last_q >= q_block ? (is_causal ? causal_key_limit(last_q, seqlen_q, seqlen_k) : seqlen_k)
@@ -256,72 +310,55 @@ __global__ void kiln_rocm_flash_fwd_wmma_qblock256_bf16_kernel(
 
     for(int key_base = 0; key_base < max_key_limit; key_base += KeyBlock)
     {
-        for(int idx = tid; idx < KeyBlock * HeadDim; idx += static_cast<int>(blockDim.x))
+        const int tile_count = min(KeyBlock, max_key_limit - key_base);
+        for(int idx = tid; idx < tile_count * HeadDim; idx += static_cast<int>(blockDim.x))
         {
             const int key_offset = idx / HeadDim;
             const int dim = idx - key_offset * HeadDim;
             const int key_idx = key_base + key_offset;
-            if(key_idx < seqlen_k)
-            {
-                const size_t v_base =
-                    ((static_cast<size_t>(batch) * seqlen_k + key_idx) * num_heads_k + kv_head) *
-                    HeadDim;
-                v_tile[key_offset][dim] = v[v_base + dim];
-            }
-            else
-            {
-                v_tile[key_offset][dim] = hip_bfloat16(0.0f);
-            }
+            const size_t kv_base =
+                ((static_cast<size_t>(batch) * seqlen_k + key_idx) * num_heads_k + kv_head) *
+                HeadDim;
+            k_tile[key_offset][dim] = k[kv_base + dim];
+            v_tile[key_offset][dim] = v[kv_base + dim];
         }
+        __syncthreads();
 
 #if KILN_ROCM_HAS_GFX11_WMMA
         if(tid < KilnLogicalWarpSize)
         {
-            kiln_f32x8 c_vec = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
             const int ab_lane = lane & 15;
-            const int q_row = q_block + ab_lane;
-            const int key_idx = key_base + ab_lane;
-
-            for(int dim_base = 0; dim_base < HeadDim; dim_base += KeyBlock)
+            for(int key_sub = 0; key_sub < KeyBlock; key_sub += WmmaCols)
             {
-                kiln_bf16x16 q_vec;
-                kiln_bf16x16 k_vec;
-                for(int k_inner = 0; k_inner < KeyBlock; ++k_inner)
+                kiln_f32x8 c_vec = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+                for(int dim_base = 0; dim_base < HeadDim; dim_base += WmmaCols)
                 {
-                    const int dim = dim_base + k_inner;
-                    if(q_row < seqlen_q)
+                    kiln_bf16x16 q_vec;
+                    kiln_bf16x16 k_vec;
+                    for(int k_inner = 0; k_inner < WmmaCols; ++k_inner)
                     {
-                        const size_t q_base =
-                            ((static_cast<size_t>(batch) * seqlen_q + q_row) * num_heads + head) *
-                            HeadDim;
-                        q_vec[k_inner] = kiln_to_native_bf16(q[q_base + dim]);
+                        const int dim = dim_base + k_inner;
+                        q_vec[k_inner] =
+                            ab_lane < Rows ? kiln_to_native_bf16(q_tile[ab_lane][dim])
+                                           : static_cast<__bf16>(0.0f);
+                        k_vec[k_inner] =
+                            key_sub + ab_lane < tile_count
+                                ? kiln_to_native_bf16(k_tile[key_sub + ab_lane][dim])
+                                : static_cast<__bf16>(0.0f);
                     }
-                    else
+                    c_vec = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(q_vec, k_vec, c_vec);
+                }
+
+                const int score_col = key_sub + (lane & 15);
+                const int score_row_parity = lane >> 4;
+                for(int i = 0; i < 8; ++i)
+                {
+                    const int score_row = i * 2 + score_row_parity;
+                    if(score_row < Rows && score_col < KeyBlock)
                     {
-                        q_vec[k_inner] = static_cast<__bf16>(0.0f);
-                    }
-                    if(key_idx < seqlen_k)
-                    {
-                        const size_t k_base =
-                            ((static_cast<size_t>(batch) * seqlen_k + key_idx) * num_heads_k +
-                             kv_head) *
-                            HeadDim;
-                        k_vec[k_inner] = kiln_to_native_bf16(k[k_base + dim]);
-                    }
-                    else
-                    {
-                        k_vec[k_inner] = static_cast<__bf16>(0.0f);
+                        scores[score_row][score_col] = c_vec[i] * softmax_scale;
                     }
                 }
-                c_vec = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(q_vec, k_vec, c_vec);
-            }
-
-            const int score_col = lane & 15;
-            const int score_row_parity = lane >> 4;
-            for(int i = 0; i < 8; ++i)
-            {
-                const int score_row = i * 2 + score_row_parity;
-                scores[score_row][score_col] = c_vec[i] * softmax_scale;
             }
         }
 #else
@@ -332,103 +369,86 @@ __global__ void kiln_rocm_flash_fwd_wmma_qblock256_bf16_kernel(
 #endif
         __syncthreads();
 
-        for(int idx = tid; idx < Rows * KeyBlock; idx += static_cast<int>(blockDim.x))
+        if(lane == 0)
         {
-            const int row = idx / KeyBlock;
-            const int col = idx - row * KeyBlock;
-            const int q_idx = q_block + row;
-            const int key_idx = key_base + col;
-            const int key_limit = q_idx < seqlen_q
-                                      ? (is_causal ? causal_key_limit(q_idx, seqlen_q, seqlen_k)
-                                                   : seqlen_k)
-                                      : 0;
-            if(q_idx >= seqlen_q || key_idx >= key_limit)
-            {
-                scores[row][col] = -INFINITY;
-            }
-        }
-        __syncthreads();
-
-        if(tid < Rows)
-        {
-            const int row = tid;
             float tile_m = -INFINITY;
             for(int col = 0; col < KeyBlock; ++col)
             {
-                tile_m = fmaxf(tile_m, scores[row][col]);
+                const int key_idx = key_base + col;
+                if(key_idx < key_limit)
+                {
+                    tile_m = fmaxf(tile_m, scores[row][col]);
+                }
             }
 
-            const float old_l = row_l[row];
-            const float old_m = row_m[row];
-            const float new_m = fmaxf(old_m, tile_m);
+            const float new_m = fmaxf(m, tile_m);
             float beta_sum = 0.0f;
             if(tile_m > -INFINITY)
             {
                 for(int col = 0; col < KeyBlock; ++col)
                 {
-                    const float score = scores[row][col];
-                    if(score > -INFINITY)
+                    const int key_idx = key_base + col;
+                    if(key_idx < key_limit)
                     {
-                        beta_sum += expf(score - new_m);
+                        const float beta = expf(scores[row][col] - new_m);
+                        scores[row][col] = beta;
+                        beta_sum += beta;
+                    }
+                    else
+                    {
+                        scores[row][col] = 0.0f;
                     }
                 }
             }
-            row_new_m[row] = new_m;
-            row_alpha[row] = old_l > 0.0f ? expf(old_m - new_m) : 0.0f;
-            row_beta_sum[row] = beta_sum;
-        }
-        __syncthreads();
-
-        for(int idx = tid; idx < Rows * HeadDim; idx += static_cast<int>(blockDim.x))
-        {
-            const int row = idx / HeadDim;
-            const int dim = idx - row * HeadDim;
-            const float new_m = row_new_m[row];
-            float weighted = 0.0f;
-            if(row_beta_sum[row] > 0.0f)
+            else
             {
                 for(int col = 0; col < KeyBlock; ++col)
                 {
-                    const float score = scores[row][col];
-                    if(score > -INFINITY)
-                    {
-                        weighted += expf(score - new_m) * static_cast<float>(v_tile[col][dim]);
-                    }
+                    scores[row][col] = 0.0f;
                 }
             }
-            acc[row][dim] = acc[row][dim] * row_alpha[row] + weighted;
+            const float alpha = l > 0.0f ? expf(m - new_m) : 0.0f;
+            row_alpha[row] = alpha;
+            l = l * alpha + beta_sum;
+            m = new_m;
         }
         __syncthreads();
 
-        if(tid < Rows)
+        const float alpha = row_alpha[row];
+        for(int i = 0; i < lane_dims; ++i)
         {
-            const int row = tid;
-            row_l[row] = row_l[row] * row_alpha[row] + row_beta_sum[row];
-            row_m[row] = row_new_m[row];
+            const int dim = dim_vals[i];
+            float weighted = 0.0f;
+            for(int col = 0; col < tile_count; ++col)
+            {
+                const float beta = scores[row][col];
+                if(beta != 0.0f)
+                {
+                    weighted += beta * static_cast<float>(v_tile[col][dim]);
+                }
+            }
+            acc_vals[i] = acc_vals[i] * alpha + weighted;
         }
         __syncthreads();
     }
 
-    for(int idx = tid; idx < Rows * HeadDim; idx += static_cast<int>(blockDim.x))
+    if(lane == 0)
     {
-        const int row = idx / HeadDim;
-        const int dim = idx - row * HeadDim;
-        const int q_idx = q_block + row;
-        if(q_idx < seqlen_q)
-        {
-            const float inv_l = row_l[row] > 0.0f ? 1.0f / row_l[row] : 0.0f;
-            const size_t q_base =
-                ((static_cast<size_t>(batch) * seqlen_q + q_idx) * num_heads + head) * HeadDim;
-            out[q_base + dim] = hip_bfloat16(acc[row][dim] * inv_l);
-        }
-    }
-    if(tid < Rows)
-    {
-        const int q_idx = q_block + tid;
-        if(q_idx < seqlen_q && lse != nullptr)
+        row_inv_l[row] = l > 0.0f ? 1.0f / l : 0.0f;
+        if(valid_q && lse != nullptr)
         {
             lse[(static_cast<size_t>(batch) * num_heads + head) * seqlen_q + q_idx] =
-                row_l[tid] > 0.0f ? row_m[tid] + logf(row_l[tid]) : -INFINITY;
+                l > 0.0f ? m + logf(l) : -INFINITY;
+        }
+    }
+    __syncthreads();
+
+    if(valid_q)
+    {
+        const float inv_l = row_inv_l[row];
+        for(int i = 0; i < lane_dims; ++i)
+        {
+            out[q_base + dim_vals[i]] = hip_bfloat16(acc_vals[i] * inv_l);
         }
     }
 }
@@ -1025,6 +1045,139 @@ __global__ void kiln_rocm_flash_fwd_qblock_cached_bf16_kernel(
     }
 }
 
+template <int HeadDim, int Rows, int QueryHeadsPerBlock, int KeyBlock>
+__global__ void kiln_rocm_flash_fwd_gqa_qblock_cached_bf16_kernel(
+    const hip_bfloat16* __restrict__ q,
+    const hip_bfloat16* __restrict__ k,
+    const hip_bfloat16* __restrict__ v,
+    hip_bfloat16* __restrict__ out,
+    float* __restrict__ lse,
+    int batch_size,
+    int seqlen_q,
+    int seqlen_k,
+    int num_heads,
+    int num_heads_k,
+    float softmax_scale,
+    int is_causal)
+{
+    const int lane = static_cast<int>(threadIdx.x) % KilnLogicalWarpSize;
+    const int warp = static_cast<int>(threadIdx.x) / KilnLogicalWarpSize;
+    const int row = warp % Rows;
+    const int q_head_in_group = warp / Rows;
+    const int q_block = static_cast<int>(blockIdx.x) * Rows;
+    const int q_idx = q_block + row;
+    const int head_group = static_cast<int>(blockIdx.y);
+    const int head = head_group * QueryHeadsPerBlock + q_head_in_group;
+    const int batch = static_cast<int>(blockIdx.z);
+
+    if(batch >= batch_size || q_head_in_group >= QueryHeadsPerBlock ||
+       head >= num_heads || row >= Rows)
+    {
+        return;
+    }
+    const int groups_per_kv_head = num_heads / num_heads_k;
+    const int kv_head = head / groups_per_kv_head;
+    if(kv_head >= num_heads_k)
+    {
+        return;
+    }
+
+    __shared__ hip_bfloat16 k_tile[KeyBlock][HeadDim];
+    __shared__ hip_bfloat16 v_tile[KeyBlock][HeadDim];
+
+    constexpr int MaxLaneDims = (HeadDim + 31) / 32;
+    float q_vals[MaxLaneDims];
+    float acc_vals[MaxLaneDims];
+    int dim_vals[MaxLaneDims];
+    int lane_dims = 0;
+
+    const bool valid_q = q_idx < seqlen_q;
+    const size_t q_base =
+        ((static_cast<size_t>(batch) * seqlen_q + (valid_q ? q_idx : 0)) * num_heads + head) *
+        HeadDim;
+
+    for(int dim = lane; dim < HeadDim; dim += KilnLogicalWarpSize)
+    {
+        dim_vals[lane_dims] = dim;
+        q_vals[lane_dims] = valid_q ? static_cast<float>(q[q_base + dim]) : 0.0f;
+        acc_vals[lane_dims] = 0.0f;
+        ++lane_dims;
+    }
+
+    const int key_limit = valid_q ? (is_causal ? causal_key_limit(q_idx, seqlen_q, seqlen_k)
+                                               : seqlen_k)
+                                  : 0;
+    const int last_q = min(seqlen_q - 1, q_block + Rows - 1);
+    const int max_key_limit =
+        last_q >= q_block ? (is_causal ? causal_key_limit(last_q, seqlen_q, seqlen_k) : seqlen_k)
+                          : 0;
+
+    float m = -INFINITY;
+    float l = 0.0f;
+
+    for(int key_base = 0; key_base < max_key_limit; key_base += KeyBlock)
+    {
+        const int tile_count = min(KeyBlock, max_key_limit - key_base);
+        const int linear_thread = static_cast<int>(threadIdx.x);
+        const int thread_count = static_cast<int>(blockDim.x);
+        for(int idx = linear_thread; idx < tile_count * HeadDim; idx += thread_count)
+        {
+            const int key_offset = idx / HeadDim;
+            const int dim = idx - key_offset * HeadDim;
+            const int key = key_base + key_offset;
+            const size_t kv_base =
+                ((static_cast<size_t>(batch) * seqlen_k + key) * num_heads_k + kv_head) *
+                HeadDim;
+            k_tile[key_offset][dim] = k[kv_base + dim];
+            v_tile[key_offset][dim] = v[kv_base + dim];
+        }
+        __syncthreads();
+
+        for(int key_offset = 0; key_offset < tile_count; ++key_offset)
+        {
+            const int key = key_base + key_offset;
+            const bool valid_key = valid_q && key < key_limit;
+
+            float partial = 0.0f;
+            for(int i = 0; i < lane_dims; ++i)
+            {
+                partial += q_vals[i] * static_cast<float>(k_tile[key_offset][dim_vals[i]]);
+            }
+            const float score =
+                valid_key ? kiln_wave_reduce_sum(partial) * softmax_scale : -INFINITY;
+
+            if(valid_key)
+            {
+                const float new_m = fmaxf(m, score);
+                const float alpha = expf(m - new_m);
+                const float beta = expf(score - new_m);
+                for(int i = 0; i < lane_dims; ++i)
+                {
+                    const float vv = static_cast<float>(v_tile[key_offset][dim_vals[i]]);
+                    acc_vals[i] = acc_vals[i] * alpha + beta * vv;
+                }
+                l = l * alpha + beta;
+                m = new_m;
+            }
+        }
+        __syncthreads();
+    }
+
+    if(valid_q)
+    {
+        const float inv_l = l > 0.0f ? 1.0f / l : 0.0f;
+        for(int i = 0; i < lane_dims; ++i)
+        {
+            out[q_base + dim_vals[i]] = hip_bfloat16(acc_vals[i] * inv_l);
+        }
+        if(lane == 0 && lse != nullptr)
+        {
+            lse[(static_cast<size_t>(batch) * num_heads + head) * seqlen_q + q_idx] =
+                l > 0.0f ? m + logf(l) : -INFINITY;
+        }
+    }
+}
+
 template <int HeadDim, int Rows>
 __global__ void kiln_rocm_flash_fwd_stream_update_bf16_kernel(
     const hip_bfloat16* __restrict__ q,
@@ -1477,6 +1630,50 @@ int launch_fwd_qblock_cached(const void* q,
     return err == hipSuccess ? 0 : static_cast<int>(err);
 }
 
+template <int HeadDim, int Rows, int QueryHeadsPerBlock, int KeyBlock>
+int launch_fwd_gqa_qblock_cached(const void* q,
+                                 const void* k,
+                                 const void* v,
+                                 void* out,
+                                 void* softmax_lse_out,
+                                 int batch_size,
+                                 int seqlen_q,
+                                 int seqlen_k,
+                                 int num_heads,
+                                 int num_heads_k,
+                                 float softmax_scale,
+                                 int is_causal,
+                                 void* stream)
+{
+    dim3 grid(static_cast<unsigned>((seqlen_q + Rows - 1) / Rows),
+              static_cast<unsigned>((num_heads + QueryHeadsPerBlock - 1) / QueryHeadsPerBlock),
+              static_cast<unsigned>(batch_size));
+    dim3 block(static_cast<unsigned>(Rows * QueryHeadsPerBlock * KilnLogicalWarpSize));
+    hipLaunchKernelGGL((kiln_rocm_flash_fwd_gqa_qblock_cached_bf16_kernel<HeadDim,
+                                                                           Rows,
+                                                                           QueryHeadsPerBlock,
+                                                                           KeyBlock>),
+                       grid,
+                       block,
+                       0,
+                       static_cast<hipStream_t>(stream),
+                       static_cast<const hip_bfloat16*>(q),
+                       static_cast<const hip_bfloat16*>(k),
+                       static_cast<const hip_bfloat16*>(v),
+                       static_cast<hip_bfloat16*>(out),
+                       static_cast<float*>(softmax_lse_out),
+                       batch_size,
+                       seqlen_q,
+                       seqlen_k,
+                       num_heads,
+                       num_heads_k,
+                       softmax_scale,
+                       is_causal != 0 ? 1 : 0);
+
+    const hipError_t err = hipGetLastError();
+    return err == hipSuccess ? 0 : static_cast<int>(err);
+}
+
 int launch_fwd_wmma_qblock256(const void* q,
                               const void* k,
                               const void* v,
@@ -1494,7 +1691,7 @@ int launch_fwd_wmma_qblock256(const void* q,
     dim3 grid(static_cast<unsigned>((seqlen_q + 15) / 16),
               static_cast<unsigned>(num_heads),
               static_cast<unsigned>(batch_size));
-    dim3 block(256);
+    dim3 block(512);
     hipLaunchKernelGGL(kiln_rocm_flash_fwd_wmma_qblock256_bf16_kernel,
                        grid,
                        block,
@@ -1845,6 +2042,22 @@ extern "C" int kiln_rocm_flash_attn_fwd_bf16(const void* q,
                                        is_causal,
                                        stream);
     case 256:
+        if(native_gqa_qblock_enabled(head_dim, seqlen_q, seqlen_k, num_heads, num_heads_k))
+        {
+            return launch_fwd_gqa_qblock_cached<256, 8, 4, 64>(q,
+                                                               k,
+                                                               v,
+                                                               out,
+                                                               softmax_lse_out,
+                                                               batch_size,
+                                                               seqlen_q,
+                                                               seqlen_k,
+                                                               num_heads,
+                                                               num_heads_k,
+                                                               softmax_scale,
+                                                               is_causal,
+                                                               stream);
+        }
         if(native_wmma_qblock_enabled(head_dim, seqlen_q, seqlen_k) &&
            current_device_supports_gfx11_wmma())
         {

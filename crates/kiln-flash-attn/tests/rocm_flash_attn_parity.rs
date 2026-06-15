@@ -375,6 +375,49 @@ fn flash_attn_fwd_native_wmma_qblock256_parity() {
 }
 
 #[test]
+fn flash_attn_fwd_native_gqa_qblock256_parity() {
+    if no_rocm() {
+        return;
+    }
+    let b = 1usize;
+    let h = 4usize;
+    let hk = 1usize;
+    let d = 256usize;
+    let sq = 37usize;
+    let sk = 81usize;
+    let scale = 1.0 / (d as f32).sqrt();
+    let causal = true;
+
+    with_env_vars(
+        &[
+            ("KILN_ROCM_FLASH_NATIVE_GQA_QBLOCK", "1"),
+            ("KILN_ROCM_FLASH_NATIVE_RECTANGULAR_CAUSAL", "1"),
+        ],
+        || {
+            let qd = fill_bf16(b * sq * h * d, 9301);
+            let kd = fill_bf16(b * sk * hk * d, 9309);
+            let vd = fill_bf16(b * sk * hk * d, 9317);
+
+            let q = rocm_bf16(&qd, vec![b, sq, h, d]);
+            let k = rocm_bf16(&kd, vec![b, sk, hk, d]);
+            let v = rocm_bf16(&vd, vec![b, sk, hk, d]);
+
+            let (out_t, lse_t) = flash_attn_fwd_kt(&q, &k, &v, scale, causal)
+                .unwrap_or_else(|e| panic!("native gqa qblock256: {e}"));
+            assert_eq!(out_t.shape(), &[b, sq, h, d]);
+            assert_eq!(lse_t.shape(), &[b, h, sq]);
+
+            let qf: Vec<f32> = qd.iter().map(|x| x.to_f32()).collect();
+            let kf: Vec<f32> = kd.iter().map(|x| x.to_f32()).collect();
+            let vf: Vec<f32> = vd.iter().map(|x| x.to_f32()).collect();
+            let want = cpu_sdpa(&qf, &kf, &vf, b, sq, sk, h, hk, d, scale, causal);
+            let got = bf16_to_f32(&out_t);
+            check_close(&got, &want, 2e-2, 2e-2, "native gqa qblock256");
+        },
+    );
+}
+
+#[test]
 fn flash_attn_fwd_no_lse_matches_fwd_output() {
     if no_rocm() {
         return;
