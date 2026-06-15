@@ -258,6 +258,27 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    pub(crate) fn kiln_rocm_flash_attn_bwd_collapsed_gqa_bf16(
+        dout: *const core::ffi::c_void,
+        q: *const core::ffi::c_void,
+        k: *const core::ffi::c_void,
+        v: *const core::ffi::c_void,
+        out: *const core::ffi::c_void,
+        softmax_lse: *const core::ffi::c_void,
+        dq: *mut core::ffi::c_void,
+        dk: *mut core::ffi::c_void,
+        dv: *mut core::ffi::c_void,
+        batch_size: i32,
+        seqlen_q: i32,
+        seqlen_k: i32,
+        num_heads: i32,
+        num_heads_k: i32,
+        head_dim: i32,
+        softmax_scale: f32,
+        is_causal: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     pub(crate) fn kiln_rocm_flash_rowsum_sub_last_axis_f32(
         a: *const core::ffi::c_void,
         rowsum: *const core::ffi::c_void,
@@ -265,6 +286,17 @@ unsafe extern "C" {
         bh: i32,
         sq: i32,
         sk: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    pub(crate) fn kiln_rocm_flash_collapse_gqa_bf16(
+        expanded: *const core::ffi::c_void,
+        collapsed: *mut core::ffi::c_void,
+        batch_size: i32,
+        seqlen: i32,
+        num_heads: i32,
+        num_heads_k: i32,
+        head_dim: i32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
 

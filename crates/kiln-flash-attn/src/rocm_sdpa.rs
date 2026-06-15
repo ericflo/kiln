@@ -623,6 +623,10 @@ fn rocm_collapsed_gqa_bwd_enabled() -> bool {
     env_bool("KILN_ROCM_FLASH_COLLAPSED_GQA_BWD").unwrap_or(true)
 }
 
+fn rocm_native_direct_collapsed_gqa_bwd_enabled() -> bool {
+    env_bool("KILN_ROCM_FLASH_NATIVE_DIRECT_COLLAPSED_GQA_BWD").unwrap_or(false)
+}
+
 fn query_tile_len_for_budget(
     b: usize,
     h: usize,
@@ -2789,13 +2793,37 @@ pub fn flash_attn_bwd_rocm_collapsed_gqa(
 ) -> Result<(KtTensor, KtTensor, KtTensor), FlashAttnError> {
     let (b, sq, h, d) = (q.shape()[0], q.shape()[1], q.shape()[2], q.shape()[3]);
     let (sk, hk) = (k.shape()[1], k.shape()[2]);
-    if hk == h || !rocm_collapsed_gqa_bwd_enabled() {
+    if hk == h {
         return flash_attn_bwd_rocm(dout, q, k, v, out, softmax_lse, softmax_scale, causal);
     }
     if hk == 0 || h % hk != 0 {
         return Err(FlashAttnError::Msg(format!(
             "rocm-sdpa collapsed bwd: invalid GQA heads h={h} hk={hk}"
         )));
+    }
+
+    if rocm_collapsed_gqa_bwd_enabled()
+        && rocm_native_direct_collapsed_gqa_bwd_enabled()
+        && rocm_native_bwd_preferred(sq, sk, d)
+    {
+        if let Some(result) = try_native_bwd_bf16_collapsed_gqa(
+            dout,
+            q,
+            k,
+            v,
+            out,
+            softmax_lse,
+            b,
+            sq,
+            sk,
+            h,
+            hk,
+            d,
+            softmax_scale,
+            causal,
+        )? {
+            return Ok(result);
+        }
     }
 
     if !rocm_native_bwd_preferred(sq, sk, d) && rocm_materialized_bwd_enabled(b, h, sq, sk) {
@@ -3531,6 +3559,101 @@ fn try_native_bwd_bf16(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn try_native_bwd_bf16_collapsed_gqa(
+    dout: &KtTensor,
+    q: &KtTensor,
+    k: &KtTensor,
+    v: &KtTensor,
+    out: &KtTensor,
+    softmax_lse: &KtTensor,
+    b: usize,
+    sq: usize,
+    sk: usize,
+    h: usize,
+    hk: usize,
+    d: usize,
+    softmax_scale: f32,
+    causal: bool,
+) -> Result<Option<(KtTensor, KtTensor, KtTensor)>, FlashAttnError> {
+    if dout.dtype() != KtDType::BF16
+        || q.dtype() != KtDType::BF16
+        || k.dtype() != KtDType::BF16
+        || v.dtype() != KtDType::BF16
+        || out.dtype() != KtDType::BF16
+        || softmax_lse.dtype() != KtDType::F32
+        || !matches!(d, 128 | 256)
+        || h == 0
+        || hk == 0
+        || h % hk != 0
+    {
+        return Ok(None);
+    }
+
+    let q_c = rocm_contig(q)?;
+    let k_c = rocm_contig(k)?;
+    let v_c = rocm_contig(v)?;
+    let out_c = rocm_contig(out)?;
+    let dout_c = rocm_contig(dout)?;
+    let lse_c = rocm_contig(softmax_lse)?;
+
+    let (q_st, _) = kiln_kt_bridge::rocm_storage_and_byte_offset(&q_c, KtDType::BF16, "q")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let dq = kiln_kt_bridge::alloc_rocm_tensor(q_st, KtDType::BF16, vec![b, sq, h, d])
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let dk = kiln_kt_bridge::alloc_rocm_tensor(q_st, KtDType::BF16, vec![b, sk, hk, d])
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let dv = kiln_kt_bridge::alloc_rocm_tensor(q_st, KtDType::BF16, vec![b, sk, hk, d])
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+
+    let dout_ptr = kiln_kt_bridge::rocm_input_device_ptr(&dout_c, KtDType::BF16, "dout")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let q_ptr = kiln_kt_bridge::rocm_input_device_ptr(&q_c, KtDType::BF16, "q")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let k_ptr = kiln_kt_bridge::rocm_input_device_ptr(&k_c, KtDType::BF16, "k")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let v_ptr = kiln_kt_bridge::rocm_input_device_ptr(&v_c, KtDType::BF16, "v")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let out_ptr = kiln_kt_bridge::rocm_input_device_ptr(&out_c, KtDType::BF16, "out")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let lse_ptr = kiln_kt_bridge::rocm_input_device_ptr(&lse_c, KtDType::F32, "softmax_lse")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let dq_ptr = kiln_kt_bridge::rocm_output_device_ptr(&dq);
+    let dk_ptr = kiln_kt_bridge::rocm_output_device_ptr(&dk);
+    let dv_ptr = kiln_kt_bridge::rocm_output_device_ptr(&dv);
+    let stream = kiln_kt_bridge::rocm_stream_raw_of(&q_c, "q")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+
+    let status = unsafe {
+        crate::kiln_rocm_flash_attn_bwd_collapsed_gqa_bf16(
+            dout_ptr as *const _,
+            q_ptr as *const _,
+            k_ptr as *const _,
+            v_ptr as *const _,
+            out_ptr as *const _,
+            lse_ptr as *const _,
+            dq_ptr as *mut _,
+            dk_ptr as *mut _,
+            dv_ptr as *mut _,
+            b as i32,
+            sq as i32,
+            sk as i32,
+            h as i32,
+            hk as i32,
+            d as i32,
+            softmax_scale,
+            if causal { 1 } else { 0 },
+            stream,
+        )
+    };
+
+    if status == 0 {
+        Ok(Some((dq, dk, dv)))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Reshape a `[b*h, s, d]` f32 tensor to `[b, s, h, d]` BF16 (transpose the
 /// head axis back out and narrow to BF16). On-device.
 fn bhsd3_to_bshd_bf16(
@@ -3604,6 +3727,37 @@ fn collapse_expanded_bshd_gqa_grad_bf16(
             "collapse_expanded_bshd_gqa_grad_bf16: expected [{b}, {s}, {h}, {d}], got {:?}",
             expanded.shape()
         )));
+    }
+
+    if expanded.dtype() == KtDType::BF16 {
+        let expanded = rocm_contig(expanded)?;
+        let (storage, _) =
+            kiln_kt_bridge::rocm_storage_and_byte_offset(&expanded, KtDType::BF16, "expanded")
+                .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+        let collapsed =
+            kiln_kt_bridge::alloc_rocm_tensor(storage, KtDType::BF16, vec![b, s, hk, d])
+                .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+        let expanded_ptr =
+            kiln_kt_bridge::rocm_input_device_ptr(&expanded, KtDType::BF16, "expanded")
+                .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+        let collapsed_ptr = kiln_kt_bridge::rocm_output_device_ptr(&collapsed);
+        let stream = kiln_kt_bridge::rocm_stream_raw_of(&expanded, "expanded")
+            .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+        let status = unsafe {
+            crate::kiln_rocm_flash_collapse_gqa_bf16(
+                expanded_ptr as *const _,
+                collapsed_ptr as *mut _,
+                b as i32,
+                s as i32,
+                h as i32,
+                hk as i32,
+                d as i32,
+                stream,
+            )
+        };
+        if status == 0 {
+            return Ok(collapsed);
+        }
     }
 
     let groups = h / hk;
