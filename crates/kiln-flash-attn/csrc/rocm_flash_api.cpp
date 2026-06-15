@@ -805,6 +805,7 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
     }
 
     __shared__ hip_bfloat16 q_tile[Rows][HeadDim];
+    __shared__ hip_bfloat16 k_tile[WmmaTile][HeadDim];
     __shared__ hip_bfloat16 v_tile[KeyBlock][HeadDim];
     __shared__ float scores[Rows][KeyBlock];
 
@@ -854,8 +855,10 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
     }
 
     uint32_t* q_tile_u32 = reinterpret_cast<uint32_t*>(&q_tile[0][0]);
+    uint32_t* k_tile_u32 = reinterpret_cast<uint32_t*>(&k_tile[0][0]);
     uint32_t* v_tile_u32 = reinterpret_cast<uint32_t*>(&v_tile[0][0]);
     const uint32_t* q_u32 = reinterpret_cast<const uint32_t*>(q);
+    const uint32_t* k_u32 = reinterpret_cast<const uint32_t*>(k);
     const uint32_t* v_u32 = reinterpret_cast<const uint32_t*>(v);
 
     for(int pair = tid; pair < Rows * HeadDimPairs; pair += static_cast<int>(blockDim.x))
@@ -917,53 +920,62 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
         __syncthreads();
 
 #if KILN_ROCM_HAS_GFX11_WMMA
-        if(tid < WmmaTasks * KilnLogicalWarpSize)
+        for(int col_tile = 0; col_tile < WmmaColTiles; ++col_tile)
         {
-            const int task = tid / KilnLogicalWarpSize;
-            const int task_lane = tid & 31;
-            const int row_tile = task / WmmaColTiles;
-            const int col_tile = task - row_tile * WmmaColTiles;
-            const int row_start = row_tile * WmmaTile;
             const int key_col_start = col_tile * WmmaTile;
-            const int ab_lane = task_lane & 15;
-
-            kiln_f32x8 c_vec = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-            for(int dim_base = 0; dim_base < HeadDim; dim_base += WmmaTile)
+            for(int pair = tid; pair < WmmaTile * HeadDimPairs; pair += static_cast<int>(blockDim.x))
             {
-                kiln_bf16x16 q_vec;
-                kiln_bf16x16 k_vec;
-                for(int k_inner = 0; k_inner < WmmaTile; ++k_inner)
+                const int key_offset = key_col_start + pair / HeadDimPairs;
+                const int dim_pair = pair % HeadDimPairs;
+                if(key_offset < tile_count)
                 {
-                    const int dim = dim_base + k_inner;
-                    q_vec[k_inner] = kiln_to_native_bf16(q_tile[row_start + ab_lane][dim]);
-                    const int key_offset = key_col_start + ab_lane;
-                    if(key_offset < tile_count)
-                    {
-                        const int key_idx = key_base + key_offset;
-                        const size_t kv_base =
-                            ((static_cast<size_t>(batch) * seqlen_k + key_idx) * num_heads_k +
-                             kv_head) *
-                            HeadDim;
-                        k_vec[k_inner] = kiln_to_native_bf16(k[kv_base + dim]);
-                    }
-                    else
-                    {
-                        k_vec[k_inner] = static_cast<__bf16>(0.0f);
-                    }
+                    const int key_idx = key_base + key_offset;
+                    const size_t kv_base =
+                        ((static_cast<size_t>(batch) * seqlen_k + key_idx) * num_heads_k + kv_head) *
+                        HeadDim;
+                    k_tile_u32[pair] = k_u32[kv_base / Bf16PerU32 + dim_pair];
                 }
-                c_vec = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(q_vec, k_vec, c_vec);
-            }
-
-            const int score_col = key_col_start + (task_lane & 15);
-            const int score_row_parity = task_lane >> 4;
-            for(int i = 0; i < 8; ++i)
-            {
-                const int score_row = row_start + i * 2 + score_row_parity;
-                if(score_row < Rows && score_col < KeyBlock)
+                else
                 {
-                    scores[score_row][score_col] = c_vec[i] * softmax_scale;
+                    k_tile_u32[pair] = 0;
                 }
             }
+            __syncthreads();
+
+            if(tid < WmmaRowTiles * KilnLogicalWarpSize)
+            {
+                const int task = tid / KilnLogicalWarpSize;
+                const int task_lane = tid & 31;
+                const int row_tile = task;
+                const int row_start = row_tile * WmmaTile;
+                const int ab_lane = task_lane & 15;
+
+                kiln_f32x8 c_vec = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+                for(int dim_base = 0; dim_base < HeadDim; dim_base += WmmaTile)
+                {
+                    kiln_bf16x16 q_vec;
+                    kiln_bf16x16 k_vec;
+                    for(int k_inner = 0; k_inner < WmmaTile; ++k_inner)
+                    {
+                        const int dim = dim_base + k_inner;
+                        q_vec[k_inner] = kiln_to_native_bf16(q_tile[row_start + ab_lane][dim]);
+                        k_vec[k_inner] = kiln_to_native_bf16(k_tile[ab_lane][dim]);
+                    }
+                    c_vec = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(q_vec, k_vec, c_vec);
+                }
+
+                const int score_col = key_col_start + (task_lane & 15);
+                const int score_row_parity = task_lane >> 4;
+                for(int i = 0; i < 8; ++i)
+                {
+                    const int score_row = row_start + i * 2 + score_row_parity;
+                    if(score_row < Rows && score_col < KeyBlock)
+                    {
+                        scores[score_row][score_col] = c_vec[i] * softmax_scale;
+                    }
+                }
+            }
+            __syncthreads();
         }
 #else
         if(tid < Rows * KeyBlock)
