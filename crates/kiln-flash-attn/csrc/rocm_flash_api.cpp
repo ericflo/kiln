@@ -806,17 +806,18 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
     __shared__ hip_bfloat16 v_tile[KeyBlock][HeadDim];
     __shared__ float scores[Rows][KeyBlock];
 
-    constexpr int MaxLanePairs = (HeadDimPairs + 31) / 32;
-    float acc_vals0_lo[MaxLanePairs];
-    float acc_vals0_hi[MaxLanePairs];
-    float acc_vals1_lo[MaxLanePairs];
-    float acc_vals1_hi[MaxLanePairs];
-    float acc_vals2_lo[MaxLanePairs];
-    float acc_vals2_hi[MaxLanePairs];
-    float acc_vals3_lo[MaxLanePairs];
-    float acc_vals3_hi[MaxLanePairs];
-    int dim_pair_vals[MaxLanePairs];
-    int lane_pairs = 0;
+    constexpr int LanePairs = HeadDimPairs / KilnLogicalWarpSize;
+    static_assert(HeadDimPairs % KilnLogicalWarpSize == 0,
+                  "HeadDimPairs must be evenly distributed across a wave");
+    float acc_vals0_lo[LanePairs];
+    float acc_vals0_hi[LanePairs];
+    float acc_vals1_lo[LanePairs];
+    float acc_vals1_hi[LanePairs];
+    float acc_vals2_lo[LanePairs];
+    float acc_vals2_hi[LanePairs];
+    float acc_vals3_lo[LanePairs];
+    float acc_vals3_hi[LanePairs];
+    int dim_pair_vals[LanePairs];
 
     const int groups_per_kv_head = num_heads / num_heads_k;
     const int kv_head = head / groups_per_kv_head;
@@ -837,18 +838,17 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
         ((static_cast<size_t>(batch) * seqlen_q + (valid_q3 ? q_idx3 : 0)) * num_heads + head) *
         HeadDim;
 
-    for(int dim_pair = lane; dim_pair < HeadDimPairs; dim_pair += KilnLogicalWarpSize)
+    for(int i = 0; i < LanePairs; ++i)
     {
-        dim_pair_vals[lane_pairs] = dim_pair;
-        acc_vals0_lo[lane_pairs] = 0.0f;
-        acc_vals0_hi[lane_pairs] = 0.0f;
-        acc_vals1_lo[lane_pairs] = 0.0f;
-        acc_vals1_hi[lane_pairs] = 0.0f;
-        acc_vals2_lo[lane_pairs] = 0.0f;
-        acc_vals2_hi[lane_pairs] = 0.0f;
-        acc_vals3_lo[lane_pairs] = 0.0f;
-        acc_vals3_hi[lane_pairs] = 0.0f;
-        ++lane_pairs;
+        dim_pair_vals[i] = lane + i * KilnLogicalWarpSize;
+        acc_vals0_lo[i] = 0.0f;
+        acc_vals0_hi[i] = 0.0f;
+        acc_vals1_lo[i] = 0.0f;
+        acc_vals1_hi[i] = 0.0f;
+        acc_vals2_lo[i] = 0.0f;
+        acc_vals2_hi[i] = 0.0f;
+        acc_vals3_lo[i] = 0.0f;
+        acc_vals3_hi[i] = 0.0f;
     }
 
     uint32_t* q_tile_u32 = reinterpret_cast<uint32_t*>(&q_tile[0][0]);
@@ -1065,7 +1065,7 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
         __syncwarp();
 
 #pragma unroll
-        for(int i = 0; i < lane_pairs; ++i)
+        for(int i = 0; i < LanePairs; ++i)
         {
             acc_vals0_lo[i] *= alpha0;
             acc_vals0_hi[i] *= alpha0;
@@ -1083,7 +1083,7 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
             const float score2 = scores[row2][col];
             const float score3 = scores[row3][col];
 #pragma unroll
-            for(int i = 0; i < lane_pairs; ++i)
+            for(int i = 0; i < LanePairs; ++i)
             {
                 float vv_lo;
                 float vv_hi;
@@ -1129,7 +1129,7 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
     if(valid_q0)
     {
         const float inv_l = l0 > 0.0f ? 1.0f / l0 : 0.0f;
-        for(int i = 0; i < lane_pairs; ++i)
+        for(int i = 0; i < LanePairs; ++i)
         {
             const int dim = dim_pair_vals[i] * Bf16PerU32;
             out[q_base0 + dim] = hip_bfloat16(acc_vals0_lo[i] * inv_l);
@@ -1139,7 +1139,7 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
     if(valid_q1)
     {
         const float inv_l = l1 > 0.0f ? 1.0f / l1 : 0.0f;
-        for(int i = 0; i < lane_pairs; ++i)
+        for(int i = 0; i < LanePairs; ++i)
         {
             const int dim = dim_pair_vals[i] * Bf16PerU32;
             out[q_base1 + dim] = hip_bfloat16(acc_vals1_lo[i] * inv_l);
@@ -1149,7 +1149,7 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
     if(valid_q2)
     {
         const float inv_l = l2 > 0.0f ? 1.0f / l2 : 0.0f;
-        for(int i = 0; i < lane_pairs; ++i)
+        for(int i = 0; i < LanePairs; ++i)
         {
             const int dim = dim_pair_vals[i] * Bf16PerU32;
             out[q_base2 + dim] = hip_bfloat16(acc_vals2_lo[i] * inv_l);
@@ -1159,7 +1159,7 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
     if(valid_q3)
     {
         const float inv_l = l3 > 0.0f ? 1.0f / l3 : 0.0f;
-        for(int i = 0; i < lane_pairs; ++i)
+        for(int i = 0; i < LanePairs; ++i)
         {
             const int dim = dim_pair_vals[i] * Bf16PerU32;
             out[q_base3 + dim] = hip_bfloat16(acc_vals3_lo[i] * inv_l);
