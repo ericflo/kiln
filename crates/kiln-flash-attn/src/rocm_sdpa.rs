@@ -52,6 +52,7 @@ const DEFAULT_NATIVE_STREAMING_FWD_MIN_SEQ: usize = 8192;
 const DEFAULT_NATIVE_STREAMING_FWD_KEY_TILE: usize = 4096;
 const DEFAULT_NATIVE_BWD_HD128_MAX_SEQ: usize = 1024;
 const DEFAULT_NATIVE_BWD_HD256_MAX_SEQ: usize = 512;
+const DEFAULT_NATIVE_BWD_LONG_MIN_SEQ: usize = 4096;
 const DEFAULT_ONLINE_QUERY_TILE: usize = 2048;
 const DEFAULT_ONLINE_KEY_TILE: usize = 4096;
 const DEFAULT_ONLINE_MATMUL_BATCH_GROUP: usize = 4;
@@ -601,7 +602,7 @@ fn rocm_materialized_bwd_enabled(b: usize, h: usize, sq: usize, sk: usize) -> bo
         .unwrap_or(false)
 }
 
-fn rocm_native_bwd_preferred(sq: usize, sk: usize, d: usize) -> bool {
+fn rocm_native_bwd_preferred(_b: usize, _h: usize, sq: usize, sk: usize, d: usize) -> bool {
     if env_bool("KILN_ROCM_FLASH_NATIVE_BWD_FORCE").unwrap_or(false) {
         return true;
     }
@@ -616,10 +617,16 @@ fn rocm_native_bwd_preferred(sq: usize, sk: usize, d: usize) -> bool {
         256 => DEFAULT_NATIVE_BWD_HD256_MAX_SEQ,
         _ => return false,
     };
-    let max_seq = env_usize("KILN_ROCM_FLASH_NATIVE_BWD_MAX_SEQ")
-        .unwrap_or(default_max_seq)
+    if let Some(max_seq) = env_usize("KILN_ROCM_FLASH_NATIVE_BWD_MAX_SEQ") {
+        return sq.max(sk) <= max_seq.max(1);
+    }
+    if sq.max(sk) <= default_max_seq {
+        return true;
+    }
+    let long_min_seq = env_usize("KILN_ROCM_FLASH_NATIVE_BWD_LONG_MIN_SEQ")
+        .unwrap_or(DEFAULT_NATIVE_BWD_LONG_MIN_SEQ)
         .max(1);
-    sq.max(sk) <= max_seq
+    sq.max(sk) >= long_min_seq
 }
 
 fn rocm_collapsed_gqa_bwd_enabled() -> bool {
@@ -2645,7 +2652,7 @@ pub fn flash_attn_bwd_rocm(
     let (b, sq, h, d) = (q.shape()[0], q.shape()[1], q.shape()[2], q.shape()[3]);
     let (sk, hk) = (k.shape()[1], k.shape()[2]);
 
-    if rocm_native_bwd_preferred(sq, sk, d) {
+    if rocm_native_bwd_preferred(b, h, sq, sk, d) {
         if let Some(result) = try_native_bwd_bf16(
             dout,
             q,
@@ -2807,7 +2814,7 @@ pub fn flash_attn_bwd_rocm_collapsed_gqa(
 
     if rocm_collapsed_gqa_bwd_enabled()
         && rocm_native_direct_collapsed_gqa_bwd_enabled()
-        && rocm_native_bwd_preferred(sq, sk, d)
+        && rocm_native_bwd_preferred(b, h, sq, sk, d)
     {
         if let Some(result) = try_native_bwd_bf16_collapsed_gqa(
             dout,
@@ -2829,7 +2836,7 @@ pub fn flash_attn_bwd_rocm_collapsed_gqa(
         }
     }
 
-    if !rocm_native_bwd_preferred(sq, sk, d) && rocm_materialized_bwd_enabled(b, h, sq, sk) {
+    if !rocm_native_bwd_preferred(b, h, sq, sk, d) && rocm_materialized_bwd_enabled(b, h, sq, sk) {
         match materialized_bwd_composite_rocm_impl(
             dout,
             q,
