@@ -63,6 +63,22 @@ pub fn rope_split_half(
 ) -> Result<Tensor> {
     validate(x, cos, sin, rotary_dim)?;
 
+    #[cfg(feature = "cuda")]
+    if matches!(x.device(), crate::Device::Cuda(_))
+        && cos.device() == x.device()
+        && sin.device() == x.device()
+    {
+        return crate::cuda_rope_split_half(x, cos, sin, rotary_dim);
+    }
+
+    #[cfg(feature = "rocm")]
+    if matches!(x.device(), crate::Device::Rocm(_))
+        && cos.device() == x.device()
+        && sin.device() == x.device()
+    {
+        return crate::rocm_rope_split_half(x, cos, sin, rotary_dim);
+    }
+
     let shape = x.shape();
     let (batch, seq, heads, head_dim) = (shape[0], shape[1], shape[2], shape[3]);
     let half = rotary_dim / 2;

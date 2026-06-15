@@ -111,6 +111,20 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_transpose_4d_12_copy_async(
+        src: *const core::ffi::c_void,
+        dst: *mut core::ffi::c_void,
+        bsz: i64,
+        heads: i64,
+        seq: i64,
+        dim: i64,
+        stride_b: i64,
+        stride_h: i64,
+        stride_t: i64,
+        bytes_per_elem: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_softmax_last_axis_async(
         x: *const core::ffi::c_void,
         out: *mut core::ffi::c_void,
@@ -476,6 +490,22 @@ pub fn rocm_synchronize_compute_stream(device_index: usize) -> Result<()> {
     })
 }
 
+/// Block until the active stream for a ROCm tensor's actual storage context
+/// completes. Prefer this at tensor handoff sites where the tensor may have
+/// been allocated on a context already in hand, rather than re-acquiring the
+/// primary context by device index.
+pub fn rocm_synchronize_tensor_stream(t: &crate::Tensor) -> Result<()> {
+    let storage = t
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| Error::Msg("rocm_synchronize_tensor_stream: tensor must be ROCm".into()))?;
+    let ctx = storage.context();
+    crate::active_rocm_stream(&ctx)
+        .synchronize()
+        .map_err(|e| Error::Msg(format!("rocm_synchronize_tensor_stream: {e:?}")))
+}
+
 /// Refresh `dst`'s contents in place from a host slice WITHOUT reallocating —
 /// the ROCm analog of [`crate::cuda_write_host_in_place`].
 ///
@@ -598,9 +628,7 @@ pub fn rocm_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
         Device::Rocm(i) => i,
         _ => unreachable!("RocmStorage::device is always Rocm"),
     };
-    let dst_storage = RocmStorage::zeros_ctx(&ctx, device_index, src.dtype(), n_elements)?;
-
-    let raw_stream = src_storage.rocm_stream_raw();
+    let dst_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, src.dtype(), n_elements)?;
 
     let (src_base, _) = src_storage.device_ptr_raw();
     let (dst_base, _) = dst_storage.device_ptr_raw();
@@ -609,8 +637,75 @@ pub fn rocm_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
     let src_ptr = (src_base + src_byte_off) as *const core::ffi::c_void;
     let dst_ptr = dst_base as *mut core::ffi::c_void;
 
+    if rocm_view_is_physically_compact(shape, strides_elems) {
+        let copy_bytes = n_elements
+            .checked_mul(bpe)
+            .ok_or_else(|| Error::Msg("rocm_contiguous: copy byte count overflow".to_string()))?;
+        if copy_bytes > 0 {
+            let stream = crate::active_rocm_stream(&ctx);
+            unsafe {
+                stream
+                    .memcpy_dtod_raw_async(dst_ptr, src_ptr, copy_bytes)
+                    .map_err(|e| {
+                        Error::Msg(format!("rocm_contiguous: dense D2D copy failed: {e:?}"))
+                    })?;
+            }
+            stream.synchronize().map_err(|e| {
+                Error::Msg(format!(
+                    "rocm_contiguous: synchronize after dense D2D copy: {e:?}"
+                ))
+            })?;
+        }
+        let storage_arc: crate::Storage = Arc::new(dst_storage);
+        return crate::Tensor::from_parts(
+            storage_arc,
+            crate::Layout::contiguous(shape.to_vec()),
+            crate::TensorId::next(),
+        )
+        .map_err(|e| Error::Msg(format!("rocm_contiguous: wrap: {e}")));
+    }
+
+    if let Some((bsz, heads, seq, dim, stride_b, stride_h, stride_t)) =
+        rocm_view_is_4d_axis12_transpose(shape, strides_elems)
+    {
+        let stream = crate::active_rocm_stream(&ctx);
+        let status = unsafe {
+            kiln_transpose_4d_12_copy_async(
+                src_ptr,
+                dst_ptr,
+                bsz as i64,
+                heads as i64,
+                seq as i64,
+                dim as i64,
+                stride_b as i64,
+                stride_h as i64,
+                stride_t as i64,
+                bpe as i32,
+                stream.hip_stream() as *mut core::ffi::c_void,
+            )
+        };
+        if status != 0 {
+            return Err(Error::Msg(format!(
+                "rocm_contiguous: kiln_transpose_4d_12_copy_async returned status {status}"
+            )));
+        }
+        stream.synchronize().map_err(|e| {
+            Error::Msg(format!(
+                "rocm_contiguous: synchronize after 4d axis12 transpose copy: {e:?}"
+            ))
+        })?;
+        let storage_arc: crate::Storage = Arc::new(dst_storage);
+        return crate::Tensor::from_parts(
+            storage_arc,
+            crate::Layout::contiguous(shape.to_vec()),
+            crate::TensorId::next(),
+        )
+        .map_err(|e| Error::Msg(format!("rocm_contiguous: wrap: {e}")));
+    }
+
     let shape_i64: Vec<i64> = shape.iter().map(|&d| d as i64).collect();
     let strides_i64: Vec<i64> = strides_elems.iter().map(|&s| s as i64).collect();
+    let stream = crate::active_rocm_stream(&ctx);
 
     let status = unsafe {
         kiln_contiguous_copy_async(
@@ -621,7 +716,7 @@ pub fn rocm_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
             rank as i32,
             bpe as i32,
             n_elements as i64,
-            raw_stream,
+            stream.hip_stream() as *mut core::ffi::c_void,
         )
     };
     if status != 0 {
@@ -629,6 +724,11 @@ pub fn rocm_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
             "rocm_contiguous: kiln_contiguous_copy_async returned status {status}"
         )));
     }
+    stream.synchronize().map_err(|e| {
+        Error::Msg(format!(
+            "rocm_contiguous: synchronize after strided D2D copy: {e:?}"
+        ))
+    })?;
 
     let storage_arc: crate::Storage = Arc::new(dst_storage);
     crate::Tensor::from_parts(
@@ -637,6 +737,52 @@ pub fn rocm_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
         crate::TensorId::next(),
     )
     .map_err(|e| Error::Msg(format!("rocm_contiguous: wrap: {e}")))
+}
+
+fn rocm_view_is_physically_compact(shape: &[usize], strides: &[usize]) -> bool {
+    if shape.len() != strides.len() {
+        return false;
+    }
+
+    let mut expected = 1usize;
+    for (&dim, &stride) in shape.iter().zip(strides.iter()).rev() {
+        if dim <= 1 {
+            continue;
+        }
+        if stride != expected {
+            return false;
+        }
+        expected = match expected.checked_mul(dim) {
+            Some(v) => v,
+            None => return false,
+        };
+    }
+    true
+}
+
+fn rocm_view_is_4d_axis12_transpose(
+    shape: &[usize],
+    strides: &[usize],
+) -> Option<(usize, usize, usize, usize, usize, usize, usize)> {
+    if shape.len() != 4 || strides.len() != 4 {
+        return None;
+    }
+
+    let bsz = shape[0];
+    let heads = shape[1];
+    let seq = shape[2];
+    let dim = shape[3];
+    if heads == 0 || seq == 0 || dim == 0 || strides[3] != 1 {
+        return None;
+    }
+
+    let expected_head_stride = dim;
+    let expected_seq_stride = heads.checked_mul(dim)?;
+    if strides[1] != expected_head_stride || strides[2] != expected_seq_stride {
+        return None;
+    }
+
+    Some((bsz, heads, seq, dim, strides[0], strides[1], strides[2]))
 }
 
 /// In-place `slice_set` along dim 0 on a ROCm tensor: flat-copy `src` into
@@ -650,9 +796,47 @@ pub fn rocm_slice_set_dim0(dst: &crate::Tensor, src: &crate::Tensor, offset: usi
             "rocm_slice_set: packed dtype not supported".to_string(),
         ));
     }
+    if dst.dtype() != src.dtype() {
+        return Err(Error::Msg(format!(
+            "rocm_slice_set: dtype mismatch dst={} src={}",
+            dst.dtype(),
+            src.dtype()
+        )));
+    }
+    if dst.device() != src.device() {
+        return Err(Error::Msg(format!(
+            "rocm_slice_set: device mismatch dst={} src={}",
+            dst.device(),
+            src.device()
+        )));
+    }
+    if !dst.is_contiguous() || !src.is_contiguous() {
+        return Err(Error::Msg(
+            "rocm_slice_set: dst and src must be contiguous".to_string(),
+        ));
+    }
     let bpe = dst.dtype().size_in_bytes();
     let inner: usize = dst.dims().iter().skip(1).product();
     let src_n = src.element_count();
+    if inner == 0 {
+        return Err(Error::Msg(
+            "rocm_slice_set: zero-size destination row".to_string(),
+        ));
+    }
+    if src_n % inner != 0 {
+        return Err(Error::Msg(format!(
+            "rocm_slice_set: src element count {src_n} is not a whole number of dst rows \
+             (inner={inner})"
+        )));
+    }
+    let rows = src_n / inner;
+    let dst_rows = dst.dims().first().copied().unwrap_or(0);
+    if offset > dst_rows || rows > dst_rows.saturating_sub(offset) {
+        return Err(Error::Msg(format!(
+            "rocm_slice_set: rows [{offset}, {}) out of bounds for dst rows {dst_rows}",
+            offset + rows
+        )));
+    }
 
     let dst_storage = dst
         .storage()
@@ -665,14 +849,19 @@ pub fn rocm_slice_set_dim0(dst: &crate::Tensor, src: &crate::Tensor, offset: usi
         .downcast_ref::<RocmStorage>()
         .ok_or_else(|| Error::Msg("rocm_slice_set: src must be ROCm storage".to_string()))?;
 
-    let raw_stream = dst_storage.rocm_stream_raw();
+    let ctx = dst_storage.context();
+    let stream = crate::active_rocm_stream(&ctx);
+    let raw_stream = stream.hip_stream() as *mut core::ffi::c_void;
     let (src_base, _) = src_storage.device_ptr_raw();
     let (dst_base, _) = dst_storage.device_ptr_raw();
     let src_byte_off = (src.layout().start_offset() * bpe) as u64;
-    let dst_byte_off = ((offset * inner) * bpe) as u64;
+    let dst_byte_off = ((dst.layout().start_offset() + offset * inner) * bpe) as u64;
     let src_ptr = (src_base + src_byte_off) as *const core::ffi::c_void;
     let dst_ptr = (dst_base + dst_byte_off) as *mut core::ffi::c_void;
 
+    // Flat contiguous copy of `src_n` elements (shape [src_n], stride [1])
+    // into dst at the computed byte offset. This mirrors the CUDA helper and
+    // avoids gfx115x raw D2D-copy corruption seen in long-context concat.
     let shape_i64 = [src_n as i64];
     let strides_i64 = [1i64];
     let status = unsafe {
@@ -692,6 +881,16 @@ pub fn rocm_slice_set_dim0(dst: &crate::Tensor, src: &crate::Tensor, offset: usi
             "rocm_slice_set: kiln_contiguous_copy_async returned status {status}"
         )));
     }
+    // `slice_set` is an in-place API whose source tensor may be dropped as soon
+    // as this function returns. The ROCm copy is async and RocmSlice frees are
+    // stream-ordered, so drain the copy outside graph capture before releasing
+    // the caller back to Rust. This matches the API's visible mutation
+    // semantics and prevents row-tiled reducers from copying from freed tiles.
+    if !crate::rocm_capture_arena_active() {
+        stream
+            .synchronize()
+            .map_err(|e| Error::Msg(format!("rocm_slice_set: synchronize after copy: {e:?}")))?;
+    }
     Ok(())
 }
 
@@ -705,6 +904,41 @@ pub fn rocm_to_host_copy(src: &crate::Tensor) -> Result<crate::Tensor> {
         )));
     }
 
+    let dtype = src.dtype();
+    let expected_byte_len = dtype.packed_buffer_bytes(src.element_count());
+    if src.is_contiguous() && src.layout().start_offset() == 0 {
+        if let Some(src_storage) = src.storage().as_any().downcast_ref::<RocmStorage>() {
+            if src_storage.is_owned() && src_storage.byte_len() == expected_byte_len {
+                let ctx = src_storage.context();
+                let stream = crate::active_rocm_stream(&ctx);
+                let host_bytes = stream.memcpy_dtoh(src_storage.slice()).map_err(|e| {
+                    Error::Msg(format!(
+                        "rocm_to_host_copy: direct memcpy_dtoh failed: {e:?}"
+                    ))
+                })?;
+                if rocm_profile_on() {
+                    let n = ROCM_DTOH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                    rocm_bt_once("dtoh", src.shape(), n);
+                    if n % 200 == 0 {
+                        eprintln!(
+                            "[rocm-profile] dtoh={} htod={} (last shape {:?})",
+                            n,
+                            ROCM_HTOD_COUNT.load(Ordering::Relaxed),
+                            src.shape()
+                        );
+                    }
+                }
+                let cpu_storage = crate::CpuStorage::from_bytes(dtype, host_bytes)?;
+                let storage_arc: crate::Storage = Arc::new(cpu_storage);
+                return crate::Tensor::from_parts(
+                    storage_arc,
+                    crate::Layout::contiguous(src.shape().to_vec()),
+                    crate::TensorId::next(),
+                );
+            }
+        }
+    }
+
     // Force a contiguous, start_offset=0 device buffer first (Owned output with
     // a usable `slice()`).
     let contig = rocm_contiguous(src)?;
@@ -716,7 +950,6 @@ pub fn rocm_to_host_copy(src: &crate::Tensor) -> Result<crate::Tensor> {
             Error::Msg("rocm_to_host_copy: contiguous'd storage must be RocmStorage".to_string())
         })?;
 
-    let dtype = src.dtype();
     let ctx = contig_storage.context();
     let stream = crate::active_rocm_stream(&ctx);
     let host_bytes = stream

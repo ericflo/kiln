@@ -41,6 +41,19 @@ impl From<BridgeError> for RmsNormError {
     }
 }
 
+fn kt_error(context: impl Into<String>, err: kiln_tensor::Error) -> RmsNormError {
+    RmsNormError::Msg(format!("{}: {err}", context.into()))
+}
+
+#[cfg(feature = "rocm")]
+fn rocm_fused_rmsnorm_row_tile_rows() -> usize {
+    std::env::var("KILN_ROCM_RMSNORM_ROW_TILE_ROWS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(4096)
+}
+
 // Backend-neutral seam (Phase R.7). These bottom out in
 // `kiln_kt_bridge::device_*`, which dispatch on the tensor's backend and work
 // for BOTH `Device::Cuda` and `Device::Rocm`. The CUDA path is unchanged (the
@@ -94,6 +107,16 @@ pub fn fused_rmsnorm_kt(
     }
     let rows: usize = x_shape[..x_shape.len() - 1].iter().product();
 
+    #[cfg(feature = "rocm")]
+    if matches!(x.device(), KtDevice::Rocm(_)) {
+        let row_tile = rocm_fused_rmsnorm_row_tile_rows();
+        if rows > row_tile {
+            return fused_rmsnorm_kt_rocm_row_tiled(
+                x, weight, eps, &x_shape, rows, hidden, row_tile,
+            );
+        }
+    }
+
     // Owner-agnostic input pointers — accepts both Owned and
     // Borrowed kt storage (Phase 7 v2).
     let x_ptr = kiln_kt_bridge::device_input_ptr(x, KtDType::BF16, "x")?;
@@ -105,6 +128,18 @@ pub fn fused_rmsnorm_kt(
     }
     let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
+    #[cfg(feature = "rocm")]
+    if matches!(x.device(), KtDevice::Rocm(_)) {
+        kiln_tensor::rocm_synchronize_tensor_stream(x).map_err(|e| {
+            RmsNormError::Msg(format!("kt-rmsnorm: synchronize ROCm x before launch: {e}"))
+        })?;
+        kiln_tensor::rocm_synchronize_tensor_stream(weight).map_err(|e| {
+            RmsNormError::Msg(format!(
+                "kt-rmsnorm: synchronize ROCm weight before launch: {e}"
+            ))
+        })?;
+    }
+
     // Run the kernel on the OUTPUT tensor's stream, not the input's. On ROCm
     // each fresh allocation (`alloc_like` -> `rocm_zeros_ctx`) creates a NEW
     // RocmContext with its OWN default stream, and the output's zeroing memset
@@ -113,10 +148,11 @@ pub fn fused_rmsnorm_kt(
     // the input's (different) stream, the output-zeroing memset could land AFTER
     // the kernel's writes with no cross-stream ordering, nondeterministically
     // zeroing valid results ("got 0"). Launching on the output's stream
-    // serializes memset -> kernel -> readback on one stream. `x`/`weight` were
-    // uploaded with a synchronizing H2D copy, so their data is fully resident
-    // regardless of which stream the kernel reads them on. (CUDA is unaffected:
-    // `device_stream_raw` resolves to the single shared default stream there.)
+    // serializes memset -> kernel -> readback on one stream. ROCm inputs can be
+    // freshly materialized on another stream (not just synchronizing H2D uploads),
+    // so synchronize their owning streams before this output-stream launch. CUDA
+    // is unaffected: `device_stream_raw` resolves to the single shared default
+    // stream there.
     let raw_stream = device_stream_raw(&out, "out")?;
 
     let status = unsafe {
@@ -136,6 +172,69 @@ pub fn fused_rmsnorm_kt(
         )));
     }
     Ok(out)
+}
+
+#[cfg(feature = "rocm")]
+fn fused_rmsnorm_kt_rocm_row_tiled(
+    x: &KtTensor,
+    weight: &KtTensor,
+    eps: f32,
+    x_shape: &[usize],
+    rows: usize,
+    hidden: usize,
+    row_tile: usize,
+) -> Result<KtTensor, RmsNormError> {
+    let x2d = x
+        .reshape(vec![rows, hidden])
+        .map_err(|e| kt_error("kt-rmsnorm rocm row-tiled reshape input", e))?;
+    let mut pieces = Vec::with_capacity(rows.div_ceil(row_tile));
+    let mut row_start = 0usize;
+    while row_start < rows {
+        let row_len = (rows - row_start).min(row_tile);
+        let x_tile = x2d
+            .narrow(0, row_start, row_len)
+            .map_err(|e| {
+                kt_error(
+                    format!(
+                        "kt-rmsnorm rocm row-tiled narrow [{row_start}, {})",
+                        row_start + row_len
+                    ),
+                    e,
+                )
+            })?
+            .contiguous()
+            .map_err(|e| {
+                kt_error(
+                    format!(
+                        "kt-rmsnorm rocm row-tiled contiguous [{row_start}, {})",
+                        row_start + row_len
+                    ),
+                    e,
+                )
+            })?;
+        let out_tile = fused_rmsnorm_kt(&x_tile, weight, eps).map_err(|e| {
+            RmsNormError::Msg(format!(
+                "kt-rmsnorm rocm row-tiled forward [{row_start}, {}): {e}",
+                row_start + row_len
+            ))
+        })?;
+        if matches!(out_tile.device(), KtDevice::Rocm(_)) {
+            kiln_tensor::rocm_synchronize_tensor_stream(&out_tile).map_err(|e| {
+                RmsNormError::Msg(format!(
+                    "kt-rmsnorm rocm row-tiled synchronize [{row_start}, {}): {e}",
+                    row_start + row_len
+                ))
+            })?;
+        }
+        pieces.push(out_tile);
+        row_start += row_len;
+    }
+    let piece_refs: Vec<&KtTensor> = pieces.iter().collect();
+    let out2d = KtTensor::cat(&piece_refs, 0)
+        .map_err(|e| kt_error("kt-rmsnorm rocm row-tiled concat", e))?;
+    out2d
+        .reshape(x_shape.to_vec())
+        .map_err(|e| kt_error("kt-rmsnorm rocm row-tiled reshape output", e))
 }
 
 /// `fused_rmsnorm_backward` over `kiln_tensor::Tensor` operands.

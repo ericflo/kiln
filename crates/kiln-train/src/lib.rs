@@ -145,6 +145,12 @@ pub struct SftExample {
 pub struct SftRequest {
     #[serde(default)]
     pub examples: Vec<SftExample>,
+    /// Optional server-local JSONL dataset path. Each non-empty line is one
+    /// `SftExample`. This keeps large local SFT corpora out of the HTTP
+    /// request body while preserving exact per-example training semantics.
+    /// Mutually exclusive with `examples` and `dataset`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_path: Option<String>,
     /// Optional name of an uploaded dataset (the eval dataset store) to train
     /// on instead of inline `examples`. The server resolves the name and reads
     /// every row — callers never round-trip rows through the client, so large

@@ -172,3 +172,91 @@ fn index_select_axis_n_parity() {
     }
     eprintln!("index_select_axis_n CPU-vs-ROCm parity passed");
 }
+
+#[test]
+fn index_select_dim0_flce_active_rows_bf16_shape() {
+    if no_rocm() {
+        return;
+    }
+
+    let src_n_rows = 27_186usize;
+    let inner = 2_560usize;
+    let n_indices = 188usize;
+    let data: Vec<half::bf16> = (0..src_n_rows * inner)
+        .map(|i| half::bf16::from_f32(val(i)))
+        .collect();
+    let indices: Vec<u32> = (0..n_indices)
+        .map(|i| ((i * 137 + 17) % src_n_rows) as u32)
+        .collect();
+
+    let src_t = Tensor::from_vec_on(Device::Rocm(0), data.clone(), vec![src_n_rows, inner])
+        .unwrap_or_else(|e| panic!("from_vec_on bf16 src: {e}"));
+    let idx_t = Tensor::from_vec_on(Device::Rocm(0), indices.clone(), vec![n_indices])
+        .unwrap_or_else(|e| panic!("from_vec_on indices: {e}"));
+    let out = kiln_tensor::ops::index_select(&src_t, 0, &idx_t)
+        .unwrap_or_else(|e| panic!("generic index_select dim0: {e}"));
+    let host =
+        kiln_tensor::rocm_to_host_copy(&out).unwrap_or_else(|e| panic!("rocm_to_host_copy: {e}"));
+    let got = host.to_vec::<half::bf16>().expect("to_vec bf16");
+
+    assert_eq!(got.len(), n_indices * inner);
+    for (out_row, &src_row) in indices.iter().enumerate() {
+        let src_row = src_row as usize;
+        let src_off = src_row * inner;
+        let dst_off = out_row * inner;
+        assert_eq!(
+            &got[dst_off..dst_off + inner],
+            &data[src_off..src_off + inner],
+            "row {out_row} should copy source row {src_row}"
+        );
+    }
+}
+
+#[test]
+fn index_select_dim0_large_sft_active_rows_bf16_shape() {
+    if no_rocm() {
+        return;
+    }
+
+    let src_n_rows = 40_314usize;
+    let inner = 2_560usize;
+    let n_indices = 1_014usize;
+    let data: Vec<half::bf16> = (0..src_n_rows * inner)
+        .map(|i| half::bf16::from_f32(val(i)))
+        .collect();
+    let mut indices: Vec<u32> = (0..n_indices)
+        .map(|i| {
+            (if i < n_indices / 2 {
+                // SFT active label rows are commonly clustered near the tail of
+                // a long prompt+completion sequence.
+                src_n_rows - n_indices + i
+            } else {
+                (i * 9_973 + 41) % src_n_rows
+            }) as u32
+        })
+        .collect();
+    indices[0] = 0;
+    indices[1] = (src_n_rows - 1) as u32;
+
+    let src_t = Tensor::from_vec_on(Device::Rocm(0), data.clone(), vec![src_n_rows, inner])
+        .unwrap_or_else(|e| panic!("from_vec_on bf16 large src: {e}"));
+    let idx_t = Tensor::from_vec_on(Device::Rocm(0), indices.clone(), vec![n_indices])
+        .unwrap_or_else(|e| panic!("from_vec_on large indices: {e}"));
+    let out = kiln_tensor::ops::index_select(&src_t, 0, &idx_t)
+        .unwrap_or_else(|e| panic!("generic large index_select dim0: {e}"));
+    let host = kiln_tensor::rocm_to_host_copy(&out)
+        .unwrap_or_else(|e| panic!("large rocm_to_host_copy: {e}"));
+    let got = host.to_vec::<half::bf16>().expect("to_vec bf16");
+
+    assert_eq!(got.len(), n_indices * inner);
+    for (out_row, &src_row) in indices.iter().enumerate() {
+        let src_row = src_row as usize;
+        let src_off = src_row * inner;
+        let dst_off = out_row * inner;
+        assert_eq!(
+            &got[dst_off..dst_off + inner],
+            &data[src_off..src_off + inner],
+            "row {out_row} should copy source row {src_row}"
+        );
+    }
+}

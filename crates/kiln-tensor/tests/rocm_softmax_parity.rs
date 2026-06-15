@@ -87,3 +87,52 @@ fn softmax_parity_wavefront_boundary_sweep() {
     }
     eprintln!("softmax CPU-vs-ROCm parity passed across wavefront-boundary widths {widths:?}");
 }
+
+#[test]
+fn softmax_handles_large_causal_neg_inf_rows() {
+    if no_rocm() {
+        return;
+    }
+
+    // Match the long-context SDPA shape class used by Qwen3.5-4B SFT:
+    // thousands of KV columns, one finite causal prefix per row, and a
+    // -inf suffix that must softmax to exactly zero rather than NaN.
+    let width = 7552usize;
+    let n_rows = 64usize;
+    let mut scores = Vec::with_capacity(n_rows * width);
+    let mut mask = Vec::with_capacity(n_rows * width);
+    let mut allowed_by_row = Vec::with_capacity(n_rows);
+    for r in 0..n_rows {
+        let allowed = ((r * 113) % width).max(1);
+        allowed_by_row.push(allowed);
+        for c in 0..width {
+            scores.push((((r * 131 + c * 17 + 7) % 2000) as f32) / 100.0 - 10.0);
+            mask.push(if c < allowed { 0.0 } else { f32::NEG_INFINITY });
+        }
+    }
+
+    let scores_t =
+        Tensor::from_vec_on(Device::Rocm(0), scores, vec![n_rows, width]).expect("scores to ROCm");
+    let mask_t =
+        Tensor::from_vec_on(Device::Rocm(0), mask, vec![n_rows, width]).expect("mask to ROCm");
+    let masked = scores_t.broadcast_add(&mask_t).expect("apply causal mask");
+    let y = kiln_tensor::rocm_softmax_last_axis(&masked).expect("rocm softmax");
+    let host = kiln_tensor::rocm_to_host_copy(&y).expect("rocm_to_host_copy");
+    let got = host.to_vec::<f32>().expect("to_vec");
+
+    for r in 0..n_rows {
+        let row = &got[r * width..(r + 1) * width];
+        let allowed = allowed_by_row[r];
+        let sum: f32 = row.iter().sum();
+        assert!(
+            sum.is_finite() && (sum - 1.0).abs() <= 2e-4,
+            "row {r} sum={sum} allowed={allowed}"
+        );
+        for (c, &v) in row.iter().enumerate() {
+            assert!(v.is_finite(), "row {r} col {c} is non-finite: {v}");
+            if c >= allowed {
+                assert_eq!(v, 0.0, "masked row {r} col {c} should be zero");
+            }
+        }
+    }
+}

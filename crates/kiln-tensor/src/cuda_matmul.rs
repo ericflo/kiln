@@ -201,7 +201,12 @@ fn cuda_blaslt_request(request: BlasLtMatmulRequest) -> MatmulRequest {
         m: request.m,
         n: request.n,
         k: request.k,
+        batch_count: request.batch_count,
+        a_batch_stride: request.a_batch_stride,
+        b_batch_stride: request.b_batch_stride,
+        c_batch_stride: request.c_batch_stride,
         dtype: request.dtype_name().to_string(),
+        output_dtype: request.output_dtype_name().to_string(),
         a_layout: cuda_blaslt_layout(request.a_layout),
         b_layout: cuda_blaslt_layout(request.b_layout),
         c_layout: cuda_blaslt_layout(request.c_layout),
@@ -283,10 +288,81 @@ pub fn cuda_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         n,
         k_a,
         dtype,
+        dtype,
         out_shape,
         BlasLtMatmulLayout::RowMajor,
         BlasLtMatmulLayout::RowMajor,
         "cuda_matmul",
+    )
+}
+
+/// Run a CUDA matmul with an explicit output dtype. Inputs still share one
+/// dtype and compute uses FP32; this is for BF16/F16 inputs that need F32
+/// materialized outputs, such as attention scores before softmax.
+pub fn cuda_matmul_to_dtype(a: &Tensor, b: &Tensor, out_dtype: DType) -> Result<Tensor> {
+    const OP: &str = "cuda_matmul_to_dtype";
+    let a_rank = a.rank();
+    let b_rank = b.rank();
+    if a_rank < 2 || b_rank < 2 {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: rank must be >= 2, got a={a_rank} b={b_rank}"
+        )));
+    }
+    if a_rank != b_rank {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: rank mismatch a={a_rank} b={b_rank}"
+        )));
+    }
+    let a_shape = a.shape();
+    let b_shape = b.shape();
+    for axis in 0..a_rank - 2 {
+        if a_shape[axis] != b_shape[axis] {
+            return Err(crate::Error::Msg(format!(
+                "{OP}: batch axis {axis} mismatch: a={} b={}",
+                a_shape[axis], b_shape[axis]
+            )));
+        }
+    }
+    let m = a_shape[a_rank - 2];
+    let k_a = a_shape[a_rank - 1];
+    let k_b = b_shape[b_rank - 2];
+    let n = b_shape[b_rank - 1];
+    if k_a != k_b {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: contraction dim mismatch a.K={k_a} b.K={k_b}"
+        )));
+    }
+    if a.dtype() != b.dtype() {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: dtype mismatch a={} b={}",
+            a.dtype(),
+            b.dtype()
+        )));
+    }
+    let dtype = a.dtype();
+    blaslt_dtype_name(dtype, OP)?;
+    blaslt_dtype_name(out_dtype, OP)?;
+    if !a.is_contiguous() || !b.is_contiguous() {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: contiguous inputs required (call .contiguous() first)"
+        )));
+    }
+
+    let mut out_shape = a_shape[..a_rank - 2].to_vec();
+    out_shape.push(m);
+    out_shape.push(n);
+    cuda_matmul_dispatch(
+        a,
+        b,
+        m,
+        n,
+        k_a,
+        dtype,
+        out_dtype,
+        out_shape,
+        BlasLtMatmulLayout::RowMajor,
+        BlasLtMatmulLayout::RowMajor,
+        OP,
     )
 }
 
@@ -353,6 +429,7 @@ pub fn cuda_matmul_lhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         m,
         n,
         k_a,
+        dtype,
         dtype,
         out_shape,
         BlasLtMatmulLayout::ColMajor,
@@ -422,6 +499,7 @@ pub fn cuda_matmul_rhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         n,
         k_a,
         dtype,
+        dtype,
         out_shape,
         BlasLtMatmulLayout::RowMajor,
         BlasLtMatmulLayout::ColMajor,
@@ -437,6 +515,7 @@ fn cuda_matmul_dispatch(
     n: usize,
     k: usize,
     dtype: DType,
+    out_dtype: DType,
     out_shape: Vec<usize>,
     a_layout: BlasLtMatmulLayout,
     b_layout: BlasLtMatmulLayout,
@@ -484,7 +563,7 @@ fn cuda_matmul_dispatch(
     // `batch * m * n` output elements are written before any read. Allocate
     // uninitialized to skip the cudaMemsetAsync zero-fill (a full-buffer DRAM
     // write the GEMM immediately overwrites).
-    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, out_n_elements)?;
+    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx, device_index, out_dtype, out_n_elements)?;
 
     // ---- acquire handle ----
     // Cold start passes the cudarc CudaContext through to
@@ -494,9 +573,13 @@ fn cuda_matmul_dispatch(
 
     // ---- per-batch dispatch ----
     let bpe = dtype.size_in_bytes();
-    let a_batch_stride = (m * k * bpe) as u64;
-    let b_batch_stride = (k * n * bpe) as u64;
-    let c_batch_stride = (m * n * bpe) as u64;
+    let out_bpe = out_dtype.size_in_bytes();
+    let a_batch_stride_elems = (m * k) as u64;
+    let b_batch_stride_elems = (k * n) as u64;
+    let c_batch_stride_elems = (m * n) as u64;
+    let a_batch_stride = a_batch_stride_elems * bpe as u64;
+    let b_batch_stride = b_batch_stride_elems * bpe as u64;
+    let c_batch_stride = c_batch_stride_elems * out_bpe as u64;
 
     // #1082 CUDA-graph fix: route through the thread-local active stream
     // (outside a capture scope this is exactly `ctx.default_stream()`).
@@ -510,11 +593,50 @@ fn cuda_matmul_dispatch(
     let a_off_root = (a.layout().start_offset() * bpe) as u64;
     let b_off_root = (b.layout().start_offset() * bpe) as u64;
 
-    let request = cuda_blaslt_request(BlasLtMatmulRequest::new(
+    let request = BlasLtMatmulRequest::new_with_output_dtype(
         m,
         n,
         k,
         dtype,
+        out_dtype,
+        a_layout,
+        b_layout,
+        BlasLtMatmulLayout::RowMajor,
+        BlasLtEpilogue::Identity,
+        1,
+        caller,
+    )?
+    .with_strided_batch(
+        batch,
+        a_batch_stride_elems,
+        b_batch_stride_elems,
+        c_batch_stride_elems,
+        caller,
+    )?;
+    let request = cuda_blaslt_request(request);
+
+    if batch > 1 {
+        let a_ptr = (a_base + a_off_root) as *const core::ffi::c_void;
+        let b_ptr = (b_base + b_off_root) as *const core::ffi::c_void;
+        let c_ptr = out_base as *mut core::ffi::c_void;
+        let batched =
+            unsafe { handle.matmul(&stream, &request, a_ptr, b_ptr, c_ptr, std::ptr::null()) };
+        if batched.is_ok() {
+            let storage_arc: Storage = Arc::new(out_storage);
+            return Tensor::from_parts(
+                storage_arc,
+                Layout::contiguous(out_shape),
+                TensorId::next(),
+            );
+        }
+    }
+
+    let request = cuda_blaslt_request(BlasLtMatmulRequest::new_with_output_dtype(
+        m,
+        n,
+        k,
+        dtype,
+        out_dtype,
         a_layout,
         b_layout,
         BlasLtMatmulLayout::RowMajor,

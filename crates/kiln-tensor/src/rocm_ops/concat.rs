@@ -1,7 +1,7 @@
 //! ROCm wrappers for the concat kernel(s) (Phase R.5).
 use std::sync::Arc;
 
-use crate::{Device, Error, Layout, Result, RocmStorage, StorageBackend, Tensor, TensorId};
+use crate::{Device, Error, Layout, Result, RocmStorage, Tensor, TensorId};
 
 // The ROCm-side `concat` launcher, compiled by `build.rs::build_rocm()` into
 // `libkiln_tensor_rocm_ops.a` with the same stable C ABI as the CUDA build.
@@ -14,6 +14,14 @@ unsafe extern "C" {
         t_axis_lens: *const i64,
         n_inputs: i32,
         outer: i64,
+        inner_bytes: i64,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+    fn kiln_concat_axis0_contiguous_async(
+        dst: *mut core::ffi::c_void,
+        src_ptrs: *const *const core::ffi::c_void,
+        t_axis_lens: *const i64,
+        n_inputs: i32,
         inner_bytes: i64,
         stream: *mut core::ffi::c_void,
     ) -> i32;
@@ -118,6 +126,13 @@ pub fn rocm_concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
     // skip the zero-fill.
     let n_out_elements: usize = out_shape.iter().product();
     let dst_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n_out_elements)?;
+    let (dst_base, _) = dst_storage.device_ptr_raw();
+    let storage_arc: crate::Storage = Arc::new(dst_storage);
+    let out = Tensor::from_parts(
+        Arc::clone(&storage_arc),
+        Layout::contiguous(out_shape.clone()),
+        TensorId::next(),
+    )?;
 
     let raw_stream = first_storage.rocm_stream_raw();
 
@@ -137,8 +152,90 @@ pub fn rocm_concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
         t_axis_lens.push(t.shape()[axis] as i64);
     }
 
-    let (dst_base, _) = dst_storage.device_ptr_raw();
     let dst_ptr = dst_base as *mut core::ffi::c_void;
+
+    // Large sequence-tile cats in model training have `outer == 1`, e.g.
+    // [1, tile, hidden] pieces concatenated along sequence. On gfx115x, the
+    // one-shot ROCm concat paths have exposed intermittent long-context
+    // corruption under allocator pressure. Assemble those large row-major cats
+    // through the same contiguous-copy primitive as `slice_set`; it is exact
+    // and has been the stable path for long-context device-to-device row
+    // copies.
+    let safe_row_assembly_enabled = std::env::var("KILN_DISABLE_ROCM_CONCAT_SAFE_ROW_ASSEMBLY")
+        .ok()
+        .map(|v| {
+            !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(true);
+    if safe_row_assembly_enabled && outer == 1 && n_out_elements >= 1_000_000 {
+        let out_rows = out
+            .reshape(vec![axis_total, inner])
+            .map_err(|e| Error::Msg(format!("rocm_concat: reshape dst rows: {e}")))?;
+        let mut row_offset = 0usize;
+        for t in inputs {
+            crate::rocm_synchronize_tensor_stream(t).map_err(|e| {
+                Error::Msg(format!(
+                    "rocm_concat: synchronize input before safe row assembly: {e}"
+                ))
+            })?;
+            let rows = t.shape()[axis];
+            let src_rows = t
+                .reshape(vec![rows, inner])
+                .map_err(|e| Error::Msg(format!("rocm_concat: reshape src rows: {e}")))?;
+            out_rows
+                .slice_set(&src_rows, 0usize, row_offset)
+                .map_err(|e| {
+                    Error::Msg(format!(
+                        "rocm_concat: safe row assembly slice_set offset={row_offset}: {e}"
+                    ))
+                })?;
+            row_offset += rows;
+        }
+        crate::active_rocm_stream(&ctx).synchronize().map_err(|e| {
+            Error::Msg(format!(
+                "rocm_concat: synchronize after safe row assembly: {e:?}"
+            ))
+        })?;
+        return Ok(out);
+    }
+
+    // The specialized vectorized row-copy kernel is kept as an opt-in
+    // diagnostic path for benchmarking and triage.
+    let axis0_row_copy_enabled = std::env::var("KILN_ROCM_CONCAT_AXIS0_ROW_COPY")
+        .ok()
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+    if axis0_row_copy_enabled && outer == 1 && n_out_elements >= 1_000_000 {
+        let status = unsafe {
+            kiln_concat_axis0_contiguous_async(
+                dst_ptr,
+                src_ptrs.as_ptr(),
+                t_axis_lens.as_ptr(),
+                inputs.len() as i32,
+                inner_bytes,
+                raw_stream,
+            )
+        };
+        if status != 0 {
+            return Err(Error::Msg(format!(
+                "rocm_concat: axis0 contiguous FFI returned status {status}"
+            )));
+        }
+        crate::active_rocm_stream(&ctx).synchronize().map_err(|e| {
+            Error::Msg(format!(
+                "rocm_concat: synchronize after axis0 contiguous concat: {e:?}"
+            ))
+        })?;
+        return Ok(out);
+    }
 
     let status = unsafe {
         kiln_concat_async(
@@ -156,7 +253,11 @@ pub fn rocm_concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
             "rocm_concat: FFI returned status {status}"
         )));
     }
+    crate::active_rocm_stream(&ctx).synchronize().map_err(|e| {
+        Error::Msg(format!(
+            "rocm_concat: synchronize after async kernel launch: {e:?}"
+        ))
+    })?;
 
-    let storage_arc: crate::Storage = Arc::new(dst_storage);
-    Tensor::from_parts(storage_arc, Layout::contiguous(out_shape), TensorId::next())
+    Ok(out)
 }

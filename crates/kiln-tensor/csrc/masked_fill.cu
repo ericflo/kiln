@@ -121,3 +121,97 @@ extern "C" int kiln_masked_fill_u8_async(const void* x,
     if (err != cudaSuccess) return 1000 + static_cast<int>(err);
     return 0;
 }
+
+__global__ void kiln_causal_mask_fill_f32(const float* __restrict__ x,
+                                          float* __restrict__ out,
+                                          int64_t n,
+                                          int64_t sq,
+                                          int64_t sk,
+                                          float fill_value) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    int64_t col = idx % sk;
+    int64_t row = (idx / sk) % sq;
+    int64_t allowed = row + (sk - sq);
+    out[idx] = (col > allowed) ? fill_value : x[idx];
+}
+
+__global__ void kiln_causal_mask_fill_bf16(const __nv_bfloat16* __restrict__ x,
+                                           __nv_bfloat16* __restrict__ out,
+                                           int64_t n,
+                                           int64_t sq,
+                                           int64_t sk,
+                                           float fill_value) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    int64_t col = idx % sk;
+    int64_t row = (idx / sk) % sq;
+    int64_t allowed = row + (sk - sq);
+    out[idx] = (col > allowed) ? __float2bfloat16(fill_value) : x[idx];
+}
+
+__global__ void kiln_causal_mask_fill_f16(const __half* __restrict__ x,
+                                          __half* __restrict__ out,
+                                          int64_t n,
+                                          int64_t sq,
+                                          int64_t sk,
+                                          float fill_value) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    int64_t col = idx % sk;
+    int64_t row = (idx / sk) % sq;
+    int64_t allowed = row + (sk - sq);
+    out[idx] = (col > allowed) ? __float2half(fill_value) : x[idx];
+}
+
+extern "C" int kiln_causal_mask_fill_async(const void* x,
+                                           void* out,
+                                           int64_t n_elements,
+                                           int64_t sq,
+                                           int64_t sk,
+                                           float fill_value,
+                                           int dtype,
+                                           cudaStream_t stream) {
+    if (n_elements < 0 || sq <= 0 || sk <= 0) return 1;
+    if (n_elements == 0) return 0;
+
+    int64_t blocks_i64 = (n_elements + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    if (blocks_i64 > (int64_t)2147483647) return 3;
+    int blocks = static_cast<int>(blocks_i64);
+
+    switch (dtype) {
+        case DTYPE_F32:
+            kiln_causal_mask_fill_f32<<<blocks, BLOCK_SIZE, 0, stream>>>(
+                static_cast<const float*>(x),
+                static_cast<float*>(out),
+                n_elements,
+                sq,
+                sk,
+                fill_value);
+            break;
+        case DTYPE_BF16:
+            kiln_causal_mask_fill_bf16<<<blocks, BLOCK_SIZE, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(x),
+                static_cast<__nv_bfloat16*>(out),
+                n_elements,
+                sq,
+                sk,
+                fill_value);
+            break;
+        case DTYPE_F16:
+            kiln_causal_mask_fill_f16<<<blocks, BLOCK_SIZE, 0, stream>>>(
+                static_cast<const __half*>(x),
+                static_cast<__half*>(out),
+                n_elements,
+                sq,
+                sk,
+                fill_value);
+            break;
+        default:
+            return 4;
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return 1000 + static_cast<int>(err);
+    return 0;
+}

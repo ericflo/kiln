@@ -39,6 +39,13 @@ struct GrpoSubmissionStats {
     streaming_dataset: bool,
 }
 
+struct SftSubmissionStats {
+    num_examples: usize,
+    max_seq_len: usize,
+    max_supervised_tokens: usize,
+    streaming_dataset: bool,
+}
+
 struct PreflightAdmission {
     reserved_bytes: u64,
     checkpoint_segments: Option<usize>,
@@ -82,6 +89,31 @@ fn training_activation_bytes_per_elem(
     }
 }
 
+fn training_activation_estimate_for_runtime_device(
+    base: usize,
+    uses_f32_activations: bool,
+    has_linear_attention: bool,
+    runtime_device: kiln_tensor::Device,
+    max_seq_len: usize,
+) -> TrainingActivationEstimate {
+    // Mirror kiln-train's GDN tape sizing. The server stamps resolved
+    // checkpoint segments at submission time, so an optimistic bf16-only
+    // preflight would bypass the trainer's more conservative auto-tuner.
+    let bytes_per_elem =
+        training_activation_bytes_per_elem(base, uses_f32_activations, has_linear_attention);
+    let streaming_gdn_tile_tokens = if has_linear_attention {
+        kiln_model::forward::streaming_prefill_enabled_for(&runtime_device, max_seq_len)
+            .then(|| kiln_model::forward::tape_streaming_tile_tokens_for(&runtime_device))
+            .filter(|&tile| tile > 0 && tile < max_seq_len)
+    } else {
+        None
+    };
+    TrainingActivationEstimate {
+        bytes_per_elem,
+        streaming_gdn_tile_tokens,
+    }
+}
+
 fn training_activation_estimate_for_state(
     state: &AppState,
     max_seq_len: usize,
@@ -102,32 +134,22 @@ fn training_activation_estimate_for_state(
             streaming_gdn_tile_tokens: None,
         };
     };
-    let has_linear_attention = runner
-        .weights
-        .linear_attention_layers_in_prefix(runner.config.num_layers)
-        > 0;
-    // Mirror kiln-train's GDN tape sizing. The server stamps resolved
-    // checkpoint segments at submission time, so an optimistic bf16-only
-    // preflight would bypass the trainer's more conservative auto-tuner.
-    let bytes_per_elem = training_activation_bytes_per_elem(
+    let capabilities = runner.backend_capabilities();
+    let has_linear_attention = state.model_config.num_full_attention_layers
+        < state.model_config.num_layers
+        || runner
+            .weights
+            .linear_attention_layers_in_prefix(runner.config.num_layers)
+            > 0;
+    training_activation_estimate_for_runtime_device(
         base,
         runner
             .training_precision_policy()
             .uses_f32_activations_for_mixed_base_weights(),
         has_linear_attention,
-    );
-    let streaming_gdn_tile_tokens = if has_linear_attention {
-        let device = runner.weights.device_kt();
-        kiln_model::forward::streaming_prefill_enabled_for(&device, max_seq_len)
-            .then(|| kiln_model::forward::tape_streaming_tile_tokens_for(&device))
-            .filter(|&tile| tile > 0 && tile < max_seq_len)
-    } else {
-        None
-    };
-    TrainingActivationEstimate {
-        bytes_per_elem,
-        streaming_gdn_tile_tokens,
-    }
+        capabilities.device,
+        max_seq_len,
+    )
 }
 
 fn checkpoint_env_override_present() -> bool {
@@ -147,6 +169,17 @@ fn effective_checkpoint_segments(config: kiln_train::CheckpointConfig) -> usize 
     } else {
         1
     }
+}
+
+fn auto_mode_reservation_segments(
+    cfg: &kiln_core::config::ModelConfig,
+    fit_segments: usize,
+) -> usize {
+    // Auto mode resolves the real checkpoint plan per example/group in
+    // kiln-train. Queue admission only needs a conservative reservation for
+    // the largest submitted row, so reserve the most checkpointed shape the
+    // shared trainer can use instead of pinning every row to that plan.
+    cfg.num_layers.max(fit_segments).max(1)
 }
 
 fn combine_training_available_bytes(
@@ -409,9 +442,34 @@ fn enforce_training_preflight(
         );
         return Err(ApiError::training_will_not_fit(msg));
     }
+    let checkpoint_segments = if vk_native_recompute || checkpoint_env_override {
+        Some(num_segments)
+    } else {
+        None
+    };
+    let reserved_bytes = if vk_native_recompute || checkpoint_env_override {
+        estimate.total_bytes
+    } else {
+        let reservation_segments =
+            auto_mode_reservation_segments(&state.model_config, num_segments);
+        if reservation_segments == num_segments {
+            estimate.total_bytes
+        } else {
+            estimate_step_working_set_with_options(
+                &state.model_config,
+                max_seq_len,
+                lora_rank,
+                reservation_segments,
+                residency,
+                weights_already_resident,
+                options,
+            )
+            .total_bytes
+        }
+    };
     Ok(PreflightAdmission {
-        reserved_bytes: estimate.total_bytes,
-        checkpoint_segments: Some(num_segments),
+        reserved_bytes,
+        checkpoint_segments,
     })
 }
 
@@ -518,11 +576,28 @@ async fn submit_sft(
     // to trained_into ON COMPLETION — a failed job leaves the basket
     // intact and re-trainable.
     let mut consumed_correction_ids: Vec<String> = Vec::new();
+    if let Some(path) = req.dataset_path.take() {
+        let path = path.trim().to_string();
+        if !path.is_empty() {
+            req.dataset_path = Some(path);
+        }
+    }
+    if req.dataset_path.is_some() && (!req.examples.is_empty() || req.dataset.is_some()) {
+        return Err(ApiError::training_invalid_request(
+            "SFT request must use exactly one of examples, dataset_path, or dataset",
+        ));
+    }
+    if req.dataset_path.is_none() && req.examples.is_empty() && req.dataset.is_none() {
+        return Err(ApiError::training_invalid_request(
+            "SFT request needs examples, dataset_path, or dataset",
+        ));
+    }
+
     if req.dataset.as_deref() == Some("corrections:active") {
         req.dataset = None;
         if !req.examples.is_empty() {
             return Err(ApiError::training_invalid_request(
-                "SFT request must use either examples or dataset, not both",
+                "SFT request must use exactly one of examples, dataset_path, or dataset",
             ));
         }
         let store = super::corrections::CorrectionsStore::for_state(&state);
@@ -544,7 +619,7 @@ async fn submit_sft(
     if let Some(dataset_name) = req.dataset.take() {
         if !req.examples.is_empty() {
             return Err(ApiError::training_invalid_request(
-                "SFT request must use either examples or dataset, not both",
+                "SFT request must use exactly one of examples, dataset_path, or dataset",
             ));
         }
         let registry = state
@@ -576,7 +651,36 @@ async fn submit_sft(
         }
     }
 
-    let num_examples = req.examples.len();
+    let stats = if let Some(path) = req.dataset_path.as_deref() {
+        let path = Path::new(path);
+        let stats = crate::sft_dataset::scan_sft_jsonl_stats(path, Some(state.tokenizer.as_ref()))
+            .map_err(|e| {
+                ApiError::training_invalid_request(format!(
+                    "invalid SFT dataset_path '{}': {e:#}",
+                    path.display()
+                ))
+            })?;
+        SftSubmissionStats {
+            num_examples: stats.examples,
+            max_seq_len: stats.max_seq_len,
+            max_supervised_tokens: stats.max_supervised_tokens,
+            streaming_dataset: true,
+        }
+    } else {
+        SftSubmissionStats {
+            num_examples: req.examples.len(),
+            max_seq_len: training_preflight::approximate_max_seq_len_sft(
+                &req.examples,
+                Some(state.tokenizer.as_ref()),
+            ),
+            max_supervised_tokens: training_preflight::approximate_max_supervised_tokens_sft(
+                &req.examples,
+                Some(state.tokenizer.as_ref()),
+            ),
+            streaming_dataset: false,
+        }
+    };
+    let num_examples = stats.num_examples;
     let job_id = uuid::Uuid::new_v4().to_string();
     if let Some(name) = req.config.output_name.as_deref() {
         super::adapters::validate_adapter_name(name)?;
@@ -601,14 +705,8 @@ async fn submit_sft(
     // Working-set preflight: refuse jobs that won't fit in the
     // corrected memory budget. Better than OOM-killing the server
     // partway through the first step.
-    let max_seq_len = training_preflight::approximate_max_seq_len_sft(
-        &req.examples,
-        Some(state.tokenizer.as_ref()),
-    );
-    let max_supervised_tokens = training_preflight::approximate_max_supervised_tokens_sft(
-        &req.examples,
-        Some(state.tokenizer.as_ref()),
-    );
+    let max_seq_len = stats.max_seq_len;
+    let max_supervised_tokens = stats.max_supervised_tokens;
     let admission = enforce_training_preflight(
         &state,
         max_seq_len,
@@ -633,6 +731,8 @@ async fn submit_sft(
         job_id = %job_id,
         adapter = %adapter_name,
         max_seq_len,
+        dataset_path = req.dataset_path.as_deref().unwrap_or(""),
+        streaming_dataset = stats.streaming_dataset,
         "SFT training request queued"
     );
 
@@ -803,7 +903,12 @@ async fn submit_grpo(
     let admission = enforce_training_preflight(
         &state,
         max_seq_len,
-        EstimateOptions::default(),
+        EstimateOptions {
+            recompute_boundaries: training_preflight::recompute_checkpoint_boundaries_for_seq_len(
+                max_seq_len,
+            ),
+            ..Default::default()
+        },
         req.config.lora_rank,
         false,
     )?;
@@ -1962,6 +2067,9 @@ mod tests {
     use super::*;
     use kiln_train::opd::{OpdConfig, OpdPrompt};
     use kiln_train::{ChatMessage, GrpoConfig, OpdLossGranularity, ScoredCompletion};
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn grpo_group() -> GrpoGroup {
         GrpoGroup {
@@ -1992,6 +2100,56 @@ mod tests {
         assert_eq!(training_activation_bytes_per_elem(2, false, false), 2);
         assert_eq!(training_activation_bytes_per_elem(2, false, true), 10);
         assert_eq!(training_activation_bytes_per_elem(2, true, true), 4);
+    }
+
+    #[test]
+    fn server_preflight_streaming_policy_uses_runtime_backend_device() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior_streaming = std::env::var("KILN_STREAMING_PREFILL").ok();
+        let prior_streaming_tile = std::env::var("KILN_STREAMING_TILE_TOKENS").ok();
+        let prior_tape_tile = std::env::var("KILN_TAPE_STREAMING_TILE_TOKENS").ok();
+        unsafe {
+            std::env::remove_var("KILN_STREAMING_PREFILL");
+            std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
+            std::env::remove_var("KILN_TAPE_STREAMING_TILE_TOKENS");
+        }
+
+        let max_seq_len = 104_412;
+        let rocm = training_activation_estimate_for_runtime_device(
+            2,
+            false,
+            true,
+            kiln_tensor::Device::Rocm(0),
+            max_seq_len,
+        );
+        let cpu_storage = training_activation_estimate_for_runtime_device(
+            2,
+            false,
+            true,
+            kiln_tensor::Device::Cpu,
+            max_seq_len,
+        );
+
+        unsafe {
+            if let Some(value) = prior_streaming {
+                std::env::set_var("KILN_STREAMING_PREFILL", value);
+            } else {
+                std::env::remove_var("KILN_STREAMING_PREFILL");
+            }
+            if let Some(value) = prior_streaming_tile {
+                std::env::set_var("KILN_STREAMING_TILE_TOKENS", value);
+            } else {
+                std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
+            }
+            if let Some(value) = prior_tape_tile {
+                std::env::set_var("KILN_TAPE_STREAMING_TILE_TOKENS", value);
+            } else {
+                std::env::remove_var("KILN_TAPE_STREAMING_TILE_TOKENS");
+            }
+        }
+
+        assert_eq!(rocm.streaming_gdn_tile_tokens, Some(1024));
+        assert_eq!(cpu_storage.streaming_gdn_tile_tokens, None);
     }
 
     #[test]
@@ -2039,6 +2197,50 @@ mod tests {
                 VramSource::NvidiaSmi,
             ),
             119 * gb
+        );
+    }
+
+    #[test]
+    fn auto_mode_reservation_uses_max_checkpointed_shape_for_long_rows() {
+        let cfg = kiln_core::config::ModelConfig::qwen3_5_4b();
+        let gb = 1024 * 1024 * 1024;
+        let vram = kiln_memory::vram::GpuVramInfo {
+            total_bytes: 120 * gb,
+            source: VramSource::LinuxDrmSysfsUnified,
+        };
+        let options = EstimateOptions {
+            max_supervised_tokens: Some(512),
+            recompute_boundaries: true,
+            activation_bytes_per_elem: Some(10),
+            streaming_gdn_tile_tokens: Some(1024),
+        };
+        let max_seq_len = 104_412;
+        let one_segment = training_preflight::estimate_step_working_set_with_options(
+            &cfg,
+            max_seq_len,
+            8,
+            1,
+            WeightResidency::for_vram_source(vram.source),
+            true,
+            options,
+        );
+        let reservation_segments = auto_mode_reservation_segments(&cfg, 1);
+        assert_eq!(
+            reservation_segments, cfg.num_layers,
+            "auto-mode queue accounting should reserve the largest row with maximum checkpointing"
+        );
+        let reserved = training_preflight::estimate_step_working_set_with_options(
+            &cfg,
+            max_seq_len,
+            8,
+            reservation_segments,
+            WeightResidency::for_vram_source(vram.source),
+            true,
+            options,
+        );
+        assert!(
+            reserved.total_bytes < one_segment.total_bytes,
+            "reservation should shrink when runtime-style checkpointing engages"
         );
     }
 

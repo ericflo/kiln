@@ -2017,29 +2017,37 @@ pub async fn run_train_sft(
     lora_rank: Option<usize>,
     adapter_smoke_test: bool,
 ) -> anyhow::Result<()> {
-    let content =
-        std::fs::read_to_string(file).map_err(|e| anyhow::anyhow!("Failed to read {file}: {e}"))?;
+    let body = if is_sft_jsonl_path(file) {
+        println!(
+            "{} Submitting SFT JSONL dataset_path for adapter '{}'",
+            style("→").cyan().bold(),
+            style(adapter).white().bold()
+        );
+        build_sft_jsonl_training_payload(file, adapter, lr, epochs, lora_rank, adapter_smoke_test)?
+    } else {
+        let content = std::fs::read_to_string(file)
+            .map_err(|e| anyhow::anyhow!("Failed to read {file}: {e}"))?;
 
-    let mut examples = Vec::new();
-    for (i, line) in content.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
+        let mut examples = Vec::new();
+        for (i, line) in content.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let val: serde_json::Value = serde_json::from_str(line)
+                .map_err(|e| anyhow::anyhow!("Invalid JSON on line {}: {e}", i + 1))?;
+            examples.push(val);
         }
-        let val: serde_json::Value = serde_json::from_str(line)
-            .map_err(|e| anyhow::anyhow!("Invalid JSON on line {}: {e}", i + 1))?;
-        examples.push(val);
-    }
 
-    println!(
-        "{} Submitting {} example(s) for SFT training on adapter '{}'",
-        style("→").cyan().bold(),
-        style(examples.len()).white().bold(),
-        style(adapter).white().bold()
-    );
+        println!(
+            "{} Submitting {} example(s) for SFT training on adapter '{}'",
+            style("→").cyan().bold(),
+            style(examples.len()).white().bold(),
+            style(adapter).white().bold()
+        );
 
-    let body =
-        build_sft_training_payload(examples, adapter, lr, epochs, lora_rank, adapter_smoke_test);
+        build_sft_training_payload(examples, adapter, lr, epochs, lora_rank, adapter_smoke_test)
+    };
 
     let client = reqwest::Client::new();
     let resp = client
@@ -2149,6 +2157,47 @@ fn is_grpo_jsonl_path(file: &str) -> bool {
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.eq_ignore_ascii_case("jsonl") || ext.eq_ignore_ascii_case("ndjson"))
         .unwrap_or(false)
+}
+
+fn is_sft_jsonl_path(file: &str) -> bool {
+    std::path::Path::new(file)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("jsonl") || ext.eq_ignore_ascii_case("ndjson"))
+        .unwrap_or(false)
+}
+
+fn build_sft_jsonl_training_payload(
+    file: &str,
+    adapter: &str,
+    lr: Option<f64>,
+    epochs: u32,
+    lora_rank: Option<usize>,
+    adapter_smoke_test: bool,
+) -> anyhow::Result<serde_json::Value> {
+    let dataset_path = std::fs::canonicalize(file)
+        .map_err(|e| anyhow::anyhow!("Failed to resolve SFT JSONL file {file}: {e}"))?;
+    let dataset_path = dataset_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("SFT JSONL path is not valid UTF-8: {file}"))?
+        .to_string();
+    let mut config = serde_json::json!({
+        "output_name": adapter,
+        "epochs": epochs,
+    });
+    if let Some(lr) = lr {
+        config["learning_rate"] = serde_json::json!(lr);
+    }
+    if let Some(rank) = lora_rank {
+        config["lora_rank"] = serde_json::json!(rank);
+    }
+    if adapter_smoke_test {
+        config["adapter_smoke_test"] = serde_json::json!(true);
+    }
+    Ok(serde_json::json!({
+        "dataset_path": dataset_path,
+        "config": config,
+    }))
 }
 
 fn build_grpo_jsonl_training_payload(

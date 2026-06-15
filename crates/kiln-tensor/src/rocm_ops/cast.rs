@@ -77,6 +77,11 @@ pub fn rocm_cast(src: &Tensor, target: DType) -> Result<Tensor> {
             "rocm_cast: FFI returned status {status}"
         )));
     }
+    crate::rocm_synchronize_compute_stream(device_index).map_err(|e| {
+        Error::Msg(format!(
+            "rocm_cast: synchronize after async kernel launch: {e}"
+        ))
+    })?;
 
     let storage_arc: crate::Storage = Arc::new(dst_storage);
     Tensor::from_parts(

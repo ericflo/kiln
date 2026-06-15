@@ -21,6 +21,21 @@ unsafe extern "C" {
         cs_dtype: i32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_rope_split_half_4d_async(
+        x_in: *const core::ffi::c_void,
+        x_out: *mut core::ffi::c_void,
+        cos: *const core::ffi::c_void,
+        sin: *const core::ffi::c_void,
+        batch: i64,
+        seq: i64,
+        heads: i64,
+        head_dim: i64,
+        rotary_dim: i64,
+        x_dtype: i32,
+        cs_dtype: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 /// Rotary position embedding over a contiguous ROCm tensor. ROCm analog of
@@ -193,4 +208,162 @@ pub fn rocm_rope(x: &Tensor, cos: &Tensor, sin: &Tensor, rotary_dim: usize) -> R
         TensorId::next(),
     )
     .map_err(|e| Error::Msg(format!("rocm_rope: wrap: {e}")))
+}
+
+/// ROCm split-half/GPT-NeoX RoPE for `[batch, seq, heads, head_dim]` tensors.
+pub fn rocm_rope_split_half(
+    x: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    rotary_dim: usize,
+) -> Result<Tensor> {
+    if x.rank() != 4 {
+        return Err(Error::Msg(format!(
+            "rocm_rope_split_half: x must be rank-4 [batch, seq, heads, head_dim], got {:?}",
+            x.shape()
+        )));
+    }
+    if cos.rank() != 2 || sin.rank() != 2 {
+        return Err(Error::Msg(format!(
+            "rocm_rope_split_half: cos / sin must be rank-2, got cos={:?} sin={:?}",
+            cos.shape(),
+            sin.shape()
+        )));
+    }
+    if cos.shape() != sin.shape() {
+        return Err(Error::Msg(format!(
+            "rocm_rope_split_half: cos / sin shape mismatch {:?} vs {:?}",
+            cos.shape(),
+            sin.shape()
+        )));
+    }
+    if cos.dtype() != sin.dtype() {
+        return Err(Error::Msg(format!(
+            "rocm_rope_split_half: cos / sin dtype mismatch {} vs {}",
+            cos.dtype(),
+            sin.dtype()
+        )));
+    }
+    let shape = x.shape();
+    let (batch, seq, heads, head_dim) = (shape[0], shape[1], shape[2], shape[3]);
+    if cos.shape()[0] != seq {
+        return Err(Error::Msg(format!(
+            "rocm_rope_split_half: cos.shape[0] ({}) != x seq ({seq})",
+            cos.shape()[0]
+        )));
+    }
+    if rotary_dim == 0 || !rotary_dim.is_multiple_of(2) {
+        return Err(Error::Msg(format!(
+            "rocm_rope_split_half: rotary_dim must be positive and even, got {rotary_dim}"
+        )));
+    }
+    if rotary_dim > head_dim {
+        return Err(Error::Msg(format!(
+            "rocm_rope_split_half: rotary_dim ({rotary_dim}) > head_dim ({head_dim})"
+        )));
+    }
+    if cos.shape()[1] * 2 != rotary_dim {
+        return Err(Error::Msg(format!(
+            "rocm_rope_split_half: cos.shape[1] ({}) * 2 != rotary_dim ({rotary_dim})",
+            cos.shape()[1]
+        )));
+    }
+    if !x.is_contiguous() || !cos.is_contiguous() || !sin.is_contiguous() {
+        return Err(Error::Msg(
+            "rocm_rope_split_half: contiguous inputs required".to_string(),
+        ));
+    }
+    if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+        return Err(Error::Msg(format!(
+            "rocm_rope_split_half: x dtype must be F32/BF16/F16, got {}",
+            x.dtype()
+        )));
+    }
+    if !matches!(cos.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+        return Err(Error::Msg(format!(
+            "rocm_rope_split_half: cos / sin dtype must be F32/BF16/F16, got {}",
+            cos.dtype()
+        )));
+    }
+
+    let x_dtype = x.dtype();
+    let cs_dtype = cos.dtype();
+    let x_dtype_tag: i32 = match x_dtype {
+        DType::F32 => 0,
+        DType::BF16 => 1,
+        DType::F16 => 2,
+        _ => unreachable!(),
+    };
+    let cs_dtype_tag: i32 = match cs_dtype {
+        DType::F32 => 0,
+        DType::BF16 => 1,
+        DType::F16 => 2,
+        _ => unreachable!(),
+    };
+
+    let x_storage = x
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| Error::Msg("rocm_rope_split_half: x must be ROCm".to_string()))?;
+    let cos_storage = cos
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| Error::Msg("rocm_rope_split_half: cos must be ROCm".to_string()))?;
+    let sin_storage = sin
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| Error::Msg("rocm_rope_split_half: sin must be ROCm".to_string()))?;
+
+    let ctx = x_storage.context();
+    let device_index = match x.device() {
+        Device::Rocm(i) => i,
+        _ => unreachable!("rocm_rope_split_half: x.device() must be Rocm"),
+    };
+    let out_storage =
+        RocmStorage::alloc_uninit_ctx(&ctx, device_index, x_dtype, x.element_count())?;
+
+    let raw_stream = x_storage.rocm_stream_raw();
+    let (x_base, _) = x_storage.device_ptr_raw();
+    let (cos_base, _) = cos_storage.device_ptr_raw();
+    let (sin_base, _) = sin_storage.device_ptr_raw();
+    let (out_base, _) = out_storage.device_ptr_raw();
+
+    let x_bpe = x_dtype.size_in_bytes();
+    let cs_bpe = cs_dtype.size_in_bytes();
+    let x_off = (x.layout().start_offset() * x_bpe) as u64;
+    let cos_off = (cos.layout().start_offset() * cs_bpe) as u64;
+    let sin_off = (sin.layout().start_offset() * cs_bpe) as u64;
+
+    let status = unsafe {
+        kiln_rope_split_half_4d_async(
+            (x_base + x_off) as *const _,
+            out_base as *mut _,
+            (cos_base + cos_off) as *const _,
+            (sin_base + sin_off) as *const _,
+            batch as i64,
+            seq as i64,
+            heads as i64,
+            head_dim as i64,
+            rotary_dim as i64,
+            x_dtype_tag,
+            cs_dtype_tag,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(Error::Msg(format!(
+            "rocm_rope_split_half: FFI returned status {status}"
+        )));
+    }
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    Tensor::from_parts(
+        storage_arc,
+        Layout::contiguous(x.shape().to_vec()),
+        TensorId::next(),
+    )
+    .map_err(|e| Error::Msg(format!("rocm_rope_split_half: wrap: {e}")))
 }

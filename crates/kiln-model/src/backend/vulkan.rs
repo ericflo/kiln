@@ -681,6 +681,15 @@ impl GdnBackend for VulkanBackend {
         vulkan_gdn::gdn_forward_substitution(self, a_strict, v_prime, beta)
     }
 
+    fn runtime_gdn_solve_tri_transpose(
+        &self,
+        a_strict: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        dw: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        vulkan_gdn::gdn_solve_tri_transpose(self, a_strict, beta, dw)
+    }
+
     fn runtime_gdn_recurrent_prefill_native_head_last(
         &self,
         q: &kiln_tensor::Tensor,

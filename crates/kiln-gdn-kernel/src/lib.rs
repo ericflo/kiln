@@ -88,13 +88,13 @@ pub use kt_api::{
     gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vbf16_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16_kt,
-    gdn_decode_qk_norm_gates_recurrent_vf32_bf16_kt, gdn_forward_substitution_kt,
-    gdn_full_chunk_forward_kt, gdn_full_chunk_forward_multiblock_kt,
+    gdn_decode_qk_norm_gates_recurrent_vf32_bf16_kt, gdn_forward_substitution_f32_kt,
+    gdn_forward_substitution_kt, gdn_full_chunk_forward_kt, gdn_full_chunk_forward_multiblock_kt,
     gdn_gated_rms_norm_bf16_f32_weight_kt, gdn_gated_rms_norm_bf16_kt,
     gdn_gated_rms_norm_bwd_bf16_f32_weight_kt, gdn_gated_rms_norm_bwd_bf16_kt,
     gdn_gated_rms_norm_bwd_supports_kt, gdn_gates_bf16_f32_bf16_params_kt,
     gdn_gates_bf16_f32_params_kt, gdn_gates_bf16_kt, gdn_l2_norm_scale_bwd_bf16_kt,
-    gdn_l2_norm_scale_bwd_supports_kt, gdn_recurrent_forward_kt,
+    gdn_l2_norm_scale_bwd_supports_kt, gdn_recurrent_forward_kt, gdn_solve_tri_transpose_f32_kt,
 };
 
 // The device-launching FFI symbols are provided by build.rs (nvcc under
@@ -108,6 +108,28 @@ unsafe extern "C" {
         v_prime: *const core::ffi::c_void,
         beta: *const core::ffi::c_void,
         w_out: *mut core::ffi::c_void,
+        batch_heads: i32,
+        chunk_size: i32,
+        dv: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_gdn_forward_substitution_f32(
+        a_strict: *const core::ffi::c_void,
+        v_prime: *const core::ffi::c_void,
+        beta: *const core::ffi::c_void,
+        w_out: *mut core::ffi::c_void,
+        batch_heads: i32,
+        chunk_size: i32,
+        dv: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_gdn_solve_tri_transpose_f32(
+        a_strict: *const core::ffi::c_void,
+        beta: *const core::ffi::c_void,
+        dw: *const core::ffi::c_void,
+        dr_out: *mut core::ffi::c_void,
         batch_heads: i32,
         chunk_size: i32,
         dv: i32,

@@ -580,6 +580,32 @@ impl RocmStream {
             "hipMemcpyDtoDAsync",
         )
     }
+
+    /// Async D2D copy between caller-supplied raw device pointers, WITHOUT a
+    /// trailing synchronize. The copy is queued on this stream and ordered with
+    /// subsequent work on the same stream.
+    ///
+    /// # Safety
+    /// `dst` and `src` must each point to at least `len` bytes of live device
+    /// allocations reachable from this stream's device. The regions must not
+    /// overlap in a way that violates HIP memcpy requirements.
+    pub unsafe fn memcpy_dtod_raw_async(
+        &self,
+        dst: *mut c_void,
+        src: *const c_void,
+        len: usize,
+    ) -> Result<()> {
+        if len == 0 {
+            return Ok(());
+        }
+        self.bind()?;
+        // SAFETY: caller guarantees both raw pointers address >= len live
+        // device bytes on this stream's device.
+        check(
+            unsafe { sys::hipMemcpyDtoDAsync(dst, src as *mut c_void, len, self.handle) },
+            "hipMemcpyDtoDAsync",
+        )
+    }
 }
 
 impl Drop for RocmStream {

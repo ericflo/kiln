@@ -110,6 +110,11 @@ pub fn rocm_elementwise_binary(a: &Tensor, b: &Tensor, kind: i32) -> Result<Tens
             "rocm_elementwise_binary: FFI returned status {status}"
         )));
     }
+    crate::rocm_synchronize_compute_stream(device_index).map_err(|e| {
+        Error::Msg(format!(
+            "rocm_elementwise_binary: synchronize after async kernel launch: {e}"
+        ))
+    })?;
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
     Tensor::from_parts(

@@ -14,10 +14,14 @@
 
 use half::bf16;
 use kiln_flash_attn::{
-    flash_attn_fwd_kt, flash_attn_paged_decode_dyn_seqlen_kt, flash_attn_paged_decode_kt,
+    flash_attn_bwd_kt, flash_attn_fwd_kt, flash_attn_fwd_no_lse_kt,
+    flash_attn_paged_decode_dyn_seqlen_kt, flash_attn_paged_decode_kt,
     paged_kv_write_token_major_bf16_kt,
 };
 use kiln_tensor::{DType, Device, Tensor};
+use std::sync::Mutex;
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn no_rocm() -> bool {
     if !kiln_tensor::rocm_is_available() {
@@ -117,6 +121,99 @@ fn cpu_sdpa(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
+fn cpu_sdpa_bwd_expanded_gqa(
+    dout: &[f32],
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    out: &[f32],
+    b: usize,
+    sq: usize,
+    sk: usize,
+    h: usize,
+    hk: usize,
+    d: usize,
+    scale: f32,
+    causal: bool,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let group = h / hk;
+    let mut dq = vec![0.0f32; b * sq * h * d];
+    let mut dk = vec![0.0f32; b * sk * h * d];
+    let mut dv = vec![0.0f32; b * sk * h * d];
+    let offset = sk as isize - sq as isize;
+
+    for bi in 0..b {
+        for hi in 0..h {
+            let hki = hi / group;
+            for si in 0..sq {
+                let last_allowed = si as isize + offset;
+                let mut scores = vec![f32::NEG_INFINITY; sk];
+                let mut maxv = f32::NEG_INFINITY;
+                for sj in 0..sk {
+                    if causal && (sj as isize) > last_allowed {
+                        continue;
+                    }
+                    let mut acc = 0.0f32;
+                    for di in 0..d {
+                        let qv = q[((bi * sq + si) * h + hi) * d + di];
+                        let kv = k[((bi * sk + sj) * hk + hki) * d + di];
+                        acc += qv * kv;
+                    }
+                    let score = acc * scale;
+                    scores[sj] = score;
+                    maxv = maxv.max(score);
+                }
+
+                let mut denom = 0.0f32;
+                let mut probs = vec![0.0f32; sk];
+                for sj in 0..sk {
+                    if scores[sj].is_finite() {
+                        let p = (scores[sj] - maxv).exp();
+                        probs[sj] = p;
+                        denom += p;
+                    }
+                }
+                if denom > 0.0 {
+                    for p in &mut probs {
+                        *p /= denom;
+                    }
+                }
+
+                let mut d_i = 0.0f32;
+                for di in 0..d {
+                    let idx = ((bi * sq + si) * h + hi) * d + di;
+                    d_i += dout[idx] * out[idx];
+                }
+
+                for sj in 0..sk {
+                    let p = probs[sj];
+                    if p == 0.0 {
+                        continue;
+                    }
+                    let mut dp = 0.0f32;
+                    for di in 0..d {
+                        let do_idx = ((bi * sq + si) * h + hi) * d + di;
+                        let v_idx = ((bi * sk + sj) * hk + hki) * d + di;
+                        dp += dout[do_idx] * v[v_idx];
+                    }
+                    let ds = p * (dp - d_i) * scale;
+                    for di in 0..d {
+                        let q_idx = ((bi * sq + si) * h + hi) * d + di;
+                        let k_idx = ((bi * sk + sj) * hk + hki) * d + di;
+                        let expanded_idx = ((bi * sk + sj) * h + hi) * d + di;
+                        dq[q_idx] += ds * k[k_idx];
+                        dk[expanded_idx] += ds * q[q_idx];
+                        dv[expanded_idx] += p * dout[q_idx];
+                    }
+                }
+            }
+        }
+    }
+
+    (dq, dk, dv)
+}
+
 fn check_close(got: &[f32], want: &[f32], rtol: f32, atol: f32, label: &str) {
     assert_eq!(got.len(), want.len(), "{label}: length mismatch");
     let mut worst = 0.0f32;
@@ -149,6 +246,59 @@ fn bf16_to_f32(t: &Tensor) -> Vec<f32> {
         .into_iter()
         .map(|x| x.to_f32())
         .collect()
+}
+
+fn rocm_sync() {
+    kiln_tensor::rocm_synchronize_default_stream(0).expect("rocm sync");
+}
+
+fn with_env_vars<R>(vars: &[(&str, &str)], f: impl FnOnce() -> R) -> R {
+    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let old: Vec<(&str, Option<String>)> = vars
+        .iter()
+        .map(|(k, _)| (*k, std::env::var(k).ok()))
+        .collect();
+    for (k, v) in vars {
+        unsafe { std::env::set_var(k, v) };
+    }
+    let result = f();
+    for (k, v) in old {
+        match v {
+            Some(v) => unsafe { std::env::set_var(k, v) },
+            None => unsafe { std::env::remove_var(k) },
+        }
+    }
+    result
+}
+
+#[test]
+fn flash_attn_fwd_no_lse_matches_fwd_output() {
+    if no_rocm() {
+        return;
+    }
+    let b = 1usize;
+    let sq = 64usize;
+    let sk = 64usize;
+    let h = 16usize;
+    let hk = 4usize;
+    let d = 256usize;
+    let scale = 1.0 / (d as f32).sqrt();
+    let causal = true;
+
+    let qd = fill_bf16(b * sq * h * d, 1001);
+    let kd = fill_bf16(b * sk * hk * d, 1002);
+    let vd = fill_bf16(b * sk * hk * d, 1003);
+    let q = rocm_bf16(&qd, vec![b, sq, h, d]);
+    let k = rocm_bf16(&kd, vec![b, sk, hk, d]);
+    let v = rocm_bf16(&vd, vec![b, sk, hk, d]);
+
+    let (out, _lse) = flash_attn_fwd_kt(&q, &k, &v, scale, causal).expect("fwd with lse");
+    let out_no_lse = flash_attn_fwd_no_lse_kt(&q, &k, &v, scale, causal)
+        .expect("fwd no-lse")
+        .expect("rocm no-lse should provide an output");
+    let got = bf16_to_f32(&out_no_lse);
+    let want = bf16_to_f32(&out);
+    check_close(&got, &want, 0.0, 0.0, "no-lse output");
 }
 
 #[test]
@@ -239,6 +389,334 @@ fn flash_attn_fwd_parity_cross_attn_sk_ne_sq() {
             );
         }
     }
+}
+
+#[test]
+fn flash_attn_fwd_keysplit_hd256_long_parity() {
+    if no_rocm() {
+        return;
+    }
+    let b = 1usize;
+    let h = 2usize;
+    let hk = 1usize;
+    let d = 256usize;
+    let sq = 17usize;
+    let sk = 512usize;
+    let scale = 1.0 / (d as f32).sqrt();
+
+    for &causal in &[false, true] {
+        let qd = fill_bf16(b * sq * h * d, 101 + causal as usize);
+        let kd = fill_bf16(b * sk * hk * d, 211 + causal as usize);
+        let vd = fill_bf16(b * sk * hk * d, 307 + causal as usize);
+
+        let q = rocm_bf16(&qd, vec![b, sq, h, d]);
+        let k = rocm_bf16(&kd, vec![b, sk, hk, d]);
+        let v = rocm_bf16(&vd, vec![b, sk, hk, d]);
+
+        let (out_t, lse_t) = flash_attn_fwd_kt(&q, &k, &v, scale, causal)
+            .unwrap_or_else(|e| panic!("keysplit hd256 causal={causal}: {e}"));
+        assert_eq!(out_t.shape(), &[b, sq, h, d]);
+        assert_eq!(lse_t.shape(), &[b, h, sq]);
+        assert_eq!(lse_t.dtype(), DType::F32);
+
+        let qf: Vec<f32> = qd.iter().map(|x| x.to_f32()).collect();
+        let kf: Vec<f32> = kd.iter().map(|x| x.to_f32()).collect();
+        let vf: Vec<f32> = vd.iter().map(|x| x.to_f32()).collect();
+        let want = cpu_sdpa(&qf, &kf, &vf, b, sq, sk, h, hk, d, scale, causal);
+        let got = bf16_to_f32(&out_t);
+        check_close(
+            &got,
+            &want,
+            2e-2,
+            2e-2,
+            &format!("keysplit hd256 causal={causal}"),
+        );
+    }
+}
+
+#[test]
+fn flash_attn_fwd_native_rectangular_query_tiled_parity() {
+    if no_rocm() {
+        return;
+    }
+    let b = 1usize;
+    let h = 2usize;
+    let hk = 1usize;
+    let d = 128usize;
+    let sq = 129usize;
+    let sk = 257usize;
+    let scale = 1.0 / (d as f32).sqrt();
+    let causal = true;
+
+    with_env_vars(
+        &[
+            ("KILN_ROCM_FLASH_NATIVE_RECTANGULAR_CAUSAL", "1"),
+            ("KILN_ROCM_FLASH_NATIVE_QUERY_TILE", "64"),
+            ("KILN_ROCM_FLASH_NATIVE_STREAMING", "0"),
+        ],
+        || {
+            let qd = fill_bf16(b * sq * h * d, 701);
+            let kd = fill_bf16(b * sk * hk * d, 709);
+            let vd = fill_bf16(b * sk * hk * d, 719);
+
+            let q = rocm_bf16(&qd, vec![b, sq, h, d]);
+            let k = rocm_bf16(&kd, vec![b, sk, hk, d]);
+            let v = rocm_bf16(&vd, vec![b, sk, hk, d]);
+
+            let (out_t, lse_t) = flash_attn_fwd_kt(&q, &k, &v, scale, causal)
+                .unwrap_or_else(|e| panic!("native rectangular query tiled: {e}"));
+            assert_eq!(out_t.shape(), &[b, sq, h, d]);
+            assert_eq!(lse_t.shape(), &[b, h, sq]);
+
+            let qf: Vec<f32> = qd.iter().map(|x| x.to_f32()).collect();
+            let kf: Vec<f32> = kd.iter().map(|x| x.to_f32()).collect();
+            let vf: Vec<f32> = vd.iter().map(|x| x.to_f32()).collect();
+            let want = cpu_sdpa(&qf, &kf, &vf, b, sq, sk, h, hk, d, scale, causal);
+            let got = bf16_to_f32(&out_t);
+            check_close(&got, &want, 2e-2, 2e-2, "native rectangular query tiled");
+        },
+    );
+}
+
+#[test]
+fn flash_attn_fwd_native_rectangular_streaming_parity() {
+    if no_rocm() {
+        return;
+    }
+    let b = 1usize;
+    let h = 2usize;
+    let hk = 1usize;
+    let d = 128usize;
+    let sq = 129usize;
+    let sk = 257usize;
+    let scale = 1.0 / (d as f32).sqrt();
+    let causal = true;
+
+    with_env_vars(
+        &[
+            ("KILN_ROCM_FLASH_NATIVE_RECTANGULAR_CAUSAL", "1"),
+            ("KILN_ROCM_FLASH_NATIVE_STREAMING_MIN_SEQ", "128"),
+            ("KILN_ROCM_FLASH_NATIVE_QUERY_TILE", "64"),
+            ("KILN_ROCM_FLASH_NATIVE_KEY_TILE", "64"),
+        ],
+        || {
+            let qd = fill_bf16(b * sq * h * d, 809);
+            let kd = fill_bf16(b * sk * hk * d, 811);
+            let vd = fill_bf16(b * sk * hk * d, 821);
+
+            let q = rocm_bf16(&qd, vec![b, sq, h, d]);
+            let k = rocm_bf16(&kd, vec![b, sk, hk, d]);
+            let v = rocm_bf16(&vd, vec![b, sk, hk, d]);
+
+            let (out_t, lse_t) = flash_attn_fwd_kt(&q, &k, &v, scale, causal)
+                .unwrap_or_else(|e| panic!("native rectangular streaming: {e}"));
+            assert_eq!(out_t.shape(), &[b, sq, h, d]);
+            assert_eq!(lse_t.shape(), &[b, h, sq]);
+
+            let qf: Vec<f32> = qd.iter().map(|x| x.to_f32()).collect();
+            let kf: Vec<f32> = kd.iter().map(|x| x.to_f32()).collect();
+            let vf: Vec<f32> = vd.iter().map(|x| x.to_f32()).collect();
+            let want = cpu_sdpa(&qf, &kf, &vf, b, sq, sk, h, hk, d, scale, causal);
+            let got = bf16_to_f32(&out_t);
+            check_close(&got, &want, 2e-2, 2e-2, "native rectangular streaming");
+        },
+    );
+}
+
+#[test]
+fn flash_attn_fwd_online_tiled_parity() {
+    if no_rocm() {
+        return;
+    }
+    let b = 1usize;
+    let h = 2usize;
+    let hk = 1usize;
+    let d = 128usize;
+    let sq = 257usize;
+    let sk = 1024usize;
+    let scale = 1.0 / (d as f32).sqrt();
+
+    with_env_vars(
+        &[
+            ("KILN_ROCM_FLASH_SCORE_BUDGET_MB", "1"),
+            ("KILN_ROCM_FLASH_ONLINE_QUERY_TILE", "512"),
+            ("KILN_ROCM_FLASH_ONLINE_KEY_TILE", "512"),
+        ],
+        || {
+            for &causal in &[false, true] {
+                let qd = fill_bf16(b * sq * h * d, 401 + causal as usize);
+                let kd = fill_bf16(b * sk * hk * d, 503 + causal as usize);
+                let vd = fill_bf16(b * sk * hk * d, 607 + causal as usize);
+
+                let q = rocm_bf16(&qd, vec![b, sq, h, d]);
+                let k = rocm_bf16(&kd, vec![b, sk, hk, d]);
+                let v = rocm_bf16(&vd, vec![b, sk, hk, d]);
+
+                let (out_t, lse_t) = flash_attn_fwd_kt(&q, &k, &v, scale, causal)
+                    .unwrap_or_else(|e| panic!("online tiled causal={causal}: {e}"));
+                assert_eq!(out_t.shape(), &[b, sq, h, d]);
+                assert_eq!(lse_t.shape(), &[b, h, sq]);
+                assert_eq!(lse_t.dtype(), DType::F32);
+
+                let qf: Vec<f32> = qd.iter().map(|x| x.to_f32()).collect();
+                let kf: Vec<f32> = kd.iter().map(|x| x.to_f32()).collect();
+                let vf: Vec<f32> = vd.iter().map(|x| x.to_f32()).collect();
+                let want = cpu_sdpa(&qf, &kf, &vf, b, sq, sk, h, hk, d, scale, causal);
+                let got = bf16_to_f32(&out_t);
+                check_close(
+                    &got,
+                    &want,
+                    2e-2,
+                    2e-2,
+                    &format!("online tiled causal={causal}"),
+                );
+            }
+        },
+    );
+}
+
+#[test]
+fn flash_attn_rocm_long_shape_bench() {
+    if no_rocm() {
+        return;
+    }
+    let Ok(seq_raw) = std::env::var("KILN_ROCM_FLASH_BENCH_SEQ") else {
+        eprintln!("set KILN_ROCM_FLASH_BENCH_SEQ to run the long-shape ROCm bench");
+        return;
+    };
+    let seq = seq_raw
+        .trim()
+        .parse::<usize>()
+        .expect("KILN_ROCM_FLASH_BENCH_SEQ must be usize");
+    if seq == 0 {
+        return;
+    }
+
+    let b = 1usize;
+    let h = std::env::var("KILN_ROCM_FLASH_BENCH_HEADS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(16);
+    let hk = std::env::var("KILN_ROCM_FLASH_BENCH_KV_HEADS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(4);
+    let d = std::env::var("KILN_ROCM_FLASH_BENCH_HEAD_DIM")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(256);
+    let scale = 1.0 / (d as f32).sqrt();
+    let causal = true;
+
+    let qd = fill_bf16(b * seq * h * d, 1701);
+    let kd = fill_bf16(b * seq * hk * d, 1801);
+    let vd = fill_bf16(b * seq * hk * d, 1901);
+    let dod = fill_bf16(b * seq * h * d, 2001);
+
+    let q = rocm_bf16(&qd, vec![b, seq, h, d]);
+    let k = rocm_bf16(&kd, vec![b, seq, hk, d]);
+    let v = rocm_bf16(&vd, vec![b, seq, hk, d]);
+    let dout = rocm_bf16(&dod, vec![b, seq, h, d]);
+
+    rocm_sync();
+    let fwd_start = std::time::Instant::now();
+    let (out_t, lse_t) = flash_attn_fwd_kt(&q, &k, &v, scale, causal)
+        .unwrap_or_else(|e| panic!("long bench fwd seq={seq}: {e}"));
+    rocm_sync();
+    eprintln!(
+        "kiln_flash_bench phase=fwd seq={seq} heads={h} kv_heads={hk} head_dim={d} elapsed_ms={:.3}",
+        fwd_start.elapsed().as_secs_f64() * 1000.0
+    );
+
+    let bwd_start = std::time::Instant::now();
+    let (dq, dk, dv) = flash_attn_bwd_kt(&dout, &q, &k, &v, &out_t, &lse_t, scale, causal)
+        .unwrap_or_else(|e| panic!("long bench bwd seq={seq}: {e}"));
+    rocm_sync();
+    eprintln!(
+        "kiln_flash_bench phase=bwd seq={seq} heads={h} kv_heads={hk} head_dim={d} elapsed_ms={:.3}",
+        bwd_start.elapsed().as_secs_f64() * 1000.0
+    );
+    assert_eq!(dq.shape(), &[b, seq, h, d]);
+    assert_eq!(dk.shape(), &[b, seq, h, d]);
+    assert_eq!(dv.shape(), &[b, seq, h, d]);
+}
+
+#[test]
+fn flash_attn_bwd_online_tiled_parity() {
+    if no_rocm() {
+        return;
+    }
+    let b = 1usize;
+    let h = 2usize;
+    let hk = 1usize;
+    let d = 128usize;
+    let sq = 9usize;
+    let sk = 17usize;
+    let scale = 1.0 / (d as f32).sqrt();
+
+    with_env_vars(
+        &[
+            ("KILN_ROCM_FLASH_MATMUL_BWD", "0"),
+            ("KILN_ROCM_FLASH_ONLINE_BWD", "1"),
+            ("KILN_ROCM_FLASH_ONLINE_QUERY_TILE", "4"),
+            ("KILN_ROCM_FLASH_ONLINE_KEY_TILE", "8"),
+            ("KILN_ROCM_FLASH_ONLINE_SCORE_BUDGET_MB", "1"),
+        ],
+        || {
+            for &causal in &[false, true] {
+                let qd = fill_bf16(b * sq * h * d, 701 + causal as usize);
+                let kd = fill_bf16(b * sk * hk * d, 809 + causal as usize);
+                let vd = fill_bf16(b * sk * hk * d, 907 + causal as usize);
+                let dod = fill_bf16(b * sq * h * d, 1009 + causal as usize);
+
+                let q = rocm_bf16(&qd, vec![b, sq, h, d]);
+                let k = rocm_bf16(&kd, vec![b, sk, hk, d]);
+                let v = rocm_bf16(&vd, vec![b, sk, hk, d]);
+                let dout = rocm_bf16(&dod, vec![b, sq, h, d]);
+
+                let (out_t, lse_t) = flash_attn_fwd_kt(&q, &k, &v, scale, causal)
+                    .unwrap_or_else(|e| panic!("bwd fwd causal={causal}: {e}"));
+                let (dq_t, dk_t, dv_t) =
+                    flash_attn_bwd_kt(&dout, &q, &k, &v, &out_t, &lse_t, scale, causal)
+                        .unwrap_or_else(|e| panic!("online bwd causal={causal}: {e}"));
+
+                assert_eq!(dq_t.shape(), &[b, sq, h, d]);
+                assert_eq!(dk_t.shape(), &[b, sk, h, d]);
+                assert_eq!(dv_t.shape(), &[b, sk, h, d]);
+
+                let qf: Vec<f32> = qd.iter().map(|x| x.to_f32()).collect();
+                let kf: Vec<f32> = kd.iter().map(|x| x.to_f32()).collect();
+                let vf: Vec<f32> = vd.iter().map(|x| x.to_f32()).collect();
+                let dof: Vec<f32> = dod.iter().map(|x| x.to_f32()).collect();
+                let outf = bf16_to_f32(&out_t);
+                let (want_dq, want_dk, want_dv) = cpu_sdpa_bwd_expanded_gqa(
+                    &dof, &qf, &kf, &vf, &outf, b, sq, sk, h, hk, d, scale, causal,
+                );
+
+                check_close(
+                    &bf16_to_f32(&dq_t),
+                    &want_dq,
+                    4e-2,
+                    4e-2,
+                    &format!("online bwd dq causal={causal}"),
+                );
+                check_close(
+                    &bf16_to_f32(&dk_t),
+                    &want_dk,
+                    4e-2,
+                    4e-2,
+                    &format!("online bwd dk causal={causal}"),
+                );
+                check_close(
+                    &bf16_to_f32(&dv_t),
+                    &want_dv,
+                    4e-2,
+                    4e-2,
+                    &format!("online bwd dv causal={causal}"),
+                );
+            }
+        },
+    );
 }
 
 #[test]

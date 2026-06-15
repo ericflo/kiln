@@ -103,6 +103,7 @@ pub struct EstimateOptions {
 }
 
 const BYTES_PER_GB: u64 = 1024 * 1024 * 1024;
+const CHECKPOINT_BOUNDARY_CACHE_TARGET_BYTES: u64 = 6 * BYTES_PER_GB;
 /// Default safety margin: 1 GB. Large enough to absorb scratch
 /// allocations the closed-form pieces don't model directly (DRM
 /// import buffers, allocator slack, kernel staging buffers).
@@ -181,15 +182,64 @@ fn boundary_state_bytes(
     if recompute_boundaries {
         let h = cfg.hidden_size as u64;
         let t = max_seq_len as u64;
+        let anchor_stride = checkpoint_boundary_anchor_stride_for_shape(
+            max_seq_len,
+            num_segments,
+            cfg.hidden_size,
+            activation_bytes_per_elem as usize,
+        );
+        let anchor_count = checkpoint_boundary_anchor_count(num_segments, anchor_stride) as u64;
+        let anchor_bytes = anchor_count * h * t * elem;
         // Long-context SFT recomputes segment inputs on demand. At peak it
-        // keeps the upstream hidden gradient (F32) plus one detached segment
-        // input (model dtype), with one F32-sized cushion for allocator
-        // overlap during recompute/backprop.
-        return 2 * h * t * 4 + h * t * elem;
+        // keeps sparse boundary anchors, the upstream hidden gradient (F32),
+        // one detached segment input (model dtype), and one F32-sized cushion
+        // for allocator overlap during replay/backprop.
+        return anchor_bytes + 2 * h * t * 4 + h * t * elem;
     }
     let h = cfg.hidden_size as u64;
     let t = max_seq_len as u64;
     (num_segments as u64 + 1) * h * t * elem
+}
+
+pub fn checkpoint_boundary_anchor_stride_for_shape(
+    max_seq_len: usize,
+    num_segments: usize,
+    hidden_size: usize,
+    activation_bytes_per_elem: usize,
+) -> usize {
+    if let Some(explicit) = std::env::var("KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 0)
+    {
+        return explicit;
+    }
+
+    if num_segments <= 1 {
+        return 1;
+    }
+
+    let cache_target_bytes = std::env::var("KILN_CHECKPOINT_BOUNDARY_CACHE_GB")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|gb| (gb * BYTES_PER_GB as f64) as u64)
+        .unwrap_or(CHECKPOINT_BOUNDARY_CACHE_TARGET_BYTES)
+        .max(1);
+    let boundary_bytes = (max_seq_len as u64)
+        .saturating_mul(hidden_size as u64)
+        .saturating_mul(activation_bytes_per_elem.max(1) as u64)
+        .max(1);
+    let max_anchors = (cache_target_bytes / boundary_bytes).max(2) as usize;
+    let replay_anchor_slots = max_anchors.saturating_sub(1).max(1);
+    num_segments.div_ceil(replay_anchor_slots).max(1)
+}
+
+pub fn checkpoint_boundary_anchor_count(num_segments: usize, anchor_stride: usize) -> usize {
+    let anchor_stride = anchor_stride.max(1);
+    (0..=num_segments)
+        .filter(|&boundary_idx| boundary_idx == 0 || boundary_idx % anchor_stride == 0)
+        .count()
 }
 
 /// Peak working-set bytes for the FLCE chunked-head pass.
@@ -532,13 +582,26 @@ pub fn estimate_vk_native_recompute_working_set(
 /// Discrete GPUs and the no-detection path keep the static behavior:
 /// reserve a fraction of the budget for inference, return the rest.
 pub fn available_for_training_bytes(vram: &GpuVramInfo) -> u64 {
-    available_for_training_bytes_with_meminfo(vram, query_linux_mem_available_bytes())
+    available_for_training_bytes_with_meminfo_details(
+        vram,
+        query_linux_mem_available_bytes(),
+        query_linux_mem_total_bytes(),
+    )
 }
 
 #[doc(hidden)]
 pub fn available_for_training_bytes_with_meminfo(
     vram: &GpuVramInfo,
     mem_available_bytes: Option<u64>,
+) -> u64 {
+    available_for_training_bytes_with_meminfo_details(vram, mem_available_bytes, None)
+}
+
+#[doc(hidden)]
+pub fn available_for_training_bytes_with_meminfo_details(
+    vram: &GpuVramInfo,
+    mem_available_bytes: Option<u64>,
+    mem_total_bytes: Option<u64>,
 ) -> u64 {
     if vram.total_bytes == 0 {
         // No detection — refuse to claim any budget. Caller should treat
@@ -556,7 +619,19 @@ pub fn available_for_training_bytes_with_meminfo(
         vram.source,
         VramSource::LinuxDrmSysfsUnified | VramSource::AppleSilicon
     ) {
-        if let Some(mem_avail) = mem_available_bytes {
+        if let Some(mem_total) = mem_total_bytes {
+            // Some ROCm systems expose a large dedicated GPU memory heap through
+            // DRM while still labelling the heap as unified. If the reported GPU
+            // budget is larger than host MemTotal, /proc/meminfo is not the
+            // limiting pool for training allocations and using MemAvailable
+            // under-admits long-context jobs.
+            if vram.total_bytes <= mem_total.saturating_add(SAFETY_MARGIN_BYTES) {
+                if let Some(mem_avail) = mem_available_bytes {
+                    let live = mem_avail.saturating_sub(SAFETY_MARGIN_BYTES);
+                    return live.min(vram.total_bytes.saturating_sub(SAFETY_MARGIN_BYTES));
+                }
+            }
+        } else if let Some(mem_avail) = mem_available_bytes {
             let live = mem_avail.saturating_sub(SAFETY_MARGIN_BYTES);
             return live.min(vram.total_bytes.saturating_sub(SAFETY_MARGIN_BYTES));
         }
@@ -590,14 +665,24 @@ fn training_memory_reserve_override_bytes() -> Option<u64> {
 
 #[cfg(target_os = "linux")]
 fn query_linux_mem_available_bytes() -> Option<u64> {
+    query_linux_meminfo_kib("MemAvailable:").map(|kib| kib * 1024)
+}
+
+#[cfg(target_os = "linux")]
+fn query_linux_mem_total_bytes() -> Option<u64> {
+    query_linux_meminfo_kib("MemTotal:").map(|kib| kib * 1024)
+}
+
+#[cfg(target_os = "linux")]
+fn query_linux_meminfo_kib(prefix: &str) -> Option<u64> {
     let raw = std::fs::read_to_string("/proc/meminfo").ok()?;
     for line in raw.lines() {
-        if let Some(rest) = line.strip_prefix("MemAvailable:") {
+        if let Some(rest) = line.strip_prefix(prefix) {
             let kib: u64 = rest
                 .split_whitespace()
                 .next()
                 .and_then(|s| s.parse().ok())?;
-            return Some(kib * 1024);
+            return Some(kib);
         }
     }
     None
@@ -605,6 +690,11 @@ fn query_linux_mem_available_bytes() -> Option<u64> {
 
 #[cfg(not(target_os = "linux"))]
 fn query_linux_mem_available_bytes() -> Option<u64> {
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn query_linux_mem_total_bytes() -> Option<u64> {
     None
 }
 
@@ -1182,6 +1272,38 @@ mod tests {
             avail,
             avail as f64 / BYTES_PER_GB as f64,
         );
+    }
+
+    #[test]
+    fn preflight_ignores_host_memavailable_when_rocm_heap_exceeds_host_ram() {
+        let vram = GpuVramInfo {
+            total_bytes: 120 * BYTES_PER_GB,
+            source: VramSource::LinuxDrmSysfsUnified,
+        };
+        let avail = available_for_training_bytes_with_meminfo_details(
+            &vram,
+            Some(16 * BYTES_PER_GB),
+            Some(32 * BYTES_PER_GB),
+        );
+        let static_gpu_budget = 120 * BYTES_PER_GB - 6 * BYTES_PER_GB - SAFETY_MARGIN_BYTES;
+        assert_eq!(
+            avail, static_gpu_budget,
+            "large ROCm heaps mislabelled as unified should not be capped by host MemAvailable"
+        );
+    }
+
+    #[test]
+    fn preflight_uses_host_memavailable_for_true_unified_memory() {
+        let vram = GpuVramInfo {
+            total_bytes: 24 * BYTES_PER_GB,
+            source: VramSource::LinuxDrmSysfsUnified,
+        };
+        let avail = available_for_training_bytes_with_meminfo_details(
+            &vram,
+            Some(17 * BYTES_PER_GB),
+            Some(32 * BYTES_PER_GB),
+        );
+        assert_eq!(avail, 17 * BYTES_PER_GB - SAFETY_MARGIN_BYTES);
     }
 
     #[test]

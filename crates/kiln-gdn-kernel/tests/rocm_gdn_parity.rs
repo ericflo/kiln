@@ -27,7 +27,8 @@
 use half::bf16;
 
 use kiln_gdn_kernel::{
-    gdn_forward_substitution_kt, gdn_gated_rms_norm_bf16_kt, gdn_gated_rms_norm_supports_kt,
+    gdn_forward_substitution_f32_kt, gdn_forward_substitution_kt, gdn_gated_rms_norm_bf16_kt,
+    gdn_gated_rms_norm_supports_kt, gdn_solve_tri_transpose_f32_kt,
 };
 use kiln_tensor::{DType, Tensor};
 
@@ -58,6 +59,12 @@ fn rocm_bf16(data: &[bf16], shape: Vec<usize>) -> Tensor {
     kiln_tensor::host_to_rocm_copy(&cpu, 0).expect("host_to_rocm_copy")
 }
 
+/// Build a contiguous F32 ROCm tensor from host data.
+fn rocm_f32(data: &[f32], shape: Vec<usize>) -> Tensor {
+    let cpu = Tensor::from_slice(data, shape).expect("cpu from_slice");
+    kiln_tensor::host_to_rocm_copy(&cpu, 0).expect("host_to_rocm_copy")
+}
+
 /// Read a ROCm BF16 tensor back to a host f32 Vec.
 fn read_bf16_f32(t: &Tensor) -> Vec<f32> {
     assert_eq!(t.dtype(), DType::BF16, "expected BF16 readback");
@@ -67,6 +74,12 @@ fn read_bf16_f32(t: &Tensor) -> Vec<f32> {
         .into_iter()
         .map(|b| b.to_f32())
         .collect()
+}
+
+fn read_f32(t: &Tensor) -> Vec<f32> {
+    assert_eq!(t.dtype(), DType::F32, "expected F32 readback");
+    let host = kiln_tensor::rocm_to_host_copy(t).expect("rocm_to_host_copy");
+    host.to_vec::<f32>().expect("to_vec f32")
 }
 
 /// Combined abs+rel tolerance suited to BF16 round-trip (~3 decimal digits) plus
@@ -177,6 +190,151 @@ fn rocm_gdn_forward_substitution_parity() {
     run_fwd_sub(1, 1, 16, 128, 0x1111);
     run_fwd_sub(2, 4, 32, 128, 0x2222);
     run_fwd_sub(1, 8, 64, 128, 0x3333);
+}
+
+fn fwd_sub_ref_f32(
+    a_strict: &[f32],
+    v_prime: &[f32],
+    beta: &[f32],
+    bh: usize,
+    c: usize,
+    dv: usize,
+) -> Vec<f32> {
+    let mut w_out = vec![0.0f32; bh * c * dv];
+    for blk in 0..bh {
+        let a_base = blk * c * c;
+        let v_base = blk * c * dv;
+        let b_base = blk * c;
+        let w_base = blk * c * dv;
+        for t in 0..c {
+            let beta_t = beta[b_base + t];
+            for d in 0..dv {
+                let mut acc = 0.0f32;
+                for i in 0..t {
+                    acc += a_strict[a_base + t * c + i] * w_out[w_base + i * dv + d];
+                }
+                w_out[w_base + t * dv + d] = beta_t * (v_prime[v_base + t * dv + d] - acc);
+            }
+        }
+    }
+    w_out
+}
+
+fn solve_tri_transpose_ref_f32(
+    a_strict: &[f32],
+    beta: &[f32],
+    dw: &[f32],
+    bh: usize,
+    c: usize,
+    dv: usize,
+) -> Vec<f32> {
+    let mut dr = vec![0.0f32; bh * c * dv];
+    for blk in 0..bh {
+        let a_base = blk * c * c;
+        let b_base = blk * c;
+        let v_base = blk * c * dv;
+        for t in (0..c).rev() {
+            for d in 0..dv {
+                let mut acc = 0.0f32;
+                for i in (t + 1)..c {
+                    acc +=
+                        beta[b_base + i] * a_strict[a_base + i * c + t] * dr[v_base + i * dv + d];
+                }
+                dr[v_base + t * dv + d] = dw[v_base + t * dv + d] - acc;
+            }
+        }
+    }
+    dr
+}
+
+fn assert_close_f32(got: &[f32], want: &[f32], ctx: &str) {
+    assert_eq!(got.len(), want.len(), "{ctx}: length mismatch");
+    let mut max_abs = 0.0f32;
+    for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
+        let diff = (g - w).abs();
+        let tol = 2e-4 * w.abs().max(1.0);
+        if diff > tol {
+            panic!("{ctx}: element {i} got {g} want {w} (|diff| {diff} > tol {tol})");
+        }
+        max_abs = max_abs.max(diff);
+    }
+    eprintln!("{ctx}: OK (max |diff| = {max_abs})");
+}
+
+fn run_fwd_sub_f32(batch: usize, heads: usize, c: usize, dv: usize, seed: u64) {
+    let bh = batch * heads;
+    let a_host = pattern(bh * c * c, seed ^ 0xA)
+        .into_iter()
+        .map(|v| v * 0.05)
+        .collect::<Vec<_>>();
+    let v_host = pattern(bh * c * dv, seed ^ 0xB);
+    let beta_host = pattern(bh * c, seed ^ 0xC)
+        .into_iter()
+        .map(sigmoid)
+        .collect::<Vec<_>>();
+
+    let a = rocm_f32(&a_host, vec![batch, heads, c, c]);
+    let v = rocm_f32(&v_host, vec![batch, heads, c, dv]);
+    let beta = rocm_f32(&beta_host, vec![batch, heads, c]);
+
+    let w =
+        gdn_forward_substitution_f32_kt(&a, &v, &beta).expect("gdn_forward_substitution_f32_kt");
+    assert_eq!(w.shape(), &[batch, heads, c, dv]);
+    assert_eq!(w.dtype(), DType::F32);
+
+    let got = read_f32(&w);
+    let want = fwd_sub_ref_f32(&a_host, &v_host, &beta_host, bh, c, dv);
+    assert_close_f32(&got, &want, &format!("fwd_sub_f32 bh={bh} c={c} dv={dv}"));
+}
+
+fn run_solve_tri_transpose_f32(batch: usize, heads: usize, c: usize, dv: usize, seed: u64) {
+    let bh = batch * heads;
+    let a_host = pattern(bh * c * c, seed ^ 0xA)
+        .into_iter()
+        .map(|v| v * 0.05)
+        .collect::<Vec<_>>();
+    let beta_host = pattern(bh * c, seed ^ 0xB)
+        .into_iter()
+        .map(sigmoid)
+        .collect::<Vec<_>>();
+    let dw_host = pattern(bh * c * dv, seed ^ 0xC);
+
+    let a = rocm_f32(&a_host, vec![batch, heads, c, c]);
+    let beta = rocm_f32(&beta_host, vec![batch, heads, c]);
+    let dw = rocm_f32(&dw_host, vec![batch, heads, c, dv]);
+
+    let dr =
+        gdn_solve_tri_transpose_f32_kt(&a, &beta, &dw).expect("gdn_solve_tri_transpose_f32_kt");
+    assert_eq!(dr.shape(), &[batch, heads, c, dv]);
+    assert_eq!(dr.dtype(), DType::F32);
+
+    let got = read_f32(&dr);
+    let want = solve_tri_transpose_ref_f32(&a_host, &beta_host, &dw_host, bh, c, dv);
+    assert_close_f32(
+        &got,
+        &want,
+        &format!("solve_tri_transpose_f32 bh={bh} c={c} dv={dv}"),
+    );
+}
+
+#[test]
+fn rocm_gdn_forward_substitution_f32_parity() {
+    if !rocm_available() {
+        eprintln!("ROCm not available; skipping rocm_gdn_forward_substitution_f32_parity");
+        return;
+    }
+    run_fwd_sub_f32(1, 1, 16, 128, 0x4444);
+    run_fwd_sub_f32(1, 8, 64, 128, 0x5555);
+}
+
+#[test]
+fn rocm_gdn_solve_tri_transpose_f32_parity() {
+    if !rocm_available() {
+        eprintln!("ROCm not available; skipping rocm_gdn_solve_tri_transpose_f32_parity");
+        return;
+    }
+    run_solve_tri_transpose_f32(1, 1, 16, 128, 0x6666);
+    run_solve_tri_transpose_f32(1, 8, 64, 128, 0x7777);
 }
 
 // ---------------------------------------------------------------------------

@@ -192,6 +192,7 @@ async fn post_eval_config_serializes_through_train_request_round_trip() {
     // Smoke test: SftRequest carrying a PostEvalConfig serializes and
     // deserializes through serde without losing fields.
     let req = kiln_train::SftRequest {
+        dataset_path: None,
         dataset: None,
         examples: vec![],
         config: Default::default(),

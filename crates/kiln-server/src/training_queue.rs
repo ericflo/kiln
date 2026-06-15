@@ -372,6 +372,30 @@ fn run_sft(
     job_id: &str,
     gpu_step_lock: Option<std::sync::Arc<std::sync::RwLock<()>>>,
 ) -> std::result::Result<PathBuf, String> {
+    let loaded_examples;
+    let examples = if let Some(dataset_path) = req.dataset_path.as_deref() {
+        if dataset_path.trim().is_empty() {
+            return Err("SFT dataset_path training requires a non-empty path".to_string());
+        }
+        if !req.examples.is_empty() {
+            return Err(
+                "SFT request must use either examples or dataset_path, not both".to_string(),
+            );
+        }
+        loaded_examples =
+            crate::sft_dataset::load_sft_jsonl_examples(std::path::Path::new(dataset_path))
+                .map_err(|e| format!("load SFT dataset_path {dataset_path:?}: {e:#}"))?;
+        tracing::info!(
+            job_id = %job_id,
+            dataset_path,
+            examples = loaded_examples.len(),
+            "loaded SFT dataset_path for exact per-example training"
+        );
+        loaded_examples.as_slice()
+    } else {
+        req.examples.as_slice()
+    };
+
     if native_route_enabled {
         #[cfg(feature = "cuda")]
         {
@@ -382,7 +406,7 @@ fn run_sft(
                 "backend native training route enabled - routing to cuda_native_sft_train"
             );
             return kiln_train::cuda_train::cuda_native_sft_train(
-                &req.examples,
+                examples,
                 &req.config,
                 model_config,
                 weights,
@@ -405,7 +429,7 @@ fn run_sft(
         }
     }
     trainer::sft_train(
-        &req.examples,
+        examples,
         &req.config,
         model_config,
         weights,
@@ -3115,6 +3139,7 @@ mod tests {
             job_id: "job-1".into(),
             reserved_bytes: 0,
             job: QueuedJob::Sft(SftRequest {
+                dataset_path: None,
                 dataset: None,
                 examples: vec![],
                 config: Default::default(),
@@ -3125,6 +3150,7 @@ mod tests {
             job_id: "job-2".into(),
             reserved_bytes: 0,
             job: QueuedJob::Sft(SftRequest {
+                dataset_path: None,
                 dataset: None,
                 examples: vec![],
                 config: Default::default(),
@@ -3135,6 +3161,7 @@ mod tests {
             job_id: "job-3".into(),
             reserved_bytes: 0,
             job: QueuedJob::Sft(SftRequest {
+                dataset_path: None,
                 dataset: None,
                 examples: vec![],
                 config: Default::default(),
@@ -3156,6 +3183,7 @@ mod tests {
             job_id: "job-1".into(),
             reserved_bytes: 0,
             job: QueuedJob::Sft(SftRequest {
+                dataset_path: None,
                 dataset: None,
                 examples: vec![],
                 config: Default::default(),
@@ -3166,6 +3194,7 @@ mod tests {
             job_id: "job-2".into(),
             reserved_bytes: 0,
             job: QueuedJob::Sft(SftRequest {
+                dataset_path: None,
                 dataset: None,
                 examples: vec![],
                 config: Default::default(),
@@ -3176,6 +3205,7 @@ mod tests {
             job_id: "job-3".into(),
             reserved_bytes: 0,
             job: QueuedJob::Sft(SftRequest {
+                dataset_path: None,
                 dataset: None,
                 examples: vec![],
                 config: Default::default(),

@@ -76,6 +76,10 @@ struct KilnHipblasLtMatmulSpec {
     m: i32,
     n: i32,
     k: i32,
+    batch_count: i32,
+    a_batch_stride: i64,
+    b_batch_stride: i64,
+    c_batch_stride: i64,
     dtype_in: i32,
     dtype_out: i32,
     a_transposed: i32,
@@ -546,7 +550,10 @@ impl HipblasLtMatmulHandle {
                 .fetch_add(1, Ordering::Relaxed);
         }
 
-        let bytes_written = bytes_for_dtype(request.dtype.as_str()) * request.m * request.n;
+        let bytes_written = bytes_for_dtype(request.output_dtype.as_str())
+            * request.m
+            * request.n
+            * request.batch_count.max(1);
         Ok(MatmulOutcome {
             bytes_written,
             elapsed_ms: None,
@@ -626,7 +633,8 @@ impl BackendMatmul for HipblasLtMatmulHandle {
             .algo_cache
             .lock()
             .expect("algo cache mutex poisoned");
-        let bytes_written = bytes_for_dtype(req.dtype.as_str()) * req.m * req.n;
+        let bytes_written =
+            bytes_for_dtype(req.output_dtype.as_str()) * req.m * req.n * req.batch_count.max(1);
         match cache.get(&key) {
             Some(v) => MatmulOutcome {
                 bytes_written,
@@ -653,7 +661,7 @@ impl BackendMatmul for HipblasLtMatmulHandle {
 
 fn build_spec(req: &MatmulRequest) -> Result<KilnHipblasLtMatmulSpec, FfiError> {
     let dtype_in = resolve_dtype_code(req.dtype.as_str())?;
-    let dtype_out = resolve_dtype_code(req.dtype.as_str())?;
+    let dtype_out = resolve_dtype_code(req.output_dtype.as_str())?;
     let epilogue = resolve_epilogue_code(req.epilogue)?;
     // Layout interpretation: the request descriptor names operand
     // layouts in *hipBLASLt* terms — `RowMajor` is the kiln-tensor
@@ -661,13 +669,17 @@ fn build_spec(req: &MatmulRequest) -> Result<KilnHipblasLtMatmulSpec, FfiError> 
     // maps these to hipBLASLt's TRANSA/TRANSB.
     let a_transposed = matches!(req.a_layout, crate::MatmulLayout::ColMajor) as i32;
     let b_transposed = matches!(req.b_layout, crate::MatmulLayout::ColMajor) as i32;
-    if req.m == 0 || req.n == 0 || req.k == 0 {
+    if req.m == 0 || req.n == 0 || req.k == 0 || req.batch_count == 0 {
         return Err(FfiError::InvalidShape);
     }
     Ok(KilnHipblasLtMatmulSpec {
         m: req.m as i32,
         n: req.n as i32,
         k: req.k as i32,
+        batch_count: req.batch_count as i32,
+        a_batch_stride: req.a_batch_stride as i64,
+        b_batch_stride: req.b_batch_stride as i64,
+        c_batch_stride: req.c_batch_stride as i64,
         dtype_in,
         dtype_out,
         a_transposed,
@@ -728,7 +740,12 @@ mod tests {
             m: 2048,
             n: 18432,
             k: 2560,
+            batch_count: 1,
+            a_batch_stride: 0,
+            b_batch_stride: 0,
+            c_batch_stride: 0,
             dtype: "bf16".to_string(),
+            output_dtype: "bf16".to_string(),
             a_layout: MatmulLayout::RowMajor,
             b_layout: MatmulLayout::RowMajor,
             c_layout: MatmulLayout::RowMajor,
@@ -739,7 +756,9 @@ mod tests {
         assert_eq!(spec.m, 2048);
         assert_eq!(spec.n, 18432);
         assert_eq!(spec.k, 2560);
+        assert_eq!(spec.batch_count, 1);
         assert_eq!(spec.dtype_in, DTYPE_BF16);
+        assert_eq!(spec.dtype_out, DTYPE_BF16);
         assert_eq!(spec.a_transposed, 0);
         assert_eq!(spec.b_transposed, 0);
         assert_eq!(spec.epilogue, EPI_IDENTITY);
@@ -751,7 +770,12 @@ mod tests {
             m: 32,
             n: 64,
             k: 128,
+            batch_count: 1,
+            a_batch_stride: 0,
+            b_batch_stride: 0,
+            c_batch_stride: 0,
             dtype: "f32".to_string(),
+            output_dtype: "f32".to_string(),
             a_layout: MatmulLayout::ColMajor,
             b_layout: MatmulLayout::RowMajor,
             c_layout: MatmulLayout::RowMajor,
@@ -769,7 +793,12 @@ mod tests {
             m: 0,
             n: 64,
             k: 128,
+            batch_count: 1,
+            a_batch_stride: 0,
+            b_batch_stride: 0,
+            c_batch_stride: 0,
             dtype: "bf16".to_string(),
+            output_dtype: "bf16".to_string(),
             a_layout: MatmulLayout::RowMajor,
             b_layout: MatmulLayout::RowMajor,
             c_layout: MatmulLayout::RowMajor,

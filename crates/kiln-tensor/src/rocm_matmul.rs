@@ -99,13 +99,203 @@ fn rocm_blaslt_request(request: BlasLtMatmulRequest) -> MatmulRequest {
         m: request.m,
         n: request.n,
         k: request.k,
+        batch_count: request.batch_count,
+        a_batch_stride: request.a_batch_stride,
+        b_batch_stride: request.b_batch_stride,
+        c_batch_stride: request.c_batch_stride,
         dtype: request.dtype_name().to_string(),
+        output_dtype: request.output_dtype_name().to_string(),
         a_layout: rocm_blaslt_layout(request.a_layout),
         b_layout: rocm_blaslt_layout(request.b_layout),
         c_layout: rocm_blaslt_layout(request.c_layout),
         epilogue: rocm_blaslt_epilogue(request.epilogue),
         concurrent_streams: request.concurrent_streams,
     }
+}
+
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+fn rocm_matmul_sync_outputs_mode() -> Option<bool> {
+    std::env::var("KILN_ROCM_MATMUL_SYNC_OUTPUTS")
+        .ok()
+        .and_then(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            match value.as_str() {
+                "0" | "false" | "no" | "off" => Some(false),
+                "1" | "true" | "yes" | "on" => Some(true),
+                _ => None,
+            }
+        })
+}
+
+fn rocm_matmul_output_elems_sync_threshold() -> u128 {
+    std::env::var("KILN_ROCM_MATMUL_SYNC_OUTPUT_ELEMS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u128>().ok())
+        .unwrap_or(1_048_576)
+}
+
+fn rocm_matmul_work_sync_threshold() -> u128 {
+    std::env::var("KILN_ROCM_MATMUL_SYNC_WORK")
+        .ok()
+        .and_then(|value| value.trim().parse::<u128>().ok())
+        .unwrap_or(268_435_456)
+}
+
+fn should_sync_rocm_matmul_output(m: usize, n: usize, k: usize, batch: usize) -> bool {
+    match rocm_matmul_sync_outputs_mode() {
+        Some(false) => return false,
+        Some(true) => return true,
+        None => {}
+    }
+
+    let batch = batch.max(1) as u128;
+    let m = m as u128;
+    let n = n as u128;
+    let k = k as u128;
+    let output_elems = batch.saturating_mul(m).saturating_mul(n);
+    let work = output_elems.saturating_mul(k);
+    output_elems >= rocm_matmul_output_elems_sync_threshold()
+        || work >= rocm_matmul_work_sync_threshold()
+}
+
+fn should_skip_rocm_strided_batched_matmul(
+    m: usize,
+    n: usize,
+    k: usize,
+    batch: usize,
+    dtype: DType,
+    out_dtype: DType,
+    op: &str,
+) -> bool {
+    if batch <= 1 || env_truthy("KILN_FORCE_ROCM_STRIDED_BATCHED_MATMUL") {
+        return false;
+    }
+    if env_truthy("KILN_DISABLE_ROCM_STRIDED_BATCHED_MATMUL") {
+        return true;
+    }
+
+    let batch_u = batch as u128;
+    let m_u = m as u128;
+    let n_u = n as u128;
+    let k_u = k as u128;
+    let output_elems = batch_u.saturating_mul(m_u).saturating_mul(n_u);
+    let work = output_elems.saturating_mul(k_u);
+
+    // ROCm 7.2 hipBLASLt strided-batched GEMM can silently return bad values
+    // on large attention-shaped batches on gfx115x. The fallback below already
+    // issues the same GEMM one batch at a time, which preserves exact math and
+    // avoids the unstable batched path without pushing this policy into every
+    // attention caller.
+    let large_attention_like = batch >= 8
+        && m >= 128
+        && n >= 128
+        && k >= 128
+        && output_elems >= 1_048_576
+        && work >= (1u128 << 31)
+        && matches!(
+            (dtype, out_dtype),
+            (DType::BF16, DType::F32) | (DType::F32, DType::F32)
+        );
+
+    if large_attention_like && env_truthy("KILN_TRACE_ROCM_MATMUL_FALLBACK") {
+        eprintln!(
+            "kiln_rocm_matmul_skip_strided_batch op={op} m={m} n={n} k={k} batch={batch} \
+             dtype={dtype} out_dtype={out_dtype} output_elems={output_elems} work={work}"
+        );
+    }
+
+    large_attention_like
+}
+
+fn sync_after_rocm_matmul_if_needed(
+    device_index: usize,
+    op: &str,
+    m: usize,
+    n: usize,
+    k: usize,
+    batch: usize,
+) -> Result<()> {
+    if !should_sync_rocm_matmul_output(m, n, k, batch) {
+        return Ok(());
+    }
+
+    if crate::rocm_capture_arena_active() {
+        return Ok(());
+    }
+
+    // HIP graph capture cannot synchronize inside the captured region. Outside
+    // capture, use a device-wide sync: ROCm/hipBLASLt has exposed stale reads
+    // after very large training GEMMs when only the active stream is drained.
+    crate::rocm_synchronize_default_stream(device_index).map_err(|e| {
+        crate::Error::Msg(format!(
+            "{op}: synchronize after large ROCm matmul m={m} n={n} k={k} batch={batch}: {e}"
+        ))
+    })
+}
+
+fn sync_rocm_device_for_matmul_boundary(
+    device_index: usize,
+    op: &str,
+    boundary: &str,
+) -> Result<()> {
+    if crate::rocm_capture_arena_active() {
+        return Ok(());
+    }
+    crate::rocm_synchronize_default_stream(device_index).map_err(|e| {
+        crate::Error::Msg(format!(
+            "{op}: synchronize {boundary} f32-output BF16 cast: {e}"
+        ))
+    })
+}
+
+fn rocm_bf16_output_matmul_via_f32(
+    m: usize,
+    n: usize,
+    k: usize,
+    batch: usize,
+    dtype: DType,
+    out_dtype: DType,
+    op: &str,
+) -> bool {
+    if dtype != DType::BF16
+        || out_dtype != DType::BF16
+        || env_truthy("KILN_DISABLE_ROCM_BF16_MATMUL_F32_OUTPUT")
+    {
+        return false;
+    }
+    if env_truthy("KILN_FORCE_ROCM_BF16_MATMUL_F32_OUTPUT") {
+        return true;
+    }
+
+    // ROCm 7.2 hipBLASLt on gfx115x can return non-finite BF16 output for
+    // large BF16 projection GEMMs. The same failure also shows up on both
+    // halves of low-rank LoRA delta shapes:
+    //
+    // - compression: [large M, large K] @ [small rank, large K]^T -> [large M, rank]
+    // - expansion:   [large M, rank] @ [large N, rank]^T -> [large M, large N]
+    //
+    // FP32 accumulation/output followed by a device-side BF16 cast preserves
+    // the requested result dtype while avoiding that unstable BF16-output
+    // epilogue.
+    let work = (batch as u128) * (m as u128) * (n as u128) * (k as u128);
+    let output_elems = (batch as u128) * (m as u128) * (n as u128);
+    let large_projection = m >= 1024 && n >= 512 && k >= 512 && work >= (1u128 << 31);
+    let large_output = m >= 512 && n >= 512 && output_elems >= 1_048_576;
+    let tall_skinny_lora_compression = m >= 1024 && n <= 64 && k >= 512;
+    if (large_projection || large_output || tall_skinny_lora_compression)
+        && env_truthy("KILN_TRACE_ROCM_BF16_MATMUL_F32_OUTPUT")
+    {
+        eprintln!("kiln_rocm_bf16_matmul_f32_output op={op} m={m} n={n} k={k} batch={batch}");
+    }
+    large_projection || large_output || tall_skinny_lora_compression
 }
 
 // ----------------------------------------------------------------------
@@ -172,6 +362,77 @@ pub fn rocm_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         n,
         k_a,
         dtype,
+        dtype,
+        out_shape,
+        BlasLtMatmulLayout::RowMajor,
+        BlasLtMatmulLayout::RowMajor,
+        OP,
+    )
+}
+
+/// Run a ROCm matmul with an explicit output dtype. Inputs still share one
+/// dtype and compute uses FP32; this is for BF16/F16 inputs that need F32
+/// materialized outputs, such as attention scores before softmax.
+pub fn rocm_matmul_to_dtype(a: &Tensor, b: &Tensor, out_dtype: DType) -> Result<Tensor> {
+    const OP: &str = "rocm_matmul_to_dtype";
+    let a_rank = a.rank();
+    let b_rank = b.rank();
+    if a_rank < 2 || b_rank < 2 {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: rank must be >= 2, got a={a_rank} b={b_rank}"
+        )));
+    }
+    if a_rank != b_rank {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: rank mismatch a={a_rank} b={b_rank}"
+        )));
+    }
+    let a_shape = a.shape();
+    let b_shape = b.shape();
+    for axis in 0..a_rank - 2 {
+        if a_shape[axis] != b_shape[axis] {
+            return Err(crate::Error::Msg(format!(
+                "{OP}: batch axis {axis} mismatch: a={} b={}",
+                a_shape[axis], b_shape[axis]
+            )));
+        }
+    }
+    let m = a_shape[a_rank - 2];
+    let k_a = a_shape[a_rank - 1];
+    let k_b = b_shape[b_rank - 2];
+    let n = b_shape[b_rank - 1];
+    if k_a != k_b {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: contraction dim mismatch a.K={k_a} b.K={k_b}"
+        )));
+    }
+    if a.dtype() != b.dtype() {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: dtype mismatch a={} b={}",
+            a.dtype(),
+            b.dtype()
+        )));
+    }
+    let dtype = a.dtype();
+    blaslt_dtype_name(dtype, OP)?;
+    blaslt_dtype_name(out_dtype, OP)?;
+    if !a.is_contiguous() || !b.is_contiguous() {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: contiguous inputs required"
+        )));
+    }
+
+    let mut out_shape = a_shape[..a_rank - 2].to_vec();
+    out_shape.push(m);
+    out_shape.push(n);
+    rocm_matmul_dispatch(
+        a,
+        b,
+        m,
+        n,
+        k_a,
+        dtype,
+        out_dtype,
         out_shape,
         BlasLtMatmulLayout::RowMajor,
         BlasLtMatmulLayout::RowMajor,
@@ -244,6 +505,83 @@ pub fn rocm_matmul_lhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         n,
         k_a,
         dtype,
+        dtype,
+        out_shape,
+        BlasLtMatmulLayout::ColMajor,
+        BlasLtMatmulLayout::RowMajor,
+        OP,
+    )
+}
+
+/// Run `a^T @ b` with an explicit output dtype, without materialising
+/// `a.transpose(-2, -1).contiguous()`.
+///
+/// `a` is stored row-major with shape `[..., K, M]`, `b` is row-major with
+/// shape `[..., K, N]`, and the result is `[..., M, N]`.
+pub fn rocm_matmul_lhs_transposed_to_dtype(
+    a: &Tensor,
+    b: &Tensor,
+    out_dtype: DType,
+) -> Result<Tensor> {
+    const OP: &str = "rocm_matmul_lhs_transposed_to_dtype";
+    let a_rank = a.rank();
+    let b_rank = b.rank();
+    if a_rank < 2 || b_rank < 2 {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: rank must be >= 2, got a={a_rank} b={b_rank}"
+        )));
+    }
+    if a_rank != b_rank {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: rank mismatch a={a_rank} b={b_rank}"
+        )));
+    }
+    let a_shape = a.shape();
+    let b_shape = b.shape();
+    for axis in 0..a_rank - 2 {
+        if a_shape[axis] != b_shape[axis] {
+            return Err(crate::Error::Msg(format!(
+                "{OP}: batch axis {axis} mismatch: a={} b={}",
+                a_shape[axis], b_shape[axis]
+            )));
+        }
+    }
+    let k_a = a_shape[a_rank - 2];
+    let m = a_shape[a_rank - 1];
+    let k_b = b_shape[b_rank - 2];
+    let n = b_shape[b_rank - 1];
+    if k_a != k_b {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: contraction dim mismatch a.K={k_a} b.K={k_b}"
+        )));
+    }
+    if a.dtype() != b.dtype() {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: dtype mismatch a={} b={}",
+            a.dtype(),
+            b.dtype()
+        )));
+    }
+    let dtype = a.dtype();
+    blaslt_dtype_name(dtype, OP)?;
+    blaslt_dtype_name(out_dtype, OP)?;
+    if !a.is_contiguous() || !b.is_contiguous() {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: contiguous inputs required"
+        )));
+    }
+
+    let mut out_shape = a_shape[..a_rank - 2].to_vec();
+    out_shape.push(m);
+    out_shape.push(n);
+    rocm_matmul_dispatch(
+        a,
+        b,
+        m,
+        n,
+        k_a,
+        dtype,
+        out_dtype,
         out_shape,
         BlasLtMatmulLayout::ColMajor,
         BlasLtMatmulLayout::RowMajor,
@@ -313,6 +651,83 @@ pub fn rocm_matmul_rhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         n,
         k_a,
         dtype,
+        dtype,
+        out_shape,
+        BlasLtMatmulLayout::RowMajor,
+        BlasLtMatmulLayout::ColMajor,
+        OP,
+    )
+}
+
+/// Run `a @ b^T` with an explicit output dtype, without materialising
+/// `b.transpose(-2, -1).contiguous()`.
+///
+/// `a` is stored row-major with shape `[..., M, K]`, `b` is row-major with
+/// shape `[..., N, K]`, and the result is `[..., M, N]`.
+pub fn rocm_matmul_rhs_transposed_to_dtype(
+    a: &Tensor,
+    b: &Tensor,
+    out_dtype: DType,
+) -> Result<Tensor> {
+    const OP: &str = "rocm_matmul_rhs_transposed_to_dtype";
+    let a_rank = a.rank();
+    let b_rank = b.rank();
+    if a_rank < 2 || b_rank < 2 {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: rank must be >= 2, got a={a_rank} b={b_rank}"
+        )));
+    }
+    if a_rank != b_rank {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: rank mismatch a={a_rank} b={b_rank}"
+        )));
+    }
+    let a_shape = a.shape();
+    let b_shape = b.shape();
+    for axis in 0..a_rank - 2 {
+        if a_shape[axis] != b_shape[axis] {
+            return Err(crate::Error::Msg(format!(
+                "{OP}: batch axis {axis} mismatch: a={} b={}",
+                a_shape[axis], b_shape[axis]
+            )));
+        }
+    }
+    let m = a_shape[a_rank - 2];
+    let k_a = a_shape[a_rank - 1];
+    let n = b_shape[b_rank - 2];
+    let k_b = b_shape[b_rank - 1];
+    if k_a != k_b {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: contraction dim mismatch a.K={k_a} b.K={k_b}"
+        )));
+    }
+    if a.dtype() != b.dtype() {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: dtype mismatch a={} b={}",
+            a.dtype(),
+            b.dtype()
+        )));
+    }
+    let dtype = a.dtype();
+    blaslt_dtype_name(dtype, OP)?;
+    blaslt_dtype_name(out_dtype, OP)?;
+    if !a.is_contiguous() || !b.is_contiguous() {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: contiguous inputs required"
+        )));
+    }
+
+    let mut out_shape = a_shape[..a_rank - 2].to_vec();
+    out_shape.push(m);
+    out_shape.push(n);
+    rocm_matmul_dispatch(
+        a,
+        b,
+        m,
+        n,
+        k_a,
+        dtype,
+        out_dtype,
         out_shape,
         BlasLtMatmulLayout::RowMajor,
         BlasLtMatmulLayout::ColMajor,
@@ -328,6 +743,7 @@ fn rocm_matmul_dispatch(
     n: usize,
     k: usize,
     dtype: DType,
+    out_dtype: DType,
     out_shape: Vec<usize>,
     a_layout: BlasLtMatmulLayout,
     b_layout: BlasLtMatmulLayout,
@@ -350,15 +766,44 @@ fn rocm_matmul_dispatch(
         .iter()
         .product::<usize>()
         .max(1);
+    if rocm_bf16_output_matmul_via_f32(m, n, k, batch, dtype, out_dtype, op) {
+        // ROCm 7.2's BF16-output hipBLASLt path is unstable for large GEMMs,
+        // so this branch computes FP32 output and casts back. Keep the
+        // matmul->cast handoff explicit: hipBLASLt and the cast kernel both
+        // use the active ROCm stream, but long training prefill has exposed
+        // stale reads when the cast is queued immediately after a huge GEMM.
+        let out_f32 = rocm_matmul_dispatch(
+            a,
+            b,
+            m,
+            n,
+            k,
+            dtype,
+            DType::F32,
+            out_shape,
+            a_layout,
+            b_layout,
+            op,
+        )?;
+        sync_rocm_device_for_matmul_boundary(device_index, op, "before")?;
+        let out = out_f32.to_dtype(DType::BF16)?;
+        sync_rocm_device_for_matmul_boundary(device_index, op, "after")?;
+        return Ok(out);
+    }
+
     let out_n_elements = batch * m * n;
-    let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, out_n_elements)?;
+    let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, out_dtype, out_n_elements)?;
 
     let handle = get_or_init_handle(device_index, &ctx)?;
 
     let bpe = dtype.size_in_bytes();
-    let a_batch_stride = (m * k * bpe) as u64;
-    let b_batch_stride = (k * n * bpe) as u64;
-    let c_batch_stride = (m * n * bpe) as u64;
+    let out_bpe = out_dtype.size_in_bytes();
+    let a_batch_stride_elems = (m * k) as u64;
+    let b_batch_stride_elems = (k * n) as u64;
+    let c_batch_stride_elems = (m * n) as u64;
+    let a_batch_stride = a_batch_stride_elems * bpe as u64;
+    let b_batch_stride = b_batch_stride_elems * bpe as u64;
+    let c_batch_stride = c_batch_stride_elems * out_bpe as u64;
 
     let stream = crate::active_rocm_stream(&ctx);
     let (a_base, _) = a_storage.device_ptr_raw();
@@ -367,11 +812,61 @@ fn rocm_matmul_dispatch(
     let a_off_root = (a.layout().start_offset() * bpe) as u64;
     let b_off_root = (b.layout().start_offset() * bpe) as u64;
 
-    let request = rocm_blaslt_request(BlasLtMatmulRequest::new(
+    let request = BlasLtMatmulRequest::new_with_output_dtype(
         m,
         n,
         k,
         dtype,
+        out_dtype,
+        a_layout,
+        b_layout,
+        BlasLtMatmulLayout::RowMajor,
+        BlasLtEpilogue::Identity,
+        1,
+        op,
+    )?
+    .with_strided_batch(
+        batch,
+        a_batch_stride_elems,
+        b_batch_stride_elems,
+        c_batch_stride_elems,
+        op,
+    )?;
+    let request = rocm_blaslt_request(request);
+
+    if batch > 1 && !should_skip_rocm_strided_batched_matmul(m, n, k, batch, dtype, out_dtype, op) {
+        let a_ptr = (a_base + a_off_root) as *const core::ffi::c_void;
+        let b_ptr = (b_base + b_off_root) as *const core::ffi::c_void;
+        let c_ptr = out_base as *mut core::ffi::c_void;
+        let batched =
+            unsafe { handle.matmul(&stream, &request, a_ptr, b_ptr, c_ptr, std::ptr::null()) };
+        if batched.is_ok() {
+            sync_after_rocm_matmul_if_needed(device_index, op, m, n, k, batch)?;
+            let storage_arc: Storage = Arc::new(out_storage);
+            return Tensor::from_parts(
+                storage_arc,
+                Layout::contiguous(out_shape),
+                TensorId::next(),
+            );
+        } else if std::env::var("KILN_TRACE_ROCM_MATMUL_FALLBACK")
+            .as_deref()
+            .is_ok_and(|v| matches!(v, "1" | "true" | "TRUE" | "yes" | "on"))
+        {
+            eprintln!(
+                "kiln_rocm_matmul_fallback op={op} m={m} n={n} k={k} batch={batch} \
+                 dtype={dtype} out_dtype={out_dtype} a_layout={a_layout:?} \
+                 b_layout={b_layout:?} error={:?}",
+                batched.err(),
+            );
+        }
+    }
+
+    let request = rocm_blaslt_request(BlasLtMatmulRequest::new_with_output_dtype(
+        m,
+        n,
+        k,
+        dtype,
+        out_dtype,
         a_layout,
         b_layout,
         BlasLtMatmulLayout::RowMajor,
@@ -394,6 +889,7 @@ fn rocm_matmul_dispatch(
         }
     }
 
+    sync_after_rocm_matmul_if_needed(device_index, op, m, n, k, batch)?;
     let storage_arc: Storage = Arc::new(out_storage);
     Tensor::from_parts(storage_arc, Layout::contiguous(out_shape), TensorId::next())
 }
@@ -504,6 +1000,7 @@ pub fn rocm_matmul_into(a: &Tensor, b: &Tensor, dst: &Tensor) -> Result<()> {
                 .map_err(|e| crate::Error::Msg(format!("{OP}: handle.matmul failed: {e}")))?;
         }
     }
+    sync_after_rocm_matmul_if_needed(device_index, OP, m, n, k_a, batch)?;
     Ok(())
 }
 
@@ -617,6 +1114,7 @@ pub fn rocm_matmul_with_bias(a: &Tensor, b: &Tensor, bias: &Tensor) -> Result<Te
         }
     }
 
+    sync_after_rocm_matmul_if_needed(device_index, OP, m, n, k_a, batch)?;
     let storage_arc: Storage = Arc::new(out_storage);
     Tensor::from_parts(storage_arc, Layout::contiguous(out_shape), TensorId::next())
 }

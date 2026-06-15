@@ -44,6 +44,10 @@ use std::path::{Path, PathBuf};
 pub struct AlgoCacheKey {
     /// Matmul shape `[m, n, k]`.
     pub shape: [u64; 3],
+    /// Number of strided-batch matrices. `1` means non-batched GEMM.
+    pub batch_count: u64,
+    /// Strides, in elements, for A/B/C between batch members.
+    pub batch_strides: [u64; 3],
     /// Input dtype short-name (`"bf16"`, `"f32"`, `"f16"`, etc.).
     pub input_dtype: String,
     /// Output dtype short-name. Often equals `input_dtype` but the FP8
@@ -68,6 +72,8 @@ impl AlgoCacheKey {
         let dt: String = dtype.into();
         AlgoCacheKey {
             shape: [m, n, k],
+            batch_count: 1,
+            batch_strides: [0, 0, 0],
             input_dtype: dt.clone(),
             output_dtype: dt.clone(),
             compute_dtype: "f32".to_string(),
@@ -211,8 +217,10 @@ pub fn serialize_to_json(cache: &AlgoCache) -> String {
         first = false;
         s.push_str("{\"key\":{");
         s.push_str(&format!(
-            "\"shape\":[{},{},{}],\"input_dtype\":{},\"output_dtype\":{},\"compute_dtype\":{},\"transpose\":[{},{}],\"expected_concurrent_streams\":{},\"kiln_version_major\":{}",
+            "\"shape\":[{},{},{}],\"batch_count\":{},\"batch_strides\":[{},{},{}],\"input_dtype\":{},\"output_dtype\":{},\"compute_dtype\":{},\"transpose\":[{},{}],\"expected_concurrent_streams\":{},\"kiln_version_major\":{}",
             k.shape[0], k.shape[1], k.shape[2],
+            k.batch_count,
+            k.batch_strides[0], k.batch_strides[1], k.batch_strides[2],
             json_str(&k.input_dtype),
             json_str(&k.output_dtype),
             json_str(&k.compute_dtype),
@@ -286,8 +294,18 @@ pub fn deserialize_from_json(json: &str) -> AlgoCache {
             ],
             _ => [false, false],
         };
+        let batch_strides = match k.get("batch_strides").and_then(|s| s.as_array()) {
+            Some(a) if a.len() == 3 => [
+                a[0].as_u64().unwrap_or(0),
+                a[1].as_u64().unwrap_or(0),
+                a[2].as_u64().unwrap_or(0),
+            ],
+            _ => [0, 0, 0],
+        };
         let key = AlgoCacheKey {
             shape,
+            batch_count: k.get("batch_count").and_then(|x| x.as_u64()).unwrap_or(1),
+            batch_strides,
             input_dtype: str_field(k, "input_dtype"),
             output_dtype: str_field(k, "output_dtype"),
             compute_dtype: str_field(k, "compute_dtype"),
@@ -622,6 +640,8 @@ mod tests {
         // Non-default values in every field so the round-trip exercises them all.
         let key = AlgoCacheKey {
             shape: [2048, 18432, 2560],
+            batch_count: 8,
+            batch_strides: [5_242_880, 47_185_920, 37_748_736],
             input_dtype: "bf16".to_string(),
             output_dtype: "f32".to_string(),
             compute_dtype: "f32".to_string(),

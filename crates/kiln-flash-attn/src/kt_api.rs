@@ -19,7 +19,7 @@
 //! (`kiln_flash_attn_*` / `kiln_paged_kv_write_*`) declared in `lib.rs`.
 
 use kiln_kt_bridge::BridgeError;
-#[cfg(feature = "rocm")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 use kiln_tensor::Device as KtDevice;
 use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
 
@@ -172,6 +172,49 @@ pub fn flash_attn_fwd_kt(
          (cuda feature off; only Device::Rocm is supported in this build)",
         q.device()
     )))
+}
+
+#[cfg_attr(not(any(feature = "cuda", feature = "rocm")), allow(unused_variables))]
+pub fn flash_attn_fwd_no_lse_kt(
+    q: &KtTensor,
+    k: &KtTensor,
+    v: &KtTensor,
+    softmax_scale: f32,
+    causal: bool,
+) -> Result<Option<KtTensor>, FlashAttnError> {
+    let q_shape = q.shape();
+    if q_shape.len() != 4 {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn-no-lse: q must be rank-4 [batch, seqlen, num_heads, head_dim], got {q_shape:?}"
+        )));
+    }
+    let k_shape = k.shape();
+    if k_shape.len() != 4 {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn-no-lse: k must be rank-4, got {k_shape:?}"
+        )));
+    }
+    if v.shape() != k_shape {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn-no-lse: k/v shape mismatch {k_shape:?}/{:?}",
+            v.shape()
+        )));
+    }
+
+    #[cfg(feature = "rocm")]
+    if matches!(q.device(), KtDevice::Rocm(_)) {
+        return crate::rocm_sdpa::flash_attn_fwd_rocm_no_lse(q, k, v, softmax_scale, causal);
+    }
+
+    #[cfg(feature = "cuda")]
+    {
+        if matches!(q.device(), KtDevice::Cuda(_)) {
+            let (out, _lse) = flash_attn_fwd_kt(q, k, v, softmax_scale, causal)?;
+            return Ok(Some(out));
+        }
+    }
+
+    Ok(None)
 }
 
 #[cfg_attr(not(feature = "rocm"), allow(unused_variables))]
@@ -1109,7 +1152,7 @@ pub fn flash_attn_bwd_kt(
         )));
     }
 
-    // ROCm composite backward dispatch (Phase R.8).
+    // ROCm native/composite backward dispatch.
     #[cfg(feature = "rocm")]
     if matches!(q.device(), KtDevice::Rocm(_)) {
         return crate::rocm_sdpa::flash_attn_bwd_rocm(
@@ -1117,6 +1160,7 @@ pub fn flash_attn_bwd_kt(
             q,
             k,
             v,
+            out,
             softmax_lse,
             softmax_scale,
             causal,

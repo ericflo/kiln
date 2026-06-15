@@ -96,6 +96,109 @@ __global__ void gdn_fwd_sub_kernel(
     }
 }
 
+__global__ void gdn_fwd_sub_f32_kernel(
+    const float *__restrict__ a_strict,  // [B*H, C, C]
+    const float *__restrict__ v_prime,   // [B*H, C, dv]
+    const float *__restrict__ beta,      // [B*H, C]
+    float *__restrict__ w_out,           // [B*H, C, dv]
+    int chunk_size,
+    int dv
+) {
+    constexpr int DV_TILE = 64;
+    const int bh = blockIdx.x;
+    const int dv_tile = blockIdx.y;
+    const int tid = threadIdx.x;
+    const int blk = blockDim.x;
+
+    const int dv_start = dv_tile * DV_TILE;
+    if (dv_start >= dv) {
+        return;
+    }
+    const int dv_count = min(DV_TILE, dv - dv_start);
+
+    extern __shared__ float smem_f32[];
+    float *sA = smem_f32;                                         // C*C
+    float *sW = smem_f32 + (size_t)chunk_size * chunk_size;       // C*DV_TILE
+
+    const float *a_base = a_strict + (size_t)bh * chunk_size * chunk_size;
+    const float *v_base = v_prime + (size_t)bh * chunk_size * dv;
+    const float *beta_base = beta + (size_t)bh * chunk_size;
+    float *w_base = w_out + (size_t)bh * chunk_size * dv;
+
+    const int total_a = chunk_size * chunk_size;
+    for (int i = tid; i < total_a; i += blk) {
+        sA[i] = a_base[i];
+    }
+    __syncthreads();
+
+    for (int t = 0; t < chunk_size; ++t) {
+        if (tid < dv_count) {
+            float acc = 0.0f;
+            const float *a_row = sA + (size_t)t * chunk_size;
+            for (int i = 0; i < t; ++i) {
+                acc += a_row[i] * sW[(size_t)i * DV_TILE + tid];
+            }
+            const int d = dv_start + tid;
+            const float w_val = beta_base[t] * (v_base[(size_t)t * dv + d] - acc);
+            sW[(size_t)t * DV_TILE + tid] = w_val;
+            w_base[(size_t)t * dv + d] = w_val;
+        }
+        __syncthreads();
+    }
+}
+
+__global__ void gdn_solve_tri_transpose_f32_kernel(
+    const float *__restrict__ a_strict,  // [B*H, C, C]
+    const float *__restrict__ beta,      // [B*H, C]
+    const float *__restrict__ dw,        // [B*H, C, dv]
+    float *__restrict__ dr_out,          // [B*H, C, dv]
+    int chunk_size,
+    int dv
+) {
+    constexpr int DV_TILE = 64;
+    const int bh = blockIdx.x;
+    const int dv_tile = blockIdx.y;
+    const int tid = threadIdx.x;
+    const int blk = blockDim.x;
+
+    const int dv_start = dv_tile * DV_TILE;
+    if (dv_start >= dv) {
+        return;
+    }
+    const int dv_count = min(DV_TILE, dv - dv_start);
+
+    extern __shared__ float smem_f32[];
+    float *sA = smem_f32;                                         // C*C
+    float *sR = smem_f32 + (size_t)chunk_size * chunk_size;       // C*DV_TILE
+
+    const float *a_base = a_strict + (size_t)bh * chunk_size * chunk_size;
+    const float *beta_base = beta + (size_t)bh * chunk_size;
+    const float *dw_base = dw + (size_t)bh * chunk_size * dv;
+    float *dr_base = dr_out + (size_t)bh * chunk_size * dv;
+
+    const int total_a = chunk_size * chunk_size;
+    for (int i = tid; i < total_a; i += blk) {
+        sA[i] = a_base[i];
+    }
+    __syncthreads();
+
+    for (int t = chunk_size - 1; t >= 0; --t) {
+        if (tid < dv_count) {
+            float acc = 0.0f;
+            for (int i = t + 1; i < chunk_size; ++i) {
+                acc += beta_base[i]
+                    * sA[(size_t)i * chunk_size + t]
+                    * sR[(size_t)i * DV_TILE + tid];
+            }
+            const int d = dv_start + tid;
+            const float dr_val = dw_base[(size_t)t * dv + d] - acc;
+            sR[(size_t)t * DV_TILE + tid] = dr_val;
+            dr_base[(size_t)t * dv + d] = dr_val;
+        }
+        __syncthreads();
+    }
+}
+
 } // namespace
 
 extern "C" kiln_gdn_status_t kiln_gdn_forward_substitution(
@@ -144,6 +247,106 @@ extern "C" kiln_gdn_status_t kiln_gdn_forward_substitution(
         reinterpret_cast<const __nv_bfloat16 *>(v_prime),
         reinterpret_cast<const __nv_bfloat16 *>(beta),
         reinterpret_cast<__nv_bfloat16 *>(w_out),
+        chunk_size,
+        dv
+    );
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        return (int)err;
+    }
+    return 0;
+}
+
+extern "C" kiln_gdn_status_t kiln_gdn_forward_substitution_f32(
+    const void *a_strict,
+    const void *v_prime,
+    const void *beta,
+    void *w_out,
+    int batch_heads,
+    int chunk_size,
+    int dv,
+    void *stream
+) {
+    if (batch_heads <= 0 || chunk_size <= 0 || dv <= 0) {
+        return -1;
+    }
+    if (chunk_size > 128) {
+        return -2;
+    }
+
+    constexpr int DV_TILE = 64;
+    dim3 blocks(batch_heads, (dv + DV_TILE - 1) / DV_TILE);
+    int threads = DV_TILE;
+    size_t smem_bytes =
+        ((size_t)chunk_size * chunk_size + (size_t)chunk_size * DV_TILE)
+        * sizeof(float);
+
+    if (smem_bytes > 48 * 1024) {
+        cudaFuncSetAttribute(
+            gdn_fwd_sub_f32_kernel,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            (int)smem_bytes
+        );
+    }
+
+    cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
+
+    gdn_fwd_sub_f32_kernel<<<blocks, threads, smem_bytes, s>>>(
+        reinterpret_cast<const float *>(a_strict),
+        reinterpret_cast<const float *>(v_prime),
+        reinterpret_cast<const float *>(beta),
+        reinterpret_cast<float *>(w_out),
+        chunk_size,
+        dv
+    );
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        return (int)err;
+    }
+    return 0;
+}
+
+extern "C" kiln_gdn_status_t kiln_gdn_solve_tri_transpose_f32(
+    const void *a_strict,
+    const void *beta,
+    const void *dw,
+    void *dr_out,
+    int batch_heads,
+    int chunk_size,
+    int dv,
+    void *stream
+) {
+    if (batch_heads <= 0 || chunk_size <= 0 || dv <= 0) {
+        return -1;
+    }
+    if (chunk_size > 128) {
+        return -2;
+    }
+
+    constexpr int DV_TILE = 64;
+    dim3 blocks(batch_heads, (dv + DV_TILE - 1) / DV_TILE);
+    int threads = DV_TILE;
+    size_t smem_bytes =
+        ((size_t)chunk_size * chunk_size + (size_t)chunk_size * DV_TILE)
+        * sizeof(float);
+
+    if (smem_bytes > 48 * 1024) {
+        cudaFuncSetAttribute(
+            gdn_solve_tri_transpose_f32_kernel,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            (int)smem_bytes
+        );
+    }
+
+    cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
+
+    gdn_solve_tri_transpose_f32_kernel<<<blocks, threads, smem_bytes, s>>>(
+        reinterpret_cast<const float *>(a_strict),
+        reinterpret_cast<const float *>(beta),
+        reinterpret_cast<const float *>(dw),
+        reinterpret_cast<float *>(dr_out),
         chunk_size,
         dv
     );

@@ -467,6 +467,11 @@ pub fn rocm_gqa_repeat_heads(src: &Tensor, h: usize) -> Result<Tensor> {
             "rocm_gqa_repeat_heads: FFI returned status {status}"
         )));
     }
+    crate::rocm_synchronize_compute_stream(device_index).map_err(|e| {
+        Error::Msg(format!(
+            "rocm_gqa_repeat_heads: synchronize after async kernel launch: {e}"
+        ))
+    })?;
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
     Tensor::from_parts(
@@ -554,6 +559,11 @@ pub fn rocm_gqa_repeat_heads_head_major(src: &Tensor, h: usize) -> Result<Tensor
             "rocm_gqa_repeat_heads_head_major: FFI returned status {status}"
         )));
     }
+    crate::rocm_synchronize_compute_stream(device_index).map_err(|e| {
+        Error::Msg(format!(
+            "rocm_gqa_repeat_heads_head_major: synchronize after async kernel launch: {e}"
+        ))
+    })?;
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
     Tensor::from_parts(

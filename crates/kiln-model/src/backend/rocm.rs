@@ -265,7 +265,8 @@ impl RocmBackend {
         let device_kt = device;
         Self {
             device_kt,
-            resident_tensor_ids: super::cuda_rocm_common::new_resident_tensor_id_registry(),
+            resident_tensor_ids: crate::backend::cuda_rocm_common::new_resident_tensor_id_registry(
+            ),
             gdn_enabled,
             gdn_gates_enabled,
             gdn_gated_rms_norm_enabled,
@@ -389,6 +390,12 @@ impl AttentionBackend for RocmBackend {
         let q_c = q.contiguous().context("flash_attn kt: q contiguous")?;
         let k_c = k.contiguous().context("flash_attn kt: k contiguous")?;
         let v_c = v.contiguous().context("flash_attn kt: v contiguous")?;
+        if let Some(out_kt) =
+            kiln_flash_attn::flash_attn_fwd_no_lse_kt(&q_c, &k_c, &v_c, softmax_scale, causal)
+                .map_err(|e| anyhow::anyhow!("flash_attn kt: flash_attn_fwd_no_lse_kt: {e}"))?
+        {
+            return Ok(Some(out_kt));
+        }
         let (out_kt, _lse_kt) =
             kiln_flash_attn::flash_attn_fwd_kt(&q_c, &k_c, &v_c, softmax_scale, causal)
                 .map_err(|e| anyhow::anyhow!("flash_attn kt: flash_attn_fwd_kt: {e}"))?;
@@ -730,17 +737,38 @@ impl GdnBackend for RocmBackend {
         v_prime: &kiln_tensor::Tensor,
         beta: &kiln_tensor::Tensor,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        if a_strict.dtype() != kiln_tensor::DType::BF16 {
-            return Ok(None);
-        }
         // Phase 7 (#1082): kt-typed surface is now the only path. With
         // the BackendRuntime decode methods flipped to kt (#1082
         // DoD-101/102) the args are already kt, so the candle↔kt
         // bridges are gone — the kernel runs directly on the caller's
         // kt tensors (zero candle roundtrip).
         kiln_nvtx::range!(c"kiln/gdn_forward_substitution_kt");
-        let out_kt = kiln_gdn_kernel::gdn_forward_substitution_kt(a_strict, v_prime, beta)
-            .map_err(|e| anyhow::anyhow!("kt gdn_forward_substitution: {e}"))?;
+        let out_kt = match a_strict.dtype() {
+            kiln_tensor::DType::BF16 => {
+                kiln_gdn_kernel::gdn_forward_substitution_kt(a_strict, v_prime, beta)
+                    .map_err(|e| anyhow::anyhow!("kt gdn_forward_substitution: {e}"))?
+            }
+            kiln_tensor::DType::F32 => {
+                kiln_gdn_kernel::gdn_forward_substitution_f32_kt(a_strict, v_prime, beta)
+                    .map_err(|e| anyhow::anyhow!("kt gdn_forward_substitution_f32: {e}"))?
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(out_kt))
+    }
+
+    fn runtime_gdn_solve_tri_transpose(
+        &self,
+        a_strict: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        dw: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if a_strict.dtype() != kiln_tensor::DType::F32 {
+            return Ok(None);
+        }
+        kiln_nvtx::range!(c"kiln/gdn_solve_tri_transpose_f32_kt");
+        let out_kt = kiln_gdn_kernel::gdn_solve_tri_transpose_f32_kt(a_strict, beta, dw)
+            .map_err(|e| anyhow::anyhow!("kt gdn_solve_tri_transpose_f32: {e}"))?;
         Ok(Some(out_kt))
     }
 
@@ -2304,6 +2332,8 @@ mod tests {
         // candle `device` field was dropped; `device_kt` is the sole device.)
         RocmBackend {
             device_kt: kiln_tensor::Device::Cpu,
+            resident_tensor_ids: crate::backend::cuda_rocm_common::new_resident_tensor_id_registry(
+            ),
             gdn_enabled: false,
             gdn_gates_enabled: false,
             gdn_gated_rms_norm_enabled: false,
@@ -2569,7 +2599,9 @@ mod tests {
         let k = KtTensor::zeros_cpu(vec![1, 2, 1, 128], KtDType::F32);
         let v = KtTensor::zeros_cpu(vec![1, 2, 1, 128], KtDType::F32);
         assert!(
-            backend.flash_attn_prefill(&q, &k, &v, 1.0, true)?.is_none(),
+            backend
+                .runtime_flash_attn_prefill(&q, &k, &v, 1.0, true)?
+                .is_none(),
             "ROCm FlashAttention prefill must decline non-BF16 inputs"
         );
 
@@ -2581,7 +2613,7 @@ mod tests {
 
         assert!(
             backend
-                .flash_attn_paged_decode(
+                .runtime_flash_attn_paged_decode(
                     &q_decode,
                     &k_pool,
                     &v_pool,
@@ -2596,7 +2628,7 @@ mod tests {
         );
         assert!(
             backend
-                .flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+                .runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
                     &q_decode,
                     &k_pool,
                     &v_pool,

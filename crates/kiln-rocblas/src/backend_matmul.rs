@@ -95,7 +95,7 @@ impl fmt::Display for Epilogue {
     }
 }
 
-/// Pure-data matmul descriptor. The shape and dtype an autotune
+/// Pure-data matmul descriptor. The shape and dtypes an autotune
 /// search keys on.
 ///
 /// This is intentionally backend-agnostic — pointer types live in
@@ -107,10 +107,23 @@ pub struct MatmulRequest {
     pub m: u64,
     pub n: u64,
     pub k: u64,
-    /// `dtype.to_string()` from `kiln_tensor::DType`. Wrapped as
-    /// `String` so this crate can stay candle/kiln-tensor-free at
+    /// Number of matrices in a strided batched GEMM. `1` means a plain
+    /// single-matrix GEMM; batch strides are ignored in that case.
+    pub batch_count: u64,
+    /// Stride, in elements, from one A matrix to the next.
+    pub a_batch_stride: u64,
+    /// Stride, in elements, from one B matrix to the next.
+    pub b_batch_stride: u64,
+    /// Stride, in elements, from one C matrix to the next.
+    pub c_batch_stride: u64,
+    /// Input `dtype.to_string()` from `kiln_tensor::DType`. Wrapped
+    /// as `String` so this crate can stay candle/kiln-tensor-free at
     /// the type level.
     pub dtype: String,
+    /// Output dtype. Most matmuls use the input dtype, but attention
+    /// score matmuls need BF16/F16 inputs with F32 output while still
+    /// using FP32 compute.
+    pub output_dtype: String,
     pub a_layout: MatmulLayout,
     pub b_layout: MatmulLayout,
     pub c_layout: MatmulLayout,
@@ -129,8 +142,14 @@ impl MatmulRequest {
     pub fn cache_key(&self) -> AlgoCacheKey {
         AlgoCacheKey {
             shape: [self.m, self.n, self.k],
+            batch_count: self.batch_count,
+            batch_strides: [
+                self.a_batch_stride,
+                self.b_batch_stride,
+                self.c_batch_stride,
+            ],
             input_dtype: self.dtype.clone(),
-            output_dtype: self.dtype.clone(),
+            output_dtype: self.output_dtype.clone(),
             compute_dtype: "f32".to_string(),
             transpose: [
                 matches!(self.a_layout, MatmulLayout::ColMajor),
@@ -191,7 +210,12 @@ mod tests {
             m: 2048,
             n: 18432,
             k: 2560,
+            batch_count: 1,
+            a_batch_stride: 0,
+            b_batch_stride: 0,
+            c_batch_stride: 0,
             dtype: "bf16".to_string(),
+            output_dtype: "bf16".to_string(),
             a_layout: MatmulLayout::RowMajor,
             b_layout: MatmulLayout::ColMajor,
             c_layout: MatmulLayout::RowMajor,
@@ -200,9 +224,16 @@ mod tests {
         };
         let k = req.cache_key();
         assert_eq!(k.shape, [2048, 18432, 2560]);
+        assert_eq!(k.batch_count, 1);
+        assert_eq!(k.batch_strides, [0, 0, 0]);
         assert_eq!(k.input_dtype, "bf16");
+        assert_eq!(k.output_dtype, "bf16");
         assert_eq!(k.transpose, [false, true]); // A row → false; B col → true
         assert_eq!(k.expected_concurrent_streams, 1);
+
+        let mut f32_out = req.clone();
+        f32_out.output_dtype = "f32".to_string();
+        assert_ne!(req.cache_key(), f32_out.cache_key());
     }
 
     #[test]
@@ -249,7 +280,12 @@ mod tests {
             m: 4,
             n: 4,
             k: 4,
+            batch_count: 1,
+            a_batch_stride: 0,
+            b_batch_stride: 0,
+            c_batch_stride: 0,
             dtype: "f32".to_string(),
+            output_dtype: "f32".to_string(),
             a_layout: MatmulLayout::RowMajor,
             b_layout: MatmulLayout::RowMajor,
             c_layout: MatmulLayout::RowMajor,
@@ -267,7 +303,12 @@ mod tests {
             m: 1024,
             n: 1024,
             k: 1024,
+            batch_count: 1,
+            a_batch_stride: 0,
+            b_batch_stride: 0,
+            c_batch_stride: 0,
             dtype: "bf16".to_string(),
+            output_dtype: "bf16".to_string(),
             a_layout: MatmulLayout::RowMajor,
             b_layout: MatmulLayout::RowMajor,
             c_layout: MatmulLayout::RowMajor,
@@ -277,5 +318,31 @@ mod tests {
         let mut three = base.clone();
         three.concurrent_streams = 3;
         assert_ne!(base.cache_key(), three.cache_key());
+    }
+
+    #[test]
+    fn batch_shape_is_in_cache_key() {
+        let base = MatmulRequest {
+            m: 128,
+            n: 256,
+            k: 64,
+            batch_count: 1,
+            a_batch_stride: 0,
+            b_batch_stride: 0,
+            c_batch_stride: 0,
+            dtype: "bf16".to_string(),
+            output_dtype: "bf16".to_string(),
+            a_layout: MatmulLayout::RowMajor,
+            b_layout: MatmulLayout::RowMajor,
+            c_layout: MatmulLayout::RowMajor,
+            epilogue: Epilogue::Identity,
+            concurrent_streams: 1,
+        };
+        let mut batched = base.clone();
+        batched.batch_count = 16;
+        batched.a_batch_stride = 8192;
+        batched.b_batch_stride = 16384;
+        batched.c_batch_stride = 32768;
+        assert_ne!(base.cache_key(), batched.cache_key());
     }
 }

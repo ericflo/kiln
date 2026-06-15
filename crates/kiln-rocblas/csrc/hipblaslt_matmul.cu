@@ -124,6 +124,10 @@ struct KilnHipblasLtMatmulSpec {
     int32_t m;
     int32_t n;
     int32_t k;
+    int32_t batch_count;
+    int64_t a_batch_stride;  // elements
+    int64_t b_batch_stride;  // elements
+    int64_t c_batch_stride;  // elements
     int32_t dtype_in;        // KILN_DTYPE_*
     int32_t dtype_out;       // KILN_DTYPE_*
     int32_t a_transposed;    // 0 = N, non-zero = T
@@ -279,7 +283,7 @@ extern "C" int kiln_blas_hipblaslt_matmul(
 
     if (ctx == nullptr) return KILN_BLAS_ERR_CTX_NULL;
     if (spec == nullptr) return KILN_BLAS_ERR_DESC_CREATE;
-    if (spec->m <= 0 || spec->n <= 0 || spec->k <= 0) {
+    if (spec->m <= 0 || spec->n <= 0 || spec->k <= 0 || spec->batch_count <= 0) {
         return KILN_BLAS_ERR_INVALID_SHAPE;
     }
 
@@ -369,6 +373,34 @@ extern "C" int kiln_blas_hipblaslt_matmul(
         != HIPBLAS_STATUS_SUCCESS) {
         ret = KILN_BLAS_ERR_LAYOUT_CREATE;
         goto cleanup;
+    }
+    if (spec->batch_count > 1) {
+        const int32_t batch_count = spec->batch_count;
+        const int64_t b_stride = spec->b_batch_stride;
+        const int64_t a_stride = spec->a_batch_stride;
+        const int64_t c_stride = spec->c_batch_stride;
+        if (b_stride <= 0 || a_stride <= 0 || c_stride <= 0 ||
+            hipblasLtMatrixLayoutSetAttribute(
+                b_desc, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT,
+                &batch_count, sizeof(batch_count)) != HIPBLAS_STATUS_SUCCESS ||
+            hipblasLtMatrixLayoutSetAttribute(
+                a_desc, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT,
+                &batch_count, sizeof(batch_count)) != HIPBLAS_STATUS_SUCCESS ||
+            hipblasLtMatrixLayoutSetAttribute(
+                c_desc, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT,
+                &batch_count, sizeof(batch_count)) != HIPBLAS_STATUS_SUCCESS ||
+            hipblasLtMatrixLayoutSetAttribute(
+                b_desc, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET,
+                &b_stride, sizeof(b_stride)) != HIPBLAS_STATUS_SUCCESS ||
+            hipblasLtMatrixLayoutSetAttribute(
+                a_desc, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET,
+                &a_stride, sizeof(a_stride)) != HIPBLAS_STATUS_SUCCESS ||
+            hipblasLtMatrixLayoutSetAttribute(
+                c_desc, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET,
+                &c_stride, sizeof(c_stride)) != HIPBLAS_STATUS_SUCCESS) {
+            ret = KILN_BLAS_ERR_LAYOUT_CREATE;
+            goto cleanup;
+        }
     }
 
     // Preference: limit workspace to caller's budget.

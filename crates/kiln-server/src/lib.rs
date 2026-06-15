@@ -22,6 +22,7 @@ pub mod pi_rpc;
 pub mod recent_requests;
 pub mod request_log;
 pub mod rollout_generate_cli;
+pub(crate) mod sft_dataset;
 pub mod state;
 pub mod training_history;
 pub mod training_preflight;

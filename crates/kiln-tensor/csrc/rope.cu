@@ -133,6 +133,57 @@ __global__ void kiln_rope_kernel(const void* __restrict__ x_in,
     }
 }
 
+// Split-half/GPT-NeoX rotary used by Qwen-style attention in kiln-model.
+// Input/output layout is exactly [batch, seq, heads, head_dim].
+__global__ void kiln_rope_split_half_4d_kernel(const void* __restrict__ x_in,
+                                               void* __restrict__ x_out,
+                                               const void* __restrict__ cos,
+                                               const void* __restrict__ sin,
+                                               int64_t batch,
+                                               int64_t seq,
+                                               int64_t heads,
+                                               int64_t head_dim,
+                                               int64_t rotary_dim,
+                                               int x_dtype,
+                                               int cs_dtype) {
+    int64_t global_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t total = batch * seq * heads * head_dim;
+    if (global_idx >= total) return;
+
+    int64_t d = global_idx % head_dim;
+    int64_t t = global_idx / head_dim;
+    int64_t h = t % heads;
+    t /= heads;
+    int64_t s = t % seq;
+    int64_t b = t / seq;
+
+    int64_t base = (((b * seq) + s) * heads + h) * head_dim;
+    if (d >= rotary_dim) {
+        float v = load_promoted(x_in, base + d, x_dtype);
+        store_narrowed(x_out, base + d, x_dtype, v);
+        return;
+    }
+
+    int64_t half = rotary_dim / 2;
+    int64_t i = d < half ? d : d - half;
+    int64_t x1_idx = base + i;
+    int64_t x2_idx = base + half + i;
+    int64_t cs_idx = s * half + i;
+
+    float x1 = load_promoted(x_in, x1_idx, x_dtype);
+    float x2 = load_promoted(x_in, x2_idx, x_dtype);
+    float c = load_promoted(cos, cs_idx, cs_dtype);
+    float si = load_promoted(sin, cs_idx, cs_dtype);
+
+    if (d < half) {
+        float v = x1 * c - x2 * si;
+        store_narrowed(x_out, base + d, x_dtype, v);
+    } else {
+        float v = x1 * si + x2 * c;
+        store_narrowed(x_out, base + d, x_dtype, v);
+    }
+}
+
 } // namespace
 
 // Entry point: launches the rope kernel on `stream`. Writes the full
@@ -167,6 +218,40 @@ extern "C" int kiln_rope_async(const void* x_in,
     kiln_rope_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
         x_in, x_out, cos, sin,
         leading, seq, head_dim, pair_count,
+        x_dtype, cs_dtype);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return 1000 + static_cast<int>(err);
+    return 0;
+}
+
+extern "C" int kiln_rope_split_half_4d_async(const void* x_in,
+                                             void* x_out,
+                                             const void* cos,
+                                             const void* sin,
+                                             int64_t batch,
+                                             int64_t seq,
+                                             int64_t heads,
+                                             int64_t head_dim,
+                                             int64_t rotary_dim,
+                                             int x_dtype,
+                                             int cs_dtype,
+                                             cudaStream_t stream) {
+    if (batch <= 0 || seq <= 0 || heads <= 0 || head_dim <= 0 || rotary_dim <= 0) return 1;
+    if ((rotary_dim % 2) != 0 || rotary_dim > head_dim) return 2;
+    if (x_dtype < 0 || x_dtype > 2) return 3;
+    if (cs_dtype < 0 || cs_dtype > 2) return 4;
+
+    int64_t total = batch * seq * heads * head_dim;
+    if (total == 0) return 0;
+
+    int64_t blocks_i64 = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    if (blocks_i64 > (int64_t)2147483647) return 5;
+    int blocks = static_cast<int>(blocks_i64);
+
+    kiln_rope_split_half_4d_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
+        x_in, x_out, cos, sin,
+        batch, seq, heads, head_dim, rotary_dim,
         x_dtype, cs_dtype);
 
     cudaError_t err = cudaGetLastError();

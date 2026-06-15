@@ -26,11 +26,12 @@ use crate::{
     kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16,
     kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16,
     kiln_gdn_decode_qk_norm_gates_recurrent_vf32_bf16, kiln_gdn_forward_substitution,
-    kiln_gdn_full_chunk_forward, kiln_gdn_full_chunk_forward_multiblock,
-    kiln_gdn_gated_rms_norm_bf16, kiln_gdn_gated_rms_norm_bwd_bf16,
-    kiln_gdn_gated_rms_norm_bwd_wf32_bf16, kiln_gdn_gated_rms_norm_wf32_bf16, kiln_gdn_gates_bf16,
-    kiln_gdn_gates_bf16_f32_bf16_params, kiln_gdn_gates_bf16_f32_params,
-    kiln_gdn_l2_norm_scale_bwd_bf16, kiln_gdn_recurrent_forward,
+    kiln_gdn_forward_substitution_f32, kiln_gdn_full_chunk_forward,
+    kiln_gdn_full_chunk_forward_multiblock, kiln_gdn_gated_rms_norm_bf16,
+    kiln_gdn_gated_rms_norm_bwd_bf16, kiln_gdn_gated_rms_norm_bwd_wf32_bf16,
+    kiln_gdn_gated_rms_norm_wf32_bf16, kiln_gdn_gates_bf16, kiln_gdn_gates_bf16_f32_bf16_params,
+    kiln_gdn_gates_bf16_f32_params, kiln_gdn_l2_norm_scale_bwd_bf16, kiln_gdn_recurrent_forward,
+    kiln_gdn_solve_tri_transpose_f32,
 };
 
 #[derive(Debug)]
@@ -124,14 +125,42 @@ fn device_stream_raw(t: &KtTensor, name: &'static str) -> Result<*mut core::ffi:
 ///
 /// Launching the kernel on S_out makes the zero-memset and the kernel write
 /// same-stream-ordered (memset first, then write), so the kernel never races
-/// its own output's initialization. Inputs uploaded on other streams are still
-/// visible because `clone_htod` fully synchronizes each upload before return.
+/// its own output's initialization. Callers must still synchronize ROCm input
+/// tensor streams before launching here, because long-context training often
+/// feeds tensors produced by earlier device kernels rather than host uploads.
 /// CUDA is untouched: it keeps the input-stream launch (its single cached
 /// context/stream already orders memset→kernel→readback), and this helper plus
 /// every call to it is `cfg(feature = "rocm")`-only.
 #[cfg(feature = "rocm")]
 fn output_stream_raw(out: &KtTensor) -> Result<*mut core::ffi::c_void, GdnError> {
     Ok(kiln_kt_bridge::device_stream_raw_of(out, "rocm_output")?)
+}
+
+#[cfg(feature = "rocm")]
+fn synchronize_rocm_input_streams(
+    label: &'static str,
+    tensors: &[(&'static str, &KtTensor)],
+) -> Result<(), GdnError> {
+    for (name, tensor) in tensors {
+        if matches!(tensor.device(), KtDevice::Rocm(_)) {
+            kiln_tensor::rocm_synchronize_tensor_stream(tensor).map_err(|e| {
+                GdnError::Msg(format!(
+                    "kt-gdn: {label}: synchronize ROCm input {name}: {e}"
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "rocm")]
+fn rocm_launch_stream(
+    out: &KtTensor,
+    label: &'static str,
+    inputs: &[(&'static str, &KtTensor)],
+) -> Result<*mut core::ffi::c_void, GdnError> {
+    synchronize_rocm_input_streams(label, inputs)?;
+    output_stream_raw(out)
 }
 
 /// Block until the just-launched kernel finishes, on the ROCm backend, so the
@@ -141,14 +170,12 @@ fn output_stream_raw(out: &KtTensor) -> Result<*mut core::ffi::c_void, GdnError>
 /// A device-wide `hipDeviceSynchronize` drains the launch stream too. CUDA keeps
 /// its byte-identical path (`cfg(feature = "rocm")`-only, compiled out on CUDA).
 #[cfg(feature = "rocm")]
-fn device_synchronize_after_launch(_t: &KtTensor) -> Result<(), GdnError> {
-    // R.10 perf: now a no-op. `primary_rocm_context` is CACHED per device (one
-    // shared context + default stream), so the kernel launch, the output's
-    // zeroing memset, and the `rocm_to_host_copy` readback all serialize on ONE
-    // stream — the readback's own `hipStreamSynchronize` already orders them.
-    // The old per-call `hipDeviceSynchronize` (added when each tensor minted its
-    // own stream, pre-cache) drained the whole GPU pipeline every GDN call — the
-    // dominant `kfd_wait_on_events` stall on the decode hot path.
+fn device_synchronize_after_launch(t: &KtTensor) -> Result<(), GdnError> {
+    if matches!(t.device(), KtDevice::Rocm(_)) {
+        kiln_tensor::rocm_synchronize_tensor_stream(t).map_err(|e| {
+            GdnError::Msg(format!("kt-gdn: synchronize ROCm output after launch: {e}"))
+        })?;
+    }
     Ok(())
 }
 
@@ -220,7 +247,11 @@ pub fn gdn_forward_substitution_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(a_st, "a_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&w_out)?;
+    let raw_stream = rocm_launch_stream(
+        &w_out,
+        "forward_substitution",
+        &[("a_strict", a_strict), ("v_prime", v_prime), ("beta", beta)],
+    )?;
     let status = unsafe {
         kiln_gdn_forward_substitution(
             a_ptr as *const _,
@@ -239,6 +270,188 @@ pub fn gdn_forward_substitution_kt(
     #[cfg(feature = "rocm")]
     device_synchronize_after_launch(&w_out)?;
     Ok(w_out)
+}
+
+/// F32 training/backward variant of [`gdn_forward_substitution_kt`].
+///
+/// Shapes:
+/// - `a_strict`: F32 `[B, H, C, C]`
+/// - `v_prime`:  F32 `[B, H, C, dv]`
+/// - `beta`:     F32 `[B, H, C]`
+///
+/// Returns F32 `W` of shape `[B, H, C, dv]`.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub fn gdn_forward_substitution_f32_kt(
+    a_strict: &KtTensor,
+    v_prime: &KtTensor,
+    beta: &KtTensor,
+) -> Result<KtTensor, GdnError> {
+    let a_shape = a_strict.shape();
+    if a_shape.len() != 4 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: f32 a_strict must be rank-4, got {a_shape:?}"
+        )));
+    }
+    let (b, h, c, c2) = (a_shape[0], a_shape[1], a_shape[2], a_shape[3]);
+    if c != c2 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: f32 a_strict must be square on last two axes, got [_, _, {c}, {c2}]"
+        )));
+    }
+    let vp_shape = v_prime.shape();
+    if vp_shape.len() != 4 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: f32 v_prime must be rank-4, got {vp_shape:?}"
+        )));
+    }
+    let dv = vp_shape[3];
+    if (vp_shape[0], vp_shape[1], vp_shape[2]) != (b, h, c) {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: f32 v_prime {vp_shape:?} mismatch with a_strict prefix [{b}, {h}, {c}]"
+        )));
+    }
+    let bt_shape = beta.shape();
+    if bt_shape.len() != 3 || (bt_shape[0], bt_shape[1], bt_shape[2]) != (b, h, c) {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: f32 beta {bt_shape:?} mismatch with [{b}, {h}, {c}]"
+        )));
+    }
+    if c > 128 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: f32 chunk_size must be <= 128, got {c}"
+        )));
+    }
+
+    let a_ptr = kiln_kt_bridge::device_input_ptr(a_strict, KtDType::F32, "a_strict")?;
+    let (a_st, _) = cuda_storage_and_byte_offset(a_strict, KtDType::F32, "a_strict")?;
+    let vp_ptr = kiln_kt_bridge::device_input_ptr(v_prime, KtDType::F32, "v_prime")?;
+    let _ = cuda_storage_and_byte_offset(v_prime, KtDType::F32, "v_prime")?;
+    let bt_ptr = kiln_kt_bridge::device_input_ptr(beta, KtDType::F32, "beta")?;
+    let _ = cuda_storage_and_byte_offset(beta, KtDType::F32, "beta")?;
+
+    let w_out = alloc_cuda_tensor(a_st, KtDType::F32, vec![b, h, c, dv])?;
+    let w_ptr = kiln_kt_bridge::device_output_ptr(&w_out);
+
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(a_st, "a_st")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = rocm_launch_stream(
+        &w_out,
+        "forward_substitution_f32",
+        &[("a_strict", a_strict), ("v_prime", v_prime), ("beta", beta)],
+    )?;
+    let status = unsafe {
+        kiln_gdn_forward_substitution_f32(
+            a_ptr as *const _,
+            vp_ptr as *const _,
+            bt_ptr as *const _,
+            w_ptr as *mut _,
+            (b * h) as i32,
+            c as i32,
+            dv as i32,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: f32 forward_substitution FFI returned {status}"
+        )));
+    }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&w_out)?;
+    Ok(w_out)
+}
+
+/// F32 adjoint triangular solve used by the analytic GDN backward.
+///
+/// Solves `M^T * dr = dW` where `M = I + diag(beta) * a_strict`.
+///
+/// Shapes:
+/// - `a_strict`: F32 `[B, H, C, C]`
+/// - `beta`:     F32 `[B, H, C]`
+/// - `dw`:       F32 `[B, H, C, dv]`
+///
+/// Returns F32 `dr` of shape `[B, H, C, dv]`.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub fn gdn_solve_tri_transpose_f32_kt(
+    a_strict: &KtTensor,
+    beta: &KtTensor,
+    dw: &KtTensor,
+) -> Result<KtTensor, GdnError> {
+    let a_shape = a_strict.shape();
+    if a_shape.len() != 4 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: solve_tri_transpose a_strict must be rank-4, got {a_shape:?}"
+        )));
+    }
+    let (b, h, c, c2) = (a_shape[0], a_shape[1], a_shape[2], a_shape[3]);
+    if c != c2 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: solve_tri_transpose a_strict must be square on last two axes, got [_, _, {c}, {c2}]"
+        )));
+    }
+    let dw_shape = dw.shape();
+    if dw_shape.len() != 4 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: solve_tri_transpose dw must be rank-4, got {dw_shape:?}"
+        )));
+    }
+    let dv = dw_shape[3];
+    if (dw_shape[0], dw_shape[1], dw_shape[2]) != (b, h, c) {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: solve_tri_transpose dw {dw_shape:?} mismatch with a_strict prefix [{b}, {h}, {c}]"
+        )));
+    }
+    let beta_shape = beta.shape();
+    if beta_shape.len() != 3 || (beta_shape[0], beta_shape[1], beta_shape[2]) != (b, h, c) {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: solve_tri_transpose beta {beta_shape:?} mismatch with [{b}, {h}, {c}]"
+        )));
+    }
+    if c > 128 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: solve_tri_transpose chunk_size must be <= 128, got {c}"
+        )));
+    }
+
+    let a_ptr = kiln_kt_bridge::device_input_ptr(a_strict, KtDType::F32, "a_strict")?;
+    let (a_st, _) = cuda_storage_and_byte_offset(a_strict, KtDType::F32, "a_strict")?;
+    let beta_ptr = kiln_kt_bridge::device_input_ptr(beta, KtDType::F32, "beta")?;
+    let _ = cuda_storage_and_byte_offset(beta, KtDType::F32, "beta")?;
+    let dw_ptr = kiln_kt_bridge::device_input_ptr(dw, KtDType::F32, "dw")?;
+    let _ = cuda_storage_and_byte_offset(dw, KtDType::F32, "dw")?;
+
+    let dr_out = alloc_cuda_tensor(a_st, KtDType::F32, vec![b, h, c, dv])?;
+    let dr_ptr = kiln_kt_bridge::device_output_ptr(&dr_out);
+
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(a_st, "a_st")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = rocm_launch_stream(
+        &dr_out,
+        "solve_tri_transpose_f32",
+        &[("a_strict", a_strict), ("beta", beta), ("dw", dw)],
+    )?;
+    let status = unsafe {
+        kiln_gdn_solve_tri_transpose_f32(
+            a_ptr as *const _,
+            beta_ptr as *const _,
+            dw_ptr as *const _,
+            dr_ptr as *mut _,
+            (b * h) as i32,
+            c as i32,
+            dv as i32,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: solve_tri_transpose FFI returned {status}"
+        )));
+    }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&dr_out)?;
+    Ok(dr_out)
 }
 
 /// `gdn_recurrent_forward` over `kiln_tensor::Tensor` operands.
@@ -327,7 +540,18 @@ pub fn gdn_recurrent_forward_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(q_st, "q_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&out)?;
+    let raw_stream = rocm_launch_stream(
+        &out,
+        "recurrent_forward",
+        &[
+            ("q", q),
+            ("k", k),
+            ("v", v),
+            ("beta", beta),
+            ("g", g),
+            ("state", state),
+        ],
+    )?;
     let status = unsafe {
         kiln_gdn_recurrent_forward(
             q_ptr as *const _,
@@ -436,7 +660,22 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(q_st, "q_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&out)?;
+    let raw_stream = rocm_launch_stream(
+        &out,
+        "decode_qk_norm_gates_recurrent_rmsnorm_bf16",
+        &[
+            ("q", q),
+            ("k", k),
+            ("v", v),
+            ("a", a),
+            ("b", b_param),
+            ("a_log", a_log),
+            ("dt_bias", dt_bias),
+            ("state", state),
+            ("z", z),
+            ("weight", weight),
+        ],
+    )?;
     let status = unsafe {
         kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16(
             q_ptr as *const _,
@@ -589,7 +828,21 @@ pub fn gdn_full_chunk_forward_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(g_st, "g_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&out)?;
+    let raw_stream = rocm_launch_stream(
+        &out,
+        "full_chunk_forward",
+        &[
+            ("g", g),
+            ("v", v),
+            ("kkt", kkt),
+            ("qkt", qkt),
+            ("ks_entry", ks_entry),
+            ("q_s", q_s),
+            ("beta", beta),
+            ("k_t", k_t),
+            ("state", state),
+        ],
+    )?;
     let status = unsafe {
         kiln_gdn_full_chunk_forward(
             g_ptr as *const _,
@@ -682,7 +935,22 @@ pub fn gdn_decode_gates_recurrent_bf16_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(q_st, "q_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&out)?;
+    let raw_stream = rocm_launch_stream(
+        &out,
+        "decode_gates_recurrent_bf16",
+        &[
+            ("q", q),
+            ("k", k),
+            ("v", v),
+            ("a", a),
+            ("b", b_param),
+            ("a_log", a_log),
+            ("dt_bias", dt_bias),
+            ("state", state),
+            ("z", z),
+            ("weight", weight),
+        ],
+    )?;
     let status = unsafe {
         kiln_gdn_decode_gates_recurrent_bf16(
             q_ptr as *const _,
@@ -773,7 +1041,20 @@ pub fn gdn_decode_qk_norm_gates_recurrent_bf16_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(q_st, "q_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&out)?;
+    let raw_stream = rocm_launch_stream(
+        &out,
+        "decode_qk_norm_gates_recurrent_bf16",
+        &[
+            ("q", q),
+            ("k", k),
+            ("v", v),
+            ("a", a),
+            ("b", b_param),
+            ("a_log", a_log),
+            ("dt_bias", dt_bias),
+            ("state", state),
+        ],
+    )?;
     let status = unsafe {
         kiln_gdn_decode_qk_norm_gates_recurrent_bf16(
             q_ptr as *const _,
@@ -868,7 +1149,22 @@ pub fn gdn_decode_gates_recurrent_vf32_bf16_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(q_st, "q_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&out)?;
+    let raw_stream = rocm_launch_stream(
+        &out,
+        "decode_gates_recurrent_vf32_bf16",
+        &[
+            ("q", q),
+            ("k", k),
+            ("v", v),
+            ("a", a),
+            ("b", b_param),
+            ("a_log", a_log),
+            ("dt_bias", dt_bias),
+            ("state", state),
+            ("z", z),
+            ("weight", weight),
+        ],
+    )?;
     let status = unsafe {
         kiln_gdn_decode_gates_recurrent_vf32_bf16(
             q_ptr as *const _,
@@ -955,7 +1251,20 @@ pub fn gdn_decode_qk_norm_gates_recurrent_vf32_bf16_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(q_st, "q_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&out)?;
+    let raw_stream = rocm_launch_stream(
+        &out,
+        "decode_qk_norm_gates_recurrent_vf32_bf16",
+        &[
+            ("q", q),
+            ("k", k),
+            ("v", v),
+            ("a", a),
+            ("b", b_param),
+            ("a_log", a_log),
+            ("dt_bias", dt_bias),
+            ("state", state),
+        ],
+    )?;
     let status = unsafe {
         kiln_gdn_decode_qk_norm_gates_recurrent_vf32_bf16(
             q_ptr as *const _,
@@ -1041,7 +1350,20 @@ pub fn gdn_decode_qk_norm_gates_recurrent_qf32_vf32_bf16_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(q_st, "q_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&out)?;
+    let raw_stream = rocm_launch_stream(
+        &out,
+        "decode_qk_norm_gates_recurrent_qf32_vf32_bf16",
+        &[
+            ("q", q),
+            ("k", k),
+            ("v", v),
+            ("a", a),
+            ("b", b_param),
+            ("a_log", a_log),
+            ("dt_bias", dt_bias),
+            ("state", state),
+        ],
+    )?;
     let status = unsafe {
         kiln_gdn_decode_qk_norm_gates_recurrent_qf32_vf32_bf16(
             q_ptr as *const _,
@@ -1127,7 +1449,20 @@ pub fn gdn_decode_qk_norm_gates_recurrent_qf32_vbf16_bf16_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(q_st, "q_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&out)?;
+    let raw_stream = rocm_launch_stream(
+        &out,
+        "decode_qk_norm_gates_recurrent_qf32_vbf16_bf16",
+        &[
+            ("q", q),
+            ("k", k),
+            ("v", v),
+            ("a", a),
+            ("b", b_param),
+            ("a_log", a_log),
+            ("dt_bias", dt_bias),
+            ("state", state),
+        ],
+    )?;
     let status = unsafe {
         kiln_gdn_decode_qk_norm_gates_recurrent_qf32_vbf16_bf16(
             q_ptr as *const _,
@@ -1220,7 +1555,22 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(q_st, "q_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&out)?;
+    let raw_stream = rocm_launch_stream(
+        &out,
+        "decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16",
+        &[
+            ("q", q),
+            ("k", k),
+            ("v", v),
+            ("a", a),
+            ("b", b_param),
+            ("a_log", a_log),
+            ("dt_bias", dt_bias),
+            ("state", state),
+            ("z", z),
+            ("weight", weight),
+        ],
+    )?;
     let status = unsafe {
         kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16(
             q_ptr as *const _,
@@ -1316,7 +1666,22 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(q_st, "q_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&out)?;
+    let raw_stream = rocm_launch_stream(
+        &out,
+        "decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16",
+        &[
+            ("q", q),
+            ("k", k),
+            ("v", v),
+            ("a", a),
+            ("b", b_param),
+            ("a_log", a_log),
+            ("dt_bias", dt_bias),
+            ("state", state),
+            ("z", z),
+            ("weight", weight),
+        ],
+    )?;
     let status = unsafe {
         kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16(
             q_ptr as *const _,
@@ -1412,7 +1777,22 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vbf16_bf16_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(q_st, "q_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&out)?;
+    let raw_stream = rocm_launch_stream(
+        &out,
+        "decode_qk_norm_gates_recurrent_rmsnorm_qf32_vbf16_bf16",
+        &[
+            ("q", q),
+            ("k", k),
+            ("v", v),
+            ("a", a),
+            ("b", b_param),
+            ("a_log", a_log),
+            ("dt_bias", dt_bias),
+            ("state", state),
+            ("z", z),
+            ("weight", weight),
+        ],
+    )?;
     let status = unsafe {
         kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vbf16_bf16(
             q_ptr as *const _,
@@ -1563,7 +1943,21 @@ pub fn gdn_full_chunk_forward_multiblock_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(g_st, "g_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&out)?;
+    let raw_stream = rocm_launch_stream(
+        &out,
+        "full_chunk_forward_multiblock",
+        &[
+            ("g", g),
+            ("v", v),
+            ("kkt", kkt),
+            ("qkt", qkt),
+            ("ks_entry", ks_entry),
+            ("q_s", q_s),
+            ("beta", beta),
+            ("k_t", k_t),
+            ("state", state),
+        ],
+    )?;
     let status = unsafe {
         kiln_gdn_full_chunk_forward_multiblock(
             g_ptr as *const _,
@@ -1643,7 +2037,11 @@ pub fn gdn_gated_rms_norm_bf16_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(x_st, "x_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&out)?;
+    let raw_stream = rocm_launch_stream(
+        &out,
+        "gated_rms_norm_bf16",
+        &[("x", x), ("z", z), ("weight", weight)],
+    )?;
     let status = unsafe {
         kiln_gdn_gated_rms_norm_bf16(
             x_ptr as *const _,
@@ -1712,7 +2110,11 @@ pub fn gdn_gated_rms_norm_bf16_f32_weight_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(x_st, "x_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&out)?;
+    let raw_stream = rocm_launch_stream(
+        &out,
+        "gated_rms_norm_bf16_f32_weight",
+        &[("x", x), ("z", z), ("weight", weight)],
+    )?;
     let status = unsafe {
         kiln_gdn_gated_rms_norm_wf32_bf16(
             x_ptr as *const _,
@@ -1799,7 +2201,16 @@ pub fn gdn_gated_rms_norm_bwd_bf16_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(go_st, "grad_out")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&dx)?;
+    let raw_stream = rocm_launch_stream(
+        &dx,
+        "gated_rms_norm_bwd_bf16",
+        &[
+            ("grad_out", grad_out),
+            ("x", x),
+            ("z", z),
+            ("weight", weight),
+        ],
+    )?;
     let status = unsafe {
         kiln_gdn_gated_rms_norm_bwd_bf16(
             go_ptr as *const _,
@@ -1878,7 +2289,16 @@ pub fn gdn_gated_rms_norm_bwd_bf16_f32_weight_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(go_st, "grad_out")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&dx)?;
+    let raw_stream = rocm_launch_stream(
+        &dx,
+        "gated_rms_norm_bwd_bf16_f32_weight",
+        &[
+            ("grad_out", grad_out),
+            ("x", x),
+            ("z", z),
+            ("weight", weight),
+        ],
+    )?;
     let status = unsafe {
         kiln_gdn_gated_rms_norm_bwd_wf32_bf16(
             go_ptr as *const _,
@@ -1940,7 +2360,11 @@ pub fn gdn_l2_norm_scale_bwd_bf16_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(go_st, "grad_out")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&dx)?;
+    let raw_stream = rocm_launch_stream(
+        &dx,
+        "l2_norm_scale_bwd_bf16",
+        &[("grad_out", grad_out), ("x", x)],
+    )?;
     let status = unsafe {
         kiln_gdn_l2_norm_scale_bwd_bf16(
             go_ptr as *const _,
@@ -2067,7 +2491,11 @@ pub fn gdn_gates_bf16_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(a_st, "a_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&beta)?;
+    let raw_stream = rocm_launch_stream(
+        &beta,
+        "gates_bf16",
+        &[("a", a), ("b", b), ("a_log", a_log), ("dt_bias", dt_bias)],
+    )?;
 
     let status = unsafe {
         kiln_gdn_gates_bf16(
@@ -2125,7 +2553,11 @@ pub fn gdn_gates_bf16_f32_params_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(a_st, "a_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&beta)?;
+    let raw_stream = rocm_launch_stream(
+        &beta,
+        "gates_bf16_f32_params",
+        &[("a", a), ("b", b), ("a_log", a_log), ("dt_bias", dt_bias)],
+    )?;
 
     let status = unsafe {
         kiln_gdn_gates_bf16_f32_params(
@@ -2182,7 +2614,11 @@ pub fn gdn_gates_bf16_f32_bf16_params_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(a_st, "a_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&beta)?;
+    let raw_stream = rocm_launch_stream(
+        &beta,
+        "gates_bf16_f32_bf16_params",
+        &[("a", a), ("b", b), ("a_log", a_log), ("dt_bias", dt_bias)],
+    )?;
 
     let status = unsafe {
         kiln_gdn_gates_bf16_f32_bf16_params(
@@ -2306,7 +2742,18 @@ pub fn gdn_chunk_prep_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(g_st, "g_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&a_strict)?;
+    let raw_stream = rocm_launch_stream(
+        &a_strict,
+        "chunk_prep",
+        &[
+            ("g", g),
+            ("v", v),
+            ("kkt", kkt),
+            ("qkt", qkt),
+            ("ks_entry", ks_entry),
+            ("q_s", q_s),
+        ],
+    )?;
 
     let status = unsafe {
         kiln_gdn_chunk_prep(
@@ -2427,7 +2874,18 @@ pub fn gdn_chunk_scan_kt(
     #[cfg(feature = "cuda")]
     let raw_stream = device_stream_raw(a_st, "a_st")?;
     #[cfg(feature = "rocm")]
-    let raw_stream = output_stream_raw(&out_chunk)?;
+    let raw_stream = rocm_launch_stream(
+        &out_chunk,
+        "chunk_scan",
+        &[
+            ("a_strict", a_strict),
+            ("b_mask", b_mask),
+            ("v_prime", v_prime),
+            ("q_s_scaled", q_s_scaled),
+            ("beta", beta),
+            ("decay_last_col", decay_last_col),
+        ],
+    )?;
 
     let status = unsafe {
         kiln_gdn_chunk_scan(

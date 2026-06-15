@@ -63,28 +63,60 @@ __global__ void kiln_contiguous_copy_kernel(const uint8_t* __restrict__ src,
                                             uint8_t* __restrict__ dst,
                                             ContiguousDesc desc) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (idx >= desc.n_elements) return;
+    int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (; idx < desc.n_elements; idx += stride) {
+        // Unflatten idx to (c0, c1, ..., c_{rank-1}) and accumulate src
+        // element offset using the source's element-strides.
+        int64_t src_off_e = 0;
+        int64_t remaining = idx;
+        // Iterate from the last (fastest-varying) dim to the first.
+        for (int d = desc.rank - 1; d >= 0; --d) {
+            int64_t sz = desc.shape[d];
+            int64_t pos = remaining % sz;
+            remaining /= sz;
+            src_off_e += pos * desc.strides_e[d];
+        }
 
-    // Unflatten idx to (c0, c1, ..., c_{rank-1}) and accumulate src
-    // element offset using the source's element-strides.
-    int64_t src_off_e = 0;
-    int64_t remaining = idx;
-    // Iterate from the last (fastest-varying) dim to the first.
-    for (int d = desc.rank - 1; d >= 0; --d) {
-        int64_t sz = desc.shape[d];
-        int64_t pos = remaining % sz;
-        remaining /= sz;
-        src_off_e += pos * desc.strides_e[d];
+        int64_t bpe = desc.bytes_per_elem;
+        int64_t src_byte = src_off_e * bpe;
+        int64_t dst_byte = idx * bpe;
+
+        // Byte-wise copy. The compiler unrolls for the common BPE values
+        // (1/2/4/8) since `bpe` is uniform across the warp.
+        for (int b = 0; b < bpe; ++b) {
+            dst[dst_byte + b] = src[src_byte + b];
+        }
     }
+}
 
-    int64_t bpe = desc.bytes_per_elem;
-    int64_t src_byte = src_off_e * bpe;
-    int64_t dst_byte = idx * bpe;
+__global__ void kiln_transpose_4d_12_copy_kernel(const uint8_t* __restrict__ src,
+                                                 uint8_t* __restrict__ dst,
+                                                 int64_t bsz,
+                                                 int64_t heads,
+                                                 int64_t seq,
+                                                 int64_t dim,
+                                                 int64_t stride_b,
+                                                 int64_t stride_h,
+                                                 int64_t stride_t,
+                                                 int64_t bytes_per_elem) {
+    int64_t rows = bsz * heads * seq;
+    int64_t row = static_cast<int64_t>(blockIdx.x);
+    int64_t row_stride = static_cast<int64_t>(gridDim.x);
+    for (; row < rows; row += row_stride) {
+        int64_t t = row % seq;
+        int64_t tmp = row / seq;
+        int64_t h = tmp % heads;
+        int64_t b = tmp / heads;
 
-    // Byte-wise copy. The compiler unrolls for the common BPE values
-    // (1/2/4/8) since `bpe` is uniform across the warp.
-    for (int b = 0; b < bpe; ++b) {
-        dst[dst_byte + b] = src[src_byte + b];
+        int64_t src_base_e = b * stride_b + h * stride_h + t * stride_t;
+        int64_t dst_base_e = row * dim;
+        for (int64_t d = threadIdx.x; d < dim; d += blockDim.x) {
+            int64_t src_byte = (src_base_e + d) * bytes_per_elem;
+            int64_t dst_byte = (dst_base_e + d) * bytes_per_elem;
+            for (int64_t byte = 0; byte < bytes_per_elem; ++byte) {
+                dst[dst_byte + byte] = src[src_byte + byte];
+            }
+        }
     }
 }
 
@@ -113,13 +145,50 @@ extern "C" int kiln_contiguous_copy_async(const void* src,
     }
 
     int64_t blocks_i64 = (n_elements + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    if (blocks_i64 > (int64_t)2147483647) return 4; // CUDA grid x limit
+    if (blocks_i64 > (int64_t)65535) blocks_i64 = 65535;
     int blocks = static_cast<int>(blocks_i64);
 
     kiln_contiguous_copy_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
         static_cast<const uint8_t*>(src),
         static_cast<uint8_t*>(dst),
         desc);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return 1000 + static_cast<int>(err);
+    return 0;
+}
+
+extern "C" int kiln_transpose_4d_12_copy_async(const void* src,
+                                               void* dst,
+                                               int64_t bsz,
+                                               int64_t heads,
+                                               int64_t seq,
+                                               int64_t dim,
+                                               int64_t stride_b,
+                                               int64_t stride_h,
+                                               int64_t stride_t,
+                                               int32_t bytes_per_elem,
+                                               cudaStream_t stream) {
+    if (bsz < 0 || heads < 0 || seq < 0 || dim < 0) return 1;
+    if (bytes_per_elem < 1 || bytes_per_elem > 8) return 2;
+    int64_t rows = bsz * heads * seq;
+    if (rows == 0 || dim == 0) return 0;
+
+    int64_t blocks_i64 = rows;
+    if (blocks_i64 > (int64_t)65535) blocks_i64 = 65535;
+    int blocks = static_cast<int>(blocks_i64);
+
+    kiln_transpose_4d_12_copy_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
+        static_cast<const uint8_t*>(src),
+        static_cast<uint8_t*>(dst),
+        bsz,
+        heads,
+        seq,
+        dim,
+        stride_b,
+        stride_h,
+        stride_t,
+        bytes_per_elem);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) return 1000 + static_cast<int>(err);

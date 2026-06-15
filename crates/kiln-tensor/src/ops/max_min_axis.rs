@@ -62,6 +62,15 @@ fn apply(kind: MinMaxKind, x: &Tensor, axis: usize) -> Result<Tensor> {
             };
         }
     }
+    #[cfg(feature = "rocm")]
+    {
+        if x.storage().as_any().is::<crate::RocmStorage>() {
+            return match kind {
+                MinMaxKind::Min => crate::rocm_min_axis(x, axis),
+                MinMaxKind::Max => crate::rocm_max_axis(x, axis),
+            };
+        }
+    }
     // Non-CPU host fallback (#1082): no Metal/Vulkan minmax kernel yet —
     // stage on host, reduce, move the result back. Recurses with a CPU
     // input so it terminates on the CPU path below.

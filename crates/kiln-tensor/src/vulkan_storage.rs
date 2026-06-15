@@ -1274,6 +1274,25 @@ pub fn primary_vulkan_device(device_index: usize) -> Result<Arc<VulkanDevice>> {
     Ok(dev)
 }
 
+/// Block until the primary Vulkan queue for `device_index` is idle.
+///
+/// This is the Vulkan counterpart to `cuda_synchronize_default_stream` /
+/// `rocm_synchronize_compute_stream` for cross-kernel handoff points where a
+/// later backend-specific consumer must see all previously submitted work.
+pub fn vulkan_synchronize_queue(device_index: usize) -> Result<()> {
+    let vulkan_device = primary_vulkan_device(device_index)?;
+    unsafe {
+        vulkan_device
+            .device()
+            .queue_wait_idle(vulkan_device.queue())
+            .map_err(|e| {
+                Error::Msg(format!(
+                    "vulkan_synchronize_queue({device_index}): queue_wait_idle failed: {e:?}"
+                ))
+            })
+    }
+}
+
 /// Upload a host (CPU-resident) tensor to a fresh `DEVICE_LOCAL`
 /// Vulkan buffer on `device_index`. **Candle-core-free.**
 ///

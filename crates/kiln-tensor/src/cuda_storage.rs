@@ -916,6 +916,21 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_rope_split_half_4d_async(
+        x_in: *const core::ffi::c_void,
+        x_out: *mut core::ffi::c_void,
+        cos: *const core::ffi::c_void,
+        sin: *const core::ffi::c_void,
+        batch: i64,
+        seq: i64,
+        heads: i64,
+        head_dim: i64,
+        rotary_dim: i64,
+        x_dtype: i32,
+        cs_dtype: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_clamp_pow_async(
         x: *const core::ffi::c_void,
         out: *mut core::ffi::c_void,
@@ -1173,6 +1188,14 @@ pub fn cuda_slice_set_dim0(dst: &crate::Tensor, src: &crate::Tensor, offset: usi
         return Err(crate::Error::Msg(format!(
             "cuda_slice_set: kiln_contiguous_copy_async returned status {status}"
         )));
+    }
+    // `slice_set` is an in-place API whose source tensor may be dropped as soon
+    // as this function returns. The copy kernel is async, so outside graph
+    // capture drain the active stream before Rust can release/reuse `src`.
+    if !crate::capture_arena_active() {
+        stream.synchronize().map_err(|e| {
+            crate::Error::Msg(format!("cuda_slice_set: synchronize after copy: {e:?}"))
+        })?;
     }
     Ok(())
 }
@@ -5329,6 +5352,200 @@ pub fn cuda_rope(
         crate::TensorId::next(),
     )
     .map_err(|e| crate::Error::Msg(format!("cuda_rope: wrap: {e}")))
+}
+
+/// CUDA split-half/GPT-NeoX RoPE for `[batch, seq, heads, head_dim]` tensors.
+#[cfg(feature = "cuda")]
+pub fn cuda_rope_split_half(
+    x: &crate::Tensor,
+    cos: &crate::Tensor,
+    sin: &crate::Tensor,
+    rotary_dim: usize,
+) -> Result<crate::Tensor> {
+    use cudarc::driver::DevicePtr;
+    use std::any::Any as _;
+
+    if x.rank() != 4 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_rope_split_half: x must be rank-4 [batch, seq, heads, head_dim], got {:?}",
+            x.shape()
+        )));
+    }
+    if cos.rank() != 2 || sin.rank() != 2 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_rope_split_half: cos / sin must be rank-2, got cos={:?} sin={:?}",
+            cos.shape(),
+            sin.shape()
+        )));
+    }
+    if cos.shape() != sin.shape() {
+        return Err(crate::Error::Msg(format!(
+            "cuda_rope_split_half: cos / sin shape mismatch {:?} vs {:?}",
+            cos.shape(),
+            sin.shape()
+        )));
+    }
+    if cos.dtype() != sin.dtype() {
+        return Err(crate::Error::Msg(format!(
+            "cuda_rope_split_half: cos / sin dtype mismatch {} vs {}",
+            cos.dtype(),
+            sin.dtype()
+        )));
+    }
+    let shape = x.shape();
+    let (batch, seq, heads, head_dim) = (shape[0], shape[1], shape[2], shape[3]);
+    if cos.shape()[0] != seq {
+        return Err(crate::Error::Msg(format!(
+            "cuda_rope_split_half: cos.shape[0] ({}) != x seq ({seq})",
+            cos.shape()[0]
+        )));
+    }
+    if rotary_dim == 0 || !rotary_dim.is_multiple_of(2) {
+        return Err(crate::Error::Msg(format!(
+            "cuda_rope_split_half: rotary_dim must be positive and even, got {rotary_dim}"
+        )));
+    }
+    if rotary_dim > head_dim {
+        return Err(crate::Error::Msg(format!(
+            "cuda_rope_split_half: rotary_dim ({rotary_dim}) > head_dim ({head_dim})"
+        )));
+    }
+    if cos.shape()[1] * 2 != rotary_dim {
+        return Err(crate::Error::Msg(format!(
+            "cuda_rope_split_half: cos.shape[1] ({}) * 2 != rotary_dim ({rotary_dim})",
+            cos.shape()[1]
+        )));
+    }
+    if !x.is_contiguous() || !cos.is_contiguous() || !sin.is_contiguous() {
+        return Err(crate::Error::Msg(
+            "cuda_rope_split_half: contiguous inputs required".to_string(),
+        ));
+    }
+    if !matches!(
+        x.dtype(),
+        crate::DType::F32 | crate::DType::BF16 | crate::DType::F16
+    ) {
+        return Err(crate::Error::Msg(format!(
+            "cuda_rope_split_half: x dtype must be F32/BF16/F16, got {}",
+            x.dtype()
+        )));
+    }
+    if !matches!(
+        cos.dtype(),
+        crate::DType::F32 | crate::DType::BF16 | crate::DType::F16
+    ) {
+        return Err(crate::Error::Msg(format!(
+            "cuda_rope_split_half: cos / sin dtype must be F32/BF16/F16, got {}",
+            cos.dtype()
+        )));
+    }
+
+    let x_dtype = x.dtype();
+    let cs_dtype = cos.dtype();
+    let x_dtype_tag: i32 = match x_dtype {
+        crate::DType::F32 => 0,
+        crate::DType::BF16 => 1,
+        crate::DType::F16 => 2,
+        _ => unreachable!(),
+    };
+    let cs_dtype_tag: i32 = match cs_dtype {
+        crate::DType::F32 => 0,
+        crate::DType::BF16 => 1,
+        crate::DType::F16 => 2,
+        _ => unreachable!(),
+    };
+
+    let x_storage = x
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg("cuda_rope_split_half: x must be CUDA".to_string()))?;
+    let cos_storage = cos
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg("cuda_rope_split_half: cos must be CUDA".to_string()))?;
+    let sin_storage = sin
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg("cuda_rope_split_half: sin must be CUDA".to_string()))?;
+
+    let ctx = x_storage.context();
+    let device_index = match x_storage.device {
+        crate::Device::Cuda(i) => i,
+        _ => unreachable!(),
+    };
+    let out_storage =
+        CudaStorage::alloc_uninit_ctx(&ctx, device_index, x_dtype, x.element_count())?;
+
+    let stream = crate::active_cuda_stream(&ctx);
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let x_bpe = x_dtype.size_in_bytes();
+    let cs_bpe = cs_dtype.size_in_bytes();
+    let x_base = match &x_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let cos_base = match &cos_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let sin_base = match &sin_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let out_base = match &out_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+
+    let x_off = (x.layout().start_offset() * x_bpe) as u64;
+    let cos_off = (cos.layout().start_offset() * cs_bpe) as u64;
+    let sin_off = (sin.layout().start_offset() * cs_bpe) as u64;
+
+    let status = unsafe {
+        kiln_rope_split_half_4d_async(
+            (x_base + x_off) as *const core::ffi::c_void,
+            out_base as *mut core::ffi::c_void,
+            (cos_base + cos_off) as *const core::ffi::c_void,
+            (sin_base + sin_off) as *const core::ffi::c_void,
+            batch as i64,
+            seq as i64,
+            heads as i64,
+            head_dim as i64,
+            rotary_dim as i64,
+            x_dtype_tag,
+            cs_dtype_tag,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_rope_split_half: FFI returned status {status}"
+        )));
+    }
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(x.shape().to_vec()),
+        crate::TensorId::next(),
+    )
+    .map_err(|e| crate::Error::Msg(format!("cuda_rope_split_half: wrap: {e}")))
 }
 
 /// CUDA inverted dropout (training-time).

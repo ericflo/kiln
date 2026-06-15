@@ -50,6 +50,41 @@ kiln_gdn_status_t kiln_gdn_forward_substitution(
     void *stream
 );
 
+// F32 training/backward variant.
+//
+//   a_strict : f32, shape [batch_heads, chunk_size, chunk_size]
+//   v_prime  : f32, shape [batch_heads, chunk_size, dv]
+//   beta     : f32, shape [batch_heads, chunk_size]
+//   w_out    : f32, shape [batch_heads, chunk_size, dv]  (overwritten)
+kiln_gdn_status_t kiln_gdn_forward_substitution_f32(
+    const void *a_strict,
+    const void *v_prime,
+    const void *beta,
+    void *w_out,
+    int batch_heads,
+    int chunk_size,
+    int dv,
+    void *stream
+);
+
+// F32 adjoint of the forward-substitution solve.
+//
+// Solves M^T * dr = dW where M = I + diag(beta) * a_strict:
+//
+//   dr[t, d] = dW[t, d] - sum_{i>t} beta[i] * a_strict[i, t] * dr[i, d]
+//
+// All tensors are f32 and contiguous in row-major layout.
+kiln_gdn_status_t kiln_gdn_solve_tri_transpose_f32(
+    const void *a_strict,
+    const void *beta,
+    const void *dw,
+    void *dr_out,
+    int batch_heads,
+    int chunk_size,
+    int dv,
+    void *stream
+);
+
 #ifdef __cplusplus
 }
 #endif

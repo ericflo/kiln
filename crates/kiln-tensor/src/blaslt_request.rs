@@ -26,7 +26,12 @@ pub(crate) struct BlasLtMatmulRequest {
     pub(crate) m: u64,
     pub(crate) n: u64,
     pub(crate) k: u64,
+    pub(crate) batch_count: u64,
+    pub(crate) a_batch_stride: u64,
+    pub(crate) b_batch_stride: u64,
+    pub(crate) c_batch_stride: u64,
     pub(crate) dtype: DType,
+    pub(crate) output_dtype: DType,
     pub(crate) a_layout: BlasLtMatmulLayout,
     pub(crate) b_layout: BlasLtMatmulLayout,
     pub(crate) c_layout: BlasLtMatmulLayout,
@@ -48,17 +53,52 @@ impl BlasLtMatmulRequest {
         concurrent_streams: u8,
         op: &str,
     ) -> Result<Self> {
+        Self::new_with_output_dtype(
+            m,
+            n,
+            k,
+            dtype,
+            dtype,
+            a_layout,
+            b_layout,
+            c_layout,
+            epilogue,
+            concurrent_streams,
+            op,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_output_dtype(
+        m: usize,
+        n: usize,
+        k: usize,
+        dtype: DType,
+        output_dtype: DType,
+        a_layout: BlasLtMatmulLayout,
+        b_layout: BlasLtMatmulLayout,
+        c_layout: BlasLtMatmulLayout,
+        epilogue: BlasLtEpilogue,
+        concurrent_streams: u8,
+        op: &str,
+    ) -> Result<Self> {
         if concurrent_streams == 0 {
             return Err(Error::Msg(format!(
                 "{op}: concurrent_streams must be non-zero"
             )));
         }
         blaslt_dtype_name(dtype, op)?;
+        blaslt_dtype_name(output_dtype, op)?;
         Ok(Self {
             m: m as u64,
             n: n as u64,
             k: k as u64,
+            batch_count: 1,
+            a_batch_stride: 0,
+            b_batch_stride: 0,
+            c_batch_stride: 0,
             dtype,
+            output_dtype,
             a_layout,
             b_layout,
             c_layout,
@@ -67,8 +107,35 @@ impl BlasLtMatmulRequest {
         })
     }
 
+    pub(crate) fn with_strided_batch(
+        mut self,
+        batch_count: usize,
+        a_batch_stride: u64,
+        b_batch_stride: u64,
+        c_batch_stride: u64,
+        op: &str,
+    ) -> Result<Self> {
+        if batch_count == 0 {
+            return Err(Error::Msg(format!("{op}: batch_count must be non-zero")));
+        }
+        if batch_count > 1 && (a_batch_stride == 0 || b_batch_stride == 0 || c_batch_stride == 0) {
+            return Err(Error::Msg(format!(
+                "{op}: strided batched matmul requires non-zero batch strides"
+            )));
+        }
+        self.batch_count = batch_count as u64;
+        self.a_batch_stride = a_batch_stride;
+        self.b_batch_stride = b_batch_stride;
+        self.c_batch_stride = c_batch_stride;
+        Ok(self)
+    }
+
     pub(crate) fn dtype_name(self) -> &'static str {
         self.dtype.short_name()
+    }
+
+    pub(crate) fn output_dtype_name(self) -> &'static str {
+        self.output_dtype.short_name()
     }
 }
 
@@ -100,7 +167,28 @@ mod tests {
             )
             .expect("supported BLASLt dtype should project");
             assert_eq!(request.dtype_name(), dtype.short_name());
+            assert_eq!(request.output_dtype_name(), dtype.short_name());
         }
+    }
+
+    #[test]
+    fn blaslt_request_supports_bf16_input_f32_output() {
+        let request = BlasLtMatmulRequest::new_with_output_dtype(
+            2,
+            4,
+            3,
+            DType::BF16,
+            DType::F32,
+            BlasLtMatmulLayout::RowMajor,
+            BlasLtMatmulLayout::RowMajor,
+            BlasLtMatmulLayout::RowMajor,
+            BlasLtEpilogue::Identity,
+            1,
+            "test_blaslt",
+        )
+        .expect("mixed input/output dtype should project");
+        assert_eq!(request.dtype_name(), "bf16");
+        assert_eq!(request.output_dtype_name(), "f32");
     }
 
     #[test]

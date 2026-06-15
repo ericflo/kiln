@@ -127,6 +127,54 @@ fn rocm_fused_rmsnorm_forward_parity_sweep() {
 }
 
 #[test]
+fn rocm_fused_rmsnorm_long_context_shape_is_finite() {
+    if std::env::var("KILN_RUN_LONG_ROCM_RMSNORM").is_err() {
+        eprintln!("set KILN_RUN_LONG_ROCM_RMSNORM=1 to run the long-context RMSNorm regression");
+        return;
+    }
+    if !rocm_available() {
+        eprintln!("ROCm not available; skipping rocm_fused_rmsnorm_long_context_shape_is_finite");
+        return;
+    }
+
+    let rows = 40_314usize;
+    let hidden = 2_560usize;
+    let eps = 1e-6f32;
+    let x_host = pattern_bf16(rows * hidden, 0x6A09_E667);
+    let w_host = pattern_bf16(hidden, 0xBB67_AE85);
+    let x = rocm_bf16(&x_host, vec![1, rows, hidden]);
+    let w = rocm_bf16(&w_host, vec![hidden]);
+
+    let out = fused_rmsnorm_kt(&x, &w, eps).expect("long-context fused_rmsnorm_kt");
+    assert_eq!(out.shape(), &[1, rows, hidden]);
+    assert_eq!(out.dtype(), DType::BF16);
+
+    let got = read_bf16_f32(&out);
+    let bad = got
+        .iter()
+        .enumerate()
+        .find(|(_, v)| !v.is_finite())
+        .map(|(i, v)| (i, *v));
+    assert!(bad.is_none(), "long-context RMSNorm non-finite at {bad:?}");
+
+    for &row in &[0usize, 1_411, 4_095, 4_096, 25_987, rows - 1] {
+        let row_start = row * hidden;
+        let want_row = rmsnorm_ref(
+            &x_host[row_start..row_start + hidden],
+            &w_host,
+            1,
+            hidden,
+            eps,
+        );
+        assert_close(
+            &got[row_start..row_start + hidden],
+            &want_row,
+            &format!("long-context forward row={row}"),
+        );
+    }
+}
+
+#[test]
 fn rocm_fused_rmsnorm_backward_parity_sweep() {
     if !rocm_available() {
         eprintln!("ROCm not available; skipping rocm_fused_rmsnorm_backward_parity_sweep");

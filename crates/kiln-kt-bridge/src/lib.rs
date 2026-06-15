@@ -66,6 +66,8 @@ use kiln_tensor::DType as KtDType;
 use kiln_tensor::RocmStorage;
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 use kiln_tensor::{StorageBackend, Tensor as KtTensor};
+#[cfg(feature = "rocm")]
+use std::sync::Arc;
 
 /// Generic error for kt-API bridge operations.
 ///
@@ -268,10 +270,11 @@ pub fn alloc_rocm_tensor(
 ) -> Result<KtTensor, BridgeError> {
     let device_index = source.device().index().unwrap_or(0);
     let n: usize = shape.iter().product();
-    let storage = kiln_tensor::rocm_zeros_ctx(device_index, dtype, n)
+    let ctx = source.context();
+    let storage = RocmStorage::zeros_ctx(&ctx, device_index, dtype, n)
         .map_err(|e| BridgeError::new(format!("kt-bridge alloc: {e}")))?;
     KtTensor::from_parts(
-        storage,
+        Arc::new(storage),
         kiln_tensor::Layout::contiguous(shape),
         kiln_tensor::TensorId::next(),
     )

@@ -24,6 +24,7 @@
 
 use kiln_flce_kernel::kt_api::{
     fused_linear_cross_entropy_phase_b_backward_kt, fused_linear_cross_entropy_phase_b_kt,
+    fused_linear_cross_entropy_phase_b_with_metadata_kt,
 };
 use kiln_tensor::{Device, Tensor};
 
@@ -142,6 +143,138 @@ fn flce_forward_parity_wavefront_boundary_sweep() {
     }
     eprintln!(
         "FLCE forward CPU-vs-ROCm parity passed across wavefront-boundary vocab widths {vocab_widths:?}"
+    );
+}
+
+#[test]
+fn flce_forward_long_sft_shape_is_finite() {
+    if no_rocm() {
+        return;
+    }
+
+    let seq_len = 40_314usize;
+    let hidden_size = 2_560usize;
+    let vocab_size = 4_096usize;
+    let active_rows = 1_014usize;
+    let chunk_size = 4_096usize;
+
+    let hidden_data: Vec<f32> = (0..seq_len * hidden_size)
+        .map(|i| val(i, 41) * 0.02)
+        .collect();
+    let head_data: Vec<f32> = (0..hidden_size * vocab_size)
+        .map(|i| val(i, 73) * 0.02)
+        .collect();
+
+    let hidden = Tensor::from_vec_on(Device::Rocm(0), hidden_data, vec![1, seq_len, hidden_size])
+        .unwrap_or_else(|e| panic!("from_vec_on long hidden: {e}"));
+    let head_t = Tensor::from_vec_on(Device::Rocm(0), head_data, vec![hidden_size, vocab_size])
+        .unwrap_or_else(|e| panic!("from_vec_on long head_t: {e}"));
+
+    let mut input_ids = vec![0u32; seq_len];
+    let mut label_mask = vec![false; seq_len];
+    for active_idx in 0..active_rows {
+        let shift_idx = active_idx * 39 + 17;
+        let label_pos = shift_idx + 1;
+        label_mask[label_pos] = true;
+        input_ids[label_pos] = ((active_idx * 97 + 11) % vocab_size) as u32;
+    }
+
+    let (loss, metadata) = fused_linear_cross_entropy_phase_b_with_metadata_kt(
+        &hidden,
+        &head_t,
+        &input_ids,
+        &label_mask,
+        chunk_size,
+    )
+    .unwrap_or_else(|e| panic!("long SFT-shaped ROCm FLCE forward: {e}"));
+    let host = kiln_tensor::rocm_to_host_copy(&loss).expect("rocm_to_host_copy loss");
+    let values = host.to_vec::<f32>().expect("loss to_vec");
+    assert_eq!(values.len(), 1);
+    assert!(
+        values[0].is_finite(),
+        "long SFT-shaped FLCE loss must be finite, got {}",
+        values[0]
+    );
+    assert!(
+        metadata.is_some(),
+        "long SFT-shaped FLCE should have active metadata for {active_rows} active rows"
+    );
+}
+
+#[test]
+fn flce_forward_backward_row_tiled_many_active_rows_matches_cpu() {
+    if no_rocm() {
+        return;
+    }
+
+    let active_rows = 5_000usize;
+    let seq_len = active_rows + 1;
+    let hidden_size = 32usize;
+    let vocab_size = 257usize;
+    let chunk_size = 64usize;
+
+    let mut input_ids = vec![0u32; seq_len];
+    let mut label_mask = vec![false; seq_len];
+    for row in 0..active_rows {
+        let label_pos = row + 1;
+        label_mask[label_pos] = true;
+        input_ids[label_pos] = ((row * 53 + 7) % vocab_size) as u32;
+    }
+
+    let (h_cpu, w_cpu) = build_inputs(Device::Cpu, seq_len, hidden_size, vocab_size);
+    let (h_roc, w_roc) = build_inputs(Device::Rocm(0), seq_len, hidden_size, vocab_size);
+
+    let loss_cpu =
+        fused_linear_cross_entropy_phase_b_kt(&h_cpu, &w_cpu, &input_ids, &label_mask, chunk_size)
+            .unwrap_or_else(|e| panic!("cpu row-tiled forward reference: {e}"));
+    let loss_roc =
+        fused_linear_cross_entropy_phase_b_kt(&h_roc, &w_roc, &input_ids, &label_mask, chunk_size)
+            .unwrap_or_else(|e| panic!("rocm row-tiled forward: {e}"));
+
+    let cpu_loss = read_host_f32(&loss_cpu)[0];
+    let rocm_loss = read_host_f32(&loss_roc)[0];
+    let loss_diff = (cpu_loss - rocm_loss).abs();
+    let loss_tol = 2e-4 + 2e-4 * cpu_loss.abs();
+    assert!(
+        loss_diff <= loss_tol,
+        "row-tiled FLCE forward mismatch: cpu {cpu_loss} rocm {rocm_loss} diff {loss_diff}"
+    );
+
+    let grad_cpu = Tensor::from_vec_on(Device::Cpu, vec![1.0f32], vec![]).expect("cpu scalar grad");
+    let grad_roc =
+        Tensor::from_vec_on(Device::Rocm(0), vec![1.0f32], vec![]).expect("rocm scalar grad");
+    let g_cpu = fused_linear_cross_entropy_phase_b_backward_kt(
+        &h_cpu,
+        &w_cpu,
+        &input_ids,
+        &label_mask,
+        chunk_size,
+        &grad_cpu,
+    )
+    .unwrap_or_else(|e| panic!("cpu row-tiled backward reference: {e}"));
+    let g_roc = fused_linear_cross_entropy_phase_b_backward_kt(
+        &h_roc,
+        &w_roc,
+        &input_ids,
+        &label_mask,
+        chunk_size,
+        &grad_roc,
+    )
+    .unwrap_or_else(|e| panic!("rocm row-tiled backward: {e}"));
+
+    let cpu_grad = read_host_f32(&g_cpu);
+    let rocm_grad = read_host_f32(&g_roc);
+    assert_eq!(cpu_grad.len(), rocm_grad.len());
+    let mut max_abs = 0.0f32;
+    let mut max_mag = 0.0f32;
+    for (a, b) in cpu_grad.iter().zip(rocm_grad.iter()) {
+        max_abs = max_abs.max((a - b).abs());
+        max_mag = max_mag.max(a.abs()).max(b.abs());
+    }
+    let grad_tol = 5e-4 + 5e-4 * max_mag;
+    assert!(
+        max_abs <= grad_tol,
+        "row-tiled FLCE backward mismatch: max_abs {max_abs} tol {grad_tol} max_mag {max_mag}"
     );
 }
 

@@ -313,6 +313,9 @@ fn build_rocm() {
         // wave-size-agnostic shared-memory reduction; used behind an opt-in
         // model-side flag for bandwidth-bound single-token projections.
         "w8_gemv.cu",
+        // Exact BF16 matmul fallback for long-row training projection slices
+        // where ROCm 7.2 hipBLASLt has produced zeros/NaNs on gfx115x.
+        "bf16_matmul.cu",
     ];
 
     let mut objects = Vec::new();

@@ -15,6 +15,24 @@ unsafe extern "C" {
     ) -> i32;
 }
 
+fn rocm_is_finite_host_scan_threshold() -> Option<usize> {
+    let disabled = std::env::var("KILN_ROCM_IS_FINITE_LARGE_HOST_SCAN")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .is_some_and(|value| matches!(value.as_str(), "0" | "false" | "no" | "off"));
+    if disabled {
+        return None;
+    }
+
+    Some(
+        std::env::var("KILN_ROCM_IS_FINITE_HOST_SCAN_ELEMENTS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(16 * 1024 * 1024),
+    )
+}
+
 /// "Any non-finite?" tensor-wide reduction on a ROCm-resident tensor. Returns
 /// `Ok(true)` if every element is finite (no NaN, no `+Inf`, no `-Inf`),
 /// `Ok(false)` otherwise. ROCm analog of `cuda_is_finite`, routing through the
@@ -55,6 +73,17 @@ pub fn rocm_is_finite(src: &Tensor) -> Result<bool> {
             )));
         }
     };
+
+    // The GPU reducer is a diagnostic/anomaly helper. On very large ROCm BF16
+    // tensors from long-context training, the reducer path can perturb the
+    // following confirmation readback on ROCm 7.2/gfx115x; a direct D2H scan is
+    // slower but authoritative and only used when finite checking is enabled.
+    if rocm_is_finite_host_scan_threshold()
+        .is_some_and(|threshold| src.element_count() >= threshold)
+    {
+        let host = crate::rocm_to_host_copy(src)?;
+        return host.all_finite();
+    }
 
     // Force a contiguous, `start_offset = 0` device buffer. The kernel walks
     // `[0..n_elements)` directly; non-contiguous strided inputs would otherwise
@@ -117,5 +146,15 @@ pub fn rocm_is_finite(src: &Tensor) -> Result<bool> {
     // right after the pointer was captured, racing the in-flight launch.
     let _input_keepalive = &contig;
 
-    Ok(flag == 0)
+    if flag == 0 {
+        return Ok(true);
+    }
+
+    // Defensive confirmation path: the ROCm reducer is a diagnostic/anomaly
+    // substrate, so false positives are worse than a rare D2H confirmation. Large
+    // BF16 tensors have produced intermittent device-flag positives while a CPU
+    // scan of the same tensor found every element finite. Confirm suspected
+    // failures with the canonical CPU stride walker before aborting training.
+    let host = crate::rocm_to_host_copy(src)?;
+    host.all_finite()
 }

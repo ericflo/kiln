@@ -109,9 +109,9 @@
 
 use anyhow::{Context, Result};
 use kiln_autograd::{
-    AddBackward, BackwardOp, ConcatBackward, CrossEntropyKtBackward, EmbeddingBackward,
-    LoraDeltaAddBackward, MatmulBackward, MulBackward, MulSigmoidGateBackward, ReshapeBackward,
-    RopeSplitHalfBackward, SiluBackward, Tape, TransposeBackward,
+    AddBackward, BackwardOp, ConcatBackward, ContiguousBackward, CrossEntropyKtBackward,
+    EmbeddingBackward, LoraDeltaAddBackward, MatmulBackward, MulBackward, MulSigmoidGateBackward,
+    ReshapeBackward, RopeSplitHalfBackward, SiluBackward, Tape, TransposeBackward,
 };
 
 use crate::backend::BackendRuntime;
@@ -121,6 +121,36 @@ use crate::forward::{
     sdpa_fallback_backward_no_grad,
 };
 use crate::lora_loader::LoraProjectionWeights;
+
+fn debug_tape_linear_finite_checks() -> bool {
+    kiln_core::env_flag::env_flag("KILN_DEBUG_TAPE_LINEAR_FINITE", false)
+        || kiln_core::env_flag::env_flag("KILN_DEBUG_SFT_FINITE", false)
+}
+
+fn ensure_tape_linear_finite(
+    enabled: bool,
+    label: impl AsRef<str>,
+    tensor: &kiln_tensor::Tensor,
+) -> Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    let label = label.as_ref();
+    let finite = tensor
+        .all_finite()
+        .with_context(|| format!("tape linear finite check failed to scan {label}"))?;
+    anyhow::ensure!(
+        finite,
+        "tape linear non-finite tensor at {label}: dtype={} shape={:?} device={} contiguous={} start_offset={} strides={:?}",
+        tensor.dtype(),
+        tensor.shape(),
+        tensor.device(),
+        tensor.is_contiguous(),
+        tensor.layout().start_offset(),
+        tensor.strides(),
+    );
+    Ok(())
+}
 
 // Phase 6a/CP-4 (#1082): the thread-local-tape scope machinery
 // (`with_thread_local_tape`, `with_active_tape`, `tape_forward_enabled`)
@@ -142,6 +172,95 @@ pub use kiln_autograd::{tape_forward_enabled, with_active_tape, with_thread_loca
 /// keeps the fast leaf kernel).
 pub fn tape_scope_active() -> bool {
     with_active_tape(|_| ()).is_some()
+}
+
+fn tape_debug_sft_finite_checks() -> bool {
+    kiln_core::env_flag::env_flag("KILN_DEBUG_SFT_FINITE", false)
+}
+
+fn ensure_tape_debug_finite(label: &str, tensor: &kiln_tensor::Tensor) -> Result<()> {
+    if !tape_debug_sft_finite_checks() {
+        return Ok(());
+    }
+    let finite = tensor
+        .all_finite()
+        .with_context(|| format!("tape finite check failed to scan {label}"))?;
+    if finite {
+        return Ok(());
+    }
+
+    let summary =
+        summarize_tape_debug_values(tensor).unwrap_or_else(|e| format!("stats_error={e}"));
+    anyhow::bail!(
+        "tape non-finite tensor at {label}: dtype={:?} shape={:?} device={} contiguous={} start_offset={} strides={:?} {}",
+        tensor.dtype(),
+        tensor.shape(),
+        tensor.device(),
+        tensor.is_contiguous(),
+        tensor.layout().start_offset(),
+        tensor.strides(),
+        summary,
+    );
+}
+
+fn summarize_tape_debug_values(tensor: &kiln_tensor::Tensor) -> Result<String> {
+    let host = tensor
+        .to_device(kiln_tensor::Device::Cpu)
+        .context("tape debug to cpu")?
+        .to_dtype(kiln_tensor::DType::F32)
+        .context("tape debug to f32")?
+        .contiguous()
+        .context("tape debug contiguous")?;
+    let values = host.to_vec::<f32>().context("tape debug to_vec")?;
+    let mut finite_count = 0usize;
+    let mut first_bad: Option<(usize, f32)> = None;
+    let mut max_abs = 0.0f32;
+    let mut max_abs_idx = 0usize;
+    for (idx, value) in values.iter().copied().enumerate() {
+        if value.is_finite() {
+            finite_count += 1;
+            let abs = value.abs();
+            if abs > max_abs {
+                max_abs = abs;
+                max_abs_idx = idx;
+            }
+        } else if first_bad.is_none() {
+            first_bad = Some((idx, value));
+        }
+    }
+
+    let shape = tensor.shape();
+    let coord = |mut idx: usize| -> Vec<usize> {
+        let mut out = vec![0usize; shape.len()];
+        for axis in (0..shape.len()).rev() {
+            let dim = shape[axis].max(1);
+            out[axis] = idx % dim;
+            idx /= dim;
+        }
+        out
+    };
+    let max_abs_coord = if values.is_empty() {
+        Vec::new()
+    } else {
+        coord(max_abs_idx)
+    };
+    let first_bad_summary = first_bad
+        .map(|(idx, value)| {
+            format!(
+                " first_bad_idx={idx} first_bad_coord={:?} first_bad={value}",
+                coord(idx)
+            )
+        })
+        .unwrap_or_default();
+    Ok(format!(
+        "finite_count={}/{} max_abs={:.8e} max_abs_idx={} max_abs_coord={:?}{}",
+        finite_count,
+        values.len(),
+        max_abs,
+        max_abs_idx,
+        max_abs_coord,
+        first_bad_summary
+    ))
 }
 
 fn tape_forward_device_supported(device: kiln_tensor::Device) -> bool {
@@ -194,6 +313,35 @@ pub fn try_tape_add_kt(
     match with_active_tape(|tape: &mut Tape| -> Result<_> {
         let y = kiln_tensor::ops::add(a, b).map_err(|e| anyhow::anyhow!("kt add: {e}"))?;
         tape.record(&y, &[a, b], Box::new(AddBackward));
+        Ok(y)
+    }) {
+        Some(result) => Ok(Some(result?)),
+        None => Ok(None),
+    }
+}
+
+/// kt-native contiguous tape recorder.
+///
+/// `Tensor::contiguous()` is value-identical but layout-changing. Calling it
+/// inside a tape-authoritative forward without recording would sever the
+/// gradient chain for strided views such as full-attention query tiles. This
+/// helper materialises the contiguous tensor and records [`ContiguousBackward`]
+/// so backward passes the upstream gradient through to the original view op.
+pub fn try_tape_contiguous_kt(x: &kiln_tensor::Tensor) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+    if !tape_forward_device_supported(x.device()) {
+        return Ok(None);
+    }
+    if x.is_contiguous() {
+        return Ok(Some(x.clone()));
+    }
+    match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let y = x
+            .contiguous()
+            .map_err(|e| anyhow::anyhow!("kt contiguous: {e}"))?;
+        tape.record(&y, &[x], Box::new(ContiguousBackward));
         Ok(y)
     }) {
         Some(result) => Ok(Some(result?)),
@@ -699,6 +847,100 @@ pub fn try_tape_mul_kt(
     }
 }
 
+#[derive(Debug)]
+struct AttnGateSigmoidMulBackward {
+    attn_output: kiln_tensor::Tensor,
+    sigmoid_gate: kiln_tensor::Tensor,
+    attn_dtype: kiln_tensor::DType,
+    gate_dtype: kiln_tensor::DType,
+}
+
+impl BackwardOp for AttnGateSigmoidMulBackward {
+    fn name(&self) -> &'static str {
+        "attn_gate_sigmoid_mul_backward"
+    }
+
+    fn input_count(&self) -> usize {
+        2
+    }
+
+    fn apply(
+        &self,
+        grad_output: &kiln_tensor::Tensor,
+    ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        use kiln_tensor::DType;
+        use kiln_tensor::ops::{add_scalar, cast, mul, mul_scalar};
+
+        if self.attn_output.dims() != self.sigmoid_gate.dims()
+            || self.attn_output.dims() != grad_output.dims()
+        {
+            return Err(kiln_tensor::Error::Msg(format!(
+                "AttnGateSigmoidMulBackward: shape mismatch attn={:?} sigmoid={:?} grad={:?}",
+                self.attn_output.dims(),
+                self.sigmoid_gate.dims(),
+                grad_output.dims()
+            )));
+        }
+
+        let dy = cast(grad_output, DType::F32)?;
+        let attn = cast(&self.attn_output, DType::F32)?;
+        let sigmoid = cast(&self.sigmoid_gate, DType::F32)?;
+        let d_attn = mul(&dy, &sigmoid)?;
+        let one_minus_sigmoid = add_scalar(&mul_scalar(&sigmoid, -1.0)?, 1.0)?;
+        let sigmoid_grad = mul(&sigmoid, &one_minus_sigmoid)?;
+        let d_gate = mul(&mul(&dy, &attn)?, &sigmoid_grad)?;
+
+        Ok(vec![
+            Some(cast(&d_attn, self.attn_dtype)?),
+            Some(cast(&d_gate, self.gate_dtype)?),
+        ])
+    }
+
+    fn requires_input(&self, _idx: usize) -> bool {
+        true
+    }
+}
+
+/// kt-native attention output gate recorder.
+///
+/// Qwen3.5 full-attention uses `attn_output * sigmoid(gate)`. This is not the
+/// SwiGLU `silu(gate) * up` derivative, so it needs its own tape op. Backward
+/// is device-composed in F32 and casts gradients back to the source dtypes.
+pub fn try_tape_attn_gate_sigmoid_mul_kt(
+    attn_output: &kiln_tensor::Tensor,
+    gate: &kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+    if !tape_forward_device_supported(attn_output.device())
+        || !tape_forward_device_supported(gate.device())
+        || attn_output.dims() != gate.dims()
+    {
+        return Ok(None);
+    }
+    match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let sigmoid_gate =
+            kiln_tensor::ops::sigmoid(gate).map_err(|e| anyhow::anyhow!("kt sigmoid: {e}"))?;
+        let y = kiln_tensor::ops::mul(attn_output, &sigmoid_gate)
+            .map_err(|e| anyhow::anyhow!("kt attention gate mul: {e}"))?;
+        tape.record(
+            &y,
+            &[attn_output, gate],
+            Box::new(AttnGateSigmoidMulBackward {
+                attn_output: attn_output.clone(),
+                sigmoid_gate,
+                attn_dtype: attn_output.dtype(),
+                gate_dtype: gate.dtype(),
+            }),
+        );
+        Ok(y)
+    }) {
+        Some(result) => Ok(Some(result?)),
+        None => Ok(None),
+    }
+}
+
 /// kt-native transpose tape recorder (#1082 seam flip) — kt-only twin of
 /// `try_tape_transpose_cuda`. Materialises the transposed view contiguous
 /// (the `TransposeBackward` adjoint transposes the upstream grad regardless).
@@ -1189,6 +1431,7 @@ pub fn try_tape_lora_add_kt(
         let base_2d = base_c
             .reshape(vec![rows, out_features])
             .map_err(|e| anyhow::anyhow!("kt base reshape -> 2d: {e}"))?;
+        ensure_tape_debug_finite("lora_add base_2d", &base_2d)?;
         tape.record(
             &base_2d,
             &[base],
@@ -1205,6 +1448,7 @@ pub fn try_tape_lora_add_kt(
         let x_2d = x_c
             .reshape(vec![rows, in_features])
             .map_err(|e| anyhow::anyhow!("kt x reshape -> 2d: {e}"))?;
+        ensure_tape_debug_finite("lora_add x_2d", &x_2d)?;
         tape.record(
             &x_2d,
             &[x],
@@ -1214,12 +1458,16 @@ pub fn try_tape_lora_add_kt(
         );
         let h_kt = kiln_tensor::ops::matmul_rhs_transposed(&x_2d, &a_kt)
             .map_err(|e| anyhow::anyhow!("kt matmul_rhs_transposed x@a_t: {e}"))?;
+        ensure_tape_debug_finite("lora_add x_a_hidden", &h_kt)?;
         let d_kt = kiln_tensor::ops::matmul_rhs_transposed(&h_kt, &b_kt)
             .map_err(|e| anyhow::anyhow!("kt matmul_rhs_transposed h@b_t: {e}"))?;
+        ensure_tape_debug_finite("lora_add h_b_delta_unscaled", &d_kt)?;
         let delta_kt = kiln_tensor::ops::mul_scalar(&d_kt, lora_scale)
             .map_err(|e| anyhow::anyhow!("kt mul_scalar(scale): {e}"))?;
+        ensure_tape_debug_finite("lora_add delta_scaled", &delta_kt)?;
         let out_2d = kiln_tensor::ops::add(&base_2d, &delta_kt)
             .map_err(|e| anyhow::anyhow!("kt add(base, delta): {e}"))?;
+        ensure_tape_debug_finite("lora_add out_2d", &out_2d)?;
         tape.record(
             &out_2d,
             &[&base_2d, &x_2d, &a_kt, &b_kt],
@@ -1389,6 +1637,7 @@ pub fn try_tape_lora_linear_kt(
         None => (None, None),
     };
     let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let debug_finite = debug_tape_linear_finite_checks();
         let x_c = if x.is_contiguous() {
             x.clone()
         } else {
@@ -1446,6 +1695,7 @@ pub fn try_tape_lora_linear_kt(
         } else {
             let base2d = kiln_tensor::ops::matmul(&x2d, weight_t)
                 .map_err(|e| anyhow::anyhow!("kt matmul x2d@w: {e}"))?;
+            ensure_tape_linear_finite(debug_finite, "base2d x2d@w", &base2d)?;
             tape.record(
                 &base2d,
                 &[&x2d, weight_t],
@@ -1461,12 +1711,16 @@ pub fn try_tape_lora_linear_kt(
             (Some(_proj), Some(a_kt), Some(b_kt)) => {
                 let h_kt = kiln_tensor::ops::matmul_rhs_transposed(&x2d, a_kt)
                     .map_err(|e| anyhow::anyhow!("kt matmul_rhs_transposed x@a_t: {e}"))?;
+                ensure_tape_linear_finite(debug_finite, "lora h x@a_t", &h_kt)?;
                 let d_kt = kiln_tensor::ops::matmul_rhs_transposed(&h_kt, b_kt)
                     .map_err(|e| anyhow::anyhow!("kt matmul_rhs_transposed h@b_t: {e}"))?;
+                ensure_tape_linear_finite(debug_finite, "lora d h@b_t", &d_kt)?;
                 let delta_kt = kiln_tensor::ops::mul_scalar(&d_kt, lora_scale)
                     .map_err(|e| anyhow::anyhow!("kt mul_scalar(scale): {e}"))?;
+                ensure_tape_linear_finite(debug_finite, "lora delta scaled", &delta_kt)?;
                 let out2d = kiln_tensor::ops::add(&base2d, &delta_kt)
                     .map_err(|e| anyhow::anyhow!("kt add(base, delta): {e}"))?;
+                ensure_tape_linear_finite(debug_finite, "lora out2d base+delta", &out2d)?;
                 tape.record(
                     &out2d,
                     &[&base2d, &x2d, a_kt, b_kt],
@@ -1494,6 +1748,7 @@ pub fn try_tape_lora_linear_kt(
         let out_kt = out2d_c
             .reshape(out_shape)
             .map_err(|e| anyhow::anyhow!("kt out reshape -> nd: {e}"))?;
+        ensure_tape_linear_finite(debug_finite, "linear out reshape", &out_kt)?;
         tape.record(
             &out_kt,
             &[&out2d],
@@ -1610,13 +1865,21 @@ impl BackwardOp for FlashAttnBackward {
             dout.contiguous()?
         };
 
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         let trace_timings =
             kiln_core::env_flag::env_flag("KILN_TRACE_FLASH_ATTN_BWD_TIMINGS", false);
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         let flash_started = if trace_timings {
-            if let kiln_tensor::Device::Cuda(i) = self.q.device() {
-                kiln_tensor::cuda_synchronize_default_stream(i)?;
+            match self.q.device() {
+                #[cfg(feature = "cuda")]
+                kiln_tensor::Device::Cuda(i) => {
+                    kiln_tensor::cuda_synchronize_default_stream(i)?;
+                }
+                #[cfg(feature = "rocm")]
+                kiln_tensor::Device::Rocm(i) => {
+                    kiln_tensor::rocm_synchronize_default_stream(i)?;
+                }
+                _ => {}
             }
             Some(std::time::Instant::now())
         } else {
@@ -1636,11 +1899,29 @@ impl BackwardOp for FlashAttnBackward {
         .map_err(|e| {
             kiln_tensor::Error::Msg(format!("FlashAttnBackward: flash_attn_bwd_kt: {e:?}"))
         })?;
+        ensure_tape_debug_finite("flash_attn_bwd dq raw", &dq)
+            .map_err(|e| kiln_tensor::Error::Msg(format!("{e:#}")))?;
+        ensure_tape_debug_finite("flash_attn_bwd dk raw expanded", &dk_exp)
+            .map_err(|e| kiln_tensor::Error::Msg(format!("{e:#}")))?;
+        ensure_tape_debug_finite("flash_attn_bwd dv raw expanded", &dv_exp)
+            .map_err(|e| kiln_tensor::Error::Msg(format!("{e:#}")))?;
 
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         if let Some(started) = flash_started {
-            if let kiln_tensor::Device::Cuda(i) = self.q.device() {
-                kiln_tensor::cuda_synchronize_default_stream(i)?;
+            let is_gpu = match self.q.device() {
+                #[cfg(feature = "cuda")]
+                kiln_tensor::Device::Cuda(i) => {
+                    kiln_tensor::cuda_synchronize_default_stream(i)?;
+                    true
+                }
+                #[cfg(feature = "rocm")]
+                kiln_tensor::Device::Rocm(i) => {
+                    kiln_tensor::rocm_synchronize_default_stream(i)?;
+                    true
+                }
+                _ => false,
+            };
+            if is_gpu {
                 let q_shape = self.q.shape();
                 let k_shape = self.k.shape();
                 eprintln!(
@@ -1658,10 +1939,18 @@ impl BackwardOp for FlashAttnBackward {
             }
         }
 
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         let collapse_started = if trace_timings && self.heads_kv != self.heads_q {
-            if let kiln_tensor::Device::Cuda(i) = self.q.device() {
-                kiln_tensor::cuda_synchronize_default_stream(i)?;
+            match self.q.device() {
+                #[cfg(feature = "cuda")]
+                kiln_tensor::Device::Cuda(i) => {
+                    kiln_tensor::cuda_synchronize_default_stream(i)?;
+                }
+                #[cfg(feature = "rocm")]
+                kiln_tensor::Device::Rocm(i) => {
+                    kiln_tensor::rocm_synchronize_default_stream(i)?;
+                }
+                _ => {}
             }
             Some(std::time::Instant::now())
         } else {
@@ -1709,11 +1998,27 @@ impl BackwardOp for FlashAttnBackward {
         } else {
             (dk_exp, dv_exp)
         };
+        ensure_tape_debug_finite("flash_attn_bwd dk collapsed", &dk)
+            .map_err(|e| kiln_tensor::Error::Msg(format!("{e:#}")))?;
+        ensure_tape_debug_finite("flash_attn_bwd dv collapsed", &dv)
+            .map_err(|e| kiln_tensor::Error::Msg(format!("{e:#}")))?;
 
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         if let Some(started) = collapse_started {
-            if let kiln_tensor::Device::Cuda(i) = self.q.device() {
-                kiln_tensor::cuda_synchronize_default_stream(i)?;
+            let is_gpu = match self.q.device() {
+                #[cfg(feature = "cuda")]
+                kiln_tensor::Device::Cuda(i) => {
+                    kiln_tensor::cuda_synchronize_default_stream(i)?;
+                    true
+                }
+                #[cfg(feature = "rocm")]
+                kiln_tensor::Device::Rocm(i) => {
+                    kiln_tensor::rocm_synchronize_default_stream(i)?;
+                    true
+                }
+                _ => false,
+            };
+            if is_gpu {
                 let k_shape = self.k.shape();
                 eprintln!(
                     "kiln_flash_attn_bwd_timing phase=gqa_collapse batch={} seq_len_k={} \
@@ -1809,7 +2114,7 @@ pub fn try_tape_flash_attn_kt(
         {
             return Ok(None);
         }
-        let Ok((bq, _sq, hq, dq_)) = q.dims4() else {
+        let Ok((bq, sq, hq, dq_)) = q.dims4() else {
             return Ok(None);
         };
         let Ok((bk, sk, hk, dk_)) = k.dims4() else {
@@ -1830,12 +2135,30 @@ pub fn try_tape_flash_attn_kt(
         {
             return Ok(None);
         }
+        #[cfg(feature = "rocm")]
+        if matches!(q.device(), kiln_tensor::Device::Rocm(_))
+            && (sq.max(sk) > 4096)
+            && kiln_core::env_flag::env_flag("KILN_DISABLE_ROCM_LONG_FLASH_ATTN", false)
+        {
+            return Ok(None);
+        }
         let softmax_scale = 1.0 / (head_dim as f32).sqrt();
         let causal = true;
         match with_active_tape(|tape: &mut Tape| -> Result<_> {
-            let (out_kt, lse_kt) =
+            let run_flash = || {
                 kiln_flash_attn::flash_attn_fwd_kt(q, k, v, softmax_scale, causal)
-                    .map_err(|e| anyhow::anyhow!("kt flash_attn_fwd_kt: {e:?}"))?;
+                    .map_err(|e| anyhow::anyhow!("kt flash_attn_fwd_kt: {e:?}"))
+            };
+            #[cfg(feature = "rocm")]
+            let (out_kt, lse_kt) = if matches!(q.device(), kiln_tensor::Device::Rocm(_))
+                && kiln_core::env_flag::env_flag("KILN_ROCM_TAPE_FLASH_MATERIALIZED", false)
+            {
+                kiln_flash_attn::with_rocm_online_fwd_disabled(run_flash)?
+            } else {
+                run_flash()?
+            };
+            #[cfg(not(feature = "rocm"))]
+            let (out_kt, lse_kt) = run_flash()?;
             tape.record(
                 &out_kt,
                 &[q, k, v],
@@ -3692,11 +4015,12 @@ pub fn tape_sdpa_enabled() -> bool {
 /// # Saved tensors / inputs
 ///
 /// `q`/`k`/`v` are the **pre-attention, head-FIRST** tensors the fallback
-/// consumes (`q = [B, nq, T, hd]`, `k`/`v = [B, nkv, T, hd]`, BEFORE the GQA
+/// consumes (`q = [B, nq, Tq, hd]`, `k`/`v = [B, nkv, Tk, hd]`, BEFORE the GQA
 /// expand) as candle clones; `scale = 1/sqrt(head_dim)`; `causal` selects the
-/// strict-upper-triangular mask. 3 differentiable inputs `[q, k, v]` in the
-/// order the adapter records them. The returned `dq` keeps `nq` heads;
-/// `dk`/`dv` are GQA-collapsed to `nkv` (matching the `k`/`v` `Var` layouts).
+/// lower-triangular mask with prefix offset `Tk - Tq`. 3 differentiable inputs
+/// `[q, k, v]` in the order the adapter records them. The returned `dq` keeps
+/// `nq` heads; `dk`/`dv` are GQA-collapsed to `nkv` (matching the `k`/`v`
+/// `Var` layouts).
 #[derive(Debug)]
 pub(crate) struct SdpaBackward {
     // #1082: candle->kt (the bwd kernel sdpa_fallback_backward_no_grad is kt-native).
@@ -3760,14 +4084,14 @@ impl BackwardOp for SdpaBackward {
 /// # Arguments
 ///
 /// * `q`/`k`/`v` — the **pre-attention head-FIRST** tensors the fallback
-///   consumes: `q = [B, nq, T, hd]`, `k`/`v = [B, nkv, T, hd]` (the
+///   consumes: `q = [B, nq, Tq, hd]`, `k`/`v = [B, nkv, Tk, hd]` (the
 ///   `prepared.{q,k,v}.transpose(1,2)` layout, BEFORE the GQA expand). They
 ///   must carry their LoRA lineage from the upstream q/k/v_proj adapters via
 ///   `tape_kt_input` chaining.
 /// * `head_dim` — `scale = 1/sqrt(head_dim)`, matching the forward's score
 ///   divisor.
 /// * `out` — the attention output the forward produced, head-FIRST
-///   `[B, nq, T, hd]` (the `attn_weights_softmax.broadcast_matmul(&v)` result
+///   `[B, nq, Tq, hd]` (the `attn_weights_softmax.broadcast_matmul(&v)` result
 ///   BEFORE its `transpose(1,2).reshape(...)`).
 ///
 /// `Ok(None)` (caller's production output unchanged) when the gate is off, no
@@ -3812,8 +4136,8 @@ pub fn try_tape_sdpa_fallback_kt(
         || nkv == 0
         || nq % nkv != 0
         || nvh != nkv
-        || tq != tk
-        || tq != tv
+        || tq > tk
+        || tk != tv
         || dq_ != head_dim
         || dk_ != head_dim
         || dv_ != head_dim

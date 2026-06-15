@@ -171,6 +171,70 @@ fn minmax_arbitrary_axis_wavefront_sweep() {
 }
 
 #[test]
+fn max_axis_flce_chunk_shape() {
+    if no_rocm() {
+        return;
+    }
+    let rows = 1014usize;
+    let cols = 4096usize;
+    let mut data = Vec::with_capacity(rows * cols);
+    for row in 0..rows {
+        for col in 0..cols {
+            data.push(val(row, col, 0));
+        }
+    }
+    let mut reference = vec![f32::NEG_INFINITY; rows];
+    for row in 0..rows {
+        for col in 0..cols {
+            reference[row] = reference[row].max(data[row * cols + col]);
+        }
+    }
+
+    let t = Tensor::from_vec_on(Device::Rocm(0), data, vec![rows, cols])
+        .unwrap_or_else(|e| panic!("from_vec_on flce chunk shape: {e}"));
+    let y = kiln_tensor::ops::max_axis(&t, 1).expect("generic max_axis should use ROCm");
+    let host = kiln_tensor::rocm_to_host_copy(&y).expect("rocm_to_host_copy max");
+    let got = host.to_vec::<f32>().expect("to_vec max");
+    for (idx, (g, rf)) in got.iter().zip(reference.iter()).enumerate() {
+        assert!(
+            approx_eq(*g, *rf),
+            "max mismatch flce chunk shape row={idx}: got {g} ref {rf}"
+        );
+    }
+}
+
+#[test]
+fn maximum_flce_metadata_len_preserves_first_row() {
+    if no_rocm() {
+        return;
+    }
+    let rows = 1014usize;
+    let cur: Vec<f32> = (0..rows).map(|idx| idx as f32 - 100.0).collect();
+    let next: Vec<f32> = (0..rows).map(|idx| 1000.0 - idx as f32).collect();
+    let reference: Vec<f32> = cur
+        .iter()
+        .copied()
+        .zip(next.iter().copied())
+        .map(|(a, b)| a.max(b))
+        .collect();
+
+    let cur = Tensor::from_vec_on(Device::Rocm(0), cur, vec![rows])
+        .unwrap_or_else(|e| panic!("from_vec_on cur: {e}"));
+    let next = Tensor::from_vec_on(Device::Rocm(0), next, vec![rows])
+        .unwrap_or_else(|e| panic!("from_vec_on next: {e}"));
+    let y = kiln_tensor::ops::maximum(&cur, &next).expect("rocm maximum");
+    let host = kiln_tensor::rocm_to_host_copy(&y).expect("rocm_to_host_copy maximum");
+    let got = host.to_vec::<f32>().expect("to_vec maximum");
+    assert_eq!(got.len(), reference.len());
+    for (idx, (g, rf)) in got.iter().zip(reference.iter()).enumerate() {
+        assert!(
+            approx_eq(*g, *rf),
+            "maximum mismatch idx={idx}: got {g} ref {rf}"
+        );
+    }
+}
+
+#[test]
 fn bool_reduce_arbitrary_axis_wavefront_sweep() {
     if no_rocm() {
         return;

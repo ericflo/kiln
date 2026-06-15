@@ -38,6 +38,7 @@ half = "2"
 # workspace-dep + feature-forward pattern as the other kernel crates).
 kiln-tensor = { workspace = true }
 kiln-kt-bridge = { path = "../kiln-kt-bridge", default-features = false }
+kiln-memory = { workspace = true }
 
 [build-dependencies]
 cc = "1"

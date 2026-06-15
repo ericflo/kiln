@@ -394,6 +394,7 @@ pub(crate) fn training_precision_policy_for_backend(
 fn training_activation_bytes_per_elem_for_policy(
     weights: &GpuWeights,
     policy: TrainingPrecisionPolicy,
+    has_linear_attention: bool,
 ) -> usize {
     const GDN_TAPE_EFFECTIVE_BYTES_PER_ELEM: usize = 10;
 
@@ -407,10 +408,11 @@ fn training_activation_bytes_per_elem_for_policy(
         kiln_tensor::DType::F32 => 4,
         _ => 4,
     };
-    if weights
-        .layers
-        .iter()
-        .any(|layer| matches!(layer.attention, GpuAttentionWeights::Linear(_)))
+    if has_linear_attention
+        || weights
+            .layers
+            .iter()
+            .any(|layer| matches!(layer.attention, GpuAttentionWeights::Linear(_)))
     {
         // GDN replay records q/k/v, gate, recurrent, qk-norm, and gated-norm
         // tensors in addition to the hidden stream. Use an intentionally
@@ -431,6 +433,7 @@ pub(crate) fn training_activation_bytes_per_elem_for_backend(
     training_activation_bytes_per_elem_for_policy(
         weights,
         training_precision_policy_for_backend(backend),
+        false,
     )
 }
 
@@ -439,7 +442,12 @@ pub(crate) fn training_activation_bytes_per_elem(weights: &GpuWeights, device: &
     training_activation_bytes_per_elem_for_policy(
         weights,
         training_precision_policy_for_device(device),
+        false,
     )
+}
+
+fn model_config_has_linear_attention(model_config: &ModelConfig) -> bool {
+    model_config.num_full_attention_layers < model_config.num_layers
 }
 
 #[inline]
@@ -666,18 +674,31 @@ pub struct TrainableLoraLayerParams {
 }
 
 struct LoraParamRef<'a> {
+    layer_idx: usize,
     module: &'static str,
+    matrix: &'static str,
     param: &'a Parameter,
 }
 
 fn push_lora_param_pair<'a>(
     params: &mut Vec<LoraParamRef<'a>>,
+    layer_idx: usize,
     module: &'static str,
     pair: &'a Option<(Parameter, Parameter)>,
 ) {
     if let Some((a, b)) = pair {
-        params.push(LoraParamRef { module, param: a });
-        params.push(LoraParamRef { module, param: b });
+        params.push(LoraParamRef {
+            layer_idx,
+            module,
+            matrix: "A",
+            param: a,
+        });
+        params.push(LoraParamRef {
+            layer_idx,
+            module,
+            matrix: "B",
+            param: b,
+        });
     }
 }
 
@@ -1448,17 +1469,17 @@ impl TrainableLoraParams {
 
     fn all_params_with_modules(&self) -> Vec<LoraParamRef<'_>> {
         let mut params = Vec::new();
-        for layer in &self.layers {
-            push_lora_param_pair(&mut params, "q_proj", &layer.q_proj);
-            push_lora_param_pair(&mut params, "k_proj", &layer.k_proj);
-            push_lora_param_pair(&mut params, "v_proj", &layer.v_proj);
-            push_lora_param_pair(&mut params, "o_proj", &layer.o_proj);
-            push_lora_param_pair(&mut params, "in_proj_qkv", &layer.in_proj_qkv);
-            push_lora_param_pair(&mut params, "in_proj_z", &layer.in_proj_z);
-            push_lora_param_pair(&mut params, "out_proj", &layer.gdn_out_proj);
-            push_lora_param_pair(&mut params, "gate_proj", &layer.gate_proj);
-            push_lora_param_pair(&mut params, "up_proj", &layer.up_proj);
-            push_lora_param_pair(&mut params, "down_proj", &layer.down_proj);
+        for (layer_idx, layer) in self.layers.iter().enumerate() {
+            push_lora_param_pair(&mut params, layer_idx, "q_proj", &layer.q_proj);
+            push_lora_param_pair(&mut params, layer_idx, "k_proj", &layer.k_proj);
+            push_lora_param_pair(&mut params, layer_idx, "v_proj", &layer.v_proj);
+            push_lora_param_pair(&mut params, layer_idx, "o_proj", &layer.o_proj);
+            push_lora_param_pair(&mut params, layer_idx, "in_proj_qkv", &layer.in_proj_qkv);
+            push_lora_param_pair(&mut params, layer_idx, "in_proj_z", &layer.in_proj_z);
+            push_lora_param_pair(&mut params, layer_idx, "out_proj", &layer.gdn_out_proj);
+            push_lora_param_pair(&mut params, layer_idx, "gate_proj", &layer.gate_proj);
+            push_lora_param_pair(&mut params, layer_idx, "up_proj", &layer.up_proj);
+            push_lora_param_pair(&mut params, layer_idx, "down_proj", &layer.down_proj);
         }
         params
     }
@@ -3226,51 +3247,29 @@ pub fn sft_train(
             .context_tokens
             .saturating_mul(config.epochs as u64);
 
-        // Auto-tune gradient checkpointing for this workload's actual
-        // sequence length, not just VRAM. On a big GPU with short prompts
-        // this typically disables checkpointing entirely (~10-30% faster).
-        let activation_bytes_per_elem =
-            training_activation_bytes_per_elem_for_policy(weights, training_precision_policy);
-        let ckpt_config = config
-            .grad_checkpoint_segments
-            .map(|segments| {
-                CheckpointConfig::from_resolved_segments(model_config.num_layers, segments)
-            })
-            .unwrap_or_else(|| {
-                CheckpointConfig::auto_for_workload_with_activation_bytes(
-                    model_config.num_layers,
-                    max_seq_len_tokens,
-                    model_config.hidden_size,
-                    model_config.intermediate_size,
-                    model_config.vocab_size,
-                    2, // BF16 base weights (canonical kiln inference dtype)
-                    activation_bytes_per_elem,
-                )
-            });
-        let segments = if ckpt_config.enabled {
-            Some(compute_segment_boundaries(
-                model_config.num_layers,
-                ckpt_config.num_segments,
-            ))
-        } else {
-            None
-        };
-
-        if let Some(ref segs) = segments {
-            tracing::info!(
-                num_segments = segs.len(),
-                boundaries = ?segs,
-                "gradient checkpointing enabled"
-            );
-        } else {
-            tracing::info!("gradient checkpointing disabled (KILN_NO_GRAD_CHECKPOINT=1)");
-        }
+        // Resolve checkpointing at each step using the current example's
+        // actual sequence length. The server preflight stamps the maximum
+        // segment count needed for admission; treating that as a job-wide
+        // fixed value makes a single very long row slow down every shorter
+        // row in the same upload.
+        let activation_bytes_per_elem = training_activation_bytes_per_elem_for_policy(
+            weights,
+            training_precision_policy,
+            model_config_has_linear_attention(model_config),
+        );
+        tracing::info!(
+            max_seq_len_tokens,
+            preflight_max_segments = ?config.grad_checkpoint_segments,
+            activation_bytes_per_elem,
+            "SFT gradient checkpointing will resolve per example"
+        );
 
         let total_steps = config.epochs * valid_indices.len();
         let mut global_step = 0;
         let mut last_loss = 0.0;
         let mut first_epoch_loss: Option<f64> = None;
         let mut best_epoch_loss = f64::INFINITY;
+        let mut last_ckpt_log_key: Option<(bool, usize)> = None;
         const SFT_DIVERGENCE_RATIO: f64 = 8.0;
         const SFT_DIVERGENCE_MIN_INCREASE: f64 = 5.0;
 
@@ -3289,6 +3288,39 @@ pub fn sft_train(
                 let (input_ids, label_mask) =
                     tokenize_for_training(&examples[ex_idx], tokenizer)
                         .with_context(|| format!("retokenize SFT example {ex_idx}"))?;
+                let ckpt_config = checkpoint_config_for_training_step(
+                    weights,
+                    &device,
+                    config.grad_checkpoint_segments,
+                    model_config.num_layers,
+                    input_ids.len(),
+                    model_config.hidden_size,
+                    model_config.intermediate_size,
+                    model_config.vocab_size,
+                    2, // BF16 base weights (canonical kiln inference dtype)
+                    activation_bytes_per_elem,
+                );
+                let segments =
+                    checkpoint_segments_for_config(weights, &device, input_ids.len(), ckpt_config);
+                let ckpt_log_key = (ckpt_config.enabled, ckpt_config.num_segments);
+                if last_ckpt_log_key != Some(ckpt_log_key) {
+                    if let Some(ref segs) = segments {
+                        tracing::info!(
+                            seq_len = input_ids.len(),
+                            num_segments = segs.len(),
+                            preflight_max_segments = ?config.grad_checkpoint_segments,
+                            boundaries = ?segs,
+                            "SFT gradient checkpointing enabled for step shape"
+                        );
+                    } else {
+                        tracing::info!(
+                            seq_len = input_ids.len(),
+                            preflight_max_segments = ?config.grad_checkpoint_segments,
+                            "SFT gradient checkpointing disabled for step shape"
+                        );
+                    }
+                    last_ckpt_log_key = Some(ckpt_log_key);
+                }
                 let loss_val;
 
                 // Per-STEP GPU coordination (the state.rs contract the
@@ -3957,49 +3989,26 @@ pub fn grpo_train(
             .max()
             .unwrap_or(0);
 
-        // Auto-tune gradient checkpointing for this workload's actual
-        // sequence length. Same pattern as `sft_train`: skip checkpointing
-        // when activation tape comfortably fits in available VRAM.
-        let activation_bytes_per_elem =
-            training_activation_bytes_per_elem_for_policy(weights, training_precision_policy);
-        let ckpt_config = config
-            .grad_checkpoint_segments
-            .map(|segments| {
-                CheckpointConfig::from_resolved_segments(model_config.num_layers, segments)
-            })
-            .unwrap_or_else(|| {
-                CheckpointConfig::auto_for_workload_with_activation_bytes(
-                    model_config.num_layers,
-                    max_seq_len_tokens,
-                    model_config.hidden_size,
-                    model_config.intermediate_size,
-                    model_config.vocab_size,
-                    2, // BF16 base weights
-                    activation_bytes_per_elem,
-                )
-            });
-        let segments = if ckpt_config.enabled {
-            Some(compute_segment_boundaries(
-                model_config.num_layers,
-                ckpt_config.num_segments,
-            ))
-        } else {
-            None
-        };
-
-        if let Some(ref segs) = segments {
-            tracing::info!(
-                num_segments = segs.len(),
-                boundaries = ?segs,
-                "GRPO gradient checkpointing enabled"
-            );
-        } else {
-            tracing::info!("GRPO gradient checkpointing disabled");
-        }
+        // Resolve checkpointing per group from the actual longest
+        // completion in that group. The submission preflight covers the
+        // worst-case group for admission, but using that segment count for
+        // every group needlessly slows shorter groups.
+        let activation_bytes_per_elem = training_activation_bytes_per_elem_for_policy(
+            weights,
+            training_precision_policy,
+            model_config_has_linear_attention(model_config),
+        );
+        tracing::info!(
+            max_seq_len_tokens,
+            preflight_max_segments = ?config.grad_checkpoint_segments,
+            activation_bytes_per_elem,
+            "GRPO gradient checkpointing will resolve per group"
+        );
 
         let total_steps = tokenized_groups.len();
         let mut global_step = 0;
         let mut last_loss = 0.0;
+        let mut last_ckpt_log_key: Option<(bool, usize)> = None;
 
         let pb = make_step_progress(total_steps, "grpo training");
 
@@ -4028,6 +4037,47 @@ pub fn grpo_train(
         for (group_idx, tgroup) in tokenized_groups.iter().enumerate() {
             let num_completions = tgroup.completions.len();
             let group_counts = token_counts_for_grpo_groups(std::slice::from_ref(tgroup));
+            let group_max_seq_len = tgroup
+                .completions
+                .iter()
+                .map(|completion| completion.input_ids.len())
+                .max()
+                .unwrap_or(0);
+            let ckpt_config = checkpoint_config_for_training_step(
+                weights,
+                &device,
+                config.grad_checkpoint_segments,
+                model_config.num_layers,
+                group_max_seq_len,
+                model_config.hidden_size,
+                model_config.intermediate_size,
+                model_config.vocab_size,
+                2, // BF16 base weights
+                activation_bytes_per_elem,
+            );
+            let segments =
+                checkpoint_segments_for_config(weights, &device, group_max_seq_len, ckpt_config);
+            let ckpt_log_key = (ckpt_config.enabled, ckpt_config.num_segments);
+            if last_ckpt_log_key != Some(ckpt_log_key) {
+                if let Some(ref segs) = segments {
+                    tracing::info!(
+                        group = group_idx + 1,
+                        max_seq_len = group_max_seq_len,
+                        num_segments = segs.len(),
+                        preflight_max_segments = ?config.grad_checkpoint_segments,
+                        boundaries = ?segs,
+                        "GRPO gradient checkpointing enabled for group shape"
+                    );
+                } else {
+                    tracing::info!(
+                        group = group_idx + 1,
+                        max_seq_len = group_max_seq_len,
+                        preflight_max_segments = ?config.grad_checkpoint_segments,
+                        "GRPO gradient checkpointing disabled for group shape"
+                    );
+                }
+                last_ckpt_log_key = Some(ckpt_log_key);
+            }
             let step_report = train_tokenized_grpo_group_with_grad_norms(
                 &*backend,
                 tgroup,
@@ -4656,34 +4706,18 @@ pub fn grpo_train_jsonl(
     }
 
     let mut train_body = || -> Result<(PathBuf, f64)> {
-        // Streaming GRPO can't pre-compute max_seq_len without consuming the
-        // dataset, so we stay on the VRAM-only auto-tune path here. The
-        // (non-streaming) `grpo_train` path uses the workload-shape-aware
-        // `CheckpointConfig::auto_for_workload` after tokenization.
-        let ckpt_config = config
-            .grad_checkpoint_segments
-            .map(|segments| {
-                CheckpointConfig::from_resolved_segments(model_config.num_layers, segments)
-            })
-            .unwrap_or_else(|| CheckpointConfig::from_env(model_config.num_layers));
-        let segments = if ckpt_config.enabled {
-            Some(compute_segment_boundaries(
-                model_config.num_layers,
-                ckpt_config.num_segments,
-            ))
-        } else {
-            None
-        };
-
-        if let Some(ref segs) = segments {
-            tracing::info!(
-                num_segments = segs.len(),
-                boundaries = ?segs,
-                "streamed GRPO gradient checkpointing enabled"
-            );
-        } else {
-            tracing::info!("streamed GRPO gradient checkpointing disabled");
-        }
+        // Streaming GRPO does not know max_seq_len until a group is
+        // tokenized, so checkpointing resolves per group below.
+        let activation_bytes_per_elem = training_activation_bytes_per_elem_for_policy(
+            weights,
+            training_precision_policy,
+            model_config_has_linear_attention(model_config),
+        );
+        tracing::info!(
+            preflight_max_segments = ?config.grad_checkpoint_segments,
+            activation_bytes_per_elem,
+            "streamed GRPO gradient checkpointing will resolve per group"
+        );
 
         if !reward_filter_enabled(config) {
             let startup_reward_groups = read_grpo_jsonl_reward_groups(dataset_path)?;
@@ -4814,6 +4848,7 @@ pub fn grpo_train_jsonl(
         let mut processed_completions = 0usize;
         let mut reward_groups: Vec<Vec<f64>> = Vec::new();
         let mut last_loss = 0.0;
+        let mut last_ckpt_log_key: Option<(bool, usize)> = None;
 
         // Phase 3b: maintain an EMA-snapshot LoRA when
         // `ReferencePolicy::Ema` is configured (see `grpo_train` for the
@@ -4911,6 +4946,48 @@ pub fn grpo_train_jsonl(
                 elapsed_ms = tokenize_start.elapsed().as_millis() as u64,
                 "streamed GRPO tokenize end"
             );
+
+            let group_max_seq_len = tgroup
+                .completions
+                .iter()
+                .map(|completion| completion.input_ids.len())
+                .max()
+                .unwrap_or(0);
+            let ckpt_config = checkpoint_config_for_training_step(
+                weights,
+                &device,
+                config.grad_checkpoint_segments,
+                model_config.num_layers,
+                group_max_seq_len,
+                model_config.hidden_size,
+                model_config.intermediate_size,
+                model_config.vocab_size,
+                2, // BF16 base weights
+                activation_bytes_per_elem,
+            );
+            let segments =
+                checkpoint_segments_for_config(weights, &device, group_max_seq_len, ckpt_config);
+            let ckpt_log_key = (ckpt_config.enabled, ckpt_config.num_segments);
+            if last_ckpt_log_key != Some(ckpt_log_key) {
+                if let Some(ref segs) = segments {
+                    tracing::info!(
+                        group = processed_groups,
+                        max_seq_len = group_max_seq_len,
+                        num_segments = segs.len(),
+                        preflight_max_segments = ?config.grad_checkpoint_segments,
+                        boundaries = ?segs,
+                        "streamed GRPO gradient checkpointing enabled for group shape"
+                    );
+                } else {
+                    tracing::info!(
+                        group = processed_groups,
+                        max_seq_len = group_max_seq_len,
+                        preflight_max_segments = ?config.grad_checkpoint_segments,
+                        "streamed GRPO gradient checkpointing disabled for group shape"
+                    );
+                }
+                last_ckpt_log_key = Some(ckpt_log_key);
+            }
 
             let step_report = train_tokenized_grpo_group_with_grad_norms(
                 &*backend,
@@ -6245,14 +6322,148 @@ pub(crate) fn observe_lora_grad_norms_from_kt_grad_store(
             if norm.is_finite() {
                 *sum_sq_by_module.entry(entry.module).or_insert(0.0) += norm * norm;
             } else {
+                let value_summary = summarize_sft_debug_values(kt_grad)
+                    .map(|(_, summary)| summary)
+                    .unwrap_or_else(|e| format!("stats_error={e:#}"));
                 tracing::warn!(
+                    layer = entry.layer_idx,
                     module = entry.module,
+                    matrix = entry.matrix,
+                    tensor_id = entry.param.tensor_id().as_raw(),
+                    dtype = ?kt_grad.dtype(),
+                    shape = ?kt_grad.shape(),
+                    device = %kt_grad.device(),
+                    value_summary,
                     "skipping non-finite LoRA grad norm sample (kt)"
                 );
             }
         }
     }
     observe_lora_grad_module_norms(accumulator, sum_sq_by_module);
+    Ok(())
+}
+
+fn validate_lora_grad_finiteness(
+    params: &TrainableLoraParams,
+    grads: &kiln_autograd::GradStore,
+    context: &str,
+) -> Result<()> {
+    for entry in params.all_params_with_modules() {
+        let Some(kt_grad) = grads.get(entry.param.tensor_id()) else {
+            continue;
+        };
+        let fast_finite = kt_grad.all_finite().with_context(|| {
+            format!(
+                "{context}: finite scan failed for LoRA grad layer={} module={} matrix={} tensor_id={}",
+                entry.layer_idx,
+                entry.module,
+                entry.matrix,
+                entry.param.tensor_id().as_raw()
+            )
+        })?;
+        if fast_finite {
+            continue;
+        }
+
+        let (cpu_finite, value_summary) = summarize_sft_debug_values(kt_grad)
+            .with_context(|| {
+                format!(
+                    "{context}: CPU-confirming finite scan failed for LoRA grad layer={} module={} matrix={} tensor_id={}",
+                    entry.layer_idx,
+                    entry.module,
+                    entry.matrix,
+                    entry.param.tensor_id().as_raw()
+                )
+            })?;
+        if cpu_finite {
+            tracing::warn!(
+                layer = entry.layer_idx,
+                module = entry.module,
+                matrix = entry.matrix,
+                tensor_id = entry.param.tensor_id().as_raw(),
+                dtype = ?kt_grad.dtype(),
+                shape = ?kt_grad.shape(),
+                device = %kt_grad.device(),
+                value_summary,
+                "{context}: backend finite reducer reported a non-finite LoRA grad but CPU confirmation was finite"
+            );
+            continue;
+        }
+
+        anyhow::bail!(
+            "{context}: non-finite LoRA grad layer={} module={} matrix={} tensor_id={} dtype={:?} shape={:?} device={} {}",
+            entry.layer_idx,
+            entry.module,
+            entry.matrix,
+            entry.param.tensor_id().as_raw(),
+            kt_grad.dtype(),
+            kt_grad.shape(),
+            kt_grad.device(),
+            value_summary
+        );
+    }
+    Ok(())
+}
+
+fn validate_lora_grad_map_finiteness(
+    params: &TrainableLoraParams,
+    grads: &GradMap,
+    context: &'static str,
+) -> Result<()> {
+    for entry in params.all_params_with_modules() {
+        let Some(kt_grad) = grads.get(&entry.param.tensor_id()) else {
+            continue;
+        };
+        let fast_finite = kt_grad.all_finite().with_context(|| {
+            format!(
+                "{context}: finite scan failed for accumulated LoRA grad layer={} module={} matrix={} tensor_id={}",
+                entry.layer_idx,
+                entry.module,
+                entry.matrix,
+                entry.param.tensor_id().as_raw()
+            )
+        })?;
+        if fast_finite {
+            continue;
+        }
+
+        let (cpu_finite, value_summary) = summarize_sft_debug_values(kt_grad)
+            .with_context(|| {
+                format!(
+                    "{context}: CPU-confirming finite scan failed for accumulated LoRA grad layer={} module={} matrix={} tensor_id={}",
+                    entry.layer_idx,
+                    entry.module,
+                    entry.matrix,
+                    entry.param.tensor_id().as_raw()
+                )
+            })?;
+        if cpu_finite {
+            tracing::warn!(
+                layer = entry.layer_idx,
+                module = entry.module,
+                matrix = entry.matrix,
+                tensor_id = entry.param.tensor_id().as_raw(),
+                dtype = ?kt_grad.dtype(),
+                shape = ?kt_grad.shape(),
+                device = %kt_grad.device(),
+                value_summary,
+                "{context}: backend finite reducer reported a non-finite accumulated LoRA grad but CPU confirmation was finite"
+            );
+            continue;
+        }
+
+        anyhow::bail!(
+            "{context}: non-finite accumulated LoRA grad layer={} module={} matrix={} tensor_id={} dtype={:?} shape={:?} device={} {}",
+            entry.layer_idx,
+            entry.module,
+            entry.matrix,
+            entry.param.tensor_id().as_raw(),
+            kt_grad.dtype(),
+            kt_grad.shape(),
+            kt_grad.device(),
+            value_summary
+        );
+    }
     Ok(())
 }
 
@@ -7432,6 +7643,269 @@ fn trace_sft_timings() -> bool {
     kiln_core::env_flag::env_flag("KILN_TRACE_SFT_TIMINGS", false)
 }
 
+fn debug_sft_finite_checks() -> bool {
+    kiln_core::env_flag::env_flag("KILN_DEBUG_SFT_FINITE", false)
+}
+
+fn debug_sft_active_rows() -> bool {
+    kiln_core::env_flag::env_flag("KILN_DEBUG_SFT_ACTIVE_ROWS", false)
+}
+
+fn debug_sft_stats_label() -> Option<String> {
+    std::env::var("KILN_DEBUG_SFT_STATS_LABEL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn debug_sft_label_matches(label: &str, filter: Option<&String>) -> bool {
+    filter
+        .map(|filter| {
+            filter
+                .split(',')
+                .map(str::trim)
+                .filter(|needle| !needle.is_empty())
+                .any(|needle| label.contains(needle))
+        })
+        .unwrap_or(true)
+}
+
+fn ensure_sft_debug_finite(enabled: bool, label: impl AsRef<str>, tensor: &Tensor) -> Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    let label = label.as_ref();
+    let stats_filter = debug_sft_stats_label();
+    if !debug_sft_label_matches(label, stats_filter.as_ref()) {
+        return Ok(());
+    }
+
+    let (finite, value_summary) = if stats_filter.is_some() {
+        summarize_sft_debug_values(tensor)
+            .with_context(|| format!("SFT finite check failed to scan {label}"))?
+    } else {
+        let finite = tensor
+            .all_finite()
+            .with_context(|| format!("SFT finite check failed to scan {label}"))?;
+        let value_summary = if finite {
+            String::new()
+        } else {
+            summarize_sft_debug_values(tensor)
+                .map(|(_, summary)| summary)
+                .unwrap_or_else(|e| format!("stats_error={e}"))
+        };
+        (finite, value_summary)
+    };
+    if stats_filter.is_some() {
+        eprintln!(
+            "kiln_sft_stats label={label} dtype={:?} shape={:?} device={} contiguous={} start_offset={} strides={:?} {value_summary}",
+            tensor.dtype(),
+            tensor.shape(),
+            tensor.device(),
+            tensor.is_contiguous(),
+            tensor.layout().start_offset(),
+            tensor.strides(),
+        );
+    }
+    anyhow::ensure!(
+        finite,
+        "SFT non-finite tensor at {label}: dtype={:?} shape={:?} device={} contiguous={} start_offset={} strides={:?} {}",
+        tensor.dtype(),
+        tensor.shape(),
+        tensor.device(),
+        tensor.is_contiguous(),
+        tensor.layout().start_offset(),
+        tensor.strides(),
+        value_summary,
+    );
+    Ok(())
+}
+
+fn sft_active_shift_indices(label_mask: &[bool], device: &Device) -> Result<Option<Tensor>> {
+    let active_positions: Vec<u32> = label_mask
+        .get(1..)
+        .unwrap_or(&[])
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, &active)| active.then_some(idx as u32))
+        .collect();
+    if active_positions.is_empty() {
+        return Ok(None);
+    }
+    let len = active_positions.len();
+    Tensor::from_vec_on(device.clone(), active_positions, vec![len])
+        .map(Some)
+        .context("build SFT active shifted row indices")
+}
+
+fn ensure_sft_active_rows_finite(
+    enabled: bool,
+    label: impl AsRef<str>,
+    tensor: &Tensor,
+    active_shift_indices: Option<&Tensor>,
+) -> Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    let Some(active_shift_indices) = active_shift_indices else {
+        return Ok(());
+    };
+    let label = label.as_ref();
+    let rank = tensor.rank();
+    let rows = match rank {
+        3 if tensor.shape()[0] == 1 => tensor
+            .squeeze(0)
+            .with_context(|| format!("{label}: squeeze batch dim for active-row check"))?,
+        2 => tensor.clone(),
+        _ => {
+            anyhow::bail!(
+                "{label}: active-row finite check expected rank-2 or [1,T,H], got shape {:?}",
+                tensor.shape()
+            );
+        }
+    };
+    let index_summary = summarize_sft_active_indices(active_shift_indices)
+        .with_context(|| format!("{label}: summarize active shifted row indices"))?;
+    let rows = rows
+        .contiguous()
+        .with_context(|| format!("{label}: make active-row source contiguous"))?;
+    let active_rows = kiln_tensor::ops::index_select(&rows, 0, active_shift_indices)
+        .with_context(|| format!("{label}: gather active shifted rows"))?;
+    synchronize_training_tensor_ready(label, &active_rows)?;
+    let (finite, value_summary) = summarize_sft_debug_values(&active_rows)
+        .with_context(|| format!("{label}: summarize active shifted rows"))?;
+    eprintln!(
+        "kiln_sft_active_rows label={label} dtype={:?} shape={:?} device={} contiguous={} start_offset={} strides={:?} {index_summary} {value_summary}",
+        active_rows.dtype(),
+        active_rows.shape(),
+        active_rows.device(),
+        active_rows.is_contiguous(),
+        active_rows.layout().start_offset(),
+        active_rows.strides(),
+    );
+    anyhow::ensure!(
+        finite,
+        "SFT active shifted rows non-finite at {label}: dtype={:?} shape={:?} device={} contiguous={} start_offset={} strides={:?} {}",
+        active_rows.dtype(),
+        active_rows.shape(),
+        active_rows.device(),
+        active_rows.is_contiguous(),
+        active_rows.layout().start_offset(),
+        active_rows.strides(),
+        format!("{index_summary} {value_summary}"),
+    );
+    Ok(())
+}
+
+fn summarize_sft_active_indices(indices: &Tensor) -> Result<String> {
+    let host = indices
+        .to_device(Device::Cpu)
+        .context("copy SFT active indices to CPU")?
+        .contiguous()
+        .context("make SFT active indices CPU tensor contiguous")?;
+    let values = host
+        .to_vec::<u32>()
+        .context("read SFT active indices as u32")?;
+    let Some((&first, rest)) = values.split_first() else {
+        return Ok("active_indices=0".to_string());
+    };
+    let mut min = first;
+    let mut max = first;
+    for &value in rest {
+        min = min.min(value);
+        max = max.max(value);
+    }
+    let head: Vec<u32> = values.iter().take(8).copied().collect();
+    let tail_start = values.len().saturating_sub(8);
+    let tail: Vec<u32> = values.iter().skip(tail_start).copied().collect();
+    Ok(format!(
+        "active_indices={} min={} max={} head={:?} tail={:?}",
+        values.len(),
+        min,
+        max,
+        head,
+        tail,
+    ))
+}
+
+fn synchronize_training_tensor_ready(label: &str, tensor: &Tensor) -> Result<()> {
+    match tensor.device() {
+        Device::Cpu => Ok(()),
+        #[cfg(feature = "cuda")]
+        Device::Cuda(idx) => kiln_tensor::cuda_synchronize_default_stream(idx)
+            .with_context(|| format!("{label}: synchronize CUDA tensor readiness")),
+        #[cfg(feature = "rocm")]
+        Device::Rocm(idx) => {
+            if kiln_tensor::rocm_capture_arena_active() {
+                Ok(())
+            } else {
+                kiln_tensor::rocm_synchronize_default_stream(idx)
+                    .with_context(|| format!("{label}: synchronize ROCm tensor readiness"))
+            }
+        }
+        #[cfg(feature = "metal")]
+        Device::Metal(idx) => kiln_tensor::primary_metal_companion(idx)
+            .and_then(|companion| companion.wait_until_completed())
+            .with_context(|| format!("{label}: synchronize Metal tensor readiness")),
+        #[cfg(feature = "vulkan")]
+        Device::Vulkan(idx) => kiln_tensor::vulkan_synchronize_queue(idx)
+            .with_context(|| format!("{label}: synchronize Vulkan tensor readiness")),
+        _ => Ok(()),
+    }
+}
+
+fn summarize_sft_debug_values(tensor: &Tensor) -> Result<(bool, String)> {
+    let host = tensor
+        .to_device(Device::Cpu)
+        .context("copy SFT debug tensor to CPU")?
+        .to_dtype(DType::F32)
+        .context("cast SFT debug tensor to f32")?
+        .contiguous()
+        .context("make SFT debug CPU tensor contiguous")?;
+    let values = host
+        .to_vec::<f32>()
+        .context("read SFT debug CPU tensor values")?;
+    let mut first_bad: Option<(usize, f32)> = None;
+    let mut max_abs = 0.0f32;
+    let mut max_abs_idx = 0usize;
+    for (idx, value) in values.iter().copied().enumerate() {
+        if value.is_finite() {
+            let abs = value.abs();
+            if abs > max_abs {
+                max_abs = abs;
+                max_abs_idx = idx;
+            }
+        } else if first_bad.is_none() {
+            first_bad = Some((idx, value));
+        }
+    }
+    let shape = tensor.shape();
+    let coord = |mut idx: usize| -> Vec<usize> {
+        let mut out = vec![0usize; shape.len()];
+        for axis in (0..shape.len()).rev() {
+            let dim = shape[axis].max(1);
+            out[axis] = idx % dim;
+            idx /= dim;
+        }
+        out
+    };
+    let (bad_idx, bad_value) = first_bad.unwrap_or((usize::MAX, f32::NAN));
+    let summary = format!(
+        "first_bad_flat={} first_bad_coord={:?} first_bad_value={} max_finite_abs={} max_finite_abs_flat={} max_finite_abs_coord={:?}",
+        bad_idx,
+        if bad_idx == usize::MAX {
+            Vec::new()
+        } else {
+            coord(bad_idx)
+        },
+        bad_value,
+        max_abs,
+        max_abs_idx,
+        coord(max_abs_idx)
+    );
+    Ok((first_bad.is_none(), summary))
+}
+
 fn debug_sft_reverse_segment_idx(num_segments: usize) -> Option<usize> {
     let raw = std::env::var("KILN_DEBUG_SFT_REVERSE_SEGMENT_IDX").ok()?;
     let idx = raw.trim().parse::<usize>().ok()?;
@@ -7466,61 +7940,167 @@ fn recompute_checkpoint_boundaries(seq_len: usize) -> bool {
     seq_len >= threshold
 }
 
-struct SpooledCheckpointBoundaries {
-    _dir: tempfile::TempDir,
-    paths: Vec<PathBuf>,
+const CHECKPOINT_BOUNDARY_CACHE_TARGET_BYTES: u64 = 6 * 1024 * 1024 * 1024;
+
+fn dtype_size_bytes(dtype: DType) -> usize {
+    match dtype {
+        DType::BF16 | DType::F16 => 2,
+        DType::F32 => 4,
+        DType::U8 => 1,
+        DType::U32 => 4,
+        DType::I64 => 8,
+        _ => 4,
+    }
 }
 
-impl SpooledCheckpointBoundaries {
-    fn new(num_segments: usize) -> Result<Self> {
-        let dir = tempfile::Builder::new()
-            .prefix("kiln-checkpoint-boundaries-")
-            .tempdir()
-            .context("create checkpoint boundary spool directory")?;
-        let paths = (0..=num_segments)
-            .map(|idx| dir.path().join(format!("boundary-{idx:04}.safetensors")))
-            .collect();
-        Ok(Self { _dir: dir, paths })
+fn checkpoint_boundary_anchor_stride(
+    seq_len: usize,
+    num_segments: usize,
+    hidden_size: usize,
+    boundary_dtype: DType,
+) -> usize {
+    if let Some(explicit) = std::env::var("KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 0)
+    {
+        return explicit;
     }
 
-    // (#1082) kt-native spool checkpoint I/O — the activation tensor is kt;
-    // move it to CPU (contiguous) and write/read via
-    // `kiln_tensor::safetensors::{save_cpu,load_cpu}`. No candle round-trip.
+    if num_segments <= 1 {
+        return 1;
+    }
+
+    let cache_target_bytes = std::env::var("KILN_CHECKPOINT_BOUNDARY_CACHE_GB")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|gb| (gb * 1024.0 * 1024.0 * 1024.0) as u64)
+        .unwrap_or(CHECKPOINT_BOUNDARY_CACHE_TARGET_BYTES)
+        .max(1);
+    let boundary_bytes = (seq_len as u64)
+        .saturating_mul(hidden_size as u64)
+        .saturating_mul(dtype_size_bytes(boundary_dtype).max(1) as u64)
+        .max(1);
+    let max_anchors = (cache_target_bytes / boundary_bytes).max(2) as usize;
+    let replay_anchor_slots = max_anchors.saturating_sub(1).max(1);
+    num_segments.div_ceil(replay_anchor_slots).max(1)
+}
+
+struct StoredCheckpointBoundaries {
+    tensors: std::cell::RefCell<Vec<Option<Tensor>>>,
+    resident_device_storage: bool,
+    anchor_stride: usize,
+}
+
+impl StoredCheckpointBoundaries {
+    fn new(num_segments: usize, resident_device_storage: bool, anchor_stride: usize) -> Self {
+        Self {
+            tensors: std::cell::RefCell::new(vec![None; num_segments + 1]),
+            resident_device_storage,
+            anchor_stride: anchor_stride.max(1),
+        }
+    }
+
+    fn should_store(&self, boundary_idx: usize) -> bool {
+        boundary_idx == 0 || boundary_idx % self.anchor_stride == 0
+    }
+
+    fn anchor_for_boundary(&self, boundary_idx: usize) -> usize {
+        (boundary_idx / self.anchor_stride) * self.anchor_stride
+    }
+
+    // Long-context checkpoint boundaries are too large to retain at every
+    // segment boundary. Keep sparse anchors in process memory and replay from
+    // the nearest anchor on demand.
     fn save(&self, boundary_idx: usize, tensor: &Tensor) -> Result<()> {
-        let path = self.paths.get(boundary_idx).ok_or_else(|| {
-            anyhow::anyhow!("checkpoint boundary index {boundary_idx} out of spool range")
+        if !self.should_store(boundary_idx) {
+            return Ok(());
+        }
+        let stored = if self.resident_device_storage {
+            tensor
+                .contiguous()
+                .map_err(|e| anyhow::anyhow!("checkpoint boundary save: contiguous: {e}"))?
+        } else {
+            tensor
+                .to_device(kiln_tensor::Device::Cpu)
+                .and_then(|t| t.contiguous())
+                .map_err(|e| anyhow::anyhow!("checkpoint boundary save: to cpu: {e}"))?
+        };
+        let mut tensors = self.tensors.borrow_mut();
+        let slot = tensors.get_mut(boundary_idx).ok_or_else(|| {
+            anyhow::anyhow!("checkpoint boundary index {boundary_idx} out of storage range")
         })?;
-        let cpu = tensor
-            .to_device(kiln_tensor::Device::Cpu)
-            .and_then(|t| t.contiguous())
-            .map_err(|e| anyhow::anyhow!("spool save: to cpu: {e}"))?;
-        let map: std::collections::HashMap<&str, &Tensor> =
-            std::collections::HashMap::from([("hidden", &cpu)]);
-        kiln_tensor::safetensors::save_cpu(&map, path).with_context(|| {
-            format!(
-                "save checkpoint boundary {boundary_idx} to {}",
-                path.display()
-            )
-        })
+        *slot = Some(stored);
+        Ok(())
+    }
+
+    fn load_stored(&self, boundary_idx: usize, device: &Device) -> Result<Option<Tensor>> {
+        let tensors = self.tensors.borrow();
+        let Some(slot) = tensors.get(boundary_idx) else {
+            anyhow::bail!("checkpoint boundary index {boundary_idx} out of spool range");
+        };
+        let Some(hidden) = slot.as_ref() else {
+            return Ok(None);
+        };
+        if self.resident_device_storage {
+            return Ok(Some(hidden.clone()));
+        }
+        Ok(Some(hidden.to_device(*device).map_err(|e| {
+            anyhow::anyhow!("checkpoint boundary load: move to device: {e}")
+        })?))
     }
 
     fn load(&self, boundary_idx: usize, device: &Device) -> Result<Tensor> {
-        let path = self.paths.get(boundary_idx).ok_or_else(|| {
-            anyhow::anyhow!("checkpoint boundary index {boundary_idx} out of spool range")
-        })?;
-        let mut tensors = kiln_tensor::safetensors::load_cpu(path).with_context(|| {
-            format!(
-                "load checkpoint boundary {boundary_idx} from {}",
-                path.display()
-            )
-        })?;
-        let hidden = tensors.remove("hidden").ok_or_else(|| {
-            anyhow::anyhow!("checkpoint boundary {boundary_idx} missing `hidden` tensor")
-        })?;
-        hidden
-            .to_device(*device)
-            .map_err(|e| anyhow::anyhow!("spool load: to device: {e}"))
+        self.load_stored(boundary_idx, device)?.ok_or_else(|| {
+            anyhow::anyhow!("checkpoint boundary {boundary_idx} missing hidden tensor")
+        })
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn load_or_recompute_checkpoint_boundary(
+    spool: &StoredCheckpointBoundaries,
+    boundary_idx: usize,
+    backend: &dyn BackendRuntime,
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    positions: &[u32],
+    segments: &[(usize, usize)],
+    lora_detached: &LoraWeights,
+    device: &Device,
+) -> Result<Tensor> {
+    anyhow::ensure!(
+        boundary_idx <= segments.len(),
+        "checkpoint boundary {boundary_idx} out of range for {} segments",
+        segments.len()
+    );
+    if let Some(stored) = spool.load_stored(boundary_idx, device)? {
+        return Ok(stored);
+    }
+
+    let anchor_idx = spool.anchor_for_boundary(boundary_idx);
+    let mut current = spool.load(anchor_idx, device)?;
+    let mut linear_state = LinearAttentionState::new(model_config, device)?;
+    for replay_idx in anchor_idx..boundary_idx {
+        let (start, end) = segments[replay_idx];
+        current = model_forward_segment(
+            backend,
+            current,
+            weights,
+            model_config,
+            positions,
+            start,
+            end,
+            Some(&mut linear_state),
+            Some(lora_detached),
+        )
+        .with_context(|| {
+            format!("checkpoint boundary replay segment {replay_idx} layers {start}..{end}")
+        })?
+        .detach();
+    }
+    Ok(current)
 }
 
 /// (#1082) SGD update (param = param - lr*grad) from a kt-native
@@ -8023,6 +8603,7 @@ pub(crate) fn optimizer_step_from_map(
     optimizer: Optimizer,
     opt_state: Option<&mut OptimizerState>,
 ) -> Result<()> {
+    validate_lora_grad_map_finiteness(params, grads, "optimizer_step_from_map")?;
     match optimizer {
         Optimizer::Sgd => sgd_step_from_map(backend, params, grads, lr),
         Optimizer::AdamW {
@@ -8141,6 +8722,7 @@ pub(crate) fn optimizer_step_from_kt_grad_store(
     optimizer: Optimizer,
     opt_state: Option<&mut OptimizerState>,
 ) -> Result<()> {
+    validate_lora_grad_finiteness(params, grads, "optimizer_step_from_kt_grad_store")?;
     match optimizer {
         Optimizer::Sgd => {
             let resident_activation =
@@ -8446,6 +9028,205 @@ impl CheckpointConfig {
             }
         }
     }
+}
+
+fn checkpoint_env_override_present() -> bool {
+    std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .is_some()
+        || std::env::var("KILN_NO_GRAD_CHECKPOINT")
+            .as_deref()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn checkpoint_config_for_training_step(
+    weights: &GpuWeights,
+    device: &Device,
+    preflight_max_segments: Option<usize>,
+    num_layers: usize,
+    seq_len_tokens: usize,
+    hidden_size: usize,
+    intermediate_size: usize,
+    vocab_size: usize,
+    bytes_per_base_param: usize,
+    activation_bytes_per_elem: usize,
+) -> CheckpointConfig {
+    if checkpoint_env_override_present() {
+        return preflight_max_segments
+            .map(|segments| CheckpointConfig::from_resolved_segments(num_layers, segments))
+            .unwrap_or_else(|| CheckpointConfig::from_env(num_layers));
+    }
+
+    let mut cfg = CheckpointConfig::auto_for_workload_with_activation_bytes(
+        num_layers,
+        seq_len_tokens,
+        hidden_size,
+        intermediate_size,
+        vocab_size,
+        bytes_per_base_param,
+        activation_bytes_per_elem,
+    );
+
+    if let Some(num_segments) =
+        long_context_full_attention_forced_checkpoint_segments(weights, device, seq_len_tokens)
+        && (!cfg.enabled || cfg.num_segments < num_segments)
+    {
+        tracing::info!(
+            seq_len_tokens,
+            num_segments,
+            "auto-tuned: gradient checkpointing engaged for long-context full-attention tape pressure"
+        );
+        cfg.enabled = num_segments > 1;
+        cfg.num_segments = num_segments;
+        cfg.auto_configured = true;
+    }
+
+    if let Some(max_segments) = preflight_max_segments {
+        let max_segments = max_segments.min(num_layers).max(1);
+        if cfg.enabled && cfg.num_segments > max_segments {
+            cfg.num_segments = max_segments;
+            cfg.enabled = max_segments > 1;
+        }
+    }
+
+    cfg
+}
+
+fn long_context_full_attention_forced_checkpoint_segments(
+    weights: &GpuWeights,
+    device: &Device,
+    seq_len_tokens: usize,
+) -> Option<usize> {
+    const MIN_TOKENS: usize = 8 * 1024;
+
+    if seq_len_tokens < MIN_TOKENS {
+        return None;
+    }
+    if !matches!(
+        device,
+        Device::Cuda(_) | Device::Rocm(_) | Device::Metal(_) | Device::Vulkan(_)
+    ) {
+        return None;
+    }
+    let full_attention_layers = weights
+        .layers
+        .iter()
+        .filter(|layer| matches!(layer.attention, GpuAttentionWeights::Full(_)))
+        .count();
+    if full_attention_layers == 0 {
+        return None;
+    }
+
+    Some(weights.layers.len().max(1))
+}
+
+fn checkpoint_segments_for_config(
+    weights: &GpuWeights,
+    device: &Device,
+    seq_len_tokens: usize,
+    ckpt_config: CheckpointConfig,
+) -> Option<Vec<(usize, usize)>> {
+    if !ckpt_config.enabled {
+        return None;
+    }
+    let mut boundaries = compute_segment_boundaries(weights.layers.len(), ckpt_config.num_segments);
+    if ckpt_config.auto_configured
+        && (materialized_full_attention_checkpoint_refinement_needed(
+            weights,
+            device,
+            seq_len_tokens,
+        ) || rocm_online_full_attention_checkpoint_refinement_needed(
+            weights,
+            device,
+            seq_len_tokens,
+        ))
+    {
+        let refined = refine_segments_for_materialized_full_attention(weights, &boundaries);
+        if refined.len() > boundaries.len() {
+            tracing::info!(
+                seq_len = seq_len_tokens,
+                original_segments = boundaries.len(),
+                refined_segments = refined.len(),
+                "refined gradient checkpoint boundaries for materialized full-attention replay"
+            );
+            boundaries = refined;
+        }
+    }
+    Some(boundaries)
+}
+
+fn rocm_online_full_attention_checkpoint_refinement_needed(
+    weights: &GpuWeights,
+    device: &Device,
+    seq_len_tokens: usize,
+) -> bool {
+    const MIN_TOKENS: usize = 8 * 1024;
+
+    if seq_len_tokens < MIN_TOKENS || !streaming_prefill_enabled_for(device, seq_len_tokens) {
+        return false;
+    }
+    if !matches!(device, Device::Rocm(_)) {
+        return false;
+    }
+    weights
+        .layers
+        .iter()
+        .filter(|layer| matches!(layer.attention, GpuAttentionWeights::Full(_)))
+        .count()
+        > 1
+}
+
+fn materialized_full_attention_checkpoint_refinement_needed(
+    weights: &GpuWeights,
+    device: &Device,
+    seq_len_tokens: usize,
+) -> bool {
+    if !streaming_prefill_enabled_for(device, seq_len_tokens) {
+        return false;
+    }
+    if !matches!(device, Device::Metal(_) | Device::Vulkan(_)) {
+        return false;
+    }
+    weights
+        .layers
+        .iter()
+        .filter(|layer| matches!(layer.attention, GpuAttentionWeights::Full(_)))
+        .count()
+        > 1
+}
+
+fn refine_segments_for_materialized_full_attention(
+    weights: &GpuWeights,
+    boundaries: &[(usize, usize)],
+) -> Vec<(usize, usize)> {
+    let mut refined = Vec::with_capacity(boundaries.len());
+    for &(start, end) in boundaries {
+        if start >= end {
+            continue;
+        }
+        let mut seg_start = start;
+        let mut full_attn_in_segment = 0usize;
+        for layer_idx in start..end {
+            if matches!(
+                weights.layers[layer_idx].attention,
+                GpuAttentionWeights::Full(_)
+            ) {
+                if full_attn_in_segment > 0 {
+                    refined.push((seg_start, layer_idx));
+                    seg_start = layer_idx;
+                    full_attn_in_segment = 0;
+                }
+                full_attn_in_segment += 1;
+            }
+        }
+        if seg_start < end {
+            refined.push((seg_start, end));
+        }
+    }
+    refined
 }
 
 /// Compute segment boundaries for gradient checkpointing.
@@ -9116,6 +9897,9 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     );
 
     let trace_timings = trace_sft_timings();
+    let debug_finite = debug_sft_finite_checks();
+    let debug_active_rows = debug_sft_active_rows();
+    let active_shift_indices = sft_active_shift_indices(label_mask, device)?;
     let total_start = Instant::now();
     if trace_timings {
         eprintln!(
@@ -9137,13 +9921,46 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     let boundary_start = Instant::now();
     let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
     let spool_boundaries = if recompute_checkpoint_boundaries(input_ids.len()) {
-        Some(SpooledCheckpointBoundaries::new(num_segments)?)
+        let resident_device_storage =
+            ResidencyBackend::runtime_supports_resident_activation(backend);
+        let anchor_stride = checkpoint_boundary_anchor_stride(
+            input_ids.len(),
+            num_segments,
+            model_config.hidden_size,
+            embed_hidden.dtype(),
+        );
+        if trace_timings {
+            eprintln!(
+                "kiln_sft_timing phase=boundary_storage seq_len={} segments={} storage={} anchor_stride={}",
+                input_ids.len(),
+                num_segments,
+                if resident_device_storage {
+                    "resident_device"
+                } else {
+                    "host_memory"
+                },
+                anchor_stride
+            );
+        }
+        Some(StoredCheckpointBoundaries::new(
+            num_segments,
+            resident_device_storage,
+            anchor_stride,
+        ))
     } else {
         None
     };
     let mut boundaries: Vec<Option<kiln_tensor::Tensor>> = Vec::with_capacity(num_segments + 1);
     let mut boundary_dtypes: Vec<DType> = Vec::with_capacity(num_segments + 1);
     let mut current = embed_hidden.detach();
+    synchronize_training_tensor_ready("embed_hidden", &current)?;
+    ensure_sft_debug_finite(debug_finite, "embed_hidden", &current)?;
+    ensure_sft_active_rows_finite(
+        debug_active_rows,
+        "embed_hidden",
+        &current,
+        active_shift_indices.as_ref(),
+    )?;
     boundary_dtypes.push(current.dtype());
     if let Some(spool) = spool_boundaries.as_ref() {
         spool.save(0, &current)?;
@@ -9167,6 +9984,15 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
                 Some(&lora_detached),
             )?
             .detach();
+            let boundary_label = format!("boundary_segment[{seg_idx}] layers {start}..{end}");
+            synchronize_training_tensor_ready(&boundary_label, &current)?;
+            ensure_sft_debug_finite(debug_finite, &boundary_label, &current)?;
+            ensure_sft_active_rows_finite(
+                debug_active_rows,
+                &boundary_label,
+                &current,
+                active_shift_indices.as_ref(),
+            )?;
             boundary_dtypes.push(current.dtype());
             if let Some(spool) = spool_boundaries.as_ref() {
                 spool.save(seg_idx + 1, &current)?;
@@ -9195,7 +10021,17 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         let (start, end) = segments[debug_seg_idx];
         let debug_start = Instant::now();
         let seg_input = if let Some(spool) = spool_boundaries.as_ref() {
-            spool.load(debug_seg_idx, device)?
+            load_or_recompute_checkpoint_boundary(
+                spool,
+                debug_seg_idx,
+                backend,
+                weights,
+                model_config,
+                &positions,
+                segments,
+                &lora_detached,
+                device,
+            )?
         } else {
             boundaries[debug_seg_idx]
                 .as_ref()
@@ -9203,7 +10039,17 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
                 .clone()
         };
         let seg_output = if let Some(spool) = spool_boundaries.as_ref() {
-            spool.load(debug_seg_idx + 1, device)?
+            load_or_recompute_checkpoint_boundary(
+                spool,
+                debug_seg_idx + 1,
+                backend,
+                weights,
+                model_config,
+                &positions,
+                segments,
+                &lora_detached,
+                device,
+            )?
         } else {
             boundaries[debug_seg_idx + 1]
                 .as_ref()
@@ -9278,7 +10124,23 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
             // tensor is retained for the FLCE/RMSNorm tail seed below.
             // The candle FLCE provider opt-in (`KILN_CUDA_FLCE`) was removed in the
             // candle drop — this is now the sole FLCE path.
+            synchronize_training_tensor_ready("tail_pre_final_norm_hidden", &final_hidden_kt)?;
+            ensure_sft_debug_finite(debug_finite, "tail_pre_final_norm_hidden", &final_hidden_kt)?;
+            ensure_sft_active_rows_finite(
+                debug_active_rows,
+                "tail_pre_final_norm_hidden",
+                &final_hidden_kt,
+                active_shift_indices.as_ref(),
+            )?;
             let normed = model_forward_final_norm(&final_hidden_kt, weights, model_config)?;
+            synchronize_training_tensor_ready("tail_final_norm", &normed)?;
+            ensure_sft_debug_finite(debug_finite, "tail_final_norm", &normed)?;
+            ensure_sft_active_rows_finite(
+                debug_active_rows,
+                "tail_final_norm",
+                &normed,
+                active_shift_indices.as_ref(),
+            )?;
             let (loss_kt, active_metadata) =
                 kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_with_metadata_kt(
                     &normed,
@@ -9292,6 +10154,8 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
                         "ckpt-kt kt-native fused linear cross-entropy (final boundary): {e}"
                     )
                 })?;
+            ensure_sft_debug_finite(debug_finite, "tail_flce_loss_scalar", &loss_kt)?;
+            synchronize_training_tensor_ready("tail_flce_loss_scalar", &loss_kt)?;
             let loss_val = loss_kt.to_scalar::<f32>()? as f64;
             flce_active_metadata_for_tail = active_metadata;
             normed_for_tail = Some(normed);
@@ -9300,7 +10164,27 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         SftFlceLossRoute::VulkanActiveRows => {
             #[cfg(feature = "vulkan")]
             {
+                ensure_sft_debug_finite(
+                    debug_finite,
+                    "tail_pre_final_norm_hidden",
+                    &final_hidden_kt,
+                )?;
+                ensure_sft_active_rows_finite(
+                    debug_active_rows,
+                    "tail_pre_final_norm_hidden",
+                    &final_hidden_kt,
+                    active_shift_indices.as_ref(),
+                )?;
+                synchronize_training_tensor_ready("tail_pre_final_norm_hidden", &final_hidden_kt)?;
                 let normed = model_forward_final_norm(&final_hidden_kt, weights, model_config)?;
+                ensure_sft_debug_finite(debug_finite, "tail_final_norm", &normed)?;
+                ensure_sft_active_rows_finite(
+                    debug_active_rows,
+                    "tail_final_norm",
+                    &normed,
+                    active_shift_indices.as_ref(),
+                )?;
+                synchronize_training_tensor_ready("tail_final_norm", &normed)?;
                 let (loss_kt, grad_normed) =
                     crate::sft_tape_shim::vulkan_sft_flce_loss_and_grad_kt(
                         &normed,
@@ -9309,6 +10193,9 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
                         label_mask,
                     )
                     .map_err(|e| anyhow::anyhow!("ckpt-kt Vulkan fused SFT FLCE tail: {e}"))?;
+                ensure_sft_debug_finite(debug_finite, "tail_vulkan_flce_loss_scalar", &loss_kt)?;
+                synchronize_training_tensor_ready("tail_vulkan_flce_loss_scalar", &loss_kt)?;
+                ensure_sft_debug_finite(debug_finite, "tail_vulkan_grad_normed", &grad_normed)?;
                 let loss_val = loss_kt.to_scalar::<f32>()? as f64;
                 tail_grad_override = Some(
                     rms_norm_backward_pre_final_norm(
@@ -9329,10 +10216,20 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         }
         SftFlceLossRoute::FullLogits => {
             tail_grad_override = None;
+            synchronize_training_tensor_ready("tail_pre_lm_head_hidden", &final_hidden_kt)?;
             let logits = model_forward_head(&final_hidden_kt, weights, model_config)?;
+            ensure_sft_debug_finite(debug_finite, "tail_full_logits", &logits)?;
+            synchronize_training_tensor_ready("tail_full_logits", &logits)?;
             cross_entropy_loss(&logits, input_ids, label_mask, device)?
         }
     };
+    anyhow::ensure!(
+        loss_val.is_finite(),
+        "SFT loss became non-finite before backward: loss={loss_val} route={} seq_len={} segments={}",
+        sft_flce_loss_route.as_str(),
+        input_ids.len(),
+        num_segments
+    );
     log_sft_timing(
         trace_timings,
         "tail_loss",
@@ -9372,6 +10269,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     let mut upstream_grad = tail_grad
         .context("ckpt-kt FLCE/RMSNorm SFT tail gradient")?
         .detach();
+    ensure_sft_debug_finite(debug_finite, "tail_upstream_grad", &upstream_grad)?;
     drop(final_hidden_kt);
     drop(current);
     log_sft_timing(
@@ -9397,7 +10295,17 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         let (start, end) = segments[seg_idx];
         let reverse_start = Instant::now();
         let seg_input = if let Some(spool) = spool_boundaries.as_ref() {
-            spool.load(seg_idx, device)?
+            load_or_recompute_checkpoint_boundary(
+                spool,
+                seg_idx,
+                backend,
+                weights,
+                model_config,
+                &positions,
+                segments,
+                &lora_detached,
+                device,
+            )?
         } else {
             boundaries[seg_idx]
                 .as_ref()
@@ -9411,6 +10319,11 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         let seed = upstream_grad
             .to_dtype(seg_output_dtype)
             .map_err(|e| anyhow::anyhow!("ckpt-kt: seed dtype cast (segment {seg_idx}): {e}"))?;
+        ensure_sft_debug_finite(
+            debug_finite,
+            format!("reverse_seed[{seg_idx}] layers {start}..{end}"),
+            &seed,
+        )?;
         let positions_ref = &positions;
         let lora_ref = &lora_weights;
         let (kt_grads, candle_grads) =
@@ -9459,12 +10372,21 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         }
 
         // Chain the upstream grad into the previous (earlier) segment.
+        if debug_finite {
+            let grad_context = format!("ckpt-kt segment {seg_idx} grad validation");
+            validate_lora_grad_finiteness(params, &grads, &grad_context)?;
+        }
         if seg_idx > 0 {
             upstream_grad = kt_grads.get(seg_input_id).cloned().ok_or_else(|| {
                 anyhow::anyhow!(
                     "ckpt-kt: tape backward produced no input gradient for segment {seg_idx}"
                 )
             })?;
+            ensure_sft_debug_finite(
+                debug_finite,
+                format!("reverse_upstream_grad[{seg_idx}] layers {start}..{end}"),
+                &upstream_grad,
+            )?;
         }
         if trace_timings {
             eprintln!(
@@ -13470,6 +14392,73 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn materialized_full_attention_checkpoint_refinement_limits_replay_scope() -> Result<()> {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior_streaming = std::env::var("KILN_STREAMING_PREFILL").ok();
+        unsafe {
+            std::env::set_var("KILN_STREAMING_PREFILL", "1");
+        }
+
+        let device = cpu_device();
+        let mut config = tiny_config();
+        config.full_attention_interval = 2;
+        config.num_full_attention_layers = 2;
+        let weights = tiny_weights(&config, &device)?;
+
+        let cfg = CheckpointConfig {
+            num_segments: 1,
+            enabled: true,
+            auto_configured: true,
+        };
+        let cuda_segments = checkpoint_segments_for_config(&weights, &Device::Cuda(0), 4096, cfg)
+            .expect("CUDA checkpointing should be enabled");
+        assert_eq!(cuda_segments, vec![(0, 4)]);
+
+        let rocm_segments = checkpoint_segments_for_config(&weights, &Device::Rocm(0), 4096, cfg)
+            .expect("ROCm checkpointing should be enabled");
+        assert_eq!(rocm_segments, vec![(0, 4)]);
+        let rocm_long_segments =
+            checkpoint_segments_for_config(&weights, &Device::Rocm(0), 8192, cfg)
+                .expect("ROCm long-context checkpointing should be enabled");
+        assert_eq!(rocm_long_segments, vec![(0, 3), (3, 4)]);
+        let rocm_layer_segments = checkpoint_segments_for_config(
+            &weights,
+            &Device::Rocm(0),
+            8192,
+            CheckpointConfig {
+                num_segments: 4,
+                enabled: true,
+                auto_configured: true,
+            },
+        )
+        .expect("ROCm layer checkpointing should be enabled");
+        assert_eq!(rocm_layer_segments, vec![(0, 1), (1, 2), (2, 3), (3, 4)]);
+
+        let metal_segments = checkpoint_segments_for_config(&weights, &Device::Metal(0), 4096, cfg)
+            .expect("Metal long-context checkpointing should be enabled");
+        assert_eq!(metal_segments, vec![(0, 3), (3, 4)]);
+
+        let vulkan_segments =
+            checkpoint_segments_for_config(&weights, &Device::Vulkan(0), 4096, cfg)
+                .expect("Vulkan long-context checkpointing should be enabled");
+        assert_eq!(vulkan_segments, vec![(0, 3), (3, 4)]);
+
+        for &(start, end) in metal_segments.iter().chain(vulkan_segments.iter()) {
+            let full_attn_count = weights.layers[start..end]
+                .iter()
+                .filter(|layer| matches!(layer.attention, GpuAttentionWeights::Full(_)))
+                .count();
+            assert!(
+                full_attn_count <= 1,
+                "materialized replay segment [{start}, {end}) has {full_attn_count} full-attention layers"
+            );
+        }
+
+        restore_env("KILN_STREAMING_PREFILL", prior_streaming);
+        Ok(())
+    }
+
+    #[test]
     #[ignore = "#1082 flip: candle gradient-checkpointing reverse is grad-severed (model_forward_segment is kt-internal; candle .backward() can't trace the kt<->candle copy bridge to the segment-input/LoRA Vars). The monolithic kt-tape path is the CP-4-validated grad producer; porting checkpointing onto the kt tape (+ CPU tape) is a tracked #1082 endgame increment. See note kiln-candle-autograd-drops-attn-conv-grads."]
     fn test_agentic_grpo_plumbing_trains_echo_variants_and_base_adapter() -> Result<()> {
         (|| -> Result<()> {
@@ -14310,6 +15299,111 @@ pub(crate) mod tests {
 
         // Restore the snapshotted env so neighbour tests see consistent
         // state (uses the existing test-mod helper at line 11313).
+        restore_env("KILN_GPU_MEMORY_GB", prev_gb);
+        restore_env("KILN_GRAD_CHECKPOINT_SEGMENTS", prev_segs);
+        restore_env("KILN_NO_GRAD_CHECKPOINT", prev_disable);
+        Ok(())
+    }
+
+    #[test]
+    fn preflight_checkpoint_segments_are_dynamic_cap_not_fixed_plan() -> Result<()> {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let prev_gb = std::env::var("KILN_GPU_MEMORY_GB").ok();
+        let prev_segs = std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS").ok();
+        let prev_disable = std::env::var("KILN_NO_GRAD_CHECKPOINT").ok();
+        unsafe {
+            std::env::set_var("KILN_GPU_MEMORY_GB", "48");
+            std::env::remove_var("KILN_GRAD_CHECKPOINT_SEGMENTS");
+            std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
+        }
+
+        let device = cpu_device();
+        let tiny_config = tiny_config_bf16();
+        let weights = tiny_weights_bf16(&tiny_config, &device)?;
+
+        let cfg = checkpoint_config_for_training_step(
+            &weights,
+            &device,
+            Some(32),
+            32,
+            30,
+            2560,
+            10240,
+            151936,
+            2,
+            2,
+        );
+        assert!(
+            !cfg.enabled,
+            "server preflight max must not force checkpointing for a short row: {cfg:?}"
+        );
+        assert_eq!(cfg.num_segments, 1);
+
+        unsafe {
+            std::env::set_var("KILN_GRAD_CHECKPOINT_SEGMENTS", "32");
+        }
+        let cfg = checkpoint_config_for_training_step(
+            &weights,
+            &device,
+            Some(32),
+            32,
+            30,
+            2560,
+            10240,
+            151936,
+            2,
+            2,
+        );
+        assert!(
+            cfg.enabled,
+            "explicit env override should remain authoritative: {cfg:?}"
+        );
+        assert_eq!(cfg.num_segments, 32);
+
+        restore_env("KILN_GPU_MEMORY_GB", prev_gb);
+        restore_env("KILN_GRAD_CHECKPOINT_SEGMENTS", prev_segs);
+        restore_env("KILN_NO_GRAD_CHECKPOINT", prev_disable);
+        Ok(())
+    }
+
+    #[test]
+    fn long_context_gpu_full_attention_forces_exact_checkpointing() -> Result<()> {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let prev_gb = std::env::var("KILN_GPU_MEMORY_GB").ok();
+        let prev_segs = std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS").ok();
+        let prev_disable = std::env::var("KILN_NO_GRAD_CHECKPOINT").ok();
+        unsafe {
+            std::env::set_var("KILN_GPU_MEMORY_GB", "128");
+            std::env::remove_var("KILN_GRAD_CHECKPOINT_SEGMENTS");
+            std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
+        }
+
+        let host = cpu_device();
+        let config = tiny_config_full_attn_bf16();
+        let weights = tiny_weights_bf16(&config, &host)?;
+        let cfg = checkpoint_config_for_training_step(
+            &weights,
+            &Device::Rocm(0),
+            Some(32),
+            config.num_layers,
+            23_682,
+            config.hidden_size,
+            config.intermediate_size,
+            config.vocab_size,
+            2,
+            10,
+        );
+        assert!(
+            cfg.enabled,
+            "long full-attention GPU rows must not use one monolithic tape: {cfg:?}"
+        );
+        assert!(
+            cfg.num_segments >= 2,
+            "long full-attention GPU rows should split the tape: {cfg:?}"
+        );
+
         restore_env("KILN_GPU_MEMORY_GB", prev_gb);
         restore_env("KILN_GRAD_CHECKPOINT_SEGMENTS", prev_segs);
         restore_env("KILN_NO_GRAD_CHECKPOINT", prev_disable);

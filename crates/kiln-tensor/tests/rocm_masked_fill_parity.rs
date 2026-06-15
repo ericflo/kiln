@@ -77,3 +77,46 @@ fn masked_fill_parity() {
     }
     eprintln!("masked_fill CPU-vs-ROCm parity passed across shapes");
 }
+
+#[test]
+fn causal_mask_fill_parity_with_prefix_offset() {
+    if no_rocm() {
+        return;
+    }
+    let fill_value = -1.0e30f32;
+    let bh = 3usize;
+    let sq = 5usize;
+    let sk = 11usize;
+    let shape = vec![bh, sq, sk];
+    let n = bh * sq * sk;
+    let x_data: Vec<f32> = (0..n).map(val).collect();
+
+    let reference: Vec<f32> = (0..n)
+        .map(|idx| {
+            let col = idx % sk;
+            let row = (idx / sk) % sq;
+            if col > row + (sk - sq) {
+                fill_value
+            } else {
+                x_data[idx]
+            }
+        })
+        .collect();
+
+    let x = Tensor::from_vec_on(Device::Rocm(0), x_data, shape.clone())
+        .unwrap_or_else(|e| panic!("from_vec_on x (shape={shape:?}): {e}"));
+    let y = kiln_tensor::rocm_causal_mask_fill(&x, sq, sk, fill_value)
+        .unwrap_or_else(|e| panic!("rocm_causal_mask_fill (shape={shape:?}): {e}"));
+    let host = kiln_tensor::rocm_to_host_copy(&y)
+        .unwrap_or_else(|e| panic!("rocm_to_host_copy (shape={shape:?}): {e}"));
+    let got = host.to_vec::<f32>().expect("to_vec");
+
+    assert_eq!(got.len(), reference.len());
+    for (i, (g, rf)) in got.iter().zip(reference.iter()).enumerate() {
+        let diff = (g - rf).abs();
+        assert!(
+            diff <= 1e-5 + 1e-4 * rf.abs(),
+            "causal_mask_fill mismatch idx={i}: got {g} ref {rf} diff {diff}"
+        );
+    }
+}

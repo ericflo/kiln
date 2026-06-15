@@ -125,8 +125,9 @@ pub use cuda_allocator::CudaAllocator;
 #[cfg(feature = "cuda")]
 pub use cuda_matmul::{
     cublaslt_cache_path, cuda_matmul, cuda_matmul_into, cuda_matmul_lhs_transposed,
-    cuda_matmul_rhs_transposed, cuda_matmul_with_bias, flush_algo_cache_to_disk,
-    load_algo_cache_from_disk, restore_into_shared_cache, snapshot_algo_cache,
+    cuda_matmul_rhs_transposed, cuda_matmul_to_dtype, cuda_matmul_with_bias,
+    flush_algo_cache_to_disk, load_algo_cache_from_disk, restore_into_shared_cache,
+    snapshot_algo_cache,
 };
 #[cfg(feature = "cuda")]
 pub use cuda_storage::{
@@ -138,11 +139,11 @@ pub use cuda_storage::{
     cuda_index_select_axis_n, cuda_index_select_dim0, cuda_is_finite, cuda_l2norm_last_axis,
     cuda_layernorm_last_axis, cuda_lerp, cuda_masked_fill, cuda_max_axis, cuda_mean_axis,
     cuda_mean_last_axis, cuda_mem_get_info, cuda_min_axis, cuda_rmsnorm_last_axis, cuda_rope,
-    cuda_scalar_op, cuda_scatter_add_dim0, cuda_set_pool_release_threshold, cuda_slice_set_dim0,
-    cuda_softmax_last_axis, cuda_sum_axis, cuda_sum_last_axis, cuda_sum_squared_last_axis,
-    cuda_synchronize_default_stream, cuda_to_host_copy, cuda_topk_last_axis, cuda_trim_pool,
-    cuda_where_select, cuda_write_host_in_place, cuda_zeros_ctx, host_to_cuda_copy,
-    host_to_cuda_copy_ctx, primary_cuda_context,
+    cuda_rope_split_half, cuda_scalar_op, cuda_scatter_add_dim0, cuda_set_pool_release_threshold,
+    cuda_slice_set_dim0, cuda_softmax_last_axis, cuda_sum_axis, cuda_sum_last_axis,
+    cuda_sum_squared_last_axis, cuda_synchronize_default_stream, cuda_to_host_copy,
+    cuda_topk_last_axis, cuda_trim_pool, cuda_where_select, cuda_write_host_in_place,
+    cuda_zeros_ctx, host_to_cuda_copy, host_to_cuda_copy_ctx, primary_cuda_context,
 };
 #[cfg(feature = "cuda")]
 pub use cuda_stream_priority::{
@@ -181,7 +182,8 @@ pub use rocm_capture_alloc::{
 };
 #[cfg(feature = "rocm")]
 pub use rocm_matmul::{
-    rocm_matmul, rocm_matmul_into, rocm_matmul_lhs_transposed, rocm_matmul_rhs_transposed,
+    rocm_matmul, rocm_matmul_into, rocm_matmul_lhs_transposed, rocm_matmul_lhs_transposed_to_dtype,
+    rocm_matmul_rhs_transposed, rocm_matmul_rhs_transposed_to_dtype, rocm_matmul_to_dtype,
     rocm_matmul_with_bias,
 };
 #[cfg(feature = "rocm")]
@@ -191,7 +193,8 @@ pub use rocm_storage::{
     RocmStorage, host_to_rocm_copy, host_to_rocm_copy_ctx, primary_rocm_context, rocm_contiguous,
     rocm_htod_count, rocm_is_available, rocm_mem_get_info, rocm_pool_stats, rocm_slice_set_dim0,
     rocm_softmax_last_axis, rocm_synchronize_compute_stream, rocm_synchronize_default_stream,
-    rocm_to_host_copy, rocm_trim_pool, rocm_write_host_in_place, rocm_zeros_ctx,
+    rocm_synchronize_tensor_stream, rocm_to_host_copy, rocm_trim_pool, rocm_write_host_in_place,
+    rocm_zeros_ctx,
 };
 #[cfg(feature = "vulkan")]
 pub use vulkan_allocator::VulkanAllocator;
@@ -203,6 +206,6 @@ pub use vulkan_storage::{
     vulkan_l2norm_last_axis, vulkan_masked_fill, vulkan_matmul, vulkan_matmul_batched,
     vulkan_matmul_bf16w, vulkan_matmul_bf16w_bwd, vulkan_matmul_lhs_transposed,
     vulkan_matmul_rhs_transposed, vulkan_mean_all, vulkan_rmsnorm_last_axis, vulkan_scale,
-    vulkan_slice_set_dim0, vulkan_softmax_last_axis, vulkan_sum_all, vulkan_to_host_copy,
-    vulkan_unary_math, vulkan_zeros,
+    vulkan_slice_set_dim0, vulkan_softmax_last_axis, vulkan_sum_all, vulkan_synchronize_queue,
+    vulkan_to_host_copy, vulkan_unary_math, vulkan_zeros,
 };

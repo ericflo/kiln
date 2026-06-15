@@ -165,7 +165,7 @@ pub(super) fn gdn_forward_substitution(
     if !backend.has_vulkan() || !backend.gdn_enabled {
         return Ok(None);
     }
-    if a_strict.dtype() != kiln_tensor::DType::BF16 {
+    if a_strict.dtype() != kiln_tensor::DType::BF16 && a_strict.dtype() != kiln_tensor::DType::F32 {
         return Ok(None);
     }
     // (#1082) kt-native: byte extraction reads straight from kt storage.
@@ -195,6 +195,44 @@ pub(super) fn gdn_forward_substitution(
         kiln_tensor::DType::F32,
     )?;
     Ok(Some(out))
+}
+
+pub(super) fn gdn_solve_tri_transpose(
+    backend: &VulkanBackend,
+    a_strict: &kiln_tensor::Tensor,
+    beta: &kiln_tensor::Tensor,
+    dw: &kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !backend.has_vulkan() || !backend.gdn_enabled {
+        return Ok(None);
+    }
+    if a_strict.dtype() != kiln_tensor::DType::F32
+        || beta.dtype() != kiln_tensor::DType::F32
+        || dw.dtype() != kiln_tensor::DType::F32
+    {
+        return Ok(None);
+    }
+    let Some(vk_device) = backend.vulkan_device() else {
+        return Ok(None);
+    };
+
+    let load = |t: &kiln_tensor::Tensor| -> Result<kiln_vulkan_kernel::vk_tensor::VkTensor> {
+        let (bytes, shape) = kt_tensor_to_f32_bytes_with_shape(t)?;
+        let data: &[f32] = bytemuck::cast_slice(&bytes);
+        kiln_vulkan_kernel::vk_tensor::VkTensor::from_f32_slice(data, shape, vk_device.clone())
+    };
+
+    let a_vk = load(a_strict)?;
+    let beta_vk = load(beta)?;
+    let dw_vk = load(dw)?;
+    let (batch, heads, chunk, dv) = dw.dims4()?;
+    let out_vk = kiln_vulkan_kernel::vk_ops::gdn_chunk_bwd::vk_solve_tri_transpose_no_grad(
+        &a_vk, &beta_vk, &dw_vk, batch, heads, chunk, dv,
+    )
+    .context("vk_solve_tri_transpose_no_grad")?;
+    let mut out =
+        vk_f32_tensors_to_cpu_tensors_batched_vk(&[(&out_vk, "gdn_solve_tri_transpose")])?;
+    Ok(out.pop())
 }
 
 pub(super) fn gdn_chunkwise_forward(

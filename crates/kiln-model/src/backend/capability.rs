@@ -1834,12 +1834,12 @@ impl DecodeBatcherPolicy {
 }
 
 fn flash_prefill_consumes_grouped_kv(name: &str) -> bool {
-    matches!(name, "cuda")
+    matches!(name, "cuda" | "rocm")
 }
 
 fn detached_chunked_prefill_support(name: &str) -> Support {
     match name {
-        "cuda" => Support::NativeWithConstraints,
+        "cuda" | "rocm" => Support::NativeWithConstraints,
         _ => Support::Declined,
     }
 }

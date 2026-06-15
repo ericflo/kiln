@@ -5,7 +5,7 @@
 //! Run: `cargo test -p kiln-tensor --features rocm --test rocm_matmul_parity`
 #![cfg(feature = "rocm")]
 
-use kiln_tensor::{Device, Tensor};
+use kiln_tensor::{DType, Device, Tensor};
 
 fn no_rocm() -> bool {
     if !kiln_tensor::rocm_is_available() {
@@ -76,6 +76,14 @@ fn check_close(got: &[f32], want: &[f32], rtol: f32, atol: f32, label: &str) {
     }
 }
 
+fn cpu_matmul_cell(a: &[f32], b: &[f32], k: usize, n: usize, row: usize, col: usize) -> f32 {
+    let mut acc = 0.0f32;
+    for p in 0..k {
+        acc += a[row * k + p] * b[p * n + col];
+    }
+    acc
+}
+
 #[test]
 fn matmul_f32_shapes() {
     if no_rocm() {
@@ -103,6 +111,55 @@ fn matmul_f32_shapes() {
             .to_vec::<f32>()
             .unwrap();
         check_close(&got, &want, 1e-4, 1e-4, &format!("f32 {m}x{k}x{n}"));
+    }
+}
+
+#[test]
+fn matmul_flce_active_rows_chunk_shape_f32() {
+    if no_rocm() {
+        return;
+    }
+
+    let (m, k, n) = (1_014usize, 2_560usize, 4_096usize);
+    let a: Vec<f32> = (0..m * k)
+        .map(|i| val(i.wrapping_mul(17).wrapping_add(3), 0.25))
+        .collect();
+    let b: Vec<f32> = (0..k * n)
+        .map(|i| val(i.wrapping_mul(31).wrapping_add(11), 0.20))
+        .collect();
+
+    let ta = Tensor::from_vec_on(Device::Rocm(0), a.clone(), vec![m, k]).expect("a");
+    let tb = Tensor::from_vec_on(Device::Rocm(0), b.clone(), vec![k, n]).expect("b");
+    let tc = kiln_tensor::ops::matmul(&ta, &tb)
+        .unwrap_or_else(|e| panic!("FLCE-shaped f32 matmul {m}x{k}x{n}: {e}"));
+    assert_eq!(tc.shape(), &[m, n]);
+    assert_eq!(tc.dtype(), DType::F32);
+    let got = kiln_tensor::rocm_to_host_copy(&tc)
+        .unwrap()
+        .to_vec::<f32>()
+        .unwrap();
+    assert!(
+        got.iter().all(|v| v.is_finite()),
+        "FLCE-shaped f32 matmul produced a non-finite output"
+    );
+
+    for &(row, col) in &[
+        (0usize, 0usize),
+        (1, 17),
+        (104, 0),
+        (104, 2_047),
+        (104, 4_095),
+        (513, 1_001),
+        (1_013, 4_095),
+    ] {
+        let want = cpu_matmul_cell(&a, &b, k, n, row, col);
+        let got = got[row * n + col];
+        let diff = (got - want).abs();
+        let tol = 5e-3 + 2e-4 * want.abs();
+        assert!(
+            diff <= tol,
+            "FLCE-shaped f32 matmul mismatch row={row} col={col}: got {got} want {want} diff {diff} tol {tol}"
+        );
     }
 }
 
@@ -291,4 +348,33 @@ fn matmul_rhs_transposed_f32_and_bf16() {
         (k as f32) * 1e-3,
         "rhs-transposed bf16",
     );
+}
+
+#[test]
+fn matmul_bf16_inputs_f32_output() {
+    if no_rocm() {
+        return;
+    }
+
+    use half::bf16;
+    let (m, k, n) = (17usize, 129usize, 19usize);
+    let a_f: Vec<f32> = (0..m * k).map(|i| val(i, 1.0)).collect();
+    let b_f: Vec<f32> = (0..k * n).map(|i| val(i + 13, 1.0)).collect();
+    let a_bf: Vec<bf16> = a_f.iter().map(|&x| bf16::from_f32(x)).collect();
+    let b_bf: Vec<bf16> = b_f.iter().map(|&x| bf16::from_f32(x)).collect();
+    let a_r: Vec<f32> = a_bf.iter().map(|x| x.to_f32()).collect();
+    let b_r: Vec<f32> = b_bf.iter().map(|x| x.to_f32()).collect();
+    let want = cpu_matmul(&a_r, &b_r, m, k, n);
+
+    let ta = Tensor::from_vec_on(Device::Rocm(0), a_bf, vec![m, k]).expect("a bf16");
+    let tb = Tensor::from_vec_on(Device::Rocm(0), b_bf, vec![k, n]).expect("b bf16");
+    let tc = kiln_tensor::rocm_matmul_to_dtype(&ta, &tb, DType::F32)
+        .unwrap_or_else(|e| panic!("bf16->f32 rocm matmul: {e}"));
+    assert_eq!(tc.shape(), &[m, n]);
+    assert_eq!(tc.dtype(), DType::F32);
+    let got = kiln_tensor::rocm_to_host_copy(&tc)
+        .unwrap()
+        .to_vec::<f32>()
+        .unwrap();
+    check_close(&got, &want, 3e-2, (k as f32) * 1e-3, "bf16->f32 matmul");
 }

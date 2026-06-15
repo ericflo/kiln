@@ -664,17 +664,38 @@ impl GdnBackend for CudaBackend {
         v_prime: &kiln_tensor::Tensor,
         beta: &kiln_tensor::Tensor,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        if a_strict.dtype() != kiln_tensor::DType::BF16 {
-            return Ok(None);
-        }
         // Phase 7 (#1082): kt-typed surface is now the only path. With
         // the BackendRuntime decode methods flipped to kt (#1082
         // DoD-101/102) the args are already kt, so the candle↔kt
         // bridges are gone — the kernel runs directly on the caller's
         // kt tensors (zero candle roundtrip).
         kiln_nvtx::range!(c"kiln/gdn_forward_substitution_kt");
-        let out_kt = kiln_gdn_kernel::gdn_forward_substitution_kt(a_strict, v_prime, beta)
-            .map_err(|e| anyhow::anyhow!("kt gdn_forward_substitution: {e}"))?;
+        let out_kt = match a_strict.dtype() {
+            kiln_tensor::DType::BF16 => {
+                kiln_gdn_kernel::gdn_forward_substitution_kt(a_strict, v_prime, beta)
+                    .map_err(|e| anyhow::anyhow!("kt gdn_forward_substitution: {e}"))?
+            }
+            kiln_tensor::DType::F32 => {
+                kiln_gdn_kernel::gdn_forward_substitution_f32_kt(a_strict, v_prime, beta)
+                    .map_err(|e| anyhow::anyhow!("kt gdn_forward_substitution_f32: {e}"))?
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(out_kt))
+    }
+
+    fn runtime_gdn_solve_tri_transpose(
+        &self,
+        a_strict: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        dw: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if a_strict.dtype() != kiln_tensor::DType::F32 {
+            return Ok(None);
+        }
+        kiln_nvtx::range!(c"kiln/gdn_solve_tri_transpose_f32_kt");
+        let out_kt = kiln_gdn_kernel::gdn_solve_tri_transpose_f32_kt(a_strict, beta, dw)
+            .map_err(|e| anyhow::anyhow!("kt gdn_solve_tri_transpose_f32: {e}"))?;
         Ok(Some(out_kt))
     }
 

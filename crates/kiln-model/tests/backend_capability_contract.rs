@@ -4128,7 +4128,7 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     }
     let server_training_dispatch_section = source_between(
         &server_training_queue_source,
-        "let result: std::result::Result<PathBuf, String> = match entry.job {",
+        "let result: std::result::Result<PathBuf, String> = if let Err(err) = memory_ready {",
         "QueuedJob::Opd",
     );
     assert!(
@@ -4300,6 +4300,15 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         !detached_chunked_prefill_section
             .contains("BackendIdentity::runtime_name(backend) != \"cuda\""),
         "detached chunked prefill should not branch on CUDA backend identity"
+    );
+    assert!(
+        capability_source.contains("\"cuda\" | \"rocm\" => Support::NativeWithConstraints"),
+        "detached chunked prefill should advertise both CUDA and ROCm; otherwise ROCm long-context training falls back to monolithic full attention"
+    );
+    assert!(
+        forward_source
+            .contains("#[cfg(any(feature = \"cuda\", feature = \"metal\", feature = \"rocm\"))]"),
+        "full-attention tape flash call sites must include ROCm so ROCm training uses the gradchecked flash tape path instead of monolithic SDPA"
     );
     let gdn_recurrent_step_dtype_section = source_between(
         &forward_source,
@@ -4779,7 +4788,7 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     );
     assert!(
         compact_body(&trainer_source).contains(
-            "training_activation_bytes_per_elem_for_policy(weights,training_precision_policy)"
+            "training_activation_bytes_per_elem_for_policy(weights,training_precision_policy,model_config_has_linear_attention(model_config),"
         ) && compact_body(&opd_source).contains("training_activation_bytes_per_elem_for_backend(")
             && compact_body(&opd_source).contains("backend_rt.as_ref()"),
         "SFT/GRPO/OPD production checkpoint sizing should consume backend precision policy"

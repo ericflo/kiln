@@ -6,6 +6,7 @@
 
 pub mod activation;
 pub mod argmax_last_axis;
+pub mod bf16_matmul;
 pub mod binary_minmax;
 pub mod cast;
 pub mod clamp_pow;
@@ -36,6 +37,7 @@ pub mod where_select;
 
 pub use activation::*;
 pub use argmax_last_axis::*;
+pub use bf16_matmul::*;
 pub use binary_minmax::*;
 pub use cast::*;
 pub use clamp_pow::*;

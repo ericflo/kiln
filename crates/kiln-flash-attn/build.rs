@@ -2,18 +2,14 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    // Phase R.8: the CUDA flash-attention `.cu` kernels are only compiled for
-    // the `cuda` feature. Under `--no-default-features --features rocm` there is
-    // no CUTLASS on ROCm — the attention path runs through the on-device
-    // `rocm_sdpa` composite (pure `kiln_tensor` ROCm primitives, no `.cu`), so
-    // build.rs does nothing. Mirrors how the rocm-only kernel crates carry no
-    // CUDA build step.
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CUDA");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_ROCM");
+
+    if std::env::var_os("CARGO_FEATURE_ROCM").is_some() {
+        build_rocm();
+    }
+
     if std::env::var_os("CARGO_FEATURE_CUDA").is_none() {
-        println!(
-            "cargo:warning=kiln-flash-attn: `cuda` feature off — skipping CUDA kernel build \
-             (ROCm composite SDPA path, no .cu compiled)"
-        );
         return;
     }
 
@@ -118,6 +114,104 @@ fn main() {
     println!("cargo:rerun-if-env-changed=KILN_CUDA_ARCHS");
 }
 
+fn build_rocm() {
+    let rocm_root = match find_rocm_root() {
+        Some(p) => p,
+        None => {
+            println!(
+                "cargo:warning=ROCm not found, kiln-flash-attn ROCm native kernels will not be \
+                 compiled. Set ROCM_PATH or HIP_PATH, or install ROCm to /opt/rocm."
+            );
+            return;
+        }
+    };
+
+    let hipcc = env::var("HIPCC")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| rocm_root.join("bin").join("hipcc"));
+    if !hipcc.exists() {
+        println!(
+            "cargo:warning=hipcc not found at {}; skipping ROCm native kernel build.",
+            hipcc.display()
+        );
+        return;
+    }
+
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let csrc_dir = manifest_dir.join("csrc");
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let archs =
+        env::var("KILN_ROCM_ARCHS").unwrap_or_else(|_| "gfx942;gfx90a;gfx1100;gfx1151".to_string());
+
+    let src = csrc_dir.join("rocm_flash_api.cpp");
+    let obj = out_dir.join("rocm_flash_api.o");
+    let mut cmd = std::process::Command::new(&hipcc);
+    cmd.arg("-O3")
+        .arg("-std=c++17")
+        .arg("-fPIC")
+        .arg("-c")
+        .arg("-I")
+        .arg(&csrc_dir)
+        .arg("-I")
+        .arg(rocm_root.join("include"));
+    for arch in archs.split(';') {
+        let arch = arch.trim();
+        if !arch.is_empty() {
+            cmd.arg(format!("--offload-arch={arch}"));
+        }
+    }
+    let ck_header = rocm_root
+        .join("include")
+        .join("ck_tile")
+        .join("ops")
+        .join("fmha_fwd_v3_impl.hpp");
+    let _ = ck_header;
+    let enable_ck_tile = env::var("KILN_ROCM_ENABLE_CK_FMHA").is_ok();
+    if env::var("KILN_ROCM_WAVE64").is_ok() {
+        cmd.arg("-mwavefrontsize64");
+    }
+    if enable_ck_tile {
+        cmd.arg("-DKILN_ENABLE_CK_TILE_FMHA=1");
+    }
+    cmd.arg(&src).arg("-o").arg(&obj);
+    let status = cmd
+        .status()
+        .unwrap_or_else(|e| panic!("failed to spawn hipcc ({}): {e}", hipcc.display()));
+    if !status.success() {
+        panic!("hipcc failed to compile {}", src.display());
+    }
+
+    let lib_path = out_dir.join("libkiln_flash_attn_rocm.a");
+    let ar = env::var("AR").unwrap_or_else(|_| "ar".to_string());
+    let _ = std::fs::remove_file(&lib_path);
+    let status = std::process::Command::new(&ar)
+        .arg("crus")
+        .arg(&lib_path)
+        .arg(&obj)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to spawn ar ({ar}): {e}"));
+    if !status.success() {
+        panic!("ar failed to create {}", lib_path.display());
+    }
+
+    println!("cargo:rustc-link-search=native={}", out_dir.display());
+    println!("cargo:rustc-link-lib=static=kiln_flash_attn_rocm");
+    println!(
+        "cargo:rustc-link-search=native={}",
+        rocm_root.join("lib").display()
+    );
+    println!("cargo:rustc-link-lib=dylib=amdhip64");
+    println!("cargo:rustc-link-lib=dylib=stdc++");
+    println!("cargo:rerun-if-changed=csrc/rocm_flash_api.cpp");
+    println!("cargo:rerun-if-env-changed=ROCM_PATH");
+    println!("cargo:rerun-if-env-changed=HIP_PATH");
+    println!("cargo:rerun-if-env-changed=HIPCC");
+    println!("cargo:rerun-if-env-changed=KILN_ROCM_ARCHS");
+    println!("cargo:rerun-if-env-changed=KILN_ROCM_WAVE64");
+    println!("cargo:rerun-if-env-changed=KILN_ROCM_ENABLE_CK_FMHA");
+    println!("cargo:rerun-if-env-changed=KILN_ROCM_DISABLE_CK_FMHA");
+}
+
 fn configure_nvcc_from_cuda_root(cuda_root: &PathBuf) {
     if env::var_os("NVCC").is_some() {
         return;
@@ -164,6 +258,33 @@ fn find_cuda_root() -> Option<PathBuf> {
                     if cuda_dir.join("include").join("cuda.h").exists() {
                         return Some(cuda_dir.to_path_buf());
                     }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn find_rocm_root() -> Option<PathBuf> {
+    for var in &["ROCM_PATH", "HIP_PATH"] {
+        if let Ok(val) = env::var(var) {
+            let p = PathBuf::from(val);
+            if p.join("bin").join("hipcc").exists() {
+                return Some(p);
+            }
+        }
+    }
+    let default = PathBuf::from("/opt/rocm");
+    if default.join("bin").join("hipcc").exists() {
+        return Some(default);
+    }
+    if let Ok(output) = std::process::Command::new("which").arg("hipcc").output() {
+        if output.status.success() {
+            let hipcc_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let p = PathBuf::from(hipcc_path);
+            if let Some(bin_dir) = p.parent() {
+                if let Some(rocm_dir) = bin_dir.parent() {
+                    return Some(rocm_dir.to_path_buf());
                 }
             }
         }

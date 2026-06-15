@@ -73,6 +73,11 @@ pub fn rocm_activation_unary(x: &Tensor, kind: i32) -> Result<Tensor> {
             "rocm_activation_unary: FFI returned status {status}"
         )));
     }
+    crate::rocm_synchronize_compute_stream(device_index).map_err(|e| {
+        Error::Msg(format!(
+            "rocm_activation_unary: synchronize after async kernel launch: {e}"
+        ))
+    })?;
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
     Tensor::from_parts(
