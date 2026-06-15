@@ -50,7 +50,8 @@ const DEFAULT_NATIVE_FWD_MAX_SEQ: usize = 4096;
 const DEFAULT_NATIVE_FWD_QUERY_TILE: usize = 2048;
 const DEFAULT_NATIVE_STREAMING_FWD_MIN_SEQ: usize = 8192;
 const DEFAULT_NATIVE_STREAMING_FWD_KEY_TILE: usize = 4096;
-const DEFAULT_NATIVE_BWD_MAX_SEQ: usize = 512;
+const DEFAULT_NATIVE_BWD_HD128_MAX_SEQ: usize = 1024;
+const DEFAULT_NATIVE_BWD_HD256_MAX_SEQ: usize = 512;
 const DEFAULT_ONLINE_QUERY_TILE: usize = 2048;
 const DEFAULT_ONLINE_KEY_TILE: usize = 4096;
 const DEFAULT_ONLINE_MATMUL_BATCH_GROUP: usize = 4;
@@ -610,11 +611,13 @@ fn rocm_native_bwd_preferred(sq: usize, sk: usize, d: usize) -> bool {
     if let Some(force) = env_bool("KILN_ROCM_FLASH_NATIVE_BWD") {
         return force;
     }
-    if d != 256 {
-        return false;
-    }
+    let default_max_seq = match d {
+        128 => DEFAULT_NATIVE_BWD_HD128_MAX_SEQ,
+        256 => DEFAULT_NATIVE_BWD_HD256_MAX_SEQ,
+        _ => return false,
+    };
     let max_seq = env_usize("KILN_ROCM_FLASH_NATIVE_BWD_MAX_SEQ")
-        .unwrap_or(DEFAULT_NATIVE_BWD_MAX_SEQ)
+        .unwrap_or(default_max_seq)
         .max(1);
     sq.max(sk) <= max_seq
 }
