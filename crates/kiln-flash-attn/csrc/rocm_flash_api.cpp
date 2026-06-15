@@ -217,6 +217,12 @@ __device__ __forceinline__ float kiln_quarter_wave_reduce_max(float v)
     return v;
 }
 
+__device__ __forceinline__ void kiln_bf16_pair_to_f32(uint32_t packed, float& lo, float& hi)
+{
+    lo = __uint_as_float((packed & 0xffffu) << 16);
+    hi = __uint_as_float((packed >> 16) << 16);
+}
+
 template <int HeadDim, int Rows>
 __device__ __forceinline__ float row_sum_x(float v)
 {
@@ -800,13 +806,17 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
     __shared__ hip_bfloat16 v_tile[KeyBlock][HeadDim];
     __shared__ float scores[Rows][KeyBlock];
 
-    constexpr int MaxLaneDims = (HeadDim + 31) / 32;
-    float acc_vals0[MaxLaneDims];
-    float acc_vals1[MaxLaneDims];
-    float acc_vals2[MaxLaneDims];
-    float acc_vals3[MaxLaneDims];
-    int dim_vals[MaxLaneDims];
-    int lane_dims = 0;
+    constexpr int MaxLanePairs = (HeadDimPairs + 31) / 32;
+    float acc_vals0_lo[MaxLanePairs];
+    float acc_vals0_hi[MaxLanePairs];
+    float acc_vals1_lo[MaxLanePairs];
+    float acc_vals1_hi[MaxLanePairs];
+    float acc_vals2_lo[MaxLanePairs];
+    float acc_vals2_hi[MaxLanePairs];
+    float acc_vals3_lo[MaxLanePairs];
+    float acc_vals3_hi[MaxLanePairs];
+    int dim_pair_vals[MaxLanePairs];
+    int lane_pairs = 0;
 
     const int groups_per_kv_head = num_heads / num_heads_k;
     const int kv_head = head / groups_per_kv_head;
@@ -827,14 +837,18 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
         ((static_cast<size_t>(batch) * seqlen_q + (valid_q3 ? q_idx3 : 0)) * num_heads + head) *
         HeadDim;
 
-    for(int dim = lane; dim < HeadDim; dim += KilnLogicalWarpSize)
+    for(int dim_pair = lane; dim_pair < HeadDimPairs; dim_pair += KilnLogicalWarpSize)
     {
-        dim_vals[lane_dims] = dim;
-        acc_vals0[lane_dims] = 0.0f;
-        acc_vals1[lane_dims] = 0.0f;
-        acc_vals2[lane_dims] = 0.0f;
-        acc_vals3[lane_dims] = 0.0f;
-        ++lane_dims;
+        dim_pair_vals[lane_pairs] = dim_pair;
+        acc_vals0_lo[lane_pairs] = 0.0f;
+        acc_vals0_hi[lane_pairs] = 0.0f;
+        acc_vals1_lo[lane_pairs] = 0.0f;
+        acc_vals1_hi[lane_pairs] = 0.0f;
+        acc_vals2_lo[lane_pairs] = 0.0f;
+        acc_vals2_hi[lane_pairs] = 0.0f;
+        acc_vals3_lo[lane_pairs] = 0.0f;
+        acc_vals3_hi[lane_pairs] = 0.0f;
+        ++lane_pairs;
     }
 
     uint32_t* q_tile_u32 = reinterpret_cast<uint32_t*>(&q_tile[0][0]);
@@ -1050,25 +1064,43 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
         }
         __syncwarp();
 
-        for(int i = 0; i < lane_dims; ++i)
+        for(int i = 0; i < lane_pairs; ++i)
         {
-            const int dim = dim_vals[i];
-            float weighted0 = 0.0f;
-            float weighted1 = 0.0f;
-            float weighted2 = 0.0f;
-            float weighted3 = 0.0f;
+            const int dim_pair = dim_pair_vals[i];
+            float weighted0_lo = 0.0f;
+            float weighted0_hi = 0.0f;
+            float weighted1_lo = 0.0f;
+            float weighted1_hi = 0.0f;
+            float weighted2_lo = 0.0f;
+            float weighted2_hi = 0.0f;
+            float weighted3_lo = 0.0f;
+            float weighted3_hi = 0.0f;
             for(int col = 0; col < tile_count; ++col)
             {
-                const float vv = static_cast<float>(v_tile[col][dim]);
-                weighted0 += scores[row0][col] * vv;
-                weighted1 += scores[row1][col] * vv;
-                weighted2 += scores[row2][col] * vv;
-                weighted3 += scores[row3][col] * vv;
+                float vv_lo;
+                float vv_hi;
+                kiln_bf16_pair_to_f32(v_tile_u32[col * HeadDimPairs + dim_pair], vv_lo, vv_hi);
+                const float score0 = scores[row0][col];
+                const float score1 = scores[row1][col];
+                const float score2 = scores[row2][col];
+                const float score3 = scores[row3][col];
+                weighted0_lo += score0 * vv_lo;
+                weighted0_hi += score0 * vv_hi;
+                weighted1_lo += score1 * vv_lo;
+                weighted1_hi += score1 * vv_hi;
+                weighted2_lo += score2 * vv_lo;
+                weighted2_hi += score2 * vv_hi;
+                weighted3_lo += score3 * vv_lo;
+                weighted3_hi += score3 * vv_hi;
             }
-            acc_vals0[i] = acc_vals0[i] * alpha0 + weighted0;
-            acc_vals1[i] = acc_vals1[i] * alpha1 + weighted1;
-            acc_vals2[i] = acc_vals2[i] * alpha2 + weighted2;
-            acc_vals3[i] = acc_vals3[i] * alpha3 + weighted3;
+            acc_vals0_lo[i] = acc_vals0_lo[i] * alpha0 + weighted0_lo;
+            acc_vals0_hi[i] = acc_vals0_hi[i] * alpha0 + weighted0_hi;
+            acc_vals1_lo[i] = acc_vals1_lo[i] * alpha1 + weighted1_lo;
+            acc_vals1_hi[i] = acc_vals1_hi[i] * alpha1 + weighted1_hi;
+            acc_vals2_lo[i] = acc_vals2_lo[i] * alpha2 + weighted2_lo;
+            acc_vals2_hi[i] = acc_vals2_hi[i] * alpha2 + weighted2_hi;
+            acc_vals3_lo[i] = acc_vals3_lo[i] * alpha3 + weighted3_lo;
+            acc_vals3_hi[i] = acc_vals3_hi[i] * alpha3 + weighted3_hi;
         }
         __syncthreads();
     }
@@ -1100,33 +1132,41 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
     if(valid_q0)
     {
         const float inv_l = l0 > 0.0f ? 1.0f / l0 : 0.0f;
-        for(int i = 0; i < lane_dims; ++i)
+        for(int i = 0; i < lane_pairs; ++i)
         {
-            out[q_base0 + dim_vals[i]] = hip_bfloat16(acc_vals0[i] * inv_l);
+            const int dim = dim_pair_vals[i] * Bf16PerU32;
+            out[q_base0 + dim] = hip_bfloat16(acc_vals0_lo[i] * inv_l);
+            out[q_base0 + dim + 1] = hip_bfloat16(acc_vals0_hi[i] * inv_l);
         }
     }
     if(valid_q1)
     {
         const float inv_l = l1 > 0.0f ? 1.0f / l1 : 0.0f;
-        for(int i = 0; i < lane_dims; ++i)
+        for(int i = 0; i < lane_pairs; ++i)
         {
-            out[q_base1 + dim_vals[i]] = hip_bfloat16(acc_vals1[i] * inv_l);
+            const int dim = dim_pair_vals[i] * Bf16PerU32;
+            out[q_base1 + dim] = hip_bfloat16(acc_vals1_lo[i] * inv_l);
+            out[q_base1 + dim + 1] = hip_bfloat16(acc_vals1_hi[i] * inv_l);
         }
     }
     if(valid_q2)
     {
         const float inv_l = l2 > 0.0f ? 1.0f / l2 : 0.0f;
-        for(int i = 0; i < lane_dims; ++i)
+        for(int i = 0; i < lane_pairs; ++i)
         {
-            out[q_base2 + dim_vals[i]] = hip_bfloat16(acc_vals2[i] * inv_l);
+            const int dim = dim_pair_vals[i] * Bf16PerU32;
+            out[q_base2 + dim] = hip_bfloat16(acc_vals2_lo[i] * inv_l);
+            out[q_base2 + dim + 1] = hip_bfloat16(acc_vals2_hi[i] * inv_l);
         }
     }
     if(valid_q3)
     {
         const float inv_l = l3 > 0.0f ? 1.0f / l3 : 0.0f;
-        for(int i = 0; i < lane_dims; ++i)
+        for(int i = 0; i < lane_pairs; ++i)
         {
-            out[q_base3 + dim_vals[i]] = hip_bfloat16(acc_vals3[i] * inv_l);
+            const int dim = dim_pair_vals[i] * Bf16PerU32;
+            out[q_base3 + dim] = hip_bfloat16(acc_vals3_lo[i] * inv_l);
+            out[q_base3 + dim + 1] = hip_bfloat16(acc_vals3_hi[i] * inv_l);
         }
     }
 }
