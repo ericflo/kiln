@@ -951,52 +951,83 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
         float alpha1 = 0.0f;
         float alpha2 = 0.0f;
         float alpha3 = 0.0f;
+        const bool full_valid_tile = key_base + KeyBlock <= key_limit0;
         {
             const int softmax_group = lane >> 3;
             const int col0 = lane & 7;
             const int col1 = col0 + 8;
-            const int key_idx0 = key_base + col0;
-            const int key_idx1 = key_base + col1;
             const int softmax_row = softmax_group == 0
                                         ? row0
                                         : (softmax_group == 1
                                                ? row1
                                                : (softmax_group == 2 ? row2 : row3));
-            const int key_limit = softmax_group == 0
-                                      ? key_limit0
-                                      : (softmax_group == 1
-                                             ? key_limit1
-                                             : (softmax_group == 2 ? key_limit2 : key_limit3));
-            const bool valid_key0 = key_idx0 < key_limit;
-            const bool valid_key1 = key_idx1 < key_limit;
-            const float score0 = valid_key0 ? scores[softmax_row][col0] : -INFINITY;
-            const float score1 = valid_key1 ? scores[softmax_row][col1] : -INFINITY;
-            const float local_tile_m = fmaxf(score0, score1);
-            const float tile_m_group = kiln_quarter_wave_reduce_max(local_tile_m);
-            const float tile_m0 = __shfl(tile_m_group, 0, KilnLogicalWarpSize);
-            const float tile_m1 = __shfl(tile_m_group, 8, KilnLogicalWarpSize);
-            const float tile_m2 = __shfl(tile_m_group, 16, KilnLogicalWarpSize);
-            const float tile_m3 = __shfl(tile_m_group, 24, KilnLogicalWarpSize);
-            const float new_m0 = fmaxf(m0, tile_m0);
-            const float new_m1 = fmaxf(m1, tile_m1);
-            const float new_m2 = fmaxf(m2, tile_m2);
-            const float new_m3 = fmaxf(m3, tile_m3);
-            const float new_m = softmax_group == 0
-                                    ? new_m0
-                                    : (softmax_group == 1
-                                           ? new_m1
-                                           : (softmax_group == 2 ? new_m2 : new_m3));
-            const float tile_m = softmax_group == 0
-                                     ? tile_m0
-                                     : (softmax_group == 1
-                                            ? tile_m1
-                                            : (softmax_group == 2 ? tile_m2 : tile_m3));
-            const float beta0 =
-                valid_key0 && tile_m > -INFINITY ? expf(score0 - new_m) : 0.0f;
-            const float beta1 =
-                valid_key1 && tile_m > -INFINITY ? expf(score1 - new_m) : 0.0f;
-            scores[softmax_row][col0] = beta0;
-            scores[softmax_row][col1] = beta1;
+            float beta0;
+            float beta1;
+            float new_m0;
+            float new_m1;
+            float new_m2;
+            float new_m3;
+            if(full_valid_tile)
+            {
+                const float score0 = scores[softmax_row][col0];
+                const float score1 = scores[softmax_row][col1];
+                const float tile_m_group = kiln_quarter_wave_reduce_max(fmaxf(score0, score1));
+                const float tile_m0 = __shfl(tile_m_group, 0, KilnLogicalWarpSize);
+                const float tile_m1 = __shfl(tile_m_group, 8, KilnLogicalWarpSize);
+                const float tile_m2 = __shfl(tile_m_group, 16, KilnLogicalWarpSize);
+                const float tile_m3 = __shfl(tile_m_group, 24, KilnLogicalWarpSize);
+                new_m0 = fmaxf(m0, tile_m0);
+                new_m1 = fmaxf(m1, tile_m1);
+                new_m2 = fmaxf(m2, tile_m2);
+                new_m3 = fmaxf(m3, tile_m3);
+                const float new_m = softmax_group == 0
+                                        ? new_m0
+                                        : (softmax_group == 1
+                                               ? new_m1
+                                               : (softmax_group == 2 ? new_m2 : new_m3));
+                beta0 = expf(score0 - new_m);
+                beta1 = expf(score1 - new_m);
+                scores[softmax_row][col0] = beta0;
+                scores[softmax_row][col1] = beta1;
+            }
+            else
+            {
+                const int key_idx0 = key_base + col0;
+                const int key_idx1 = key_base + col1;
+                const int key_limit = softmax_group == 0
+                                          ? key_limit0
+                                          : (softmax_group == 1
+                                                 ? key_limit1
+                                                 : (softmax_group == 2 ? key_limit2 : key_limit3));
+                const bool valid_key0 = key_idx0 < key_limit;
+                const bool valid_key1 = key_idx1 < key_limit;
+                const float score0 = valid_key0 ? scores[softmax_row][col0] : -INFINITY;
+                const float score1 = valid_key1 ? scores[softmax_row][col1] : -INFINITY;
+                const float local_tile_m = fmaxf(score0, score1);
+                const float tile_m_group = kiln_quarter_wave_reduce_max(local_tile_m);
+                const float tile_m0 = __shfl(tile_m_group, 0, KilnLogicalWarpSize);
+                const float tile_m1 = __shfl(tile_m_group, 8, KilnLogicalWarpSize);
+                const float tile_m2 = __shfl(tile_m_group, 16, KilnLogicalWarpSize);
+                const float tile_m3 = __shfl(tile_m_group, 24, KilnLogicalWarpSize);
+                new_m0 = fmaxf(m0, tile_m0);
+                new_m1 = fmaxf(m1, tile_m1);
+                new_m2 = fmaxf(m2, tile_m2);
+                new_m3 = fmaxf(m3, tile_m3);
+                const float new_m = softmax_group == 0
+                                        ? new_m0
+                                        : (softmax_group == 1
+                                               ? new_m1
+                                               : (softmax_group == 2 ? new_m2 : new_m3));
+                const float tile_m = softmax_group == 0
+                                         ? tile_m0
+                                         : (softmax_group == 1
+                                                ? tile_m1
+                                                : (softmax_group == 2 ? tile_m2 : tile_m3));
+                beta0 = valid_key0 && tile_m > -INFINITY ? expf(score0 - new_m) : 0.0f;
+                beta1 = valid_key1 && tile_m > -INFINITY ? expf(score1 - new_m) : 0.0f;
+                scores[softmax_row][col0] = beta0;
+                scores[softmax_row][col1] = beta1;
+            }
 
             const float beta_sum_group = kiln_quarter_wave_reduce_sum(beta0 + beta1);
             const float beta_sum0 = __shfl(beta_sum_group, 0, KilnLogicalWarpSize);
