@@ -634,7 +634,7 @@ fn rocm_collapsed_gqa_bwd_enabled() -> bool {
 }
 
 fn rocm_native_direct_collapsed_gqa_bwd_enabled() -> bool {
-    env_bool("KILN_ROCM_FLASH_NATIVE_DIRECT_COLLAPSED_GQA_BWD").unwrap_or(false)
+    env_bool("KILN_ROCM_FLASH_NATIVE_DIRECT_COLLAPSED_GQA_BWD").unwrap_or(true)
 }
 
 fn query_tile_len_for_budget(

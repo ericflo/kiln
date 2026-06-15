@@ -3089,6 +3089,69 @@ extern "C" int kiln_rocm_flash_attn_bwd_collapsed_gqa_bf16(const void* dout,
     switch(head_dim)
     {
     case 128:
+    {
+        const int qpar =
+            env_i32_or("KILN_ROCM_FLASH_NATIVE_DIRECT_COLLAPSED_GQA_QPAR", 1);
+        if(qpar <= 1)
+        {
+            return launch_bwd_collapsed_gqa<128, 1>(dout,
+                                                    q,
+                                                    k,
+                                                    v,
+                                                    out,
+                                                    softmax_lse,
+                                                    dq,
+                                                    dk,
+                                                    dv,
+                                                    batch_size,
+                                                    seqlen_q,
+                                                    seqlen_k,
+                                                    num_heads,
+                                                    num_heads_k,
+                                                    softmax_scale,
+                                                    is_causal,
+                                                    stream);
+        }
+        if(qpar <= 2)
+        {
+            return launch_bwd_collapsed_gqa<128, 2>(dout,
+                                                    q,
+                                                    k,
+                                                    v,
+                                                    out,
+                                                    softmax_lse,
+                                                    dq,
+                                                    dk,
+                                                    dv,
+                                                    batch_size,
+                                                    seqlen_q,
+                                                    seqlen_k,
+                                                    num_heads,
+                                                    num_heads_k,
+                                                    softmax_scale,
+                                                    is_causal,
+                                                    stream);
+        }
+        if(qpar <= 4)
+        {
+            return launch_bwd_collapsed_gqa<128, 4>(dout,
+                                                    q,
+                                                    k,
+                                                    v,
+                                                    out,
+                                                    softmax_lse,
+                                                    dq,
+                                                    dk,
+                                                    dv,
+                                                    batch_size,
+                                                    seqlen_q,
+                                                    seqlen_k,
+                                                    num_heads,
+                                                    num_heads_k,
+                                                    softmax_scale,
+                                                    is_causal,
+                                                    stream);
+        }
         return launch_bwd_collapsed_gqa<128, 8>(dout,
                                                 q,
                                                 k,
@@ -3106,7 +3169,51 @@ extern "C" int kiln_rocm_flash_attn_bwd_collapsed_gqa_bf16(const void* dout,
                                                 softmax_scale,
                                                 is_causal,
                                                 stream);
+    }
     case 256:
+    {
+        const int qpar =
+            env_i32_or("KILN_ROCM_FLASH_NATIVE_DIRECT_COLLAPSED_GQA_QPAR", 1);
+        if(qpar <= 1)
+        {
+            return launch_bwd_collapsed_gqa<256, 1>(dout,
+                                                    q,
+                                                    k,
+                                                    v,
+                                                    out,
+                                                    softmax_lse,
+                                                    dq,
+                                                    dk,
+                                                    dv,
+                                                    batch_size,
+                                                    seqlen_q,
+                                                    seqlen_k,
+                                                    num_heads,
+                                                    num_heads_k,
+                                                    softmax_scale,
+                                                    is_causal,
+                                                    stream);
+        }
+        if(qpar <= 2)
+        {
+            return launch_bwd_collapsed_gqa<256, 2>(dout,
+                                                    q,
+                                                    k,
+                                                    v,
+                                                    out,
+                                                    softmax_lse,
+                                                    dq,
+                                                    dk,
+                                                    dv,
+                                                    batch_size,
+                                                    seqlen_q,
+                                                    seqlen_k,
+                                                    num_heads,
+                                                    num_heads_k,
+                                                    softmax_scale,
+                                                    is_causal,
+                                                    stream);
+        }
         return launch_bwd_collapsed_gqa<256, 4>(dout,
                                                 q,
                                                 k,
@@ -3124,6 +3231,7 @@ extern "C" int kiln_rocm_flash_attn_bwd_collapsed_gqa_bf16(const void* dout,
                                                 softmax_scale,
                                                 is_causal,
                                                 stream);
+    }
     default:
         return -4;
     }
