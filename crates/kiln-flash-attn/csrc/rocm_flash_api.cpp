@@ -10,10 +10,22 @@
 #include <type_traits>
 #include <utility>
 
-#if defined(KILN_ENABLE_CK_TILE_FMHA) && __has_include(<ck_tile/ops/fmha_fwd_v3_impl.hpp>)
-#include <ck_tile/ops/fmha_fwd_v3_impl.hpp>
+#if defined(KILN_ENABLE_CK_TILE_FMHA) && __has_include(<ck_tile/ops/fmha_bwd.hpp>)
+#include <ck_tile/ops/fmha_bwd.hpp>
+#include <ck_tile/ops/epilogue.hpp>
+#include <ck_tile/ops/fmha.hpp>
 #include <ck_tile/ops/mask.hpp>
 #define KILN_HAS_CK_TILE_FMHA 1
+#else
+#define KILN_HAS_CK_TILE_FMHA 0
+#endif
+
+#if KILN_HAS_CK_TILE_FMHA && defined(KILN_ENABLE_CK_TILE_FMHA_FWD) && \
+    __has_include(<ck_tile/ops/fmha_fwd_v3_impl.hpp>)
+#include <ck_tile/ops/fmha_fwd_v3_impl.hpp>
+#define KILN_HAS_CK_TILE_FMHA_FWD 1
+#else
+#define KILN_HAS_CK_TILE_FMHA_FWD 0
 #endif
 
 namespace {
@@ -465,7 +477,7 @@ __global__ void kiln_rocm_flash_fwd_wmma_qblock256_bf16_kernel(
     }
 }
 
-#if KILN_HAS_CK_TILE_FMHA
+#if KILN_HAS_CK_TILE_FMHA_FWD
 struct KilnFmhaGfx11Policy : ck_tile::BlockFmhaV3PipelineDefaultPolicy
 {
     template <typename Problem>
@@ -2155,6 +2167,52 @@ __global__ void kiln_rocm_flash_bwd_dkdv_collapsed_gqa_delta_warp_bf16_kernel(
     }
 }
 
+__global__ void kiln_rocm_flash_f32_to_bf16_kernel(const float* __restrict__ src,
+                                                   hip_bfloat16* __restrict__ dst,
+                                                   long long n)
+{
+    const long long idx = blockIdx.x * static_cast<long long>(blockDim.x) + threadIdx.x;
+    if(idx < n)
+    {
+        dst[idx] = hip_bfloat16(src[idx]);
+    }
+}
+
+template <int HeadDim>
+__global__ void kiln_rocm_flash_reduce_gqa_grads_f32_to_bf16_kernel(
+    const float* __restrict__ src,
+    hip_bfloat16* __restrict__ dst,
+    int batch_size,
+    int seqlen_k,
+    int num_heads,
+    int num_heads_k)
+{
+    const long long idx = blockIdx.x * static_cast<long long>(blockDim.x) + threadIdx.x;
+    const long long n = static_cast<long long>(batch_size) * seqlen_k * num_heads_k * HeadDim;
+    if(idx >= n)
+    {
+        return;
+    }
+
+    const int dim = static_cast<int>(idx % HeadDim);
+    long long rem = idx / HeadDim;
+    const int kv_head = static_cast<int>(rem % num_heads_k);
+    rem /= num_heads_k;
+    const int key = static_cast<int>(rem % seqlen_k);
+    const int batch = static_cast<int>(rem / seqlen_k);
+    const int groups_per_kv_head = num_heads / num_heads_k;
+
+    float acc = 0.0f;
+    for(int group = 0; group < groups_per_kv_head; ++group)
+    {
+        const int head = kv_head * groups_per_kv_head + group;
+        const size_t src_idx =
+            ((static_cast<size_t>(batch) * seqlen_k + key) * num_heads + head) * HeadDim + dim;
+        acc += src[src_idx];
+    }
+    dst[idx] = hip_bfloat16(acc);
+}
+
 template <int HeadDim, int Rows, int XDim>
 int launch_fwd(const void* q,
                const void* k,
@@ -2913,6 +2971,336 @@ int launch_bwd_collapsed_gqa_warp(const void* dout,
     return free_err == hipSuccess ? 0 : static_cast<int>(free_err);
 }
 
+#if KILN_HAS_CK_TILE_FMHA
+template <int HeadDim>
+int launch_bwd_collapsed_gqa_ck_trload(const void* dout,
+                                       const void* q,
+                                       const void* k,
+                                       const void* v,
+                                       const void* out,
+                                       const void* softmax_lse,
+                                       void* dq,
+                                       void* dk,
+                                       void* dv,
+                                       int batch_size,
+                                       int seqlen_q,
+                                       int seqlen_k,
+                                       int num_heads,
+                                       int num_heads_k,
+                                       float softmax_scale,
+                                       int is_causal,
+                                       void* stream)
+{
+    if(!is_causal || HeadDim != 256)
+    {
+        return -4;
+    }
+
+    using dtype = FmhaBwdTypeConfig<FmhaBwdBf16>;
+    using block_tile = ck_tile::sequence<32, 32, 16, 32, 16, 32, 16, HeadDim, HeadDim>;
+    using warps = ck_tile::sequence<2, 1, 1>;
+    using warp_tile = ck_tile::sequence<16, 16, 16>;
+    using shape = ck_tile::TileFmhaBwdShape<block_tile,
+                                            warps,
+                                            warp_tile,
+                                            warps,
+                                            warp_tile,
+                                            warps,
+                                            warp_tile,
+                                            warps,
+                                            warp_tile,
+                                            warps,
+                                            warp_tile,
+                                            0>;
+    using traits =
+        ck_tile::TileFmhaBwdTraits<0, 0, ck_tile::BlockAttentionBiasEnum::NO_BIAS, false, -1>;
+    using mask = ck_tile::GenericAttentionMask<true, false>;
+    using problem =
+        ck_tile::BlockFmhaBwdPipelineProblem<typename dtype::QDataType,
+                                             typename dtype::KDataType,
+                                             typename dtype::VDataType,
+                                             typename dtype::GemmDataType,
+                                             typename dtype::LSEDataType,
+                                             typename dtype::AccDataType,
+                                             typename dtype::DDataType,
+                                             typename dtype::BiasDataType,
+                                             typename dtype::RandValOutputDataType,
+                                             typename dtype::ODataType,
+                                             typename dtype::OGradDataType,
+                                             typename dtype::QGradDataType,
+                                             typename dtype::AccDataType,
+                                             typename dtype::AccDataType,
+                                             typename dtype::BiasGradDataType,
+                                             shape,
+                                             false,
+                                             false,
+                                             mask,
+                                             ck_tile::BlockDropoutBwd<false, false, false>,
+                                             true,
+                                             traits>;
+    using pipeline = ck_tile::BlockFmhaBwdDQDKDVPipeline<problem>;
+    using kgrad_epilogue = ck_tile::Default2DEpilogue<
+        ck_tile::Default2DEpilogueProblem<typename dtype::AccDataType,
+                                          typename dtype::AccDataType,
+                                          false,
+                                          false,
+                                          true>>;
+    using vgrad_epilogue = ck_tile::Default2DEpilogue<
+        ck_tile::Default2DEpilogueProblem<typename dtype::AccDataType,
+                                          typename dtype::AccDataType,
+                                          false,
+                                          false,
+                                          true>>;
+    using qgrad_epilogue = ck_tile::Default2DEpilogue<
+        ck_tile::Default2DEpilogueProblem<typename dtype::AccDataType,
+                                          typename dtype::QGradDataType,
+                                          false,
+                                          false,
+                                          true>>;
+    using kernel =
+        ck_tile::FmhaBwdDQDKDVKernel<pipeline, kgrad_epilogue, vgrad_epilogue, qgrad_epilogue>;
+
+    const hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+    float* delta = nullptr;
+    float* dq_acc = nullptr;
+    float* dk_full = nullptr;
+    float* dv_full = nullptr;
+    const size_t delta_count = static_cast<size_t>(batch_size) * num_heads * seqlen_q;
+    const size_t dq_count =
+        static_cast<size_t>(batch_size) * seqlen_q * num_heads * HeadDim;
+    const size_t dkdv_full_count =
+        static_cast<size_t>(batch_size) * seqlen_k * num_heads * HeadDim;
+    hipError_t err =
+        hipMallocAsync(reinterpret_cast<void**>(&delta), delta_count * sizeof(float), hip_stream);
+    if(err != hipSuccess)
+    {
+        return static_cast<int>(err);
+    }
+    err = hipMallocAsync(reinterpret_cast<void**>(&dq_acc), dq_count * sizeof(float), hip_stream);
+    if(err != hipSuccess)
+    {
+        hipFreeAsync(delta, hip_stream);
+        return static_cast<int>(err);
+    }
+    err = hipMallocAsync(reinterpret_cast<void**>(&dk_full),
+                         dkdv_full_count * sizeof(float),
+                         hip_stream);
+    if(err != hipSuccess)
+    {
+        hipFreeAsync(dq_acc, hip_stream);
+        hipFreeAsync(delta, hip_stream);
+        return static_cast<int>(err);
+    }
+    err = hipMallocAsync(reinterpret_cast<void**>(&dv_full),
+                         dkdv_full_count * sizeof(float),
+                         hip_stream);
+    if(err != hipSuccess)
+    {
+        hipFreeAsync(dk_full, hip_stream);
+        hipFreeAsync(dq_acc, hip_stream);
+        hipFreeAsync(delta, hip_stream);
+        return static_cast<int>(err);
+    }
+
+    dim3 delta_grid(static_cast<unsigned>(seqlen_q),
+                    static_cast<unsigned>(num_heads),
+                    static_cast<unsigned>(batch_size));
+    dim3 delta_block(static_cast<unsigned>(HeadDim), 1);
+    hipLaunchKernelGGL((kiln_rocm_flash_bwd_delta_bf16_kernel<HeadDim>),
+                       delta_grid,
+                       delta_block,
+                       0,
+                       hip_stream,
+                       static_cast<const hip_bfloat16*>(dout),
+                       static_cast<const hip_bfloat16*>(out),
+                       delta,
+                       batch_size,
+                       seqlen_q,
+                       num_heads);
+    err = hipGetLastError();
+    if(err == hipSuccess)
+    {
+        err = hipMemsetAsync(dq_acc, 0, dq_count * sizeof(float), hip_stream);
+    }
+    if(err != hipSuccess)
+    {
+        hipFreeAsync(dv_full, hip_stream);
+        hipFreeAsync(dk_full, hip_stream);
+        hipFreeAsync(dq_acc, hip_stream);
+        hipFreeAsync(delta, hip_stream);
+        return static_cast<int>(err);
+    }
+
+    const int groups_per_kv_head = num_heads / num_heads_k;
+    const ck_tile::index_t stride_q = num_heads * HeadDim;
+    const ck_tile::index_t stride_k = num_heads_k * HeadDim;
+    const ck_tile::index_t stride_v = num_heads_k * HeadDim;
+    const ck_tile::index_t stride_do = num_heads * HeadDim;
+    const ck_tile::index_t stride_dq_acc = num_heads * HeadDim;
+    const ck_tile::index_t stride_dk = num_heads * HeadDim;
+    const ck_tile::index_t stride_dv = num_heads * HeadDim;
+    const ck_tile::index_t nhead_stride_q = HeadDim;
+    const ck_tile::index_t nhead_stride_k = HeadDim;
+    const ck_tile::index_t nhead_stride_v = HeadDim;
+    const ck_tile::index_t nhead_stride_do = HeadDim;
+    const ck_tile::index_t nhead_stride_lsed = seqlen_q;
+    const ck_tile::index_t nhead_stride_dq_acc = HeadDim;
+    const ck_tile::index_t nhead_stride_dk = HeadDim;
+    const ck_tile::index_t nhead_stride_dv = HeadDim;
+    const ck_tile::index_t batch_stride_q = seqlen_q * num_heads * HeadDim;
+    const ck_tile::index_t batch_stride_k = seqlen_k * num_heads_k * HeadDim;
+    const ck_tile::index_t batch_stride_v = seqlen_k * num_heads_k * HeadDim;
+    const ck_tile::index_t batch_stride_do = seqlen_q * num_heads * HeadDim;
+    const ck_tile::index_t batch_stride_lsed = num_heads * seqlen_q;
+    const ck_tile::index_t batch_stride_dq_acc = seqlen_q * num_heads * HeadDim;
+    const ck_tile::index_t batch_stride_dk = seqlen_k * num_heads * HeadDim;
+    const ck_tile::index_t batch_stride_dv = seqlen_k * num_heads * HeadDim;
+
+    auto kargs = kernel::MakeKargsImpl(q,
+                                       k,
+                                       v,
+                                       nullptr,
+                                       softmax_lse,
+                                       dout,
+                                       delta,
+                                       nullptr,
+                                       dk_full,
+                                       dv_full,
+                                       nullptr,
+                                       dq_acc,
+                                       seqlen_q,
+                                       seqlen_k,
+                                       HeadDim,
+                                       HeadDim,
+                                       num_heads,
+                                       groups_per_kv_head,
+                                       softmax_scale,
+                                       stride_q,
+                                       stride_k,
+                                       stride_v,
+                                       0,
+                                       0,
+                                       stride_do,
+                                       stride_dq_acc,
+                                       stride_dk,
+                                       stride_dv,
+                                       0,
+                                       nhead_stride_q,
+                                       nhead_stride_k,
+                                       nhead_stride_v,
+                                       0,
+                                       0,
+                                       nhead_stride_do,
+                                       nhead_stride_lsed,
+                                       nhead_stride_dq_acc,
+                                       nhead_stride_dk,
+                                       nhead_stride_dv,
+                                       0,
+                                       batch_stride_q,
+                                       batch_stride_k,
+                                       batch_stride_v,
+                                       0,
+                                       0,
+                                       batch_stride_do,
+                                       batch_stride_lsed,
+                                       batch_stride_dq_acc,
+                                       batch_stride_dk,
+                                       batch_stride_dv,
+                                       0,
+                                       0,
+                                       -1,
+                                       0,
+                                       static_cast<ck_tile::index_t>(mask_enum::mask_bottom_right),
+                                       0.0f,
+                                       std::pair<uint64_t, uint64_t>{0, 0});
+    const dim3 ck_grid = kernel::GridSize(batch_size, num_heads, seqlen_k);
+    const ck_tile::stream_config stream_config{hip_stream, false};
+    try
+    {
+        ck_tile::launch_kernel(
+            stream_config,
+            ck_tile::make_kernel<kernel::kBlockPerCu>(
+                kernel{}, ck_grid, kernel::BlockSize(), 0, kargs));
+    }
+    catch(const std::exception&)
+    {
+        hipFreeAsync(dv_full, hip_stream);
+        hipFreeAsync(dk_full, hip_stream);
+        hipFreeAsync(dq_acc, hip_stream);
+        hipFreeAsync(delta, hip_stream);
+        return -21;
+    }
+    err = hipGetLastError();
+    if(err == hipSuccess)
+    {
+        constexpr int block = 256;
+        const long long dq_n = static_cast<long long>(dq_count);
+        const int dq_grid = static_cast<int>((dq_n + block - 1) / block);
+        kiln_rocm_flash_f32_to_bf16_kernel<<<dq_grid, block, 0, hip_stream>>>(
+            dq_acc, static_cast<hip_bfloat16*>(dq), dq_n);
+        err = hipGetLastError();
+    }
+    if(err == hipSuccess)
+    {
+        constexpr int block = 256;
+        const long long kv_n =
+            static_cast<long long>(batch_size) * seqlen_k * num_heads_k * HeadDim;
+        const int kv_grid = static_cast<int>((kv_n + block - 1) / block);
+        kiln_rocm_flash_reduce_gqa_grads_f32_to_bf16_kernel<HeadDim><<<kv_grid,
+                                                                        block,
+                                                                        0,
+                                                                        hip_stream>>>(
+            dk_full,
+            static_cast<hip_bfloat16*>(dk),
+            batch_size,
+            seqlen_k,
+            num_heads,
+            num_heads_k);
+        err = hipGetLastError();
+    }
+    if(err == hipSuccess)
+    {
+        constexpr int block = 256;
+        const long long kv_n =
+            static_cast<long long>(batch_size) * seqlen_k * num_heads_k * HeadDim;
+        const int kv_grid = static_cast<int>((kv_n + block - 1) / block);
+        kiln_rocm_flash_reduce_gqa_grads_f32_to_bf16_kernel<HeadDim><<<kv_grid,
+                                                                        block,
+                                                                        0,
+                                                                        hip_stream>>>(
+            dv_full,
+            static_cast<hip_bfloat16*>(dv),
+            batch_size,
+            seqlen_k,
+            num_heads,
+            num_heads_k);
+        err = hipGetLastError();
+    }
+
+    const hipError_t free_dv_err = hipFreeAsync(dv_full, hip_stream);
+    const hipError_t free_dk_err = hipFreeAsync(dk_full, hip_stream);
+    const hipError_t free_dq_err = hipFreeAsync(dq_acc, hip_stream);
+    const hipError_t free_delta_err = hipFreeAsync(delta, hip_stream);
+    if(err != hipSuccess)
+    {
+        return static_cast<int>(err);
+    }
+    if(free_dv_err != hipSuccess)
+    {
+        return static_cast<int>(free_dv_err);
+    }
+    if(free_dk_err != hipSuccess)
+    {
+        return static_cast<int>(free_dk_err);
+    }
+    if(free_dq_err != hipSuccess)
+    {
+        return static_cast<int>(free_dq_err);
+    }
+    return free_delta_err == hipSuccess ? 0 : static_cast<int>(free_delta_err);
+}
+#endif
+
 } // namespace
 
 extern "C" int kiln_rocm_flash_attn_fwd_ck_bf16(const void* q,
@@ -2947,7 +3335,7 @@ extern "C" int kiln_rocm_flash_attn_fwd_ck_bf16(const void* q,
         return -5;
     }
 
-#if KILN_HAS_CK_TILE_FMHA
+#if KILN_HAS_CK_TILE_FMHA_FWD
     if(!is_causal)
     {
         return -6;
@@ -3406,6 +3794,31 @@ extern "C" int kiln_rocm_flash_attn_bwd_collapsed_gqa_bf16(const void* dout,
     {
         return -3;
     }
+
+#if KILN_HAS_CK_TILE_FMHA
+    if(!env_truthy("KILN_ROCM_FLASH_DISABLE_CK_BWD_COLLAPSED_GQA") && head_dim == 256 &&
+       is_causal &&
+       current_device_supports_gfx11_wmma())
+    {
+        return launch_bwd_collapsed_gqa_ck_trload<256>(dout,
+                                                       q,
+                                                       k,
+                                                       v,
+                                                       out,
+                                                       softmax_lse,
+                                                       dq,
+                                                       dk,
+                                                       dv,
+                                                       batch_size,
+                                                       seqlen_q,
+                                                       seqlen_k,
+                                                       num_heads,
+                                                       num_heads_k,
+                                                       softmax_scale,
+                                                       is_causal,
+                                                       stream);
+    }
+#endif
 
     switch(head_dim)
     {

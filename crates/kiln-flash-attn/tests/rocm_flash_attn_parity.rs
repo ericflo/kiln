@@ -838,6 +838,85 @@ fn flash_attn_rocm_long_shape_bench() {
 }
 
 #[test]
+fn flash_attn_bwd_collapsed_gqa_hd256_ck_matches_default() {
+    if no_rocm() {
+        return;
+    }
+    let b = 1usize;
+    let h = 8usize;
+    let hk = 2usize;
+    let d = 256usize;
+    let sq = 256usize;
+    let sk = 384usize;
+    let scale = 1.0 / (d as f32).sqrt();
+    let causal = true;
+
+    let qd = fill_bf16(b * sq * h * d, 2601);
+    let kd = fill_bf16(b * sk * hk * d, 2603);
+    let vd = fill_bf16(b * sk * hk * d, 2609);
+    let dod = fill_bf16(b * sq * h * d, 2617);
+
+    let q = rocm_bf16(&qd, vec![b, sq, h, d]);
+    let k = rocm_bf16(&kd, vec![b, sk, hk, d]);
+    let v = rocm_bf16(&vd, vec![b, sk, hk, d]);
+    let dout = rocm_bf16(&dod, vec![b, sq, h, d]);
+    let (out_t, lse_t) = flash_attn_fwd_kt(&q, &k, &v, scale, causal)
+        .unwrap_or_else(|e| panic!("hd256 ck/default compare fwd: {e}"));
+
+    let (dq_default, dk_default, dv_default) = with_env_vars(
+        &[
+            ("KILN_ROCM_FLASH_MATMUL_BWD", "1"),
+            ("KILN_ROCM_FLASH_DISABLE_CK_BWD_COLLAPSED_GQA", "1"),
+        ],
+        || {
+            let grads =
+                flash_attn_bwd_collapsed_gqa_kt(&dout, &q, &k, &v, &out_t, &lse_t, scale, causal)
+                    .unwrap_or_else(|e| panic!("hd256 default collapsed bwd: {e}"));
+            rocm_sync();
+            grads
+        },
+    );
+    let (dq_ck, dk_ck, dv_ck) = with_env_vars(
+        &[
+            ("KILN_ROCM_FLASH_MATMUL_BWD", "1"),
+            ("KILN_ROCM_FLASH_DISABLE_CK_BWD_COLLAPSED_GQA", "0"),
+        ],
+        || {
+            let grads =
+                flash_attn_bwd_collapsed_gqa_kt(&dout, &q, &k, &v, &out_t, &lse_t, scale, causal)
+                    .unwrap_or_else(|e| panic!("hd256 ck collapsed bwd: {e}"));
+            rocm_sync();
+            grads
+        },
+    );
+
+    assert_eq!(dq_ck.shape(), &[b, sq, h, d]);
+    assert_eq!(dk_ck.shape(), &[b, sk, hk, d]);
+    assert_eq!(dv_ck.shape(), &[b, sk, hk, d]);
+    check_close(
+        &bf16_to_f32(&dq_ck),
+        &bf16_to_f32(&dq_default),
+        8e-2,
+        8e-2,
+        "hd256 ck/default dq",
+    );
+    check_close(
+        &bf16_to_f32(&dk_ck),
+        &bf16_to_f32(&dk_default),
+        8e-2,
+        8e-2,
+        "hd256 ck/default dk",
+    );
+    check_close(
+        &bf16_to_f32(&dv_ck),
+        &bf16_to_f32(&dv_default),
+        8e-2,
+        8e-2,
+        "hd256 ck/default dv",
+    );
+}
+
+#[test]
 fn flash_attn_bwd_online_tiled_parity() {
     if no_rocm() {
         return;
@@ -923,67 +1002,74 @@ fn flash_attn_bwd_collapsed_gqa_parity() {
     let b = 1usize;
     let h = 4usize;
     let hk = 1usize;
-    let d = 128usize;
-    let sq = 11usize;
-    let sk = 19usize;
-    let scale = 1.0 / (d as f32).sqrt();
 
-    with_env_vars(&[("KILN_ROCM_FLASH_MATMUL_BWD", "1")], || {
-        for &causal in &[false, true] {
-            let qd = fill_bf16(b * sq * h * d, 2101 + causal as usize);
-            let kd = fill_bf16(b * sk * hk * d, 2203 + causal as usize);
-            let vd = fill_bf16(b * sk * hk * d, 2309 + causal as usize);
-            let dod = fill_bf16(b * sq * h * d, 2411 + causal as usize);
+    with_env_vars(
+        &[
+            ("KILN_ROCM_FLASH_MATMUL_BWD", "1"),
+            ("KILN_ROCM_FLASH_DISABLE_CK_BWD_COLLAPSED_GQA", "0"),
+        ],
+        || {
+            for &(d, sq, sk) in &[(128usize, 11usize, 19usize), (256usize, 7usize, 13usize)] {
+                let scale = 1.0 / (d as f32).sqrt();
+                for &causal in &[false, true] {
+                    let seed_offset = d + causal as usize;
+                    let qd = fill_bf16(b * sq * h * d, 2101 + seed_offset);
+                    let kd = fill_bf16(b * sk * hk * d, 2203 + seed_offset);
+                    let vd = fill_bf16(b * sk * hk * d, 2309 + seed_offset);
+                    let dod = fill_bf16(b * sq * h * d, 2411 + seed_offset);
 
-            let q = rocm_bf16(&qd, vec![b, sq, h, d]);
-            let k = rocm_bf16(&kd, vec![b, sk, hk, d]);
-            let v = rocm_bf16(&vd, vec![b, sk, hk, d]);
-            let dout = rocm_bf16(&dod, vec![b, sq, h, d]);
+                    let q = rocm_bf16(&qd, vec![b, sq, h, d]);
+                    let k = rocm_bf16(&kd, vec![b, sk, hk, d]);
+                    let v = rocm_bf16(&vd, vec![b, sk, hk, d]);
+                    let dout = rocm_bf16(&dod, vec![b, sq, h, d]);
 
-            let (out_t, lse_t) = flash_attn_fwd_kt(&q, &k, &v, scale, causal)
-                .unwrap_or_else(|e| panic!("collapsed bwd fwd causal={causal}: {e}"));
-            let (dq_t, dk_t, dv_t) =
-                flash_attn_bwd_collapsed_gqa_kt(&dout, &q, &k, &v, &out_t, &lse_t, scale, causal)
-                    .unwrap_or_else(|e| panic!("collapsed bwd causal={causal}: {e}"));
+                    let (out_t, lse_t) = flash_attn_fwd_kt(&q, &k, &v, scale, causal)
+                        .unwrap_or_else(|e| panic!("collapsed bwd fwd d={d} causal={causal}: {e}"));
+                    let (dq_t, dk_t, dv_t) = flash_attn_bwd_collapsed_gqa_kt(
+                        &dout, &q, &k, &v, &out_t, &lse_t, scale, causal,
+                    )
+                    .unwrap_or_else(|e| panic!("collapsed bwd d={d} causal={causal}: {e}"));
 
-            assert_eq!(dq_t.shape(), &[b, sq, h, d]);
-            assert_eq!(dk_t.shape(), &[b, sk, hk, d]);
-            assert_eq!(dv_t.shape(), &[b, sk, hk, d]);
+                    assert_eq!(dq_t.shape(), &[b, sq, h, d]);
+                    assert_eq!(dk_t.shape(), &[b, sk, hk, d]);
+                    assert_eq!(dv_t.shape(), &[b, sk, hk, d]);
 
-            let qf: Vec<f32> = qd.iter().map(|x| x.to_f32()).collect();
-            let kf: Vec<f32> = kd.iter().map(|x| x.to_f32()).collect();
-            let vf: Vec<f32> = vd.iter().map(|x| x.to_f32()).collect();
-            let dof: Vec<f32> = dod.iter().map(|x| x.to_f32()).collect();
-            let outf = bf16_to_f32(&out_t);
-            let (want_dq, want_dk_exp, want_dv_exp) = cpu_sdpa_bwd_expanded_gqa(
-                &dof, &qf, &kf, &vf, &outf, b, sq, sk, h, hk, d, scale, causal,
-            );
-            let want_dk = collapse_expanded_gqa_host(&want_dk_exp, b, sk, h, hk, d);
-            let want_dv = collapse_expanded_gqa_host(&want_dv_exp, b, sk, h, hk, d);
+                    let qf: Vec<f32> = qd.iter().map(|x| x.to_f32()).collect();
+                    let kf: Vec<f32> = kd.iter().map(|x| x.to_f32()).collect();
+                    let vf: Vec<f32> = vd.iter().map(|x| x.to_f32()).collect();
+                    let dof: Vec<f32> = dod.iter().map(|x| x.to_f32()).collect();
+                    let outf = bf16_to_f32(&out_t);
+                    let (want_dq, want_dk_exp, want_dv_exp) = cpu_sdpa_bwd_expanded_gqa(
+                        &dof, &qf, &kf, &vf, &outf, b, sq, sk, h, hk, d, scale, causal,
+                    );
+                    let want_dk = collapse_expanded_gqa_host(&want_dk_exp, b, sk, h, hk, d);
+                    let want_dv = collapse_expanded_gqa_host(&want_dv_exp, b, sk, h, hk, d);
 
-            check_close(
-                &bf16_to_f32(&dq_t),
-                &want_dq,
-                4e-2,
-                4e-2,
-                &format!("collapsed bwd dq causal={causal}"),
-            );
-            check_close(
-                &bf16_to_f32(&dk_t),
-                &want_dk,
-                5e-2,
-                5e-2,
-                &format!("collapsed bwd dk causal={causal}"),
-            );
-            check_close(
-                &bf16_to_f32(&dv_t),
-                &want_dv,
-                5e-2,
-                5e-2,
-                &format!("collapsed bwd dv causal={causal}"),
-            );
-        }
-    });
+                    check_close(
+                        &bf16_to_f32(&dq_t),
+                        &want_dq,
+                        4e-2,
+                        4e-2,
+                        &format!("collapsed bwd dq d={d} causal={causal}"),
+                    );
+                    check_close(
+                        &bf16_to_f32(&dk_t),
+                        &want_dk,
+                        5e-2,
+                        5e-2,
+                        &format!("collapsed bwd dk d={d} causal={causal}"),
+                    );
+                    check_close(
+                        &bf16_to_f32(&dv_t),
+                        &want_dv,
+                        5e-2,
+                        5e-2,
+                        &format!("collapsed bwd dv d={d} causal={causal}"),
+                    );
+                }
+            }
+        },
+    );
 }
 
 #[test]
