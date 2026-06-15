@@ -1064,6 +1064,7 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
         }
         __syncwarp();
 
+#pragma unroll
         for(int i = 0; i < lane_pairs; ++i)
         {
             const int dim_pair = dim_pair_vals[i];
