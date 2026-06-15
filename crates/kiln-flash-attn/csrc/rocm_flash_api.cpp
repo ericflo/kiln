@@ -190,6 +190,15 @@ __device__ __forceinline__ float kiln_wave_reduce_sum(float v)
     return v;
 }
 
+__device__ __forceinline__ float kiln_wave_reduce_max(float v)
+{
+    for(int offset = KilnLogicalWarpSize >> 1; offset > 0; offset >>= 1)
+    {
+        v = fmaxf(v, __shfl_xor(v, offset, KilnLogicalWarpSize));
+    }
+    return v;
+}
+
 template <int HeadDim, int Rows>
 __device__ __forceinline__ float row_sum_x(float v)
 {
@@ -885,116 +894,67 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
 #endif
         __syncthreads();
 
-        if(lane == 0)
         {
-            float tile_m = -INFINITY;
-            for(int col = 0; col < KeyBlock; ++col)
-            {
-                const int key_idx = key_base + col;
-                if(key_idx < key_limit0)
-                {
-                    tile_m = fmaxf(tile_m, scores[row0][col]);
-                }
-            }
+            const int col = lane & 15;
+            const int key_idx = key_base + col;
+            const bool lane_row0 = lane < 16;
+            const bool valid_key0 = key_idx < key_limit0;
+            const bool valid_key1 = key_idx < key_limit1;
+            const float score0 = valid_key0 ? scores[row0][col] : -INFINITY;
+            const float score1 = valid_key1 ? scores[row1][col] : -INFINITY;
 
-            const float new_m0 = fmaxf(m0, tile_m);
-            float beta_sum = 0.0f;
-            if(tile_m > -INFINITY)
-            {
-                for(int col = 0; col < KeyBlock; ++col)
-                {
-                    const int key_idx = key_base + col;
-                    if(key_idx < key_limit0)
-                    {
-                        const float beta = expf(scores[row0][col] - new_m0);
-                        scores[row0][col] = beta;
-                        beta_sum += beta;
-                    }
-                    else
-                    {
-                        scores[row0][col] = 0.0f;
-                    }
-                }
-            }
-            else
-            {
-                for(int col = 0; col < KeyBlock; ++col)
-                {
-                    scores[row0][col] = 0.0f;
-                }
-            }
+            const float tile_m0 =
+                kiln_wave_reduce_max(lane_row0 ? score0 : -INFINITY);
+            const float tile_m1 =
+                kiln_wave_reduce_max(lane_row0 ? -INFINITY : score1);
+
+            const float new_m0 = fmaxf(m0, tile_m0);
+            const float new_m1 = fmaxf(m1, tile_m1);
+            const float beta0 =
+                lane_row0 && valid_key0 && tile_m0 > -INFINITY ? expf(score0 - new_m0) : 0.0f;
+            const float beta1 =
+                !lane_row0 && valid_key1 && tile_m1 > -INFINITY ? expf(score1 - new_m1) : 0.0f;
+            const float beta_sum0 = kiln_wave_reduce_sum(beta0);
+            const float beta_sum1 = kiln_wave_reduce_sum(beta1);
             const float alpha0 = l0 > 0.0f ? expf(m0 - new_m0) : 0.0f;
-            row_alpha[row0] = alpha0;
-            l0 = l0 * alpha0 + beta_sum;
-            m0 = new_m0;
+            const float alpha1 = l1 > 0.0f ? expf(m1 - new_m1) : 0.0f;
 
-            tile_m = -INFINITY;
-            for(int col = 0; col < KeyBlock; ++col)
+            if(lane_row0)
             {
-                const int key_idx = key_base + col;
-                if(key_idx < key_limit1)
-                {
-                    tile_m = fmaxf(tile_m, scores[row1][col]);
-                }
-            }
-
-            const float new_m1 = fmaxf(m1, tile_m);
-            beta_sum = 0.0f;
-            if(tile_m > -INFINITY)
-            {
-                for(int col = 0; col < KeyBlock; ++col)
-                {
-                    const int key_idx = key_base + col;
-                    if(key_idx < key_limit1)
-                    {
-                        const float beta = expf(scores[row1][col] - new_m1);
-                        scores[row1][col] = beta;
-                        beta_sum += beta;
-                    }
-                    else
-                    {
-                        scores[row1][col] = 0.0f;
-                    }
-                }
+                scores[row0][col] = beta0;
             }
             else
             {
-                for(int col = 0; col < KeyBlock; ++col)
-                {
-                    scores[row1][col] = 0.0f;
-                }
+                scores[row1][col] = beta1;
             }
-            const float alpha1 = l1 > 0.0f ? expf(m1 - new_m1) : 0.0f;
-            row_alpha[row1] = alpha1;
-            l1 = l1 * alpha1 + beta_sum;
+
+            if(lane == 0)
+            {
+                row_alpha[row0] = alpha0;
+                row_alpha[row1] = alpha1;
+            }
+            l0 = l0 * alpha0 + beta_sum0;
+            l1 = l1 * alpha1 + beta_sum1;
+            m0 = new_m0;
             m1 = new_m1;
         }
         __syncthreads();
 
         const float alpha0 = row_alpha[row0];
-        for(int i = 0; i < lane_dims; ++i)
-        {
-            const int dim = dim_vals[i];
-            float weighted = 0.0f;
-            for(int col = 0; col < tile_count; ++col)
-            {
-                const float beta = scores[row0][col];
-                weighted += beta * static_cast<float>(v_tile[col][dim]);
-            }
-            acc_vals0[i] = acc_vals0[i] * alpha0 + weighted;
-        }
-
         const float alpha1 = row_alpha[row1];
         for(int i = 0; i < lane_dims; ++i)
         {
             const int dim = dim_vals[i];
-            float weighted = 0.0f;
+            float weighted0 = 0.0f;
+            float weighted1 = 0.0f;
             for(int col = 0; col < tile_count; ++col)
             {
-                const float beta = scores[row1][col];
-                weighted += beta * static_cast<float>(v_tile[col][dim]);
+                const float vv = static_cast<float>(v_tile[col][dim]);
+                weighted0 += scores[row0][col] * vv;
+                weighted1 += scores[row1][col] * vv;
             }
-            acc_vals1[i] = acc_vals1[i] * alpha1 + weighted;
+            acc_vals0[i] = acc_vals0[i] * alpha0 + weighted0;
+            acc_vals1[i] = acc_vals1[i] * alpha1 + weighted1;
         }
         __syncthreads();
     }
