@@ -23,6 +23,15 @@ use std::sync::Mutex;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+unsafe extern "C" {
+    fn kiln_rocm_flash_wmma_qk16_bf16(
+        a: *const core::ffi::c_void,
+        b: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+}
+
 fn no_rocm() -> bool {
     if !kiln_tensor::rocm_is_available() {
         eprintln!("no ROCm device available; skipping R.8 flash-attn parity test");
@@ -252,6 +261,11 @@ fn rocm_sync() {
     kiln_tensor::rocm_synchronize_default_stream(0).expect("rocm sync");
 }
 
+fn f32_to_vec(t: &Tensor) -> Vec<f32> {
+    let host = kiln_tensor::rocm_to_host_copy(t).expect("d2h");
+    host.to_vec::<f32>().expect("f32 readback")
+}
+
 fn with_env_vars<R>(vars: &[(&str, &str)], f: impl FnOnce() -> R) -> R {
     let _guard = ENV_LOCK.lock().expect("env lock poisoned");
     let old: Vec<(&str, Option<String>)> = vars
@@ -269,6 +283,95 @@ fn with_env_vars<R>(vars: &[(&str, &str)], f: impl FnOnce() -> R) -> R {
         }
     }
     result
+}
+
+#[test]
+fn rocm_wmma_qk16_bf16_tile_matches_cpu_dot() {
+    if no_rocm() {
+        return;
+    }
+
+    let tile = 16usize;
+    let a_data = fill_bf16(tile * tile, 9101);
+    let b_data = fill_bf16(tile * tile, 9109);
+    let a = rocm_bf16(&a_data, vec![tile, tile]);
+    let b = rocm_bf16(&b_data, vec![tile, tile]);
+    let out = Tensor::zeros(vec![tile, tile], DType::F32, Device::Rocm(0)).expect("rocm f32 out");
+
+    let a_ptr = kiln_kt_bridge::rocm_input_device_ptr(&a, DType::BF16, "wmma_a").expect("a ptr");
+    let b_ptr = kiln_kt_bridge::rocm_input_device_ptr(&b, DType::BF16, "wmma_b").expect("b ptr");
+    let out_ptr = kiln_kt_bridge::rocm_output_device_ptr(&out);
+    let stream = kiln_kt_bridge::rocm_stream_raw_of(&a, "wmma_a").expect("stream");
+    let status = unsafe {
+        kiln_rocm_flash_wmma_qk16_bf16(
+            a_ptr as *const _,
+            b_ptr as *const _,
+            out_ptr as *mut _,
+            stream,
+        )
+    };
+    if status == -30 {
+        eprintln!("ROCm device does not report gfx11 WMMA support; skipping qk16 tile test");
+        return;
+    }
+    assert_eq!(status, 0, "wmma qk16 launch status");
+    rocm_sync();
+
+    let got = f32_to_vec(&out);
+    let mut want = vec![0.0f32; tile * tile];
+    for m in 0..tile {
+        for n in 0..tile {
+            let mut acc = 0.0f32;
+            for k in 0..tile {
+                acc += a_data[m * tile + k].to_f32() * b_data[n * tile + k].to_f32();
+            }
+            want[m * tile + n] = acc;
+        }
+    }
+    check_close(&got, &want, 1e-4, 1e-4, "rocm wmma qk16 bf16 tile");
+}
+
+#[test]
+fn flash_attn_fwd_native_wmma_qblock256_parity() {
+    if no_rocm() {
+        return;
+    }
+    let b = 1usize;
+    let h = 2usize;
+    let hk = 1usize;
+    let d = 256usize;
+    let sq = 35usize;
+    let sk = 79usize;
+    let scale = 1.0 / (d as f32).sqrt();
+    let causal = true;
+
+    with_env_vars(
+        &[
+            ("KILN_ROCM_FLASH_NATIVE_WMMA_QBLOCK", "1"),
+            ("KILN_ROCM_FLASH_NATIVE_RECTANGULAR_CAUSAL", "1"),
+        ],
+        || {
+            let qd = fill_bf16(b * sq * h * d, 9201);
+            let kd = fill_bf16(b * sk * hk * d, 9209);
+            let vd = fill_bf16(b * sk * hk * d, 9217);
+
+            let q = rocm_bf16(&qd, vec![b, sq, h, d]);
+            let k = rocm_bf16(&kd, vec![b, sk, hk, d]);
+            let v = rocm_bf16(&vd, vec![b, sk, hk, d]);
+
+            let (out_t, lse_t) = flash_attn_fwd_kt(&q, &k, &v, scale, causal)
+                .unwrap_or_else(|e| panic!("native wmma qblock256: {e}"));
+            assert_eq!(out_t.shape(), &[b, sq, h, d]);
+            assert_eq!(lse_t.shape(), &[b, h, sq]);
+
+            let qf: Vec<f32> = qd.iter().map(|x| x.to_f32()).collect();
+            let kf: Vec<f32> = kd.iter().map(|x| x.to_f32()).collect();
+            let vf: Vec<f32> = vd.iter().map(|x| x.to_f32()).collect();
+            let want = cpu_sdpa(&qf, &kf, &vf, b, sq, sk, h, hk, d, scale, causal);
+            let got = bf16_to_f32(&out_t);
+            check_close(&got, &want, 2e-2, 2e-2, "native wmma qblock256");
+        },
+    );
 }
 
 #[test]
