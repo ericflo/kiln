@@ -752,6 +752,9 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
     constexpr int WmmaRowTiles = Rows / WmmaTile;
     constexpr int WmmaColTiles = KeyBlock / WmmaTile;
     constexpr int WmmaTasks = WmmaRowTiles * WmmaColTiles;
+    constexpr int Bf16PerU32 = 2;
+    constexpr int HeadDimPairs = HeadDim / Bf16PerU32;
+    static_assert(HeadDim % Bf16PerU32 == 0, "HeadDim must be even for packed bf16 staging");
 
     const int tid = static_cast<int>(threadIdx.x);
     const int lane = tid & 31;
@@ -773,7 +776,6 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
     __shared__ hip_bfloat16 k_tile[KeyBlock][HeadDim];
     __shared__ hip_bfloat16 v_tile[KeyBlock][HeadDim];
     __shared__ float scores[Rows][KeyBlock];
-    __shared__ float row_alpha[Rows];
     __shared__ float row_inv_l[Rows];
 
     constexpr int MaxLaneDims = (HeadDim + 31) / 32;
@@ -801,20 +803,27 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
         ++lane_dims;
     }
 
-    for(int idx = tid; idx < Rows * HeadDim; idx += static_cast<int>(blockDim.x))
+    uint32_t* q_tile_u32 = reinterpret_cast<uint32_t*>(&q_tile[0][0]);
+    uint32_t* k_tile_u32 = reinterpret_cast<uint32_t*>(&k_tile[0][0]);
+    uint32_t* v_tile_u32 = reinterpret_cast<uint32_t*>(&v_tile[0][0]);
+    const uint32_t* q_u32 = reinterpret_cast<const uint32_t*>(q);
+    const uint32_t* k_u32 = reinterpret_cast<const uint32_t*>(k);
+    const uint32_t* v_u32 = reinterpret_cast<const uint32_t*>(v);
+
+    for(int pair = tid; pair < Rows * HeadDimPairs; pair += static_cast<int>(blockDim.x))
     {
-        const int q_row = idx / HeadDim;
-        const int dim = idx - q_row * HeadDim;
+        const int q_row = pair / HeadDimPairs;
+        const int dim_pair = pair - q_row * HeadDimPairs;
         const int load_q = q_block + q_row;
         if(load_q < seqlen_q)
         {
             const size_t load_q_base =
                 ((static_cast<size_t>(batch) * seqlen_q + load_q) * num_heads + head) * HeadDim;
-            q_tile[q_row][dim] = q[load_q_base + dim];
+            q_tile_u32[pair] = q_u32[load_q_base / Bf16PerU32 + dim_pair];
         }
         else
         {
-            q_tile[q_row][dim] = hip_bfloat16(0.0f);
+            q_tile_u32[pair] = 0;
         }
     }
     __syncthreads();
@@ -837,16 +846,16 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
     for(int key_base = 0; key_base < max_key_limit; key_base += KeyBlock)
     {
         const int tile_count = min(KeyBlock, max_key_limit - key_base);
-        for(int idx = tid; idx < tile_count * HeadDim; idx += static_cast<int>(blockDim.x))
+        for(int pair = tid; pair < tile_count * HeadDimPairs; pair += static_cast<int>(blockDim.x))
         {
-            const int key_offset = idx / HeadDim;
-            const int dim = idx - key_offset * HeadDim;
+            const int key_offset = pair / HeadDimPairs;
+            const int dim_pair = pair - key_offset * HeadDimPairs;
             const int key_idx = key_base + key_offset;
             const size_t kv_base =
                 ((static_cast<size_t>(batch) * seqlen_k + key_idx) * num_heads_k + kv_head) *
                 HeadDim;
-            k_tile[key_offset][dim] = k[kv_base + dim];
-            v_tile[key_offset][dim] = v[kv_base + dim];
+            k_tile_u32[pair] = k_u32[kv_base / Bf16PerU32 + dim_pair];
+            v_tile_u32[pair] = v_u32[kv_base / Bf16PerU32 + dim_pair];
         }
         __syncthreads();
 
@@ -894,6 +903,8 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
 #endif
         __syncthreads();
 
+        float alpha0 = 0.0f;
+        float alpha1 = 0.0f;
         {
             const int col = lane & 15;
             const int key_idx = key_base + col;
@@ -916,8 +927,8 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
                 !lane_row0 && valid_key1 && tile_m1 > -INFINITY ? expf(score1 - new_m1) : 0.0f;
             const float beta_sum0 = kiln_wave_reduce_sum(beta0);
             const float beta_sum1 = kiln_wave_reduce_sum(beta1);
-            const float alpha0 = l0 > 0.0f ? expf(m0 - new_m0) : 0.0f;
-            const float alpha1 = l1 > 0.0f ? expf(m1 - new_m1) : 0.0f;
+            alpha0 = l0 > 0.0f ? expf(m0 - new_m0) : 0.0f;
+            alpha1 = l1 > 0.0f ? expf(m1 - new_m1) : 0.0f;
 
             if(lane_row0)
             {
@@ -928,20 +939,13 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
                 scores[row1][col] = beta1;
             }
 
-            if(lane == 0)
-            {
-                row_alpha[row0] = alpha0;
-                row_alpha[row1] = alpha1;
-            }
             l0 = l0 * alpha0 + beta_sum0;
             l1 = l1 * alpha1 + beta_sum1;
             m0 = new_m0;
             m1 = new_m1;
         }
-        __syncthreads();
+        __syncwarp();
 
-        const float alpha0 = row_alpha[row0];
-        const float alpha1 = row_alpha[row1];
         for(int i = 0; i < lane_dims; ++i)
         {
             const int dim = dim_vals[i];
