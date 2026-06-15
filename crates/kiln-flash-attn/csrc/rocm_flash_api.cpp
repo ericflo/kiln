@@ -112,17 +112,20 @@ bool native_gqa_qblock_enabled(int head_dim,
     return std::max(seqlen_q, seqlen_k) >= threshold;
 }
 
-bool wmma_gqa_r64k16_enabled(int seqlen_q, int seqlen_k)
+bool wmma_gqa_r64k32_enabled(int seqlen_q, int seqlen_k)
 {
-    if(env_truthy("KILN_ROCM_FLASH_DISABLE_WMMA_GQA_R64K16"))
+    if(env_truthy("KILN_ROCM_FLASH_DISABLE_WMMA_GQA_R64K32") ||
+       env_truthy("KILN_ROCM_FLASH_DISABLE_WMMA_GQA_R64K16"))
     {
         return false;
     }
-    if(env_truthy("KILN_ROCM_FLASH_USE_WMMA_GQA_R64K16"))
+    if(env_truthy("KILN_ROCM_FLASH_USE_WMMA_GQA_R64K32") ||
+       env_truthy("KILN_ROCM_FLASH_USE_WMMA_GQA_R64K16"))
     {
         return true;
     }
-    const int threshold = env_i32_or("KILN_ROCM_FLASH_WMMA_GQA_R64K16_MIN_SEQ", 256);
+    const int legacy_threshold = env_i32_or("KILN_ROCM_FLASH_WMMA_GQA_R64K16_MIN_SEQ", 256);
+    const int threshold = env_i32_or("KILN_ROCM_FLASH_WMMA_GQA_R64K32_MIN_SEQ", legacy_threshold);
     return std::max(seqlen_q, seqlen_k) >= threshold;
 }
 
@@ -754,7 +757,7 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r32h1k32_bf16_kernel(
     }
 }
 
-__global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
+__global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
     const hip_bfloat16* __restrict__ q,
     const hip_bfloat16* __restrict__ k,
     const hip_bfloat16* __restrict__ v,
@@ -771,7 +774,7 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
     constexpr int HeadDim = 256;
     constexpr int Rows = 64;
     constexpr int QuarterRows = Rows / 4;
-    constexpr int KeyBlock = 16;
+    constexpr int KeyBlock = 32;
     constexpr int WmmaTile = 16;
     constexpr int WmmaRowTiles = Rows / WmmaTile;
     constexpr int WmmaColTiles = KeyBlock / WmmaTile;
@@ -802,7 +805,6 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
     }
 
     __shared__ hip_bfloat16 q_tile[Rows][HeadDim];
-    __shared__ hip_bfloat16 k_tile[KeyBlock][HeadDim];
     __shared__ hip_bfloat16 v_tile[KeyBlock][HeadDim];
     __shared__ float scores[Rows][KeyBlock];
 
@@ -852,10 +854,8 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
     }
 
     uint32_t* q_tile_u32 = reinterpret_cast<uint32_t*>(&q_tile[0][0]);
-    uint32_t* k_tile_u32 = reinterpret_cast<uint32_t*>(&k_tile[0][0]);
     uint32_t* v_tile_u32 = reinterpret_cast<uint32_t*>(&v_tile[0][0]);
     const uint32_t* q_u32 = reinterpret_cast<const uint32_t*>(q);
-    const uint32_t* k_u32 = reinterpret_cast<const uint32_t*>(k);
     const uint32_t* v_u32 = reinterpret_cast<const uint32_t*>(v);
 
     for(int pair = tid; pair < Rows * HeadDimPairs; pair += static_cast<int>(blockDim.x))
@@ -912,7 +912,6 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
             const size_t kv_base =
                 ((static_cast<size_t>(batch) * seqlen_k + key_idx) * num_heads_k + kv_head) *
                 HeadDim;
-            k_tile_u32[pair] = k_u32[kv_base / Bf16PerU32 + dim_pair];
             v_tile_u32[pair] = v_u32[kv_base / Bf16PerU32 + dim_pair];
         }
         __syncthreads();
@@ -923,7 +922,9 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
             const int task = tid / KilnLogicalWarpSize;
             const int task_lane = tid & 31;
             const int row_tile = task / WmmaColTiles;
+            const int col_tile = task - row_tile * WmmaColTiles;
             const int row_start = row_tile * WmmaTile;
+            const int key_col_start = col_tile * WmmaTile;
             const int ab_lane = task_lane & 15;
 
             kiln_f32x8 c_vec = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
@@ -935,14 +936,25 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
                 {
                     const int dim = dim_base + k_inner;
                     q_vec[k_inner] = kiln_to_native_bf16(q_tile[row_start + ab_lane][dim]);
-                    k_vec[k_inner] =
-                        ab_lane < tile_count ? kiln_to_native_bf16(k_tile[ab_lane][dim])
-                                             : static_cast<__bf16>(0.0f);
+                    const int key_offset = key_col_start + ab_lane;
+                    if(key_offset < tile_count)
+                    {
+                        const int key_idx = key_base + key_offset;
+                        const size_t kv_base =
+                            ((static_cast<size_t>(batch) * seqlen_k + key_idx) * num_heads_k +
+                             kv_head) *
+                            HeadDim;
+                        k_vec[k_inner] = kiln_to_native_bf16(k[kv_base + dim]);
+                    }
+                    else
+                    {
+                        k_vec[k_inner] = static_cast<__bf16>(0.0f);
+                    }
                 }
                 c_vec = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(q_vec, k_vec, c_vec);
             }
 
-            const int score_col = task_lane & 15;
+            const int score_col = key_col_start + (task_lane & 15);
             const int score_row_parity = task_lane >> 4;
             for(int i = 0; i < 8; ++i)
             {
@@ -970,6 +982,8 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
             const int softmax_group = lane >> 3;
             const int col0 = lane & 7;
             const int col1 = col0 + 8;
+            const int col2 = col0 + 16;
+            const int col3 = col0 + 24;
             const int softmax_row = softmax_group == 0
                                         ? row0
                                         : (softmax_group == 1
@@ -985,7 +999,10 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
             {
                 const float score0 = scores[softmax_row][col0];
                 const float score1 = scores[softmax_row][col1];
-                const float tile_m_group = kiln_quarter_wave_reduce_max(fmaxf(score0, score1));
+                const float score2 = scores[softmax_row][col2];
+                const float score3 = scores[softmax_row][col3];
+                const float tile_m_group =
+                    kiln_quarter_wave_reduce_max(fmaxf(fmaxf(score0, score1), fmaxf(score2, score3)));
                 const float tile_m0 = __shfl(tile_m_group, 0, KilnLogicalWarpSize);
                 const float tile_m1 = __shfl(tile_m_group, 8, KilnLogicalWarpSize);
                 const float tile_m2 = __shfl(tile_m_group, 16, KilnLogicalWarpSize);
@@ -1001,13 +1018,21 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
                                                : (softmax_group == 2 ? new_m2 : new_m3));
                 beta0 = expf(score0 - new_m);
                 beta1 = expf(score1 - new_m);
+                const float beta2 = expf(score2 - new_m);
+                const float beta3 = expf(score3 - new_m);
                 scores[softmax_row][col0] = beta0;
                 scores[softmax_row][col1] = beta1;
+                scores[softmax_row][col2] = beta2;
+                scores[softmax_row][col3] = beta3;
+                beta0 += beta2;
+                beta1 += beta3;
             }
             else
             {
                 const int key_idx0 = key_base + col0;
                 const int key_idx1 = key_base + col1;
+                const int key_idx2 = key_base + col2;
+                const int key_idx3 = key_base + col3;
                 const int key_limit = softmax_group == 0
                                           ? key_limit0
                                           : (softmax_group == 1
@@ -1015,9 +1040,13 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
                                                  : (softmax_group == 2 ? key_limit2 : key_limit3));
                 const bool valid_key0 = key_idx0 < key_limit;
                 const bool valid_key1 = key_idx1 < key_limit;
+                const bool valid_key2 = key_idx2 < key_limit;
+                const bool valid_key3 = key_idx3 < key_limit;
                 const float score0 = valid_key0 ? scores[softmax_row][col0] : -INFINITY;
                 const float score1 = valid_key1 ? scores[softmax_row][col1] : -INFINITY;
-                const float local_tile_m = fmaxf(score0, score1);
+                const float score2 = valid_key2 ? scores[softmax_row][col2] : -INFINITY;
+                const float score3 = valid_key3 ? scores[softmax_row][col3] : -INFINITY;
+                const float local_tile_m = fmaxf(fmaxf(score0, score1), fmaxf(score2, score3));
                 const float tile_m_group = kiln_quarter_wave_reduce_max(local_tile_m);
                 const float tile_m0 = __shfl(tile_m_group, 0, KilnLogicalWarpSize);
                 const float tile_m1 = __shfl(tile_m_group, 8, KilnLogicalWarpSize);
@@ -1039,8 +1068,16 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel(
                                                 : (softmax_group == 2 ? tile_m2 : tile_m3));
                 beta0 = valid_key0 && tile_m > -INFINITY ? expf(score0 - new_m) : 0.0f;
                 beta1 = valid_key1 && tile_m > -INFINITY ? expf(score1 - new_m) : 0.0f;
+                const float beta2 =
+                    valid_key2 && tile_m > -INFINITY ? expf(score2 - new_m) : 0.0f;
+                const float beta3 =
+                    valid_key3 && tile_m > -INFINITY ? expf(score3 - new_m) : 0.0f;
                 scores[softmax_row][col0] = beta0;
                 scores[softmax_row][col1] = beta1;
+                scores[softmax_row][col2] = beta2;
+                scores[softmax_row][col3] = beta3;
+                beta0 += beta2;
+                beta1 += beta3;
             }
 
             const float beta_sum_group = kiln_quarter_wave_reduce_sum(beta0 + beta1);
@@ -3151,7 +3188,7 @@ int launch_fwd_wmma_gqa_r32h1k32(const void* q,
     return err == hipSuccess ? 0 : static_cast<int>(err);
 }
 
-int launch_fwd_wmma_gqa_r64h1k16(const void* q,
+int launch_fwd_wmma_gqa_r64h1k32(const void* q,
                                   const void* k,
                                   const void* v,
                                   void* out,
@@ -3169,7 +3206,7 @@ int launch_fwd_wmma_gqa_r64h1k16(const void* q,
               static_cast<unsigned>(num_heads),
               static_cast<unsigned>(batch_size));
     dim3 block(512);
-    hipLaunchKernelGGL(kiln_rocm_flash_fwd_wmma_gqa_r64h1k16_bf16_kernel,
+    hipLaunchKernelGGL(kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel,
                        grid,
                        block,
                        0,
@@ -4246,9 +4283,9 @@ extern "C" int kiln_rocm_flash_attn_fwd_bf16(const void* q,
             if(!env_truthy("KILN_ROCM_FLASH_DISABLE_WMMA_GQA_QBLOCK") &&
                current_device_supports_gfx11_wmma())
             {
-                if(wmma_gqa_r64k16_enabled(seqlen_q, seqlen_k))
+                if(wmma_gqa_r64k32_enabled(seqlen_q, seqlen_k))
                 {
-                    return launch_fwd_wmma_gqa_r64h1k16(q,
+                    return launch_fwd_wmma_gqa_r64h1k32(q,
                                                         k,
                                                         v,
                                                         out,
