@@ -446,10 +446,7 @@ __global__ void kiln_rocm_flash_fwd_wmma_qblock256_bf16_kernel(
             for(int col = 0; col < tile_count; ++col)
             {
                 const float beta = scores[row][col];
-                if(beta != 0.0f)
-                {
-                    weighted += beta * static_cast<float>(v_tile[col][dim]);
-                }
+                weighted += beta * static_cast<float>(v_tile[col][dim]);
             }
             acc_vals[i] = acc_vals[i] * alpha + weighted;
         }
@@ -682,10 +679,7 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r32h1k32_bf16_kernel(
             for(int col = 0; col < tile_count; ++col)
             {
                 const float beta = scores[row][col];
-                if(beta != 0.0f)
-                {
-                    weighted += beta * static_cast<float>(v_tile[col][dim]);
-                }
+                weighted += beta * static_cast<float>(v_tile[col][dim]);
             }
             acc_vals[i] = acc_vals[i] * alpha + weighted;
         }
