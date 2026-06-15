@@ -122,26 +122,6 @@ __device__ __forceinline__ __bf16 kiln_to_native_bf16(hip_bfloat16 value)
     return static_cast<__bf16>(static_cast<float>(value));
 }
 
-template <int HeadDim, int Rows>
-__device__ float row_sum_x(float v)
-{
-    __shared__ float scratch[Rows][HeadDim];
-    const int x = static_cast<int>(threadIdx.x);
-    const int y = static_cast<int>(threadIdx.y);
-    scratch[y][x] = v;
-    __syncthreads();
-
-    for(int stride = HeadDim / 2; stride > 0; stride >>= 1)
-    {
-        if(x < stride)
-        {
-            scratch[y][x] += scratch[y][x + stride];
-        }
-        __syncthreads();
-    }
-    return scratch[y][0];
-}
-
 template <int Rows, int XDim>
 __device__ float row_sum_rows(float v)
 {
@@ -182,6 +162,38 @@ __device__ __forceinline__ float kiln_wave_reduce_sum(float v)
         v += __shfl_xor(v, offset, KilnLogicalWarpSize);
     }
     return v;
+}
+
+template <int HeadDim, int Rows>
+__device__ __forceinline__ float row_sum_x(float v)
+{
+    static_assert(HeadDim % KilnLogicalWarpSize == 0, "HeadDim must be a multiple of wave size");
+    constexpr int WavesPerRow = HeadDim / KilnLogicalWarpSize;
+    __shared__ float partial[Rows][WavesPerRow];
+    const int x = static_cast<int>(threadIdx.x);
+    const int y = static_cast<int>(threadIdx.y);
+    const int lane = x & (KilnLogicalWarpSize - 1);
+    const int wave = x / KilnLogicalWarpSize;
+
+    const float wave_sum = kiln_wave_reduce_sum(v);
+    if(lane == 0)
+    {
+        partial[y][wave] = wave_sum;
+    }
+    __syncthreads();
+
+    float total = 0.0f;
+    if(wave == 0)
+    {
+        total = lane < WavesPerRow ? partial[y][lane] : 0.0f;
+        total = kiln_wave_reduce_sum(total);
+        if(lane == 0)
+        {
+            partial[y][0] = total;
+        }
+    }
+    __syncthreads();
+    return partial[y][0];
 }
 
 using kiln_bf16x16 = __bf16 __attribute__((ext_vector_type(16)));
