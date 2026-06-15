@@ -1413,6 +1413,126 @@ __global__ void kiln_rocm_flash_bwd_dq_bf16_kernel(const hip_bfloat16* __restric
     }
 }
 
+template <int HeadDim>
+__global__ void kiln_rocm_flash_bwd_delta_bf16_kernel(const hip_bfloat16* __restrict__ dout,
+                                                      const hip_bfloat16* __restrict__ out,
+                                                      float* __restrict__ delta,
+                                                      int batch_size,
+                                                      int seqlen_q,
+                                                      int num_heads)
+{
+    const int q_idx = static_cast<int>(blockIdx.x);
+    const int head = static_cast<int>(blockIdx.y);
+    const int batch = static_cast<int>(blockIdx.z);
+    const int dim = static_cast<int>(threadIdx.x);
+
+    if(batch >= batch_size || q_idx >= seqlen_q || head >= num_heads || dim >= HeadDim)
+    {
+        return;
+    }
+
+    const size_t q_base =
+        ((static_cast<size_t>(batch) * seqlen_q + q_idx) * num_heads + head) * HeadDim;
+    const float dov = static_cast<float>(dout[q_base + dim]);
+    const float outv = static_cast<float>(out[q_base + dim]);
+    const float d_i = row_sum_x<HeadDim, 1>(dov * outv);
+
+    if(dim == 0)
+    {
+        delta[(static_cast<size_t>(batch) * num_heads + head) * seqlen_q + q_idx] = d_i;
+    }
+}
+
+template <int HeadDim, int KPar>
+__global__ void kiln_rocm_flash_bwd_dq_delta_bf16_kernel(const hip_bfloat16* __restrict__ q,
+                                                         const hip_bfloat16* __restrict__ k,
+                                                         const hip_bfloat16* __restrict__ v,
+                                                         const hip_bfloat16* __restrict__ dout,
+                                                         const float* __restrict__ lse,
+                                                         const float* __restrict__ delta,
+                                                         hip_bfloat16* __restrict__ dq,
+                                                         int batch_size,
+                                                         int seqlen_q,
+                                                         int seqlen_k,
+                                                         int num_heads,
+                                                         int num_heads_k,
+                                                         float softmax_scale,
+                                                         int is_causal)
+{
+    const int q_idx = static_cast<int>(blockIdx.x);
+    const int head = static_cast<int>(blockIdx.y);
+    const int batch = static_cast<int>(blockIdx.z);
+    const int dim = static_cast<int>(threadIdx.x);
+    const int lane = static_cast<int>(threadIdx.y);
+
+    if(batch >= batch_size || q_idx >= seqlen_q || head >= num_heads || dim >= HeadDim ||
+       lane >= KPar)
+    {
+        return;
+    }
+
+    const int groups_per_kv_head = num_heads / num_heads_k;
+    const int kv_head = head / groups_per_kv_head;
+    const size_t q_base =
+        ((static_cast<size_t>(batch) * seqlen_q + q_idx) * num_heads + head) * HeadDim;
+    const float qv = static_cast<float>(q[q_base + dim]);
+    const float dov = static_cast<float>(dout[q_base + dim]);
+    const size_t row_idx =
+        (static_cast<size_t>(batch) * num_heads + head) * seqlen_q + q_idx;
+    const float d_i = delta[row_idx];
+    const float row_lse = lse[row_idx];
+    const int key_limit = is_causal ? causal_key_limit(q_idx, seqlen_q, seqlen_k) : seqlen_k;
+
+    float acc = 0.0f;
+    __shared__ float scores[KPar];
+    __shared__ float dps[KPar];
+    for(int key_base = 0; key_base < key_limit; key_base += KPar)
+    {
+        const int key = key_base + lane;
+        const bool valid_key = key < key_limit;
+        const size_t kv_base =
+            ((static_cast<size_t>(batch) * seqlen_k + key) * num_heads_k + kv_head) * HeadDim;
+        const float kval = valid_key ? static_cast<float>(k[kv_base + dim]) : 0.0f;
+        const float vv = valid_key ? static_cast<float>(v[kv_base + dim]) : 0.0f;
+        const float score =
+            valid_key ? row_sum_x<HeadDim, KPar>(qv * kval) * softmax_scale
+                      : row_sum_x<HeadDim, KPar>(0.0f);
+        const float dp = valid_key ? row_sum_x<HeadDim, KPar>(dov * vv)
+                                   : row_sum_x<HeadDim, KPar>(0.0f);
+        if(dim == 0)
+        {
+            scores[lane] = score;
+            dps[lane] = dp;
+        }
+        __syncthreads();
+
+        if(lane == 0)
+        {
+            for(int key_lane = 0; key_lane < KPar; ++key_lane)
+            {
+                const int update_key = key_base + key_lane;
+                if(update_key >= key_limit)
+                {
+                    break;
+                }
+                const size_t update_kv_base =
+                    ((static_cast<size_t>(batch) * seqlen_k + update_key) * num_heads_k +
+                     kv_head) *
+                    HeadDim;
+                const float p = expf(scores[key_lane] - row_lse);
+                const float ds = p * (dps[key_lane] - d_i) * softmax_scale;
+                acc += ds * static_cast<float>(k[update_kv_base + dim]);
+            }
+        }
+        __syncthreads();
+    }
+
+    if(lane == 0)
+    {
+        dq[q_base + dim] = hip_bfloat16(acc);
+    }
+}
+
 template <int HeadDim, int QPar>
 __global__ void kiln_rocm_flash_bwd_dkdv_bf16_kernel(const hip_bfloat16* __restrict__ dout,
                                                      const hip_bfloat16* __restrict__ q,
@@ -1475,6 +1595,112 @@ __global__ void kiln_rocm_flash_bwd_dkdv_bf16_kernel(const hip_bfloat16* __restr
         const float outv = valid_q ? static_cast<float>(out[q_base + dim]) : 0.0f;
         const float d_i = valid_q ? row_sum_x<HeadDim, QPar>(dov * outv)
                                   : row_sum_x<HeadDim, QPar>(0.0f);
+        const float score = valid_q ? row_sum_x<HeadDim, QPar>(qv * kval) * softmax_scale
+                                    : row_sum_x<HeadDim, QPar>(0.0f);
+        const float dp =
+            valid_q ? row_sum_x<HeadDim, QPar>(dov * vv) : row_sum_x<HeadDim, QPar>(0.0f);
+        if(dim == 0)
+        {
+            scores[lane] = score;
+            dps[lane] = dp;
+            dis[lane] = d_i;
+        }
+        __syncthreads();
+
+        if(lane == 0)
+        {
+            for(int q_lane = 0; q_lane < QPar; ++q_lane)
+            {
+                const int update_q = q_base_idx + q_lane;
+                if(update_q >= seqlen_q)
+                {
+                    break;
+                }
+                const size_t update_q_base =
+                    ((static_cast<size_t>(batch) * seqlen_q + update_q) * num_heads + head) *
+                    HeadDim;
+                const float row_lse =
+                    lse[(static_cast<size_t>(batch) * num_heads + head) * seqlen_q + update_q];
+                const float p = expf(scores[q_lane] - row_lse);
+                const float ds = p * (dps[q_lane] - dis[q_lane]) * softmax_scale;
+                dk_acc += ds * static_cast<float>(q[update_q_base + dim]);
+                dv_acc += p * static_cast<float>(dout[update_q_base + dim]);
+            }
+        }
+        __syncthreads();
+    }
+
+    const size_t expanded_base =
+        ((static_cast<size_t>(batch) * seqlen_k + key) * num_heads + head) * HeadDim;
+    if(lane == 0)
+    {
+        dk[expanded_base + dim] = hip_bfloat16(dk_acc);
+        dv[expanded_base + dim] = hip_bfloat16(dv_acc);
+    }
+}
+
+template <int HeadDim, int QPar>
+__global__ void kiln_rocm_flash_bwd_dkdv_delta_bf16_kernel(const hip_bfloat16* __restrict__ dout,
+                                                           const hip_bfloat16* __restrict__ q,
+                                                           const hip_bfloat16* __restrict__ k,
+                                                           const hip_bfloat16* __restrict__ v,
+                                                           const float* __restrict__ lse,
+                                                           const float* __restrict__ delta,
+                                                           hip_bfloat16* __restrict__ dk,
+                                                           hip_bfloat16* __restrict__ dv,
+                                                           int batch_size,
+                                                           int seqlen_q,
+                                                           int seqlen_k,
+                                                           int num_heads,
+                                                           int num_heads_k,
+                                                           float softmax_scale,
+                                                           int is_causal)
+{
+    const int key = static_cast<int>(blockIdx.x);
+    const int head = static_cast<int>(blockIdx.y);
+    const int batch = static_cast<int>(blockIdx.z);
+    const int dim = static_cast<int>(threadIdx.x);
+    const int lane = static_cast<int>(threadIdx.y);
+
+    if(batch >= batch_size || key >= seqlen_k || head >= num_heads || dim >= HeadDim ||
+       lane >= QPar)
+    {
+        return;
+    }
+
+    const int groups_per_kv_head = num_heads / num_heads_k;
+    const int kv_head = head / groups_per_kv_head;
+    const size_t kv_base =
+        ((static_cast<size_t>(batch) * seqlen_k + key) * num_heads_k + kv_head) * HeadDim;
+    const float kval = static_cast<float>(k[kv_base + dim]);
+    const float vv = static_cast<float>(v[kv_base + dim]);
+
+    int q_start = 0;
+    if(is_causal)
+    {
+        q_start = key - (seqlen_k - seqlen_q);
+        if(q_start < 0)
+        {
+            q_start = 0;
+        }
+    }
+
+    float dk_acc = 0.0f;
+    float dv_acc = 0.0f;
+    __shared__ float scores[QPar];
+    __shared__ float dps[QPar];
+    __shared__ float dis[QPar];
+    for(int q_base_idx = q_start; q_base_idx < seqlen_q; q_base_idx += QPar)
+    {
+        const int q_idx = q_base_idx + lane;
+        const bool valid_q = q_idx < seqlen_q;
+        const size_t q_base =
+            ((static_cast<size_t>(batch) * seqlen_q + q_idx) * num_heads + head) * HeadDim;
+        const float qv = valid_q ? static_cast<float>(q[q_base + dim]) : 0.0f;
+        const float dov = valid_q ? static_cast<float>(dout[q_base + dim]) : 0.0f;
+        const float d_i =
+            valid_q ? delta[(static_cast<size_t>(batch) * num_heads + head) * seqlen_q + q_idx]
+                    : 0.0f;
         const float score = valid_q ? row_sum_x<HeadDim, QPar>(qv * kval) * softmax_scale
                                     : row_sum_x<HeadDim, QPar>(0.0f);
         const float dp =
@@ -1942,6 +2168,102 @@ int launch_bwd(const void* dout,
     dim3 dq_grid(static_cast<unsigned>(seqlen_q),
                  static_cast<unsigned>(num_heads),
                  static_cast<unsigned>(batch_size));
+    const bool use_delta_bwd =
+        env_truthy("KILN_ROCM_FLASH_BWD_PRECOMPUTE_DELTA") ||
+        std::max(seqlen_q, seqlen_k) <=
+            env_i32_or("KILN_ROCM_FLASH_BWD_PRECOMPUTE_DELTA_MAX_SEQ", 1024);
+    if(use_delta_bwd)
+    {
+        float* delta = nullptr;
+        const size_t delta_count =
+            static_cast<size_t>(batch_size) * num_heads * seqlen_q;
+        const hipError_t alloc_err =
+            hipMallocAsync(reinterpret_cast<void**>(&delta),
+                           delta_count * sizeof(float),
+                           static_cast<hipStream_t>(stream));
+        if(alloc_err == hipSuccess)
+        {
+            dim3 delta_grid(static_cast<unsigned>(seqlen_q),
+                            static_cast<unsigned>(num_heads),
+                            static_cast<unsigned>(batch_size));
+            dim3 delta_block(static_cast<unsigned>(HeadDim), 1);
+            hipLaunchKernelGGL((kiln_rocm_flash_bwd_delta_bf16_kernel<HeadDim>),
+                               delta_grid,
+                               delta_block,
+                               0,
+                               static_cast<hipStream_t>(stream),
+                               static_cast<const hip_bfloat16*>(dout),
+                               static_cast<const hip_bfloat16*>(out),
+                               delta,
+                               batch_size,
+                               seqlen_q,
+                               num_heads);
+            hipError_t err = hipGetLastError();
+            if(err != hipSuccess)
+            {
+                hipFreeAsync(delta, static_cast<hipStream_t>(stream));
+                return static_cast<int>(err);
+            }
+
+            hipLaunchKernelGGL((kiln_rocm_flash_bwd_dq_delta_bf16_kernel<HeadDim, KPar>),
+                               dq_grid,
+                               block,
+                               0,
+                               static_cast<hipStream_t>(stream),
+                               static_cast<const hip_bfloat16*>(q),
+                               static_cast<const hip_bfloat16*>(k),
+                               static_cast<const hip_bfloat16*>(v),
+                               static_cast<const hip_bfloat16*>(dout),
+                               static_cast<const float*>(softmax_lse),
+                               delta,
+                               static_cast<hip_bfloat16*>(dq),
+                               batch_size,
+                               seqlen_q,
+                               seqlen_k,
+                               num_heads,
+                               num_heads_k,
+                               softmax_scale,
+                               is_causal != 0 ? 1 : 0);
+            err = hipGetLastError();
+            if(err != hipSuccess)
+            {
+                hipFreeAsync(delta, static_cast<hipStream_t>(stream));
+                return static_cast<int>(err);
+            }
+
+            dim3 dkdv_grid(static_cast<unsigned>(seqlen_k),
+                           static_cast<unsigned>(num_heads),
+                           static_cast<unsigned>(batch_size));
+            hipLaunchKernelGGL((kiln_rocm_flash_bwd_dkdv_delta_bf16_kernel<HeadDim, KPar>),
+                               dkdv_grid,
+                               block,
+                               0,
+                               static_cast<hipStream_t>(stream),
+                               static_cast<const hip_bfloat16*>(dout),
+                               static_cast<const hip_bfloat16*>(q),
+                               static_cast<const hip_bfloat16*>(k),
+                               static_cast<const hip_bfloat16*>(v),
+                               static_cast<const float*>(softmax_lse),
+                               delta,
+                               static_cast<hip_bfloat16*>(dk),
+                               static_cast<hip_bfloat16*>(dv),
+                               batch_size,
+                               seqlen_q,
+                               seqlen_k,
+                               num_heads,
+                               num_heads_k,
+                               softmax_scale,
+                               is_causal != 0 ? 1 : 0);
+            err = hipGetLastError();
+            const hipError_t free_err = hipFreeAsync(delta, static_cast<hipStream_t>(stream));
+            if(err != hipSuccess)
+            {
+                return static_cast<int>(err);
+            }
+            return free_err == hipSuccess ? 0 : static_cast<int>(free_err);
+        }
+    }
+
     hipLaunchKernelGGL((kiln_rocm_flash_bwd_dq_bf16_kernel<HeadDim, KPar>),
                        dq_grid,
                        block,
