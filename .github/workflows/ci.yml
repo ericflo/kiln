@@ -23,6 +23,23 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  rustfmt:
+    name: Rust formatting
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        run: |
+          rustup set profile minimal
+          rustup default stable
+          rustup component add rustfmt
+          rustc --version
+          cargo fmt --version
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
   macos-metal:
     name: macOS / Metal (M-series)
     runs-on: macos-14

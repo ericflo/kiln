@@ -82,7 +82,7 @@ See [`QUICKSTART.md`](QUICKSTART.md) for the full zero-to-running walkthrough â€
 
 ## Code style
 
-- Match the surrounding style. There is no enforced `cargo fmt` policy yet, but keep new code reasonably tidy.
+- Run `cargo fmt --all` before committing. CI enforces `cargo fmt --all --check` for the Rust workspace.
 - **Avoid adding dependencies casually.** Kiln deliberately keeps the dep tree small; every new crate is a build-time cost, an attack-surface increase, and a maintenance burden. Justify new deps in the PR body.
 - **No new `unwrap()` in the request path.** Prefer `?` with helpful errors. The error-message style added in PR #545 is a good reference: say what failed, why, and what to try next, instead of bubbling up a bare `io::Error`.
 - Keep comments short and load-bearing. Explain *why*, not *what* â€” the code already shows what.
