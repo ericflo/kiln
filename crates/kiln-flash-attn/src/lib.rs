@@ -221,7 +221,7 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
-    pub(crate) fn kiln_rocm_flash_attn_fwd_abs_tile_into_bf16(
+    pub(crate) fn kiln_rocm_flash_attn_fwd_abs_tile_base_into_bf16(
         q: *const core::ffi::c_void,
         k: *const core::ffi::c_void,
         v: *const core::ffi::c_void,

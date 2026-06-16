@@ -1979,9 +1979,8 @@ fn try_native_fwd_bf16_query_tiled_into(
         if causal && causal_block_limit(sk, q_start, q_len, causal_offset) == 0 {
             return Ok(None);
         }
-        let q_tile = rocm_contig(&map_kt(q.narrow(1, q_start, q_len))?)?;
-        if !try_ffi_fwd_bf16_abs_tile_into(
-            &q_tile,
+        if !try_ffi_fwd_bf16_abs_tile_base_into(
+            q,
             k_full,
             v_full,
             &out,
@@ -2001,7 +2000,7 @@ fn try_native_fwd_bf16_query_tiled_into(
         }
         if rocm_trace_fwd_enabled() {
             eprintln!(
-                "kiln_rocm_flash_fwd_tile path=native_query_tiled_abs_into q_start={q_start} q_len={q_len} key_len={sk}"
+                "kiln_rocm_flash_fwd_tile path=native_query_tiled_abs_base_into q_start={q_start} q_len={q_len} key_len={sk}"
             );
         }
         q_start += q_len;
@@ -2190,7 +2189,7 @@ fn try_ffi_fwd_bf16_abs_tile(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn try_ffi_fwd_bf16_abs_tile_into(
+fn try_ffi_fwd_bf16_abs_tile_base_into(
     q: &KtTensor,
     k: &KtTensor,
     v: &KtTensor,
@@ -2216,7 +2215,7 @@ fn try_ffi_fwd_bf16_abs_tile_into(
         || h == 0
         || hk == 0
         || h % hk != 0
-        || q.shape() != [b, q_len, h, d]
+        || q.shape() != [b, sq_total, h, d]
         || k.shape() != [b, sk, hk, d]
         || v.shape() != [b, sk, hk, d]
         || out.shape() != [b, sq_total, h, d]
@@ -2248,7 +2247,7 @@ fn try_ffi_fwd_bf16_abs_tile_into(
     rocm_native_ffi_sync_if_enabled(q.device())?;
 
     let status = unsafe {
-        crate::kiln_rocm_flash_attn_fwd_abs_tile_into_bf16(
+        crate::kiln_rocm_flash_attn_fwd_abs_tile_base_into_bf16(
             q_ptr as *const _,
             k_ptr as *const _,
             v_ptr as *const _,
@@ -2273,7 +2272,7 @@ fn try_ffi_fwd_bf16_abs_tile_into(
     } else {
         if rocm_trace_fwd_enabled() {
             eprintln!(
-                "kiln_rocm_flash_fwd_tile path=native_abs_tile_into_declined status={status} q_start={q_start} q_len={q_len} seq_q_total={sq_total} seq_k={sk} heads={h} kv_heads={hk} head_dim={d} causal={causal}"
+                "kiln_rocm_flash_fwd_tile path=native_abs_tile_base_into_declined status={status} q_start={q_start} q_len={q_len} seq_q_total={sq_total} seq_k={sk} heads={h} kv_heads={hk} head_dim={d} causal={causal}"
             );
         }
         Ok(false)
