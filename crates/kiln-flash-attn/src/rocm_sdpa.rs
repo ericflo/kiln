@@ -47,6 +47,7 @@ const MATERIALIZED_BWD_SCORE_SCRATCH_BUFFERS: usize = 8;
 const MATERIALIZED_SCORE_TILE_GRANULARITY: usize = 128;
 const DEFAULT_MATERIALIZED_SCORE_TILE_MAX_ELEMENTS: usize = 1 << 29;
 const DEFAULT_NATIVE_FWD_MAX_SEQ: usize = 4096;
+const DEFAULT_NATIVE_SINGLE_FWD_MAX_SEQ: usize = 32768;
 const DEFAULT_NATIVE_FWD_QUERY_TILE: usize = 2048;
 const DEFAULT_NATIVE_STREAMING_FWD_MIN_SEQ: usize = 8192;
 const DEFAULT_NATIVE_STREAMING_FWD_KEY_TILE: usize = 4096;
@@ -541,6 +542,13 @@ fn native_scalar_fwd_enabled(sq: usize, sk: usize) -> bool {
 
 fn native_fwd_query_tile_len() -> usize {
     env_usize("KILN_ROCM_FLASH_NATIVE_QUERY_TILE").unwrap_or(DEFAULT_NATIVE_FWD_QUERY_TILE)
+}
+
+fn native_single_fwd_launch_enabled(sq: usize, sk: usize) -> bool {
+    let max_seq = env_usize("KILN_ROCM_FLASH_NATIVE_SINGLE_MAX_SEQ")
+        .unwrap_or(DEFAULT_NATIVE_SINGLE_FWD_MAX_SEQ)
+        .max(1);
+    sq.max(sk) <= max_seq
 }
 
 fn native_tiled_fwd_enabled(sq: usize, sk: usize) -> bool {
@@ -1683,7 +1691,8 @@ fn try_native_fwd_bf16(
     let q_tile = native_fwd_query_tile_len();
     let native_single_available =
         native_scalar_fwd_enabled(sq, sk) || native_tiled_fwd_enabled(sq, sk);
-    let prefer_native_single = native_single_available && (!causal || sq == sk);
+    let native_single_allowed = native_single_available && native_single_fwd_launch_enabled(sq, sk);
+    let prefer_native_single = native_single_allowed && (!causal || sq == sk);
     if prefer_native_single {
         let q_c = rocm_contig(q)?;
         let k_c = rocm_contig(k)?;
@@ -1738,7 +1747,7 @@ fn try_native_fwd_bf16(
     let q_c = rocm_contig(q)?;
     let k_c = rocm_contig(k)?;
     let v_c = rocm_contig(v)?;
-    if native_single_available {
+    if native_single_allowed {
         if rocm_trace_fwd_enabled() {
             eprintln!(
                 "kiln_rocm_flash_fwd path=native_single batch={b} seq_q={sq} seq_k={sk} heads={h} kv_heads={hk} head_dim={d} causal={causal}"
@@ -1842,6 +1851,38 @@ fn try_native_fwd_bf16_query_tiled(
         }
 
         let q_tile = rocm_contig(&map_kt(q.narrow(1, q_start, q_len))?)?;
+        let abs_tile_result = if causal {
+            try_ffi_fwd_bf16_abs_tile(
+                &q_tile,
+                &k_full,
+                &v_full,
+                b,
+                q_len,
+                sk,
+                sq,
+                h,
+                hk,
+                d,
+                softmax_scale,
+                causal,
+                q_start,
+            )?
+        } else {
+            None
+        };
+        if let Some((out_tile, lse_tile)) = abs_tile_result {
+            if rocm_trace_fwd_enabled() {
+                eprintln!(
+                    "kiln_rocm_flash_fwd_tile path=native_query_tiled_abs q_start={q_start} q_len={q_len} key_len={sk}"
+                );
+            }
+            out_tiles.push(out_tile);
+            lse_tiles.push(lse_tile);
+            q_start += q_len;
+            rocm_attention_cooperative_yield(device)?;
+            continue;
+        }
+
         let k_tile;
         let v_tile;
         let (k_ref, v_ref) = if key_len == sk {
@@ -1975,6 +2016,93 @@ fn try_ffi_fwd_bf16(
         if rocm_trace_fwd_enabled() {
             eprintln!(
                 "kiln_rocm_flash_fwd path=native_ffi_declined status={status} batch={b} seq_q={sq} seq_k={sk} heads={h} kv_heads={hk} head_dim={d} causal={causal} use_ck={use_ck}"
+            );
+        }
+        Ok(None)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_ffi_fwd_bf16_abs_tile(
+    q: &KtTensor,
+    k: &KtTensor,
+    v: &KtTensor,
+    b: usize,
+    q_len: usize,
+    sk: usize,
+    sq_total: usize,
+    h: usize,
+    hk: usize,
+    d: usize,
+    softmax_scale: f32,
+    causal: bool,
+    q_start: usize,
+) -> Result<Option<(KtTensor, KtTensor)>, FlashAttnError> {
+    if q.dtype() != KtDType::BF16
+        || k.dtype() != KtDType::BF16
+        || v.dtype() != KtDType::BF16
+        || !matches!(d, 128 | 256)
+        || h == 0
+        || hk == 0
+        || h % hk != 0
+        || !q.is_contiguous()
+        || !k.is_contiguous()
+        || !v.is_contiguous()
+        || match q_start.checked_add(q_len) {
+            Some(end) => end > sq_total,
+            None => true,
+        }
+    {
+        return Ok(None);
+    }
+
+    let (q_st, _) = kiln_kt_bridge::rocm_storage_and_byte_offset(q, KtDType::BF16, "q")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let out = kiln_kt_bridge::alloc_rocm_tensor(q_st, KtDType::BF16, vec![b, q_len, h, d])
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let lse = kiln_kt_bridge::alloc_rocm_tensor(q_st, KtDType::F32, vec![b, h, q_len])
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+
+    let q_ptr = kiln_kt_bridge::rocm_input_device_ptr(q, KtDType::BF16, "q")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let k_ptr = kiln_kt_bridge::rocm_input_device_ptr(k, KtDType::BF16, "k")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let v_ptr = kiln_kt_bridge::rocm_input_device_ptr(v, KtDType::BF16, "v")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+    let out_ptr = kiln_kt_bridge::rocm_output_device_ptr(&out);
+    let lse_ptr = kiln_kt_bridge::rocm_output_device_ptr(&lse);
+    let stream = kiln_kt_bridge::rocm_stream_raw_of(q, "q")
+        .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
+
+    rocm_sync_device(q.device())?;
+
+    let status = unsafe {
+        crate::kiln_rocm_flash_attn_fwd_abs_tile_bf16(
+            q_ptr as *const _,
+            k_ptr as *const _,
+            v_ptr as *const _,
+            out_ptr as *mut _,
+            lse_ptr as *mut _,
+            b as i32,
+            q_len as i32,
+            sk as i32,
+            sq_total as i32,
+            h as i32,
+            hk as i32,
+            d as i32,
+            softmax_scale,
+            if causal { 1 } else { 0 },
+            q_start as i32,
+            stream,
+        )
+    };
+    if status == 0 {
+        rocm_sync_device(q.device())?;
+        Ok(Some((out, lse)))
+    } else {
+        if rocm_trace_fwd_enabled() {
+            eprintln!(
+                "kiln_rocm_flash_fwd_tile path=native_abs_tile_declined status={status} q_start={q_start} q_len={q_len} seq_q_total={sq_total} seq_k={sk} heads={h} kv_heads={hk} head_dim={d} causal={causal}"
             );
         }
         Ok(None)

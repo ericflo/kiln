@@ -202,6 +202,25 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    pub(crate) fn kiln_rocm_flash_attn_fwd_abs_tile_bf16(
+        q: *const core::ffi::c_void,
+        k: *const core::ffi::c_void,
+        v: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        softmax_lse_out: *mut core::ffi::c_void,
+        batch_size: i32,
+        seqlen_q_tile: i32,
+        seqlen_k: i32,
+        seqlen_q_total: i32,
+        num_heads: i32,
+        num_heads_k: i32,
+        head_dim: i32,
+        softmax_scale: f32,
+        is_causal: i32,
+        q_start: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     pub(crate) fn kiln_rocm_flash_attn_fwd_stream_update_bf16(
         q: *const core::ffi::c_void,
         k: *const core::ffi::c_void,

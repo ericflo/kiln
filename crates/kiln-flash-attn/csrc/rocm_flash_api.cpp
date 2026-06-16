@@ -808,9 +808,11 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
     int batch_size,
     int seqlen_q,
     int seqlen_k,
+    int seqlen_q_total,
     int num_heads,
     int num_heads_k,
     float softmax_scale,
+    int q_start,
     int is_causal)
 {
     constexpr int HeadDim = 256;
@@ -876,6 +878,10 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
     const bool valid_q1 = q_idx1 < seqlen_q;
     const bool valid_q2 = q_idx2 < seqlen_q;
     const bool valid_q3 = q_idx3 < seqlen_q;
+    const int q_abs0 = q_start + q_idx0;
+    const int q_abs1 = q_start + q_idx1;
+    const int q_abs2 = q_start + q_idx2;
+    const int q_abs3 = q_start + q_idx3;
     constexpr float Log2E = 1.4426950408889634074f;
     const float score_scale = Log2Domain ? softmax_scale * Log2E : softmax_scale;
     const size_t q_base0 =
@@ -937,21 +943,23 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
     float l2 = 0.0f;
     float m3 = -INFINITY;
     float l3 = 0.0f;
-    const int key_limit0 = valid_q0 ? (is_causal ? causal_key_limit(q_idx0, seqlen_q, seqlen_k)
+    const int key_limit0 = valid_q0 ? (is_causal ? causal_key_limit(q_abs0, seqlen_q_total, seqlen_k)
                                                  : seqlen_k)
                                     : 0;
-    const int key_limit1 = valid_q1 ? (is_causal ? causal_key_limit(q_idx1, seqlen_q, seqlen_k)
+    const int key_limit1 = valid_q1 ? (is_causal ? causal_key_limit(q_abs1, seqlen_q_total, seqlen_k)
                                                  : seqlen_k)
                                     : 0;
-    const int key_limit2 = valid_q2 ? (is_causal ? causal_key_limit(q_idx2, seqlen_q, seqlen_k)
+    const int key_limit2 = valid_q2 ? (is_causal ? causal_key_limit(q_abs2, seqlen_q_total, seqlen_k)
                                                  : seqlen_k)
                                     : 0;
-    const int key_limit3 = valid_q3 ? (is_causal ? causal_key_limit(q_idx3, seqlen_q, seqlen_k)
+    const int key_limit3 = valid_q3 ? (is_causal ? causal_key_limit(q_abs3, seqlen_q_total, seqlen_k)
                                                  : seqlen_k)
                                     : 0;
     const int last_q = min(seqlen_q - 1, q_block + Rows - 1);
+    const int last_q_abs = q_start + last_q;
     const int max_key_limit =
-        last_q >= q_block ? (is_causal ? causal_key_limit(last_q, seqlen_q, seqlen_k) : seqlen_k)
+        last_q >= q_block ? (is_causal ? causal_key_limit(last_q_abs, seqlen_q_total, seqlen_k)
+                                        : seqlen_k)
                           : 0;
 
     for(int key_base = 0; key_base < max_key_limit; key_base += KeyBlock)
@@ -1750,9 +1758,11 @@ __global__ void kiln_rocm_flash_fwd_qblock_cached_bf16_kernel(
     int batch_size,
     int seqlen_q,
     int seqlen_k,
+    int seqlen_q_total,
     int num_heads,
     int num_heads_k,
     float softmax_scale,
+    int q_start,
     int is_causal)
 {
     const int lane = static_cast<int>(threadIdx.x) % KilnLogicalWarpSize;
@@ -1779,6 +1789,7 @@ __global__ void kiln_rocm_flash_fwd_qblock_cached_bf16_kernel(
     const int groups_per_kv_head = num_heads / num_heads_k;
     const int kv_head = head / groups_per_kv_head;
     const bool valid_q = q_idx < seqlen_q;
+    const int q_abs = q_start + q_idx;
     const size_t q_base =
         ((static_cast<size_t>(batch) * seqlen_q + (valid_q ? q_idx : 0)) * num_heads + head) *
         HeadDim;
@@ -1791,12 +1802,14 @@ __global__ void kiln_rocm_flash_fwd_qblock_cached_bf16_kernel(
         ++lane_dims;
     }
 
-    const int key_limit = valid_q ? (is_causal ? causal_key_limit(q_idx, seqlen_q, seqlen_k)
+    const int key_limit = valid_q ? (is_causal ? causal_key_limit(q_abs, seqlen_q_total, seqlen_k)
                                                : seqlen_k)
                                   : 0;
     const int last_q = min(seqlen_q - 1, q_block + Rows - 1);
+    const int last_q_abs = q_start + last_q;
     const int max_key_limit =
-        last_q >= q_block ? (is_causal ? causal_key_limit(last_q, seqlen_q, seqlen_k) : seqlen_k)
+        last_q >= q_block ? (is_causal ? causal_key_limit(last_q_abs, seqlen_q_total, seqlen_k)
+                                        : seqlen_k)
                           : 0;
 
     float m = -INFINITY;
@@ -1875,9 +1888,11 @@ __global__ void kiln_rocm_flash_fwd_gqa_qblock_cached_bf16_kernel(
     int batch_size,
     int seqlen_q,
     int seqlen_k,
+    int seqlen_q_total,
     int num_heads,
     int num_heads_k,
     float softmax_scale,
+    int q_start,
     int is_causal)
 {
     const int lane = static_cast<int>(threadIdx.x) % KilnLogicalWarpSize;
@@ -1912,6 +1927,7 @@ __global__ void kiln_rocm_flash_fwd_gqa_qblock_cached_bf16_kernel(
     int lane_dims = 0;
 
     const bool valid_q = q_idx < seqlen_q;
+    const int q_abs = q_start + q_idx;
     const size_t q_base =
         ((static_cast<size_t>(batch) * seqlen_q + (valid_q ? q_idx : 0)) * num_heads + head) *
         HeadDim;
@@ -1924,12 +1940,14 @@ __global__ void kiln_rocm_flash_fwd_gqa_qblock_cached_bf16_kernel(
         ++lane_dims;
     }
 
-    const int key_limit = valid_q ? (is_causal ? causal_key_limit(q_idx, seqlen_q, seqlen_k)
+    const int key_limit = valid_q ? (is_causal ? causal_key_limit(q_abs, seqlen_q_total, seqlen_k)
                                                : seqlen_k)
                                   : 0;
     const int last_q = min(seqlen_q - 1, q_block + Rows - 1);
+    const int last_q_abs = q_start + last_q;
     const int max_key_limit =
-        last_q >= q_block ? (is_causal ? causal_key_limit(last_q, seqlen_q, seqlen_k) : seqlen_k)
+        last_q >= q_block ? (is_causal ? causal_key_limit(last_q_abs, seqlen_q_total, seqlen_k)
+                                        : seqlen_k)
                           : 0;
 
     float m = -INFINITY;
@@ -3100,9 +3118,11 @@ int launch_fwd_qblock_cached(const void* q,
                              int batch_size,
                              int seqlen_q,
                              int seqlen_k,
+                             int seqlen_q_total,
                              int num_heads,
                              int num_heads_k,
                              float softmax_scale,
+                             int q_start,
                              int is_causal,
                              void* stream)
 {
@@ -3123,9 +3143,11 @@ int launch_fwd_qblock_cached(const void* q,
                        batch_size,
                        seqlen_q,
                        seqlen_k,
+                       seqlen_q_total,
                        num_heads,
                        num_heads_k,
                        softmax_scale,
+                       q_start,
                        is_causal != 0 ? 1 : 0);
 
     const hipError_t err = hipGetLastError();
@@ -3141,9 +3163,11 @@ int launch_fwd_gqa_qblock_cached(const void* q,
                                  int batch_size,
                                  int seqlen_q,
                                  int seqlen_k,
+                                 int seqlen_q_total,
                                  int num_heads,
                                  int num_heads_k,
                                  float softmax_scale,
+                                 int q_start,
                                  int is_causal,
                                  void* stream)
 {
@@ -3167,9 +3191,11 @@ int launch_fwd_gqa_qblock_cached(const void* q,
                        batch_size,
                        seqlen_q,
                        seqlen_k,
+                       seqlen_q_total,
                        num_heads,
                        num_heads_k,
                        softmax_scale,
+                       q_start,
                        is_causal != 0 ? 1 : 0);
 
     const hipError_t err = hipGetLastError();
@@ -3264,9 +3290,11 @@ int launch_fwd_wmma_gqa_r64h1k32(const void* q,
                                   int batch_size,
                                   int seqlen_q,
                                   int seqlen_k,
+                                  int seqlen_q_total,
                                   int num_heads,
                                   int num_heads_k,
                                   float softmax_scale,
+                                  int q_start,
                                   int is_causal,
                                   void* stream)
 {
@@ -3289,9 +3317,11 @@ int launch_fwd_wmma_gqa_r64h1k32(const void* q,
                            batch_size,
                            seqlen_q,
                            seqlen_k,
+                           seqlen_q_total,
                            num_heads,
                            num_heads_k,
                            softmax_scale,
+                           q_start,
                            is_causal != 0 ? 1 : 0);
     }
     else
@@ -3309,9 +3339,11 @@ int launch_fwd_wmma_gqa_r64h1k32(const void* q,
                            batch_size,
                            seqlen_q,
                            seqlen_k,
+                           seqlen_q_total,
                            num_heads,
                            num_heads_k,
                            softmax_scale,
+                           q_start,
                            is_causal != 0 ? 1 : 0);
     }
 
@@ -4349,9 +4381,11 @@ extern "C" int kiln_rocm_flash_attn_fwd_bf16(const void* q,
                                                         batch_size,
                                                         seqlen_q,
                                                         seqlen_k,
+                                                        seqlen_q,
                                                         num_heads,
                                                         num_heads_k,
                                                         softmax_scale,
+                                                        0,
                                                         is_causal,
                                                         stream);
         }
@@ -4384,9 +4418,11 @@ extern "C" int kiln_rocm_flash_attn_fwd_bf16(const void* q,
                                                         batch_size,
                                                         seqlen_q,
                                                         seqlen_k,
+                                                        seqlen_q,
                                                         num_heads,
                                                         num_heads_k,
                                                         softmax_scale,
+                                                        0,
                                                         is_causal,
                                                         stream);
                 }
@@ -4412,9 +4448,11 @@ extern "C" int kiln_rocm_flash_attn_fwd_bf16(const void* q,
                                                                batch_size,
                                                                seqlen_q,
                                                                seqlen_k,
+                                                               seqlen_q,
                                                                num_heads,
                                                                num_heads_k,
                                                                softmax_scale,
+                                                               0,
                                                                is_causal,
                                                                stream);
         }
@@ -4461,9 +4499,11 @@ extern "C" int kiln_rocm_flash_attn_fwd_bf16(const void* q,
                                                         batch_size,
                                                         seqlen_q,
                                                         seqlen_k,
+                                                        seqlen_q,
                                                         num_heads,
                                                         num_heads_k,
                                                         softmax_scale,
+                                                        0,
                                                         is_causal,
                                                         stream);
         }
@@ -4483,6 +4523,117 @@ extern "C" int kiln_rocm_flash_attn_fwd_bf16(const void* q,
     default:
         return -4;
     }
+}
+
+extern "C" int kiln_rocm_flash_attn_fwd_abs_tile_bf16(const void* q,
+                                                      const void* k,
+                                                      const void* v,
+                                                      void* out,
+                                                      void* softmax_lse_out,
+                                                      int batch_size,
+                                                      int seqlen_q_tile,
+                                                      int seqlen_k,
+                                                      int seqlen_q_total,
+                                                      int num_heads,
+                                                      int num_heads_k,
+                                                      int head_dim,
+                                                      float softmax_scale,
+                                                      int is_causal,
+                                                      int q_start,
+                                                      void* stream)
+{
+    if(q == nullptr || k == nullptr || v == nullptr || out == nullptr)
+    {
+        return -1;
+    }
+    if(batch_size <= 0 || seqlen_q_tile <= 0 || seqlen_k <= 0 || seqlen_q_total <= 0 ||
+       num_heads <= 0 || num_heads_k <= 0 || q_start < 0 ||
+       q_start + seqlen_q_tile > seqlen_q_total)
+    {
+        return -2;
+    }
+    if(num_heads % num_heads_k != 0)
+    {
+        return -3;
+    }
+    switch(head_dim)
+    {
+    case 128:
+        return launch_fwd_qblock_cached<128, 8, 32>(q,
+                                                    k,
+                                                    v,
+                                                    out,
+                                                    softmax_lse_out,
+                                                    batch_size,
+                                                    seqlen_q_tile,
+                                                    seqlen_k,
+                                                    seqlen_q_total,
+                                                    num_heads,
+                                                    num_heads_k,
+                                                    softmax_scale,
+                                                    q_start,
+                                                    is_causal,
+                                                    stream);
+    case 256:
+        break;
+    default:
+        return -4;
+    }
+
+    if(native_gqa_qblock_enabled(head_dim, seqlen_q_tile, seqlen_k, num_heads, num_heads_k))
+    {
+        if(!env_truthy("KILN_ROCM_FLASH_DISABLE_WMMA_GQA_QBLOCK") &&
+           current_device_supports_gfx11_wmma() &&
+           wmma_gqa_r64k32_enabled(seqlen_q_tile, seqlen_k))
+        {
+            return launch_fwd_wmma_gqa_r64h1k32(q,
+                                                k,
+                                                v,
+                                                out,
+                                                softmax_lse_out,
+                                                batch_size,
+                                                seqlen_q_tile,
+                                                seqlen_k,
+                                                seqlen_q_total,
+                                                num_heads,
+                                                num_heads_k,
+                                                softmax_scale,
+                                                q_start,
+                                                is_causal,
+                                                stream);
+        }
+        return launch_fwd_gqa_qblock_cached<256, 8, 4, 64>(q,
+                                                           k,
+                                                           v,
+                                                           out,
+                                                           softmax_lse_out,
+                                                           batch_size,
+                                                           seqlen_q_tile,
+                                                           seqlen_k,
+                                                           seqlen_q_total,
+                                                           num_heads,
+                                                           num_heads_k,
+                                                           softmax_scale,
+                                                           q_start,
+                                                           is_causal,
+                                                           stream);
+    }
+
+    return launch_fwd_qblock_cached<256, 8, 32>(q,
+                                                k,
+                                                v,
+                                                out,
+                                                softmax_lse_out,
+                                                batch_size,
+                                                seqlen_q_tile,
+                                                seqlen_k,
+                                                seqlen_q_total,
+                                                num_heads,
+                                                num_heads_k,
+                                                softmax_scale,
+                                                q_start,
+                                                is_causal,
+                                                stream);
 }
 
 extern "C" int kiln_rocm_flash_attn_fwd_stream_update_bf16(const void* q,
