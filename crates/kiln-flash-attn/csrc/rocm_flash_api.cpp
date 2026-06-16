@@ -129,6 +129,20 @@ bool wmma_gqa_r64k32_enabled(int seqlen_q, int seqlen_k)
     return std::max(seqlen_q, seqlen_k) >= threshold;
 }
 
+bool wmma_gqa_r64k32_log2_enabled(int seqlen_q, int seqlen_k)
+{
+    if(env_truthy("KILN_ROCM_FLASH_DISABLE_WMMA_GQA_R64K32_LOG2"))
+    {
+        return false;
+    }
+    if(env_truthy("KILN_ROCM_FLASH_USE_WMMA_GQA_R64K32_LOG2"))
+    {
+        return true;
+    }
+    const int threshold = env_i32_or("KILN_ROCM_FLASH_WMMA_GQA_R64K32_LOG2_MIN_SEQ", 32768);
+    return std::max(seqlen_q, seqlen_k) >= threshold;
+}
+
 bool current_device_supports_gfx11_wmma()
 {
     int device = 0;
@@ -224,6 +238,33 @@ __device__ __forceinline__ void kiln_bf16_pair_to_f32(uint32_t packed, float& lo
 {
     lo = __uint_as_float((packed & 0xffffu) << 16);
     hi = __uint_as_float((packed >> 16) << 16);
+}
+
+template <bool Log2Domain>
+__device__ __forceinline__ float kiln_softmax_exp(float x)
+{
+    if constexpr(Log2Domain)
+    {
+        return exp2f(x);
+    }
+    else
+    {
+        return expf(x);
+    }
+}
+
+template <bool Log2Domain>
+__device__ __forceinline__ float kiln_lse_from_m_l(float m, float l)
+{
+    if constexpr(Log2Domain)
+    {
+        constexpr float Ln2 = 0.6931471805599453094f;
+        return m * Ln2 + logf(l);
+    }
+    else
+    {
+        return m + logf(l);
+    }
 }
 
 template <int HeadDim, int Rows>
@@ -757,6 +798,7 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r32h1k32_bf16_kernel(
     }
 }
 
+template <bool Log2Domain>
 __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
     const hip_bfloat16* __restrict__ q,
     const hip_bfloat16* __restrict__ k,
@@ -834,6 +876,8 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
     const bool valid_q1 = q_idx1 < seqlen_q;
     const bool valid_q2 = q_idx2 < seqlen_q;
     const bool valid_q3 = q_idx3 < seqlen_q;
+    constexpr float Log2E = 1.4426950408889634074f;
+    const float score_scale = Log2Domain ? softmax_scale * Log2E : softmax_scale;
     const size_t q_base0 =
         ((static_cast<size_t>(batch) * seqlen_q + (valid_q0 ? q_idx0 : 0)) * num_heads + head) *
         HeadDim;
@@ -975,7 +1019,7 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
                     const int score_row = row_start + i * 2 + score_row_parity;
                     if(score_row < Rows && score_col < KeyBlock)
                     {
-                        scores[score_row][score_col] = c_vec[i] * softmax_scale;
+                        scores[score_row][score_col] = c_vec[i] * score_scale;
                     }
                 }
             }
@@ -1032,10 +1076,10 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
                                         : (softmax_group == 1
                                                ? new_m1
                                                : (softmax_group == 2 ? new_m2 : new_m3));
-                beta0 = expf(score0 - new_m);
-                beta1 = expf(score1 - new_m);
-                const float beta2 = expf(score2 - new_m);
-                const float beta3 = expf(score3 - new_m);
+                beta0 = kiln_softmax_exp<Log2Domain>(score0 - new_m);
+                beta1 = kiln_softmax_exp<Log2Domain>(score1 - new_m);
+                const float beta2 = kiln_softmax_exp<Log2Domain>(score2 - new_m);
+                const float beta3 = kiln_softmax_exp<Log2Domain>(score3 - new_m);
                 scores[softmax_row][col0] = beta0;
                 scores[softmax_row][col1] = beta1;
                 scores[softmax_row][col2] = beta2;
@@ -1082,12 +1126,20 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
                                          : (softmax_group == 1
                                                 ? tile_m1
                                                 : (softmax_group == 2 ? tile_m2 : tile_m3));
-                beta0 = valid_key0 && tile_m > -INFINITY ? expf(score0 - new_m) : 0.0f;
-                beta1 = valid_key1 && tile_m > -INFINITY ? expf(score1 - new_m) : 0.0f;
+                beta0 = valid_key0 && tile_m > -INFINITY
+                            ? kiln_softmax_exp<Log2Domain>(score0 - new_m)
+                            : 0.0f;
+                beta1 = valid_key1 && tile_m > -INFINITY
+                            ? kiln_softmax_exp<Log2Domain>(score1 - new_m)
+                            : 0.0f;
                 const float beta2 =
-                    valid_key2 && tile_m > -INFINITY ? expf(score2 - new_m) : 0.0f;
+                    valid_key2 && tile_m > -INFINITY
+                        ? kiln_softmax_exp<Log2Domain>(score2 - new_m)
+                        : 0.0f;
                 const float beta3 =
-                    valid_key3 && tile_m > -INFINITY ? expf(score3 - new_m) : 0.0f;
+                    valid_key3 && tile_m > -INFINITY
+                        ? kiln_softmax_exp<Log2Domain>(score3 - new_m)
+                        : 0.0f;
                 scores[softmax_row][col0] = beta0;
                 scores[softmax_row][col1] = beta1;
                 scores[softmax_row][col2] = beta2;
@@ -1101,10 +1153,10 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
             const float beta_sum1 = __shfl(beta_sum_group, 8, KilnLogicalWarpSize);
             const float beta_sum2 = __shfl(beta_sum_group, 16, KilnLogicalWarpSize);
             const float beta_sum3 = __shfl(beta_sum_group, 24, KilnLogicalWarpSize);
-            alpha0 = l0 > 0.0f ? expf(m0 - new_m0) : 0.0f;
-            alpha1 = l1 > 0.0f ? expf(m1 - new_m1) : 0.0f;
-            alpha2 = l2 > 0.0f ? expf(m2 - new_m2) : 0.0f;
-            alpha3 = l3 > 0.0f ? expf(m3 - new_m3) : 0.0f;
+            alpha0 = l0 > 0.0f ? kiln_softmax_exp<Log2Domain>(m0 - new_m0) : 0.0f;
+            alpha1 = l1 > 0.0f ? kiln_softmax_exp<Log2Domain>(m1 - new_m1) : 0.0f;
+            alpha2 = l2 > 0.0f ? kiln_softmax_exp<Log2Domain>(m2 - new_m2) : 0.0f;
+            alpha3 = l3 > 0.0f ? kiln_softmax_exp<Log2Domain>(m3 - new_m3) : 0.0f;
 
             l0 = l0 * alpha0 + beta_sum0;
             l1 = l1 * alpha1 + beta_sum1;
@@ -1160,22 +1212,22 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
         if(valid_q0 && lse != nullptr)
         {
             lse[(static_cast<size_t>(batch) * num_heads + head) * seqlen_q + q_idx0] =
-                l0 > 0.0f ? m0 + logf(l0) : -INFINITY;
+                l0 > 0.0f ? kiln_lse_from_m_l<Log2Domain>(m0, l0) : -INFINITY;
         }
         if(valid_q1 && lse != nullptr)
         {
             lse[(static_cast<size_t>(batch) * num_heads + head) * seqlen_q + q_idx1] =
-                l1 > 0.0f ? m1 + logf(l1) : -INFINITY;
+                l1 > 0.0f ? kiln_lse_from_m_l<Log2Domain>(m1, l1) : -INFINITY;
         }
         if(valid_q2 && lse != nullptr)
         {
             lse[(static_cast<size_t>(batch) * num_heads + head) * seqlen_q + q_idx2] =
-                l2 > 0.0f ? m2 + logf(l2) : -INFINITY;
+                l2 > 0.0f ? kiln_lse_from_m_l<Log2Domain>(m2, l2) : -INFINITY;
         }
         if(valid_q3 && lse != nullptr)
         {
             lse[(static_cast<size_t>(batch) * num_heads + head) * seqlen_q + q_idx3] =
-                l3 > 0.0f ? m3 + logf(l3) : -INFINITY;
+                l3 > 0.0f ? kiln_lse_from_m_l<Log2Domain>(m3, l3) : -INFINITY;
         }
     }
 
@@ -3222,23 +3274,46 @@ int launch_fwd_wmma_gqa_r64h1k32(const void* q,
               static_cast<unsigned>(num_heads),
               static_cast<unsigned>(batch_size));
     dim3 block(512);
-    hipLaunchKernelGGL(kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel,
-                       grid,
-                       block,
-                       0,
-                       static_cast<hipStream_t>(stream),
-                       static_cast<const hip_bfloat16*>(q),
-                       static_cast<const hip_bfloat16*>(k),
-                       static_cast<const hip_bfloat16*>(v),
-                       static_cast<hip_bfloat16*>(out),
-                       static_cast<float*>(softmax_lse_out),
-                       batch_size,
-                       seqlen_q,
-                       seqlen_k,
-                       num_heads,
-                       num_heads_k,
-                       softmax_scale,
-                       is_causal != 0 ? 1 : 0);
+    if(wmma_gqa_r64k32_log2_enabled(seqlen_q, seqlen_k))
+    {
+        hipLaunchKernelGGL((kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel<true>),
+                           grid,
+                           block,
+                           0,
+                           static_cast<hipStream_t>(stream),
+                           static_cast<const hip_bfloat16*>(q),
+                           static_cast<const hip_bfloat16*>(k),
+                           static_cast<const hip_bfloat16*>(v),
+                           static_cast<hip_bfloat16*>(out),
+                           static_cast<float*>(softmax_lse_out),
+                           batch_size,
+                           seqlen_q,
+                           seqlen_k,
+                           num_heads,
+                           num_heads_k,
+                           softmax_scale,
+                           is_causal != 0 ? 1 : 0);
+    }
+    else
+    {
+        hipLaunchKernelGGL((kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel<false>),
+                           grid,
+                           block,
+                           0,
+                           static_cast<hipStream_t>(stream),
+                           static_cast<const hip_bfloat16*>(q),
+                           static_cast<const hip_bfloat16*>(k),
+                           static_cast<const hip_bfloat16*>(v),
+                           static_cast<hip_bfloat16*>(out),
+                           static_cast<float*>(softmax_lse_out),
+                           batch_size,
+                           seqlen_q,
+                           seqlen_k,
+                           num_heads,
+                           num_heads_k,
+                           softmax_scale,
+                           is_causal != 0 ? 1 : 0);
+    }
 
     const hipError_t err = hipGetLastError();
     return err == hipSuccess ? 0 : static_cast<int>(err);
