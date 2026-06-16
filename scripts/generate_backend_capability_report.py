@@ -931,6 +931,9 @@ def training_precision_policy_report() -> dict[str, Any]:
             "optimizer_parameter_dtypes": ["F32"],
             "mixed_rms_norm_weight_dtype": None,
             "streaming_prefill_tile_tokens": 8192,
+            "detached_full_attn_tile_tokens": 8192,
+            "detached_full_attn_boundary_tile_tokens": 8192,
+            "detached_full_attn_tape_replay_tile_tokens": 8192,
             "tape_streaming_tile_tokens": 8192,
             "paged_prefill_medium_tile_tokens": None,
             "paged_prefill_medium_tile_max_tokens": None,
@@ -947,6 +950,9 @@ def training_precision_policy_report() -> dict[str, Any]:
             "optimizer_parameter_dtypes": ["F32", "BF16"],
             "mixed_rms_norm_weight_dtype": None,
             "streaming_prefill_tile_tokens": 1024,
+            "detached_full_attn_tile_tokens": 8192,
+            "detached_full_attn_boundary_tile_tokens": 65536,
+            "detached_full_attn_tape_replay_tile_tokens": 65536,
             "tape_streaming_tile_tokens": 1024,
             "paged_prefill_medium_tile_tokens": None,
             "paged_prefill_medium_tile_max_tokens": None,
@@ -963,12 +969,15 @@ def training_precision_policy_report() -> dict[str, Any]:
             "optimizer_parameter_dtypes": ["F32", "BF16"],
             "mixed_rms_norm_weight_dtype": None,
             "streaming_prefill_tile_tokens": 1024,
+            "detached_full_attn_tile_tokens": 8192,
+            "detached_full_attn_boundary_tile_tokens": 8192,
+            "detached_full_attn_tape_replay_tile_tokens": 8192,
             "tape_streaming_tile_tokens": 1024,
             "paged_prefill_medium_tile_tokens": 1024,
             "paged_prefill_medium_tile_max_tokens": 20000,
             "exact_gdn_backward_tile_tokens": None,
             "mixed_precision": True,
-            "notes": "ROCm mirrors CUDA's kt-tape dtype envelope while dispatching through HIP/hipBLASLt-native leaves where available.",
+            "notes": "ROCm mirrors CUDA's kt-tape dtype envelope while dispatching through HIP/hipBLASLt-native leaves where available; materializing SDPA paths dynamically shrink exact full-attention tiles to fit live memory.",
         },
         "metal": {
             "name": "metal_bf16_uma",
@@ -979,6 +988,9 @@ def training_precision_policy_report() -> dict[str, Any]:
             "optimizer_parameter_dtypes": ["F32", "BF16"],
             "mixed_rms_norm_weight_dtype": None,
             "streaming_prefill_tile_tokens": 2048,
+            "detached_full_attn_tile_tokens": 8192,
+            "detached_full_attn_boundary_tile_tokens": 8192,
+            "detached_full_attn_tape_replay_tile_tokens": 8192,
             "tape_streaming_tile_tokens": 2048,
             "paged_prefill_medium_tile_tokens": None,
             "paged_prefill_medium_tile_max_tokens": None,
@@ -995,6 +1007,9 @@ def training_precision_policy_report() -> dict[str, Any]:
             "optimizer_parameter_dtypes": ["F32", "BF16"],
             "mixed_rms_norm_weight_dtype": "BF16",
             "streaming_prefill_tile_tokens": 2048,
+            "detached_full_attn_tile_tokens": 8192,
+            "detached_full_attn_boundary_tile_tokens": 8192,
+            "detached_full_attn_tape_replay_tile_tokens": 8192,
             "tape_streaming_tile_tokens": 2048,
             "paged_prefill_medium_tile_tokens": None,
             "paged_prefill_medium_tile_max_tokens": None,
@@ -2812,8 +2827,8 @@ def markdown(data: dict[str, Any]) -> str:
     lines.append("")
     lines.append("## Training Precision Policy")
     lines.append("")
-    lines.append("| Backend | Policy | Activations | Base Weights | LoRA | Loss Accum | Optimizer Params | Mixed RMSNorm Weight | Streaming Tile | Tape Tile | Paged Medium Tile | Exact GDN Backward Tile | Mixed |")
-    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("| Backend | Policy | Activations | Base Weights | LoRA | Loss Accum | Optimizer Params | Mixed RMSNorm Weight | Streaming Tile | Detached Full-Attn Tile | Detached Boundary Tile | Detached Tape Tile | Tape Tile | Paged Medium Tile | Exact GDN Backward Tile | Mixed |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for backend, info in data["training_precision_policy"].items():
         exact_gdn_tile = info["exact_gdn_backward_tile_tokens"]
         exact_gdn_tile_display = (
@@ -2838,6 +2853,9 @@ def markdown(data: dict[str, Any]) -> str:
             f"`{','.join(info['optimizer_parameter_dtypes'])}` | "
             f"`{mixed_rms_norm_weight_dtype}` | "
             f"`{info['streaming_prefill_tile_tokens']}` | "
+            f"`{info['detached_full_attn_tile_tokens']}` | "
+            f"`{info['detached_full_attn_boundary_tile_tokens']}` | "
+            f"`{info['detached_full_attn_tape_replay_tile_tokens']}` | "
             f"`{info['tape_streaming_tile_tokens']}` | "
             f"`{paged_medium_tile_display}` | "
             f"`{exact_gdn_tile_display}` | "

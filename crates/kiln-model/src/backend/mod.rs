@@ -394,6 +394,8 @@ pub struct TrainingPrecisionPolicy {
     pub mixed_rms_norm_weight_dtype: Option<kiln_tensor::DType>,
     pub streaming_prefill_tile_tokens: usize,
     pub detached_full_attn_tile_tokens: usize,
+    pub detached_full_attn_boundary_tile_tokens: usize,
+    pub detached_full_attn_tape_replay_tile_tokens: usize,
     pub tape_streaming_tile_tokens: usize,
     pub paged_prefill_medium_tile_tokens: Option<usize>,
     pub paged_prefill_medium_tile_max_tokens: Option<usize>,
@@ -414,6 +416,8 @@ impl TrainingPrecisionPolicy {
             mixed_rms_norm_weight_dtype: None,
             streaming_prefill_tile_tokens: 8192,
             detached_full_attn_tile_tokens: 8192,
+            detached_full_attn_boundary_tile_tokens: 8192,
+            detached_full_attn_tape_replay_tile_tokens: 8192,
             tape_streaming_tile_tokens: 8192,
             paged_prefill_medium_tile_tokens: None,
             paged_prefill_medium_tile_max_tokens: None,
@@ -434,6 +438,10 @@ impl TrainingPrecisionPolicy {
             mixed_rms_norm_weight_dtype: None,
             streaming_prefill_tile_tokens: 1024,
             detached_full_attn_tile_tokens: 8192,
+            detached_full_attn_boundary_tile_tokens:
+                crate::forward::DETACHED_FULL_ATTN_FLASH_DEFAULT_TILE,
+            detached_full_attn_tape_replay_tile_tokens:
+                crate::forward::DETACHED_FULL_ATTN_FLASH_DEFAULT_TILE,
             tape_streaming_tile_tokens: 1024,
             paged_prefill_medium_tile_tokens: None,
             paged_prefill_medium_tile_max_tokens: None,
@@ -454,6 +462,10 @@ impl TrainingPrecisionPolicy {
             mixed_rms_norm_weight_dtype: None,
             streaming_prefill_tile_tokens: 1024,
             detached_full_attn_tile_tokens:
+                crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE,
+            detached_full_attn_boundary_tile_tokens:
+                crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE,
+            detached_full_attn_tape_replay_tile_tokens:
                 crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE,
             tape_streaming_tile_tokens: 1024,
             paged_prefill_medium_tile_tokens: Some(1024),
@@ -476,6 +488,10 @@ impl TrainingPrecisionPolicy {
             streaming_prefill_tile_tokens: 2048,
             detached_full_attn_tile_tokens:
                 crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE,
+            detached_full_attn_boundary_tile_tokens:
+                crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE,
+            detached_full_attn_tape_replay_tile_tokens:
+                crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE,
             tape_streaming_tile_tokens: 2048,
             paged_prefill_medium_tile_tokens: None,
             paged_prefill_medium_tile_max_tokens: None,
@@ -496,6 +512,10 @@ impl TrainingPrecisionPolicy {
             mixed_rms_norm_weight_dtype: Some(kiln_tensor::DType::BF16),
             streaming_prefill_tile_tokens: 2048,
             detached_full_attn_tile_tokens:
+                crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE,
+            detached_full_attn_boundary_tile_tokens:
+                crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE,
+            detached_full_attn_tape_replay_tile_tokens:
                 crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE,
             tape_streaming_tile_tokens: 2048,
             paged_prefill_medium_tile_tokens: None,
@@ -2119,6 +2139,14 @@ mod tests {
         assert_eq!(cuda.exact_gdn_backward_tile_tokens, Some(1024));
         assert_eq!(cuda.streaming_prefill_tile_tokens, 1024);
         assert_eq!(cuda.detached_full_attn_tile_tokens, 8192);
+        assert_eq!(
+            cuda.detached_full_attn_boundary_tile_tokens,
+            crate::forward::DETACHED_FULL_ATTN_FLASH_DEFAULT_TILE
+        );
+        assert_eq!(
+            cuda.detached_full_attn_tape_replay_tile_tokens,
+            crate::forward::DETACHED_FULL_ATTN_FLASH_DEFAULT_TILE
+        );
         assert_eq!(cuda.tape_streaming_tile_tokens, 1024);
         assert!(cuda.mixed_precision);
 
@@ -2126,6 +2154,14 @@ mod tests {
         assert_eq!(rocm.streaming_prefill_tile_tokens, 1024);
         assert_eq!(
             rocm.detached_full_attn_tile_tokens,
+            crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE
+        );
+        assert_eq!(
+            rocm.detached_full_attn_boundary_tile_tokens,
+            crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE
+        );
+        assert_eq!(
+            rocm.detached_full_attn_tape_replay_tile_tokens,
             crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE
         );
         assert_eq!(rocm.tape_streaming_tile_tokens, 1024);
@@ -2139,6 +2175,14 @@ mod tests {
         assert_eq!(metal.streaming_prefill_tile_tokens, 2048);
         assert_eq!(
             metal.detached_full_attn_tile_tokens,
+            crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE
+        );
+        assert_eq!(
+            metal.detached_full_attn_boundary_tile_tokens,
+            crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE
+        );
+        assert_eq!(
+            metal.detached_full_attn_tape_replay_tile_tokens,
             crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE
         );
         assert_eq!(metal.tape_streaming_tile_tokens, 2048);
@@ -2155,6 +2199,14 @@ mod tests {
         assert_eq!(vulkan.streaming_prefill_tile_tokens, 2048);
         assert_eq!(
             vulkan.detached_full_attn_tile_tokens,
+            crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE
+        );
+        assert_eq!(
+            vulkan.detached_full_attn_boundary_tile_tokens,
+            crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE
+        );
+        assert_eq!(
+            vulkan.detached_full_attn_tape_replay_tile_tokens,
             crate::forward::DETACHED_FULL_ATTN_MATERIALIZED_DEFAULT_TILE
         );
         assert_eq!(vulkan.tape_streaming_tile_tokens, 2048);

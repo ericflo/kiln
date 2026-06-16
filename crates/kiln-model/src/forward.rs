@@ -6018,34 +6018,19 @@ pub fn detached_full_attn_tile_tokens_for(device: &Device) -> usize {
 
 fn detached_full_attn_boundary_tile_tokens_for(device: &Device) -> usize {
     detached_full_attn_tile_tokens_env_override().unwrap_or_else(|| {
-        match streaming_prefill_device_kind(device) {
-            StreamingPrefillDeviceKind::Cuda => DETACHED_FULL_ATTN_FLASH_DEFAULT_TILE,
-            #[cfg(feature = "rocm")]
-            StreamingPrefillDeviceKind::Rocm
-                if rocm_long_flash_attn_enabled()
-                    && rocm_native_rectangular_causal_flash_enabled() =>
-            {
-                DETACHED_FULL_ATTN_ROCM_ONLINE_DEFAULT_TILE
-            }
-            _ => {
-                crate::backend::training_precision_policy_for_device_kt(*device)
-                    .detached_full_attn_tile_tokens
-            }
+        if rocm_online_full_attn_boundary_tile_enabled(device) {
+            DETACHED_FULL_ATTN_ROCM_ONLINE_DEFAULT_TILE
+        } else {
+            crate::backend::training_precision_policy_for_device_kt(*device)
+                .detached_full_attn_boundary_tile_tokens
         }
     })
 }
 
 fn detached_full_attn_tape_replay_tile_tokens_for(device: &Device) -> usize {
     detached_full_attn_tile_tokens_env_override().unwrap_or_else(|| {
-        if matches!(
-            streaming_prefill_device_kind(device),
-            StreamingPrefillDeviceKind::Cuda
-        ) {
-            DETACHED_FULL_ATTN_FLASH_DEFAULT_TILE
-        } else {
-            crate::backend::training_precision_policy_for_device_kt(*device)
-                .detached_full_attn_tile_tokens
-        }
+        crate::backend::training_precision_policy_for_device_kt(*device)
+            .detached_full_attn_tape_replay_tile_tokens
     })
 }
 
@@ -6058,19 +6043,39 @@ fn rocm_native_rectangular_causal_flash_enabled() -> bool {
     kiln_core::env_flag::env_flag("KILN_ROCM_FLASH_NATIVE_RECTANGULAR_CAUSAL", true)
 }
 
+fn rocm_online_full_attn_boundary_tile_enabled(device: &Device) -> bool {
+    #[cfg(feature = "rocm")]
+    {
+        matches!(
+            streaming_prefill_device_kind(device),
+            StreamingPrefillDeviceKind::Rocm
+        ) && rocm_long_flash_attn_enabled()
+            && rocm_native_rectangular_causal_flash_enabled()
+    }
+    #[cfg(not(feature = "rocm"))]
+    {
+        let _ = device;
+        false
+    }
+}
+
 fn long_prefill_leaf_flash_allowed_for_device(
     device: &Device,
     q_len: usize,
     kv_len: usize,
 ) -> bool {
     let _ = (q_len, kv_len);
-    match streaming_prefill_device_kind(device) {
+    if matches!(
+        streaming_prefill_device_kind(device),
+        StreamingPrefillDeviceKind::Rocm
+    ) {
         // ROCm's long flash/online SDPA route is exact and is the only
         // practical path for large prefix-causal training rows on gfx115x.
         // Keep the disable env as a production kill switch, but do not require
         // a server restart with an opt-in env just to fit and train a long row.
-        StreamingPrefillDeviceKind::Rocm => rocm_long_flash_attn_enabled(),
-        _ => true,
+        rocm_long_flash_attn_enabled()
+    } else {
+        true
     }
 }
 
