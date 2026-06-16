@@ -1113,12 +1113,18 @@ mod tests {
 
     #[test]
     fn estimator_recompute_boundaries_does_not_scale_with_segment_count() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE");
+            std::env::remove_var("KILN_CHECKPOINT_BOUNDARY_CACHE_GB");
+        }
         let cfg = qwen_4b();
+        let seq_len = 104_412;
         let cached =
-            estimate_step_working_set(&cfg, 8192, 16, 32, WeightResidency::SingleCopy, false);
+            estimate_step_working_set(&cfg, seq_len, 16, 32, WeightResidency::SingleCopy, false);
         let recompute = estimate_step_working_set_with_options(
             &cfg,
-            8192,
+            seq_len,
             16,
             32,
             WeightResidency::SingleCopy,
@@ -1136,14 +1142,20 @@ mod tests {
     }
 
     #[test]
-    fn recompute_boundary_estimate_charges_model_dtype_segment_input() {
+    fn recompute_boundary_estimate_charges_sparse_anchors_and_segment_input() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE");
+            std::env::remove_var("KILN_CHECKPOINT_BOUNDARY_CACHE_GB");
+        }
         let cfg = qwen_4b();
         let seq_len = 8192usize;
+        let num_segments = 32usize;
         let estimate = estimate_step_working_set_with_options(
             &cfg,
             seq_len,
             16,
-            32,
+            num_segments,
             WeightResidency::SingleCopy,
             true,
             EstimateOptions {
@@ -1154,7 +1166,15 @@ mod tests {
         );
         let h = cfg.hidden_size as u64;
         let t = seq_len as u64;
-        let expected = 2 * h * t * 4 + h * t * dtype_bytes(cfg.dtype);
+        let elem = dtype_bytes(cfg.dtype);
+        let anchor_stride = checkpoint_boundary_anchor_stride_for_shape(
+            seq_len,
+            num_segments,
+            cfg.hidden_size,
+            elem as usize,
+        );
+        let anchor_count = checkpoint_boundary_anchor_count(num_segments, anchor_stride) as u64;
+        let expected = anchor_count * h * t * elem + 2 * h * t * 4 + h * t * elem;
         assert_eq!(estimate.breakdown.boundary_states, expected);
     }
 
