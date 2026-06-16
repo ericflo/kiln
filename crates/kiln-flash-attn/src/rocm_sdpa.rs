@@ -283,18 +283,22 @@ fn rocm_timed_finish(
 }
 
 fn rocm_attention_cooperative_yield(device: KtDevice) -> Result<(), FlashAttnError> {
-    if matches!(
-        env_bool("KILN_ROCM_ATTENTION_COOPERATIVE_YIELD"),
-        Some(false)
-    ) {
+    if !env_bool("KILN_ROCM_ATTENTION_COOPERATIVE_YIELD").unwrap_or(false) {
         return Ok(());
     }
     rocm_sync_device(device)?;
-    let sleep_ms = env_usize("KILN_ROCM_ATTENTION_YIELD_MS").unwrap_or(1);
+    let sleep_ms = env_usize("KILN_ROCM_ATTENTION_YIELD_MS").unwrap_or(0);
     if sleep_ms > 0 {
         std::thread::sleep(std::time::Duration::from_millis(sleep_ms as u64));
     } else {
         std::thread::yield_now();
+    }
+    Ok(())
+}
+
+fn rocm_native_ffi_sync_if_enabled(device: KtDevice) -> Result<(), FlashAttnError> {
+    if env_bool("KILN_ROCM_FLASH_NATIVE_FFI_SYNC").unwrap_or(false) {
+        rocm_sync_device(device)?;
     }
     Ok(())
 }
@@ -2056,11 +2060,11 @@ fn try_ffi_fwd_bf16(
     let stream = kiln_kt_bridge::rocm_stream_raw_of(q, "q")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
 
-    // The native FFI kernels read borrowed q/k/v pointers that often point at
-    // just-materialized contiguous tiles. Fence the active ROCm stream before
-    // crossing into the custom HIP launch so those producer kernels cannot race
-    // with the raw-pointer consumer.
-    rocm_sync_device(q.device())?;
+    // The native FFI kernels launch on the same active ROCm stream as tensor
+    // ops and stream-ordered allocation/free. Stream ordering preserves
+    // producer/consumer and temporary-buffer lifetimes; an opt-in fence remains
+    // available for runtime debugging.
+    rocm_native_ffi_sync_if_enabled(q.device())?;
 
     let status = unsafe {
         let launch = if use_ck {
@@ -2086,10 +2090,7 @@ fn try_ffi_fwd_bf16(
         )
     };
     if status == 0 {
-        // The native FFI launch is async. Complete it before returning so
-        // caller-local q/k/v temporaries cannot be dropped and recycled while
-        // the kernel is still reading them.
-        rocm_sync_device(q.device())?;
+        rocm_native_ffi_sync_if_enabled(q.device())?;
         Ok(Some((out, lse)))
     } else {
         if rocm_trace_fwd_enabled() {
@@ -2153,7 +2154,7 @@ fn try_ffi_fwd_bf16_abs_tile(
     let stream = kiln_kt_bridge::rocm_stream_raw_of(q, "q")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
 
-    rocm_sync_device(q.device())?;
+    rocm_native_ffi_sync_if_enabled(q.device())?;
 
     let status = unsafe {
         crate::kiln_rocm_flash_attn_fwd_abs_tile_bf16(
@@ -2176,7 +2177,7 @@ fn try_ffi_fwd_bf16_abs_tile(
         )
     };
     if status == 0 {
-        rocm_sync_device(q.device())?;
+        rocm_native_ffi_sync_if_enabled(q.device())?;
         Ok(Some((out, lse)))
     } else {
         if rocm_trace_fwd_enabled() {
@@ -2244,7 +2245,7 @@ fn try_ffi_fwd_bf16_abs_tile_into(
     let stream = kiln_kt_bridge::rocm_stream_raw_of(q, "q")
         .map_err(|e| FlashAttnError::Msg(e.to_string()))?;
 
-    rocm_sync_device(q.device())?;
+    rocm_native_ffi_sync_if_enabled(q.device())?;
 
     let status = unsafe {
         crate::kiln_rocm_flash_attn_fwd_abs_tile_into_bf16(
@@ -2267,7 +2268,7 @@ fn try_ffi_fwd_bf16_abs_tile_into(
         )
     };
     if status == 0 {
-        rocm_sync_device(q.device())?;
+        rocm_native_ffi_sync_if_enabled(q.device())?;
         Ok(true)
     } else {
         if rocm_trace_fwd_enabled() {
@@ -4719,5 +4720,40 @@ mod tests {
             16usize.saturating_mul(tile_len).saturating_mul(32_768) <= 536_870_912,
             "tile_len={tile_len} still exceeds score element cap"
         );
+    }
+
+    #[test]
+    fn cooperative_yield_is_opt_in() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        unsafe {
+            std::env::remove_var("KILN_ROCM_ATTENTION_COOPERATIVE_YIELD");
+            std::env::remove_var("KILN_ROCM_ATTENTION_YIELD_MS");
+        }
+        rocm_attention_cooperative_yield(KtDevice::Cpu).expect("default yield should be disabled");
+        unsafe {
+            std::env::set_var("KILN_ROCM_ATTENTION_COOPERATIVE_YIELD", "0");
+        }
+        rocm_attention_cooperative_yield(KtDevice::Cpu).expect("explicit false should be disabled");
+        unsafe {
+            std::env::remove_var("KILN_ROCM_ATTENTION_COOPERATIVE_YIELD");
+        }
+    }
+
+    #[test]
+    fn native_ffi_sync_is_opt_in() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        unsafe {
+            std::env::remove_var("KILN_ROCM_FLASH_NATIVE_FFI_SYNC");
+        }
+        rocm_native_ffi_sync_if_enabled(KtDevice::Cpu)
+            .expect("default native FFI fence should be disabled");
+        unsafe {
+            std::env::set_var("KILN_ROCM_FLASH_NATIVE_FFI_SYNC", "0");
+        }
+        rocm_native_ffi_sync_if_enabled(KtDevice::Cpu)
+            .expect("explicit false native FFI fence should be disabled");
+        unsafe {
+            std::env::remove_var("KILN_ROCM_FLASH_NATIVE_FFI_SYNC");
+        }
     }
 }
