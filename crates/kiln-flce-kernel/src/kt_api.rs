@@ -850,7 +850,6 @@ fn flce_gpu_host_scalar_mean_enabled(device: &KtDevice) -> bool {
     }
 }
 
-#[cfg(any(feature = "cuda", feature = "rocm"))]
 fn mean_flce_loss_from_metadata_host_scalar(
     running_max: &KtTensor,
     running_sumexp: &KtTensor,
@@ -908,7 +907,6 @@ fn mean_flce_loss_from_metadata_host_scalar(
     KtTensor::from_vec_on(device, vec![mean], vec![]).map_err(FlceError::Kt)
 }
 
-#[cfg(any(feature = "cuda", feature = "rocm"))]
 fn flce_host_f32_values(label: &str, tensor: &KtTensor) -> Result<Vec<f32>, FlceError> {
     synchronize_flce_reduction_tensor(label, tensor)?;
     tensor

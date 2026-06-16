@@ -10983,7 +10983,7 @@ fn rocm_training_mlp_chunk_tokens() -> usize {
     })
 }
 
-#[cfg(not(feature = "rocm"))]
+#[cfg(all(any(feature = "cuda", feature = "rocm"), not(feature = "rocm")))]
 fn rocm_training_mlp_chunk_tokens() -> usize {
     generic_cuda_training_mlp_chunk_tokens()
 }
@@ -39436,6 +39436,7 @@ mod tests {
             std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
             std::env::remove_var("KILN_TAPE_STREAMING_TILE_TOKENS");
             std::env::remove_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS");
+            std::env::remove_var("KILN_DETACHED_FULL_ATTN_TILE_TOKENS");
             std::env::remove_var("KILN_STREAMING_LAST_TOKEN_LM_HEAD");
         }
         assert!(!streaming_prefill_enabled(), "default must be disabled");
@@ -39521,9 +39522,13 @@ mod tests {
             detached_full_attn_boundary_tile_tokens_for(&Device::Cuda(0)),
             DETACHED_FULL_ATTN_FLASH_DEFAULT_TILE
         );
+        #[cfg(feature = "rocm")]
+        let expected_rocm_boundary_tile = DETACHED_FULL_ATTN_ROCM_ONLINE_DEFAULT_TILE;
+        #[cfg(not(feature = "rocm"))]
+        let expected_rocm_boundary_tile = DETACHED_FULL_ATTN_ROCM_DEFAULT_TILE;
         assert_eq!(
             detached_full_attn_boundary_tile_tokens_for(&Device::Rocm(0)),
-            DETACHED_FULL_ATTN_ROCM_ONLINE_DEFAULT_TILE
+            expected_rocm_boundary_tile
         );
         assert_eq!(
             detached_full_attn_tape_replay_tile_tokens_for(&Device::Cuda(0)),
