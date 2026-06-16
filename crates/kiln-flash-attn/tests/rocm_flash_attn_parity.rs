@@ -848,6 +848,18 @@ fn flash_attn_rocm_long_shape_bench() {
         "kiln_flash_bench phase=fwd seq={seq} heads={h} kv_heads={hk} head_dim={d} elapsed_ms={:.3}",
         fwd_start.elapsed().as_secs_f64() * 1000.0
     );
+    if std::env::var("KILN_ROCM_FLASH_BENCH_FWD_ONLY")
+        .ok()
+        .map(|s| {
+            matches!(
+                s.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+    {
+        return;
+    }
 
     let collapsed_bwd = std::env::var("KILN_ROCM_FLASH_BENCH_COLLAPSED_BWD")
         .ok()
