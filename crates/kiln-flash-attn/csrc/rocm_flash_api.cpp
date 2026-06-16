@@ -813,6 +813,8 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
     int num_heads_k,
     float softmax_scale,
     int q_start,
+    int out_q_start,
+    int out_seqlen_q,
     int is_causal)
 {
     constexpr int HeadDim = 256;
@@ -884,18 +886,26 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
     const int q_abs3 = q_start + q_idx3;
     constexpr float Log2E = 1.4426950408889634074f;
     const float score_scale = Log2Domain ? softmax_scale * Log2E : softmax_scale;
-    const size_t q_base0 =
-        ((static_cast<size_t>(batch) * seqlen_q + (valid_q0 ? q_idx0 : 0)) * num_heads + head) *
-        HeadDim;
-    const size_t q_base1 =
-        ((static_cast<size_t>(batch) * seqlen_q + (valid_q1 ? q_idx1 : 0)) * num_heads + head) *
-        HeadDim;
-    const size_t q_base2 =
-        ((static_cast<size_t>(batch) * seqlen_q + (valid_q2 ? q_idx2 : 0)) * num_heads + head) *
-        HeadDim;
-    const size_t q_base3 =
-        ((static_cast<size_t>(batch) * seqlen_q + (valid_q3 ? q_idx3 : 0)) * num_heads + head) *
-        HeadDim;
+    const size_t out_base0 = ((static_cast<size_t>(batch) * out_seqlen_q +
+                               (valid_q0 ? out_q_start + q_idx0 : 0)) *
+                                  num_heads +
+                              head) *
+                             HeadDim;
+    const size_t out_base1 = ((static_cast<size_t>(batch) * out_seqlen_q +
+                               (valid_q1 ? out_q_start + q_idx1 : 0)) *
+                                  num_heads +
+                              head) *
+                             HeadDim;
+    const size_t out_base2 = ((static_cast<size_t>(batch) * out_seqlen_q +
+                               (valid_q2 ? out_q_start + q_idx2 : 0)) *
+                                  num_heads +
+                              head) *
+                             HeadDim;
+    const size_t out_base3 = ((static_cast<size_t>(batch) * out_seqlen_q +
+                               (valid_q3 ? out_q_start + q_idx3 : 0)) *
+                                  num_heads +
+                              head) *
+                             HeadDim;
 
     for(int i = 0; i < LanePairs; ++i)
     {
@@ -1219,22 +1229,26 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
     {
         if(valid_q0 && lse != nullptr)
         {
-            lse[(static_cast<size_t>(batch) * num_heads + head) * seqlen_q + q_idx0] =
+            lse[(static_cast<size_t>(batch) * num_heads + head) * out_seqlen_q + out_q_start +
+                q_idx0] =
                 l0 > 0.0f ? kiln_lse_from_m_l<Log2Domain>(m0, l0) : -INFINITY;
         }
         if(valid_q1 && lse != nullptr)
         {
-            lse[(static_cast<size_t>(batch) * num_heads + head) * seqlen_q + q_idx1] =
+            lse[(static_cast<size_t>(batch) * num_heads + head) * out_seqlen_q + out_q_start +
+                q_idx1] =
                 l1 > 0.0f ? kiln_lse_from_m_l<Log2Domain>(m1, l1) : -INFINITY;
         }
         if(valid_q2 && lse != nullptr)
         {
-            lse[(static_cast<size_t>(batch) * num_heads + head) * seqlen_q + q_idx2] =
+            lse[(static_cast<size_t>(batch) * num_heads + head) * out_seqlen_q + out_q_start +
+                q_idx2] =
                 l2 > 0.0f ? kiln_lse_from_m_l<Log2Domain>(m2, l2) : -INFINITY;
         }
         if(valid_q3 && lse != nullptr)
         {
-            lse[(static_cast<size_t>(batch) * num_heads + head) * seqlen_q + q_idx3] =
+            lse[(static_cast<size_t>(batch) * num_heads + head) * out_seqlen_q + out_q_start +
+                q_idx3] =
                 l3 > 0.0f ? kiln_lse_from_m_l<Log2Domain>(m3, l3) : -INFINITY;
         }
     }
@@ -1245,8 +1259,8 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
         for(int i = 0; i < LanePairs; ++i)
         {
             const int dim = dim_pair_vals[i] * Bf16PerU32;
-            out[q_base0 + dim] = hip_bfloat16(acc_vals0_lo[i] * inv_l);
-            out[q_base0 + dim + 1] = hip_bfloat16(acc_vals0_hi[i] * inv_l);
+            out[out_base0 + dim] = hip_bfloat16(acc_vals0_lo[i] * inv_l);
+            out[out_base0 + dim + 1] = hip_bfloat16(acc_vals0_hi[i] * inv_l);
         }
     }
     if(valid_q1)
@@ -1255,8 +1269,8 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
         for(int i = 0; i < LanePairs; ++i)
         {
             const int dim = dim_pair_vals[i] * Bf16PerU32;
-            out[q_base1 + dim] = hip_bfloat16(acc_vals1_lo[i] * inv_l);
-            out[q_base1 + dim + 1] = hip_bfloat16(acc_vals1_hi[i] * inv_l);
+            out[out_base1 + dim] = hip_bfloat16(acc_vals1_lo[i] * inv_l);
+            out[out_base1 + dim + 1] = hip_bfloat16(acc_vals1_hi[i] * inv_l);
         }
     }
     if(valid_q2)
@@ -1265,8 +1279,8 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
         for(int i = 0; i < LanePairs; ++i)
         {
             const int dim = dim_pair_vals[i] * Bf16PerU32;
-            out[q_base2 + dim] = hip_bfloat16(acc_vals2_lo[i] * inv_l);
-            out[q_base2 + dim + 1] = hip_bfloat16(acc_vals2_hi[i] * inv_l);
+            out[out_base2 + dim] = hip_bfloat16(acc_vals2_lo[i] * inv_l);
+            out[out_base2 + dim + 1] = hip_bfloat16(acc_vals2_hi[i] * inv_l);
         }
     }
     if(valid_q3)
@@ -1275,8 +1289,8 @@ __global__ void kiln_rocm_flash_fwd_wmma_gqa_r64h1k32_bf16_kernel(
         for(int i = 0; i < LanePairs; ++i)
         {
             const int dim = dim_pair_vals[i] * Bf16PerU32;
-            out[q_base3 + dim] = hip_bfloat16(acc_vals3_lo[i] * inv_l);
-            out[q_base3 + dim + 1] = hip_bfloat16(acc_vals3_hi[i] * inv_l);
+            out[out_base3 + dim] = hip_bfloat16(acc_vals3_lo[i] * inv_l);
+            out[out_base3 + dim + 1] = hip_bfloat16(acc_vals3_hi[i] * inv_l);
         }
     }
 }
@@ -1763,6 +1777,8 @@ __global__ void kiln_rocm_flash_fwd_qblock_cached_bf16_kernel(
     int num_heads_k,
     float softmax_scale,
     int q_start,
+    int out_q_start,
+    int out_seqlen_q,
     int is_causal)
 {
     const int lane = static_cast<int>(threadIdx.x) % KilnLogicalWarpSize;
@@ -1792,6 +1808,11 @@ __global__ void kiln_rocm_flash_fwd_qblock_cached_bf16_kernel(
     const int q_abs = q_start + q_idx;
     const size_t q_base =
         ((static_cast<size_t>(batch) * seqlen_q + (valid_q ? q_idx : 0)) * num_heads + head) *
+        HeadDim;
+    const size_t out_base =
+        ((static_cast<size_t>(batch) * out_seqlen_q + (valid_q ? out_q_start + q_idx : 0)) *
+             num_heads +
+         head) *
         HeadDim;
 
     for(int dim = lane; dim < HeadDim; dim += KilnLogicalWarpSize)
@@ -1868,11 +1889,12 @@ __global__ void kiln_rocm_flash_fwd_qblock_cached_bf16_kernel(
         const float inv_l = l > 0.0f ? 1.0f / l : 0.0f;
         for(int i = 0; i < lane_dims; ++i)
         {
-            out[q_base + dim_vals[i]] = hip_bfloat16(acc_vals[i] * inv_l);
+            out[out_base + dim_vals[i]] = hip_bfloat16(acc_vals[i] * inv_l);
         }
         if(lane == 0 && lse != nullptr)
         {
-            lse[(static_cast<size_t>(batch) * num_heads + head) * seqlen_q + q_idx] =
+            lse[(static_cast<size_t>(batch) * num_heads + head) * out_seqlen_q + out_q_start +
+                q_idx] =
                 l > 0.0f ? m + logf(l) : -INFINITY;
         }
     }
@@ -1893,6 +1915,8 @@ __global__ void kiln_rocm_flash_fwd_gqa_qblock_cached_bf16_kernel(
     int num_heads_k,
     float softmax_scale,
     int q_start,
+    int out_q_start,
+    int out_seqlen_q,
     int is_causal)
 {
     const int lane = static_cast<int>(threadIdx.x) % KilnLogicalWarpSize;
@@ -1931,6 +1955,11 @@ __global__ void kiln_rocm_flash_fwd_gqa_qblock_cached_bf16_kernel(
     const size_t q_base =
         ((static_cast<size_t>(batch) * seqlen_q + (valid_q ? q_idx : 0)) * num_heads + head) *
         HeadDim;
+    const size_t out_base =
+        ((static_cast<size_t>(batch) * out_seqlen_q + (valid_q ? out_q_start + q_idx : 0)) *
+             num_heads +
+         head) *
+        HeadDim;
 
     for(int dim = lane; dim < HeadDim; dim += KilnLogicalWarpSize)
     {
@@ -2006,11 +2035,12 @@ __global__ void kiln_rocm_flash_fwd_gqa_qblock_cached_bf16_kernel(
         const float inv_l = l > 0.0f ? 1.0f / l : 0.0f;
         for(int i = 0; i < lane_dims; ++i)
         {
-            out[q_base + dim_vals[i]] = hip_bfloat16(acc_vals[i] * inv_l);
+            out[out_base + dim_vals[i]] = hip_bfloat16(acc_vals[i] * inv_l);
         }
         if(lane == 0 && lse != nullptr)
         {
-            lse[(static_cast<size_t>(batch) * num_heads + head) * seqlen_q + q_idx] =
+            lse[(static_cast<size_t>(batch) * num_heads + head) * out_seqlen_q + out_q_start +
+                q_idx] =
                 l > 0.0f ? m + logf(l) : -INFINITY;
         }
     }
@@ -3123,6 +3153,8 @@ int launch_fwd_qblock_cached(const void* q,
                              int num_heads_k,
                              float softmax_scale,
                              int q_start,
+                             int out_q_start,
+                             int out_seqlen_q,
                              int is_causal,
                              void* stream)
 {
@@ -3148,6 +3180,8 @@ int launch_fwd_qblock_cached(const void* q,
                        num_heads_k,
                        softmax_scale,
                        q_start,
+                       out_q_start,
+                       out_seqlen_q,
                        is_causal != 0 ? 1 : 0);
 
     const hipError_t err = hipGetLastError();
@@ -3168,6 +3202,8 @@ int launch_fwd_gqa_qblock_cached(const void* q,
                                  int num_heads_k,
                                  float softmax_scale,
                                  int q_start,
+                                 int out_q_start,
+                                 int out_seqlen_q,
                                  int is_causal,
                                  void* stream)
 {
@@ -3196,6 +3232,8 @@ int launch_fwd_gqa_qblock_cached(const void* q,
                        num_heads_k,
                        softmax_scale,
                        q_start,
+                       out_q_start,
+                       out_seqlen_q,
                        is_causal != 0 ? 1 : 0);
 
     const hipError_t err = hipGetLastError();
@@ -3295,6 +3333,8 @@ int launch_fwd_wmma_gqa_r64h1k32(const void* q,
                                   int num_heads_k,
                                   float softmax_scale,
                                   int q_start,
+                                  int out_q_start,
+                                  int out_seqlen_q,
                                   int is_causal,
                                   void* stream)
 {
@@ -3322,6 +3362,8 @@ int launch_fwd_wmma_gqa_r64h1k32(const void* q,
                            num_heads_k,
                            softmax_scale,
                            q_start,
+                           out_q_start,
+                           out_seqlen_q,
                            is_causal != 0 ? 1 : 0);
     }
     else
@@ -3344,6 +3386,8 @@ int launch_fwd_wmma_gqa_r64h1k32(const void* q,
                            num_heads_k,
                            softmax_scale,
                            q_start,
+                           out_q_start,
+                           out_seqlen_q,
                            is_causal != 0 ? 1 : 0);
     }
 
@@ -4386,6 +4430,8 @@ extern "C" int kiln_rocm_flash_attn_fwd_bf16(const void* q,
                                                         num_heads_k,
                                                         softmax_scale,
                                                         0,
+                                                        0,
+                                                        seqlen_q,
                                                         is_causal,
                                                         stream);
         }
@@ -4423,6 +4469,8 @@ extern "C" int kiln_rocm_flash_attn_fwd_bf16(const void* q,
                                                         num_heads_k,
                                                         softmax_scale,
                                                         0,
+                                                        0,
+                                                        seqlen_q,
                                                         is_causal,
                                                         stream);
                 }
@@ -4453,6 +4501,8 @@ extern "C" int kiln_rocm_flash_attn_fwd_bf16(const void* q,
                                                                num_heads_k,
                                                                softmax_scale,
                                                                0,
+                                                               0,
+                                                               seqlen_q,
                                                                is_causal,
                                                                stream);
         }
@@ -4504,6 +4554,8 @@ extern "C" int kiln_rocm_flash_attn_fwd_bf16(const void* q,
                                                         num_heads_k,
                                                         softmax_scale,
                                                         0,
+                                                        0,
+                                                        seqlen_q,
                                                         is_causal,
                                                         stream);
         }
@@ -4572,6 +4624,8 @@ extern "C" int kiln_rocm_flash_attn_fwd_abs_tile_bf16(const void* q,
                                                     num_heads_k,
                                                     softmax_scale,
                                                     q_start,
+                                                    0,
+                                                    seqlen_q_tile,
                                                     is_causal,
                                                     stream);
     case 256:
@@ -4599,6 +4653,8 @@ extern "C" int kiln_rocm_flash_attn_fwd_abs_tile_bf16(const void* q,
                                                 num_heads_k,
                                                 softmax_scale,
                                                 q_start,
+                                                0,
+                                                seqlen_q_tile,
                                                 is_causal,
                                                 stream);
         }
@@ -4615,6 +4671,8 @@ extern "C" int kiln_rocm_flash_attn_fwd_abs_tile_bf16(const void* q,
                                                            num_heads_k,
                                                            softmax_scale,
                                                            q_start,
+                                                           0,
+                                                           seqlen_q_tile,
                                                            is_causal,
                                                            stream);
     }
@@ -4632,6 +4690,127 @@ extern "C" int kiln_rocm_flash_attn_fwd_abs_tile_bf16(const void* q,
                                                 num_heads_k,
                                                 softmax_scale,
                                                 q_start,
+                                                0,
+                                                seqlen_q_tile,
+                                                is_causal,
+                                                stream);
+}
+
+extern "C" int kiln_rocm_flash_attn_fwd_abs_tile_into_bf16(const void* q,
+                                                           const void* k,
+                                                           const void* v,
+                                                           void* out,
+                                                           void* softmax_lse_out,
+                                                           int batch_size,
+                                                           int seqlen_q_tile,
+                                                           int seqlen_k,
+                                                           int seqlen_q_total,
+                                                           int num_heads,
+                                                           int num_heads_k,
+                                                           int head_dim,
+                                                           float softmax_scale,
+                                                           int is_causal,
+                                                           int q_start,
+                                                           void* stream)
+{
+    if(q == nullptr || k == nullptr || v == nullptr || out == nullptr)
+    {
+        return -1;
+    }
+    if(batch_size <= 0 || seqlen_q_tile <= 0 || seqlen_k <= 0 || seqlen_q_total <= 0 ||
+       num_heads <= 0 || num_heads_k <= 0 || q_start < 0 ||
+       q_start + seqlen_q_tile > seqlen_q_total)
+    {
+        return -2;
+    }
+    if(num_heads % num_heads_k != 0)
+    {
+        return -3;
+    }
+    switch(head_dim)
+    {
+    case 128:
+        return launch_fwd_qblock_cached<128, 8, 32>(q,
+                                                    k,
+                                                    v,
+                                                    out,
+                                                    softmax_lse_out,
+                                                    batch_size,
+                                                    seqlen_q_tile,
+                                                    seqlen_k,
+                                                    seqlen_q_total,
+                                                    num_heads,
+                                                    num_heads_k,
+                                                    softmax_scale,
+                                                    q_start,
+                                                    q_start,
+                                                    seqlen_q_total,
+                                                    is_causal,
+                                                    stream);
+    case 256:
+        break;
+    default:
+        return -4;
+    }
+
+    if(native_gqa_qblock_enabled(head_dim, seqlen_q_tile, seqlen_k, num_heads, num_heads_k))
+    {
+        if(!env_truthy("KILN_ROCM_FLASH_DISABLE_WMMA_GQA_QBLOCK") &&
+           current_device_supports_gfx11_wmma() &&
+           wmma_gqa_r64k32_enabled(seqlen_q_tile, seqlen_k))
+        {
+            return launch_fwd_wmma_gqa_r64h1k32(q,
+                                                k,
+                                                v,
+                                                out,
+                                                softmax_lse_out,
+                                                batch_size,
+                                                seqlen_q_tile,
+                                                seqlen_k,
+                                                seqlen_q_total,
+                                                num_heads,
+                                                num_heads_k,
+                                                softmax_scale,
+                                                q_start,
+                                                q_start,
+                                                seqlen_q_total,
+                                                is_causal,
+                                                stream);
+        }
+        return launch_fwd_gqa_qblock_cached<256, 8, 4, 64>(q,
+                                                           k,
+                                                           v,
+                                                           out,
+                                                           softmax_lse_out,
+                                                           batch_size,
+                                                           seqlen_q_tile,
+                                                           seqlen_k,
+                                                           seqlen_q_total,
+                                                           num_heads,
+                                                           num_heads_k,
+                                                           softmax_scale,
+                                                           q_start,
+                                                           q_start,
+                                                           seqlen_q_total,
+                                                           is_causal,
+                                                           stream);
+    }
+
+    return launch_fwd_qblock_cached<256, 8, 32>(q,
+                                                k,
+                                                v,
+                                                out,
+                                                softmax_lse_out,
+                                                batch_size,
+                                                seqlen_q_tile,
+                                                seqlen_k,
+                                                seqlen_q_total,
+                                                num_heads,
+                                                num_heads_k,
+                                                softmax_scale,
+                                                q_start,
+                                                q_start,
+                                                seqlen_q_total,
                                                 is_causal,
                                                 stream);
 }
