@@ -1681,6 +1681,36 @@ fn try_native_fwd_bf16(
     }
 
     let q_tile = native_fwd_query_tile_len();
+    let native_single_available =
+        native_scalar_fwd_enabled(sq, sk) || native_tiled_fwd_enabled(sq, sk);
+    let prefer_native_single = native_single_available && (!causal || sq == sk);
+    if prefer_native_single {
+        let q_c = rocm_contig(q)?;
+        let k_c = rocm_contig(k)?;
+        let v_c = rocm_contig(v)?;
+        if rocm_trace_fwd_enabled() {
+            eprintln!(
+                "kiln_rocm_flash_fwd path=native_single batch={b} seq_q={sq} seq_k={sk} heads={h} kv_heads={hk} head_dim={d} causal={causal}"
+            );
+        }
+        if let Some(result) = try_ffi_fwd_bf16(
+            &q_c,
+            &k_c,
+            &v_c,
+            b,
+            sq,
+            sk,
+            h,
+            hk,
+            d,
+            softmax_scale,
+            causal,
+            false,
+        )? {
+            return Ok(Some(result));
+        }
+    }
+
     if sq > q_tile && native_tiled_fwd_enabled(sq, sk) {
         if rocm_trace_fwd_enabled() {
             eprintln!(
@@ -1708,7 +1738,7 @@ fn try_native_fwd_bf16(
     let q_c = rocm_contig(q)?;
     let k_c = rocm_contig(k)?;
     let v_c = rocm_contig(v)?;
-    if native_scalar_fwd_enabled(sq, sk) || native_tiled_fwd_enabled(sq, sk) {
+    if native_single_available {
         if rocm_trace_fwd_enabled() {
             eprintln!(
                 "kiln_rocm_flash_fwd path=native_single batch={b} seq_q={sq} seq_k={sk} heads={h} kv_heads={hk} head_dim={d} causal={causal}"
