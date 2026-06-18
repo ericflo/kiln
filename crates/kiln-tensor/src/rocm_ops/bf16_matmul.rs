@@ -101,9 +101,11 @@ pub fn rocm_bf16_matmul_bf16_out(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     if status != 0 {
         return Err(Error::Msg(format!("{OP}: FFI returned status {status}")));
     }
-    crate::active_rocm_stream(&ctx)
-        .synchronize()
-        .map_err(|e| Error::Msg(format!("{OP}: synchronize after kernel launch: {e:?}")))?;
+    if !crate::rocm_capture_arena_active() {
+        crate::active_rocm_stream(&ctx)
+            .synchronize()
+            .map_err(|e| Error::Msg(format!("{OP}: synchronize after kernel launch: {e:?}")))?;
+    }
 
     let storage_arc: crate::Storage = Arc::new(out_storage);
     Tensor::from_parts(

@@ -482,6 +482,13 @@ pub fn rocm_trim_pool(device_index: usize, min_keep_bytes: usize) -> Result<()> 
 /// than [`rocm_synchronize_default_stream`] when other (e.g. hipBLASLt-internal)
 /// streams have pending work we don't need to wait on.
 pub fn rocm_synchronize_compute_stream(device_index: usize) -> Result<()> {
+    // HIP rejects hipStreamSynchronize while that stream is being captured.
+    // Graph capture installs the arena and routes every kt op onto one active
+    // capture stream; same-stream ordering plus the graph runner's explicit
+    // pre-capture syncs provide the needed handoff guarantees there.
+    if crate::rocm_capture_arena_active() {
+        return Ok(());
+    }
     let ctx = primary_rocm_context(device_index)?;
     crate::active_rocm_stream(&ctx).synchronize().map_err(|e| {
         Error::Msg(format!(
@@ -500,6 +507,9 @@ pub fn rocm_synchronize_tensor_stream(t: &crate::Tensor) -> Result<()> {
         .as_any()
         .downcast_ref::<RocmStorage>()
         .ok_or_else(|| Error::Msg("rocm_synchronize_tensor_stream: tensor must be ROCm".into()))?;
+    if crate::rocm_capture_arena_active() {
+        return Ok(());
+    }
     let ctx = storage.context();
     crate::active_rocm_stream(&ctx)
         .synchronize()
@@ -650,11 +660,13 @@ pub fn rocm_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
                         Error::Msg(format!("rocm_contiguous: dense D2D copy failed: {e:?}"))
                     })?;
             }
-            stream.synchronize().map_err(|e| {
-                Error::Msg(format!(
-                    "rocm_contiguous: synchronize after dense D2D copy: {e:?}"
-                ))
-            })?;
+            if !crate::rocm_capture_arena_active() {
+                stream.synchronize().map_err(|e| {
+                    Error::Msg(format!(
+                        "rocm_contiguous: synchronize after dense D2D copy: {e:?}"
+                    ))
+                })?;
+            }
         }
         let storage_arc: crate::Storage = Arc::new(dst_storage);
         return crate::Tensor::from_parts(
@@ -689,11 +701,13 @@ pub fn rocm_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
                 "rocm_contiguous: kiln_transpose_4d_12_copy_async returned status {status}"
             )));
         }
-        stream.synchronize().map_err(|e| {
-            Error::Msg(format!(
-                "rocm_contiguous: synchronize after 4d axis12 transpose copy: {e:?}"
-            ))
-        })?;
+        if !crate::rocm_capture_arena_active() {
+            stream.synchronize().map_err(|e| {
+                Error::Msg(format!(
+                    "rocm_contiguous: synchronize after 4d axis12 transpose copy: {e:?}"
+                ))
+            })?;
+        }
         let storage_arc: crate::Storage = Arc::new(dst_storage);
         return crate::Tensor::from_parts(
             storage_arc,
@@ -724,11 +738,13 @@ pub fn rocm_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
             "rocm_contiguous: kiln_contiguous_copy_async returned status {status}"
         )));
     }
-    stream.synchronize().map_err(|e| {
-        Error::Msg(format!(
-            "rocm_contiguous: synchronize after strided D2D copy: {e:?}"
-        ))
-    })?;
+    if !crate::rocm_capture_arena_active() {
+        stream.synchronize().map_err(|e| {
+            Error::Msg(format!(
+                "rocm_contiguous: synchronize after strided D2D copy: {e:?}"
+            ))
+        })?;
+    }
 
     let storage_arc: crate::Storage = Arc::new(dst_storage);
     crate::Tensor::from_parts(

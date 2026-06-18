@@ -305,6 +305,55 @@ fn rocm_graph_warm_pass_prewarms_capture_stream() {
 }
 
 #[test]
+fn rocm_capture_arena_suppresses_active_stream_synchronizes() {
+    let rocm_storage = read("crates/kiln-tensor/src/rocm_storage.rs");
+    let compute_sync = source_between(
+        &rocm_storage,
+        "pub fn rocm_synchronize_compute_stream(",
+        "/// Block until the active stream for a ROCm tensor",
+    );
+    let tensor_sync = source_between(
+        &rocm_storage,
+        "pub fn rocm_synchronize_tensor_stream(",
+        "/// Refresh `dst`'s contents in place",
+    );
+    let contiguous = source_between(
+        &rocm_storage,
+        "pub fn rocm_contiguous(",
+        "fn rocm_view_is_physically_compact(",
+    );
+    let concat = read("crates/kiln-tensor/src/rocm_ops/concat.rs");
+    let bf16_matmul = read("crates/kiln-tensor/src/rocm_ops/bf16_matmul.rs");
+
+    assert!(
+        compute_sync.contains("if crate::rocm_capture_arena_active()"),
+        "ROCm active compute-stream sync must no-op under HIP graph capture"
+    );
+    assert!(
+        tensor_sync.contains("if crate::rocm_capture_arena_active()"),
+        "ROCm tensor-stream sync must no-op under HIP graph capture"
+    );
+    assert!(
+        contiguous
+            .matches("if !crate::rocm_capture_arena_active()")
+            .count()
+            >= 3,
+        "ROCm contiguous must not call hipStreamSynchronize inside capture"
+    );
+    assert!(
+        concat
+            .matches("if !crate::rocm_capture_arena_active()")
+            .count()
+            >= 3,
+        "ROCm concat must not call hipStreamSynchronize inside capture"
+    );
+    assert!(
+        bf16_matmul.contains("if !crate::rocm_capture_arena_active()"),
+        "ROCm BF16 matmul fallback must not call hipStreamSynchronize inside capture"
+    );
+}
+
+#[test]
 fn hip_runtime_errors_are_cleared_at_wrapper_boundary() {
     let hip = read("crates/kiln-hip/src/lib.rs");
     let sys = read("crates/kiln-hip/src/sys.rs");

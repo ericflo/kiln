@@ -194,11 +194,13 @@ pub fn rocm_concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
                 })?;
             row_offset += rows;
         }
-        crate::active_rocm_stream(&ctx).synchronize().map_err(|e| {
-            Error::Msg(format!(
-                "rocm_concat: synchronize after safe row assembly: {e:?}"
-            ))
-        })?;
+        if !crate::rocm_capture_arena_active() {
+            crate::active_rocm_stream(&ctx).synchronize().map_err(|e| {
+                Error::Msg(format!(
+                    "rocm_concat: synchronize after safe row assembly: {e:?}"
+                ))
+            })?;
+        }
         return Ok(out);
     }
 
@@ -229,11 +231,13 @@ pub fn rocm_concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
                 "rocm_concat: axis0 contiguous FFI returned status {status}"
             )));
         }
-        crate::active_rocm_stream(&ctx).synchronize().map_err(|e| {
-            Error::Msg(format!(
-                "rocm_concat: synchronize after axis0 contiguous concat: {e:?}"
-            ))
-        })?;
+        if !crate::rocm_capture_arena_active() {
+            crate::active_rocm_stream(&ctx).synchronize().map_err(|e| {
+                Error::Msg(format!(
+                    "rocm_concat: synchronize after axis0 contiguous concat: {e:?}"
+                ))
+            })?;
+        }
         return Ok(out);
     }
 
@@ -253,11 +257,13 @@ pub fn rocm_concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
             "rocm_concat: FFI returned status {status}"
         )));
     }
-    crate::active_rocm_stream(&ctx).synchronize().map_err(|e| {
-        Error::Msg(format!(
-            "rocm_concat: synchronize after async kernel launch: {e:?}"
-        ))
-    })?;
+    if !crate::rocm_capture_arena_active() {
+        crate::active_rocm_stream(&ctx).synchronize().map_err(|e| {
+            Error::Msg(format!(
+                "rocm_concat: synchronize after async kernel launch: {e:?}"
+            ))
+        })?;
+    }
 
     Ok(out)
 }
