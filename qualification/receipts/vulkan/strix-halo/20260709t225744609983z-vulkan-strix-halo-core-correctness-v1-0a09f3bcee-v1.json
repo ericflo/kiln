@@ -1,0 +1,240 @@
+{
+  "artifacts": [
+    {
+      "bytes": 6321,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t225744609983z-vulkan-strix-halo-core-correctness-v1-0a09f3bcee-v1/environment.json",
+      "sha256": "sha256:1d3f8fffc223ab06232e4af79a9975f91c12ccc315f65ca10235e6e22ac0dc4c"
+    },
+    {
+      "bytes": 3012,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t225744609983z-vulkan-strix-halo-core-correctness-v1-0a09f3bcee-v1/cases/001-device-probe-r001/stdout.log",
+      "sha256": "sha256:13620326f6fed22af90aff249a546b1f8184a4476925f8a8c58f46fdff1d4ccf"
+    },
+    {
+      "bytes": 0,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t225744609983z-vulkan-strix-halo-core-correctness-v1-0a09f3bcee-v1/cases/001-device-probe-r001/stderr.log",
+      "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 641,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t225744609983z-vulkan-strix-halo-core-correctness-v1-0a09f3bcee-v1/cases/001-device-probe-r001/case-result.json",
+      "sha256": "sha256:4c2c1a2f125406eb45d0dacb8302019ef338f178fc3f789b2df51cb4ce6413d2"
+    },
+    {
+      "bytes": 759,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t225744609983z-vulkan-strix-halo-core-correctness-v1-0a09f3bcee-v1/cases/002-tensor-parity-r001/stdout.log",
+      "sha256": "sha256:59b2d9fd1e4db98ebb746bb29cfd938cc8a7a9897e199dbfbe4454962b5d042a"
+    },
+    {
+      "bytes": 2478,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t225744609983z-vulkan-strix-halo-core-correctness-v1-0a09f3bcee-v1/cases/002-tensor-parity-r001/stderr.log",
+      "sha256": "sha256:8b6c21e0f367a6b2b59794d738a0b174561db7fc8ae670545f496cd872e899da"
+    },
+    {
+      "bytes": 642,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t225744609983z-vulkan-strix-halo-core-correctness-v1-0a09f3bcee-v1/cases/002-tensor-parity-r001/case-result.json",
+      "sha256": "sha256:c4347b475e8751897edd1a137ad8a53d3ccbc50b1dbc8a0071e43450ed88091e"
+    },
+    {
+      "bytes": 543,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t225744609983z-vulkan-strix-halo-core-correctness-v1-0a09f3bcee-v1/cases/003-matmul-parity-r001/stdout.log",
+      "sha256": "sha256:a4b938d00d60b3bcc90844bb467a095299a527638a265afdf12eb657c279d056"
+    },
+    {
+      "bytes": 2576,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t225744609983z-vulkan-strix-halo-core-correctness-v1-0a09f3bcee-v1/cases/003-matmul-parity-r001/stderr.log",
+      "sha256": "sha256:af1c9d39a8ba66f6b90a78d0825099b4c1733ac3cc7b2a95b04d479dd5d9e07b"
+    },
+    {
+      "bytes": 641,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t225744609983z-vulkan-strix-halo-core-correctness-v1-0a09f3bcee-v1/cases/003-matmul-parity-r001/case-result.json",
+      "sha256": "sha256:4aee5c8e25c61a2b4adf943b789a8e87b3f11f417efee73eb4429e6b3e509e5e"
+    },
+    {
+      "bytes": 21159,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t225744609983z-vulkan-strix-halo-core-correctness-v1-0a09f3bcee-v1/run-config.json",
+      "sha256": "sha256:0698f05644ce8831af78442afb0859c811d1b8b5c8ff2a582cf4180fb6b39933"
+    }
+  ],
+  "created_at_utc": "2026-07-09T22:57:45.908Z",
+  "effective_config": {},
+  "environment": {
+    "compiler": {
+      "cargo": "cargo 1.94.1 (29ea6fb6a 2026-03-24)",
+      "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+      "shader": "2026.2"
+    },
+    "device": {
+      "architecture": "strix_halo",
+      "driver": "radv Mesa 26.1.3-arch1.2",
+      "memory_bytes": 103079215104,
+      "name": "AMD Radeon 8060S Graphics (RADV STRIX_HALO)",
+      "unified_memory": true
+    },
+    "host_id": "strix-halo",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "7.0.14-arch1-1",
+      "name": "EndeavourOS",
+      "version": "2025.03.19"
+    },
+    "runtime": {
+      "driver": "Mesa 26.1.3-arch1.2",
+      "execution_environment_sha256": "sha256:8e1ad1077a8aaf2a76367b88fa4922090d5088a5a20893e0dce475cc4511c57b",
+      "vulkan_device": "1.4.348",
+      "vulkan_instance": "1.4.350"
+    }
+  },
+  "metrics": [],
+  "model": null,
+  "notes": [],
+  "qualification": {
+    "backend": "vulkan",
+    "command": [
+      "/usr/bin/python3",
+      "scripts/qualification/run.py",
+      "qualification/workloads/correctness-core-v1.json",
+      "--variant",
+      "vulkan",
+      "--host-id",
+      "strix-halo"
+    ],
+    "duration_seconds": 1.2987853270024061,
+    "finished_at_utc": "2026-07-09T22:57:45.908Z",
+    "kind": "correctness",
+    "profile": "core-correctness-v1",
+    "started_at_utc": "2026-07-09T22:57:44.609Z",
+    "verdict": "passed"
+  },
+  "receipt_id": "20260709t225744609983z-vulkan-strix-halo-core-correctness-v1-0a09f3bcee-v1",
+  "results": [
+    {
+      "details": null,
+      "duration_seconds": 0.04213640400121221,
+      "id": "device-probe",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 0.18185986200114712,
+      "id": "tensor-parity",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 0.4630627000005916,
+      "id": "matmul-parity",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "2a6df2f83973dadf7ad7e55cbf09a37c97bf89be",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:429d38681db801b5dac873fd6130715f4594f47fc6cbe53d47ead31ba9e1868a",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [],
+  "workload": {
+    "id": "core-correctness-v1",
+    "parameters": {
+      "variant_id": "vulkan"
+    },
+    "seed": 20260709,
+    "sha256": "sha256:805b7b7797d61aeea57a830586e2f22c587e274fa5b8da97a799fcf2a619a688"
+  }
+}
