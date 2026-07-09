@@ -222,6 +222,19 @@ class WorkloadTests(unittest.TestCase):
         errors = workload_module.validate_workload(value)
         self.assertTrue(any("command cannot declare runner-owned metrics" in error for error in errors))
 
+    def test_cases_cannot_override_runner_environment_bindings(self) -> None:
+        for name in (
+            "KILN_QUALIFICATION_CASE_RESULT",
+            "KILN_QUALIFICATION_VARIANT_ID",
+        ):
+            with self.subTest(name=name):
+                value = valid_performance_workload()
+                value["variants"][0]["cases"][0]["environment"][name] = "spoofed"
+                errors = workload_module.validate_workload(value)
+                self.assertTrue(
+                    any(f"cannot override runner-owned {name}" in error for error in errors)
+                )
+
     def test_performance_policy_requires_real_required_evidence(self) -> None:
         value = valid_performance_workload()
         case = value["variants"][0]["cases"][0]

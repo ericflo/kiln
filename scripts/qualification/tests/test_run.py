@@ -423,6 +423,34 @@ class RunnerTests(unittest.TestCase):
         )
         self.assert_valid(outcome, repository.root)
 
+    def test_selected_variant_is_bound_into_case_environment(self) -> None:
+        workload = environment_workload(
+            [
+                sys.executable,
+                "-c",
+                "import os; print(os.environ['KILN_QUALIFICATION_VARIANT_ID'])",
+            ],
+            assertions=[
+                {"stream": "stdout", "match": "required", "pattern": "^rocm$"}
+            ],
+        )
+        repository = Repository(workload)
+        self.addCleanup(repository.close)
+        outcome = self.execute(repository)
+
+        self.assertEqual(outcome.exit_code, 0)
+        config_artifact = next(
+            artifact
+            for artifact in outcome.receipt["artifacts"]
+            if artifact["kind"] == "effective_run_config"
+        )
+        run_config = json.loads((repository.root / config_artifact["path"]).read_text())
+        self.assertEqual(
+            run_config["cases"][0]["runner_environment"],
+            {"KILN_QUALIFICATION_VARIANT_ID": "rocm"},
+        )
+        self.assert_valid(outcome, repository.root)
+
     def test_nonzero_exit_still_emits_valid_failed_receipt(self) -> None:
         repository = Repository(
             environment_workload([sys.executable, "-c", "raise SystemExit(7)"])

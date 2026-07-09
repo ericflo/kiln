@@ -45,6 +45,11 @@ OUTPUT_MATCHES = {"required", "forbidden"}
 RESULT_PROTOCOL_FORMAT = "qualification-case-result-v1"
 RESULT_PROTOCOL_PRODUCERS = {"runner", "command"}
 RESULT_PATH_ENVIRONMENT_VARIABLE = "KILN_QUALIFICATION_CASE_RESULT"
+VARIANT_ID_ENVIRONMENT_VARIABLE = "KILN_QUALIFICATION_VARIANT_ID"
+RUNNER_OWNED_ENVIRONMENT_VARIABLES = {
+    RESULT_PATH_ENVIRONMENT_VARIABLE,
+    VARIANT_ID_ENVIRONMENT_VARIABLE,
+}
 RUNNER_METRIC_DEFINITIONS = {
     "case_pass": {"unit": "bool", "aggregation": "exact", "lower_is_better": False},
     "exit_code": {"unit": "code", "aggregation": "exact", "lower_is_better": False},
@@ -493,10 +498,9 @@ def _validate_case(
                 )
                 if name:
                     environment_variables.add(name)
-            if key == RESULT_PATH_ENVIRONMENT_VARIABLE:
+            if key in RUNNER_OWNED_ENVIRONMENT_VARIABLES:
                 errors.append(
-                    f"{context}.environment cannot override runner-owned "
-                    f"{RESULT_PATH_ENVIRONMENT_VARIABLE}"
+                    f"{context}.environment cannot override runner-owned {key}"
                 )
 
     _check_bounded_positive_int(

@@ -49,6 +49,7 @@ from workload import (
 ROOT = Path(__file__).resolve().parents[2]
 WORKLOAD_DIRECTORY = Path("qualification/workloads")
 RESULT_PATH_ENVIRONMENT_VARIABLE = "KILN_QUALIFICATION_CASE_RESULT"
+VARIANT_ID_ENVIRONMENT_VARIABLE = "KILN_QUALIFICATION_VARIANT_ID"
 MODEL_REQUIRED_KINDS = {"serving", "performance", "training", "eval", "soak"}
 HOST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,63}$")
 RECEIPT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,127}$")
@@ -1548,6 +1549,7 @@ def run_qualification(
             process_environment = dict(inherited_environment)
             process_environment.update(overrides)
             process_environment[RESULT_PATH_ENVIRONMENT_VARIABLE] = str(command_result_path)
+            process_environment[VARIANT_ID_ENVIRONMENT_VARIABLE] = variant_id
             run_config_cases.append(
                 {
                     "case_id": case["id"],
@@ -1556,6 +1558,9 @@ def run_qualification(
                     "executed_argv": executed_argv,
                     "working_directory": working_directory.relative_to(root).as_posix() or ".",
                     "environment_overrides": overrides,
+                    "runner_environment": {
+                        VARIANT_ID_ENVIRONMENT_VARIABLE: variant_id,
+                    },
                     "case_result_path": command_result_path.relative_to(root).as_posix(),
                     "process_environment_sha256": _canonical_hash(process_environment),
                     "timeout_seconds": case["timeout_seconds"],
