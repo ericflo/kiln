@@ -55,45 +55,45 @@ path.
 ## Execution Rules
 
 - [x] Read this entire document before changing code.
-- [ ] Update checkboxes and the evidence log in the same commit as the work
+- [x] Update checkboxes and the evidence log in the same commit as the work
   they describe.
-- [ ] Work in the order written unless a later item is required to unblock an
+- [x] Work in the order written unless a later item is required to unblock an
   earlier acceptance gate. Record any reordering in the evidence log.
-- [ ] Make small, reviewable commits. A backend phase is expected to contain
+- [x] Make small, reviewable commits. A backend phase is expected to contain
   many commits and pushes, not one platform-sized commit. Do not accumulate a
   multi-day or multi-feature working tree.
-- [ ] The goal runner has standing authorization to commit and push completed
+- [x] The goal runner has standing authorization to commit and push completed
   work directly to `origin/main` throughout this goal.
-- [ ] Commit and push at every reasonable green checkpoint, including each
+- [x] Commit and push at every reasonable green checkpoint, including each
   coherent bug fix, regression test, instrumentation slice, qualification-tool
   addition, benchmark-harness improvement, configuration migration,
   documentation correction, and compact hardware receipt. Do not wait for the
   surrounding phase or machine to be complete.
-- [ ] When hardware exposes a defect, normally push at least three checkpoints:
+- [x] When hardware exposes a defect, normally push at least three checkpoints:
   the focused reproducer/test, the fix with focused validation, and the passing
   qualification receipt. Combine them only when they cannot be made independently
   correct and green.
-- [ ] Commit and push before starting a long benchmark/soak, after recording its
+- [x] Commit and push before starting a long benchmark/soak, after recording its
   result, before a risky architectural change, before changing task area, and
   before handing work to another machine.
-- [ ] Update relevant checkboxes and the evidence log at each checkpoint. Do not
+- [x] Update relevant checkboxes and the evidence log at each checkpoint. Do not
   create artificial WIP commits that knowingly leave `main` broken when a
   coherent green checkpoint is available.
-- [ ] Never amend or force-push a published commit. Before starting on another
+- [x] Never amend or force-push a published commit. Before starting on another
   machine, fetch and fast-forward to `origin/main` and confirm a clean tree.
-- [ ] Do not revert unrelated user changes. Stop and document a real conflict
+- [x] Do not revert unrelated user changes. Stop and document a real conflict
   rather than using destructive Git commands.
-- [ ] A compile-only check, mock, source-string assertion, skipped test, or
+- [x] A compile-only check, mock, source-string assertion, skipped test, or
   external CI badge does not count as runtime backend evidence.
-- [ ] Hardware tests must fail, not silently skip, when run in qualification
+- [x] Hardware tests must fail, not silently skip, when run in qualification
   mode and the requested device/backend is unavailable.
-- [ ] Do not weaken a tolerance, delete a failing test, ignore an advisory, or
+- [x] Do not weaken a tolerance, delete a failing test, ignore an advisory, or
   relabel a feature experimental merely to make a gate pass. Scope can be
   narrowed only when the support matrix and user-facing docs are updated in
   the same commit.
-- [ ] Keep raw logs, traces, and profiles out of Git. Check in compact receipts,
+- [x] Keep raw logs, traces, and profiles out of Git. Check in compact receipts,
   summaries, schemas, and hashes only.
-- [ ] Do not rewrite repository history as part of this goal. Any history purge
+- [x] Do not rewrite repository history as part of this goal. Any history purge
   requires a separate explicit decision because it disrupts every clone.
 
 ## What Counts As Evidence
@@ -698,7 +698,11 @@ or focused documents. Never paste raw logs here.
 | 2026-07-09 | Shared strict JSON policy | `sha256:429d38681db8` | this commit | portable | `scripts/qualification/strict_json.py` | passed | One exact numeric, duplicate-key, integer-bound, and plain-UTF-8 policy now serves workloads, receipts, comparisons, and command results; 138 qualification tests |
 | 2026-07-09 | ROCm core correctness | `sha256:429d38681db8` | `d457a89ce267` | Strix Halo ROCm | `qualification/receipts/rocm/strix-halo/20260709t225523453678z-rocm-strix-halo-core-correctness-v1-9faecc7321-v1.json` | passed | Real gfx1151 device probe, ROCm tensor parity, and ROCm matmul parity passed under loopback-only and PID-isolated execution in 88.4 seconds; receipt and all local artifact hashes revalidated |
 | 2026-07-09 | Vulkan core correctness and cross-backend parity | `sha256:429d38681db8` | `2a6df2f83973` | Strix Halo Vulkan | `qualification/receipts/vulkan/strix-halo/20260709t225744609983z-vulkan-strix-halo-core-correctness-v1-0a09f3bcee-v1.json` | passed | Real RADV device probe, tensor parity, and matmul parity passed in 1.30 seconds; declared comparison against the ROCm receipt accepted only the listed backend fields and all three required case metrics were exactly equal |
-| 2026-07-09 | Serving A/B configuration observability | `sha256:4ed553507ea1` | this commit | portable + ROCm | `/health`, `/v1/debug/model-state` | passed | Health now reports CUDA, ROCm, and Metal graph states independently; debug state exposes the ROCm-graph and KV-autoscale launch flags; focused ROCm-feature server tests and formatting passed |
+| 2026-07-09 | Serving A/B configuration observability | `sha256:4ed553507ea1` | `39814f2a` | portable + ROCm | `/health`, `/v1/debug/model-state` | passed | Health now reports CUDA, ROCm, and Metal graph states independently; debug state exposes the ROCm-graph and KV-autoscale launch flags; focused ROCm-feature server tests and formatting passed |
+| 2026-07-09 | KV autoscaler runtime observability | `sha256:779d5663643e` | `03cf5015` | portable + ROCm | `/health.decode_runtime.kv_autoscaler` | passed | Health exposes the resolved default/off state and bounded reason without inferring it from ambient environment |
+| 2026-07-09 | Safe memory-governor default | `sha256:d4c3f94bdaf3` | `6234e764` | portable + ROCm | memory-governor unit tests and runtime state | passed | Physical reclaim is off by default; on-demand and automatic modes are explicit, strictly parsed, documented, and source-attributed |
+| 2026-07-09 | Zero-yield ROCm pool-trim avoidance | `sha256:456146c5693c` | `afd40ee3` | ROCm/gfx1151 | `rocm_trim_pool` hardware tests | passed | Empty pools avoid device synchronization; trim honors the target, propagates HIP failures, and reports measured reserved-byte deltas with timing and reason |
+| 2026-07-09 | Qualification variant binding | `sha256:7c60cce84c78` | `8dd88171` | portable | runner and workload unit suites | passed | Runner-owned variant identity is injected into each case, cannot be overridden by a manifest, and is recorded in the run configuration |
 | 2026-07-09 | First reduced-CI measurement | `sha256:cda13f3f84e5` | `3c71cc4002f8` | GitHub Actions | run `29049575526` | passed | Three active jobs completed in 3m52s wall and about 4m36s aggregate time; all GPU backend jobs were skipped |
 
 ## Known Starting Defects
