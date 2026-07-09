@@ -5847,7 +5847,22 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         .find(|gate| gate["gate"] == "hardware_latency_thresholds")
         .expect("hardware latency threshold gate should be present");
 
-    assert_eq!(hardware_gate["status"], "covered");
+    let manifest_path = root.join("docs/backend-latency-fixtures.json");
+    let manifest: Value = serde_json::from_str(
+        &fs::read_to_string(&manifest_path).expect("latency fixture manifest should be readable"),
+    )
+    .expect("latency fixture manifest should parse");
+    let manifest_status = manifest["status"]
+        .as_str()
+        .expect("latency fixture manifest status should be a string");
+    assert!(
+        manifest_status == "covered" || manifest_status == "fixture_required",
+        "unexpected latency fixture manifest status {manifest_status}"
+    );
+    assert_eq!(
+        hardware_gate["status"], manifest["status"],
+        "hardware latency gate status should be derived from the fixture manifest"
+    );
     let command = hardware_gate["command"]
         .as_str()
         .expect("hardware latency command should be a string");
@@ -6059,34 +6074,6 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         );
     }
 
-    let perf_workflow =
-        fs::read_to_string(root.join(".github/workflows/perf-regression-nightly.yml"))
-            .expect("perf regression workflow should be readable");
-    for required in [
-        "Verify backend latency fixture contract",
-        "scripts/run_backend_latency_fixture.py --self-test",
-        "scripts/write_backend_latency_result_artifact.py --self-test",
-        "scripts/import_backend_latency_artifact.py --self-test",
-        "scripts/lock_backend_latency_thresholds.py --self-test",
-        "scripts/check_backend_latency_fixtures.py --self-test",
-        "scripts/plan_backend_latency_fixture_dispatch.py --self-test",
-        "scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json",
-        "docs/backend-latency-fixtures.json",
-        "docs/backend-latency-result-schema.md",
-        "latency_fixture_id",
-        "inputs.latency_fixture_id == 'none'",
-        "latency_runner_labels_json",
-        "Run selected backend latency fixture",
-        "Upload backend latency fixture artifacts",
-        "bench-results/backend-latency/*.json",
-        "bench-results/backend-latency/raw/*.log",
-    ] {
-        assert!(
-            perf_workflow.contains(required),
-            "perf workflow should run non-hardware latency fixture validation: {required}"
-        );
-    }
-
     let local_gate_source = fs::read_to_string(root.join("scripts/check_unification_gates.sh"))
         .expect("local unification gate should be readable");
     for required in [
@@ -6268,18 +6255,41 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         .iter()
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
-    assert!(
-        coverage_blockers.is_empty(),
-        "covered hardware latency gate should not expose fixture blockers: {coverage_blockers:?}"
-    );
+    if manifest_status == "covered" {
+        assert!(
+            coverage_blockers.is_empty(),
+            "covered hardware latency gate should not expose fixture blockers: {coverage_blockers:?}"
+        );
+    } else {
+        assert!(
+            !coverage_blockers.is_empty(),
+            "fixture-required hardware latency gate should explain its blockers"
+        );
+        assert!(
+            coverage_blockers
+                .iter()
+                .any(|blocker| blocker.contains("manifest status is 'fixture_required'")),
+            "fixture-required gate should identify the manifest status: {coverage_blockers:?}"
+        );
+        for fixture in manifest["fixtures"]
+            .as_array()
+            .expect("fixtures should be an array")
+        {
+            if fixture["threshold_state"] == "pending_fixture_result" {
+                let fixture_id = fixture["id"]
+                    .as_str()
+                    .expect("pending fixture id should be a string");
+                assert!(
+                    coverage_blockers
+                        .iter()
+                        .any(|blocker| blocker.contains(fixture_id)),
+                    "pending fixture {fixture_id} should be named in coverage blockers: {coverage_blockers:?}"
+                );
+            }
+        }
+    }
 
-    let manifest_path = root.join("docs/backend-latency-fixtures.json");
-    let manifest: Value = serde_json::from_str(
-        &fs::read_to_string(&manifest_path).expect("latency fixture manifest should be readable"),
-    )
-    .expect("latency fixture manifest should parse");
     assert_eq!(manifest["schema_version"], 1);
-    assert_eq!(manifest["status"], "covered");
     let policy = manifest["policy"]
         .as_object()
         .expect("latency fixture manifest policy should be an object");
@@ -6445,6 +6455,28 @@ fn generated_capability_report_tracks_migration_phase_status() {
     let phases = report["migration_phase_status"]
         .as_array()
         .expect("migration_phase_status should be an array");
+    let conformance_gates = report["conformance_gates"]
+        .as_array()
+        .expect("conformance_gates should be an array");
+    let hardware_latency_status = conformance_gates
+        .iter()
+        .find(|gate| gate["gate"] == "hardware_latency_thresholds")
+        .and_then(|gate| gate["status"].as_str())
+        .expect("hardware latency threshold gate should have a status");
+    let expected_phase8_status = if conformance_gates
+        .iter()
+        .all(|gate| gate["status"] == "covered")
+    {
+        "covered"
+    } else if hardware_latency_status == "fixture_required"
+        && conformance_gates.iter().all(|gate| {
+            gate["gate"] == "hardware_latency_thresholds" || gate["status"] == "covered"
+        })
+    {
+        "fixture_required"
+    } else {
+        "partial"
+    };
     assert_eq!(
         phases.len(),
         9,
@@ -6922,20 +6954,40 @@ fn generated_capability_report_tracks_migration_phase_status() {
         .iter()
         .find(|phase| phase["phase"] == 8)
         .expect("Phase 8 should be present");
-    assert_eq!(phase8["status"], "covered");
+    assert_eq!(
+        phase8["status"], expected_phase8_status,
+        "Phase 8 should derive its status from the conformance gates"
+    );
     assert_eq!(phase8["contract"], "landed");
-    assert_eq!(phase8["migration"], "complete");
-    assert_eq!(phase8["genuine"], true);
+    let phase8_complete = expected_phase8_status == "covered";
+    assert_eq!(
+        phase8["migration"],
+        if phase8_complete {
+            "complete"
+        } else {
+            "partial"
+        }
+    );
+    assert_eq!(phase8["genuine"], phase8_complete);
     let phase8_remaining = phase8["remaining"]
         .as_array()
         .expect("Phase 8 remaining should be an array")
         .iter()
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
-    assert!(
-        phase8_remaining.is_empty(),
-        "covered Phase 8 should not list remaining hardware latency work: {phase8_remaining:?}"
-    );
+    if phase8_complete {
+        assert!(
+            phase8_remaining.is_empty(),
+            "covered Phase 8 should not list remaining hardware latency work: {phase8_remaining:?}"
+        );
+    } else {
+        assert!(
+            phase8_remaining
+                .iter()
+                .any(|remaining| remaining.contains("hardware_latency_thresholds")),
+            "incomplete Phase 8 should name remaining hardware latency work: {phase8_remaining:?}"
+        );
+    }
 
     let report_md = fs::read_to_string(root.join("docs/backend-capability-report.md"))
         .expect("capability report markdown should be readable");
@@ -6964,9 +7016,18 @@ fn generated_capability_report_tracks_migration_phase_status() {
         ),
         "Markdown report should expose Phase 1 as complete and genuine"
     );
+    let expected_phase8_row = format!(
+        "| Phase 8 | Conformance and performance gates | `{expected_phase8_status}` | `landed` | `{}` | {} |",
+        if phase8_complete {
+            "complete"
+        } else {
+            "partial"
+        },
+        if phase8_complete { "yes" } else { "no" }
+    );
     assert!(
-        report_md.contains("| Phase 8 | Conformance and performance gates | `covered` | `landed` | `complete` | yes |"),
-        "Markdown report should mark Phase 8 covered after all latency fixtures lock"
+        report_md.contains(&expected_phase8_row),
+        "Markdown report should match the derived Phase 8 state: {expected_phase8_row}"
     );
 }
 

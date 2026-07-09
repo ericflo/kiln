@@ -2497,7 +2497,21 @@
     },
     {
       "command": "python3 scripts/run_backend_latency_fixture.py --self-test && python3 scripts/write_backend_latency_result_artifact.py --self-test && python3 scripts/import_backend_latency_artifact.py --self-test && python3 scripts/lock_backend_latency_thresholds.py --self-test && python3 scripts/check_backend_latency_fixtures.py --self-test && python3 scripts/plan_backend_latency_fixture_dispatch.py --self-test && python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered",
-      "coverage_blockers": [],
+      "coverage_blockers": [
+        "manifest status is 'fixture_required', expected 'covered'",
+        "metal_apple_silicon_matmul_qwen35_4b: threshold_state is 'pending_fixture_result', expected 'locked_threshold'",
+        "metal_apple_silicon_matmul_qwen35_4b.decode_qkv_m1_2560x4096_ms: max threshold is not finite numeric",
+        "metal_apple_silicon_matmul_qwen35_4b.prefill_qkv_m256_2560x4096_ms: max threshold is not finite numeric",
+        "metal_apple_silicon_matmul_qwen35_4b.prefill_gate_up_m256_2560x18432_ms: max threshold is not finite numeric",
+        "metal_apple_silicon_matmul_qwen35_4b.lm_head_m1_2560x152064_ms: max threshold is not finite numeric",
+        "metal_apple_silicon_sdpa_qwen35_4b: threshold_state is 'pending_fixture_result', expected 'locked_threshold'",
+        "metal_apple_silicon_sdpa_qwen35_4b.decode_sq1_sk512_ms: max threshold is not finite numeric",
+        "metal_apple_silicon_sdpa_qwen35_4b.decode_sq1_sk4096_ms: max threshold is not finite numeric",
+        "metal_apple_silicon_sdpa_qwen35_4b.prefill_sq512_sk512_ms: max threshold is not finite numeric",
+        "vulkan_strix_halo_decode_microbench: threshold_state is 'pending_fixture_result', expected 'locked_threshold'",
+        "vulkan_strix_halo_decode_microbench.full_step_resident_us: max threshold is not finite numeric",
+        "vulkan_strix_halo_decode_microbench.full_token_resident_paged_us: max threshold is not finite numeric"
+      ],
       "evidence": [
         "docs/backend-latency-fixtures.json",
         "docs/backend-latency-result-schema.md",
@@ -2537,7 +2551,7 @@
       ],
       "gate": "hardware_latency_thresholds",
       "phase8_requirement": "backend-specific latency thresholds on known hardware fixtures",
-      "status": "covered",
+      "status": "fixture_required",
       "supplemental_commands": []
     },
     {
@@ -3920,15 +3934,17 @@
         "scripts/generate_backend_capability_report.py",
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
-      "genuine": true,
-      "migration": "complete",
+      "genuine": false,
+      "migration": "partial",
       "migration_signals": [],
       "phase": 8,
-      "remaining": [],
+      "remaining": [
+        "hardware_latency_thresholds remains fixture_required until real known-hardware result artifacts satisfy --require-covered"
+      ],
       "report_sections": [
         "Conformance And Performance Gates"
       ],
-      "status": "covered",
+      "status": "fixture_required",
       "title": "Conformance and performance gates"
     }
   ],
