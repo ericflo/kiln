@@ -173,15 +173,28 @@ struct PromptCacheInfo {
 
 #[derive(Serialize)]
 struct DecodeRuntimeInfo {
-    cuda_graphs: CudaGraphInfo,
+    cuda_graphs: GraphInfo,
+    rocm_graphs: GraphInfo,
+    metal_graphs: GraphInfo,
     decode_batcher: Option<DecodeBatcherInfo>,
     batching_engine: Option<BatchingEngineInfo>,
 }
 
 #[derive(Serialize)]
-struct CudaGraphInfo {
+struct GraphInfo {
     enabled: Option<bool>,
     state: &'static str,
+}
+
+fn graph_info(enabled: Option<bool>) -> GraphInfo {
+    GraphInfo {
+        enabled,
+        state: match enabled {
+            Some(true) => "enabled",
+            Some(false) => "disabled",
+            None => "busy",
+        },
+    }
 }
 
 #[derive(Serialize)]
@@ -261,6 +274,8 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         decode_batcher,
         batching_engine,
         cuda_graphs,
+        rocm_graphs,
+        metal_graphs,
         model_loaded,
     ) = match state.backend.as_ref() {
         ModelBackend::Mock { scheduler, .. } => {
@@ -278,10 +293,9 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
                 PrefixCacheInfo::from(sched.prefix_cache_stats()),
                 None,
                 None,
-                CudaGraphInfo {
-                    enabled: Some(false),
-                    state: "disabled",
-                },
+                graph_info(Some(false)),
+                graph_info(Some(false)),
+                graph_info(Some(false)),
                 true,
             )
         }
@@ -314,25 +328,24 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
                 Some(engine) => engine.snapshot().await.ok().map(BatchingEngineInfo::from),
                 None => None,
             };
-            let cuda_graph_enabled = runner
-                .try_read()
-                .ok()
-                .and_then(|runner| runner.cuda_graph_enabled().ok());
-            let cuda_graphs = CudaGraphInfo {
-                enabled: cuda_graph_enabled,
-                state: match cuda_graph_enabled {
-                    Some(true) => "enabled",
-                    Some(false) => "disabled",
-                    None => "busy",
-                },
-            };
+            let (cuda_graph_enabled, rocm_graph_enabled, metal_graph_enabled) =
+                match runner.try_read() {
+                    Ok(runner) => (
+                        runner.cuda_graph_enabled().ok(),
+                        runner.rocm_graph_enabled().ok(),
+                        runner.metal_graph_enabled().ok(),
+                    ),
+                    Err(_) => (None, None, None),
+                };
             (
                 "model",
                 scheduler_stats,
                 prefix_cache,
                 decode_batcher,
                 batching_engine,
-                cuda_graphs,
+                graph_info(cuda_graph_enabled),
+                graph_info(rocm_graph_enabled),
+                graph_info(metal_graph_enabled),
                 true,
             )
         }
@@ -344,6 +357,8 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let prompt_caches = prompt_caches(&state);
     let decode_runtime = DecodeRuntimeInfo {
         cuda_graphs,
+        rocm_graphs,
+        metal_graphs,
         decode_batcher,
         batching_engine,
     };
@@ -801,6 +816,10 @@ mod tests {
         assert!(json["prefix_cache"].is_object());
         assert!(json["prompt_caches"].is_object());
         assert!(json["decode_runtime"].is_object());
+        for backend in ["cuda_graphs", "rocm_graphs", "metal_graphs"] {
+            assert_eq!(json["decode_runtime"][backend]["enabled"], false);
+            assert_eq!(json["decode_runtime"][backend]["state"], "disabled");
+        }
         assert!(json["training"].is_object());
         assert_eq!(json["training"]["queued"], 0);
         assert!(json["training"]["active_job"].is_null());

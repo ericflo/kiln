@@ -1943,6 +1943,14 @@ impl ModelRunner {
             .is_enabled())
     }
 
+    pub fn rocm_graph_enabled(&self) -> Result<bool> {
+        Ok(self
+            .rocm_graph
+            .lock()
+            .map_err(|e| anyhow::anyhow!("failed to lock ROCm graph runner: {e}"))?
+            .is_enabled())
+    }
+
     pub fn metal_graph_enabled(&self) -> Result<bool> {
         Ok(self
             .metal_graph
