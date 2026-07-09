@@ -28,6 +28,11 @@ class SourceTreeHashTests(unittest.TestCase):
         self._write("qualification/schema/receipt.json", "{}\n")
         self._write("qualification/workloads/smoke.json", "{}\n")
         self._write("qualification/receipts/rocm/result.json", "{}\n")
+        self._write("assets/logo.png", "runtime asset\n")
+        self._write("assets/profiling/run.log", "historical evidence\n")
+        self._write("desktop/src/main.rs", "fn main() {}\n")
+        self._write("desktop/README.md", "desktop prose\n")
+        self._write("scripts/c2_artifacts/reference.txt", "historical artifact\n")
         self._write("docs/plan.md", "not a runtime input\n")
         subprocess.run(["git", "add", "."], cwd=self.root, check=True)
 
@@ -61,11 +66,24 @@ class SourceTreeHashTests(unittest.TestCase):
                 self.assertNotEqual(before, self._hash())
                 path.write_text(path.read_text()[:-1])
 
-    def test_receipts_and_docs_do_not_change_hash(self) -> None:
+    def test_receipts_docs_and_historical_artifacts_do_not_change_hash(self) -> None:
         before = self._hash()
         self._write("qualification/receipts/rocm/result.json", '{"result":"passed"}\n')
         self._write("docs/plan.md", "updated plan\n")
+        self._write("desktop/README.md", "updated desktop prose\n")
+        self._write("assets/profiling/run.log", "updated historical evidence\n")
+        self._write("scripts/c2_artifacts/reference.txt", "updated historical artifact\n")
         self.assertEqual(before, self._hash())
+
+    def test_runtime_assets_and_desktop_source_change_hash(self) -> None:
+        for relative in ("assets/logo.png", "desktop/src/main.rs"):
+            with self.subTest(relative=relative):
+                before = self._hash()
+                path = self.root / relative
+                original = path.read_text()
+                path.write_text(original + "changed\n")
+                self.assertNotEqual(before, self._hash())
+                path.write_text(original)
 
     def test_input_order_is_deterministic(self) -> None:
         first_hash, first_entries = source_tree_hash.source_tree_hash(self.root)
@@ -84,6 +102,10 @@ class SourceTreeHashTests(unittest.TestCase):
         tool.chmod(tool.stat().st_mode | 0o111)
         subprocess.run(["git", "add", str(tool)], cwd=self.root, check=True)
         self.assertNotEqual(before, self._hash())
+
+    def test_hash_uses_repository_sha256_convention(self) -> None:
+        digest = self._hash()
+        self.assertRegex(digest, r"^sha256:[0-9a-f]{64}$")
 
 
 if __name__ == "__main__":

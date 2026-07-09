@@ -676,6 +676,7 @@ or focused documents. Never paste raw logs here.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2026-07-09 | Plan created | pending | pending | n/a | this document | pending | Audit converted into executable goal |
 | 2026-07-09 | Receipt foundation: source identity | `a76a5e1b664b` | this commit | n/a | `scripts/qualification/source_tree_hash.py` | passed | 5 unit tests; receipts and docs excluded from identity |
+| 2026-07-09 | Source identity scope correction | `sha256:ebdb799360a7` | this commit | n/a | source identity unit suite | passed | 7 tests; excludes profiling artifacts and desktop prose; uses repository hash convention |
 
 ## Known Starting Defects
 

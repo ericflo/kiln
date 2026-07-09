@@ -20,23 +20,30 @@ INCLUDED_FILES = {
     ".dockerignore",
     "Cargo.lock",
     "Cargo.toml",
+    "assets/logo.png",
     "about.hbs",
     "about.toml",
+    "desktop/Cargo.lock",
+    "desktop/Cargo.toml",
+    "desktop/build.rs",
+    "desktop/tauri.conf.json",
     "deny.toml",
     "kiln.example.toml",
 }
 INCLUDED_PREFIXES = (
-    "assets/",
     "crates/",
     "deploy/",
-    "desktop/",
+    "desktop/capabilities/",
+    "desktop/icons/",
+    "desktop/src/",
+    "desktop/ui/",
     "qualification/schema/",
     "qualification/workloads/",
     "scripts/",
 )
 EXCLUDED_PREFIXES = (
-    "desktop/target/",
     "qualification/receipts/",
+    "scripts/c2_artifacts/",
 )
 
 
@@ -112,8 +119,9 @@ def source_tree_hash(root: Path = ROOT) -> tuple[str, list[SourceEntry]]:
         content_digest = hashlib.sha256(content).hexdigest()
         digest.update(entry.mode.encode("ascii") + b"\0")
         digest.update(entry.path.encode("utf-8") + b"\0")
+        digest.update(str(len(content)).encode("ascii") + b"\0")
         digest.update(content_digest.encode("ascii") + b"\0")
-    return digest.hexdigest(), entries
+    return f"sha256:{digest.hexdigest()}", entries
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
