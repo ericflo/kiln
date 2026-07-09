@@ -703,6 +703,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-09 | Safe memory-governor default | `sha256:d4c3f94bdaf3` | `6234e764` | portable + ROCm | memory-governor unit tests and runtime state | passed | Physical reclaim is off by default; on-demand and automatic modes are explicit, strictly parsed, documented, and source-attributed |
 | 2026-07-09 | Zero-yield ROCm pool-trim avoidance | `sha256:456146c5693c` | `afd40ee3` | ROCm/gfx1151 | `rocm_trim_pool` hardware tests | passed | Empty pools avoid device synchronization; trim honors the target, propagates HIP failures, and reports measured reserved-byte deltas with timing and reason |
 | 2026-07-09 | Qualification variant binding | `sha256:7c60cce84c78` | `8dd88171` | portable | runner and workload unit suites | passed | Runner-owned variant identity is injected into each case, cannot be overridden by a manifest, and is recorded in the run configuration |
+| 2026-07-09 | Response backpressure observability | `sha256:29b38d21102e` | this commit | portable | batching-engine snapshots, debug state, and Prometheus metrics | passed | Monotonic counters distinguish channel saturation, actual wait, stall eviction, and closed receivers; exact structured events and 23 focused tests passed |
 | 2026-07-09 | First reduced-CI measurement | `sha256:cda13f3f84e5` | `3c71cc4002f8` | GitHub Actions | run `29049575526` | passed | Three active jobs completed in 3m52s wall and about 4m36s aggregate time; all GPU backend jobs were skipped |
 
 ## Known Starting Defects

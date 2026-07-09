@@ -695,6 +695,48 @@ impl Metrics {
             ),
         );
 
+        out.push_str("# HELP kiln_batching_engine_response_backpressure_events_total Token-delivery attempts that encountered a full per-request response channel.\n");
+        out.push_str("# TYPE kiln_batching_engine_response_backpressure_events_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_response_backpressure_events_total {}",
+                gauges.batching_engine.response_backpressure_events
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_response_backpressure_wait_seconds_total Cumulative time spent waiting for full per-request response channels to drain.\n");
+        out.push_str(
+            "# TYPE kiln_batching_engine_response_backpressure_wait_seconds_total counter\n",
+        );
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_response_backpressure_wait_seconds_total {:.6}",
+                gauges.batching_engine.response_backpressure_wait_ms as f64 / 1_000.0
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_response_stall_evictions_total Requests evicted after their response channel remained full for the configured grace window.\n");
+        out.push_str("# TYPE kiln_batching_engine_response_stall_evictions_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_response_stall_evictions_total {}",
+                gauges.batching_engine.response_stall_evictions
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_response_channel_closed_total Active requests discarded because their response receiver was closed.\n");
+        out.push_str("# TYPE kiln_batching_engine_response_channel_closed_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_response_channel_closed_total {}",
+                gauges.batching_engine.response_channel_closed
+            ),
+        );
+
         out.push_str("# HELP kiln_batching_engine_prefix_deferred_waiting Queued requests currently held back because an active same-adapter request can become their reusable strict prefix.\n");
         out.push_str("# TYPE kiln_batching_engine_prefix_deferred_waiting gauge\n");
         push_line(
@@ -1245,6 +1287,10 @@ mod tests {
                 total_decode_tokens: 128,
                 total_prefill_tokens: 8192,
                 total_errors: 1,
+                response_backpressure_events: 2,
+                response_backpressure_wait_ms: 750,
+                response_stall_evictions: 1,
+                response_channel_closed: 3,
                 prefix_deferred_waiting: 1,
                 prefix_admission_deferrals: 4,
                 ..BatchingEngineSnapshot::default()
@@ -1304,6 +1350,13 @@ mod tests {
         assert!(output.contains("kiln_batching_engine_decode_tokens_total 128"));
         assert!(output.contains("kiln_batching_engine_prefill_tokens_total 8192"));
         assert!(output.contains("kiln_batching_engine_errors_total 1"));
+        assert!(output.contains("kiln_batching_engine_response_backpressure_events_total 2"));
+        assert!(
+            output
+                .contains("kiln_batching_engine_response_backpressure_wait_seconds_total 0.750000")
+        );
+        assert!(output.contains("kiln_batching_engine_response_stall_evictions_total 1"));
+        assert!(output.contains("kiln_batching_engine_response_channel_closed_total 3"));
         assert!(output.contains("kiln_batching_engine_prefix_deferred_waiting 1"));
         assert!(output.contains("kiln_batching_engine_prefix_admission_deferrals_total 4"));
         assert!(output.contains("kiln_active_adapter{name=\"my-adapter\"} 1"));

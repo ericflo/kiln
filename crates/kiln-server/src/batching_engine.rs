@@ -52,6 +52,10 @@ fn stalled_client_send_grace() -> Duration {
     })
 }
 
+fn duration_millis_saturating(duration: Duration) -> u64 {
+    duration.as_millis().min(u64::MAX as u128) as u64
+}
+
 fn blocks_needed_for_tokens(num_tokens: usize, block_size: usize) -> usize {
     num_tokens.div_ceil(block_size)
 }
@@ -188,6 +192,15 @@ pub struct BatchingEngineSnapshot {
     pub total_decode_tokens: u64,
     pub total_prefill_tokens: u64,
     pub total_errors: u64,
+    /// Token-delivery attempts that encountered a full per-request event channel.
+    /// A single bounded-grace polling episode counts once, regardless of polls.
+    pub response_backpressure_events: u64,
+    /// Cumulative time spent polling full response channels during bounded grace.
+    pub response_backpressure_wait_ms: u64,
+    /// Requests evicted after their response channel remained full for the grace window.
+    pub response_stall_evictions: u64,
+    /// Active requests discarded because their response receiver was already closed.
+    pub response_channel_closed: u64,
     pub adapter_groups_waiting: usize,
     pub prefix_deferred_waiting: usize,
     pub prefix_admission_deferrals: u64,
@@ -1426,21 +1439,65 @@ impl BatchingEngineActor {
     fn send_token_or_evict_stalled(&mut self, idx: usize, token: TokenId) -> bool {
         let mut event = EngineEvent::Token(token);
         let mut waited = Duration::ZERO;
+        let mut grace = None;
+        let mut backpressure_observed = false;
+        let mut backpressure_started_at: Option<Instant> = None;
         loop {
             match self.active[idx].response_tx.try_send(event) {
-                Ok(()) => return true,
+                Ok(()) => {
+                    if let Some(started_at) = backpressure_started_at {
+                        self.record_response_backpressure_wait(started_at.elapsed());
+                    }
+                    return true;
+                }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
-                    self.forward.discard_request(self.active.remove(idx).slot);
+                    let actual_wait =
+                        backpressure_started_at.map(|started_at| started_at.elapsed());
+                    if let Some(wait) = actual_wait {
+                        self.record_response_backpressure_wait(wait);
+                    }
+                    let active = self.active.remove(idx);
+                    self.snapshot.response_channel_closed =
+                        self.snapshot.response_channel_closed.saturating_add(1);
+                    tracing::info!(
+                        event = "response_channel_closed",
+                        request_id = %active.req.request_id,
+                        backpressured = backpressure_observed,
+                        waited_ms = actual_wait.map_or(0, duration_millis_saturating),
+                        "stream response receiver closed; discarding active request"
+                    );
+                    self.forward.discard_request(active.slot);
                     return false;
                 }
                 Err(mpsc::error::TrySendError::Full(e)) => {
-                    if waited >= stalled_client_send_grace() {
+                    let grace = *grace.get_or_insert_with(stalled_client_send_grace);
+                    if !backpressure_observed {
+                        backpressure_observed = true;
+                        backpressure_started_at = Some(Instant::now());
+                        self.snapshot.response_backpressure_events =
+                            self.snapshot.response_backpressure_events.saturating_add(1);
+                        tracing::info!(
+                            event = "response_channel_backpressure",
+                            request_id = %self.active[idx].req.request_id,
+                            channel_capacity = self.active[idx].response_tx.max_capacity(),
+                            grace_ms = duration_millis_saturating(grace),
+                            "response_channel_backpressure"
+                        );
+                    }
+                    if waited >= grace {
                         let active = self.active.remove(idx);
+                        let actual_wait = backpressure_started_at
+                            .expect("full response channel records its start time")
+                            .elapsed();
+                        self.record_response_backpressure_wait(actual_wait);
+                        self.snapshot.response_stall_evictions =
+                            self.snapshot.response_stall_evictions.saturating_add(1);
                         tracing::warn!(
+                            event = "response_channel_backpressure_timeout",
                             request_id = %active.req.request_id,
-                            grace_ms = stalled_client_send_grace().as_millis() as u64,
-                            "cancelling stalled streaming client: event channel full and \
-                             undrained for the full grace window"
+                            grace_ms = duration_millis_saturating(grace),
+                            waited_ms = duration_millis_saturating(actual_wait),
+                            "response_channel_backpressure_timeout"
                         );
                         active.req.cancel.cancel();
                         self.forward.discard_request(active.slot);
@@ -1458,6 +1515,14 @@ impl BatchingEngineActor {
                 }
             }
         }
+    }
+
+    fn record_response_backpressure_wait(&mut self, waited: Duration) {
+        let waited_ms = duration_millis_saturating(waited);
+        self.snapshot.response_backpressure_wait_ms = self
+            .snapshot
+            .response_backpressure_wait_ms
+            .saturating_add(waited_ms);
     }
 
     fn should_defer_for_active_prefix(&self, queued: &QueuedRequest) -> bool {
@@ -2111,7 +2176,38 @@ mod tests {
             assert!(err.contains("stalled"), "{err}");
         }
 
+        let snapshot = handle.snapshot().await.unwrap();
+        assert_eq!(snapshot.response_backpressure_events, 1);
+        assert!(snapshot.response_backpressure_wait_ms >= 50, "{snapshot:?}");
+        assert_eq!(snapshot.response_stall_evictions, 1);
+        assert_eq!(snapshot.response_channel_closed, 0);
+
         handle.stop().await.unwrap();
+    }
+
+    #[test]
+    fn closed_response_channel_is_counted_without_backpressure() {
+        let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let forward = Arc::new(MockForward::default());
+        let mut actor = BatchingEngineActor::new(rx, forward, 8, false, 1, false);
+        let (response_tx, response_rx) = mpsc::channel(1);
+        drop(response_rx);
+        let req = request(101, 2);
+        actor.active.push(ActiveRequest {
+            req,
+            response_tx,
+            slot: DecodeSlot::Mock {
+                next_token: 101,
+                generated_tokens: Vec::new(),
+            },
+        });
+
+        assert!(!actor.send_token_or_evict_stalled(0, 111));
+        assert!(actor.active.is_empty());
+        assert_eq!(actor.snapshot.response_channel_closed, 1);
+        assert_eq!(actor.snapshot.response_backpressure_events, 0);
+        assert_eq!(actor.snapshot.response_backpressure_wait_ms, 0);
+        assert_eq!(actor.snapshot.response_stall_evictions, 0);
     }
 
     /// Forward whose `prepare_request` reports a block-pool shortage for a
