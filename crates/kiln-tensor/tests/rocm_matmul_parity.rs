@@ -1,14 +1,22 @@
 //! Phase R.6 — hipBLASLt dense GEMM parity vs a CPU reference, on a real AMD
 //! GPU. Covers F32 + BF16, decode-skinny (M=1), square, tall, and batched
-//! shapes, plus the fused-bias epilogue. Skips when no ROCm device is present.
+//! shapes, plus the fused-bias epilogue. Normal developer runs skip when no
+//! ROCm device is present; `KILN_QUALIFICATION=1` makes that a test failure.
 //!
 //! Run: `cargo test -p kiln-tensor --features rocm --test rocm_matmul_parity`
 #![cfg(feature = "rocm")]
 
 use kiln_tensor::{DType, Device, Tensor};
 
+fn qualification_required(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
 fn no_rocm() -> bool {
     if !kiln_tensor::rocm_is_available() {
+        if qualification_required(std::env::var("KILN_QUALIFICATION").ok().as_deref()) {
+            panic!("ROCm device unavailable while KILN_QUALIFICATION=1");
+        }
         eprintln!("no ROCm device available; skipping R.6 matmul parity test");
         true
     } else {

@@ -1,6 +1,6 @@
 //! Phase R.3 smoke tests — Tensor <-> ROCm device round-trips on a real AMD
-//! GPU. Skips cleanly when no ROCm device is present (toolchain-less / CI hosts
-//! without an AMD GPU), mirroring the cuda/metal availability-probe pattern.
+//! GPU. Normal developer runs skip when no ROCm device is present; runs with
+//! `KILN_QUALIFICATION=1` fail so missing hardware cannot look like evidence.
 //!
 //! Run with: `cargo test -p kiln-tensor --features rocm --test rocm_storage_smoke`
 #![cfg(feature = "rocm")]
@@ -8,13 +8,29 @@
 use half::bf16;
 use kiln_tensor::{DType, Device, Tensor};
 
+fn qualification_required(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
 fn no_rocm() -> bool {
     if !kiln_tensor::rocm_is_available() {
+        if qualification_required(std::env::var("KILN_QUALIFICATION").ok().as_deref()) {
+            panic!("ROCm device unavailable while KILN_QUALIFICATION=1");
+        }
         eprintln!("no ROCm device available; skipping R.3 smoke test");
         true
     } else {
         false
     }
+}
+
+#[test]
+fn qualification_mode_is_exact_opt_in() {
+    assert!(qualification_required(Some("1")));
+    assert!(!qualification_required(None));
+    assert!(!qualification_required(Some("")));
+    assert!(!qualification_required(Some("0")));
+    assert!(!qualification_required(Some("true")));
 }
 
 #[test]

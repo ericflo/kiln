@@ -10,6 +10,8 @@
 //!
 //! Also covers the LoRA-style composition `delta = (x @ A.T) @ B.T`
 //! since it's the Phase B canonical use case.
+//! Normal developer runs skip if no Vulkan device is available; runs with
+//! `KILN_QUALIFICATION=1` fail on an unavailable or uninitializable device.
 
 use anyhow::Result;
 use half::bf16;
@@ -28,11 +30,30 @@ use kiln_vulkan_kernel::vk_ops::shape::vk_transpose_2d_no_grad;
 use kiln_vulkan_kernel::vk_tensor::VkTensor;
 use std::sync::Arc;
 
+fn qualification_required(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
 fn vk_dev() -> Option<Arc<VulkanDevice>> {
     if !VulkanDevice::probe() {
+        if qualification_required(std::env::var("KILN_QUALIFICATION").ok().as_deref()) {
+            panic!("Vulkan device unavailable while KILN_QUALIFICATION=1");
+        }
+        eprintln!("no Vulkan device available; skipping matmul parity test");
         return None;
     }
-    VulkanDevice::new().ok().map(Arc::new)
+    match VulkanDevice::new() {
+        Ok(device) => Some(Arc::new(device)),
+        Err(error) => {
+            if qualification_required(std::env::var("KILN_QUALIFICATION").ok().as_deref()) {
+                panic!("Vulkan device initialization failed while KILN_QUALIFICATION=1: {error:#}");
+            }
+            eprintln!(
+                "Vulkan device initialization failed; skipping matmul parity test: {error:#}"
+            );
+            None
+        }
+    }
 }
 
 fn upload_f32(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
