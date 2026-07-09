@@ -80,9 +80,10 @@ the raw minute totals imply.
 After this policy, an ordinary Rust change launches three jobs: formatting,
 one Linux CPU job, and dependency policy. Backend jobs require an explicit
 dispatch, and packaging and performance workflows have no automatic trigger.
-The initial expected total is 4-6 aggregate runner-minutes. Update this
-document with measured post-change data after enough runs have completed; do
-not present the estimate as a measurement.
+The first successful post-change run, GitHub Actions run `29049575526`, measured
+3m52s wall time and approximately 4m36s of aggregate hosted time. This is one
+sample, not a stable range; retain measurements from later representative Rust
+changes before treating 4-6 aggregate minutes as the established baseline.
 
 ## Local Receipt Flow
 
