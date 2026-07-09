@@ -1,0 +1,240 @@
+{
+  "artifacts": [
+    {
+      "bytes": 18225,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t225523453678z-rocm-strix-halo-core-correctness-v1-9faecc7321-v1/environment.json",
+      "sha256": "sha256:5bb5ea09e08a40a71e24b5c912c1986c9c2f117da899e72a265706e7ba8f5f50"
+    },
+    {
+      "bytes": 14662,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t225523453678z-rocm-strix-halo-core-correctness-v1-9faecc7321-v1/cases/001-device-probe-r001/stdout.log",
+      "sha256": "sha256:820dd0476532e0ea4383c6edd608fa2dc96fbced44e3f965f0f6133a4cd2f6b7"
+    },
+    {
+      "bytes": 0,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t225523453678z-rocm-strix-halo-core-correctness-v1-9faecc7321-v1/cases/001-device-probe-r001/stderr.log",
+      "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 640,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t225523453678z-rocm-strix-halo-core-correctness-v1-9faecc7321-v1/cases/001-device-probe-r001/case-result.json",
+      "sha256": "sha256:dedf655ff05f60736fde226f6866796fac2e0286129415c017d122fa22c054ec"
+    },
+    {
+      "bytes": 1010,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t225523453678z-rocm-strix-halo-core-correctness-v1-9faecc7321-v1/cases/002-tensor-parity-r001/stdout.log",
+      "sha256": "sha256:9084d0e08ad302889ee581350bb3068040ed1268cd9cc8b3ccfda5af259bc860"
+    },
+    {
+      "bytes": 5198,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t225523453678z-rocm-strix-halo-core-correctness-v1-9faecc7321-v1/cases/002-tensor-parity-r001/stderr.log",
+      "sha256": "sha256:ca2534120434a3c0f1869fe1fc5a08db33003f4cade655a7b30c1ef162626184"
+    },
+    {
+      "bytes": 640,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t225523453678z-rocm-strix-halo-core-correctness-v1-9faecc7321-v1/cases/002-tensor-parity-r001/case-result.json",
+      "sha256": "sha256:3e6d496c23528fc784ab5932a5e70faceb0c1f2e8f829b795119280476b3c26d"
+    },
+    {
+      "bytes": 426,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t225523453678z-rocm-strix-halo-core-correctness-v1-9faecc7321-v1/cases/003-matmul-parity-r001/stdout.log",
+      "sha256": "sha256:7b279f6233b198e9285077cc5edcaea4e46c5480976f7e47ca5f269bb7a5843a"
+    },
+    {
+      "bytes": 5023,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t225523453678z-rocm-strix-halo-core-correctness-v1-9faecc7321-v1/cases/003-matmul-parity-r001/stderr.log",
+      "sha256": "sha256:678bf6776c1392807c0dfd7d8e69def3979f9c8f6a7e833fed4d21bcbcd3cae9"
+    },
+    {
+      "bytes": 641,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t225523453678z-rocm-strix-halo-core-correctness-v1-9faecc7321-v1/cases/003-matmul-parity-r001/case-result.json",
+      "sha256": "sha256:f0c0e74242b022363ec3a511b793891f70b92c3e6649fbe16938f8e504066d19"
+    },
+    {
+      "bytes": 21113,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t225523453678z-rocm-strix-halo-core-correctness-v1-9faecc7321-v1/run-config.json",
+      "sha256": "sha256:b23480d23e3316de65e9614728672040bf5f1497b550abf7d5d068326af6b0fb"
+    }
+  ],
+  "created_at_utc": "2026-07-09T22:56:51.856Z",
+  "effective_config": {},
+  "environment": {
+    "compiler": {
+      "cargo": "cargo 1.94.1 (29ea6fb6a 2026-03-24)",
+      "hipcc": "HIP version: 7.2.53211-9999",
+      "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)"
+    },
+    "device": {
+      "architecture": "gfx1151",
+      "driver": "amdgpu kernel 7.0.14-arch1-1",
+      "memory_bytes": 103079215104,
+      "name": "AMD Radeon 8060S Graphics",
+      "unified_memory": true
+    },
+    "host_id": "strix-halo",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "7.0.14-arch1-1",
+      "name": "EndeavourOS",
+      "version": "2025.03.19"
+    },
+    "runtime": {
+      "execution_environment_sha256": "sha256:8e1ad1077a8aaf2a76367b88fa4922090d5088a5a20893e0dce475cc4511c57b",
+      "hipcc": "HIP version: 7.2.53211-9999",
+      "hsa": "1.18",
+      "rocm": "7.2.4"
+    }
+  },
+  "metrics": [],
+  "model": null,
+  "notes": [],
+  "qualification": {
+    "backend": "rocm",
+    "command": [
+      "/usr/bin/python3",
+      "scripts/qualification/run.py",
+      "qualification/workloads/correctness-core-v1.json",
+      "--variant",
+      "rocm",
+      "--host-id",
+      "strix-halo"
+    ],
+    "duration_seconds": 88.40320731799875,
+    "finished_at_utc": "2026-07-09T22:56:51.856Z",
+    "kind": "correctness",
+    "profile": "core-correctness-v1",
+    "started_at_utc": "2026-07-09T22:55:23.453Z",
+    "verdict": "passed"
+  },
+  "receipt_id": "20260709t225523453678z-rocm-strix-halo-core-correctness-v1-9faecc7321-v1",
+  "results": [
+    {
+      "details": null,
+      "duration_seconds": 0.0610282890011149,
+      "id": "device-probe",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 86.72366726999826,
+      "id": "tensor-parity",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 1.2857723029992485,
+      "id": "matmul-parity",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "d457a89ce267634cbb0f970bd5585585910ba000",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:429d38681db801b5dac873fd6130715f4594f47fc6cbe53d47ead31ba9e1868a",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [],
+  "workload": {
+    "id": "core-correctness-v1",
+    "parameters": {
+      "variant_id": "rocm"
+    },
+    "seed": 20260709,
+    "sha256": "sha256:805b7b7797d61aeea57a830586e2f22c587e274fa5b8da97a799fcf2a619a688"
+  }
+}
