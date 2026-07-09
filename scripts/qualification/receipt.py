@@ -30,6 +30,7 @@ METRIC_NAME_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 HOST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,63}$")
 CONFIG_SEGMENT_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 JSON_INTEGER_MAX_DIGITS = 4096
+MAX_RESULT_DETAIL_CHARACTERS = 2048
 KINDS = {"environment", "correctness", "serving", "performance", "training", "eval", "soak"}
 BACKENDS = {"cpu", "cuda", "rocm", "vulkan", "metal"}
 VERDICTS = {"passed", "failed"}
@@ -457,7 +458,17 @@ def validate_receipt(
             _validate_metrics(errors, result.get("metrics"), f"{context}.metrics")
             details = result.get("details")
             if details is not None:
-                _check_string(errors, details, f"{context}.details", allow_empty=True)
+                checked_details = _check_string(
+                    errors, details, f"{context}.details", allow_empty=True
+                )
+                if (
+                    checked_details is not None
+                    and len(checked_details) > MAX_RESULT_DETAIL_CHARACTERS
+                ):
+                    errors.append(
+                        f"{context}.details must be at most "
+                        f"{MAX_RESULT_DETAIL_CHARACTERS} characters"
+                    )
 
     _validate_metrics(errors, top.get("metrics"), "receipt.metrics")
 

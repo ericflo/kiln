@@ -244,6 +244,18 @@ def _metric_identity(receipt: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _strict_result_identity(receipt: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": result["id"],
+            "required": result["required"],
+            "status": result["status"],
+            "metrics": sorted(result["metrics"], key=lambda item: item["name"]),
+        }
+        for result in sorted(receipt["results"], key=lambda item: item["id"])
+    ]
+
+
 def _workload_base_identity(workload: dict[str, Any]) -> dict[str, Any]:
     parameters = {
         key: 0.0 if isinstance(value, float) and value == 0 else value
@@ -677,9 +689,12 @@ def compare_receipts(
         if baseline.sha256 == candidate.sha256:
             raise ComparisonError("manifest-bound comparison requires distinct receipt content")
         policy = manifest.value["comparison_policy"]
-        if not isinstance(policy, dict):
+        if policy is None and manifest.value["kind"] == "environment":
+            mode = "strict_environment_workload"
+        elif not isinstance(policy, dict):
             raise ComparisonError("the committed workload does not declare a comparison policy")
-        mode = policy["mode"]
+        else:
+            mode = policy["mode"]
 
     baseline_value = baseline.value
     candidate_value = candidate.value
@@ -778,7 +793,34 @@ def compare_receipts(
             "environment": candidate_value["environment"],
         }
 
-        if mode == "same_environment_performance":
+        if mode == "strict_environment_workload":
+            if baseline_variant != candidate_variant:
+                rejected.append(
+                    {
+                        "compatibility": "workload_variant",
+                        "baseline": baseline_variant,
+                        "candidate": candidate_variant,
+                    }
+                )
+            _add_difference(
+                rejected,
+                "backend_environment",
+                backend_environment_before,
+                backend_environment_after,
+            )
+            _add_difference(
+                rejected,
+                "result_evidence",
+                _strict_result_identity(baseline_value),
+                _strict_result_identity(candidate_value),
+            )
+            _add_difference(
+                rejected,
+                "unsupported",
+                baseline_value["unsupported"],
+                candidate_value["unsupported"],
+            )
+        elif mode == "same_environment_performance":
             if baseline_variant != candidate_variant:
                 rejected.append(
                     {

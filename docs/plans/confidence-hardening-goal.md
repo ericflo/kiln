@@ -126,7 +126,7 @@ Receipt rules:
 - [x] Add a schema and validator for qualification receipts.
 - [x] Add a deterministic `source_tree_hash` command and tests proving receipt
   files do not change it while source changes do.
-- [ ] Add a local qualification runner that writes raw logs under an ignored
+- [x] Add a local qualification runner that writes raw logs under an ignored
   directory and emits a compact receipt.
 - [x] Add a receipt comparison command that rejects incompatible source trees,
   models, workloads, and environments rather than comparing unlike runs.
@@ -694,6 +694,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-09 | Workload contract foundation | `sha256:c49a86951eab` | this commit | portable | `qualification/schema/workload-v1.schema.json` | passed | Exact byte identity, argv-only cases, structured results, closed comparison modes, and initial environment/core-correctness manifests; 14 focused tests |
 | 2026-07-09 | Qualification-required backend tests | `sha256:31f9133268ee` | this commit | ROCm/Vulkan | core correctness hardware test binaries | passed | Exact `KILN_QUALIFICATION=1` opt-in converts missing devices and Vulkan initialization failures from developer skips into test failures |
 | 2026-07-09 | Strict receipt comparison | `sha256:4fcbf0c90547` | this commit | portable | `scripts/qualification/compare_receipts.py` | passed | Committed policy binds source, model, parameters, config, environment exceptions, and metric semantics; 25 comparator tests and 88 isolated qualification tests |
+| 2026-07-09 | Local qualification runner | `sha256:bedb3fc59bee` | this commit | portable + Strix Halo | `scripts/qualification/run.py` | passed | 36 runner tests and 126 qualification tests; strict bounded evidence, config/model/source attestation, exact repetition aggregation, no-network/PID isolation, and process-tree cleanup; real namespace probes preserved ROCm gfx1151 and RADV Vulkan access |
 | 2026-07-09 | First reduced-CI measurement | `sha256:cda13f3f84e5` | `3c71cc4002f8` | GitHub Actions | run `29049575526` | passed | Three active jobs completed in 3m52s wall and about 4m36s aggregate time; all GPU backend jobs were skipped |
 
 ## Known Starting Defects

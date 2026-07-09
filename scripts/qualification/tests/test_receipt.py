@@ -108,6 +108,14 @@ class ReceiptTests(unittest.TestCase):
         errors = receipt_module.validate_receipt(value)
         self.assertTrue(any("failed receipt must contain" in error for error in errors))
 
+    def test_result_details_have_a_strict_size_limit(self) -> None:
+        value = valid_receipt()
+        value["results"][0]["details"] = (
+            "x" * (receipt_module.MAX_RESULT_DETAIL_CHARACTERS + 1)
+        )
+        errors = receipt_module.validate_receipt(value)
+        self.assertTrue(any("details must be at most" in error for error in errors))
+
     def test_duplicate_result_and_metric_names_are_rejected(self) -> None:
         value = valid_receipt()
         value["results"].append(copy.deepcopy(value["results"][0]))
@@ -234,6 +242,12 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(schema["properties"]["schema_version"]["const"], 1)
         self.assertEqual(schema["properties"]["effective_config"]["$ref"], "#/$defs/configObject")
         self.assertEqual(len(schema["allOf"]), 2)
+        self.assertEqual(
+            schema["$defs"]["result"]["properties"]["details"]["oneOf"][0][
+                "maxLength"
+            ],
+            receipt_module.MAX_RESULT_DETAIL_CHARACTERS,
+        )
         self.assertEqual(
             schema["allOf"][0]["then"]["properties"]["workload"]["$ref"],
             "#/$defs/workload",

@@ -390,11 +390,53 @@ class WorkloadTests(unittest.TestCase):
                 errors = workload_module.validate_workload_parameters(value, parameters)
                 self.assertTrue(any(expected in error for error in errors), errors)
 
+    def test_runtime_bounds_are_finite_and_soak_capable(self) -> None:
+        value = valid_performance_workload()
+        value["determinism"]["repetitions"] = workload_module.MAX_REPETITIONS + 1
+        errors = workload_module.validate_workload(value)
+        self.assertTrue(any("repetitions must be at most" in error for error in errors))
+
+        value = valid_performance_workload()
+        value["variants"][0]["cases"][0]["timeout_seconds"] = (
+            workload_module.MAX_CASE_TIMEOUT_SECONDS + 1
+        )
+        errors = workload_module.validate_workload(value)
+        self.assertTrue(any("timeout_seconds must be at most" in error for error in errors))
+
+        value = valid_performance_workload()
+        value["determinism"]["repetitions"] = 4
+        value["variants"][0]["cases"][0]["timeout_seconds"] = (
+            workload_module.MAX_CASE_TIMEOUT_SECONDS
+        )
+        errors = workload_module.validate_workload(value)
+        self.assertTrue(any("declared timeout budget exceeds" in error for error in errors))
+
+        value = valid_performance_workload()
+        template = value["variants"][0]["cases"][0]
+        cases = []
+        for index in range(11):
+            case = copy.deepcopy(template)
+            case["id"] = "decode-throughput" if index == 0 else f"extra-case-{index:02d}"
+            case["timeout_seconds"] = 1
+            cases.append(case)
+        value["variants"][0]["cases"] = cases
+        value["determinism"]["repetitions"] = 1000
+        errors = workload_module.validate_workload(value)
+        self.assertTrue(any("more than 10000 case executions" in error for error in errors))
+
     def test_schema_files_are_closed_and_match_validator_contracts(self) -> None:
         schema = json.loads((ROOT / "qualification/schema/workload-v1.schema.json").read_text())
         self.assertFalse(schema["additionalProperties"])
         self.assertEqual(set(schema["required"]), workload_module.TOP_LEVEL_KEYS)
         self.assertEqual(set(schema["properties"]), workload_module.TOP_LEVEL_KEYS)
+        self.assertEqual(
+            schema["$defs"]["determinism"]["properties"]["repetitions"]["maximum"],
+            workload_module.MAX_REPETITIONS,
+        )
+        self.assertEqual(
+            schema["$defs"]["case"]["properties"]["timeout_seconds"]["maximum"],
+            workload_module.MAX_CASE_TIMEOUT_SECONDS,
+        )
         contracts = [
             (schema["$defs"]["determinism"], workload_module.DETERMINISM_KEYS),
             (schema["$defs"]["variable"], workload_module.VARIABLE_KEYS),

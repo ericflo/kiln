@@ -33,7 +33,7 @@
     },
     "details": {
       "oneOf": [
-        { "type": "string" },
+        { "type": "string", "maxLength": 2048 },
         { "type": "null" }
       ]
     }

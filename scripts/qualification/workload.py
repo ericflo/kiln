@@ -24,6 +24,10 @@ PLACEHOLDER_RE = re.compile(r"^\$\{([a-z][a-z0-9_]{1,63}|seed)\}$")
 RESERVED_PLACEHOLDERS = {"seed", "model_path"}
 MODEL_REQUIRED_KINDS = {"serving", "performance", "training", "eval", "soak"}
 JSON_INTEGER_MAX_DIGITS = 4096
+MAX_REPETITIONS = 1000
+MAX_CASE_TIMEOUT_SECONDS = 172800
+MAX_DECLARED_WALL_SECONDS = 604800
+MAX_CASE_EXECUTIONS = 10000
 
 KINDS = {"environment", "correctness", "serving", "performance", "training", "eval", "soak"}
 BACKENDS = {"cpu", "cuda", "rocm", "vulkan", "metal"}
@@ -265,6 +269,16 @@ def _check_positive_int(errors: list[str], value: Any, context: str) -> int | No
         errors.append(f"{context} must be a positive integer")
         return None
     return value
+
+
+def _check_bounded_positive_int(
+    errors: list[str], value: Any, context: str, maximum: int
+) -> int | None:
+    parsed = _check_positive_int(errors, value, context)
+    if parsed is not None and parsed > maximum:
+        errors.append(f"{context} must be at most {maximum}")
+        return None
+    return parsed
 
 
 def _check_nonnegative_number(errors: list[str], value: Any, context: str) -> float | None:
@@ -527,7 +541,12 @@ def _validate_case(
                     f"{RESULT_PATH_ENVIRONMENT_VARIABLE}"
                 )
 
-    _check_positive_int(errors, case.get("timeout_seconds"), f"{context}.timeout_seconds")
+    _check_bounded_positive_int(
+        errors,
+        case.get("timeout_seconds"),
+        f"{context}.timeout_seconds",
+        MAX_CASE_TIMEOUT_SECONDS,
+    )
     exit_codes = case.get("expected_exit_codes")
     if not isinstance(exit_codes, list) or not exit_codes:
         errors.append(f"{context}.expected_exit_codes must be a non-empty array")
@@ -1020,7 +1039,12 @@ def validate_workload(workload: dict[str, Any]) -> list[str]:
         SEED_DELIVERIES,
         "workload.determinism.seed_delivery",
     )
-    _check_positive_int(errors, determinism.get("repetitions"), "workload.determinism.repetitions")
+    repetitions = _check_bounded_positive_int(
+        errors,
+        determinism.get("repetitions"),
+        "workload.determinism.repetitions",
+        MAX_REPETITIONS,
+    )
     if determinism.get("case_order") != "declared":
         errors.append("workload.determinism.case_order must be 'declared'")
     if determinism.get("max_parallel_cases") != 1:
@@ -1116,6 +1140,8 @@ def validate_workload(workload: dict[str, Any]) -> list[str]:
             command_seed = False
             environment_seed = False
             required_case_count = 0
+            case_timeout_total = 0
+            case_timeouts_valid = True
             if not isinstance(cases, list) or not cases:
                 errors.append(f"{variant_context}.cases must be a non-empty array")
             else:
@@ -1144,11 +1170,38 @@ def validate_workload(workload: dict[str, Any]) -> list[str]:
                             "producer": producer,
                         }
                     required_case_count += required is True
+                    raw_timeout = raw_case.get("timeout_seconds") if isinstance(raw_case, dict) else None
+                    if (
+                        isinstance(raw_timeout, int)
+                        and not isinstance(raw_timeout, bool)
+                        and 0 < raw_timeout <= MAX_CASE_TIMEOUT_SECONDS
+                    ):
+                        case_timeout_total += raw_timeout
+                    else:
+                        case_timeouts_valid = False
                     references.update(case_references)
                     command_seed = command_seed or "seed" in command_references
                     environment_seed = environment_seed or "seed" in environment_references
             if required_case_count == 0:
                 errors.append(f"{variant_context}.cases must contain at least one required case")
+            if (
+                repetitions is not None
+                and case_timeouts_valid
+                and repetitions * case_timeout_total > MAX_DECLARED_WALL_SECONDS
+            ):
+                errors.append(
+                    f"{variant_context} declared timeout budget exceeds "
+                    f"{MAX_DECLARED_WALL_SECONDS} seconds"
+                )
+            if (
+                repetitions is not None
+                and isinstance(cases, list)
+                and repetitions * len(cases) > MAX_CASE_EXECUTIONS
+            ):
+                errors.append(
+                    f"{variant_context} declares more than "
+                    f"{MAX_CASE_EXECUTIONS} case executions"
+                )
             if effective_config and any(
                 case_contract.get("producer") != "command"
                 for case_contract in case_contracts.values()
