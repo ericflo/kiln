@@ -196,6 +196,18 @@ class ReceiptTests(unittest.TestCase):
         self.assertFalse(schema["additionalProperties"])
         self.assertEqual(schema["properties"]["schema_version"]["const"], 1)
 
+    def test_atomic_write_json_replaces_complete_document(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "nested" / "receipt.json"
+            receipt_module.atomic_write_json(path, {"version": 1})
+            self.assertEqual(json.loads(path.read_text()), {"version": 1})
+            receipt_module.atomic_write_json(path, {"version": 2, "complete": True})
+            self.assertEqual(
+                json.loads(path.read_text()),
+                {"version": 2, "complete": True},
+            )
+            self.assertEqual(list(path.parent.glob("*.tmp")), [])
+
     def test_python_validator_keys_and_enums_match_schema(self) -> None:
         schema_path = Path(__file__).resolve().parents[3] / "qualification/schema/receipt-v1.schema.json"
         schema = json.loads(schema_path.read_text())
