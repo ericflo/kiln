@@ -1951,6 +1951,16 @@ impl ModelRunner {
             .is_enabled())
     }
 
+    /// Snapshot ROCm graph configuration, circuit-breaker state, and execution
+    /// counters. Counters are lifetime-monotonic for this model runner.
+    pub fn rocm_graph_stats(&self) -> Result<crate::rocm_graph::RocmGraphStats> {
+        Ok(self
+            .rocm_graph
+            .try_lock()
+            .map_err(|e| anyhow::anyhow!("ROCm graph runner snapshot unavailable: {e}"))?
+            .stats())
+    }
+
     pub fn metal_graph_enabled(&self) -> Result<bool> {
         Ok(self
             .metal_graph

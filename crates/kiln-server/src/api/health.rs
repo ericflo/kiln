@@ -174,7 +174,7 @@ struct PromptCacheInfo {
 #[derive(Serialize)]
 struct DecodeRuntimeInfo {
     cuda_graphs: GraphInfo,
-    rocm_graphs: GraphInfo,
+    rocm_graphs: RocmGraphInfo,
     metal_graphs: GraphInfo,
     kv_autoscaler: crate::kv_autoscaler::KvAutoscalerState,
     memory_governor: MemoryGovernorRuntimeInfo,
@@ -217,6 +217,48 @@ fn graph_info(enabled: Option<bool>) -> GraphInfo {
             Some(false) => "disabled",
             None => "busy",
         },
+    }
+}
+
+#[derive(Serialize)]
+struct RocmGraphInfo {
+    requested: Option<bool>,
+    capture_requested: Option<bool>,
+    enabled: Option<bool>,
+    capture_enabled: Option<bool>,
+    state: &'static str,
+    capture_attempts: Option<u64>,
+    capture_successes: Option<u64>,
+    capture_deferrals: Option<u64>,
+    capture_failures: Option<u64>,
+    replay_attempts: Option<u64>,
+    replay_successes: Option<u64>,
+    replay_failures: Option<u64>,
+    failures: Option<u64>,
+    captured_graph_count: Option<usize>,
+}
+
+fn rocm_graph_info(stats: Option<kiln_model::RocmGraphStats>) -> RocmGraphInfo {
+    let enabled = stats.map(|snapshot| snapshot.enabled);
+    RocmGraphInfo {
+        requested: stats.map(|snapshot| snapshot.requested),
+        capture_requested: stats.map(|snapshot| snapshot.capture_requested),
+        enabled,
+        capture_enabled: stats.map(|snapshot| snapshot.capture_enabled),
+        state: match enabled {
+            Some(true) => "enabled",
+            Some(false) => "disabled",
+            None => "busy",
+        },
+        capture_attempts: stats.map(|snapshot| snapshot.capture_attempts),
+        capture_successes: stats.map(|snapshot| snapshot.capture_successes),
+        capture_deferrals: stats.map(|snapshot| snapshot.capture_deferrals),
+        capture_failures: stats.map(|snapshot| snapshot.capture_failures),
+        replay_attempts: stats.map(|snapshot| snapshot.replay_attempts),
+        replay_successes: stats.map(|snapshot| snapshot.replay_successes),
+        replay_failures: stats.map(|snapshot| snapshot.replay_failures),
+        failures: stats.map(|snapshot| snapshot.failures),
+        captured_graph_count: stats.map(|snapshot| snapshot.captured_graph_count),
     }
 }
 
@@ -317,7 +359,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
                 None,
                 None,
                 graph_info(Some(false)),
-                graph_info(Some(false)),
+                rocm_graph_info(Some(kiln_model::RocmGraphStats::default())),
                 graph_info(Some(false)),
                 true,
             )
@@ -351,11 +393,11 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
                 Some(engine) => engine.snapshot().await.ok().map(BatchingEngineInfo::from),
                 None => None,
             };
-            let (cuda_graph_enabled, rocm_graph_enabled, metal_graph_enabled) =
+            let (cuda_graph_enabled, rocm_graph_stats, metal_graph_enabled) =
                 match runner.try_read() {
                     Ok(runner) => (
                         runner.cuda_graph_enabled().ok(),
-                        runner.rocm_graph_enabled().ok(),
+                        runner.rocm_graph_stats().ok(),
                         runner.metal_graph_enabled().ok(),
                     ),
                     Err(_) => (None, None, None),
@@ -367,7 +409,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
                 decode_batcher,
                 batching_engine,
                 graph_info(cuda_graph_enabled),
-                graph_info(rocm_graph_enabled),
+                rocm_graph_info(rocm_graph_stats),
                 graph_info(metal_graph_enabled),
                 true,
             )
@@ -761,6 +803,41 @@ mod tests {
         )
     }
 
+    #[test]
+    fn rocm_graph_health_preserves_runtime_snapshot() {
+        let info = rocm_graph_info(Some(kiln_model::RocmGraphStats {
+            requested: true,
+            capture_requested: true,
+            enabled: false,
+            capture_enabled: false,
+            capture_attempts: 4,
+            capture_successes: 2,
+            capture_deferrals: 1,
+            capture_failures: 1,
+            replay_attempts: 9,
+            replay_successes: 8,
+            replay_failures: 1,
+            failures: 2,
+            captured_graph_count: 0,
+        }));
+        let json = serde_json::to_value(info).unwrap();
+
+        assert_eq!(json["requested"], true);
+        assert_eq!(json["capture_requested"], true);
+        assert_eq!(json["enabled"], false);
+        assert_eq!(json["capture_enabled"], false);
+        assert_eq!(json["state"], "disabled");
+        assert_eq!(json["capture_attempts"], 4);
+        assert_eq!(json["capture_successes"], 2);
+        assert_eq!(json["capture_deferrals"], 1);
+        assert_eq!(json["capture_failures"], 1);
+        assert_eq!(json["replay_attempts"], 9);
+        assert_eq!(json["replay_successes"], 8);
+        assert_eq!(json["replay_failures"], 1);
+        assert_eq!(json["failures"], 2);
+        assert_eq!(json["captured_graph_count"], 0);
+    }
+
     #[tokio::test]
     async fn test_health_returns_ok() {
         let state = make_test_state();
@@ -844,6 +921,23 @@ mod tests {
         for backend in ["cuda_graphs", "rocm_graphs", "metal_graphs"] {
             assert_eq!(json["decode_runtime"][backend]["enabled"], false);
             assert_eq!(json["decode_runtime"][backend]["state"], "disabled");
+        }
+        let rocm_graphs = &json["decode_runtime"]["rocm_graphs"];
+        assert_eq!(rocm_graphs["requested"], false);
+        assert_eq!(rocm_graphs["capture_requested"], false);
+        assert_eq!(rocm_graphs["capture_enabled"], false);
+        for counter in [
+            "capture_attempts",
+            "capture_successes",
+            "capture_deferrals",
+            "capture_failures",
+            "replay_attempts",
+            "replay_successes",
+            "replay_failures",
+            "failures",
+            "captured_graph_count",
+        ] {
+            assert_eq!(rocm_graphs[counter], 0, "unexpected {counter}");
         }
         assert_eq!(json["decode_runtime"]["kv_autoscaler"]["enabled"], false);
         assert_eq!(
