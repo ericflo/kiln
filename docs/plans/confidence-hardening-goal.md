@@ -688,6 +688,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-09 | Consolidated cheap automatic checks | `sha256:c4f18b397716` | this commit | Linux CPU | `.github/workflows/ci.yml` | passed | Folded leaf and dependency-tree guards into default job; added portable receipt contract validation |
 | 2026-07-09 | CI cost inventory and operator policy | `sha256:c4f18b397716` | this commit | GitHub Actions/local hardware | `docs/ci-policy.md` | passed | Recorded all prior automatic workflows, measured cost, three-job Rust target, manual dispatch commands, and local evidence ownership |
 | 2026-07-09 | Deduplicated release drift check | `sha256:d56d06727edd` | this commit | Linux CPU | `.github/workflows/release-version-drift.yml` | passed | Release workflow now owns version/CLI/link drift only; Pages and UI workflows retain their browser smoke coverage |
+| 2026-07-09 | Honest legacy latency status | `sha256:d56d06727edd` | this commit | Metal/Vulkan fixtures | `docs/backend-latency-fixtures.json` | passed | Stale source-bound Metal and Vulkan artifacts are pending rerun; the legacy manifest no longer claims covered hardware evidence |
 
 ## Known Starting Defects
 

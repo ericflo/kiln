@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "status": "covered",
+  "status": "fixture_required",
   "policy": {
     "covered_gate_requires": [
       "Every required backend has at least one known hardware fixture.",
@@ -63,31 +63,31 @@
       "source": "crates/kiln-tensor/tests/metal_matmul_bench.rs",
       "command": "cargo test -p kiln-tensor --features metal --test metal_matmul_bench -- --ignored --nocapture",
       "result_artifact": "bench-results/backend-latency/metal-apple-silicon-matmul.json",
-      "threshold_state": "locked_threshold",
+      "threshold_state": "pending_fixture_result",
       "metrics": [
         {
           "name": "decode_qkv_m1_2560x4096_ms",
           "unit": "ms",
           "comparison": "<=",
-          "max": 1.416912
+          "max": null
         },
         {
           "name": "prefill_qkv_m256_2560x4096_ms",
           "unit": "ms",
           "comparison": "<=",
-          "max": 4.284225
+          "max": null
         },
         {
           "name": "prefill_gate_up_m256_2560x18432_ms",
           "unit": "ms",
           "comparison": "<=",
-          "max": 19.164885
+          "max": null
         },
         {
           "name": "lm_head_m1_2560x152064_ms",
           "unit": "ms",
           "comparison": "<=",
-          "max": 42.799126
+          "max": null
         }
       ]
     },
@@ -98,25 +98,25 @@
       "source": "crates/kiln-tensor/tests/metal_sdpa_bench.rs",
       "command": "cargo test -p kiln-tensor --features metal --test metal_sdpa_bench -- --ignored --nocapture",
       "result_artifact": "bench-results/backend-latency/metal-apple-silicon-sdpa.json",
-      "threshold_state": "locked_threshold",
+      "threshold_state": "pending_fixture_result",
       "metrics": [
         {
           "name": "decode_sq1_sk512_ms",
           "unit": "ms",
           "comparison": "<=",
-          "max": 0.143847
+          "max": null
         },
         {
           "name": "decode_sq1_sk4096_ms",
           "unit": "ms",
           "comparison": "<=",
-          "max": 0.617131
+          "max": null
         },
         {
           "name": "prefill_sq512_sk512_ms",
           "unit": "ms",
           "comparison": "<=",
-          "max": 4.511978
+          "max": null
         }
       ]
     },
@@ -172,7 +172,7 @@
       "source": "crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs",
       "command": "KILN_VK_MICROBENCH_ONLY=full_step_resident,full_token_resident_paged KILN_VK_MICROBENCH_BATCHES=1 cargo run --release -p kiln-vulkan-kernel --bin vulkan_decode_microbench",
       "result_artifact": "bench-results/backend-latency/vulkan-strix-halo-decode.json",
-      "threshold_state": "locked_threshold",
+      "threshold_state": "pending_fixture_result",
       "selected_cases": [
         "full_step_resident",
         "full_token_resident_paged"
@@ -182,13 +182,13 @@
           "name": "full_step_resident_us",
           "unit": "us",
           "comparison": "<=",
-          "max": 1724.157784
+          "max": null
         },
         {
           "name": "full_token_resident_paged_us",
           "unit": "us",
           "comparison": "<=",
-          "max": 55889.454756
+          "max": null
         }
       ]
     }
