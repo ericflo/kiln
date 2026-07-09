@@ -176,6 +176,7 @@ struct DecodeRuntimeInfo {
     cuda_graphs: GraphInfo,
     rocm_graphs: GraphInfo,
     metal_graphs: GraphInfo,
+    kv_autoscaler: crate::kv_autoscaler::KvAutoscalerState,
     decode_batcher: Option<DecodeBatcherInfo>,
     batching_engine: Option<BatchingEngineInfo>,
 }
@@ -359,6 +360,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         cuda_graphs,
         rocm_graphs,
         metal_graphs,
+        kv_autoscaler: state.kv_autoscaler,
         decode_batcher,
         batching_engine,
     };
@@ -820,6 +822,11 @@ mod tests {
             assert_eq!(json["decode_runtime"][backend]["enabled"], false);
             assert_eq!(json["decode_runtime"][backend]["state"], "disabled");
         }
+        assert_eq!(json["decode_runtime"]["kv_autoscaler"]["enabled"], false);
+        assert_eq!(
+            json["decode_runtime"]["kv_autoscaler"]["reason"],
+            "mock_backend"
+        );
         assert!(json["training"].is_object());
         assert_eq!(json["training"]["queued"], 0);
         assert!(json["training"]["active_job"].is_null());

@@ -26,6 +26,45 @@ use kiln_model::{GpuAllocatorMemoryProbePolicy, PagedKvCacheKt};
 
 use crate::batching_engine::BatchingEngineHandle;
 
+/// Startup state exposed through `/health`. This distinguishes an operator
+/// request from a control loop that actually owns a usable device KV pool.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct KvAutoscalerState {
+    pub requested: bool,
+    pub enabled: bool,
+    pub state: &'static str,
+    pub reason: &'static str,
+    pub start_blocks: Option<usize>,
+    pub min_blocks: Option<usize>,
+    pub bytes_per_block: Option<usize>,
+}
+
+impl KvAutoscalerState {
+    pub fn unavailable(reason: &'static str) -> Self {
+        Self {
+            requested: !is_disabled(),
+            enabled: false,
+            state: "unavailable",
+            reason,
+            start_blocks: None,
+            min_blocks: None,
+            bytes_per_block: None,
+        }
+    }
+
+    fn disabled() -> Self {
+        Self {
+            requested: false,
+            enabled: false,
+            state: "disabled",
+            reason: "environment",
+            start_blocks: None,
+            min_blocks: None,
+            bytes_per_block: None,
+        }
+    }
+}
+
 /// How often the policy re-evaluates.
 const TICK: Duration = Duration::from_secs(2);
 /// Minimum spacing between two resizes — a resize blocks the GPU briefly, so we
@@ -61,16 +100,16 @@ pub fn spawn(
     engine: BatchingEngineHandle,
     paged_cache: Arc<PagedKvCacheKt>,
     gpu_allocator_memory_probe_policy: GpuAllocatorMemoryProbePolicy,
-) {
+) -> KvAutoscalerState {
     if is_disabled() {
         tracing::info!("KV autoscaler disabled (KILN_KV_AUTOSCALE=0)");
-        return;
+        return KvAutoscalerState::disabled();
     }
     let bytes_per_block = paged_cache.bytes_per_block();
     let start_blocks = paged_cache.num_blocks();
     if bytes_per_block == 0 || start_blocks == 0 {
         tracing::info!("KV autoscaler not started: cache reports no geometry");
-        return;
+        return KvAutoscalerState::unavailable("cache_geometry");
     }
     // Keep at least a quarter of the startup cache (and >= 1) under any pressure.
     let bounds = Bounds {
@@ -96,6 +135,16 @@ pub fn spawn(
             )
         })
         .expect("spawn kv autoscaler");
+
+    KvAutoscalerState {
+        requested: true,
+        enabled: true,
+        state: "enabled",
+        reason: "active",
+        start_blocks: Some(start_blocks),
+        min_blocks: Some(bounds.min_blocks),
+        bytes_per_block: Some(bytes_per_block),
+    }
 }
 
 fn run(

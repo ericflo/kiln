@@ -1460,6 +1460,8 @@ pub struct AppState {
     pub training_jobs: TrainingJobs,
     /// GPU memory budget for coordinating inference and training.
     pub memory_budget: Arc<GpuMemoryBudget>,
+    /// Whether the dynamic device KV control loop was requested and started.
+    pub kv_autoscaler: crate::kv_autoscaler::KvAutoscalerState,
     /// Coordination lock: inference takes read lock, training takes write lock.
     /// This prevents simultaneous GPU-heavy operations from OOMing.
     pub gpu_lock: GpuCoordinationLock,
@@ -1725,6 +1727,7 @@ impl AppState {
             adapter_swap_lock: Arc::new(tokio::sync::Mutex::new(())),
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
             memory_budget: Arc::new(GpuMemoryBudget::compute(0, 0, 0, 0, 0, 1.0, None)),
+            kv_autoscaler: crate::kv_autoscaler::KvAutoscalerState::unavailable("mock_backend"),
             gpu_lock: Arc::new(std::sync::RwLock::new(())),
             training_queue: crate::training_queue::new_shared_queue(),
             teacher_registry: Arc::new(crate::api::teachers::TeacherRegistry::new()),
@@ -2325,15 +2328,21 @@ impl AppState {
         // arbitrate. The autoscaler shrinks KV when VRAM gets tight and grows it
         // back when headroom returns; the resize itself runs on the engine actor
         // at its barrier under exclusive GPU access.
-        if let Some(engine) = batching_engine.clone() {
+        let kv_autoscaler = if let Some(engine) = batching_engine.clone() {
             if backend_capabilities.storage.kv_cache_device_memory_pressure {
                 crate::kv_autoscaler::spawn(
                     engine,
                     paged_cache.clone(),
                     gpu_allocator_memory_probe_policy,
-                );
+                )
+            } else {
+                crate::kv_autoscaler::KvAutoscalerState::unavailable(
+                    "backend_pool_not_device_resident",
+                )
             }
-        }
+        } else {
+            crate::kv_autoscaler::KvAutoscalerState::unavailable("batching_engine_disabled")
+        };
         let decode_batcher = if let Some(config) = decode_batcher_config {
             tracing::info!(
                 backend = backend_name,
@@ -2382,6 +2391,7 @@ impl AppState {
             adapter_swap_lock: Arc::new(tokio::sync::Mutex::new(())),
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
             memory_budget: Arc::new(memory_budget),
+            kv_autoscaler,
             gpu_lock,
             training_queue: crate::training_queue::new_shared_queue(),
             teacher_registry: teacher_registry_for_real.clone(),
