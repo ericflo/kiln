@@ -170,7 +170,7 @@ local receipt validator runs in cheap CI.
 
 ### 0.2 Baseline this machine
 
-- [ ] Produce a Strix Halo ROCm environment receipt at the starting source tree.
+- [x] Produce a Strix Halo ROCm environment receipt at the starting source tree.
 - [ ] Produce a Strix Halo Vulkan environment receipt at the starting source
   tree.
 - [ ] Capture a short mixed-load ROCm baseline with all current defaults.
@@ -679,6 +679,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-09 | Source identity scope correction | `sha256:ebdb799360a7` | this commit | n/a | source identity unit suite | passed | 7 tests; excludes profiling artifacts and desktop prose; uses repository hash convention |
 | 2026-07-09 | Receipt schema and strict validator | `sha256:74efdd391d91` | this commit | portable | `qualification/schema/receipt-v1.schema.json` | passed | 13 receipt tests plus 7 source identity tests |
 | 2026-07-09 | Atomic ROCm/Vulkan environment collector | `sha256:c4f18b397716` | this commit | Strix Halo target | `scripts/qualification/environment.py` | passed | 25 portable tests; real receipts captured after clean collector commit |
+| 2026-07-09 | Initial ROCm environment | `sha256:c4f18b397716` | `33f27c5f4dc6` | ROCm/gfx1151 | `qualification/receipts/rocm/strix-halo/20260709t202926z-rocm-strix-halo-environment-v1.json` | passed | ROCm 7.2.4; HIP 7.2.53211; 96 GiB unified VRAM |
 
 ## Known Starting Defects
 

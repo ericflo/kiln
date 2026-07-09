@@ -1,0 +1,121 @@
+{
+  "artifacts": [
+    {
+      "bytes": 16413,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t202926z-rocm-strix-halo-environment-v1/environment-probes.json",
+      "sha256": "sha256:83e01a46aa052bae3e7781d7672fc8d27d68f595d880e4d0e628a23de4dce9cc"
+    }
+  ],
+  "created_at_utc": "2026-07-09T20:29:27.256Z",
+  "effective_config": {
+    "environment": {}
+  },
+  "environment": {
+    "compiler": {
+      "cargo": "cargo 1.94.1 (29ea6fb6a 2026-03-24)",
+      "hipcc": "HIP version: 7.2.53211-9999",
+      "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)"
+    },
+    "device": {
+      "architecture": "gfx1151",
+      "driver": "amdgpu kernel 7.0.14-arch1-1",
+      "memory_bytes": 103079215104,
+      "name": "AMD Radeon 8060S Graphics",
+      "unified_memory": true
+    },
+    "host_id": "strix-halo",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "7.0.14-arch1-1",
+      "name": "EndeavourOS",
+      "version": "2025.03.19"
+    },
+    "runtime": {
+      "hipcc": "HIP version: 7.2.53211-9999",
+      "hsa": "1.18",
+      "rocm": "7.2.4"
+    }
+  },
+  "metrics": [],
+  "model": null,
+  "notes": [],
+  "qualification": {
+    "backend": "rocm",
+    "command": [
+      "/usr/bin/python3",
+      "scripts/qualification/environment.py",
+      "--backend",
+      "rocm",
+      "--host-id",
+      "strix-halo"
+    ],
+    "duration_seconds": 0.3275551010010531,
+    "finished_at_utc": "2026-07-09T20:29:27.256Z",
+    "kind": "environment",
+    "profile": "environment-v1",
+    "started_at_utc": "2026-07-09T20:29:26.929Z",
+    "verdict": "passed"
+  },
+  "receipt_id": "20260709t202926z-rocm-strix-halo-environment-v1",
+  "results": [
+    {
+      "details": null,
+      "duration_seconds": 0.0,
+      "id": "clean-source-at-start",
+      "metrics": [],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 0.011087539000072866,
+      "id": "rustc-version",
+      "metrics": [],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 0.007316683999306406,
+      "id": "cargo-version",
+      "metrics": [],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 0.1720666679993883,
+      "id": "rocm-device-probe",
+      "metrics": [],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 0.03809518600064621,
+      "id": "hipcc-version",
+      "metrics": [],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": "gfx1151 AMD Radeon 8060S Graphics",
+      "duration_seconds": 0.0,
+      "id": "rocm-gpu-agent",
+      "metrics": [],
+      "required": true,
+      "status": "passed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "33f27c5f4dc64c38e266d1fc17b92a919d3545e5",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:c4f18b3977163dd05a97c99c9063e02a62f25907115506ed890228c8843c3496",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [],
+  "workload": null
+}
