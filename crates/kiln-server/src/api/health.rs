@@ -295,6 +295,10 @@ struct BatchingEngineInfo {
     total_decode_tokens: u64,
     total_prefill_tokens: u64,
     total_errors: u64,
+    response_backpressure_events: u64,
+    response_backpressure_wait_ms: u64,
+    response_stall_evictions: u64,
+    response_channel_closed: u64,
     adapter_groups_waiting: usize,
     prefix_deferred_waiting: usize,
     prefix_admission_deferrals: u64,
@@ -756,6 +760,10 @@ impl From<BatchingEngineSnapshot> for BatchingEngineInfo {
             total_decode_tokens: snapshot.total_decode_tokens,
             total_prefill_tokens: snapshot.total_prefill_tokens,
             total_errors: snapshot.total_errors,
+            response_backpressure_events: snapshot.response_backpressure_events,
+            response_backpressure_wait_ms: snapshot.response_backpressure_wait_ms,
+            response_stall_evictions: snapshot.response_stall_evictions,
+            response_channel_closed: snapshot.response_channel_closed,
             adapter_groups_waiting: snapshot.adapter_groups_waiting,
             prefix_deferred_waiting: snapshot.prefix_deferred_waiting,
             prefix_admission_deferrals: snapshot.prefix_admission_deferrals,
@@ -836,6 +844,23 @@ mod tests {
         assert_eq!(json["replay_failures"], 1);
         assert_eq!(json["failures"], 2);
         assert_eq!(json["captured_graph_count"], 0);
+    }
+
+    #[test]
+    fn batching_engine_health_preserves_delivery_counters() {
+        let info = BatchingEngineInfo::from(BatchingEngineSnapshot {
+            response_backpressure_events: 3,
+            response_backpressure_wait_ms: 750,
+            response_stall_evictions: 2,
+            response_channel_closed: 5,
+            ..BatchingEngineSnapshot::default()
+        });
+        let json = serde_json::to_value(info).unwrap();
+
+        assert_eq!(json["response_backpressure_events"], 3);
+        assert_eq!(json["response_backpressure_wait_ms"], 750);
+        assert_eq!(json["response_stall_evictions"], 2);
+        assert_eq!(json["response_channel_closed"], 5);
     }
 
     #[tokio::test]
