@@ -12,12 +12,16 @@ import re
 import subprocess
 import sys
 import tempfile
-from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from source_tree_hash import HASH_FORMAT, SourceTreeHashError, source_tree_hash
+from strict_json import (
+    JSON_INTEGER_MAX_DIGITS,
+    StrictJSONError,
+    loads as strict_json_loads,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -29,7 +33,6 @@ RESULT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 METRIC_NAME_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 HOST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,63}$")
 CONFIG_SEGMENT_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
-JSON_INTEGER_MAX_DIGITS = 4096
 MAX_RESULT_DETAIL_CHARACTERS = 2048
 KINDS = {"environment", "correctness", "serving", "performance", "training", "eval", "soak"}
 BACKENDS = {"cpu", "cuda", "rocm", "vulkan", "metal"}
@@ -107,55 +110,10 @@ def atomic_write_json(path: Path, value: Any) -> None:
             temp_path.unlink(missing_ok=True)
 
 
-def _reject_constant(value: str) -> None:
-    raise ReceiptLoadError(f"non-finite JSON number is not allowed: {value}")
-
-
-def _parse_finite_float(value: str) -> float:
-    try:
-        exact = Decimal(value)
-        parsed = float(value)
-    except (InvalidOperation, OverflowError, ValueError) as exc:
-        raise ReceiptLoadError(f"invalid JSON number: {value}") from exc
-    if not math.isfinite(parsed):
-        raise ReceiptLoadError(f"JSON number overflows finite float range: {value}")
-    if parsed == 0.0:
-        if exact != 0:
-            raise ReceiptLoadError(f"JSON number underflows finite float range: {value}")
-        return 0.0
-    if Decimal(str(parsed)) != exact:
-        raise ReceiptLoadError(f"JSON number is not exactly representable: {value}")
-    return parsed
-
-
-def _parse_bounded_int(value: str) -> int:
-    if len(value.lstrip("-")) > JSON_INTEGER_MAX_DIGITS:
-        raise ReceiptLoadError(f"JSON integer exceeds {JSON_INTEGER_MAX_DIGITS} digits")
-    try:
-        return int(value)
-    except ValueError as exc:
-        raise ReceiptLoadError(f"invalid JSON integer: {value}") from exc
-
-
-def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ReceiptLoadError(f"duplicate JSON object key: {key}")
-        result[key] = value
-    return result
-
-
 def load_receipt(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(
-            path.read_text(),
-            object_pairs_hook=_unique_object,
-            parse_constant=_reject_constant,
-            parse_float=_parse_finite_float,
-            parse_int=_parse_bounded_int,
-        )
-    except (OSError, json.JSONDecodeError, ReceiptLoadError) as exc:
+        value = strict_json_loads(path.read_bytes())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, StrictJSONError) as exc:
         raise ReceiptLoadError(f"cannot load {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise ReceiptLoadError(f"{path}: receipt must be a JSON object")

@@ -9,9 +9,15 @@ import json
 import math
 import re
 import sys
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+from strict_json import (
+    JSON_INTEGER_MAX_DIGITS,
+    StrictJSONError,
+    loads as strict_json_loads,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -23,7 +29,6 @@ ENVIRONMENT_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 PLACEHOLDER_RE = re.compile(r"^\$\{([a-z][a-z0-9_]{1,63}|seed)\}$")
 RESERVED_PLACEHOLDERS = {"seed", "model_path"}
 MODEL_REQUIRED_KINDS = {"serving", "performance", "training", "eval", "soak"}
-JSON_INTEGER_MAX_DIGITS = 4096
 MAX_REPETITIONS = 1000
 MAX_CASE_TIMEOUT_SECONDS = 172800
 MAX_DECLARED_WALL_SECONDS = 604800
@@ -156,58 +161,11 @@ def runner_metric_definition(name: str, repetitions: int) -> dict[str, Any] | No
     return dict(definition)
 
 
-def _reject_constant(value: str) -> None:
-    raise WorkloadLoadError(f"non-finite JSON number is not allowed: {value}")
-
-
-def _parse_finite_float(value: str) -> float:
-    try:
-        exact = Decimal(value)
-        parsed = float(value)
-    except (InvalidOperation, OverflowError, ValueError) as exc:
-        raise WorkloadLoadError(f"invalid JSON number: {value}") from exc
-    if not math.isfinite(parsed):
-        raise WorkloadLoadError(f"JSON number overflows finite float range: {value}")
-    if parsed == 0.0:
-        if exact != 0:
-            raise WorkloadLoadError(f"JSON number underflows finite float range: {value}")
-        return 0.0
-    if Decimal(str(parsed)) != exact:
-        raise WorkloadLoadError(f"JSON number is not exactly representable: {value}")
-    return parsed
-
-
-def _parse_bounded_int(value: str) -> int:
-    if len(value.lstrip("-")) > JSON_INTEGER_MAX_DIGITS:
-        raise WorkloadLoadError(
-            f"JSON integer exceeds {JSON_INTEGER_MAX_DIGITS} digits"
-        )
-    try:
-        return int(value)
-    except ValueError as exc:
-        raise WorkloadLoadError(f"invalid JSON integer: {value}") from exc
-
-
-def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise WorkloadLoadError(f"duplicate JSON object key: {key}")
-        result[key] = value
-    return result
-
-
 def load_workload_document(path: Path) -> tuple[dict[str, Any], bytes]:
     try:
         raw = path.read_bytes()
-        value = json.loads(
-            raw,
-            object_pairs_hook=_unique_object,
-            parse_constant=_reject_constant,
-            parse_float=_parse_finite_float,
-            parse_int=_parse_bounded_int,
-        )
-    except (OSError, json.JSONDecodeError, WorkloadLoadError) as exc:
+        value = strict_json_loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, StrictJSONError) as exc:
         raise WorkloadLoadError(f"cannot load {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise WorkloadLoadError(f"{path}: workload must be a JSON object")

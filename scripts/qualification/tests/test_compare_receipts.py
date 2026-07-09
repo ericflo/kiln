@@ -854,6 +854,22 @@ class ReceiptComparisonTests(unittest.TestCase):
                     with self.assertRaises(compare_module.ComparisonError):
                         compare_module.load_validated_receipt(path)
 
+    def test_comparator_bytes_require_plain_utf8(self) -> None:
+        payloads = {
+            "invalid-utf8": b"\xff{\"schema_version\":1}",
+            "utf8-bom": b"\xef\xbb\xbf{\"schema_version\":1}",
+            "utf16": '{"schema_version":1}'.encode("utf-16"),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, payload in payloads.items():
+                with self.subTest(name=name):
+                    path = Path(tmp) / f"{name}.json"
+                    path.write_bytes(payload)
+                    with self.assertRaisesRegex(
+                        compare_module.ComparisonError, "cannot load receipt"
+                    ):
+                        compare_module.load_validated_receipt(path)
+
     def test_cross_backend_effective_config_excludes_backend_and_variant_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

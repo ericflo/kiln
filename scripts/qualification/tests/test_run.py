@@ -1413,6 +1413,28 @@ class RunnerTests(unittest.TestCase):
                 finally:
                     repository.close()
 
+    def test_command_result_bytes_require_plain_utf8(self) -> None:
+        payloads = {
+            "invalid-utf8": b"\xff{}",
+            "utf8-bom": b"\xef\xbb\xbf{}",
+            "utf16": "{}".encode("utf-16"),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, payload in payloads.items():
+                with self.subTest(name=name):
+                    path = Path(tmp) / f"{name}.json"
+                    path.write_bytes(payload)
+                    with self.assertRaisesRegex(
+                        run_module.CaseResultError,
+                        "cannot load command case result",
+                    ):
+                        run_module.load_case_result(
+                            path,
+                            expected_case_id="smoke-case",
+                            declared_metrics={"sample_value"},
+                            expected_effective_config={},
+                        )
+
     def test_case_result_schema_matches_closed_runner_contract(self) -> None:
         schema = json.loads(
             (QUALIFICATION_DIR.parents[1] / "qualification/schema/case-result-v1.schema.json").read_text()

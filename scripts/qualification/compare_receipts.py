@@ -16,6 +16,11 @@ from pathlib import Path
 from typing import Any
 
 from receipt import validate_receipt
+from strict_json import (
+    JSON_INTEGER_MAX_DIGITS,
+    StrictJSONError,
+    loads as strict_json_loads,
+)
 from workload import (
     WorkloadLoadError,
     WorkloadValidationError,
@@ -29,7 +34,6 @@ from workload import (
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKLOAD_DIRECTORY = Path("qualification/workloads")
-JSON_INTEGER_MAX_DIGITS = 4096
 
 
 class ComparisonError(RuntimeError):
@@ -56,52 +60,9 @@ def _sha256(payload: bytes) -> str:
 
 
 def _strict_json_object(payload: bytes, path: Path, kind: str) -> dict[str, Any]:
-    def reject_constant(value: str) -> None:
-        raise ComparisonError(f"non-finite JSON number is not allowed: {value}")
-
-    def parse_finite_float(value: str) -> float:
-        try:
-            exact = Decimal(value)
-            parsed = float(value)
-        except (DecimalException, OverflowError, ValueError) as exc:
-            raise ComparisonError(f"invalid JSON number: {value}") from exc
-        if not math.isfinite(parsed):
-            raise ComparisonError(f"JSON number overflows finite float range: {value}")
-        if parsed == 0.0:
-            if exact != 0:
-                raise ComparisonError(f"JSON number underflows finite float range: {value}")
-            return 0.0
-        if Decimal(str(parsed)) != exact:
-            raise ComparisonError(f"JSON number is not exactly representable: {value}")
-        return parsed
-
-    def parse_bounded_int(value: str) -> int:
-        if len(value.lstrip("-")) > JSON_INTEGER_MAX_DIGITS:
-            raise ComparisonError(
-                f"JSON integer exceeds {JSON_INTEGER_MAX_DIGITS} digits"
-            )
-        try:
-            return int(value)
-        except ValueError as exc:
-            raise ComparisonError(f"invalid JSON integer: {value}") from exc
-
-    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                raise ComparisonError(f"duplicate JSON object key: {key}")
-            result[key] = value
-        return result
-
     try:
-        value = json.loads(
-            payload.decode("utf-8"),
-            object_pairs_hook=unique_object,
-            parse_constant=reject_constant,
-            parse_float=parse_finite_float,
-            parse_int=parse_bounded_int,
-        )
-    except (UnicodeDecodeError, json.JSONDecodeError, ComparisonError) as exc:
+        value = strict_json_loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError, StrictJSONError) as exc:
         raise ComparisonError(f"cannot load {kind} {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise ComparisonError(f"{kind} {path} must be a JSON object")

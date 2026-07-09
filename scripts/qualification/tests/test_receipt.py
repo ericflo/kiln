@@ -165,6 +165,22 @@ class ReceiptTests(unittest.TestCase):
             with self.assertRaises(receipt_module.ReceiptLoadError):
                 receipt_module.load_receipt(path)
 
+    def test_receipt_bytes_require_plain_utf8_and_wrap_decode_errors(self) -> None:
+        payloads = {
+            "invalid-utf8": b"\xff{\"schema_version\":1}",
+            "utf8-bom": b"\xef\xbb\xbf{\"schema_version\":1}",
+            "utf16": '{"schema_version":1}'.encode("utf-16"),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, payload in payloads.items():
+                with self.subTest(name=name):
+                    path = Path(tmp) / f"{name}.json"
+                    path.write_bytes(payload)
+                    with self.assertRaisesRegex(
+                        receipt_module.ReceiptLoadError, "cannot load"
+                    ):
+                        receipt_module.load_receipt(path)
+
     def test_lossy_and_oversized_json_numbers_are_rejected(self) -> None:
         payloads = {
             "overflow": '{"value":1e400}',

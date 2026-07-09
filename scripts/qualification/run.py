@@ -24,7 +24,6 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -33,8 +32,8 @@ import environment as environment_module
 from model_fingerprint import ModelFingerprintError, fingerprint_model
 from receipt import MAX_RESULT_DETAIL_CHARACTERS, validate_receipt
 from source_tree_hash import HASH_FORMAT, SourceTreeHashError, source_tree_hash
+from strict_json import JSON_INTEGER_MAX_DIGITS, loads as strict_json_loads
 from workload import (
-    JSON_INTEGER_MAX_DIGITS,
     MAX_CASE_EXECUTIONS,
     MAX_CASE_TIMEOUT_SECONDS,
     MAX_DECLARED_WALL_SECONDS,
@@ -328,7 +327,7 @@ def _parse_variable_value(raw: str, definition: dict[str, Any]) -> Any:
                 )
             value = int(raw, 10)
         elif variable_type == "number":
-            value = json.loads(raw, parse_float=_parse_json_float)
+            value = strict_json_loads(raw)
             if not _is_finite_number(value):
                 raise ValueError("number must be finite")
             value = _canonical_number(value)
@@ -630,45 +629,6 @@ DEFAULT_HOOKS = RunnerHooks(
 )
 
 
-def _reject_constant(value: str) -> None:
-    raise CaseResultError(f"non-finite JSON number is not allowed: {value}")
-
-
-def _parse_json_float(value: str) -> float:
-    try:
-        exact = Decimal(value)
-        converted = float(value)
-    except (InvalidOperation, OverflowError, ValueError) as exc:
-        raise ValueError(f"invalid JSON number {value!r}") from exc
-    if not math.isfinite(converted):
-        raise ValueError(f"JSON number is outside the finite float range: {value}")
-    if converted == 0.0:
-        if exact != 0:
-            raise ValueError(f"JSON number underflows the finite float range: {value}")
-        return 0.0
-    if Decimal(str(converted)) != exact:
-        raise ValueError(f"JSON number is not exactly representable: {value}")
-    return converted
-
-
-def _parse_json_int(value: str) -> int:
-    if len(value.lstrip("-")) > JSON_INTEGER_MAX_DIGITS:
-        raise ValueError(f"JSON integer exceeds {JSON_INTEGER_MAX_DIGITS} digits")
-    try:
-        return int(value)
-    except ValueError as exc:
-        raise ValueError(f"invalid JSON integer: {value}") from exc
-
-
-def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise CaseResultError(f"duplicate JSON object key: {key}")
-        result[key] = value
-    return result
-
-
 def _exact_keys(value: Any, expected: set[str], context: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise CaseResultError(f"{context} must be an object")
@@ -851,14 +811,7 @@ def load_case_result(
             raise CaseResultTooLargeError(
                 f"command case result exceeds {max_bytes} byte limit"
             )
-        payload = b"".join(chunks).decode("utf-8")
-        value = json.loads(
-            payload,
-            object_pairs_hook=_unique_object,
-            parse_constant=_reject_constant,
-            parse_float=_parse_json_float,
-            parse_int=_parse_json_int,
-        )
+        value = strict_json_loads(b"".join(chunks))
     except CaseResultTooLargeError:
         raise
     except (OSError, UnicodeError, ValueError, CaseResultError) as exc:

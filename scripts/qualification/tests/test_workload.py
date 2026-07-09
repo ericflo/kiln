@@ -135,6 +135,22 @@ class WorkloadTests(unittest.TestCase):
                     with self.assertRaises(workload_module.WorkloadLoadError):
                         workload_module.load_workload(path)
 
+    def test_workload_bytes_require_plain_utf8_and_wrap_decode_errors(self) -> None:
+        payloads = {
+            "invalid-utf8": b"\xff{\"schema_version\":1}",
+            "utf8-bom": b"\xef\xbb\xbf{\"schema_version\":1}",
+            "utf16": '{"schema_version":1}'.encode("utf-16"),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, payload in payloads.items():
+                with self.subTest(name=name):
+                    path = Path(tmp) / f"{name}.json"
+                    path.write_bytes(payload)
+                    with self.assertRaisesRegex(
+                        workload_module.WorkloadLoadError, "cannot load"
+                    ):
+                        workload_module.load_workload(path)
+
     def test_file_hash_uses_exact_validated_bytes(self) -> None:
         value = valid_performance_workload()
         with tempfile.TemporaryDirectory() as tmp:
