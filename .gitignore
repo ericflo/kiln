@@ -2,6 +2,8 @@
 *.swp
 *.swo
 *~
+__pycache__/
+*.py[cod]
 .DS_Store
 .claude/
 
@@ -16,6 +18,10 @@ profile-out/
 profile/
 profiling/
 profiling-artifacts/
+
+# Local hardware qualification output. Compact validated receipts live under
+# qualification/receipts; raw logs, traces, and profiles stay here.
+.qualification/
 
 # Vulkan SPIR-V build artifacts
 *.spv

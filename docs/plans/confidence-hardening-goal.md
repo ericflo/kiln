@@ -54,7 +54,7 @@ path.
 
 ## Execution Rules
 
-- [ ] Read this entire document before changing code.
+- [x] Read this entire document before changing code.
 - [ ] Update checkboxes and the evidence log in the same commit as the work
   they describe.
 - [ ] Work in the order written unless a later item is required to unblock an
@@ -124,7 +124,7 @@ Each receipt must contain at least:
 Receipt rules:
 
 - [ ] Add a schema and validator for qualification receipts.
-- [ ] Add a deterministic `source_tree_hash` command and tests proving receipt
+- [x] Add a deterministic `source_tree_hash` command and tests proving receipt
   files do not change it while source changes do.
 - [ ] Add a local qualification runner that writes raw logs under an ignored
   directory and emits a compact receipt.
@@ -675,6 +675,7 @@ or focused documents. Never paste raw logs here.
 | Date | Phase | Source tree | Commit | Backend/device | Evidence | Result | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2026-07-09 | Plan created | pending | pending | n/a | this document | pending | Audit converted into executable goal |
+| 2026-07-09 | Receipt foundation: source identity | `a76a5e1b664b` | this commit | n/a | `scripts/qualification/source_tree_hash.py` | passed | 5 unit tests; receipts and docs excluded from identity |
 
 ## Known Starting Defects
 
