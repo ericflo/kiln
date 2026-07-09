@@ -19,6 +19,7 @@
       "backend": "rocm",
       "device_requirement": "required",
       "skip_policy": "fail",
+      "effective_config": {},
       "cases": [
         {
           "id": "device-probe",
@@ -131,6 +132,7 @@
       "backend": "vulkan",
       "device_requirement": "required",
       "skip_policy": "fail",
+      "effective_config": {},
       "cases": [
         {
           "id": "device-probe",
@@ -245,16 +247,31 @@
         "backend_a": "rocm",
         "variant_a_id": "rocm",
         "backend_b": "vulkan",
-        "variant_b_id": "vulkan"
+        "variant_b_id": "vulkan",
+        "allowed_environment_differences": [
+          "compiler.hipcc",
+          "compiler.shader",
+          "device.architecture",
+          "device.driver",
+          "device.name",
+          "runtime.driver",
+          "runtime.hipcc",
+          "runtime.hsa",
+          "runtime.rocm",
+          "runtime.vulkan_device",
+          "runtime.vulkan_instance"
+        ]
       }
     ],
-    "allowed_effective_config_differences": [],
     "metric_rules": [
       {
         "scope": "result",
         "result_id": "device-probe",
         "metric": "case_pass",
         "metric_class": "correctness",
+        "unit": "bool",
+        "aggregation": "exact",
+        "lower_is_better": false,
         "operator": "equal",
         "absolute_tolerance": 0,
         "relative_tolerance": 0,
@@ -265,6 +282,9 @@
         "result_id": "matmul-parity",
         "metric": "case_pass",
         "metric_class": "correctness",
+        "unit": "bool",
+        "aggregation": "exact",
+        "lower_is_better": false,
         "operator": "equal",
         "absolute_tolerance": 0,
         "relative_tolerance": 0,
@@ -275,6 +295,9 @@
         "result_id": "tensor-parity",
         "metric": "case_pass",
         "metric_class": "correctness",
+        "unit": "bool",
+        "aggregation": "exact",
+        "lower_is_better": false,
         "operator": "equal",
         "absolute_tolerance": 0,
         "relative_tolerance": 0,

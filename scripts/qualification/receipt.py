@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,8 @@ ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,127}$")
 RESULT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 METRIC_NAME_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 HOST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,63}$")
+CONFIG_SEGMENT_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+JSON_INTEGER_MAX_DIGITS = 4096
 KINDS = {"environment", "correctness", "serving", "performance", "training", "eval", "soak"}
 BACKENDS = {"cpu", "cuda", "rocm", "vulkan", "metal"}
 VERDICTS = {"passed", "failed"}
@@ -107,6 +110,32 @@ def _reject_constant(value: str) -> None:
     raise ReceiptLoadError(f"non-finite JSON number is not allowed: {value}")
 
 
+def _parse_finite_float(value: str) -> float:
+    try:
+        exact = Decimal(value)
+        parsed = float(value)
+    except (InvalidOperation, OverflowError, ValueError) as exc:
+        raise ReceiptLoadError(f"invalid JSON number: {value}") from exc
+    if not math.isfinite(parsed):
+        raise ReceiptLoadError(f"JSON number overflows finite float range: {value}")
+    if parsed == 0.0:
+        if exact != 0:
+            raise ReceiptLoadError(f"JSON number underflows finite float range: {value}")
+        return 0.0
+    if Decimal(str(parsed)) != exact:
+        raise ReceiptLoadError(f"JSON number is not exactly representable: {value}")
+    return parsed
+
+
+def _parse_bounded_int(value: str) -> int:
+    if len(value.lstrip("-")) > JSON_INTEGER_MAX_DIGITS:
+        raise ReceiptLoadError(f"JSON integer exceeds {JSON_INTEGER_MAX_DIGITS} digits")
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ReceiptLoadError(f"invalid JSON integer: {value}") from exc
+
+
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -122,6 +151,8 @@ def load_receipt(path: Path) -> dict[str, Any]:
             path.read_text(),
             object_pairs_hook=_unique_object,
             parse_constant=_reject_constant,
+            parse_float=_parse_finite_float,
+            parse_int=_parse_bounded_int,
         )
     except (OSError, json.JSONDecodeError, ReceiptLoadError) as exc:
         raise ReceiptLoadError(f"cannot load {path}: {exc}") from exc
@@ -131,11 +162,14 @@ def load_receipt(path: Path) -> dict[str, Any]:
 
 
 def _is_number(value: Any) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-    )
+    try:
+        return (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+        )
+    except OverflowError:
+        return False
 
 
 def _check_exact_keys(errors: list[str], value: Any, expected: set[str], context: str) -> dict[str, Any]:
@@ -211,6 +245,23 @@ def _check_string_map(errors: list[str], value: Any, context: str) -> None:
         if not isinstance(key, str) or not key:
             errors.append(f"{context} keys must be non-empty strings")
         _check_string(errors, item, f"{context}.{key}")
+
+
+def _validate_config(errors: list[str], value: Any, context: str) -> None:
+    if not isinstance(value, dict):
+        errors.append(f"{context} must be an object")
+        return
+    for key, item in value.items():
+        if not isinstance(key, str) or not CONFIG_SEGMENT_RE.fullmatch(key):
+            errors.append(f"{context} key {key!r} must be a dot-path-compatible segment")
+            continue
+        item_context = f"{context}.{key}"
+        if isinstance(item, dict):
+            _validate_config(errors, item, item_context)
+        elif item is None or isinstance(item, (str, bool)) or _is_number(item):
+            continue
+        else:
+            errors.append(f"{item_context} must be a finite JSON scalar or nested object")
 
 
 def _validate_metric(errors: list[str], value: Any, context: str) -> str:
@@ -376,10 +427,10 @@ def validate_receipt(
     if kind in {"serving", "performance", "training", "eval", "soak"}:
         if model is None:
             errors.append(f"receipt.model is required for qualification kind {kind!r}")
+    if kind in KINDS - {"environment"}:
         if workload is None:
             errors.append(f"receipt.workload is required for qualification kind {kind!r}")
-    if not isinstance(top.get("effective_config"), dict):
-        errors.append("receipt.effective_config must be an object")
+    _validate_config(errors, top.get("effective_config"), "receipt.effective_config")
 
     results = top.get("results")
     required_failures = 0

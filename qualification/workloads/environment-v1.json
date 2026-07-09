@@ -46,6 +46,7 @@
       "backend": "rocm",
       "device_requirement": "required",
       "skip_policy": "fail",
+      "effective_config": {},
       "cases": [
         {
           "id": "environment-capture",
@@ -81,6 +82,7 @@
       "backend": "vulkan",
       "device_requirement": "required",
       "skip_policy": "fail",
+      "effective_config": {},
       "cases": [
         {
           "id": "environment-capture",

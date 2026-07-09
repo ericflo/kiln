@@ -42,12 +42,15 @@ def valid_performance_workload() -> dict:
                 "backend": "cpu",
                 "device_requirement": "none",
                 "skip_policy": "allow",
+                "effective_config": {
+                    "scheduler": {"max_batch_size": 8, "memory_fraction": 1.0}
+                },
                 "cases": [
                     {
                         "id": "decode-throughput",
                         "description": "Measure deterministic decode throughput.",
                         "required": True,
-                        "command": ["bench", "--seed", "${seed}"],
+                        "command": ["bench", "--model", "${model_path}", "--seed", "${seed}"],
                         "working_directory": ".",
                         "environment": {},
                         "timeout_seconds": 60,
@@ -67,13 +70,15 @@ def valid_performance_workload() -> dict:
             "mode": "same_environment_performance",
             "variant_pairs": [],
             "backend_pairs": [],
-            "allowed_effective_config_differences": [],
             "metric_rules": [
                 {
                     "scope": "result",
                     "result_id": "decode-throughput",
                     "metric": "tokens_per_second",
                     "metric_class": "performance",
+                    "unit": "tokens/s",
+                    "aggregation": "rate",
+                    "lower_is_better": False,
                     "operator": "not_less",
                     "absolute_tolerance": 0,
                     "relative_tolerance": 0.05,
@@ -115,6 +120,20 @@ class WorkloadTests(unittest.TestCase):
             non_finite.write_text('{"value":NaN}')
             with self.assertRaises(workload_module.WorkloadLoadError):
                 workload_module.load_workload(non_finite)
+
+            for name, payload in {
+                "overflow": '{"value":1e400}',
+                "underflow": '{"value":1e-4000}',
+                "rounded-boundary": '{"value":8.9999999999999999}',
+                "rounded-integer": '{"value":9007199254740993.0}',
+                "rounded-subnormal": '{"value":4e-324}',
+                "huge-integer": '{"value":1' + "0" * 5000 + "}",
+            }.items():
+                with self.subTest(name=name):
+                    path = Path(tmp) / f"{name}.json"
+                    path.write_text(payload)
+                    with self.assertRaises(workload_module.WorkloadLoadError):
+                        workload_module.load_workload(path)
 
     def test_file_hash_uses_exact_validated_bytes(self) -> None:
         value = valid_performance_workload()
@@ -181,10 +200,45 @@ class WorkloadTests(unittest.TestCase):
         self.assertTrue(any("runner cannot produce metrics" in error for error in errors))
         self.assertTrue(any("must declare the case_pass metric" in error for error in errors))
 
+        value = valid_performance_workload()
+        protocol = value["variants"][0]["cases"][0]["result_protocol"]
+        protocol["declared_metrics"] = ["case_pass"]
+        errors = workload_module.validate_workload(value)
+        self.assertTrue(any("command cannot declare runner-owned metrics" in error for error in errors))
+
+    def test_performance_policy_requires_real_required_evidence(self) -> None:
+        value = valid_performance_workload()
+        case = value["variants"][0]["cases"][0]
+        case["result_protocol"] = {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass"],
+        }
+        value["comparison_policy"]["metric_rules"] = [
+            {
+                "scope": "result",
+                "result_id": "decode-throughput",
+                "metric": "case_pass",
+                "metric_class": "performance",
+                "unit": "bool",
+                "aggregation": "exact",
+                "lower_is_better": False,
+                "operator": "not_less",
+                "absolute_tolerance": 0,
+                "relative_tolerance": 0,
+                "required": False,
+            }
+        ]
+        errors = workload_module.validate_workload(value)
+        self.assertTrue(any("at least one required rule" in error for error in errors))
+        self.assertTrue(any("command-produced non-runner metric" in error for error in errors))
+
     def test_declared_ab_policy_names_pair_and_exact_config_differences(self) -> None:
         value = valid_performance_workload()
         candidate = copy.deepcopy(value["variants"][0])
         candidate["id"] = "cpu-tuned"
+        candidate["effective_config"]["scheduler"]["max_batch_size"] = 16
         value["variants"].append(candidate)
         value["comparison_policy"] = {
             "mode": "declared_ab_variants",
@@ -192,17 +246,65 @@ class WorkloadTests(unittest.TestCase):
                 {
                     "baseline_variant_id": "cpu-default",
                     "candidate_variant_id": "cpu-tuned",
+                    "allowed_effective_config_differences": [
+                        "scheduler.max_batch_size"
+                    ],
                 }
             ],
             "backend_pairs": [],
-            "allowed_effective_config_differences": ["scheduler.max_batch_size"],
             "metric_rules": copy.deepcopy(value["comparison_policy"]["metric_rules"]),
         }
         self.assertEqual(workload_module.validate_workload(value), [])
 
-        value["comparison_policy"]["allowed_effective_config_differences"] = []
+        candidate_both = copy.deepcopy(candidate)
+        candidate_both["id"] = "cpu-tuned-both"
+        candidate_both["effective_config"]["scheduler"]["memory_fraction"] = 0.5
+        value["variants"].append(candidate_both)
+        value["comparison_policy"]["variant_pairs"].append(
+            {
+                "baseline_variant_id": "cpu-default",
+                "candidate_variant_id": "cpu-tuned-both",
+                "allowed_effective_config_differences": [
+                    "scheduler.max_batch_size",
+                    "scheduler.memory_fraction",
+                ],
+            }
+        )
+        self.assertEqual(workload_module.validate_workload(value), [])
+
+        value["comparison_policy"]["variant_pairs"][0][
+            "allowed_effective_config_differences"
+        ] = []
         errors = workload_module.validate_workload(value)
-        self.assertTrue(any("requires exact allowed effective-config" in error for error in errors))
+        self.assertTrue(any("must be a non-empty array" in error for error in errors))
+
+        value["comparison_policy"]["variant_pairs"][0][
+            "allowed_effective_config_differences"
+        ] = ["scheduler.memory_fraction", "scheduler.max_batch_size"]
+        errors = workload_module.validate_workload(value)
+        self.assertTrue(any("must use ascending order" in error for error in errors))
+
+        value["comparison_policy"]["variant_pairs"][0][
+            "allowed_effective_config_differences"
+        ] = ["scheduler.max_batch_size", "scheduler.max_batch_size"]
+        errors = workload_module.validate_workload(value)
+        self.assertTrue(any("contains duplicates" in error for error in errors))
+
+        value = valid_performance_workload()
+        candidate = copy.deepcopy(value["variants"][0])
+        candidate["id"] = "cpu-tuned"
+        candidate["effective_config"]["scheduler"]["max_batch_size"] = "16"
+        value["variants"].append(candidate)
+        value["comparison_policy"]["mode"] = "declared_ab_variants"
+        value["comparison_policy"]["variant_pairs"] = [
+            {
+                "baseline_variant_id": "cpu-default",
+                "candidate_variant_id": "cpu-tuned",
+                "allowed_effective_config_differences": ["scheduler.max_batch_size"],
+            }
+        ]
+        errors = workload_module.validate_workload(value)
+        self.assertTrue(any("must preserve JSON leaf type" in error for error in errors))
 
     def test_cross_backend_policy_binds_variants_and_forbids_performance_metrics(self) -> None:
         value = workload_module.load_workload(
@@ -220,6 +322,14 @@ class WorkloadTests(unittest.TestCase):
         errors = workload_module.validate_workload(value)
         self.assertTrue(any("backend does not match variant" in error for error in errors))
 
+        value = workload_module.load_workload(
+            ROOT / "qualification/workloads/correctness-core-v1.json"
+        )
+        value["variants"][1]["backend"] = "rocm"
+        value["comparison_policy"]["backend_pairs"][0]["backend_b"] = "rocm"
+        errors = workload_module.validate_workload(value)
+        self.assertTrue(any("must name two different backends" in error for error in errors))
+
     def test_cross_backend_metrics_must_be_required_declared_results(self) -> None:
         value = workload_module.load_workload(
             ROOT / "qualification/workloads/correctness-core-v1.json"
@@ -234,6 +344,51 @@ class WorkloadTests(unittest.TestCase):
         value["comparison_policy"]["metric_rules"][0]["metric"] = "max_abs_error"
         errors = workload_module.validate_workload(value)
         self.assertTrue(any("is not declared by result" in error for error in errors))
+
+    def test_model_path_placeholder_matches_workload_model_requirement(self) -> None:
+        value = valid_performance_workload()
+        value["variants"][0]["cases"][0]["command"].remove("${model_path}")
+        errors = workload_module.validate_workload(value)
+        self.assertTrue(any("must consume the runner-owned ${model_path}" in error for error in errors))
+
+        value = workload_module.load_workload(
+            ROOT / "qualification/workloads/environment-v1.json"
+        )
+        value["variants"][0]["cases"][0]["command"].append("${model_path}")
+        errors = workload_module.validate_workload(value)
+        self.assertTrue(any("cannot reference ${model_path}" in error for error in errors))
+
+    def test_resolved_parameters_are_variant_scoped_typed_and_constrained(self) -> None:
+        value = valid_performance_workload()
+        value["variables"] = [
+            {
+                "name": "ratio",
+                "description": "Synthetic request mix ratio.",
+                "type": "number",
+                "required": False,
+                "default": 0.5,
+                "constraints": {
+                    "allowed_values": [],
+                    "minimum": 0,
+                    "maximum": 1,
+                    "pattern": None,
+                },
+            }
+        ]
+        value["variants"][0]["cases"][0]["command"].append("${ratio}")
+        self.assertEqual(workload_module.validate_workload(value), [])
+
+        valid = {"variant_id": "cpu-default", "ratio": 0.5}
+        self.assertEqual(workload_module.validate_workload_parameters(value, valid), [])
+        for parameters, expected in (
+            ({"variant_id": "cpu-default"}, "missing resolved keys"),
+            ({**valid, "extra": 1}, "undeclared keys"),
+            ({"variant_id": "cpu-default", "ratio": 1}, "canonical JSON float"),
+            ({"variant_id": "cpu-default", "ratio": 2.0}, "declared maximum"),
+        ):
+            with self.subTest(parameters=parameters):
+                errors = workload_module.validate_workload_parameters(value, parameters)
+                self.assertTrue(any(expected in error for error in errors), errors)
 
     def test_schema_files_are_closed_and_match_validator_contracts(self) -> None:
         schema = json.loads((ROOT / "qualification/schema/workload-v1.schema.json").read_text())
@@ -270,6 +425,11 @@ class WorkloadTests(unittest.TestCase):
         )
         self.assertFalse(case_result["additionalProperties"])
         self.assertEqual(case_result["properties"]["schema_version"]["const"], 1)
+        self.assertIn("effective_config", case_result["required"])
+        self.assertEqual(
+            case_result["properties"]["effective_config"]["$ref"],
+            "#/$defs/configObject",
+        )
 
 
 if __name__ == "__main__":

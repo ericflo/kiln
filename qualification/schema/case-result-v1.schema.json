@@ -9,6 +9,7 @@
     "case_id",
     "status",
     "duration_seconds",
+    "effective_config",
     "metrics",
     "tolerances",
     "details"
@@ -21,6 +22,7 @@
     },
     "status": { "enum": ["passed", "failed", "skipped"] },
     "duration_seconds": { "type": "number", "minimum": 0 },
+    "effective_config": { "$ref": "#/$defs/configObject" },
     "metrics": {
       "type": "array",
       "items": { "$ref": "#/$defs/metric" }
@@ -37,6 +39,19 @@
     }
   },
   "$defs": {
+    "configValue": {
+      "oneOf": [
+        { "type": ["string", "number", "boolean", "null"] },
+        { "$ref": "#/$defs/configObject" }
+      ]
+    },
+    "configObject": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_-]*$"
+      },
+      "additionalProperties": { "$ref": "#/$defs/configValue" }
+    },
     "metric": {
       "type": "object",
       "additionalProperties": false,

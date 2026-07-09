@@ -44,13 +44,20 @@
       "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"
     },
     "nullableScalar": {
+      "type": ["string", "number", "boolean", "null"]
+    },
+    "configValue": {
       "oneOf": [
-        { "type": "string" },
-        { "type": "integer" },
-        { "type": "number" },
-        { "type": "boolean" },
-        { "type": "null" }
+        { "$ref": "#/$defs/nullableScalar" },
+        { "$ref": "#/$defs/configObject" }
       ]
+    },
+    "configObject": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_-]*$"
+      },
+      "additionalProperties": { "$ref": "#/$defs/configValue" }
     },
     "determinism": {
       "type": "object",
@@ -203,6 +210,7 @@
         "backend",
         "device_requirement",
         "skip_policy",
+        "effective_config",
         "cases"
       ],
       "properties": {
@@ -211,6 +219,7 @@
         "backend": { "enum": ["cpu", "cuda", "rocm", "vulkan", "metal"] },
         "device_requirement": { "enum": ["none", "required"] },
         "skip_policy": { "enum": ["allow", "fail"] },
+        "effective_config": { "$ref": "#/$defs/configObject" },
         "cases": {
           "type": "array",
           "minItems": 1,
@@ -221,21 +230,49 @@
     "variantPair": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["baseline_variant_id", "candidate_variant_id"],
+      "required": [
+        "baseline_variant_id",
+        "candidate_variant_id",
+        "allowed_effective_config_differences"
+      ],
       "properties": {
         "baseline_variant_id": { "$ref": "#/$defs/id" },
-        "candidate_variant_id": { "$ref": "#/$defs/id" }
+        "candidate_variant_id": { "$ref": "#/$defs/id" },
+        "allowed_effective_config_differences": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)*$"
+          }
+        }
       }
     },
     "backendPair": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["backend_a", "variant_a_id", "backend_b", "variant_b_id"],
+      "required": [
+        "backend_a",
+        "variant_a_id",
+        "backend_b",
+        "variant_b_id",
+        "allowed_environment_differences"
+      ],
       "properties": {
         "backend_a": { "enum": ["cpu", "cuda", "rocm", "vulkan", "metal"] },
         "variant_a_id": { "$ref": "#/$defs/id" },
         "backend_b": { "enum": ["cpu", "cuda", "rocm", "vulkan", "metal"] },
-        "variant_b_id": { "$ref": "#/$defs/id" }
+        "variant_b_id": { "$ref": "#/$defs/id" },
+        "allowed_environment_differences": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)*$"
+          }
+        }
       }
     },
     "metricRule": {
@@ -246,24 +283,25 @@
         "result_id",
         "metric",
         "metric_class",
+        "unit",
+        "aggregation",
+        "lower_is_better",
         "operator",
         "absolute_tolerance",
         "relative_tolerance",
         "required"
       ],
       "properties": {
-        "scope": { "enum": ["receipt", "result"] },
-        "result_id": {
-          "oneOf": [
-            { "$ref": "#/$defs/id" },
-            { "type": "null" }
-          ]
-        },
+        "scope": { "const": "result" },
+        "result_id": { "$ref": "#/$defs/id" },
         "metric": {
           "type": "string",
           "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
         },
         "metric_class": { "enum": ["correctness", "performance"] },
+        "unit": { "type": "string", "minLength": 1 },
+        "aggregation": { "type": "string", "minLength": 1 },
+        "lower_is_better": { "type": "boolean" },
         "operator": { "enum": ["equal", "not_greater", "not_less"] },
         "absolute_tolerance": { "type": "number", "minimum": 0 },
         "relative_tolerance": { "type": "number", "minimum": 0 },
@@ -277,7 +315,6 @@
         "mode",
         "variant_pairs",
         "backend_pairs",
-        "allowed_effective_config_differences",
         "metric_rules"
       ],
       "properties": {
@@ -295,14 +332,6 @@
         "backend_pairs": {
           "type": "array",
           "items": { "$ref": "#/$defs/backendPair" }
-        },
-        "allowed_effective_config_differences": {
-          "type": "array",
-          "uniqueItems": true,
-          "items": {
-            "type": "string",
-            "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)*$"
-          }
         },
         "metric_rules": {
           "type": "array",

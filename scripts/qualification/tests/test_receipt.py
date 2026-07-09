@@ -136,6 +136,13 @@ class ReceiptTests(unittest.TestCase):
         self.assertTrue(any("model is required" in error for error in errors))
         self.assertTrue(any("workload is required" in error for error in errors))
 
+    def test_correctness_receipt_requires_workload_but_not_model(self) -> None:
+        value = valid_receipt()
+        value["qualification"]["kind"] = "correctness"
+        errors = receipt_module.validate_receipt(value)
+        self.assertTrue(any("workload is required" in error for error in errors))
+        self.assertFalse(any("model is required" in error for error in errors))
+
     def test_duplicate_json_key_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "duplicate.json"
@@ -149,6 +156,36 @@ class ReceiptTests(unittest.TestCase):
             path.write_text('{"value":NaN}')
             with self.assertRaises(receipt_module.ReceiptLoadError):
                 receipt_module.load_receipt(path)
+
+    def test_lossy_and_oversized_json_numbers_are_rejected(self) -> None:
+        payloads = {
+            "overflow": '{"value":1e400}',
+            "underflow": '{"value":1e-4000}',
+            "rounded-boundary": '{"value":8.9999999999999999}',
+            "rounded-integer": '{"value":9007199254740993.0}',
+            "rounded-subnormal": '{"value":4e-324}',
+            "huge-integer": '{"value":1' + "0" * 5000 + "}",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, payload in payloads.items():
+                with self.subTest(name=name):
+                    path = Path(tmp) / f"{name}.json"
+                    path.write_text(payload)
+                    with self.assertRaises(receipt_module.ReceiptLoadError):
+                        receipt_module.load_receipt(path)
+
+    def test_effective_config_has_canonical_finite_scalar_leaves(self) -> None:
+        invalid_configs = [
+            {"BadKey": True},
+            {"scheduler": [1, 2]},
+            {"scheduler": {"limit": 10**500}},
+        ]
+        for config in invalid_configs:
+            with self.subTest(config=config):
+                value = valid_receipt()
+                value["effective_config"] = config
+                errors = receipt_module.validate_receipt(value)
+                self.assertTrue(any("effective_config" in error for error in errors))
 
     def test_current_source_mismatch_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -195,6 +232,16 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(schema["$schema"], "https://json-schema.org/draft/2020-12/schema")
         self.assertFalse(schema["additionalProperties"])
         self.assertEqual(schema["properties"]["schema_version"]["const"], 1)
+        self.assertEqual(schema["properties"]["effective_config"]["$ref"], "#/$defs/configObject")
+        self.assertEqual(len(schema["allOf"]), 2)
+        self.assertEqual(
+            schema["allOf"][0]["then"]["properties"]["workload"]["$ref"],
+            "#/$defs/workload",
+        )
+        self.assertEqual(
+            schema["allOf"][1]["then"]["properties"]["model"]["$ref"],
+            "#/$defs/model",
+        )
 
     def test_atomic_write_json_replaces_complete_document(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
