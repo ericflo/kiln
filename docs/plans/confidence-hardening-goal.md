@@ -187,7 +187,7 @@ local receipt validator runs in cheap CI.
   for supported ROCm operation.
 - [ ] In the stable profile, prohibit physical KV resize, pool trim, live graph
   capture, and training GPU ownership changes while requests are active.
-- [ ] Add a real off switch for memory-governor automatic reclaim. Changing the
+- [x] Add a real off switch for memory-governor automatic reclaim. Changing the
   probe interval is not an off switch.
 - [ ] Keep logical admission/eviction available without moving live allocation
   pointers.

@@ -60,6 +60,39 @@ pub enum MemoryPressure {
     Critical,
 }
 
+pub const MEMORY_RECLAIM_MODE_ENV: &str = "KILN_MEMORY_RECLAIM_MODE";
+
+/// Controls whether memory observation may mutate backend allocator state.
+/// `Off` is the stable default because a reclaim hook may synchronize a live
+/// accelerator. The other modes require an explicit operator choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryReclaimMode {
+    Off,
+    OnDemand,
+    Automatic,
+}
+
+impl MemoryReclaimMode {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" => Ok(Self::Off),
+            "on-demand" => Ok(Self::OnDemand),
+            "automatic" => Ok(Self::Automatic),
+            _ => Err(format!(
+                "{MEMORY_RECLAIM_MODE_ENV} must be one of off, on-demand, automatic; got {value:?}"
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::OnDemand => "on-demand",
+            Self::Automatic => "automatic",
+        }
+    }
+}
+
 impl MemoryPressure {
     /// True once the system should start *releasing* memory (Tight or worse).
     pub fn should_reclaim(self) -> bool {
@@ -83,6 +116,8 @@ pub struct GovernorConfig {
     pub critical_frac: f64,
     /// `free/total` at/above which pressure is [`MemoryPressure::Comfortable`].
     pub comfortable_frac: f64,
+    /// Whether backend reclaim hooks are disabled, on-demand, or periodic.
+    pub reclaim_mode: MemoryReclaimMode,
 }
 
 impl Default for GovernorConfig {
@@ -93,6 +128,7 @@ impl Default for GovernorConfig {
             critical_frac: 0.05,
             tight_frac: 0.10,
             comfortable_frac: 0.25,
+            reclaim_mode: MemoryReclaimMode::Off,
         }
     }
 }
@@ -101,6 +137,7 @@ impl GovernorConfig {
     /// Build from defaults with optional env overrides:
     /// * `KILN_MEMORY_FLOOR_GB` — safety floor in GiB.
     /// * `KILN_MEMORY_PROBE_MS` — probe TTL in milliseconds.
+    /// * `KILN_MEMORY_RECLAIM_MODE` — `off`, `on-demand`, or `automatic`.
     pub fn from_env() -> Self {
         let mut cfg = GovernorConfig::default();
         if let Ok(v) = std::env::var("KILN_MEMORY_FLOOR_GB") {
@@ -112,6 +149,13 @@ impl GovernorConfig {
             if let Ok(ms) = v.parse::<u64>() {
                 cfg.ttl = Duration::from_millis(ms);
             }
+        }
+        if let Some(v) = std::env::var_os(MEMORY_RECLAIM_MODE_ENV) {
+            let v = v
+                .into_string()
+                .unwrap_or_else(|_| panic!("{MEMORY_RECLAIM_MODE_ENV} must contain valid UTF-8"));
+            cfg.reclaim_mode =
+                MemoryReclaimMode::parse(&v).unwrap_or_else(|error| panic!("{error}"));
         }
         cfg
     }
@@ -285,6 +329,11 @@ impl MemoryGovernor {
         &self.cfg
     }
 
+    /// True only after the opt-in background monitor has spawned.
+    pub fn monitor_started(&self) -> bool {
+        self.monitor_started.load(Ordering::Acquire)
+    }
+
     /// Register a reclaim hook (the allocator layer's "return pooled VRAM to the
     /// OS" function). Invoked under memory pressure so kiln gives memory back to
     /// a coexisting process instead of hoarding it. Multiple hooks may register
@@ -300,6 +349,9 @@ impl MemoryGovernor {
     /// Returns total bytes freed (best-effort; a hook may report 0 if it can't
     /// measure). A no-op with no reclaimers registered.
     pub fn reclaim(&self, target_bytes: u64) -> u64 {
+        if self.cfg.reclaim_mode == MemoryReclaimMode::Off {
+            return 0;
+        }
         let mut freed = 0u64;
         {
             let hooks = self.reclaimers.lock().unwrap_or_else(|e| e.into_inner());
@@ -334,12 +386,23 @@ impl MemoryGovernor {
     /// (or kiln itself) drives memory tight, kiln returns pooled VRAM to the OS
     /// without anyone asking. Idempotent — starts at most one thread. Requires a
     /// `'static` governor (use [`MemoryGovernor::global`]).
-    pub fn start_monitor(&'static self) {
-        if self.monitor_started.swap(true, Ordering::SeqCst) {
-            return;
+    pub fn start_monitor(&'static self) -> bool {
+        if self.cfg.reclaim_mode != MemoryReclaimMode::Automatic {
+            tracing::info!(
+                mode = self.cfg.reclaim_mode.as_str(),
+                "memory governor automatic reclaim monitor not started"
+            );
+            return false;
+        }
+        if self
+            .monitor_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return true;
         }
         let interval = self.cfg.ttl.max(Duration::from_secs(2));
-        std::thread::Builder::new()
+        if let Err(err) = std::thread::Builder::new()
             .name("kiln-mem-governor".into())
             .spawn(move || {
                 loop {
@@ -358,7 +421,12 @@ impl MemoryGovernor {
                     }
                 }
             })
-            .ok();
+        {
+            self.monitor_started.store(false, Ordering::Release);
+            tracing::error!(error = %err, "failed to start memory governor monitor");
+            return false;
+        }
+        true
     }
 }
 
@@ -453,6 +521,44 @@ mod tests {
         assert_eq!(gov(24 * GB, 4 * GB).pressure(), MemoryPressure::Moderate); // ~17%
         assert_eq!(gov(24 * GB, 2 * GB).pressure(), MemoryPressure::Tight); // ~8%
         assert_eq!(gov(24 * GB, GB).pressure(), MemoryPressure::Critical); // ~4%
+    }
+
+    #[test]
+    fn reclaim_mode_is_strict() {
+        assert_eq!(
+            MemoryReclaimMode::parse("off").unwrap(),
+            MemoryReclaimMode::Off
+        );
+        assert_eq!(
+            MemoryReclaimMode::parse("ON-DEMAND").unwrap(),
+            MemoryReclaimMode::OnDemand
+        );
+        assert_eq!(
+            MemoryReclaimMode::parse(" automatic ").unwrap(),
+            MemoryReclaimMode::Automatic
+        );
+        assert!(MemoryReclaimMode::parse("true").is_err());
+        assert!(MemoryReclaimMode::parse("").is_err());
+    }
+
+    #[test]
+    fn reclaim_is_off_by_default_and_disabled_monitor_does_not_start() {
+        let cfg = GovernorConfig::default();
+        assert_eq!(cfg.reclaim_mode, MemoryReclaimMode::Off);
+        let g = Box::leak(Box::new(MemoryGovernor::with_source(
+            Box::new(Fixed::new(24 * GB, GB)),
+            cfg,
+        )));
+        let calls = std::sync::Arc::new(AtomicU64::new(0));
+        let calls_for_hook = calls.clone();
+        g.register_reclaimer(move |_| {
+            calls_for_hook.fetch_add(1, Ordering::SeqCst);
+            GB
+        });
+        assert_eq!(g.reclaim(GB), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(!g.start_monitor());
+        assert!(!g.monitor_started());
     }
 
     #[test]
@@ -583,6 +689,7 @@ mod tests {
         }
         let cfg = GovernorConfig {
             ttl: Duration::from_millis(0),
+            reclaim_mode: MemoryReclaimMode::OnDemand,
             ..GovernorConfig::default()
         };
         let g = MemoryGovernor::with_source(Box::new(Shared(src.clone())), cfg);

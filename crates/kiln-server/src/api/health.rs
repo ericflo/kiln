@@ -177,8 +177,30 @@ struct DecodeRuntimeInfo {
     rocm_graphs: GraphInfo,
     metal_graphs: GraphInfo,
     kv_autoscaler: crate::kv_autoscaler::KvAutoscalerState,
+    memory_governor: MemoryGovernorRuntimeInfo,
     decode_batcher: Option<DecodeBatcherInfo>,
     batching_engine: Option<BatchingEngineInfo>,
+}
+
+#[derive(Serialize)]
+struct MemoryGovernorRuntimeInfo {
+    reclaim_mode: &'static str,
+    automatic_monitor_enabled: bool,
+    source: &'static str,
+}
+
+fn memory_governor_runtime_info() -> MemoryGovernorRuntimeInfo {
+    let governor = kiln_memory::MemoryGovernor::global();
+    let enabled = governor.monitor_started();
+    MemoryGovernorRuntimeInfo {
+        reclaim_mode: governor.config().reclaim_mode.as_str(),
+        automatic_monitor_enabled: enabled,
+        source: if std::env::var_os(kiln_memory::MEMORY_RECLAIM_MODE_ENV).is_some() {
+            "environment"
+        } else {
+            "default"
+        },
+    }
 }
 
 #[derive(Serialize)]
@@ -361,6 +383,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         rocm_graphs,
         metal_graphs,
         kv_autoscaler: state.kv_autoscaler,
+        memory_governor: memory_governor_runtime_info(),
         decode_batcher,
         batching_engine,
     };
@@ -826,6 +849,14 @@ mod tests {
         assert_eq!(
             json["decode_runtime"]["kv_autoscaler"]["reason"],
             "mock_backend"
+        );
+        assert_eq!(
+            json["decode_runtime"]["memory_governor"]["automatic_monitor_enabled"],
+            false
+        );
+        assert_eq!(
+            json["decode_runtime"]["memory_governor"]["reclaim_mode"],
+            "off"
         );
         assert!(json["training"].is_object());
         assert_eq!(json["training"]["queued"], 0);

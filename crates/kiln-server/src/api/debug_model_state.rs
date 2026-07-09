@@ -307,6 +307,7 @@ fn selected_env_flags() -> BTreeMap<&'static str, EnvFlagState> {
         "KILN_CUDA_GRAPHS",
         "KILN_ROCM_GRAPHS",
         "KILN_KV_AUTOSCALE",
+        "KILN_MEMORY_RECLAIM_MODE",
         "KILN_KV_CACHE_FP8",
         "KILN_PREFIX_CACHE_ENABLED",
         "KILN_NUM_BLOCKS",
@@ -609,6 +610,7 @@ mod tests {
         assert_eq!(json["batching_engine"]["enabled"], false);
         assert!(json["env_flags"]["KILN_ROCM_GRAPHS"].is_object());
         assert!(json["env_flags"]["KILN_KV_AUTOSCALE"].is_object());
+        assert!(json["env_flags"]["KILN_MEMORY_RECLAIM_MODE"].is_object());
         assert!(json["caches"]["rendered_prompt"].is_object());
         assert!(json["caches"]["prefix_cache"].is_object());
 

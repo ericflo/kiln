@@ -532,12 +532,20 @@ Kiln uses a TOML config file. Environment variables override config values. See 
 | `server.fold_reasoning_into_content` | `KILN_FOLD_REASONING_INTO_CONTENT` | false | Also copy separated reasoning into chat `content` for compatibility |
 | `memory.inference_memory_fraction` | — | 0.7 | VRAM fraction for inference vs training |
 | `memory.kv_cache_fp8` | `KILN_KV_CACHE_FP8` | false | FP8 KV cache (2x context length) |
+| — | `KILN_MEMORY_RECLAIM_MODE` | `off` | Device-pool reclaim policy: `off`, `on-demand`, or `automatic` |
 | `logging.format` | `KILN_LOG_FORMAT` | auto | `auto` (default; pretty on TTY, JSON otherwise), `json`, `pretty`, `text`, or `human` |
 | `prefix_cache.enabled` | `KILN_PREFIX_CACHE_ENABLED` | true | Reuse KV cache for shared prefixes |
 | `prefix_cache.max_blocks` | `KILN_PREFIX_CACHE_MAX_BLOCKS` | auto | Cap retained KV blocks for shared prefixes (auto = 50% of KV block pool) |
 | `prefix_cache.max_entries` | `KILN_PREFIX_CACHE_MAX_ENTRIES` | auto | Cap cached GDN state snapshots (~49 MiB each; auto budget ≤1 GiB) |
 | `request_log.enabled` | `KILN_REQUEST_LOG_ENABLED` | true | Durable JSONL request/response log for the inference endpoints |
 | `request_log.dir` | `KILN_REQUEST_LOG_DIR` | `<adapter_dir>/.requests` | Request log directory (rotated + gzipped, retention-capped) |
+
+Device-pool reclaim is disabled by default because CUDA and ROCm reclaim hooks
+may synchronize the accelerator. `on-demand` permits explicit startup and
+training reclaim calls but does not start a timer. `automatic` also enables the
+background pressure monitor and is experimental. Invalid values stop startup;
+the resolved mode and automatic-monitor state are reported under
+`/health.decode_runtime.memory_governor`.
 
 Kiln boots with the built-in `Qwen3.5-4B` defaults profile. That profile
 preserves Qwen3.5-4B's official chat-template thinking default for ordinary
