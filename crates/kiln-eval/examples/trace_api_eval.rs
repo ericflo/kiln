@@ -25,7 +25,7 @@ use kiln_eval::qwen3::{extract_first_tool_call, validate_against_schema};
 use kiln_eval::scorers::{NoopJudgeRunner, Scorer, score_completion};
 use kiln_eval::{
     AggregateMetrics, EvalGenerationParams, EvalJobState, EvalOutcomeKind, EvalResult, EvalSuite,
-    ExampleOutcome, SuiteResult,
+    EvalThinkingBudget, EvalThinkingBudgetOutcome, ExampleOutcome, SuiteResult,
 };
 use serde_json::{Value, json};
 
@@ -252,6 +252,7 @@ async fn run_model(
         started_at: run_started.to_rfc3339(),
         finished_at: chrono::Utc::now().to_rfc3339(),
         suite_hash: suite_hash(suite)?,
+        effective_generation_hash: String::new(),
     })
 }
 
@@ -307,6 +308,8 @@ async fn run_api_job(
                 example_id: job.example_id.clone(),
                 completion_index: job.completion_idx,
                 completion_text: String::new(),
+                raw_completion_text: None,
+                thinking_budget: None,
                 kind: EvalOutcomeKind::Error,
                 score: 0.0,
                 detail: Some(format!("generation failed: {err}")),
@@ -371,6 +374,18 @@ async fn call_chat_api(
     }
     if !gen_params.stop.is_empty() {
         body["stop"] = json!(gen_params.stop);
+    }
+    match gen_params.thinking_budget_tokens {
+        kiln_eval::EvalBudgetOverride::Inherit => {}
+        kiln_eval::EvalBudgetOverride::Unlimited => body["thinking_budget_tokens"] = Value::Null,
+        kiln_eval::EvalBudgetOverride::Limited(value) => {
+            body["thinking_budget_tokens"] = json!(value)
+        }
+    }
+    match gen_params.thinking_budget_ms {
+        kiln_eval::EvalBudgetOverride::Inherit => {}
+        kiln_eval::EvalBudgetOverride::Unlimited => body["thinking_budget_ms"] = Value::Null,
+        kiln_eval::EvalBudgetOverride::Limited(value) => body["thinking_budget_ms"] = json!(value),
     }
     if !args.no_tools {
         if let Some(tools) = example.effective_tools(suite.tools.as_deref()) {
@@ -470,6 +485,7 @@ fn score_api_response(
     outcome.prompt_tokens = response.prompt_tokens;
     outcome.completion_tokens = response.completion_tokens;
     outcome.latency_ms = Some(latency_ms);
+    outcome.thinking_budget = response.thinking_budget;
     Ok((outcome, predicted_tool, schema_violation))
 }
 
@@ -477,6 +493,7 @@ struct ApiCompletion {
     completion_text: String,
     prompt_tokens: Option<usize>,
     completion_tokens: Option<usize>,
+    thinking_budget: Option<EvalThinkingBudget>,
     /// True when the completion's tool calls came back as structured
     /// `message.tool_calls` — the serving layer already parsed them, so the
     /// raw output format the model emitted is unknowable here.
@@ -514,6 +531,39 @@ impl ApiCompletion {
             tool_calls_were_api_native = true;
         }
         let usage = value.get("usage");
+        let budget_metadata = value.pointer("/metadata/thinking_budget");
+        let budget_outcome = choice
+            .get("thinking_budget")
+            .filter(|value| !value.is_null())
+            .and_then(|value| {
+                serde_json::from_value::<EvalThinkingBudgetOutcome>(value.clone()).ok()
+            });
+        let thinking_budget = budget_metadata.map(|metadata| EvalThinkingBudget {
+            configured: metadata
+                .get("configured")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            applied: metadata
+                .get("applied")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            max_tokens: metadata
+                .get("max_tokens")
+                .and_then(Value::as_u64)
+                .map(|value| value as usize),
+            max_time_ms: metadata.get("max_time_ms").and_then(Value::as_u64),
+            tokens_source: metadata
+                .get("tokens_source")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+            time_source: metadata
+                .get("time_source")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+            outcome: budget_outcome,
+        });
         Ok(Self {
             completion_text: answer,
             tool_calls_were_api_native,
@@ -525,6 +575,7 @@ impl ApiCompletion {
                 .and_then(|u| u.get("completion_tokens"))
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize),
+            thinking_budget,
         })
     }
 }

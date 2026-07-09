@@ -64,6 +64,7 @@ impl EvalGenerator for OrderedMockGenerator {
         Box::pin(async move {
             Ok(PreparedPrompt {
                 tokens: vec![1, 2, 3],
+                starts_in_reasoning: false,
             })
         })
     }
@@ -72,6 +73,7 @@ impl EvalGenerator for OrderedMockGenerator {
         &self,
         _prepared: &PreparedPrompt,
         _params: &EvalGenerationParams,
+        thinking_budget: &kiln_eval::EvalThinkingBudget,
         _completion_index: usize,
         adapter_label: Option<&str>,
     ) -> std::pin::Pin<
@@ -79,14 +81,17 @@ impl EvalGenerator for OrderedMockGenerator {
     > {
         let next = self.replies.lock().unwrap().pop_front();
         let adapter = adapter_label.map(str::to_string);
+        let thinking_budget = thinking_budget.clone();
         Box::pin(async move {
             let text = next.unwrap_or_else(|| "no canned reply".into());
             Ok(EvalCompletion {
+                raw_text: text.clone(),
                 text,
                 prompt_tokens: 3,
                 completion_tokens: 1,
                 latency_ms: 0.1,
                 adapter,
+                thinking_budget,
             })
         })
     }

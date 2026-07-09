@@ -119,6 +119,8 @@ struct DecodeBatcherDebug {
 struct ThinkingDebugState {
     eval_mode: bool,
     default_thinking_enabled: Option<bool>,
+    default_thinking_budget_tokens: Option<usize>,
+    default_thinking_budget_ms: Option<u64>,
     profile_server_default_thinking_enabled: Option<bool>,
     template_default_thinking_enabled: bool,
     eval_mode_default_thinking_enabled: bool,
@@ -368,6 +370,8 @@ fn thinking_state(state: &AppState) -> ThinkingDebugState {
     ThinkingDebugState {
         eval_mode: state.eval_mode,
         default_thinking_enabled: state.default_thinking_enabled,
+        default_thinking_budget_tokens: state.default_thinking_budget_tokens,
+        default_thinking_budget_ms: state.default_thinking_budget_ms,
         profile_server_default_thinking_enabled: state
             .model_defaults_profile
             .server_default_thinking_enabled,

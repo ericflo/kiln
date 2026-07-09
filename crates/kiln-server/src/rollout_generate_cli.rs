@@ -10,11 +10,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::cli::ThinkingBudgetArg;
+
 #[derive(Debug, Clone)]
 pub struct RolloutGenerateOptions {
     pub url: String,
     pub adapter: String,
     pub thinking: bool,
+    pub thinking_budget_tokens: Option<ThinkingBudgetArg<usize>>,
+    pub thinking_budget_ms: Option<ThinkingBudgetArg<u64>>,
     pub tasks: PathBuf,
     pub seeds: usize,
     pub seed_start: u64,
@@ -30,6 +34,18 @@ pub struct RolloutGenerateSummary {
     pub adapter_label: String,
     pub url: String,
     pub thinking_enabled: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_requested_thinking_budget"
+    )]
+    pub thinking_budget_tokens: Option<ThinkingBudgetArg<usize>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_requested_thinking_budget"
+    )]
+    pub thinking_budget_ms: Option<ThinkingBudgetArg<u64>>,
     pub task_count: usize,
     pub seeds: usize,
     pub seed_start: u64,
@@ -59,6 +75,20 @@ pub struct RolloutGenerateStats {
     pub mean_client_latency_ms: f64,
     pub max_client_latency_ms: f64,
     pub mean_server_latency_ms: Option<f64>,
+}
+
+fn deserialize_requested_thinking_budget<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<ThinkingBudgetArg<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    let value = <Option<T> as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(Some(value.map_or(
+        ThinkingBudgetArg::Unlimited,
+        ThinkingBudgetArg::Limited,
+    )))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +190,8 @@ pub async fn run_rollout_generate(
                 seed,
                 adapter.request_value.as_deref(),
                 options.thinking,
+                options.thinking_budget_tokens,
+                options.thinking_budget_ms,
             )?;
             let request_messages = extract_messages_for_group(&request)?;
             match &group_messages {
@@ -298,6 +330,8 @@ pub async fn run_rollout_generate(
         adapter_label: adapter.label,
         url: options.url,
         thinking_enabled: options.thinking,
+        thinking_budget_tokens: options.thinking_budget_tokens,
+        thinking_budget_ms: options.thinking_budget_ms,
         task_count: tasks.len(),
         seeds: options.seeds,
         seed_start: options.seed_start,
@@ -381,6 +415,8 @@ fn render_rollout_request(
     seed: u64,
     adapter: Option<&str>,
     thinking: bool,
+    thinking_budget_tokens: Option<ThinkingBudgetArg<usize>>,
+    thinking_budget_ms: Option<ThinkingBudgetArg<u64>>,
 ) -> Result<Value> {
     let mut value = render_template_value(template, task, seed, adapter, thinking)?;
     let obj = value
@@ -393,6 +429,18 @@ fn render_rollout_request(
     );
     obj.insert("stream".to_string(), Value::Bool(false));
     obj.insert("include_performance".to_string(), Value::Bool(true));
+    if let Some(budget) = thinking_budget_tokens {
+        obj.insert(
+            "thinking_budget_tokens".to_string(),
+            serde_json::to_value(budget)?,
+        );
+    }
+    if let Some(budget) = thinking_budget_ms {
+        obj.insert(
+            "thinking_budget_ms".to_string(),
+            serde_json::to_value(budget)?,
+        );
+    }
     let kwargs = obj
         .entry("chat_template_kwargs".to_string())
         .or_insert_with(|| Value::Object(Map::new()));
@@ -761,12 +809,23 @@ mod tests {
             "model": "Qwen3.5-4B",
             "messages": [{"role": "user", "content": "Question {{prompt}} seed {{seed}} {{adapter_label}} {{thinking_enabled}}"}],
             "chat_template_kwargs": {"enable_thinking": true, "custom": "kept"},
+            "thinking_budget_tokens": 64,
+            "thinking_budget_ms": 750,
             "stream": true,
             "max_tokens": "{{max_tokens}}"
         });
         let task = json!({"prompt": "2+2?", "max_tokens": 3});
 
-        let request = render_rollout_request(&template, &task, 7, Some("cap"), false).unwrap();
+        let request = render_rollout_request(
+            &template,
+            &task,
+            7,
+            Some("cap"),
+            false,
+            Some(ThinkingBudgetArg::Limited(96)),
+            Some(ThinkingBudgetArg::Limited(1500)),
+        )
+        .unwrap();
         assert_eq!(request["adapter"], "cap");
         assert_eq!(request["seed"], 7);
         assert_eq!(request["stream"], false);
@@ -777,17 +836,34 @@ mod tests {
         );
         assert_eq!(request["chat_template_kwargs"]["custom"], "kept");
         assert_eq!(request["max_tokens"], 3);
+        assert_eq!(request["thinking_budget_tokens"], 96);
+        assert_eq!(request["thinking_budget_ms"], 1500);
         assert_eq!(
             request["messages"][0]["content"],
             "Question 2+2? seed 7 cap false"
         );
 
-        let base = render_rollout_request(&template, &task, 8, None, true).unwrap();
+        let base = render_rollout_request(&template, &task, 8, None, true, None, None).unwrap();
         assert!(base["adapter"].is_null());
         assert_eq!(
             base["chat_template_kwargs"]["enable_thinking"],
             Value::Bool(true)
         );
+        assert_eq!(base["thinking_budget_tokens"], 64);
+        assert_eq!(base["thinking_budget_ms"], 750);
+
+        let unlimited = render_rollout_request(
+            &template,
+            &task,
+            9,
+            None,
+            true,
+            Some(ThinkingBudgetArg::Unlimited),
+            Some(ThinkingBudgetArg::Unlimited),
+        )
+        .unwrap();
+        assert!(unlimited["thinking_budget_tokens"].is_null());
+        assert!(unlimited["thinking_budget_ms"].is_null());
     }
 
     #[test]
@@ -889,6 +965,8 @@ mod tests {
             url: format!("http://{addr}"),
             adapter: "cap".to_string(),
             thinking: false,
+            thinking_budget_tokens: Some(ThinkingBudgetArg::Limited(96)),
+            thinking_budget_ms: Some(ThinkingBudgetArg::Limited(1500)),
             tasks,
             seeds: 2,
             seed_start: 10,
@@ -905,7 +983,41 @@ mod tests {
         assert_eq!(summary.stats.total_tokens, 14);
         assert_eq!(summary.stats.total_completion_tokens, 4);
         assert_eq!(summary.stats.mean_reward, 1.0);
+        assert_eq!(
+            summary.thinking_budget_tokens,
+            Some(ThinkingBudgetArg::Limited(96))
+        );
+        assert_eq!(
+            summary.thinking_budget_ms,
+            Some(ThinkingBudgetArg::Limited(1500))
+        );
         assert!(summary_output.exists());
+
+        let summary_json: Value =
+            serde_json::from_slice(&std::fs::read(&summary_output).unwrap()).unwrap();
+        assert_eq!(summary_json["thinking_budget_tokens"], 96);
+        assert_eq!(summary_json["thinking_budget_ms"], 1500);
+        let decoded: RolloutGenerateSummary = serde_json::from_value(summary_json.clone()).unwrap();
+        assert_eq!(
+            decoded.thinking_budget_tokens,
+            Some(ThinkingBudgetArg::Limited(96))
+        );
+
+        let mut unlimited_summary = summary_json.clone();
+        unlimited_summary["thinking_budget_tokens"] = Value::Null;
+        let decoded: RolloutGenerateSummary = serde_json::from_value(unlimited_summary).unwrap();
+        assert_eq!(
+            decoded.thinking_budget_tokens,
+            Some(ThinkingBudgetArg::Unlimited)
+        );
+
+        let mut inherited_summary = summary_json.clone();
+        inherited_summary
+            .as_object_mut()
+            .unwrap()
+            .remove("thinking_budget_tokens");
+        let decoded: RolloutGenerateSummary = serde_json::from_value(inherited_summary).unwrap();
+        assert_eq!(decoded.thinking_budget_tokens, None);
 
         let line = std::fs::read_to_string(&output).unwrap();
         let group_value: Value = serde_json::from_str(line.trim()).unwrap();
@@ -929,6 +1041,8 @@ mod tests {
         assert_eq!(observed[0]["adapter"], "cap");
         assert_eq!(observed[0]["seed"], 10);
         assert_eq!(observed[1]["seed"], 11);
+        assert_eq!(observed[0]["thinking_budget_tokens"], 96);
+        assert_eq!(observed[0]["thinking_budget_ms"], 1500);
         assert_eq!(
             observed[0]["chat_template_kwargs"]["enable_thinking"],
             Value::Bool(false)

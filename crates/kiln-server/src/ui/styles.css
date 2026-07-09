@@ -1227,6 +1227,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
 }
 .chat-controls #chat-adapter { width: auto; min-width: 180px; }
 .chat-controls #chat-temp    { width: 76px; }
+.chat-controls #chat-thinking-budget-mode { min-width: 132px; }
 .chat-controls .chat-toggle-label {
   display: inline-flex;
   align-items: center;
@@ -1265,6 +1266,17 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
 }
 .chat-advanced .chat-adv-system { width: 100%; }
 .chat-advanced .chat-adv-stop   { flex: 1; min-width: 200px; }
+.chat-thinking-budget-custom {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--accent);
+  min-width: 248px;
+}
+.chat-thinking-budget-custom[hidden] { display: none; }
+.chat-thinking-budget-custom.is-disabled { opacity: 0.55; }
+.chat-thinking-budget-custom .chat-adv-field { flex: 1 1 112px; }
 .chat-advanced .chat-adv-label {
   font-size: var(--text-2xs);
   text-transform: uppercase;
@@ -1283,6 +1295,15 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
   color: var(--text);
 }
 .chat-advanced textarea { resize: vertical; min-height: 38px; max-height: 200px; line-height: 1.45; }
+
+@media (max-width: 720px) {
+  .chat-controls #chat-thinking-budget-mode { min-width: 0; max-width: 100%; }
+  .chat-thinking-budget-custom {
+    flex: 1 1 100%;
+    min-width: 0;
+    max-width: 100%;
+  }
+}
 
 .restore-banner {
   display: flex;

@@ -22,13 +22,18 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use kiln_core::sampling::SamplingParams;
+use kiln_core::sampling::{SamplingParams, ThinkingBudget};
 use kiln_core::token::TokenId;
 use kiln_eval::scorers::JudgeRunner;
-use kiln_eval::{EvalChatMessage, EvalGenerationParams};
+use kiln_eval::{
+    EvalBudgetOverride, EvalChatMessage, EvalGenerationParams, EvalThinkingBudget,
+    EvalThinkingBudgetOutcome,
+};
 use uuid::Uuid;
 
-use crate::api::completions::{Message, encode_prompt_tokens, render_prompt_text};
+use crate::api::completions::{
+    Message, encode_prompt_tokens, render_prompt_text, stop_sequence_conflicts_with_thinking_close,
+};
 use crate::batching_engine::{EngineEvent, EngineRequest};
 use crate::state::{AppState, ModelBackend, gpu_coordination_read_guard};
 
@@ -36,13 +41,84 @@ use crate::state::{AppState, ModelBackend, gpu_coordination_read_guard};
 /// the example and record cost metadata.
 #[derive(Debug, Clone)]
 pub struct EvalCompletion {
+    /// Eval-normalized text used for scoring. This may restore an opening
+    /// `<think>` that was prefilled by the chat template.
     pub text: String,
+    /// Exact model continuation before eval-only normalization.
+    pub raw_text: String,
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
     pub latency_ms: f64,
     /// Adapter that produced the completion (echo of the request — useful
     /// for compare-mode diffs).
     pub adapter: Option<String>,
+    pub thinking_budget: EvalThinkingBudget,
+}
+
+/// Origin of the effective generation object selected by the executor.
+/// Individual inherited budget dimensions still report `server_default`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvalGenerationSource {
+    Suite,
+    RunOverride,
+    Example,
+}
+
+impl EvalGenerationSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Suite => "suite",
+            Self::RunOverride => "run_override",
+            Self::Example => "example",
+        }
+    }
+
+    fn unlimited_str(self) -> &'static str {
+        match self {
+            Self::Suite => "suite_unlimited",
+            Self::RunOverride => "run_override_unlimited",
+            Self::Example => "example_unlimited",
+        }
+    }
+}
+
+fn budget_source<T>(
+    value: EvalBudgetOverride<T>,
+    server_default: Option<T>,
+    generation_source: EvalGenerationSource,
+) -> String
+where
+    T: Copy,
+{
+    match value {
+        EvalBudgetOverride::Inherit if server_default.is_some() => "server_default".into(),
+        EvalBudgetOverride::Inherit => "unlimited".into(),
+        EvalBudgetOverride::Unlimited => generation_source.unlimited_str().into(),
+        EvalBudgetOverride::Limited(_) => generation_source.as_str().into(),
+    }
+}
+
+fn resolved_thinking_budget(
+    params: &EvalGenerationParams,
+    default_tokens: Option<usize>,
+    default_ms: Option<u64>,
+    generation_source: EvalGenerationSource,
+) -> EvalThinkingBudget {
+    let max_tokens = params.thinking_budget_tokens.resolve(default_tokens);
+    let max_time_ms = params.thinking_budget_ms.resolve(default_ms);
+    EvalThinkingBudget {
+        configured: max_tokens.is_some() || max_time_ms.is_some(),
+        applied: false,
+        max_tokens,
+        max_time_ms,
+        tokens_source: budget_source(
+            params.thinking_budget_tokens,
+            default_tokens,
+            generation_source,
+        ),
+        time_source: budget_source(params.thinking_budget_ms, default_ms, generation_source),
+        outcome: None,
+    }
 }
 
 /// Pre-rendered example handed from `prepare` → `run`. Opaque-ish: the
@@ -50,11 +126,35 @@ pub struct EvalCompletion {
 #[derive(Debug, Clone)]
 pub struct PreparedPrompt {
     pub tokens: Vec<TokenId>,
+    pub starts_in_reasoning: bool,
+}
+
+fn normalize_eval_completion(text: String, starts_in_reasoning: bool) -> String {
+    if starts_in_reasoning && !text.trim_start().starts_with("<think>") {
+        format!("<think>\n{text}")
+    } else {
+        text
+    }
 }
 
 /// Generator trait. The executor calls `set_adapter` once per suite run,
 /// `prepare` once per example, `run` once per completion.
 pub trait EvalGenerator: Send + Sync {
+    /// Resolve inherited limits and validate tokenizer/stop/max-token
+    /// compatibility before the adapter is loaded or any example runs.
+    fn preflight_thinking_budget(
+        &self,
+        params: &EvalGenerationParams,
+        generation_source: EvalGenerationSource,
+        starts_in_reasoning: bool,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<EvalThinkingBudget, String>> + Send + '_>,
+    > {
+        let resolved = resolved_thinking_budget(params, None, None, generation_source);
+        let _ = starts_in_reasoning;
+        Box::pin(async move { Ok(resolved) })
+    }
+
     /// Load `adapter` (or unload to the base model when `None`) for an
     /// eval run. Returns the *previous* active adapter name so the caller
     /// can restore after the suite run.
@@ -103,6 +203,7 @@ pub trait EvalGenerator: Send + Sync {
         &self,
         prepared: &PreparedPrompt,
         params: &EvalGenerationParams,
+        thinking_budget: &EvalThinkingBudget,
         completion_index: usize,
         adapter_label: Option<&str>,
     ) -> std::pin::Pin<
@@ -155,6 +256,62 @@ impl LiveEvalGenerator {
 }
 
 impl EvalGenerator for LiveEvalGenerator {
+    fn preflight_thinking_budget(
+        &self,
+        params: &EvalGenerationParams,
+        generation_source: EvalGenerationSource,
+        starts_in_reasoning: bool,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<EvalThinkingBudget, String>> + Send + '_>,
+    > {
+        let state = self.state.clone();
+        let params = params.clone();
+        Box::pin(async move {
+            let resolved = resolved_thinking_budget(
+                &params,
+                state.default_thinking_budget_tokens,
+                state.default_thinking_budget_ms,
+                generation_source,
+            );
+            if !starts_in_reasoning || !resolved.configured || params.max_tokens == 0 {
+                return Ok(resolved);
+            }
+            let sampling = build_sampling(&params, 0);
+            if sampling
+                .stop
+                .iter()
+                .any(|stop| stop_sequence_conflicts_with_thinking_close(stop))
+            {
+                return Err(
+                    "thinking budgets cannot be combined with a stop sequence that matches part of '</think>'"
+                        .to_string(),
+                );
+            }
+            let close_tokens = state
+                .tokenizer
+                .encode("</think>")
+                .map_err(|error| format!("tokenize thinking close tag: {error}"))?;
+            let decoded_close = state
+                .tokenizer
+                .decode(&close_tokens)
+                .map_err(|error| format!("decode thinking close tag: {error}"))?;
+            if decoded_close != "</think>" {
+                return Err(
+                    "the active tokenizer cannot reproduce \"</think>\" as a forced token sequence"
+                        .to_string(),
+                );
+            }
+            ThinkingBudget::new(
+                resolved.max_tokens,
+                resolved.max_time_ms.map(std::time::Duration::from_millis),
+                params.max_tokens,
+                close_tokens,
+            )
+            .map_err(|error| format!("configure thinking budget: {error}"))?;
+            Ok(resolved)
+        })
+    }
+
     fn set_adapter(
         &self,
         adapter: Option<&str>,
@@ -260,7 +417,10 @@ impl EvalGenerator for LiveEvalGenerator {
                 .map_err(|e| format!("chat template render: {e:?}"))?;
                 let tokens = encode_prompt_tokens(&state, &prompt)
                     .map_err(|e| format!("tokenize: {e:?}"))?;
-                Ok(PreparedPrompt { tokens })
+                Ok(PreparedPrompt {
+                    tokens,
+                    starts_in_reasoning: prompt.trim_end().ends_with("<think>"),
+                })
             })
             .await
             .map_err(|e| format!("join error: {e}"))?
@@ -271,6 +431,7 @@ impl EvalGenerator for LiveEvalGenerator {
         &self,
         prepared: &PreparedPrompt,
         params: &EvalGenerationParams,
+        thinking_budget: &EvalThinkingBudget,
         completion_index: usize,
         adapter_label: Option<&str>,
     ) -> std::pin::Pin<
@@ -278,9 +439,58 @@ impl EvalGenerator for LiveEvalGenerator {
     > {
         let state = self.state.clone();
         let prompt_tokens = prepared.tokens.clone();
-        let sampling = build_sampling(params, completion_index);
+        let starts_in_reasoning = prepared.starts_in_reasoning;
+        let params = params.clone();
+        let mut thinking_budget_record = thinking_budget.clone();
         let adapter_label = adapter_label.map(str::to_string);
         Box::pin(async move {
+            let mut sampling = build_sampling(&params, completion_index);
+            if starts_in_reasoning && sampling.max_tokens > 0 && thinking_budget_record.configured {
+                if sampling
+                    .stop
+                    .iter()
+                    .any(|stop| stop_sequence_conflicts_with_thinking_close(stop))
+                {
+                    return Err(
+                        "thinking budgets cannot be combined with a stop sequence that matches part of '</think>'"
+                            .to_string(),
+                    );
+                }
+                let close_tokens = state
+                    .tokenizer
+                    .encode("</think>")
+                    .map_err(|error| format!("tokenize thinking close tag: {error}"))?;
+                let decoded_close = state
+                    .tokenizer
+                    .decode(&close_tokens)
+                    .map_err(|error| format!("decode thinking close tag: {error}"))?;
+                if decoded_close != "</think>" {
+                    return Err(
+                        "the active tokenizer cannot reproduce \"</think>\" as a forced token sequence"
+                            .to_string(),
+                    );
+                }
+                if close_tokens.len() > sampling.max_tokens {
+                    return Err(format!(
+                        "max_tokens {} is too small for the tokenizer's {}-token </think> close sequence",
+                        sampling.max_tokens,
+                        close_tokens.len()
+                    ));
+                }
+                sampling.thinking_budget = Some(
+                    ThinkingBudget::new(
+                        thinking_budget_record.max_tokens,
+                        thinking_budget_record
+                            .max_time_ms
+                            .map(std::time::Duration::from_millis),
+                        sampling.max_tokens,
+                        close_tokens,
+                    )
+                    .map_err(|error| format!("configure thinking budget: {error}"))?,
+                );
+                thinking_budget_record.applied = true;
+            }
+            let thinking_budget_handle = sampling.thinking_budget.clone();
             // Swap-corruption detection (round-4 discovery item 8): a
             // concurrent chat request's ensure_runtime_adapter can
             // barrier-swap the global weights MID-SUITE — the engine
@@ -355,12 +565,28 @@ impl EvalGenerator for LiveEvalGenerator {
             };
             cancel.clear_prefill_progress();
             let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+            if let Some(status) = thinking_budget_handle.map(|budget| budget.status()) {
+                thinking_budget_record.outcome = Some(EvalThinkingBudgetOutcome {
+                    triggered: status.trigger.is_some(),
+                    trigger: status.trigger.map(|trigger| trigger.as_str().to_string()),
+                    closed: status.closed,
+                    thinking_tokens: if status.closed {
+                        status.thinking_tokens
+                    } else {
+                        output.completion_tokens
+                    },
+                    thinking_time_ms: status.elapsed_ms,
+                });
+            }
+            let raw_text = output.text;
             Ok(EvalCompletion {
-                text: output.text,
+                text: normalize_eval_completion(raw_text.clone(), starts_in_reasoning),
+                raw_text,
                 prompt_tokens: prompt_tokens.len(),
                 completion_tokens: output.completion_tokens,
                 latency_ms: elapsed_ms,
                 adapter: adapter_label,
+                thinking_budget: thinking_budget_record,
             })
         })
     }
@@ -436,6 +662,8 @@ impl JudgeRunner for LiveJudgeRunner {
             n: 1,
             stop: vec![],
             seed: Some(0xC0FFEE),
+            thinking_budget_tokens: kiln_eval::EvalBudgetOverride::Inherit,
+            thinking_budget_ms: kiln_eval::EvalBudgetOverride::Inherit,
             chat_template_kwargs: None,
         };
         let prep_fut = self.generator.prepare(&messages, None, None, &params);
@@ -448,7 +676,20 @@ impl JudgeRunner for LiveJudgeRunner {
         };
         // `adapter` is a label for the engine request only — the executor
         // already activated the judge adapter at the batch boundary.
-        let run_fut = self.generator.run(&prepared, &params, 0, adapter);
+        let budget = match self
+            .runtime
+            .block_on(self.generator.preflight_thinking_budget(
+                &params,
+                EvalGenerationSource::Suite,
+                prepared.starts_in_reasoning,
+            )) {
+            Ok(budget) => budget,
+            Err(e) => {
+                tracing::warn!(error = %e, "LLM judge thinking-budget preflight failed");
+                return None;
+            }
+        };
+        let run_fut = self.generator.run(&prepared, &params, &budget, 0, adapter);
         match self.runtime.block_on(run_fut) {
             Ok(c) => Some(c.text),
             Err(e) => {
@@ -537,6 +778,7 @@ impl EvalGenerator for MockEvalGenerator {
         Box::pin(async move {
             Ok(PreparedPrompt {
                 tokens: approx_tokens,
+                starts_in_reasoning: false,
             })
         })
     }
@@ -545,6 +787,7 @@ impl EvalGenerator for MockEvalGenerator {
         &self,
         prepared: &PreparedPrompt,
         _params: &EvalGenerationParams,
+        thinking_budget: &EvalThinkingBudget,
         _completion_index: usize,
         adapter_label: Option<&str>,
     ) -> std::pin::Pin<
@@ -553,6 +796,7 @@ impl EvalGenerator for MockEvalGenerator {
         let prompt_token_count = prepared.tokens.len();
         let adapter_key = adapter_label.unwrap_or("").to_string();
         let adapter_owned = adapter_label.map(str::to_string);
+        let thinking_budget = thinking_budget.clone();
         let force = self.force_reply.clone();
         let mapped = self.adapter_replies.get(&adapter_key).cloned();
         Box::pin(async move {
@@ -560,11 +804,13 @@ impl EvalGenerator for MockEvalGenerator {
                 .or(mapped)
                 .unwrap_or_else(|| format!("mock-reply [{adapter_key}]"));
             Ok(EvalCompletion {
+                raw_text: text.clone(),
                 text,
                 prompt_tokens: prompt_token_count,
                 completion_tokens: 1,
                 latency_ms: 0.5,
                 adapter: adapter_owned,
+                thinking_budget,
             })
         })
     }
@@ -582,15 +828,44 @@ pub fn generator_from_state(state: AppState) -> Arc<dyn EvalGenerator> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn resolved_budget_tracks_limit_provenance() {
+        let params = EvalGenerationParams {
+            thinking_budget_tokens: EvalBudgetOverride::Inherit,
+            thinking_budget_ms: EvalBudgetOverride::Unlimited,
+            ..EvalGenerationParams::default()
+        };
+        let budget =
+            resolved_thinking_budget(&params, Some(17), Some(900), EvalGenerationSource::Example);
+        assert!(budget.configured);
+        assert_eq!(budget.max_tokens, Some(17));
+        assert_eq!(budget.max_time_ms, None);
+        assert_eq!(budget.tokens_source, "server_default");
+        assert_eq!(budget.time_source, "example_unlimited");
+        assert!(!budget.applied);
+        assert!(budget.outcome.is_none());
+    }
+
     #[tokio::test]
     async fn mock_generator_three_phase_round_trip() {
         let g = MockEvalGenerator::new();
         let messages = vec![EvalChatMessage::new("user", "hi")];
         let params = EvalGenerationParams::default();
         let prepared = g.prepare(&messages, None, None, &params).await.unwrap();
+        let budget = g
+            .preflight_thinking_budget(
+                &params,
+                EvalGenerationSource::Suite,
+                prepared.starts_in_reasoning,
+            )
+            .await
+            .unwrap();
         let prev = g.set_adapter(Some("foo")).await.unwrap();
         assert_eq!(prev, None);
-        let r = g.run(&prepared, &params, 0, Some("foo")).await.unwrap();
+        let r = g
+            .run(&prepared, &params, &budget, 0, Some("foo"))
+            .await
+            .unwrap();
         assert!(r.text.contains("[foo]"));
         // Restoring None returns "foo" as the previous.
         let prev = g.set_adapter(None).await.unwrap();
@@ -602,11 +877,26 @@ mod tests {
         let g = MockEvalGenerator::new().with_adapter_reply("alpha", "alpha-answer");
         let prepared = PreparedPrompt {
             tokens: vec![1, 2, 3],
+            starts_in_reasoning: false,
         };
         let params = EvalGenerationParams::default();
-        let r = g.run(&prepared, &params, 0, Some("alpha")).await.unwrap();
+        let budget = g
+            .preflight_thinking_budget(
+                &params,
+                EvalGenerationSource::Suite,
+                prepared.starts_in_reasoning,
+            )
+            .await
+            .unwrap();
+        let r = g
+            .run(&prepared, &params, &budget, 0, Some("alpha"))
+            .await
+            .unwrap();
         assert_eq!(r.text, "alpha-answer");
-        let r2 = g.run(&prepared, &params, 0, Some("beta")).await.unwrap();
+        let r2 = g
+            .run(&prepared, &params, &budget, 0, Some("beta"))
+            .await
+            .unwrap();
         assert!(r2.text.contains("[beta]"));
     }
 
@@ -615,10 +905,42 @@ mod tests {
         let g = MockEvalGenerator::new()
             .with_adapter_reply("alpha", "alpha-answer")
             .with_force_reply("override");
-        let prepared = PreparedPrompt { tokens: vec![] };
+        let prepared = PreparedPrompt {
+            tokens: vec![],
+            starts_in_reasoning: false,
+        };
         let params = EvalGenerationParams::default();
-        let r = g.run(&prepared, &params, 0, Some("alpha")).await.unwrap();
+        let budget = g
+            .preflight_thinking_budget(
+                &params,
+                EvalGenerationSource::Suite,
+                prepared.starts_in_reasoning,
+            )
+            .await
+            .unwrap();
+        let r = g
+            .run(&prepared, &params, &budget, 0, Some("alpha"))
+            .await
+            .unwrap();
         assert_eq!(r.text, "override");
+    }
+
+    #[test]
+    fn reasoning_prefill_is_restored_for_eval_splitting_and_scoring() {
+        let normalized = normalize_eval_completion(
+            "work through it\n</think>\n\nfinal answer".to_string(),
+            true,
+        );
+        let split = kiln_eval::qwen3::split_thinking(&normalized);
+        assert_eq!(split.reasoning, Some("work through it"));
+        assert_eq!(split.answer, "final answer");
+        assert!(split.had_thinking);
+        assert!(!split.unclosed);
+
+        assert_eq!(
+            normalize_eval_completion("plain answer".to_string(), false),
+            "plain answer"
+        );
     }
 
     #[tokio::test]

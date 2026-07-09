@@ -21,6 +21,12 @@ pub struct Settings {
     pub speculative_decoding: bool,
     pub adapter_dir: Option<PathBuf>,
     pub served_model_id: Option<String>,
+    /// Default maximum number of reasoning tokens before the server forces the
+    /// current `<think>` block closed. `None` leaves reasoning unlimited.
+    pub default_thinking_budget_tokens: Option<usize>,
+    /// Default reasoning wall-clock budget in milliseconds. `None` leaves
+    /// reasoning unlimited. Request-level API fields can still override it.
+    pub default_thinking_budget_ms: Option<u64>,
     pub auto_start: bool,
     pub auto_restart: bool,
     pub launch_at_login: bool,
@@ -40,6 +46,8 @@ impl Default for Settings {
             speculative_decoding: cfg!(target_os = "macos"),
             adapter_dir: None,
             served_model_id: None,
+            default_thinking_budget_tokens: None,
+            default_thinking_budget_ms: None,
             auto_start: true,
             auto_restart: true,
             launch_at_login: false,
@@ -187,6 +195,18 @@ pub fn apply_to_supervisor_config(s: &Settings, cfg: &mut SupervisorConfig) {
             envs.push(("KILN_SERVED_MODEL_ID".to_string(), trimmed.to_string()));
         }
     }
+    // Always emit both dimensions. The child inherits the desktop process's
+    // environment, so omission would let an ambient KILN_* value override the
+    // Unlimited mode selected in the UI. The server accepts `unlimited` as the
+    // explicit representation of `None`.
+    envs.push((
+        "KILN_DEFAULT_THINKING_BUDGET_TOKENS".to_string(),
+        optional_limit_env(s.default_thinking_budget_tokens),
+    ));
+    envs.push((
+        "KILN_DEFAULT_THINKING_BUDGET_MS".to_string(),
+        optional_limit_env(s.default_thinking_budget_ms),
+    ));
 
     cfg.args = Vec::new();
     cfg.envs = envs;
@@ -207,6 +227,12 @@ fn bool_env(b: bool) -> String {
     }
 }
 
+fn optional_limit_env<T: ToString>(value: Option<T>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unlimited".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,6 +248,8 @@ mod tests {
         assert_eq!(s.cuda_graphs, !cfg!(target_os = "macos"));
         assert!(s.prefix_cache);
         assert_eq!(s.speculative_decoding, cfg!(target_os = "macos"));
+        assert_eq!(s.default_thinking_budget_tokens, None);
+        assert_eq!(s.default_thinking_budget_ms, None);
         assert!(s.auto_start);
         assert!(s.auto_restart);
         assert!(!s.launch_at_login);
@@ -236,6 +264,8 @@ mod tests {
         s.model_path = Some(PathBuf::from("/models/foo"));
         s.adapter_dir = Some(PathBuf::from("/adapters"));
         s.served_model_id = Some("custom-id".to_string());
+        s.default_thinking_budget_tokens = Some(0);
+        s.default_thinking_budget_ms = Some(1_500);
         s.auto_restart = false;
 
         let mut cfg = SupervisorConfig::default();
@@ -277,6 +307,8 @@ mod tests {
         assert_eq!(env_get("KILN_MODEL_PATH"), Some("/models/foo"));
         assert_eq!(env_get("KILN_ADAPTER_DIR"), Some("/adapters"));
         assert_eq!(env_get("KILN_SERVED_MODEL_ID"), Some("custom-id"));
+        assert_eq!(env_get("KILN_DEFAULT_THINKING_BUDGET_TOKENS"), Some("0"));
+        assert_eq!(env_get("KILN_DEFAULT_THINKING_BUDGET_MS"), Some("1500"));
 
         // Host/port also propagated as structured fields for the poller.
         assert_eq!(cfg.host, "0.0.0.0");
@@ -303,11 +335,17 @@ mod tests {
 
     #[test]
     fn roundtrip_json() {
-        let s = Settings::default();
+        let s = Settings {
+            default_thinking_budget_tokens: Some(0),
+            default_thinking_budget_ms: Some(1_250),
+            ..Settings::default()
+        };
         let json = serde_json::to_string(&s).unwrap();
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.port, s.port);
         assert_eq!(back.host, s.host);
+        assert_eq!(back.default_thinking_budget_tokens, Some(0));
+        assert_eq!(back.default_thinking_budget_ms, Some(1_250));
     }
 
     #[test]
@@ -317,6 +355,69 @@ mod tests {
         assert_eq!(s.port, 9001);
         assert_eq!(s.host, "127.0.0.1");
         assert_eq!(s.cuda_graphs, !cfg!(target_os = "macos"));
+        assert_eq!(s.default_thinking_budget_tokens, None);
+        assert_eq!(s.default_thinking_budget_ms, None);
+    }
+
+    #[test]
+    fn unlimited_thinking_budgets_override_ambient_env() {
+        let s = Settings::default();
+        let mut cfg = SupervisorConfig::default();
+        apply_to_supervisor_config(&s, &mut cfg);
+
+        let env_get = |key: &str| {
+            cfg.envs
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(
+            env_get("KILN_DEFAULT_THINKING_BUDGET_TOKENS"),
+            Some("unlimited")
+        );
+        assert_eq!(
+            env_get("KILN_DEFAULT_THINKING_BUDGET_MS"),
+            Some("unlimited")
+        );
+    }
+
+    #[test]
+    fn legacy_settings_migrate_to_unlimited_thinking_budgets() {
+        let legacy = r#"{
+            "host": "0.0.0.0",
+            "port": 8420,
+            "auto_start": false
+        }"#;
+        let s: Settings = serde_json::from_str(legacy).unwrap();
+
+        assert_eq!(s.host, "0.0.0.0");
+        assert_eq!(s.port, 8420);
+        assert!(!s.auto_start);
+        assert_eq!(s.default_thinking_budget_tokens, None);
+        assert_eq!(s.default_thinking_budget_ms, None);
+    }
+
+    #[test]
+    fn thinking_budget_fields_reject_negative_and_fractional_json_numbers() {
+        assert!(
+            serde_json::from_str::<Settings>(r#"{"default_thinking_budget_tokens":-1}"#).is_err()
+        );
+        assert!(
+            serde_json::from_str::<Settings>(r#"{"default_thinking_budget_tokens":1.5}"#).is_err()
+        );
+        assert!(serde_json::from_str::<Settings>(r#"{"default_thinking_budget_ms":-1}"#).is_err());
+        assert!(serde_json::from_str::<Settings>(r#"{"default_thinking_budget_ms":0.5}"#).is_err());
+    }
+
+    #[test]
+    fn settings_ui_exposes_budget_mode_and_exact_millisecond_conversion() {
+        let html = include_str!("../ui/settings.html");
+        assert!(html.contains("data-budget-mode=\"unlimited\""));
+        assert!(html.contains("data-budget-mode=\"custom\""));
+        assert!(html.contains("id=\"default_thinking_budget_tokens\""));
+        assert!(html.contains("id=\"default_thinking_budget_seconds\""));
+        assert!(html.contains("default_thinking_budget_ms: milliseconds"));
+        assert!(html.contains("Number.isSafeInteger(integerMilliseconds)"));
     }
 
     #[test]

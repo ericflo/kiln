@@ -1866,6 +1866,7 @@ function renderRuntimeConfigBody(cfg) {
   const kv = cfg.kv_cache || {};
   const train = cfg.training || {};
   const b = cfg.memory_budget || {};
+  const generation = cfg.generation || {};
   const srcChip = s => s == null ? '' : ` <span class="rc-source" title="Where this value came from">${escapeHtml(String(s))}</span>`;
   const onOff = v => v ? 'on' : 'off';
   const num = v => (typeof v === 'number' && isFinite(v)) ? v.toLocaleString() : '—';
@@ -1885,6 +1886,12 @@ function renderRuntimeConfigBody(cfg) {
         <div class="rc-group-title">Training</div>
         ${runtimeConfigRow('Grad checkpointing', `<strong>${onOff(train.checkpointing_enabled)}</strong>`, 'Gradient checkpointing trades recompute for activation memory during LoRA training.')}
         ${runtimeConfigRow('Segments', `<strong>${num(train.checkpoint_segments)}</strong>${srcChip(train.checkpoint_segments_source)}`, 'Checkpoint segment count (auto-sized, or pinned via KILN_GRAD_CHECKPOINT_SEGMENTS).')}
+      </div>
+      <div class="rc-group">
+        <div class="rc-group-title">Generation</div>
+        ${runtimeConfigRow('Thinking default', `<strong>${generation.default_thinking_enabled == null ? 'template' : onOff(generation.default_thinking_enabled)}</strong>`)}
+        ${runtimeConfigRow('Thinking tokens', `<strong>${generation.default_thinking_budget_tokens == null ? 'unlimited' : num(generation.default_thinking_budget_tokens)}</strong>`)}
+        ${runtimeConfigRow('Thinking time', `<strong>${generation.default_thinking_budget_ms == null ? 'unlimited' : num(generation.default_thinking_budget_ms) + ' ms'}</strong>`)}
       </div>
       <div class="rc-group">
         <div class="rc-group-title">Memory budget</div>
@@ -4323,6 +4330,9 @@ function capturePlaygroundSettings() {
     temperature:        get('chat-temp')?.value ?? '1.0',
     maxTokens:          get('chat-max-tokens')?.value ?? '16384',
     enableThinking:     !!get('chat-enable-thinking')?.checked,
+    thinkingBudgetMode: get('chat-thinking-budget-mode')?.value ?? 'server',
+    thinkingBudgetTokens: get('chat-thinking-budget-tokens')?.value ?? '',
+    thinkingBudgetSeconds: get('chat-thinking-budget-seconds')?.value ?? '',
     preset:             get('chat-preset')?.value ?? 'qwen3-thinking-general',
     topP:               get('chat-top-p')?.value ?? '',
     topK:               get('chat-top-k')?.value ?? '',
@@ -4351,6 +4361,10 @@ function applyPlaygroundSettings(settings) {
   if (settings.maxTokens && settings.maxTokens !== '1024') {
     set('chat-max-tokens', settings.maxTokens);
   }
+  const budgetModes = new Set(['server', 'unlimited', 'custom']);
+  set('chat-thinking-budget-mode', budgetModes.has(settings.thinkingBudgetMode) ? settings.thinkingBudgetMode : 'server');
+  set('chat-thinking-budget-tokens', settings.thinkingBudgetTokens);
+  set('chat-thinking-budget-seconds', settings.thinkingBudgetSeconds);
   set('chat-preset',              settings.preset);
   set('chat-top-p',               settings.topP);
   set('chat-top-k',               settings.topK);
@@ -4363,6 +4377,7 @@ function applyPlaygroundSettings(settings) {
   set('chat-system',              settings.system);
   const thinking = document.getElementById('chat-enable-thinking');
   if (thinking && typeof settings.enableThinking === 'boolean') thinking.checked = settings.enableThinking;
+  syncThinkingBudgetControls();
   const adv = document.getElementById('chat-advanced');
   const advBtn = document.getElementById('chat-toggle-advanced');
   if (adv && advBtn && settings.advancedOpen) {
@@ -4417,6 +4432,7 @@ function applyChatPreset(name) {
   set('chat-repetition-penalty', preset.repetitionPenalty);
   const thinking = document.getElementById('chat-enable-thinking');
   if (thinking) thinking.checked = preset.enableThinking;
+  syncThinkingBudgetControls();
   persistPlaygroundSettingsSoon();
 }
 
@@ -4449,7 +4465,96 @@ function parseOptionalFloat(raw, { min, max } = {}) {
   return n;
 }
 
-function buildChatRequestBody({ messages, temperature }) {
+function thinkingBudgetError(message, fieldId) {
+  const error = new Error(message);
+  error.fieldId = fieldId;
+  return error;
+}
+
+function readThinkingBudgetRequest() {
+  const thinkingEnabled = document.getElementById('chat-enable-thinking')?.checked !== false;
+  const mode = document.getElementById('chat-thinking-budget-mode')?.value || 'server';
+  if (!thinkingEnabled || mode === 'server') return { mode: 'server' };
+  if (mode === 'unlimited') return { mode, tokens: null, ms: null };
+
+  const tokensInput = document.getElementById('chat-thinking-budget-tokens');
+  const secondsInput = document.getElementById('chat-thinking-budget-seconds');
+  const tokensRaw = (tokensInput?.value || '').trim();
+  const secondsRaw = (secondsInput?.value || '').trim();
+  if (!tokensRaw && !secondsRaw) {
+    throw thinkingBudgetError(
+      'Set a thinking token limit, a time limit, or choose Unlimited.',
+      'chat-thinking-budget-tokens',
+    );
+  }
+
+  let tokens = null;
+  if (tokensRaw) {
+    const parsed = Number(tokensRaw);
+    if (!/^\d+$/.test(tokensRaw) || !Number.isSafeInteger(parsed) || parsed > 131072) {
+      throw thinkingBudgetError(
+        'Thinking tokens must be a whole number from 0 to 131072.',
+        'chat-thinking-budget-tokens',
+      );
+    }
+    tokens = parsed;
+  }
+
+  let ms = null;
+  if (secondsRaw) {
+    const decimalSeconds = /^(?:\d+|\d*\.\d{1,3})$/;
+    const seconds = Number(secondsRaw);
+    if (!decimalSeconds.test(secondsRaw) || !Number.isFinite(seconds) || seconds > 86400) {
+      throw thinkingBudgetError(
+        'Thinking seconds must be between 0 and 86400 with at most three decimal places.',
+        'chat-thinking-budget-seconds',
+      );
+    }
+    ms = Math.round(seconds * 1000);
+  }
+  return { mode, tokens, ms };
+}
+
+function readThinkingBudgetRequestOrNotify() {
+  try {
+    return readThinkingBudgetRequest();
+  } catch (error) {
+    const field = error?.fieldId && document.getElementById(error.fieldId);
+    if (field) field.focus();
+    toast(error?.message || 'Invalid thinking budget.', 'err');
+    return null;
+  }
+}
+
+function openChatAdvancedControls() {
+  const panel = document.getElementById('chat-advanced');
+  const button = document.getElementById('chat-toggle-advanced');
+  if (!panel || !button || !panel.hidden) return;
+  panel.hidden = false;
+  button.setAttribute('aria-expanded', 'true');
+}
+
+function syncThinkingBudgetControls({ revealCustom = false } = {}) {
+  const enabled = document.getElementById('chat-enable-thinking')?.checked !== false;
+  const modeInput = document.getElementById('chat-thinking-budget-mode');
+  const mode = modeInput?.value || 'server';
+  const custom = document.getElementById('chat-thinking-budget-custom');
+  const tokens = document.getElementById('chat-thinking-budget-tokens');
+  const seconds = document.getElementById('chat-thinking-budget-seconds');
+  const customMode = mode === 'custom';
+
+  if (modeInput) modeInput.disabled = !enabled;
+  if (custom) {
+    custom.hidden = !customMode;
+    custom.classList.toggle('is-disabled', !enabled);
+    custom.setAttribute('aria-disabled', String(!enabled));
+  }
+  if (tokens) tokens.disabled = !enabled || !customMode;
+  if (seconds) seconds.disabled = !enabled || !customMode;
+  if (enabled && customMode && revealCustom) openChatAdvancedControls();
+}
+
+function buildChatRequestBody({ messages, temperature, thinkingBudget }) {
   const body = {
     messages,
     stream: true,
@@ -4484,6 +4589,11 @@ function buildChatRequestBody({ messages, temperature }) {
   const stop = parseChatStopSequences(document.getElementById('chat-stop-sequences')?.value);
   if (stop) body.stop = stop;
 
+  if (thinkingBudget?.mode && thinkingBudget.mode !== 'server') {
+    body.thinking_budget_tokens = thinkingBudget.tokens;
+    body.thinking_budget_ms = thinkingBudget.ms;
+  }
+
   const enableThinking = document.getElementById('chat-enable-thinking');
   if (enableThinking && !enableThinking.checked) {
     body.chat_template_kwargs = { enable_thinking: false };
@@ -4508,6 +4618,7 @@ function serializableChatMessages() {
       reasoning: m.reasoning || '',
       adapter: m.adapter || null,
       temperature: m.temperature ?? null,
+      thinkingBudget: m.thinkingBudget || null,
     }));
 }
 
@@ -4560,6 +4671,7 @@ function restorePlaygroundHistoryBanner() {
           thinkOpen: false,
           adapter: m.adapter || null,
           temperature: m.temperature ?? null,
+          thinkingBudget: m.thinkingBudget || null,
         });
       }
       renderChat();
@@ -4705,6 +4817,19 @@ function chatTokensPerSec(message) {
   return (tokens * 1000) / message.durationMs;
 }
 
+function thinkingBudgetSummary(outcome) {
+  if (!outcome?.applied) return '';
+  if (outcome.triggered) {
+    const trigger = outcome.trigger === 'tokens'
+      ? 'token cap'
+      : outcome.trigger === 'time'
+        ? 'time cap'
+        : 'completion limit';
+    return trigger;
+  }
+  return outcome.closed ? 'natural close' : 'unclosed';
+}
+
 function renderAssistantBubble(m) {
   const parts = [];
   const hasReasoning = !!(m.reasoning && m.reasoning.length);
@@ -4723,7 +4848,8 @@ function renderAssistantBubble(m) {
         return `<span class="think-label">Thinking</span>${elapsed ? `<span class="think-meta">· ${escapeHtml(elapsed)}</span>` : ''}`;
       }
       const dur = (m.thinkStartMs && m.thinkEndMs) ? formatChatDuration(m.thinkEndMs - m.thinkStartMs) : null;
-      return `<span class="think-label">Thought</span>${dur ? `<span class="think-meta">· for ${escapeHtml(dur)}</span>` : ''}`;
+      const outcome = thinkingBudgetSummary(m.thinkingBudget);
+      return `<span class="think-label">Thought</span>${dur ? `<span class="think-meta">· for ${escapeHtml(dur)}</span>` : ''}${outcome ? `<span class="think-meta">· ${escapeHtml(outcome)}</span>` : ''}`;
     })();
     parts.push(`
       <details class="think-block${live ? ' live' : ''}"${open ? ' open' : ''} data-think-toggle="${escapeHtml(m._id)}">
@@ -4778,6 +4904,8 @@ function renderAssistantBubble(m) {
     if (m.durationMs != null) stats.push(`<span class="stat"><strong>${m.pending ? 'Elapsed' : 'Total'}</strong> ${escapeHtml(formatChatDuration(m.durationMs))}</span>`);
     const tps = chatTokensPerSec(m);
     if (tps != null)          stats.push(`<span class="stat"><strong>~${tps.toFixed(tps >= 100 ? 0 : 1)}</strong> tok/s</span>`);
+    const budgetOutcome = !m.pending && !hasReasoning ? thinkingBudgetSummary(m.thinkingBudget) : '';
+    if (budgetOutcome)        stats.push(`<span class="stat"><strong>Thinking</strong> ${escapeHtml(budgetOutcome)}</span>`);
     if (!m.pending && m.finishReason && m.finishReason !== 'stop') {
       const kind = m.finishReason === 'length' ? 'truncated' : m.finishReason;
       const cls = m.finishReason === 'length' ? 'stat finish-warn' : 'stat';
@@ -5059,6 +5187,7 @@ function makeAssistantPlaceholder() {
     durationMs: null,
     error: null,
     aborted: false,
+    thinkingBudget: null,
   };
 }
 
@@ -5081,6 +5210,8 @@ async function sendChat() {
     toast(error.message, 'err');
     return;
   }
+  const thinkingBudget = readThinkingBudgetRequestOrNotify();
+  if (!thinkingBudget) return;
 
   input.value = '';
   autoresizeChatInput();
@@ -5089,10 +5220,10 @@ async function sendChat() {
   chatMessages.push({ _id: newChatMsgId(), role: 'user', content: msg });
   chatMessages.push(makeAssistantPlaceholder());
   renderChat();
-  await streamAssistantTurn(temp);
+  await streamAssistantTurn(temp, thinkingBudget);
 }
 
-async function streamAssistantTurn(temp) {
+async function streamAssistantTurn(temp, thinkingBudget) {
   setChatGenerating(true);
 
   const adapter = document.getElementById('chat-adapter').value || undefined;
@@ -5111,7 +5242,7 @@ async function streamAssistantTurn(temp) {
   const sys = getSystemPromptMessage();
   const messages = sys ? [sys, ...convo] : convo;
 
-  const body = buildChatRequestBody({ messages, temperature: temp });
+  const body = buildChatRequestBody({ messages, temperature: temp, thinkingBudget });
   if (servedModelId) body.model = servedModelId;
   if (adapter) body.adapter = adapter;
 
@@ -5173,6 +5304,9 @@ async function streamAssistantTurn(temp) {
           const delta = choice?.delta;
           if (choice?.finish_reason) {
             assistant.finishReason = choice.finish_reason;
+          }
+          if (chunk.metadata?.thinking_budget?.applied) {
+            assistant.thinkingBudget = chunk.metadata.thinking_budget;
           }
           if (!delta) continue;
           const now = performance.now();
@@ -5253,6 +5387,8 @@ function autoresizeChatInput() {
 
 async function regenerateAssistantMessage(messageId) {
   if (chatAbort) return;
+  const thinkingBudget = readThinkingBudgetRequestOrNotify();
+  if (!thinkingBudget) return;
   // Find the assistant message and the chain of user/assistant turns
   // *before* it. We replace it in-place with a fresh placeholder and
   // re-stream, so the user's prior message and the conversation
@@ -5277,7 +5413,7 @@ async function regenerateAssistantMessage(messageId) {
     renderChat();
     return;
   }
-  await streamAssistantTurn(temp);
+  await streamAssistantTurn(temp, thinkingBudget);
 }
 
 function handleChatActionClick(event) {
@@ -5336,6 +5472,8 @@ function handleChatActionClick(event) {
       toast('Message can not be empty.', 'err');
       return;
     }
+    const thinkingBudget = readThinkingBudgetRequestOrNotify();
+    if (!thinkingBudget) return;
     if (chatAbort) chatAbort.abort();
     const idx = chatMessages.indexOf(m);
     m.content = next;
@@ -5355,7 +5493,7 @@ function handleChatActionClick(event) {
       renderChat();
       return;
     }
-    streamAssistantTurn(temp);
+    streamAssistantTurn(temp, thinkingBudget);
     return;
   }
 }
@@ -5494,6 +5632,7 @@ if (chatAdvBtn && chatAdvPanel) {
 
 const PLAYGROUND_SETTING_IDS = [
   'chat-temp', 'chat-max-tokens', 'chat-enable-thinking',
+  'chat-thinking-budget-mode', 'chat-thinking-budget-tokens', 'chat-thinking-budget-seconds',
   'chat-preset',
   'chat-top-p', 'chat-top-k', 'chat-min-p',
   'chat-presence-penalty', 'chat-frequency-penalty', 'chat-repetition-penalty',
@@ -5504,6 +5643,15 @@ PLAYGROUND_SETTING_IDS.forEach(id => {
   if (!el) return;
   const ev = (el.type === 'checkbox' || el.tagName === 'SELECT') ? 'change' : 'input';
   el.addEventListener(ev, persistPlaygroundSettingsSoon);
+});
+
+const thinkingBudgetMode = document.getElementById('chat-thinking-budget-mode');
+thinkingBudgetMode?.addEventListener('change', () => {
+  syncThinkingBudgetControls({ revealCustom: true });
+});
+const thinkingEnabled = document.getElementById('chat-enable-thinking');
+thinkingEnabled?.addEventListener('change', () => {
+  syncThinkingBudgetControls();
 });
 
 // Wire the preset dropdown: changing it applies the preset's values
@@ -9157,7 +9305,7 @@ function _renderCompareSide(side, m) {
   head.innerHTML = html;
 }
 
-async function streamCompareSide(side, adapterName, prompt, temp, signal) {
+async function streamCompareSide(side, adapterName, prompt, temp, thinkingBudget, signal) {
   const m = {
     role: 'assistant', content: '', reasoning: '',
     pending: true,
@@ -9181,6 +9329,7 @@ async function streamCompareSide(side, adapterName, prompt, temp, signal) {
         return sys ? [sys, user] : [user];
       })(),
       temperature: temp,
+      thinkingBudget,
     });
     if (servedModelId) body.model = servedModelId;
     if (adapterName) body.adapter = adapterName;
@@ -9267,6 +9416,8 @@ async function sendChatCompare() {
   let temp;
   try { temp = parseQuickInferenceTemperature(document.getElementById('chat-temp')); }
   catch (error) { toast(error.message, 'err'); return; }
+  const thinkingBudget = readThinkingBudgetRequestOrNotify();
+  if (!thinkingBudget) return;
 
   const adapterA = document.getElementById('chat-adapter').value;
   const adapterB = document.getElementById('chat-adapter-b').value;
@@ -9281,8 +9432,8 @@ async function sendChatCompare() {
   chatCompareAbort = new AbortController();
   try {
     const [a, b] = await Promise.all([
-      streamCompareSide('a', adapterA, prompt, temp, chatCompareAbort.signal),
-      streamCompareSide('b', adapterB, prompt, temp, chatCompareAbort.signal),
+      streamCompareSide('a', adapterA, prompt, temp, thinkingBudget, chatCompareAbort.signal),
+      streamCompareSide('b', adapterB, prompt, temp, thinkingBudget, chatCompareAbort.signal),
     ]);
     if (a.content || b.content) {
       chatComparePair = {

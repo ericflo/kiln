@@ -29,10 +29,11 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use kiln_eval::qwen3::extract_first_tool_call;
 use kiln_eval::{
-    EvalChatMessage, EvalCompareSpec, EvalExample, EvalGenerationParams, EvalSuite,
-    ProductionTraceError, ProductionTraceFormat, ProductionTraceInputLine,
+    EvalBudgetOverride, EvalChatMessage, EvalCompareSpec, EvalExample, EvalGenerationParams,
+    EvalSuite, ProductionTraceError, ProductionTraceFormat, ProductionTraceInputLine,
     ProductionTraceSuiteConfig, SuiteResult,
 };
+use kiln_server::cli::ThinkingBudgetArg;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -92,6 +93,12 @@ struct RunArgs {
     /// Override the suite-wide max_tokens.
     #[arg(long)]
     max_tokens: Option<usize>,
+    /// Thinking token budget: omit to inherit, use 0 to close immediately, or `unlimited` for no limit.
+    #[arg(long, value_name = "TOKENS|unlimited")]
+    thinking_budget_tokens: Option<ThinkingBudgetArg<usize>>,
+    /// Thinking decode-time budget: omit to inherit, use 0 to close immediately, or `unlimited` for no limit.
+    #[arg(long, value_name = "MILLISECONDS|unlimited")]
+    thinking_budget_ms: Option<ThinkingBudgetArg<u64>>,
     /// Wait for the job to finish, polling every 2s.
     #[arg(long)]
     watch: bool,
@@ -133,6 +140,12 @@ struct ProbeArgs {
     max_tokens: usize,
     #[arg(long, default_value_t = 0.0)]
     temperature: f32,
+    /// Thinking token budget: omit to inherit, use 0 to close immediately, or `unlimited` for no limit.
+    #[arg(long, value_name = "TOKENS|unlimited")]
+    thinking_budget_tokens: Option<ThinkingBudgetArg<usize>>,
+    /// Thinking decode-time budget: omit to inherit, use 0 to close immediately, or `unlimited` for no limit.
+    #[arg(long, value_name = "MILLISECONDS|unlimited")]
+    thinking_budget_ms: Option<ThinkingBudgetArg<u64>>,
     #[arg(long)]
     json: bool,
 }
@@ -191,6 +204,12 @@ struct TraceSuiteArgs {
     /// Override suite generation temperature.
     #[arg(long)]
     temperature: Option<f32>,
+    /// Thinking token budget: omit to inherit, use 0 to close immediately, or `unlimited` for no limit.
+    #[arg(long, value_name = "TOKENS|unlimited")]
+    thinking_budget_tokens: Option<ThinkingBudgetArg<usize>>,
+    /// Thinking decode-time budget: omit to inherit, use 0 to close immediately, or `unlimited` for no limit.
+    #[arg(long, value_name = "MILLISECONDS|unlimited")]
+    thinking_budget_ms: Option<ThinkingBudgetArg<u64>>,
     /// Print the generated suite JSON to stdout instead of writing --output.
     #[arg(long)]
     stdout: bool,
@@ -382,6 +401,8 @@ fn cmd_trace_suite(args: TraceSuiteArgs) -> Result<()> {
     if let Some(temperature) = args.temperature {
         cfg.generation.temperature = temperature;
     }
+    cfg.generation.thinking_budget_tokens = eval_budget_override(args.thinking_budget_tokens);
+    cfg.generation.thinking_budget_ms = eval_budget_override(args.thinking_budget_ms);
 
     let input_lines = TraceInputLines::new(input_paths.clone());
     let (suite, stats) = kiln_eval::synthesize_production_trace_suite_from_lines(input_lines, &cfg)
@@ -1055,15 +1076,13 @@ async fn cmd_run(client: &reqwest::Client, server: &str, args: RunArgs) -> Resul
     if let Some(adapter) = args.adapter {
         body.insert("adapter".into(), serde_json::json!(adapter));
     }
-    if args.temperature.is_some() || args.max_tokens.is_some() {
-        let mut generation = serde_json::Map::new();
-        if let Some(t) = args.temperature {
-            generation.insert("temperature".into(), serde_json::json!(t));
-        }
-        if let Some(m) = args.max_tokens {
-            generation.insert("max_tokens".into(), serde_json::json!(m));
-        }
-        body.insert("generation".into(), serde_json::Value::Object(generation));
+    if let Some(generation) = generation_override_json(
+        args.temperature,
+        args.max_tokens,
+        args.thinking_budget_tokens,
+        args.thinking_budget_ms,
+    )? {
+        body.insert("generation".into(), generation);
     }
     let resp = client
         .post(format!("{server}/v1/eval/run"))
@@ -1088,6 +1107,50 @@ async fn cmd_run(client: &reqwest::Client, server: &str, args: RunArgs) -> Resul
         print_human(&result);
     }
     Ok(())
+}
+
+fn generation_override_json(
+    temperature: Option<f32>,
+    max_tokens: Option<usize>,
+    thinking_budget_tokens: Option<ThinkingBudgetArg<usize>>,
+    thinking_budget_ms: Option<ThinkingBudgetArg<u64>>,
+) -> Result<Option<serde_json::Value>> {
+    if temperature.is_none()
+        && max_tokens.is_none()
+        && thinking_budget_tokens.is_none()
+        && thinking_budget_ms.is_none()
+    {
+        return Ok(None);
+    }
+
+    let mut generation = serde_json::Map::new();
+    if let Some(value) = temperature {
+        generation.insert("temperature".into(), serde_json::json!(value));
+    }
+    if let Some(value) = max_tokens {
+        generation.insert("max_tokens".into(), serde_json::json!(value));
+    }
+    if let Some(value) = thinking_budget_tokens {
+        generation.insert(
+            "thinking_budget_tokens".into(),
+            serde_json::to_value(eval_budget_override(Some(value)))?,
+        );
+    }
+    if let Some(value) = thinking_budget_ms {
+        generation.insert(
+            "thinking_budget_ms".into(),
+            serde_json::to_value(eval_budget_override(Some(value)))?,
+        );
+    }
+    Ok(Some(serde_json::Value::Object(generation)))
+}
+
+fn eval_budget_override<T>(value: Option<ThinkingBudgetArg<T>>) -> EvalBudgetOverride<T> {
+    match value {
+        None => EvalBudgetOverride::Inherit,
+        Some(ThinkingBudgetArg::Unlimited) => EvalBudgetOverride::Unlimited,
+        Some(ThinkingBudgetArg::Limited(value)) => EvalBudgetOverride::Limited(value),
+    }
 }
 
 async fn cmd_compare(client: &reqwest::Client, server: &str, args: CompareArgs) -> Result<()> {
@@ -1147,6 +1210,8 @@ async fn cmd_probe(client: &reqwest::Client, server: &str, args: ProbeArgs) -> R
         generation: EvalGenerationParams {
             temperature: args.temperature,
             max_tokens: args.max_tokens,
+            thinking_budget_tokens: eval_budget_override(args.thinking_budget_tokens),
+            thinking_budget_ms: eval_budget_override(args.thinking_budget_ms),
             ..Default::default()
         },
         system_prompt: None,
@@ -1494,6 +1559,148 @@ mod tests {
     }
 
     #[test]
+    fn thinking_budget_flags_parse_for_generation_commands() {
+        let cli = Cli::parse_from([
+            "kiln-eval",
+            "run",
+            "--suite",
+            "smoke",
+            "--thinking-budget-tokens",
+            "0",
+            "--thinking-budget-ms",
+            "1250",
+        ]);
+        let Command::Run(args) = cli.cmd else {
+            panic!("expected run command");
+        };
+        assert_eq!(
+            args.thinking_budget_tokens,
+            Some(ThinkingBudgetArg::Limited(0))
+        );
+        assert_eq!(
+            args.thinking_budget_ms,
+            Some(ThinkingBudgetArg::Limited(1250))
+        );
+
+        let cli = Cli::parse_from([
+            "kiln-eval",
+            "probe",
+            "--prompt",
+            "2+2",
+            "--target",
+            "4",
+            "--thinking-budget-tokens",
+            "64",
+            "--thinking-budget-ms",
+            "500",
+        ]);
+        let Command::Probe(args) = cli.cmd else {
+            panic!("expected probe command");
+        };
+        assert_eq!(
+            args.thinking_budget_tokens,
+            Some(ThinkingBudgetArg::Limited(64))
+        );
+        assert_eq!(
+            args.thinking_budget_ms,
+            Some(ThinkingBudgetArg::Limited(500))
+        );
+
+        let cli = Cli::parse_from([
+            "kiln-eval",
+            "trace-suite",
+            "--input",
+            "trace.jsonl",
+            "--suite-name",
+            "trace",
+            "--stdout",
+            "--thinking-budget-tokens",
+            "96",
+            "--thinking-budget-ms",
+            "1500",
+        ]);
+        let Command::TraceSuite(args) = cli.cmd else {
+            panic!("expected trace-suite command");
+        };
+        assert_eq!(
+            args.thinking_budget_tokens,
+            Some(ThinkingBudgetArg::Limited(96))
+        );
+        assert_eq!(
+            args.thinking_budget_ms,
+            Some(ThinkingBudgetArg::Limited(1500))
+        );
+
+        let cli = Cli::parse_from([
+            "kiln-eval",
+            "run",
+            "--suite",
+            "smoke",
+            "--thinking-budget-tokens",
+            "unlimited",
+            "--thinking-budget-ms",
+            "unlimited",
+        ]);
+        let Command::Run(args) = cli.cmd else {
+            panic!("expected run command");
+        };
+        assert_eq!(
+            args.thinking_budget_tokens,
+            Some(ThinkingBudgetArg::Unlimited)
+        );
+        assert_eq!(args.thinking_budget_ms, Some(ThinkingBudgetArg::Unlimited));
+    }
+
+    #[test]
+    fn run_generation_override_serializes_limited_thinking_budgets() {
+        assert!(
+            generation_override_json(None, None, None, None)
+                .unwrap()
+                .is_none()
+        );
+
+        let generation = generation_override_json(
+            None,
+            None,
+            Some(ThinkingBudgetArg::Limited(0)),
+            Some(ThinkingBudgetArg::Limited(1250)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(generation["thinking_budget_tokens"], 0);
+        assert_eq!(generation["thinking_budget_ms"], 1250);
+        assert!(generation.get("temperature").is_none());
+        assert!(generation.get("max_tokens").is_none());
+
+        let unlimited = generation_override_json(
+            None,
+            None,
+            Some(ThinkingBudgetArg::Unlimited),
+            Some(ThinkingBudgetArg::Unlimited),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            unlimited
+                .get("thinking_budget_tokens")
+                .is_some_and(serde_json::Value::is_null)
+        );
+        assert!(
+            unlimited
+                .get("thinking_budget_ms")
+                .is_some_and(serde_json::Value::is_null)
+        );
+        assert_eq!(
+            eval_budget_override::<usize>(None),
+            EvalBudgetOverride::Inherit
+        );
+        assert_eq!(
+            eval_budget_override(Some(ThinkingBudgetArg::<usize>::Unlimited)),
+            EvalBudgetOverride::Unlimited
+        );
+    }
+
+    #[test]
     fn trace_suite_writes_output_file_even_with_stdout() {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("trace.jsonl");
@@ -1521,10 +1728,20 @@ mod tests {
             require_qwen_xml: false,
             max_tokens: None,
             temperature: None,
+            thinking_budget_tokens: Some(ThinkingBudgetArg::Limited(0)),
+            thinking_budget_ms: Some(ThinkingBudgetArg::Limited(1250)),
             stdout: true,
         };
         cmd_trace_suite(args).unwrap();
         let suite: EvalSuite = serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
         assert_eq!(suite.examples.len(), 1);
+        assert_eq!(
+            suite.generation.thinking_budget_tokens,
+            EvalBudgetOverride::Limited(0)
+        );
+        assert_eq!(
+            suite.generation.thinking_budget_ms,
+            EvalBudgetOverride::Limited(1250)
+        );
     }
 }

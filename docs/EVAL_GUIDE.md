@@ -505,6 +505,22 @@ examples use one scorer, but a handful need a custom regex:
 `weight` contributes to the weighted mean — set it to 0 for "test but
 don't count" rows.
 
+Eval generation accepts the same thinking budgets as chat and batch requests.
+For a reasoning eval that still guarantees time for a final answer:
+
+```json
+{
+  "generation": {
+    "chat_template_kwargs": {"enable_thinking": true},
+    "thinking_budget_tokens": 96,
+    "thinking_budget_ms": 2000
+  }
+}
+```
+
+An omitted budget inherits the server default. Explicit `null` makes that
+dimension unlimited for the example, and `0` closes thinking immediately.
+
 ## API reference
 
 ### `POST /v1/eval/suites`
@@ -613,14 +629,28 @@ Two layouts are supported:
 - `tag_breakdown` — per-tag pass counts and confidence intervals
 - `by_scorer` — per-scorer-kind breakdown when the suite mixes scorers
 
+Each run also carries two audit hashes. `suite_hash` changes only when the
+suite content changes. `effective_generation_hash` additionally includes the
+run-level generation override and every example's resolved thinking-budget
+limits and provenance, so a run that inherits different server defaults has a
+different identity even when its suite file is unchanged.
+
 Every example record (`outcomes[]`) carries:
 
 - `example_id`, `completion_index`, `completion_text`
+- `raw_completion_text` — the exact decoder continuation. `completion_text`
+  is the scoring form and may restore a prompt-prefilled `<think>` opener that
+  the decoder itself did not repeat.
 - `kind` — `pass | fail | invalid | error`
 - `score`, `detail`
 - `tags`, `metadata` — copied from the source example for aggregate slicing
   and per-outcome provenance
 - `prompt_tokens`, `completion_tokens`, `latency_ms`
+- `thinking_budget` — effective `max_tokens` / `max_time_ms`, per-dimension
+  source (`server_default`, `suite`, `run_override`, or `example`, including
+  explicit `_unlimited` variants), whether the controller was applied, and
+  its runtime `outcome`. The outcome records `triggered`, `trigger`, `closed`,
+  `thinking_tokens`, and `thinking_time_ms`.
 
 ## Recipes
 
@@ -675,12 +705,30 @@ The reasoning text is preserved on each `ExampleOutcome` as
 answering" without re-parsing. The aggregate metrics include a
 `reasoning_length` histogram (mean / p50 / p90 / max) across the run, and
 `num_unclosed_thinking` flags completions that opened `<think>` but never
-closed it (typically max_tokens hit inside reasoning).
+closed it (typically `max_tokens` was reached before either a natural or
+budget-forced close).
 
 To disable thinking on a per-example basis, set
 `"generation": {"chat_template_kwargs": {"enable_thinking": false}}` —
 Qwen3.5's template will then prefill an empty `<think>\n\n</think>\n\n`
 block.
+
+To keep reasoning but bound it, use `thinking_budget_tokens` and/or
+`thinking_budget_ms` in the example's `generation` object. Omitted fields
+inherit `server.default_thinking_budget_tokens` and
+`server.default_thinking_budget_ms`; explicit `null` is unlimited for that
+dimension and `0` closes the block immediately. If both limits are active, the
+first reached wins. Time starts at the first decode candidate, excluding queue
+and prefill, and is checked at token boundaries.
+
+A natural `</think>` always wins if it arrives first. Otherwise Kiln feeds the
+forced close-tag tokens into model context and continues decoding the answer;
+those tokens count toward `max_tokens` and completion usage. A successfully
+forced close is therefore not counted by `num_unclosed_thinking`. Budgets do
+nothing when the rendered prompt is not inside a thinking block. Live
+in-process eval generation does not use the chat response cache; it only reuses
+rendered-prompt and prompt-tokenization caches. Time-budgeted evals are
+therefore always decoded, while repeated prompt setup remains inexpensive.
 
 For agentic evals where most requests should run without Qwen thinking, set
 `server.default_thinking_enabled = false` in `kiln.toml` or

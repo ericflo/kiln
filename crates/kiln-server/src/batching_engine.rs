@@ -1355,6 +1355,13 @@ impl BatchingEngineActor {
     }
 
     fn emit_output_token_at(&mut self, idx: usize, token: TokenId) {
+        let token = {
+            let generated_tokens = self.generated_tokens_for(idx);
+            self.active[idx]
+                .req
+                .sampling
+                .apply_thinking_budget(generated_tokens, token)
+        };
         match self.forward.is_eos_token(token) {
             Ok(true) => {
                 self.finish_active(idx, FinishReason::Eos);
@@ -1672,6 +1679,7 @@ impl BatchingEngineActor {
 mod tests {
     use super::*;
     use kiln_core::block::BlockTable;
+    use kiln_core::sampling::ThinkingBudget;
     use kiln_model::LinearAttentionState;
     use std::sync::Mutex as StdMutex;
 
@@ -1860,6 +1868,34 @@ mod tests {
             adapter: None,
             first_token_pending,
         }
+    }
+
+    #[tokio::test]
+    async fn thinking_budget_forces_close_tokens_into_batched_decode_history() {
+        let forward = Arc::new(MockForward::default());
+        let handle = BatchingEngineHandle::start_with_options(forward.clone(), 4);
+        let mut req = request(1, 4);
+        req.sampling.thinking_budget = Some(
+            ThinkingBudget::new(Some(0), None, req.sampling.max_tokens, vec![90, 91]).unwrap(),
+        );
+
+        let mut events = handle.enqueue(req).await.unwrap();
+        let output = loop {
+            match events.recv().await {
+                Some(EngineEvent::Done { output }) => break output,
+                Some(EngineEvent::Error(error)) => panic!("generation failed: {error}"),
+                Some(EngineEvent::Token(_)) => {}
+                None => panic!("engine closed before completion"),
+            }
+        };
+
+        assert_eq!(&output.token_ids[..2], &[90, 91]);
+        let calls = forward.calls.lock().unwrap();
+        assert!(
+            calls.iter().any(|batch| batch.contains(&90)),
+            "the second forced close token must be decoded from KV state containing the first"
+        );
+        assert!(output.token_ids.len() > 2, "answer decoding must resume");
     }
 
     /// Test double whose `forward_decode` blocks until the test releases a

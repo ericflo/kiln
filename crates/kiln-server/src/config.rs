@@ -138,6 +138,12 @@ pub struct ServerConfig {
     /// preserves the model template default; requests can still override via
     /// `chat_template_kwargs.enable_thinking`.
     pub default_thinking_enabled: Option<bool>,
+    /// Default maximum number of reasoning tokens before Kiln forces the
+    /// model's `</think>` sequence. `None` leaves thinking unbounded.
+    pub default_thinking_budget_tokens: Option<usize>,
+    /// Default reasoning wall-clock budget in milliseconds. The clock begins
+    /// at the first decode candidate, after queueing and prefill.
+    pub default_thinking_budget_ms: Option<u64>,
     /// Copy separated `reasoning_content` into `content` for clients that do
     /// not understand reasoning channels. Requests can override this.
     pub fold_reasoning_into_content: bool,
@@ -519,6 +525,8 @@ impl Default for ServerConfig {
             request_timeout_secs: 600,
             eval_mode: false,
             default_thinking_enabled: None,
+            default_thinking_budget_tokens: None,
+            default_thinking_budget_ms: None,
             fold_reasoning_into_content: false,
             chat_performance_metadata: false,
             chat_config_hash_metadata: false,
@@ -753,6 +761,24 @@ impl KilnConfig {
             && let Some(enabled) = parse_bool_env(&v)
         {
             self.server.default_thinking_enabled = Some(enabled);
+        }
+        if let Ok(v) = std::env::var("KILN_DEFAULT_THINKING_BUDGET_TOKENS") {
+            match parse_optional_usize_env(&v) {
+                Ok(value) => self.server.default_thinking_budget_tokens = value,
+                Err(()) => tracing::warn!(
+                    value = %v,
+                    "ignoring invalid KILN_DEFAULT_THINKING_BUDGET_TOKENS; expected a non-negative integer or 'unlimited'"
+                ),
+            }
+        }
+        if let Ok(v) = std::env::var("KILN_DEFAULT_THINKING_BUDGET_MS") {
+            match parse_optional_u64_env(&v) {
+                Ok(value) => self.server.default_thinking_budget_ms = value,
+                Err(()) => tracing::warn!(
+                    value = %v,
+                    "ignoring invalid KILN_DEFAULT_THINKING_BUDGET_MS; expected a non-negative integer or 'unlimited'"
+                ),
+            }
         }
         if let Ok(v) = std::env::var("KILN_FOLD_REASONING_INTO_CONTENT")
             && let Some(enabled) = parse_bool_env(&v)
@@ -1005,6 +1031,29 @@ fn parse_bool_env(value: &str) -> Option<bool> {
     }
 }
 
+fn optional_limit_is_unlimited(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "" | "none" | "null" | "off" | "unlimited"
+    )
+}
+
+fn parse_optional_usize_env(value: &str) -> Result<Option<usize>, ()> {
+    if optional_limit_is_unlimited(value) {
+        Ok(None)
+    } else {
+        value.trim().parse::<usize>().map(Some).map_err(|_| ())
+    }
+}
+
+fn parse_optional_u64_env(value: &str) -> Result<Option<u64>, ()> {
+    if optional_limit_is_unlimited(value) {
+        Ok(None)
+    } else {
+        value.trim().parse::<u64>().map(Some).map_err(|_| ())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1027,6 +1076,8 @@ mod tests {
         assert_eq!(config.server.request_timeout_secs, 600);
         assert!(!config.server.eval_mode);
         assert_eq!(config.server.default_thinking_enabled, None);
+        assert_eq!(config.server.default_thinking_budget_tokens, None);
+        assert_eq!(config.server.default_thinking_budget_ms, None);
         assert!(!config.server.fold_reasoning_into_content);
         assert!(!config.server.chat_performance_metadata);
         assert!(!config.server.chat_config_hash_metadata);
@@ -1105,6 +1156,8 @@ port = 9000
 request_timeout_secs = 60
 eval_mode = true
 default_thinking_enabled = false
+default_thinking_budget_tokens = 256
+default_thinking_budget_ms = 1500
 fold_reasoning_into_content = true
 chat_performance_metadata = true
 chat_config_hash_metadata = true
@@ -1164,6 +1217,8 @@ composed_cache_max_entries = 8
         assert_eq!(config.server.request_timeout_secs, 60);
         assert!(config.server.eval_mode);
         assert_eq!(config.server.default_thinking_enabled, Some(false));
+        assert_eq!(config.server.default_thinking_budget_tokens, Some(256));
+        assert_eq!(config.server.default_thinking_budget_ms, Some(1500));
         assert!(config.server.fold_reasoning_into_content);
         assert!(config.server.chat_performance_metadata);
         assert!(config.server.chat_config_hash_metadata);

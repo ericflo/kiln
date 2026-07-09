@@ -1724,6 +1724,12 @@
           <input type="checkbox" id="chat-enable-thinking" checked>
           <span>Thinking</span>
         </label>
+        <label for="chat-thinking-budget-mode" title="Choose whether this request inherits the server thinking budget, removes both limits, or supplies custom limits.">Think budget</label>
+        <select id="chat-thinking-budget-mode" aria-controls="chat-thinking-budget-custom">
+          <option value="server" selected>Server default</option>
+          <option value="unlimited">Unlimited</option>
+          <option value="custom">Custom</option>
+        </select>
         <label for="chat-preset" title="Apply one of Qwen3.5's officially recommended sampling profiles.">Preset</label>
         <select id="chat-preset">
           <option value="qwen3-thinking-general" selected>Thinking · general (Qwen3.5 default)</option>
@@ -1746,6 +1752,16 @@
             <span class="chat-adv-label">max_tokens</span>
             <input type="number" id="chat-max-tokens" value="16384" min="1" max="131072" step="1">
           </label>
+          <div class="chat-thinking-budget-custom" id="chat-thinking-budget-custom" hidden>
+            <label class="chat-adv-field" for="chat-thinking-budget-tokens" title="Maximum reasoning tokens before Kiln closes the think block and asks for the final answer. Zero closes it immediately; blank leaves this custom dimension unlimited.">
+              <span class="chat-adv-label">think tokens</span>
+              <input type="number" id="chat-thinking-budget-tokens" min="0" max="131072" step="1" placeholder="No limit" inputmode="numeric">
+            </label>
+            <label class="chat-adv-field" for="chat-thinking-budget-seconds" title="Maximum reasoning time in seconds, measured from the first decode token. Zero closes the think block immediately; blank leaves this custom dimension unlimited.">
+              <span class="chat-adv-label">think seconds</span>
+              <input type="number" id="chat-thinking-budget-seconds" min="0" max="86400" step="0.001" placeholder="No limit" inputmode="decimal">
+            </label>
+          </div>
           <label class="chat-adv-field" for="chat-top-p" title="Qwen3.5 thinking-general default: 0.95. Set to 1.0 to disable nucleus filtering.">
             <span class="chat-adv-label">top_p</span>
             <input type="number" id="chat-top-p" value="0.95" min="0" max="1" step="0.05">

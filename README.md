@@ -68,7 +68,7 @@ A 4B model continuously tuned to your specific workload — and continuously *me
 
 ## Features
 
-- **OpenAI-compatible API** — drop in as a local replacement. SSE streaming, chat completions, tool use formatting.
+- **OpenAI-compatible API** — drop in as a local replacement. SSE streaming, chat completions, tool use formatting, and first-class thinking budgets by token count or decode time.
 - **pi integration** — `kiln pi-setup` backs up and merges `~/.pi/agent/models.json` + `settings.json`, then points pi at Kiln as an OpenAI-compatible tool-calling backend.
 - **Embedded agent runs** — the server drives pi itself (`POST /v1/agent/runs`): spawns `pi --mode rpc` against its own model, streams the trajectory live with steer/abort, and auto-indexes finished sessions into the trace layer the self-improvement flywheel trains on.
 - **SFT training** over HTTP — submit examples, model updates in seconds via LoRA hot-swap.
@@ -389,9 +389,9 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/v1/chat/completions` | Chat completions (OpenAI-compatible) |
+| POST | `/v1/chat/completions` | Chat completions (OpenAI-compatible), including per-request thinking budgets |
 | POST | `/v1/completions` | vLLM-compatible prompt logprobs for remote OPD teachers |
-| POST | `/v1/completions/batch` | Batch generation API for GRPO (up to 64 prompts per request) |
+| POST | `/v1/completions/batch` | Batch generation API for GRPO (up to 64 prompts per request), with the same thinking-budget controls |
 | POST | `/v1/train/sft` | Submit SFT training examples (optionally with a `post_eval` hook) |
 | POST | `/v1/train/grpo` | Submit GRPO scored completions (optionally with a `post_eval` hook). Supports the new `agentic_groups` shape with multi-turn `trajectory` fields; action/observation masks are built end-to-end, and the ECHO env-CE term applies by default (λ=0.05) to trajectories with observation segments. |
 | POST | `/v1/train/agentic` | Canonical alias of `/v1/train/grpo` — same handler, semantically-honest name for multi-turn rollouts |
@@ -527,6 +527,8 @@ Kiln uses a TOML config file. Environment variables override config values. See 
 | `model.path` | `KILN_MODEL_PATH` | — | Path to model weights (required) |
 | `server.port` | `KILN_PORT` | 8420 | Server listen port |
 | `server.default_thinking_enabled` | `KILN_DEFAULT_THINKING_ENABLED` | template default | Default `chat_template_kwargs.enable_thinking` when a request omits it |
+| `server.default_thinking_budget_tokens` | `KILN_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default maximum generated tokens before Kiln closes an open thinking block |
+| `server.default_thinking_budget_ms` | `KILN_DEFAULT_THINKING_BUDGET_MS` | unlimited | Default decode-time budget before Kiln closes an open thinking block |
 | `server.fold_reasoning_into_content` | `KILN_FOLD_REASONING_INTO_CONTENT` | false | Also copy separated reasoning into chat `content` for compatibility |
 | `memory.inference_memory_fraction` | — | 0.7 | VRAM fraction for inference vs training |
 | `memory.kv_cache_fp8` | `KILN_KV_CACHE_FP8` | false | FP8 KV cache (2x context length) |
@@ -547,6 +549,56 @@ instead of long `reasoning_content`. Operators can also set
 `server.default_thinking_enabled = false` or
 `KILN_DEFAULT_THINKING_ENABLED=false` for non-eval serving. The legacy
 `KILN_DEFAULT_NO_THINK` env var is still accepted as a compatibility alias.
+
+Thinking can also be bounded without disabling it. Set
+`thinking_budget_tokens` and/or `thinking_budget_ms` on
+`POST /v1/chat/completions` or `POST /v1/completions/batch`:
+
+```json
+{
+  "messages": [{"role": "user", "content": "Solve this carefully."}],
+  "max_tokens": 512,
+  "thinking_budget_tokens": 128,
+  "thinking_budget_ms": 3000
+}
+```
+
+An omitted field inherits its corresponding server default; explicit `null`
+means unlimited for that dimension, even when the server has a default. `0`
+closes thinking immediately. When both limits are set, the first one reached
+wins. The time budget starts when the first decode candidate is ready, so queue
+and prefill time do not consume it, and it is checked between generated tokens.
+If the model emits `</think>` naturally first, Kiln leaves it alone.
+
+On exhaustion, Kiln feeds the forced close-tag tokens into the model context and
+continues decoding the final answer. Those tokens count toward `max_tokens` and
+completion usage just like model-generated close-tag tokens. Budgets are inert
+when the rendered prompt did not start inside a thinking block. Time-budgeted
+requests bypass deterministic completion caches because their boundary depends
+on runtime speed; token-budgeted requests remain cacheable under a budget-aware
+cache key. Both server defaults are unlimited when omitted.
+
+Non-streaming chat choices and batch items include a `thinking_budget` outcome
+when a budget was applied:
+
+```json
+{
+  "triggered": true,
+  "trigger": "tokens",
+  "closed": true,
+  "thinking_tokens": 128,
+  "thinking_time_ms": 742
+}
+```
+
+`trigger` is `tokens`, `time`, or `max_tokens`; the last value means Kiln
+reserved the remaining completion slots for an atomic close. A natural close
+has `triggered=false` and `closed=true`. Chat `metadata.thinking_budget` also
+reports the effective limits and whether each came from the request, a server
+default, or an explicit unlimited override. For SSE, that metadata and the
+final outcome are attached to the chunk containing `finish_reason`, immediately
+before the optional usage chunk and `[DONE]`. Cached token-budget responses
+preserve the original outcome.
 
 The Qwen3.5-4B profile expects adapters in `model.adapter_dir` when configured,
 otherwise `<model.path>/adapters`. Chat-template loading prefers

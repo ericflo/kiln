@@ -8,6 +8,7 @@ use kiln_core::block::BlockManager;
 use kiln_core::config::ModelConfig;
 use kiln_core::config_hashes::ConfigHashes;
 use kiln_core::prefix_cache::default_prefix_cache_max_blocks;
+use kiln_core::sampling::ThinkingBudgetStatus;
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::Engine;
@@ -444,6 +445,7 @@ pub struct DeterministicCompletionCacheKey {
     pub prompt_tokens: Vec<TokenId>,
     pub temperature_bits: u32,
     pub max_tokens: usize,
+    pub thinking_budget_tokens: Option<usize>,
     pub stop: Vec<String>,
     pub top_p_bits: u32,
     pub top_k: u32,
@@ -462,6 +464,7 @@ pub struct DeterministicCompletionCacheValue {
     pub tool_calls: Option<Vec<serde_json::Value>>,
     pub finish_reason: String,
     pub completion_tokens: usize,
+    pub thinking_budget_status: Option<ThinkingBudgetStatus>,
 }
 
 #[derive(Debug, Clone)]
@@ -566,6 +569,7 @@ pub struct DeterministicBatchCacheItem {
     pub finish_reason: String,
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
+    pub thinking_budget_status: Option<ThinkingBudgetStatus>,
 }
 
 #[derive(Debug, Clone)]
@@ -1479,6 +1483,10 @@ pub struct AppState {
     /// Server-level default for chat-template thinking mode. `None` preserves
     /// the template's own default.
     pub default_thinking_enabled: Option<bool>,
+    /// Server defaults for forced reasoning closure. Requests may inherit,
+    /// override, or explicitly disable each dimension independently.
+    pub default_thinking_budget_tokens: Option<usize>,
+    pub default_thinking_budget_ms: Option<u64>,
     /// Active model-specific runtime defaults profile.
     pub model_defaults_profile: crate::config::ModelDefaultsProfile,
     /// Compatibility mode: duplicate separated reasoning into `content`.
@@ -1728,6 +1736,8 @@ impl AppState {
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
             eval_mode: false,
             default_thinking_enabled: None,
+            default_thinking_budget_tokens: None,
+            default_thinking_budget_ms: None,
             model_defaults_profile: crate::config::ModelDefaultsProfile::qwen3_5_4b(),
             fold_reasoning_into_content: false,
             chat_performance_metadata: false,
@@ -2380,6 +2390,8 @@ impl AppState {
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
             eval_mode: false,
             default_thinking_enabled: None,
+            default_thinking_budget_tokens: None,
+            default_thinking_budget_ms: None,
             model_defaults_profile: crate::config::ModelDefaultsProfile::qwen3_5_4b(),
             fold_reasoning_into_content: false,
             chat_performance_metadata: false,
@@ -2992,6 +3004,7 @@ mod tests {
             prompt_tokens: vec![1, 2, 3],
             temperature_bits: 0.0f32.to_bits(),
             max_tokens: 4,
+            thinking_budget_tokens: None,
             stop: Vec::new(),
             top_p_bits: 1.0f32.to_bits(),
             top_k: 0,
@@ -3008,6 +3021,7 @@ mod tests {
             tool_calls: None,
             finish_reason: "length".to_string(),
             completion_tokens: 4,
+            thinking_budget_status: None,
         };
 
         assert!(matches!(
@@ -3053,6 +3067,7 @@ mod tests {
                 finish_reason: "length".to_string(),
                 prompt_tokens: 3,
                 completion_tokens: 4,
+                thinking_budget_status: None,
             }],
             prompt_tokens: 3,
             completion_tokens: 4,
@@ -3099,6 +3114,7 @@ mod tests {
                 tool_calls: None,
                 finish_reason: "length".to_string(),
                 completion_tokens: 4,
+                thinking_budget_status: None,
             },
         };
 
@@ -3144,6 +3160,7 @@ mod tests {
                     tool_calls: None,
                     finish_reason: "length".to_string(),
                     completion_tokens: 4,
+                    thinking_budget_status: None,
                 },
                 DeterministicCompletionCacheValue {
                     text: "second".to_string(),
@@ -3151,6 +3168,7 @@ mod tests {
                     tool_calls: None,
                     finish_reason: "stop".to_string(),
                     completion_tokens: 2,
+                    thinking_budget_status: None,
                 },
             ],
         };
@@ -3608,6 +3626,7 @@ mod tests {
             prompt_tokens: vec![1, 2, 3],
             temperature_bits: 0,
             max_tokens: 16,
+            thinking_budget_tokens: None,
             stop: Vec::new(),
             top_p_bits: 0,
             top_k: 0,
@@ -3624,6 +3643,7 @@ mod tests {
             tool_calls: None,
             finish_reason: "stop".to_string(),
             completion_tokens: 3,
+            thinking_budget_status: None,
         };
         cache.insert_complete_value(key(Some("retrained")), value.clone());
         cache.insert_complete_value(key(Some("other")), value.clone());

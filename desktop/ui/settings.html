@@ -62,6 +62,38 @@
         box-sizing: border-box;
       }
       label.row > input[type="number"].small { width: 100px; }
+      .segmented {
+        display: inline-flex;
+        align-items: center;
+        border: 1px solid var(--border-strong);
+        border-radius: 4px;
+        overflow: hidden;
+      }
+      .segmented button {
+        min-width: 82px;
+        padding: 5px 10px;
+        border: 0;
+        border-right: 1px solid var(--border-strong);
+        border-radius: 0;
+        background: var(--surface-2);
+        color: var(--text-muted);
+        font-size: 12px;
+      }
+      .segmented button:last-child { border-right: 0; }
+      .segmented button:hover { background: var(--surface-3); color: var(--text); }
+      .segmented button.active {
+        background: var(--accent);
+        color: #fff;
+      }
+      .budget-fields[hidden] { display: none; }
+      .field-warning {
+        display: none;
+        color: var(--danger-fg);
+        font-size: 12px;
+        line-height: 1.35;
+        margin: 4px 0 0;
+      }
+      .field-warning.visible { display: block; }
       .path-row {
         display: flex;
         align-items: center;
@@ -395,6 +427,28 @@
       </fieldset>
 
       <fieldset>
+        <legend>Generation defaults</legend>
+        <label class="row"><span class="name">Thinking budget</span>
+          <span class="segmented" id="thinking_budget_mode" role="group" aria-label="Thinking budget mode">
+            <button type="button" class="active" data-budget-mode="unlimited" aria-pressed="true">Unlimited</button>
+            <button type="button" data-budget-mode="custom" aria-pressed="false">Custom</button>
+          </span>
+          <span class="hint">Caps reasoning before Kiln closes the thinking block and continues with the final answer.</span>
+        </label>
+        <div class="budget-fields" id="thinking_budget_fields" hidden>
+          <label class="row"><span class="name">Token budget</span>
+            <input type="number" class="small" id="default_thinking_budget_tokens" min="0" step="1" inputmode="numeric" placeholder="Unlimited" />
+            <span class="hint">Maximum reasoning tokens. Zero closes the thinking block immediately; blank leaves this limit unused.</span>
+          </label>
+          <label class="row"><span class="name">Time budget (seconds)</span>
+            <input type="number" class="small" id="default_thinking_budget_seconds" min="0" step="0.001" inputmode="decimal" placeholder="Unlimited" />
+            <span class="hint">Wall-clock reasoning limit, with millisecond precision. When both limits are set, the first reached wins.</span>
+          </label>
+          <p class="field-warning" id="thinking_budget_warning" role="alert"></p>
+        </div>
+      </fieldset>
+
+      <fieldset>
         <legend>Memory &amp; performance</legend>
         <label class="row"><span class="name">Inference fraction (0..1)</span>
           <input type="number" class="small" id="inference_fraction" min="0" max="1" step="0.05" />
@@ -501,14 +555,83 @@
       const restartBtn = document.getElementById("restart");
       const isMacOS = /mac/i.test(navigator.userAgent || "");
       let lastSavedSnapshot = null;
+      let thinkingBudgetMode = "unlimited";
 
       const fields = [
         "kiln_binary", "model_path", "host", "port",
         "inference_fraction", "fp8_kv_cache", "cuda_graphs",
         "prefix_cache", "speculative_decoding", "adapter_dir",
-        "served_model_id",
+        "served_model_id", "default_thinking_budget_tokens",
+        "default_thinking_budget_seconds",
         "auto_start", "auto_restart", "launch_at_login",
       ];
+
+      function setThinkingBudgetWarning(message) {
+        const warning = document.getElementById("thinking_budget_warning");
+        warning.textContent = message || "";
+        warning.classList.toggle("visible", !!message);
+      }
+
+      function setThinkingBudgetMode(mode) {
+        thinkingBudgetMode = mode === "custom" ? "custom" : "unlimited";
+        const custom = thinkingBudgetMode === "custom";
+        document.getElementById("thinking_budget_fields").hidden = !custom;
+        for (const input of document.querySelectorAll("#thinking_budget_fields input")) {
+          input.disabled = !custom;
+        }
+        for (const button of document.querySelectorAll("#thinking_budget_mode button")) {
+          const active = button.dataset.budgetMode === thinkingBudgetMode;
+          button.classList.toggle("active", active);
+          button.setAttribute("aria-pressed", active ? "true" : "false");
+        }
+        if (!custom) setThinkingBudgetWarning("");
+      }
+
+      function optionalNonnegativeInteger(id, label) {
+        const raw = document.getElementById(id).value.trim();
+        if (!raw.length) return null;
+        const value = Number(raw);
+        if (!Number.isFinite(value) || value < 0 || !Number.isSafeInteger(value)) {
+          throw new Error(label + " must be a nonnegative whole number.");
+        }
+        return value;
+      }
+
+      function optionalMillisecondsFromSeconds() {
+        const raw = document.getElementById("default_thinking_budget_seconds").value.trim();
+        if (!raw.length) return null;
+        const seconds = Number(raw);
+        if (!Number.isFinite(seconds) || seconds < 0) {
+          throw new Error("Time budget must be a finite, nonnegative number of seconds.");
+        }
+        const milliseconds = seconds * 1000;
+        const integerMilliseconds = Math.round(milliseconds);
+        if (!Number.isSafeInteger(integerMilliseconds) || Math.abs(milliseconds - integerMilliseconds) > 1e-7) {
+          throw new Error("Time budget supports at most three decimal places.");
+        }
+        return integerMilliseconds;
+      }
+
+      function readThinkingBudget() {
+        if (thinkingBudgetMode === "unlimited") {
+          return {
+            default_thinking_budget_tokens: null,
+            default_thinking_budget_ms: null,
+          };
+        }
+        const tokens = optionalNonnegativeInteger(
+          "default_thinking_budget_tokens",
+          "Token budget",
+        );
+        const milliseconds = optionalMillisecondsFromSeconds();
+        if (tokens === null && milliseconds === null) {
+          throw new Error("Enter a token budget, a time budget, or choose Unlimited.");
+        }
+        return {
+          default_thinking_budget_tokens: tokens,
+          default_thinking_budget_ms: milliseconds,
+        };
+      }
 
       function readForm() {
         const n = (id) => document.getElementById(id);
@@ -516,6 +639,7 @@
           const v = n(id).value.trim();
           return v.length ? v : null;
         };
+        const thinkingBudget = readThinkingBudget();
         return {
           kiln_binary: strOrNull("kiln_binary"),
           model_path: strOrNull("model_path"),
@@ -528,6 +652,7 @@
           speculative_decoding: n("speculative_decoding").checked,
           adapter_dir: strOrNull("adapter_dir"),
           served_model_id: strOrNull("served_model_id"),
+          ...thinkingBudget,
           auto_start: n("auto_start").checked,
           auto_restart: n("auto_restart").checked,
           launch_at_login: n("launch_at_login").checked,
@@ -547,6 +672,17 @@
         n("speculative_decoding").checked = !!s.speculative_decoding;
         n("adapter_dir").value = s.adapter_dir || "";
         n("served_model_id").value = s.served_model_id || "";
+        const hasTokenBudget = s.default_thinking_budget_tokens !== null &&
+          s.default_thinking_budget_tokens !== undefined;
+        const hasTimeBudget = s.default_thinking_budget_ms !== null &&
+          s.default_thinking_budget_ms !== undefined;
+        n("default_thinking_budget_tokens").value = hasTokenBudget
+          ? String(s.default_thinking_budget_tokens)
+          : "";
+        n("default_thinking_budget_seconds").value = hasTimeBudget
+          ? String(s.default_thinking_budget_ms / 1000)
+          : "";
+        setThinkingBudgetMode(hasTokenBudget || hasTimeBudget ? "custom" : "unlimited");
         n("auto_start").checked = !!s.auto_start;
         n("auto_restart").checked = !!s.auto_restart;
         n("launch_at_login").checked = !!s.launch_at_login;
@@ -619,14 +755,28 @@
 
       function isDirty() {
         if (lastSavedSnapshot === null) return false;
-        return JSON.stringify(readForm()) !== lastSavedSnapshot;
+        try {
+          return JSON.stringify(readForm()) !== lastSavedSnapshot;
+        } catch (_) {
+          return true;
+        }
       }
 
       function updateDirtyIndicator() {
-        const dirty = isDirty();
+        let current = null;
+        let validationError = "";
+        try {
+          current = readForm();
+        } catch (e) {
+          validationError = String(e && e.message ? e.message : e);
+        }
+        setThinkingBudgetWarning(validationError);
+        const dirty = validationError
+          ? true
+          : lastSavedSnapshot !== null && JSON.stringify(current) !== lastSavedSnapshot;
         const btn = document.getElementById("save");
         btn.classList.toggle("dirty", dirty);
-        btn.disabled = !dirty;
+        btn.disabled = !dirty || !!validationError;
       }
 
       function setStatus(msg, err) {
@@ -671,8 +821,9 @@
 
       async function save() {
         try {
-          await invoke("set_settings", { new: readForm() });
-          lastSavedSnapshot = JSON.stringify(readForm());
+          const settings = readForm();
+          await invoke("set_settings", { new: settings });
+          lastSavedSnapshot = JSON.stringify(settings);
           updateDirtyIndicator();
           let running = false;
           try {
@@ -735,6 +886,12 @@
       saveBtn.addEventListener("click", save);
       restoreBtn.addEventListener("click", restoreDefaults);
       restartBtn.addEventListener("click", restart);
+      for (const button of document.querySelectorAll("#thinking_budget_mode button")) {
+        button.addEventListener("click", () => {
+          setThinkingBudgetMode(button.dataset.budgetMode);
+          updateDirtyIndicator();
+        });
+      }
 
       const formContainer = document.querySelector(".wrap");
       formContainer.addEventListener("input", updateDirtyIndicator);

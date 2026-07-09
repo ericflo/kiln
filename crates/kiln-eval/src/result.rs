@@ -35,12 +35,54 @@ pub enum EvalOutcomeKind {
     Error,
 }
 
+/// Runtime result of applying a thinking budget to one completion.
+///
+/// This deliberately mirrors the server's chat-completion metadata without
+/// depending on `kiln-core`, keeping the eval data crate portable.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvalThinkingBudgetOutcome {
+    pub triggered: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
+    pub closed: bool,
+    pub thinking_tokens: usize,
+    pub thinking_time_ms: u64,
+}
+
+/// Effective thinking-budget configuration and provenance for one eval
+/// completion. Sources are stable strings such as `server_default`, `suite`,
+/// `run_override`, `example`, and their explicit `_unlimited` forms.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvalThinkingBudget {
+    pub configured: bool,
+    pub applied: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_time_ms: Option<u64>,
+    pub tokens_source: String,
+    pub time_source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<EvalThinkingBudgetOutcome>,
+}
+
 /// Per-example record returned in the `EvalResult`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExampleOutcome {
     pub example_id: String,
     pub completion_index: usize,
     pub completion_text: String,
+    /// Exact decoder text before eval-only normalization. In particular, a
+    /// prompt prefilled with `<think>` does not make the decoder repeat that
+    /// opening tag, so `completion_text` restores it for scoring while this
+    /// field preserves the model's actual continuation for audit/replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_completion_text: Option<String>,
+    /// Resolved thinking-budget limits, provenance, and runtime outcome for
+    /// this completion. Absent on legacy results and generations that failed
+    /// before a completion was produced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<EvalThinkingBudget>,
     pub kind: EvalOutcomeKind,
     /// Score in `[0.0, 1.0]`. Most scorers emit binary 0/1 outcomes; numeric
     /// tolerance and LLM-judge can emit continuous values.
@@ -582,6 +624,11 @@ pub struct SuiteResult {
     /// Stable hash of the suite content (header + examples) for replay
     /// auditing — different suite revisions produce different hashes.
     pub suite_hash: String,
+    /// Hash of the suite, optional run-level generation override, and every
+    /// example's resolved thinking-budget limits/provenance. Unlike
+    /// `suite_hash`, this changes when inherited server defaults change.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub effective_generation_hash: String,
 }
 
 /// Top-level eval result that may contain multiple suite runs (one per
@@ -734,6 +781,8 @@ mod tests {
             example_id: id.into(),
             completion_index: idx,
             completion_text: format!("c-{id}-{idx}"),
+            raw_completion_text: None,
+            thinking_budget: None,
             kind,
             score,
             detail: None,
@@ -765,7 +814,46 @@ mod tests {
             started_at: "2026-05-14T00:00:00Z".into(),
             finished_at: "2026-05-14T00:00:01Z".into(),
             suite_hash: "deadbeef".into(),
+            effective_generation_hash: "feedface".into(),
         }
+    }
+
+    #[test]
+    fn outcome_serializes_raw_text_and_thinking_budget_provenance() {
+        let mut outcome = mk("a", 0, EvalOutcomeKind::Pass, 1.0, 2.0);
+        outcome.raw_completion_text = Some("decoder continuation".into());
+        outcome.thinking_budget = Some(EvalThinkingBudget {
+            configured: true,
+            applied: true,
+            max_tokens: Some(12),
+            max_time_ms: None,
+            tokens_source: "server_default".into(),
+            time_source: "example_unlimited".into(),
+            outcome: Some(EvalThinkingBudgetOutcome {
+                triggered: true,
+                trigger: Some("tokens".into()),
+                closed: true,
+                thinking_tokens: 12,
+                thinking_time_ms: 41,
+            }),
+        });
+
+        let json = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(json["raw_completion_text"], "decoder continuation");
+        assert_eq!(json["thinking_budget"]["max_tokens"], 12);
+        assert_eq!(json["thinking_budget"]["outcome"]["trigger"], "tokens");
+        assert_eq!(json["thinking_budget"]["outcome"]["closed"], true);
+
+        let legacy = serde_json::json!({
+            "example_id": "legacy",
+            "completion_index": 0,
+            "completion_text": "answer",
+            "kind": "pass",
+            "score": 1.0
+        });
+        let decoded: ExampleOutcome = serde_json::from_value(legacy).unwrap();
+        assert!(decoded.raw_completion_text.is_none());
+        assert!(decoded.thinking_budget.is_none());
     }
 
     #[test]

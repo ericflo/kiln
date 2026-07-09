@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use kiln_core::config_hashes::ConfigHashes;
 use kiln_core::request::Request;
-use kiln_core::sampling::SamplingParams;
+use kiln_core::sampling::{SamplingParams, ThinkingBudget, ThinkingBudgetStatus};
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::{ChatMessage, ChatTemplateOptions};
 use kiln_eval::qwen3::ParsedToolCall;
@@ -50,6 +50,7 @@ const PROMPT_PREVIEW_MAX_CHARS: usize = 120;
 const COMPLETION_PREVIEW_MAX_CHARS: usize = 200;
 const QWEN_TOOL_CALL_OPEN_TAG: &str = "<tool_call>";
 const QWEN_TOOL_CALL_CLOSE_TAG: &str = "</tool_call>";
+const MOCK_COMPLETION_TOKEN_LIMIT: usize = 20;
 
 fn observe_post_prefill_vram(memory_budget: &std::sync::Arc<crate::state::GpuMemoryBudget>) {
     if let Some(bytes) = kiln_memory::vram::detect_used_vram_bytes() {
@@ -95,6 +96,174 @@ fn effective_thinking_enabled_for_request(
     req: &ChatCompletionRequest,
 ) -> Option<bool> {
     request_thinking_enabled(req).or(state.default_thinking_enabled)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EffectiveThinkingBudget {
+    tokens: Option<usize>,
+    ms: Option<u64>,
+    tokens_source: &'static str,
+    ms_source: &'static str,
+}
+
+fn effective_thinking_budget_for_request(
+    state: &AppState,
+    req: &ChatCompletionRequest,
+) -> EffectiveThinkingBudget {
+    EffectiveThinkingBudget {
+        tokens: req
+            .thinking_budget_tokens
+            .resolve(state.default_thinking_budget_tokens),
+        ms: req
+            .thinking_budget_ms
+            .resolve(state.default_thinking_budget_ms),
+        tokens_source: req
+            .thinking_budget_tokens
+            .source(state.default_thinking_budget_tokens),
+        ms_source: req
+            .thinking_budget_ms
+            .source(state.default_thinking_budget_ms),
+    }
+}
+
+fn thinking_budget_metadata_for_request(
+    state: &AppState,
+    req: &ChatCompletionRequest,
+    starts_in_reasoning: bool,
+) -> ThinkingBudgetMetadata {
+    let effective = effective_thinking_budget_for_request(state, req);
+    let configured = effective.tokens.is_some() || effective.ms.is_some();
+    ThinkingBudgetMetadata {
+        configured,
+        applied: configured && starts_in_reasoning && chat_request_max_tokens(req) > 0,
+        max_tokens: effective.tokens,
+        max_time_ms: effective.ms,
+        tokens_source: effective.tokens_source,
+        time_source: effective.ms_source,
+        triggered: false,
+        trigger: None,
+        closed: None,
+        thinking_tokens: None,
+        thinking_time_ms: None,
+    }
+}
+
+fn attach_thinking_budget_outcome(
+    sampling: &SamplingParams,
+    response: &mut ChatCompletionResponse,
+) {
+    let Some(budget) = sampling.thinking_budget.as_ref() else {
+        return;
+    };
+    let mut status = budget.status();
+    if !status.closed {
+        status.thinking_tokens = response
+            .choices
+            .first()
+            .map(|choice| choice.completion_tokens)
+            .unwrap_or(status.thinking_tokens);
+    }
+    apply_thinking_budget_status_to_metadata(&mut response.metadata.thinking_budget, status);
+    if let Some(choice) = response.choices.first_mut() {
+        choice.thinking_budget = Some(status);
+    }
+}
+
+fn apply_thinking_budget_status_to_metadata(
+    metadata: &mut ThinkingBudgetMetadata,
+    status: ThinkingBudgetStatus,
+) {
+    metadata.triggered = status.trigger.is_some();
+    metadata.trigger = status.trigger.map(|value| value.as_str().to_string());
+    metadata.closed = Some(status.closed);
+    metadata.thinking_time_ms = Some(status.elapsed_ms);
+    metadata.thinking_tokens = Some(status.thinking_tokens);
+}
+
+fn attach_cached_thinking_budget_outcome(response: &mut ChatCompletionResponse) {
+    if let Some(status) = response
+        .choices
+        .first()
+        .and_then(|choice| choice.thinking_budget)
+    {
+        response.metadata.thinking_enabled = true;
+        response.metadata.thinking_mode = "reasoning".to_string();
+        response.metadata.thinking_budget.applied = true;
+        apply_thinking_budget_status_to_metadata(&mut response.metadata.thinking_budget, status);
+    }
+}
+
+fn configure_thinking_budget_for_prompt(
+    state: &AppState,
+    req: &ChatCompletionRequest,
+    prompt_text: &str,
+    sampling: &mut SamplingParams,
+) -> Result<(), ApiError> {
+    if !prompt_starts_in_reasoning(prompt_text) || sampling.max_tokens == 0 {
+        sampling.thinking_budget = None;
+        return Ok(());
+    }
+    let effective = effective_thinking_budget_for_request(state, req);
+    if effective.tokens.is_none() && effective.ms.is_none() {
+        sampling.thinking_budget = None;
+        return Ok(());
+    }
+
+    if sampling
+        .stop
+        .iter()
+        .any(|stop| stop_sequence_conflicts_with_thinking_close(stop))
+    {
+        return Err(ApiError::chat_invalid_request(
+            "thinking budgets cannot be combined with a stop sequence that matches part of '</think>'",
+        ));
+    }
+
+    let close_token_ids = state
+        .tokenizer
+        .encode(REASONING_CLOSE_TAG)
+        .map_err(ApiError::tokenization_failed)?;
+    let decoded_close = state
+        .tokenizer
+        .decode(&close_token_ids)
+        .map_err(ApiError::tokenization_failed)?;
+    if decoded_close != REASONING_CLOSE_TAG {
+        return Err(ApiError::chat_invalid_request(format!(
+            "the active tokenizer cannot reproduce {REASONING_CLOSE_TAG:?} as a forced token sequence"
+        )));
+    }
+    if close_token_ids.len() > sampling.max_tokens {
+        return Err(ApiError::chat_invalid_request(format!(
+            "max_tokens {} is too small for the tokenizer's {}-token </think> close sequence",
+            sampling.max_tokens,
+            close_token_ids.len()
+        )));
+    }
+    let max_completion_tokens = match state.backend.as_ref() {
+        ModelBackend::Mock { .. } => sampling.max_tokens.min(MOCK_COMPLETION_TOKEN_LIMIT),
+        ModelBackend::Real { .. } => sampling.max_tokens,
+    };
+    sampling.thinking_budget = Some(
+        ThinkingBudget::new(
+            effective.tokens,
+            effective.ms.map(std::time::Duration::from_millis),
+            max_completion_tokens,
+            close_token_ids,
+        )
+        .map_err(|error| ApiError::chat_invalid_request(error.to_string()))?,
+    );
+    Ok(())
+}
+
+pub(crate) fn stop_sequence_conflicts_with_thinking_close(stop: &str) -> bool {
+    if stop.is_empty() || REASONING_CLOSE_TAG.contains(stop) || stop.contains(REASONING_CLOSE_TAG) {
+        return true;
+    }
+
+    let stop = stop.as_bytes();
+    let close = REASONING_CLOSE_TAG.as_bytes();
+    (1..=stop.len().min(close.len()))
+        .any(|len| stop.ends_with(&close[..len]) || close.ends_with(&stop[..len]))
 }
 
 fn fold_reasoning_into_content_for_request(state: &AppState, req: &ChatCompletionRequest) -> bool {
@@ -153,6 +322,11 @@ fn chat_completion_metadata_from_prompt(
         final_content_empty: false,
         content_empty_reason: None,
         reasoning_folded_into_content: false,
+        thinking_budget: thinking_budget_metadata_for_request(
+            state,
+            req,
+            prompt_starts_in_reasoning(prompt_text),
+        ),
         config_hashes: None,
         performance: None,
     }
@@ -177,6 +351,11 @@ fn chat_completion_metadata_from_prompt_and_output(
                 .reasoning_content
                 .as_deref()
                 .is_some_and(|text| !text.is_empty()),
+        thinking_budget: thinking_budget_metadata_for_request(
+            state,
+            req,
+            prompt_starts_in_reasoning(prompt_text),
+        ),
         config_hashes: None,
         performance: None,
     }
@@ -210,6 +389,7 @@ fn chat_completion_metadata_from_cached_output(
                 .reasoning_content
                 .as_deref()
                 .is_some_and(|text| !text.is_empty()),
+        thinking_budget: thinking_budget_metadata_for_request(state, req, thinking_enabled),
         config_hashes: None,
         performance: None,
     }
@@ -232,6 +412,7 @@ fn chat_completion_metadata_from_request(
         final_content_empty: false,
         content_empty_reason: None,
         reasoning_folded_into_content: false,
+        thinking_budget: thinking_budget_metadata_for_request(state, req, thinking_enabled),
         config_hashes: None,
         performance: None,
     }
@@ -522,7 +703,7 @@ const REASONING_CLOSE_TAG: &str = "</think>";
 /// suffix Qwen3.5 emits, so the bare ChatML fallback and any
 /// non-reasoning template stay on the OpenAI-shaped pure-`content` path.
 fn prompt_starts_in_reasoning(prompt_text: &str) -> bool {
-    prompt_text.ends_with(REASONING_OPEN_TAG)
+    prompt_text.trim_end().ends_with("<think>")
 }
 
 /// Per-stream parser that splits incremental decode-token text into
@@ -896,6 +1077,31 @@ fn usage_chunk_json(
         }
     })
     .to_string()
+}
+
+fn finalized_thinking_budget_status(
+    budget: Option<&ThinkingBudget>,
+    completion_tokens: usize,
+) -> Option<ThinkingBudgetStatus> {
+    let mut status = budget.map(ThinkingBudget::status)?;
+    if !status.closed && status.trigger.is_none() {
+        status.thinking_tokens = completion_tokens;
+    }
+    Some(status)
+}
+
+fn streaming_finish_chunk_json(
+    chunk: &ChatCompletionChunk,
+    thinking_budget: &ThinkingBudgetMetadata,
+) -> String {
+    let mut value = serde_json::to_value(chunk).expect("chat completion chunk must serialize");
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "metadata".to_string(),
+            serde_json::json!({"thinking_budget": thinking_budget}),
+        );
+    }
+    serde_json::to_string(&value).expect("chat completion chunk JSON must serialize")
 }
 
 async fn emit_or_buffer_reasoning_chunk(
@@ -1882,6 +2088,14 @@ fn deterministic_completion_cache_key(
     sampling: &SamplingParams,
     fold_reasoning_into_content: bool,
 ) -> Option<DeterministicCompletionCacheKey> {
+    if sampling
+        .thinking_budget
+        .as_ref()
+        .and_then(ThinkingBudget::max_time)
+        .is_some()
+    {
+        return None;
+    }
     let greedy = sampling.is_effectively_greedy();
     if !greedy && sampling.seed.is_none() {
         return None;
@@ -1930,6 +2144,10 @@ fn deterministic_completion_cache_key(
         prompt_tokens: prompt_tokens.to_vec(),
         temperature_bits,
         max_tokens: sampling.max_tokens,
+        thinking_budget_tokens: sampling
+            .thinking_budget
+            .as_ref()
+            .and_then(ThinkingBudget::max_tokens),
         stop: normalized_stop_for_cache(&sampling.stop),
         top_p_bits,
         top_k,
@@ -1955,6 +2173,8 @@ struct DeterministicChatRequestCacheKey<'a> {
     fold_reasoning_into_content: bool,
     temperature_bits: u32,
     max_tokens: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_budget_tokens: Option<usize>,
     stop: Vec<String>,
     top_p_bits: u32,
     top_k: u32,
@@ -1979,6 +2199,8 @@ struct DeterministicChatChoicesCacheKey<'a> {
     n: usize,
     temperature_bits: u32,
     max_tokens: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_budget_tokens: Option<usize>,
     stop: Vec<String>,
     top_p_bits: u32,
     top_k: u32,
@@ -2008,7 +2230,15 @@ fn deterministic_chat_request_cache_key_with_vocab_size(
         sampling,
         vocab_size,
         req.fold_reasoning_into_content.unwrap_or(false),
+        request_token_budget_without_server_default(req),
     )
+}
+
+fn request_token_budget_without_server_default(req: &ChatCompletionRequest) -> Option<usize> {
+    match req.thinking_budget_tokens {
+        BudgetOverride::Limited(value) => Some(value),
+        BudgetOverride::Inherit | BudgetOverride::Unlimited => None,
+    }
 }
 
 fn deterministic_chat_request_cache_key_with_vocab_size_and_fold(
@@ -2016,6 +2246,7 @@ fn deterministic_chat_request_cache_key_with_vocab_size_and_fold(
     sampling: &SamplingParams,
     vocab_size: usize,
     fold_reasoning_into_content: bool,
+    thinking_budget_tokens: Option<usize>,
 ) -> Result<Option<String>, ApiError> {
     if req.n.unwrap_or(1) != 1 {
         return Ok(None);
@@ -2056,6 +2287,7 @@ fn deterministic_chat_request_cache_key_with_vocab_size_and_fold(
         fold_reasoning_into_content,
         temperature_bits,
         max_tokens: sampling.max_tokens,
+        thinking_budget_tokens,
         stop,
         top_p_bits,
         top_k,
@@ -2101,6 +2333,14 @@ fn batch_request_sampling_for_cache_key(
         frequency_penalty: requested_or_default_frequency_penalty(req.frequency_penalty),
         stop: req.stop.clone().unwrap_or_default(),
         seed,
+        thinking_budget: None,
+    }
+}
+
+fn batch_token_budget_without_server_default(req: &BatchCompletionRequest) -> Option<usize> {
+    match req.thinking_budget_tokens {
+        BudgetOverride::Limited(value) => Some(value),
+        BudgetOverride::Inherit | BudgetOverride::Unlimited => None,
     }
 }
 
@@ -2145,6 +2385,7 @@ fn deterministic_chat_request_cache_key_from_chat_choice_with_vocab_size_and_fol
         fold_reasoning_into_content,
         temperature_bits,
         max_tokens: sampling.max_tokens,
+        thinking_budget_tokens: request_token_budget_without_server_default(req),
         stop,
         top_p_bits,
         top_k,
@@ -2180,6 +2421,7 @@ fn deterministic_chat_choices_cache_key_with_vocab_size(
         sampling,
         vocab_size,
         req.fold_reasoning_into_content.unwrap_or(false),
+        request_token_budget_without_server_default(req),
     )
 }
 
@@ -2189,6 +2431,7 @@ fn deterministic_chat_choices_cache_key_with_vocab_size_and_fold(
     sampling: &SamplingParams,
     vocab_size: usize,
     fold_reasoning_into_content: bool,
+    thinking_budget_tokens: Option<usize>,
 ) -> Result<Option<String>, ApiError> {
     if n_per <= 1 || req.adapter.is_explicit() || req.adapters.is_some() {
         return Ok(None);
@@ -2226,6 +2469,7 @@ fn deterministic_chat_choices_cache_key_with_vocab_size_and_fold(
         n: n_per,
         temperature_bits,
         max_tokens: sampling.max_tokens,
+        thinking_budget_tokens,
         stop,
         top_p_bits,
         top_k,
@@ -2305,6 +2549,7 @@ fn deterministic_chat_choices_cache_key_from_batch_prompt_with_vocab_size_and_fo
         n: n_per,
         temperature_bits,
         max_tokens: sampling.max_tokens,
+        thinking_budget_tokens: batch_token_budget_without_server_default(req),
         stop,
         top_p_bits,
         top_k,
@@ -2373,6 +2618,7 @@ fn deterministic_chat_request_cache_key_from_batch_prompt_with_vocab_size_and_fo
         fold_reasoning_into_content,
         temperature_bits,
         max_tokens: sampling.max_tokens,
+        thinking_budget_tokens: batch_token_budget_without_server_default(req),
         stop,
         top_p_bits,
         top_k,
@@ -2540,6 +2786,26 @@ fn batch_request_max_tokens(req: &BatchCompletionRequest) -> usize {
     resolved_max_tokens(req.max_tokens, req.max_completion_tokens)
 }
 
+fn effective_batch_thinking_budget_for_request(
+    state: &AppState,
+    req: &BatchCompletionRequest,
+) -> EffectiveThinkingBudget {
+    EffectiveThinkingBudget {
+        tokens: req
+            .thinking_budget_tokens
+            .resolve(state.default_thinking_budget_tokens),
+        ms: req
+            .thinking_budget_ms
+            .resolve(state.default_thinking_budget_ms),
+        tokens_source: req
+            .thinking_budget_tokens
+            .source(state.default_thinking_budget_tokens),
+        ms_source: req
+            .thinking_budget_ms
+            .source(state.default_thinking_budget_ms),
+    }
+}
+
 fn response_from_cached_chat_request(
     state: &AppState,
     req: &ChatCompletionRequest,
@@ -2604,6 +2870,7 @@ fn chat_request_cache_value_from_choice(
             tool_calls: choice.message.tool_calls.clone(),
             finish_reason: choice.finish_reason.clone(),
             completion_tokens: choice.completion_tokens,
+            thinking_budget_status: choice.thinking_budget,
         },
     }
 }
@@ -2614,7 +2881,13 @@ fn store_chat_request_cache_from_chat_choices_response(
     resp: &ChatCompletionResponse,
     vocab_size: usize,
 ) -> Result<(), ApiError> {
-    if chat_request_max_tokens(req) != 0 || req.adapter.is_explicit() || req.adapters.is_some() {
+    if effective_thinking_budget_for_request(state, req)
+        .ms
+        .is_some()
+        || chat_request_max_tokens(req) != 0
+        || req.adapter.is_explicit()
+        || req.adapters.is_some()
+    {
         return Ok(());
     }
     let mut entries = Vec::with_capacity(resp.choices.len());
@@ -2699,6 +2972,7 @@ fn chat_choices_cache_value_from_response(
             tool_calls: choice.message.tool_calls.clone(),
             finish_reason: choice.finish_reason.clone(),
             completion_tokens: choice.completion_tokens,
+            thinking_budget_status: choice.thinking_budget,
         })
         .collect();
 
@@ -2723,6 +2997,7 @@ fn response_from_cached_completion(
         .unwrap_or_else(|| state.served_model_id.clone());
 
     let completion_tokens = cached.completion_tokens;
+    let thinking_budget_status = cached.thinking_budget_status;
     let cached_output = assistant_output_from_cached_parts(
         req,
         cached.text,
@@ -2769,6 +3044,7 @@ fn response_from_cached_completion(
                 tool_call_id: None,
             },
             finish_reason,
+            thinking_budget: thinking_budget_status,
             completion_tokens,
         }],
         usage: Usage {
@@ -2778,6 +3054,7 @@ fn response_from_cached_completion(
         },
         metadata,
     };
+    attach_cached_thinking_budget_outcome(&mut response);
     attach_chat_performance_metadata(
         state,
         req,
@@ -2808,6 +3085,7 @@ fn response_from_cached_chat_choices(
         .into_iter()
         .map(|completion| {
             let completion_tokens = completion.completion_tokens;
+            let thinking_budget_status = completion.thinking_budget_status;
             let output = assistant_output_from_cached_parts(
                 req,
                 completion.text,
@@ -2815,30 +3093,31 @@ fn response_from_cached_chat_choices(
                 completion.tool_calls,
                 completion.finish_reason,
             );
-            (completion_tokens, output)
+            (completion_tokens, thinking_budget_status, output)
         })
         .collect::<Vec<_>>();
     let metadata = cached_completions
         .first()
-        .map(|(_, output)| chat_completion_metadata_from_cached_output(state, req, output))
+        .map(|(_, _, output)| chat_completion_metadata_from_cached_output(state, req, output))
         .unwrap_or_else(|| chat_completion_metadata_from_request(state, req));
     let fold_reasoning = fold_reasoning_into_content_for_request(state, req);
     let cached_completions = cached_completions
         .into_iter()
-        .map(|(completion_tokens, output)| {
+        .map(|(completion_tokens, thinking_budget_status, output)| {
             (
                 completion_tokens,
+                thinking_budget_status,
                 apply_reasoning_content_policy(output, fold_reasoning),
             )
         })
         .collect::<Vec<_>>();
     let preview_source = cached_completions
         .first()
-        .map(|(_, output)| output.preview_source())
+        .map(|(_, _, output)| output.preview_source())
         .unwrap_or("");
     let completion_tokens = cached_completions
         .iter()
-        .map(|(completion_tokens, _)| *completion_tokens)
+        .map(|(completion_tokens, _, _)| *completion_tokens)
         .sum::<usize>();
     record_recent_request(
         state,
@@ -2852,7 +3131,7 @@ fn response_from_cached_chat_choices(
             duration_ms: request_start.elapsed().as_millis() as u64,
             finish_reason: cached_completions
                 .first()
-                .map(|(_, output)| output.finish_reason.clone())
+                .map(|(_, _, output)| output.finish_reason.clone())
                 .unwrap_or_else(|| "length".to_string()),
             prefix_cache: Some("chat_choices_cache_hit".to_string()),
             ..request_record_from_req(req, &id, &model, false)
@@ -2862,19 +3141,22 @@ fn response_from_cached_chat_choices(
     let choices = cached_completions
         .into_iter()
         .enumerate()
-        .map(|(index, (completion_tokens, output))| Choice {
-            index,
-            message: Message {
-                role: "assistant".to_string(),
-                content: output.content,
-                reasoning_content: output.reasoning_content,
-                tool_calls: output.tool_calls,
-                name: None,
-                tool_call_id: None,
+        .map(
+            |(index, (completion_tokens, thinking_budget_status, output))| Choice {
+                index,
+                message: Message {
+                    role: "assistant".to_string(),
+                    content: output.content,
+                    reasoning_content: output.reasoning_content,
+                    tool_calls: output.tool_calls,
+                    name: None,
+                    tool_call_id: None,
+                },
+                finish_reason: output.finish_reason,
+                thinking_budget: thinking_budget_status,
+                completion_tokens,
             },
-            finish_reason: output.finish_reason,
-            completion_tokens,
-        })
+        )
         .collect();
 
     let mut response = ChatCompletionResponse {
@@ -2890,6 +3172,7 @@ fn response_from_cached_chat_choices(
         },
         metadata,
     };
+    attach_cached_thinking_budget_outcome(&mut response);
     attach_chat_performance_metadata(
         state,
         req,
@@ -2916,6 +3199,7 @@ fn streaming_response_from_cached_completion(
         .clone()
         .unwrap_or_else(|| state.served_model_id.clone());
     let completion_tokens = cached.completion_tokens;
+    let thinking_budget_status = cached.thinking_budget_status;
     let cached_output = assistant_output_from_cached_parts(
         req,
         cached.text,
@@ -2924,6 +3208,12 @@ fn streaming_response_from_cached_completion(
         cached.finish_reason,
     );
     let preview_source = cached_output.preview_source();
+    let mut thinking_budget_metadata =
+        chat_completion_metadata_from_cached_output(state, req, &cached_output).thinking_budget;
+    if let Some(status) = thinking_budget_status {
+        thinking_budget_metadata.applied = true;
+        apply_thinking_budget_status_to_metadata(&mut thinking_budget_metadata, status);
+    }
 
     record_recent_request(
         state,
@@ -3055,7 +3345,10 @@ fn streaming_response_from_cached_completion(
             finish_reason: Some(cached_output.finish_reason),
         }],
     };
-    events.push(Event::default().data(serde_json::to_string(&done_chunk).unwrap()));
+    events.push(Event::default().data(streaming_finish_chunk_json(
+        &done_chunk,
+        &thinking_budget_metadata,
+    )));
     events.push(Event::default().data("[DONE]"));
 
     let stream = tokio_stream::iter(events.into_iter().map(Ok::<_, std::convert::Infallible>));
@@ -3081,6 +3374,7 @@ fn empty_chat_completion_response(
             tool_calls: None,
             finish_reason: "length".to_string(),
             completion_tokens: 0,
+            thinking_budget_status: None,
         },
     )
 }
@@ -3102,6 +3396,7 @@ fn empty_chat_completion_streaming_response(
             tool_calls: None,
             finish_reason: "length".to_string(),
             completion_tokens: 0,
+            thinking_budget_status: None,
         },
     )
 }
@@ -3119,6 +3414,7 @@ fn cache_value_from_response(
         tool_calls: choice.message.tool_calls.clone(),
         finish_reason: choice.finish_reason.clone(),
         completion_tokens: resp.usage.completion_tokens,
+        thinking_budget_status: choice.thinking_budget,
     })
 }
 
@@ -3416,6 +3712,90 @@ pub struct StreamOptions {
     pub include_usage: bool,
 }
 
+/// A request override that preserves the semantic difference between an
+/// omitted JSON property and an explicit `null`.
+///
+/// Thinking budgets use all three states: omitted inherits the server
+/// default, `null` means unlimited, and a number (including zero) is a
+/// request-local limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetOverride<T> {
+    Inherit,
+    Unlimited,
+    Limited(T),
+}
+
+impl<T> Default for BudgetOverride<T> {
+    fn default() -> Self {
+        Self::Inherit
+    }
+}
+
+impl<T: Copy> BudgetOverride<T> {
+    fn resolve(self, server_default: Option<T>) -> Option<T> {
+        match self {
+            Self::Inherit => server_default,
+            Self::Unlimited => None,
+            Self::Limited(value) => Some(value),
+        }
+    }
+
+    fn source(self, server_default: Option<T>) -> &'static str {
+        match self {
+            Self::Inherit if server_default.is_some() => "server_default",
+            Self::Inherit => "unlimited",
+            Self::Unlimited => "request_unlimited",
+            Self::Limited(_) => "request",
+        }
+    }
+}
+
+impl<'de, T> Deserialize<'de> for BudgetOverride<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct OverrideVisitor<T>(std::marker::PhantomData<T>);
+
+        impl<'de, T> serde::de::Visitor<'de> for OverrideVisitor<T>
+        where
+            T: Deserialize<'de>,
+        {
+            type Value = BudgetOverride<T>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("null or a non-negative numeric thinking budget")
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(BudgetOverride::Unlimited)
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(BudgetOverride::Unlimited)
+            }
+
+            fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                T::deserialize(deserializer).map(BudgetOverride::Limited)
+            }
+        }
+
+        deserializer.deserialize_option(OverrideVisitor(std::marker::PhantomData))
+    }
+}
+
 /// OpenAI-compatible chat completion request.
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionRequest {
@@ -3474,6 +3854,17 @@ pub struct ChatCompletionRequest {
     /// are present to preserve existing request behavior.
     #[serde(default)]
     pub max_completion_tokens: Option<usize>,
+    /// Kiln extension: maximum reasoning tokens before the server forces the
+    /// tokenizer's `</think>` sequence into the model context. Omitted
+    /// inherits the server default; `null` disables the token limit; `0`
+    /// closes immediately.
+    #[serde(default)]
+    pub thinking_budget_tokens: BudgetOverride<usize>,
+    /// Kiln extension: reasoning wall-clock budget in milliseconds. The clock
+    /// begins at the first decode candidate, after queueing and prefill.
+    /// Omitted inherits the server default; `null` disables the time limit.
+    #[serde(default)]
+    pub thinking_budget_ms: BudgetOverride<u64>,
     #[serde(default)]
     pub stream: bool,
     /// OpenAI `stream_options`. `include_usage: true` appends a final
@@ -3676,10 +4067,85 @@ pub struct ChatCompletionMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_empty_reason: Option<&'static str>,
     pub reasoning_folded_into_content: bool,
+    pub thinking_budget: ThinkingBudgetMetadata,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config_hashes: Option<ConfigHashes>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub performance: Option<ChatCompletionPerformanceMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ThinkingBudgetMetadata {
+    pub configured: bool,
+    pub applied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_time_ms: Option<u64>,
+    pub tokens_source: &'static str,
+    pub time_source: &'static str,
+    pub triggered: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_time_ms: Option<u64>,
+}
+
+impl Default for ThinkingBudgetMetadata {
+    fn default() -> Self {
+        Self {
+            configured: false,
+            applied: false,
+            max_tokens: None,
+            max_time_ms: None,
+            tokens_source: "unlimited",
+            time_source: "unlimited",
+            triggered: false,
+            trigger: None,
+            closed: None,
+            thinking_tokens: None,
+            thinking_time_ms: None,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ThinkingBudgetOutcomeWire<'a> {
+    triggered: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trigger: Option<&'a str>,
+    closed: bool,
+    thinking_tokens: usize,
+    thinking_time_ms: u64,
+}
+
+impl<'a> From<&'a ThinkingBudgetStatus> for ThinkingBudgetOutcomeWire<'a> {
+    fn from(status: &'a ThinkingBudgetStatus) -> Self {
+        Self {
+            triggered: status.trigger.is_some(),
+            trigger: status.trigger.map(|trigger| trigger.as_str()),
+            closed: status.closed,
+            thinking_tokens: status.thinking_tokens,
+            thinking_time_ms: status.elapsed_ms,
+        }
+    }
+}
+
+fn serialize_optional_thinking_budget_status<S>(
+    status: &Option<ThinkingBudgetStatus>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match status {
+        Some(status) => ThinkingBudgetOutcomeWire::from(status).serialize(serializer),
+        None => serializer.serialize_none(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3701,6 +4167,11 @@ pub struct Choice {
     pub index: usize,
     pub message: Message,
     pub finish_reason: String,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_thinking_budget_status"
+    )]
+    pub thinking_budget: Option<ThinkingBudgetStatus>,
     #[serde(skip)]
     pub completion_tokens: usize,
 }
@@ -3895,6 +4366,14 @@ fn resolve_speculative_mode(
     mtp_supported: bool,
     has_active_lora: bool,
 ) -> ResolvedSpeculativeMode {
+    // Forced thinking closure changes the accepted token at a precise decode
+    // boundary. A speculative block was verified against the model's sampled
+    // prefix, so replacing a token in the middle would invalidate every later
+    // accepted token in that block. Keep budgeted requests on single-token
+    // decode until speculative rollback can represent forced-token insertion.
+    if sampling.thinking_budget.is_some() {
+        return ResolvedSpeculativeMode::Off;
+    }
     let speculative = SpeculativeDecodingConfig::from_env();
     let (native_mtp_allowed, speculative_policy) = speculative_decode_policy_for_state(state);
     resolve_speculative_mode_from_config(
@@ -4267,6 +4746,7 @@ async fn chat_completions_inner(
 
     apply_eval_mode_chat_defaults(state, &mut req);
     let mut sampling = sampling_params_for_chat_request(&req);
+    let effective_thinking_budget = effective_thinking_budget_for_request(state, &req);
 
     // Validate adapter / adapters mutual exclusion. Done up front (before
     // backend dispatch) so 400-on-misuse is observable from any backend.
@@ -4294,13 +4774,18 @@ async fn chat_completions_inner(
     }
 
     if n_per > 1 {
-        let chat_choices_cache_key = deterministic_chat_choices_cache_key_with_vocab_size_and_fold(
-            &req,
-            n_per,
-            &sampling,
-            state.model_config.vocab_size,
-            fold_reasoning_into_content_for_request(state, &req),
-        )?;
+        let chat_choices_cache_key = if effective_thinking_budget.ms.is_some() {
+            None
+        } else {
+            deterministic_chat_choices_cache_key_with_vocab_size_and_fold(
+                &req,
+                n_per,
+                &sampling,
+                state.model_config.vocab_size,
+                fold_reasoning_into_content_for_request(state, &req),
+                effective_thinking_budget.tokens,
+            )?
+        };
         let can_hit_chat_choices_cache_before_adapter_work =
             state.active_adapter_name.read().unwrap().is_none();
         let mut chat_choices_cache_owner = None;
@@ -4377,12 +4862,17 @@ async fn chat_completions_inner(
         return Ok(Json(resp).into_response());
     }
 
-    let chat_request_cache_key = deterministic_chat_request_cache_key_with_vocab_size_and_fold(
-        &req,
-        &sampling,
-        state.model_config.vocab_size,
-        fold_reasoning_into_content_for_request(state, &req),
-    )?;
+    let chat_request_cache_key = if effective_thinking_budget.ms.is_some() {
+        None
+    } else {
+        deterministic_chat_request_cache_key_with_vocab_size_and_fold(
+            &req,
+            &sampling,
+            state.model_config.vocab_size,
+            fold_reasoning_into_content_for_request(state, &req),
+            effective_thinking_budget.tokens,
+        )?
+    };
     let can_hit_chat_request_cache_before_adapter_work =
         state.active_adapter_name.read().unwrap().is_none();
     let mut chat_request_cache_owner = None;
@@ -4452,6 +4942,7 @@ async fn chat_completions_inner(
     )?;
     let prompt_tokens = encode_prompt_tokens(state, &prompt_text)?;
     enforce_context_window(state, &mut sampling, prompt_tokens.len())?;
+    configure_thinking_budget_for_prompt(state, &req, &prompt_text, &mut sampling)?;
 
     if sampling.max_tokens == 0 {
         let cache_value = DeterministicChatRequestCacheValue {
@@ -4462,6 +4953,7 @@ async fn chat_completions_inner(
                 tool_calls: None,
                 finish_reason: "length".to_string(),
                 completion_tokens: 0,
+                thinking_budget_status: None,
             },
         };
         if let Some(owner) = chat_request_cache_owner.take() {
@@ -5311,6 +5803,7 @@ async fn generate_real_batched(
                 tool_call_id: None,
             },
             finish_reason,
+            thinking_budget: None,
             completion_tokens,
         }],
         usage: Usage {
@@ -5320,6 +5813,7 @@ async fn generate_real_batched(
         },
         metadata,
     };
+    attach_thinking_budget_outcome(sampling, &mut response);
     attach_chat_performance_metadata(
         state,
         req,
@@ -5384,6 +5878,9 @@ async fn generate_real_batched_streaming(
     let include_usage = req.stream_options.as_ref().is_some_and(|o| o.include_usage);
     let batching_engine = batching_engine.clone();
     let stop_sequences = sampling.stop.clone();
+    let thinking_budget = sampling.thinking_budget.clone();
+    let stream_thinking_budget_metadata =
+        thinking_budget_metadata_for_request(state, req, prompt_starts_in_reasoning);
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
 
     tokio::task::spawn({
@@ -5673,6 +6170,17 @@ async fn generate_real_batched_streaming(
                                 }
                                 let finish = assistant_output.finish_reason.clone();
                                 let record_completion = assistant_output.preview_source().to_string();
+                                let mut thinking_budget_metadata =
+                                    stream_thinking_budget_metadata.clone();
+                                if let Some(status) = finalized_thinking_budget_status(
+                                    thinking_budget.as_ref(),
+                                    completion_token_count as usize,
+                                ) {
+                                    apply_thinking_budget_status_to_metadata(
+                                        &mut thinking_budget_metadata,
+                                        status,
+                                    );
+                                }
                                 let chunk = ChatCompletionChunk {
                                     id: id.clone(),
                                     object: "chat.completion.chunk",
@@ -5690,7 +6198,10 @@ async fn generate_real_batched_streaming(
                                     }],
                                 };
                                 let _ = tx
-                                    .send(Event::default().data(serde_json::to_string(&chunk).unwrap()))
+                                    .send(Event::default().data(streaming_finish_chunk_json(
+                                        &chunk,
+                                        &thinking_budget_metadata,
+                                    )))
                                     .await;
                                 if include_usage {
                                     let _ = tx
@@ -5803,8 +6314,18 @@ async fn generate_real_batched_streaming(
                         finish_reason: Some(finish.clone()),
                     }],
                 };
+                let mut thinking_budget_metadata = stream_thinking_budget_metadata.clone();
+                if let Some(status) = finalized_thinking_budget_status(
+                    thinking_budget.as_ref(),
+                    completion_token_count as usize,
+                ) {
+                    apply_thinking_budget_status_to_metadata(&mut thinking_budget_metadata, status);
+                }
                 let _ = tx
-                    .send(Event::default().data(serde_json::to_string(&timeout_chunk).unwrap()))
+                    .send(Event::default().data(streaming_finish_chunk_json(
+                        &timeout_chunk,
+                        &thinking_budget_metadata,
+                    )))
                     .await;
                 let _ = tx.send(Event::default().data("[DONE]")).await;
                 record(finish, &record_completion, completion_token_count);
@@ -6182,6 +6703,7 @@ async fn generate_real(
                 tool_call_id: None,
             },
             finish_reason,
+            thinking_budget: None,
             completion_tokens,
         }],
         usage: Usage {
@@ -6191,6 +6713,7 @@ async fn generate_real(
         },
         metadata,
     };
+    attach_thinking_budget_outcome(sampling, &mut response);
     attach_chat_performance_metadata(
         state,
         req,
@@ -6249,6 +6772,7 @@ async fn generate_real_streaming(
     let prompt_token_count = prompt_tokens.len();
     let prompt_tokens = prompt_tokens.to_vec();
     let params = sampling.clone();
+    let thinking_budget = sampling.thinking_budget.clone();
     // For prefix-cache keying. After ensure_adapter / ensure_composed_adapter_swap,
     // state.loaded_adapter_name reflects the actually-loaded adapter (a
     // `__composed:<hash>` name when the request used `adapters: [...]`), which
@@ -6282,6 +6806,8 @@ async fn generate_real_streaming(
     let mut tool_gate = ToolCallGate::new(buffer_tool_content);
     let include_usage = req.stream_options.as_ref().is_some_and(|o| o.include_usage);
     let thinking_mode = thinking_mode_for_prompt(&prompt).to_string();
+    let stream_thinking_budget_metadata =
+        thinking_budget_metadata_for_request(state, req, prompt_starts_in_reasoning(&prompt));
     let prefix_cache_diagnostic = std::sync::Arc::new(std::sync::Mutex::new("unknown"));
 
     // Use a tokio mpsc channel to bridge sync generation -> async SSE stream.
@@ -6809,6 +7335,18 @@ async fn generate_real_streaming(
                                 }
                                 let finish = assistant_output.finish_reason.clone();
                                 let record_completion = assistant_output.preview_source().to_string();
+                                let thinking_budget_status = finalized_thinking_budget_status(
+                                    thinking_budget.as_ref(),
+                                    completion_token_count as usize,
+                                );
+                                let mut thinking_budget_metadata =
+                                    stream_thinking_budget_metadata.clone();
+                                if let Some(status) = thinking_budget_status {
+                                    apply_thinking_budget_status_to_metadata(
+                                        &mut thinking_budget_metadata,
+                                        status,
+                                    );
+                                }
                                 let chunk = ChatCompletionChunk {
                                     id: id.clone(),
                                     object: "chat.completion.chunk",
@@ -6828,7 +7366,10 @@ async fn generate_real_streaming(
                                 let _ = tx
                                     .send(
                                         Event::default()
-                                            .data(serde_json::to_string(&chunk).unwrap()),
+                                            .data(streaming_finish_chunk_json(
+                                                &chunk,
+                                                &thinking_budget_metadata,
+                                            )),
                                     )
                                     .await;
                                 if include_usage {
@@ -6849,6 +7390,7 @@ async fn generate_real_streaming(
                                     tool_calls: assistant_output.tool_calls.clone(),
                                     finish_reason: finish.clone(),
                                     completion_tokens: completion_token_count as usize,
+                                    thinking_budget_status,
                                 };
                                 if let Some(key) = completion_cache_key.clone() {
                                     completion_cache
@@ -6947,8 +7489,18 @@ async fn generate_real_streaming(
                         finish_reason: Some(finish.clone()),
                     }],
                 };
+                let mut thinking_budget_metadata = stream_thinking_budget_metadata.clone();
+                if let Some(status) = finalized_thinking_budget_status(
+                    thinking_budget.as_ref(),
+                    completion_token_count as usize,
+                ) {
+                    apply_thinking_budget_status_to_metadata(&mut thinking_budget_metadata, status);
+                }
                 let _ = tx
-                    .send(Event::default().data(serde_json::to_string(&error_chunk).unwrap()))
+                    .send(Event::default().data(streaming_finish_chunk_json(
+                        &error_chunk,
+                        &thinking_budget_metadata,
+                    )))
                     .await;
                 let _ = tx.send(Event::default().data("[DONE]")).await;
                 record(finish, &record_completion, completion_token_count);
@@ -7014,10 +7566,15 @@ async fn generate_mock(
         let engine_output = engine.step(&batch).map_err(ApiError::generation_failed)?;
 
         for (rid, token, finished) in &engine_output.results {
+            let accepted_token = if *rid == request_id {
+                token.map(|token| sampling.apply_thinking_budget(&output_tokens, token))
+            } else {
+                *token
+            };
             if *rid == request_id {
-                if let Some(t) = token {
+                if let Some(t) = accepted_token {
                     first_token_at.get_or_insert_with(std::time::Instant::now);
-                    output_tokens.push(*t);
+                    output_tokens.push(t);
                 }
             }
 
@@ -7027,8 +7584,9 @@ async fn generate_mock(
                 .find(|s| s.request_id == *rid && s.is_prefill)
                 .map(|s| s.num_tokens);
 
-            let finished = *finished || output_tokens.len() >= 20; // Mock: stop after 20 tokens
-            sched.update_request(rid, *token, finished, prefill_processed);
+            let finished = *finished
+                || output_tokens.len() >= sampling.max_tokens.min(MOCK_COMPLETION_TOKEN_LIMIT);
+            sched.update_request(rid, accepted_token, finished, prefill_processed);
         }
 
         // Check if our request is done
@@ -7107,6 +7665,7 @@ async fn generate_mock(
                 tool_call_id: None,
             },
             finish_reason,
+            thinking_budget: None,
             completion_tokens,
         }],
         usage: Usage {
@@ -7116,6 +7675,7 @@ async fn generate_mock(
         },
         metadata,
     };
+    attach_thinking_budget_outcome(sampling, &mut response);
     let ttft = first_token_at.map(|instant| instant.duration_since(request_start));
     attach_chat_performance_metadata(state, req, &mut response, request_start, ttft, None, None);
     Ok(response)
@@ -7197,6 +7757,13 @@ pub struct BatchCompletionRequest {
     /// are present to preserve existing request behavior.
     #[serde(default)]
     pub max_completion_tokens: Option<usize>,
+    /// Shared thinking token budget for every completion in the batch. Uses
+    /// the same omitted/null/number semantics as the chat endpoint.
+    #[serde(default)]
+    pub thinking_budget_tokens: BudgetOverride<usize>,
+    /// Shared thinking wall-clock budget (milliseconds) for every completion.
+    #[serde(default)]
+    pub thinking_budget_ms: BudgetOverride<u64>,
     #[serde(default, deserialize_with = "deserialize_optional_stop")]
     pub stop: Option<Vec<String>>,
     /// Base seed. When set, each completion's effective seed is
@@ -7253,6 +7820,11 @@ pub struct BatchCompletionItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<serde_json::Value>>,
     pub finish_reason: String,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_thinking_budget_status"
+    )]
+    pub thinking_budget: Option<ThinkingBudgetStatus>,
     pub usage: Usage,
 }
 
@@ -7287,6 +7859,8 @@ struct DeterministicBatchCacheKeyWire<'a> {
     n: usize,
     temperature_bits: u32,
     max_tokens: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_budget_tokens: Option<usize>,
     stop: Vec<String>,
     top_p_bits: u32,
     top_k: u32,
@@ -7382,7 +7956,13 @@ fn deterministic_batch_cache_key_with_vocab_size(
     total_outputs: usize,
     vocab_size: usize,
 ) -> Option<DeterministicBatchCacheKey> {
-    deterministic_batch_cache_key_with_vocab_size_and_fold(req, total_outputs, vocab_size, false)
+    deterministic_batch_cache_key_with_vocab_size_and_fold(
+        req,
+        total_outputs,
+        vocab_size,
+        false,
+        batch_token_budget_without_server_default(req),
+    )
 }
 
 fn deterministic_batch_cache_key_with_vocab_size_and_fold(
@@ -7390,6 +7970,7 @@ fn deterministic_batch_cache_key_with_vocab_size_and_fold(
     total_outputs: usize,
     vocab_size: usize,
     fold_reasoning_into_content: bool,
+    thinking_budget_tokens: Option<usize>,
 ) -> Option<DeterministicBatchCacheKey> {
     if total_outputs == 0 || req.adapter.is_some() || req.adapters.is_some() {
         return None;
@@ -7429,6 +8010,7 @@ fn deterministic_batch_cache_key_with_vocab_size_and_fold(
         n: req.n.unwrap_or(1),
         temperature_bits,
         max_tokens: sampling.max_tokens,
+        thinking_budget_tokens,
         stop,
         top_p_bits,
         top_k,
@@ -7454,6 +8036,7 @@ fn batch_response_from_cached_value(
         .completions
         .into_iter()
         .map(|item| {
+            let thinking_budget = item.thinking_budget_status;
             let reasoning_content = item.reasoning_content;
             BatchCompletionItem {
                 prompt_index: item.prompt_index,
@@ -7466,6 +8049,7 @@ fn batch_response_from_cached_value(
                 reasoning_content,
                 tool_calls: item.tool_calls,
                 finish_reason: item.finish_reason,
+                thinking_budget,
                 usage: Usage {
                     prompt_tokens: item.prompt_tokens,
                     completion_tokens: item.completion_tokens,
@@ -7509,6 +8093,7 @@ fn batch_response_from_cached_chat_choices(
         .map(|(completion_index, completion)| {
             total_completion_tokens =
                 total_completion_tokens.saturating_add(completion.completion_tokens);
+            let thinking_budget = completion.thinking_budget_status;
             let reasoning_content = completion.reasoning_content;
             BatchCompletionItem {
                 prompt_index: 0,
@@ -7521,6 +8106,7 @@ fn batch_response_from_cached_chat_choices(
                 reasoning_content,
                 tool_calls: completion.tool_calls,
                 finish_reason: completion.finish_reason,
+                thinking_budget,
                 usage: Usage {
                     prompt_tokens: prompt_tokens_per_choice,
                     completion_tokens: completion.completion_tokens,
@@ -7572,6 +8158,7 @@ fn batch_response_from_cached_chat_choice_groups(
         for (completion_index, completion) in cached.completions.into_iter().enumerate() {
             total_completion_tokens =
                 total_completion_tokens.saturating_add(completion.completion_tokens);
+            let thinking_budget = completion.thinking_budget_status;
             let reasoning_content = completion.reasoning_content;
             completions.push(BatchCompletionItem {
                 prompt_index,
@@ -7584,6 +8171,7 @@ fn batch_response_from_cached_chat_choice_groups(
                 reasoning_content,
                 tool_calls: completion.tool_calls,
                 finish_reason: completion.finish_reason,
+                thinking_budget,
                 usage: Usage {
                     prompt_tokens: cached.prompt_tokens,
                     completion_tokens: completion.completion_tokens,
@@ -7628,6 +8216,7 @@ fn batch_response_from_cached_chat_requests(
             total_prompt_tokens = total_prompt_tokens.saturating_add(cached.prompt_tokens);
             total_completion_tokens =
                 total_completion_tokens.saturating_add(completion.completion_tokens);
+            let thinking_budget = completion.thinking_budget_status;
             let reasoning_content = completion.reasoning_content;
             BatchCompletionItem {
                 prompt_index,
@@ -7640,6 +8229,7 @@ fn batch_response_from_cached_chat_requests(
                 reasoning_content,
                 tool_calls: completion.tool_calls,
                 finish_reason: completion.finish_reason,
+                thinking_budget,
                 usage: Usage {
                     prompt_tokens: cached.prompt_tokens,
                     completion_tokens: completion.completion_tokens,
@@ -7670,7 +8260,12 @@ fn batch_response_from_chat_request_cache_hits(
     req: &BatchCompletionRequest,
     vocab_size: usize,
 ) -> Result<Option<BatchCompletionResponse>, ApiError> {
-    if req.n.unwrap_or(1) != 1 || req.adapter.is_some() || req.adapters.is_some() {
+    let budget = effective_batch_thinking_budget_for_request(state, req);
+    if (budget.tokens.is_some() || budget.ms.is_some())
+        || req.n.unwrap_or(1) != 1
+        || req.adapter.is_some()
+        || req.adapters.is_some()
+    {
         return Ok(None);
     }
 
@@ -7714,7 +8309,12 @@ fn batch_response_from_chat_choices_cache_hits(
     vocab_size: usize,
 ) -> Result<Option<BatchCompletionResponse>, ApiError> {
     let n_per = req.n.unwrap_or(1);
-    if n_per <= 1 || req.adapter.is_some() || req.adapters.is_some() {
+    let budget = effective_batch_thinking_budget_for_request(state, req);
+    if (budget.tokens.is_some() || budget.ms.is_some())
+        || n_per <= 1
+        || req.adapter.is_some()
+        || req.adapters.is_some()
+    {
         return Ok(None);
     }
 
@@ -7775,6 +8375,7 @@ fn cache_value_from_batch_response(resp: &BatchCompletionResponse) -> Determinis
                 finish_reason: item.finish_reason.clone(),
                 prompt_tokens: item.usage.prompt_tokens,
                 completion_tokens: item.usage.completion_tokens,
+                thinking_budget_status: item.thinking_budget,
             })
             .collect(),
         prompt_tokens: resp.usage.prompt_tokens,
@@ -7793,6 +8394,7 @@ fn chat_request_cache_value_from_batch_item(
             tool_calls: item.tool_calls.clone(),
             finish_reason: item.finish_reason.clone(),
             completion_tokens: item.usage.completion_tokens,
+            thinking_budget_status: item.thinking_budget,
         },
     })
 }
@@ -7804,7 +8406,12 @@ fn store_chat_request_cache_from_batch_response(
     vocab_size: usize,
 ) -> Result<(), ApiError> {
     let n_per = req.n.unwrap_or(1);
-    if n_per == 0 || req.adapter.is_some() || req.adapters.is_some() {
+    let budget = effective_batch_thinking_budget_for_request(state, req);
+    if (budget.tokens.is_some() || budget.ms.is_some())
+        || n_per == 0
+        || req.adapter.is_some()
+        || req.adapters.is_some()
+    {
         return Ok(());
     }
 
@@ -7891,6 +8498,7 @@ fn chat_choices_cache_value_from_batch_items(
                 tool_calls: item.tool_calls.clone(),
                 finish_reason: item.finish_reason.clone(),
                 completion_tokens: item.usage.completion_tokens,
+                thinking_budget_status: item.thinking_budget,
             })
             .collect(),
     })
@@ -7903,7 +8511,12 @@ fn store_chat_choices_cache_from_batch_response(
     vocab_size: usize,
 ) -> Result<(), ApiError> {
     let n_per = req.n.unwrap_or(1);
-    if n_per <= 1 || req.adapter.is_some() || req.adapters.is_some() {
+    let budget = effective_batch_thinking_budget_for_request(state, req);
+    if (budget.tokens.is_some() || budget.ms.is_some())
+        || n_per <= 1
+        || req.adapter.is_some()
+        || req.adapters.is_some()
+    {
         return Ok(());
     }
 
@@ -7952,6 +8565,10 @@ fn store_chat_caches_from_batch_response(
     resp: &BatchCompletionResponse,
     vocab_size: usize,
 ) -> Result<(), ApiError> {
+    let budget = effective_batch_thinking_budget_for_request(state, req);
+    if budget.tokens.is_some() || budget.ms.is_some() {
+        return Ok(());
+    }
     store_chat_request_cache_from_batch_response(state, req, resp, vocab_size)?;
     store_chat_choices_cache_from_batch_response(state, req, resp, vocab_size)?;
     Ok(())
@@ -8037,13 +8654,19 @@ async fn batch_completions_inner(
     }
 
     apply_eval_mode_batch_defaults(state, &mut req);
+    let effective_thinking_budget = effective_batch_thinking_budget_for_request(state, &req);
 
-    let batch_cache_key = deterministic_batch_cache_key_with_vocab_size_and_fold(
-        &req,
-        total_outputs,
-        state.model_config.vocab_size,
-        state.fold_reasoning_into_content,
-    );
+    let batch_cache_key = if effective_thinking_budget.ms.is_some() {
+        None
+    } else {
+        deterministic_batch_cache_key_with_vocab_size_and_fold(
+            &req,
+            total_outputs,
+            state.model_config.vocab_size,
+            state.fold_reasoning_into_content,
+            effective_thinking_budget.tokens,
+        )
+    };
     let can_hit_batch_cache_before_adapter_work =
         state.active_adapter_name.read().unwrap().is_none();
     let mut batch_cache_owner = None;
@@ -8082,11 +8705,15 @@ async fn batch_completions_inner(
     }
 
     let chat_choices_cache_key =
-        deterministic_chat_choices_cache_key_from_single_prompt_batch_with_vocab_size_and_fold(
-            &req,
-            state.model_config.vocab_size,
-            state.fold_reasoning_into_content,
-        )?;
+        if effective_thinking_budget.tokens.is_some() || effective_thinking_budget.ms.is_some() {
+            None
+        } else {
+            deterministic_chat_choices_cache_key_from_single_prompt_batch_with_vocab_size_and_fold(
+                &req,
+                state.model_config.vocab_size,
+                state.fold_reasoning_into_content,
+            )?
+        };
     if can_hit_batch_cache_before_adapter_work && let Some(key) = chat_choices_cache_key.as_ref() {
         let probe = state.chat_choices_cache.lock().unwrap().probe(key);
         match probe {
@@ -8195,6 +8822,7 @@ async fn batch_completions_inner(
                         reasoning_content: None,
                         tool_calls: None,
                         finish_reason: "length".to_string(),
+                        thinking_budget: None,
                         usage: Usage {
                             prompt_tokens: prompt_token_count,
                             completion_tokens: 0,
@@ -8289,8 +8917,10 @@ async fn batch_completions_inner(
     // (`temp=0`) duplicates go further: the output is deterministic, so one
     // decode can serve each prompt-local `n` group and every identical prompt
     // row in the group.
-    let clone_greedy_completions = batch_can_clone_deterministic_completions(&req);
-    let clone_greedy_prompt_groups = batch_can_clone_identical_prompt_groups(&req);
+    let clone_greedy_completions =
+        effective_thinking_budget.ms.is_none() && batch_can_clone_deterministic_completions(&req);
+    let clone_greedy_prompt_groups =
+        effective_thinking_budget.ms.is_none() && batch_can_clone_identical_prompt_groups(&req);
     let prompt_count = req.prompts.len();
     let prompt_groups = batch_prompt_groups(&req.prompts);
     let prepare_prompt_groups = !batch_prepared_prompts_disabled() && !clone_greedy_completions;
@@ -8309,6 +8939,8 @@ async fn batch_completions_inner(
         let sampling_preset = req.sampling_preset.clone();
         let max_tokens = req.max_tokens;
         let max_completion_tokens = req.max_completion_tokens;
+        let thinking_budget_tokens = req.thinking_budget_tokens;
+        let thinking_budget_ms = req.thinking_budget_ms;
         let seed = req.seed;
         let tools = normalized_tools_option_for_synthetic_request(req.tools.as_deref());
         let tool_choice = normalized_tool_choice_option_for_synthetic_request(
@@ -8365,6 +8997,8 @@ async fn batch_completions_inner(
                         sampling_preset: sampling_preset.clone(),
                         max_tokens,
                         max_completion_tokens,
+                        thinking_budget_tokens,
+                        thinking_budget_ms,
                         stream: false,
                         stream_options: None,
                         stop: stop.clone(),
@@ -8462,6 +9096,7 @@ async fn batch_completions_inner(
                 reasoning_content: choice.message.reasoning_content,
                 tool_calls: choice.message.tool_calls,
                 finish_reason: choice.finish_reason,
+                thinking_budget: choice.thinking_budget,
                 usage: resp.usage,
             });
         }
@@ -8543,6 +9178,7 @@ async fn generate_multi_chat_response(
                 tool_calls: None,
                 finish_reason: "length".to_string(),
                 completion_tokens: 0,
+                thinking_budget_status: None,
             },
         );
         resp.metadata = chat_completion_metadata_from_prompt(state, req, &prompt_text);
@@ -8587,7 +9223,10 @@ async fn generate_multi_chat_response(
         }
     }
 
-    let clone_greedy_choices = request_values_are_effectively_greedy(req.temperature, req.top_k);
+    let clone_greedy_choices = effective_thinking_budget_for_request(state, req)
+        .ms
+        .is_none()
+        && request_values_are_effectively_greedy(req.temperature, req.top_k);
     let completion_count = if clone_greedy_choices { 1 } else { n_per };
     let mut responses = Vec::with_capacity(n_per);
     let stop = normalized_stop_option_for_synthetic_request(req.stop.as_deref());
@@ -8616,6 +9255,8 @@ async fn generate_multi_chat_response(
             sampling_preset: req.sampling_preset.clone(),
             max_tokens: req.max_tokens,
             max_completion_tokens: req.max_completion_tokens,
+            thinking_budget_tokens: req.thinking_budget_tokens,
+            thinking_budget_ms: req.thinking_budget_ms,
             stream: false,
             stream_options: None,
             stop: stop.clone(),
@@ -8681,6 +9322,7 @@ fn chat_response_from_multi_responses(
             index: completion_idx,
             message: choice.message,
             finish_reason: choice.finish_reason,
+            thinking_budget: choice.thinking_budget,
             completion_tokens: choice.completion_tokens,
         });
     }
@@ -8820,14 +9462,22 @@ async fn generate_one_response(
 ) -> Result<ChatCompletionResponse, ApiError> {
     let request_start = std::time::Instant::now();
     apply_eval_mode_chat_defaults(state, &mut req);
-    let sampling = sampling_params_for_chat_request(&req);
+    let mut sampling = sampling_params_for_chat_request(&req);
 
-    let chat_request_cache_key = deterministic_chat_request_cache_key_with_vocab_size_and_fold(
-        &req,
-        &sampling,
-        state.model_config.vocab_size,
-        fold_reasoning_into_content_for_request(state, &req),
-    )?;
+    let chat_request_cache_key = if effective_thinking_budget_for_request(state, &req)
+        .ms
+        .is_some()
+    {
+        None
+    } else {
+        deterministic_chat_request_cache_key_with_vocab_size_and_fold(
+            &req,
+            &sampling,
+            state.model_config.vocab_size,
+            fold_reasoning_into_content_for_request(state, &req),
+            effective_thinking_budget_for_request(state, &req).tokens,
+        )?
+    };
     let can_hit_chat_request_cache_before_prompt_work =
         state.loaded_adapter_name.read().unwrap().is_none();
     let mut chat_request_cache_owner = None;
@@ -8871,6 +9521,8 @@ async fn generate_one_response(
         req.chat_template_kwargs.as_ref(),
     )?;
     let prompt_tokens = encode_prompt_tokens(state, &prompt_text)?;
+    enforce_context_window(state, &mut sampling, prompt_tokens.len())?;
+    configure_thinking_budget_for_prompt(state, &req, &prompt_text, &mut sampling)?;
 
     generate_one_prepared_response(
         state,
@@ -8893,14 +9545,22 @@ async fn generate_one_prepared_prompt_response(
 ) -> Result<ChatCompletionResponse, ApiError> {
     let request_start = std::time::Instant::now();
     apply_eval_mode_chat_defaults(state, &mut req);
-    let sampling = sampling_params_for_chat_request(&req);
+    let mut sampling = sampling_params_for_chat_request(&req);
 
-    let chat_request_cache_key = deterministic_chat_request_cache_key_with_vocab_size_and_fold(
-        &req,
-        &sampling,
-        state.model_config.vocab_size,
-        fold_reasoning_into_content_for_request(state, &req),
-    )?;
+    let chat_request_cache_key = if effective_thinking_budget_for_request(state, &req)
+        .ms
+        .is_some()
+    {
+        None
+    } else {
+        deterministic_chat_request_cache_key_with_vocab_size_and_fold(
+            &req,
+            &sampling,
+            state.model_config.vocab_size,
+            fold_reasoning_into_content_for_request(state, &req),
+            effective_thinking_budget_for_request(state, &req).tokens,
+        )?
+    };
     let can_hit_chat_request_cache_before_prompt_work =
         state.loaded_adapter_name.read().unwrap().is_none();
     let mut chat_request_cache_owner = None;
@@ -8935,6 +9595,9 @@ async fn generate_one_prepared_prompt_response(
             }
         }
     }
+
+    enforce_context_window(state, &mut sampling, prompt_tokens.len())?;
+    configure_thinking_budget_for_prompt(state, &req, prompt_text, &mut sampling)?;
 
     generate_one_prepared_response(
         state,
@@ -9171,6 +9834,320 @@ mod tests {
 
     fn parse_request(json: &str) -> ChatCompletionRequest {
         serde_json::from_str(json).expect("request should deserialize")
+    }
+
+    #[test]
+    fn thinking_budget_request_fields_preserve_inherit_unlimited_and_zero() {
+        let inherited = parse_request(r#"{"messages":[{"role":"user","content":"hi"}]}"#);
+        assert_eq!(inherited.thinking_budget_tokens, BudgetOverride::Inherit);
+        assert_eq!(inherited.thinking_budget_ms, BudgetOverride::Inherit);
+
+        let unlimited = parse_request(
+            r#"{"messages":[{"role":"user","content":"hi"}],
+                "thinking_budget_tokens":null,"thinking_budget_ms":null}"#,
+        );
+        assert_eq!(unlimited.thinking_budget_tokens, BudgetOverride::Unlimited);
+        assert_eq!(unlimited.thinking_budget_ms, BudgetOverride::Unlimited);
+
+        let immediate = parse_request(
+            r#"{"messages":[{"role":"user","content":"hi"}],
+                "thinking_budget_tokens":0,"thinking_budget_ms":0}"#,
+        );
+        assert_eq!(immediate.thinking_budget_tokens, BudgetOverride::Limited(0));
+        assert_eq!(immediate.thinking_budget_ms, BudgetOverride::Limited(0));
+    }
+
+    #[test]
+    fn thinking_budget_configuration_resolves_defaults_and_request_unlimited() {
+        let mut state = make_qwen_template_test_state();
+        let tokenizer = kiln_core::tokenizer::KilnTokenizer::from_bytes(
+            br#"{
+                "version":"1.0",
+                "model":{
+                    "type":"WordLevel",
+                    "vocab":{"</think>":0,"<unk>":1},
+                    "unk_token":"<unk>"
+                }
+            }"#,
+        )
+        .unwrap();
+        state.tokenizer = std::sync::Arc::new(tokenizer);
+        state.default_thinking_budget_tokens = Some(12);
+        state.default_thinking_budget_ms = Some(250);
+        let inherited =
+            parse_request(r#"{"messages":[{"role":"user","content":"hi"}],"max_tokens":64}"#);
+        let mut sampling = sampling_params_for_chat_request(&inherited);
+
+        configure_thinking_budget_for_prompt(
+            &state,
+            &inherited,
+            "<|im_start|>assistant\n<think>\n\n",
+            &mut sampling,
+        )
+        .unwrap();
+        let budget = sampling.thinking_budget.as_ref().unwrap();
+        assert_eq!(budget.max_tokens(), Some(12));
+        assert_eq!(
+            budget.max_time(),
+            Some(std::time::Duration::from_millis(250))
+        );
+
+        let request_override = parse_request(
+            r#"{"messages":[{"role":"user","content":"hi"}],"max_tokens":64,
+                "thinking_budget_tokens":null,"thinking_budget_ms":0}"#,
+        );
+        let mut sampling = sampling_params_for_chat_request(&request_override);
+        configure_thinking_budget_for_prompt(
+            &state,
+            &request_override,
+            "<|im_start|>assistant\n<think>\n",
+            &mut sampling,
+        )
+        .unwrap();
+        let budget = sampling.thinking_budget.as_ref().unwrap();
+        assert_eq!(budget.max_tokens(), None);
+        assert_eq!(budget.max_time(), Some(std::time::Duration::ZERO));
+    }
+
+    #[test]
+    fn thinking_budget_is_inert_outside_reasoning_and_for_zero_output() {
+        let mut state = make_qwen_template_test_state();
+        state.default_thinking_budget_tokens = Some(8);
+        let req = parse_request(r#"{"messages":[{"role":"user","content":"hi"}],"max_tokens":64}"#);
+        let mut sampling = sampling_params_for_chat_request(&req);
+        configure_thinking_budget_for_prompt(
+            &state,
+            &req,
+            "<|im_start|>assistant\n",
+            &mut sampling,
+        )
+        .unwrap();
+        assert!(sampling.thinking_budget.is_none());
+
+        let zero = parse_request(r#"{"messages":[{"role":"user","content":"hi"}],"max_tokens":0}"#);
+        let metadata =
+            chat_completion_metadata_from_prompt(&state, &zero, "<|im_start|>assistant\n<think>\n");
+        assert!(metadata.thinking_budget.configured);
+        assert!(!metadata.thinking_budget.applied);
+    }
+
+    #[test]
+    fn thinking_budget_rejects_stop_sequences_that_can_intercept_the_close_tag() {
+        for stop in ["", "think", "</think>\n", "think>\n", "prefix</thi"] {
+            assert!(
+                stop_sequence_conflicts_with_thinking_close(stop),
+                "expected conflict for {stop:?}"
+            );
+        }
+        assert!(!stop_sequence_conflicts_with_thinking_close("<|im_end|>"));
+
+        let state = make_qwen_template_test_state();
+        let req = parse_request(
+            r#"{"messages":[{"role":"user","content":"hi"}],"max_tokens":64,
+                "thinking_budget_tokens":8,"stop":["</think>\n"]}"#,
+        );
+        let mut sampling = sampling_params_for_chat_request(&req);
+        let error = configure_thinking_budget_for_prompt(
+            &state,
+            &req,
+            "<|im_start|>assistant\n<think>\n",
+            &mut sampling,
+        )
+        .unwrap_err();
+        assert!(error.message.contains("stop sequence"));
+    }
+
+    #[test]
+    fn thinking_budget_rejects_negative_request_values() {
+        assert!(
+            serde_json::from_str::<ChatCompletionRequest>(
+                r#"{"messages":[{"role":"user","content":"hi"}],"thinking_budget_tokens":-1}"#,
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<ChatCompletionRequest>(
+                r#"{"messages":[{"role":"user","content":"hi"}],"thinking_budget_ms":-1}"#,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn token_thinking_budget_is_part_of_chat_cache_identity() {
+        let a = parse_request(
+            r#"{"messages":[{"role":"user","content":"hi"}],
+                "temperature":0,"thinking_budget_tokens":8}"#,
+        );
+        let b = parse_request(
+            r#"{"messages":[{"role":"user","content":"hi"}],
+                "temperature":0,"thinking_budget_tokens":9}"#,
+        );
+        let key_a = deterministic_chat_request_cache_key(&a, &sampling_params_for_chat_request(&a))
+            .unwrap()
+            .unwrap();
+        let key_b = deterministic_chat_request_cache_key(&b, &sampling_params_for_chat_request(&b))
+            .unwrap()
+            .unwrap();
+        assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn deterministic_completion_cache_keys_token_budgets_and_rejects_time_budgets() {
+        let state = make_qwen_template_test_state();
+        let mut token_sampling = SamplingParams::greedy();
+        token_sampling.max_tokens = 16;
+        token_sampling.thinking_budget =
+            Some(ThinkingBudget::new(Some(4), None, token_sampling.max_tokens, vec![90]).unwrap());
+        let token_key =
+            deterministic_completion_cache_key(&state, &[1, 2, 3], &token_sampling, false).unwrap();
+        assert_eq!(token_key.thinking_budget_tokens, Some(4));
+
+        let mut time_sampling = SamplingParams::greedy();
+        time_sampling.max_tokens = 16;
+        time_sampling.thinking_budget = Some(
+            ThinkingBudget::new(
+                None,
+                Some(std::time::Duration::from_millis(1)),
+                time_sampling.max_tokens,
+                vec![90],
+            )
+            .unwrap(),
+        );
+        assert!(
+            deterministic_completion_cache_key(&state, &[1, 2, 3], &time_sampling, false).is_none()
+        );
+    }
+
+    #[test]
+    fn thinking_budget_outcome_serializes_and_survives_cache_conversion() {
+        let status = ThinkingBudgetStatus {
+            trigger: Some(kiln_core::sampling::ThinkingBudgetTrigger::Tokens),
+            closed: true,
+            thinking_tokens: 8,
+            elapsed_ms: 17,
+        };
+        let response = ChatCompletionResponse {
+            id: "chatcmpl-budget".to_string(),
+            object: "chat.completion",
+            created: 1,
+            model: "test".to_string(),
+            choices: vec![Choice {
+                index: 0,
+                message: Message {
+                    role: "assistant".to_string(),
+                    content: "answer".to_string(),
+                    reasoning_content: Some("reasoning".to_string()),
+                    tool_calls: None,
+                    name: None,
+                    tool_call_id: None,
+                },
+                finish_reason: "stop".to_string(),
+                thinking_budget: Some(status),
+                completion_tokens: 10,
+            }],
+            usage: Usage {
+                prompt_tokens: 4,
+                completion_tokens: 10,
+                total_tokens: 14,
+            },
+            metadata: ChatCompletionMetadata {
+                thinking_enabled: true,
+                thinking_mode: "reasoning".to_string(),
+                thinking_source: "request",
+                default_thinking_enabled: None,
+                final_content_empty: false,
+                content_empty_reason: None,
+                reasoning_folded_into_content: false,
+                thinking_budget: ThinkingBudgetMetadata::default(),
+                config_hashes: None,
+                performance: None,
+            },
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["choices"][0]["thinking_budget"]["triggered"], true);
+        assert_eq!(json["choices"][0]["thinking_budget"]["trigger"], "tokens");
+        assert_eq!(json["choices"][0]["thinking_budget"]["closed"], true);
+        assert_eq!(json["choices"][0]["thinking_budget"]["thinking_tokens"], 8);
+        assert_eq!(
+            json["choices"][0]["thinking_budget"]["thinking_time_ms"],
+            17
+        );
+        assert_eq!(
+            cache_value_from_response(&response)
+                .unwrap()
+                .thinking_budget_status,
+            Some(status)
+        );
+    }
+
+    #[test]
+    fn streaming_finish_metadata_distinguishes_natural_and_unclosed_thinking() {
+        let chunk = ChatCompletionChunk {
+            id: "chatcmpl-budget".to_string(),
+            object: "chat.completion.chunk",
+            created: 1,
+            model: "test".to_string(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: Delta {
+                    role: None,
+                    content: None,
+                    reasoning_content: None,
+                    tool_calls: None,
+                },
+                finish_reason: Some("stop".to_string()),
+            }],
+        };
+        let mut metadata = ThinkingBudgetMetadata::default();
+        metadata.applied = true;
+        apply_thinking_budget_status_to_metadata(
+            &mut metadata,
+            ThinkingBudgetStatus {
+                trigger: None,
+                closed: true,
+                thinking_tokens: 5,
+                elapsed_ms: 9,
+            },
+        );
+        let natural: serde_json::Value =
+            serde_json::from_str(&streaming_finish_chunk_json(&chunk, &metadata)).unwrap();
+        assert_eq!(natural["metadata"]["thinking_budget"]["triggered"], false);
+        assert_eq!(natural["metadata"]["thinking_budget"]["closed"], true);
+
+        apply_thinking_budget_status_to_metadata(
+            &mut metadata,
+            ThinkingBudgetStatus {
+                trigger: None,
+                closed: false,
+                thinking_tokens: 7,
+                elapsed_ms: 11,
+            },
+        );
+        let unclosed: serde_json::Value =
+            serde_json::from_str(&streaming_finish_chunk_json(&chunk, &metadata)).unwrap();
+        assert_eq!(unclosed["metadata"]["thinking_budget"]["closed"], false);
+    }
+
+    #[test]
+    fn finalized_stream_status_preserves_partial_forced_close_telemetry() {
+        let forcing = ThinkingBudget::new(Some(0), None, 4, vec![90, 91]).unwrap();
+        assert_eq!(forcing.apply(&[], 10), 90);
+        let forcing_status = finalized_thinking_budget_status(Some(&forcing), 1).unwrap();
+        assert_eq!(
+            forcing_status.trigger,
+            Some(kiln_core::sampling::ThinkingBudgetTrigger::Tokens)
+        );
+        assert!(!forcing_status.closed);
+        assert_eq!(forcing_status.thinking_tokens, 0);
+
+        let active = ThinkingBudget::new(Some(10), None, 16, vec![90]).unwrap();
+        assert_eq!(active.apply(&[], 10), 10);
+        let active_status = finalized_thinking_budget_status(Some(&active), 1).unwrap();
+        assert_eq!(active_status.trigger, None);
+        assert!(!active_status.closed);
+        assert_eq!(active_status.thinking_tokens, 1);
     }
 
     /// pi always sends tools, and presence_penalty 1.5 punishes every
@@ -10106,6 +11083,7 @@ mod tests {
                     tool_call_id: None,
                 },
                 finish_reason: assistant_output.finish_reason,
+                thinking_budget: None,
                 completion_tokens: 4,
             }],
             usage: Usage {
@@ -10236,6 +11214,7 @@ mod tests {
                     tool_call_id: None,
                 },
                 finish_reason: "stop".to_string(),
+                thinking_budget: None,
                 completion_tokens: 3,
             }],
             usage: Usage {
@@ -10251,6 +11230,7 @@ mod tests {
                 final_content_empty: false,
                 content_empty_reason: None,
                 reasoning_folded_into_content: true,
+                thinking_budget: ThinkingBudgetMetadata::default(),
                 config_hashes: None,
                 performance: None,
             },
@@ -10781,6 +11761,7 @@ mod tests {
                     tool_call_id: None,
                 },
                 finish_reason: "tool_calls".to_string(),
+                thinking_budget: None,
                 completion_tokens: 8,
             }],
             usage: Usage {
@@ -10796,6 +11777,7 @@ mod tests {
                 final_content_empty: true,
                 content_empty_reason: Some("tool_call"),
                 reasoning_folded_into_content: false,
+                thinking_budget: ThinkingBudgetMetadata::default(),
                 config_hashes: None,
                 performance: None,
             },
@@ -10847,6 +11829,7 @@ mod tests {
             tool_calls: Some(tool_calls.clone()),
             finish_reason: "tool_calls".to_string(),
             completion_tokens: 7,
+            thinking_budget_status: None,
         };
 
         let from_choices = batch_response_from_cached_chat_choices(
@@ -10892,6 +11875,7 @@ mod tests {
             reasoning_content: output.reasoning_content,
             tool_calls: output.tool_calls,
             finish_reason: output.finish_reason,
+            thinking_budget: None,
             usage: Usage {
                 prompt_tokens: 5,
                 completion_tokens: 7,
@@ -10926,6 +11910,7 @@ mod tests {
             reasoning_content: Some("Still thinking.".to_string()),
             tool_calls: None,
             finish_reason: "length".to_string(),
+            thinking_budget: None,
             usage: Usage {
                 prompt_tokens: 5,
                 completion_tokens: 7,
@@ -10957,6 +11942,7 @@ mod tests {
                 reasoning_content: None,
                 tool_calls: Some(tool_calls.clone()),
                 finish_reason: "tool_calls".to_string(),
+                thinking_budget: None,
                 usage: Usage {
                     prompt_tokens: 4,
                     completion_tokens: 8,
@@ -10999,6 +11985,7 @@ mod tests {
             reasoning_content: None,
             tool_calls: Some(tool_calls.clone()),
             finish_reason: "tool_calls".to_string(),
+            thinking_budget: None,
             usage: Usage {
                 prompt_tokens: 4,
                 completion_tokens: 8,
@@ -11236,6 +12223,17 @@ mod tests {
 
     fn parse_batch_request(json: &str) -> BatchCompletionRequest {
         serde_json::from_str(json).expect("batch request should deserialize")
+    }
+
+    #[test]
+    fn batch_thinking_budgets_preserve_null_and_numeric_overrides() {
+        let inherited = parse_batch_request(r#"{"prompts":[[]]}"#);
+        assert_eq!(inherited.thinking_budget_tokens, BudgetOverride::Inherit);
+        let request = parse_batch_request(
+            r#"{"prompts":[[]],"thinking_budget_tokens":null,"thinking_budget_ms":250}"#,
+        );
+        assert_eq!(request.thinking_budget_tokens, BudgetOverride::Unlimited);
+        assert_eq!(request.thinking_budget_ms, BudgetOverride::Limited(250));
     }
 
     fn make_batch_test_state() -> AppState {
@@ -13180,8 +14178,20 @@ mod tests {
             r#"{"prompts":[[{"role":"user","content":"same batch prompt"}]],"temperature":0.0,"max_tokens":4}"#,
         );
         assert_ne!(
-            deterministic_batch_cache_key_with_vocab_size_and_fold(&batch, 1, usize::MAX, false),
-            deterministic_batch_cache_key_with_vocab_size_and_fold(&batch, 1, usize::MAX, true),
+            deterministic_batch_cache_key_with_vocab_size_and_fold(
+                &batch,
+                1,
+                usize::MAX,
+                false,
+                batch_token_budget_without_server_default(&batch),
+            ),
+            deterministic_batch_cache_key_with_vocab_size_and_fold(
+                &batch,
+                1,
+                usize::MAX,
+                true,
+                batch_token_budget_without_server_default(&batch),
+            ),
             "batch-cache entries must split when server folding changes response shape"
         );
     }
@@ -16430,6 +17440,7 @@ mod tests {
                     tool_calls: None,
                     finish_reason: "stop".to_string(),
                     completion_tokens: 3,
+                    thinking_budget_status: None,
                 },
             );
         assert_eq!(

@@ -15,6 +15,55 @@ use crate::adapter_verify::{
     DETERMINISTIC_GREEDY_TEXT_NOTE, finalize_status, push_check, verify_adapter_offline,
 };
 
+/// CLI value for a thinking-budget flag. Omitting the flag inherits the
+/// server or template value; a present flag is either a numeric limit or an
+/// explicit request for no limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingBudgetArg<T> {
+    Unlimited,
+    Limited(T),
+}
+
+impl<T> std::str::FromStr for ThinkingBudgetArg<T>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        let value = raw.trim();
+        if value.eq_ignore_ascii_case("unlimited") {
+            return Ok(Self::Unlimited);
+        }
+        value.parse::<T>().map(Self::Limited).map_err(|err| {
+            format!("invalid thinking budget `{raw}`: expected a non-negative integer or `unlimited` ({err})")
+        })
+    }
+}
+
+impl<T: serde::Serialize> serde::Serialize for ThinkingBudgetArg<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Unlimited => serializer.serialize_none(),
+            Self::Limited(value) => value.serialize(serializer),
+        }
+    }
+}
+
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for ThinkingBudgetArg<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Option::<T>::deserialize(deserializer)
+            .map(|value| value.map_or(Self::Unlimited, Self::Limited))
+    }
+}
+
 const TOP_LEVEL_OVERVIEW: &str = r#"Kiln serves Qwen3.5-4B from one Rust process and lets you adapt it with live LoRA training.
 
 Running `kiln` with no subcommand starts the OpenAI-compatible server, just like `kiln serve`. Commands such as `kiln health`, `kiln train sft`, `kiln train grpo`, and `kiln adapters list` talk to a running server.
@@ -214,6 +263,12 @@ chat-completions JSON body with placeholders like {{prompt}}, {{task.prompt}},
 CLI forces an explicit `adapter`, deterministic `seed`, non-streaming response,
 performance metadata, and `chat_template_kwargs.enable_thinking`.
 
+`--thinking-budget-tokens` and `--thinking-budget-ms` override matching fields
+from the request template. Omit a flag to preserve the template or server
+default, pass a non-negative integer for a limit (`0` closes thinking
+immediately), or pass `unlimited` to send an explicit JSON null and bypass a
+server default. The requested states are recorded in the rollout summary.
+
 The scorer executable receives one JSON object on stdin with the task, request,
 response, content, seed, adapter, token usage, and latency. It may print a
 single numeric reward or a JSON object with `reward`, `score`, or `value`.
@@ -225,6 +280,12 @@ scorer output.
 const ROLLOUT_GENERATE_EXAMPLES: &str = r#"Examples:
   kiln rollout-generate --adapter support-bot --thinking false --tasks tasks.jsonl --seeds 4 --request-template request.json --scorer ./score_one.py
       Generate four deterministic scored completions per task and write rollouts.scored.jsonl.
+
+  kiln rollout-generate --adapter support-bot --thinking true --thinking-budget-tokens 96 --thinking-budget-ms 1500 --tasks tasks.jsonl --request-template request.json --scorer ./score_one.py
+      Bound each thinking block by both tokens and decode time; the first limit reached closes it.
+
+  kiln rollout-generate --adapter support-bot --thinking true --thinking-budget-tokens unlimited --tasks tasks.jsonl --request-template request.json --scorer ./score_one.py
+      Explicitly disable the server's default token budget while preserving any template/server time budget.
 
   kiln rollout-generate --adapter base --thinking false --tasks tasks.jsonl --request-template request.json --scorer ./score_one.py --output base.rollouts.jsonl --summary-output base.rollouts.summary.json --url http://127.0.0.1:8420
       Generate base-model rollouts by forcing `adapter: null` in every request.
@@ -504,6 +565,14 @@ pub enum Commands {
             default_value_t = false
         )]
         thinking: bool,
+
+        /// Thinking token budget: omit to preserve the template/server value, use 0 to close immediately, or `unlimited` for no limit
+        #[arg(long, value_name = "TOKENS|unlimited")]
+        thinking_budget_tokens: Option<ThinkingBudgetArg<usize>>,
+
+        /// Thinking decode-time budget: omit to preserve the template/server value, use 0 to close immediately, or `unlimited` for no limit
+        #[arg(long, value_name = "MILLISECONDS|unlimited")]
+        thinking_budget_ms: Option<ThinkingBudgetArg<u64>>,
 
         /// JSONL task file, one task object per line
         #[arg(long)]
@@ -1096,6 +1165,23 @@ pub fn format_health_pretty(body: &serde_json::Value) -> String {
         style("Adapters:").dim(),
         style(adapters_loaded).cyan().bold()
     );
+    let thinking_tokens = body
+        .get("default_thinking_budget_tokens")
+        .and_then(|value| value.as_u64())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unlimited".to_string());
+    let thinking_time = body
+        .get("default_thinking_budget_ms")
+        .and_then(|value| value.as_u64())
+        .map(|value| format!("{value} ms"))
+        .unwrap_or_else(|| "unlimited".to_string());
+    let _ = writeln!(
+        out,
+        "  {} tokens={} time={}",
+        style("Thinking:").dim(),
+        style(thinking_tokens).cyan(),
+        style(thinking_time).cyan()
+    );
 
     if let Some(sched) = body.get("scheduler").and_then(|v| v.as_object()) {
         let waiting = sched.get("waiting").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -1289,6 +1375,24 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
                 "  {} {}",
                 style("Prefix cache:").dim(),
                 config.prefix_cache.enabled
+            );
+            println!(
+                "  {} {}",
+                style("Thinking tokens:").dim(),
+                config
+                    .server
+                    .default_thinking_budget_tokens
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unlimited".to_string())
+            );
+            println!(
+                "  {} {}",
+                style("Thinking time:").dim(),
+                config
+                    .server
+                    .default_thinking_budget_ms
+                    .map(|value| format!("{value} ms"))
+                    .unwrap_or_else(|| "unlimited".to_string())
             );
             println!(
                 "  {} {}",
@@ -2964,6 +3068,8 @@ pub async fn run_rollout_generate(
     url: &str,
     adapter: &str,
     thinking: bool,
+    thinking_budget_tokens: Option<ThinkingBudgetArg<usize>>,
+    thinking_budget_ms: Option<ThinkingBudgetArg<u64>>,
     tasks: &Path,
     seeds: usize,
     seed_start: u64,
@@ -2977,6 +3083,8 @@ pub async fn run_rollout_generate(
             url: url.to_string(),
             adapter: adapter.to_string(),
             thinking,
+            thinking_budget_tokens,
+            thinking_budget_ms,
             tasks: tasks.to_path_buf(),
             seeds,
             seed_start,
@@ -3178,6 +3286,10 @@ mod tests {
             "support-bot",
             "--thinking",
             "false",
+            "--thinking-budget-tokens",
+            "96",
+            "--thinking-budget-ms",
+            "1500",
             "--tasks",
             "tasks.jsonl",
             "--seeds",
@@ -3197,6 +3309,8 @@ mod tests {
         let Some(Commands::RolloutGenerate {
             adapter,
             thinking,
+            thinking_budget_tokens,
+            thinking_budget_ms,
             tasks,
             seeds,
             seed_start,
@@ -3212,6 +3326,8 @@ mod tests {
 
         assert_eq!(adapter, "support-bot");
         assert!(!thinking);
+        assert_eq!(thinking_budget_tokens, Some(ThinkingBudgetArg::Limited(96)));
+        assert_eq!(thinking_budget_ms, Some(ThinkingBudgetArg::Limited(1500)));
         assert_eq!(tasks, PathBuf::from("tasks.jsonl"));
         assert_eq!(seeds, 3);
         assert_eq!(seed_start, 42);
@@ -3220,6 +3336,80 @@ mod tests {
         assert_eq!(output, PathBuf::from("rollouts.jsonl"));
         assert_eq!(summary_output, PathBuf::from("summary.json"));
         assert_eq!(url, "http://localhost:8420");
+    }
+
+    #[test]
+    fn rollout_thinking_budget_flags_support_inherit_and_unlimited() {
+        let inherited = Cli::parse_from([
+            "kiln",
+            "rollout-generate",
+            "--adapter",
+            "base",
+            "--tasks",
+            "tasks.jsonl",
+            "--request-template",
+            "request.json",
+            "--scorer",
+            "./score.py",
+        ]);
+        let Some(Commands::RolloutGenerate {
+            thinking_budget_tokens,
+            thinking_budget_ms,
+            ..
+        }) = inherited.command
+        else {
+            panic!("expected rollout-generate command");
+        };
+        assert_eq!(thinking_budget_tokens, None);
+        assert_eq!(thinking_budget_ms, None);
+
+        let unlimited = Cli::parse_from([
+            "kiln",
+            "rollout-generate",
+            "--adapter",
+            "base",
+            "--thinking-budget-tokens",
+            "unlimited",
+            "--thinking-budget-ms",
+            "UNLIMITED",
+            "--tasks",
+            "tasks.jsonl",
+            "--request-template",
+            "request.json",
+            "--scorer",
+            "./score.py",
+        ]);
+        let Some(Commands::RolloutGenerate {
+            thinking_budget_tokens,
+            thinking_budget_ms,
+            ..
+        }) = unlimited.command
+        else {
+            panic!("expected rollout-generate command");
+        };
+        assert_eq!(thinking_budget_tokens, Some(ThinkingBudgetArg::Unlimited));
+        assert_eq!(thinking_budget_ms, Some(ThinkingBudgetArg::Unlimited));
+    }
+
+    #[test]
+    fn thinking_budget_arg_uses_api_shaped_json() {
+        assert_eq!(
+            "0".parse::<ThinkingBudgetArg<usize>>().unwrap(),
+            ThinkingBudgetArg::Limited(0)
+        );
+        assert_eq!(
+            "unlimited".parse::<ThinkingBudgetArg<usize>>().unwrap(),
+            ThinkingBudgetArg::Unlimited
+        );
+        assert!("-1".parse::<ThinkingBudgetArg<usize>>().is_err());
+        assert_eq!(
+            serde_json::to_value(ThinkingBudgetArg::<usize>::Unlimited).unwrap(),
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            serde_json::to_value(ThinkingBudgetArg::Limited(0usize)).unwrap(),
+            serde_json::json!(0)
+        );
     }
 
     #[test]

@@ -2005,6 +2005,7 @@ impl ModelRunner {
                 *s = s.wrapping_add(1);
             }
 
+            next_token = params.apply_thinking_budget(&generated_tokens, next_token);
             // Check for EOS
             if self.eos_token_ids.contains(&next_token) {
                 finish_reason = FinishReason::Eos;
@@ -2113,6 +2114,7 @@ impl ModelRunner {
                 *s = s.wrapping_add(1);
             }
 
+            next_token = params.apply_thinking_budget(&generated_tokens, next_token);
             // Check for EOS
             if self.eos_token_ids.contains(&next_token) {
                 return Ok(GenerationOutput {
@@ -4123,6 +4125,7 @@ impl ModelRunner {
                 *s = s.wrapping_add(1);
             }
 
+            next_token = params.apply_thinking_budget(&generated_tokens, next_token);
             if self.eos_token_ids.contains(&next_token) {
                 return Ok(GenerationOutput {
                     text: String::new(),
@@ -5556,6 +5559,15 @@ impl ModelRunner {
         spec_config: &SpeculativeConfig,
         cancel: Option<&CancelHandle>,
     ) -> Result<GenerationOutput> {
+        if params.thinking_budget.is_some() {
+            return self.generate_paged_shared_tokens(
+                prompt_tokens,
+                params,
+                block_manager,
+                paged_cache,
+                cancel,
+            );
+        }
         anyhow::ensure!(
             params.temperature == 0.0,
             "paged skip-layer speculative decode is greedy-only"
@@ -5680,6 +5692,7 @@ impl ModelRunner {
                 *s = s.wrapping_add(1);
             }
 
+            next_token = params.apply_thinking_budget(&generated_tokens, next_token);
             if self.eos_token_ids.contains(&next_token) {
                 return Ok(GenerationOutput {
                     text: String::new(),
@@ -5841,6 +5854,7 @@ impl ModelRunner {
                 *s = s.wrapping_add(1);
             }
 
+            next_token = params.apply_thinking_budget(&generated_tokens, next_token);
             if self.eos_token_ids.contains(&next_token) {
                 return Ok(GenerationOutput {
                     text: String::new(),
@@ -6229,6 +6243,7 @@ impl ModelRunner {
                 *s = s.wrapping_add(1);
             }
 
+            next_token = params.apply_thinking_budget(&generated_tokens, next_token);
             // Check for EOS
             if self.eos_token_ids.contains(&next_token) {
                 return Ok(GenerationOutput {
@@ -6375,6 +6390,9 @@ impl ModelRunner {
     ) -> Result<GenerationOutput> {
         use rand::SeedableRng;
 
+        if params.thinking_budget.is_some() {
+            return self.generate_from_tokens(prompt_tokens, params);
+        }
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
         spec_config
             .validate(&self.config)
@@ -6608,6 +6626,16 @@ impl ModelRunner {
     ) -> Result<MtpGenerationOutput> {
         use rand::SeedableRng;
 
+        if params.thinking_budget.is_some() {
+            let output = self.generate_from_tokens(prompt_tokens, params)?;
+            return Ok(MtpGenerationOutput {
+                text: output.text,
+                token_ids: output.token_ids,
+                finish_reason: output.finish_reason,
+                draft_accepted_count: 0,
+                total_draft_attempts: 0,
+            });
+        }
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
         anyhow::ensure!(
             self.weights.mtp.is_some(),
@@ -6887,6 +6915,9 @@ impl ModelRunner {
     ) -> Result<mpsc::Receiver<StreamEvent>> {
         use rand::SeedableRng;
 
+        if params.thinking_budget.is_some() {
+            return self.generate_streaming(prompt, params);
+        }
         let prompt_tokens = self
             .tokenizer
             .encode(prompt)
@@ -7070,6 +7101,9 @@ impl ModelRunner {
     ) -> Result<mpsc::Receiver<StreamEvent>> {
         use rand::SeedableRng;
 
+        if params.thinking_budget.is_some() {
+            return self.generate_streaming(prompt, params);
+        }
         let prompt_tokens = self
             .tokenizer
             .encode(prompt)
@@ -7847,6 +7881,14 @@ impl ModelRunner {
         paged_cache: &PagedKvCache,
         spec_config: &SpeculativeConfig,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
+        if params.thinking_budget.is_some() {
+            return self.generate_streaming_paged_shared_tokens(
+                prompt_tokens,
+                params,
+                block_manager,
+                paged_cache,
+            );
+        }
         anyhow::ensure!(
             params.temperature == 0.0,
             "paged skip-layer speculative streaming is greedy-only"
@@ -8261,6 +8303,7 @@ impl ModelRunner {
                 *s = s.wrapping_add(1);
             }
 
+            next_token = params.apply_thinking_budget(&generated_tokens, next_token);
             if self.eos_token_ids.contains(&next_token) {
                 finish_reason = FinishReason::Eos;
                 break;
@@ -8598,6 +8641,7 @@ impl ModelRunner {
                 *s = s.wrapping_add(1);
             }
 
+            next_token = params.apply_thinking_budget(&generated_tokens, next_token);
             if self.eos_token_ids.contains(&next_token) {
                 finish_reason = FinishReason::Eos;
                 break;

@@ -30,6 +30,15 @@ shutdown_timeout_secs = 5
                                       # is set; eval mode still defaults omitted
                                       # requests to enable_thinking=false. Requests
                                       # can override chat_template_kwargs.enable_thinking.
+# default_thinking_budget_tokens = 512 # Optional maximum tokens inside an open thinking
+                                      # block. Omit for unlimited. Requests inherit this
+                                      # when thinking_budget_tokens is omitted; explicit
+                                      # JSON null disables the default, and 0 closes
+                                      # thinking immediately.
+# default_thinking_budget_ms = 5000    # Optional thinking decode-time limit in milliseconds.
+                                      # Queue and prefill time are excluded. Omit for
+                                      # unlimited; thinking_budget_ms follows the same
+                                      # omitted/null/0 request semantics as the token limit.
 # fold_reasoning_into_content = false # Optional. Compatibility mode for clients that expect
                                       # non-empty assistant content: duplicate separated
                                       # reasoning_content into content. Requests can override

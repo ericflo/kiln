@@ -299,6 +299,7 @@
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#power-user-requests">Power-user requests</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#server-status">Server status</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#generation">Generation</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#thinking-budgets">Thinking budgets</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#lora-lifecycle">LoRA lifecycle</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#training">Training</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#training-data-safety">Training data safety</a>
@@ -345,7 +346,11 @@
             <h3 class="font-semibold mb-2">First chat completion</h3>
             <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"messages": [{"role": "user", "content": "Hello!"}], "max_tokens": 64}' \
+  -d '{
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "max_tokens": 128,
+    "thinking_budget_tokens": 32
+  }' \
   | python3 -m json.tool</code></pre>
           </section>
           <section class="endpoint">
@@ -469,7 +474,61 @@ kiln serve --config kiln.toml</code></pre>
         <div class="endpoint-list" style="color: var(--fg-dim);">
           <div class="endpoint"><span class="method">POST</span> <code>/v1/chat/completions</code> &mdash; chat completions with OpenAI-shaped request and response bodies, including SSE streaming and normalized tool-call deltas.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/completions</code> &mdash; vLLM-compatible prompt-logprobs scoring for remote OPD teachers (no generation-only mode, no streaming; prompts capped at 4096 tokens).</div>
-          <div class="endpoint"><span class="method">POST</span> <code>/v1/completions/batch</code> &mdash; multi-prompt batch generation for efficient GRPO rollouts.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/completions/batch</code> &mdash; multi-prompt batch generation for efficient GRPO rollouts, with the same thinking-budget fields as chat.</div>
+        </div>
+        <h3 id="thinking-budgets" class="text-xl font-semibold mt-6 mb-3">Bound thinking without disabling it</h3>
+        <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
+          Set <code>thinking_budget_tokens</code>, <code>thinking_budget_ms</code>, or both on a chat or
+          batch request. An omitted field inherits its server default; explicit <code>null</code> makes
+          that dimension unlimited, even when the server has a default; <code>0</code> closes an open
+          thinking block immediately.
+        </p>
+        <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>{
+  "messages": [{"role": "user", "content": "Solve this carefully."}],
+  "max_tokens": 512,
+  "thinking_budget_tokens": 128,
+  "thinking_budget_ms": 3000
+}</code></pre>
+        <p class="leading-relaxed mt-4" style="color: var(--fg-dim);">
+          When both budgets are active, the first reached wins. The time clock starts at the first
+          decode candidate, excluding queue and prefill, and Kiln checks it between tokens. A natural
+          <code>&lt;/think&gt;</code> wins if it arrives first. Otherwise Kiln feeds the forced close-tag
+          tokens into model context and continues decoding the answer. Those tokens count toward
+          <code>max_tokens</code> and completion usage. Budgets are inert unless the rendered prompt
+          starts inside thinking.
+        </p>
+        <p class="leading-relaxed mt-4" style="color: var(--fg-dim);">
+          Time-budgeted requests bypass deterministic completion caches because their boundary depends
+          on runtime speed. Token-budgeted requests remain cacheable under a budget-aware key. Official
+          OpenAI clients can send these Kiln extensions through <code>extra_body</code>.
+        </p>
+        <pre class="overflow-x-auto text-sm leading-relaxed mt-4" style="color: var(--fg);"><code>{
+  "triggered": true,
+  "trigger": "tokens",
+  "closed": true,
+  "thinking_tokens": 128,
+  "thinking_time_ms": 742
+}</code></pre>
+        <p class="leading-relaxed mt-4" style="color: var(--fg-dim);">
+          This outcome appears on each non-streaming <code>choices[].thinking_budget</code> and
+          <code>completions[].thinking_budget</code>. <code>trigger</code> is <code>tokens</code>,
+          <code>time</code>, or <code>max_tokens</code>; a natural close reports
+          <code>triggered=false</code> with <code>closed=true</code>. Chat
+          <code>metadata.thinking_budget</code> also reports effective limits and their sources. In
+          SSE streams, the chunk containing <code>finish_reason</code> carries that metadata and the
+          final outcome before the optional usage chunk and <code>[DONE]</code>. Cached token-budget
+          responses preserve the original outcome.
+        </p>
+        <div class="endpoint mt-5">
+          <h3 class="font-semibold mb-2">Server defaults</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code># kiln.toml; omit either setting for unlimited
+[server]
+default_thinking_budget_tokens = 512
+default_thinking_budget_ms = 5000
+
+# equivalent environment variables
+KILN_DEFAULT_THINKING_BUDGET_TOKENS=512
+KILN_DEFAULT_THINKING_BUDGET_MS=5000</code></pre>
         </div>
       </article>
 
@@ -559,6 +618,12 @@ curl -s -X DELETE http://localhost:8420/v1/train/queue/$JOB_ID | python3 -m json
           Inference responses follow OpenAI-compatible <code>choices</code> payloads. Training submissions return
           queued job metadata with a <code>job_id</code>, then <code>/v1/train/status</code> and the per-job
           <code>/v1/train/status/{job_id}</code> lookup report state, loss, adapter name, and any failure message.
+        </p>
+        <p class="leading-relaxed mt-4" style="color: var(--fg-dim);">
+          For thinking responses, <code>choices[].message.reasoning_content</code> contains text before the
+          natural or forced close, while <code>content</code> contains the final answer. Streaming uses the
+          corresponding <code>delta.reasoning_content</code> and <code>delta.content</code> channels; raw thinking
+          tags are not emitted on the separated path.
         </p>
       </article>
     </div>

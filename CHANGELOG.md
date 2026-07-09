@@ -1,5 +1,30 @@
 # Kiln Server Changelog
 
+## Unreleased — bounded thinking by tokens or decode time
+
+- inference: chat, streaming chat, multi-choice chat, and batch generation now
+  accept `thinking_budget_tokens` and `thinking_budget_ms`. Kiln closes an open
+  thinking block at the first active limit, feeds the close-tag tokens through
+  model context, and continues into the final answer. Forced tokens count toward
+  completion usage and `max_tokens`; natural closes still win.
+- configuration: `server.default_thinking_budget_tokens` /
+  `server.default_thinking_budget_ms` and
+  `KILN_DEFAULT_THINKING_BUDGET_TOKENS` /
+  `KILN_DEFAULT_THINKING_BUDGET_MS` set inheritable defaults. Both default to
+  unlimited; request `null` opts out of a configured dimension and `0` closes
+  thinking immediately.
+- correctness: the time clock begins with the first decode candidate, excluding
+  queue and prefill, and is checked at token boundaries. Timed requests bypass
+  deterministic completion caches; token budgets participate in cache keys.
+- observability: non-streaming choices, batch items, and final SSE chunks report
+  the budget trigger, closure state, thinking-token count, and elapsed thinking
+  time. Chat metadata also reports effective limits and request/default source;
+  deterministic token-budget cache hits retain the original outcome.
+- product and eval: the Playground, desktop settings, rollout generator, and
+  `kiln-eval` CLI expose inherited, unlimited, zero, and custom limits. Eval
+  runs preflight active budgets before decode and retain raw output, effective
+  limit provenance, runtime outcomes, and a generation-configuration hash.
+
 ## kiln-v0.4.1 — 2026-06-12 — multi-turn prefix caching actually caches
 
 Every pi / terminal turn was silently re-prefilling its entire conversation

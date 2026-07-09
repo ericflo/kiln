@@ -43,16 +43,16 @@ pub use production_trace::{
     synthesize_production_trace_suite_from_lines,
 };
 pub use result::{
-    AggregateMetrics, EvalJobState, EvalOutcomeKind, EvalProgress, EvalResult, ExampleOutcome,
-    FlipDiff, LatencyStats, PassRateConfidenceInterval, ReasoningLengthStats, ScorerBreakdown,
-    SuiteResult, TagBreakdown, ToolBreakdown,
+    AggregateMetrics, EvalJobState, EvalOutcomeKind, EvalProgress, EvalResult, EvalThinkingBudget,
+    EvalThinkingBudgetOutcome, ExampleOutcome, FlipDiff, LatencyStats, PassRateConfidenceInterval,
+    ReasoningLengthStats, ScorerBreakdown, SuiteResult, TagBreakdown, ToolBreakdown,
 };
 pub use scorers::{
     ArgsScoring, CodeStyle, NameMatch, NumericTolerance, Scorer, ScorerError, score_completion,
 };
 pub use suite::{
-    EvalChatMessage, EvalCompareSpec, EvalExample, EvalGenerationParams, EvalSuite,
-    EvalSuiteSummary, PostEvalConfig, default_max_tokens, default_temperature,
+    EvalBudgetOverride, EvalChatMessage, EvalCompareSpec, EvalExample, EvalGenerationParams,
+    EvalSuite, EvalSuiteSummary, PostEvalConfig, default_max_tokens, default_temperature,
 };
 pub use synthesis::{
     Sampling, ScorerChoice, SftConversation, SftMessage, SynthesisConfig, SynthesisError,

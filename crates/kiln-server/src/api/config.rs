@@ -9,6 +9,7 @@ struct ConfigResponse {
     kv_cache: KvCacheConfig,
     training: TrainingConfig,
     memory_budget: MemoryBudgetConfig,
+    generation: GenerationConfig,
 }
 
 #[derive(Serialize)]
@@ -38,6 +39,14 @@ struct MemoryBudgetConfig {
     kv_cache_gb: f64,
     training_budget_gb: f64,
     inference_memory_fraction: f64,
+}
+
+#[derive(Serialize)]
+struct GenerationConfig {
+    default_thinking_enabled: Option<bool>,
+    default_thinking_budget_tokens: Option<usize>,
+    default_thinking_budget_ms: Option<u64>,
+    fold_reasoning_into_content: bool,
 }
 
 async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
@@ -107,6 +116,12 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
             kv_cache_gb: b.kv_cache_bytes as f64 / 1e9,
             training_budget_gb: b.training_budget_bytes as f64 / 1e9,
             inference_memory_fraction: b.inference_memory_fraction,
+        },
+        generation: GenerationConfig {
+            default_thinking_enabled: state.default_thinking_enabled,
+            default_thinking_budget_tokens: state.default_thinking_budget_tokens,
+            default_thinking_budget_ms: state.default_thinking_budget_ms,
+            fold_reasoning_into_content: state.fold_reasoning_into_content,
         },
     })
 }

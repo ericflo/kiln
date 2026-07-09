@@ -554,10 +554,11 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
   -d '{
     "model": "Qwen3.5-4B",
     "messages": [{"role": "user", "content": "What is 2+2?"}],
-    "max_tokens": 64,
+    "max_tokens": 128,
+    "thinking_budget_tokens": 32,
     "temperature": 0.7
   }' | python3 -m json.tool</code></pre>
-          <p class="text-sm mt-3" style="color: var(--fg-mute);">This is the first inference checkpoint: get one response before moving on to <a href="#sft-corrections">SFT</a> or <a href="grpo.html">GRPO</a>.</p>
+          <p class="text-sm mt-3" style="color: var(--fg-mute);">This is the first inference checkpoint: get one response before moving on to <a href="#sft-corrections">SFT</a> or <a href="grpo.html">GRPO</a>. The token budget closes an open thinking block after 32 generated tokens so the remaining completion can carry the final answer; see the <a href="api.html#thinking-budgets">API reference</a> for token, time, inheritance, and unlimited modes.</p>
         </div>
       </div>
       <figure class="card mt-6 overflow-hidden">

@@ -1,4 +1,348 @@
 use serde::{Deserialize, Serialize};
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering},
+};
+use std::time::{Duration, Instant};
+use thiserror::Error;
+
+use crate::token::TokenId;
+
+/// The limit that caused Kiln to take over generation and force the model's
+/// closing `</think>` token sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingBudgetTrigger {
+    Tokens,
+    Time,
+    /// The completion-wide `max_tokens` cap was close enough that the closing
+    /// sequence had to start immediately in order to fit atomically.
+    MaxTokens,
+}
+
+impl ThinkingBudgetTrigger {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tokens => "tokens",
+            Self::Time => "time",
+            Self::MaxTokens => "max_tokens",
+        }
+    }
+}
+
+/// Runtime outcome of a thinking budget. The state is shared by clones of a
+/// request's [`SamplingParams`], which is important for the batching and
+/// streaming paths that clone sampling parameters before decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThinkingBudgetStatus {
+    pub trigger: Option<ThinkingBudgetTrigger>,
+    pub closed: bool,
+    pub thinking_tokens: usize,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Default)]
+struct ThinkingBudgetRuntime {
+    started_at: OnceLock<Instant>,
+    state: AtomicU8,
+    thinking_tokens: AtomicUsize,
+    elapsed_ms: AtomicU64,
+}
+
+const BUDGET_ACTIVE: u8 = 0;
+const BUDGET_NATURALLY_CLOSED: u8 = 1;
+const BUDGET_FORCING_TOKENS: u8 = 2;
+const BUDGET_FORCING_TIME: u8 = 3;
+const BUDGET_FORCING_MAX_TOKENS: u8 = 4;
+const BUDGET_CLOSED_TOKENS: u8 = 5;
+const BUDGET_CLOSED_TIME: u8 = 6;
+const BUDGET_CLOSED_MAX_TOKENS: u8 = 7;
+const BUDGET_PUBLISHING: u8 = u8::MAX;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum ThinkingBudgetConfigError {
+    #[error("a thinking budget requires at least one token or time limit")]
+    MissingLimit,
+    #[error("the thinking close sequence must contain at least one token")]
+    EmptyCloseSequence,
+    #[error(
+        "max completion tokens ({max_completion_tokens}) cannot fit the {close_token_count}-token thinking close sequence"
+    )]
+    CompletionTooShort {
+        max_completion_tokens: usize,
+        close_token_count: usize,
+    },
+}
+
+/// Decode-time policy for closing a reasoning block without terminating the
+/// completion. Once a limit is reached, [`ThinkingBudget::apply`] replaces
+/// sampled tokens with the configured close sequence. Those tokens therefore
+/// enter the model's KV history before ordinary answer generation resumes.
+///
+/// This type is runtime-only. It is deliberately skipped when
+/// [`SamplingParams`] is serialized: API/config layers own the user-facing
+/// limits, while this object also contains tokenizer-specific token IDs and
+/// request-local timing state.
+#[derive(Debug, Clone)]
+pub struct ThinkingBudget {
+    max_tokens: Option<usize>,
+    max_time: Option<Duration>,
+    max_completion_tokens: usize,
+    close_token_ids: Vec<TokenId>,
+    runtime: Arc<ThinkingBudgetRuntime>,
+}
+
+impl ThinkingBudget {
+    pub fn new(
+        max_tokens: Option<usize>,
+        max_time: Option<Duration>,
+        max_completion_tokens: usize,
+        close_token_ids: Vec<TokenId>,
+    ) -> Result<Self, ThinkingBudgetConfigError> {
+        if max_tokens.is_none() && max_time.is_none() {
+            return Err(ThinkingBudgetConfigError::MissingLimit);
+        }
+        if close_token_ids.is_empty() {
+            return Err(ThinkingBudgetConfigError::EmptyCloseSequence);
+        }
+        if max_completion_tokens < close_token_ids.len() {
+            return Err(ThinkingBudgetConfigError::CompletionTooShort {
+                max_completion_tokens,
+                close_token_count: close_token_ids.len(),
+            });
+        }
+        Ok(Self {
+            max_tokens,
+            max_time,
+            max_completion_tokens,
+            close_token_ids,
+            runtime: Arc::new(ThinkingBudgetRuntime::default()),
+        })
+    }
+
+    pub fn max_tokens(&self) -> Option<usize> {
+        self.max_tokens
+    }
+
+    pub fn max_time(&self) -> Option<Duration> {
+        self.max_time
+    }
+
+    pub fn close_token_count(&self) -> usize {
+        self.close_token_ids.len()
+    }
+
+    /// Apply the budget decision at the current token boundary.
+    pub fn apply(&self, generated: &[TokenId], sampled: TokenId) -> TokenId {
+        self.apply_at(generated, sampled, Instant::now())
+    }
+
+    fn apply_at(&self, generated: &[TokenId], sampled: TokenId, now: Instant) -> TokenId {
+        let mut state = self.load_state();
+        if budget_is_closed(state) {
+            return sampled;
+        }
+
+        let started_at = *self.runtime.started_at.get_or_init(|| now);
+        let elapsed = now.saturating_duration_since(started_at);
+
+        // This normally transitions on the candidate that completes the tag.
+        // Keeping a suffix check also makes cloned/restored callers robust if
+        // they first observe the controller immediately after a completed tag.
+        if generated.ends_with(&self.close_token_ids) {
+            let thinking_tokens = generated.len().saturating_sub(self.close_token_ids.len());
+            if state == BUDGET_ACTIVE {
+                state =
+                    self.publish_active_outcome(BUDGET_NATURALLY_CLOSED, thinking_tokens, elapsed);
+            } else if budget_is_forcing(state) {
+                let closed = closed_state_for(state);
+                let _ = self.runtime.state.compare_exchange(
+                    state,
+                    closed,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+                state = self.load_state();
+            }
+            if budget_is_closed(state) {
+                return sampled;
+            }
+        }
+
+        let close_progress = suffix_prefix_len(generated, &self.close_token_ids);
+        let thinking_tokens = generated.len().saturating_sub(close_progress);
+
+        if budget_is_forcing(state) {
+            let expected = self.close_token_ids[close_progress];
+            if close_progress + 1 == self.close_token_ids.len() {
+                let _ = self.runtime.state.compare_exchange(
+                    state,
+                    closed_state_for(state),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+            }
+            return expected;
+        }
+
+        let trigger = {
+            if self
+                .max_tokens
+                .is_some_and(|limit| thinking_tokens >= limit)
+            {
+                Some(ThinkingBudgetTrigger::Tokens)
+            } else if self.max_time.is_some_and(|limit| elapsed >= limit) {
+                Some(ThinkingBudgetTrigger::Time)
+            } else if generated.len().saturating_add(self.close_token_ids.len())
+                >= self.max_completion_tokens
+            {
+                Some(ThinkingBudgetTrigger::MaxTokens)
+            } else {
+                None
+            }
+        };
+
+        let Some(trigger) = trigger else {
+            // Record a natural close as soon as its final token is selected so
+            // telemetry still freezes when the completion ends on that token.
+            if sampled == self.close_token_ids[close_progress]
+                && close_progress + 1 == self.close_token_ids.len()
+            {
+                self.publish_active_outcome(BUDGET_NATURALLY_CLOSED, thinking_tokens, elapsed);
+            }
+            return sampled;
+        };
+        let expected = self.close_token_ids[close_progress];
+
+        // If the model is naturally producing the close sequence, let it do
+        // so and leave the budget outcome untriggered. This makes a natural
+        // close win even when it begins exactly on a token/time boundary.
+        if sampled == expected {
+            if close_progress + 1 == self.close_token_ids.len() {
+                self.publish_active_outcome(BUDGET_NATURALLY_CLOSED, thinking_tokens, elapsed);
+            }
+            return sampled;
+        }
+
+        let forcing_state = forcing_state_for(trigger);
+        let published_state = if close_progress + 1 == self.close_token_ids.len() {
+            closed_state_for(forcing_state)
+        } else {
+            forcing_state
+        };
+        self.publish_active_outcome(published_state, thinking_tokens, elapsed);
+        expected
+    }
+
+    pub fn status(&self) -> ThinkingBudgetStatus {
+        let state = self.load_state();
+        let trigger = decode_trigger(state);
+        let elapsed_ms = if state != BUDGET_ACTIVE {
+            self.runtime.elapsed_ms.load(Ordering::Acquire)
+        } else {
+            self.runtime
+                .started_at
+                .get()
+                .map(|started| started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
+                .unwrap_or(0)
+        };
+        ThinkingBudgetStatus {
+            trigger,
+            closed: budget_is_closed(state),
+            thinking_tokens: self.runtime.thinking_tokens.load(Ordering::Acquire),
+            elapsed_ms,
+        }
+    }
+
+    fn publish_active_outcome(&self, outcome: u8, thinking_tokens: usize, elapsed: Duration) -> u8 {
+        if self
+            .runtime
+            .state
+            .compare_exchange(
+                BUDGET_ACTIVE,
+                BUDGET_PUBLISHING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            self.runtime
+                .thinking_tokens
+                .store(thinking_tokens, Ordering::Relaxed);
+            self.runtime.elapsed_ms.store(
+                elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
+                Ordering::Relaxed,
+            );
+            // Release-publish the payload only after both values are complete.
+            self.runtime.state.store(outcome, Ordering::Release);
+            outcome
+        } else {
+            self.load_state()
+        }
+    }
+
+    fn load_state(&self) -> u8 {
+        loop {
+            let state = self.runtime.state.load(Ordering::Acquire);
+            if state != BUDGET_PUBLISHING {
+                return state;
+            }
+            std::hint::spin_loop();
+        }
+    }
+}
+
+fn suffix_prefix_len(generated: &[TokenId], close: &[TokenId]) -> usize {
+    let max = generated.len().min(close.len().saturating_sub(1));
+    (1..=max)
+        .rev()
+        .find(|&len| generated.ends_with(&close[..len]))
+        .unwrap_or(0)
+}
+
+fn forcing_state_for(trigger: ThinkingBudgetTrigger) -> u8 {
+    match trigger {
+        ThinkingBudgetTrigger::Tokens => BUDGET_FORCING_TOKENS,
+        ThinkingBudgetTrigger::Time => BUDGET_FORCING_TIME,
+        ThinkingBudgetTrigger::MaxTokens => BUDGET_FORCING_MAX_TOKENS,
+    }
+}
+
+fn decode_trigger(state: u8) -> Option<ThinkingBudgetTrigger> {
+    match state {
+        BUDGET_FORCING_TOKENS | BUDGET_CLOSED_TOKENS => Some(ThinkingBudgetTrigger::Tokens),
+        BUDGET_FORCING_TIME | BUDGET_CLOSED_TIME => Some(ThinkingBudgetTrigger::Time),
+        BUDGET_FORCING_MAX_TOKENS | BUDGET_CLOSED_MAX_TOKENS => {
+            Some(ThinkingBudgetTrigger::MaxTokens)
+        }
+        _ => None,
+    }
+}
+
+fn budget_is_forcing(state: u8) -> bool {
+    matches!(
+        state,
+        BUDGET_FORCING_TOKENS | BUDGET_FORCING_TIME | BUDGET_FORCING_MAX_TOKENS
+    )
+}
+
+fn budget_is_closed(state: u8) -> bool {
+    matches!(
+        state,
+        BUDGET_NATURALLY_CLOSED
+            | BUDGET_CLOSED_TOKENS
+            | BUDGET_CLOSED_TIME
+            | BUDGET_CLOSED_MAX_TOKENS
+    )
+}
+
+fn closed_state_for(state: u8) -> u8 {
+    match state {
+        BUDGET_FORCING_TOKENS => BUDGET_CLOSED_TOKENS,
+        BUDGET_FORCING_TIME => BUDGET_CLOSED_TIME,
+        BUDGET_FORCING_MAX_TOKENS => BUDGET_CLOSED_MAX_TOKENS,
+        _ => state,
+    }
+}
 
 /// Parameters controlling how tokens are sampled from the model's output logits.
 ///
@@ -64,6 +408,12 @@ pub struct SamplingParams {
     /// Random seed for reproducibility. None = random.
     #[serde(default)]
     pub seed: Option<u64>,
+
+    /// Request-local forced reasoning closure policy. API/config layers build
+    /// this only after rendering the prompt and resolving the tokenizer's
+    /// close-tag token sequence.
+    #[serde(skip)]
+    pub thinking_budget: Option<ThinkingBudget>,
 }
 
 fn default_temperature() -> f32 {
@@ -103,6 +453,7 @@ impl SamplingParams {
             frequency_penalty: 0.0,
             stop: vec![],
             seed: None,
+            thinking_budget: None,
         }
     }
 
@@ -121,6 +472,7 @@ impl SamplingParams {
             frequency_penalty: 0.0,
             stop: vec![],
             seed: None,
+            thinking_budget: None,
         }
     }
 
@@ -139,6 +491,7 @@ impl SamplingParams {
             frequency_penalty: 0.0,
             stop: vec![],
             seed: None,
+            thinking_budget: None,
         }
     }
 
@@ -156,6 +509,7 @@ impl SamplingParams {
             frequency_penalty: 0.0,
             stop: vec![],
             seed: None,
+            thinking_budget: None,
         }
     }
 
@@ -173,6 +527,7 @@ impl SamplingParams {
             frequency_penalty: 0.0,
             stop: vec![],
             seed: None,
+            thinking_budget: None,
         }
     }
 
@@ -199,6 +554,15 @@ impl SamplingParams {
     /// True when min-p filtering is disabled.
     pub fn min_p_is_disabled(min_p: f32) -> bool {
         !min_p.is_finite() || min_p <= 0.0
+    }
+
+    /// Replace a sampled token with the next forced close-tag token when the
+    /// active thinking budget has elapsed.
+    pub fn apply_thinking_budget(&self, generated: &[TokenId], sampled: TokenId) -> TokenId {
+        self.thinking_budget
+            .as_ref()
+            .map(|budget| budget.apply(generated, sampled))
+            .unwrap_or(sampled)
     }
 }
 
@@ -266,6 +630,98 @@ mod tests {
         let coding = SamplingParams::qwen3_thinking_coding();
         // Coding mode has all penalties off.
         assert!(coding.token_penalties_are_no_op());
+    }
+
+    #[test]
+    fn thinking_token_budget_forces_the_full_close_sequence() {
+        let budget = ThinkingBudget::new(Some(2), None, 16, vec![90, 91, 92]).unwrap();
+        let started = Instant::now();
+
+        assert_eq!(budget.apply_at(&[], 10, started), 10);
+        assert_eq!(budget.apply_at(&[10], 11, started), 11);
+        assert_eq!(budget.apply_at(&[10, 11], 12, started), 90);
+        assert_eq!(budget.apply_at(&[10, 11, 90], 13, started), 91);
+        assert_eq!(budget.apply_at(&[10, 11, 90, 91], 14, started), 92);
+        assert_eq!(budget.apply_at(&[10, 11, 90, 91, 92], 15, started), 15);
+
+        let status = budget.status();
+        assert_eq!(status.trigger, Some(ThinkingBudgetTrigger::Tokens));
+        assert!(status.closed);
+        assert_eq!(status.thinking_tokens, 2);
+    }
+
+    #[test]
+    fn thinking_time_budget_starts_at_first_decode_candidate() {
+        let budget =
+            ThinkingBudget::new(None, Some(Duration::from_millis(25)), 16, vec![90]).unwrap();
+        let started = Instant::now();
+
+        assert_eq!(budget.apply_at(&[], 10, started), 10);
+        assert_eq!(
+            budget.apply_at(&[10], 11, started + Duration::from_millis(24)),
+            11
+        );
+        assert_eq!(
+            budget.apply_at(&[10, 11], 12, started + Duration::from_millis(25)),
+            90
+        );
+        let status = budget.status();
+        assert_eq!(status.trigger, Some(ThinkingBudgetTrigger::Time));
+        assert!(status.closed);
+        assert_eq!(status.thinking_tokens, 2);
+        assert_eq!(status.elapsed_ms, 25);
+    }
+
+    #[test]
+    fn natural_thinking_close_wins_on_the_budget_boundary() {
+        let budget = ThinkingBudget::new(Some(1), None, 16, vec![90, 91]).unwrap();
+        let started = Instant::now();
+
+        assert_eq!(budget.apply_at(&[], 10, started), 10);
+        assert_eq!(
+            budget.apply_at(&[10], 90, started + Duration::from_millis(4)),
+            90
+        );
+        assert_eq!(
+            budget.apply_at(&[10, 90], 91, started + Duration::from_millis(5)),
+            91
+        );
+        assert_eq!(
+            budget.apply_at(&[10, 90, 91], 12, started + Duration::from_millis(100)),
+            12
+        );
+        let status = budget.status();
+        assert_eq!(status.trigger, None);
+        assert!(status.closed);
+        assert_eq!(status.thinking_tokens, 1);
+        assert_eq!(status.elapsed_ms, 5);
+    }
+
+    #[test]
+    fn completion_limit_reserves_room_for_an_atomic_close() {
+        let budget = ThinkingBudget::new(Some(100), None, 5, vec![90, 91]).unwrap();
+        let started = Instant::now();
+
+        assert_eq!(budget.apply_at(&[], 10, started), 10);
+        assert_eq!(budget.apply_at(&[10], 11, started), 11);
+        assert_eq!(budget.apply_at(&[10, 11], 12, started), 12);
+        assert_eq!(budget.apply_at(&[10, 11, 12], 13, started), 90);
+        assert_eq!(budget.apply_at(&[10, 11, 12, 90], 13, started), 91);
+        assert_eq!(
+            budget.status().trigger,
+            Some(ThinkingBudgetTrigger::MaxTokens)
+        );
+    }
+
+    #[test]
+    fn thinking_budget_rejects_a_completion_too_short_for_the_close() {
+        assert_eq!(
+            ThinkingBudget::new(Some(0), None, 1, vec![90, 91]).unwrap_err(),
+            ThinkingBudgetConfigError::CompletionTooShort {
+                max_completion_tokens: 1,
+                close_token_count: 2,
+            }
+        );
     }
 
     #[test]

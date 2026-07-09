@@ -655,6 +655,7 @@ mod tests {
             &self,
             prepared: &crate::eval::generator::PreparedPrompt,
             params: &EvalGenerationParams,
+            thinking_budget: &kiln_eval::EvalThinkingBudget,
             completion_index: usize,
             adapter_label: Option<&str>,
         ) -> std::pin::Pin<
@@ -667,9 +668,13 @@ mod tests {
             let call = self
                 .calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let fut = self
-                .inner
-                .run(prepared, params, completion_index, adapter_label);
+            let fut = self.inner.run(
+                prepared,
+                params,
+                thinking_budget,
+                completion_index,
+                adapter_label,
+            );
             let reached = self.reached.clone();
             let resume = self.resume.clone();
             Box::pin(async move {

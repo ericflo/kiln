@@ -8,11 +8,11 @@ use std::time::Instant;
 use kiln_eval::scorers::{JudgeRunner, NoopJudgeRunner, score_completion};
 use kiln_eval::{
     AggregateMetrics, EvalGenerationParams, EvalOutcomeKind, EvalProgress, EvalSuite,
-    ExampleOutcome, SuiteResult,
+    EvalThinkingBudget, ExampleOutcome, SuiteResult,
 };
 use sha2::{Digest, Sha256};
 
-use crate::eval::generator::EvalGenerator;
+use crate::eval::generator::{EvalGenerationSource, EvalGenerator, PreparedPrompt};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EvalExecutionError {
@@ -40,6 +40,15 @@ pub async fn run_suite_against_adapter(
     cancelled: Arc<std::sync::atomic::AtomicBool>,
     judge_runner: Arc<dyn JudgeRunner>,
 ) -> Result<SuiteResult, EvalExecutionError> {
+    // Resolve inherited server defaults and reject invalid close-token/stop/
+    // max-token combinations before loading an adapter or generating any
+    // examples. Cache duplicate generation objects so suite-wide defaults are
+    // validated exactly once per run.
+    let (prepared_examples, resolved_budgets) =
+        prepare_and_preflight_examples(suite, generation_override, generator.as_ref()).await?;
+    let effective_generation_hash =
+        hash_effective_generation(suite, generation_override, &resolved_budgets);
+
     // Hoist the adapter swap out of the per-example loop. The previous
     // active adapter is restored at the end via the same call so a suite
     // run never leaves the model in an unexpected state, even when an
@@ -53,6 +62,9 @@ pub async fn run_suite_against_adapter(
         suite,
         adapter,
         generation_override,
+        prepared_examples,
+        resolved_budgets,
+        effective_generation_hash,
         generator.clone(),
         progress,
         cancelled,
@@ -80,6 +92,8 @@ struct DeferredJudgeScore {
     example_index: usize,
     completion_idx: usize,
     completion_text: String,
+    raw_completion_text: String,
+    thinking_budget: EvalThinkingBudget,
     prompt_tokens: usize,
     completion_tokens: usize,
     latency_ms: f64,
@@ -90,6 +104,9 @@ async fn run_suite_inner(
     suite: &EvalSuite,
     adapter: Option<&str>,
     generation_override: Option<&EvalGenerationParams>,
+    prepared_examples: Vec<Result<PreparedPrompt, String>>,
+    resolved_budgets: Vec<EvalThinkingBudget>,
+    effective_generation_hash: String,
     generator: Arc<dyn EvalGenerator>,
     progress: Option<ProgressCallback>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
@@ -141,33 +158,23 @@ async fn run_suite_inner(
                 }
             }
         }
-        let gen_params = example
-            .generation
-            .as_ref()
-            .or(generation_override)
-            .unwrap_or(&suite.generation)
-            .clone();
+        let (gen_params, _) = effective_generation(example, suite, generation_override);
+        let gen_params = gen_params.clone();
+        let resolved_budget = &resolved_budgets[outcomes_example_index];
 
-        // Render chat template + tokenize once per example. For n>1 the
-        // resulting `PreparedPrompt` is reused across every completion.
-        // Pass through the effective tool catalogue (per-example override
-        // or suite-level default) so Qwen3.5's `<tools>` block renders.
-        let effective_tools = example.effective_tools(suite.tools.as_deref());
-        let prepared = match generator
-            .prepare(
-                &example.messages,
-                suite.system_prompt.as_deref(),
-                effective_tools,
-                &gen_params,
-            )
-            .await
-        {
-            Ok(p) => p,
+        // Prompts were rendered before the adapter swap so all active budget
+        // configurations could be validated before any decode. Preserve the
+        // historical behavior of recording template/tokenization failures as
+        // per-example error outcomes.
+        let prepared = match &prepared_examples[outcomes_example_index] {
+            Ok(prepared) => prepared.clone(),
             Err(err) => {
                 let outcome = ExampleOutcome {
                     example_id: example_id.clone(),
                     completion_index: 0,
                     completion_text: String::new(),
+                    raw_completion_text: None,
+                    thinking_budget: None,
                     kind: EvalOutcomeKind::Error,
                     score: 0.0,
                     detail: Some(format!("prepare failed: {err}")),
@@ -191,7 +198,13 @@ async fn run_suite_inner(
                 break;
             }
             let result = generator
-                .run(&prepared, &gen_params, completion_idx, adapter)
+                .run(
+                    &prepared,
+                    &gen_params,
+                    resolved_budget,
+                    completion_idx,
+                    adapter,
+                )
                 .await;
             let mut pending_schema_detail: Option<kiln_eval::qwen3::SchemaCheck> = None;
             let outcome = match result {
@@ -254,6 +267,8 @@ async fn run_suite_inner(
                             example_index: outcomes_example_index,
                             completion_idx,
                             completion_text: completion.text.clone(),
+                            raw_completion_text: completion.raw_text.clone(),
+                            thinking_budget: completion.thinking_budget.clone(),
                             prompt_tokens: completion.prompt_tokens,
                             completion_tokens: completion.completion_tokens,
                             latency_ms: completion.latency_ms,
@@ -263,6 +278,8 @@ async fn run_suite_inner(
                             example_id: example_id.clone(),
                             completion_index: completion_idx,
                             completion_text: completion.text.clone(),
+                            raw_completion_text: Some(completion.raw_text.clone()),
+                            thinking_budget: Some(completion.thinking_budget.clone()),
                             kind: EvalOutcomeKind::Invalid,
                             score: 0.0,
                             detail: Some("awaiting judge pass".into()),
@@ -291,6 +308,8 @@ async fn run_suite_inner(
                                 example_id: example_id.clone(),
                                 completion_index: completion_idx,
                                 completion_text: completion.text.clone(),
+                                raw_completion_text: Some(completion.raw_text.clone()),
+                                thinking_budget: Some(completion.thinking_budget.clone()),
                                 kind: EvalOutcomeKind::Error,
                                 score: 0.0,
                                 detail: Some(format!("scorer error: {e}")),
@@ -307,6 +326,8 @@ async fn run_suite_inner(
                         o.prompt_tokens = Some(completion.prompt_tokens);
                         o.completion_tokens = Some(completion.completion_tokens);
                         o.latency_ms = Some(completion.latency_ms);
+                        o.raw_completion_text = Some(completion.raw_text);
+                        o.thinking_budget = Some(completion.thinking_budget);
                         if let Some(note) = schema_note.as_ref() {
                             o.detail =
                                 Some(o.detail.map(|d| d + note).unwrap_or_else(|| {
@@ -320,6 +341,8 @@ async fn run_suite_inner(
                     example_id: example_id.clone(),
                     completion_index: completion_idx,
                     completion_text: String::new(),
+                    raw_completion_text: None,
+                    thinking_budget: None,
                     kind: EvalOutcomeKind::Error,
                     score: 0.0,
                     detail: Some(format!("generation failed: {err}")),
@@ -434,6 +457,8 @@ async fn run_suite_inner(
                         o.prompt_tokens = Some(item.prompt_tokens);
                         o.completion_tokens = Some(item.completion_tokens);
                         o.latency_ms = Some(item.latency_ms);
+                        o.raw_completion_text = Some(item.raw_completion_text);
+                        o.thinking_budget = Some(item.thinking_budget);
                         if let Some(note) = item.schema_note.as_ref() {
                             o.detail =
                                 Some(o.detail.map(|d| d + note).unwrap_or_else(|| {
@@ -493,7 +518,88 @@ async fn run_suite_inner(
         started_at: started_at.to_rfc3339(),
         finished_at: finished_at.to_rfc3339(),
         suite_hash,
+        effective_generation_hash,
     })
+}
+
+fn effective_generation<'a>(
+    example: &'a kiln_eval::EvalExample,
+    suite: &'a EvalSuite,
+    generation_override: Option<&'a EvalGenerationParams>,
+) -> (&'a EvalGenerationParams, EvalGenerationSource) {
+    if let Some(params) = example.generation.as_ref() {
+        (params, EvalGenerationSource::Example)
+    } else if let Some(params) = generation_override {
+        (params, EvalGenerationSource::RunOverride)
+    } else {
+        (&suite.generation, EvalGenerationSource::Suite)
+    }
+}
+
+async fn prepare_and_preflight_examples(
+    suite: &EvalSuite,
+    generation_override: Option<&EvalGenerationParams>,
+    generator: &dyn EvalGenerator,
+) -> Result<(Vec<Result<PreparedPrompt, String>>, Vec<EvalThinkingBudget>), EvalExecutionError> {
+    let mut cache: BTreeMap<String, EvalThinkingBudget> = BTreeMap::new();
+    let mut prepared_examples = Vec::with_capacity(suite.examples.len());
+    let mut resolved = Vec::with_capacity(suite.examples.len());
+    for example in &suite.examples {
+        let (params, source) = effective_generation(example, suite, generation_override);
+        let prepared = generator
+            .prepare(
+                &example.messages,
+                suite.system_prompt.as_deref(),
+                example.effective_tools(suite.tools.as_deref()),
+                params,
+            )
+            .await;
+        let starts_in_reasoning = prepared
+            .as_ref()
+            .map(|prompt| prompt.starts_in_reasoning)
+            .unwrap_or(false);
+        let key = format!(
+            "{}:{starts_in_reasoning}:{}",
+            match source {
+                EvalGenerationSource::Suite => "suite",
+                EvalGenerationSource::RunOverride => "run_override",
+                EvalGenerationSource::Example => "example",
+            },
+            serde_json::to_string(params).unwrap_or_else(|_| format!("{params:?}")),
+        );
+        let budget = if let Some(cached) = cache.get(&key) {
+            cached.clone()
+        } else {
+            let budget = generator
+                .preflight_thinking_budget(params, source, starts_in_reasoning)
+                .await
+                .map_err(EvalExecutionError::Generation)?;
+            cache.insert(key, budget.clone());
+            budget
+        };
+        prepared_examples.push(prepared);
+        resolved.push(budget);
+    }
+    Ok((prepared_examples, resolved))
+}
+
+fn hash_effective_generation(
+    suite: &EvalSuite,
+    generation_override: Option<&EvalGenerationParams>,
+    resolved_budgets: &[EvalThinkingBudget],
+) -> String {
+    let mut hasher = Sha256::new();
+    if let Ok(bytes) = serde_json::to_vec(suite) {
+        hasher.update(bytes);
+    }
+    if let Ok(bytes) = serde_json::to_vec(&generation_override) {
+        hasher.update(bytes);
+    }
+    if let Ok(bytes) = serde_json::to_vec(resolved_budgets) {
+        hasher.update(bytes);
+    }
+    let digest = hasher.finalize();
+    digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
 /// Stable hash of the suite content. Used to detect "did the suite change
@@ -522,8 +628,10 @@ mod tests {
     use super::*;
     use crate::eval::generator::MockEvalGenerator;
     use kiln_eval::scorers::{NumericTolerance, Scorer};
-    use kiln_eval::{EvalChatMessage, EvalExample, EvalGenerationParams, EvalSuite};
-    use std::sync::atomic::AtomicBool;
+    use kiln_eval::{
+        EvalBudgetOverride, EvalChatMessage, EvalExample, EvalGenerationParams, EvalSuite,
+    };
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn suite_with_numeric_answer() -> EvalSuite {
         let mk = |id: &str, q: &str, a: &str| EvalExample {
@@ -547,6 +655,165 @@ mod tests {
             schema_version: 1,
             tools: None,
         }
+    }
+
+    struct PreflightProbeGenerator {
+        starts_in_reasoning: bool,
+        preflight_calls: AtomicUsize,
+        adapter_calls: AtomicUsize,
+    }
+
+    impl EvalGenerator for PreflightProbeGenerator {
+        fn preflight_thinking_budget(
+            &self,
+            params: &EvalGenerationParams,
+            source: EvalGenerationSource,
+            starts_in_reasoning: bool,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<EvalThinkingBudget, String>> + Send + '_>,
+        > {
+            self.preflight_calls.fetch_add(1, Ordering::Relaxed);
+            let max_tokens = params.thinking_budget_tokens.resolve(None);
+            let source = match source {
+                EvalGenerationSource::Suite => "suite",
+                EvalGenerationSource::RunOverride => "run_override",
+                EvalGenerationSource::Example => "example",
+            };
+            Box::pin(async move {
+                if starts_in_reasoning {
+                    return Err("synthetic invalid close sequence".into());
+                }
+                Ok(EvalThinkingBudget {
+                    configured: max_tokens.is_some(),
+                    applied: false,
+                    max_tokens,
+                    max_time_ms: None,
+                    tokens_source: source.into(),
+                    time_source: "unlimited".into(),
+                    outcome: None,
+                })
+            })
+        }
+
+        fn set_adapter(
+            &self,
+            _adapter: Option<&str>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Option<String>, String>> + Send + '_>,
+        > {
+            self.adapter_calls.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async { Ok(None) })
+        }
+
+        fn prepare(
+            &self,
+            _messages: &[EvalChatMessage],
+            _system_prompt: Option<&str>,
+            _tools: Option<&[serde_json::Value]>,
+            _params: &EvalGenerationParams,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<PreparedPrompt, String>> + Send + '_>,
+        > {
+            let starts_in_reasoning = self.starts_in_reasoning;
+            Box::pin(async move {
+                Ok(PreparedPrompt {
+                    tokens: vec![1],
+                    starts_in_reasoning,
+                })
+            })
+        }
+
+        fn run(
+            &self,
+            _prepared: &PreparedPrompt,
+            _params: &EvalGenerationParams,
+            thinking_budget: &EvalThinkingBudget,
+            _completion_index: usize,
+            adapter_label: Option<&str>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<crate::eval::generator::EvalCompletion, String>,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            let thinking_budget = thinking_budget.clone();
+            let adapter = adapter_label.map(str::to_string);
+            Box::pin(async move {
+                Ok(crate::eval::generator::EvalCompletion {
+                    text: "2".into(),
+                    raw_text: "decoder-raw".into(),
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    latency_ms: 0.1,
+                    adapter,
+                    thinking_budget,
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn budget_preflight_is_deduplicated_gated_by_rendered_prompt_and_precedes_adapter_swap() {
+        let mut suite = suite_with_numeric_answer();
+        suite.generation.thinking_budget_tokens = EvalBudgetOverride::Limited(1);
+
+        let inert = Arc::new(PreflightProbeGenerator {
+            starts_in_reasoning: false,
+            preflight_calls: AtomicUsize::new(0),
+            adapter_calls: AtomicUsize::new(0),
+        });
+        let result = run_suite_against_adapter(
+            &suite,
+            None,
+            None,
+            inert.clone(),
+            None,
+            Arc::new(AtomicBool::new(false)),
+            noop_judge_runner(),
+        )
+        .await
+        .expect("an inert budget must not be rejected");
+        assert_eq!(inert.preflight_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(inert.adapter_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            result.outcomes[0].raw_completion_text.as_deref(),
+            Some("decoder-raw")
+        );
+        assert_eq!(
+            result.outcomes[0]
+                .thinking_budget
+                .as_ref()
+                .unwrap()
+                .tokens_source,
+            "suite"
+        );
+        assert!(!result.effective_generation_hash.is_empty());
+
+        let active = Arc::new(PreflightProbeGenerator {
+            starts_in_reasoning: true,
+            preflight_calls: AtomicUsize::new(0),
+            adapter_calls: AtomicUsize::new(0),
+        });
+        let error = run_suite_against_adapter(
+            &suite,
+            None,
+            None,
+            active.clone(),
+            None,
+            Arc::new(AtomicBool::new(false)),
+            noop_judge_runner(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("synthetic invalid close sequence")
+        );
+        assert_eq!(active.preflight_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(active.adapter_calls.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]

@@ -225,6 +225,7 @@ curl -s http://localhost:8420/v1/chat/completions \
   -d '{
     "messages": [{"role": "user", "content": "What is 2+2?"}],
     "max_tokens": 64,
+    "thinking_budget_tokens": 24,
     "temperature": 0.7
   }' | python3 -m json.tool
 ```
@@ -237,9 +238,22 @@ curl -N http://localhost:8420/v1/chat/completions \
   -d '{
     "messages": [{"role": "user", "content": "Write a haiku about rust programming"}],
     "max_tokens": 64,
+    "thinking_budget_ms": 2000,
     "stream": true
   }'
 ```
+
+Thinking budgets close an open `<think>` block and let generation continue into
+the final answer. Request fields inherit server defaults when omitted; use
+explicit `null` for an unlimited dimension or `0` to close thinking immediately.
+If token and time budgets are both present, the first one reached wins. The
+clock excludes queue and prefill time and is checked between decode tokens.
+The final non-streaming choice exposes the outcome as
+`choices[].thinking_budget`; batch responses use
+`completions[].thinking_budget`. With SSE, inspect
+`metadata.thinking_budget` on the chunk that carries `finish_reason`. The
+outcome includes `triggered`, optional `trigger` (`tokens`, `time`, or
+`max_tokens`), `closed`, `thinking_tokens`, and `thinking_time_ms`.
 
 ### Optional: point pi at Kiln
 
@@ -538,6 +552,7 @@ curl -s http://localhost:8420/v1/completions/batch \
     ],
     "n": 4,
     "max_tokens": 32,
+    "thinking_budget_tokens": 12,
     "temperature": 0.7,
     "seed": 42
   }' | python3 -m json.tool
@@ -766,8 +781,8 @@ Use `kiln -v serve` when first-run startup or model-load diagnostics are needed.
 | GET | `/health` | Server health and diagnostics |
 | GET | `/metrics` | Prometheus metrics |
 | GET | `/v1/models` | List available models |
-| POST | `/v1/chat/completions` | Chat completion (OpenAI-compatible). Kiln extension: per-request `adapter` (single name) or `adapters: [{name, scale}, …]` for adapter composition (see [9.8](#98-compose-adapters-per-request)). |
-| POST | `/v1/completions/batch` | Multi-prompt batch generation — efficient for GRPO rollouts (see [9.4](#94-batch-generation-efficient-for-grpo-rollouts)). |
+| POST | `/v1/chat/completions` | Chat completion (OpenAI-compatible). Kiln extensions include `thinking_budget_tokens` / `thinking_budget_ms` and per-request `adapter` or `adapters: [{name, scale}, …]` composition (see [9.8](#98-compose-adapters-per-request)). |
+| POST | `/v1/completions/batch` | Multi-prompt batch generation with the same thinking-budget controls — efficient for GRPO rollouts (see [9.4](#94-batch-generation-efficient-for-grpo-rollouts)). |
 | GET | `/v1/adapters` | List LoRA adapters |
 | POST | `/v1/adapters/load` | Load adapter from disk |
 | POST | `/v1/adapters/unload` | Unload active adapter |
@@ -806,6 +821,8 @@ Key settings:
 |---------|---------|---------|-------------|
 | `model.path` | `KILN_MODEL_PATH` | none | Path to model weights (required for real inference) |
 | `server.port` | `KILN_PORT` | 8420 | Server listen port |
+| `server.default_thinking_budget_tokens` | `KILN_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default token budget for an open thinking block |
+| `server.default_thinking_budget_ms` | `KILN_DEFAULT_THINKING_BUDGET_MS` | unlimited | Default decode-time budget for an open thinking block |
 | `memory.inference_memory_fraction` | — | 0.7 | VRAM fraction for inference (rest for training) |
 | `memory.kv_cache_fp8` | `KILN_KV_CACHE_FP8` | false | FP8 KV cache (halves memory, ~2x context) |
 | `logging.format` | `KILN_LOG_FORMAT` | auto | Log format: `auto` (pretty on TTY, JSON otherwise), `json`, `pretty`, `text`, `human` |

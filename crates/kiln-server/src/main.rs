@@ -55,6 +55,8 @@ async fn main() -> Result<()> {
             ref url,
             ref adapter,
             thinking,
+            thinking_budget_tokens,
+            thinking_budget_ms,
             ref tasks,
             seeds,
             seed_start,
@@ -67,6 +69,8 @@ async fn main() -> Result<()> {
                 url,
                 adapter,
                 thinking,
+                thinking_budget_tokens,
+                thinking_budget_ms,
                 tasks,
                 seeds,
                 seed_start,
@@ -403,6 +407,8 @@ async fn main() -> Result<()> {
     state.tracked_job_ttl = std::time::Duration::from_secs(config.training.tracked_job_ttl_secs);
     state.eval_mode = config.server.eval_mode;
     state.default_thinking_enabled = config.server.default_thinking_enabled;
+    state.default_thinking_budget_tokens = config.server.default_thinking_budget_tokens;
+    state.default_thinking_budget_ms = config.server.default_thinking_budget_ms;
     state.model_defaults_profile = model_defaults_profile;
     state.model_path = model_path.map(PathBuf::from);
     state.fold_reasoning_into_content = config.server.fold_reasoning_into_content;
@@ -465,6 +471,8 @@ async fn main() -> Result<()> {
     );
     tracing::debug!(
         default_thinking_enabled = ?state.default_thinking_enabled,
+        default_thinking_budget_tokens = ?state.default_thinking_budget_tokens,
+        default_thinking_budget_ms = ?state.default_thinking_budget_ms,
         "chat-template thinking default configured"
     );
     tracing::debug!(

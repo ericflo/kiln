@@ -15,6 +15,74 @@ use serde::{Deserialize, Serialize};
 
 use crate::scorers::Scorer;
 
+/// Three-state eval override used for limits where omitted means "inherit"
+/// and explicit JSON null means "unlimited".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EvalBudgetOverride<T> {
+    #[default]
+    Inherit,
+    Unlimited,
+    Limited(T),
+}
+
+impl<T: Copy> EvalBudgetOverride<T> {
+    pub fn resolve(self, default: Option<T>) -> Option<T> {
+        match self {
+            Self::Inherit => default,
+            Self::Unlimited => None,
+            Self::Limited(value) => Some(value),
+        }
+    }
+
+    fn is_inherit(&self) -> bool {
+        matches!(self, Self::Inherit)
+    }
+}
+
+impl<T: Serialize> Serialize for EvalBudgetOverride<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Inherit | Self::Unlimited => serializer.serialize_none(),
+            Self::Limited(value) => value.serialize(serializer),
+        }
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for EvalBudgetOverride<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor<T>(std::marker::PhantomData<T>);
+        impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Visitor<T> {
+            type Value = EvalBudgetOverride<T>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("null or a non-negative numeric thinking budget")
+            }
+
+            fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(EvalBudgetOverride::Unlimited)
+            }
+
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(EvalBudgetOverride::Unlimited)
+            }
+
+            fn visit_some<D: serde::Deserializer<'de>>(
+                self,
+                deserializer: D,
+            ) -> Result<Self::Value, D::Error> {
+                T::deserialize(deserializer).map(EvalBudgetOverride::Limited)
+            }
+        }
+        deserializer.deserialize_option(Visitor(std::marker::PhantomData))
+    }
+}
+
 /// Sampling / decode params used when running an eval example.
 ///
 /// Mirrors the `ChatCompletionRequest` knobs we care about for eval. The
@@ -41,6 +109,14 @@ pub struct EvalGenerationParams {
     /// picks one per request (and records it in the result for replayability).
     #[serde(default)]
     pub seed: Option<u64>,
+    /// Maximum reasoning tokens before forced `</think>` closure. Omitted
+    /// inherits the live server default; null is unlimited; zero is immediate.
+    #[serde(default, skip_serializing_if = "EvalBudgetOverride::is_inherit")]
+    pub thinking_budget_tokens: EvalBudgetOverride<usize>,
+    /// Reasoning wall-clock budget in milliseconds, with the same tri-state
+    /// semantics as `thinking_budget_tokens`.
+    #[serde(default, skip_serializing_if = "EvalBudgetOverride::is_inherit")]
+    pub thinking_budget_ms: EvalBudgetOverride<u64>,
     /// Optional per-eval chat-template variables (e.g. Qwen's
     /// `enable_thinking=false`). Forwarded into the chat template context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,6 +149,8 @@ impl Default for EvalGenerationParams {
             n: default_n(),
             stop: Vec::new(),
             seed: None,
+            thinking_budget_tokens: EvalBudgetOverride::Inherit,
+            thinking_budget_ms: EvalBudgetOverride::Inherit,
             chat_template_kwargs: None,
         }
     }
@@ -607,6 +685,39 @@ mod tests {
         assert_eq!(s.num_examples, 2);
         assert_eq!(s.tags.get("math"), Some(&2));
         assert_eq!(s.tags.get("easy"), Some(&1));
+    }
+
+    #[test]
+    fn generation_thinking_budgets_roundtrip_all_three_states() {
+        let inherited: EvalGenerationParams = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            inherited.thinking_budget_tokens,
+            EvalBudgetOverride::Inherit
+        );
+
+        let unlimited: EvalGenerationParams =
+            serde_json::from_str(r#"{"thinking_budget_tokens":null,"thinking_budget_ms":null}"#)
+                .unwrap();
+        assert_eq!(
+            unlimited.thinking_budget_tokens,
+            EvalBudgetOverride::Unlimited
+        );
+        assert_eq!(unlimited.thinking_budget_ms, EvalBudgetOverride::Unlimited);
+
+        let limited: EvalGenerationParams =
+            serde_json::from_str(r#"{"thinking_budget_tokens":0,"thinking_budget_ms":1250}"#)
+                .unwrap();
+        assert_eq!(
+            limited.thinking_budget_tokens,
+            EvalBudgetOverride::Limited(0)
+        );
+        assert_eq!(
+            limited.thinking_budget_ms,
+            EvalBudgetOverride::Limited(1250)
+        );
+        let json = serde_json::to_value(&limited).unwrap();
+        assert_eq!(json["thinking_budget_tokens"], 0);
+        assert_eq!(json["thinking_budget_ms"], 1250);
     }
 
     #[test]

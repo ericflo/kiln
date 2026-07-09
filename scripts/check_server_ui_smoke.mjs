@@ -2822,10 +2822,65 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
 
     await goToPrimaryTab(page, 'playground');
     await expectDisabled(page, '#chat-send', true, 'Quick Inference send should start disabled until text is entered');
+    const initialThinkingBudget = await page.evaluate(() => ({
+      mode: document.getElementById('chat-thinking-budget-mode')?.value,
+      modeDisabled: document.getElementById('chat-thinking-budget-mode')?.disabled,
+      customHidden: document.getElementById('chat-thinking-budget-custom')?.hidden,
+      tokensDisabled: document.getElementById('chat-thinking-budget-tokens')?.disabled,
+      secondsDisabled: document.getElementById('chat-thinking-budget-seconds')?.disabled,
+    }));
+    if (initialThinkingBudget.mode !== 'server' || initialThinkingBudget.modeDisabled) {
+      fail(`Thinking budget should start at enabled Server default, got ${JSON.stringify(initialThinkingBudget)}`);
+    }
+    if (!initialThinkingBudget.customHidden || !initialThinkingBudget.tokensDisabled || !initialThinkingBudget.secondsDisabled) {
+      fail(`Server-default thinking budget should hide and disable custom fields, got ${JSON.stringify(initialThinkingBudget)}`);
+    }
+
+    await page.select('#chat-thinking-budget-mode', 'custom');
+    await page.waitForFunction(() => (
+      document.getElementById('chat-advanced')?.hidden === false
+      && document.getElementById('chat-thinking-budget-custom')?.hidden === false
+      && document.getElementById('chat-thinking-budget-tokens')?.disabled === false
+      && document.getElementById('chat-thinking-budget-seconds')?.disabled === false
+    ), { timeout: 5000 }).catch(() => fail('Custom thinking budget should reveal enabled token/time controls in Advanced'));
+    await page.$eval('#chat-thinking-budget-tokens', (input) => {
+      input.value = '0';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await page.$eval('#chat-thinking-budget-seconds', (input) => {
+      input.value = '1.25';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await page.waitForFunction(() => {
+      const settings = JSON.parse(localStorage.getItem('kiln.playground.settings.v1') || '{}');
+      return settings.thinkingBudgetMode === 'custom'
+        && settings.thinkingBudgetTokens === '0'
+        && settings.thinkingBudgetSeconds === '1.25'
+        && settings.advancedOpen === true;
+    }, { timeout: 5000 }).catch(() => fail('Custom thinking budget should persist with the Playground settings'));
+
+    await page.click('#chat-enable-thinking');
+    await expectDisabled(page, '#chat-thinking-budget-mode', true, 'Thinking off should disable budget mode');
+    await expectDisabled(page, '#chat-thinking-budget-tokens', true, 'Thinking off should disable the token budget');
+    await expectDisabled(page, '#chat-thinking-budget-seconds', true, 'Thinking off should disable the time budget');
+    await page.click('#chat-enable-thinking');
+    await expectDisabled(page, '#chat-thinking-budget-mode', false, 'Thinking on should re-enable budget mode');
+    await expectDisabled(page, '#chat-thinking-budget-tokens', false, 'Thinking on should restore custom token budget editing');
+    await expectDisabled(page, '#chat-thinking-budget-seconds', false, 'Thinking on should restore custom time budget editing');
+
     await page.type('#chat-input', 'Explain Kiln in one sentence.');
     await expectDisabled(page, '#chat-send', false, 'Quick Inference send should enable after text is entered');
     await page.evaluate(() => { window.__copiedText = ''; });
+    const customBudgetRequestPromise = page.waitForRequest(
+      (request) => request.method() === 'POST' && request.url().endsWith('/v1/chat/completions'),
+      { timeout: 5000 },
+    );
     await clickAndWait(page, '#chat-send', 'Could not click Quick Inference send');
+    const customBudgetRequest = await customBudgetRequestPromise.catch(() => fail('Custom budget Quick Inference request was not sent'));
+    const customBudgetBody = JSON.parse(customBudgetRequest.postData() || '{}');
+    if (customBudgetBody.thinking_budget_tokens !== 0 || customBudgetBody.thinking_budget_ms !== 1250) {
+      fail(`Custom thinking budget should send token zero and fractional seconds as integer ms, got ${JSON.stringify(customBudgetBody)}`);
+    }
     await waitForPanelText(page, '#chat-output', /Kiln serves one tuned model and learns from feedback live\./, 'Quick Inference response missing');
     await expectDisabled(page, '#copy-chat-response', false, 'Copy response should enable after an assistant response renders');
     await clickAndWait(page, '#copy-chat-response', 'Could not click Copy response');
@@ -2837,6 +2892,44 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       fail(`Copy response should copy the latest assistant response, got ${JSON.stringify(copiedText)}`);
     });
     await clickAndWait(page, '#chat-clear', 'Could not click Quick Inference clear');
+
+    await page.select('#chat-thinking-budget-mode', 'unlimited');
+    const unlimitedState = await page.evaluate(() => ({
+      customHidden: document.getElementById('chat-thinking-budget-custom')?.hidden,
+      tokensDisabled: document.getElementById('chat-thinking-budget-tokens')?.disabled,
+      secondsDisabled: document.getElementById('chat-thinking-budget-seconds')?.disabled,
+    }));
+    if (!unlimitedState.customHidden || !unlimitedState.tokensDisabled || !unlimitedState.secondsDisabled) {
+      fail(`Unlimited thinking budget should hide and disable custom fields, got ${JSON.stringify(unlimitedState)}`);
+    }
+    await page.type('#chat-input', 'Explain Kiln in one sentence.');
+    const unlimitedRequestPromise = page.waitForRequest(
+      (request) => request.method() === 'POST' && request.url().endsWith('/v1/chat/completions'),
+      { timeout: 5000 },
+    );
+    await clickAndWait(page, '#chat-send', 'Could not send Unlimited thinking-budget request');
+    const unlimitedRequest = await unlimitedRequestPromise.catch(() => fail('Unlimited budget Quick Inference request was not sent'));
+    const unlimitedBody = JSON.parse(unlimitedRequest.postData() || '{}');
+    if (unlimitedBody.thinking_budget_tokens !== null || unlimitedBody.thinking_budget_ms !== null) {
+      fail(`Unlimited thinking budget should send explicit nulls, got ${JSON.stringify(unlimitedBody)}`);
+    }
+    await waitForPanelText(page, '#chat-output', /Kiln serves one tuned model and learns from feedback live\./, 'Unlimited budget response missing');
+    await clickAndWait(page, '#chat-clear', 'Could not clear Unlimited thinking-budget response');
+
+    await page.select('#chat-thinking-budget-mode', 'server');
+    await page.type('#chat-input', 'Explain Kiln in one sentence.');
+    const inheritedRequestPromise = page.waitForRequest(
+      (request) => request.method() === 'POST' && request.url().endsWith('/v1/chat/completions'),
+      { timeout: 5000 },
+    );
+    await clickAndWait(page, '#chat-send', 'Could not send inherited thinking-budget request');
+    const inheritedRequest = await inheritedRequestPromise.catch(() => fail('Inherited budget Quick Inference request was not sent'));
+    const inheritedBody = JSON.parse(inheritedRequest.postData() || '{}');
+    if ('thinking_budget_tokens' in inheritedBody || 'thinking_budget_ms' in inheritedBody) {
+      fail(`Server-default thinking budget should omit both request fields, got ${JSON.stringify(inheritedBody)}`);
+    }
+    await waitForPanelText(page, '#chat-output', /Kiln serves one tuned model and learns from feedback live\./, 'Inherited budget response missing');
+    await clickAndWait(page, '#chat-clear', 'Could not clear inherited thinking-budget response');
     await waitForPanelText(page, '#chat-output', /Send a message to test inference\./, 'Quick Inference clear should restore the empty state');
     await expectDisabled(page, '#copy-chat-response', true, 'Copy response should disable after clearing chat');
 

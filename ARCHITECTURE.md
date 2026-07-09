@@ -666,6 +666,34 @@ The response carries `prompts.len() × n` items, each tagged with `prompt_index`
 
 When `seed` is set, each completion's effective seed is `seed + (prompt_index * n + completion_index)` so completions are deterministic across runs but distinct within a group — without that, identical prompts plus a fixed seed would produce identical outputs even at temperature > 0. Total output count is capped at 64 per request (`BATCH_MAX_TOTAL_OUTPUTS`); over the cap, the request is rejected with `batch_too_large` (HTTP 400) so a runaway client cannot pin the engine for an unbounded number of iterations. `stream: true` is not supported on this endpoint — only the aggregated final result is returned. The entire batch shares a single adapter (or composition, or none); per-prompt adapter override is a future extension. See `BatchCompletionRequest`, `BatchCompletionResponse`, and `batch_completions` in `crates/kiln-server/src/api/completions.rs`.
 
+## Thinking Budgets
+
+`ThinkingBudget` in `kiln-core::sampling` is a request-local decode state
+machine shared by the sampling clones used by the engine and response layer.
+It activates only when the rendered prompt ends inside `<think>`. At each token
+boundary it observes the reasoning-token count and elapsed decode time, lets a
+natural `</think>` win, or replaces the sampled candidate with the next token
+of the tokenizer-validated close sequence. It also reserves enough of the
+completion-wide `max_tokens` allowance to emit that sequence atomically.
+
+The replacement happens before EOS and stop checks. Each forced token is then
+accepted through the normal decode path, enters KV and generated-token history,
+and is visible to the next model step. Once the sequence is complete, the state
+machine becomes inert and ordinary answer generation resumes. The batching
+actor applies the same ordering to its first-token and decode-token paths. The
+ordinary flat, paged, streaming, and batched loops enforce the controller;
+speculative and MTP entry points fall back to the corresponding single-token
+loop while a budget is active so multi-token acceptance cannot skip a boundary.
+
+Request limits use three states per dimension: omitted inherits the server
+default, explicit JSON `null` is unlimited, and a nonnegative number is a
+request limit (`0` closes immediately). Time starts when the first decode
+candidate is available, excluding queue and prefill. Time-budgeted requests do
+not use deterministic response caches; token budgets are part of cache identity
+and cached values retain their original closure outcome. Chat choices, batch
+items, final SSE chunks, eval results, health/config APIs, the Playground, the
+desktop settings UI, and rollout/eval CLIs all expose the same semantics.
+
 ## Performance Optimizations
 
 ### CUDA Graphs for Decode
