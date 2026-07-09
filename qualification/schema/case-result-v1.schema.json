@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kiln.local/schemas/qualification-case-result-v1.json",
+  "title": "Kiln qualification case result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "case_id",
+    "status",
+    "duration_seconds",
+    "metrics",
+    "tolerances",
+    "details"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "case_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"
+    },
+    "status": { "enum": ["passed", "failed", "skipped"] },
+    "duration_seconds": { "type": "number", "minimum": 0 },
+    "metrics": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/metric" }
+    },
+    "tolerances": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/tolerance" }
+    },
+    "details": {
+      "oneOf": [
+        { "type": "string" },
+        { "type": "null" }
+      ]
+    }
+  },
+  "$defs": {
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value", "unit", "aggregation", "lower_is_better"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+        },
+        "value": { "type": "number" },
+        "unit": { "type": "string", "minLength": 1 },
+        "aggregation": { "type": "string", "minLength": 1 },
+        "lower_is_better": { "type": "boolean" }
+      }
+    },
+    "tolerance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["metric", "absolute_tolerance", "relative_tolerance"],
+      "properties": {
+        "metric": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+        },
+        "absolute_tolerance": { "type": "number", "minimum": 0 },
+        "relative_tolerance": { "type": "number", "minimum": 0 }
+      }
+    }
+  }
+}

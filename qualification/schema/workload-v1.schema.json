@@ -1,0 +1,314 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kiln.local/schemas/qualification-workload-v1.json",
+  "title": "Kiln local hardware qualification workload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "workload_id",
+    "kind",
+    "description",
+    "determinism",
+    "variables",
+    "variants",
+    "comparison_policy"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "workload_id": { "$ref": "#/$defs/id" },
+    "kind": {
+      "enum": ["environment", "correctness", "serving", "performance", "training", "eval", "soak"]
+    },
+    "description": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "determinism": { "$ref": "#/$defs/determinism" },
+    "variables": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/variable" }
+    },
+    "variants": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/variant" }
+    },
+    "comparison_policy": {
+      "anyOf": [
+        { "$ref": "#/$defs/comparisonPolicy" },
+        { "type": "null" }
+      ]
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"
+    },
+    "nullableScalar": {
+      "oneOf": [
+        { "type": "string" },
+        { "type": "integer" },
+        { "type": "number" },
+        { "type": "boolean" },
+        { "type": "null" }
+      ]
+    },
+    "determinism": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seed",
+        "seed_delivery",
+        "repetitions",
+        "case_order",
+        "max_parallel_cases",
+        "network_access"
+      ],
+      "properties": {
+        "seed": {
+          "oneOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "null" }
+          ]
+        },
+        "seed_delivery": {
+          "enum": ["not_applicable", "fixed_fixture", "argv", "environment"]
+        },
+        "repetitions": { "type": "integer", "minimum": 1 },
+        "case_order": { "const": "declared" },
+        "max_parallel_cases": { "const": 1 },
+        "network_access": { "const": "forbidden" }
+      }
+    },
+    "variable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "description", "type", "required", "default", "constraints"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{1,63}$"
+        },
+        "description": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "type": { "enum": ["string", "integer", "number", "boolean"] },
+        "required": { "type": "boolean" },
+        "default": { "$ref": "#/$defs/nullableScalar" },
+        "constraints": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["allowed_values", "minimum", "maximum", "pattern"],
+          "properties": {
+            "allowed_values": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/nullableScalar" }
+            },
+            "minimum": {
+              "oneOf": [
+                { "type": "number" },
+                { "type": "null" }
+              ]
+            },
+            "maximum": {
+              "oneOf": [
+                { "type": "number" },
+                { "type": "null" }
+              ]
+            },
+            "pattern": {
+              "oneOf": [
+                { "type": "string", "minLength": 1 },
+                { "type": "null" }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "outputAssertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stream", "match", "pattern"],
+      "properties": {
+        "stream": { "enum": ["stdout", "stderr", "combined"] },
+        "match": { "enum": ["required", "forbidden"] },
+        "pattern": { "type": "string", "minLength": 1, "maxLength": 512 }
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "description",
+        "required",
+        "command",
+        "working_directory",
+        "environment",
+        "timeout_seconds",
+        "expected_exit_codes",
+        "output_assertions",
+        "result_protocol"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "description": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "required": { "type": "boolean" },
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "working_directory": { "type": "string", "minLength": 1 },
+        "environment": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[A-Z_][A-Z0-9_]*$" },
+          "additionalProperties": { "type": "string", "minLength": 1 }
+        },
+        "timeout_seconds": { "type": "integer", "minimum": 1 },
+        "expected_exit_codes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+        },
+        "output_assertions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/outputAssertion" }
+        },
+        "result_protocol": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["format", "producer", "path_environment_variable", "declared_metrics"],
+          "properties": {
+            "format": { "const": "qualification-case-result-v1" },
+            "producer": { "enum": ["runner", "command"] },
+            "path_environment_variable": { "const": "KILN_QUALIFICATION_CASE_RESULT" },
+            "declared_metrics": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+              }
+            }
+          }
+        }
+      }
+    },
+    "variant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "description",
+        "backend",
+        "device_requirement",
+        "skip_policy",
+        "cases"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "description": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "backend": { "enum": ["cpu", "cuda", "rocm", "vulkan", "metal"] },
+        "device_requirement": { "enum": ["none", "required"] },
+        "skip_policy": { "enum": ["allow", "fail"] },
+        "cases": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/case" }
+        }
+      }
+    },
+    "variantPair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseline_variant_id", "candidate_variant_id"],
+      "properties": {
+        "baseline_variant_id": { "$ref": "#/$defs/id" },
+        "candidate_variant_id": { "$ref": "#/$defs/id" }
+      }
+    },
+    "backendPair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backend_a", "variant_a_id", "backend_b", "variant_b_id"],
+      "properties": {
+        "backend_a": { "enum": ["cpu", "cuda", "rocm", "vulkan", "metal"] },
+        "variant_a_id": { "$ref": "#/$defs/id" },
+        "backend_b": { "enum": ["cpu", "cuda", "rocm", "vulkan", "metal"] },
+        "variant_b_id": { "$ref": "#/$defs/id" }
+      }
+    },
+    "metricRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "result_id",
+        "metric",
+        "metric_class",
+        "operator",
+        "absolute_tolerance",
+        "relative_tolerance",
+        "required"
+      ],
+      "properties": {
+        "scope": { "enum": ["receipt", "result"] },
+        "result_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/id" },
+            { "type": "null" }
+          ]
+        },
+        "metric": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+        },
+        "metric_class": { "enum": ["correctness", "performance"] },
+        "operator": { "enum": ["equal", "not_greater", "not_less"] },
+        "absolute_tolerance": { "type": "number", "minimum": 0 },
+        "relative_tolerance": { "type": "number", "minimum": 0 },
+        "required": { "type": "boolean" }
+      }
+    },
+    "comparisonPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "variant_pairs",
+        "backend_pairs",
+        "allowed_effective_config_differences",
+        "metric_rules"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "same_environment_performance",
+            "declared_ab_variants",
+            "cross_backend_correctness"
+          ]
+        },
+        "variant_pairs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/variantPair" }
+        },
+        "backend_pairs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/backendPair" }
+        },
+        "allowed_effective_config_differences": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)*$"
+          }
+        },
+        "metric_rules": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/metricRule" }
+        }
+      }
+    }
+  }
+}

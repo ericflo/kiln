@@ -1,0 +1,285 @@
+{
+  "schema_version": 1,
+  "workload_id": "core-correctness-v1",
+  "kind": "correctness",
+  "description": "Run deterministic accelerator discovery, tensor transfer, and matmul parity cases against CPU oracles.",
+  "determinism": {
+    "seed": 20260709,
+    "seed_delivery": "fixed_fixture",
+    "repetitions": 1,
+    "case_order": "declared",
+    "max_parallel_cases": 1,
+    "network_access": "forbidden"
+  },
+  "variables": [],
+  "variants": [
+    {
+      "id": "rocm",
+      "description": "ROCm correctness cases on a required AMD accelerator.",
+      "backend": "rocm",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "cases": [
+        {
+          "id": "device-probe",
+          "description": "Require rocminfo to observe a usable ROCm runtime and device.",
+          "required": true,
+          "command": ["rocminfo"],
+          "working_directory": ".",
+          "environment": {},
+          "timeout_seconds": 60,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no rocm device|skipp(?:ed|ing))"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "tensor-parity",
+          "description": "Run real-device ROCm tensor allocation, transfer, layout, and finite-value parity tests.",
+          "required": true,
+          "command": [
+            "cargo",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-tensor",
+            "--features",
+            "rocm",
+            "--test",
+            "rocm_storage_smoke",
+            "--",
+            "--nocapture"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "KILN_QUALIFICATION": "1",
+            "ROCM_PATH": "/opt/rocm"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no rocm device|skipp(?:ed|ing).*(?:rocm|r\\.[0-9]))"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "matmul-parity",
+          "description": "Run deterministic ROCm dense matmul parity against the CPU oracle.",
+          "required": true,
+          "command": [
+            "cargo",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-tensor",
+            "--features",
+            "rocm",
+            "--test",
+            "rocm_matmul_parity",
+            "--",
+            "--nocapture"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "KILN_QUALIFICATION": "1",
+            "ROCM_PATH": "/opt/rocm"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no rocm device|skipp(?:ed|ing).*(?:rocm|r\\.[0-9]))"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "vulkan",
+      "description": "Vulkan correctness cases on a required Vulkan accelerator.",
+      "backend": "vulkan",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "cases": [
+        {
+          "id": "device-probe",
+          "description": "Require vulkaninfo to observe a usable Vulkan runtime and physical device.",
+          "required": true,
+          "command": ["vulkaninfo", "--summary"],
+          "working_directory": ".",
+          "environment": {},
+          "timeout_seconds": 60,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "Devices:"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no vulkan device|skipp(?:ed|ing))"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "tensor-parity",
+          "description": "Run Vulkan tensor forward, backward, transfer, and reduction parity against CPU oracles.",
+          "required": true,
+          "command": [
+            "cargo",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-vulkan-kernel",
+            "--test",
+            "vk_tensor_parity",
+            "--",
+            "--nocapture"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no vulkan device|vulkan device.*(?:unavailable|not available)|skipp(?:ed|ing).*vulkan)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "matmul-parity",
+          "description": "Run deterministic Vulkan dense matmul parity against the CPU oracle.",
+          "required": true,
+          "command": [
+            "cargo",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-vulkan-kernel",
+            "--test",
+            "vk_matmul_parity",
+            "--",
+            "--nocapture"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no vulkan device|vulkan device.*(?:unavailable|not available)|skipp(?:ed|ing).*vulkan)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        }
+      ]
+    }
+  ],
+  "comparison_policy": {
+    "mode": "cross_backend_correctness",
+    "variant_pairs": [],
+    "backend_pairs": [
+      {
+        "backend_a": "rocm",
+        "variant_a_id": "rocm",
+        "backend_b": "vulkan",
+        "variant_b_id": "vulkan"
+      }
+    ],
+    "allowed_effective_config_differences": [],
+    "metric_rules": [
+      {
+        "scope": "result",
+        "result_id": "device-probe",
+        "metric": "case_pass",
+        "metric_class": "correctness",
+        "operator": "equal",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      },
+      {
+        "scope": "result",
+        "result_id": "matmul-parity",
+        "metric": "case_pass",
+        "metric_class": "correctness",
+        "operator": "equal",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      },
+      {
+        "scope": "result",
+        "result_id": "tensor-parity",
+        "metric": "case_pass",
+        "metric_class": "correctness",
+        "operator": "equal",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      }
+    ]
+  }
+}

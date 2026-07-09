@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "workload_id": "local-environment-v1",
+  "kind": "environment",
+  "description": "Capture a strict local accelerator environment receipt without network access.",
+  "determinism": {
+    "seed": null,
+    "seed_delivery": "not_applicable",
+    "repetitions": 1,
+    "case_order": "declared",
+    "max_parallel_cases": 1,
+    "network_access": "forbidden"
+  },
+  "variables": [
+    {
+      "name": "host_id",
+      "description": "Stable non-secret identifier for the physical qualification host.",
+      "type": "string",
+      "required": true,
+      "default": null,
+      "constraints": {
+        "allowed_values": [],
+        "minimum": null,
+        "maximum": null,
+        "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+      }
+    },
+    {
+      "name": "output_path",
+      "description": "Ignored local path where the environment collector writes its receipt.",
+      "type": "string",
+      "required": true,
+      "default": null,
+      "constraints": {
+        "allowed_values": [],
+        "minimum": null,
+        "maximum": null,
+        "pattern": "^\\.qualification/[a-z0-9_-]+(?:/[a-z0-9_-]+)*\\.json$"
+      }
+    }
+  ],
+  "variants": [
+    {
+      "id": "rocm",
+      "description": "Collect ROCm, HIP, HSA, compiler, kernel, and AMD GPU identity.",
+      "backend": "rocm",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "cases": [
+        {
+          "id": "environment-capture",
+          "description": "Run the strict ROCm environment collector.",
+          "required": true,
+          "command": [
+            "python3",
+            "scripts/qualification/environment.py",
+            "--backend",
+            "rocm",
+            "--host-id",
+            "${host_id}",
+            "--output",
+            "${output_path}"
+          ],
+          "working_directory": ".",
+          "environment": {},
+          "timeout_seconds": 120,
+          "expected_exit_codes": [0],
+          "output_assertions": [],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "vulkan",
+      "description": "Collect Vulkan instance, RADV device, Mesa, compiler, kernel, and GPU identity.",
+      "backend": "vulkan",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "cases": [
+        {
+          "id": "environment-capture",
+          "description": "Run the strict Vulkan environment collector.",
+          "required": true,
+          "command": [
+            "python3",
+            "scripts/qualification/environment.py",
+            "--backend",
+            "vulkan",
+            "--host-id",
+            "${host_id}",
+            "--output",
+            "${output_path}"
+          ],
+          "working_directory": ".",
+          "environment": {},
+          "timeout_seconds": 120,
+          "expected_exit_codes": [0],
+          "output_assertions": [],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        }
+      ]
+    }
+  ],
+  "comparison_policy": null
+}

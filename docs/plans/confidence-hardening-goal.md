@@ -691,6 +691,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-09 | Honest legacy latency status | `sha256:d56d06727edd` | this commit | Metal/Vulkan fixtures | `docs/backend-latency-fixtures.json` | passed | Stale source-bound Metal and Vulkan artifacts are pending rerun; the legacy manifest no longer claims covered hardware evidence |
 | 2026-07-09 | Capability report truth alignment | `sha256:cda13f3f84e5` | this commit | Linux CPU | `docs/backend-capability-report.{json,md}` and `backend_capability_contract` | passed | Generated report exposes fixture-required Phase 8 and pending hardware blockers; generator checks and all 51 focused contract tests pass |
 | 2026-07-09 | Exact model content fingerprint | `sha256:85e21e751643` | this commit | portable | `scripts/qualification/model_fingerprint.py` | passed | Loader-aligned shards and serving-template fallback; stable hashes; traversal, symlink, reference, duplicate, and mutation tests |
+| 2026-07-09 | Workload contract foundation | `sha256:c49a86951eab` | this commit | portable | `qualification/schema/workload-v1.schema.json` | passed | Exact byte identity, argv-only cases, structured results, closed comparison modes, and initial environment/core-correctness manifests; 14 focused tests |
 | 2026-07-09 | First reduced-CI measurement | `sha256:cda13f3f84e5` | `3c71cc4002f8` | GitHub Actions | run `29049575526` | passed | Three active jobs completed in 3m52s wall and about 4m36s aggregate time; all GPU backend jobs were skipped |
 
 ## Known Starting Defects
