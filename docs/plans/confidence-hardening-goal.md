@@ -155,7 +155,7 @@ Suggested locations:
   minutes without executing on the target hardware.
 - [x] Remove the broken scheduled performance workflow or convert it into a
   local qualification command. Do not retain a permanently red nightly badge.
-- [ ] Keep one inexpensive automatic path for formatting, dependency policy,
+- [x] Keep one inexpensive automatic path for formatting, dependency policy,
   CPU/unit tests, UI smoke, and schema/receipt validation.
 - [x] Ensure release packaging can be invoked deliberately after local hardware
   qualification rather than running a full matrix on every ordinary push.
@@ -684,6 +684,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-09 | Manual-only backend compile jobs | `sha256:c4f18b397716` | this commit | GitHub Actions | `.github/workflows/ci.yml` | passed | Metal/Vulkan/CUDA/ROCm changed to explicit dispatch; cancels superseded runs |
 | 2026-07-09 | Retire broken automatic perf workflow | `sha256:c4f18b397716` | this commit | GitHub Actions | `.github/workflows/perf-regression-nightly.yml` | passed | Removed nightly/PR triggers; legacy fixture and A6000 paths are explicit manual dispatch only |
 | 2026-07-09 | Manual-only release packaging | `sha256:c4f18b397716` | this commit | GitHub Actions | desktop/server/Docker/RunPod workflows | passed | Removed automatic push, tag, PR, and schedule triggers; explicit dispatch remains |
+| 2026-07-09 | Consolidated cheap automatic checks | `sha256:c4f18b397716` | this commit | Linux CPU | `.github/workflows/ci.yml` | passed | Folded leaf and dependency-tree guards into default job; added portable receipt contract validation |
 
 ## Known Starting Defects
 

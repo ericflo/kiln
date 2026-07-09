@@ -131,24 +131,6 @@ jobs:
       - name: Test (default features)
         run: cargo test --locked
 
-  candle-free-crate-tests:
-    name: Linux / candle-free crate tests (#1082 transition)
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust stable
-        run: |
-          rustup set profile minimal
-          rustup default stable
-          rustc --version
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-
-      - name: Fetch dependencies
-        run: cargo fetch
-
       - name: Test substrate leaf crates directly
         # Historical note: added while the #1082 candle removal broke the
         # whole-workspace build. That migration is DONE (the default job
@@ -170,21 +152,6 @@ jobs:
           KILN_DETECT_ANOMALY=1 cargo test --locked -p kiln-autograd anomaly -- --test-threads=1
           KILN_DETERMINISTIC=1 cargo test --locked -p kiln-tensor determinism -- --test-threads=1
 
-  cuda-candle-free:
-    name: CUDA dep tree is candle-free (#1082)
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust stable
-        run: |
-          rustup set profile minimal
-          rustup default stable
-          rustc --version
-
-      - name: Fetch dependencies
-        run: cargo fetch
-
       - name: Assert no candle in the --features cuda runtime dep tree
         # #1082 DoD line 100: `cargo build --release --features cuda` must have
         # no candle in its dep tree. `cargo tree` resolves manifest metadata
@@ -204,6 +171,15 @@ jobs:
             exit 1
           fi
           echo "OK — no candle in the CUDA runtime dep tree."
+
+      - name: Validate local qualification tooling and portable receipts
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts/qualification/tests -v
+          mapfile -d '' receipts < <(find qualification/receipts -type f -name '*.json' -print0 | sort -z)
+          if [ "${#receipts[@]}" -gt 0 ]; then
+            python3 scripts/qualification/receipt.py "${receipts[@]}"
+          fi
 
   linux-vulkan:
     name: Linux / Vulkan
