@@ -1,15 +1,10 @@
 name: Build kiln-runpod image
 
+# The large CUDA image is built only on deliberate dispatch. Ordinary pushes
+# and weekly timers do not spend hosted runner time rebuilding it.
+
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'deploy/runpod/**'
-      - '.github/workflows/runpod-image.yml'
   workflow_dispatch:
-  schedule:
-    # Weekly rebuild for security patches
-    - cron: '0 8 * * 1'
 
 env:
   REGISTRY: ghcr.io

@@ -1,6 +1,8 @@
 name: Kiln server release
 
-# Publishes prebuilt `kiln` server binaries on `kiln-v*` tags. The desktop
+# Deliberately publishes prebuilt `kiln` server binaries when manually
+# dispatched from a `kiln-v*` tag. Tag creation alone does not launch the
+# expensive platform matrix. The desktop
 # app fetches from these releases to onboard users who don't want to build
 # from source (see desktop/src/installer.rs and docs/desktop/signing.md).
 #
@@ -18,9 +20,6 @@ name: Kiln server release
 # common enough in the user base to justify the extra build time.
 
 on:
-  push:
-    tags:
-      - "kiln-v*"
   workflow_dispatch:
 
 permissions:

@@ -1,17 +1,10 @@
 name: Build kiln-desktop
 
+# Expensive cross-platform packaging is deliberately manual. Dispatch this
+# workflow from a desktop-v* tag to publish a release, or from another ref to
+# validate packaging without making every desktop edit build three platforms.
+
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'desktop/**'
-      - '.github/workflows/desktop-build.yml'
-    tags:
-      - 'desktop-v*'
-  pull_request:
-    paths:
-      - 'desktop/**'
-      - '.github/workflows/desktop-build.yml'
   workflow_dispatch:
 
 permissions:

@@ -150,14 +150,14 @@ Suggested locations:
 
 - [ ] Inventory every automatic workflow, trigger, hosted-runner platform,
   average duration, and what unique defect it can actually catch.
-- [ ] Remove or change to `workflow_dispatch` automatic CUDA, ROCm, Vulkan,
+- [x] Remove or change to `workflow_dispatch` automatic CUDA, ROCm, Vulkan,
   Metal, release-matrix, and performance jobs that consume substantial hosted
   minutes without executing on the target hardware.
 - [x] Remove the broken scheduled performance workflow or convert it into a
   local qualification command. Do not retain a permanently red nightly badge.
 - [ ] Keep one inexpensive automatic path for formatting, dependency policy,
   CPU/unit tests, UI smoke, and schema/receipt validation.
-- [ ] Ensure release packaging can be invoked deliberately after local hardware
+- [x] Ensure release packaging can be invoked deliberately after local hardware
   qualification rather than running a full matrix on every ordinary push.
 - [ ] Record before/after automatic job counts and expected hosted minutes in a
   small checked-in summary.
@@ -683,6 +683,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-09 | Initial Vulkan environment | `sha256:c4f18b397716` | `1538505b5129` | Vulkan/Strix Halo | `qualification/receipts/vulkan/strix-halo/20260709t203013z-vulkan-strix-halo-environment-v1.json` | passed | Vulkan 1.4.348; RADV Mesa 26.1.3; 96 GiB unified VRAM |
 | 2026-07-09 | Manual-only backend compile jobs | `sha256:c4f18b397716` | this commit | GitHub Actions | `.github/workflows/ci.yml` | passed | Metal/Vulkan/CUDA/ROCm changed to explicit dispatch; cancels superseded runs |
 | 2026-07-09 | Retire broken automatic perf workflow | `sha256:c4f18b397716` | this commit | GitHub Actions | `.github/workflows/perf-regression-nightly.yml` | passed | Removed nightly/PR triggers; legacy fixture and A6000 paths are explicit manual dispatch only |
+| 2026-07-09 | Manual-only release packaging | `sha256:c4f18b397716` | this commit | GitHub Actions | desktop/server/Docker/RunPod workflows | passed | Removed automatic push, tag, PR, and schedule triggers; explicit dispatch remains |
 
 ## Known Starting Defects
 

@@ -1,8 +1,9 @@
 name: Build and publish kiln-server image
 
-# Publishes the production kiln server Docker image to
-# `ghcr.io/ericflo/kiln-server` on every `kiln-v*` tag push, mirroring the
-# binary release flow in `server-release.yml`. Phase 9 release-prep:
+# Deliberately publishes the production kiln server Docker image to
+# `ghcr.io/ericflo/kiln-server` when manually dispatched from a `kiln-v*` tag,
+# mirroring the binary release flow in `server-release.yml`. Tag creation alone
+# does not launch this CUDA image build. Phase 9 release-prep:
 # users should be able to `docker pull ghcr.io/ericflo/kiln-server:latest`
 # (or pin a version) instead of building from source.
 #
@@ -11,14 +12,10 @@ name: Build and publish kiln-server image
 # under the same owner (`ericflo`) as the repo — same setup that
 # `runpod-image.yml` uses for `ghcr.io/ericflo/kiln-runpod`.
 #
-# `workflow_dispatch` is wired up too so we can validate the workflow
-# end-to-end without cutting a real tag, but the manual run does NOT push
+# A run dispatched from a non-tag ref validates the workflow but does NOT push
 # (push is gated on `startsWith(github.ref, 'refs/tags/kiln-v')`).
 
 on:
-  push:
-    tags:
-      - "kiln-v*"
   workflow_dispatch:
 
 env:
