@@ -2757,14 +2757,49 @@ fn register_backend_memory_reclaimer(policy: GpuMemoryReclaimPolicy, device: kil
         GpuMemoryReclaimer::None => {}
         GpuMemoryReclaimer::RocmTrimPool => {
             #[cfg(feature = "rocm")]
-            if let kiln_tensor::Device::Rocm(idx) = device {
-                kiln_memory::MemoryGovernor::global().register_reclaimer(move |_target| {
-                    // Best-effort: return all pooled-but-unused VRAM (keep 0).
-                    // Device-synced inside, so it's race-free; HIP doesn't
-                    // surface bytes freed, so report 0.
-                    let _ = kiln_tensor::rocm_trim_pool(idx, 0);
-                    0
-                });
+            {
+                if let kiln_tensor::Device::Rocm(idx) = device {
+                    kiln_memory::MemoryGovernor::global().register_reclaimer(move |target| {
+                        let (reserved, used) = match kiln_tensor::rocm_pool_stats(idx) {
+                            Ok(stats) => stats,
+                            Err(error) => {
+                                tracing::warn!(%error, "ROCm pool reclaim skipped: statistics unavailable");
+                                return 0;
+                            }
+                        };
+                        let Some(min_keep) = pool_trim_min_keep(reserved, used, target) else {
+                            tracing::debug!(reserved, used, target, "ROCm pool reclaim skipped: no releasable bytes");
+                            return 0;
+                        };
+                        let started = std::time::Instant::now();
+                        match kiln_tensor::rocm_trim_pool(idx, min_keep) {
+                            Ok(reclaimed) => {
+                                tracing::info!(
+                                    reason = "memory_governor",
+                                    target,
+                                    reserved_before = reserved,
+                                    used_before = used,
+                                    requested_min_keep = min_keep,
+                                    reclaimed,
+                                    duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+                                    "ROCm pool reclaim completed"
+                                );
+                                reclaimed
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    target,
+                                    reserved_before = reserved,
+                                    used_before = used,
+                                    duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+                                    "ROCm pool reclaim failed"
+                                );
+                                0
+                            }
+                        }
+                    });
+                }
             }
         }
         GpuMemoryReclaimer::CudaTrimPool => {
@@ -2799,6 +2834,14 @@ fn register_backend_memory_reclaimer(policy: GpuMemoryReclaimPolicy, device: kil
             });
         }
     }
+}
+
+fn pool_trim_min_keep(reserved: u64, used: u64, target: u64) -> Option<usize> {
+    let releasable = reserved.saturating_sub(used).min(target);
+    if releasable == 0 {
+        return None;
+    }
+    usize::try_from(reserved.saturating_sub(releasable)).ok()
 }
 
 /// Auto-size the KV cache by trying `configured_fraction` first and then each
@@ -2953,6 +2996,15 @@ fn format_oom_remediation_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pool_trim_target_skips_empty_spare_and_honors_requested_bytes() {
+        assert_eq!(pool_trim_min_keep(8_000, 8_000, u64::MAX), None);
+        assert_eq!(pool_trim_min_keep(8_000, 4_000, 0), None);
+        assert_eq!(pool_trim_min_keep(8_000, 4_000, 1_000), Some(7_000));
+        assert_eq!(pool_trim_min_keep(8_000, 4_000, u64::MAX), Some(4_000));
+        assert_eq!(pool_trim_min_keep(4_000, 8_000, u64::MAX), None);
+    }
 
     /// Shared CPU device for tests. #1082: now emits a kt `Device::Cpu`
     /// directly — `AppState::new_real` and `LinearAttentionState::new` both take

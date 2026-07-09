@@ -216,24 +216,45 @@ impl RocmContext {
     /// blocks via the release-threshold pin, by design, to avoid the async-free
     /// decode race).
     ///
-    /// **Synchronizes the device first** so no in-flight kernel is reading a
-    /// block being released — that's what makes the trim race-free, unlike the
-    /// automatic threshold-0 release the pin disables. Best-effort: a no-op if
-    /// the runtime lacks mempools.
-    pub fn trim_pool(&self, min_keep_bytes: usize) -> Result<()> {
+    /// When spare bytes exist, synchronizes the device before releasing them so
+    /// no in-flight kernel is reading a released block. Returns the measured
+    /// reduction in pool-reserved bytes. A pool with no spare bytes returns
+    /// without synchronizing the device.
+    pub fn trim_pool(&self, min_keep_bytes: usize) -> Result<u64> {
         self.bind_to_thread()?;
+        let (reserved_before, used_before) = self.pool_stats()?;
+        let spare_before = reserved_before.saturating_sub(used_before);
+        let requested_release = reserved_before
+            .saturating_sub(min_keep_bytes as u64)
+            .min(spare_before);
+        if requested_release == 0 {
+            return Ok(0);
+        }
         // Drain in-flight work so freed pages aren't yanked from under a kernel.
         check(
             unsafe { sys::hipDeviceSynchronize() },
             "hipDeviceSynchronize",
         )?;
         let mut pool: *mut c_void = ptr::null_mut();
-        if unsafe { sys::hipDeviceGetDefaultMemPool(&mut pool, self.ordinal) } == sys::HIP_SUCCESS
-            && !pool.is_null()
-        {
-            let _ = unsafe { sys::hipMemPoolTrimTo(pool, min_keep_bytes) };
+        check(
+            unsafe { sys::hipDeviceGetDefaultMemPool(&mut pool, self.ordinal) },
+            "hipDeviceGetDefaultMemPool",
+        )?;
+        if pool.is_null() {
+            return Ok(0);
         }
-        Ok(())
+        let effective_min_keep = usize::try_from(reserved_before.saturating_sub(requested_release))
+            .map_err(|_| HipError {
+                code: -1,
+                api: "RocmContext::trim_pool",
+                message: "pool byte count does not fit usize".to_string(),
+            })?;
+        check(
+            unsafe { sys::hipMemPoolTrimTo(pool, effective_min_keep) },
+            "hipMemPoolTrimTo",
+        )?;
+        let (reserved_after, _) = self.pool_stats()?;
+        Ok(reserved_before.saturating_sub(reserved_after))
     }
 
     /// `(reserved, used)` bytes of THIS device's default stream-ordered memory
@@ -259,20 +280,26 @@ impl RocmContext {
         }
         let mut reserved: u64 = 0;
         let mut used: u64 = 0;
-        let _ = unsafe {
-            sys::hipMemPoolGetAttribute(
-                pool,
-                HIP_MEM_POOL_ATTR_RESERVED_MEM_CURRENT,
-                &mut reserved as *mut u64 as *mut c_void,
-            )
-        };
-        let _ = unsafe {
-            sys::hipMemPoolGetAttribute(
-                pool,
-                HIP_MEM_POOL_ATTR_USED_MEM_CURRENT,
-                &mut used as *mut u64 as *mut c_void,
-            )
-        };
+        check(
+            unsafe {
+                sys::hipMemPoolGetAttribute(
+                    pool,
+                    HIP_MEM_POOL_ATTR_RESERVED_MEM_CURRENT,
+                    &mut reserved as *mut u64 as *mut c_void,
+                )
+            },
+            "hipMemPoolGetAttribute(reserved)",
+        )?;
+        check(
+            unsafe {
+                sys::hipMemPoolGetAttribute(
+                    pool,
+                    HIP_MEM_POOL_ATTR_USED_MEM_CURRENT,
+                    &mut used as *mut u64 as *mut c_void,
+                )
+            },
+            "hipMemPoolGetAttribute(used)",
+        )?;
         Ok((reserved, used))
     }
 

@@ -469,9 +469,10 @@ pub fn rocm_mem_get_info(device_index: usize) -> Result<(usize, usize)> {
 /// Return pooled-but-unused ROCm VRAM to the OS, keeping at least
 /// `min_keep_bytes` cached. The memory-pressure reclaim hook: when the governor
 /// sees a coexisting process needs VRAM, this hands kiln's freed pool blocks
-/// back. Device-synchronizes first so the release is race-free (see
+/// back. Synchronizes only when pool statistics show reclaimable spare bytes;
+/// returns the measured reduction in reserved bytes (see
 /// [`kiln_hip::RocmContext::trim_pool`]).
-pub fn rocm_trim_pool(device_index: usize, min_keep_bytes: usize) -> Result<()> {
+pub fn rocm_trim_pool(device_index: usize, min_keep_bytes: usize) -> Result<u64> {
     let ctx = primary_rocm_context(device_index)?;
     ctx.trim_pool(min_keep_bytes)
         .map_err(|e| Error::Msg(format!("rocm_trim_pool({device_index}): {e:?}")))

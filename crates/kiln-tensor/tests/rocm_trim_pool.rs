@@ -32,7 +32,11 @@ fn trim_pool_is_callable_and_clean() {
         return;
     }
     // A trim with nothing to release must be a clean no-op.
-    kiln_tensor::rocm_trim_pool(0, 0).expect("rocm_trim_pool no-op");
+    let reclaimed = kiln_tensor::rocm_trim_pool(0, 0).expect("rocm_trim_pool no-op");
+    assert_eq!(
+        reclaimed, 0,
+        "an unused fresh pool should have no trim yield"
+    );
 }
 
 #[test]
@@ -68,15 +72,16 @@ fn trim_pool_returns_memory_to_os() {
     let pooled = dev_free();
 
     // Trim the pool back to the OS.
-    kiln_tensor::rocm_trim_pool(0, 0).expect("trim");
+    let reclaimed = kiln_tensor::rocm_trim_pool(0, 0).expect("trim");
     let after_trim = dev_free();
 
     eprintln!(
         "device free (hipMemGetInfo): before={:.2}GB  after-free(pooled)={:.2}GB  after-trim={:.2}GB  \
-         | reclaimed-by-trim={:.2}GB",
+         | reclaimed-by-driver={:.2}GB  reclaimed-by-pool={:.2}GB",
         gb(before),
         gb(pooled),
         gb(after_trim),
         gb(after_trim.saturating_sub(pooled)),
+        gb(reclaimed),
     );
 }
