@@ -677,6 +677,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-09 | Plan created | pending | pending | n/a | this document | pending | Audit converted into executable goal |
 | 2026-07-09 | Receipt foundation: source identity | `a76a5e1b664b` | this commit | n/a | `scripts/qualification/source_tree_hash.py` | passed | 5 unit tests; receipts and docs excluded from identity |
 | 2026-07-09 | Source identity scope correction | `sha256:ebdb799360a7` | this commit | n/a | source identity unit suite | passed | 7 tests; excludes profiling artifacts and desktop prose; uses repository hash convention |
+| 2026-07-09 | Source identity index hardening | `sha256:d56d06727edd` | this commit | portable | source identity unit suite | passed | Rejects unresolved index stages; hashes symlink targets and gitlink object IDs without dereferencing |
 | 2026-07-09 | Receipt schema and strict validator | `sha256:74efdd391d91` | this commit | portable | `qualification/schema/receipt-v1.schema.json` | passed | 13 receipt tests plus 7 source identity tests |
 | 2026-07-09 | Atomic ROCm/Vulkan environment collector | `sha256:c4f18b397716` | this commit | Strix Halo target | `scripts/qualification/environment.py` | passed | 25 portable tests; real receipts captured after clean collector commit |
 | 2026-07-09 | Initial ROCm environment | `sha256:c4f18b397716` | `33f27c5f4dc6` | ROCm/gfx1151 | `qualification/receipts/rocm/strix-halo/20260709t202926z-rocm-strix-halo-environment-v1.json` | passed | ROCm 7.2.4; HIP 7.2.53211; 96 GiB unified VRAM |

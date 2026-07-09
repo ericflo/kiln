@@ -54,6 +54,7 @@ class SourceTreeHashError(RuntimeError):
 @dataclass(frozen=True)
 class SourceEntry:
     mode: str
+    oid: str
     path: str
 
 
@@ -93,14 +94,46 @@ def tracked_source_entries(root: Path = ROOT) -> list[SourceEntry]:
             continue
         try:
             metadata, raw_path = record.split(b"\t", 1)
-            mode = metadata.split(b" ", 1)[0].decode("ascii")
+            raw_mode, raw_oid, raw_stage = metadata.split(b" ")
+            mode = raw_mode.decode("ascii")
+            oid = raw_oid.decode("ascii")
+            stage = raw_stage.decode("ascii")
             path = raw_path.decode("utf-8")
         except (ValueError, UnicodeDecodeError) as exc:
             raise SourceTreeHashError("git ls-files returned an invalid record") from exc
+        if stage != "0":
+            raise SourceTreeHashError(
+                f"tracked path {path} has unresolved index stage {stage}"
+            )
+        if mode not in {"100644", "100755", "120000", "160000"}:
+            raise SourceTreeHashError(f"tracked path {path} has unsupported mode {mode}")
+        if len(oid) not in {40, 64} or any(
+            character not in "0123456789abcdef" for character in oid
+        ):
+            raise SourceTreeHashError(f"tracked path {path} has invalid object ID {oid!r}")
         if is_source_path(path):
-            entries.append(SourceEntry(mode=mode, path=path))
+            entries.append(SourceEntry(mode=mode, oid=oid, path=path))
     entries.sort(key=lambda entry: entry.path.encode("utf-8"))
     return entries
+
+
+def _entry_content(root: Path, entry: SourceEntry) -> bytes:
+    path = root / entry.path
+    if entry.mode == "120000":
+        try:
+            return os.readlink(os.fsencode(path))
+        except OSError as exc:
+            raise SourceTreeHashError(
+                f"cannot read tracked symlink target {entry.path}: {exc}"
+            ) from exc
+    if entry.mode == "160000":
+        return entry.oid.encode("ascii")
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise SourceTreeHashError(
+            f"cannot read tracked source input {entry.path}: {exc}"
+        ) from exc
 
 
 def source_tree_hash(root: Path = ROOT) -> tuple[str, list[SourceEntry]]:
@@ -111,11 +144,7 @@ def source_tree_hash(root: Path = ROOT) -> tuple[str, list[SourceEntry]]:
     digest = hashlib.sha256()
     digest.update(HASH_FORMAT.encode("ascii") + b"\0")
     for entry in entries:
-        path = root / entry.path
-        try:
-            content = path.read_bytes()
-        except OSError as exc:
-            raise SourceTreeHashError(f"cannot read tracked source input {entry.path}: {exc}") from exc
+        content = _entry_content(root, entry)
         content_digest = hashlib.sha256(content).hexdigest()
         digest.update(entry.mode.encode("ascii") + b"\0")
         digest.update(entry.path.encode("utf-8") + b"\0")
