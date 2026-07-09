@@ -17,6 +17,23 @@ on:
       - 'deny.toml'
       - '.github/workflows/ci.yml'
   workflow_dispatch:
+    inputs:
+      backend_build:
+        description: 'Optional compile-only backend build (local receipts are the hardware evidence)'
+        required: true
+        default: 'none'
+        type: choice
+        options:
+          - 'none'
+          - 'all'
+          - 'metal'
+          - 'vulkan'
+          - 'cuda'
+          - 'rocm'
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -42,6 +59,7 @@ jobs:
 
   macos-metal:
     name: macOS / Metal (M-series)
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.backend_build == 'all' || inputs.backend_build == 'metal') }}
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v6
@@ -189,6 +207,7 @@ jobs:
 
   linux-vulkan:
     name: Linux / Vulkan
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.backend_build == 'all' || inputs.backend_build == 'vulkan') }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
@@ -228,6 +247,7 @@ jobs:
 
   linux-cuda:
     name: Linux / CUDA (build)
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.backend_build == 'all' || inputs.backend_build == 'cuda') }}
     # Compile-only gate for the CUDA backend — the same pattern as the ROCm
     # job below. GitHub offers no NVIDIA-GPU runner, but nvcc compiles the
     # csrc/*.cu kernels OFFLINE and the toolkit supplies the cudart/cuBLAS
@@ -283,6 +303,7 @@ jobs:
 
   linux-rocm:
     name: Linux / ROCm (build)
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.backend_build == 'all' || inputs.backend_build == 'rocm') }}
     # Compile-only gate for the ROCm/HIP backend. GitHub offers no AMD-GPU
     # runner, but hipcc cross-compiles the csrc/*.cu kernels to the gfx ISA
     # OFFLINE (no GPU needed) and the HIP SDK supplies libamdhip64 / hipBLASLt
