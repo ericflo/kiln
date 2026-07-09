@@ -1,0 +1,121 @@
+{
+  "artifacts": [
+    {
+      "bytes": 4461,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260709t203013z-vulkan-strix-halo-environment-v1/environment-probes.json",
+      "sha256": "sha256:c2907ab40b31e7a9e40f4e8660b1fdac0f64415dd2918911f237d825832069db"
+    }
+  ],
+  "created_at_utc": "2026-07-09T20:30:14.049Z",
+  "effective_config": {
+    "environment": {}
+  },
+  "environment": {
+    "compiler": {
+      "cargo": "cargo 1.94.1 (29ea6fb6a 2026-03-24)",
+      "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+      "shader": "2026.2"
+    },
+    "device": {
+      "architecture": "strix_halo",
+      "driver": "radv Mesa 26.1.3-arch1.2",
+      "memory_bytes": 103079215104,
+      "name": "AMD Radeon 8060S Graphics (RADV STRIX_HALO)",
+      "unified_memory": true
+    },
+    "host_id": "strix-halo",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "7.0.14-arch1-1",
+      "name": "EndeavourOS",
+      "version": "2025.03.19"
+    },
+    "runtime": {
+      "driver": "Mesa 26.1.3-arch1.2",
+      "vulkan_device": "1.4.348",
+      "vulkan_instance": "1.4.350"
+    }
+  },
+  "metrics": [],
+  "model": null,
+  "notes": [],
+  "qualification": {
+    "backend": "vulkan",
+    "command": [
+      "/usr/bin/python3",
+      "scripts/qualification/environment.py",
+      "--backend",
+      "vulkan",
+      "--host-id",
+      "strix-halo"
+    ],
+    "duration_seconds": 0.14019190999897546,
+    "finished_at_utc": "2026-07-09T20:30:14.049Z",
+    "kind": "environment",
+    "profile": "environment-v1",
+    "started_at_utc": "2026-07-09T20:30:13.909Z",
+    "verdict": "passed"
+  },
+  "receipt_id": "20260709t203013z-vulkan-strix-halo-environment-v1",
+  "results": [
+    {
+      "details": null,
+      "duration_seconds": 0.0,
+      "id": "clean-source-at-start",
+      "metrics": [],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 0.011591348000365542,
+      "id": "rustc-version",
+      "metrics": [],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 0.007054379999317462,
+      "id": "cargo-version",
+      "metrics": [],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 0.019012340000699623,
+      "id": "vulkan-device-probe",
+      "metrics": [],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 0.009687011001005885,
+      "id": "shader-compiler-version",
+      "metrics": [],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": "AMD Radeon 8060S Graphics (RADV STRIX_HALO)",
+      "duration_seconds": 0.0,
+      "id": "vulkan-physical-device",
+      "metrics": [],
+      "required": true,
+      "status": "passed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "1538505b5129860c473e0fcea0d9b8ebce5c8ee7",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:c4f18b3977163dd05a97c99c9063e02a62f25907115506ed890228c8843c3496",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [],
+  "workload": null
+}
