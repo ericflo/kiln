@@ -1,5 +1,13 @@
 # Backend Latency Result Artifact Schema
 
+> **Legacy compatibility contract.** This pipeline predates structured local
+> qualification and retains checked-in raw logs because its validator requires
+> them. Do not add new qualification coverage here. New hardware evidence uses
+> `scripts/qualification/`, keeps raw data under ignored `.qualification/`, and
+> checks in compact receipts under `qualification/receipts/`; see
+> [`ci-policy.md`](ci-policy.md). A legacy artifact is not a qualification
+> receipt and a legacy workflow run is not backend qualification.
+
 Hardware latency fixtures remain `fixture_required` until every backend fixture
 has a checked result artifact, locked numeric thresholds, and passing measured
 metrics. The validator is `scripts/check_backend_latency_fixtures.py`.
@@ -163,16 +171,16 @@ python3 scripts/run_backend_latency_fixture.py \
   metal_apple_silicon_matmul_qwen35_4b
 ```
 
-The fixture runner executes the selected fixture `command`, writes a timestamped
-raw log under `bench-results/backend-latency/raw`, and then invokes the same
-artifact materialization contract used by the standalone writer. If the command
-exits unsuccessfully, or if it succeeds without emitting the required
-`KILN_LATENCY_METRIC` lines, the runner reports the raw log path and a bounded
-raw-log tail so hardware skips such as a missing GPU device are visible in CI
-logs. If the fixture has already been run manually, materialize the result
-artifact from the raw log.
-Covered artifacts should use a raw log checked into the repository, such as one
-captured by the fixture runner under `bench-results/backend-latency/raw`:
+The legacy fixture runner executes the selected fixture `command`, writes a
+timestamped raw log under `bench-results/backend-latency/raw`, and invokes the
+same artifact materialization contract used by the standalone writer. If the
+command exits unsuccessfully, or succeeds without the required
+`KILN_LATENCY_METRIC` lines, it reports a bounded raw-log tail. This behavior
+exists only to reproduce and retire the old fixture contract. Do not use it for
+new evidence; the qualification runner must keep raw logs ignored and emit a
+compact failed receipt when a requested device is absent.
+
+When maintaining an existing legacy artifact, materialize it from its raw log:
 
 ```sh
 python3 scripts/write_backend_latency_result_artifact.py \
@@ -184,8 +192,11 @@ python3 scripts/write_backend_latency_result_artifact.py \
 By default the script writes the fixture's `result_artifact`; use `--output` for
 a scratch artifact.
 
-The GitHub `Perf regression nightly` workflow also exposes a manual
-`workflow_dispatch` handoff for known-hardware runs. Set `latency_fixture_id` to
+The manual-only `Perf regression nightly` workflow retains a temporary
+`workflow_dispatch` compatibility handoff. It is neither scheduled nor used by
+pull requests, and it is not qualification evidence. Prefer running structured
+qualification directly on the named machine. To reproduce the legacy handoff,
+set `latency_fixture_id` to
 one manifest fixture and set `latency_runner_labels_json` to the target
 self-hosted runner labels, such as `["self-hosted","linux","cuda-rtx4090"]` or a
 site-local Metal/ROCm/Vulkan label set. The checked-in fixtures use

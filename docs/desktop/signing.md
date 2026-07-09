@@ -8,7 +8,8 @@ the first time they try to open the downloaded bundle.
 The
 [`desktop-build.yml`](../../.github/workflows/desktop-build.yml) workflow
 handles signing, notarization (via `notarytool`), and stapling automatically
-when the `APPLE_*` secrets below are present; tauri-action creates a temp
+when it is manually dispatched from a `desktop-v*` tag and the `APPLE_*`
+secrets below are present; tauri-action creates a temp
 keychain on the macOS runner, imports the `.p12`, signs with the hardened
 runtime, and submits to notarytool. A follow-up step notarizes and staples
 the `.dmg` wrapper itself.
@@ -92,7 +93,7 @@ notarized.
 Both macOS signing steps are guarded on
 `runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/desktop-v')`
 so they only run when building for release (i.e. on a `desktop-v*` tag).
-A non-tag push has no release to upload to.
+A manual non-tag dispatch has no release to upload to.
 
 ## Verifying a Release
 

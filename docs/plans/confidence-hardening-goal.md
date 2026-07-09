@@ -148,7 +148,7 @@ Suggested locations:
 
 ### 0.1 Automatic CI cost and scope
 
-- [ ] Inventory every automatic workflow, trigger, hosted-runner platform,
+- [x] Inventory every automatic workflow, trigger, hosted-runner platform,
   average duration, and what unique defect it can actually catch.
 - [x] Remove or change to `workflow_dispatch` automatic CUDA, ROCm, Vulkan,
   Metal, release-matrix, and performance jobs that consume substantial hosted
@@ -159,9 +159,9 @@ Suggested locations:
   CPU/unit tests, UI smoke, and schema/receipt validation.
 - [x] Ensure release packaging can be invoked deliberately after local hardware
   qualification rather than running a full matrix on every ordinary push.
-- [ ] Record before/after automatic job counts and expected hosted minutes in a
+- [x] Record before/after automatic job counts and expected hosted minutes in a
   small checked-in summary.
-- [ ] Update contributor docs so nobody treats automatic CI as backend
+- [x] Update contributor docs so nobody treats automatic CI as backend
   qualification.
 
 **Acceptance:** An ordinary push starts only the agreed cheap workflows.
@@ -685,6 +685,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-09 | Retire broken automatic perf workflow | `sha256:c4f18b397716` | this commit | GitHub Actions | `.github/workflows/perf-regression-nightly.yml` | passed | Removed nightly/PR triggers; legacy fixture and A6000 paths are explicit manual dispatch only |
 | 2026-07-09 | Manual-only release packaging | `sha256:c4f18b397716` | this commit | GitHub Actions | desktop/server/Docker/RunPod workflows | passed | Removed automatic push, tag, PR, and schedule triggers; explicit dispatch remains |
 | 2026-07-09 | Consolidated cheap automatic checks | `sha256:c4f18b397716` | this commit | Linux CPU | `.github/workflows/ci.yml` | passed | Folded leaf and dependency-tree guards into default job; added portable receipt contract validation |
+| 2026-07-09 | CI cost inventory and operator policy | `sha256:c4f18b397716` | this commit | GitHub Actions/local hardware | `docs/ci-policy.md` | passed | Recorded all prior automatic workflows, measured cost, three-job Rust target, manual dispatch commands, and local evidence ownership |
 
 ## Known Starting Defects
 

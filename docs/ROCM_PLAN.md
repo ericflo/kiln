@@ -298,6 +298,11 @@ Organized by subsystem. Every box must be checked for "as first-class as CUDA."
 - [ ] Tests gated on `KILN_ROCM_DEVICE`. `parity-tolerance.csv` widened.
 
 ### 13. CI / release
+This checklist records the original implementation plan. Hosted compile jobs
+are now manual compatibility checks, not ROCm qualification, and no self-hosted
+runner is required. Runtime evidence is captured locally on Strix Halo under
+`qualification/receipts/rocm/`; see `docs/ci-policy.md`.
+
 - [ ] `.github/workflows/ci.yml` `linux-rocm` job (modeled on `linux-vulkan`):
       `cargo check --locked -p kiln-server --features rocm` toolchain-less.
 - [ ] (Optional, self-hosted) AMD gfx942/gfx1100 runner running the parity suite.

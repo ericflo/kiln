@@ -47,10 +47,13 @@ CUDA builds compile a fair amount of `nvcc` per architecture. To target only an 
 KILN_CUDA_ARCHS=86 cargo build --release --features cuda
 ```
 
-Run the test suite. The skipped `test_health_with_real_backend` depends on a live network backend and is intentionally excluded from CI. Env-mutating tests are now serialized via an internal `ENV_LOCK` mutex and run safely in parallel. CI on macOS additionally pins the Metal feature tests to `--test-threads=1` because of a known race in `candle-metal`'s `MetalDevice::new`:
+Run the test suite. The skipped `test_health_with_real_backend` depends on a live network backend and is intentionally excluded from automatic CI. Env-mutating tests are serialized via an internal `ENV_LOCK` mutex and run safely in parallel. Run Metal feature tests locally with `--test-threads=1` because of a known race in `candle-metal`'s `MetalDevice::new`:
 
 ```bash
 cargo test --locked -- --skip test_health_with_real_backend
+
+# On an Apple Silicon qualification machine:
+cargo test --locked --features metal -- --test-threads=1
 ```
 
 If you have `cargo-nextest` installed, it runs the same tests in parallel and is noticeably faster:
@@ -76,9 +79,9 @@ See [`QUICKSTART.md`](QUICKSTART.md) for the full zero-to-running walkthrough �
 
 - Branch from `main`. Forks and direct branches are both fine.
 - One logical change per PR. Small PRs land faster and are easier to bisect when something regresses.
-- Run `cargo build --locked` and `cargo test --locked` (with the documented skips above) before pushing. CI will run them again on Linux default-features and macOS Metal — see `.github/workflows/ci.yml`.
+- Run `cargo build --locked` and `cargo test --locked` (with the documented skips above) before pushing. Automatic CI reruns the Linux default-feature checks; GPU backend builds are deliberate manual jobs and real hardware evidence comes from local qualification receipts. See [`docs/ci-policy.md`](docs/ci-policy.md).
 - Open the PR with a **plain title** — no project prefix. Describe what changed and why in the body.
-- For performance PRs, include the bench numbers in the body. Median of 3 runs, hardware noted, and ideally the relevant `PROFILING.md` region cited so reviewers can sanity-check the math ceiling.
+- For performance PRs, include comparable local qualification receipts. Record the exact source/model/workload identity, named hardware, tail latency, throughput, memory, and raw-log hash; a green compile-only job is not performance evidence.
 
 ## Code style
 
