@@ -153,7 +153,7 @@ Suggested locations:
 - [ ] Remove or change to `workflow_dispatch` automatic CUDA, ROCm, Vulkan,
   Metal, release-matrix, and performance jobs that consume substantial hosted
   minutes without executing on the target hardware.
-- [ ] Remove the broken scheduled performance workflow or convert it into a
+- [x] Remove the broken scheduled performance workflow or convert it into a
   local qualification command. Do not retain a permanently red nightly badge.
 - [ ] Keep one inexpensive automatic path for formatting, dependency policy,
   CPU/unit tests, UI smoke, and schema/receipt validation.
@@ -682,6 +682,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-09 | Initial ROCm environment | `sha256:c4f18b397716` | `33f27c5f4dc6` | ROCm/gfx1151 | `qualification/receipts/rocm/strix-halo/20260709t202926z-rocm-strix-halo-environment-v1.json` | passed | ROCm 7.2.4; HIP 7.2.53211; 96 GiB unified VRAM |
 | 2026-07-09 | Initial Vulkan environment | `sha256:c4f18b397716` | `1538505b5129` | Vulkan/Strix Halo | `qualification/receipts/vulkan/strix-halo/20260709t203013z-vulkan-strix-halo-environment-v1.json` | passed | Vulkan 1.4.348; RADV Mesa 26.1.3; 96 GiB unified VRAM |
 | 2026-07-09 | Manual-only backend compile jobs | `sha256:c4f18b397716` | this commit | GitHub Actions | `.github/workflows/ci.yml` | passed | Metal/Vulkan/CUDA/ROCm changed to explicit dispatch; cancels superseded runs |
+| 2026-07-09 | Retire broken automatic perf workflow | `sha256:c4f18b397716` | this commit | GitHub Actions | `.github/workflows/perf-regression-nightly.yml` | passed | Removed nightly/PR triggers; legacy fixture and A6000 paths are explicit manual dispatch only |
 
 ## Known Starting Defects
 
