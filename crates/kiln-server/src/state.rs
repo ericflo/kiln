@@ -1063,10 +1063,15 @@ impl RealPrefixCache {
             .iter()
             .enumerate()
             .filter(|(_, entry)| {
-                let exact_hit =
-                    prompt_tokens.len() == entry.prompt_tokens.len() && entry.next_token.is_some();
-                let strict_prefix_hit = prompt_tokens.len() > entry.prompt_tokens.len()
-                    && entry.prompt_tokens.len() % self.block_size == 0;
+                let block_aligned =
+                    self.block_size > 0 && entry.prompt_tokens.len() % self.block_size == 0;
+                let block_shape_valid = block_aligned
+                    && entry.block_ids.len() == entry.prompt_tokens.len() / self.block_size;
+                let exact_hit = prompt_tokens.len() == entry.prompt_tokens.len()
+                    && entry.next_token.is_some()
+                    && block_shape_valid;
+                let strict_prefix_hit =
+                    prompt_tokens.len() > entry.prompt_tokens.len() && block_shape_valid;
                 &entry.adapter == adapter
                     && (exact_hit || strict_prefix_hit)
                     && prompt_tokens.starts_with(&entry.prompt_tokens)
@@ -1105,10 +1110,15 @@ impl RealPrefixCache {
         adapter: Option<String>,
         registration: PagedPrefixRegistration,
     ) -> RealPrefixCacheRegisterOutcome {
-        let exact_reusable = registration.next_token.is_some();
-        let strict_prefix_reusable = registration.prompt_tokens.len() % self.block_size == 0;
+        let block_aligned =
+            self.block_size > 0 && registration.prompt_tokens.len() % self.block_size == 0;
+        let block_shape_valid = block_aligned
+            && registration.block_ids.len() == registration.prompt_tokens.len() / self.block_size;
+        let exact_reusable = registration.next_token.is_some() && block_aligned;
+        let strict_prefix_reusable = block_aligned;
         if !self.is_enabled()
             || !self.should_register_prompt(&registration.prompt_tokens)
+            || !block_shape_valid
             || (!exact_reusable && !strict_prefix_reusable)
             || registration.block_ids.is_empty()
         {
@@ -3511,7 +3521,7 @@ mod tests {
         let device = cpu_device!();
 
         let mut cache = RealPrefixCache::new(true, 4, 4, 1024, 49);
-        cache.register(
+        let outcome = cache.register(
             None,
             PagedPrefixRegistration {
                 prompt_tokens: vec![1, 2, 3, 4],
@@ -3535,6 +3545,8 @@ mod tests {
                 next_token: Some(PagedPrefixNextToken::GreedyToken(123)),
             },
         );
+        assert_eq!(outcome.retained_blocks, vec![9]);
+        assert!(outcome.evicted_blocks.is_empty());
         let hit = cache.lookup(&None, &[1, 2, 3, 4])?.expect("exact hit");
         assert_eq!(hit.cached_tokens, 4);
         assert_eq!(hit.block_ids, vec![9]);
@@ -3544,26 +3556,123 @@ mod tests {
         ));
         cache.release_hit(hit.entry_id);
 
+        Ok(())
+    }
+
+    #[test]
+    fn real_prefix_cache_rejects_partial_block_exact_entry_and_uses_safe_prefix()
+    -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let device = cpu_device!();
+
         let mut cache = RealPrefixCache::new(true, 4, 4, 1024, 49);
-        cache.register(
+        let safe = cache.register(
             None,
             PagedPrefixRegistration {
-                prompt_tokens: vec![1, 2, 3],
+                prompt_tokens: vec![1, 2, 3, 4],
                 block_ids: vec![10],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
+            },
+        );
+        assert_eq!(safe.retained_blocks, vec![10]);
+        assert!(safe.evicted_blocks.is_empty());
+
+        let unsafe_exact = cache.register(
+            None,
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4, 5],
+                block_ids: vec![10, 11],
                 linear_state: LinearAttentionState::new(&config, &device)?,
                 next_token: Some(PagedPrefixNextToken::GreedyToken(124)),
             },
         );
-        assert!(
-            cache.lookup(&None, &[1, 2, 3, 4])?.is_none(),
-            "partial-block entries are exact-hit only and must not serve longer prompts"
+        assert!(unsafe_exact.retained_blocks.is_empty());
+        assert!(unsafe_exact.evicted_blocks.is_empty());
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.cached_blocks(), 1);
+        assert_eq!(cache.block_refcounts.get(&10), Some(&1));
+        assert!(!cache.block_refcounts.contains_key(&11));
+        assert_eq!(cache.entries[0].active_uses, 0);
+
+        let malformed_aligned = cache.register(
+            None,
+            PagedPrefixRegistration {
+                prompt_tokens: vec![20, 21, 22, 23, 24, 25, 26, 27],
+                block_ids: vec![12],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
+            },
         );
+        assert!(malformed_aligned.retained_blocks.is_empty());
+        assert!(malformed_aligned.evicted_blocks.is_empty());
+        assert_eq!(cache.entries.len(), 1);
+        assert!(!cache.block_refcounts.contains_key(&12));
+
         let hit = cache
-            .lookup(&None, &[1, 2, 3])?
-            .expect("non-block-aligned exact hit");
-        assert_eq!(hit.cached_tokens, 3);
+            .lookup(&None, &[1, 2, 3, 4, 5])?
+            .expect("safe strict-prefix fallback");
+        assert_eq!(hit.cached_tokens, 4);
         assert_eq!(hit.block_ids, vec![10]);
+        assert!(hit.next_token.is_none());
+        assert_eq!(cache.entries[0].active_uses, 1);
         cache.release_hit(hit.entry_id);
+        assert_eq!(cache.entries[0].active_uses, 0);
+        assert_eq!(cache.cached_blocks(), 1);
+        assert_eq!(cache.block_refcounts.get(&10), Some(&1));
+        Ok(())
+    }
+
+    #[test]
+    fn real_prefix_cache_lookup_skips_legacy_partial_block_entry() -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let device = cpu_device!();
+        let mut cache = RealPrefixCache::new(true, 4, 8, 1024, 49);
+
+        cache.register(
+            None,
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4],
+                block_ids: vec![10],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
+            },
+        );
+
+        // Simulate an entry created before partial-block exact reuse was
+        // rejected. Candidate filtering must skip it before ranking and pin
+        // only the shorter, complete-block prefix.
+        let legacy_id = cache.next_entry_id;
+        cache.next_entry_id += 1;
+        *cache.block_refcounts.entry(10).or_insert(0) += 1;
+        *cache.block_refcounts.entry(11).or_insert(0) += 1;
+        cache.entries.push(RealPrefixCacheEntry {
+            id: legacy_id,
+            adapter: None,
+            prompt_tokens: vec![1, 2, 3, 4, 5],
+            block_ids: vec![10, 11],
+            linear_state: LinearAttentionState::new(&config, &device)?,
+            next_token: Some(PagedPrefixNextToken::GreedyToken(124)),
+            last_used: 0,
+            active_uses: 0,
+        });
+
+        let hit = cache
+            .lookup(&None, &[1, 2, 3, 4, 5])?
+            .expect("safe strict-prefix fallback");
+        assert_ne!(hit.entry_id, legacy_id);
+        assert_eq!(hit.cached_tokens, 4);
+        assert_eq!(hit.block_ids, vec![10]);
+        assert_eq!(cache.entries[0].active_uses, 1);
+        assert_eq!(cache.entries[1].active_uses, 0);
+        let stats = cache.stats();
+        assert_eq!(stats.lookup_hits, 1);
+        assert_eq!(stats.hit_tokens, 4);
+        assert_eq!(stats.hit_blocks, 1);
+
+        cache.release_hit(hit.entry_id);
+        assert_eq!(cache.entries[0].active_uses, 0);
+        assert_eq!(cache.entries[1].active_uses, 0);
         Ok(())
     }
 
@@ -3823,7 +3932,7 @@ mod tests {
         cache.register(
             Some("a".to_string()),
             PagedPrefixRegistration {
-                prompt_tokens: vec![5, 6, 7, 8],
+                prompt_tokens: vec![5, 6, 7, 8, 9, 10, 11, 12],
                 block_ids: vec![20, 21],
                 linear_state: LinearAttentionState::new(&config, &device)?,
                 next_token: None,
@@ -3832,7 +3941,7 @@ mod tests {
         cache.register(
             Some("b".to_string()),
             PagedPrefixRegistration {
-                prompt_tokens: vec![9, 10, 11, 12],
+                prompt_tokens: vec![13, 14, 15, 16],
                 block_ids: vec![22],
                 linear_state: LinearAttentionState::new(&config, &device)?,
                 next_token: None,
@@ -3844,7 +3953,7 @@ mod tests {
         let outcome = cache.register(
             Some("c".to_string()),
             PagedPrefixRegistration {
-                prompt_tokens: vec![13, 14, 15, 16, 17, 18, 19, 20],
+                prompt_tokens: vec![17, 18, 19, 20, 21, 22, 23, 24],
                 block_ids: vec![20, 99],
                 linear_state: LinearAttentionState::new(&config, &device)?,
                 next_token: None,

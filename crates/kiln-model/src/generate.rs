@@ -1395,6 +1395,34 @@ pub fn append_prefix_block_table(cached_blocks: &[u32], allocated_blocks: &[u32]
     block_table
 }
 
+/// A reused KV prefix may be extended only when its final block is complete.
+/// Otherwise decode would append into a partial block still owned by the
+/// prefix cache and corrupt that shared entry for later requests.
+fn paged_prefix_reuse_matches_prompt(
+    prefix: &PagedPrefixReuse,
+    prompt_len: usize,
+    block_size: usize,
+    params: &SamplingParams,
+) -> bool {
+    if block_size == 0
+        || prefix.cached_tokens == 0
+        || prefix.cached_tokens > prompt_len
+        || prefix.cached_tokens % block_size != 0
+        || prefix.block_ids.len() != prefix.cached_tokens / block_size
+    {
+        return false;
+    }
+
+    if prefix.cached_tokens < prompt_len {
+        return true;
+    }
+
+    prefix.next_token.as_ref().is_some_and(|next| match next {
+        PagedPrefixNextToken::Logits(_) => true,
+        PagedPrefixNextToken::GreedyToken(_) => params.is_effectively_greedy(),
+    })
+}
+
 /// Legacy "lm_head → host sampler" batched path. Used when the backend
 /// doesn't expose the fused on-device sampler, when the sampling request is
 /// outside the backend kernel's supported envelope, or as the final fallback
@@ -2474,25 +2502,7 @@ impl ModelRunner {
         };
 
         let cached_prefix = cached_prefix.filter(|prefix| {
-            if prefix.cached_tokens == 0 || prefix.cached_tokens > prompt_tokens.len() {
-                return false;
-            }
-
-            let exact_candidate = prefix.cached_tokens == prompt_tokens.len();
-            let expected_blocks = if exact_candidate {
-                Self::blocks_needed(prefix.cached_tokens, block_size)
-            } else {
-                prefix.cached_tokens / block_size
-            };
-            let block_shape_valid = prefix.block_ids.len() == expected_blocks;
-            let partial_hit = prefix.cached_tokens < prompt_tokens.len()
-                && prefix.cached_tokens % block_size == 0;
-            let exact_hit = prefix.cached_tokens == prompt_tokens.len()
-                && prefix.next_token.as_ref().is_some_and(|next| match next {
-                    PagedPrefixNextToken::Logits(_) => true,
-                    PagedPrefixNextToken::GreedyToken(_) => params.is_effectively_greedy(),
-                });
-            block_shape_valid && (partial_hit || exact_hit)
+            paged_prefix_reuse_matches_prompt(prefix, prompt_tokens.len(), block_size, params)
         });
 
         let cached_blocks = cached_prefix
@@ -2657,25 +2667,7 @@ impl ModelRunner {
         };
 
         let cached_prefix = cached_prefix.filter(|prefix| {
-            if prefix.cached_tokens == 0 || prefix.cached_tokens > prompt_tokens.len() {
-                return false;
-            }
-
-            let exact_candidate = prefix.cached_tokens == prompt_tokens.len();
-            let expected_blocks = if exact_candidate {
-                Self::blocks_needed(prefix.cached_tokens, block_size)
-            } else {
-                prefix.cached_tokens / block_size
-            };
-            let block_shape_valid = prefix.block_ids.len() == expected_blocks;
-            let partial_hit = prefix.cached_tokens < prompt_tokens.len()
-                && prefix.cached_tokens % block_size == 0;
-            let exact_hit = prefix.cached_tokens == prompt_tokens.len()
-                && prefix.next_token.as_ref().is_some_and(|next| match next {
-                    PagedPrefixNextToken::Logits(_) => true,
-                    PagedPrefixNextToken::GreedyToken(_) => params.is_effectively_greedy(),
-                });
-            block_shape_valid && (partial_hit || exact_hit)
+            paged_prefix_reuse_matches_prompt(prefix, prompt_tokens.len(), block_size, params)
         });
 
         let cached_blocks = cached_prefix
@@ -4168,17 +4160,10 @@ impl ModelRunner {
         block_size: usize,
         next_token: Option<PagedPrefixNextToken>,
     ) -> Result<Option<PagedPrefixRegistration>> {
-        if prompt_tokens.is_empty() {
+        if prompt_tokens.is_empty() || block_size == 0 || prompt_tokens.len() % block_size != 0 {
             return Ok(None);
         }
-        let num_prompt_blocks = if next_token.is_some() {
-            Self::blocks_needed(prompt_tokens.len(), block_size)
-        } else {
-            if prompt_tokens.len() % block_size != 0 {
-                return Ok(None);
-            }
-            prompt_tokens.len() / block_size
-        };
+        let num_prompt_blocks = prompt_tokens.len() / block_size;
         if num_prompt_blocks == 0 || block_table.blocks.len() < num_prompt_blocks {
             return Ok(None);
         }
@@ -7682,25 +7667,7 @@ impl ModelRunner {
         };
 
         let cached_prefix = cached_prefix.filter(|prefix| {
-            if prefix.cached_tokens == 0 || prefix.cached_tokens > prompt_tokens.len() {
-                return false;
-            }
-
-            let exact_candidate = prefix.cached_tokens == prompt_tokens.len();
-            let expected_blocks = if exact_candidate {
-                Self::blocks_needed(prefix.cached_tokens, block_size)
-            } else {
-                prefix.cached_tokens / block_size
-            };
-            let block_shape_valid = prefix.block_ids.len() == expected_blocks;
-            let partial_hit = prefix.cached_tokens < prompt_tokens.len()
-                && prefix.cached_tokens % block_size == 0;
-            let exact_hit = prefix.cached_tokens == prompt_tokens.len()
-                && prefix.next_token.as_ref().is_some_and(|next| match next {
-                    PagedPrefixNextToken::Logits(_) => true,
-                    PagedPrefixNextToken::GreedyToken(_) => params.is_effectively_greedy(),
-                });
-            block_shape_valid && (partial_hit || exact_hit)
+            paged_prefix_reuse_matches_prompt(prefix, prompt_tokens.len(), block_size, &params)
         });
 
         let cached_blocks = cached_prefix
@@ -9537,6 +9504,53 @@ mod tests {
         );
         assert_eq!(strict_prompt_prefix_split_pos(8, 4, 4), None);
         assert_eq!(strict_prompt_prefix_split_pos(3, 0, 4), None);
+    }
+
+    #[test]
+    fn paged_prefix_reuse_requires_a_complete_final_block() {
+        let greedy = SamplingParams::greedy();
+        let sampled = SamplingParams {
+            temperature: 0.8,
+            ..SamplingParams::default()
+        };
+
+        let non_aligned_exact = PagedPrefixReuse {
+            cached_tokens: 5,
+            block_ids: vec![10, 11],
+            linear_state: empty_linear_state(),
+            next_token: Some(PagedPrefixNextToken::GreedyToken(7)),
+        };
+        assert!(!paged_prefix_reuse_matches_prompt(
+            &non_aligned_exact,
+            5,
+            4,
+            &greedy
+        ));
+
+        let aligned_exact = PagedPrefixReuse {
+            cached_tokens: 4,
+            block_ids: vec![10],
+            linear_state: empty_linear_state(),
+            next_token: Some(PagedPrefixNextToken::GreedyToken(7)),
+        };
+        assert!(paged_prefix_reuse_matches_prompt(
+            &aligned_exact,
+            4,
+            4,
+            &greedy
+        ));
+        assert!(!paged_prefix_reuse_matches_prompt(
+            &aligned_exact,
+            4,
+            4,
+            &sampled
+        ));
+        assert!(paged_prefix_reuse_matches_prompt(
+            &aligned_exact,
+            9,
+            4,
+            &sampled
+        ));
     }
 
     #[test]

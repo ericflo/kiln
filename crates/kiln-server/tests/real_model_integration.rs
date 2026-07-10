@@ -1518,7 +1518,7 @@ use kiln_core::block::BlockManager;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 use kiln_model::{CancelHandle, FinishReason, PagedKvCacheKt, PagedPrefixReuse};
-use kiln_server::batching_engine::{DecodeForward, EngineRequest, RealDecodeForward};
+use kiln_server::batching_engine::{DecodeForward, DecodeSlot, EngineRequest, RealDecodeForward};
 use kiln_server::state::RealPrefixCache;
 use uuid::Uuid;
 
@@ -1698,10 +1698,10 @@ fn prefix_test_turn1_prompt() -> Vec<TokenId> {
     (0..81u32).map(|i| (i % 17) + 1).collect()
 }
 
-/// Batching-engine serve path (CUDA / Vulkan / ROCm / CPU default): turn 1
-/// must register a block-aligned strict-prefix entry, and turn 2 (a superset
-/// prompt, as every multi-turn agent request is) must HIT it instead of
-/// re-prefilling the whole conversation.
+/// Batching-engine serve path (CUDA / Vulkan / ROCm / CPU default): a prompt
+/// ending inside a KV block must retain only its block-aligned strict prefix.
+/// Both an identical retry and a longer second turn must resume from that safe
+/// entry instead of sharing and then mutating the prompt's final partial block.
 #[test]
 fn prefix_cache_multi_turn_hit_through_batching_engine_forward() {
     let config = tiny_config();
@@ -1716,12 +1716,13 @@ fn prefix_cache_multi_turn_hit_through_batching_engine_forward() {
         1024, // state_bytes_per_entry (accounting only)
         64,   // production REAL_PREFIX_CACHE_MIN_REGISTER_TOKENS
     )));
+    let block_manager = Arc::new(Mutex::new(BlockManager::new(
+        PREFIX_TEST_NUM_BLOCKS,
+        PREFIX_TEST_BLOCK_SIZE,
+    )));
     let forward = RealDecodeForward::new(
         Arc::new(RwLock::new(runner)),
-        Arc::new(Mutex::new(BlockManager::new(
-            PREFIX_TEST_NUM_BLOCKS,
-            PREFIX_TEST_BLOCK_SIZE,
-        ))),
+        block_manager.clone(),
         Arc::new(prefix_test_paged_cache(&config)),
         prefix_cache.clone(),
         Arc::new(RwLock::new(())),
@@ -1740,6 +1741,10 @@ fn prefix_cache_multi_turn_hit_through_batching_engine_forward() {
         cancel: CancelHandle::new(),
     };
     let slot1 = forward.prepare_request(&req1).expect("turn-1 prepare");
+    let turn1_next_token = match &slot1 {
+        DecodeSlot::Real { state, .. } => state.next_token,
+        DecodeSlot::Mock { .. } => panic!("real forward returned a mock slot"),
+    };
     forward
         .finish_request(slot1, FinishReason::MaxTokens)
         .expect("turn-1 finish");
@@ -1747,12 +1752,52 @@ fn prefix_cache_multi_turn_hit_through_batching_engine_forward() {
     let stats = prefix_cache.lock().unwrap().stats();
     assert_eq!(stats.lookup_hits, 0);
     assert_eq!(stats.lookup_misses, 1, "turn-1 lookup must miss (cold)");
-    assert!(
-        stats.cached_entries >= 2,
-        "turn-1 must register the prompt entry AND the block-aligned \
-         prefill-split entry; got {} entries — if this is 1, the split \
-         snapshot was not captured (the 002af558 regression)",
-        stats.cached_entries
+    assert_eq!(
+        stats.cached_entries, 1,
+        "the non-aligned full prompt must not become an exact entry"
+    );
+    assert_eq!(
+        stats.cached_blocks, 5,
+        "the aligned 80-token prefix owns five blocks"
+    );
+    assert_eq!(block_manager.lock().unwrap().num_used(), 5);
+
+    // An identical retry must select the safe 80-token entry and prefill the
+    // one-token suffix into a separately allocated block. It must not take an
+    // exact hit on the six-block, partially filled turn-1 table.
+    let retry = EngineRequest {
+        request_id: Uuid::new_v4(),
+        prompt_tokens: turn1.clone(),
+        sampling: sampling.clone(),
+        adapter: None,
+        cancel: CancelHandle::new(),
+    };
+    let retry_slot = forward
+        .prepare_request(&retry)
+        .expect("same-prompt safe-prefix prepare");
+    match &retry_slot {
+        DecodeSlot::Real {
+            state,
+            hit_entry_id,
+            ..
+        } => {
+            assert!(
+                hit_entry_id.is_some(),
+                "retry must pin the safe prefix entry"
+            );
+            assert_eq!(state.next_token, turn1_next_token);
+            assert_eq!(state.block_table.blocks.len(), 6);
+        }
+        DecodeSlot::Mock { .. } => panic!("real forward returned a mock slot"),
+    }
+    assert_eq!(block_manager.lock().unwrap().num_used(), 6);
+    forward
+        .finish_request(retry_slot, FinishReason::MaxTokens)
+        .expect("same-prompt safe-prefix finish");
+    assert_eq!(
+        block_manager.lock().unwrap().num_used(),
+        5,
+        "retry suffix block must be released while cached aligned blocks stay retained"
     );
 
     // Turn 2: the conversation grew (assistant reply + new user message).
@@ -1768,12 +1813,12 @@ fn prefix_cache_multi_turn_hit_through_batching_engine_forward() {
     let slot2 = forward.prepare_request(&req2).expect("turn-2 prepare");
     let stats = prefix_cache.lock().unwrap().stats();
     assert_eq!(
-        stats.lookup_hits, 1,
+        stats.lookup_hits, 2,
         "turn-2 must hit the block-aligned strict-prefix entry"
     );
     assert_eq!(
-        stats.hit_tokens, 80,
-        "the hit must cover the full split position (floor((81-1)/16)*16)"
+        stats.hit_tokens, 160,
+        "both hits must cover the full split position (floor((81-1)/16)*16)"
     );
     forward
         .finish_request(slot2, FinishReason::MaxTokens)
