@@ -24,8 +24,9 @@ use uuid::Uuid;
 
 use crate::config::{ConfigValueSource, StreamStallGrace};
 use crate::response_delivery::{
-    DeliveryBatch, DeliveryCommand, DeliveryKey, DeliveryResult, DeliveryResultNotifyError,
-    DeliveryResultSink, DeliveryResultSinkError, DeliveryTerminal, DeliveryWorker,
+    DeliveryBarrierError, DeliveryBatch, DeliveryCommand, DeliveryKey, DeliveryResult,
+    DeliveryResultNotifyError, DeliveryResultSink, DeliveryResultSinkError, DeliveryTerminal,
+    DeliveryWorker,
 };
 use crate::state::{
     GpuCoordinationLock, RealPrefixCache, gpu_coordination_read_guard, gpu_coordination_write_guard,
@@ -1313,9 +1314,29 @@ impl BatchingEngineActor {
             if self.stopped {
                 break;
             }
-            self.admit_waiting();
+            let admission_deliveries = self.admit_waiting();
             if self.stopped {
                 break;
+            }
+            if admission_deliveries {
+                let barrier = self
+                    .delivery_worker
+                    .as_ref()
+                    .ok_or(DeliveryBarrierError)
+                    .and_then(DeliveryWorker::barrier);
+                if let Err(error) = barrier {
+                    self.accepting = false;
+                    self.stopped = true;
+                    tracing::error!(
+                        error = %error,
+                        "response delivery worker unavailable at admission barrier; stopping batching actor"
+                    );
+                    break;
+                }
+                self.drain_delivery_results();
+                if self.stopped {
+                    break;
+                }
             }
             if self.has_ready_decode_row() {
                 self.run_decode_batch();
@@ -1680,15 +1701,18 @@ impl BatchingEngineActor {
         }
     }
 
-    fn admit_waiting(&mut self) {
+    /// Admit queued requests and report whether this cycle submitted one or
+    /// more prefill-produced first tokens to the delivery worker.
+    fn admit_waiting(&mut self) -> bool {
         // A pending adapter swap needs the active batch to drain — admitting
         // new requests now would (a) delay the swap arbitrarily and (b) run
         // them under weights the caller is replacing. They stay queued and
         // resume right after the swap executes.
         if !self.pending_swaps.is_empty() {
-            return;
+            return false;
         }
         let mut admitted = 0usize;
+        let mut submitted_first_tokens = false;
         // #1082 CUDA concurrency regression fix: CUDA (burst_refill) refills the
         // batch toward max_decode_batch every cycle — the LKG 2d9d4fc4 burst-fill
         // that sustained a wide decode batch and scaled to ~498 tok/s @ bs=64.
@@ -1742,7 +1766,7 @@ impl BatchingEngineActor {
                     // Publish admission before first-token delivery, which can
                     // itself encounter a slow response channel.
                     self.refresh_snapshot();
-                    self.emit_pending_first_token_at(active_idx);
+                    submitted_first_tokens |= self.emit_pending_first_token_at(active_idx);
                 }
                 Err(err) => {
                     // A block-pool shortage while other requests are active
@@ -1773,6 +1797,7 @@ impl BatchingEngineActor {
                 .saturating_add(1);
         }
         self.refresh_snapshot();
+        submitted_first_tokens
     }
 
     fn pending_first_token_at(&mut self, idx: usize) -> Option<TokenId> {
@@ -2220,6 +2245,7 @@ mod tests {
     #[derive(Default)]
     struct PendingFirstTokenForward {
         calls: StdMutex<Vec<Vec<TokenId>>>,
+        prepare_delay: Duration,
     }
 
     impl DecodeForward for MockForward {
@@ -2294,6 +2320,9 @@ mod tests {
 
     impl DecodeForward for PendingFirstTokenForward {
         fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot> {
+            if !self.prepare_delay.is_zero() {
+                thread::sleep(self.prepare_delay);
+            }
             let next_token = req
                 .prompt_tokens
                 .last()
@@ -3771,7 +3800,13 @@ mod tests {
 
     #[test]
     fn delivery_ack_cohort_preserves_sustained_wide_decode() {
-        let forward = Arc::new(MockForward::default());
+        let forward = Arc::new(PendingFirstTokenForward {
+            calls: StdMutex::new(Vec::new()),
+            // Earlier rows are acknowledged while later rows are still being
+            // prepared. Without the post-admission FIFO barrier this reliably
+            // splits the first decode turn into a wide prefix plus one row.
+            prepare_delay: Duration::from_millis(5),
+        });
         let (command_tx, command_rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
         let (delivery_result_tx, delivery_results) = std_mpsc::channel();
         let response_delivery_policy = ResponseDeliveryPolicy::default();
@@ -3800,7 +3835,7 @@ mod tests {
         let mut receivers = Vec::new();
         for prompt in 100..108 {
             let (response_tx, response_rx) = mpsc::channel(64);
-            queue_test_request(&mut actor, request(prompt, 4), response_tx);
+            queue_test_request(&mut actor, request(prompt, 5), response_tx);
             receivers.push(response_rx);
         }
 
@@ -3811,8 +3846,8 @@ mod tests {
                 match response_rx.blocking_recv() {
                     Some(EngineEvent::Token { .. }) => token_count += 1,
                     Some(EngineEvent::Done { output }) => {
-                        assert_eq!(token_count, 4, "row {row}");
-                        assert_eq!(output.completion_tokens, 4, "row {row}");
+                        assert_eq!(token_count, 5, "row {row}");
+                        assert_eq!(output.completion_tokens, 5, "row {row}");
                         break;
                     }
                     Some(EngineEvent::Error(error)) => panic!("row {row} failed: {error}"),
@@ -3829,7 +3864,7 @@ mod tests {
         actor_thread.join().unwrap();
 
         let calls = forward.calls.lock().unwrap().clone();
-        let expected: Vec<Vec<TokenId>> = (0..4)
+        let expected: Vec<Vec<TokenId>> = (1..5)
             .map(|step| (100..108).map(|token| token + step * 10).collect())
             .collect();
         assert_eq!(calls, expected);

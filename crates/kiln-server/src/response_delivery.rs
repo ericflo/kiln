@@ -112,10 +112,18 @@ pub(crate) enum DeliveryCommand {
     DeliverMany {
         deliveries: Vec<(DeliveryKey, DeliveryBatch)>,
     },
+    Barrier {
+        reply: std_mpsc::Sender<()>,
+    },
     /// Terminate a lane without overtaking an already accepted token.
-    Terminate { key: DeliveryKey, error: String },
+    Terminate {
+        key: DeliveryKey,
+        error: String,
+    },
     /// Best-effort error notification followed by immediate sender teardown.
-    Shutdown { error: String },
+    Shutdown {
+        error: String,
+    },
 }
 
 impl fmt::Debug for DeliveryCommand {
@@ -135,6 +143,7 @@ impl fmt::Debug for DeliveryCommand {
                 .debug_struct("DeliverMany")
                 .field("deliveries", deliveries)
                 .finish(),
+            Self::Barrier { .. } => f.debug_struct("Barrier").finish(),
             Self::Terminate { key, error } => f
                 .debug_struct("Terminate")
                 .field("key", key)
@@ -226,6 +235,21 @@ pub(crate) trait DeliveryResultSink: Send + 'static {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DeliveryResultNotifyError;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DeliveryBarrierError;
+
+impl fmt::Display for DeliveryBarrierError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "response delivery worker stopped or did not acknowledge its barrier within {} ms",
+            DELIVERY_BARRIER_TIMEOUT.as_millis()
+        )
+    }
+}
+
+impl std::error::Error for DeliveryBarrierError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DeliveryResultSinkError {
@@ -391,6 +415,9 @@ impl DeliveryState {
                     }));
                     self.newly_ready_lanes.push_back(key);
                 }
+            }
+            DeliveryCommand::Barrier { .. } => {
+                unreachable!("delivery barriers are handled by the worker")
             }
             DeliveryCommand::Shutdown { error } => {
                 // Shutdown is deliberately best-effort: full and closed lanes
@@ -616,6 +643,7 @@ fn poll_lane(
 const WORKER_DISCONNECTED_ERROR: &str = "response delivery command channel closed";
 const RESULT_SINK_CLOSED_ERROR: &str = "response delivery result sink closed";
 const WORKER_DROP_ERROR: &str = "response delivery worker dropped";
+const DELIVERY_BARRIER_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Owning handle for the response-delivery thread.
 ///
@@ -668,6 +696,17 @@ impl DeliveryWorker {
         command_tx.send(command).map_err(|error| error.0)
     }
 
+    /// Wait until every result produced before this FIFO barrier has been
+    /// accepted and published as one or more sink cohorts.
+    pub(crate) fn barrier(&self) -> Result<(), DeliveryBarrierError> {
+        let (reply, reply_rx) = std_mpsc::channel();
+        self.command(DeliveryCommand::Barrier { reply })
+            .map_err(|_| DeliveryBarrierError)?;
+        reply_rx
+            .recv_timeout(DELIVERY_BARRIER_TIMEOUT)
+            .map_err(|_| DeliveryBarrierError)
+    }
+
     /// Request ordered best-effort lane shutdown and join the worker thread.
     pub(crate) fn shutdown(&mut self, error: String) -> thread::Result<()> {
         let _ = self.command(DeliveryCommand::Shutdown { error });
@@ -709,26 +748,35 @@ fn run_delivery_worker<S>(
     S: DeliveryResultSink,
 {
     let mut pending_results = VecDeque::new();
+    let mut pending_barriers = VecDeque::new();
+    let mut results_enqueued = 0_u128;
+    let mut results_published = 0_u128;
     let mut next_poll = Instant::now();
 
     loop {
-        if flush_delivery_results(&mut sink, &mut pending_results).is_closed() {
+        let flush = flush_delivery_results(&mut sink, &mut pending_results);
+        if flush.is_closed() {
             let _ = state.handle(DeliveryCommand::Shutdown {
                 error: RESULT_SINK_CLOSED_ERROR.into(),
             });
             return;
         }
+        results_published += flush.accepted as u128;
+        acknowledge_delivery_barriers(&mut pending_barriers, results_published);
 
         let now = Instant::now();
         if now >= next_poll {
-            pending_results.extend(state.poll(now));
+            enqueue_delivery_results(&mut pending_results, &mut results_enqueued, state.poll(now));
             next_poll = now.checked_add(poll_cadence).unwrap_or(now);
-            if flush_delivery_results(&mut sink, &mut pending_results).is_closed() {
+            let flush = flush_delivery_results(&mut sink, &mut pending_results);
+            if flush.is_closed() {
                 let _ = state.handle(DeliveryCommand::Shutdown {
                     error: RESULT_SINK_CLOSED_ERROR.into(),
                 });
                 return;
             }
+            results_published += flush.accepted as u128;
+            acknowledge_delivery_barriers(&mut pending_barriers, results_published);
         }
 
         let received = if !state.has_pending() && pending_results.is_empty() {
@@ -746,6 +794,14 @@ fn run_delivery_worker<S>(
         };
         match received {
             WorkerReceive::Command(command) => {
+                if let DeliveryCommand::Barrier { reply } = command {
+                    pending_barriers.push_back(PendingDeliveryBarrier {
+                        result_target: results_enqueued,
+                        reply,
+                    });
+                    acknowledge_delivery_barriers(&mut pending_barriers, results_published);
+                    continue;
+                }
                 let shutdown = matches!(&command, DeliveryCommand::Shutdown { .. });
                 let poll_immediately = matches!(
                     &command,
@@ -754,13 +810,21 @@ fn run_delivery_worker<S>(
                         | DeliveryCommand::Terminate { .. }
                 );
                 if let Err(error) = state.handle(command) {
-                    pending_results.push_back(DeliveryResult::ProtocolError(error));
+                    enqueue_delivery_results(
+                        &mut pending_results,
+                        &mut results_enqueued,
+                        [DeliveryResult::ProtocolError(error)],
+                    );
                 }
                 if shutdown {
                     return;
                 }
                 if poll_immediately {
-                    pending_results.extend(state.poll_ready(Instant::now()));
+                    enqueue_delivery_results(
+                        &mut pending_results,
+                        &mut results_enqueued,
+                        state.poll_ready(Instant::now()),
+                    );
                 }
             }
             WorkerReceive::Timeout => {}
@@ -771,6 +835,39 @@ fn run_delivery_worker<S>(
                 return;
             }
         }
+    }
+}
+
+struct PendingDeliveryBarrier {
+    result_target: u128,
+    reply: std_mpsc::Sender<()>,
+}
+
+fn enqueue_delivery_results<I>(
+    pending_results: &mut VecDeque<DeliveryResult>,
+    results_enqueued: &mut u128,
+    results: I,
+) where
+    I: IntoIterator<Item = DeliveryResult>,
+{
+    for result in results {
+        pending_results.push_back(result);
+        *results_enqueued += 1;
+    }
+}
+
+fn acknowledge_delivery_barriers(
+    pending_barriers: &mut VecDeque<PendingDeliveryBarrier>,
+    results_published: u128,
+) {
+    while pending_barriers
+        .front()
+        .is_some_and(|barrier| barrier.result_target <= results_published)
+    {
+        let barrier = pending_barriers
+            .pop_front()
+            .expect("front barrier remains present");
+        let _ = barrier.reply.send(());
     }
 }
 
@@ -786,6 +883,18 @@ enum SinkStatus {
     Closed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FlushOutcome {
+    status: SinkStatus,
+    accepted: usize,
+}
+
+impl FlushOutcome {
+    fn is_closed(self) -> bool {
+        self.status.is_closed()
+    }
+}
+
 impl SinkStatus {
     fn is_closed(self) -> bool {
         matches!(self, Self::Closed)
@@ -795,33 +904,48 @@ impl SinkStatus {
 fn flush_delivery_results<S>(
     sink: &mut S,
     pending_results: &mut VecDeque<DeliveryResult>,
-) -> SinkStatus
+) -> FlushOutcome
 where
     S: DeliveryResultSink,
 {
-    let mut accepted_any = false;
+    let mut accepted = 0;
     while let Some(result) = pending_results.pop_front() {
         match sink.try_send(result) {
-            Ok(()) => accepted_any = true,
+            Ok(()) => accepted += 1,
             Err(DeliveryResultSinkError::Full(result)) => {
                 pending_results.push_front(result);
-                if accepted_any && sink.notify().is_err() {
-                    return SinkStatus::Closed;
+                if accepted > 0 && sink.notify().is_err() {
+                    return FlushOutcome {
+                        status: SinkStatus::Closed,
+                        accepted,
+                    };
                 }
-                return SinkStatus::Open;
+                return FlushOutcome {
+                    status: SinkStatus::Open,
+                    accepted,
+                };
             }
             Err(DeliveryResultSinkError::Closed(_)) => {
-                if accepted_any {
+                if accepted > 0 {
                     let _ = sink.notify();
                 }
-                return SinkStatus::Closed;
+                return FlushOutcome {
+                    status: SinkStatus::Closed,
+                    accepted,
+                };
             }
         }
     }
-    if accepted_any && sink.notify().is_err() {
-        return SinkStatus::Closed;
+    if accepted > 0 && sink.notify().is_err() {
+        return FlushOutcome {
+            status: SinkStatus::Closed,
+            accepted,
+        };
     }
-    SinkStatus::Open
+    FlushOutcome {
+        status: SinkStatus::Open,
+        accepted,
+    }
 }
 
 #[cfg(test)]
@@ -1071,6 +1195,99 @@ mod tests {
     }
 
     #[test]
+    fn worker_barrier_waits_for_prior_result_publication() {
+        let ready_at = Instant::now();
+        let key = key(7, 0);
+        let occupied = DeliveryResult::BackpressureStarted {
+            key,
+            sequence: 99,
+            capacity: 1,
+        };
+        let (result_tx, result_rx) = std_mpsc::sync_channel(1);
+        result_tx.try_send(occupied.clone()).unwrap();
+        let mut worker = DeliveryWorker::start(GRACE, Duration::from_millis(1), result_tx).unwrap();
+        let (response_tx, mut response_rx) = mpsc::channel(1);
+        worker
+            .command(DeliveryCommand::Register { key, response_tx })
+            .unwrap();
+        worker
+            .command(DeliveryCommand::Deliver {
+                key,
+                batch: token(77, ready_at, 0),
+            })
+            .unwrap();
+        assert_eq!(
+            recv_engine_event(&mut response_rx, Duration::from_secs(1)),
+            EngineEvent::Token {
+                token: 77,
+                ready_at,
+            }
+        );
+
+        thread::scope(|scope| {
+            let (barrier_done_tx, barrier_done_rx) = std_mpsc::channel();
+            let worker_ref = &worker;
+            scope.spawn(move || {
+                barrier_done_tx.send(worker_ref.barrier()).unwrap();
+            });
+            assert!(matches!(
+                barrier_done_rx.recv_timeout(Duration::from_millis(20)),
+                Err(std_mpsc::RecvTimeoutError::Timeout)
+            ));
+
+            assert_eq!(result_rx.recv().unwrap(), occupied);
+            assert_eq!(
+                barrier_done_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .unwrap(),
+                Ok(())
+            );
+            assert_eq!(
+                result_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+                DeliveryResult::Delivered {
+                    key,
+                    sequence: 0,
+                    terminal: false,
+                    waited: Duration::ZERO,
+                }
+            );
+        });
+
+        worker.shutdown("test complete".into()).unwrap();
+        assert_eq!(worker.barrier(), Err(DeliveryBarrierError));
+    }
+
+    #[test]
+    fn worker_barrier_is_not_acknowledged_after_notification_failure() {
+        let ready_at = Instant::now();
+        let mut worker = DeliveryWorker::start(
+            GRACE,
+            Duration::from_millis(1),
+            BoundedRecordingSink {
+                capacity: 1,
+                accepted: Vec::new(),
+                notified_lengths: Vec::new(),
+                notification_fails: true,
+            },
+        )
+        .unwrap();
+        let key = key(8, 0);
+        let (response_tx, _response_rx) = mpsc::channel(1);
+        worker
+            .command(DeliveryCommand::Register { key, response_tx })
+            .unwrap();
+        worker
+            .command(DeliveryCommand::Deliver {
+                key,
+                batch: token(88, ready_at, 0),
+            })
+            .unwrap();
+
+        assert_eq!(worker.barrier(), Err(DeliveryBarrierError));
+        worker.join().unwrap();
+    }
+
+    #[test]
     fn worker_thread_services_a_ready_lane_while_a_peer_is_full() {
         let ready_at = Instant::now();
         let (result_tx, result_rx) = std_mpsc::channel();
@@ -1209,7 +1426,7 @@ mod tests {
         };
 
         assert_eq!(
-            flush_delivery_results(&mut sink, &mut pending),
+            flush_delivery_results(&mut sink, &mut pending).status,
             SinkStatus::Open
         );
         assert_eq!(sink.accepted, vec![first.clone()]);
@@ -1218,7 +1435,7 @@ mod tests {
 
         sink.capacity = 2;
         assert_eq!(
-            flush_delivery_results(&mut sink, &mut pending),
+            flush_delivery_results(&mut sink, &mut pending).status,
             SinkStatus::Open
         );
         assert_eq!(sink.accepted, vec![first, second]);
@@ -1243,7 +1460,7 @@ mod tests {
         };
 
         assert_eq!(
-            flush_delivery_results(&mut sink, &mut pending),
+            flush_delivery_results(&mut sink, &mut pending).status,
             SinkStatus::Closed
         );
         assert_eq!(sink.accepted, vec![result]);

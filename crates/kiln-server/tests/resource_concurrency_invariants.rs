@@ -445,6 +445,7 @@ fn response_delivery_is_off_actor_ordered_and_non_blocking() {
     assert!(batching.contains("ActiveDeliveryState::InFlight"));
     assert!(batching.contains("DeliveryCommand::DeliverMany"));
     assert!(batching.contains("delivery_outbox"));
+    assert!(batching.contains("DeliveryWorker::barrier"));
     assert!(batching.contains("Sender<Vec<DeliveryResult>>"));
     assert!(batching.contains("for result in results"));
     assert!(batching.contains("mpsc::WeakSender<EngineCommand>"));
@@ -457,6 +458,8 @@ fn response_delivery_is_off_actor_ordered_and_non_blocking() {
         "newly_ready_lanes",
         "cadence_blocked_lanes",
         "fn notify(&mut self)",
+        "PendingDeliveryBarrier",
+        "results_published",
         "DeliveryResult::ProtocolError",
     ] {
         assert!(
