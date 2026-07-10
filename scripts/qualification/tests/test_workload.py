@@ -91,7 +91,11 @@ def valid_performance_workload() -> dict:
 
 class WorkloadTests(unittest.TestCase):
     def test_checked_in_environment_and_correctness_workloads_validate(self) -> None:
-        for name in ("environment-v1.json", "correctness-core-v1.json"):
+        for name in (
+            "environment-v1.json",
+            "correctness-core-v1.json",
+            "serving-mixed-rocm-v1.json",
+        ):
             with self.subTest(name=name):
                 path = ROOT / "qualification/workloads" / name
                 workload = workload_module.load_workload(path)

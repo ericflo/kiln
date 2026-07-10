@@ -1,0 +1,731 @@
+{
+  "schema_version": 1,
+  "workload_id": "serving-mixed-rocm-v1",
+  "kind": "performance",
+  "description": "Measure deterministic mixed streaming load, long prefill, cancellation, and slow-consumer behavior on a required ROCm device.",
+  "determinism": {
+    "seed": 20260709,
+    "seed_delivery": "argv",
+    "repetitions": 1,
+    "case_order": "declared",
+    "max_parallel_cases": 1,
+    "network_access": "forbidden"
+  },
+  "variables": [],
+  "variants": [
+    {
+      "id": "autoscale-off",
+      "description": "KV-autoscale-off arm; resize attribution remains observational unless the default arm records a resize.",
+      "backend": "rocm",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {
+        "build": {
+          "binary": "kiln",
+          "features": "rocm",
+          "locked": true,
+          "no_default_features": true,
+          "offline": true,
+          "package": "kiln-server",
+          "profile": "release",
+          "rocm_archs": "gfx1151",
+          "rocm_path": "/opt/rocm"
+        },
+        "runtime": {
+          "kv_autoscale_enabled": false,
+          "memory_reclaim_mode": "off",
+          "rocm_graphs_enabled": true
+        },
+        "server": {
+          "chat_performance_metadata_enabled": true,
+          "debug_endpoints_enabled": true,
+          "default_thinking_enabled": false,
+          "http_send_buffer_bytes": 4096,
+          "log_format": "json",
+          "request_timeout_seconds": 180,
+          "stream_stall_grace_ms": 2000
+        },
+        "workload": {
+          "cancellation_after_semantic_deltas": 4,
+          "long_prefill_max_tokens": 32,
+          "long_prefill_words": 1536,
+          "max_warmup_requests": 4,
+          "memory_poll_interval_ms": 500,
+          "normal_max_tokens": 128,
+          "normal_requests": 8,
+          "outlier_absolute_ms": 250,
+          "outlier_history_size": 64,
+          "outlier_multiplier": 5,
+          "overall_timeout_seconds": 420,
+          "pressure_peer_dispatch": "after_slow_headers_before_pressure_wait",
+          "pressure_peer_max_tokens": 512,
+          "pressure_peer_prompt_words": 64,
+          "pressure_peer_seed_offset": 103,
+          "request_timeout_seconds": 120,
+          "slow_socket_buffer_bytes": 4096,
+          "slow_max_tokens": 4096,
+          "startup_timeout_seconds": 240,
+          "warmup_max_tokens": 32
+        }
+      },
+      "cases": [
+        {
+          "id": "mixed-load",
+          "description": "Build current source and run qualification-grade mixed SSE traffic with cancellation and socket backpressure.",
+          "required": true,
+          "command": [
+            "python3",
+            "scripts/qualification/serve_mixed_load.py",
+            "--model-path",
+            "${model_path}",
+            "--seed",
+            "${seed}"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "PYTHONUNBUFFERED": "1",
+            "ROCM_PATH": "/opt/rocm"
+          },
+          "timeout_seconds": 900,
+          "expected_exit_codes": [
+            0
+          ],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no rocm device|skipp(?:ed|ing).*rocm)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "command",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": [
+              "attributed_itl_outlier_count",
+              "batching_batched_decode_forward_count",
+              "batching_decode_forward_count",
+              "batching_decode_row_count",
+              "batching_max_observed_batch_size",
+              "batching_mean_rows_per_forward",
+              "batching_total_errors",
+              "cancellation_confirmed_count",
+              "client_backpressure_event_count",
+              "client_backpressure_wait_ms",
+              "client_stall_eviction_count",
+              "completion_token_count",
+              "e2e_latency_ms_p50",
+              "e2e_latency_ms_p99",
+              "e2e_latency_ms_p999",
+              "graph_measured_capture_attempt_count",
+              "graph_measured_capture_deferral_count",
+              "graph_measured_capture_failure_count",
+              "graph_measured_capture_success_count",
+              "graph_measured_live_count_end",
+              "graph_measured_replay_attempt_count",
+              "graph_measured_replay_failure_count",
+              "graph_measured_replay_success_count",
+              "graph_pre_measurement_capture_success_count",
+              "graph_pre_measurement_failure_count",
+              "graph_pre_measurement_replay_success_count",
+              "itl_ms_p50",
+              "itl_ms_p99",
+              "itl_ms_p999",
+              "kv_blocks_end",
+              "kv_blocks_start",
+              "kv_resize_event_count",
+              "long_prefill_prompt_tokens",
+              "memory_reclaim_event_count",
+              "output_token_throughput_per_second",
+              "peak_gpu_memory_used_bytes",
+              "prompt_token_count",
+              "request_count",
+              "request_failure_count",
+              "request_throughput_per_second",
+              "response_queue_delay_ms_p50",
+              "response_queue_delay_ms_p99",
+              "response_queue_delay_ms_p999",
+              "slo_goodput_requests_per_second",
+              "slow_consumer_peer_success_count",
+              "ttft_ms_p50",
+              "ttft_ms_p99",
+              "ttft_ms_p999",
+              "unexplained_itl_outlier_count",
+              "zero_token_response_count"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "both-off",
+      "description": "Combined configuration arm with physical KV autoscaling and ROCm graphs disabled.",
+      "backend": "rocm",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {
+        "build": {
+          "binary": "kiln",
+          "features": "rocm",
+          "locked": true,
+          "no_default_features": true,
+          "offline": true,
+          "package": "kiln-server",
+          "profile": "release",
+          "rocm_archs": "gfx1151",
+          "rocm_path": "/opt/rocm"
+        },
+        "runtime": {
+          "kv_autoscale_enabled": false,
+          "memory_reclaim_mode": "off",
+          "rocm_graphs_enabled": false
+        },
+        "server": {
+          "chat_performance_metadata_enabled": true,
+          "debug_endpoints_enabled": true,
+          "default_thinking_enabled": false,
+          "http_send_buffer_bytes": 4096,
+          "log_format": "json",
+          "request_timeout_seconds": 180,
+          "stream_stall_grace_ms": 2000
+        },
+        "workload": {
+          "cancellation_after_semantic_deltas": 4,
+          "long_prefill_max_tokens": 32,
+          "long_prefill_words": 1536,
+          "max_warmup_requests": 4,
+          "memory_poll_interval_ms": 500,
+          "normal_max_tokens": 128,
+          "normal_requests": 8,
+          "outlier_absolute_ms": 250,
+          "outlier_history_size": 64,
+          "outlier_multiplier": 5,
+          "overall_timeout_seconds": 420,
+          "pressure_peer_dispatch": "after_slow_headers_before_pressure_wait",
+          "pressure_peer_max_tokens": 512,
+          "pressure_peer_prompt_words": 64,
+          "pressure_peer_seed_offset": 103,
+          "request_timeout_seconds": 120,
+          "slow_socket_buffer_bytes": 4096,
+          "slow_max_tokens": 4096,
+          "startup_timeout_seconds": 240,
+          "warmup_max_tokens": 32
+        }
+      },
+      "cases": [
+        {
+          "id": "mixed-load",
+          "description": "Build current source and run qualification-grade mixed SSE traffic with cancellation and socket backpressure.",
+          "required": true,
+          "command": [
+            "python3",
+            "scripts/qualification/serve_mixed_load.py",
+            "--model-path",
+            "${model_path}",
+            "--seed",
+            "${seed}"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "PYTHONUNBUFFERED": "1",
+            "ROCM_PATH": "/opt/rocm"
+          },
+          "timeout_seconds": 900,
+          "expected_exit_codes": [
+            0
+          ],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no rocm device|skipp(?:ed|ing).*rocm)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "command",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": [
+              "attributed_itl_outlier_count",
+              "batching_batched_decode_forward_count",
+              "batching_decode_forward_count",
+              "batching_decode_row_count",
+              "batching_max_observed_batch_size",
+              "batching_mean_rows_per_forward",
+              "batching_total_errors",
+              "cancellation_confirmed_count",
+              "client_backpressure_event_count",
+              "client_backpressure_wait_ms",
+              "client_stall_eviction_count",
+              "completion_token_count",
+              "e2e_latency_ms_p50",
+              "e2e_latency_ms_p99",
+              "e2e_latency_ms_p999",
+              "graph_measured_capture_attempt_count",
+              "graph_measured_capture_deferral_count",
+              "graph_measured_capture_failure_count",
+              "graph_measured_capture_success_count",
+              "graph_measured_live_count_end",
+              "graph_measured_replay_attempt_count",
+              "graph_measured_replay_failure_count",
+              "graph_measured_replay_success_count",
+              "graph_pre_measurement_capture_success_count",
+              "graph_pre_measurement_failure_count",
+              "graph_pre_measurement_replay_success_count",
+              "itl_ms_p50",
+              "itl_ms_p99",
+              "itl_ms_p999",
+              "kv_blocks_end",
+              "kv_blocks_start",
+              "kv_resize_event_count",
+              "long_prefill_prompt_tokens",
+              "memory_reclaim_event_count",
+              "output_token_throughput_per_second",
+              "peak_gpu_memory_used_bytes",
+              "prompt_token_count",
+              "request_count",
+              "request_failure_count",
+              "request_throughput_per_second",
+              "response_queue_delay_ms_p50",
+              "response_queue_delay_ms_p99",
+              "response_queue_delay_ms_p999",
+              "slo_goodput_requests_per_second",
+              "slow_consumer_peer_success_count",
+              "ttft_ms_p50",
+              "ttft_ms_p99",
+              "ttft_ms_p999",
+              "unexplained_itl_outlier_count",
+              "zero_token_response_count"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "default",
+      "description": "Default KV-autoscale/ROCm-graph A/B arm under the shared qualification transport envelope.",
+      "backend": "rocm",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {
+        "build": {
+          "binary": "kiln",
+          "features": "rocm",
+          "locked": true,
+          "no_default_features": true,
+          "offline": true,
+          "package": "kiln-server",
+          "profile": "release",
+          "rocm_archs": "gfx1151",
+          "rocm_path": "/opt/rocm"
+        },
+        "runtime": {
+          "kv_autoscale_enabled": true,
+          "memory_reclaim_mode": "off",
+          "rocm_graphs_enabled": true
+        },
+        "server": {
+          "chat_performance_metadata_enabled": true,
+          "debug_endpoints_enabled": true,
+          "default_thinking_enabled": false,
+          "http_send_buffer_bytes": 4096,
+          "log_format": "json",
+          "request_timeout_seconds": 180,
+          "stream_stall_grace_ms": 2000
+        },
+        "workload": {
+          "cancellation_after_semantic_deltas": 4,
+          "long_prefill_max_tokens": 32,
+          "long_prefill_words": 1536,
+          "max_warmup_requests": 4,
+          "memory_poll_interval_ms": 500,
+          "normal_max_tokens": 128,
+          "normal_requests": 8,
+          "outlier_absolute_ms": 250,
+          "outlier_history_size": 64,
+          "outlier_multiplier": 5,
+          "overall_timeout_seconds": 420,
+          "pressure_peer_dispatch": "after_slow_headers_before_pressure_wait",
+          "pressure_peer_max_tokens": 512,
+          "pressure_peer_prompt_words": 64,
+          "pressure_peer_seed_offset": 103,
+          "request_timeout_seconds": 120,
+          "slow_socket_buffer_bytes": 4096,
+          "slow_max_tokens": 4096,
+          "startup_timeout_seconds": 240,
+          "warmup_max_tokens": 32
+        }
+      },
+      "cases": [
+        {
+          "id": "mixed-load",
+          "description": "Build current source and run qualification-grade mixed SSE traffic with cancellation and socket backpressure.",
+          "required": true,
+          "command": [
+            "python3",
+            "scripts/qualification/serve_mixed_load.py",
+            "--model-path",
+            "${model_path}",
+            "--seed",
+            "${seed}"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "PYTHONUNBUFFERED": "1",
+            "ROCM_PATH": "/opt/rocm"
+          },
+          "timeout_seconds": 900,
+          "expected_exit_codes": [
+            0
+          ],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no rocm device|skipp(?:ed|ing).*rocm)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "command",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": [
+              "attributed_itl_outlier_count",
+              "batching_batched_decode_forward_count",
+              "batching_decode_forward_count",
+              "batching_decode_row_count",
+              "batching_max_observed_batch_size",
+              "batching_mean_rows_per_forward",
+              "batching_total_errors",
+              "cancellation_confirmed_count",
+              "client_backpressure_event_count",
+              "client_backpressure_wait_ms",
+              "client_stall_eviction_count",
+              "completion_token_count",
+              "e2e_latency_ms_p50",
+              "e2e_latency_ms_p99",
+              "e2e_latency_ms_p999",
+              "graph_measured_capture_attempt_count",
+              "graph_measured_capture_deferral_count",
+              "graph_measured_capture_failure_count",
+              "graph_measured_capture_success_count",
+              "graph_measured_live_count_end",
+              "graph_measured_replay_attempt_count",
+              "graph_measured_replay_failure_count",
+              "graph_measured_replay_success_count",
+              "graph_pre_measurement_capture_success_count",
+              "graph_pre_measurement_failure_count",
+              "graph_pre_measurement_replay_success_count",
+              "itl_ms_p50",
+              "itl_ms_p99",
+              "itl_ms_p999",
+              "kv_blocks_end",
+              "kv_blocks_start",
+              "kv_resize_event_count",
+              "long_prefill_prompt_tokens",
+              "memory_reclaim_event_count",
+              "output_token_throughput_per_second",
+              "peak_gpu_memory_used_bytes",
+              "prompt_token_count",
+              "request_count",
+              "request_failure_count",
+              "request_throughput_per_second",
+              "response_queue_delay_ms_p50",
+              "response_queue_delay_ms_p99",
+              "response_queue_delay_ms_p999",
+              "slo_goodput_requests_per_second",
+              "slow_consumer_peer_success_count",
+              "ttft_ms_p50",
+              "ttft_ms_p99",
+              "ttft_ms_p999",
+              "unexplained_itl_outlier_count",
+              "zero_token_response_count"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "graphs-off",
+      "description": "Controlled arm with ROCm graph capture and replay disabled.",
+      "backend": "rocm",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {
+        "build": {
+          "binary": "kiln",
+          "features": "rocm",
+          "locked": true,
+          "no_default_features": true,
+          "offline": true,
+          "package": "kiln-server",
+          "profile": "release",
+          "rocm_archs": "gfx1151",
+          "rocm_path": "/opt/rocm"
+        },
+        "runtime": {
+          "kv_autoscale_enabled": true,
+          "memory_reclaim_mode": "off",
+          "rocm_graphs_enabled": false
+        },
+        "server": {
+          "chat_performance_metadata_enabled": true,
+          "debug_endpoints_enabled": true,
+          "default_thinking_enabled": false,
+          "http_send_buffer_bytes": 4096,
+          "log_format": "json",
+          "request_timeout_seconds": 180,
+          "stream_stall_grace_ms": 2000
+        },
+        "workload": {
+          "cancellation_after_semantic_deltas": 4,
+          "long_prefill_max_tokens": 32,
+          "long_prefill_words": 1536,
+          "max_warmup_requests": 4,
+          "memory_poll_interval_ms": 500,
+          "normal_max_tokens": 128,
+          "normal_requests": 8,
+          "outlier_absolute_ms": 250,
+          "outlier_history_size": 64,
+          "outlier_multiplier": 5,
+          "overall_timeout_seconds": 420,
+          "pressure_peer_dispatch": "after_slow_headers_before_pressure_wait",
+          "pressure_peer_max_tokens": 512,
+          "pressure_peer_prompt_words": 64,
+          "pressure_peer_seed_offset": 103,
+          "request_timeout_seconds": 120,
+          "slow_socket_buffer_bytes": 4096,
+          "slow_max_tokens": 4096,
+          "startup_timeout_seconds": 240,
+          "warmup_max_tokens": 32
+        }
+      },
+      "cases": [
+        {
+          "id": "mixed-load",
+          "description": "Build current source and run qualification-grade mixed SSE traffic with cancellation and socket backpressure.",
+          "required": true,
+          "command": [
+            "python3",
+            "scripts/qualification/serve_mixed_load.py",
+            "--model-path",
+            "${model_path}",
+            "--seed",
+            "${seed}"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "PYTHONUNBUFFERED": "1",
+            "ROCM_PATH": "/opt/rocm"
+          },
+          "timeout_seconds": 900,
+          "expected_exit_codes": [
+            0
+          ],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no rocm device|skipp(?:ed|ing).*rocm)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "command",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": [
+              "attributed_itl_outlier_count",
+              "batching_batched_decode_forward_count",
+              "batching_decode_forward_count",
+              "batching_decode_row_count",
+              "batching_max_observed_batch_size",
+              "batching_mean_rows_per_forward",
+              "batching_total_errors",
+              "cancellation_confirmed_count",
+              "client_backpressure_event_count",
+              "client_backpressure_wait_ms",
+              "client_stall_eviction_count",
+              "completion_token_count",
+              "e2e_latency_ms_p50",
+              "e2e_latency_ms_p99",
+              "e2e_latency_ms_p999",
+              "graph_measured_capture_attempt_count",
+              "graph_measured_capture_deferral_count",
+              "graph_measured_capture_failure_count",
+              "graph_measured_capture_success_count",
+              "graph_measured_live_count_end",
+              "graph_measured_replay_attempt_count",
+              "graph_measured_replay_failure_count",
+              "graph_measured_replay_success_count",
+              "graph_pre_measurement_capture_success_count",
+              "graph_pre_measurement_failure_count",
+              "graph_pre_measurement_replay_success_count",
+              "itl_ms_p50",
+              "itl_ms_p99",
+              "itl_ms_p999",
+              "kv_blocks_end",
+              "kv_blocks_start",
+              "kv_resize_event_count",
+              "long_prefill_prompt_tokens",
+              "memory_reclaim_event_count",
+              "output_token_throughput_per_second",
+              "peak_gpu_memory_used_bytes",
+              "prompt_token_count",
+              "request_count",
+              "request_failure_count",
+              "request_throughput_per_second",
+              "response_queue_delay_ms_p50",
+              "response_queue_delay_ms_p99",
+              "response_queue_delay_ms_p999",
+              "slo_goodput_requests_per_second",
+              "slow_consumer_peer_success_count",
+              "ttft_ms_p50",
+              "ttft_ms_p99",
+              "ttft_ms_p999",
+              "unexplained_itl_outlier_count",
+              "zero_token_response_count"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "comparison_policy": {
+    "mode": "declared_ab_variants",
+    "variant_pairs": [
+      {
+        "baseline_variant_id": "default",
+        "candidate_variant_id": "autoscale-off",
+        "allowed_effective_config_differences": [
+          "runtime.kv_autoscale_enabled"
+        ]
+      },
+      {
+        "baseline_variant_id": "default",
+        "candidate_variant_id": "graphs-off",
+        "allowed_effective_config_differences": [
+          "runtime.rocm_graphs_enabled"
+        ]
+      },
+      {
+        "baseline_variant_id": "default",
+        "candidate_variant_id": "both-off",
+        "allowed_effective_config_differences": [
+          "runtime.kv_autoscale_enabled",
+          "runtime.rocm_graphs_enabled"
+        ]
+      }
+    ],
+    "backend_pairs": [],
+    "metric_rules": [
+      {
+        "scope": "result",
+        "result_id": "mixed-load",
+        "metric": "e2e_latency_ms_p99",
+        "metric_class": "performance",
+        "unit": "ms",
+        "aggregation": "p99",
+        "lower_is_better": true,
+        "operator": "not_greater",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": false
+      },
+      {
+        "scope": "result",
+        "result_id": "mixed-load",
+        "metric": "itl_ms_p99",
+        "metric_class": "performance",
+        "unit": "ms",
+        "aggregation": "p99",
+        "lower_is_better": true,
+        "operator": "not_greater",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": false
+      },
+      {
+        "scope": "result",
+        "result_id": "mixed-load",
+        "metric": "itl_ms_p999",
+        "metric_class": "performance",
+        "unit": "ms",
+        "aggregation": "p99.9",
+        "lower_is_better": true,
+        "operator": "not_greater",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": false
+      },
+      {
+        "scope": "result",
+        "result_id": "mixed-load",
+        "metric": "output_token_throughput_per_second",
+        "metric_class": "performance",
+        "unit": "tokens/s",
+        "aggregation": "rate",
+        "lower_is_better": false,
+        "operator": "not_less",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": false
+      },
+      {
+        "scope": "result",
+        "result_id": "mixed-load",
+        "metric": "request_failure_count",
+        "metric_class": "performance",
+        "unit": "count",
+        "aggregation": "sum",
+        "lower_is_better": true,
+        "operator": "not_greater",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      },
+      {
+        "scope": "result",
+        "result_id": "mixed-load",
+        "metric": "slo_goodput_requests_per_second",
+        "metric_class": "performance",
+        "unit": "requests/s",
+        "aggregation": "rate",
+        "lower_is_better": false,
+        "operator": "not_less",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": false
+      },
+      {
+        "scope": "result",
+        "result_id": "mixed-load",
+        "metric": "ttft_ms_p99",
+        "metric_class": "performance",
+        "unit": "ms",
+        "aggregation": "p99",
+        "lower_is_better": true,
+        "operator": "not_greater",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": false
+      },
+      {
+        "scope": "result",
+        "result_id": "mixed-load",
+        "metric": "unexplained_itl_outlier_count",
+        "metric_class": "performance",
+        "unit": "count",
+        "aggregation": "sum",
+        "lower_is_better": true,
+        "operator": "not_greater",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": false
+      }
+    ]
+  }
+}

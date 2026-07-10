@@ -66,6 +66,24 @@ model directory and `--model-id` with its public identity. Select each declared
 A/B arm explicitly; the manifest, not an ambient environment variable, owns
 the effective configuration recorded in the receipt.
 
+For the Strix Halo ROCm mixed-serving workload, run each of `default`,
+`autoscale-off`, `graphs-off`, and `both-off` separately:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" ROCM_PATH=/opt/rocm \
+python3 scripts/qualification/run.py \
+  --variant default \
+  --host-id strix-halo \
+  --model /absolute/path/to/Qwen3.5-4B \
+  --model-id Qwen3.5-4B \
+  qualification/workloads/serving-mixed-rocm-v1.json
+```
+
+The variant named `default` preserves the default KV-autoscale and ROCm-graph
+A/B settings, but the manifest intentionally applies one shared qualification
+transport envelope to every arm. It is not an uncontrolled production-default
+benchmark.
+
 Never edit a receipt to make it pass. A failed receipt is useful evidence: keep
 it when it identifies a reproducible product defect, fix the defect in a new
 commit, and run a new receipt with a new ID.
