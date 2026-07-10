@@ -11,10 +11,12 @@
 //! 3. `./kiln.toml` in the current working directory (if it exists)
 //! 4. No file — use defaults only
 
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Smallest accepted per-connection HTTP `SO_SNDBUF` request.
 pub const HTTP_SEND_BUFFER_MIN_BYTES: usize = 1024;
@@ -22,6 +24,105 @@ pub const HTTP_SEND_BUFFER_MIN_BYTES: usize = 1024;
 /// primarily for bounded transport/backpressure testing; allowing arbitrarily
 /// large buffers would multiply memory use by every concurrent connection.
 pub const HTTP_SEND_BUFFER_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// Default time a full streaming response channel may remain undrained before
+/// the batching actor evicts that request.
+pub const DEFAULT_STREAM_STALL_GRACE_MS: u64 = 2_000;
+/// Minimum stream-stall grace. This matches the actor's retry cadence, so every
+/// accepted value permits at least one bounded delivery retry.
+pub const STREAM_STALL_GRACE_MIN_MS: u64 = 10;
+/// Maximum stream-stall grace. A stalled response blocks the batching actor's
+/// delivery loop, so this must remain a bounded operational safety valve.
+pub const STREAM_STALL_GRACE_MAX_MS: u64 = DEFAULT_STREAM_STALL_GRACE_MS;
+
+/// Provenance of a resolved startup configuration value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigValueSource {
+    #[default]
+    Default,
+    ConfigFile,
+    Environment,
+}
+
+impl fmt::Display for ConfigValueSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Default => "default",
+            Self::ConfigFile => "config_file",
+            Self::Environment => "environment",
+        })
+    }
+}
+
+/// Validated stream-stall grace plus the startup source that selected it.
+///
+/// The custom serde implementation keeps `server.stream_stall_grace_ms` an
+/// ordinary TOML integer while distinguishing an explicit file value from the
+/// built-in default. Environment resolution happens once in [`KilnConfig::load`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamStallGrace {
+    millis: u64,
+    source: ConfigValueSource,
+}
+
+impl StreamStallGrace {
+    fn new(millis: u64, source: ConfigValueSource) -> Result<Self> {
+        validate_stream_stall_grace_ms(millis)?;
+        Ok(Self { millis, source })
+    }
+
+    fn from_environment_value(raw: &str) -> Result<Self> {
+        let millis = raw.trim().parse::<u64>().with_context(|| {
+            format!(
+                "KILN_STREAM_STALL_GRACE_MS must be a decimal integer in {}..={}, got {raw:?}",
+                STREAM_STALL_GRACE_MIN_MS, STREAM_STALL_GRACE_MAX_MS
+            )
+        })?;
+        Self::new(millis, ConfigValueSource::Environment)
+            .context("invalid KILN_STREAM_STALL_GRACE_MS")
+    }
+
+    pub fn millis(self) -> u64 {
+        self.millis
+    }
+
+    pub fn duration(self) -> Duration {
+        Duration::from_millis(self.millis)
+    }
+
+    pub fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for StreamStallGrace {
+    fn default() -> Self {
+        Self {
+            millis: DEFAULT_STREAM_STALL_GRACE_MS,
+            source: ConfigValueSource::Default,
+        }
+    }
+}
+
+impl Serialize for StreamStallGrace {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(self.millis)
+    }
+}
+
+impl<'de> Deserialize<'de> for StreamStallGrace {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let millis = u64::deserialize(deserializer)?;
+        Self::new(millis, ConfigValueSource::ConfigFile).map_err(serde::de::Error::custom)
+    }
+}
 
 /// Top-level configuration for kiln.
 #[derive(Debug, Deserialize, Serialize)]
@@ -144,6 +245,10 @@ pub struct ServerConfig {
     /// Kiln preflights the listener, normalizes platform accounting, and
     /// rejects ineffective application before advertising readiness.
     pub http_send_buffer_bytes: Option<usize>,
+    /// How long a full per-request streaming response channel may remain
+    /// undrained before the batching actor cancels that request. While delivery
+    /// remains actor-local, this bounds the pause imposed on peer requests.
+    pub stream_stall_grace_ms: StreamStallGrace,
     /// Enable deterministic eval-serving behavior for `kiln serve`.
     pub eval_mode: bool,
     /// Server-level default for chat-template `enable_thinking`. `None`
@@ -536,6 +641,7 @@ impl Default for ServerConfig {
             port: 8420,
             request_timeout_secs: 600,
             http_send_buffer_bytes: None,
+            stream_stall_grace_ms: StreamStallGrace::default(),
             eval_mode: false,
             default_thinking_enabled: None,
             default_thinking_budget_tokens: None,
@@ -744,6 +850,7 @@ impl KilnConfig {
 
         config.apply_env_overrides();
         config.apply_http_send_buffer_env_override()?;
+        config.apply_stream_stall_grace_env_override()?;
         config.request_log.apply_env_overrides();
         config.validate()?;
         Ok(config)
@@ -1011,6 +1118,26 @@ impl KilnConfig {
         Ok(())
     }
 
+    /// Resolve the batching stream-stall override strictly at startup. The
+    /// actor never reads process environment and receives only this typed value.
+    fn apply_stream_stall_grace_env_override(&mut self) -> Result<()> {
+        let raw = match std::env::var("KILN_STREAM_STALL_GRACE_MS") {
+            Ok(raw) => raw,
+            Err(std::env::VarError::NotPresent) => return Ok(()),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                anyhow::bail!("KILN_STREAM_STALL_GRACE_MS must be valid UTF-8 decimal milliseconds")
+            }
+        };
+        self.apply_stream_stall_grace_env_value(Some(&raw))
+    }
+
+    fn apply_stream_stall_grace_env_value(&mut self, raw: Option<&str>) -> Result<()> {
+        if let Some(raw) = raw {
+            self.server.stream_stall_grace_ms = StreamStallGrace::from_environment_value(raw)?;
+        }
+        Ok(())
+    }
+
     /// Validate configuration values. Returns an error describing the first invalid value.
     fn validate(&self) -> Result<()> {
         if self.server.port == 0 {
@@ -1022,6 +1149,7 @@ impl KilnConfig {
         if let Some(bytes) = self.server.http_send_buffer_bytes {
             validate_http_send_buffer_bytes(bytes)?;
         }
+        validate_stream_stall_grace_ms(self.server.stream_stall_grace_ms.millis())?;
         if self.server.shutdown_timeout_secs == 0 {
             anyhow::bail!("server.shutdown_timeout_secs must be > 0");
         }
@@ -1067,6 +1195,17 @@ fn validate_http_send_buffer_bytes(bytes: usize) -> Result<()> {
             "server.http_send_buffer_bytes must be between {} and {} bytes, got {bytes}",
             HTTP_SEND_BUFFER_MIN_BYTES,
             HTTP_SEND_BUFFER_MAX_BYTES
+        );
+    }
+    Ok(())
+}
+
+fn validate_stream_stall_grace_ms(millis: u64) -> Result<()> {
+    if !(STREAM_STALL_GRACE_MIN_MS..=STREAM_STALL_GRACE_MAX_MS).contains(&millis) {
+        anyhow::bail!(
+            "server.stream_stall_grace_ms must be between {} and {} milliseconds, got {millis}",
+            STREAM_STALL_GRACE_MIN_MS,
+            STREAM_STALL_GRACE_MAX_MS
         );
     }
     Ok(())
@@ -1124,6 +1263,14 @@ mod tests {
         assert_eq!(config.server.port, 8420);
         assert_eq!(config.server.request_timeout_secs, 600);
         assert_eq!(config.server.http_send_buffer_bytes, None);
+        assert_eq!(
+            config.server.stream_stall_grace_ms.millis(),
+            DEFAULT_STREAM_STALL_GRACE_MS
+        );
+        assert_eq!(
+            config.server.stream_stall_grace_ms.source(),
+            ConfigValueSource::Default
+        );
         assert!(!config.server.eval_mode);
         assert_eq!(config.server.default_thinking_enabled, None);
         assert_eq!(config.server.default_thinking_budget_tokens, None);
@@ -1205,6 +1352,7 @@ host = "127.0.0.1"
 port = 9000
 request_timeout_secs = 60
 http_send_buffer_bytes = 8192
+stream_stall_grace_ms = 1500
 eval_mode = true
 default_thinking_enabled = false
 default_thinking_budget_tokens = 256
@@ -1267,6 +1415,11 @@ composed_cache_max_entries = 8
         assert_eq!(config.server.port, 9000);
         assert_eq!(config.server.request_timeout_secs, 60);
         assert_eq!(config.server.http_send_buffer_bytes, Some(8192));
+        assert_eq!(config.server.stream_stall_grace_ms.millis(), 1500);
+        assert_eq!(
+            config.server.stream_stall_grace_ms.source(),
+            ConfigValueSource::ConfigFile
+        );
         assert!(config.server.eval_mode);
         assert_eq!(config.server.default_thinking_enabled, Some(false));
         assert_eq!(config.server.default_thinking_budget_tokens, Some(256));
@@ -1322,6 +1475,10 @@ port = 3000
         assert_eq!(config.server.host, "127.0.0.1"); // default (loopback)
         assert_eq!(config.server.request_timeout_secs, 600); // default
         assert_eq!(config.server.http_send_buffer_bytes, None); // default
+        assert_eq!(
+            config.server.stream_stall_grace_ms,
+            StreamStallGrace::default()
+        );
         assert!(!config.server.eval_mode); // default
         assert_eq!(config.server.default_thinking_enabled, None); // default
         assert!(!config.server.fold_reasoning_into_content); // default
@@ -1444,6 +1601,62 @@ port = 3000
             let error = config.validate().unwrap_err();
             assert!(
                 format!("{error:#}").contains("server.http_send_buffer_bytes"),
+                "unexpected error for {invalid}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_stream_stall_grace_env_override_is_strict_and_source_tracked() {
+        let mut config: KilnConfig = toml::from_str(
+            r#"
+[server]
+stream_stall_grace_ms = 1000
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.server.stream_stall_grace_ms.source(),
+            ConfigValueSource::ConfigFile
+        );
+
+        config
+            .apply_stream_stall_grace_env_value(Some(" 50 "))
+            .unwrap();
+        assert_eq!(config.server.stream_stall_grace_ms.millis(), 50);
+        assert_eq!(
+            config.server.stream_stall_grace_ms.source(),
+            ConfigValueSource::Environment
+        );
+
+        for invalid in ["", "0", "9", "2001", "-1", "not-a-number"] {
+            let error = StreamStallGrace::from_environment_value(invalid).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("KILN_STREAM_STALL_GRACE_MS"),
+                "unexpected error for {invalid:?}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_stream_stall_grace_toml_validation_bounds() {
+        for valid in [STREAM_STALL_GRACE_MIN_MS, STREAM_STALL_GRACE_MAX_MS] {
+            let config: KilnConfig =
+                toml::from_str(&format!("[server]\nstream_stall_grace_ms = {valid}\n")).unwrap();
+            assert_eq!(config.server.stream_stall_grace_ms.millis(), valid);
+            assert_eq!(
+                config.server.stream_stall_grace_ms.source(),
+                ConfigValueSource::ConfigFile
+            );
+        }
+
+        for invalid in [STREAM_STALL_GRACE_MIN_MS - 1, STREAM_STALL_GRACE_MAX_MS + 1] {
+            let error = toml::from_str::<KilnConfig>(&format!(
+                "[server]\nstream_stall_grace_ms = {invalid}\n"
+            ))
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("server.stream_stall_grace_ms"),
                 "unexpected error for {invalid}: {error:#}"
             );
         }

@@ -1821,6 +1821,7 @@ impl AppState {
         device_kt: kiln_tensor::Device,
         adapter_dir: PathBuf,
         memory_cfg: &crate::config::MemoryConfig,
+        response_delivery_policy: crate::batching_engine::ResponseDeliveryPolicy,
         request_timeout_secs: u64,
         served_model_id: String,
         prefix_cache_cfg: &crate::config::PrefixCacheConfig,
@@ -2317,6 +2318,10 @@ impl AppState {
             tracing::info!(
                 backend = backend_name,
                 max_decode_batch,
+                stream_stall_grace_ms = response_delivery_policy
+                    .stream_stall_grace_ms(),
+                stream_stall_grace_source = %response_delivery_policy
+                    .stream_stall_grace_source(),
                 "batching engine enabled — routing streaming and non-streaming real completions through batching actor (set KILN_BATCHING_ENGINE=0 to disable)"
             );
             crate::batching_engine::BatchingEngineHandle::start_with_backend_options(
@@ -2329,6 +2334,7 @@ impl AppState {
                 )),
                 max_decode_batch,
                 Some(decode_batcher_policy),
+                response_delivery_policy,
             )
         });
         // #24/#26: drive dynamic KV resize from live memory pressure on GPU

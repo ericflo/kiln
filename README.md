@@ -527,6 +527,7 @@ Kiln uses a TOML config file. Environment variables override config values. See 
 | `model.path` | `KILN_MODEL_PATH` | — | Path to model weights (required) |
 | `server.port` | `KILN_PORT` | 8420 | Server listen port |
 | `server.http_send_buffer_bytes` | `KILN_HTTP_SEND_BUFFER_BYTES` | OS default | Optional accepted-socket `SO_SNDBUF` request (1024–16777216 bytes); Kiln preflights it before readiness and reports requested, kernel-readback, and platform-normalized effective bytes in health/debug |
+| `server.stream_stall_grace_ms` | `KILN_STREAM_STALL_GRACE_MS` | 2000 | Time a full 64-event response channel may remain undrained before that request is cancelled (10–2000 ms). Strict startup validation rejects malformed or out-of-range values; health/debug report the effective value and whether it came from the default, config file, or environment |
 | `server.default_thinking_enabled` | `KILN_DEFAULT_THINKING_ENABLED` | template default | Default `chat_template_kwargs.enable_thinking` when a request omits it |
 | `server.default_thinking_budget_tokens` | `KILN_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default maximum generated tokens before Kiln closes an open thinking block |
 | `server.default_thinking_budget_ms` | `KILN_DEFAULT_THINKING_BUDGET_MS` | unlimited | Default decode-time budget before Kiln closes an open thinking block |

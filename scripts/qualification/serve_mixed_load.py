@@ -1380,6 +1380,28 @@ def attest_runtime(
     batching = runtime.get("batching_engine")
     if not isinstance(batching, dict):
         failures.append("batching engine is not enabled")
+    else:
+        expected_stall_grace = VARIANT_CONFIGS[variant]["server"][
+            "stream_stall_grace_ms"
+        ]
+        if batching.get("stream_stall_grace_ms") != expected_stall_grace:
+            failures.append("health batching stream-stall grace does not match config")
+        if batching.get("stream_stall_grace_source") != "environment":
+            failures.append("health batching stream-stall grace source is not environment")
+
+        debug_batching = debug.get("batching_engine")
+        debug_snapshot = (
+            debug_batching.get("snapshot")
+            if isinstance(debug_batching, dict)
+            else None
+        )
+        if not isinstance(debug_snapshot, dict):
+            failures.append("debug batching-engine snapshot is missing")
+        elif (
+            debug_snapshot.get("stream_stall_grace_ms") != expected_stall_grace
+            or debug_snapshot.get("stream_stall_grace_source") != "environment"
+        ):
+            failures.append("debug batching stream-stall policy does not match environment")
 
     flags = debug.get("env_flags")
     if not isinstance(flags, dict):
@@ -1408,6 +1430,14 @@ def attest_runtime(
         or send_buffer_flag.get("value") != str(expected_send_buffer)
     ):
         failures.append("HTTP send-buffer debug flag does not match effective mode")
+    stall_grace_flag = flags.get("KILN_STREAM_STALL_GRACE_MS")
+    if (
+        not isinstance(stall_grace_flag, dict)
+        or stall_grace_flag.get("present") is not True
+        or stall_grace_flag.get("value")
+        != str(VARIANT_CONFIGS[variant]["server"]["stream_stall_grace_ms"])
+    ):
+        failures.append("stream-stall grace debug flag does not match effective policy")
     return failures
 
 

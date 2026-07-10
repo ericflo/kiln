@@ -9,7 +9,7 @@ use serde::Serialize;
 use std::sync::atomic::Ordering;
 
 use crate::batching_engine::BatchingEngineSnapshot;
-use crate::config::ModelDefaultsProfile;
+use crate::config::{ConfigValueSource, ModelDefaultsProfile};
 use crate::recent_requests::RequestRecord;
 use crate::state::{AppState, ModelBackend};
 
@@ -298,6 +298,8 @@ struct DecodeBatcherInfo {
 #[derive(Serialize)]
 struct BatchingEngineInfo {
     snapshot_age_ms: u64,
+    stream_stall_grace_ms: u64,
+    stream_stall_grace_source: ConfigValueSource,
     accepting: bool,
     queue_depth: usize,
     active_decode: usize,
@@ -769,6 +771,8 @@ impl From<BatchingEngineSnapshot> for BatchingEngineInfo {
     fn from(snapshot: BatchingEngineSnapshot) -> Self {
         Self {
             snapshot_age_ms: snapshot.snapshot_age_ms,
+            stream_stall_grace_ms: snapshot.stream_stall_grace_ms,
+            stream_stall_grace_source: snapshot.stream_stall_grace_source,
             accepting: snapshot.accepting,
             queue_depth: snapshot.queue_depth,
             active_decode: snapshot.active_decode,
@@ -881,6 +885,8 @@ mod tests {
     fn batching_engine_health_preserves_delivery_counters() {
         let info = BatchingEngineInfo::from(BatchingEngineSnapshot {
             snapshot_age_ms: 125,
+            stream_stall_grace_ms: 750,
+            stream_stall_grace_source: ConfigValueSource::Environment,
             response_backpressure_events: 3,
             response_backpressure_wait_ms: 750,
             response_stall_evictions: 2,
@@ -890,6 +896,8 @@ mod tests {
         let json = serde_json::to_value(info).unwrap();
 
         assert_eq!(json["snapshot_age_ms"], 125);
+        assert_eq!(json["stream_stall_grace_ms"], 750);
+        assert_eq!(json["stream_stall_grace_source"], "environment");
         assert_eq!(json["response_backpressure_events"], 3);
         assert_eq!(json["response_backpressure_wait_ms"], 750);
         assert_eq!(json["response_stall_evictions"], 2);

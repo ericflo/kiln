@@ -21,6 +21,7 @@ use kiln_model::{
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
+use crate::config::{ConfigValueSource, StreamStallGrace};
 use crate::state::{
     GpuCoordinationLock, RealPrefixCache, gpu_coordination_read_guard, gpu_coordination_write_guard,
 };
@@ -31,25 +32,39 @@ const DEFAULT_MAX_DECODE_BATCH: usize = 8;
 const DEFAULT_PREFILL_ADMISSION_QUANTUM: usize = 4;
 const DEFAULT_PREFIX_AWARE_ADMISSION: bool = true;
 
-/// How long a client with a FULL event channel (64 buffered tokens) may
-/// refuse to drain before the engine cancels its request. A healthy SSE
-/// consumer drains instantly; a slow link is absorbed by the channel
-/// buffer plus kernel TCP buffers. Hitting full-and-undrained for this
-/// long means the reader is gone (suspended process, slept laptop, zero
-/// TCP window). Tunable via `KILN_STREAM_STALL_GRACE_MS`.
-const DEFAULT_STALLED_SEND_GRACE: Duration = Duration::from_millis(2000);
 /// Poll cadence while waiting out the grace window.
 const STALLED_SEND_POLL: Duration = Duration::from_millis(10);
 
-fn stalled_client_send_grace() -> Duration {
-    static GRACE: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
-    *GRACE.get_or_init(|| {
-        std::env::var("KILN_STREAM_STALL_GRACE_MS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(Duration::from_millis)
-            .unwrap_or(DEFAULT_STALLED_SEND_GRACE)
-    })
+/// Delivery settings resolved and validated before the batching actor starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResponseDeliveryPolicy {
+    stream_stall_grace: Duration,
+    stream_stall_grace_source: ConfigValueSource,
+}
+
+impl ResponseDeliveryPolicy {
+    pub fn stream_stall_grace_ms(self) -> u64 {
+        duration_millis_saturating(self.stream_stall_grace)
+    }
+
+    pub fn stream_stall_grace_source(self) -> ConfigValueSource {
+        self.stream_stall_grace_source
+    }
+}
+
+impl From<StreamStallGrace> for ResponseDeliveryPolicy {
+    fn from(grace: StreamStallGrace) -> Self {
+        Self {
+            stream_stall_grace: grace.duration(),
+            stream_stall_grace_source: grace.source(),
+        }
+    }
+}
+
+impl Default for ResponseDeliveryPolicy {
+    fn default() -> Self {
+        StreamStallGrace::default().into()
+    }
 }
 
 fn duration_millis_saturating(duration: Duration) -> u64 {
@@ -180,6 +195,10 @@ pub struct BatchingEngineSnapshot {
     /// snapshots return zero; [`BatchingEngineHandle::cached_snapshot`] fills
     /// this from the publication timestamp without contacting the actor.
     pub snapshot_age_ms: u64,
+    /// Effective full-response-channel grace injected when this actor started.
+    pub stream_stall_grace_ms: u64,
+    /// Startup source that selected `stream_stall_grace_ms`.
+    pub stream_stall_grace_source: ConfigValueSource,
     pub accepting: bool,
     pub queue_depth: usize,
     pub active_decode: usize,
@@ -861,13 +880,19 @@ impl BatchingEngineHandle {
     }
 
     pub fn start_with_options(forward: Arc<dyn DecodeForward>, max_decode_batch: usize) -> Self {
-        Self::start_with_backend_options(forward, max_decode_batch, None)
+        Self::start_with_backend_options(
+            forward,
+            max_decode_batch,
+            None,
+            ResponseDeliveryPolicy::default(),
+        )
     }
 
     pub fn start_with_backend_options(
         forward: Arc<dyn DecodeForward>,
         max_decode_batch: usize,
         policy: Option<DecodeBatcherPolicy>,
+        response_delivery_policy: ResponseDeliveryPolicy,
     ) -> Self {
         let max_decode_batch = max_decode_batch.max(1);
         Self::start_with_policy(
@@ -876,6 +901,7 @@ impl BatchingEngineHandle {
             env_prefix_aware_admission(),
             env_prefill_admission_quantum_for_policy(max_decode_batch, policy),
             policy.is_some_and(|policy| policy.burst_prefill_admission),
+            response_delivery_policy,
         )
     }
 
@@ -885,6 +911,7 @@ impl BatchingEngineHandle {
         prefix_aware_admission: bool,
         prefill_admission_quantum: usize,
         burst_refill: bool,
+        response_delivery_policy: ResponseDeliveryPolicy,
     ) -> Self {
         let (tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
         let actor = BatchingEngineActor::new(
@@ -894,6 +921,7 @@ impl BatchingEngineHandle {
             prefix_aware_admission,
             prefill_admission_quantum,
             burst_refill,
+            response_delivery_policy,
         );
         let published_snapshot = actor.published_snapshot.clone();
         thread::Builder::new()
@@ -1105,6 +1133,7 @@ struct BatchingEngineActor {
     // anti-scaling (n=32 slower than n=8). Set only for CUDA; Vulkan/Metal keep
     // their tuned yield behavior.
     burst_refill: bool,
+    response_delivery_policy: ResponseDeliveryPolicy,
     /// Adapter swaps waiting for the active batch to drain. While any swap
     /// is pending, admission pauses (waiting requests stay queued) so the
     /// barrier is reached promptly; swaps then run FIFO on this thread.
@@ -1121,12 +1150,17 @@ impl BatchingEngineActor {
         prefix_aware_admission: bool,
         prefill_admission_quantum: usize,
         burst_refill: bool,
+        response_delivery_policy: ResponseDeliveryPolicy,
     ) -> Self {
         let max_decode_batch = max_decode_batch.max(1);
         let max_prefill_admissions_per_cycle = prefill_admission_quantum.clamp(1, max_decode_batch);
         let snapshot = BatchingEngineSnapshot {
             accepting: true,
             max_prefill_admission_quantum: max_prefill_admissions_per_cycle,
+            stream_stall_grace_ms: duration_millis_saturating(
+                response_delivery_policy.stream_stall_grace,
+            ),
+            stream_stall_grace_source: response_delivery_policy.stream_stall_grace_source,
             ..BatchingEngineSnapshot::default()
         };
         let published_snapshot = Arc::new(RwLock::new(PublishedBatchingEngineSnapshot {
@@ -1144,6 +1178,7 @@ impl BatchingEngineActor {
             prefix_aware_admission,
             max_prefill_admissions_per_cycle,
             burst_refill,
+            response_delivery_policy,
             pending_swaps: VecDeque::new(),
             snapshot,
             published_snapshot,
@@ -1485,17 +1520,16 @@ impl BatchingEngineActor {
     /// without closing its socket (laptop sleep mid-stream, suspended pi
     /// process, TCP zero-window) until TCP gave up.
     ///
-    /// Now: `try_send`, and on a full channel a bounded grace; a client
-    /// that has a full event buffer AND refuses to drain it for the whole
-    /// grace window is cancelled — its slot frees, everyone else keeps
-    /// decoding. Returns false when the request was removed.
+    /// Now: `try_send`, and on a full channel a wall-clock-bounded grace; a
+    /// client that refuses to drain for the whole grace window is cancelled.
+    /// Delivery still runs on this actor, so peers pause during the grace, but
+    /// the injected policy makes that impact explicit and strictly bounded.
+    /// Returns false when the request was removed.
     fn send_token_or_evict_stalled(&mut self, idx: usize, token: TokenId) -> bool {
         let mut event = EngineEvent::Token {
             token,
             ready_at: Instant::now(),
         };
-        let mut waited = Duration::ZERO;
-        let mut grace = None;
         let mut backpressure_observed = false;
         let mut backpressure_started_at: Option<Instant> = None;
         loop {
@@ -1527,7 +1561,7 @@ impl BatchingEngineActor {
                     return false;
                 }
                 Err(mpsc::error::TrySendError::Full(e)) => {
-                    let grace = *grace.get_or_insert_with(stalled_client_send_grace);
+                    let grace = self.response_delivery_policy.stream_stall_grace;
                     if !backpressure_observed {
                         backpressure_observed = true;
                         backpressure_started_at = Some(Instant::now());
@@ -1542,7 +1576,9 @@ impl BatchingEngineActor {
                             "response_channel_backpressure"
                         );
                     }
-                    if waited >= grace {
+                    if backpressure_started_at
+                        .is_some_and(|started_at| started_at.elapsed() >= grace)
+                    {
                         let active = self.active.remove(idx);
                         let actual_wait = backpressure_started_at
                             .expect("full response channel records its start time")
@@ -1570,7 +1606,6 @@ impl BatchingEngineActor {
                     }
                     event = e;
                     thread::sleep(STALLED_SEND_POLL);
-                    waited += STALLED_SEND_POLL;
                 }
             }
         }
@@ -2295,12 +2330,19 @@ mod tests {
     /// until TCP gave up.)
     #[tokio::test]
     async fn stalled_streaming_client_is_evicted_and_others_proceed() {
-        // Shrink the grace so the test runs in milliseconds. OnceLock
-        // caches it process-wide; no other engine test exercises a full
-        // channel, so the cached small value is inert elsewhere.
-        unsafe { std::env::set_var("KILN_STREAM_STALL_GRACE_MS", "50") };
         let forward = Arc::new(MockForward::default());
-        let handle = BatchingEngineHandle::start_with_options(forward, 8);
+        let response_delivery_policy = ResponseDeliveryPolicy {
+            stream_stall_grace: Duration::from_millis(50),
+            stream_stall_grace_source: ConfigValueSource::ConfigFile,
+        };
+        let handle = BatchingEngineHandle::start_with_policy(
+            forward,
+            8,
+            env_prefix_aware_admission(),
+            env_prefill_admission_quantum_for_policy(8, None),
+            false,
+            response_delivery_policy,
+        );
 
         // A wants 200 tokens but its events are NEVER read — the channel
         // (cap 64) fills and the client looks suspended.
@@ -2343,6 +2385,11 @@ mod tests {
         }
 
         let snapshot = handle.snapshot().await.unwrap();
+        assert_eq!(snapshot.stream_stall_grace_ms, 50);
+        assert_eq!(
+            snapshot.stream_stall_grace_source,
+            ConfigValueSource::ConfigFile
+        );
         assert_eq!(snapshot.response_backpressure_events, 1);
         assert!(snapshot.response_backpressure_wait_ms >= 50, "{snapshot:?}");
         assert_eq!(snapshot.response_stall_evictions, 1);
@@ -2355,7 +2402,15 @@ mod tests {
     fn closed_response_channel_is_counted_without_backpressure() {
         let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
         let forward = Arc::new(MockForward::default());
-        let mut actor = BatchingEngineActor::new(rx, forward, 8, false, 1, false);
+        let mut actor = BatchingEngineActor::new(
+            rx,
+            forward,
+            8,
+            false,
+            1,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
         let (response_tx, response_rx) = mpsc::channel(1);
         drop(response_rx);
         let req = request(101, 2);
@@ -2380,7 +2435,15 @@ mod tests {
     fn delivered_token_carries_response_ready_timestamp() {
         let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
         let forward = Arc::new(MockForward::default());
-        let mut actor = BatchingEngineActor::new(rx, forward, 8, false, 1, false);
+        let mut actor = BatchingEngineActor::new(
+            rx,
+            forward,
+            8,
+            false,
+            1,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
         let (response_tx, mut response_rx) = mpsc::channel(1);
         actor.active.push(ActiveRequest {
             req: request(101, 2),
@@ -2806,7 +2869,15 @@ mod tests {
     fn prefill_admission_quantum_limits_each_actor_cycle() {
         let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
         let forward = Arc::new(MockForward::default());
-        let mut actor = BatchingEngineActor::new(rx, forward, 8, false, 3, false);
+        let mut actor = BatchingEngineActor::new(
+            rx,
+            forward,
+            8,
+            false,
+            3,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
         for idx in 0..8 {
             let (response_tx, _response_rx) = mpsc::channel(DEFAULT_RESPONSE_CHANNEL);
             actor.waiting.push_back(QueuedRequest {
@@ -2836,7 +2907,15 @@ mod tests {
     fn ready_decode_rows_limit_followup_prefill_admission_to_one() {
         let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
         let forward = Arc::new(PendingFirstTokenForward::default());
-        let mut actor = BatchingEngineActor::new(rx, forward.clone(), 8, false, 3, false);
+        let mut actor = BatchingEngineActor::new(
+            rx,
+            forward.clone(),
+            8,
+            false,
+            3,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
         let mut receivers = Vec::new();
         for idx in 0..6 {
             let (response_tx, response_rx) = mpsc::channel(DEFAULT_RESPONSE_CHANNEL);
@@ -2872,7 +2951,15 @@ mod tests {
     fn admission_emits_prefill_first_tokens_without_model_decode() {
         let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
         let forward = Arc::new(PendingFirstTokenForward::default());
-        let mut actor = BatchingEngineActor::new(rx, forward.clone(), 8, false, 3, false);
+        let mut actor = BatchingEngineActor::new(
+            rx,
+            forward.clone(),
+            8,
+            false,
+            3,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
         let mut receivers = Vec::new();
         for idx in 0..4 {
             let (response_tx, response_rx) = mpsc::channel(DEFAULT_RESPONSE_CHANNEL);
@@ -2968,7 +3055,15 @@ mod tests {
             ..MockForward::default()
         });
         let (_cmd_tx, cmd_rx) = mpsc::channel(8);
-        let mut actor = BatchingEngineActor::new(cmd_rx, forward.clone(), 8, true, 8, false);
+        let mut actor = BatchingEngineActor::new(
+            cmd_rx,
+            forward.clone(),
+            8,
+            true,
+            8,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
 
         // Root row becomes active; keep its receiver alive so decode steps
         // can deliver tokens.
@@ -3026,7 +3121,14 @@ mod tests {
             reusable_prefixes: true,
             ..MockForward::default()
         });
-        let handle = BatchingEngineHandle::start_with_policy(forward.clone(), 8, true, 8, false);
+        let handle = BatchingEngineHandle::start_with_policy(
+            forward.clone(),
+            8,
+            true,
+            8,
+            false,
+            ResponseDeliveryPolicy::default(),
+        );
 
         let mut prefix_rx = handle
             .enqueue(request_with_tokens(vec![1, 2], 1))

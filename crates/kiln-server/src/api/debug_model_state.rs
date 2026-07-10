@@ -13,7 +13,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::batching_engine::BatchingEngineSnapshot;
-use crate::config::ModelDefaultsProfile;
+use crate::config::{ConfigValueSource, ModelDefaultsProfile};
 use crate::state::{AppState, ModelBackend};
 
 const DEBUG_ENDPOINT_ENV: &str = "KILN_DEBUG_ENDPOINTS";
@@ -91,6 +91,8 @@ struct BatchingEngineDebugState {
 #[derive(Serialize)]
 struct BatchingEngineSnapshotDebug {
     snapshot_age_ms: u64,
+    stream_stall_grace_ms: u64,
+    stream_stall_grace_source: ConfigValueSource,
     accepting: bool,
     queue_depth: usize,
     active_decode: usize,
@@ -334,6 +336,7 @@ fn selected_env_flags() -> BTreeMap<&'static str, EnvFlagState> {
         "KILN_NUM_BLOCKS",
         "KILN_INFERENCE_MEMORY_FRACTION",
         "KILN_HTTP_SEND_BUFFER_BYTES",
+        "KILN_STREAM_STALL_GRACE_MS",
     ]
     .into_iter()
     .map(|name| {
@@ -467,6 +470,8 @@ impl From<BatchingEngineSnapshot> for BatchingEngineSnapshotDebug {
     fn from(snapshot: BatchingEngineSnapshot) -> Self {
         Self {
             snapshot_age_ms: snapshot.snapshot_age_ms,
+            stream_stall_grace_ms: snapshot.stream_stall_grace_ms,
+            stream_stall_grace_source: snapshot.stream_stall_grace_source,
             accepting: snapshot.accepting,
             queue_depth: snapshot.queue_depth,
             active_decode: snapshot.active_decode,
@@ -642,6 +647,7 @@ mod tests {
         assert!(json["env_flags"]["KILN_KV_AUTOSCALE"].is_object());
         assert!(json["env_flags"]["KILN_MEMORY_RECLAIM_MODE"].is_object());
         assert!(json["env_flags"]["KILN_HTTP_SEND_BUFFER_BYTES"].is_object());
+        assert!(json["env_flags"]["KILN_STREAM_STALL_GRACE_MS"].is_object());
         assert_eq!(json["http"]["send_buffer_requested_bytes"], 4096);
         assert_eq!(json["http"]["send_buffer_kernel_readback_bytes"], 8192);
         assert_eq!(json["http"]["send_buffer_effective_bytes"], 4096);
@@ -652,5 +658,18 @@ mod tests {
         assert!(!serialized.contains("secret prompt"));
         assert!(!serialized.contains("full secret prompt"));
         assert!(!serialized.contains("secret completion"));
+    }
+
+    #[test]
+    fn batching_engine_debug_preserves_stream_stall_policy() {
+        let debug = BatchingEngineSnapshotDebug::from(BatchingEngineSnapshot {
+            stream_stall_grace_ms: 500,
+            stream_stall_grace_source: ConfigValueSource::ConfigFile,
+            ..BatchingEngineSnapshot::default()
+        });
+        let json = serde_json::to_value(debug).unwrap();
+
+        assert_eq!(json["stream_stall_grace_ms"], 500);
+        assert_eq!(json["stream_stall_grace_source"], "config_file");
     }
 }

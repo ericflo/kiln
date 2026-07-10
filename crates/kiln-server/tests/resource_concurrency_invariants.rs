@@ -374,6 +374,53 @@ fn control_plane_uses_published_batching_snapshot_without_actor_await() {
 }
 
 #[test]
+fn stream_stall_grace_is_strict_startup_config_not_actor_environment() {
+    let config = read("crates/kiln-server/src/config.rs");
+    for required in [
+        "pub stream_stall_grace_ms: StreamStallGrace",
+        "config.apply_stream_stall_grace_env_override()?",
+        "STREAM_STALL_GRACE_MIN_MS",
+        "STREAM_STALL_GRACE_MAX_MS",
+        "ConfigValueSource::Environment",
+    ] {
+        assert!(
+            config.contains(required),
+            "stream-stall config must be strict, bounded, and source tracked: {required}"
+        );
+    }
+
+    let batching = read("crates/kiln-server/src/batching_engine.rs");
+    assert!(batching.contains("response_delivery_policy: ResponseDeliveryPolicy"));
+    assert!(batching.contains("self.response_delivery_policy.stream_stall_grace"));
+    for forbidden in [
+        "KILN_STREAM_STALL_GRACE_MS",
+        "stalled_client_send_grace",
+        "OnceLock<Duration>",
+        "set_var(\"KILN_STREAM_STALL_GRACE_MS\"",
+    ] {
+        assert!(
+            !batching.contains(forbidden),
+            "batching actor/test must not use process-global stall config: {forbidden}"
+        );
+    }
+
+    let state = read("crates/kiln-server/src/state.rs");
+    assert!(
+        state.contains("response_delivery_policy: crate::batching_engine::ResponseDeliveryPolicy")
+    );
+    assert!(state.contains("stream_stall_grace_source = %response_delivery_policy"));
+
+    for path in [
+        "crates/kiln-server/src/api/health.rs",
+        "crates/kiln-server/src/api/debug_model_state.rs",
+    ] {
+        let source = read(path);
+        assert!(source.contains("stream_stall_grace_ms"), "{path}");
+        assert!(source.contains("stream_stall_grace_source"), "{path}");
+    }
+}
+
+#[test]
 fn rocm_graph_owner_lifecycle_is_bounded_and_observable() {
     let rocm_graph = read("crates/kiln-model/src/rocm_graph.rs");
     let generate = read("crates/kiln-model/src/generate.rs");

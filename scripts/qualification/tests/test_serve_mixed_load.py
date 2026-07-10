@@ -68,6 +68,8 @@ def health_fixture(*, kv_autoscale: bool, rocm_graphs: bool) -> dict:
                 "source": "environment",
             },
             "batching_engine": {
+                "stream_stall_grace_ms": serve.STREAM_STALL_GRACE_MS,
+                "stream_stall_grace_source": "environment",
                 "active_decode": 0,
                 "queue_depth": 0,
                 "max_observed_batch_size": 8,
@@ -91,6 +93,14 @@ def debug_fixture(*, kv_autoscale: bool, rocm_graphs: bool) -> dict:
 
     return {
         "http": http_fixture(),
+        "batching_engine": {
+            "backend": "model",
+            "enabled": True,
+            "snapshot": {
+                "stream_stall_grace_ms": serve.STREAM_STALL_GRACE_MS,
+                "stream_stall_grace_source": "environment",
+            },
+        },
         "env_flags": {
             "KILN_KV_AUTOSCALE": flag(kv_autoscale),
             "KILN_ROCM_GRAPHS": flag(rocm_graphs),
@@ -98,6 +108,10 @@ def debug_fixture(*, kv_autoscale: bool, rocm_graphs: bool) -> dict:
             "KILN_HTTP_SEND_BUFFER_BYTES": {
                 "present": True,
                 "value": str(serve.HTTP_SEND_BUFFER_BYTES),
+            },
+            "KILN_STREAM_STALL_GRACE_MS": {
+                "present": True,
+                "value": str(serve.STREAM_STALL_GRACE_MS),
             },
         }
     }
@@ -829,10 +843,16 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         debug["env_flags"]["KILN_KV_AUTOSCALE"] = {"present": True, "value": "1"}
         debug["http"]["send_buffer_effective_bytes"] *= 2
         debug["http"]["send_buffer_kernel_readback_bytes"] *= 2
+        health["decode_runtime"]["batching_engine"][
+            "stream_stall_grace_source"
+        ] = "default"
+        debug["env_flags"]["KILN_STREAM_STALL_GRACE_MS"]["value"] = "10"
         failures = serve.attest_runtime("default", health, debug)
         self.assertTrue(any("ROCm graph enabled" in failure for failure in failures))
         self.assertTrue(any("must remain absent" in failure for failure in failures))
         self.assertTrue(any("disagree exactly" in failure for failure in failures))
+        self.assertTrue(any("grace source" in failure for failure in failures))
+        self.assertTrue(any("grace debug flag" in failure for failure in failures))
 
     def test_runtime_execution_requires_capture_and_replay_only_when_enabled(self) -> None:
         warmup = health_fixture(kv_autoscale=True, rocm_graphs=True)

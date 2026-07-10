@@ -432,6 +432,9 @@ async fn main() -> Result<()> {
         "tokenizer loaded successfully"
     );
 
+    let response_delivery_policy = kiln_server::batching_engine::ResponseDeliveryPolicy::from(
+        config.server.stream_stall_grace_ms,
+    );
     let mut state = if let Some(mp) = model_path {
         // Real inference mode: load model weights and create ModelRunner.
         tracing::debug!("loading model weights from {mp}");
@@ -485,6 +488,7 @@ async fn main() -> Result<()> {
             device_kt,
             adapter_dir,
             &config.memory,
+            response_delivery_policy,
             config.server.request_timeout_secs,
             served_model_id,
             &config.prefix_cache,
