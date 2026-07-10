@@ -82,7 +82,10 @@ fn observe_post_prefill_vram(memory_budget: &std::sync::Arc<crate::state::GpuMem
 fn ensure_backend_admission(state: &AppState) -> Result<(), ApiError> {
     state
         .ensure_backend_healthy()
-        .map_err(ApiError::backend_quarantined)
+        .map_err(ApiError::backend_quarantined)?;
+    state
+        .ensure_inference_admission_allowed()
+        .map_err(|_| ApiError::inference_disabled_by_profile(state.serving_profile.profile()))
 }
 
 /// Pull the most recent user-authored message text from a request, falling

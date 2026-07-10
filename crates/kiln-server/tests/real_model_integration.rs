@@ -267,9 +267,15 @@ fn real_runner(state: &AppState) -> Arc<std::sync::RwLock<ModelRunner>> {
     }
 }
 
+#[cfg(feature = "vulkan")]
 fn enable_experimental_serving(state: &mut AppState) {
     state.serving_profile =
         ServingProfileSetting::new(ServingProfile::Experimental, ConfigValueSource::ConfigFile);
+}
+
+fn enable_maintenance_serving(state: &mut AppState) {
+    state.serving_profile =
+        ServingProfileSetting::new(ServingProfile::Maintenance, ConfigValueSource::ConfigFile);
 }
 
 fn prompt_logprob_request(prompt: &[u32], top_k: usize) -> Request<Body> {
@@ -308,7 +314,7 @@ async fn adapter_load_publishes_the_exact_loaded_content_revision() {
     let exact_source = LoraSourceIdentity::from_adapter_dir(&adapter_dir).unwrap();
     let expected_revision = exact_source.content_revision();
     let mut state = tiny_real_state_with_timeout(tiny_config(), Duration::from_secs(1));
-    enable_experimental_serving(&mut state);
+    enable_maintenance_serving(&mut state);
     state.adapter_dir = adapters.path().to_path_buf();
     let state_for_assert = state.clone();
     let runner = real_runner(&state);
@@ -346,6 +352,50 @@ async fn adapter_load_publishes_the_exact_loaded_content_revision() {
         .expect("runner retained the exact loader source identity");
     assert_eq!(loaded_source, &exact_source);
     assert_eq!(loaded_source.content_revision(), published.content_revision);
+}
+
+#[tokio::test]
+async fn maintenance_profile_rejects_inference_before_gpu_read_acquisition() {
+    let mut state = tiny_real_state_with_timeout(tiny_config(), Duration::from_secs(1));
+    enable_maintenance_serving(&mut state);
+    let state_for_assert = state.clone();
+    let retained_exclusive = state.gpu_lock.clone().write_owned().await;
+    let app = api::router(state);
+
+    for request in [
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"model":"Qwen3.5-4B","messages":[{"role":"user","content":"hello"}],"max_tokens":1}"#,
+            ))
+            .unwrap(),
+        Request::builder()
+            .method("POST")
+            .uri("/v1/agent/runs")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"task":"must not start"}"#))
+            .unwrap(),
+    ] {
+        let response = tokio::time::timeout(Duration::from_secs(1), app.clone().oneshot(request))
+            .await
+            .expect("maintenance inference admission must not wait for a GPU read owner")
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{json}");
+        assert_eq!(
+            json["error"]["code"],
+            "inference_disabled_by_profile"
+        );
+    }
+    assert!(state_for_assert.gpu_lock.try_read().is_err());
+    drop(retained_exclusive);
+    assert!(state_for_assert.gpu_lock.try_read().is_ok());
 }
 
 #[tokio::test]

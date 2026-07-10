@@ -103,6 +103,16 @@ impl ApiError {
         }
     }
 
+    pub fn inference_disabled_by_profile(profile: crate::config::ServingProfile) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "inference_disabled_by_profile",
+            message: format!("Serving profile `{profile}` disables inference admission"),
+            hint: "Finish exclusive maintenance work, then restart with KILN_SERVING_PROFILE=stable (recommended) or experimental to admit inference.",
+            retry_after_seconds: None,
+        }
+    }
+
     /// OpenAI-compatible context overflow: agent harnesses (pi included)
     /// key their auto-compaction off HTTP 400 + this exact code, so both
     /// must match the convention.

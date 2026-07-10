@@ -2572,6 +2572,19 @@ impl AppState {
         Ok(())
     }
 
+    /// Process-lifetime inference admission. Maintenance mode is entered only
+    /// by restart, so rejecting every new owner makes that restart the explicit
+    /// drain boundary for exclusive GPU work.
+    pub fn ensure_inference_admission_allowed(&self) -> anyhow::Result<()> {
+        if !self.serving_profile.runtime_policy().inference_admission {
+            anyhow::bail!(
+                "serving profile `{}` disables inference admission",
+                self.serving_profile.profile()
+            );
+        }
+        Ok(())
+    }
+
     /// Refuse any real-backend training path that could take exclusive GPU
     /// ownership when the process was started for stable serving.
     pub(crate) fn ensure_training_gpu_ownership_allowed(&self) -> anyhow::Result<()> {
@@ -2616,7 +2629,8 @@ impl AppState {
         kind: crate::eval::queue::EvalSubmissionKind,
         source_training_job_id: Option<String>,
         job: crate::eval::queue::QueuedEvalJob,
-    ) -> String {
+    ) -> anyhow::Result<String> {
+        self.ensure_inference_admission_allowed()?;
         let job_id = uuid::Uuid::new_v4().to_string();
         let info = crate::eval::queue::EvalJobInfo::queued(
             job_id.clone(),
@@ -2633,7 +2647,7 @@ impl AppState {
                 job_id: job_id.clone(),
                 job,
             });
-        job_id
+        Ok(job_id)
     }
 
     /// Logically invalidate every real prefix entry immediately. Unpinned

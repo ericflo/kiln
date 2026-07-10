@@ -91,6 +91,14 @@ struct EvalJobListResponse {
 const EVAL_BODY_LIMIT: usize = 32 * 1024 * 1024;
 const SUITE_BODY_LIMIT: usize = 32 * 1024 * 1024;
 
+fn map_eval_enqueue_error(state: &AppState, error: anyhow::Error) -> ApiError {
+    if state.ensure_inference_admission_allowed().is_err() {
+        ApiError::inference_disabled_by_profile(state.serving_profile.profile())
+    } else {
+        ApiError::internal(error)
+    }
+}
+
 async fn list_suites(State(state): State<AppState>) -> Result<Json<SuiteListResponse>, ApiError> {
     let Some(reg) = state.suite_registry.as_ref() else {
         // No registry = no suites, but we still return 200 with an empty list
@@ -216,13 +224,15 @@ async fn submit_eval(
         (suite_name, queued)
     };
 
-    let job_id = state.enqueue_eval(
-        suite_name.clone(),
-        adapters,
-        EvalSubmissionKind::OnDemand,
-        None,
-        queued_job,
-    );
+    let job_id = state
+        .enqueue_eval(
+            suite_name.clone(),
+            adapters,
+            EvalSubmissionKind::OnDemand,
+            None,
+            queued_job,
+        )
+        .map_err(|error| map_eval_enqueue_error(&state, error))?;
     tracing::info!(job_id = %job_id, suite = %suite_name, "eval job queued");
     Ok(Json(EvalRunResponse {
         job_id,
@@ -273,13 +283,15 @@ async fn submit_compare(
         .map(|a| if a.is_empty() { None } else { Some(a.clone()) })
         .collect();
     let suite_name = spec.suite.clone();
-    let job_id = state.enqueue_eval(
-        suite_name.clone(),
-        adapters,
-        EvalSubmissionKind::Compare,
-        None,
-        QueuedEvalJob::Compare(spec),
-    );
+    let job_id = state
+        .enqueue_eval(
+            suite_name.clone(),
+            adapters,
+            EvalSubmissionKind::Compare,
+            None,
+            QueuedEvalJob::Compare(spec),
+        )
+        .map_err(|error| map_eval_enqueue_error(&state, error))?;
     Ok(Json(EvalRunResponse {
         job_id,
         state: EvalJobState::Queued,
@@ -383,17 +395,19 @@ async fn rerun_job(
         },
     )?;
     let suite_label = inline.name.clone();
-    let new_job_id = state.enqueue_eval(
-        suite_label.clone(),
-        vec![adapter.clone()],
-        EvalSubmissionKind::OnDemand,
-        None,
-        QueuedEvalJob::Inline {
-            suite: Box::new(inline),
-            adapter,
-            generation_override: None,
-        },
-    );
+    let new_job_id = state
+        .enqueue_eval(
+            suite_label.clone(),
+            vec![adapter.clone()],
+            EvalSubmissionKind::OnDemand,
+            None,
+            QueuedEvalJob::Inline {
+                suite: Box::new(inline),
+                adapter,
+                generation_override: None,
+            },
+        )
+        .map_err(|error| map_eval_enqueue_error(&state, error))?;
     Ok(Json(EvalRunResponse {
         job_id: new_job_id,
         state: EvalJobState::Queued,
@@ -748,19 +762,21 @@ async fn synthesize_dataset(
             } else {
                 Some(adapter)
             };
-            state.enqueue_eval(
-                outcome.suite.name.clone(),
-                vec![adapter_opt.clone()],
-                EvalSubmissionKind::OnDemand,
-                None,
-                QueuedEvalJob::Registered {
-                    suite_name: outcome.suite.name.clone(),
-                    adapter: adapter_opt,
-                    generation_override: None,
-                },
-            )
+            state
+                .enqueue_eval(
+                    outcome.suite.name.clone(),
+                    vec![adapter_opt.clone()],
+                    EvalSubmissionKind::OnDemand,
+                    None,
+                    QueuedEvalJob::Registered {
+                        suite_name: outcome.suite.name.clone(),
+                        adapter: adapter_opt,
+                        generation_override: None,
+                    },
+                )
+                .map_err(|error| map_eval_enqueue_error(&state, error))
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Json(serde_json::json!({
         "suite": outcome.suite,
         "stats": outcome.stats,
@@ -1016,17 +1032,19 @@ async fn validate_judgment_adapter(
         }
     }
     let suite_name = suite.name.clone();
-    let job_id = state.enqueue_eval(
-        suite_name,
-        vec![Some(body.adapter.clone())],
-        EvalSubmissionKind::OnDemand,
-        None,
-        QueuedEvalJob::Inline {
-            suite: Box::new(suite),
-            adapter: Some(body.adapter),
-            generation_override: None,
-        },
-    );
+    let job_id = state
+        .enqueue_eval(
+            suite_name,
+            vec![Some(body.adapter.clone())],
+            EvalSubmissionKind::OnDemand,
+            None,
+            QueuedEvalJob::Inline {
+                suite: Box::new(suite),
+                adapter: Some(body.adapter),
+                generation_override: None,
+            },
+        )
+        .map_err(|error| map_eval_enqueue_error(&state, error))?;
     Ok(Json(serde_json::json!({
         "status": "queued",
         "eval_job_id": job_id,
@@ -1204,6 +1222,38 @@ mod tests {
         assert_eq!(resp["state"], "queued");
         // Tracked in the map.
         assert_eq!(state.eval_jobs.read().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn maintenance_profile_rejects_eval_before_queue_publication() {
+        let mut state = mk_state();
+        state.serving_profile = crate::config::ServingProfileSetting::new(
+            crate::config::ServingProfile::Maintenance,
+            crate::config::ConfigValueSource::ConfigFile,
+        );
+        let router = routes().with_state(state.clone());
+        let body = serde_json::json!({"inline_suite": mk_inline_suite()});
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/eval/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{json}");
+        assert_eq!(json["error"]["code"], "inference_disabled_by_profile");
+        assert!(state.eval_jobs.read().unwrap().is_empty());
+        assert!(state.eval_queue.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -321,6 +321,9 @@ impl EvalGenerator for LiveEvalGenerator {
         let state = self.state.clone();
         let want = adapter.map(str::to_string).filter(|s| !s.is_empty());
         Box::pin(async move {
+            state
+                .ensure_inference_admission_allowed()
+                .map_err(|error| format!("eval adapter selection rejected: {error:#}"))?;
             let previous = state.active_adapter_name.read().unwrap().clone();
             // NO name-equality early return here (round-4 discovery): the
             // §8.7 gate evaluates an adapter that was just RETRAINED under
@@ -448,6 +451,9 @@ impl EvalGenerator for LiveEvalGenerator {
         let mut thinking_budget_record = thinking_budget.clone();
         let adapter_label = adapter_label.map(str::to_string);
         Box::pin(async move {
+            state
+                .ensure_inference_admission_allowed()
+                .map_err(|error| format!("eval generation rejected: {error:#}"))?;
             let mut sampling = build_sampling(&params, completion_index);
             if starts_in_reasoning && sampling.max_tokens > 0 && thinking_budget_record.configured {
                 if sampling

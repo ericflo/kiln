@@ -111,6 +111,9 @@ async fn create_run(
     if state.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
     }
+    state
+        .ensure_inference_admission_allowed()
+        .map_err(|_| ApiError::inference_disabled_by_profile(state.serving_profile.profile()))?;
     require_runs_enabled()?;
     let task = req.task.trim();
     if task.is_empty() {

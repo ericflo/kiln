@@ -89,6 +89,9 @@ async fn run_one_job_with_generator(
     generator: Arc<dyn crate::eval::generator::EvalGenerator>,
 ) {
     let job_id = entry.job_id.clone();
+    let inference_admission = state
+        .ensure_inference_admission_allowed()
+        .map_err(|error| format!("eval rejected before execution: {error:#}"));
     let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Mark as running, stamp started_at, and install the cancellation flag
     // so DELETE /v1/eval/jobs/{id} can actually stop the executor.
@@ -128,15 +131,20 @@ async fn run_one_job_with_generator(
         }
     });
 
-    let result = run_job(
-        &state,
-        &entry.job,
-        generator,
-        judge_runner,
-        Some(progress_cb),
-        cancel_flag.clone(),
-    )
-    .await;
+    let result = match inference_admission {
+        Ok(()) => {
+            run_job(
+                &state,
+                &entry.job,
+                generator,
+                judge_runner,
+                Some(progress_cb),
+                cancel_flag.clone(),
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
 
     let now_iso = chrono::Utc::now().to_rfc3339();
     let now_instant = std::time::Instant::now();
@@ -628,6 +636,53 @@ mod tests {
     use kiln_eval::{EvalChatMessage, EvalExample, EvalGenerationParams, EvalSuite};
     use tower::ServiceExt;
 
+    struct PanicIfInvokedGenerator;
+
+    impl crate::eval::generator::EvalGenerator for PanicIfInvokedGenerator {
+        fn set_adapter(
+            &self,
+            _adapter: Option<&str>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Option<String>, String>> + Send + '_>,
+        > {
+            panic!("maintenance worker invoked eval adapter selection")
+        }
+
+        fn prepare(
+            &self,
+            _messages: &[EvalChatMessage],
+            _system_prompt: Option<&str>,
+            _tools: Option<&[serde_json::Value]>,
+            _params: &EvalGenerationParams,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<crate::eval::generator::PreparedPrompt, String>,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            panic!("maintenance worker invoked eval prompt preparation")
+        }
+
+        fn run(
+            &self,
+            _prepared: &crate::eval::generator::PreparedPrompt,
+            _params: &EvalGenerationParams,
+            _thinking_budget: &kiln_eval::EvalThinkingBudget,
+            _completion_index: usize,
+            _adapter_label: Option<&str>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<crate::eval::EvalCompletion, String>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            panic!("maintenance worker invoked eval generation")
+        }
+    }
+
     fn big_suite(n: usize) -> EvalSuite {
         EvalSuite {
             name: "cancel-me".into(),
@@ -750,6 +805,48 @@ mod tests {
         );
         state.adapter_dir = adapter_dir.path().to_path_buf();
         (state, adapter_dir)
+    }
+
+    #[tokio::test]
+    async fn maintenance_rejects_injected_eval_before_generator_invocation() {
+        let (mut state, _dir) = gate_test_state();
+        state.serving_profile = crate::config::ServingProfileSetting::new(
+            crate::config::ServingProfile::Maintenance,
+            crate::config::ConfigValueSource::ConfigFile,
+        );
+        let suite = gate_suite("unused");
+        let job_id = "maintenance-injected-eval".to_string();
+        state.eval_jobs.write().unwrap().insert(
+            job_id.clone(),
+            EvalJobInfo::queued(
+                job_id.clone(),
+                suite.name.clone(),
+                vec![None],
+                EvalSubmissionKind::OnDemand,
+                None,
+            ),
+        );
+        let entry = EvalQueueEntry {
+            job_id: job_id.clone(),
+            job: QueuedEvalJob::Inline {
+                suite: Box::new(suite),
+                adapter: None,
+                generation_override: None,
+            },
+        };
+
+        run_one_job_with_generator(state.clone(), entry, Arc::new(PanicIfInvokedGenerator)).await;
+
+        let jobs = state.eval_jobs.read().unwrap();
+        let job = jobs.get(&job_id).unwrap();
+        assert_eq!(job.state, kiln_eval::EvalJobState::Failed);
+        assert!(
+            job.error
+                .as_deref()
+                .is_some_and(|error| error.contains("disables inference admission")),
+            "{:?}",
+            job.error
+        );
     }
 
     fn seed_training_job(state: &crate::state::AppState, job_id: &str, adapter: &str) {

@@ -3488,23 +3488,25 @@ pub fn enqueue_post_training_eval(
             state.max_queued_eval_jobs
         ));
     }
-    let push = |adapter: Option<String>| -> String {
-        state.enqueue_eval(
-            cfg.suite.clone(),
-            vec![adapter.clone()],
-            crate::eval::queue::EvalSubmissionKind::PostTraining,
-            Some(training_job_id.to_string()),
-            crate::eval::queue::QueuedEvalJob::Registered {
-                suite_name: cfg.suite.clone(),
-                adapter,
-                generation_override: cfg.generation.clone(),
-            },
-        )
+    let push = |adapter: Option<String>| -> Result<String, String> {
+        state
+            .enqueue_eval(
+                cfg.suite.clone(),
+                vec![adapter.clone()],
+                crate::eval::queue::EvalSubmissionKind::PostTraining,
+                Some(training_job_id.to_string()),
+                crate::eval::queue::QueuedEvalJob::Registered {
+                    suite_name: cfg.suite.clone(),
+                    adapter,
+                    generation_override: cfg.generation.clone(),
+                },
+            )
+            .map_err(|error| format!("post-training eval admission failed: {error:#}"))
     };
 
     let mut linked_ids: Vec<String> = Vec::new();
     if cfg.include_baseline {
-        linked_ids.push(push(None));
+        linked_ids.push(push(None)?);
     }
     // Regression detection (round-4 discovery): a gated run compares the
     // new adapter against the CURRENT ACTIVE adapter (the previous
@@ -3524,22 +3526,24 @@ pub fn enqueue_post_training_eval(
     };
     let adapter_eval_id = if cfg.min_accuracy.is_some() {
         let baseline_slot = baseline_for_gate.clone().unwrap_or_default();
-        state.enqueue_eval(
-            cfg.suite.clone(),
-            vec![
-                Some(baseline_slot.clone()).filter(|s| !s.is_empty()),
-                Some(adapter_name.to_string()),
-            ],
-            crate::eval::queue::EvalSubmissionKind::PostTraining,
-            Some(training_job_id.to_string()),
-            crate::eval::queue::QueuedEvalJob::Compare(kiln_eval::EvalCompareSpec {
-                suite: cfg.suite.clone(),
-                adapters: vec![baseline_slot, adapter_name.to_string()],
-                generation: cfg.generation.clone(),
-            }),
-        )
+        state
+            .enqueue_eval(
+                cfg.suite.clone(),
+                vec![
+                    Some(baseline_slot.clone()).filter(|s| !s.is_empty()),
+                    Some(adapter_name.to_string()),
+                ],
+                crate::eval::queue::EvalSubmissionKind::PostTraining,
+                Some(training_job_id.to_string()),
+                crate::eval::queue::QueuedEvalJob::Compare(kiln_eval::EvalCompareSpec {
+                    suite: cfg.suite.clone(),
+                    adapters: vec![baseline_slot, adapter_name.to_string()],
+                    generation: cfg.generation.clone(),
+                }),
+            )
+            .map_err(|error| format!("post-training eval admission failed: {error:#}"))?
     } else {
-        push(Some(adapter_name.to_string()))
+        push(Some(adapter_name.to_string()))?
     };
     linked_ids.push(adapter_eval_id.clone());
 

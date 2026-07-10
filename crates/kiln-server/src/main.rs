@@ -1054,6 +1054,17 @@ fn load_chat_template_from_model_dir(dir: &Path) -> Result<Option<(&'static str,
 }
 
 fn spawn_backend_prewarm(state: AppState) {
+    if let Err(error) = state.ensure_inference_admission_allowed() {
+        state
+            .inference_prewarm_complete
+            .store(true, Ordering::Release);
+        tracing::info!(
+            serving_profile = %state.serving_profile.profile(),
+            reason = %error,
+            "skipping inference prewarm because inference admission is disabled"
+        );
+        return;
+    }
     let ModelBackend::Real {
         runner,
         block_manager,
