@@ -331,7 +331,7 @@ impl EvalGenerator for LiveEvalGenerator {
             //
             // Barrier swap (see `adapter_swap`): a streaming request that's
             // mid-generation when an eval starts finishes on its own
-            // weights first. This also keeps `loaded_adapter_name`
+            // weights first. This also keeps the loaded-adapter identity
             // truthful — the old direct swap left it stale, so the next
             // chat request could no-op its adapter check and silently
             // serve on the eval's weights. Per-adapter cache keying means
@@ -500,7 +500,7 @@ impl EvalGenerator for LiveEvalGenerator {
             // example loudly; the gate's incomplete-run verdict refuses
             // promotion and the operator sees exactly what happened.
             let pinned = state.active_adapter_name.read().unwrap().clone();
-            let loaded = state.loaded_adapter_name.read().unwrap().clone();
+            let loaded = state.loaded_adapter_name();
             if pinned != loaded {
                 return Err(format!(
                     "eval invalidated by a concurrent adapter swap: the suite pinned                      `{}` but the runtime now serves `{}` — re-run the eval (or gate)                      when live traffic isn't swapping adapters",
@@ -526,7 +526,7 @@ impl EvalGenerator for LiveEvalGenerator {
             // Inference-side gpu_lock — read lock so concurrent eval calls
             // can fan out across batching slots. Held only across the
             // synchronous enqueue scheduling step.
-            let active_adapter = state.active_adapter_name.read().unwrap().clone();
+            let active_adapter = state.loaded_adapter_identity();
             let enqueue_fut = {
                 state
                     .ensure_backend_healthy()

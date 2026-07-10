@@ -560,8 +560,8 @@ KILN_DEFAULT_THINKING_BUDGET_MS=5000</code></pre>
         <div class="label mb-3">Adapters</div>
         <h2 id="lora-lifecycle" class="text-2xl font-semibold mb-4">LoRA lifecycle</h2>
         <div class="endpoint-list" style="color: var(--fg-dim);">
-          <div class="endpoint"><span class="method">GET</span> <code>/v1/adapters</code> &mdash; list saved/available LoRA adapters and identify the active adapter.</div>
-          <div class="endpoint"><span class="method">POST</span> <code>/v1/adapters/load</code> &mdash; load an adapter from disk.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/adapters</code> &mdash; list saved/available LoRA adapters and the exact loaded name/content revision.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/adapters/load</code> &mdash; load an adapter from disk and return its exact content revision.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/adapters/unload</code> &mdash; unload the active adapter.</div>
           <div class="endpoint"><span class="method">DELETE</span> <code>/v1/adapters/{name}</code> &mdash; delete an adapter.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/adapters/{name}/detail</code> &mdash; files, training history, and eval history for one adapter.</div>
@@ -570,6 +570,9 @@ KILN_DEFAULT_THINKING_BUDGET_MS=5000</code></pre>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/adapters/upload</code> &mdash; import an adapter from a multipart tar.gz archive.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/adapters/merge</code> &mdash; combine adapters with weighted average, TIES, or concatenation.</div>
         </div>
+        <p class="mt-4" style="color: var(--fg-dim);">
+          Adapter identity is content-addressed rather than name-only. A successful load returns <code>content_revision</code>; the list response exposes the authoritative <code>loaded_adapter_identity</code>; <code>/health</code> exposes <code>loaded_adapter_revision</code>; and chat responses include <code>x-kiln-loaded-adapter-revision</code> (<code>base</code> without a LoRA). The revision is published with the weight flip and binds queued work plus prefix and deterministic response caches, so an in-place rewrite cannot reuse results produced by the prior bytes.
+        </p>
       </article>
 
       <article class="card p-6">

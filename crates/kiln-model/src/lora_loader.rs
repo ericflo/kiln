@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 const ADAPTER_WEIGHTS_IDENTITY_DOMAIN: &[u8] = b"kiln.adapter-weights.v1\0";
+const ADAPTER_CONTENT_REVISION_DOMAIN: &[u8] = b"kiln.adapter-content-revision.v1\0";
 const PEFT_SAFETENSORS_FILENAME: &str = "adapter_model.safetensors";
 
 /// Configuration from PEFT's adapter_config.json.
@@ -125,7 +126,7 @@ pub struct LoraWeights {
 /// Both digests are raw lowercase SHA-256. `weights_sha256` uses Kiln's
 /// versioned adapter-weight framing contract, shared with
 /// `scripts/vllm_teacher.py`, rather than naming or rescanning a mutable path.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LoraSourceIdentity {
     weights_sha256: String,
     config_sha256: String,
@@ -170,6 +171,19 @@ impl LoraSourceIdentity {
 
     pub fn config_sha256(&self) -> &str {
         &self.config_sha256
+    }
+
+    /// Canonical revision of the exact PEFT config and weight identities.
+    ///
+    /// The domain separator and length framing make this safe to use as a
+    /// stable cache/queue identity rather than concatenating two digests at
+    /// each caller. The returned value is raw lowercase SHA-256.
+    pub fn content_revision(&self) -> String {
+        let mut digest = Sha256::new();
+        digest.update(ADAPTER_CONTENT_REVISION_DOMAIN);
+        feed_len_prefixed(&mut digest, self.weights_sha256.as_bytes());
+        feed_len_prefixed(&mut digest, self.config_sha256.as_bytes());
+        hex_digest(&digest.finalize())
     }
 }
 
@@ -1016,6 +1030,14 @@ mod tests {
             source_identity.weights_sha256(),
             adapter_weights_identity_sha256(PEFT_SAFETENSORS_FILENAME, &serialized)
         );
+        let original_revision = source_identity.content_revision();
+        assert_eq!(original_revision.len(), 64);
+        assert!(
+            original_revision
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+        assert_eq!(original_revision, source_identity.content_revision());
         LoraWeights::load_pinned(adapter_dir, 1, device, source_identity)?;
 
         let mut changed_config = config.clone();
@@ -1024,6 +1046,10 @@ mod tests {
             adapter_dir.join("adapter_config.json"),
             serde_json::to_vec_pretty(&changed_config)?,
         )?;
+        assert_ne!(
+            LoraSourceIdentity::from_adapter_dir(adapter_dir)?.content_revision(),
+            original_revision
+        );
         let error = match LoraWeights::load_pinned(adapter_dir, 1, device, source_identity) {
             Ok(_) => panic!("changed adapter config must not satisfy the pinned identity"),
             Err(error) => error,

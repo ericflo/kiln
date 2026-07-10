@@ -21,6 +21,7 @@ use kiln_model::forward::{
     GpuAttentionWeights, GpuFfnWeights, GpuFullAttentionWeights, GpuLayerWeights,
     GpuLinearAttentionWeights, GpuWeights, LinearAttentionState,
 };
+use kiln_model::lora_loader::LoraSourceIdentity;
 use kiln_model::{LoraWeights, ModelRunner};
 use kiln_server::api;
 use kiln_server::state::{AppState, ModelBackend};
@@ -278,6 +279,65 @@ fn prompt_logprob_request(prompt: &[u32], top_k: usize) -> Request<Body> {
             .to_string(),
         ))
         .unwrap()
+}
+
+#[tokio::test]
+async fn adapter_load_publishes_the_exact_loaded_content_revision() {
+    let adapters = tempfile::tempdir().unwrap();
+    let adapter_dir = adapters.path().join("revisioned");
+    std::fs::create_dir_all(&adapter_dir).unwrap();
+    std::fs::write(
+        adapter_dir.join("adapter_config.json"),
+        br#"{"r":1,"lora_alpha":1.0,"target_modules":[]}"#,
+    )
+    .unwrap();
+    let tensor_bytes = 0.0f32.to_le_bytes();
+    let ignored =
+        safetensors::tensor::TensorView::new(safetensors::Dtype::F32, vec![1], &tensor_bytes)
+            .unwrap();
+    let weights = safetensors::tensor::serialize([("ignored.weight", ignored)], None).unwrap();
+    std::fs::write(adapter_dir.join("adapter_model.safetensors"), weights).unwrap();
+
+    let exact_source = LoraSourceIdentity::from_adapter_dir(&adapter_dir).unwrap();
+    let expected_revision = exact_source.content_revision();
+    let mut state = tiny_real_state_with_timeout(tiny_config(), Duration::from_secs(1));
+    state.adapter_dir = adapters.path().to_path_buf();
+    let state_for_assert = state.clone();
+    let runner = real_runner(&state);
+    let app = api::router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/adapters/load")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"revisioned"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], "revisioned");
+    assert_eq!(body["content_revision"], expected_revision);
+
+    let published = state_for_assert
+        .loaded_adapter_identity()
+        .expect("loaded identity published with the runner flip");
+    assert_eq!(published.name, "revisioned");
+    assert_eq!(published.content_revision, expected_revision);
+    let runner = runner.read().unwrap();
+    let loaded_source = runner
+        .active_lora()
+        .and_then(LoraWeights::source_identity)
+        .expect("runner retained the exact loader source identity");
+    assert_eq!(loaded_source, &exact_source);
+    assert_eq!(loaded_source.content_revision(), published.content_revision);
 }
 
 #[tokio::test]
@@ -2320,7 +2380,7 @@ use kiln_core::sampling::{SamplingParams, ThinkingBudget};
 use kiln_core::token::TokenId;
 use kiln_model::{CancelHandle, FinishReason, PagedKvCacheKt, PagedPrefixReuse, StreamEvent};
 use kiln_server::batching_engine::{DecodeForward, DecodeSlot, EngineRequest, RealDecodeForward};
-use kiln_server::state::RealPrefixCache;
+use kiln_server::state::{LoadedAdapterIdentity, RealPrefixCache};
 use uuid::Uuid;
 
 const PREFIX_TEST_BLOCK_SIZE: usize = 16;
@@ -2492,6 +2552,52 @@ fn prefix_test_paged_cache(config: &ModelConfig) -> PagedKvCacheKt {
 }
 
 #[test]
+fn batching_forward_rejects_queued_request_after_same_name_revision_swap() {
+    let config = tiny_config();
+    let runner = ModelRunner::new(
+        tiny_weights(&config, &Device::Cpu),
+        test_tokenizer(),
+        config.clone(),
+    );
+    let loaded_adapter = Arc::new(RwLock::new(Some(LoadedAdapterIdentity {
+        name: "same-name".to_string(),
+        content_revision: "new-revision".to_string(),
+    })));
+    let forward = RealDecodeForward::new(
+        Arc::new(RwLock::new(runner)),
+        Arc::new(Mutex::new(BlockManager::new(
+            PREFIX_TEST_NUM_BLOCKS,
+            PREFIX_TEST_BLOCK_SIZE,
+        ))),
+        Arc::new(prefix_test_paged_cache(&config)),
+        Arc::new(Mutex::new(RealPrefixCache::disabled(
+            PREFIX_TEST_BLOCK_SIZE,
+        ))),
+        Arc::new(tokio::sync::RwLock::new(())),
+        loaded_adapter,
+    );
+    let request = EngineRequest {
+        request_id: Uuid::new_v4(),
+        prompt_tokens: vec![1, 2, 3],
+        sampling: SamplingParams::greedy(),
+        adapter: Some(LoadedAdapterIdentity {
+            name: "same-name".to_string(),
+            content_revision: "old-revision".to_string(),
+        }),
+        cancel: CancelHandle::new(),
+    };
+
+    let error = match forward.prepare_request(&request) {
+        Ok(_) => panic!("stale queued request unexpectedly reached prefill"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("adapter revision is stale"),
+        "{error:#}"
+    );
+}
+
+#[test]
 #[allow(deprecated)]
 fn legacy_mutable_paged_stream_settles_before_return() {
     let config = tiny_config();
@@ -2564,6 +2670,7 @@ fn prefix_cache_multi_turn_hit_through_batching_engine_forward() {
         Arc::new(prefix_test_paged_cache(&config)),
         prefix_cache.clone(),
         Arc::new(tokio::sync::RwLock::new(())),
+        Arc::new(RwLock::new(None)),
     );
 
     let sampling = SamplingParams {

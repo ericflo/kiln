@@ -441,7 +441,7 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
 
     // FAILED the gate. If someone manually loaded the adapter while the
     // eval ran, get it out of serving first.
-    let currently_loaded = state.loaded_adapter_name.read().unwrap().clone();
+    let currently_loaded = state.loaded_adapter_name();
     if currently_loaded.as_deref() == Some(gate.adapter_name.as_str()) {
         if let Err(e) = crate::adapter_swap::swap_runtime_adapter(
             state,

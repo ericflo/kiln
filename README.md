@@ -461,9 +461,9 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | POST | `/v1/agent/runs/{id}/steer` | Queue a steering message into a live run |
 | POST | `/v1/agent/runs/{id}/follow_up` | Queue a follow-up task into a live run |
 | POST | `/v1/agent/runs/{id}/abort` | Abort a queued or running run |
-| GET | `/v1/adapters` | List saved/available LoRA adapters and identify the active adapter |
+| GET | `/v1/adapters` | List saved/available LoRA adapters and the exact loaded name/content revision |
 | GET | `/v1/adapters/{name}/detail` | Files + training history + eval history for one adapter |
-| POST | `/v1/adapters/load` | Load adapter from disk |
+| POST | `/v1/adapters/load` | Load adapter from disk and return its exact content revision |
 | POST | `/v1/adapters/unload` | Unload active adapter |
 | DELETE | `/v1/adapters/{name}` | Delete an adapter |
 | POST | `/v1/adapters/upload` | Multipart tar.gz import of an adapter |
@@ -585,7 +585,22 @@ endpoint.
 | `"adapter": ""` | Use the base model for this request only. |
 | `"adapter": "<name>"` | Use that named adapter for this request only; the name must be a loaded/available adapter directory under `adapter_dir`. |
 
-Only `POST /v1/adapters/load` and `POST /v1/adapters/unload` change the server default adapter reported by `GET /v1/adapters`. Chat requests log adapter runtime transitions with the old adapter, new adapter, request id, and transition reason.
+Only `POST /v1/adapters/load` and `POST /v1/adapters/unload` change the
+server default adapter reported by `GET /v1/adapters`. A successful load
+returns `content_revision`; `GET /v1/adapters` publishes the authoritative
+`loaded_adapter_identity` tuple, and `/health` plus debug state expose
+`loaded_adapter_revision`. Completion responses carry the same value in
+`x-kiln-loaded-adapter-revision` (`base` when no LoRA is loaded).
+
+The revision is a canonical SHA-256 over the exact PEFT config and safetensor
+identities consumed by the loader. It is published with the runner's weight
+flip, copied into queued inference work, prefix-cache keys, and deterministic
+response-cache keys, and checked again before queued prefill. Same-name
+rewrites therefore cannot reuse old KV or responses. Cache purges advance a
+generation fence and revoke in-flight owner claims, so a late old request
+cannot restore an invalidated entry. Chat requests log adapter runtime
+transitions with the old adapter, new adapter, request id, and transition
+reason.
 
 ## Architecture
 

@@ -19,7 +19,7 @@ use uuid::Uuid;
 use kiln_model::adapter_merge::{PeftLora, merge_concat, merge_linear, merge_ties};
 
 use crate::error::ApiError;
-use crate::state::{AppState, ModelBackend};
+use crate::state::{AppState, LoadedAdapterIdentity, ModelBackend};
 
 /// Response for GET /v1/adapters.
 #[derive(Serialize)]
@@ -30,6 +30,8 @@ struct AdaptersResponse {
     active: Option<String>,
     /// Adapter currently loaded into the model runner, if any.
     loaded_adapter: Option<String>,
+    /// Exact adapter name and content revision published with the weight flip.
+    loaded_adapter_identity: Option<LoadedAdapterIdentity>,
     /// All adapters currently resident in server state. Kiln has one runner,
     /// so this is at most the default and runtime-loaded adapter names.
     loaded_adapters: Vec<String>,
@@ -113,6 +115,7 @@ struct LoadAdapterRequest {
 struct LoadAdapterResponse {
     status: &'static str,
     name: String,
+    content_revision: String,
 }
 
 /// Response for POST /v1/adapters/unload.
@@ -145,7 +148,10 @@ fn adapter_swap_error(state: &AppState, error: String) -> ApiError {
 async fn list_adapters(State(state): State<AppState>) -> Json<AdaptersResponse> {
     // Read the active adapter name from shared state.
     let active = state.active_adapter_name.read().unwrap().clone();
-    let loaded_adapter = state.loaded_adapter_name.read().unwrap().clone();
+    let loaded_adapter_identity = state.loaded_adapter_identity();
+    let loaded_adapter = loaded_adapter_identity
+        .as_ref()
+        .map(|identity| identity.name.clone());
     let load_errors = state.adapter_load_errors.read().unwrap().clone();
 
     let mut loaded_adapters = Vec::new();
@@ -170,6 +176,7 @@ async fn list_adapters(State(state): State<AppState>) -> Json<AdaptersResponse> 
         active_adapter: active.clone(),
         active,
         loaded_adapter,
+        loaded_adapter_identity,
         loaded_adapters,
         adapter_dir,
         available: available.clone(),
@@ -229,9 +236,14 @@ async fn load_adapter(
             #[cfg(test)]
             {
                 record_adapter_loaded(&state, &req.name, &resolved_adapter_path);
+                let content_revision = state
+                    .loaded_adapter_identity()
+                    .expect("mock load published adapter identity")
+                    .content_revision;
                 return Ok(Json(LoadAdapterResponse {
                     status: "loaded",
                     name: req.name,
+                    content_revision,
                 }));
             }
             #[cfg(not(test))]
@@ -277,17 +289,33 @@ async fn load_adapter(
 
     ensure_adapter_mutation_admission(&state)?;
     record_adapter_loaded(&state, &req.name, &resolved_adapter_path);
+    let loaded = state.loaded_adapter_identity().ok_or_else(|| {
+        ApiError::internal("adapter weight flip completed without publishing its identity")
+    })?;
+    if loaded.name != req.name {
+        return Err(ApiError::internal(format!(
+            "adapter weight flip published `{}` while loading `{}`",
+            loaded.name, req.name
+        )));
+    }
 
     Ok(Json(LoadAdapterResponse {
         status: "loaded",
         name,
+        content_revision: loaded.content_revision,
     }))
 }
 
 fn record_adapter_loaded(state: &AppState, name: &str, path: &Path) {
     let old = state.active_adapter_name.read().unwrap().clone();
     *state.active_adapter_name.write().unwrap() = Some(name.to_string());
-    *state.loaded_adapter_name.write().unwrap() = Some(name.to_string());
+    #[cfg(test)]
+    if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
+        let source = kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(path)
+            .expect("validated mock adapter retains an exact source identity");
+        *state.loaded_adapter.write().unwrap() =
+            Some(LoadedAdapterIdentity::from_source(name, &source));
+    }
     state.adapter_load_errors.write().unwrap().remove(name);
 
     tracing::info!(
@@ -400,7 +428,10 @@ async fn unload_adapter(
 fn record_adapter_unloaded(state: &AppState) {
     let old = state.active_adapter_name.read().unwrap().clone();
     *state.active_adapter_name.write().unwrap() = None;
-    *state.loaded_adapter_name.write().unwrap() = None;
+    #[cfg(test)]
+    if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
+        *state.loaded_adapter.write().unwrap() = None;
+    }
 
     tracing::info!(
         request_id = %Uuid::new_v4(),
@@ -1805,11 +1836,13 @@ mod tests {
             }"#,
         )
         .unwrap();
-        std::fs::write(
-            path.join("adapter_model.safetensors"),
-            b"\x00\x00\x00\x00tiny-test-adapter",
-        )
-        .unwrap();
+        let tensor_bytes = 0.0f32.to_le_bytes();
+        let tensor =
+            safetensors::tensor::TensorView::new(safetensors::Dtype::F32, vec![1], &tensor_bytes)
+                .unwrap();
+        let serialized =
+            safetensors::tensor::serialize([("ignored.weight", tensor)], None).unwrap();
+        std::fs::write(path.join("adapter_model.safetensors"), serialized).unwrap();
     }
 
     fn write_quarantined_canary(adapter_dir: &Path, name: &str, reason: &str) {
@@ -1876,6 +1909,13 @@ mod tests {
                 assert_eq!(body["active"].as_str(), Some(name));
                 assert_eq!(body["active_adapter"].as_str(), Some(name));
                 assert_eq!(body["loaded_adapter"].as_str(), Some(name));
+                assert_eq!(body["loaded_adapter_identity"]["name"].as_str(), Some(name));
+                assert_eq!(
+                    body["loaded_adapter_identity"]["content_revision"]
+                        .as_str()
+                        .map(str::len),
+                    Some(64)
+                );
                 assert!(
                     body["loaded_adapters"]
                         .as_array()
@@ -1889,6 +1929,7 @@ mod tests {
                 assert!(body["active"].is_null());
                 assert!(body["active_adapter"].is_null());
                 assert!(body["loaded_adapter"].is_null());
+                assert!(body["loaded_adapter_identity"].is_null());
                 assert!(body["loaded_adapters"].as_array().unwrap().is_empty());
             }
         }
@@ -1981,13 +2022,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(
-            state_for_assert
-                .loaded_adapter_name
-                .read()
-                .unwrap()
-                .is_none()
-        );
+        assert!(state_for_assert.loaded_adapter_identity().is_none());
     }
 
     #[tokio::test]
@@ -2056,6 +2091,8 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
             assert_eq!(body["status"], "loaded");
             assert_eq!(body["name"], adapter);
+            let content_revision = body["content_revision"].as_str().unwrap().to_string();
+            assert_eq!(content_revision.len(), 64);
 
             let (status, _, body) = request_json(&app, Method::GET, "/v1/adapters", None).await;
             assert_eq!(status, StatusCode::OK);
@@ -2069,11 +2106,7 @@ mod tests {
                 Some(adapter)
             );
             assert_eq!(
-                state_for_assert
-                    .loaded_adapter_name
-                    .read()
-                    .unwrap()
-                    .as_deref(),
+                state_for_assert.loaded_adapter_name().as_deref(),
                 Some(adapter)
             );
 
@@ -2091,6 +2124,14 @@ mod tests {
             assert_eq!(headers.get("x-kiln-eval-mode").unwrap(), "true");
             assert_eq!(headers.get("x-kiln-active-adapter").unwrap(), adapter);
             assert_eq!(headers.get("x-kiln-loaded-adapter").unwrap(), adapter);
+            assert_eq!(
+                headers
+                    .get("x-kiln-loaded-adapter-revision")
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                content_revision
+            );
             assert_eq!(body["object"], "chat.completion");
 
             let (status, _, body) =
@@ -2108,13 +2149,7 @@ mod tests {
                     .unwrap()
                     .is_none()
             );
-            assert!(
-                state_for_assert
-                    .loaded_adapter_name
-                    .read()
-                    .unwrap()
-                    .is_none()
-            );
+            assert!(state_for_assert.loaded_adapter_identity().is_none());
 
             cycle_latencies.push(started.elapsed());
         }

@@ -35,16 +35,30 @@ use crate::recent_requests::{FULL_BODY_MAX_CHARS, RequestRecord, now_unix_ms, tr
 use crate::state::{
     AppState, DeterministicBatchCache, DeterministicBatchCacheClaim, DeterministicBatchCacheItem,
     DeterministicBatchCacheKey, DeterministicBatchCacheValue, DeterministicBatchInFlightState,
-    DeterministicChatChoicesCache, DeterministicChatChoicesCacheClaim,
-    DeterministicChatChoicesCacheProbe, DeterministicChatChoicesCacheValue,
-    DeterministicChatChoicesInFlightState, DeterministicChatRequestCache,
-    DeterministicChatRequestCacheClaim, DeterministicChatRequestCacheProbe,
-    DeterministicChatRequestCacheValue, DeterministicChatRequestInFlightState,
-    DeterministicCompletionCacheClaim, DeterministicCompletionCacheKey,
-    DeterministicCompletionCacheProbe, DeterministicCompletionCacheValue,
-    DeterministicCompletionInFlightState, ModelBackend, RealPrefixCache, RealPrefixCacheRequest,
-    gpu_coordination_read_guard, gpu_coordination_write_guard_while_healthy_async,
+    DeterministicCacheClaimId, DeterministicCacheKey, DeterministicChatChoicesCache,
+    DeterministicChatChoicesCacheClaim, DeterministicChatChoicesCacheProbe,
+    DeterministicChatChoicesCacheValue, DeterministicChatChoicesInFlightState,
+    DeterministicChatRequestCache, DeterministicChatRequestCacheClaim,
+    DeterministicChatRequestCacheProbe, DeterministicChatRequestCacheValue,
+    DeterministicChatRequestInFlightState, DeterministicCompletionCacheClaim,
+    DeterministicCompletionCacheKey, DeterministicCompletionCacheProbe,
+    DeterministicCompletionCacheValue, DeterministicCompletionInFlightState, LoadedAdapterIdentity,
+    ModelBackend, RealPrefixCache, RealPrefixCacheRequest, gpu_coordination_read_guard,
+    gpu_coordination_write_guard_while_healthy_async,
 };
+
+/// Snapshot a default adapter that is already the exact revision published by
+/// the runner. `None` means a transient per-request override is loaded, so a
+/// default-request cache lookup must wait until adapter resolution completes.
+fn stable_default_adapter_identity(state: &AppState) -> Option<Option<LoadedAdapterIdentity>> {
+    let default_name = state.active_adapter_name.read().unwrap().clone();
+    let loaded = state.loaded_adapter_identity();
+    match (default_name.as_deref(), loaded) {
+        (None, None) => Some(None),
+        (Some(name), Some(identity)) if identity.name == name => Some(Some(identity)),
+        _ => None,
+    }
+}
 use crate::teacher_identity::{
     MAX_COMPLETION_PROMPT_LOGPROB_CANDIDATES, MAX_COMPLETION_PROMPT_LOGPROBS,
     MAX_COMPLETION_PROMPT_TOKENS, MAX_PROMPT_LOGPROB_PROJECTION_CHUNK_TOKENS,
@@ -451,10 +465,7 @@ fn duration_ms_u64(duration: std::time::Duration) -> u64 {
 
 fn adapter_used_for_performance_metadata(state: &AppState) -> String {
     state
-        .loaded_adapter_name
-        .read()
-        .unwrap()
-        .clone()
+        .loaded_adapter_name()
         .unwrap_or_else(|| "base".to_string())
 }
 
@@ -1726,6 +1737,25 @@ fn adapter_header_value(adapter: Option<String>) -> HeaderValue {
         .unwrap_or_else(|_| HeaderValue::from_static("invalid"))
 }
 
+fn response_with_loaded_adapter_identity(
+    mut response: Response,
+    adapter: &Option<LoadedAdapterIdentity>,
+) -> Response {
+    response.headers_mut().insert(
+        HeaderName::from_static("x-kiln-loaded-adapter"),
+        adapter_header_value(adapter.as_ref().map(|identity| identity.name.clone())),
+    );
+    response.headers_mut().insert(
+        HeaderName::from_static("x-kiln-loaded-adapter-revision"),
+        adapter_header_value(
+            adapter
+                .as_ref()
+                .map(|identity| identity.content_revision.clone()),
+        ),
+    );
+    response
+}
+
 fn response_with_runtime_headers(state: &AppState, mut response: Response) -> Response {
     let eval_mode = if state.eval_mode {
         HeaderValue::from_static("true")
@@ -1739,10 +1769,13 @@ fn response_with_runtime_headers(state: &AppState, mut response: Response) -> Re
         HeaderName::from_static("x-kiln-active-adapter"),
         adapter_header_value(state.active_adapter_name.read().unwrap().clone()),
     );
-    response.headers_mut().insert(
-        HeaderName::from_static("x-kiln-loaded-adapter"),
-        adapter_header_value(state.loaded_adapter_name.read().unwrap().clone()),
-    );
+    if !response
+        .headers()
+        .contains_key("x-kiln-loaded-adapter-revision")
+    {
+        response =
+            response_with_loaded_adapter_identity(response, &state.loaded_adapter_identity());
+    }
     response
 }
 
@@ -2160,8 +2193,9 @@ pub(crate) fn enforce_context_window_with_ceiling(
     Ok(())
 }
 
-fn deterministic_completion_cache_key(
+fn deterministic_completion_cache_key_for_adapter(
     state: &AppState,
+    adapter: Option<LoadedAdapterIdentity>,
     prompt_tokens: &[TokenId],
     sampling: &SamplingParams,
     fold_reasoning_into_content: bool,
@@ -2217,8 +2251,11 @@ fn deterministic_completion_cache_key(
         )
     };
 
+    let (global_generation, adapter_generation) = state.deterministic_cache_fence(&adapter);
     Some(DeterministicCompletionCacheKey {
-        adapter: state.loaded_adapter_name.read().unwrap().clone(),
+        adapter,
+        global_generation,
+        adapter_generation,
         prompt_tokens: prompt_tokens.to_vec(),
         temperature_bits,
         max_tokens: sampling.max_tokens,
@@ -2236,6 +2273,22 @@ fn deterministic_completion_cache_key(
         seed,
         fold_reasoning_into_content,
     })
+}
+
+#[cfg(test)]
+fn deterministic_completion_cache_key(
+    state: &AppState,
+    prompt_tokens: &[TokenId],
+    sampling: &SamplingParams,
+    fold_reasoning_into_content: bool,
+) -> Option<DeterministicCompletionCacheKey> {
+    deterministic_completion_cache_key_for_adapter(
+        state,
+        state.loaded_adapter_identity(),
+        prompt_tokens,
+        sampling,
+        fold_reasoning_into_content,
+    )
 }
 
 #[derive(Serialize)]
@@ -2955,6 +3008,7 @@ fn chat_request_cache_value_from_choice(
 
 fn store_chat_request_cache_from_chat_choices_response(
     state: &AppState,
+    adapter: &Option<LoadedAdapterIdentity>,
     req: &ChatCompletionRequest,
     resp: &ChatCompletionResponse,
     vocab_size: usize,
@@ -2992,13 +3046,14 @@ fn store_chat_request_cache_from_chat_choices_response(
 
     let mut cache = state.chat_request_cache.lock().unwrap();
     for (key, value) in entries {
-        cache.insert(key, value);
+        cache.insert(state.deterministic_cache_key(adapter.clone(), key), value);
     }
     Ok(())
 }
 
 async fn zero_chat_choices_response_from_request_cache_hit(
     state: &AppState,
+    adapter: &Option<LoadedAdapterIdentity>,
     req: &ChatCompletionRequest,
     request_start: std::time::Instant,
     n_per: usize,
@@ -3018,6 +3073,7 @@ async fn zero_chat_choices_response_from_request_cache_hit(
         return Ok(None);
     };
 
+    let key = state.deterministic_cache_key(adapter.clone(), key);
     let probe = state.chat_request_cache.lock().unwrap().probe(&key);
     let cached = match probe {
         DeterministicChatRequestCacheProbe::Hit(cached) => cached,
@@ -3514,17 +3570,26 @@ fn store_deterministic_completion(
 fn complete_deterministic_completion_owner(
     state: &AppState,
     key: DeterministicCompletionCacheKey,
+    claim_id: DeterministicCacheClaimId,
     resp: &ChatCompletionResponse,
 ) {
     let Some(value) = cache_value_from_response(resp) else {
-        state.completion_cache.lock().unwrap().fail(&key);
+        state.completion_cache.lock().unwrap().fail(&key, claim_id);
         return;
     };
-    state.completion_cache.lock().unwrap().complete(key, value);
+    state
+        .completion_cache
+        .lock()
+        .unwrap()
+        .complete(key, claim_id, value);
 }
 
-fn fail_deterministic_completion_owner(state: &AppState, key: &DeterministicCompletionCacheKey) {
-    state.completion_cache.lock().unwrap().fail(key);
+fn fail_deterministic_completion_owner(
+    state: &AppState,
+    key: &DeterministicCompletionCacheKey,
+    claim_id: DeterministicCacheClaimId,
+) {
+    state.completion_cache.lock().unwrap().fail(key, claim_id);
 }
 
 async fn wait_for_deterministic_completion(
@@ -3544,32 +3609,42 @@ async fn wait_for_deterministic_completion(
 
 struct ChatRequestCacheOwnerGuard {
     cache: std::sync::Arc<std::sync::Mutex<DeterministicChatRequestCache>>,
-    key: String,
+    key: DeterministicCacheKey,
+    claim_id: DeterministicCacheClaimId,
     active: bool,
 }
 
 impl ChatRequestCacheOwnerGuard {
     fn new(
         cache: std::sync::Arc<std::sync::Mutex<DeterministicChatRequestCache>>,
-        key: String,
+        key: DeterministicCacheKey,
+        claim_id: DeterministicCacheClaimId,
     ) -> Self {
         Self {
             cache,
             key,
+            claim_id,
             active: true,
         }
     }
 
     fn complete(mut self, value: DeterministicChatRequestCacheValue) {
-        self.cache.lock().unwrap().complete(self.key.clone(), value);
+        self.cache
+            .lock()
+            .unwrap()
+            .complete(self.key.clone(), self.claim_id, value);
         self.active = false;
+    }
+
+    fn matches_key(&self, key: &DeterministicCacheKey) -> bool {
+        &self.key == key
     }
 }
 
 impl Drop for ChatRequestCacheOwnerGuard {
     fn drop(&mut self) {
         if self.active {
-            self.cache.lock().unwrap().fail(&self.key);
+            self.cache.lock().unwrap().fail(&self.key, self.claim_id);
         }
     }
 }
@@ -3591,32 +3666,42 @@ async fn wait_for_deterministic_chat_request(
 
 struct ChatChoicesCacheOwnerGuard {
     cache: std::sync::Arc<std::sync::Mutex<DeterministicChatChoicesCache>>,
-    key: String,
+    key: DeterministicCacheKey,
+    claim_id: DeterministicCacheClaimId,
     active: bool,
 }
 
 impl ChatChoicesCacheOwnerGuard {
     fn new(
         cache: std::sync::Arc<std::sync::Mutex<DeterministicChatChoicesCache>>,
-        key: String,
+        key: DeterministicCacheKey,
+        claim_id: DeterministicCacheClaimId,
     ) -> Self {
         Self {
             cache,
             key,
+            claim_id,
             active: true,
         }
     }
 
     fn complete(mut self, value: DeterministicChatChoicesCacheValue) {
-        self.cache.lock().unwrap().complete(self.key.clone(), value);
+        self.cache
+            .lock()
+            .unwrap()
+            .complete(self.key.clone(), self.claim_id, value);
         self.active = false;
+    }
+
+    fn matches_key(&self, key: &DeterministicCacheKey) -> bool {
+        &self.key == key
     }
 }
 
 impl Drop for ChatChoicesCacheOwnerGuard {
     fn drop(&mut self) {
         if self.active {
-            self.cache.lock().unwrap().fail(&self.key);
+            self.cache.lock().unwrap().fail(&self.key, self.claim_id);
         }
     }
 }
@@ -3638,7 +3723,7 @@ async fn wait_for_deterministic_chat_choices(
 
 fn finish_chat_request_cache(
     state: &AppState,
-    key: Option<String>,
+    key: Option<DeterministicCacheKey>,
     owner: Option<ChatRequestCacheOwnerGuard>,
     resp: &ChatCompletionResponse,
 ) {
@@ -3650,7 +3735,7 @@ fn finish_chat_request_cache(
 
 fn finish_chat_request_cache_value(
     state: &AppState,
-    key: Option<String>,
+    key: Option<DeterministicCacheKey>,
     owner: Option<ChatRequestCacheOwnerGuard>,
     value: DeterministicChatRequestCacheValue,
 ) {
@@ -3663,7 +3748,7 @@ fn finish_chat_request_cache_value(
 
 fn finish_chat_choices_cache(
     state: &AppState,
-    key: Option<String>,
+    key: Option<DeterministicCacheKey>,
     owner: Option<ChatChoicesCacheOwnerGuard>,
     resp: &ChatCompletionResponse,
 ) {
@@ -3680,6 +3765,7 @@ fn finish_chat_choices_cache(
 struct BatchCacheOwnerGuard {
     cache: std::sync::Arc<std::sync::Mutex<DeterministicBatchCache>>,
     key: DeterministicBatchCacheKey,
+    claim_id: DeterministicCacheClaimId,
     active: bool,
 }
 
@@ -3687,24 +3773,33 @@ impl BatchCacheOwnerGuard {
     fn new(
         cache: std::sync::Arc<std::sync::Mutex<DeterministicBatchCache>>,
         key: DeterministicBatchCacheKey,
+        claim_id: DeterministicCacheClaimId,
     ) -> Self {
         Self {
             cache,
             key,
+            claim_id,
             active: true,
         }
     }
 
     fn complete(mut self, value: DeterministicBatchCacheValue) {
-        self.cache.lock().unwrap().complete(self.key.clone(), value);
+        self.cache
+            .lock()
+            .unwrap()
+            .complete(self.key.clone(), self.claim_id, value);
         self.active = false;
+    }
+
+    fn matches_key(&self, key: &DeterministicBatchCacheKey) -> bool {
+        &self.key == key
     }
 }
 
 impl Drop for BatchCacheOwnerGuard {
     fn drop(&mut self) {
         if self.active {
-            self.cache.lock().unwrap().fail(&self.key);
+            self.cache.lock().unwrap().fail(&self.key, self.claim_id);
         }
     }
 }
@@ -5648,7 +5743,11 @@ async fn chat_completions_inner(
     }
 
     if n_per > 1 {
-        let chat_choices_cache_key = if effective_thinking_budget.ms.is_some() {
+        let stable_default_adapter = stable_default_adapter_identity(state);
+        let cache_adapter = stable_default_adapter
+            .clone()
+            .unwrap_or_else(|| state.loaded_adapter_identity());
+        let mut chat_choices_cache_key = if effective_thinking_budget.ms.is_some() {
             None
         } else {
             deterministic_chat_choices_cache_key_with_vocab_size_and_fold(
@@ -5659,9 +5758,9 @@ async fn chat_completions_inner(
                 fold_reasoning_into_content_for_request(state, &req),
                 effective_thinking_budget.tokens,
             )?
+            .map(|request| state.deterministic_cache_key(cache_adapter.clone(), request))
         };
-        let can_hit_chat_choices_cache_before_adapter_work =
-            state.active_adapter_name.read().unwrap().is_none();
+        let can_hit_chat_choices_cache_before_adapter_work = stable_default_adapter.is_some();
         let mut chat_choices_cache_owner = None;
         if can_hit_chat_choices_cache_before_adapter_work
             && let Some(key) = chat_choices_cache_key.as_ref()
@@ -5673,11 +5772,15 @@ async fn chat_completions_inner(
                         response_from_cached_chat_choices(state, &req, request_start, cached);
                     store_chat_request_cache_from_chat_choices_response(
                         state,
+                        &cache_adapter,
                         &req,
                         &resp,
                         state.model_config.vocab_size,
                     )?;
-                    return Ok(Json(resp).into_response());
+                    return Ok(response_with_loaded_adapter_identity(
+                        Json(resp).into_response(),
+                        &cache_adapter,
+                    ));
                 }
                 DeterministicChatChoicesCacheClaim::Wait(receiver) => {
                     if let Some(cached) = wait_for_deterministic_chat_choices(receiver).await {
@@ -5685,17 +5788,22 @@ async fn chat_completions_inner(
                             response_from_cached_chat_choices(state, &req, request_start, cached);
                         store_chat_request_cache_from_chat_choices_response(
                             state,
+                            &cache_adapter,
                             &req,
                             &resp,
                             state.model_config.vocab_size,
                         )?;
-                        return Ok(Json(resp).into_response());
+                        return Ok(response_with_loaded_adapter_identity(
+                            Json(resp).into_response(),
+                            &cache_adapter,
+                        ));
                     }
                 }
-                DeterministicChatChoicesCacheClaim::Owner => {
+                DeterministicChatChoicesCacheClaim::Owner(claim_id) => {
                     chat_choices_cache_owner = Some(ChatChoicesCacheOwnerGuard::new(
                         state.chat_choices_cache.clone(),
                         key.clone(),
+                        claim_id,
                     ));
                 }
             }
@@ -5704,6 +5812,7 @@ async fn chat_completions_inner(
         if can_hit_chat_choices_cache_before_adapter_work
             && let Some(resp) = zero_chat_choices_response_from_request_cache_hit(
                 state,
+                &cache_adapter,
                 &req,
                 request_start,
                 n_per,
@@ -5717,12 +5826,28 @@ async fn chat_completions_inner(
                 chat_choices_cache_owner.take(),
                 &resp,
             );
-            return Ok(Json(resp).into_response());
+            return Ok(response_with_loaded_adapter_identity(
+                Json(resp).into_response(),
+                &cache_adapter,
+            ));
         }
 
-        let resp = generate_multi_chat_response(state, &req, request_start, n_per).await?;
+        let (resp, loaded_adapter) =
+            generate_multi_chat_response(state, &req, request_start, n_per).await?;
+        if let Some(key) = chat_choices_cache_key.as_mut() {
+            let rebound =
+                state.deterministic_cache_key(loaded_adapter.clone(), key.request.clone());
+            if chat_choices_cache_owner
+                .as_ref()
+                .is_some_and(|owner| !owner.matches_key(&rebound))
+            {
+                drop(chat_choices_cache_owner.take());
+            }
+            *key = rebound;
+        }
         store_chat_request_cache_from_chat_choices_response(
             state,
+            &loaded_adapter,
             &req,
             &resp,
             state.model_config.vocab_size,
@@ -5733,10 +5858,17 @@ async fn chat_completions_inner(
             chat_choices_cache_owner.take(),
             &resp,
         );
-        return Ok(Json(resp).into_response());
+        return Ok(response_with_loaded_adapter_identity(
+            Json(resp).into_response(),
+            &loaded_adapter,
+        ));
     }
 
-    let chat_request_cache_key = if effective_thinking_budget.ms.is_some() {
+    let stable_default_adapter = stable_default_adapter_identity(state);
+    let cache_adapter = stable_default_adapter
+        .clone()
+        .unwrap_or_else(|| state.loaded_adapter_identity());
+    let mut chat_request_cache_key = if effective_thinking_budget.ms.is_some() {
         None
     } else {
         deterministic_chat_request_cache_key_with_vocab_size_and_fold(
@@ -5746,9 +5878,9 @@ async fn chat_completions_inner(
             fold_reasoning_into_content_for_request(state, &req),
             effective_thinking_budget.tokens,
         )?
+        .map(|request| state.deterministic_cache_key(cache_adapter.clone(), request))
     };
-    let can_hit_chat_request_cache_before_adapter_work =
-        state.active_adapter_name.read().unwrap().is_none();
+    let can_hit_chat_request_cache_before_adapter_work = stable_default_adapter.is_some();
     let mut chat_request_cache_owner = None;
     if can_hit_chat_request_cache_before_adapter_work
         && let Some(key) = chat_request_cache_key.as_ref()
@@ -5757,27 +5889,34 @@ async fn chat_completions_inner(
             let claim = state.chat_request_cache.lock().unwrap().claim(key);
             match claim {
                 DeterministicChatRequestCacheClaim::Hit(cached) => {
-                    return Ok(streaming_response_from_cached_chat_request(
-                        state,
-                        &req,
-                        request_start,
-                        cached,
-                    ));
-                }
-                DeterministicChatRequestCacheClaim::Wait(receiver) => {
-                    if let Some(cached) = wait_for_deterministic_chat_request(receiver).await {
-                        return Ok(streaming_response_from_cached_chat_request(
+                    return Ok(response_with_loaded_adapter_identity(
+                        streaming_response_from_cached_chat_request(
                             state,
                             &req,
                             request_start,
                             cached,
+                        ),
+                        &cache_adapter,
+                    ));
+                }
+                DeterministicChatRequestCacheClaim::Wait(receiver) => {
+                    if let Some(cached) = wait_for_deterministic_chat_request(receiver).await {
+                        return Ok(response_with_loaded_adapter_identity(
+                            streaming_response_from_cached_chat_request(
+                                state,
+                                &req,
+                                request_start,
+                                cached,
+                            ),
+                            &cache_adapter,
                         ));
                     }
                 }
-                DeterministicChatRequestCacheClaim::Owner => {
+                DeterministicChatRequestCacheClaim::Owner(claim_id) => {
                     chat_request_cache_owner = Some(ChatRequestCacheOwnerGuard::new(
                         state.chat_request_cache.clone(),
                         key.clone(),
+                        claim_id,
                     ));
                 }
             }
@@ -5787,19 +5926,26 @@ async fn chat_completions_inner(
                 DeterministicChatRequestCacheClaim::Hit(cached) => {
                     let resp =
                         response_from_cached_chat_request(state, &req, request_start, cached);
-                    return Ok(Json(resp).into_response());
+                    return Ok(response_with_loaded_adapter_identity(
+                        Json(resp).into_response(),
+                        &cache_adapter,
+                    ));
                 }
                 DeterministicChatRequestCacheClaim::Wait(receiver) => {
                     if let Some(cached) = wait_for_deterministic_chat_request(receiver).await {
                         let resp =
                             response_from_cached_chat_request(state, &req, request_start, cached);
-                        return Ok(Json(resp).into_response());
+                        return Ok(response_with_loaded_adapter_identity(
+                            Json(resp).into_response(),
+                            &cache_adapter,
+                        ));
                     }
                 }
-                DeterministicChatRequestCacheClaim::Owner => {
+                DeterministicChatRequestCacheClaim::Owner(claim_id) => {
                     chat_request_cache_owner = Some(ChatRequestCacheOwnerGuard::new(
                         state.chat_request_cache.clone(),
                         key.clone(),
+                        claim_id,
                     ));
                 }
             }
@@ -5840,11 +5986,14 @@ async fn chat_completions_inner(
                 .insert(key, cache_value);
         }
         if req.stream {
-            return Ok(empty_chat_completion_streaming_response(
-                state,
-                &req,
-                prompt_tokens.len(),
-                request_start,
+            return Ok(response_with_loaded_adapter_identity(
+                empty_chat_completion_streaming_response(
+                    state,
+                    &req,
+                    prompt_tokens.len(),
+                    request_start,
+                ),
+                &cache_adapter,
             ));
         }
         let mut resp =
@@ -5859,7 +6008,10 @@ async fn chat_completions_inner(
             Some(std::time::Duration::ZERO),
             Some(std::time::Duration::ZERO),
         );
-        return Ok(Json(resp).into_response());
+        return Ok(response_with_loaded_adapter_identity(
+            Json(resp).into_response(),
+            &cache_adapter,
+        ));
     }
 
     // If `adapters` is set, synthesize (or reuse cached) composed adapter on
@@ -5888,13 +6040,26 @@ async fn chat_completions_inner(
         }
     }
 
-    let completion_cache_key = deterministic_completion_cache_key(
+    let request_adapter = state.loaded_adapter_identity();
+    if let Some(key) = chat_request_cache_key.as_mut() {
+        let rebound = state.deterministic_cache_key(request_adapter.clone(), key.request.clone());
+        if chat_request_cache_owner
+            .as_ref()
+            .is_some_and(|owner| !owner.matches_key(&rebound))
+        {
+            drop(chat_request_cache_owner.take());
+        }
+        *key = rebound;
+    }
+
+    let completion_cache_key = deterministic_completion_cache_key_for_adapter(
         state,
+        request_adapter.clone(),
         &prompt_tokens,
         &sampling,
         fold_reasoning_into_content_for_request(state, &req),
     );
-    let mut completion_cache_owner = false;
+    let mut completion_cache_owner = None;
     if let Some(key) = completion_cache_key.as_ref() {
         if req.stream {
             let probe = state.completion_cache.lock().unwrap().probe(key);
@@ -5908,11 +6073,14 @@ async fn chat_completions_inner(
                         chat_request_cache_owner.take(),
                         chat_cache_value.clone(),
                     );
-                    return Ok(streaming_response_from_cached_chat_request(
-                        state,
-                        &req,
-                        request_start,
-                        chat_cache_value,
+                    return Ok(response_with_loaded_adapter_identity(
+                        streaming_response_from_cached_chat_request(
+                            state,
+                            &req,
+                            request_start,
+                            chat_cache_value,
+                        ),
+                        &request_adapter,
                     ));
                 }
                 DeterministicCompletionCacheProbe::Wait(receiver) => {
@@ -5925,11 +6093,14 @@ async fn chat_completions_inner(
                             chat_request_cache_owner.take(),
                             chat_cache_value.clone(),
                         );
-                        return Ok(streaming_response_from_cached_chat_request(
-                            state,
-                            &req,
-                            request_start,
-                            chat_cache_value,
+                        return Ok(response_with_loaded_adapter_identity(
+                            streaming_response_from_cached_chat_request(
+                                state,
+                                &req,
+                                request_start,
+                                chat_cache_value,
+                            ),
+                            &request_adapter,
                         ));
                     }
                 }
@@ -5952,7 +6123,10 @@ async fn chat_completions_inner(
                         chat_request_cache_owner.take(),
                         &resp,
                     );
-                    return Ok(Json(resp).into_response());
+                    return Ok(response_with_loaded_adapter_identity(
+                        Json(resp).into_response(),
+                        &request_adapter,
+                    ));
                 }
                 DeterministicCompletionCacheClaim::Wait(receiver) => {
                     if let Some(cached) = wait_for_deterministic_completion(receiver).await {
@@ -5969,17 +6143,20 @@ async fn chat_completions_inner(
                             chat_request_cache_owner.take(),
                             &resp,
                         );
-                        return Ok(Json(resp).into_response());
+                        return Ok(response_with_loaded_adapter_identity(
+                            Json(resp).into_response(),
+                            &request_adapter,
+                        ));
                     }
                 }
-                DeterministicCompletionCacheClaim::Owner => {
-                    completion_cache_owner = true;
+                DeterministicCompletionCacheClaim::Owner(claim_id) => {
+                    completion_cache_owner = Some(claim_id);
                 }
             }
         }
     }
 
-    if req.stream {
+    let result = if req.stream {
         match state.backend.as_ref() {
             ModelBackend::Real {
                 runner,
@@ -5994,6 +6171,7 @@ async fn chat_completions_inner(
                     generate_real_batched_streaming(
                         state,
                         batching_engine,
+                        request_adapter.clone(),
                         &prompt_text,
                         &prompt_tokens,
                         &sampling,
@@ -6009,6 +6187,7 @@ async fn chat_completions_inner(
                         paged_cache,
                         prefix_cache,
                         decode_batcher,
+                        request_adapter.clone(),
                         &prompt_text,
                         &prompt_tokens,
                         &sampling,
@@ -6037,6 +6216,7 @@ async fn chat_completions_inner(
                     generate_real_batched(
                         state,
                         batching_engine,
+                        request_adapter.clone(),
                         &prompt_text,
                         &prompt_tokens,
                         &sampling,
@@ -6051,6 +6231,7 @@ async fn chat_completions_inner(
                         block_manager,
                         paged_cache,
                         prefix_cache,
+                        request_adapter.clone(),
                         &prompt_text,
                         &prompt_tokens,
                         &sampling,
@@ -6074,15 +6255,17 @@ async fn chat_completions_inner(
                             prompt_tokens.len(),
                             &err,
                         );
-                        if completion_cache_owner && let Some(key) = completion_cache_key.as_ref() {
-                            fail_deterministic_completion_owner(state, key);
+                        if let (Some(claim_id), Some(key)) =
+                            (completion_cache_owner, completion_cache_key.as_ref())
+                        {
+                            fail_deterministic_completion_owner(state, key, claim_id);
                         }
                         return Err(err);
                     }
                 };
                 if let Some(key) = completion_cache_key.clone() {
-                    if completion_cache_owner {
-                        complete_deterministic_completion_owner(state, key, &resp);
+                    if let Some(claim_id) = completion_cache_owner {
+                        complete_deterministic_completion_owner(state, key, claim_id, &resp);
                     } else {
                         store_deterministic_completion(state, key, &resp);
                     }
@@ -6126,15 +6309,17 @@ async fn chat_completions_inner(
                             prompt_tokens.len(),
                             &err,
                         );
-                        if completion_cache_owner && let Some(key) = completion_cache_key.as_ref() {
-                            fail_deterministic_completion_owner(state, key);
+                        if let (Some(claim_id), Some(key)) =
+                            (completion_cache_owner, completion_cache_key.as_ref())
+                        {
+                            fail_deterministic_completion_owner(state, key, claim_id);
                         }
                         return Err(err);
                     }
                 };
                 if let Some(key) = completion_cache_key.clone() {
-                    if completion_cache_owner {
-                        complete_deterministic_completion_owner(state, key, &resp);
+                    if let Some(claim_id) = completion_cache_owner {
+                        complete_deterministic_completion_owner(state, key, claim_id, &resp);
                     } else {
                         store_deterministic_completion(state, key, &resp);
                     }
@@ -6151,7 +6336,8 @@ async fn chat_completions_inner(
                 Ok(Json(resp).into_response())
             }
         }
-    }
+    };
+    result.map(|response| response_with_loaded_adapter_identity(response, &request_adapter))
 }
 
 /// Ensure the model runner has the adapter required for this chat request.
@@ -6199,7 +6385,7 @@ async fn ensure_runtime_adapter(
     request_id: &str,
     reason: &str,
 ) -> Result<(), ApiError> {
-    let current = state.loaded_adapter_name.read().unwrap().clone();
+    let current = state.loaded_adapter_name();
     if target_adapter == current {
         return Ok(());
     }
@@ -6252,7 +6438,7 @@ async fn ensure_runtime_adapter(
 /// Disk handle for a composed adapter ready to be loaded.
 #[derive(Debug, Clone)]
 struct ComposedTarget {
-    /// Stable cache name embedded in `loaded_adapter_name` once swapped in,
+    /// Stable cache name embedded in the loaded-adapter identity once swapped in,
     /// e.g. `"__composed:abc123..."`. Used for cache-hit comparison and as
     /// the prefix-cache adapter key.
     active_name: String,
@@ -6284,7 +6470,7 @@ fn validate_compose_name(name: &str) -> Result<(), ApiError> {
 ///
 /// Hashes the sorted list of `"<name>@<scale>"` pairs with `DefaultHasher`
 /// (deterministic SipHash-1-3 with key (0,0)). Used as the cache directory
-/// name and the suffix of `loaded_adapter_name`.
+/// name and the suffix of the loaded-adapter identity.
 fn composition_hash(adapters: &[AdapterRef]) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -6519,8 +6705,10 @@ async fn ensure_composed_adapter_swap(
     target: &ComposedTarget,
 ) -> Result<(), ApiError> {
     {
-        let current = state.loaded_adapter_name.read().unwrap();
-        if current.as_deref() == Some(target.active_name.as_str()) {
+        let current = state.loaded_adapter_identity();
+        if current.as_ref().map(|identity| identity.name.as_str())
+            == Some(target.active_name.as_str())
+        {
             return Ok(());
         }
     }
@@ -6552,6 +6740,7 @@ async fn ensure_composed_adapter_swap(
 async fn generate_real_batched(
     state: &AppState,
     batching_engine: &crate::batching_engine::BatchingEngineHandle,
+    adapter: Option<LoadedAdapterIdentity>,
     prompt_text: &str,
     prompt_tokens: &[TokenId],
     sampling: &SamplingParams,
@@ -6563,7 +6752,6 @@ async fn generate_real_batched(
     let cancel = CancelHandle::with_prefill_progress_gauge(
         state.metrics.request_prefill_tokens_completed.clone(),
     );
-    let adapter = state.loaded_adapter_name.read().unwrap().clone();
     let mut events = batching_engine
         .enqueue(EngineRequest {
             request_id,
@@ -6704,6 +6892,7 @@ async fn generate_real_batched(
 async fn generate_real_batched_streaming(
     state: &AppState,
     batching_engine: &crate::batching_engine::BatchingEngineHandle,
+    adapter: Option<LoadedAdapterIdentity>,
     prompt_text: &str,
     prompt_tokens: &[TokenId],
     sampling: &SamplingParams,
@@ -6715,7 +6904,6 @@ async fn generate_real_batched_streaming(
     let cancel = CancelHandle::with_prefill_progress_gauge(
         state.metrics.request_prefill_tokens_completed.clone(),
     );
-    let adapter = state.loaded_adapter_name.read().unwrap().clone();
     let events = batching_engine
         .enqueue(EngineRequest {
             request_id,
@@ -7329,6 +7517,7 @@ async fn generate_real(
     block_manager: &std::sync::Arc<std::sync::Mutex<kiln_core::block::BlockManager>>,
     paged_cache: &std::sync::Arc<kiln_model::PagedKvCacheKt>,
     prefix_cache: &std::sync::Arc<std::sync::Mutex<RealPrefixCache>>,
+    adapter: Option<LoadedAdapterIdentity>,
     prompt_text: &str,
     prompt_tokens: &[TokenId],
     sampling: &SamplingParams,
@@ -7358,19 +7547,16 @@ async fn generate_real(
     let prompt = prompt_text.to_owned();
     let prompt_tokens = prompt_tokens.to_vec();
     let params = sampling.clone();
-    // For prefix-cache keying. After ensure_adapter / ensure_composed_adapter_swap,
-    // state.loaded_adapter_name reflects the actually-loaded adapter (a
-    // `__composed:<hash>` name when the request used `adapters: [...]`), which
-    // is what we want as the cache key — distinct compositions and the base
-    // model must not share cached blocks.
-    let adapter = state.loaded_adapter_name.read().unwrap().clone();
-
     let gpu_lock = state.gpu_lock.clone();
+    let loaded_adapter = state.loaded_adapter.clone();
     let memory_budget = state.memory_budget.clone();
     let metrics = state.metrics.clone();
     let timeout = state.request_timeout;
     let mtp_acceptance = state.mtp_acceptance.clone();
-    let acceptance_adapter = adapter.clone().unwrap_or_else(|| "base".to_string());
+    let acceptance_adapter = adapter
+        .as_ref()
+        .map(|identity| identity.name.clone())
+        .unwrap_or_else(|| "base".to_string());
     let prefix_cache_diagnostic = std::sync::Arc::new(std::sync::Mutex::new("unknown"));
     let prefix_cache_diagnostic_inner = prefix_cache_diagnostic.clone();
     // Cooperative cancellation: `tokio::time::timeout` cancels the outer
@@ -7388,6 +7574,16 @@ async fn generate_real(
         // Acquire GPU coordination read lock — allows concurrent inference,
         // but blocks while training holds the write lock.
         let gpu_guard = gpu_coordination_read_guard(&gpu_lock);
+        let loaded = loaded_adapter
+            .read()
+            .map_err(|error| anyhow::anyhow!("loaded adapter identity lock poisoned: {error}"))?;
+        anyhow::ensure!(
+            *loaded == adapter,
+            "direct request adapter revision is stale: expected {:?}, loaded {:?}",
+            adapter,
+            *loaded
+        );
+        drop(loaded);
         let runner_guard = runner.read().unwrap();
         let result = (|| -> anyhow::Result<TimedGenerationOutput> {
             runner_guard.ensure_backend_healthy()?;
@@ -8039,13 +8235,14 @@ async fn generate_real_streaming(
     paged_cache: &std::sync::Arc<kiln_model::PagedKvCacheKt>,
     prefix_cache: &std::sync::Arc<std::sync::Mutex<RealPrefixCache>>,
     decode_batcher: &Option<std::sync::Arc<kiln_model::DecodeBatcher>>,
+    adapter: Option<LoadedAdapterIdentity>,
     prompt_text: &str,
     prompt_tokens: &[TokenId],
     sampling: &SamplingParams,
     req: &ChatCompletionRequest,
     request_start: std::time::Instant,
     completion_cache_key: Option<DeterministicCompletionCacheKey>,
-    chat_request_cache_key: Option<String>,
+    chat_request_cache_key: Option<DeterministicCacheKey>,
     chat_request_cache_owner: Option<ChatRequestCacheOwnerGuard>,
 ) -> Result<Response, ApiError> {
     let (mtp_supported, has_active_lora) = {
@@ -8071,12 +8268,6 @@ async fn generate_real_streaming(
     let prompt_tokens = prompt_tokens.to_vec();
     let params = sampling.clone();
     let thinking_budget = sampling.thinking_budget.clone();
-    // For prefix-cache keying. After ensure_adapter / ensure_composed_adapter_swap,
-    // state.loaded_adapter_name reflects the actually-loaded adapter (a
-    // `__composed:<hash>` name when the request used `adapters: [...]`), which
-    // is what we want as the cache key — distinct compositions and the base
-    // model must not share cached blocks.
-    let adapter = state.loaded_adapter_name.read().unwrap().clone();
     let model = req
         .model
         .clone()
@@ -8091,6 +8282,7 @@ async fn generate_real_streaming(
     let state_for_record = state.clone();
     let completion_cache = state.completion_cache.clone();
     let chat_request_cache = state.chat_request_cache.clone();
+    let loaded_adapter = state.loaded_adapter.clone();
     let prompt_text_full = last_user_message_text(req);
     let prompt_preview = truncate_chars(&prompt_text_full, PROMPT_PREVIEW_MAX_CHARS);
     let prompt_full = truncate_chars(&prompt_text_full, FULL_BODY_MAX_CHARS);
@@ -8241,12 +8433,22 @@ async fn generate_real_streaming(
             // worker, that worker is also drained through explicit settlement.
             let prefix_cache_diagnostic_for_prefill = prefix_cache_diagnostic.clone();
             let cancel_for_prefill = cancel.clone();
-            let mut prefill =
-                tokio::task::spawn_blocking(move || -> anyhow::Result<DirectModelStream> {
+            let mut prefill = tokio::task::spawn_blocking(
+                move || -> anyhow::Result<DirectModelStream> {
                     if cancel_for_prefill.is_cancelled() {
                         anyhow::bail!("direct streaming prefill cancelled before GPU ownership");
                     }
                     let gpu_guard = gpu_coordination_read_guard(&gpu_lock);
+                    let loaded = loaded_adapter.read().map_err(|error| {
+                        anyhow::anyhow!("loaded adapter identity lock poisoned: {error}")
+                    })?;
+                    anyhow::ensure!(
+                        *loaded == adapter,
+                        "direct streaming request adapter revision is stale: expected {:?}, loaded {:?}",
+                        adapter,
+                        *loaded
+                    );
+                    drop(loaded);
                     if cancel_for_prefill.is_cancelled() {
                         anyhow::bail!("direct streaming prefill cancelled before model work");
                     }
@@ -8354,7 +8556,8 @@ async fn generate_real_streaming(
                             )
                         }
                     }
-                });
+                },
+            );
 
             let prefill_selection =
                 select_direct_stream_before_deadline(deadline, tx.closed(), &mut prefill).await;
@@ -9287,7 +9490,7 @@ fn batch_prepared_prompts_disabled() -> bool {
 fn deterministic_batch_cache_key(
     req: &BatchCompletionRequest,
     total_outputs: usize,
-) -> Option<DeterministicBatchCacheKey> {
+) -> Option<String> {
     deterministic_batch_cache_key_with_vocab_size(req, total_outputs, usize::MAX)
 }
 
@@ -9296,7 +9499,7 @@ fn deterministic_batch_cache_key_with_vocab_size(
     req: &BatchCompletionRequest,
     total_outputs: usize,
     vocab_size: usize,
-) -> Option<DeterministicBatchCacheKey> {
+) -> Option<String> {
     deterministic_batch_cache_key_with_vocab_size_and_fold(
         req,
         total_outputs,
@@ -9312,7 +9515,7 @@ fn deterministic_batch_cache_key_with_vocab_size_and_fold(
     vocab_size: usize,
     fold_reasoning_into_content: bool,
     thinking_budget_tokens: Option<usize>,
-) -> Option<DeterministicBatchCacheKey> {
+) -> Option<String> {
     if total_outputs == 0 || req.adapter.is_some() || req.adapters.is_some() {
         return None;
     }
@@ -9598,6 +9801,7 @@ fn batch_response_from_cached_chat_requests(
 
 fn batch_response_from_chat_request_cache_hits(
     state: &AppState,
+    adapter: &Option<LoadedAdapterIdentity>,
     req: &BatchCompletionRequest,
     vocab_size: usize,
 ) -> Result<Option<BatchCompletionResponse>, ApiError> {
@@ -9624,7 +9828,7 @@ fn batch_response_from_chat_request_cache_hits(
         else {
             return Ok(None);
         };
-        keys.push(key);
+        keys.push(state.deterministic_cache_key(adapter.clone(), key));
     }
 
     let mut cached = Vec::with_capacity(keys.len());
@@ -9646,6 +9850,7 @@ fn batch_response_from_chat_request_cache_hits(
 
 fn batch_response_from_chat_choices_cache_hits(
     state: &AppState,
+    adapter: &Option<LoadedAdapterIdentity>,
     req: &BatchCompletionRequest,
     vocab_size: usize,
 ) -> Result<Option<BatchCompletionResponse>, ApiError> {
@@ -9675,7 +9880,7 @@ fn batch_response_from_chat_choices_cache_hits(
         else {
             return Ok(None);
         };
-        keys.push(key);
+        keys.push(state.deterministic_cache_key(adapter.clone(), key));
     }
 
     let mut cached_by_prompt = Vec::with_capacity(keys.len());
@@ -9742,6 +9947,7 @@ fn chat_request_cache_value_from_batch_item(
 
 fn store_chat_request_cache_from_batch_response(
     state: &AppState,
+    adapter: &Option<LoadedAdapterIdentity>,
     req: &BatchCompletionRequest,
     resp: &BatchCompletionResponse,
     vocab_size: usize,
@@ -9804,7 +10010,7 @@ fn store_chat_request_cache_from_batch_response(
 
     let mut cache = state.chat_request_cache.lock().unwrap();
     for (key, value) in entries {
-        cache.insert(key, value);
+        cache.insert(state.deterministic_cache_key(adapter.clone(), key), value);
     }
     Ok(())
 }
@@ -9847,6 +10053,7 @@ fn chat_choices_cache_value_from_batch_items(
 
 fn store_chat_choices_cache_from_batch_response(
     state: &AppState,
+    adapter: &Option<LoadedAdapterIdentity>,
     req: &BatchCompletionRequest,
     resp: &BatchCompletionResponse,
     vocab_size: usize,
@@ -9895,13 +10102,14 @@ fn store_chat_choices_cache_from_batch_response(
 
     let mut cache = state.chat_choices_cache.lock().unwrap();
     for (key, value) in entries {
-        cache.insert(key, value);
+        cache.insert(state.deterministic_cache_key(adapter.clone(), key), value);
     }
     Ok(())
 }
 
 fn store_chat_caches_from_batch_response(
     state: &AppState,
+    adapter: &Option<LoadedAdapterIdentity>,
     req: &BatchCompletionRequest,
     resp: &BatchCompletionResponse,
     vocab_size: usize,
@@ -9910,8 +10118,8 @@ fn store_chat_caches_from_batch_response(
     if budget.tokens.is_some() || budget.ms.is_some() {
         return Ok(());
     }
-    store_chat_request_cache_from_batch_response(state, req, resp, vocab_size)?;
-    store_chat_choices_cache_from_batch_response(state, req, resp, vocab_size)?;
+    store_chat_request_cache_from_batch_response(state, adapter, req, resp, vocab_size)?;
+    store_chat_choices_cache_from_batch_response(state, adapter, req, resp, vocab_size)?;
     Ok(())
 }
 
@@ -10000,8 +10208,12 @@ async fn batch_completions_inner(
 
     apply_eval_mode_batch_defaults(state, &mut req);
     let effective_thinking_budget = effective_batch_thinking_budget_for_request(state, &req);
+    let stable_default_adapter = stable_default_adapter_identity(state);
+    let cache_adapter = stable_default_adapter
+        .clone()
+        .unwrap_or_else(|| state.loaded_adapter_identity());
 
-    let batch_cache_key = if effective_thinking_budget.ms.is_some() {
+    let mut batch_cache_key = if effective_thinking_budget.ms.is_some() {
         None
     } else {
         deterministic_batch_cache_key_with_vocab_size_and_fold(
@@ -10011,9 +10223,9 @@ async fn batch_completions_inner(
             state.fold_reasoning_into_content,
             effective_thinking_budget.tokens,
         )
+        .map(|request| state.deterministic_cache_key(cache_adapter.clone(), request))
     };
-    let can_hit_batch_cache_before_adapter_work =
-        state.active_adapter_name.read().unwrap().is_none();
+    let can_hit_batch_cache_before_adapter_work = stable_default_adapter.is_some();
     let mut batch_cache_owner = None;
     if can_hit_batch_cache_before_adapter_work && let Some(key) = batch_cache_key.as_ref() {
         let claim = state.batch_cache.lock().unwrap().claim(key);
@@ -10022,28 +10234,37 @@ async fn batch_completions_inner(
                 let resp = batch_response_from_cached_value(state, &req, cached);
                 store_chat_caches_from_batch_response(
                     state,
+                    &cache_adapter,
                     &req,
                     &resp,
                     state.model_config.vocab_size,
                 )?;
-                return Ok(Json(resp).into_response());
+                return Ok(response_with_loaded_adapter_identity(
+                    Json(resp).into_response(),
+                    &cache_adapter,
+                ));
             }
             DeterministicBatchCacheClaim::Wait(receiver) => {
                 if let Some(cached) = wait_for_deterministic_batch(receiver).await {
                     let resp = batch_response_from_cached_value(state, &req, cached);
                     store_chat_caches_from_batch_response(
                         state,
+                        &cache_adapter,
                         &req,
                         &resp,
                         state.model_config.vocab_size,
                     )?;
-                    return Ok(Json(resp).into_response());
+                    return Ok(response_with_loaded_adapter_identity(
+                        Json(resp).into_response(),
+                        &cache_adapter,
+                    ));
                 }
             }
-            DeterministicBatchCacheClaim::Owner => {
+            DeterministicBatchCacheClaim::Owner(claim_id) => {
                 batch_cache_owner = Some(BatchCacheOwnerGuard::new(
                     state.batch_cache.clone(),
                     key.clone(),
+                    claim_id,
                 ));
             }
         }
@@ -10058,6 +10279,7 @@ async fn batch_completions_inner(
                 state.model_config.vocab_size,
                 state.fold_reasoning_into_content,
             )?
+            .map(|request| state.deterministic_cache_key(cache_adapter.clone(), request))
         };
     if can_hit_batch_cache_before_adapter_work && let Some(key) = chat_choices_cache_key.as_ref() {
         let probe = state.chat_choices_cache.lock().unwrap().probe(key);
@@ -10072,11 +10294,15 @@ async fn batch_completions_inner(
                 }
                 store_chat_request_cache_from_batch_response(
                     state,
+                    &cache_adapter,
                     &req,
                     &resp,
                     state.model_config.vocab_size,
                 )?;
-                return Ok(Json(resp).into_response());
+                return Ok(response_with_loaded_adapter_identity(
+                    Json(resp).into_response(),
+                    &cache_adapter,
+                ));
             }
             DeterministicChatChoicesCacheProbe::Wait(receiver) => {
                 if let Some(cached) = wait_for_deterministic_chat_choices(receiver).await {
@@ -10089,11 +10315,15 @@ async fn batch_completions_inner(
                     }
                     store_chat_request_cache_from_batch_response(
                         state,
+                        &cache_adapter,
                         &req,
                         &resp,
                         state.model_config.vocab_size,
                     )?;
-                    return Ok(Json(resp).into_response());
+                    return Ok(response_with_loaded_adapter_identity(
+                        Json(resp).into_response(),
+                        &cache_adapter,
+                    ));
                 }
             }
             DeterministicChatChoicesCacheProbe::Miss => {}
@@ -10101,8 +10331,12 @@ async fn batch_completions_inner(
     }
 
     if can_hit_batch_cache_before_adapter_work
-        && let Some(resp) =
-            batch_response_from_chat_choices_cache_hits(state, &req, state.model_config.vocab_size)?
+        && let Some(resp) = batch_response_from_chat_choices_cache_hits(
+            state,
+            &cache_adapter,
+            &req,
+            state.model_config.vocab_size,
+        )?
     {
         let cache_value = cache_value_from_batch_response(&resp);
         if let Some(owner) = batch_cache_owner.take() {
@@ -10112,16 +10346,24 @@ async fn batch_completions_inner(
         }
         store_chat_request_cache_from_batch_response(
             state,
+            &cache_adapter,
             &req,
             &resp,
             state.model_config.vocab_size,
         )?;
-        return Ok(Json(resp).into_response());
+        return Ok(response_with_loaded_adapter_identity(
+            Json(resp).into_response(),
+            &cache_adapter,
+        ));
     }
 
     if can_hit_batch_cache_before_adapter_work
-        && let Some(resp) =
-            batch_response_from_chat_request_cache_hits(state, &req, state.model_config.vocab_size)?
+        && let Some(resp) = batch_response_from_chat_request_cache_hits(
+            state,
+            &cache_adapter,
+            &req,
+            state.model_config.vocab_size,
+        )?
     {
         let cache_value = cache_value_from_batch_response(&resp);
         if let Some(owner) = batch_cache_owner.take() {
@@ -10129,7 +10371,10 @@ async fn batch_completions_inner(
         } else if let Some(key) = batch_cache_key.clone() {
             state.batch_cache.lock().unwrap().insert(key, cache_value);
         }
-        return Ok(Json(resp).into_response());
+        return Ok(response_with_loaded_adapter_identity(
+            Json(resp).into_response(),
+            &cache_adapter,
+        ));
     }
 
     if batch_request_max_tokens(&req) == 0 {
@@ -10215,21 +10460,26 @@ async fn batch_completions_inner(
         }
         store_chat_request_cache_from_batch_response(
             state,
+            &cache_adapter,
             &req,
             &resp,
             state.model_config.vocab_size,
         )?;
         store_chat_choices_cache_from_batch_response(
             state,
+            &cache_adapter,
             &req,
             &resp,
             state.model_config.vocab_size,
         )?;
-        return Ok(Json(resp).into_response());
+        return Ok(response_with_loaded_adapter_identity(
+            Json(resp).into_response(),
+            &cache_adapter,
+        ));
     }
 
     // Resolve adapter once for the entire batch. After this returns,
-    // state.loaded_adapter_name reflects the loaded adapter and every
+    // The loaded-adapter identity reflects the loaded adapter and every
     // synthesized per-output ChatCompletionRequest below leaves
     // `adapter`/`adapters` as None — generate_real reads the active adapter
     // from state, not from the request.
@@ -10255,6 +10505,18 @@ async fn batch_completions_inner(
         }
     }
 
+    let request_adapter = state.loaded_adapter_identity();
+    if let Some(key) = batch_cache_key.as_mut() {
+        let rebound = state.deterministic_cache_key(request_adapter.clone(), key.request.clone());
+        if batch_cache_owner
+            .as_ref()
+            .is_some_and(|owner| !owner.matches_key(&rebound))
+        {
+            drop(batch_cache_owner.take());
+        }
+        *key = rebound;
+    }
+
     // Spawn one task per distinct rendered prompt, then run duplicates in that
     // group sequentially. Different prompts still run concurrently, while
     // duplicate prompt groups let the first physical generation register exact
@@ -10272,6 +10534,7 @@ async fn batch_completions_inner(
     let mut handles = Vec::with_capacity(prompt_groups.len());
     for prompt_group in prompt_groups {
         let state_clone = state.clone();
+        let request_adapter = request_adapter.clone();
         let model = req.model.clone();
         let stop = normalized_stop_option_for_synthetic_request(req.stop.as_deref());
         let temperature = req.temperature;
@@ -10362,12 +10625,14 @@ async fn batch_completions_inner(
                         generate_one_prepared_prompt_response(
                             &state_clone,
                             synth_req,
+                            request_adapter.clone(),
                             prompt_text,
                             prompt_tokens,
                         )
                         .await?
                     } else {
-                        generate_one_response(&state_clone, synth_req).await?
+                        generate_one_response(&state_clone, synth_req, request_adapter.clone())
+                            .await?
                     };
                     responses.push((completion_idx, resp));
                 }
@@ -10472,11 +10737,15 @@ async fn batch_completions_inner(
     }
     store_chat_choices_cache_from_batch_response(
         state,
+        &request_adapter,
         &req,
         &resp,
         state.model_config.vocab_size,
     )?;
-    Ok(Json(resp).into_response())
+    Ok(response_with_loaded_adapter_identity(
+        Json(resp).into_response(),
+        &request_adapter,
+    ))
 }
 
 fn request_values_are_effectively_greedy(temperature: Option<f32>, top_k: Option<u32>) -> bool {
@@ -10502,7 +10771,7 @@ async fn generate_multi_chat_response(
     req: &ChatCompletionRequest,
     request_start: std::time::Instant,
     n_per: usize,
-) -> Result<ChatCompletionResponse, ApiError> {
+) -> Result<(ChatCompletionResponse, Option<LoadedAdapterIdentity>), ApiError> {
     if chat_request_max_tokens(req) == 0 {
         let prompt_text = render_prompt_text(
             state,
@@ -10536,14 +10805,15 @@ async fn generate_multi_chat_response(
             Some(std::time::Duration::ZERO),
             Some(std::time::Duration::ZERO),
         );
-        return chat_response_from_multi_responses(
+        let response = chat_response_from_multi_responses(
             state,
             req,
             request_start,
             vec![(0, resp)],
             n_per,
             true,
-        );
+        )?;
+        return Ok((response, state.loaded_adapter_identity()));
     }
 
     let composed_target: Option<ComposedTarget> = if let Some(list) = req.adapters.as_deref() {
@@ -10567,6 +10837,7 @@ async fn generate_multi_chat_response(
             ensure_adapter(state, runner, &req.adapter, &Uuid::new_v4().to_string()).await?;
         }
     }
+    let request_adapter = state.loaded_adapter_identity();
 
     let clone_greedy_choices = effective_thinking_budget_for_request(state, req)
         .ms
@@ -10615,18 +10886,19 @@ async fn generate_multi_chat_response(
             include_performance: req.include_performance,
             include_config_hashes: req.include_config_hashes,
         };
-        let resp = generate_one_response(state, synth_req).await?;
+        let resp = generate_one_response(state, synth_req, request_adapter.clone()).await?;
         responses.push((completion_idx, resp));
     }
 
-    chat_response_from_multi_responses(
+    let response = chat_response_from_multi_responses(
         state,
         req,
         request_start,
         responses,
         n_per,
         clone_greedy_choices,
-    )
+    )?;
+    Ok((response, request_adapter))
 }
 
 fn chat_response_from_multi_responses(
@@ -10804,6 +11076,7 @@ fn preset_or_default(name: Option<&str>) -> SamplingParams {
 async fn generate_one_response(
     state: &AppState,
     mut req: ChatCompletionRequest,
+    request_adapter: Option<LoadedAdapterIdentity>,
 ) -> Result<ChatCompletionResponse, ApiError> {
     let request_start = std::time::Instant::now();
     apply_eval_mode_chat_defaults(state, &mut req);
@@ -10822,13 +11095,10 @@ async fn generate_one_response(
             fold_reasoning_into_content_for_request(state, &req),
             effective_thinking_budget_for_request(state, &req).tokens,
         )?
+        .map(|request| state.deterministic_cache_key(request_adapter.clone(), request))
     };
-    let can_hit_chat_request_cache_before_prompt_work =
-        state.loaded_adapter_name.read().unwrap().is_none();
     let mut chat_request_cache_owner = None;
-    if can_hit_chat_request_cache_before_prompt_work
-        && let Some(key) = chat_request_cache_key.as_ref()
-    {
+    if let Some(key) = chat_request_cache_key.as_ref() {
         let claim = state.chat_request_cache.lock().unwrap().claim(key);
         match claim {
             DeterministicChatRequestCacheClaim::Hit(cached) => {
@@ -10849,10 +11119,11 @@ async fn generate_one_response(
                     ));
                 }
             }
-            DeterministicChatRequestCacheClaim::Owner => {
+            DeterministicChatRequestCacheClaim::Owner(claim_id) => {
                 chat_request_cache_owner = Some(ChatRequestCacheOwnerGuard::new(
                     state.chat_request_cache.clone(),
                     key.clone(),
+                    claim_id,
                 ));
             }
         }
@@ -10874,6 +11145,7 @@ async fn generate_one_response(
         &req,
         request_start,
         &sampling,
+        request_adapter,
         chat_request_cache_key,
         chat_request_cache_owner,
         &prompt_text,
@@ -10885,6 +11157,7 @@ async fn generate_one_response(
 async fn generate_one_prepared_prompt_response(
     state: &AppState,
     mut req: ChatCompletionRequest,
+    request_adapter: Option<LoadedAdapterIdentity>,
     prompt_text: &str,
     prompt_tokens: &[TokenId],
 ) -> Result<ChatCompletionResponse, ApiError> {
@@ -10905,13 +11178,10 @@ async fn generate_one_prepared_prompt_response(
             fold_reasoning_into_content_for_request(state, &req),
             effective_thinking_budget_for_request(state, &req).tokens,
         )?
+        .map(|request| state.deterministic_cache_key(request_adapter.clone(), request))
     };
-    let can_hit_chat_request_cache_before_prompt_work =
-        state.loaded_adapter_name.read().unwrap().is_none();
     let mut chat_request_cache_owner = None;
-    if can_hit_chat_request_cache_before_prompt_work
-        && let Some(key) = chat_request_cache_key.as_ref()
-    {
+    if let Some(key) = chat_request_cache_key.as_ref() {
         let claim = state.chat_request_cache.lock().unwrap().claim(key);
         match claim {
             DeterministicChatRequestCacheClaim::Hit(cached) => {
@@ -10932,10 +11202,11 @@ async fn generate_one_prepared_prompt_response(
                     ));
                 }
             }
-            DeterministicChatRequestCacheClaim::Owner => {
+            DeterministicChatRequestCacheClaim::Owner(claim_id) => {
                 chat_request_cache_owner = Some(ChatRequestCacheOwnerGuard::new(
                     state.chat_request_cache.clone(),
                     key.clone(),
+                    claim_id,
                 ));
             }
         }
@@ -10949,6 +11220,7 @@ async fn generate_one_prepared_prompt_response(
         &req,
         request_start,
         &sampling,
+        request_adapter,
         chat_request_cache_key,
         chat_request_cache_owner,
         prompt_text,
@@ -10963,18 +11235,20 @@ async fn generate_one_prepared_response(
     req: &ChatCompletionRequest,
     request_start: std::time::Instant,
     sampling: &SamplingParams,
-    chat_request_cache_key: Option<String>,
+    request_adapter: Option<LoadedAdapterIdentity>,
+    chat_request_cache_key: Option<DeterministicCacheKey>,
     mut chat_request_cache_owner: Option<ChatRequestCacheOwnerGuard>,
     prompt_text: &str,
     prompt_tokens: &[TokenId],
 ) -> Result<ChatCompletionResponse, ApiError> {
-    let completion_cache_key = deterministic_completion_cache_key(
+    let completion_cache_key = deterministic_completion_cache_key_for_adapter(
         state,
+        request_adapter.clone(),
         prompt_tokens,
         sampling,
         fold_reasoning_into_content_for_request(state, req),
     );
-    let mut completion_cache_owner = false;
+    let mut completion_cache_owner = None;
     if let Some(key) = completion_cache_key.as_ref() {
         let claim = state.completion_cache.lock().unwrap().claim(key);
         match claim {
@@ -11012,8 +11286,8 @@ async fn generate_one_prepared_response(
                     return Ok(resp);
                 }
             }
-            DeterministicCompletionCacheClaim::Owner => {
-                completion_cache_owner = true;
+            DeterministicCompletionCacheClaim::Owner(claim_id) => {
+                completion_cache_owner = Some(claim_id);
             }
         }
     }
@@ -11031,6 +11305,7 @@ async fn generate_one_prepared_response(
                 generate_real_batched(
                     state,
                     batching_engine,
+                    request_adapter.clone(),
                     prompt_text,
                     prompt_tokens,
                     sampling,
@@ -11045,6 +11320,7 @@ async fn generate_one_prepared_response(
                     block_manager,
                     paged_cache,
                     prefix_cache,
+                    request_adapter.clone(),
                     prompt_text,
                     prompt_tokens,
                     sampling,
@@ -11068,15 +11344,17 @@ async fn generate_one_prepared_response(
                         prompt_tokens.len(),
                         &err,
                     );
-                    if completion_cache_owner && let Some(key) = completion_cache_key.as_ref() {
-                        fail_deterministic_completion_owner(state, key);
+                    if let (Some(claim_id), Some(key)) =
+                        (completion_cache_owner, completion_cache_key.as_ref())
+                    {
+                        fail_deterministic_completion_owner(state, key, claim_id);
                     }
                     return Err(err);
                 }
             };
             if let Some(key) = completion_cache_key.clone() {
-                if completion_cache_owner {
-                    complete_deterministic_completion_owner(state, key, &resp);
+                if let Some(claim_id) = completion_cache_owner {
+                    complete_deterministic_completion_owner(state, key, claim_id, &resp);
                 } else {
                     store_deterministic_completion(state, key, &resp);
                 }
@@ -11119,15 +11397,17 @@ async fn generate_one_prepared_response(
                         prompt_tokens.len(),
                         &err,
                     );
-                    if completion_cache_owner && let Some(key) = completion_cache_key.as_ref() {
-                        fail_deterministic_completion_owner(state, key);
+                    if let (Some(claim_id), Some(key)) =
+                        (completion_cache_owner, completion_cache_key.as_ref())
+                    {
+                        fail_deterministic_completion_owner(state, key, claim_id);
                     }
                     return Err(err);
                 }
             };
             if let Some(key) = completion_cache_key.clone() {
-                if completion_cache_owner {
-                    complete_deterministic_completion_owner(state, key, &resp);
+                if let Some(claim_id) = completion_cache_owner {
+                    complete_deterministic_completion_owner(state, key, claim_id, &resp);
                 } else {
                     store_deterministic_completion(state, key, &resp);
                 }
@@ -11800,7 +12080,10 @@ mod tests {
     async fn chat_adapter_missing_regression_does_not_unload_active_adapter_http_path() {
         let state = make_batch_test_state();
         *state.active_adapter_name.write().unwrap() = Some("loaded-a".to_string());
-        *state.loaded_adapter_name.write().unwrap() = Some("loaded-a".to_string());
+        *state.loaded_adapter.write().unwrap() = Some(LoadedAdapterIdentity {
+            name: "loaded-a".to_string(),
+            content_revision: "a".repeat(64),
+        });
         let state_for_assert = state.clone();
 
         let (status, body) = chat_post(
@@ -11821,11 +12104,7 @@ mod tests {
             "regression: omitted chat `adapter` must not unload server default"
         );
         assert_eq!(
-            state_for_assert
-                .loaded_adapter_name
-                .read()
-                .unwrap()
-                .as_deref(),
+            state_for_assert.loaded_adapter_name().as_deref(),
             Some("loaded-a"),
             "regression: omitted chat `adapter` must not unload runtime adapter"
         );
@@ -15077,6 +15356,12 @@ mod tests {
                 "eval-adapter"
             );
             assert_eq!(resp.headers().get("x-kiln-loaded-adapter").unwrap(), "base");
+            assert_eq!(
+                resp.headers()
+                    .get("x-kiln-loaded-adapter-revision")
+                    .unwrap(),
+                "base"
+            );
             let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
             let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(json["object"], "chat.completion");
@@ -21473,6 +21758,50 @@ mod tests {
             (0, 1, 1),
             "sampled n>1 batch should tokenize the shared prompt once"
         );
+    }
+
+    #[test]
+    fn runtime_headers_preserve_the_revision_bound_to_the_response() {
+        let state = make_batch_test_state();
+        let old = Some(LoadedAdapterIdentity {
+            name: "same-name".to_string(),
+            content_revision: "old-revision".to_string(),
+        });
+        let response =
+            response_with_loaded_adapter_identity(Response::new(axum::body::Body::empty()), &old);
+        *state.loaded_adapter.write().unwrap() = Some(LoadedAdapterIdentity {
+            name: "same-name".to_string(),
+            content_revision: "new-revision".to_string(),
+        });
+
+        let response = response_with_runtime_headers(&state, response);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-kiln-loaded-adapter-revision")
+                .unwrap(),
+            "old-revision"
+        );
+    }
+
+    #[test]
+    fn cache_owner_key_match_includes_the_purge_generation() {
+        let state = make_batch_test_state();
+        let adapter = Some(LoadedAdapterIdentity {
+            name: "same-name".to_string(),
+            content_revision: "same-revision".to_string(),
+        });
+        let old_key = state.deterministic_cache_key(adapter.clone(), "request".to_string());
+        let claim_id = match state.chat_request_cache.lock().unwrap().claim(&old_key) {
+            DeterministicChatRequestCacheClaim::Owner(claim_id) => claim_id,
+            _ => panic!("first request should own the cache claim"),
+        };
+        let owner =
+            ChatRequestCacheOwnerGuard::new(state.chat_request_cache.clone(), old_key, claim_id);
+        state.purge_adapter_caches(&Some("same-name".to_string()));
+        let rebound = state.deterministic_cache_key(adapter, "request".to_string());
+
+        assert!(!owner.matches_key(&rebound));
     }
 
     #[test]

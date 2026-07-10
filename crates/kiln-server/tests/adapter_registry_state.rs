@@ -13,7 +13,7 @@ use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::MockEngine;
 use kiln_scheduler::{Scheduler, SchedulerConfig};
 use kiln_server::api;
-use kiln_server::state::AppState;
+use kiln_server::state::{AppState, LoadedAdapterIdentity};
 
 fn test_tokenizer() -> KilnTokenizer {
     let mut vocab: HashMap<String, u32> = HashMap::new();
@@ -156,7 +156,10 @@ async fn adapters_registry_reports_loaded_available_and_invalid_entries() {
 
     let state = make_state(tmp.path().to_path_buf());
     *state.active_adapter_name.write().unwrap() = Some("active-adapter".to_string());
-    *state.loaded_adapter_name.write().unwrap() = Some("runtime-only".to_string());
+    *state.loaded_adapter.write().unwrap() = Some(LoadedAdapterIdentity {
+        name: "runtime-only".to_string(),
+        content_revision: "b".repeat(64),
+    });
     state.adapter_load_errors.write().unwrap().insert(
         "invalid-empty".to_string(),
         "previous load failed".to_string(),

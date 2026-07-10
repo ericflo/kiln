@@ -602,6 +602,15 @@ curl -s http://localhost:8420/v1/adapters/merge \
 
 The standard `/v1/chat/completions` endpoint accepts a request-body `adapters` array as a Kiln extension (mutually exclusive with `adapter`). Each entry is `{"name", "scale"}`. The server merges the composed adapter once via `merge_concat`, caches it on disk under `adapter_dir/.composed/` keyed by `(name, scale)` hash, and reuses the cache on subsequent requests with the same composition. `/v1/completions/batch` accepts the same `adapters` field for the whole batch.
 
+Adapter identity is content-addressed, not name-only. `POST /v1/adapters/load`
+returns `content_revision`; `GET /v1/adapters` exposes the authoritative
+`loaded_adapter_identity` object; `/health` exposes
+`loaded_adapter_revision`; and chat responses include
+`x-kiln-loaded-adapter-revision` (`base` without a LoRA). The revision is
+published with the weight flip and is part of queued work, prefix-cache keys,
+and deterministic response-cache keys, so rewriting an adapter in place cannot
+reuse results produced by the previous bytes.
+
 ```bash
 curl -s http://localhost:8420/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -783,8 +792,8 @@ Use `kiln -v serve` when first-run startup or model-load diagnostics are needed.
 | GET | `/v1/models` | List available models |
 | POST | `/v1/chat/completions` | Chat completion (OpenAI-compatible). Kiln extensions include `thinking_budget_tokens` / `thinking_budget_ms` and per-request `adapter` or `adapters: [{name, scale}, …]` composition (see [9.8](#98-compose-adapters-per-request)). |
 | POST | `/v1/completions/batch` | Multi-prompt batch generation with the same thinking-budget controls — efficient for GRPO rollouts (see [9.4](#94-batch-generation-efficient-for-grpo-rollouts)). |
-| GET | `/v1/adapters` | List LoRA adapters |
-| POST | `/v1/adapters/load` | Load adapter from disk |
+| GET | `/v1/adapters` | List LoRA adapters and the exact loaded name/content revision |
+| POST | `/v1/adapters/load` | Load adapter from disk and return its exact content revision |
 | POST | `/v1/adapters/unload` | Unload active adapter |
 | DELETE | `/v1/adapters/{name}` | Delete an adapter |
 | GET | `/v1/adapters/{name}/download` | Stream adapter as `application/gzip` tar.gz (see [9.5](#95-export-an-adapter-download-targz)). |

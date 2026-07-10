@@ -19,7 +19,7 @@ use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::MockEngine;
 use kiln_scheduler::{Scheduler, SchedulerConfig};
 use kiln_server::api;
-use kiln_server::state::AppState;
+use kiln_server::state::{AppState, LoadedAdapterIdentity};
 
 fn test_tokenizer() -> KilnTokenizer {
     let mut vocab: HashMap<String, u32> = HashMap::new();
@@ -204,7 +204,10 @@ async fn test_load_rejects_missing_adapter_config_without_changing_active() {
 
     let state = make_state(tmp.path().to_path_buf());
     *state.active_adapter_name.write().unwrap() = Some("previous".to_string());
-    *state.loaded_adapter_name.write().unwrap() = Some("previous".to_string());
+    *state.loaded_adapter.write().unwrap() = Some(LoadedAdapterIdentity {
+        name: "previous".to_string(),
+        content_revision: "a".repeat(64),
+    });
     let state_for_assert = state.clone();
     let app = api::router(state);
 
@@ -232,11 +235,7 @@ async fn test_load_rejects_missing_adapter_config_without_changing_active() {
         Some("previous")
     );
     assert_eq!(
-        state_for_assert
-            .loaded_adapter_name
-            .read()
-            .unwrap()
-            .as_deref(),
+        state_for_assert.loaded_adapter_name().as_deref(),
         Some("previous")
     );
 }
@@ -254,7 +253,10 @@ async fn test_load_rejects_missing_adapter_weights_without_changing_active() {
 
     let state = make_state(tmp.path().to_path_buf());
     *state.active_adapter_name.write().unwrap() = Some("previous".to_string());
-    *state.loaded_adapter_name.write().unwrap() = Some("previous".to_string());
+    *state.loaded_adapter.write().unwrap() = Some(LoadedAdapterIdentity {
+        name: "previous".to_string(),
+        content_revision: "a".repeat(64),
+    });
     let state_for_assert = state.clone();
     let app = api::router(state);
 
@@ -282,11 +284,7 @@ async fn test_load_rejects_missing_adapter_weights_without_changing_active() {
         Some("previous")
     );
     assert_eq!(
-        state_for_assert
-            .loaded_adapter_name
-            .read()
-            .unwrap()
-            .as_deref(),
+        state_for_assert.loaded_adapter_name().as_deref(),
         Some("previous")
     );
 }

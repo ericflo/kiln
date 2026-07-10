@@ -30,8 +30,8 @@ use crate::response_delivery::{
     DeliveryWorker,
 };
 use crate::state::{
-    GpuCoordinationLock, RealPrefixCache, RealPrefixCacheRequest, gpu_coordination_read_guard,
-    gpu_coordination_write_guard_while_healthy,
+    GpuCoordinationLock, LoadedAdapterIdentity, RealPrefixCache, RealPrefixCacheRequest,
+    gpu_coordination_read_guard, gpu_coordination_write_guard_while_healthy,
 };
 
 const DEFAULT_ENGINE_CHANNEL: usize = 1024;
@@ -166,7 +166,7 @@ pub struct EngineRequest {
     pub request_id: Uuid,
     pub prompt_tokens: Vec<TokenId>,
     pub sampling: SamplingParams,
-    pub adapter: Option<String>,
+    pub adapter: Option<LoadedAdapterIdentity>,
     pub cancel: CancelHandle,
 }
 
@@ -366,6 +366,7 @@ pub struct RealDecodeForward {
     paged_cache: Arc<PagedKvCacheKt>,
     prefix_cache: Arc<Mutex<RealPrefixCache>>,
     gpu_lock: GpuCoordinationLock,
+    loaded_adapter: Arc<RwLock<Option<LoadedAdapterIdentity>>>,
     // When set, multi-row decode steps are dispatched as a loop of single-row
     // forwards instead of one batched forward. Defaults off so Vulkan reaches
     // the native multi-row resident decode route; the env override is kept for
@@ -380,6 +381,7 @@ impl RealDecodeForward {
         paged_cache: Arc<PagedKvCacheKt>,
         prefix_cache: Arc<Mutex<RealPrefixCache>>,
         gpu_lock: GpuCoordinationLock,
+        loaded_adapter: Arc<RwLock<Option<LoadedAdapterIdentity>>>,
     ) -> Self {
         let rowwise_decode = default_rowwise_decode();
         let backend_health = runner
@@ -393,6 +395,7 @@ impl RealDecodeForward {
             paged_cache,
             prefix_cache,
             gpu_lock,
+            loaded_adapter,
             rowwise_decode,
         }
     }
@@ -575,6 +578,17 @@ impl DecodeForward for RealDecodeForward {
     }
 
     fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot> {
+        let loaded = self
+            .loaded_adapter
+            .read()
+            .map_err(|error| anyhow::anyhow!("loaded adapter identity lock poisoned: {error}"))?;
+        anyhow::ensure!(
+            *loaded == req.adapter,
+            "queued request adapter revision is stale: expected {:?}, loaded {:?}",
+            req.adapter,
+            *loaded
+        );
+        drop(loaded);
         let gpu_guard = gpu_coordination_read_guard(&self.gpu_lock);
         let runner_guard = self.runner_guard()?;
         let prefix_cache_enabled = self.prefix_cache_guard()?.is_enabled();

@@ -62,6 +62,7 @@ struct AdapterDebugState {
     adapter_dir: String,
     active_adapter: Option<String>,
     loaded_adapter: Option<String>,
+    loaded_adapter_revision: Option<String>,
     loaded_adapters: Vec<LoadedAdapterDebugState>,
     available_adapter_count: usize,
     load_errors: BTreeMap<String, String>,
@@ -276,7 +277,11 @@ fn model_debug_state(state: &AppState) -> ModelDebugState {
 
 fn adapter_debug_state(state: &AppState) -> AdapterDebugState {
     let active_adapter = state.active_adapter_name.read().unwrap().clone();
-    let loaded_adapter = state.loaded_adapter_name.read().unwrap().clone();
+    let loaded_identity = state.loaded_adapter_identity();
+    let loaded_adapter = loaded_identity
+        .as_ref()
+        .map(|identity| identity.name.clone());
+    let loaded_adapter_revision = loaded_identity.map(|identity| identity.content_revision);
     let load_errors: BTreeMap<String, String> = state
         .adapter_load_errors
         .read()
@@ -302,6 +307,7 @@ fn adapter_debug_state(state: &AppState) -> AdapterDebugState {
         adapter_dir: state.adapter_dir.display().to_string(),
         active_adapter,
         loaded_adapter,
+        loaded_adapter_revision,
         loaded_adapters,
         available_adapter_count: count_adapter_dirs(&state.adapter_dir),
         load_errors,
@@ -617,7 +623,10 @@ mod tests {
         state.http_send_buffer_preflight_effective_bytes = Some(4096);
         state.default_thinking_enabled = Some(false);
         *state.active_adapter_name.write().unwrap() = Some("eval-adapter".to_string());
-        *state.loaded_adapter_name.write().unwrap() = Some("eval-adapter".to_string());
+        *state.loaded_adapter.write().unwrap() = Some(crate::state::LoadedAdapterIdentity {
+            name: "eval-adapter".to_string(),
+            content_revision: "a".repeat(64),
+        });
         state.adapter_load_errors.write().unwrap().insert(
             "bad-adapter".to_string(),
             "missing adapter_config.json".to_string(),
@@ -654,6 +663,7 @@ mod tests {
         assert_eq!(json["model"]["defaults_profile"]["name"], "Qwen3.5-4B");
         assert_eq!(json["adapters"]["active_adapter"], "eval-adapter");
         assert_eq!(json["adapters"]["loaded_adapter"], "eval-adapter");
+        assert_eq!(json["adapters"]["loaded_adapter_revision"], "a".repeat(64));
         assert_eq!(json["adapters"]["available_adapter_count"], 1);
         assert_eq!(
             json["adapters"]["load_errors"]["bad-adapter"],

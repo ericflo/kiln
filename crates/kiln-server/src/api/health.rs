@@ -31,6 +31,7 @@ struct HealthResponse {
     config_hashes: ConfigHashes,
     active_adapter: Option<String>,
     loaded_adapter: Option<String>,
+    loaded_adapter_revision: Option<String>,
     loaded_adapter_count: usize,
     adapters_loaded: usize,
     request_count: u64,
@@ -363,7 +364,11 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
 
     // Adapter info
     let active_adapter = state.active_adapter_name.read().unwrap().clone();
-    let loaded_adapter = state.loaded_adapter_name.read().unwrap().clone();
+    let loaded_identity = state.loaded_adapter_identity();
+    let loaded_adapter = loaded_identity
+        .as_ref()
+        .map(|identity| identity.name.clone());
+    let loaded_adapter_revision = loaded_identity.map(|identity| identity.content_revision);
     let loaded_adapter_count = usize::from(loaded_adapter.is_some());
 
     let adapter_dir = state.adapter_dir.clone();
@@ -606,6 +611,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         config_hashes: state.config_hashes.clone(),
         active_adapter,
         loaded_adapter,
+        loaded_adapter_revision,
         loaded_adapter_count,
         adapters_loaded,
         request_count,
@@ -1028,6 +1034,7 @@ mod tests {
         assert!(json["config_hashes"]["kiln_env_config_hash"].is_null());
         assert!(json["active_adapter"].is_null());
         assert!(json["loaded_adapter"].is_null());
+        assert!(json["loaded_adapter_revision"].is_null());
         assert_eq!(json["loaded_adapter_count"], 0);
         assert_eq!(json["adapters_loaded"], 0);
         assert_eq!(json["request_count"], 0);
@@ -1137,6 +1144,10 @@ mod tests {
         state.default_thinking_enabled = Some(false);
         state.fold_reasoning_into_content = true;
         *state.active_adapter_name.write().unwrap() = Some("eval-adapter".to_string());
+        *state.loaded_adapter.write().unwrap() = Some(crate::state::LoadedAdapterIdentity {
+            name: "eval-adapter".to_string(),
+            content_revision: "a".repeat(64),
+        });
         state.metrics.inc_request(crate::metrics::RequestStatus::Ok);
         state
             .metrics
@@ -1161,6 +1172,8 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
         assert_eq!(json["active_adapter"], "eval-adapter");
+        assert_eq!(json["loaded_adapter"], "eval-adapter");
+        assert_eq!(json["loaded_adapter_revision"], "a".repeat(64));
         assert_eq!(json["eval_mode"], true);
         assert_eq!(json["default_thinking_enabled"], false);
         assert_eq!(json["fold_reasoning_into_content"], true);

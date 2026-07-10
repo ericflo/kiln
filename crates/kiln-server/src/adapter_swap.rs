@@ -10,12 +10,11 @@
 //! would continue mid-generation on different weights whenever training
 //! auto-loaded or an eval swapped adapters.
 //!
-//! With the batching engine running (the default), the swap closure now
-//! executes at the engine's between-requests barrier (the `ResizeKv`
-//! pattern): admission pauses, active requests finish, then the weights
-//! flip and queued requests resume. The engine-less fallback path keeps
-//! the historical between-steps behavior — it serves one request at a
-//! time, so the window is far smaller there.
+//! With the batching engine running (the default), the swap closure executes
+//! at the engine's between-requests barrier (the `ResizeKv` pattern): admission
+//! pauses, active requests finish, then the weights flip and queued requests
+//! resume. The engine-less fallback takes exclusive GPU coordination ownership,
+//! paired with the request-lifetime read owner held by direct inference.
 //!
 //! Cache coherence rides along: when the target adapter's directory
 //! content changed (retrain auto-load, upload), its name-keyed cache
@@ -28,7 +27,9 @@ use std::sync::Arc;
 use kiln_model::ModelRunner;
 use kiln_model::lora_loader::LoraWeights;
 
-use crate::state::{AppState, ModelBackend};
+use crate::state::{
+    AppState, LoadedAdapterIdentity, ModelBackend, gpu_coordination_write_guard_while_healthy,
+};
 
 /// What to activate.
 #[derive(Debug, Clone)]
@@ -73,7 +74,7 @@ pub async fn swap_runtime_adapter(
     let _serial = adapter_swap_guard(state).await?;
 
     let target_name = req.target.cache_name();
-    let current = state.loaded_adapter_name.read().unwrap().clone();
+    let current = state.loaded_adapter_name();
     if current == target_name && !req.content_changed {
         return Ok(current);
     }
@@ -105,27 +106,29 @@ pub async fn swap_runtime_adapter(
     state
         .ensure_backend_healthy()
         .map_err(|error| format!("{error:#}"))?;
+    let target_identity = loaded_identity(&target_name, lora.as_ref())?;
 
     let backend_health = state
         .backend_health_handle()
         .ok_or_else(|| "adapter swap requires the real model backend".to_string())?;
 
-    let closure = swap_closure(
-        state,
-        runner,
-        lora,
-        target_name.clone(),
-        req.content_changed,
-    );
+    let closure = swap_closure(state, runner, lora, target_identity, req.content_changed);
     match engine {
         Some(engine) => engine
             .swap_adapter_while_healthy(closure, &backend_health)
             .await
             .map_err(|e| format!("{e:#}"))?,
         None => {
-            tokio::task::spawn_blocking(closure)
-                .await
-                .map_err(|e| format!("join error: {e}"))??;
+            let gpu_lock = state.gpu_lock.clone();
+            let backend_health = backend_health.clone();
+            tokio::task::spawn_blocking(move || {
+                let _gpu_guard =
+                    gpu_coordination_write_guard_while_healthy(&gpu_lock, &backend_health)
+                        .map_err(|error| format!("{error:#}"))?;
+                closure()
+            })
+            .await
+            .map_err(|e| format!("join error: {e}"))??;
         }
     }
 
@@ -141,7 +144,7 @@ pub fn swap_runtime_adapter_blocking(
     let _serial = adapter_swap_guard_blocking(state)?;
 
     let target_name = req.target.cache_name();
-    let current = state.loaded_adapter_name.read().unwrap().clone();
+    let current = state.loaded_adapter_name();
     if current == target_name && !req.content_changed {
         return Ok(current);
     }
@@ -163,23 +166,23 @@ pub fn swap_runtime_adapter_blocking(
     state
         .ensure_backend_healthy()
         .map_err(|error| format!("{error:#}"))?;
+    let target_identity = loaded_identity(&target_name, lora.as_ref())?;
 
     let backend_health = state
         .backend_health_handle()
         .ok_or_else(|| "adapter swap requires the real model backend".to_string())?;
 
-    let closure = swap_closure(
-        state,
-        runner,
-        lora,
-        target_name.clone(),
-        req.content_changed,
-    );
+    let closure = swap_closure(state, runner, lora, target_identity, req.content_changed);
     match engine {
         Some(engine) => engine
             .swap_adapter_blocking_while_healthy(closure, &backend_health)
             .map_err(|e| format!("{e:#}"))?,
-        None => closure()?,
+        None => {
+            let _gpu_guard =
+                gpu_coordination_write_guard_while_healthy(&state.gpu_lock, &backend_health)
+                    .map_err(|error| format!("{error:#}"))?;
+            closure()?;
+        }
     }
 
     log_transition(&current, &target_name, req.reason);
@@ -253,6 +256,23 @@ fn resolve_dir(state: &AppState, target: &SwapTarget) -> Result<Option<PathBuf>,
     }
 }
 
+fn loaded_identity(
+    target_name: &Option<String>,
+    lora: Option<&LoraWeights>,
+) -> Result<Option<LoadedAdapterIdentity>, String> {
+    match (target_name, lora) {
+        (None, None) => Ok(None),
+        (Some(name), Some(lora)) => lora
+            .source_identity()
+            .map(|source| Some(LoadedAdapterIdentity::from_source(name.clone(), source)))
+            .ok_or_else(|| format!("adapter `{name}` was loaded without an exact source identity")),
+        (name, weights) => Err(format!(
+            "adapter target/weight mismatch: target={name:?}, has_weights={}",
+            weights.is_some()
+        )),
+    }
+}
+
 /// The work that runs at the engine barrier (or inline on the fallback
 /// path): flip the weights, update the physical-truth name, and purge the
 /// target's stale cache entries when its content changed — after every
@@ -262,7 +282,7 @@ fn swap_closure(
     state: &AppState,
     runner: Arc<std::sync::RwLock<ModelRunner>>,
     lora: Option<LoraWeights>,
-    target_name: Option<String>,
+    target_identity: Option<LoadedAdapterIdentity>,
     content_changed: bool,
 ) -> crate::batching_engine::AdapterSwapClosure {
     let state = state.clone();
@@ -271,17 +291,22 @@ fn swap_closure(
             .ensure_backend_healthy()
             .map_err(|error| format!("{error:#}"))?;
         {
+            let mut published = state.loaded_adapter.write().unwrap();
             let mut guard = runner.write().unwrap();
             guard
                 .swap_lora(lora)
                 .map_err(|error| format!("{error:#}"))?;
+            *published = target_identity.clone();
         }
         state
             .ensure_backend_healthy()
             .map_err(|error| format!("{error:#}"))?;
-        *state.loaded_adapter_name.write().unwrap() = target_name.clone();
         if content_changed {
-            state.purge_adapter_caches(&target_name);
+            state.purge_adapter_caches(
+                &target_identity
+                    .as_ref()
+                    .map(|identity| identity.name.clone()),
+            );
         }
         Ok(())
     })
