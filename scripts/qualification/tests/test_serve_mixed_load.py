@@ -105,9 +105,10 @@ def debug_fixture(*, kv_autoscale: bool, rocm_graphs: bool) -> dict:
 
 class ServeMixedLoadTests(unittest.TestCase):
     def test_stream_reader_waits_for_readiness_before_touching_http_buffer(self) -> None:
-        sock = object()
+        sock = mock.Mock()
         connection = mock.Mock(sock=sock)
         response = mock.Mock()
+        response.fp.peek.return_value = b""
         response.read1.return_value = b"data: {}\n\n"
 
         with mock.patch.object(
@@ -127,10 +128,89 @@ class ServeMixedLoadTests(unittest.TestCase):
         self.assertEqual(select_call.call_count, 2)
         response.read1.assert_called_once_with(4096)
 
-    def test_stream_reader_retries_interrupted_readiness_poll(self) -> None:
-        sock = object()
+    def test_stream_reader_drains_buffered_body_before_polling_socket(self) -> None:
+        sock = mock.Mock()
         connection = mock.Mock(sock=sock)
         response = mock.Mock()
+        response.fp.peek.return_value = b"data"
+        response.read1.return_value = b"data: {}\n\n"
+
+        with mock.patch.object(serve.select, "select") as select_call:
+            chunk = serve.read_stream_chunk(
+                connection,
+                response,
+                deadline=serve.time.monotonic() + 10.0,
+                abort_event=None,
+                name="reader-test",
+            )
+
+        self.assertEqual(chunk, b"data: {}\n\n")
+        select_call.assert_not_called()
+        sock.setblocking.assert_called_once_with(False)
+        response.fp.peek.assert_called_once_with(1)
+        response.read1.assert_called_once_with(4096)
+
+    def test_stream_reader_drains_real_httpresponse_buffer_on_keep_alive(self) -> None:
+        body = b"data: [DONE]\n\n"
+        encoded = f"{len(body):x}\r\n".encode() + body + b"\r\n0\r\n\r\n"
+        listener = serve.socket.socket(serve.socket.AF_INET, serve.socket.SOCK_STREAM)
+        listener.setsockopt(serve.socket.SOL_SOCKET, serve.socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(2.0)
+        port = listener.getsockname()[1]
+        release = serve.threading.Event()
+
+        def serve_once() -> None:
+            accepted, _ = listener.accept()
+            accepted.settimeout(2.0)
+            request = b""
+            while b"\r\n\r\n" not in request:
+                request += accepted.recv(4096)
+            accepted.sendall(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: text/event-stream\r\n"
+                b"Transfer-Encoding: chunked\r\n"
+                b"Connection: keep-alive\r\n\r\n"
+                + encoded
+            )
+            release.wait(2.0)
+            accepted.close()
+
+        worker = serve.threading.Thread(target=serve_once, daemon=True)
+        worker.start()
+        connection = serve.http.client.HTTPConnection("127.0.0.1", port, timeout=2.0)
+        try:
+            connection.request("GET", "/stream")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertTrue(response.fp.peek(1))
+
+            with mock.patch.object(
+                serve.select,
+                "select",
+                side_effect=AssertionError("buffered body must not poll the socket"),
+            ):
+                chunk = serve.read_stream_chunk(
+                    connection,
+                    response,
+                    deadline=serve.time.monotonic() + 2.0,
+                    abort_event=None,
+                    name="real-buffer-test",
+                )
+            self.assertEqual(chunk, body)
+        finally:
+            release.set()
+            connection.close()
+            listener.close()
+            worker.join(timeout=2.0)
+        self.assertFalse(worker.is_alive())
+
+    def test_stream_reader_retries_interrupted_readiness_poll(self) -> None:
+        sock = mock.Mock()
+        connection = mock.Mock(sock=sock)
+        response = mock.Mock()
+        response.fp.peek.return_value = b""
         response.read1.return_value = b""
 
         with mock.patch.object(
@@ -190,6 +270,7 @@ class ServeMixedLoadTests(unittest.TestCase):
         connection = mock.Mock(sock=sock)
         response = mock.Mock(status=200)
         response.getheader.return_value = "text/event-stream"
+        response.fp.peek.return_value = b"data"
         response.read1.return_value = (
             b'data: {"choices":[{"delta":{"content":"token"}}]}\n\n'
         )
@@ -215,7 +296,8 @@ class ServeMixedLoadTests(unittest.TestCase):
 
         self.assertTrue(result.cancelled)
         self.assertEqual(len(result.semantic_times), 1)
-        sock.settimeout.assert_called_once_with(None)
+        sock.setblocking.assert_called_once_with(False)
+        sock.settimeout.assert_called_once()
         response.read1.assert_called_once_with(4096)
         connection.close.assert_called_once_with()
 

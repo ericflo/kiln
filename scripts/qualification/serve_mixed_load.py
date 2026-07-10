@@ -509,6 +509,25 @@ def read_stream_chunk(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError(f"{name} exceeded its request or overall deadline")
+
+        # getresponse() parses headers through a BufferedReader and may already
+        # have pulled body bytes out of the kernel socket. Probe that buffer in
+        # nonblocking mode before polling the socket itself, otherwise a full
+        # SSE response buffered with the headers can be starved on keep-alive.
+        buffered = b""
+        sock.setblocking(False)
+        try:
+            if response.fp is not None:
+                buffered = response.fp.peek(1)
+        except (BlockingIOError, InterruptedError, socket.timeout):
+            buffered = b""
+        finally:
+            # Any timeout from the actual buffered read is terminal at the
+            # request deadline; it is never retried on the same HTTPResponse.
+            sock.settimeout(remaining)
+        if buffered:
+            return response.read1(4096)
+
         try:
             readable, _, exceptional = select.select(
                 [sock], [], [sock], min(remaining, STREAM_READ_POLL_SECONDS)
@@ -518,6 +537,7 @@ def read_stream_chunk(
         if exceptional:
             raise ConnectionError(f"{name} stream socket reported an exceptional condition")
         if readable:
+            sock.settimeout(max(0.1, deadline - time.monotonic()))
             return response.read1(4096)
 
 
@@ -580,10 +600,6 @@ def run_stream(
             raise QualificationError(f"{name} returned unexpected content type {content_type!r}")
         if connection.sock is None:
             raise ConnectionError(f"{name} HTTP connection has no live socket")
-        # A timeout raised by HTTPResponse's buffered file permanently poisons
-        # subsequent reads ("cannot read from timed out object"). Readiness
-        # polling keeps cancellation responsive without entering that state.
-        connection.sock.settimeout(None)
         parser = SSEParser()
         while not done:
             chunk = read_stream_chunk(
