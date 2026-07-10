@@ -89,7 +89,8 @@ changes before treating 4-6 aggregate minutes as the established baseline.
 
 Raw logs, traces, and profiles belong under ignored `.qualification/` paths.
 Only compact receipts, workload manifests, schemas, and useful summaries are
-checked in.
+checked in. The complete new-machine, workload, validation, comparison, and
+check-in procedure is in [Local Hardware Qualification](qualification.md).
 
 Capture this machine's backend environment:
 

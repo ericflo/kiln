@@ -81,7 +81,7 @@ See [`QUICKSTART.md`](QUICKSTART.md) for the full zero-to-running walkthrough â€
 - One logical change per PR. Small PRs land faster and are easier to bisect when something regresses.
 - Run `cargo build --locked` and `cargo test --locked` (with the documented skips above) before pushing. Automatic CI reruns the Linux default-feature checks; GPU backend builds are deliberate manual jobs and real hardware evidence comes from local qualification receipts. See [`docs/ci-policy.md`](docs/ci-policy.md).
 - Open the PR with a **plain title** â€” no project prefix. Describe what changed and why in the body.
-- For performance PRs, include comparable local qualification receipts. Record the exact source/model/workload identity, named hardware, tail latency, throughput, memory, and raw-log hash; a green compile-only job is not performance evidence.
+- For performance PRs, include comparable local qualification receipts. Record the exact source/model/workload identity, named hardware, tail latency, throughput, memory, and raw-log hash; a green compile-only job is not performance evidence. Follow the [local hardware qualification guide](docs/qualification.md) so another machine can validate and extend the evidence chain.
 
 ## Code style
 
