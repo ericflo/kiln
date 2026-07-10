@@ -80,7 +80,7 @@ A 4B model continuously tuned to your specific workload — and continuously *me
 - **Adapter smoke tests** — pass `--adapter-smoke-test` on SFT/GRPO CLI submissions to record base-vs-adapter canary metrics in `train_receipt.json` before a full eval.
 - **Muon optimizer (default)** — momentum-orthogonalized SGD with fused on-device Newton-Schulz kernels for every backend (CUDA, ROCm, Vulkan, Metal). Converges LoRA fine-tunes in fewer steps than AdamW at roughly half the optimizer state (one momentum buffer vs Adam's two moments). AdamW and SGD remain selectable per-request via `{"optimizer": {"kind": "adam_w"}}` / `{"kind": "sgd"}`. Omit `learning_rate` and the server picks the per-optimizer default (Muon ~2e-2 vs AdamW ~1e-4 for SFT LoRA).
 - **LoRA hot-swap** — new adapter weights activate atomically at iteration boundaries. Zero downtime.
-- **Continuous batching** with chunked prefill — decode requests are never stalled by long prompts.
+- **Continuous batching** with token-budgeted prefill — long prompts yield after every bounded quantum so ready decode rows keep advancing.
 - **128K+ context** on 24GB — Qwen3.5-4B's hybrid architecture (24 linear attention + 8 full attention layers) means KV cache is 4x smaller than a pure transformer.
 - **Paged KV cache** — virtual memory-style block allocation eliminates fragmentation.
 - **FP8 KV cache** — optional quantization doubles effective context length.
@@ -687,6 +687,7 @@ Kiln uses a TOML config file. Environment variables override config values. See 
 | `server.port` | `KILN_PORT` | 8420 | Server listen port |
 | `server.http_send_buffer_bytes` | `KILN_HTTP_SEND_BUFFER_BYTES` | OS default | Optional accepted-socket `SO_SNDBUF` request (1024–16777216 bytes); Kiln preflights it before readiness and reports requested, kernel-readback, and platform-normalized effective bytes in health/debug |
 | `server.stream_stall_grace_ms` | `KILN_STREAM_STALL_GRACE_MS` | 2000 | Maximum continuous time a full 64-event response channel may make no delivery progress before that request is cancelled (10–2000 ms). Strict startup validation rejects malformed or out-of-range values; health/debug report the effective value and whether it came from the default, config file, or environment |
+| `server.max_batch_tokens` | `KILN_MAX_BATCH_TOKENS` | 512 | Combined decode-plus-prefill tokens per batching-actor cycle (2–65536). Ready decode rows consume one token each first; resumable prefills use the remainder round-robin. Lower values favor inter-token latency under long-prompt load; higher values favor prefill throughput. Invalid values stop startup; health/debug report value and source |
 | `server.default_thinking_enabled` | `KILN_DEFAULT_THINKING_ENABLED` | template default | Default `chat_template_kwargs.enable_thinking` when a request omits it |
 | `server.default_thinking_budget_tokens` | `KILN_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default maximum generated tokens before Kiln closes an open thinking block |
 | `server.default_thinking_budget_ms` | `KILN_DEFAULT_THINKING_BUDGET_MS` | unlimited | Default decode-time budget before Kiln closes an open thinking block |
@@ -710,6 +711,19 @@ so response handling cannot fragment a wide batch into per-row forwards.
 Current in-flight, backpressured, and pending-terminal counts are reported by
 `/health`, `/v1/debug/model-state`, and the
 `kiln_batching_engine_response_delivery_*` Prometheus gauges.
+
+Real-model serving initializes paged prefill ownership without running an
+unbounded prompt forward. Each actor cycle reserves one token for every ready
+decode row, then advances partial prefills round-robin within the remaining
+`server.max_batch_tokens` budget. Cancellation and shutdown release partial KV
+ownership only after the backend synchronization boundary; an unsettled device
+failure is quarantined instead of recycling pages. `/health` and
+`/v1/debug/model-state` expose `active_prefill`, the effective budget and its
+source, the last quantum size, and cumulative prefill-forward count. Prometheus
+exports the corresponding `kiln_batching_engine_active_prefill`,
+`kiln_batching_engine_max_batch_tokens`,
+`kiln_batching_engine_last_prefill_tokens`, and
+`kiln_batching_engine_prefill_forwards_total` series.
 
 Device-pool reclaim is disabled by default because CUDA and ROCm reclaim hooks
 may synchronize the accelerator. `on-demand` permits explicit startup and

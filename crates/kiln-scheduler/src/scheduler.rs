@@ -4,6 +4,9 @@ use kiln_core::request::{Request, RequestId, RequestState};
 use kiln_core::token::TokenId;
 use std::collections::VecDeque;
 
+/// Product default for one combined decode-plus-prefill scheduling cycle.
+pub const DEFAULT_MAX_BATCH_TOKENS: usize = 512;
+
 /// Configuration for the scheduler.
 #[derive(Debug, Clone)]
 pub struct SchedulerConfig {
@@ -29,7 +32,7 @@ pub struct SchedulerConfig {
 impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
-            max_batch_tokens: 8192,
+            max_batch_tokens: DEFAULT_MAX_BATCH_TOKENS,
             max_batch_size: 64,
             block_size: 16,
             prefix_cache_enabled: true,
@@ -442,6 +445,15 @@ mod tests {
 
     fn make_request_with_tokens(tokens: Vec<TokenId>) -> Request {
         Request::new(tokens, SamplingParams::greedy(), None)
+    }
+
+    #[test]
+    fn default_token_budget_matches_the_product_default() {
+        assert_eq!(SchedulerConfig::default().max_batch_tokens, 512);
+        assert_eq!(
+            SchedulerConfig::default().max_batch_tokens,
+            DEFAULT_MAX_BATCH_TOKENS
+        );
     }
 
     #[test]

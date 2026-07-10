@@ -1,5 +1,6 @@
 mod scheduler;
 
 pub use scheduler::{
-    PrefixCacheStats, ScheduledRequest, Scheduler, SchedulerConfig, SchedulerOutput,
+    DEFAULT_MAX_BATCH_TOKENS, PrefixCacheStats, ScheduledRequest, Scheduler, SchedulerConfig,
+    SchedulerOutput,
 };

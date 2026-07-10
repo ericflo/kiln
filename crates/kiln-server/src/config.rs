@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+pub use kiln_scheduler::DEFAULT_MAX_BATCH_TOKENS;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Smallest accepted per-connection HTTP `SO_SNDBUF` request.
@@ -39,7 +40,6 @@ pub const STREAM_STALL_GRACE_MAX_MS: u64 = DEFAULT_STREAM_STALL_GRACE_MS;
 /// Default combined decode-plus-prefill token budget for one batching-actor
 /// scheduling cycle. Decode rows consume one token each before prefill uses
 /// the remainder.
-pub const DEFAULT_MAX_BATCH_TOKENS: usize = 512;
 pub const MAX_BATCH_TOKENS_MIN: usize = 2;
 pub const MAX_BATCH_TOKENS_MAX: usize = 65_536;
 

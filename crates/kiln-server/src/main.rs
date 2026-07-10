@@ -535,7 +535,7 @@ async fn main() -> Result<()> {
         tracing::debug!("no model path set — running in mock mode");
         tracing::debug!("training endpoints will return 503 in mock mode (no real weights)");
         let scheduler_config = SchedulerConfig {
-            max_batch_tokens: 8192,
+            max_batch_tokens: config.server.max_batch_tokens.tokens(),
             max_batch_size: 64,
             block_size: 16,
             prefix_cache_enabled: config.prefix_cache.enabled,

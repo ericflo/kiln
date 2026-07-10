@@ -4181,8 +4181,8 @@ mod tests {
         });
         let handle = BatchingEngineHandle::start_with_options(forward, 8);
 
-        let mut rx_a = handle.enqueue(request(100, 5)).await.unwrap();
-        let mut rx_b = handle.enqueue(request(200, 5)).await.unwrap();
+        let rx_a = handle.enqueue(request(100, 5)).await.unwrap();
+        let rx_b = handle.enqueue(request(200, 5)).await.unwrap();
 
         let outcome = |mut rx: mpsc::Receiver<EngineEvent>| async move {
             loop {

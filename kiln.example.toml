@@ -42,6 +42,13 @@ stream_stall_grace_ms = 2000             # Maximum continuous time a full 64-eve
                                         # KILN_STREAM_STALL_GRACE_MS overrides this strictly;
                                         # malformed/zero/out-of-range values fail startup. The
                                         # effective value and source are in health/debug state.
+max_batch_tokens = 512                   # Combined decode-plus-prefill token budget per batching
+                                        # actor cycle. Existing decode rows consume one token each;
+                                        # resumable prefills share only the remainder, round-robin.
+                                        # Lower values improve decode latency under long-prompt load;
+                                        # higher values improve prefill throughput. Valid range:
+                                        # 2..=65536. KILN_MAX_BATCH_TOKENS overrides this strictly;
+                                        # the effective value and source are in health/debug state.
 # eval_mode = false
 # default_thinking_enabled = false     # Optional. Qwen3.5-4B profile preserves the
                                       # official template thinking default unless this

@@ -862,6 +862,7 @@ Key settings:
 |---------|---------|---------|-------------|
 | `model.path` | `KILN_MODEL_PATH` | none | Path to model weights (required for real inference) |
 | `server.port` | `KILN_PORT` | 8420 | Server listen port |
+| `server.max_batch_tokens` | `KILN_MAX_BATCH_TOKENS` | 512 | Combined decode-plus-prefill tokens per actor cycle; lower values favor decode latency during long prefills, higher values favor prefill throughput |
 | `server.default_thinking_budget_tokens` | `KILN_DEFAULT_THINKING_BUDGET_TOKENS` | unlimited | Default token budget for an open thinking block |
 | `server.default_thinking_budget_ms` | `KILN_DEFAULT_THINKING_BUDGET_MS` | unlimited | Default decode-time budget for an open thinking block |
 | `memory.inference_memory_fraction` | — | 0.7 | VRAM fraction for inference (rest for training) |

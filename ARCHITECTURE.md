@@ -127,18 +127,26 @@ The journey from HTTP request to generated text:
 
 See `crates/kiln-server/src/api/completions.rs` for the HTTP handler and `crates/kiln-model/src/generate.rs` for the generation loop.
 
-### Scheduler: Sarathi-Style Chunked Prefill
+### Scheduler: Token-Budgeted Chunked Prefill
 
-The scheduler (`crates/kiln-scheduler/src/scheduler.rs`) implements continuous batching with a strict priority order per iteration:
+Real-model serving is scheduled by the actor in
+`crates/kiln-server/src/batching_engine.rs`; resumable paged-prefill ownership
+lives in `crates/kiln-model/src/generate.rs`. The `kiln-scheduler` crate drives
+mock-mode execution and retains the same scheduling policy. Each cycle has a
+strict priority order:
 
 1. **Decode requests first** — each active decode request gets exactly 1 token. These have absolute priority because stalling a decode request means latency for a waiting user.
 2. **Continue partial prefills** — if a prefill was chunked (prompt too large for one iteration's token budget), continue it with remaining budget.
 3. **Start new prefills** — promote waiting requests and begin their prefill, chunking to fit the remaining budget.
 
-The token budget (`max_batch_tokens`, default 8192) caps the total tokens per forward pass. A 50-token prompt with a budget of 30 gets split into two chunks (30 + 20). During the first chunk, any active decode requests still get their 1-token slot.
+The resolved `server.max_batch_tokens` budget (default 512) caps combined decode
+and prefill work per actor cycle. A 50-token prompt with a budget of 30 gets
+split into bounded chunks; if two decode rows are ready, they consume two tokens
+and that cycle's prefill quantum is at most 28. Partial prefills are selected
+round-robin, so a 16K prompt cannot repeatedly hide a shorter prefill.
 
 ```
-Iteration token budget: 8192
+Actor-cycle token budget: 512
 ┌──────────────────────────────────────────────────────────┐
 │ Decode tokens (1 each) │ Partial prefill │ New prefills  │
 │   Highest priority     │   Continue      │  Remaining    │
