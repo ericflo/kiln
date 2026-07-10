@@ -1156,31 +1156,74 @@ impl RealPrefixCache {
             };
         }
 
-        let mut evicted_blocks = Vec::new();
-        let needed_new_blocks = registration
-            .block_ids
-            .iter()
-            .filter(|block_id| !self.block_refcounts.contains_key(block_id))
-            .count();
-        if needed_new_blocks > self.max_blocks {
-            // This entry can never fit, even into an empty cache. Bail
-            // before the eviction loop below, which would otherwise evict
-            // every resident entry chasing an impossible target and still
-            // register nothing — destroying the whole cache for no gain.
+        let registration_blocks: HashSet<u32> = registration.block_ids.iter().copied().collect();
+        if registration_blocks.len() != registration.block_ids.len()
+            || registration_blocks.len() > self.max_blocks
+        {
+            // A single entry must fit after every resident entry is gone, and
+            // a sequence block table may not alias the same physical page at
+            // multiple logical positions.
             return RealPrefixCacheRegisterOutcome {
                 retained_blocks: Vec::new(),
                 evicted_blocks: Vec::new(),
             };
         }
-        while self.cached_blocks() + needed_new_blocks > self.max_blocks
-            || self.entries.len() >= self.max_entries
-        {
-            let Some(evict_idx) = self.oldest_evictable_entry_idx() else {
+
+        // Plan the complete mutation against a private refcount copy. The old
+        // loop evicted entries incrementally and could then discover a pinned
+        // entry made the registration impossible, returning a partially
+        // destroyed cache. It also kept `needed_new_blocks` fixed while
+        // eviction removed blocks shared with the incoming entry, allowing the
+        // committed cache to exceed `max_blocks`.
+        let mut projected_refcounts = self.block_refcounts.clone();
+        let mut eviction_candidates: Vec<usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.active_uses == 0)
+            .map(|(idx, _)| idx)
+            .collect();
+        eviction_candidates.sort_by_key(|&idx| {
+            let entry = &self.entries[idx];
+            (entry.last_used, entry.id)
+        });
+        let mut planned_evictions = Vec::new();
+        let mut candidate_cursor = 0;
+        loop {
+            let projected_blocks = registration_blocks.len()
+                + projected_refcounts
+                    .keys()
+                    .filter(|block_id| !registration_blocks.contains(block_id))
+                    .count();
+            let projected_entries = self.entries.len() - planned_evictions.len() + 1;
+            if projected_blocks <= self.max_blocks && projected_entries <= self.max_entries {
+                break;
+            }
+
+            let Some(&evict_idx) = eviction_candidates.get(candidate_cursor) else {
                 return RealPrefixCacheRegisterOutcome {
                     retained_blocks: Vec::new(),
-                    evicted_blocks,
+                    evicted_blocks: Vec::new(),
                 };
             };
+            candidate_cursor += 1;
+            planned_evictions.push(evict_idx);
+            for block_id in &self.entries[evict_idx].block_ids {
+                let remove = projected_refcounts
+                    .get_mut(block_id)
+                    .is_some_and(|refcount| {
+                        *refcount = refcount.saturating_sub(1);
+                        *refcount == 0
+                    });
+                if remove {
+                    projected_refcounts.remove(block_id);
+                }
+            }
+        }
+
+        let mut evicted_blocks = Vec::new();
+        planned_evictions.sort_unstable_by(|a, b| b.cmp(a));
+        for evict_idx in planned_evictions {
             let evicted = self.entries.remove(evict_idx);
             evicted_blocks.extend(self.release_entry_blocks(&evicted.block_ids));
         }
@@ -1200,8 +1243,7 @@ impl RealPrefixCache {
         // re-claimed them. Returning them in `evicted_blocks` would cause the
         // API layer to free live cached blocks back to the BlockManager, where
         // a concurrent request can re-allocate and overwrite them.
-        let registration_set: HashSet<u32> = registration.block_ids.iter().copied().collect();
-        evicted_blocks.retain(|block_id| !registration_set.contains(block_id));
+        evicted_blocks.retain(|block_id| !registration_blocks.contains(block_id));
         debug_assert!(
             evicted_blocks
                 .iter()
@@ -1221,6 +1263,19 @@ impl RealPrefixCache {
             last_used,
             active_uses: 0,
         });
+        debug_assert!(self.cached_blocks() <= self.max_blocks);
+        debug_assert!(self.entries.len() <= self.max_entries);
+        debug_assert_eq!(
+            self.block_refcounts,
+            self.entries
+                .iter()
+                .fold(HashMap::new(), |mut counts, entry| {
+                    for block_id in &entry.block_ids {
+                        *counts.entry(*block_id).or_insert(0) += 1;
+                    }
+                    counts
+                })
+        );
         RealPrefixCacheRegisterOutcome {
             retained_blocks,
             evicted_blocks,
@@ -1255,15 +1310,6 @@ impl RealPrefixCache {
             }
         }
         freed
-    }
-
-    fn oldest_evictable_entry_idx(&self) -> Option<usize> {
-        self.entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| entry.active_uses == 0)
-            .min_by_key(|(_, entry)| entry.last_used)
-            .map(|(idx, _)| idx)
     }
 
     fn release_entry_blocks(&mut self, block_ids: &[u32]) -> Vec<u32> {
@@ -4064,19 +4110,15 @@ mod tests {
         ));
     }
 
-    // Regression tests for #673: prefix-cache eviction must never return block
-    // IDs that the same `register()` call has just re-retained for the new
-    // entry. If it does, the API layer hands those IDs to BlockManager::free_all,
-    // which under workers=2 can re-allocate them and overwrite live KV that the
-    // prefix cache still serves as valid.
+    // Prefix-cache registration is a capacity transaction: it either plans a
+    // complete fit and commits it, or leaves every resident entry untouched.
 
     #[test]
-    fn register_does_not_evict_blocks_retained_by_incoming() -> anyhow::Result<()> {
+    fn register_rejects_incoming_union_larger_than_capacity() -> anyhow::Result<()> {
         let config = tiny_linear_config();
         let device = cpu_device!();
         let mut cache = RealPrefixCache::new(true, 4, 2, 1024, 49);
 
-        // Entry A occupies blocks [10, 11], the cache's full capacity.
         let outcome_a = cache.register(
             None,
             PagedPrefixRegistration {
@@ -4089,12 +4131,11 @@ mod tests {
         assert_eq!(outcome_a.retained_blocks, vec![10, 11]);
         assert!(outcome_a.evicted_blocks.is_empty());
 
-        // Entry B is a strict superset of A and reuses A's blocks plus block 12.
-        // To make room (cached_blocks=2 + needed_new=1 > max=2), the cache must
-        // evict A. Pre-fix, evicted_blocks would contain [10, 11] AND those IDs
-        // would be re-retained for B — a double-claim that frees live blocks.
+        // The fixed `needed_new_blocks` calculation used to count only block 12,
+        // evict A, and then commit all three incoming blocks under a two-block
+        // limit. Incoming unique ownership alone makes this entry impossible.
         let outcome_b = cache.register(
-            None,
+            Some("larger".to_string()),
             PagedPrefixRegistration {
                 prompt_tokens: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
                 block_ids: vec![10, 11, 12],
@@ -4103,18 +4144,90 @@ mod tests {
             },
         );
 
-        let retained: HashSet<u32> = outcome_b.retained_blocks.iter().copied().collect();
-        let evicted: HashSet<u32> = outcome_b.evicted_blocks.iter().copied().collect();
-        assert!(
-            retained.is_disjoint(&evicted),
-            "retained_blocks {retained:?} must not overlap evicted_blocks {evicted:?}",
+        assert!(outcome_b.retained_blocks.is_empty());
+        assert!(outcome_b.evicted_blocks.is_empty());
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.cached_blocks(), 2);
+        assert_eq!(cache.block_refcounts, HashMap::from([(10, 1), (11, 1)]));
+        assert_eq!(cache.stats().max_blocks, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn register_failure_does_not_partially_evict_before_pinned_entry() -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let device = cpu_device!();
+        let mut cache = RealPrefixCache::new(true, 4, 2, 1024, 49);
+        cache.register(
+            None,
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4],
+                block_ids: vec![10],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
+            },
         );
-        for block_id in &[10u32, 11, 12] {
-            assert!(
-                !evicted.contains(block_id),
-                "block {block_id} re-retained by incoming registration must not appear in evicted_blocks: {evicted:?}",
-            );
-        }
+        cache.register(
+            Some("evictable".to_string()),
+            PagedPrefixRegistration {
+                prompt_tokens: vec![5, 6, 7, 8],
+                block_ids: vec![11],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
+            },
+        );
+        let hit = cache
+            .lookup(&None, &[1, 2, 3, 4, 9], &SamplingParams::greedy())?
+            .expect("first entry must be pinned");
+        let entries_before: Vec<u64> = cache.entries.iter().map(|entry| entry.id).collect();
+        let refcounts_before = cache.block_refcounts.clone();
+
+        // Fitting [20, 21] requires both residents to leave. The unpinned
+        // entry is a candidate, but the first entry cannot be evicted until
+        // this hit releases its lease.
+        let outcome = cache.register(
+            Some("incoming".to_string()),
+            PagedPrefixRegistration {
+                prompt_tokens: vec![9, 10, 11, 12, 13, 14, 15, 16],
+                block_ids: vec![20, 21],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
+            },
+        );
+
+        assert!(outcome.retained_blocks.is_empty());
+        assert!(outcome.evicted_blocks.is_empty());
+        assert_eq!(
+            cache
+                .entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            entries_before
+        );
+        assert_eq!(cache.block_refcounts, refcounts_before);
+        cache.release_hit(hit.entry_id);
+        Ok(())
+    }
+
+    #[test]
+    fn register_rejects_duplicate_physical_blocks() -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let device = cpu_device!();
+        let mut cache = RealPrefixCache::new(true, 4, 4, 1024, 49);
+        let outcome = cache.register(
+            None,
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                block_ids: vec![10, 10],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
+            },
+        );
+        assert!(outcome.retained_blocks.is_empty());
+        assert!(outcome.evicted_blocks.is_empty());
+        assert!(cache.entries.is_empty());
+        assert!(cache.block_refcounts.is_empty());
         Ok(())
     }
 
@@ -4193,10 +4306,19 @@ mod tests {
     fn register_evicted_blocks_not_in_refcounts_after() -> anyhow::Result<()> {
         let config = tiny_linear_config();
         let device = cpu_device!();
-        let mut cache = RealPrefixCache::new(true, 4, 2, 1024, 49);
+        let mut cache = RealPrefixCache::new(true, 4, 3, 1024, 49);
 
-        // Fill capacity with an evictable entry whose blocks the next
-        // registration also wants.
+        // Make the unrelated entry oldest so one eviction is sufficient. The
+        // shared prefix entry must remain resident and gain a second refcount.
+        cache.register(
+            Some("old".to_string()),
+            PagedPrefixRegistration {
+                prompt_tokens: vec![40, 41, 42, 43],
+                block_ids: vec![40],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
+            },
+        );
         cache.register(
             None,
             PagedPrefixRegistration {
@@ -4207,9 +4329,9 @@ mod tests {
             },
         );
 
-        // Register a longer prompt that reuses [30, 31] and adds 32. The bug
-        // would let evicted_blocks contain 30/31 even though they are now
-        // tracked by the new entry's refcounts.
+        // Register a longer prompt that reuses [30, 31] and adds 32. Both old
+        // entries leave, but only block 40 becomes unowned after the incoming
+        // entry is committed. The unrelated oldest entry is the only removal.
         let outcome = cache.register(
             Some("ad".to_string()),
             PagedPrefixRegistration {
@@ -4220,6 +4342,12 @@ mod tests {
             },
         );
 
+        assert_eq!(outcome.retained_blocks, vec![32]);
+        assert_eq!(outcome.evicted_blocks, vec![40]);
+        assert_eq!(
+            cache.block_refcounts,
+            HashMap::from([(30, 2), (31, 2), (32, 1)])
+        );
         for block_id in &outcome.evicted_blocks {
             assert!(
                 !cache.block_refcounts.contains_key(block_id),
