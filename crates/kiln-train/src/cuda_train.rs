@@ -53,6 +53,33 @@ pub fn cuda_native_sft_train(
     progress_cb: Option<ProgressCallback>,
     gpu_step_coordination: Option<crate::trainer::GpuStepCoordination>,
 ) -> Result<PathBuf> {
+    cuda_native_sft_train_to(
+        examples,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        adapter_dir,
+        adapter_name,
+        progress_cb,
+        gpu_step_coordination,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn cuda_native_sft_train_to(
+    examples: &[SftExample],
+    config: &SftConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+    gpu_step_coordination: Option<crate::trainer::GpuStepCoordination>,
+) -> Result<PathBuf> {
     tracing::info!(
         num_examples = examples.len(),
         epochs = config.epochs,
@@ -63,13 +90,14 @@ pub fn cuda_native_sft_train(
         path = "backend_runtime_via_sft_train",
         "cuda_native_sft_train: routing through the trainer BackendRuntime path"
     );
-    crate::trainer::sft_train(
+    crate::trainer::sft_train_to(
         examples,
         config,
         model_config,
         weights,
         tokenizer,
         adapter_dir,
+        output_adapter_dir,
         adapter_name,
         progress_cb,
         None,
@@ -93,6 +121,31 @@ pub fn cuda_native_grpo_train(
     adapter_name: &str,
     progress_cb: Option<ProgressCallback>,
 ) -> Result<PathBuf> {
+    cuda_native_grpo_train_to(
+        groups,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        adapter_dir,
+        adapter_name,
+        progress_cb,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn cuda_native_grpo_train_to(
+    groups: &[GrpoGroup],
+    config: &GrpoConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+) -> Result<PathBuf> {
     tracing::info!(
         num_groups = groups.len(),
         learning_rate = config.effective_learning_rate(),
@@ -102,13 +155,14 @@ pub fn cuda_native_grpo_train(
         path = "backend_runtime_via_grpo_train",
         "cuda_native_grpo_train: routing through the trainer BackendRuntime path"
     );
-    crate::trainer::grpo_train(
+    crate::trainer::grpo_train_to(
         groups,
         config,
         model_config,
         weights,
         tokenizer,
         adapter_dir,
+        output_adapter_dir,
         adapter_name,
         progress_cb,
         None,
@@ -129,6 +183,31 @@ pub fn cuda_native_grpo_train_jsonl(
     adapter_name: &str,
     progress_cb: Option<ProgressCallback>,
 ) -> Result<PathBuf> {
+    cuda_native_grpo_train_jsonl_to(
+        dataset_path,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        adapter_dir,
+        adapter_name,
+        progress_cb,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn cuda_native_grpo_train_jsonl_to(
+    dataset_path: &Path,
+    config: &GrpoConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+) -> Result<PathBuf> {
     tracing::info!(
         dataset_path = %dataset_path.display(),
         learning_rate = config.effective_learning_rate(),
@@ -138,13 +217,14 @@ pub fn cuda_native_grpo_train_jsonl(
         path = "backend_runtime_via_grpo_train_jsonl",
         "cuda_native_grpo_train_jsonl: routing through the trainer BackendRuntime path"
     );
-    crate::trainer::grpo_train_jsonl(
+    crate::trainer::grpo_train_jsonl_to(
         dataset_path,
         config,
         model_config,
         weights,
         tokenizer,
         adapter_dir,
+        output_adapter_dir,
         adapter_name,
         progress_cb,
         None,

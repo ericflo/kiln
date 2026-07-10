@@ -157,6 +157,10 @@ pub struct ReplayState {
     started_at: std::time::Instant,
 }
 
+/// Reserved directory used by staged server training to pin the adapter being
+/// rewritten. It is intentionally hidden from adapter registry scans.
+pub const STARTING_ADAPTER_SNAPSHOT_DIR: &str = ".starting-adapter";
+
 /// Open the replay log + lineage for a training run *before* the optimizer
 /// step runs. Returns the effective seed so the trainer can apply it
 /// consistently to RNG sources used during init.
@@ -168,6 +172,28 @@ pub fn open_replay_state(
     config_seed: Option<u64>,
     parent_adapter: Option<&str>,
     adapter_dir: &Path,
+    adapter_name: &str,
+) -> Result<(ReplayState, u64)> {
+    open_replay_state_to(
+        ctx,
+        config_seed,
+        parent_adapter,
+        adapter_dir,
+        adapter_dir,
+        adapter_name,
+    )
+}
+
+/// Staged-output variant of [`open_replay_state`]. Parent lineage resolves
+/// from the prepared starting snapshot when rewriting that same adapter, or
+/// from the durable registry otherwise. New replay state remains beneath
+/// `output_adapter_dir` until the caller publishes it.
+pub fn open_replay_state_to(
+    ctx: &ReplayContext,
+    config_seed: Option<u64>,
+    parent_adapter: Option<&str>,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
     adapter_name: &str,
 ) -> Result<(ReplayState, u64)> {
     let seed = config_seed.unwrap_or_else(|| rand::random());
@@ -184,7 +210,12 @@ pub fn open_replay_state(
 
     let parent_lora = match parent_adapter {
         Some(name) => {
-            let parent_dir = adapter_dir.join(name);
+            let parent_dir = resolve_base_adapter_dir_from_roots(
+                name,
+                adapter_dir,
+                output_adapter_dir,
+                adapter_name,
+            );
             let parent_lineage = replay::read_lineage(&parent_dir)
                 .with_context(|| format!("reading parent lineage at {}", parent_dir.display()))?;
             Some(ParentLora {
@@ -195,7 +226,7 @@ pub fn open_replay_state(
         None => None,
     };
 
-    let output_dir = adapter_dir.join(adapter_name);
+    let output_dir = output_adapter_dir.join(adapter_name);
     let log = ReplayLog::new(&output_dir)?;
     log.append_request(&request)?;
 
@@ -1876,6 +1907,65 @@ fn resolve_and_validate_base_adapter(
     Ok(Some(base_dir))
 }
 
+pub(crate) fn resolve_base_adapter_dir_from_roots(
+    base_name: &str,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    output_adapter_name: &str,
+) -> PathBuf {
+    if base_name == output_adapter_name {
+        let starting_snapshot = output_adapter_dir.join(STARTING_ADAPTER_SNAPSHOT_DIR);
+        if starting_snapshot.is_dir() {
+            return starting_snapshot;
+        }
+    }
+    let staged = output_adapter_dir.join(base_name);
+    if base_name != output_adapter_name && staged.is_dir() {
+        staged
+    } else {
+        crate::adapter_shape::resolve_base_adapter_dir(base_name, adapter_dir)
+    }
+}
+
+fn resolve_and_validate_base_adapter_from_roots(
+    base_adapter: Option<&str>,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    output_adapter_name: &str,
+    model_config: &ModelConfig,
+    lora_rank: usize,
+    allow_adapter_shape_conversion: bool,
+) -> Result<Option<PathBuf>> {
+    let Some(base_name) = base_adapter else {
+        return Ok(None);
+    };
+    let base_dir = resolve_base_adapter_dir_from_roots(
+        base_name,
+        adapter_dir,
+        output_adapter_dir,
+        output_adapter_name,
+    );
+    let compatibility = crate::adapter_shape::validate_base_adapter_compatibility(
+        &base_dir,
+        model_config,
+        lora_rank,
+        allow_adapter_shape_conversion,
+    )
+    .with_context(|| {
+        format!(
+            "validate base adapter {} before optimizer setup",
+            base_dir.display()
+        )
+    })?;
+    tracing::info!(
+        base = %base_dir.display(),
+        rank = compatibility.rank,
+        tensor_count = compatibility.tensor_count,
+        "validated base adapter compatibility"
+    );
+    Ok(Some(base_dir))
+}
+
 /// Deterministic per-epoch permutation of `0..n` (Fisher-Yates seeded by
 /// `seed` + epoch). SFT previously replayed the dataset in identical order
 /// every epoch at batch size 1, so late examples always saw the
@@ -3068,8 +3158,40 @@ pub fn sft_train(
     replay_ctx: Option<ReplayContext>,
     gpu_step_coordination: Option<GpuStepCoordination>,
 ) -> Result<PathBuf> {
+    sft_train_to(
+        examples,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        adapter_dir,
+        adapter_name,
+        progress_cb,
+        replay_ctx,
+        gpu_step_coordination,
+    )
+}
+
+/// Train against adapters in `adapter_dir` while writing all new artifacts to
+/// `output_adapter_dir`. The server uses this to keep an in-progress rewrite
+/// invisible until its revision-barrier commit.
+#[allow(clippy::too_many_arguments)]
+pub fn sft_train_to(
+    examples: &[SftExample],
+    config: &SftConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+    replay_ctx: Option<ReplayContext>,
+    gpu_step_coordination: Option<GpuStepCoordination>,
+) -> Result<PathBuf> {
     let run_started = Instant::now();
-    let output_dir = adapter_dir.join(adapter_name);
+    let output_dir = output_adapter_dir.join(adapter_name);
     let training_data_sha256 = crate::train_receipt::sha256_json_serializable(&examples);
     let mut data_stats = crate::train_receipt::DataStatsReceipt {
         examples_read: examples.len(),
@@ -3077,10 +3199,9 @@ pub fn sft_train(
     };
     let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
     let mut lora_grad_norms = crate::train_receipt::LoraGradNormAccumulator::default();
-    let requested_base_adapter_dir = config
-        .base_adapter
-        .as_deref()
-        .map(|name| crate::adapter_shape::resolve_base_adapter_dir(name, adapter_dir));
+    let requested_base_adapter_dir = config.base_adapter.as_deref().map(|name| {
+        resolve_base_adapter_dir_from_roots(name, adapter_dir, output_adapter_dir, adapter_name)
+    });
 
     // (#1082) `embed_tokens.device()` is a kt Device; the SFT path is now
     // kt-native end-to-end (kt `Parameter`s, kt AdamW state, kt tape
@@ -3155,11 +3276,12 @@ pub fn sft_train(
     // and resolve the effective seed.
     let (replay_state, effective_seed) = match replay_ctx.as_ref() {
         Some(ctx) => {
-            let (state, seed) = open_replay_state(
+            let (state, seed) = open_replay_state_to(
                 ctx,
                 config.seed,
                 config.base_adapter.as_deref(),
                 adapter_dir,
+                output_adapter_dir,
                 adapter_name,
             )?;
             (Some(state), Some(seed))
@@ -3167,9 +3289,11 @@ pub fn sft_train(
         None => (None, config.seed),
     };
 
-    let base_adapter_dir = match resolve_and_validate_base_adapter(
+    let base_adapter_dir = match resolve_and_validate_base_adapter_from_roots(
         config.base_adapter.as_deref(),
         adapter_dir,
+        output_adapter_dir,
+        adapter_name,
         model_config,
         config.lora_rank,
         config.allow_adapter_shape_conversion,
@@ -3461,8 +3585,8 @@ pub fn sft_train(
                 // Periodic adapter checkpoint
                 if let Some(interval) = config.checkpoint_interval {
                     if interval > 0 && global_step % interval == 0 && global_step < total_steps {
-                        let ckpt_dir =
-                            adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
+                        let ckpt_dir = output_adapter_dir
+                            .join(format!("{adapter_name}-checkpoint-{global_step}"));
                         // Pull current Var values from registry into candle
                         // CPU storage before save_peft serializes them.
                         if let Err(e) = params.sync_to_master(&*backend) {
@@ -3673,6 +3797,34 @@ pub fn grpo_train(
     progress_cb: Option<ProgressCallback>,
     replay_ctx: Option<ReplayContext>,
 ) -> Result<PathBuf> {
+    grpo_train_to(
+        groups,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        adapter_dir,
+        adapter_name,
+        progress_cb,
+        replay_ctx,
+    )
+}
+
+/// Staged-output variant of [`grpo_train`].
+#[allow(clippy::too_many_arguments)]
+pub fn grpo_train_to(
+    groups: &[GrpoGroup],
+    config: &GrpoConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+    replay_ctx: Option<ReplayContext>,
+) -> Result<PathBuf> {
     let run_started = Instant::now();
     // Fail fast on loss compositions the kt-tape path cannot train —
     // BEFORE any forward pass. The old order discovered this per-step,
@@ -3689,12 +3841,11 @@ pub fn grpo_train(
         .validate_for_kt_tape(has_env_tokens)
         .map_err(|e| anyhow::anyhow!("GRPO loss config: {e}"))?;
 
-    let output_dir = adapter_dir.join(adapter_name);
+    let output_dir = output_adapter_dir.join(adapter_name);
     let training_data_sha256 = crate::train_receipt::sha256_json_serializable(&groups);
-    let requested_base_adapter_dir = config
-        .base_adapter
-        .as_deref()
-        .map(|name| crate::adapter_shape::resolve_base_adapter_dir(name, adapter_dir));
+    let requested_base_adapter_dir = config.base_adapter.as_deref().map(|name| {
+        resolve_base_adapter_dir_from_roots(name, adapter_dir, output_adapter_dir, adapter_name)
+    });
     // (#1082) `embed_tokens.device()` is a kt Device; the GRPO body is now
     // kt-native (kt `Parameter`s, kt AdamW state, kt tape forward/backward),
     // so keep `device` kt downstream. The only candle touch is safetensors
@@ -3794,11 +3945,12 @@ pub fn grpo_train(
     // optimizer step) and resolve the effective seed.
     let (replay_state, effective_seed) = match replay_ctx.as_ref() {
         Some(ctx) => {
-            let (state, seed) = open_replay_state(
+            let (state, seed) = open_replay_state_to(
                 ctx,
                 config.seed,
                 config.base_adapter.as_deref(),
                 adapter_dir,
+                output_adapter_dir,
                 adapter_name,
             )?;
             (Some(state), Some(seed))
@@ -3806,9 +3958,11 @@ pub fn grpo_train(
         None => (None, config.seed),
     };
 
-    let base_adapter_dir = match resolve_and_validate_base_adapter(
+    let base_adapter_dir = match resolve_and_validate_base_adapter_from_roots(
         config.base_adapter.as_deref(),
         adapter_dir,
+        output_adapter_dir,
+        adapter_name,
         model_config,
         config.lora_rank,
         config.allow_adapter_shape_conversion,
@@ -4162,7 +4316,7 @@ pub fn grpo_train(
             if let Some(interval) = config.checkpoint_interval {
                 if interval > 0 && global_step % interval == 0 && global_step < total_steps {
                     let ckpt_dir =
-                        adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
+                        output_adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
                     if let Err(e) = params.sync_to_master(&*backend) {
                         tracing::warn!(step = global_step, error = %e, "failed to sync LoRA Vars to candle for GRPO checkpoint");
                     }
@@ -4560,6 +4714,34 @@ pub fn grpo_train_jsonl(
     progress_cb: Option<ProgressCallback>,
     replay_ctx: Option<ReplayContext>,
 ) -> Result<PathBuf> {
+    grpo_train_jsonl_to(
+        dataset_path,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        adapter_dir,
+        adapter_name,
+        progress_cb,
+        replay_ctx,
+    )
+}
+
+/// Staged-output variant of [`grpo_train_jsonl`].
+#[allow(clippy::too_many_arguments)]
+pub fn grpo_train_jsonl_to(
+    dataset_path: &Path,
+    config: &GrpoConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    output_adapter_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+    replay_ctx: Option<ReplayContext>,
+) -> Result<PathBuf> {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 
@@ -4573,16 +4755,15 @@ pub fn grpo_train_jsonl(
         .loss
         .validate_for_kt_tape(false)
         .map_err(|e| anyhow::anyhow!("GRPO loss config: {e}"))?;
-    let output_dir = adapter_dir.join(adapter_name);
+    let output_dir = output_adapter_dir.join(adapter_name);
     let training_data = crate::train_receipt::TrainingDataReceipt {
         source: "jsonl_grpo_groups".to_string(),
         path: Some(dataset_path.display().to_string()),
         sha256: crate::train_receipt::sha256_file(dataset_path).ok(),
     };
-    let requested_base_adapter_dir = config
-        .base_adapter
-        .as_deref()
-        .map(|name| crate::adapter_shape::resolve_base_adapter_dir(name, adapter_dir));
+    let requested_base_adapter_dir = config.base_adapter.as_deref().map(|name| {
+        resolve_base_adapter_dir_from_roots(name, adapter_dir, output_adapter_dir, adapter_name)
+    });
     let mut data_stats = crate::train_receipt::DataStatsReceipt::default();
     let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
     let mut echo_metrics = crate::train_receipt::EchoActivityMetrics::default();
@@ -4664,11 +4845,12 @@ pub fn grpo_train_jsonl(
 
     let (replay_state, effective_seed) = match replay_ctx.as_ref() {
         Some(ctx) => {
-            let (state, seed) = open_replay_state(
+            let (state, seed) = open_replay_state_to(
                 ctx,
                 config.seed,
                 config.base_adapter.as_deref(),
                 adapter_dir,
+                output_adapter_dir,
                 adapter_name,
             )?;
             (Some(state), Some(seed))
@@ -4676,9 +4858,11 @@ pub fn grpo_train_jsonl(
         None => (None, config.seed),
     };
 
-    let base_adapter_dir = match resolve_and_validate_base_adapter(
+    let base_adapter_dir = match resolve_and_validate_base_adapter_from_roots(
         config.base_adapter.as_deref(),
         adapter_dir,
+        output_adapter_dir,
+        adapter_name,
         model_config,
         config.lora_rank,
         config.allow_adapter_shape_conversion,
@@ -5110,8 +5294,8 @@ pub fn grpo_train_jsonl(
 
             if let Some(interval) = config.checkpoint_interval {
                 if interval > 0 && processed_groups % interval == 0 && bytes_read < total_bytes {
-                    let ckpt_dir =
-                        adapter_dir.join(format!("{adapter_name}-checkpoint-{processed_groups}"));
+                    let ckpt_dir = output_adapter_dir
+                        .join(format!("{adapter_name}-checkpoint-{processed_groups}"));
                     if let Err(e) = params.sync_to_master(&*backend) {
                         tracing::warn!(step = processed_groups, error = %e, "failed to sync LoRA Vars to candle for streamed GRPO checkpoint");
                     }
@@ -11277,6 +11461,32 @@ pub(crate) mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     #[cfg(feature = "cuda")]
     pub(crate) static CUDA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn staged_base_resolution_never_uses_the_output_being_rewritten() {
+        let durable = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        std::fs::create_dir(durable.path().join("target")).unwrap();
+        std::fs::create_dir(staging.path().join("target")).unwrap();
+        std::fs::create_dir(staging.path().join("phase-one")).unwrap();
+        std::fs::create_dir(staging.path().join(STARTING_ADAPTER_SNAPSHOT_DIR)).unwrap();
+
+        assert_eq!(
+            resolve_base_adapter_dir_from_roots("target", durable.path(), staging.path(), "target",),
+            staging.path().join(STARTING_ADAPTER_SNAPSHOT_DIR),
+            "a same-name rewrite must stay pinned to its prepared starting snapshot"
+        );
+        assert_eq!(
+            resolve_base_adapter_dir_from_roots(
+                "phase-one",
+                durable.path(),
+                staging.path(),
+                "target",
+            ),
+            staging.path().join("phase-one"),
+            "a later phase may consume a distinct adapter produced in staging"
+        );
+    }
 
     #[test]
     fn gpu_step_coordination_rejects_when_quarantine_latches_during_wait() {

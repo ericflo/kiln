@@ -434,6 +434,7 @@ fn run_sft(
     weights: &kiln_model::forward::GpuWeights,
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
     adapter_dir: &std::path::Path,
+    output_adapter_dir: &std::path::Path,
     adapter_name: &str,
     progress_cb: trainer::ProgressCallback,
     replay_ctx: trainer::ReplayContext,
@@ -473,13 +474,14 @@ fn run_sft(
                 native_route_env,
                 "backend native training route enabled - routing to cuda_native_sft_train"
             );
-            return kiln_train::cuda_train::cuda_native_sft_train(
+            return kiln_train::cuda_train::cuda_native_sft_train_to(
                 examples,
                 &req.config,
                 model_config,
                 weights,
                 tokenizer,
                 adapter_dir,
+                output_adapter_dir,
                 adapter_name,
                 Some(progress_cb),
                 gpu_step_coordination,
@@ -497,13 +499,14 @@ fn run_sft(
             );
         }
     }
-    trainer::sft_train(
+    trainer::sft_train_to(
         examples,
         &req.config,
         model_config,
         weights,
         tokenizer,
         adapter_dir,
+        output_adapter_dir,
         adapter_name,
         Some(progress_cb),
         Some(replay_ctx),
@@ -521,6 +524,7 @@ fn run_grpo(
     weights: &kiln_model::forward::GpuWeights,
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
     adapter_dir: &std::path::Path,
+    output_adapter_dir: &std::path::Path,
     adapter_name: &str,
     progress_cb: trainer::ProgressCallback,
     replay_ctx: trainer::ReplayContext,
@@ -546,13 +550,14 @@ fn run_grpo(
                     "backend native training route enabled - routing streamed GRPO dataset to \
                      cuda_native_grpo_train_jsonl"
                 );
-                return kiln_train::cuda_train::cuda_native_grpo_train_jsonl(
+                return kiln_train::cuda_train::cuda_native_grpo_train_jsonl_to(
                     std::path::Path::new(dataset_path),
                     &req.config,
                     model_config,
                     weights,
                     tokenizer,
                     adapter_dir,
+                    output_adapter_dir,
                     adapter_name,
                     Some(progress_cb),
                 )
@@ -575,13 +580,14 @@ fn run_grpo(
                 dataset_path,
                 "routing streamed GRPO dataset to generic trainer"
             );
-            return trainer::grpo_train_jsonl(
+            return trainer::grpo_train_jsonl_to(
                 std::path::Path::new(dataset_path),
                 &req.config,
                 model_config,
                 weights,
                 tokenizer,
                 adapter_dir,
+                output_adapter_dir,
                 adapter_name,
                 Some(progress_cb),
                 Some(replay_ctx),
@@ -598,13 +604,14 @@ fn run_grpo(
                 native_route_env,
                 "backend native training route enabled - routing GRPO to cuda_native_grpo_train"
             );
-            return kiln_train::cuda_train::cuda_native_grpo_train(
+            return kiln_train::cuda_train::cuda_native_grpo_train_to(
                 &req.groups,
                 &req.config,
                 model_config,
                 weights,
                 tokenizer,
                 adapter_dir,
+                output_adapter_dir,
                 adapter_name,
                 Some(progress_cb),
             )
@@ -621,13 +628,14 @@ fn run_grpo(
             );
         }
     }
-    trainer::grpo_train(
+    trainer::grpo_train_to(
         &req.groups,
         &req.config,
         model_config,
         weights,
         tokenizer,
         adapter_dir,
+        output_adapter_dir,
         adapter_name,
         Some(progress_cb),
         Some(replay_ctx),
@@ -737,6 +745,7 @@ fn run_opd(
     weights: &kiln_model::forward::GpuWeights,
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
     adapter_dir: &std::path::Path,
+    output_adapter_dir: &std::path::Path,
     adapter_name: &str,
     progress_cb: trainer::ProgressCallback,
     teacher_spec: &crate::api::teachers::TeacherSpec,
@@ -936,7 +945,7 @@ fn run_opd(
 
     let trainer_progress_cb: trainer::ProgressCallback = progress_cb;
 
-    let output_dir = kiln_train::opd::opd_train(
+    let output_dir = kiln_train::opd::opd_train_to(
         prompts,
         &req.config,
         model_config,
@@ -944,6 +953,7 @@ fn run_opd(
         tokenizer,
         teacher,
         adapter_dir,
+        output_adapter_dir,
         adapter_name,
         Some(trainer_progress_cb),
     )
@@ -1616,6 +1626,7 @@ fn run_distill_refresh(
     weights: &kiln_model::forward::GpuWeights,
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
     adapter_dir: &std::path::Path,
+    output_adapter_dir: &std::path::Path,
     adapter_name: &str,
     progress_cb: trainer::ProgressCallback,
     teacher_spec: &crate::api::teachers::TeacherSpec,
@@ -1725,13 +1736,14 @@ fn run_distill_refresh(
         adapter_smoke_test: false,
     };
     tracing::info!(job_id = %job_id, adapter = %midtrain_name, "phase 1 — SFT midtrain");
-    trainer::sft_train(
+    trainer::sft_train_to(
         &midtrain_examples,
         &midtrain_config,
         model_config,
         weights,
         tokenizer,
         adapter_dir,
+        output_adapter_dir,
         &midtrain_name,
         Some(progress_cb),
         None,
@@ -1790,7 +1802,7 @@ fn run_distill_refresh(
         teacher = %req.behavioural_teacher,
         "phase 2 — OPD recover"
     );
-    let output_dir = kiln_train::opd::opd_train(
+    let output_dir = kiln_train::opd::opd_train_to(
         &prompts,
         &recover_config,
         model_config,
@@ -1798,6 +1810,7 @@ fn run_distill_refresh(
         tokenizer,
         teacher,
         adapter_dir,
+        output_adapter_dir,
         adapter_name,
         None,
     )
@@ -1838,6 +1851,7 @@ fn run_distill_merge(
     weights: &kiln_model::forward::GpuWeights,
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
     adapter_dir: &std::path::Path,
+    output_adapter_dir: &std::path::Path,
     adapter_name: &str,
     progress_cb: trainer::ProgressCallback,
     job_id: &str,
@@ -1938,7 +1952,7 @@ fn run_distill_merge(
     merge_config.output_name = Some(adapter_name.to_string());
     merge_config.auto_load = false;
 
-    let output_dir = kiln_train::opd::opd_train(
+    let output_dir = kiln_train::opd::opd_train_to(
         &all_prompts,
         &merge_config,
         model_config,
@@ -1946,6 +1960,7 @@ fn run_distill_merge(
         tokenizer,
         teacher,
         adapter_dir,
+        output_adapter_dir,
         adapter_name,
         Some(progress_cb),
     )
@@ -2049,6 +2064,7 @@ fn run_distill_pump(
     weights: &kiln_model::forward::GpuWeights,
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
     adapter_dir: &std::path::Path,
+    output_adapter_dir: &std::path::Path,
     adapter_name: &str,
     progress_cb: trainer::ProgressCallback,
     teacher_spec: &crate::api::teachers::TeacherSpec,
@@ -2144,7 +2160,7 @@ fn run_distill_pump(
     pump_config.output_name = Some(adapter_name.to_string());
     pump_config.auto_load = false;
 
-    let output_dir = kiln_train::opd::opd_train(
+    let output_dir = kiln_train::opd::opd_train_to(
         &prompts,
         &pump_config,
         model_config,
@@ -2152,6 +2168,7 @@ fn run_distill_pump(
         tokenizer,
         teacher,
         adapter_dir,
+        output_adapter_dir,
         adapter_name,
         Some(progress_cb),
     )
@@ -2313,6 +2330,7 @@ fn run_distill_self(
     weights: &kiln_model::forward::GpuWeights,
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
     adapter_dir: &std::path::Path,
+    output_adapter_dir: &std::path::Path,
     adapter_name: &str,
     progress_cb: trainer::ProgressCallback,
     job_id: &str,
@@ -2386,7 +2404,7 @@ fn run_distill_self(
     self_config.output_name = Some(adapter_name.to_string());
     self_config.auto_load = false;
 
-    let output_dir = kiln_train::opd::opd_train(
+    let output_dir = kiln_train::opd::opd_train_to(
         &prompts,
         &self_config,
         model_config,
@@ -2394,6 +2412,7 @@ fn run_distill_self(
         tokenizer,
         teacher,
         adapter_dir,
+        output_adapter_dir,
         adapter_name,
         Some(progress_cb),
     )
@@ -2603,6 +2622,192 @@ fn reject_queued_job_for_backend_quarantine(state: &AppState, job_id: &str, erro
     tracing::error!(job_id, error = %detail, "queued training rejected by backend quarantine");
 }
 
+struct PreparedTrainingPublication {
+    staging_root: tempfile::TempDir,
+    final_path: PathBuf,
+    expected_revision: crate::adapter_swap::AdapterDiskRevision,
+}
+
+impl PreparedTrainingPublication {
+    fn output_root(&self) -> &std::path::Path {
+        self.staging_root.path()
+    }
+}
+
+struct PublishedTrainingOutput {
+    path: PathBuf,
+    reloaded: bool,
+}
+
+fn prepare_training_publication(
+    state: &AppState,
+    adapter_name: &str,
+) -> Result<PreparedTrainingPublication, String> {
+    let staging_root = tempfile::Builder::new()
+        .prefix(".training-tmp-")
+        .tempdir_in(&state.adapter_dir)
+        .map_err(|error| format!("create training staging root: {error}"))?;
+    let final_path = state.adapter_dir.join(adapter_name);
+    let serial = crate::adapter_swap::adapter_mutation_guard_blocking(state)?;
+    let expected_revision =
+        crate::adapter_swap::capture_adapter_disk_revision_locked(&final_path, &serial)?;
+    snapshot_starting_adapter_locked(
+        &final_path,
+        staging_root.path(),
+        &expected_revision,
+        &serial,
+    )?;
+    Ok(PreparedTrainingPublication {
+        staging_root,
+        final_path,
+        expected_revision,
+    })
+}
+
+fn snapshot_starting_adapter_locked(
+    source: &std::path::Path,
+    staging_root: &std::path::Path,
+    expected_revision: &crate::adapter_swap::AdapterDiskRevision,
+    _serial: &crate::adapter_swap::AdapterMutationGuard<'_>,
+) -> Result<(), String> {
+    let crate::adapter_swap::AdapterDiskRevision::Content(expected_content) = expected_revision
+    else {
+        return Ok(());
+    };
+    let snapshot = staging_root.join(kiln_train::trainer::STARTING_ADAPTER_SNAPSHOT_DIR);
+    snapshot_adapter_tree(source, &snapshot)?;
+    let actual = kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(&snapshot)
+        .map_err(|error| {
+            format!(
+                "validate prepared starting-adapter snapshot at {}: {error:#}",
+                snapshot.display()
+            )
+        })?
+        .content_revision();
+    if &actual != expected_content {
+        return Err(format!(
+            "starting-adapter snapshot revision mismatch: expected {expected_content}, found {actual}"
+        ));
+    }
+    Ok(())
+}
+
+fn snapshot_adapter_tree(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<(), String> {
+    std::fs::create_dir(destination).map_err(|error| {
+        format!(
+            "create starting-adapter snapshot directory {}: {error}",
+            destination.display()
+        )
+    })?;
+    let entries = std::fs::read_dir(source)
+        .map_err(|error| format!("read adapter snapshot source {}: {error}", source.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!(
+                "read adapter snapshot entry in {}: {error}",
+                source.display()
+            )
+        })?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type().map_err(|error| {
+            format!(
+                "inspect adapter snapshot source {}: {error}",
+                source_path.display()
+            )
+        })?;
+        if file_type.is_dir() {
+            snapshot_adapter_tree(&source_path, &destination_path)?;
+        } else if file_type.is_file() {
+            if std::fs::hard_link(&source_path, &destination_path).is_err() {
+                std::fs::copy(&source_path, &destination_path).map_err(|error| {
+                    format!(
+                        "copy adapter snapshot file {} to {}: {error}",
+                        source_path.display(),
+                        destination_path.display()
+                    )
+                })?;
+            }
+        } else {
+            return Err(format!(
+                "adapter snapshot source {} is not a regular file or directory",
+                source_path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn publish_training_output(
+    state: &AppState,
+    adapter_name: &str,
+    staged_path: PathBuf,
+    publication: &PreparedTrainingPublication,
+) -> Result<PublishedTrainingOutput, String> {
+    let expected_path = publication.output_root().join(adapter_name);
+    if staged_path != expected_path {
+        return Err(format!(
+            "trainer returned unexpected staged path {}; expected {}",
+            staged_path.display(),
+            expected_path.display()
+        ));
+    }
+    let serial = crate::adapter_swap::adapter_mutation_guard_blocking(state)?;
+    let published = crate::adapter_swap::publish_staged_adapter_blocking_locked(
+        state,
+        adapter_name,
+        &staged_path,
+        &publication.final_path,
+        &publication.output_root().join("previous-adapter"),
+        &publication.expected_revision,
+        &serial,
+    )?;
+    publish_training_checkpoints_locked(state, adapter_name, publication.output_root(), &serial);
+    tracing::info!(
+        adapter = adapter_name,
+        content_revision = %published.content_revision,
+        reloaded = published.reloaded,
+        "published staged training output at adapter revision barrier"
+    );
+    Ok(PublishedTrainingOutput {
+        path: publication.final_path.clone(),
+        reloaded: published.reloaded,
+    })
+}
+
+fn publish_training_checkpoints_locked(
+    state: &AppState,
+    adapter_name: &str,
+    staging_root: &std::path::Path,
+    _serial: &crate::adapter_swap::AdapterMutationGuard<'_>,
+) {
+    let prefix = format!("{adapter_name}-checkpoint-");
+    if let Ok(entries) = std::fs::read_dir(&state.adapter_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(&prefix)
+                && let Err(error) = std::fs::remove_dir_all(entry.path())
+            {
+                tracing::warn!(checkpoint = %name, %error, "failed to remove stale training checkpoint");
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(staging_root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(&prefix) {
+                let destination = state.adapter_dir.join(&name);
+                if let Err(error) = std::fs::rename(entry.path(), &destination) {
+                    tracing::warn!(checkpoint = %name, %error, "failed to publish training checkpoint");
+                }
+            }
+        }
+    }
+}
+
 /// Execute a single training job (runs on a blocking thread).
 fn execute_job(state: AppState, entry: QueueEntry) {
     let job_id = entry.job_id.clone();
@@ -2675,6 +2880,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
         let job = jobs.get(&job_id).unwrap();
         (job.auto_load, job.adapter_name.clone(), job.job_type)
     };
+    let publication = prepare_training_publication(&state, &adapter_name);
 
     let metric_type = match job_type {
         TrainingJobType::Sft => TrainingMetricType::Sft,
@@ -2793,7 +2999,8 @@ fn execute_job(state: AppState, entry: QueueEntry) {
     // the autoscaler's floor). RAII: drops at the end of this function scope —
     // after the match AND finalize — releasing the budget back to inference.
     // Read `reserved_bytes` (Copy) here, before `match entry.job` moves the job.
-    let binding_is_valid = pinned_teacher.is_ok() && prepared_remote_teacher.is_ok();
+    let binding_is_valid =
+        pinned_teacher.is_ok() && prepared_remote_teacher.is_ok() && publication.is_ok();
     let _mem_reservation = (binding_is_valid && entry.reserved_bytes > 0).then(|| {
         let total = kiln_memory::vram::detect_vram().total_bytes;
         let bytes = if total > 0 {
@@ -2816,7 +3023,10 @@ fn execute_job(state: AppState, entry: QueueEntry) {
     } else {
         Ok(())
     };
-    let result: std::result::Result<PathBuf, String> = if let Err(err) = pinned_teacher.as_ref() {
+    let staged_result: std::result::Result<PathBuf, String> = if let Err(err) = publication.as_ref()
+    {
+        Err(err.clone())
+    } else if let Err(err) = pinned_teacher.as_ref() {
         Err(err.clone())
     } else if let Err(err) = prepared_remote_teacher.as_ref() {
         Err(err.clone())
@@ -2826,6 +3036,10 @@ fn execute_job(state: AppState, entry: QueueEntry) {
         let pinned_teacher = pinned_teacher.expect("pinned teacher checked above");
         let prepared_remote_teacher =
             prepared_remote_teacher.expect("remote teacher handshake checked above");
+        let output_adapter_dir = publication
+            .as_ref()
+            .expect("training publication checked above")
+            .output_root();
         match entry.job {
             QueuedJob::Sft(mut req) => {
                 if req.config.checkpoint_interval.is_none() {
@@ -2857,6 +3071,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                     &guard.weights,
                     &state.tokenizer,
                     &state.adapter_dir,
+                    output_adapter_dir,
                     &adapter_name,
                     progress_cb,
                     _replay_ctx,
@@ -2895,6 +3110,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                             &guard.weights,
                             &state.tokenizer,
                             &state.adapter_dir,
+                            output_adapter_dir,
                             &adapter_name,
                             progress_cb,
                             replay_ctx,
@@ -2916,6 +3132,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                     &guard.weights,
                     &state.tokenizer,
                     &state.adapter_dir,
+                    output_adapter_dir,
                     &adapter_name,
                     progress_cb,
                     teacher_spec,
@@ -2936,6 +3153,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                     &guard.weights,
                     &state.tokenizer,
                     &state.adapter_dir,
+                    output_adapter_dir,
                     &adapter_name,
                     progress_cb,
                     teacher_spec,
@@ -2957,6 +3175,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                             &guard.weights,
                             &state.tokenizer,
                             &state.adapter_dir,
+                            output_adapter_dir,
                             &adapter_name,
                             progress_cb,
                             &job_id,
@@ -2974,6 +3193,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                     &guard.weights,
                     &state.tokenizer,
                     &state.adapter_dir,
+                    output_adapter_dir,
                     &adapter_name,
                     progress_cb,
                     teacher_spec,
@@ -2994,6 +3214,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                             &guard.weights,
                             &state.tokenizer,
                             &state.adapter_dir,
+                            output_adapter_dir,
                             &adapter_name,
                             progress_cb,
                             &job_id,
@@ -3003,8 +3224,16 @@ fn execute_job(state: AppState, entry: QueueEntry) {
         }
     };
 
+    let result: std::result::Result<PublishedTrainingOutput, String> =
+        staged_result.and_then(|staged_path| {
+            let publication = publication.as_ref().map_err(|error| error.clone())?;
+            publish_training_output(&state, &adapter_name, staged_path, publication)
+        });
+
     match result {
-        Ok(adapter_path) => {
+        Ok(published_output) => {
+            let adapter_path = published_output.path;
+            let reloaded_by_publication = published_output.reloaded;
             let path_str = adapter_path.display().to_string();
             tracing::info!(job_id = %job_id, job_type = ?job_type, adapter = %adapter_name, path = %path_str, "training completed");
 
@@ -3045,7 +3274,12 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 .is_some_and(|cfg| cfg.min_accuracy.is_some());
             let canary_ok = adapter_canary_allows_auto_load(&adapter_path, &adapter_name, &job_id);
             if auto_load && canary_ok && !promotion_gate_pending {
-                if let Err(e) = auto_load_adapter(&state, &adapter_path, &adapter_name) {
+                if let Err(e) = auto_load_adapter(
+                    &state,
+                    &adapter_path,
+                    &adapter_name,
+                    !reloaded_by_publication,
+                ) {
                     tracing::error!(job_id = %job_id, "auto-load failed: {e}");
                 } else {
                     tracing::info!(job_id = %job_id, "auto-loaded trained adapter");
@@ -3058,13 +3292,9 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                         "auto-load deferred until the post-eval gate passes (§8.7)"
                     );
                 }
-                // Not promoting the fresh weights into serving (yet) — but
-                // the adapter directory CONTENT changed, so any cache
-                // entries keyed to this name (prefix KV, deterministic
-                // completions) now describe weights that no longer exist.
-                // Without this, retraining an idle adapter and swapping
-                // back to it later replays the old model's answers.
-                state.purge_adapter_caches(&Some(adapter_name.clone()));
+                // Publication already purged this name at the revision
+                // barrier. A physically loaded target was reloaded there;
+                // otherwise it remains an idle on-disk revision until chosen.
             }
 
             // Post-training auto-eval: enqueue an eval job against the
@@ -3338,6 +3568,7 @@ fn auto_load_adapter(
     state: &AppState,
     adapter_path: &std::path::Path,
     adapter_name: &str,
+    content_changed: bool,
 ) -> Result<(), String> {
     // Barrier swap (see `adapter_swap`): in-flight requests finish on the
     // weights they started with, THEN the fresh adapter activates and its
@@ -3350,7 +3581,7 @@ fn auto_load_adapter(
                 active_name: adapter_name.to_string(),
                 dir: adapter_path.to_path_buf(),
             },
-            content_changed: true,
+            content_changed,
             default_adapter: crate::adapter_swap::DefaultAdapterUpdate::Replace(Some(
                 adapter_name.to_string(),
             )),
@@ -3478,6 +3709,154 @@ mod tests {
         );
         state.adapter_dir = dir.to_path_buf();
         state
+    }
+
+    fn write_revisioned_adapter(root: &std::path::Path, name: &str, value: f32) {
+        let path = root.join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(
+            path.join("adapter_config.json"),
+            br#"{"r":1,"lora_alpha":1,"target_modules":["q_proj"]}"#,
+        )
+        .unwrap();
+        let bytes = value.to_le_bytes();
+        let tensor =
+            safetensors::tensor::TensorView::new(safetensors::Dtype::F32, vec![1], &bytes).unwrap();
+        let encoded = safetensors::tensor::serialize([("ignored.weight", tensor)], None).unwrap();
+        std::fs::write(path.join("adapter_model.safetensors"), encoded).unwrap();
+    }
+
+    #[test]
+    fn staged_training_publication_rejects_an_intervening_target_revision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = mock_state_in(tmp.path());
+        write_revisioned_adapter(tmp.path(), "target", 1.0);
+        let starting_revision = kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(
+            &tmp.path().join("target"),
+        )
+        .unwrap()
+        .content_revision();
+        let publication = prepare_training_publication(&state, "target").unwrap();
+        write_revisioned_adapter(publication.output_root(), "target", 2.0);
+
+        // Simulate a delete/upload or another serialized publisher winning
+        // while the long GPU job was preparing its output.
+        std::fs::remove_dir_all(tmp.path().join("target")).unwrap();
+        write_revisioned_adapter(tmp.path(), "target", 3.0);
+        let winning_revision = kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(
+            &tmp.path().join("target"),
+        )
+        .unwrap()
+        .content_revision();
+
+        let error = publish_training_output(
+            &state,
+            "target",
+            publication.output_root().join("target"),
+            &publication,
+        )
+        .err()
+        .expect("stale training publication must fail");
+        assert!(error.contains("changed while training"), "{error}");
+        assert_eq!(
+            kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(
+                &tmp.path().join("target")
+            )
+            .unwrap()
+            .content_revision(),
+            winning_revision,
+            "stale publisher must not overwrite the intervening winner"
+        );
+        assert_eq!(
+            kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(
+                &publication
+                    .output_root()
+                    .join(kiln_train::trainer::STARTING_ADAPTER_SNAPSHOT_DIR)
+            )
+            .unwrap()
+            .content_revision(),
+            starting_revision,
+            "the trainer input remains pinned after the durable target changes"
+        );
+    }
+
+    #[test]
+    fn staged_training_publication_replaces_idle_revision_and_checkpoints() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = mock_state_in(tmp.path());
+        write_revisioned_adapter(tmp.path(), "target", 1.0);
+        std::fs::create_dir_all(tmp.path().join("target-checkpoint-1")).unwrap();
+        std::fs::write(tmp.path().join("target-checkpoint-1/marker"), b"old").unwrap();
+        let publication = prepare_training_publication(&state, "target").unwrap();
+        write_revisioned_adapter(publication.output_root(), "target", 2.0);
+        std::fs::create_dir_all(publication.output_root().join("target-checkpoint-2")).unwrap();
+        std::fs::write(
+            publication.output_root().join("target-checkpoint-2/marker"),
+            b"new",
+        )
+        .unwrap();
+        let staged_revision = kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(
+            &publication.output_root().join("target"),
+        )
+        .unwrap()
+        .content_revision();
+
+        let published = publish_training_output(
+            &state,
+            "target",
+            publication.output_root().join("target"),
+            &publication,
+        )
+        .unwrap();
+        assert!(!published.reloaded);
+        assert_eq!(published.path, tmp.path().join("target"));
+        assert_eq!(
+            kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(&published.path)
+                .unwrap()
+                .content_revision(),
+            staged_revision
+        );
+        assert!(!tmp.path().join("target-checkpoint-1").exists());
+        assert_eq!(
+            std::fs::read(tmp.path().join("target-checkpoint-2/marker")).unwrap(),
+            b"new"
+        );
+    }
+
+    #[test]
+    fn loaded_training_rewrite_fails_closed_without_a_weight_barrier() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = mock_state_in(tmp.path());
+        write_revisioned_adapter(tmp.path(), "target", 1.0);
+        let old_source = kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(
+            &tmp.path().join("target"),
+        )
+        .unwrap();
+        let old_revision = old_source.content_revision();
+        *state.loaded_adapter.write().unwrap() = Some(
+            crate::state::LoadedAdapterIdentity::from_source("target", &old_source),
+        );
+        let publication = prepare_training_publication(&state, "target").unwrap();
+        write_revisioned_adapter(publication.output_root(), "target", 2.0);
+
+        let error = publish_training_output(
+            &state,
+            "target",
+            publication.output_root().join("target"),
+            &publication,
+        )
+        .err()
+        .expect("loaded content must never be replaced without a live runner barrier");
+        assert!(error.contains("real model backend"), "{error}");
+        assert_eq!(
+            kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(
+                &tmp.path().join("target")
+            )
+            .unwrap()
+            .content_revision(),
+            old_revision
+        );
+        assert!(publication.output_root().join("target").is_dir());
     }
 
     fn pinned_teacher_spec(alias: &str, model_id: &str) -> crate::api::teachers::TeacherSpec {

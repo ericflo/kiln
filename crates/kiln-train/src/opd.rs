@@ -2988,6 +2988,36 @@ pub fn opd_train(
     adapter_name: &str,
     progress_cb: Option<crate::trainer::ProgressCallback>,
 ) -> Result<std::path::PathBuf> {
+    opd_train_to(
+        prompts,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        teacher,
+        adapter_dir,
+        adapter_dir,
+        adapter_name,
+        progress_cb,
+    )
+}
+
+/// Staged-output variant of [`opd_train`]. Existing adapters resolve from
+/// `adapter_dir`; all new weights, receipts, and checkpoints stay under
+/// `output_adapter_dir` until the caller publishes them.
+#[allow(clippy::too_many_arguments)]
+pub fn opd_train_to(
+    prompts: &[OpdPrompt],
+    config: &OpdConfig,
+    model_config: &kiln_core::config::ModelConfig,
+    weights: &kiln_model::forward::GpuWeights,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    teacher: Arc<dyn LogitSource>,
+    adapter_dir: &std::path::Path,
+    output_adapter_dir: &std::path::Path,
+    adapter_name: &str,
+    progress_cb: Option<crate::trainer::ProgressCallback>,
+) -> Result<std::path::PathBuf> {
     config
         .validate_runtime_contract()
         .context("opd_train: unsupported configuration")?;
@@ -3017,12 +3047,16 @@ pub fn opd_train(
         }
     };
     let run_started = std::time::Instant::now();
-    let output_dir = adapter_dir.join(adapter_name);
+    let output_dir = output_adapter_dir.join(adapter_name);
     let training_data_sha256 = crate::train_receipt::sha256_json_serializable(&prompts);
-    let requested_base_adapter_dir = config
-        .base_adapter
-        .as_deref()
-        .map(|name| crate::adapter_shape::resolve_base_adapter_dir(name, adapter_dir));
+    let requested_base_adapter_dir = config.base_adapter.as_deref().map(|name| {
+        crate::trainer::resolve_base_adapter_dir_from_roots(
+            name,
+            adapter_dir,
+            output_adapter_dir,
+            adapter_name,
+        )
+    });
     let mut data_stats = crate::train_receipt::DataStatsReceipt {
         examples_read: prompts.len(),
         ..Default::default()
@@ -3766,8 +3800,8 @@ pub fn opd_train(
                 // is None or 0.
                 if let Some(interval) = config.checkpoint_interval {
                     if interval > 0 && global_step % interval == 0 && global_step < total_steps {
-                        let ckpt_dir =
-                            adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
+                        let ckpt_dir = output_adapter_dir
+                            .join(format!("{adapter_name}-checkpoint-{global_step}"));
                         if let Err(e) = params.sync_to_master(&*backend_rt) {
                             tracing::warn!(
                                 step = global_step,
