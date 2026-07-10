@@ -1,0 +1,240 @@
+{
+  "artifacts": [
+    {
+      "bytes": 18224,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260710t231446356203z-rocm-strix-halo-prefill-scheduling-v1-f397c29fc3-v1/environment.json",
+      "sha256": "sha256:2df68a861f9550ef14e4fa3fa808fcd4bf95fcaaaf601e866877217761f91357"
+    },
+    {
+      "bytes": 14662,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260710t231446356203z-rocm-strix-halo-prefill-scheduling-v1-f397c29fc3-v1/cases/001-device-probe-r001/stdout.log",
+      "sha256": "sha256:820dd0476532e0ea4383c6edd608fa2dc96fbced44e3f965f0f6133a4cd2f6b7"
+    },
+    {
+      "bytes": 0,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260710t231446356203z-rocm-strix-halo-prefill-scheduling-v1-f397c29fc3-v1/cases/001-device-probe-r001/stderr.log",
+      "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 642,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260710t231446356203z-rocm-strix-halo-prefill-scheduling-v1-f397c29fc3-v1/cases/001-device-probe-r001/case-result.json",
+      "sha256": "sha256:4e662fd00233a2ac41bd2f15425a315f2a132338a07d8605d73e08cee7edf3b8"
+    },
+    {
+      "bytes": 208,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260710t231446356203z-rocm-strix-halo-prefill-scheduling-v1-f397c29fc3-v1/cases/002-mixed-admission-fairness-r001/stdout.log",
+      "sha256": "sha256:a721338882e91dac8742c9dac956965062133c4b36382da0ddb502b9fb145260"
+    },
+    {
+      "bytes": 20349,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260710t231446356203z-rocm-strix-halo-prefill-scheduling-v1-f397c29fc3-v1/cases/002-mixed-admission-fairness-r001/stderr.log",
+      "sha256": "sha256:ca652d05856836efd56a12a07d48769819840760775fec81010b2f1776b370b1"
+    },
+    {
+      "bytes": 653,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260710t231446356203z-rocm-strix-halo-prefill-scheduling-v1-f397c29fc3-v1/cases/002-mixed-admission-fairness-r001/case-result.json",
+      "sha256": "sha256:421b8d7540ce2cb08d8abe1f27b4f7180d3e720baf766532ae4f5effe6241876"
+    },
+    {
+      "bytes": 173,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260710t231446356203z-rocm-strix-halo-prefill-scheduling-v1-f397c29fc3-v1/cases/003-resumable-prefill-parity-r001/stdout.log",
+      "sha256": "sha256:efa61c7cdfb5a707edbc33e3f0628b6fa731079e4c80fb2d814f3459567f0ad3"
+    },
+    {
+      "bytes": 20852,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260710t231446356203z-rocm-strix-halo-prefill-scheduling-v1-f397c29fc3-v1/cases/003-resumable-prefill-parity-r001/stderr.log",
+      "sha256": "sha256:0b35f86c836cfc7a976369b9609e352fa20fd9bdea7914f5f31255867904ebb8"
+    },
+    {
+      "bytes": 652,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260710t231446356203z-rocm-strix-halo-prefill-scheduling-v1-f397c29fc3-v1/cases/003-resumable-prefill-parity-r001/case-result.json",
+      "sha256": "sha256:f278333f77f4344e4eb32ffbbf519f31a91723bb47bf96cf98a516cbc00cd905"
+    },
+    {
+      "bytes": 22360,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260710t231446356203z-rocm-strix-halo-prefill-scheduling-v1-f397c29fc3-v1/run-config.json",
+      "sha256": "sha256:a1281862e93c18383f03b3f236d743bb961f9ac4c8641ceac1f7a03df5310a06"
+    }
+  ],
+  "created_at_utc": "2026-07-10T23:14:49.367Z",
+  "effective_config": {},
+  "environment": {
+    "compiler": {
+      "cargo": "cargo 1.94.1 (29ea6fb6a 2026-03-24)",
+      "hipcc": "HIP version: 7.2.53211-9999",
+      "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)"
+    },
+    "device": {
+      "architecture": "gfx1151",
+      "driver": "amdgpu kernel 7.0.14-arch1-1",
+      "memory_bytes": 103079215104,
+      "name": "AMD Radeon 8060S Graphics",
+      "unified_memory": true
+    },
+    "host_id": "strix-halo",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "7.0.14-arch1-1",
+      "name": "EndeavourOS",
+      "version": "2025.03.19"
+    },
+    "runtime": {
+      "execution_environment_sha256": "sha256:7275a4445e431ce0c216b5b01b45bdb4f93bedaf2d2e6c4279f0c695c280913a",
+      "hipcc": "HIP version: 7.2.53211-9999",
+      "hsa": "1.18",
+      "rocm": "7.2.4"
+    }
+  },
+  "metrics": [],
+  "model": null,
+  "notes": [],
+  "qualification": {
+    "backend": "rocm",
+    "command": [
+      "/usr/bin/python3",
+      "scripts/qualification/run.py",
+      "--variant",
+      "rocm",
+      "--host-id",
+      "strix-halo",
+      "qualification/workloads/prefill-scheduling-v1.json"
+    ],
+    "duration_seconds": 3.011470131998067,
+    "finished_at_utc": "2026-07-10T23:14:49.367Z",
+    "kind": "correctness",
+    "profile": "prefill-scheduling-v1",
+    "started_at_utc": "2026-07-10T23:14:46.356Z",
+    "verdict": "passed"
+  },
+  "receipt_id": "20260710t231446356203z-rocm-strix-halo-prefill-scheduling-v1-f397c29fc3-v1",
+  "results": [
+    {
+      "details": null,
+      "duration_seconds": 0.061264075004146434,
+      "id": "device-probe",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 0.30233652399329003,
+      "id": "mixed-admission-fairness",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 2.2717848280008184,
+      "id": "resumable-prefill-parity",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "4103074b86a32e8cbf7498111e07168ae02f6951",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:22a66f8622c24f1f74a0a3e3a30434c4d0052fcead113bcb2e5232cc455afe67",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [],
+  "workload": {
+    "id": "prefill-scheduling-v1",
+    "parameters": {
+      "variant_id": "rocm"
+    },
+    "seed": 20260710,
+    "sha256": "sha256:077d1697a7795dd5693956d47b85ced20bebd34f70035e4ca8ad938a946d2b98"
+  }
+}
