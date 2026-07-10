@@ -12,6 +12,7 @@ import json
 import math
 import os
 import re
+import select
 import shutil
 import signal
 import socket
@@ -59,6 +60,7 @@ HTTP_SEND_BUFFER_BYTES = 4096
 STREAM_STALL_GRACE_MS = 2000
 SLO_TTFT_MS = 30_000.0
 SLO_E2E_MS = 120_000.0
+STREAM_READ_POLL_SECONDS = 0.25
 
 
 def _variant_config(*, kv_autoscale: bool, rocm_graphs: bool) -> dict[str, Any]:
@@ -489,6 +491,36 @@ def text_request(port: int, path: str) -> str:
         connection.close()
 
 
+def read_stream_chunk(
+    connection: http.client.HTTPConnection,
+    response: http.client.HTTPResponse,
+    *,
+    deadline: float,
+    abort_event: threading.Event | None,
+    name: str,
+) -> bytes:
+    """Wait for stream data without timing out HTTPResponse's buffered reader."""
+    sock = connection.sock
+    if sock is None:
+        raise ConnectionError(f"{name} HTTP connection has no live socket")
+    while True:
+        if abort_event is not None and abort_event.is_set():
+            raise QualificationError(f"{name} aborted by qualification cleanup")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"{name} exceeded its request or overall deadline")
+        try:
+            readable, _, exceptional = select.select(
+                [sock], [], [sock], min(remaining, STREAM_READ_POLL_SECONDS)
+            )
+        except InterruptedError:
+            continue
+        if exceptional:
+            raise ConnectionError(f"{name} stream socket reported an exceptional condition")
+        if readable:
+            return response.read1(4096)
+
+
 def run_stream(
     port: int,
     *,
@@ -546,19 +578,21 @@ def run_stream(
             raise QualificationError(f"{name} returned HTTP {response.status}: {response.read(512)!r}")
         if "text/event-stream" not in content_type.lower():
             raise QualificationError(f"{name} returned unexpected content type {content_type!r}")
+        if connection.sock is None:
+            raise ConnectionError(f"{name} HTTP connection has no live socket")
+        # A timeout raised by HTTPResponse's buffered file permanently poisons
+        # subsequent reads ("cannot read from timed out object"). Readiness
+        # polling keeps cancellation responsive without entering that state.
+        connection.sock.settimeout(None)
         parser = SSEParser()
         while not done:
-            if abort_event is not None and abort_event.is_set():
-                raise QualificationError(f"{name} aborted by qualification cleanup")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(f"{name} exceeded its request or overall deadline")
-            if connection.sock is not None:
-                connection.sock.settimeout(min(remaining, 5.0))
-            try:
-                chunk = response.read1(4096)
-            except socket.timeout:
-                continue
+            chunk = read_stream_chunk(
+                connection,
+                response,
+                deadline=deadline,
+                abort_event=abort_event,
+                name=name,
+            )
             if not chunk:
                 break
             observed = time.monotonic()

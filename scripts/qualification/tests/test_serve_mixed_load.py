@@ -104,6 +104,121 @@ def debug_fixture(*, kv_autoscale: bool, rocm_graphs: bool) -> dict:
 
 
 class ServeMixedLoadTests(unittest.TestCase):
+    def test_stream_reader_waits_for_readiness_before_touching_http_buffer(self) -> None:
+        sock = object()
+        connection = mock.Mock(sock=sock)
+        response = mock.Mock()
+        response.read1.return_value = b"data: {}\n\n"
+
+        with mock.patch.object(
+            serve.select,
+            "select",
+            side_effect=[([], [], []), ([sock], [], [])],
+        ) as select_call:
+            chunk = serve.read_stream_chunk(
+                connection,
+                response,
+                deadline=serve.time.monotonic() + 10.0,
+                abort_event=None,
+                name="reader-test",
+            )
+
+        self.assertEqual(chunk, b"data: {}\n\n")
+        self.assertEqual(select_call.call_count, 2)
+        response.read1.assert_called_once_with(4096)
+
+    def test_stream_reader_retries_interrupted_readiness_poll(self) -> None:
+        sock = object()
+        connection = mock.Mock(sock=sock)
+        response = mock.Mock()
+        response.read1.return_value = b""
+
+        with mock.patch.object(
+            serve.select,
+            "select",
+            side_effect=[InterruptedError(), ([sock], [], [])],
+        ):
+            self.assertEqual(
+                serve.read_stream_chunk(
+                    connection,
+                    response,
+                    deadline=serve.time.monotonic() + 10.0,
+                    abort_event=None,
+                    name="reader-test",
+                ),
+                b"",
+            )
+
+    def test_stream_reader_honors_cleanup_without_buffered_read_timeout(self) -> None:
+        abort = serve.threading.Event()
+        abort.set()
+        connection = mock.Mock(sock=object())
+        response = mock.Mock()
+
+        with mock.patch.object(serve.select, "select") as select_call:
+            with self.assertRaisesRegex(
+                serve.QualificationError, "aborted by qualification cleanup"
+            ):
+                serve.read_stream_chunk(
+                    connection,
+                    response,
+                    deadline=serve.time.monotonic() + 10.0,
+                    abort_event=abort,
+                    name="reader-test",
+                )
+
+        select_call.assert_not_called()
+        response.read1.assert_not_called()
+
+    def test_stream_reader_enforces_request_deadline_before_read(self) -> None:
+        connection = mock.Mock(sock=object())
+        response = mock.Mock()
+
+        with self.assertRaisesRegex(TimeoutError, "exceeded its request or overall deadline"):
+            serve.read_stream_chunk(
+                connection,
+                response,
+                deadline=serve.time.monotonic() - 1.0,
+                abort_event=None,
+                name="reader-test",
+            )
+
+        response.read1.assert_not_called()
+
+    def test_run_stream_uses_blocking_http_buffer_after_readiness_poll(self) -> None:
+        sock = mock.Mock()
+        connection = mock.Mock(sock=sock)
+        response = mock.Mock(status=200)
+        response.getheader.return_value = "text/event-stream"
+        response.read1.return_value = (
+            b'data: {"choices":[{"delta":{"content":"token"}}]}\n\n'
+        )
+        connection.getresponse.return_value = response
+
+        with (
+            mock.patch.object(
+                serve.http.client, "HTTPConnection", return_value=connection
+            ),
+            mock.patch.object(
+                serve.select, "select", return_value=([sock], [], [])
+            ),
+        ):
+            result = serve.run_stream(
+                12345,
+                name="reader-test",
+                marker="marker",
+                prompt_words=1,
+                max_tokens=2,
+                seed=7,
+                cancel_after=1,
+            )
+
+        self.assertTrue(result.cancelled)
+        self.assertEqual(len(result.semantic_times), 1)
+        sock.settimeout.assert_called_once_with(None)
+        response.read1.assert_called_once_with(4096)
+        connection.close.assert_called_once_with()
+
     def test_checked_in_workload_exactly_matches_driver_contract(self) -> None:
         manifest = json.loads(
             (ROOT / "qualification/workloads/serving-mixed-rocm-v1.json").read_text()
