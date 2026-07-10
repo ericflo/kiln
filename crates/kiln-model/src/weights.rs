@@ -1,9 +1,13 @@
 use std::fmt;
+use std::fs::File;
+use std::io;
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
+use sha2::{Digest, Sha256};
 
 /// Data type for stored tensor data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,6 +349,169 @@ pub struct DeferredMtpSource {
     pub config: kiln_core::config::ModelConfig,
 }
 
+/// Loader-owned proof that the bytes used to construct CPU weights remain the
+/// bytes named by the model revision.
+///
+/// Keeping `Arc<Mmap>` values pins every mapping, including shards from which
+/// no language-model tensor was extracted. The matching open files let the
+/// post-upload check use bounded reads instead of touching a mapping after its
+/// backing file may have been truncated (which can raise SIGBUS on Unix).
+#[derive(Debug)]
+pub(crate) struct SourceContentGuard {
+    shards: Vec<SourceContentShard>,
+    initial_shard_count: usize,
+    initial_sha256: String,
+}
+
+#[derive(Debug)]
+struct SourceContentShard {
+    file: Arc<File>,
+    mmap: Arc<Mmap>,
+}
+
+impl SourceContentGuard {
+    pub(crate) fn new(shards: Vec<(Arc<File>, Arc<Mmap>)>) -> Self {
+        let shards = shards
+            .into_iter()
+            .map(|(file, mmap)| SourceContentShard { file, mmap })
+            .collect::<Vec<_>>();
+        let initial_shard_count = shards.len();
+        let records = shards
+            .iter()
+            .map(|shard| {
+                let digest: [u8; 32] = Sha256::digest(&shard.mmap[..]).into();
+                (digest, shard.mmap.len() as u64)
+            })
+            .collect();
+        let initial_sha256 = source_content_sha256_from_records(records);
+        Self {
+            shards,
+            initial_shard_count,
+            initial_sha256,
+        }
+    }
+
+    pub(crate) fn initial_sha256(&self) -> &str {
+        &self.initial_sha256
+    }
+
+    fn verify_unchanged(&self) -> Result<()> {
+        if self.shards.len() != self.initial_shard_count {
+            bail!(
+                "model source shard count changed after load: expected {}, observed {}",
+                self.initial_shard_count,
+                self.shards.len()
+            );
+        }
+
+        let mut records = Vec::with_capacity(self.shards.len());
+        for (index, shard) in self.shards.iter().enumerate() {
+            let expected_len = shard.mmap.len() as u64;
+            let before_len = shard
+                .file
+                .metadata()
+                .with_context(|| format!("failed to stat retained model source shard {index}"))?
+                .len();
+            if before_len != expected_len {
+                bail!(
+                    "model source shard {index} length changed after load: expected {expected_len} bytes, observed {before_len}"
+                );
+            }
+
+            let digest = hash_open_file_exact(&shard.file, expected_len)
+                .with_context(|| format!("failed to verify model source shard {index}"))?;
+            let after_len = shard
+                .file
+                .metadata()
+                .with_context(|| format!("failed to restat retained model source shard {index}"))?
+                .len();
+            if after_len != expected_len {
+                bail!(
+                    "model source shard {index} length changed during verification: expected {expected_len} bytes, observed {after_len}"
+                );
+            }
+            records.push((digest, expected_len));
+        }
+
+        let observed = source_content_sha256_from_records(records);
+        if observed != self.initial_sha256 {
+            bail!(
+                "model source content changed after load: expected {}, observed {observed}",
+                self.initial_sha256
+            );
+        }
+        Ok(())
+    }
+}
+
+const SOURCE_VERIFY_BUFFER_BYTES: usize = 256 * 1024;
+
+fn hash_open_file_exact(file: &File, expected_len: u64) -> Result<[u8; 32]> {
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; SOURCE_VERIFY_BUFFER_BYTES];
+    let mut offset = 0u64;
+    while offset < expected_len {
+        let remaining = usize::try_from((expected_len - offset).min(buffer.len() as u64))
+            .expect("bounded source verification read length must fit usize");
+        let read = loop {
+            match read_file_at(file, &mut buffer[..remaining], offset) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                result => break result,
+            }
+        }?;
+        if read == 0 {
+            bail!("model source ended at byte {offset}, before the expected {expected_len} bytes");
+        }
+        hasher.update(&buffer[..read]);
+        offset += read as u64;
+    }
+
+    let mut extra = [0u8; 1];
+    if read_file_at(file, &mut extra, expected_len)? != 0 {
+        bail!("model source grew beyond the expected {expected_len} bytes");
+    }
+    Ok(hasher.finalize().into())
+}
+
+#[cfg(unix)]
+fn read_file_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
+    std::os::unix::fs::FileExt::read_at(file, buffer, offset)
+}
+
+#[cfg(windows)]
+fn read_file_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
+    std::os::windows::fs::FileExt::seek_read(file, buffer, offset)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_file_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut clone = file.try_clone()?;
+    clone.seek(SeekFrom::Start(offset))?;
+    clone.read(buffer)
+}
+
+fn source_content_sha256_from_records(mut records: Vec<([u8; 32], u64)>) -> String {
+    records.sort_unstable();
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"kiln.base-model-content.v1\0");
+    hasher.update((records.len() as u64).to_le_bytes());
+    for (digest, byte_len) in records {
+        hasher.update(byte_len.to_le_bytes());
+        hasher.update(digest);
+    }
+    let digest = hasher.finalize();
+    format!(
+        "sha256:{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
 /// Complete Qwen3.5-4B language model weights.
 ///
 /// Note: lm_head is tied to embed_tokens (shared weight matrix),
@@ -356,6 +523,9 @@ pub struct ModelWeights {
     /// Test-constructed weights that did not pass through the file loader have
     /// no authoritative source revision.
     pub source_content_sha256: Option<String>,
+    /// Retains the exact loader mappings and their open files until the caller
+    /// has verified the source again after GPU upload.
+    pub(crate) source_content_guard: Option<SourceContentGuard>,
     pub embedding: EmbeddingWeights,
     pub layers: Vec<LayerWeights>,
     /// Final RMSNorm. [hidden_size]
@@ -372,6 +542,28 @@ pub struct ModelWeights {
 }
 
 impl ModelWeights {
+    /// Verify that the loader's exact source shards still match the revision
+    /// recorded before safetensors parsing.
+    ///
+    /// Call this immediately after GPU upload. Verification reads the retained
+    /// open files in a fixed-size buffer; it does not rediscover paths or trust
+    /// mtimes, and truncation is reported without dereferencing an invalidated
+    /// mmap region.
+    pub fn verify_source_content_unchanged(&self) -> Result<()> {
+        let guard = self
+            .source_content_guard
+            .as_ref()
+            .context("model weights have no loader-owned source content guard")?;
+        if self.source_content_sha256.as_deref() != Some(guard.initial_sha256()) {
+            bail!(
+                "model source revision does not match the loader-owned revision: expected {}, observed {}",
+                guard.initial_sha256(),
+                self.source_content_sha256.as_deref().unwrap_or("missing")
+            );
+        }
+        guard.verify_unchanged()
+    }
+
     /// Total size of all loaded weights in bytes.
     pub fn total_bytes(&self) -> usize {
         let mut total = self.embedding.embed_tokens.size_bytes();

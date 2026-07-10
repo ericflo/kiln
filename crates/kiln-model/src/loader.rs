@@ -7,7 +7,6 @@ use std::time::UNIX_EPOCH;
 use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
 use safetensors::SafeTensors;
-use sha2::{Digest, Sha256};
 
 use kiln_core::config::ModelConfig;
 
@@ -31,6 +30,7 @@ struct ShardMetadata {
 #[derive(Debug)]
 struct LoadedShard {
     meta: Arc<ShardMetadata>,
+    file: Arc<fs::File>,
     mmap: Arc<Mmap>,
 }
 
@@ -130,7 +130,8 @@ fn load_model_dense(
 
     // Memory-map all shards and parse safetensors headers.
     let loaded_shards = mmap_shards(&shards)?;
-    let source_content_sha256 = loaded_shard_content_sha256(&loaded_shards);
+    let source_content_guard = loaded_shard_content_guard(&loaded_shards);
+    let source_content_sha256 = source_content_guard.initial_sha256().to_string();
     let parsed: Vec<SafeTensors<'_>> = loaded_shards
         .iter()
         .map(|shard| {
@@ -203,6 +204,7 @@ fn load_model_dense(
 
     let weights = ModelWeights {
         source_content_sha256: Some(source_content_sha256),
+        source_content_guard: Some(source_content_guard),
         embedding: EmbeddingWeights { embed_tokens },
         layers,
         final_norm,
@@ -245,7 +247,8 @@ fn load_model_gptq(
     );
 
     let loaded_shards = mmap_shards(&shards)?;
-    let source_content_sha256 = loaded_shard_content_sha256(&loaded_shards);
+    let source_content_guard = loaded_shard_content_guard(&loaded_shards);
+    let source_content_sha256 = source_content_guard.initial_sha256().to_string();
     let parsed: Vec<SafeTensors<'_>> = loaded_shards
         .iter()
         .map(|shard| {
@@ -297,6 +300,7 @@ fn load_model_gptq(
 
     let weights = ModelWeights {
         source_content_sha256: Some(source_content_sha256),
+        source_content_guard: Some(source_content_guard),
         embedding: EmbeddingWeights { embed_tokens },
         layers,
         final_norm,
@@ -384,8 +388,10 @@ fn mmap_shards(paths: &[std::path::PathBuf]) -> Result<Vec<LoadedShard>> {
     paths
         .iter()
         .map(|path| {
-            let file = fs::File::open(path)
-                .with_context(|| format!("Failed to open {}", path.display()))?;
+            let file = Arc::new(
+                fs::File::open(path)
+                    .with_context(|| format!("Failed to open {}", path.display()))?,
+            );
             let meta = file
                 .metadata()
                 .with_context(|| format!("Failed to stat {}", path.display()))?;
@@ -402,48 +408,31 @@ fn mmap_shards(paths: &[std::path::PathBuf]) -> Result<Vec<LoadedShard>> {
             });
             // SAFETY: We assume the file is not modified while mapped.
             // This is standard practice for model weight loading.
-            let mmap = unsafe { Mmap::map(&file) }
+            let mmap = unsafe { Mmap::map(file.as_ref()) }
                 .with_context(|| format!("Failed to mmap {}", path.display()))?;
             Ok(LoadedShard {
                 meta: shard_meta,
+                file,
                 mmap: Arc::new(mmap),
             })
         })
         .collect()
 }
 
-/// Hash the exact checkpoint bytes held by the loader's read-only mappings.
-///
-/// Each shard first receives its own SHA-256 digest. The model revision hashes
-/// the sorted `(digest, byte length)` multiset with a versioned domain, so
-/// moving a checkpoint or changing index iteration order does not change its
-/// identity while any byte change does. Duplicate shard content remains
-/// represented twice by the count and repeated records.
-fn loaded_shard_content_sha256(shards: &[LoadedShard]) -> String {
-    let mut records = shards
-        .iter()
-        .map(|shard| {
-            let digest: [u8; 32] = Sha256::digest(&shard.mmap[..]).into();
-            (digest, shard.mmap.len() as u64)
-        })
-        .collect::<Vec<_>>();
-    records.sort_unstable();
-
-    let mut hasher = Sha256::new();
-    hasher.update(b"kiln.base-model-content.v1\0");
-    hasher.update((records.len() as u64).to_le_bytes());
-    for (digest, byte_len) in records {
-        hasher.update(byte_len.to_le_bytes());
-        hasher.update(digest);
-    }
-    let digest = hasher.finalize();
-    format!(
-        "sha256:{}",
-        digest
+fn loaded_shard_content_guard(shards: &[LoadedShard]) -> SourceContentGuard {
+    SourceContentGuard::new(
+        shards
             .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
+            .map(|shard| (Arc::clone(&shard.file), Arc::clone(&shard.mmap)))
+            .collect(),
     )
+}
+
+#[cfg(test)]
+fn loaded_shard_content_sha256(shards: &[LoadedShard]) -> String {
+    loaded_shard_content_guard(shards)
+        .initial_sha256()
+        .to_string()
 }
 
 /// Detect the weight name prefix by checking which keys exist.
@@ -1312,6 +1301,7 @@ mod tests {
     use super::*;
     use safetensors::tensor::Dtype as StDtype;
     use std::collections::HashMap as StdMap;
+    use std::io::{Seek, SeekFrom, Write};
 
     /// Create a minimal safetensors file with the given tensors.
     fn create_test_safetensors(tensors: &[(&str, Vec<usize>, StDtype)]) -> Vec<u8> {
@@ -1556,6 +1546,101 @@ mod tests {
             linear_conv_kernel_dim: 4,
             partial_rotary_factor: 0.25,
         }
+    }
+
+    fn load_tiny_source_guard_fixture() -> (tempfile::TempDir, std::path::PathBuf, ModelWeights) {
+        let tensors = tiny_model_tensors("model.language_model.");
+        let tensor_refs = tensors
+            .iter()
+            .map(|(name, shape, dtype)| (name.as_str(), shape.clone(), *dtype))
+            .collect::<Vec<_>>();
+        let bytes = create_test_safetensors(&tensor_refs);
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("model.safetensors");
+        fs::write(&source, bytes).unwrap();
+        let weights = load_model(dir.path(), &tiny_model_config()).unwrap();
+        (dir, source, weights)
+    }
+
+    #[test]
+    fn source_content_guard_accepts_unchanged_loaded_shards() {
+        let (_dir, _source, weights) = load_tiny_source_guard_fixture();
+
+        weights.verify_source_content_unchanged().unwrap();
+    }
+
+    #[test]
+    fn source_content_guard_rejects_same_length_source_mutation() {
+        let (_dir, source, weights) = load_tiny_source_guard_fixture();
+        let mut file = fs::OpenOptions::new().write(true).open(source).unwrap();
+        file.seek(SeekFrom::End(-1)).unwrap();
+        file.write_all(&[0xa5]).unwrap();
+        file.sync_all().unwrap();
+
+        let error = weights.verify_source_content_unchanged().unwrap_err();
+        assert!(
+            error.to_string().contains("source content changed"),
+            "unexpected verification error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn source_content_guard_rejects_truncated_source_without_reading_past_eof() {
+        let (_dir, source, weights) = load_tiny_source_guard_fixture();
+        let file = fs::OpenOptions::new().write(true).open(source).unwrap();
+        let original_len = file.metadata().unwrap().len();
+        file.set_len(original_len - 1).unwrap();
+
+        let error = weights.verify_source_content_unchanged().unwrap_err();
+        assert!(
+            error.to_string().contains("length changed after load"),
+            "unexpected verification error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn source_content_guard_verifies_shards_without_extracted_model_tensors() {
+        let model_tensors = tiny_model_tensors("model.language_model.");
+        let model_refs = model_tensors
+            .iter()
+            .map(|(name, shape, dtype)| (name.as_str(), shape.clone(), *dtype))
+            .collect::<Vec<_>>();
+        let ignored_refs = [("model.visual.unused", vec![1], StDtype::BF16)];
+        let dir = tempfile::tempdir().unwrap();
+        let model_shard = dir.path().join("model-00001-of-00002.safetensors");
+        let ignored_shard = dir.path().join("model-00002-of-00002.safetensors");
+        fs::write(&model_shard, create_test_safetensors(&model_refs)).unwrap();
+        fs::write(&ignored_shard, create_test_safetensors(&ignored_refs)).unwrap();
+
+        let mut weight_map = serde_json::Map::new();
+        for (name, _, _) in &model_tensors {
+            weight_map.insert(
+                name.clone(),
+                serde_json::Value::String("model-00001-of-00002.safetensors".to_string()),
+            );
+        }
+        weight_map.insert(
+            "model.visual.unused".to_string(),
+            serde_json::Value::String("model-00002-of-00002.safetensors".to_string()),
+        );
+        fs::write(
+            dir.path().join(INDEX_FILENAME),
+            serde_json::to_vec(&serde_json::json!({ "weight_map": weight_map })).unwrap(),
+        )
+        .unwrap();
+
+        let weights = load_model(dir.path(), &tiny_model_config()).unwrap();
+        weights.verify_source_content_unchanged().unwrap();
+
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .open(ignored_shard)
+            .unwrap();
+        file.seek(SeekFrom::End(-1)).unwrap();
+        file.write_all(&[0xa5]).unwrap();
+        file.sync_all().unwrap();
+
+        assert!(weights.verify_source_content_unchanged().is_err());
     }
 
     #[test]
