@@ -16,6 +16,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// Smallest accepted per-connection HTTP `SO_SNDBUF` request.
+pub const HTTP_SEND_BUFFER_MIN_BYTES: usize = 1024;
+/// Largest accepted per-connection HTTP `SO_SNDBUF` request. This opt-in is
+/// primarily for bounded transport/backpressure testing; allowing arbitrarily
+/// large buffers would multiply memory use by every concurrent connection.
+pub const HTTP_SEND_BUFFER_MAX_BYTES: usize = 16 * 1024 * 1024;
+
 /// Top-level configuration for kiln.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
@@ -132,6 +139,10 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub request_timeout_secs: u64,
+    /// Optional `SO_SNDBUF` request applied to every accepted HTTP socket.
+    /// Operating systems may round or account for bookkeeping differently;
+    /// Kiln reads the actual value back and rejects ineffective application.
+    pub http_send_buffer_bytes: Option<usize>,
     /// Enable deterministic eval-serving behavior for `kiln serve`.
     pub eval_mode: bool,
     /// Server-level default for chat-template `enable_thinking`. `None`
@@ -523,6 +534,7 @@ impl Default for ServerConfig {
             host: "127.0.0.1".into(),
             port: 8420,
             request_timeout_secs: 600,
+            http_send_buffer_bytes: None,
             eval_mode: false,
             default_thinking_enabled: None,
             default_thinking_budget_tokens: None,
@@ -730,6 +742,7 @@ impl KilnConfig {
         };
 
         config.apply_env_overrides();
+        config.apply_http_send_buffer_env_override()?;
         config.request_log.apply_env_overrides();
         config.validate()?;
         Ok(config)
@@ -976,6 +989,27 @@ impl KilnConfig {
         }
     }
 
+    /// Apply the accepted-socket send-buffer override strictly. Unlike legacy
+    /// numeric overrides, a present but malformed value is a startup error.
+    fn apply_http_send_buffer_env_override(&mut self) -> Result<()> {
+        let raw = match std::env::var("KILN_HTTP_SEND_BUFFER_BYTES") {
+            Ok(raw) => raw,
+            Err(std::env::VarError::NotPresent) => return Ok(()),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                anyhow::bail!("KILN_HTTP_SEND_BUFFER_BYTES must be valid UTF-8 decimal bytes")
+            }
+        };
+        let value = raw.trim().parse::<usize>().with_context(|| {
+            format!(
+                "KILN_HTTP_SEND_BUFFER_BYTES must be a decimal integer in {}..={}, got {raw:?}",
+                HTTP_SEND_BUFFER_MIN_BYTES, HTTP_SEND_BUFFER_MAX_BYTES
+            )
+        })?;
+        validate_http_send_buffer_bytes(value).context("invalid KILN_HTTP_SEND_BUFFER_BYTES")?;
+        self.server.http_send_buffer_bytes = Some(value);
+        Ok(())
+    }
+
     /// Validate configuration values. Returns an error describing the first invalid value.
     fn validate(&self) -> Result<()> {
         if self.server.port == 0 {
@@ -983,6 +1017,9 @@ impl KilnConfig {
         }
         if self.server.request_timeout_secs == 0 {
             anyhow::bail!("server.request_timeout_secs must be > 0");
+        }
+        if let Some(bytes) = self.server.http_send_buffer_bytes {
+            validate_http_send_buffer_bytes(bytes)?;
         }
         if self.server.shutdown_timeout_secs == 0 {
             anyhow::bail!("server.shutdown_timeout_secs must be > 0");
@@ -1021,6 +1058,17 @@ impl KilnConfig {
 
         Ok(())
     }
+}
+
+fn validate_http_send_buffer_bytes(bytes: usize) -> Result<()> {
+    if !(HTTP_SEND_BUFFER_MIN_BYTES..=HTTP_SEND_BUFFER_MAX_BYTES).contains(&bytes) {
+        anyhow::bail!(
+            "server.http_send_buffer_bytes must be between {} and {} bytes, got {bytes}",
+            HTTP_SEND_BUFFER_MIN_BYTES,
+            HTTP_SEND_BUFFER_MAX_BYTES
+        );
+    }
+    Ok(())
 }
 
 fn parse_bool_env(value: &str) -> Option<bool> {
@@ -1074,6 +1122,7 @@ mod tests {
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 8420);
         assert_eq!(config.server.request_timeout_secs, 600);
+        assert_eq!(config.server.http_send_buffer_bytes, None);
         assert!(!config.server.eval_mode);
         assert_eq!(config.server.default_thinking_enabled, None);
         assert_eq!(config.server.default_thinking_budget_tokens, None);
@@ -1154,6 +1203,7 @@ mod tests {
 host = "127.0.0.1"
 port = 9000
 request_timeout_secs = 60
+http_send_buffer_bytes = 8192
 eval_mode = true
 default_thinking_enabled = false
 default_thinking_budget_tokens = 256
@@ -1215,6 +1265,7 @@ composed_cache_max_entries = 8
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 9000);
         assert_eq!(config.server.request_timeout_secs, 60);
+        assert_eq!(config.server.http_send_buffer_bytes, Some(8192));
         assert!(config.server.eval_mode);
         assert_eq!(config.server.default_thinking_enabled, Some(false));
         assert_eq!(config.server.default_thinking_budget_tokens, Some(256));
@@ -1269,6 +1320,7 @@ port = 3000
         assert_eq!(config.server.port, 3000);
         assert_eq!(config.server.host, "127.0.0.1"); // default (loopback)
         assert_eq!(config.server.request_timeout_secs, 600); // default
+        assert_eq!(config.server.http_send_buffer_bytes, None); // default
         assert!(!config.server.eval_mode); // default
         assert_eq!(config.server.default_thinking_enabled, None); // default
         assert!(!config.server.fold_reasoning_into_content); // default
@@ -1337,6 +1389,63 @@ port = 3000
         let mut config2 = KilnConfig::default();
         config2.server.shutdown_timeout_secs = 0;
         assert!(config2.validate().is_err());
+    }
+
+    #[test]
+    fn test_http_send_buffer_env_override_is_strict() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("kiln.toml");
+        std::fs::write(&path, "").unwrap();
+        let path = path.to_str().unwrap();
+
+        unsafe {
+            std::env::remove_var("KILN_HTTP_SEND_BUFFER_BYTES");
+        }
+        let config = KilnConfig::load(Some(path)).unwrap();
+        assert_eq!(config.server.http_send_buffer_bytes, None);
+
+        unsafe {
+            std::env::set_var("KILN_HTTP_SEND_BUFFER_BYTES", "4096");
+        }
+        let config = KilnConfig::load(Some(path)).unwrap();
+        assert_eq!(config.server.http_send_buffer_bytes, Some(4096));
+
+        for invalid in ["", "0", "1023", "16777217", "not-a-number"] {
+            unsafe {
+                std::env::set_var("KILN_HTTP_SEND_BUFFER_BYTES", invalid);
+            }
+            let error = KilnConfig::load(Some(path)).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("HTTP_SEND_BUFFER"),
+                "unexpected error for {invalid:?}: {error:#}"
+            );
+        }
+        unsafe {
+            std::env::remove_var("KILN_HTTP_SEND_BUFFER_BYTES");
+        }
+    }
+
+    #[test]
+    fn test_http_send_buffer_validation_bounds() {
+        let mut config = KilnConfig::default();
+
+        for valid in [HTTP_SEND_BUFFER_MIN_BYTES, HTTP_SEND_BUFFER_MAX_BYTES] {
+            config.server.http_send_buffer_bytes = Some(valid);
+            assert!(config.validate().is_ok(), "rejected valid bound {valid}");
+        }
+
+        for invalid in [
+            HTTP_SEND_BUFFER_MIN_BYTES - 1,
+            HTTP_SEND_BUFFER_MAX_BYTES + 1,
+        ] {
+            config.server.http_send_buffer_bytes = Some(invalid);
+            let error = config.validate().unwrap_err();
+            assert!(
+                format!("{error:#}").contains("server.http_send_buffer_bytes"),
+                "unexpected error for {invalid}: {error:#}"
+            );
+        }
     }
 
     #[test]

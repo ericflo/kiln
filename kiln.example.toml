@@ -24,6 +24,13 @@ host = "127.0.0.1"                    # Kiln has no built-in auth. Set "0.0.0.0"
 port = 8420
 request_timeout_secs = 600
 shutdown_timeout_secs = 5
+# http_send_buffer_bytes = 4096         # Optional per-connection SO_SNDBUF request, useful for
+                                        # deterministic slow-client/backpressure testing. The OS
+                                        # may round or double it; Kiln logs the read-back value and
+                                        # exits if application is ineffective. Valid range:
+                                        # 1024..=16777216. Override strictly with
+                                        # KILN_HTTP_SEND_BUFFER_BYTES; malformed/zero/out-of-range
+                                        # values are fatal startup errors.
 # eval_mode = false
 # default_thinking_enabled = false     # Optional. Qwen3.5-4B profile preserves the
                                       # official template thinking default unless this

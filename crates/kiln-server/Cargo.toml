@@ -60,6 +60,7 @@ kiln-tensor = { workspace = true }
 kiln-kt-bridge = { path = "../kiln-kt-bridge", default-features = false }
 kiln-train = { workspace = true }
 axum = { workspace = true }
+socket2 = { workspace = true }
 portable-pty = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }

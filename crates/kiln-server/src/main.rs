@@ -3,7 +3,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result};
+use axum::serve::ListenerExt as _;
 use clap::Parser;
+use socket2::SockRef;
 
 use kiln_server::api;
 use kiln_server::cli::{self, AdapterCommands, Cli, Commands, TrainCommands, TrajectoryCommands};
@@ -21,6 +23,25 @@ use kiln_model::forward::GpuWeights;
 use kiln_model::{ModelRunner, StartupCapabilities};
 use kiln_scheduler::{Scheduler, SchedulerConfig};
 use state::{AppState, ModelBackend};
+
+const HTTP_SEND_BUFFER_ACTUAL_MAX_MULTIPLIER: usize = 8;
+
+fn configure_http_send_buffer(
+    stream: &tokio::net::TcpStream,
+    requested_bytes: usize,
+) -> std::io::Result<usize> {
+    let socket = SockRef::from(stream);
+    socket.set_send_buffer_size(requested_bytes)?;
+    let actual_bytes = socket.send_buffer_size()?;
+    let maximum_actual = requested_bytes.saturating_mul(HTTP_SEND_BUFFER_ACTUAL_MAX_MULTIPLIER);
+    if actual_bytes < requested_bytes || actual_bytes > maximum_actual {
+        return Err(std::io::Error::other(format!(
+            "SO_SNDBUF read-back {actual_bytes} is outside the accepted range \
+             {requested_bytes}..={maximum_actual} for request {requested_bytes}"
+        )));
+    }
+    Ok(actual_bytes)
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -409,6 +430,7 @@ async fn main() -> Result<()> {
     state.default_thinking_enabled = config.server.default_thinking_enabled;
     state.default_thinking_budget_tokens = config.server.default_thinking_budget_tokens;
     state.default_thinking_budget_ms = config.server.default_thinking_budget_ms;
+    state.http_send_buffer_bytes = config.server.http_send_buffer_bytes;
     state.model_defaults_profile = model_defaults_profile;
     state.model_path = model_path.map(PathBuf::from);
     state.fold_reasoning_into_content = config.server.fold_reasoning_into_content;
@@ -748,6 +770,34 @@ async fn main() -> Result<()> {
             return Err(anyhow::Error::new(e).context(format!("failed to bind {addr}")));
         }
     };
+    let requested_http_send_buffer_bytes = config.server.http_send_buffer_bytes;
+    let listener = listener.tap_io(move |stream| {
+        let Some(requested_bytes) = requested_http_send_buffer_bytes else {
+            return;
+        };
+        match configure_http_send_buffer(stream, requested_bytes) {
+            Ok(actual_bytes) => tracing::info!(
+                requested_bytes,
+                actual_bytes,
+                "http_accepted_socket_send_buffer_configured"
+            ),
+            Err(error) => {
+                let actual_bytes = SockRef::from(&*stream).send_buffer_size().ok();
+                tracing::error!(
+                    requested_bytes,
+                    actual_bytes = actual_bytes.unwrap_or_default(),
+                    actual_bytes_known = actual_bytes.is_some(),
+                    error = %error,
+                    "http_accepted_socket_send_buffer_configuration_failed"
+                );
+                // `tap_io` cannot return a configuration error. Let the panic
+                // escape Axum's accept loop so an ineffective opt-in is fatal.
+                panic!(
+                    "fatal accepted-socket SO_SNDBUF configuration failure: requested={requested_bytes}: {error}"
+                );
+            }
+        }
+    });
     tracing::debug!(
         host = %host,
         port = port,
@@ -1126,4 +1176,31 @@ async fn shutdown_signal(
         tracing::warn!("second SIGINT received — exiting immediately");
         std::process::exit(130);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn accepted_socket_send_buffer_is_applied_and_bounded() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requested_bytes = 4096;
+        let mut listener = listener.tap_io(move |stream| {
+            configure_http_send_buffer(stream, requested_bytes).unwrap();
+        });
+        let (client, (accepted, _)) = tokio::join!(
+            tokio::net::TcpStream::connect(address),
+            axum::serve::Listener::accept(&mut listener),
+        );
+        let _client = client.unwrap();
+
+        let actual_bytes = SockRef::from(&accepted).send_buffer_size().unwrap();
+        assert!(actual_bytes >= requested_bytes);
+        assert!(
+            actual_bytes <= requested_bytes.saturating_mul(HTTP_SEND_BUFFER_ACTUAL_MAX_MULTIPLIER),
+            "accepted socket SO_SNDBUF {actual_bytes} was not bounded near request {requested_bytes}"
+        );
+    }
 }

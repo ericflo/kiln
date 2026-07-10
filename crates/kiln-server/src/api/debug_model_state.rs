@@ -29,6 +29,7 @@ struct ModelStateResponse {
     model: ModelDebugState,
     adapters: AdapterDebugState,
     config_hashes: ConfigHashes,
+    http: HttpDebugState,
     env_flags: BTreeMap<&'static str, EnvFlagState>,
     batching_engine: BatchingEngineDebugState,
     thinking: ThinkingDebugState,
@@ -67,6 +68,12 @@ struct LoadedAdapterDebugState {
 struct EnvFlagState {
     present: bool,
     value: Option<String>,
+}
+
+#[derive(Serialize)]
+struct HttpDebugState {
+    /// Effective requested value after TOML and environment resolution.
+    send_buffer_bytes: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -198,6 +205,9 @@ async fn build_model_state_response(state: &AppState) -> ModelStateResponse {
         model: model_debug_state(state),
         adapters: adapter_debug_state(state),
         config_hashes: state.config_hashes.clone(),
+        http: HttpDebugState {
+            send_buffer_bytes: state.http_send_buffer_bytes,
+        },
         env_flags: selected_env_flags(),
         batching_engine: batching_engine_state(state).await,
         thinking: thinking_state(state),
@@ -316,6 +326,7 @@ fn selected_env_flags() -> BTreeMap<&'static str, EnvFlagState> {
         "KILN_PREFIX_CACHE_ENABLED",
         "KILN_NUM_BLOCKS",
         "KILN_INFERENCE_MEMORY_FRACTION",
+        "KILN_HTTP_SEND_BUFFER_BYTES",
     ]
     .into_iter()
     .map(|name| {
@@ -548,6 +559,7 @@ mod tests {
 
         let mut state = make_test_state(tmp.path().to_path_buf());
         state.eval_mode = true;
+        state.http_send_buffer_bytes = Some(4096);
         state.default_thinking_enabled = Some(false);
         *state.active_adapter_name.write().unwrap() = Some("eval-adapter".to_string());
         *state.loaded_adapter_name.write().unwrap() = Some("eval-adapter".to_string());
@@ -619,6 +631,8 @@ mod tests {
         assert!(json["env_flags"]["KILN_ROCM_GRAPHS"].is_object());
         assert!(json["env_flags"]["KILN_KV_AUTOSCALE"].is_object());
         assert!(json["env_flags"]["KILN_MEMORY_RECLAIM_MODE"].is_object());
+        assert!(json["env_flags"]["KILN_HTTP_SEND_BUFFER_BYTES"].is_object());
+        assert_eq!(json["http"]["send_buffer_bytes"], 4096);
         assert!(json["caches"]["rendered_prompt"].is_object());
         assert!(json["caches"]["prefix_cache"].is_object());
 

@@ -20,6 +20,7 @@ struct HealthResponse {
     uptime_seconds: u64,
     model: String,
     backend: &'static str,
+    http: HttpRuntimeInfo,
     model_defaults_profile: ModelDefaultsProfile,
     eval_mode: bool,
     default_thinking_enabled: Option<bool>,
@@ -44,6 +45,12 @@ struct HealthResponse {
     decode_runtime: DecodeRuntimeInfo,
     training: TrainingInfo,
     checks: Vec<HealthCheck>,
+}
+
+#[derive(Serialize)]
+struct HttpRuntimeInfo {
+    /// Requested per-connection `SO_SNDBUF`; null leaves the OS default.
+    send_buffer_bytes: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -532,6 +539,9 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
             state.model_config.num_kv_heads,
         ),
         backend: backend_name,
+        http: HttpRuntimeInfo {
+            send_buffer_bytes: state.http_send_buffer_bytes,
+        },
         model_defaults_profile: state.model_defaults_profile,
         eval_mode: state.eval_mode,
         default_thinking_enabled: state.default_thinking_enabled,
@@ -889,6 +899,7 @@ mod tests {
         assert!(json["uptime_seconds"].is_number());
         assert!(json["model"].as_str().unwrap().contains("Qwen3.5-4B"));
         assert_eq!(json["backend"], "mock");
+        assert!(json["http"]["send_buffer_bytes"].is_null());
         assert_eq!(json["model_defaults_profile"]["name"], "Qwen3.5-4B");
         assert_eq!(
             json["model_defaults_profile"]["canonical_model_id"],
@@ -983,6 +994,30 @@ mod tests {
         assert!(json["checks"].is_array());
         let checks = json["checks"].as_array().unwrap();
         assert!(checks.iter().all(|c| c["pass"] == true));
+    }
+
+    #[tokio::test]
+    async fn test_health_reports_effective_http_send_buffer() {
+        let mut state = make_test_state();
+        state.http_send_buffer_bytes = Some(4096);
+        let app = routes().with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["http"]["send_buffer_bytes"], 4096);
     }
 
     #[tokio::test]
