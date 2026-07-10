@@ -9832,10 +9832,11 @@ async function refreshTeachersList() {
     } else {
       const rows = teachers.map(t => {
         const caps = t.capabilities ? `<span class="hint">${t.capabilities.max_top_k || '?'} top-K · ${t.capabilities.vocab_size || '?'} vocab</span>` : '';
+        const adapter = t.spec?.adapter ? ` · adapter ${escapeHtml(t.spec.adapter)}` : '';
         return `<div class="adapter-card" style="display:flex; align-items:center; gap:var(--space-3);">
           <div style="flex:1; min-width:0;">
             <div style="font-weight:600;">${escapeHtml(t.spec?.alias || '?')}</div>
-            <div style="font-size:var(--text-xs); color:var(--text-muted);">${escapeHtml(t.spec?.kind || '?')} · ${escapeHtml(t.spec?.model_id || '?')}</div>
+            <div style="font-size:var(--text-xs); color:var(--text-muted);">${escapeHtml(t.spec?.kind || '?')} · ${escapeHtml(t.spec?.model_id || '?')}${adapter}</div>
           </div>
           ${caps}
           <button class="btn btn-sm" data-teacher-delete="${escapeHtml(t.spec?.alias || '')}">Delete</button>
@@ -9883,6 +9884,16 @@ document.addEventListener('click', async (ev) => {
   } catch (e) { toast('Delete failed: ' + e.message, 'err'); }
 });
 
+document.querySelectorAll('#teacher-form select[name="kind"]').forEach(select => {
+  const sync = () => {
+    document.querySelectorAll('#teacher-form [data-teacher-kind-field]').forEach(node => {
+      node.hidden = node.getAttribute('data-teacher-kind-field') !== select.value;
+    });
+  };
+  select.addEventListener('change', sync);
+  sync();
+});
+
 document.getElementById('teacher-form')?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const form = e.target;
@@ -9892,13 +9903,16 @@ document.getElementById('teacher-form')?.addEventListener('submit', async (e) =>
       kind: form.kind.value,
       model_id: form.model_id.value.trim(),
     };
+    if (body.kind === 'remote') body.provider = 'vllm';
     if (form.url.value.trim()) body.url = form.url.value.trim();
     if (form.api_key_env.value.trim()) body.api_key_env = form.api_key_env.value.trim();
+    if (body.kind === 'local' && form.adapter.value.trim()) body.adapter = form.adapter.value.trim();
     if (form.max_top_k.value) body.max_top_k = parseInt(form.max_top_k.value, 10);
     if (form.vocab_size.value) body.vocab_size = parseInt(form.vocab_size.value, 10);
     await api('/v1/teachers', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
     toast(`Registered teacher ${body.alias}`);
     form.reset();
+    form.kind.dispatchEvent(new Event('change'));
     refreshTeachersList();
   } catch (err) { toast('Register failed: ' + err.message, 'err'); }
 });
@@ -9973,13 +9987,16 @@ document.getElementById('opd-form')?.addEventListener('submit', async (e) => {
         max_tokens: parseInt(document.getElementById('opd-max-tokens').value, 10),
         temperature: parseFloat(document.getElementById('opd-temperature').value),
         top_p: parseFloat(document.getElementById('opd-top-p').value),
+        training_mode: 'on_policy',
+        objective: 'reverse_kl',
+        stable_opd: { mode: 'off' },
+        discount: 0,
+        clip_epsilon: 0,
         auto_load: document.getElementById('opd-auto-load').checked,
       },
     };
     // Blank lr is omitted so the server resolves the per-optimizer default.
     if (opdLearningRate !== null) body.config.learning_rate = opdLearningRate;
-    const maxCost = document.getElementById('opd-max-cost').value;
-    if (maxCost.trim()) body.config.max_cost_usd = parseFloat(maxCost);
     const res = await api('/v1/train/opd', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
     toast(res.message || 'Distillation job queued');
     selectPage('training');
@@ -10064,6 +10081,7 @@ document.getElementById('distill-merge-form')?.addEventListener('submit', async 
       sources,
       student: form.student.value.trim() || 'base',
       rollout_budget: parseInt(form.rollout_budget.value, 10),
+      config: { training_mode: 'off_policy' },
     };
     const res = await api('/v1/adapters/distill_merge', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
     toast(res.message || 'Merge queued');
@@ -10074,6 +10092,19 @@ document.getElementById('distill-merge-form')?.addEventListener('submit', async 
 // --- Distill / Self (/v1/distill/self) ------------------------------
 document.querySelectorAll('#distill-self-form select[name="mode"]').forEach(sel => {
   const sync = () => {
+    const requiresContext = sel.value === 'ground_truth_conditioning' || sel.value === 'document_as_pi';
+    const prompts = document.getElementById('self-prompts');
+    const groundTruth = document.getElementById('self-ground-truth');
+    const documents = document.getElementById('self-documents');
+    if (prompts) prompts.required = true;
+    if (groundTruth) groundTruth.required = sel.value === 'ground_truth_conditioning';
+    if (documents) documents.required = sel.value === 'document_as_pi';
+    const promptsLabel = document.getElementById('self-prompts-label');
+    const promptsHelp = document.getElementById('self-prompts-help');
+    if (promptsLabel) promptsLabel.textContent = 'Prompts with assistant actions (JSON array)';
+    if (promptsHelp) promptsHelp.textContent = requiresContext
+      ? 'Required. Every prompt needs an assistant action, and the context array must have the same number of entries.'
+      : 'Required. Every prompt needs a non-empty assistant action for the privileged teacher to rescore.';
     document.querySelectorAll('#distill-self-form [data-self-mode-field]').forEach(node => {
       node.hidden = node.getAttribute('data-self-mode-field') !== sel.value;
     });
@@ -10089,8 +10120,11 @@ document.getElementById('distill-self-form')?.addEventListener('submit', async (
     const body = {
       name: form.name.value.trim(),
       mode: form.mode.value,
+      config: { training_mode: 'off_policy' },
     };
-    if (form.prompts.value.trim()) body.prompts = JSON.parse(form.prompts.value);
+    const prompts = JSON.parse(form.prompts.value);
+    if (!Array.isArray(prompts) || prompts.length === 0) throw new Error('Prompts must be a non-empty JSON array');
+    body.prompts = prompts;
     const gt = document.getElementById('self-ground-truth')?.value?.trim();
     if (gt) body.ground_truth = JSON.parse(gt);
     const docs = document.getElementById('self-documents')?.value?.trim();

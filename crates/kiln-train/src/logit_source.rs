@@ -118,8 +118,8 @@ impl LogprobBatch {
 #[derive(Debug, Error)]
 pub enum LogitSourceError {
     /// The caller requested top-K higher than the source's `max_top_k`.
-    /// Mitigation: the trainer should clamp to `caps.max_top_k` or fall
-    /// back to a `sampled_token` loss (§3.1).
+    /// Mitigation: the trainer should clamp to `caps.max_top_k` or use a
+    /// source with a wider validated support.
     #[error("top_k {requested} exceeds source cap {cap} for teacher {teacher_id:?}")]
     TopKExceedsCap {
         requested: usize,
@@ -166,6 +166,308 @@ impl LogitSourceError {
     }
 }
 
+/// Validate the request-side invariants shared by every [`LogitSource`].
+///
+/// Duplicate and out-of-order positions are valid: implementations must return
+/// one row for each requested position in exactly the caller-provided order.
+pub fn validate_logit_request(
+    caps: &LogitSourceCaps,
+    tokens: &[u32],
+    positions: &[usize],
+    top_k: Option<usize>,
+) -> Result<(), LogitSourceError> {
+    let invalid = |message: String| LogitSourceError::invalid(&caps.teacher_id, message);
+
+    if caps.vocab_size == 0 {
+        return Err(invalid("vocab_size must be greater than zero".into()));
+    }
+    if tokens.is_empty() {
+        return Err(invalid("tokens must not be empty".into()));
+    }
+    for (token_index, &token_id) in tokens.iter().enumerate() {
+        if token_id as usize >= caps.vocab_size {
+            return Err(invalid(format!(
+                "token {token_index} has id {token_id}, outside vocab_size {}",
+                caps.vocab_size
+            )));
+        }
+    }
+    for (row_index, &position) in positions.iter().enumerate() {
+        if position >= tokens.len() {
+            return Err(invalid(format!(
+                "positions[{row_index}]={position} is outside token length {}",
+                tokens.len()
+            )));
+        }
+    }
+
+    match top_k {
+        Some(0) => Err(invalid("top_k must be greater than zero".into())),
+        Some(requested) if requested > caps.max_top_k => Err(LogitSourceError::TopKExceedsCap {
+            requested,
+            cap: caps.max_top_k,
+            teacher_id: caps.teacher_id.clone(),
+        }),
+        Some(requested) if requested > caps.vocab_size => Err(invalid(format!(
+            "top_k {requested} exceeds vocab_size {}",
+            caps.vocab_size
+        ))),
+        Some(_) => Ok(()),
+        None if !caps.supports_full_vocab => Err(LogitSourceError::FullVocabUnsupported {
+            teacher_id: caps.teacher_id.clone(),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Validate one sparse logprob row against a source's advertised vocabulary.
+///
+/// The support must have exactly `expected_top_k` unique token IDs. Values are
+/// full-vocabulary logprobs, so every value is finite and non-positive and the
+/// probability mass represented by the sparse support cannot exceed one.
+pub fn validate_topk_logprob_row(
+    caps: &LogitSourceCaps,
+    expected_top_k: usize,
+    row_index: usize,
+    indices: &[u32],
+    logprobs: &[f32],
+) -> Result<(), LogitSourceError> {
+    let invalid = |message| LogitSourceError::invalid(&caps.teacher_id, message);
+
+    if expected_top_k == 0 {
+        return Err(invalid(format!("row {row_index} declares top_k 0")));
+    }
+    if expected_top_k > caps.max_top_k {
+        return Err(invalid(format!(
+            "row {row_index} top_k {expected_top_k} exceeds source cap {}",
+            caps.max_top_k
+        )));
+    }
+    if expected_top_k > caps.vocab_size {
+        return Err(invalid(format!(
+            "row {row_index} top_k {expected_top_k} exceeds vocab_size {}",
+            caps.vocab_size
+        )));
+    }
+    if indices.len() != expected_top_k || logprobs.len() != expected_top_k {
+        return Err(invalid(format!(
+            "row {row_index} declares top_k {expected_top_k} but has {} indices and {} logprobs",
+            indices.len(),
+            logprobs.len()
+        )));
+    }
+
+    let mut seen = std::collections::HashSet::with_capacity(expected_top_k);
+    let mut probability_mass = 0.0f64;
+    let mut previous_logprob = None;
+    for (candidate_index, (&token_id, &logprob)) in indices.iter().zip(logprobs.iter()).enumerate()
+    {
+        if token_id as usize >= caps.vocab_size {
+            return Err(invalid(format!(
+                "row {row_index} candidate {candidate_index} has token id {token_id}, outside vocab_size {}",
+                caps.vocab_size
+            )));
+        }
+        if !seen.insert(token_id) {
+            return Err(invalid(format!(
+                "row {row_index} contains duplicate token id {token_id}"
+            )));
+        }
+        if !logprob.is_finite() || logprob > 0.0 {
+            return Err(invalid(format!(
+                "row {row_index} candidate {candidate_index} has invalid logprob {logprob}"
+            )));
+        }
+        if let Some(previous) = previous_logprob {
+            if logprob > previous {
+                return Err(invalid(format!(
+                    "row {row_index} logprobs are not non-increasing at candidate {candidate_index}: {logprob} follows {previous}"
+                )));
+            }
+        }
+        previous_logprob = Some(logprob);
+        probability_mass += (logprob as f64).exp();
+    }
+
+    const MASS_TOLERANCE: f64 = 32.0 * f32::EPSILON as f64;
+    if probability_mass > 1.0 + MASS_TOLERANCE {
+        return Err(invalid(format!(
+            "row {row_index} sparse probability mass {probability_mass:.9} exceeds 1"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate the exact shape and every row of a top-K logprob response.
+///
+/// A batch contains exactly one row per item in `positions`; this is the
+/// structural part of the position-order contract. Implementations remain
+/// responsible for placing each semantic row in the corresponding slot.
+pub fn validate_topk_logprobs_batch(
+    caps: &LogitSourceCaps,
+    tokens: &[u32],
+    positions: &[usize],
+    requested_top_k: usize,
+    batch: &TopKLogprobs,
+) -> Result<(), LogitSourceError> {
+    validate_logit_request(caps, tokens, positions, Some(requested_top_k))?;
+    if batch.top_k != requested_top_k {
+        return Err(LogitSourceError::invalid(
+            &caps.teacher_id,
+            format!(
+                "response declares top_k {}, expected {requested_top_k}",
+                batch.top_k
+            ),
+        ));
+    }
+    let flat_len = positions
+        .len()
+        .checked_mul(requested_top_k)
+        .ok_or_else(|| {
+            LogitSourceError::invalid(&caps.teacher_id, "top-K response shape overflows usize")
+        })?;
+    if batch.indices.len() != flat_len || batch.logprobs.len() != flat_len {
+        return Err(LogitSourceError::invalid(
+            &caps.teacher_id,
+            format!(
+                "response for {} positions at top_k {requested_top_k} requires {flat_len} values, got {} indices and {} logprobs",
+                positions.len(),
+                batch.indices.len(),
+                batch.logprobs.len()
+            ),
+        ));
+    }
+
+    for row_index in 0..positions.len() {
+        let start = row_index * requested_top_k;
+        let end = start + requested_top_k;
+        validate_topk_logprob_row(
+            caps,
+            requested_top_k,
+            row_index,
+            &batch.indices[start..end],
+            &batch.logprobs[start..end],
+        )?;
+    }
+    Ok(())
+}
+
+/// Validate a full-vocabulary logprob response, including normalization.
+pub fn validate_full_vocab_logprobs_batch(
+    caps: &LogitSourceCaps,
+    tokens: &[u32],
+    positions: &[usize],
+    batch: &LogprobBatch,
+) -> Result<(), LogitSourceError> {
+    validate_logit_request(caps, tokens, positions, None)?;
+    let LogprobBatch::FullVocab {
+        logprobs,
+        vocab_size,
+    } = batch
+    else {
+        return Err(LogitSourceError::invalid(
+            &caps.teacher_id,
+            "full-vocab request returned a top-K response",
+        ));
+    };
+    if *vocab_size != caps.vocab_size {
+        return Err(LogitSourceError::invalid(
+            &caps.teacher_id,
+            format!(
+                "full-vocab response declares vocab_size {vocab_size}, expected {}",
+                caps.vocab_size
+            ),
+        ));
+    }
+    let flat_len = positions
+        .len()
+        .checked_mul(caps.vocab_size)
+        .ok_or_else(|| {
+            LogitSourceError::invalid(
+                &caps.teacher_id,
+                "full-vocab response shape overflows usize",
+            )
+        })?;
+    if logprobs.len() != flat_len {
+        return Err(LogitSourceError::invalid(
+            &caps.teacher_id,
+            format!(
+                "full-vocab response for {} positions requires {flat_len} values, got {}",
+                positions.len(),
+                logprobs.len()
+            ),
+        ));
+    }
+
+    const MASS_TOLERANCE: f64 = 64.0 * f32::EPSILON as f64;
+    for (row_index, row) in logprobs.chunks_exact(caps.vocab_size).enumerate() {
+        let mut probability_mass = 0.0f64;
+        for (token_id, &logprob) in row.iter().enumerate() {
+            if !logprob.is_finite() || logprob > 0.0 {
+                return Err(LogitSourceError::invalid(
+                    &caps.teacher_id,
+                    format!(
+                        "full-vocab row {row_index} token {token_id} has invalid logprob {logprob}"
+                    ),
+                ));
+            }
+            probability_mass += (logprob as f64).exp();
+        }
+        if (probability_mass - 1.0).abs() > MASS_TOLERANCE {
+            return Err(LogitSourceError::invalid(
+                &caps.teacher_id,
+                format!(
+                    "full-vocab row {row_index} probability mass {probability_mass:.9} is not normalized"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Convert target-token positions into the causal logits rows that predict them.
+///
+/// A target token at position `q` is scored by logits row `q - 1`. Callers must
+/// provide a strictly increasing, unique list of targets that exist in the
+/// original token sequence; token zero has no preceding causal row.
+pub fn target_token_positions_to_logits_rows(
+    teacher_id: &str,
+    token_len: usize,
+    target_positions: &[usize],
+) -> Result<Vec<usize>, LogitSourceError> {
+    let mut logits_rows = Vec::with_capacity(target_positions.len());
+    let mut previous = None;
+    for (index, &target_position) in target_positions.iter().enumerate() {
+        if target_position == 0 {
+            return Err(LogitSourceError::invalid(
+                teacher_id,
+                format!("target_positions[{index}] is zero and has no preceding logits row"),
+            ));
+        }
+        if target_position >= token_len {
+            return Err(LogitSourceError::invalid(
+                teacher_id,
+                format!(
+                    "target_positions[{index}]={target_position} is outside token length {token_len}"
+                ),
+            ));
+        }
+        if let Some(previous) = previous {
+            if target_position <= previous {
+                return Err(LogitSourceError::invalid(
+                    teacher_id,
+                    format!(
+                        "target positions must be strictly increasing and unique: {target_position} follows {previous}"
+                    ),
+                ));
+            }
+        }
+        previous = Some(target_position);
+        logits_rows.push(target_position - 1);
+    }
+    Ok(logits_rows)
+}
+
 /// A source of teacher logprobs for on-policy distillation.
 ///
 /// The contract:
@@ -174,8 +476,8 @@ impl LogitSourceError {
 ///    start of an OPD run.
 /// 2. For each rollout batch, the trainer calls
 ///    [`LogitSource::fetch_logprobs`] with the rollout's token IDs and
-///    the positions where it needs teacher signal (typically the
-///    assistant tokens; prompt tokens are masked).
+///    the causal logits rows that predict its active target tokens. Callers
+///    convert a target-token index `q` to row `q - 1` before this boundary.
 /// 3. The source returns a [`LogprobBatch`] — either top-K (the §3.2
 ///    default) or full-vocab (corporate-tier). The order of entries
 ///    matches the order of `positions`.
@@ -186,11 +488,10 @@ impl LogitSourceError {
 ///   (or attaches to one already loaded), runs a forward pass, extracts
 ///   top-K via `torch.topk`-equivalent on the resulting logits. Default
 ///   for the prosumer / corporate tiers (§2.2 / §2.3).
-/// * `RemoteTeacher` (next milestone) — speaks the OpenAI-compatible
-///   `top_logprobs` schema. Adapters per provider (vLLM, sglang,
-///   llama.cpp, OpenRouter, Together, Fireworks, …).
-/// * `CachedTeacher` (next milestone) — wraps another source, answers
-///   from local + community logit cache before falling through (§3.3).
+/// * `RemoteTeacher` speaks the validated OpenAI-compatible prompt-logprob
+///   schema for explicitly supported providers.
+/// * `CachedTeacher` wraps another source and answers from the local logit
+///   cache before falling through (§3.3).
 pub trait LogitSource: Send + Sync + Debug {
     /// Self-describing capability set. Called once at the start of an
     /// OPD run to pick the loss granularity.
@@ -204,8 +505,11 @@ pub trait LogitSource: Send + Sync + Debug {
     ///   only returns logprobs at the positions in `positions`. This
     ///   matches the kiln trainer convention (prompt tokens never
     ///   contribute to the loss).
-    /// * `positions` — 0-indexed positions in `tokens` where the trainer
-    ///   wants teacher signal. Typically the assistant-token positions.
+    /// * `positions` — 0-indexed causal logits-row indices. Row `p`
+    ///   conditions on `tokens[..=p]` and predicts `tokens[p + 1]` when that
+    ///   target exists. The final row `p == tokens.len() - 1` is the generic
+    ///   next-token distribution; remote sources may need to append a probe
+    ///   token to obtain it. Duplicate and out-of-order rows are allowed.
     /// * `top_k` — `Some(K)` requests top-K logprobs; `None` requests
     ///   full-vocab logprobs (only valid if `caps.supports_full_vocab`).
     ///
@@ -302,17 +606,8 @@ impl LogitSource for FixtureLogitSource {
         top_k: Option<usize>,
     ) -> Result<LogprobBatch, LogitSourceError> {
         let teacher_id = self.caps.teacher_id.clone();
+        validate_logit_request(&self.caps, tokens, positions, top_k)?;
         let requested_k = top_k.unwrap_or(self.top_k);
-        if requested_k > self.caps.max_top_k {
-            return Err(LogitSourceError::TopKExceedsCap {
-                requested: requested_k,
-                cap: self.caps.max_top_k,
-                teacher_id,
-            });
-        }
-        if top_k.is_none() && !self.caps.supports_full_vocab {
-            return Err(LogitSourceError::FullVocabUnsupported { teacher_id });
-        }
 
         let tokens_hash = Self::hash_tokens(tokens);
         let mut indices = Vec::with_capacity(positions.len() * requested_k);
@@ -324,14 +619,17 @@ impl LogitSource for FixtureLogitSource {
                     format!("no fixture entry for (hash={tokens_hash:#x}, pos={pos})"),
                 )
             })?;
+            validate_topk_logprob_row(&self.caps, self.top_k, pos, &entry.0, &entry.1)?;
             indices.extend_from_slice(&entry.0[..requested_k]);
             logprobs.extend_from_slice(&entry.1[..requested_k]);
         }
-        Ok(LogprobBatch::TopK(TopKLogprobs {
+        let batch = TopKLogprobs {
             indices,
             logprobs,
             top_k: requested_k,
-        }))
+        };
+        validate_topk_logprobs_batch(&self.caps, tokens, positions, requested_k, &batch)?;
+        Ok(LogprobBatch::TopK(batch))
     }
 }
 
@@ -378,14 +676,8 @@ impl LogitSource for DeterministicUniformLogitSource {
         top_k: Option<usize>,
     ) -> Result<LogprobBatch, LogitSourceError> {
         let teacher_id = self.caps.teacher_id.clone();
-        let requested_k = top_k.unwrap_or(self.top_k).min(self.caps.max_top_k);
-        if requested_k > self.caps.max_top_k {
-            return Err(LogitSourceError::TopKExceedsCap {
-                requested: requested_k,
-                cap: self.caps.max_top_k,
-                teacher_id,
-            });
-        }
+        validate_logit_request(&self.caps, tokens, positions, top_k)?;
+        let requested_k = top_k.unwrap_or(self.top_k);
         let vocab = self.caps.vocab_size as u32;
         if vocab < requested_k as u32 {
             return Err(LogitSourceError::invalid(
@@ -420,11 +712,13 @@ impl LogitSource for DeterministicUniformLogitSource {
                 idx = (idx + 1) % vocab;
             }
         }
-        Ok(LogprobBatch::TopK(TopKLogprobs {
+        let batch = TopKLogprobs {
             indices,
             logprobs,
             top_k: requested_k,
-        }))
+        };
+        validate_topk_logprobs_batch(&self.caps, tokens, positions, requested_k, &batch)?;
+        Ok(LogprobBatch::TopK(batch))
     }
 }
 
@@ -432,13 +726,157 @@ impl LogitSource for DeterministicUniformLogitSource {
 mod tests {
     use super::*;
 
+    fn validation_caps() -> LogitSourceCaps {
+        LogitSourceCaps {
+            teacher_id: "validator-test".into(),
+            vocab_size: 8,
+            max_top_k: 4,
+            supports_full_vocab: false,
+            supports_batched: true,
+            tokenizer_hash: None,
+        }
+    }
+
+    #[test]
+    fn request_validation_rejects_invalid_tokens_positions_and_k() {
+        let caps = validation_caps();
+        assert!(validate_logit_request(&caps, &[], &[], Some(2)).is_err());
+        assert!(validate_logit_request(&caps, &[0, 8], &[0], Some(2)).is_err());
+        assert!(validate_logit_request(&caps, &[0, 1], &[2], Some(2)).is_err());
+        assert!(validate_logit_request(&caps, &[0, 1], &[0], Some(0)).is_err());
+        assert!(matches!(
+            validate_logit_request(&caps, &[0, 1], &[0], Some(5)),
+            Err(LogitSourceError::TopKExceedsCap { .. })
+        ));
+        assert!(matches!(
+            validate_logit_request(&caps, &[0, 1], &[0], None),
+            Err(LogitSourceError::FullVocabUnsupported { .. })
+        ));
+
+        let mut zero_vocab = caps.clone();
+        zero_vocab.vocab_size = 0;
+        assert!(validate_logit_request(&zero_vocab, &[0], &[0], Some(1)).is_err());
+
+        let mut vocab_bound = caps;
+        vocab_bound.max_top_k = 16;
+        assert!(validate_logit_request(&vocab_bound, &[0], &[0], Some(9)).is_err());
+    }
+
+    #[test]
+    fn request_validation_allows_empty_and_duplicate_position_lists() {
+        let caps = validation_caps();
+        validate_logit_request(&caps, &[0, 1, 2], &[], Some(2)).unwrap();
+        validate_logit_request(&caps, &[0, 1, 2], &[2, 0, 2], Some(2)).unwrap();
+    }
+
+    #[test]
+    fn topk_row_validation_rejects_malformed_sparse_support() {
+        let caps = validation_caps();
+        validate_topk_logprob_row(&caps, 2, 0, &[1, 2], &[-0.5, -1.5]).unwrap();
+
+        assert!(validate_topk_logprob_row(&caps, 2, 0, &[1], &[-1.0]).is_err());
+        assert!(validate_topk_logprob_row(&caps, 2, 0, &[1, 1], &[-1.0, -1.0]).is_err());
+        assert!(validate_topk_logprob_row(&caps, 2, 0, &[1, 8], &[-1.0, -1.0]).is_err());
+        assert!(validate_topk_logprob_row(&caps, 2, 0, &[1, 2], &[-2.0, -1.0]).is_err());
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.01] {
+            assert!(validate_topk_logprob_row(&caps, 2, 0, &[1, 2], &[-1.0, bad]).is_err());
+        }
+        assert!(validate_topk_logprob_row(&caps, 2, 0, &[1, 2], &[0.0, 0.0]).is_err());
+    }
+
+    #[test]
+    fn topk_batch_validation_enforces_declared_k_and_row_count() {
+        let caps = validation_caps();
+        let tokens = [0, 1, 2];
+        let positions = [2, 0];
+        let valid = TopKLogprobs {
+            indices: vec![1, 2, 3, 4],
+            logprobs: vec![-1.0, -1.5, -1.0, -1.5],
+            top_k: 2,
+        };
+        validate_topk_logprobs_batch(&caps, &tokens, &positions, 2, &valid).unwrap();
+
+        let mut wrong_declared_k = valid.clone();
+        wrong_declared_k.top_k = 3;
+        assert!(
+            validate_topk_logprobs_batch(&caps, &tokens, &positions, 2, &wrong_declared_k).is_err()
+        );
+        let mut short = valid;
+        short.indices.pop();
+        assert!(validate_topk_logprobs_batch(&caps, &tokens, &positions, 2, &short).is_err());
+    }
+
+    #[test]
+    fn full_vocab_validation_enforces_variant_shape_values_and_mass() {
+        let mut caps = validation_caps();
+        caps.vocab_size = 4;
+        caps.supports_full_vocab = true;
+        let tokens = [0, 1, 2];
+        let positions = [0, 2];
+        let uniform = -(4.0f32).ln();
+        let valid = LogprobBatch::FullVocab {
+            logprobs: vec![uniform; 8],
+            vocab_size: 4,
+        };
+        validate_full_vocab_logprobs_batch(&caps, &tokens, &positions, &valid).unwrap();
+
+        let wrong_variant = LogprobBatch::TopK(TopKLogprobs {
+            indices: vec![0, 1, 0, 1],
+            logprobs: vec![-1.0, -1.5, -1.0, -1.5],
+            top_k: 2,
+        });
+        assert!(
+            validate_full_vocab_logprobs_batch(&caps, &tokens, &positions, &wrong_variant).is_err()
+        );
+        let wrong_vocab = LogprobBatch::FullVocab {
+            logprobs: vec![uniform; 8],
+            vocab_size: 8,
+        };
+        assert!(
+            validate_full_vocab_logprobs_batch(&caps, &tokens, &positions, &wrong_vocab).is_err()
+        );
+        let short = LogprobBatch::FullVocab {
+            logprobs: vec![uniform; 7],
+            vocab_size: 4,
+        };
+        assert!(validate_full_vocab_logprobs_batch(&caps, &tokens, &positions, &short).is_err());
+        for malformed_row in [
+            vec![f32::NAN, uniform, uniform, uniform],
+            vec![0.1, uniform, uniform, uniform],
+            vec![0.0; 4],
+            vec![-10.0; 4],
+        ] {
+            let malformed = LogprobBatch::FullVocab {
+                logprobs: malformed_row,
+                vocab_size: 4,
+            };
+            assert!(validate_full_vocab_logprobs_batch(&caps, &tokens, &[0], &malformed).is_err());
+        }
+    }
+
+    #[test]
+    fn target_positions_convert_to_preceding_logits_rows() {
+        assert_eq!(
+            target_token_positions_to_logits_rows("teacher", 8, &[1, 3, 7]).unwrap(),
+            vec![0, 2, 6]
+        );
+        assert!(
+            target_token_positions_to_logits_rows("teacher", 0, &[])
+                .unwrap()
+                .is_empty()
+        );
+        for invalid in [&[0][..], &[1, 1], &[2, 1], &[1, 8]] {
+            assert!(target_token_positions_to_logits_rows("teacher", 8, invalid).is_err());
+        }
+    }
+
     #[test]
     fn fixture_returns_inserted_entries() {
         let mut src = FixtureLogitSource::uniform_topk("test-teacher", 64, 4);
         let tokens = vec![10u32, 20, 30, 40];
         let h = FixtureLogitSource::hash_tokens(&tokens);
-        src.insert(h, 1, vec![5, 6, 7, 8], vec![-0.1, -0.2, -0.3, -0.4]);
-        src.insert(h, 2, vec![9, 10, 11, 12], vec![-0.5, -0.6, -0.7, -0.8]);
+        src.insert(h, 1, vec![5, 6, 7, 8], vec![-1.5, -1.6, -1.7, -1.8]);
+        src.insert(h, 2, vec![9, 10, 11, 12], vec![-2.0, -2.1, -2.2, -2.3]);
 
         let batch = src.fetch_logprobs(&tokens, &[1, 2], Some(4)).unwrap();
         match batch {
@@ -447,7 +885,7 @@ mod tests {
                 assert_eq!(t.indices, vec![5, 6, 7, 8, 9, 10, 11, 12]);
                 assert_eq!(
                     t.logprobs,
-                    vec![-0.1, -0.2, -0.3, -0.4, -0.5, -0.6, -0.7, -0.8]
+                    vec![-1.5, -1.6, -1.7, -1.8, -2.0, -2.1, -2.2, -2.3]
                 );
             }
             _ => panic!("expected top-k batch"),

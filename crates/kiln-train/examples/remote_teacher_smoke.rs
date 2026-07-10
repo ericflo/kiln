@@ -5,10 +5,10 @@
 //! Run with:
 //! ```bash
 //! cargo run -p kiln-train --release --example remote_teacher_smoke -- \
-//!   http://localhost:8002 qwen3.6-27b-fp8 8
+//!   http://localhost:8002 qwen3.6-27b-fp8 8 <vocab-size>
 //! ```
 //!
-//! Args: <vllm_url> <model_id> <top_k>
+//! Args: <vllm_url> <model_id> <top_k> <vocab_size>
 
 use kiln_train::logit_source::{LogitSource, LogprobBatch};
 use kiln_train::{RemoteProvider, RemoteTeacher, RemoteTeacherConfig};
@@ -20,6 +20,10 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| "http://localhost:8002".to_string());
     let model = args.next().unwrap_or_else(|| "qwen3.6-27b-fp8".to_string());
     let top_k: usize = args.next().unwrap_or_else(|| "8".to_string()).parse()?;
+    let vocab_size: usize = args
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing required <vocab_size> argument"))?
+        .parse()?;
 
     let cfg = RemoteTeacherConfig {
         provider: RemoteProvider::Vllm,
@@ -29,11 +33,11 @@ fn main() -> anyhow::Result<()> {
         teacher_id: format!("vllm/{model}"),
         tokenizer_hash: None,
         max_top_k: top_k,
-        vocab_size: 0,
+        vocab_size,
         max_cost_usd: None,
         timeout_ms: 60_000,
     };
-    let teacher = RemoteTeacher::new(cfg);
+    let teacher = RemoteTeacher::new(cfg)?;
     let caps = teacher.capabilities();
     println!("RemoteTeacher capabilities: {caps:?}");
 
@@ -41,7 +45,7 @@ fn main() -> anyhow::Result<()> {
     // The point isn't semantics, just that vLLM produces top-K logprobs
     // at every prompt position we ask about.
     let tokens: Vec<u32> = vec![9707, 1879, 2, 30246, 11, 1246, 525];
-    let positions: Vec<usize> = vec![1, 3, 5];
+    let positions: Vec<usize> = vec![0, 3, tokens.len() - 1];
 
     let batch = teacher.fetch_logprobs(&tokens, &positions, Some(top_k))?;
     match batch {

@@ -1248,14 +1248,15 @@
               <label for="opd-loss">Loss granularity</label>
               <select id="opd-loss" name="loss">
                 <option value="teacher_top_k" selected>teacher_top_k (recommended)</option>
-                <option value="sampled_token">sampled_token (Lu 2025 baseline)</option>
-                <option value="full_vocab">full_vocab (corporate tier; DeepSeek-V4)</option>
               </select>
             </div>
             <div class="form-group">
               <label for="opd-top-k">Top-K</label>
-              <input type="number" id="opd-top-k" name="top_k" value="32" min="1" max="1024">
-              <div class="form-help">Default 32 — number of teacher logits to match per token.</div>
+              <select id="opd-top-k" name="top_k">
+                <option value="16" selected>16 (stock vLLM compatible)</option>
+                <option value="32">32 (requires a 32-logprob teacher)</option>
+              </select>
+              <div class="form-help">The active OPD kernels support 16 or 32 teacher logits per token.</div>
             </div>
             <div class="form-group">
               <label for="opd-samples">Samples / prompt</label>
@@ -1287,11 +1288,6 @@
             <div class="form-group">
               <label for="opd-top-p">Top-p</label>
               <input type="text" id="opd-top-p" name="top_p" value="0.9">
-            </div>
-            <div class="form-group">
-              <label for="opd-max-cost">Cost cap (USD)</label>
-              <input type="text" id="opd-max-cost" name="max_cost_usd" value="25" placeholder="25">
-              <div class="form-help">Hard cap on remote-teacher API spend for this job (default $25). Local and fixture teachers cost $0.</div>
             </div>
           </div>
           <div class="form-group">
@@ -1330,37 +1326,42 @@
           <div class="form-row">
             <div class="form-group">
               <label for="teacher-alias">Alias</label>
-              <input type="text" id="teacher-alias" name="alias" required placeholder="qwen3.6-27b@openrouter">
+              <input type="text" id="teacher-alias" name="alias" required placeholder="qwen3.5-27b@vllm">
               <div class="form-help">Stable id used in <code>teacher</code> fields. Conventional shape: <code>model@source</code>.</div>
             </div>
             <div class="form-group">
               <label for="teacher-kind">Kind</label>
               <select id="teacher-kind" name="kind" required>
                 <option value="fixture">Fixture (deterministic; synthetic)</option>
-                <option value="local">Local (same process, in-RAM)</option>
-                <option value="remote" selected>Remote (HTTP top_logprobs)</option>
+                <option value="local">Local (served model)</option>
+                <option value="remote" selected>Remote (vLLM prompt_logprobs)</option>
               </select>
             </div>
           </div>
           <div class="form-row">
             <div class="form-group">
               <label for="teacher-model-id">Model id</label>
-              <input type="text" id="teacher-model-id" name="model_id" placeholder="qwen/qwen-3.6-27b">
+              <input type="text" id="teacher-model-id" name="model_id" placeholder="Qwen/Qwen3.5-27B">
             </div>
-            <div class="form-group">
+            <div class="form-group" data-teacher-kind-field="remote">
               <label for="teacher-url">URL <span class="hint">(Remote)</span></label>
-              <input type="text" id="teacher-url" name="url" placeholder="https://openrouter.ai/api/v1">
+              <input type="text" id="teacher-url" name="url" placeholder="http://127.0.0.1:8000">
+            </div>
+            <div class="form-group" data-teacher-kind-field="local" hidden>
+              <label for="teacher-adapter">Adapter <span class="hint">(Local, optional)</span></label>
+              <input type="text" id="teacher-adapter" name="adapter" placeholder="prior-self-v17">
+              <div class="form-help">When set, the local teacher wears this adapter; blank means the served base model.</div>
             </div>
           </div>
           <div class="form-row">
-            <div class="form-group">
+            <div class="form-group" data-teacher-kind-field="remote">
               <label for="teacher-api-key-env">API-key env var <span class="hint">(Remote)</span></label>
-              <input type="text" id="teacher-api-key-env" name="api_key_env" placeholder="OPENROUTER_API_KEY">
-              <div class="form-help">Cost-lock — Kiln never stores the key, only the env-var name to read.</div>
+              <input type="text" id="teacher-api-key-env" name="api_key_env" placeholder="VLLM_API_KEY (optional)">
+              <div class="form-help">Kiln stores only the environment-variable name, never the secret value.</div>
             </div>
             <div class="form-group">
               <label for="teacher-max-top-k">Max top-K</label>
-              <input type="number" id="teacher-max-top-k" name="max_top_k" value="32" min="1" max="1024">
+              <input type="number" id="teacher-max-top-k" name="max_top_k" value="20" min="1" max="1024">
             </div>
             <div class="form-group">
               <label for="teacher-vocab-size">Vocab size</label>
@@ -1543,23 +1544,24 @@
                 <option value="ground_truth_conditioning">Ground-truth conditioning (OPSD)</option>
                 <option value="conciseness" selected>Conciseness (CRISP)</option>
                 <option value="document_as_pi">Document as privileged info (GATES)</option>
-                <option value="reverse_teacher">Reverse teacher (RLRT)</option>
               </select>
               <div class="form-help">The teacher is this same model given privileged information &mdash; the right answer, retrieved documents &mdash; that the student never sees. (No relation to the pi coding agent.)</div>
             </div>
           </div>
           <div class="form-group">
-            <label for="self-prompts">Prompts (JSON array, optional)</label>
-            <textarea id="self-prompts" name="prompts" rows="5" placeholder='[{"messages":[{"role":"user","content":"..."}]}]'></textarea>
-            <div class="form-help">Optional — when blank, Kiln uses wide canonical seeds.</div>
+            <label for="self-prompts" id="self-prompts-label">Prompts with assistant actions (JSON array)</label>
+            <textarea id="self-prompts" name="prompts" rows="5" required placeholder='[{"messages":[{"role":"user","content":"Question"},{"role":"assistant","content":"Answer to refine"}]}]'></textarea>
+            <div class="form-help" id="self-prompts-help">Required. Each prompt needs a non-empty assistant action that the privileged teacher can rescore.</div>
           </div>
           <div class="form-group" data-self-mode-field="ground_truth_conditioning" hidden>
             <label for="self-ground-truth">Ground-truth answers (JSON array of strings)</label>
             <textarea id="self-ground-truth" name="ground_truth" rows="3" placeholder='["The answer is 42.", "Bonjour"]'></textarea>
+            <div class="form-help">Exactly one non-empty answer for each prompt, in the same order.</div>
           </div>
           <div class="form-group" data-self-mode-field="document_as_pi" hidden>
             <label for="self-documents">Retrieved documents (JSON array of strings)</label>
             <textarea id="self-documents" name="documents" rows="3" placeholder='["Document text 1...", "Document text 2..."]'></textarea>
+            <div class="form-help">Exactly one non-empty document context for each prompt, in the same order.</div>
           </div>
           <div style="display: flex; gap: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border);">
             <button type="submit" class="btn btn-primary" style="margin-left: auto;">Queue self-improvement job</button>

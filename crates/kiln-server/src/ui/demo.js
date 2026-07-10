@@ -85,9 +85,9 @@
   });
   const teachers = () => ({
     teachers: [
-      { spec: { alias: 'qwen3.6-27b-local', kind: 'local', model_id: 'Qwen/Qwen3.6-27B' }, capabilities: { teacher_id: 'qwen3.6-27b@local', vocab_size: 151_936, max_top_k: 128 } },
-      { spec: { alias: 'gpt-frontier', kind: 'http', model_id: 'gpt-4.1', url: 'https://api.openai.com/v1', api_key_env: 'OPENAI_API_KEY' }, capabilities: { teacher_id: 'gpt-4.1@openai', vocab_size: 200_000, max_top_k: 20 } },
-      { spec: { alias: 'claude-judge', kind: 'http', model_id: 'claude-opus-4', url: 'https://api.anthropic.com', api_key_env: 'ANTHROPIC_API_KEY' }, capabilities: { teacher_id: 'claude-opus-4@anthropic', vocab_size: 0, max_top_k: 0 } },
+      { spec: { alias: 'served-base', kind: 'local', model_id: 'Qwen/Qwen3.5-4B' }, capabilities: { teacher_id: 'served-base', vocab_size: 248_320, max_top_k: 32 } },
+      { spec: { alias: 'qwen-vllm', kind: 'remote', provider: 'vllm', model_id: 'Qwen/Qwen3.5-27B', url: 'http://127.0.0.1:8000' }, capabilities: { teacher_id: 'qwen-vllm', vocab_size: 248_320, max_top_k: 20 } },
+      { spec: { alias: 'deterministic-fixture', kind: 'fixture', model_id: 'fixture-v1' }, capabilities: { teacher_id: 'deterministic-fixture', vocab_size: 248_320, max_top_k: 32 } },
     ],
   });
   const recipes = () => ({
@@ -119,9 +119,9 @@
   });
   const preflightTiers = () => ({
     tiers: [
-      { tier: 'fast', default_logit_source: 'local', default_loss: 'kl_topk', default_top_k: 64, lora_rank: 16, batch_size: 8, samples_per_prompt_default: 2, samples_per_prompt_data_multiplier: 1, max_rollout_tokens: 512, auto_checkpoint_cadence_steps: 100, cost_cap_default_usd: 10, cold_start_overlap_threshold: 0.5, mixture_distillation_golden_fraction: 0.1, eval_gate_required: false, notifications_channels: [] },
-      { tier: 'balanced', default_logit_source: 'local', default_loss: 'kl_topk', default_top_k: 128, lora_rank: 32, batch_size: 8, samples_per_prompt_default: 4, samples_per_prompt_data_multiplier: 2, max_rollout_tokens: 1024, auto_checkpoint_cadence_steps: 250, cost_cap_default_usd: 50, cold_start_overlap_threshold: 0.6, mixture_distillation_golden_fraction: 0.15, eval_gate_required: true, notifications_channels: ['slack'] },
-      { tier: 'quality', default_logit_source: 'http', default_loss: 'full_kl', default_top_k: 256, lora_rank: 64, batch_size: 4, samples_per_prompt_default: 8, samples_per_prompt_data_multiplier: 3, max_rollout_tokens: 2048, auto_checkpoint_cadence_steps: 500, cost_cap_default_usd: null, cold_start_overlap_threshold: 0.7, mixture_distillation_golden_fraction: 0.2, eval_gate_required: true, notifications_channels: ['slack', 'email'] },
+      { tier: 'fast', default_logit_source: 'remote', default_loss: 'teacher_top_k', default_top_k: 16, lora_rank: 16, batch_size: 8, samples_per_prompt_default: 2, samples_per_prompt_data_multiplier: 1, max_rollout_tokens: 512, auto_checkpoint_cadence_steps: 100, cost_cap_default_usd: 10, cold_start_overlap_threshold: 0.5, mixture_distillation_golden_fraction: 0.1, eval_gate_required: false, notifications_channels: [] },
+      { tier: 'balanced', default_logit_source: 'local', default_loss: 'teacher_top_k', default_top_k: 32, lora_rank: 32, batch_size: 8, samples_per_prompt_default: 4, samples_per_prompt_data_multiplier: 2, max_rollout_tokens: 1024, auto_checkpoint_cadence_steps: 250, cost_cap_default_usd: 50, cold_start_overlap_threshold: 0.6, mixture_distillation_golden_fraction: 0.15, eval_gate_required: true, notifications_channels: ['slack'] },
+      { tier: 'quality', default_logit_source: 'local', default_loss: 'teacher_top_k', default_top_k: 32, lora_rank: 64, batch_size: 4, samples_per_prompt_default: 8, samples_per_prompt_data_multiplier: 3, max_rollout_tokens: 2048, auto_checkpoint_cadence_steps: 500, cost_cap_default_usd: null, cold_start_overlap_threshold: 0.7, mixture_distillation_golden_fraction: 0.2, eval_gate_required: true, notifications_channels: ['slack', 'email'] },
     ],
   });
   const agentTraces = () => ({

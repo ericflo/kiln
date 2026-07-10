@@ -18,8 +18,8 @@
 //!
 //! * Request / config types matching `SftRequest` / `GrpoRequest` shape
 //!   (the §4 endpoint payload).
-//! * `OpdLossGranularity` enum (`SampledToken` / `TeacherTopK` /
-//!   `FullVocab`) with the §6 defaults.
+//! * `OpdLossGranularity` compatibility enum. The executable server path is
+//!   `TeacherTopK` with K 16 or 32; other values fail closed.
 //! * `opd_step_loss` — one OPD step's loss + per-position KL, given a
 //!   fully tokenized rollout, the student's hidden states at the
 //!   rollout's positions, and a `LogitSource` to query the teacher.
@@ -44,18 +44,18 @@
 //!
 //! Three granularities produce different per-token KL:
 //!
-//! 1. **`SampledToken`** (Lu's default for the reasoning case).
-//!    `KL_t = student_logprobs[t] - teacher_logprob_at_sampled[t]`.
-//!    Cheap (no kernel), brittle on long rollouts (§3.1 of Fu et al.).
+//! 1. **`SampledToken`** is retained only as a backwards-compatible wire
+//!    value and rejected before training. A correct implementation needs the
+//!    observed token's teacher logprob; ranked top-1 support would yield zero.
 //! 2. **`TeacherTopK`** (§6 default, robust). Renormalise both
 //!    distributions over the teacher's K support, then compute
 //!    `KL(p_hat || q_hat)`. Uses `kiln-opd-loss-kernel`.
-//! 3. **`FullVocab`** (corporate tier per §5.1.2 of deepseek_v4).
-//!    The K support is the full vocabulary; same kernel, K = V.
+//! 3. **`FullVocab`** is retained as a compatibility value but rejected by
+//!    the server because no concrete source/kernel route implements K = V.
 //!
-//! Per-token advantage for the importance-sampling loss is
-//! `A_t = -KL_t`. The trainer's GRPO loss machinery (`grpo_loss` in
-//! `trainer.rs`) is reused verbatim with this advantage.
+//! Production currently minimizes the mean per-token top-K reverse KL
+//! directly. Discounted advantages and importance-ratio clipping are rejected
+//! until a policy-gradient loss root is connected.
 
 use std::sync::Arc;
 
@@ -95,7 +95,11 @@ use crate::cd_types::{DType, Tensor};
 use crate::cd_types::Device;
 use serde::{Deserialize, Serialize};
 
-use crate::logit_source::{LogitSource, LogprobBatch};
+use crate::logit_source::{
+    LogitSource, LogprobBatch, target_token_positions_to_logits_rows,
+    validate_full_vocab_logprobs_batch, validate_logit_request, validate_topk_logprob_row,
+    validate_topk_logprobs_batch,
+};
 use crate::{ChatMessage, Optimizer, default_alpha, default_rank};
 #[cfg(any(
     feature = "cuda",
@@ -128,6 +132,21 @@ pub const fn default_opd_top_k() -> usize {
     32
 }
 
+/// Resolve a requested OPD support size against the source and KT-kernel
+/// envelopes. The current authoritative forward/backward kernels support only
+/// K=16 and K=32, so arbitrary request/provider caps must be rounded down to
+/// the largest executable value before teacher I/O or GPU work begins.
+pub fn resolve_opd_top_k(requested_top_k: usize, source_max_top_k: usize) -> Result<usize> {
+    [32usize, 16]
+        .into_iter()
+        .find(|&candidate| candidate <= requested_top_k && candidate <= source_max_top_k)
+        .ok_or_else(|| {
+            anyhow!(
+                "OPD teacher_top_k has no executable support size: requested {requested_top_k}, source cap {source_max_top_k}, KT kernels require one of {{16, 32}}"
+            )
+        })
+}
+
 /// §3.1 default rollouts-per-prompt. Lu (2025) used 4; auto-scales to
 /// 16/64 when the dataset is small (`data_multiplier` mode, §3.5.4).
 /// The auto-scale logic is a trainer-level decision and lives in
@@ -140,8 +159,10 @@ pub const fn default_opd_samples_per_prompt() -> usize {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OpdLossGranularity {
-    /// Single-token reverse KL — `student_lp - teacher_lp_at_sampled`.
-    /// Lu's default; brittle on long rollouts per Fu et al. 2026.
+    /// Reserved wire value for single-token reverse KL. Rejected before
+    /// training: the current `LogitSource` contract returns ranked top-K rows,
+    /// not the sampled token's teacher logprob, so treating K=1 as this loss
+    /// would silently produce an identically zero renormalized-support KL.
     SampledToken,
     /// Top-K renormalised reverse KL. **The default.** Fu et al. 2026
     /// teacher Top-K local support matching.
@@ -153,6 +174,18 @@ pub enum OpdLossGranularity {
 impl Default for OpdLossGranularity {
     fn default() -> Self {
         Self::TeacherTopK
+    }
+}
+
+impl OpdLossGranularity {
+    /// Explain why a deserializable loss mode cannot currently train.
+    pub const fn unsupported_reason(self) -> Option<&'static str> {
+        match self {
+            Self::SampledToken => Some(
+                "sampled_token is unsupported: the teacher contract does not return the sampled token's logprob, and using ranked top-1 would produce an identically zero loss",
+            ),
+            Self::TeacherTopK | Self::FullVocab => None,
+        }
     }
 }
 
@@ -177,7 +210,8 @@ impl Default for OpdTrainingMode {
 pub enum OpdObjective {
     /// Reverse-KL against teacher top-K logprobs.
     ReverseKl,
-    /// Cross-entropy on the teacher response tokens.
+    /// Reserved wire value. Dataset preparation can validate CE targets, but
+    /// the production trainer rejects this until CE is part of its loss root.
     CrossEntropy,
 }
 
@@ -187,15 +221,24 @@ impl Default for OpdObjective {
     }
 }
 
-/// §3.1 Stable-OPD knob set (Luo et al. 2026). When `Auto`, the
-/// `LengthInflation` guardrail (§3.9, lands in #24) toggles these
-/// based on RepRate observations. Power users can pin
-/// `Off` or `Manual { kl, sft }`.
+impl OpdObjective {
+    pub const fn unsupported_reason(self) -> Option<&'static str> {
+        match self {
+            Self::ReverseKl => None,
+            Self::CrossEntropy => {
+                Some("cross_entropy is not wired into the production OPD loss root; use reverse_kl")
+            }
+        }
+    }
+}
+
+/// Reserved Stable-OPD knob set (Luo et al. 2026). Only `Off` is executable
+/// today; `Auto` and `Manual` remain deserializable so older requests fail with
+/// a precise contract error instead of an unknown-enum error.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "mode")]
 pub enum StableOpdMode {
-    /// Disable Stable-OPD entirely. Only useful for parity studies vs
-    /// the Lu (2025) baseline; never recommended for real runs.
+    /// Disable Stable-OPD. This is the only production-supported value today.
     Off,
     /// Auto-engage based on the diagnostic stack — §3.9 default.
     Auto,
@@ -210,7 +253,18 @@ pub enum StableOpdMode {
 
 impl Default for StableOpdMode {
     fn default() -> Self {
-        Self::Auto
+        Self::Off
+    }
+}
+
+impl StableOpdMode {
+    pub const fn unsupported_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Off => None,
+            Self::Auto | Self::Manual { .. } => Some(
+                "Stable-OPD is not wired into the production loss root; use {\"mode\":\"off\"}",
+            ),
+        }
     }
 }
 
@@ -456,7 +510,7 @@ pub struct DistillMergeRequest {
     /// Per-job OPD config; loss granularity defaults to
     /// `teacher_top_k` so each source's distillation honours the §6
     /// fast path.
-    #[serde(default)]
+    #[serde(default = "default_off_policy_opd_config")]
     pub config: OpdConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_eval: Option<kiln_eval::PostEvalConfig>,
@@ -467,6 +521,13 @@ fn default_merge_student() -> String {
 }
 fn default_merge_rollout_budget() -> usize {
     5_000
+}
+
+fn default_off_policy_opd_config() -> OpdConfig {
+    OpdConfig {
+        training_mode: OpdTrainingMode::OffPolicy,
+        ..OpdConfig::default()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -533,7 +594,8 @@ pub enum SelfDistillMode {
     Conciseness,
     /// GATES: retrieval context to teacher only.
     DocumentAsPi,
-    /// RLRT: reversed teacher signal.
+    /// Reserved RLRT-style mode. The server rejects it until a distinct
+    /// reverse objective is implemented; negating logprobs is invalid.
     ReverseTeacher,
 }
 
@@ -547,14 +609,15 @@ pub struct DistillSelfRequest {
     /// dataset registered with the server.
     #[serde(default)]
     pub prompts: Option<Vec<OpdPrompt>>,
-    /// Optional ground-truth answers for `GroundTruthConditioning`.
-    /// Must match `prompts` length when both are set.
+    /// Ground-truth answers for `GroundTruthConditioning`: exactly one
+    /// non-empty answer per explicit prompt.
     #[serde(default)]
     pub ground_truth: Option<Vec<String>>,
-    /// Optional retrieval context for `DocumentAsPi`.
+    /// Retrieval context for `DocumentAsPi`: exactly one non-empty document
+    /// string per explicit prompt.
     #[serde(default)]
     pub documents: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default = "default_off_policy_opd_config")]
     pub config: OpdConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_eval: Option<kiln_eval::PostEvalConfig>,
@@ -590,8 +653,8 @@ pub struct OpdConfig {
     #[serde(default)]
     pub training_mode: OpdTrainingMode,
 
-    /// Action-token objective. `reverse_kl` consumes teacher logprobs;
-    /// `cross_entropy` trains on teacher response tokens.
+    /// Action-token objective. Only `reverse_kl` is executable today;
+    /// `cross_entropy` is retained as a rejected compatibility value.
     #[serde(default)]
     pub objective: OpdObjective,
 
@@ -600,7 +663,7 @@ pub struct OpdConfig {
     pub loss: OpdLossGranularity,
 
     /// Top-K size when `loss = TeacherTopK`. Default 32 (Fu et al. 2026
-    /// ablation). Ignored when `loss = SampledToken` or `FullVocab`.
+    /// ablation). Ignored for `FullVocab`; `SampledToken` is rejected.
     #[serde(default = "default_opd_top_k")]
     pub top_k: usize,
 
@@ -626,18 +689,17 @@ pub struct OpdConfig {
     #[serde(default = "default_opd_max_tokens")]
     pub max_tokens: usize,
 
-    /// Stable-OPD mode (§3.1, §3.9). Defaults to `Auto`.
+    /// Stable-OPD mode (§3.1, §3.9). Defaults to `Off`; other modes are
+    /// rejected until their reference-KL and golden-SFT terms are wired.
     #[serde(default)]
     pub stable_opd: StableOpdMode,
 
-    /// Discount factor on the per-token reverse KL. Lu (2025) §3.1
-    /// picks γ = 0 ("variance dominates the bias gain"). Exposed for
-    /// research parity but the production default is 0.
+    /// Reserved discount factor. Production currently supports only zero.
     #[serde(default)]
     pub discount: f64,
 
-    /// PPO-style clip epsilon for the importance-sampling ratio.
-    /// Inherited from the GRPO loss; default matches `GrpoConfig`.
+    /// Reserved PPO-style importance-ratio clipping. Production currently
+    /// supports only zero because OPD roots the direct reverse-KL mean.
     #[serde(default = "default_opd_clip_eps")]
     pub clip_epsilon: f64,
 
@@ -701,9 +763,8 @@ pub struct OpdConfig {
     #[serde(default = "default_opd_epochs")]
     pub epochs: usize,
 
-    /// Hard cap on remote-teacher $ spend, in USD. §8.6 cost lock.
-    /// `None` falls back to the server-wide default. Applies only when
-    /// the resolved `LogitSource` reports a non-zero $/token cost.
+    /// Reserved paid-provider cost cap. Only self-hosted vLLM is wired today,
+    /// so any non-`None` value is rejected rather than falsely advertised.
     #[serde(default)]
     pub max_cost_usd: Option<f64>,
 }
@@ -718,7 +779,7 @@ fn default_opd_max_tokens() -> usize {
     7168
 }
 fn default_opd_clip_eps() -> f64 {
-    0.2
+    0.0
 }
 fn default_opd_checkpoint_interval() -> Option<usize> {
     // Mid-flight checkpoint cadence. With OPD at ~150s/step (asymmetric
@@ -741,6 +802,36 @@ impl OpdConfig {
     pub fn effective_learning_rate(&self) -> f64 {
         self.learning_rate
             .unwrap_or_else(|| crate::resolve_learning_rate(&self.optimizer, crate::TrainMode::Opd))
+    }
+
+    /// Validate the subset whose values participate in the production OPD
+    /// computation. Keep this at the library boundary so alternate server
+    /// admission paths cannot enqueue semantically inert configuration.
+    pub fn validate_runtime_contract(&self) -> Result<()> {
+        if let Some(reason) = self.loss.unsupported_reason() {
+            anyhow::bail!("OPD loss: {reason}");
+        }
+        if let Some(reason) = self.objective.unsupported_reason() {
+            anyhow::bail!("OPD objective: {reason}");
+        }
+        if let Some(reason) = self.stable_opd.unsupported_reason() {
+            anyhow::bail!("OPD stable_opd: {reason}");
+        }
+        anyhow::ensure!(
+            self.discount == 0.0,
+            "OPD discount={} is unsupported because discounted advantages are not wired; use 0",
+            self.discount
+        );
+        anyhow::ensure!(
+            self.clip_epsilon == 0.0,
+            "OPD clip_epsilon={} is unsupported because importance-ratio clipping is not wired; use 0",
+            self.clip_epsilon
+        );
+        anyhow::ensure!(
+            self.max_cost_usd.is_none(),
+            "OPD max_cost_usd is unavailable: the only wired remote provider is self-hosted vLLM and no metered billing source exists"
+        );
+        Ok(())
     }
 }
 
@@ -871,6 +962,10 @@ pub fn prepare_off_policy_distillation_dataset(
 ) -> Result<PreparedOffPolicyDistillation> {
     anyhow::ensure!(top_k > 0, "top_k must be > 0");
     anyhow::ensure!(vocab_size > 0, "vocab_size must be > 0");
+    anyhow::ensure!(
+        top_k <= vocab_size,
+        "top_k {top_k} exceeds vocab_size {vocab_size}"
+    );
     let teacher_id = teacher_id.into();
     let mut prompts = Vec::with_capacity(examples.len());
     let mut fixture =
@@ -923,6 +1018,14 @@ pub fn prepare_off_policy_distillation_dataset(
             !active_positions.is_empty(),
             "off-policy OPD example {example_idx} produced no assistant action tokens"
         );
+        let logits_rows = target_token_positions_to_logits_rows(
+            &teacher_id,
+            tokenized.input_ids.len(),
+            &active_positions,
+        )
+        .with_context(|| {
+            format!("off-policy OPD example {example_idx} has invalid action-token positions")
+        })?;
         summary.action_tokens = summary
             .action_tokens
             .saturating_add(active_positions.len() as u64);
@@ -937,10 +1040,11 @@ pub fn prepare_off_policy_distillation_dataset(
                     example.teacher_tokens.len(),
                     active_positions.len()
                 );
-                for (token_idx, (teacher_token, &position)) in example
+                for (token_idx, ((teacher_token, &position), &logits_row)) in example
                     .teacher_tokens
                     .iter()
                     .zip(active_positions.iter())
+                    .zip(logits_rows.iter())
                     .enumerate()
                 {
                     anyhow::ensure!(
@@ -963,12 +1067,26 @@ pub fn prepare_off_policy_distillation_dataset(
                         indices.push(entry.token_id);
                         logprobs.push(entry.logprob);
                     }
-                    fixture.insert(tokens_hash, position, indices, logprobs);
+                    validate_topk_logprob_row(
+                        &fixture.capabilities(),
+                        top_k,
+                        token_idx,
+                        &indices,
+                        &logprobs,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "off-policy OPD example {example_idx} target position {position} has invalid teacher logprobs"
+                        )
+                    })?;
+                    fixture.insert(tokens_hash, logits_row, indices, logprobs);
                 }
                 summary.examples_with_teacher_logprobs += 1;
             }
             OpdObjective::CrossEntropy => {
-                for (token_idx, &position) in active_positions.iter().enumerate() {
+                for (token_idx, (&position, &logits_row)) in
+                    active_positions.iter().zip(logits_rows.iter()).enumerate()
+                {
                     let target = tokenized.input_ids[position];
                     let mut indices = Vec::with_capacity(top_k);
                     indices.push(target);
@@ -986,7 +1104,7 @@ pub fn prepare_off_policy_distillation_dataset(
                     );
                     let mut logprobs = vec![-30.0_f32; top_k];
                     logprobs[0] = 0.0;
-                    fixture.insert(tokens_hash, position, indices, logprobs);
+                    fixture.insert(tokens_hash, logits_row, indices, logprobs);
                 }
             }
         }
@@ -1065,12 +1183,12 @@ pub struct OpdStepInputs<'a> {
     /// teacher query token sequence *unless* `teacher_tokens` is set
     /// (asymmetric teacher conditioning).
     pub tokens: &'a [u32],
-    /// Positions in `tokens` that contribute to the loss. Typically the
-    /// completion's assistant-token positions. The OPD-loss kernel
-    /// expects `label_mask` of length `tokens.len()`, but the rollout's
-    /// trainer constructs that mask once per group; here we accept the
-    /// explicit position list and build the mask internally to match
-    /// the §3.1 pseudocode interface.
+    /// Target-token positions in `tokens` that contribute to the loss.
+    /// Typically these are the completion's assistant-token indices. A
+    /// target at index `q` is predicted by causal logits row `q - 1`; this
+    /// boundary converts the targets before building the kernel mask or
+    /// querying the teacher. Positions must be strictly increasing and unique,
+    /// and position zero cannot be a target because it has no preceding row.
     pub active_positions: &'a [usize],
     /// Student hidden states at *all* `tokens` positions, shape
     /// `[1, tokens.len(), hidden_size]`. Produced by the trainer's
@@ -1080,13 +1198,13 @@ pub struct OpdStepInputs<'a> {
     /// Frozen LM head weights, shape `[H, V]`. Matches the layout used
     /// by `kiln-flce-kernel` and `kiln-model::forward::embed_tokens_t`.
     pub head_t: &'a Tensor,
-    /// Teacher source. Queried for top-K logprobs at `active_positions`
-    /// (or `teacher_active_positions` if set).
+    /// Teacher source. Queried at the causal logits rows that predict
+    /// `active_positions` (or `teacher_active_positions` if set).
     pub teacher: Arc<dyn LogitSource>,
     /// Loss granularity (§3.1).
     pub loss: OpdLossGranularity,
-    /// Top-K size for `TeacherTopK`. Ignored for `SampledToken` /
-    /// `FullVocab`.
+    /// Top-K size for `TeacherTopK`. Ignored for `FullVocab`;
+    /// `SampledToken` is rejected before the teacher query.
     pub top_k: usize,
     /// Chunk size along the active-token axis for the kernel. Falls
     /// back to `DEFAULT_CHUNK_SIZE` (= 4096) when 0.
@@ -1095,15 +1213,13 @@ pub struct OpdStepInputs<'a> {
     /// what's sent to `teacher.fetch_logprobs`; `tokens` continues to
     /// drive the student-side state. Typical shape:
     /// `teacher_prefix_tokens ++ tokens` — i.e. the same rollout, but
-    /// preceded by privileged context only the teacher sees. Length
-    /// must match the longest active position in `teacher_active_positions`.
+    /// preceded by privileged context only the teacher sees. It must contain
+    /// every target in `teacher_active_positions`.
     pub teacher_tokens: Option<&'a [u32]>,
-    /// Active positions in `teacher_tokens`'s frame. Pair-wise aligned
-    /// with `active_positions` — position `i` in the loss kernel reads
-    /// student logits at `active_positions[i]` (within `tokens`) and
-    /// teacher logprobs at `teacher_active_positions[i]` (within
-    /// `teacher_tokens`). Required when `teacher_tokens` is set; ignored
-    /// otherwise.
+    /// Target-token positions in `teacher_tokens`'s frame. Pair-wise aligned
+    /// with `active_positions`: target `i` is scored from student logits row
+    /// `active_positions[i] - 1` and teacher logits row
+    /// `teacher_active_positions[i] - 1`. Required with `teacher_tokens`.
     pub teacher_active_positions: Option<&'a [usize]>,
 }
 
@@ -1131,8 +1247,9 @@ pub struct OpdStepOutputs {
 ///
 /// This is the §3.1 pseudocode's "compute reward" step, made explicit:
 ///
-/// 1. Build the `label_mask` from `active_positions`.
-/// 2. Query the teacher for top-K logprobs at those positions.
+/// 1. Convert target-token positions to their preceding causal logits rows and
+///    build the `label_mask` from those rows.
+/// 2. Query the teacher at the corresponding logits rows.
 /// 3. Run the OPD-loss kernel.
 /// 4. Return `(per_position_kl, mean_kl)`.
 ///
@@ -1174,62 +1291,76 @@ fn prepare_opd_kernel_inputs(
     teacher_tokens: Option<&[u32]>,
     teacher_active_positions: Option<&[usize]>,
 ) -> Result<PreparedOpdKernelInputs> {
-    // Pair-wise alignment check for asymmetric teacher conditioning.
-    if let (Some(t_tok), Some(t_act)) = (teacher_tokens, teacher_active_positions) {
-        if t_act.len() != active_positions.len() {
-            return Err(anyhow!(
-                "opd_step_loss: teacher_active_positions.len() ({}) != active_positions.len() ({})",
-                t_act.len(),
-                active_positions.len()
-            ));
-        }
-        for &p in t_act {
-            if p >= t_tok.len() {
-                return Err(anyhow!(
-                    "opd_step_loss: teacher active position {} out of range for teacher_tokens.len() {}",
-                    p,
-                    t_tok.len()
-                ));
-            }
-        }
-    } else if teacher_tokens.is_some() ^ teacher_active_positions.is_some() {
+    if let Some(reason) = loss.unsupported_reason() {
+        return Err(anyhow!("opd_step_loss: {reason}"));
+    }
+    if active_positions.is_empty() {
+        return Err(anyhow!(
+            "opd_step_loss called with no active positions - caller should short-circuit"
+        ));
+    }
+    if teacher_tokens.is_some() ^ teacher_active_positions.is_some() {
         return Err(anyhow!(
             "opd_step_loss: teacher_tokens and teacher_active_positions must be set together"
         ));
     }
-    let (query_tokens, query_positions): (&[u32], &[usize]) =
-        match (teacher_tokens, teacher_active_positions) {
-            (Some(t), Some(a)) => (t, a),
-            _ => (tokens, active_positions),
-        };
 
-    if active_positions.is_empty() {
-        return Err(anyhow!(
-            "opd_step_loss called with no active positions — caller should short-circuit"
-        ));
-    }
-    let seq_len = tokens.len();
+    let caps = teacher.capabilities();
+    let student_logits_rows =
+        target_token_positions_to_logits_rows(&caps.teacher_id, tokens.len(), active_positions)
+            .context("opd_step_loss: invalid student target-token positions")?;
     let label_mask: Vec<bool> = {
-        let mut m = vec![false; seq_len];
-        for &p in active_positions {
-            if p >= seq_len {
-                return Err(anyhow!(
-                    "active position {} out of range for seq_len {}",
-                    p,
-                    seq_len
-                ));
-            }
-            m[p] = true;
+        let mut mask = vec![false; tokens.len()];
+        for &row in &student_logits_rows {
+            mask[row] = true;
         }
-        m
+        mask
     };
     let active_count = active_positions.len();
 
-    // Caps check: pick the actual top-K from the teacher.
-    let caps = teacher.capabilities();
+    let teacher_logits_rows;
+    let (query_tokens, query_positions): (&[u32], &[usize]) = match (
+        teacher_tokens,
+        teacher_active_positions,
+    ) {
+        (Some(teacher_tokens), Some(teacher_targets)) => {
+            if teacher_targets.len() != active_count {
+                return Err(anyhow!(
+                    "opd_step_loss: teacher_active_positions.len() ({}) != active_positions.len() ({active_count})",
+                    teacher_targets.len()
+                ));
+            }
+            teacher_logits_rows = target_token_positions_to_logits_rows(
+                &caps.teacher_id,
+                teacher_tokens.len(),
+                teacher_targets,
+            )
+            .context("opd_step_loss: invalid teacher target-token positions")?;
+            for (pair_index, (&student_target, &teacher_target)) in active_positions
+                .iter()
+                .zip(teacher_targets.iter())
+                .enumerate()
+            {
+                if tokens[student_target] != teacher_tokens[teacher_target] {
+                    return Err(anyhow!(
+                        "opd_step_loss: asymmetric target pair {pair_index} has student token {} at {student_target} but teacher token {} at {teacher_target}",
+                        tokens[student_target],
+                        teacher_tokens[teacher_target]
+                    ));
+                }
+            }
+            (teacher_tokens, &teacher_logits_rows)
+        }
+        (None, None) => (tokens, &student_logits_rows),
+        _ => unreachable!("paired teacher options checked above"),
+    };
+
     let resolved_top_k = match loss {
-        OpdLossGranularity::SampledToken => 1,
-        OpdLossGranularity::TeacherTopK => top_k.min(caps.max_top_k),
+        OpdLossGranularity::SampledToken => unreachable!("unsupported loss rejected above"),
+        OpdLossGranularity::TeacherTopK => {
+            resolve_opd_top_k(top_k, caps.max_top_k.min(caps.vocab_size))
+                .context("opd_step_loss: cannot resolve an executable teacher top-K")?
+        }
         OpdLossGranularity::FullVocab => caps.vocab_size,
     };
 
@@ -1238,6 +1369,8 @@ fn prepare_opd_kernel_inputs(
         OpdLossGranularity::FullVocab => None,
         _ => Some(resolved_top_k),
     };
+    validate_logit_request(&caps, query_tokens, query_positions, request_top_k)
+        .context("opd_step_loss: invalid teacher logprob request")?;
     let batch = teacher
         .fetch_logprobs(query_tokens, query_positions, request_top_k)
         .with_context(|| {
@@ -1247,12 +1380,24 @@ fn prepare_opd_kernel_inputs(
             )
         })?;
 
-    let (teacher_topk_indices, teacher_topk_logprobs) = match batch {
-        LogprobBatch::TopK(t) => (t.indices, t.logprobs),
-        LogprobBatch::FullVocab {
-            logprobs,
-            vocab_size: _,
-        } => {
+    let (teacher_topk_indices, teacher_topk_logprobs) = match (request_top_k, batch) {
+        (Some(requested_top_k), LogprobBatch::TopK(topk)) => {
+            validate_topk_logprobs_batch(
+                &caps,
+                query_tokens,
+                query_positions,
+                requested_top_k,
+                &topk,
+            )
+            .context("opd_step_loss: teacher returned invalid top-K logprobs")?;
+            (topk.indices, topk.logprobs)
+        }
+        (None, full_vocab @ LogprobBatch::FullVocab { .. }) => {
+            validate_full_vocab_logprobs_batch(&caps, query_tokens, query_positions, &full_vocab)
+                .context("opd_step_loss: teacher returned invalid full-vocabulary logprobs")?;
+            let LogprobBatch::FullVocab { logprobs, .. } = full_vocab else {
+                unreachable!()
+            };
             // For full-vocab, indices are 0..V repeated per position.
             let mut indices = Vec::with_capacity(active_count * resolved_top_k);
             for _ in 0..active_count {
@@ -1261,6 +1406,16 @@ fn prepare_opd_kernel_inputs(
                 }
             }
             (indices, logprobs)
+        }
+        (Some(_), LogprobBatch::FullVocab { .. }) => {
+            return Err(anyhow!(
+                "opd_step_loss: top-K request returned a full-vocabulary response"
+            ));
+        }
+        (None, LogprobBatch::TopK(_)) => {
+            return Err(anyhow!(
+                "opd_step_loss: full-vocabulary request returned a top-K response"
+            ));
         }
     };
 
@@ -1855,7 +2010,8 @@ pub fn compute_stable_opd_loss(inputs: StableOpdLossInputs<'_>) -> Result<Stable
 
 /// Build an in-process "local teacher" FixtureLogitSource by running
 /// the loaded model forward on each prompt and extracting top-K
-/// logprobs at the active (assistant-token) positions.
+/// logprobs that predict the active (assistant) target tokens. Inputs use
+/// target-token positions; fixture keys use the preceding causal logits rows.
 ///
 /// This is the production §3.2 LocalTeacher path materialised as a
 /// pre-compute step: instead of holding a long-lived `&GpuWeights`
@@ -1898,6 +2054,9 @@ pub fn build_local_teacher_fixture(
     let backend_rt = backend::for_device_kt(&device);
 
     let vocab_size = model_config.vocab_size;
+    if top_k == 0 {
+        return Err(anyhow!("build_local_teacher_fixture: top_k must be > 0"));
+    }
     if top_k > vocab_size {
         return Err(anyhow!(
             "build_local_teacher_fixture: top_k {top_k} > vocab_size {vocab_size}"
@@ -1913,10 +2072,16 @@ pub fn build_local_teacher_fixture(
     // tokenizer hash via a fresh insertion path.
     let _ = (caps_clone, tokenizer_hash);
 
-    for (tokens, active_positions) in prompts_and_active {
-        if active_positions.is_empty() {
+    for (tokens, active_target_positions) in prompts_and_active {
+        if active_target_positions.is_empty() {
             continue;
         }
+        let logits_rows = target_token_positions_to_logits_rows(
+            &fixture.capabilities().teacher_id,
+            tokens.len(),
+            active_target_positions,
+        )
+        .context("build_local_teacher_fixture: invalid active target-token positions")?;
         let mut linear_state = LinearAttentionState::new(model_config, &device)?;
         let logits = model_forward_kt(
             &*backend_rt,
@@ -1959,32 +2124,24 @@ pub fn build_local_teacher_fixture(
             .to_vec2::<f32>()
             .context("local-teacher logprobs to host")?;
         let tokens_hash = crate::logit_source::FixtureLogitSource::hash_tokens(tokens);
-        for &pos in active_positions {
-            if pos >= log_probs_host.len() {
-                continue;
-            }
-            let row = &log_probs_host[pos];
-            let mut indexed: Vec<(u32, f32)> = row
-                .iter()
-                .copied()
-                .enumerate()
-                .map(|(i, lp)| (i as u32, lp))
-                .collect();
-            indexed.sort_unstable_by(|a, b| {
-                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-            });
-            indexed.truncate(top_k);
-            let indices: Vec<u32> = indexed.iter().map(|(i, _)| *i).collect();
-            let logprobs: Vec<f32> = indexed.iter().map(|(_, lp)| *lp).collect();
-            fixture.insert(tokens_hash, pos, indices, logprobs);
+        let fixture_caps = fixture.capabilities();
+        for (row_index, &logits_row) in logits_rows.iter().enumerate() {
+            let row = &log_probs_host[logits_row];
+            let (indices, logprobs) =
+                select_validated_topk_logprob_row(&fixture_caps, row_index, row, top_k)
+                    .context("build_local_teacher_fixture: model returned invalid logprob row")?;
+            validate_topk_logprob_row(&fixture_caps, top_k, row_index, &indices, &logprobs)
+                .context("build_local_teacher_fixture: model returned invalid top-K logprobs")?;
+            fixture.insert(tokens_hash, logits_row, indices, logprobs);
         }
     }
 
     Ok(fixture)
 }
 
-/// Run `model_forward_kt` on `tokens` and return, for each position in
-/// `positions` (in order), the teacher's top-`top_k` `(indices, logprobs)`.
+/// Run `model_forward_kt` on `tokens` and return the teacher's top-`top_k`
+/// `(indices, logprobs)` for each causal logits row in `positions`, in order.
+/// Logits row `p` predicts target token `tokens[p + 1]`.
 /// This is the shared forward+log_softmax+top-K core behind both the
 /// pre-computed [`build_local_teacher_fixture`] and the live
 /// [`LiveLocalTeacher`]. Runs in inference (detached) — no tape recording.
@@ -1995,6 +2152,7 @@ fn forward_topk_at_positions(
     model_config: &kiln_core::config::ModelConfig,
     teacher_lora: Option<&kiln_model::lora_loader::LoraWeights>,
     top_k: usize,
+    caps: &crate::logit_source::LogitSourceCaps,
 ) -> Result<Vec<(Vec<u32>, Vec<f32>)>> {
     use kiln_model::backend;
     use kiln_model::forward::{LinearAttentionState, model_forward_kt};
@@ -2039,27 +2197,60 @@ fn forward_topk_at_positions(
         .context("live-teacher logprobs to host")?;
 
     let mut out = Vec::with_capacity(positions.len());
-    for &pos in positions {
+    for (row_index, &pos) in positions.iter().enumerate() {
         if pos >= log_probs_host.len() {
             return Err(anyhow!(
                 "live-teacher: position {pos} >= seq_len {}",
                 log_probs_host.len()
             ));
         }
-        let mut indexed: Vec<(u32, f32)> = log_probs_host[pos]
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(i, lp)| (i as u32, lp))
-            .collect();
-        indexed.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        indexed.truncate(top_k);
-        out.push((
-            indexed.iter().map(|(i, _)| *i).collect(),
-            indexed.iter().map(|(_, lp)| *lp).collect(),
-        ));
+        out.push(
+            select_validated_topk_logprob_row(caps, row_index, &log_probs_host[pos], top_k)
+                .context("live-teacher: model returned invalid logprob row")?,
+        );
     }
     Ok(out)
+}
+
+fn select_validated_topk_logprob_row(
+    caps: &crate::logit_source::LogitSourceCaps,
+    row_index: usize,
+    row: &[f32],
+    top_k: usize,
+) -> Result<(Vec<u32>, Vec<f32>)> {
+    anyhow::ensure!(
+        row.len() == caps.vocab_size,
+        "teacher {:?} row {row_index} has width {}, expected vocabulary width {}",
+        caps.teacher_id,
+        row.len(),
+        caps.vocab_size
+    );
+    anyhow::ensure!(
+        top_k > 0 && top_k <= row.len(),
+        "teacher {:?} requested invalid top_k {top_k} for row width {}",
+        caps.teacher_id,
+        row.len()
+    );
+    for (token_id, &logprob) in row.iter().enumerate() {
+        anyhow::ensure!(
+            logprob.is_finite() && logprob <= 0.0,
+            "teacher {:?} row {row_index} token {token_id} has invalid logprob {logprob:?}",
+            caps.teacher_id
+        );
+    }
+
+    let mut indexed: Vec<(u32, f32)> = row
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(token_id, logprob)| (token_id as u32, logprob))
+        .collect();
+    indexed.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    indexed.truncate(top_k);
+    Ok((
+        indexed.iter().map(|(token_id, _)| *token_id).collect(),
+        indexed.iter().map(|(_, logprob)| *logprob).collect(),
+    ))
 }
 
 /// In-process self-distillation teacher (#31): holds a shared (cheap, Arc-backed)
@@ -2104,7 +2295,7 @@ impl LiveLocalTeacher {
             // Live forward yields full logits, so any K up to vocab is servable.
             max_top_k: vocab_size,
             supports_full_vocab: false,
-            supports_batched: false,
+            supports_batched: true,
             // Self-distillation: teacher IS the student model — same tokenizer.
             tokenizer_hash: None,
         };
@@ -2132,17 +2323,8 @@ impl crate::logit_source::LogitSource for LiveLocalTeacher {
     {
         use crate::logit_source::{LogitSourceError, LogprobBatch, TopKLogprobs};
         let teacher_id = self.caps.teacher_id.clone();
+        validate_logit_request(&self.caps, tokens, positions, top_k)?;
         let requested_k = top_k.unwrap_or(self.default_top_k);
-        if requested_k > self.caps.max_top_k {
-            return Err(LogitSourceError::TopKExceedsCap {
-                requested: requested_k,
-                cap: self.caps.max_top_k,
-                teacher_id,
-            });
-        }
-        if top_k.is_none() && !self.caps.supports_full_vocab {
-            return Err(LogitSourceError::FullVocabUnsupported { teacher_id });
-        }
         let per_pos = forward_topk_at_positions(
             tokens,
             positions,
@@ -2150,6 +2332,7 @@ impl crate::logit_source::LogitSource for LiveLocalTeacher {
             &self.model_config,
             self.teacher_lora.as_ref(),
             requested_k,
+            &self.caps,
         )
         .map_err(|e| {
             LogitSourceError::invalid(&teacher_id, format!("live teacher forward: {e:#}"))
@@ -2161,11 +2344,13 @@ impl crate::logit_source::LogitSource for LiveLocalTeacher {
             indices.extend_from_slice(&idx);
             logprobs.extend_from_slice(&lp);
         }
-        Ok(LogprobBatch::TopK(TopKLogprobs {
+        let batch = TopKLogprobs {
             indices,
             logprobs,
             top_k: requested_k,
-        }))
+        };
+        validate_topk_logprobs_batch(&self.caps, tokens, positions, requested_k, &batch)?;
+        Ok(LogprobBatch::TopK(batch))
     }
 }
 
@@ -2308,6 +2493,131 @@ fn sample_student_rollout(
     Ok(generated)
 }
 
+fn chat_messages_without_trailing_assistant(
+    messages: &[ChatMessage],
+) -> Vec<kiln_core::tokenizer::ChatMessage> {
+    let mut rendered_messages: Vec<_> = messages
+        .iter()
+        .map(|message| kiln_core::tokenizer::ChatMessage {
+            role: message.role.clone(),
+            content: message.content.clone(),
+            ..Default::default()
+        })
+        .collect();
+    while rendered_messages
+        .last()
+        .map(|message| message.role.as_str())
+        == Some("assistant")
+    {
+        rendered_messages.pop();
+    }
+    rendered_messages
+}
+
+fn thinking_disabled_chat_template_options() -> kiln_core::tokenizer::ChatTemplateOptions {
+    kiln_core::tokenizer::ChatTemplateOptions {
+        template_kwargs: serde_json::Map::from_iter([(
+            "enable_thinking".to_string(),
+            serde_json::Value::Bool(false),
+        )]),
+    }
+}
+
+fn render_rollout_prompt_prefixes(
+    prompts: &[OpdPrompt],
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+) -> Result<Vec<Vec<u32>>> {
+    prompts
+        .iter()
+        .enumerate()
+        .map(|(prompt_idx, prompt)| {
+            let messages = chat_messages_without_trailing_assistant(&prompt.messages);
+            let text = tokenizer
+                .apply_chat_template_full_with_options(
+                    &messages,
+                    None,
+                    None,
+                    thinking_disabled_chat_template_options(),
+                )
+                .with_context(|| {
+                    format!("opd_train: render rollout chat template for prompt {prompt_idx}")
+                })?;
+            let tokens = tokenizer.encode(&text).with_context(|| {
+                format!("opd_train: encode rendered rollout prompt {prompt_idx}")
+            })?;
+            anyhow::ensure!(
+                !tokens.is_empty(),
+                "opd_train: rendered rollout prompt {prompt_idx} encoded to zero tokens"
+            );
+            Ok(tokens)
+        })
+        .collect()
+}
+
+fn render_teacher_prompt_tokens(
+    prompts: &[OpdPrompt],
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+) -> Result<Vec<Vec<u32>>> {
+    prompts
+        .iter()
+        .enumerate()
+        .map(|(prompt_idx, prompt)| {
+            if prompt.teacher_extra_messages.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let mut merged = chat_messages_without_trailing_assistant(&prompt.messages);
+            let extras_text = prompt
+                .teacher_extra_messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            if let Some(first) = merged.first_mut() {
+                if first.role == "system" {
+                    first.content = format!("{extras_text}\n\n{}", first.content);
+                } else {
+                    merged.insert(
+                        0,
+                        kiln_core::tokenizer::ChatMessage {
+                            role: "system".to_string(),
+                            content: extras_text,
+                            ..Default::default()
+                        },
+                    );
+                }
+            } else {
+                merged.push(kiln_core::tokenizer::ChatMessage {
+                    role: "system".to_string(),
+                    content: extras_text,
+                    ..Default::default()
+                });
+            }
+
+            let text = tokenizer
+                .apply_chat_template_full_with_options(
+                    &merged,
+                    None,
+                    None,
+                    thinking_disabled_chat_template_options(),
+                )
+                .with_context(|| {
+                    format!(
+                        "opd_train: render asymmetric teacher chat template for prompt {prompt_idx}"
+                    )
+                })?;
+            let tokens = tokenizer.encode(&text).with_context(|| {
+                format!("opd_train: encode asymmetric teacher prompt {prompt_idx}")
+            })?;
+            anyhow::ensure!(
+                !tokens.is_empty(),
+                "opd_train: asymmetric teacher prompt {prompt_idx} encoded to zero tokens"
+            );
+            Ok(tokens)
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn opd_train(
     prompts: &[OpdPrompt],
@@ -2320,6 +2630,33 @@ pub fn opd_train(
     adapter_name: &str,
     progress_cb: Option<crate::trainer::ProgressCallback>,
 ) -> Result<std::path::PathBuf> {
+    config
+        .validate_runtime_contract()
+        .context("opd_train: unsupported configuration")?;
+    let teacher_caps = teacher.capabilities();
+    let effective_top_k = match config.loss {
+        OpdLossGranularity::SampledToken => unreachable!("unsupported loss rejected above"),
+        OpdLossGranularity::TeacherTopK => resolve_opd_top_k(
+            config.top_k,
+            teacher_caps.max_top_k.min(teacher_caps.vocab_size),
+        )
+        .context("opd_train: cannot resolve an executable teacher top-K")?,
+        OpdLossGranularity::FullVocab => {
+            anyhow::ensure!(
+                teacher_caps.supports_full_vocab,
+                "opd_train: teacher {:?} does not support full-vocabulary logprobs",
+                teacher_caps.teacher_id
+            );
+            let resolved = resolve_opd_top_k(teacher_caps.vocab_size, teacher_caps.vocab_size)
+                .context("opd_train: full-vocabulary size is outside the KT kernel envelope")?;
+            anyhow::ensure!(
+                resolved == teacher_caps.vocab_size,
+                "opd_train: full-vocabulary size {} is outside the KT kernel envelope {{16, 32}}",
+                teacher_caps.vocab_size
+            );
+            resolved
+        }
+    };
     let run_started = std::time::Instant::now();
     let output_dir = adapter_dir.join(adapter_name);
     let training_data_sha256 = crate::train_receipt::sha256_json_serializable(&prompts);
@@ -2357,6 +2694,7 @@ pub fn opd_train(
             model_config,
             tokenizer,
             config,
+            effective_top_k,
             &output_dir,
             requested_base_adapter_dir.as_deref(),
             training_data_sha256,
@@ -2440,7 +2778,9 @@ pub fn opd_train(
         num_prompts = prompts.len(),
         samples_per_prompt = effective_samples_per_prompt,
         config_samples_per_prompt = config.samples_per_prompt,
-        top_k = config.top_k,
+        requested_top_k = config.top_k,
+        effective_top_k,
+        teacher_top_k_cap = teacher_caps.max_top_k,
         loss = ?config.loss,
         lr = learning_rate,
         rank = config.lora_rank,
@@ -2461,6 +2801,7 @@ pub fn opd_train(
                 model_config,
                 tokenizer,
                 config,
+                effective_top_k,
                 &output_dir,
                 requested_base_adapter_dir.as_deref(),
                 training_data_sha256,
@@ -2564,6 +2905,7 @@ pub fn opd_train(
             model_config,
             tokenizer,
             config,
+            effective_top_k,
             &output_dir,
             requested_base_adapter_dir.as_deref(),
             training_data_sha256,
@@ -2651,7 +2993,6 @@ pub fn opd_train(
     // Per-prompt pre-render of the rollout prefix. Drops the last
     // assistant message (if any), passes `enable_thinking=false`, lets
     // the template emit the proper marker tokens, encodes to ids.
-    use kiln_core::tokenizer::{ChatMessage as CoreChatMessage, ChatTemplateOptions};
     // OPT-IN via env var. The chat-template render path is correct (verified
     // via `examples/test_render`) but produces broken adapters end-to-end on
     // structured-list capabilities (see opd-cap.code-symbol-extraction/
@@ -2667,39 +3008,7 @@ pub fn opd_train(
         // per the legacy behavior. Same as pre-fix.
         vec![Vec::new(); prompts.len()]
     } else {
-        prompts
-            .iter()
-            .map(|p| {
-                // Drop trailing assistant message(s) if present; we want the
-                // chat template to *insert* the assistant cue via
-                // add_generation_prompt rather than echo the (dummy) one we
-                // have in the prompt. Convert kiln-train ChatMessage to the
-                // kiln-core variant the template engine expects.
-                let mut msgs: Vec<CoreChatMessage> = p
-                    .messages
-                    .iter()
-                    .map(|m| CoreChatMessage {
-                        role: m.role.clone(),
-                        content: m.content.clone(),
-                        ..Default::default()
-                    })
-                    .collect();
-                while msgs.last().map(|m| m.role.as_str()) == Some("assistant") {
-                    msgs.pop();
-                }
-                let opts = ChatTemplateOptions {
-                    template_kwargs: serde_json::Map::from_iter([(
-                        "enable_thinking".to_string(),
-                        serde_json::Value::Bool(false),
-                    )]),
-                };
-                let text = tokenizer
-                    .apply_chat_template_full_with_options(msgs.as_slice(), None, None, opts)
-                    .map_err(|e| anyhow!("apply_chat_template_full_with_options: {e}"))
-                    .unwrap_or_default();
-                tokenizer.encode(&text).unwrap_or_default()
-            })
-            .collect()
+        render_rollout_prompt_prefixes(prompts, tokenizer)?
     };
     if use_chat_template_render {
         let avg_prefix_len = rollout_prompt_prefixes
@@ -2730,80 +3039,7 @@ pub fn opd_train(
     // included) only allow one system message at position 0. The merge
     // concatenates the teacher_extra content into the existing system
     // message (or creates one when the student has none).
-    let teacher_prompt_tokens: Vec<Vec<u32>> = prompts
-        .iter()
-        .map(|p| {
-            if p.teacher_extra_messages.is_empty() {
-                return Vec::new();
-            }
-            // Build the merged messages: drop the dummy trailing
-            // assistant (the student's rollout will replace it); merge
-            // each teacher_extra content into the system position.
-            let mut merged: Vec<CoreChatMessage> = p
-                .messages
-                .iter()
-                .map(|m| CoreChatMessage {
-                    role: m.role.clone(),
-                    content: m.content.clone(),
-                    ..Default::default()
-                })
-                .collect();
-            while merged.last().map(|m| m.role.as_str()) == Some("assistant") {
-                merged.pop();
-            }
-            // Collect the teacher_extra content into a single string,
-            // joined by blank lines.
-            let extras_text = p
-                .teacher_extra_messages
-                .iter()
-                .map(|m| m.content.as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            // Merge or create the first system message.
-            if let Some(first) = merged.first_mut() {
-                if first.role == "system" {
-                    first.content = format!("{}\n\n{}", extras_text, first.content);
-                } else {
-                    merged.insert(
-                        0,
-                        CoreChatMessage {
-                            role: "system".to_string(),
-                            content: extras_text,
-                            ..Default::default()
-                        },
-                    );
-                }
-            } else {
-                merged.push(CoreChatMessage {
-                    role: "system".to_string(),
-                    content: extras_text,
-                    ..Default::default()
-                });
-            }
-            // Render with the same options the student's rollout prompt
-            // would use, so the teacher and student see the SAME chat
-            // template framing — only the system-message content differs.
-            let opts = ChatTemplateOptions {
-                template_kwargs: serde_json::Map::from_iter([(
-                    "enable_thinking".to_string(),
-                    serde_json::Value::Bool(false),
-                )]),
-            };
-            let text = match tokenizer.apply_chat_template_full_with_options(
-                merged.as_slice(),
-                None,
-                None,
-                opts,
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(error = %e, "teacher render failed; falling back to symmetric for this prompt");
-                    return Vec::new();
-                }
-            };
-            tokenizer.encode(&text).unwrap_or_default()
-        })
-        .collect();
+    let teacher_prompt_tokens = render_teacher_prompt_tokens(prompts, tokenizer)?;
     let any_asymmetric = teacher_prompt_tokens.iter().any(|v| !v.is_empty());
     if any_asymmetric {
         let n_with_extra = teacher_prompt_tokens
@@ -2833,13 +3069,13 @@ pub fn opd_train(
             // Build the rollout prompt from the pre-rendered chat-template
             // prefix (see above — drops the dummy assistant turn and lets
             // the template emit the proper assistant cue marker tokens).
-            // Falls back to the legacy `orig_input_ids[..first_label]`
-            // path if rendering failed.
-            let prompt_only: Vec<u32> = if !rollout_prompt_prefixes[prompt_idx].is_empty() {
+            // The explicitly enabled render path fails before training if a
+            // prompt cannot be rendered or encoded. The legacy framing is
+            // used only when that mode was selected above.
+            let prompt_only: Vec<u32> = if use_chat_template_render {
                 rollout_prompt_prefixes[prompt_idx].clone()
             } else {
-                // Fallback path — preserves prior behaviour rather than
-                // failing hard if a chat template is missing.
+                // Legacy path selected explicitly by the current default.
                 let prompt_end = tokenized_prompt
                     .action_mask
                     .iter()
@@ -3060,7 +3296,7 @@ pub fn opd_train(
                                     teacher.clone(),
                                     &active_positions,
                                     config.loss,
-                                    config.top_k,
+                                    effective_top_k,
                                     teacher_tokens_opt,
                                     teacher_active_opt,
                                     echo_spec.as_ref(),
@@ -3078,7 +3314,7 @@ pub fn opd_train(
                                     teacher.clone(),
                                     &active_positions,
                                     config.loss,
-                                    config.top_k,
+                                    effective_top_k,
                                     teacher_tokens_opt,
                                     teacher_active_opt,
                                     echo_spec.as_ref(),
@@ -3261,6 +3497,7 @@ pub fn opd_train(
         model_config,
         tokenizer,
         config,
+        effective_top_k,
         &output_dir,
         requested_base_adapter_dir.as_deref(),
         training_data_sha256,
@@ -3877,6 +4114,7 @@ fn write_opd_train_receipt_best_effort(
     model_config: &kiln_core::config::ModelConfig,
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
     config: &OpdConfig,
+    effective_top_k: usize,
     output_dir: &std::path::Path,
     base_adapter_dir: Option<&std::path::Path>,
     training_data_sha256: Option<String>,
@@ -3889,6 +4127,7 @@ fn write_opd_train_receipt_best_effort(
     lora_grad_norms: Vec<crate::train_receipt::LoraGradNormSummary>,
     status_error: Option<String>,
 ) {
+    let effective_config = opd_config_for_receipt(config, effective_top_k);
     let mut receipt = crate::train_receipt::TrainReceipt::new(
         adapter_name,
         "opd",
@@ -3906,7 +4145,7 @@ fn write_opd_train_receipt_best_effort(
             shuffle: false,
             seed: config.seed,
         },
-        serde_json::to_value(config).unwrap_or(serde_json::Value::Null),
+        serde_json::to_value(&effective_config).unwrap_or(serde_json::Value::Null),
     );
     receipt.training_data = crate::train_receipt::TrainingDataReceipt {
         source: "inline_opd_prompts".to_string(),
@@ -3932,7 +4171,7 @@ fn write_opd_train_receipt_best_effort(
             config.loss,
             OpdLossGranularity::TeacherTopK | OpdLossGranularity::FullVocab
         )
-        .then_some(config.top_k),
+        .then_some(effective_top_k),
         samples_per_prompt: config.samples_per_prompt,
         action_tokens: token_counts.action_tokens,
         env_tokens: token_counts.env_tokens,
@@ -3993,10 +4232,18 @@ fn write_opd_train_receipt_best_effort(
     }
 }
 
+fn opd_config_for_receipt(config: &OpdConfig, effective_top_k: usize) -> OpdConfig {
+    let mut effective_config = config.clone();
+    effective_config.top_k = effective_top_k;
+    effective_config
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::logit_source::FixtureLogitSource;
+    use crate::logit_source::{
+        FixtureLogitSource, LogitSourceCaps, LogitSourceError, TopKLogprobs,
+    };
     // (#1082) Test-mod `Tensor` / `DType` / `Device` references go through
     // `crate::cd_types::*` rather than naming `candle_core::` directly, so
     // adding more tests does not regrow the per-file candle ref count. The
@@ -4004,6 +4251,56 @@ mod tests {
     // surface migrating off candle `Tensor` in the public API — see the
     // module-level note above.
     use kiln_core::tokenizer::KilnTokenizer;
+
+    #[derive(Debug)]
+    struct RecordingLogitSource {
+        caps: LogitSourceCaps,
+        batch: LogprobBatch,
+        calls: std::sync::Mutex<Vec<Vec<usize>>>,
+    }
+
+    impl RecordingLogitSource {
+        fn topk(vocab_size: usize, top_k: usize, rows: usize) -> Arc<Self> {
+            let mut indices = Vec::with_capacity(rows * top_k);
+            let mut logprobs = Vec::with_capacity(rows * top_k);
+            for _ in 0..rows {
+                indices.extend((0..top_k).map(|token| token as u32));
+                logprobs.extend((0..top_k).map(|rank| -0.7 - rank as f32));
+            }
+            Arc::new(Self {
+                caps: LogitSourceCaps {
+                    teacher_id: "recording-teacher".into(),
+                    vocab_size,
+                    max_top_k: top_k,
+                    supports_full_vocab: false,
+                    supports_batched: true,
+                    tokenizer_hash: None,
+                },
+                batch: LogprobBatch::TopK(TopKLogprobs {
+                    indices,
+                    logprobs,
+                    top_k,
+                }),
+                calls: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    impl LogitSource for RecordingLogitSource {
+        fn capabilities(&self) -> LogitSourceCaps {
+            self.caps.clone()
+        }
+
+        fn fetch_logprobs(
+            &self,
+            _tokens: &[u32],
+            positions: &[usize],
+            _top_k: Option<usize>,
+        ) -> std::result::Result<LogprobBatch, LogitSourceError> {
+            self.calls.lock().unwrap().push(positions.to_vec());
+            Ok(self.batch.clone())
+        }
+    }
 
     fn off_policy_smoke_tokenizer() -> Result<KilnTokenizer> {
         let mut vocab = String::from("{");
@@ -4038,6 +4335,73 @@ mod tests {
             .with_chat_template(template.to_string()))
     }
 
+    fn smoke_opd_prompt_with_teacher_context() -> OpdPrompt {
+        OpdPrompt {
+            messages: vec![
+                ChatMessage {
+                    role: "user".into(),
+                    content: "hi".into(),
+                },
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: "ok".into(),
+                },
+            ],
+            teacher_extra_messages: vec![ChatMessage {
+                role: "system".into(),
+                content: "result".into(),
+            }],
+            trajectory: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn explicit_rollout_and_teacher_rendering_fail_closed_with_prompt_index() {
+        let tokenizer = off_policy_smoke_tokenizer()
+            .unwrap()
+            .with_chat_template("{{ raise_exception('template boom') }}".to_string());
+        let prompts = [smoke_opd_prompt_with_teacher_context()];
+
+        let rollout_error = render_rollout_prompt_prefixes(&prompts, &tokenizer).unwrap_err();
+        assert!(
+            rollout_error
+                .to_string()
+                .contains("render rollout chat template for prompt 0"),
+            "{rollout_error:#}"
+        );
+
+        let teacher_error = render_teacher_prompt_tokens(&prompts, &tokenizer).unwrap_err();
+        assert!(
+            teacher_error
+                .to_string()
+                .contains("render asymmetric teacher chat template for prompt 0"),
+            "{teacher_error:#}"
+        );
+    }
+
+    #[test]
+    fn local_teacher_topk_validates_full_row_and_breaks_ties_by_token_id() {
+        let caps = LogitSourceCaps {
+            teacher_id: "local-test".into(),
+            vocab_size: 4,
+            max_top_k: 4,
+            supports_full_vocab: false,
+            supports_batched: true,
+            tokenizer_hash: None,
+        };
+        let (indices, logprobs) =
+            select_validated_topk_logprob_row(&caps, 0, &[-1.0, -1.0, -2.0, -3.0], 2).unwrap();
+        assert_eq!(indices, [0, 1]);
+        assert_eq!(logprobs, [-1.0, -1.0]);
+
+        for corrupt in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.1] {
+            let error =
+                select_validated_topk_logprob_row(&caps, 7, &[-0.1, -0.2, -0.3, corrupt], 2)
+                    .unwrap_err();
+            assert!(error.to_string().contains("token 3"), "{error:#}");
+        }
+    }
+
     /// End-to-end: feed a tokenized rollout, a fixture teacher, and a
     /// random `student_hidden` into `opd_step_loss`, confirm we get a
     /// scalar mean_kl + per-position vector of the right shape and
@@ -4050,7 +4414,7 @@ mod tests {
         let seq_len = 8;
         let hidden_size = 8;
         let vocab_size = 64;
-        let top_k = 4;
+        let top_k = 16;
 
         // Hidden + head are arbitrary smooth tensors.
         let hidden_vec: Vec<f32> = (0..(seq_len * hidden_size))
@@ -4069,7 +4433,7 @@ mod tests {
             .collect();
         let active_positions = vec![3, 5, 7]; // arbitrary completion tokens
 
-        // Build a fixture teacher with deterministic top-K at each active position.
+        // Build a fixture teacher at each causal row that predicts an active target.
         let mut fixture = FixtureLogitSource::uniform_topk("test", vocab_size, top_k);
         let h = FixtureLogitSource::hash_tokens(&tokens);
         for &pos in &active_positions {
@@ -4079,7 +4443,7 @@ mod tests {
             let lp: Vec<f32> = (0..top_k)
                 .map(|k| -((pos + 1) as f32).ln() - (k as f32) * 0.3)
                 .collect();
-            fixture.insert(h, pos, idx, lp);
+            fixture.insert(h, pos - 1, idx, lp);
         }
         let teacher: Arc<dyn LogitSource> = Arc::new(fixture);
 
@@ -4131,6 +4495,171 @@ mod tests {
     }
 
     #[test]
+    fn opd_top_k_resolution_uses_largest_executable_support() {
+        assert_eq!(resolve_opd_top_k(32, 20).unwrap(), 16);
+        assert_eq!(resolve_opd_top_k(32, 32).unwrap(), 32);
+        assert_eq!(resolve_opd_top_k(24, 64).unwrap(), 16);
+        assert_eq!(resolve_opd_top_k(128, 128).unwrap(), 32);
+        assert!(resolve_opd_top_k(15, 32).is_err());
+        assert!(resolve_opd_top_k(32, 15).is_err());
+    }
+
+    #[test]
+    fn opd_receipt_config_records_effective_not_requested_top_k() {
+        let config = OpdConfig::default();
+        assert_eq!(config.top_k, 32);
+
+        let receipt_config = opd_config_for_receipt(&config, 16);
+        assert_eq!(receipt_config.top_k, 16);
+        assert_eq!(
+            config.top_k, 32,
+            "receipt preparation must not mutate the request"
+        );
+        assert_eq!(
+            serde_json::to_value(receipt_config).unwrap()["top_k"],
+            serde_json::json!(16)
+        );
+    }
+
+    #[test]
+    fn opd_top_k_resolution_fails_before_teacher_fetch() {
+        let teacher = RecordingLogitSource::topk(64, 15, 1);
+        let err = prepare_opd_kernel_inputs(
+            &[3, 5, 7],
+            &[2],
+            teacher.clone(),
+            OpdLossGranularity::TeacherTopK,
+            32,
+            None,
+            None,
+        )
+        .err()
+        .expect("a source cap below K=16 must fail admission");
+
+        assert!(format!("{err:#}").contains("no executable"), "{err:#}");
+        assert!(teacher.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn opd_preparation_shifts_action_targets_to_their_causal_logits_rows() -> Result<()> {
+        let response = RecordingLogitSource::topk(64, 16, 2);
+        let mut caps = response.caps.clone();
+        caps.max_top_k = 20;
+        let teacher = Arc::new(RecordingLogitSource {
+            caps,
+            batch: response.batch.clone(),
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let prepared = prepare_opd_kernel_inputs(
+            &[3, 5, 7, 9, 11],
+            &[1, 4],
+            teacher.clone(),
+            OpdLossGranularity::TeacherTopK,
+            32,
+            None,
+            None,
+        )?;
+
+        assert_eq!(*teacher.calls.lock().unwrap(), vec![vec![0, 3]]);
+        assert_eq!(prepared.label_mask, vec![true, false, false, true, false]);
+        assert_eq!(prepared.resolved_top_k, 16);
+        assert_eq!(prepared.active_count, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn opd_preparation_rejects_invalid_target_order_before_teacher_fetch() {
+        for positions in [&[0][..], &[2, 2], &[3, 2]] {
+            let teacher = RecordingLogitSource::topk(16, 2, positions.len());
+            let err = prepare_opd_kernel_inputs(
+                &[3, 5, 7, 9],
+                positions,
+                teacher.clone(),
+                OpdLossGranularity::TeacherTopK,
+                2,
+                None,
+                None,
+            )
+            .err()
+            .expect("invalid target positions must fail");
+            assert!(
+                err.to_string().contains("target"),
+                "unexpected error for {positions:?}: {err:#}"
+            );
+            assert!(teacher.calls.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn opd_preparation_rejects_sampled_token_noop_before_teacher_fetch() {
+        let teacher = RecordingLogitSource::topk(16, 1, 1);
+        let err = prepare_opd_kernel_inputs(
+            &[3, 5, 7],
+            &[2],
+            teacher.clone(),
+            OpdLossGranularity::SampledToken,
+            1,
+            None,
+            None,
+        )
+        .err()
+        .expect("sampled-token no-op must fail closed");
+        assert!(err.to_string().contains("identically zero"), "{err:#}");
+        assert!(teacher.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn opd_preparation_rejects_malformed_teacher_batch_before_kernel() {
+        let teacher = RecordingLogitSource::topk(64, 16, 2);
+        let mut malformed_indices: Vec<u32> = (0..32).map(|idx| (idx % 16) as u32).collect();
+        malformed_indices[31] = 64;
+        let malformed = Arc::new(RecordingLogitSource {
+            caps: teacher.caps.clone(),
+            batch: LogprobBatch::TopK(TopKLogprobs {
+                indices: malformed_indices,
+                logprobs: (0..32).map(|index| -3.0 - (index % 16) as f32).collect(),
+                top_k: 16,
+            }),
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+
+        let err = prepare_opd_kernel_inputs(
+            &[1, 2, 3, 4],
+            &[1, 3],
+            malformed.clone(),
+            OpdLossGranularity::TeacherTopK,
+            32,
+            None,
+            None,
+        )
+        .err()
+        .expect("malformed teacher batch must fail");
+        assert!(err.to_string().contains("invalid top-K"), "{err:#}");
+        assert_eq!(*malformed.calls.lock().unwrap(), vec![vec![0, 2]]);
+    }
+
+    #[test]
+    fn opd_preparation_rejects_asymmetric_target_token_mismatch() {
+        let teacher = RecordingLogitSource::topk(16, 2, 1);
+        let err = prepare_opd_kernel_inputs(
+            &[1, 2, 3],
+            &[2],
+            teacher.clone(),
+            OpdLossGranularity::TeacherTopK,
+            2,
+            Some(&[8, 1, 9]),
+            Some(&[2]),
+        )
+        .err()
+        .expect("asymmetric target mismatch must fail");
+        assert!(
+            err.to_string().contains("asymmetric target pair"),
+            "{err:#}"
+        );
+        assert!(teacher.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn opd_step_loss_asymmetric_teacher_pairs_by_index() -> Result<()> {
         // Verify that when teacher_tokens / teacher_active_positions are
         // set, the kernel queries the teacher at the SHIFTED positions
@@ -4139,7 +4668,7 @@ mod tests {
         let _device = Device::Cpu;
         let vocab_size = 16usize;
         let hidden_size = 8usize;
-        let top_k = 4usize;
+        let top_k = 16usize;
         let student_seq_len = 10usize;
         let teacher_prefix_len = 5usize;
         let teacher_seq_len = teacher_prefix_len + student_seq_len;
@@ -4175,8 +4704,7 @@ mod tests {
 
         // Build a fixture teacher keyed off the *teacher* tokens. The
         // OPD kernel must hand the fixture the teacher_tokens (not the
-        // student tokens) and the SHIFTED positions for the lookup to
-        // succeed — that's the asymmetric path under test.
+        // student tokens) and the causal rows preceding the shifted targets.
         let mut fixture = FixtureLogitSource::uniform_topk("asym-test", vocab_size, top_k);
         let h = FixtureLogitSource::hash_tokens(&teacher_tokens);
         for &pos in &teacher_active {
@@ -4186,7 +4714,7 @@ mod tests {
             let lp: Vec<f32> = (0..top_k)
                 .map(|k| -((pos + 1) as f32).ln() - (k as f32) * 0.3)
                 .collect();
-            fixture.insert(h, pos, idx, lp);
+            fixture.insert(h, pos - 1, idx, lp);
         }
         let teacher: Arc<dyn LogitSource> = Arc::new(fixture);
 
@@ -4358,10 +4886,14 @@ mod tests {
             .enumerate()
             .filter_map(|(idx, active)| active.then_some(idx))
             .collect();
-        let batch =
-            prepared
-                .teacher
-                .fetch_logprobs(&tokenized.input_ids, &active_positions, Some(2))?;
+        let logits_rows = target_token_positions_to_logits_rows(
+            "teacher-fixture",
+            tokenized.input_ids.len(),
+            &active_positions,
+        )?;
+        let batch = prepared
+            .teacher
+            .fetch_logprobs(&tokenized.input_ids, &logits_rows, Some(2))?;
         let LogprobBatch::TopK(topk) = batch else {
             panic!("CE fixture should return top-k logprobs");
         };
@@ -4408,10 +4940,66 @@ mod tests {
         assert_eq!(cfg.top_p, 0.9);
         assert_eq!(cfg.max_tokens, 7168);
         assert_eq!(cfg.discount, 0.0);
-        assert_eq!(cfg.clip_epsilon, 0.2);
-        assert!(matches!(cfg.stable_opd, StableOpdMode::Auto));
+        assert_eq!(cfg.clip_epsilon, 0.0);
+        assert!(matches!(cfg.stable_opd, StableOpdMode::Off));
         assert!(matches!(cfg.loss, OpdLossGranularity::TeacherTopK));
         assert_eq!(cfg.checkpoint_interval, Some(25));
+        cfg.validate_runtime_contract().unwrap();
+    }
+
+    #[test]
+    fn opd_runtime_contract_rejects_every_unwired_knob() {
+        let base = OpdConfig::default();
+
+        let mut config = base.clone();
+        config.objective = OpdObjective::CrossEntropy;
+        assert!(
+            config
+                .validate_runtime_contract()
+                .unwrap_err()
+                .to_string()
+                .contains("cross_entropy")
+        );
+
+        let mut config = base.clone();
+        config.stable_opd = StableOpdMode::Auto;
+        assert!(
+            config
+                .validate_runtime_contract()
+                .unwrap_err()
+                .to_string()
+                .contains("Stable-OPD")
+        );
+
+        let mut config = base.clone();
+        config.discount = 0.5;
+        assert!(
+            config
+                .validate_runtime_contract()
+                .unwrap_err()
+                .to_string()
+                .contains("discount")
+        );
+
+        let mut config = base.clone();
+        config.clip_epsilon = 0.2;
+        assert!(
+            config
+                .validate_runtime_contract()
+                .unwrap_err()
+                .to_string()
+                .contains("clip_epsilon")
+        );
+
+        let mut config = base;
+        config.max_cost_usd = Some(25.0);
+        assert!(
+            config
+                .validate_runtime_contract()
+                .unwrap_err()
+                .to_string()
+                .contains("max_cost_usd")
+        );
     }
 
     #[test]

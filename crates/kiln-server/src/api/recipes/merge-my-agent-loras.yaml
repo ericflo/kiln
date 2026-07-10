@@ -21,5 +21,6 @@ steps:
         weight: 0.7
     rollout_budget: 5000
     config:
+      training_mode: off_policy
       top_k: 32
       samples_per_prompt: 4

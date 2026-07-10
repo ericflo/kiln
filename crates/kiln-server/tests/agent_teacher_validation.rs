@@ -397,9 +397,8 @@ async fn teacher_registration_validates_adapter_field() {
     assert_eq!(response["spec"]["adapter"], "prior-self", "{response}");
 }
 
-/// Remote teachers whose URL resolves to a provider the runtime can't
-/// serve ("not yet wired") must be rejected at registration with the
-/// supported list — not enqueued into jobs guaranteed to die.
+/// Remote teachers must declare the protocol explicitly. Unsupported and
+/// legacy missing-provider registrations fail before they can queue work.
 #[tokio::test]
 async fn teacher_registration_rejects_unwired_remote_providers() {
     let (state, _dir) = make_state();
@@ -408,7 +407,7 @@ async fn teacher_registration_rejects_unwired_remote_providers() {
     let (status, response) = post(
         &app,
         "/v1/teachers",
-        json!({"alias": "t@tgi", "kind": "remote", "model_id": "m", "url": "https://tgi.example.com"}),
+        json!({"alias": "t@tgi", "kind": "remote", "provider": "tgi", "model_id": "m", "url": "https://tgi.example.com"}),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
@@ -418,11 +417,48 @@ async fn teacher_registration_rejects_unwired_remote_providers() {
         "names the supported providers: {message}"
     );
 
-    // A vLLM-shaped URL registers fine.
     let (status, response) = post(
         &app,
         "/v1/teachers",
-        json!({"alias": "t@vllm", "kind": "remote", "model_id": "m", "url": "https://vllm.example.com"}),
+        json!({"alias": "t@legacy", "kind": "remote", "model_id": "m", "url": "https://vllm.example.com"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("explicit provider"),
+        "{response}"
+    );
+
+    let (status, response) = post(
+        &app,
+        "/v1/teachers",
+        json!({
+            "alias": "t@missing-key",
+            "kind": "remote",
+            "provider": "vllm",
+            "model_id": "m",
+            "url": "https://vllm.example.com",
+            "api_key_env": "KILN_TEST_REMOTE_KEY_INTENTIONALLY_UNSET"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not set"),
+        "{response}"
+    );
+
+    // An explicit vLLM registration is accepted on any valid HTTP(S) URL.
+    let (status, response) = post(
+        &app,
+        "/v1/teachers",
+        json!({"alias": "t@vllm", "kind": "remote", "provider": "vllm", "model_id": "m", "url": "https://vllm.example.com"}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{response}");
@@ -536,4 +572,53 @@ async fn distill_merge_rejects_missing_source_adapters() {
         "{response}"
     );
     assert_no_jobs(&state, "merge missing source");
+}
+
+#[tokio::test]
+async fn front_door_rejects_structurally_empty_opd_before_enqueue() {
+    let (state, _dir) = make_state();
+    let app = api::router(state.clone());
+    register_teacher(&app, "real@t").await;
+
+    let (status, response) = post(
+        &app,
+        "/v1/train",
+        json!({"kind": "opd", "prompts": [], "teacher": "real@t"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("exactly one"),
+        "{response}"
+    );
+    assert_no_jobs(&state, "front-door empty OPD");
+}
+
+#[tokio::test]
+async fn front_door_rejects_missing_merge_source_before_enqueue() {
+    let (state, _dir) = make_state();
+    let app = api::router(state.clone());
+
+    let (status, response) = post(
+        &app,
+        "/v1/train",
+        json!({
+            "kind": "distill_merge",
+            "name": "merged",
+            "sources": [{"adapter": "missing"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("missing"),
+        "{response}"
+    );
+    assert_no_jobs(&state, "front-door missing merge source");
 }

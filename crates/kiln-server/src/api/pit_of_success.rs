@@ -4,7 +4,7 @@
 //!   trainer picks SFT vs GRPO vs OPD vs distill_refresh vs
 //!   distill_merge from the request body.
 //! - `GET  /v1/preflight/compatibility?teacher=&student=&domain=` —
-//!   §8.4 compatibility-table lookup. 30+ validated rows shipped.
+//!   §8.4 seeded compatibility predictions for the wired vLLM protocol.
 //! - `POST /v1/preflight/capacity` — §8.5 capacity calculator.
 //!   bits_needed vs bits_storable_in_lora vs expected_overlap_at_step_50.
 //! - `GET  /v1/preflight/tier_defaults?tier=` — §8.13 tier-aware
@@ -83,7 +83,7 @@ async fn submit_front_door(
         return Err(ApiError::shutting_down());
     }
 
-    let (pipeline, job_type, adapter_name, auto_load, lora_scale, queued): (
+    let (pipeline, job_type, adapter_name, auto_load, lora_scale, mut queued): (
         &'static str,
         TrainingJobType,
         String,
@@ -181,6 +181,7 @@ async fn submit_front_door(
     // directory under adapter_dir — same gate as the dedicated endpoints.
     super::adapters::validate_adapter_name(&adapter_name)?;
     super::training::validate_lora_scale_at_submit(lora_scale.0, lora_scale.1, lora_scale.2)?;
+    let top_k_adjustment = super::training::normalize_queued_opd_top_k(&state, &mut queued)?;
     super::training::enforce_queue_caps(&state)?;
 
     let job_id = uuid::Uuid::new_v4().to_string();
@@ -206,23 +207,29 @@ async fn submit_front_door(
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };
-    state
-        .training_jobs
-        .write()
-        .unwrap()
-        .insert(job_id.clone(), info);
-    state.training_queue.lock().unwrap().push(QueueEntry {
-        job_id: job_id.clone(),
-        reserved_bytes: 0,
-        job: queued,
-    });
+    super::training::admit_training_jobs(
+        &state,
+        vec![(
+            info,
+            QueueEntry {
+                job_id: job_id.clone(),
+                reserved_bytes: 0,
+                job: queued,
+            },
+        )],
+    )?;
 
     Ok(Json(FrontDoorResponse {
         picked: pipeline,
         training: TrainingResponse {
             job_id,
             state: kiln_train::TrainingState::Queued,
-            message: format!("§8.2 front-door dispatched to {pipeline}."),
+            message: format!(
+                "§8.2 front-door dispatched to {pipeline}.{}",
+                top_k_adjustment.map_or_else(String::new, |(requested, effective)| {
+                    format!(" Effective top_k was resolved from {requested} to {effective}.")
+                })
+            ),
         },
     }))
 }
@@ -290,14 +297,10 @@ pub fn builtin_compatibility_table() -> Vec<CompatibilityRow> {
         }
     }
 
-    // Three teachers × ten domains = 30 entries. Numbers are seeded
+    // One wired protocol × ten domains. Numbers are seeded
     // from §6 / §9.7 expectations + Li et al. phenomenology; they
     // get refined as real runs land and the table grows.
-    let teachers: &[(&str, Option<f64>)] = &[
-        ("qwen3.6-27b@local", None),
-        ("qwen3.6-27b@openrouter", Some(0.0003)),
-        ("qwen3.6-27b@together", Some(0.0002)),
-    ];
+    let teachers: &[(&str, Option<f64>)] = &[("qwen3.6-27b@vllm", None)];
     let domains: &[(&str, f64, usize, &str, f64)] = &[
         ("math_reasoning", 0.78, 64, "math-frontier-eval", 12.0),
         ("python_codegen", 0.72, 64, "humaneval-plus", 8.0),
@@ -317,7 +320,7 @@ pub fn builtin_compatibility_table() -> Vec<CompatibilityRow> {
             let cold_start = if *overlap < 0.5 { Some(2) } else { None };
             // Hours = base 4h scaled by rank/64.
             let hours = 4.0 * (*rank as f64 / 64.0).max(0.5);
-            let cost = cost_per_1k.map(|c| c * 15_000.0 * 1.0); // ~$5 for canonical pump
+            let cost = cost_per_1k.map(|c| c * 15_000.0);
             rows.push(row(
                 teacher,
                 "Qwen3.5-4B@kiln",
@@ -515,8 +518,8 @@ pub fn builtin_tier_defaults() -> BTreeMap<String, TierDefaults> {
         TierDefaults {
             tier: "laptop".to_string(),
             default_logit_source: "Best-cached → RemoteTeacher".to_string(),
-            default_loss: "teacher_top_k (K=20, most APIs cap)".to_string(),
-            default_top_k: 20,
+            default_loss: "teacher_top_k (K=16)".to_string(),
+            default_top_k: 16,
             lora_rank: 16,
             batch_size: 8,
             samples_per_prompt_default: 4,
@@ -534,7 +537,7 @@ pub fn builtin_tier_defaults() -> BTreeMap<String, TierDefaults> {
         "prosumer".to_string(),
         TierDefaults {
             tier: "prosumer".to_string(),
-            default_logit_source: "LocalTeacher(qwen3.6-27b, fp8)".to_string(),
+            default_logit_source: "LocalTeacher(served model + optional LoRA)".to_string(),
             default_loss: "teacher_top_k (K=32)".to_string(),
             default_top_k: 32,
             lora_rank: 32,
@@ -554,9 +557,9 @@ pub fn builtin_tier_defaults() -> BTreeMap<String, TierDefaults> {
         "corporate".to_string(),
         TierDefaults {
             tier: "corporate".to_string(),
-            default_logit_source: "LocalTeacher(qwen3.6-27b, full) ×N".to_string(),
-            default_loss: "full_vocab".to_string(),
-            default_top_k: 0,
+            default_logit_source: "LocalTeacher(served model + source LoRA) ×N".to_string(),
+            default_loss: "teacher_top_k (K=32)".to_string(),
+            default_top_k: 32,
             lora_rank: 128,
             batch_size: 32,
             samples_per_prompt_default: 4,
@@ -623,13 +626,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compatibility_table_has_30_plus_entries() {
+    fn compatibility_table_only_names_the_wired_teacher_protocol() {
         let table = builtin_compatibility_table();
-        assert!(
-            table.len() >= 30,
-            "§8.4 promises ≥30 day-1 entries; got {}",
-            table.len()
-        );
+        assert_eq!(table.len(), 10);
+        assert!(table.iter().all(|row| row.teacher == "qwen3.6-27b@vllm"));
+        assert!(table.iter().all(|row| row.expected_cost_usd.is_none()));
     }
 
     #[test]
@@ -642,6 +643,13 @@ mod tests {
         assert_eq!(map.get("laptop").unwrap().lora_rank, 16);
         assert_eq!(map.get("prosumer").unwrap().lora_rank, 32);
         assert_eq!(map.get("corporate").unwrap().lora_rank, 128);
+        assert_eq!(map.get("laptop").unwrap().default_top_k, 16);
+        assert_eq!(map.get("prosumer").unwrap().default_top_k, 32);
+        assert_eq!(map.get("corporate").unwrap().default_top_k, 32);
+        assert!(
+            map.values()
+                .all(|defaults| defaults.default_loss.starts_with("teacher_top_k"))
+        );
         assert_eq!(
             map.get("corporate").unwrap().auto_checkpoint_cadence_steps,
             5

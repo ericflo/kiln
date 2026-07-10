@@ -539,6 +539,373 @@ pub(crate) fn validate_lora_scale_at_submit(
         .map_err(|e| ApiError::training_invalid_request(format!("{e:#}")))
 }
 
+fn validate_opd_loss_at_submit(loss: kiln_train::OpdLossGranularity) -> Result<(), ApiError> {
+    if matches!(loss, kiln_train::OpdLossGranularity::FullVocab) {
+        return Err(ApiError::training_invalid_request(
+            "OPD loss is unavailable: full_vocab has no concrete server-built teacher source; use teacher_top_k"
+                .to_string(),
+        ));
+    }
+    match loss.unsupported_reason() {
+        Some(reason) => Err(ApiError::training_invalid_request(format!(
+            "OPD loss is unavailable: {reason}"
+        ))),
+        None => Ok(()),
+    }
+}
+
+fn validate_opd_config_at_submit(config: &kiln_train::OpdConfig) -> Result<(), ApiError> {
+    validate_opd_loss_at_submit(config.loss)?;
+    config
+        .validate_runtime_contract()
+        .map_err(|error| ApiError::training_invalid_request(format!("{error:#}")))
+}
+
+fn require_off_policy_fixture_mode(
+    surface: &str,
+    config: &kiln_train::OpdConfig,
+) -> Result<(), ApiError> {
+    if !matches!(
+        config.training_mode,
+        kiln_train::opd::OpdTrainingMode::OffPolicy
+    ) {
+        return Err(ApiError::training_invalid_request(format!(
+            "{surface} materializes teacher logits for fixed action sequences and requires config.training_mode=\"off_policy\""
+        )));
+    }
+    Ok(())
+}
+
+fn registered_teacher_top_k_limit(
+    spec: &super::teachers::TeacherSpec,
+    requested_top_k: usize,
+) -> usize {
+    let configured = spec.max_top_k.unwrap_or(0);
+    let provider_limit =
+        if matches!(spec.kind, super::teachers::TeacherKind::Remote) && configured == 0 {
+            kiln_train::RemoteProvider::Vllm.default_max_top_k()
+        } else if configured == 0 {
+            requested_top_k
+        } else {
+            configured
+        };
+    spec.vocab_size
+        .map_or(provider_limit, |vocab_size| provider_limit.min(vocab_size))
+}
+
+/// Resolve the user-facing OPD K to a value implemented by the active KT
+/// kernels before any job or teacher request is admitted.
+fn resolve_opd_top_k_at_submit(
+    config: &mut kiln_train::OpdConfig,
+    source_max_top_k: usize,
+) -> Result<Option<(usize, usize)>, ApiError> {
+    let requested = config.top_k;
+    let effective = kiln_train::resolve_opd_top_k(requested, source_max_top_k).map_err(|error| {
+        ApiError::training_invalid_request(format!(
+            "OPD top_k {requested} is not executable with source cap {source_max_top_k}: {error:#}"
+        ))
+    })?;
+    config.top_k = effective;
+    Ok((effective != requested).then_some((requested, effective)))
+}
+
+fn top_k_adjustment_suffix(adjustment: Option<(usize, usize)>) -> String {
+    adjustment.map_or_else(String::new, |(requested, effective)| {
+        format!(
+            " Requested top_k {requested} was resolved to effective top_k {effective} for the teacher and active OPD kernel."
+        )
+    })
+}
+
+fn validate_self_distill_context_at_submit(
+    req: &kiln_train::DistillSelfRequest,
+) -> Result<(), ApiError> {
+    let require_prompts = || {
+        req.prompts.as_deref().filter(|prompts| !prompts.is_empty()).ok_or_else(|| {
+            ApiError::training_invalid_request(
+                "distill/self: this privileged-information mode requires explicit non-empty `prompts`"
+                    .to_string(),
+            )
+        })
+    };
+    match req.mode {
+        kiln_train::SelfDistillMode::GroundTruthConditioning => {
+            let prompts = require_prompts()?;
+            let answers = req.ground_truth.as_deref().ok_or_else(|| {
+                ApiError::training_invalid_request(
+                    "distill/self: ground_truth_conditioning requires `ground_truth`".to_string(),
+                )
+            })?;
+            if answers.len() != prompts.len()
+                || answers.iter().any(|answer| answer.trim().is_empty())
+            {
+                return Err(ApiError::training_invalid_request(format!(
+                    "distill/self: ground_truth must contain one non-empty answer per prompt ({} prompts, {} answers)",
+                    prompts.len(),
+                    answers.len()
+                )));
+            }
+        }
+        kiln_train::SelfDistillMode::DocumentAsPi => {
+            let prompts = require_prompts()?;
+            let documents = req.documents.as_deref().ok_or_else(|| {
+                ApiError::training_invalid_request(
+                    "distill/self: document_as_pi requires `documents`".to_string(),
+                )
+            })?;
+            if documents.len() != prompts.len()
+                || documents.iter().any(|document| document.trim().is_empty())
+            {
+                return Err(ApiError::training_invalid_request(format!(
+                    "distill/self: documents must contain one non-empty context per prompt ({} prompts, {} documents)",
+                    prompts.len(),
+                    documents.len()
+                )));
+            }
+        }
+        kiln_train::SelfDistillMode::Conciseness | kiln_train::SelfDistillMode::ReverseTeacher => {}
+    }
+    Ok(())
+}
+
+fn opd_prompt_has_action(prompt: &kiln_train::opd::OpdPrompt) -> bool {
+    prompt
+        .messages
+        .iter()
+        .any(|message| message.role == "assistant" && !message.content.trim().is_empty())
+        || prompt.trajectory.iter().any(|segment| {
+            matches!(segment.kind, kiln_train::trajectory::TurnKind::Action)
+                && !segment.content.trim().is_empty()
+        })
+}
+
+fn validate_opd_prompts_at_submit(
+    surface: &str,
+    prompts: &[kiln_train::opd::OpdPrompt],
+    require_action: bool,
+) -> Result<(), ApiError> {
+    if prompts.is_empty() {
+        return Err(ApiError::training_invalid_request(format!(
+            "{surface} requires at least one prompt"
+        )));
+    }
+    for (prompt_idx, prompt) in prompts.iter().enumerate() {
+        if prompt.messages.is_empty() {
+            return Err(ApiError::training_invalid_request(format!(
+                "{surface} prompt {prompt_idx} has no messages"
+            )));
+        }
+        if require_action && !opd_prompt_has_action(prompt) {
+            return Err(ApiError::training_invalid_request(format!(
+                "{surface} prompt {prompt_idx} requires a non-empty assistant action for off-policy scoring"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_opd_request_at_submit(req: &kiln_train::OpdRequest) -> Result<(), ApiError> {
+    if req.prompts.is_empty() == req.dataset_path.is_none() {
+        return Err(ApiError::training_invalid_request(
+            "OPD request must use exactly one of non-empty prompts or dataset_path".to_string(),
+        ));
+    }
+    if req.teacher.trim().is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "OPD request must specify a teacher alias".to_string(),
+        ));
+    }
+    if let Some(path) = req.dataset_path.as_deref() {
+        if path.trim().is_empty() {
+            return Err(ApiError::training_invalid_request(
+                "OPD dataset_path must be non-empty".to_string(),
+            ));
+        }
+        if !crate::dataset_resolve::is_agent_traces_selector(path)
+            && !matches!(
+                req.config.training_mode,
+                kiln_train::opd::OpdTrainingMode::OffPolicy
+            )
+        {
+            return Err(ApiError::training_invalid_request(
+                "OPD teacher-logprob JSONL requires config.training_mode=\"off_policy\"; for on-policy training on pi sessions use an `agent_traces:` selector"
+                    .to_string(),
+            ));
+        }
+    } else {
+        let require_action = matches!(
+            req.config.training_mode,
+            kiln_train::opd::OpdTrainingMode::OffPolicy
+        );
+        validate_opd_prompts_at_submit("OPD", &req.prompts, require_action)?;
+    }
+    validate_opd_config_at_submit(&req.config)
+}
+
+fn validate_distill_merge_at_submit(
+    state: &AppState,
+    req: &kiln_train::DistillMergeRequest,
+) -> Result<(), ApiError> {
+    if req.name.trim().is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "distill_merge: name must be non-empty".to_string(),
+        ));
+    }
+    super::adapters::validate_adapter_name(&req.name)?;
+    if req.sources.is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "distill_merge: sources must be non-empty".to_string(),
+        ));
+    }
+    validate_opd_config_at_submit(&req.config)?;
+    require_off_policy_fixture_mode("distill_merge", &req.config)?;
+    for source in &req.sources {
+        super::adapters::validate_adapter_name(&source.adapter)?;
+        let dir = state.adapter_dir.join(&source.adapter);
+        if !dir.is_dir() {
+            return Err(ApiError::training_invalid_request(format!(
+                "distill_merge: source adapter {:?} not found at {}",
+                source.adapter,
+                dir.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_distill_self_at_submit(req: &kiln_train::DistillSelfRequest) -> Result<(), ApiError> {
+    if req.name.trim().is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "distill/self: name must be non-empty".to_string(),
+        ));
+    }
+    super::adapters::validate_adapter_name(&req.name)?;
+    if matches!(req.mode, kiln_train::SelfDistillMode::ReverseTeacher) {
+        return Err(ApiError::training_invalid_request(
+            "distill/self: reverse_teacher requires a distinct reverse objective".to_string(),
+        ));
+    }
+    validate_opd_config_at_submit(&req.config)?;
+    require_off_policy_fixture_mode("distill/self", &req.config)?;
+    let prompts = req.prompts.as_deref().ok_or_else(|| {
+        ApiError::training_invalid_request(
+            "distill/self requires explicit off-policy prompts with assistant actions".to_string(),
+        )
+    })?;
+    validate_opd_prompts_at_submit("distill/self", prompts, true)?;
+    validate_self_distill_context_at_submit(req)
+}
+
+fn validate_distill_pump_at_submit(req: &kiln_train::DistillPumpRequest) -> Result<(), ApiError> {
+    if req.name.trim().is_empty() || req.teacher.trim().is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "distill/pump requires non-empty name and teacher".to_string(),
+        ));
+    }
+    super::adapters::validate_adapter_name(&req.name)?;
+    validate_opd_config_at_submit(&req.config)?;
+    let off_policy = matches!(
+        req.config.training_mode,
+        kiln_train::opd::OpdTrainingMode::OffPolicy
+    );
+    match &req.mode {
+        kiln_train::DistillPumpMode::Examples { examples } => {
+            validate_opd_prompts_at_submit("distill/pump", examples, off_policy)?;
+        }
+        _ if off_policy => {
+            return Err(ApiError::training_invalid_request(
+                    "distill/pump domain and wide seed modes require on_policy training; off_policy requires explicit examples with assistant actions"
+                        .to_string(),
+                ));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_distill_refresh_at_submit(
+    req: &kiln_train::DistillRefreshRequest,
+) -> Result<(), ApiError> {
+    if req.name.trim().is_empty() || req.behavioural_teacher.trim().is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "distill/refresh requires non-empty name and behavioural_teacher".to_string(),
+        ));
+    }
+    validate_opd_config_at_submit(&req.config)?;
+    if let kiln_train::NewKnowledgeSource::Inline { examples } = &req.new_data {
+        // The first phase is SFT, so every inline example needs an assistant
+        // target even when the recovery phase samples on-policy.
+        validate_opd_prompts_at_submit("distill/refresh", examples, true)?;
+    }
+    Ok(())
+}
+
+/// Normalize every OPD-class queue payload, including recipes, scheduled
+/// self-improvement, and the intent-aware front door that bypass dedicated
+/// endpoint handlers.
+pub(crate) fn normalize_queued_opd_top_k(
+    state: &AppState,
+    job: &mut QueuedJob,
+) -> Result<Option<(usize, usize)>, ApiError> {
+    match job {
+        QueuedJob::Opd(req) => {
+            validate_opd_request_at_submit(req)?;
+            let spec = super::teachers::require_registered_teacher(
+                state,
+                &req.teacher,
+                format!("OPD teacher alias '{}' is not registered", req.teacher),
+            )?;
+            let prescored = req
+                .dataset_path
+                .as_deref()
+                .is_some_and(|path| !crate::dataset_resolve::is_agent_traces_selector(path));
+            let source_limit = if prescored {
+                req.config.top_k
+            } else {
+                registered_teacher_top_k_limit(&spec, req.config.top_k)
+            };
+            resolve_opd_top_k_at_submit(&mut req.config, source_limit)
+        }
+        QueuedJob::DistillRefresh(req) => {
+            validate_distill_refresh_at_submit(req)?;
+            let spec = super::teachers::require_registered_teacher(
+                state,
+                &req.behavioural_teacher,
+                format!(
+                    "DistillRefresh: behavioural_teacher alias '{}' is not registered",
+                    req.behavioural_teacher
+                ),
+            )?;
+            let source_limit = registered_teacher_top_k_limit(&spec, req.config.top_k);
+            resolve_opd_top_k_at_submit(&mut req.config, source_limit)
+        }
+        QueuedJob::DistillPump(req) => {
+            validate_distill_pump_at_submit(req)?;
+            let spec = super::teachers::require_registered_teacher(
+                state,
+                &req.teacher,
+                format!(
+                    "distill/pump: teacher alias '{}' is not registered",
+                    req.teacher
+                ),
+            )?;
+            let source_limit = registered_teacher_top_k_limit(&spec, req.config.top_k);
+            resolve_opd_top_k_at_submit(&mut req.config, source_limit)
+        }
+        QueuedJob::DistillMerge(req) => {
+            validate_distill_merge_at_submit(state, req)?;
+            let requested = req.config.top_k;
+            resolve_opd_top_k_at_submit(&mut req.config, requested)
+        }
+        QueuedJob::DistillSelf(req) => {
+            validate_distill_self_at_submit(req)?;
+            let requested = req.config.top_k;
+            resolve_opd_top_k_at_submit(&mut req.config, requested)
+        }
+        QueuedJob::Sft(_) | QueuedJob::Grpo(_) => Ok(None),
+    }
+}
+
 async fn submit_sft(
     State(state): State<AppState>,
     Json(mut req): Json<SftRequest>,
@@ -759,22 +1126,18 @@ async fn submit_sft(
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };
-    state
-        .training_jobs
-        .write()
-        .unwrap()
-        .insert(job_id.clone(), info);
-
-    // Enqueue the job
-    let queue_position = {
-        let mut q = state.training_queue.lock().unwrap();
-        q.push(QueueEntry {
-            job_id: job_id.clone(),
-            reserved_bytes,
-            job: QueuedJob::Sft(req),
-        });
-        q.len() // position = queue length after push (1-indexed)
-    };
+    // Enqueue and publish the tracking record under one admission lock pair.
+    let queue_position = admit_training_jobs(
+        &state,
+        vec![(
+            info,
+            QueueEntry {
+                job_id: job_id.clone(),
+                reserved_bytes,
+                job: QueuedJob::Sft(req),
+            },
+        )],
+    )?;
 
     Ok(Json(TrainingResponse {
         job_id,
@@ -938,22 +1301,18 @@ async fn submit_grpo(
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };
-    state
-        .training_jobs
-        .write()
-        .unwrap()
-        .insert(job_id.clone(), info);
-
-    // Enqueue the job
-    let queue_position = {
-        let mut q = state.training_queue.lock().unwrap();
-        q.push(QueueEntry {
-            job_id: job_id.clone(),
-            reserved_bytes,
-            job: QueuedJob::Grpo(req),
-        });
-        q.len()
-    };
+    // Enqueue and publish the tracking record under one admission lock pair.
+    let queue_position = admit_training_jobs(
+        &state,
+        vec![(
+            info,
+            QueueEntry {
+                job_id: job_id.clone(),
+                reserved_bytes,
+                job: QueuedJob::Grpo(req),
+            },
+        )],
+    )?;
 
     Ok(Json(TrainingResponse {
         job_id,
@@ -977,8 +1336,8 @@ async fn submit_grpo(
 /// Mirror of `submit_grpo` adapted to the §3.1 OPD recipe. The request
 /// shape is `OpdRequest` (defined in `kiln-train::opd`): a list of
 /// prompts, a teacher alias, and an `OpdConfig` whose §6 paper-cited
-/// defaults match the grand plan exactly (top_k=32, temperature=1.0,
-/// top_p=0.9, max_tokens=7K, γ=0, Stable-OPD auto, etc.).
+/// defaults select the bounded executable path (top_k=32, temperature=1.0,
+/// top_p=0.9, max_tokens=7K, direct reverse-KL, Stable-OPD off).
 ///
 /// Same queue / hot-swap / auto-load / post-eval semantics as SFT/GRPO.
 /// Job tracking via `/v1/train/status`, `/v1/train/queue`, etc.
@@ -1012,6 +1371,7 @@ async fn submit_opd(
             req.dataset_path = Some(path);
         }
     }
+    validate_opd_request_at_submit(&req)?;
 
     if req.prompts.is_empty() && req.dataset_path.is_none() {
         return Err(ApiError::training_invalid_request(
@@ -1058,6 +1418,7 @@ async fn submit_opd(
             "OPD top_k must be > 0".to_string(),
         ));
     }
+    validate_opd_config_at_submit(&req.config)?;
     if req.config.samples_per_prompt == 0 {
         return Err(ApiError::training_invalid_request(
             "OPD samples_per_prompt must be > 0".to_string(),
@@ -1078,11 +1439,21 @@ async fn submit_opd(
     // later behind a long queue. Fail here with the remediation. (After
     // the pure-input checks above: a malformed request is the caller's
     // first problem, an unregistered teacher the second.)
-    super::teachers::require_registered_teacher(
+    let teacher_spec = super::teachers::require_registered_teacher(
         &state,
         &req.teacher,
         format!("OPD teacher alias '{}' is not registered", req.teacher),
     )?;
+    let uses_prescored_dataset = req
+        .dataset_path
+        .as_deref()
+        .is_some_and(|path| !crate::dataset_resolve::is_agent_traces_selector(path));
+    let source_max_top_k = if uses_prescored_dataset {
+        req.config.top_k
+    } else {
+        registered_teacher_top_k_limit(&teacher_spec, req.config.top_k)
+    };
+    let top_k_adjustment = resolve_opd_top_k_at_submit(&mut req.config, source_max_top_k)?;
     let adapter_name = req
         .config
         .output_name
@@ -1095,6 +1466,7 @@ async fn submit_opd(
         teacher = %req.teacher,
         loss = ?req.config.loss,
         top_k = req.config.top_k,
+        requested_top_k = top_k_adjustment.map(|(requested, _)| requested),
         samples_per_prompt = req.config.samples_per_prompt,
         job_id = %job_id,
         adapter = %adapter_name,
@@ -1157,26 +1529,25 @@ async fn submit_opd(
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };
-    state
-        .training_jobs
-        .write()
-        .unwrap()
-        .insert(job_id.clone(), info);
-
-    let queue_position = {
-        let mut q = state.training_queue.lock().unwrap();
-        q.push(QueueEntry {
-            job_id: job_id.clone(),
-            reserved_bytes, // #36: OPD working-set reservation (preflight estimate)
-            job: QueuedJob::Opd(req),
-        });
-        q.len()
-    };
+    let queue_position = admit_training_jobs(
+        &state,
+        vec![(
+            info,
+            QueueEntry {
+                job_id: job_id.clone(),
+                reserved_bytes, // #36: OPD working-set reservation (preflight estimate)
+                job: QueuedJob::Opd(req),
+            },
+        )],
+    )?;
 
     Ok(Json(TrainingResponse {
         job_id,
         state: TrainingState::Queued,
-        message: format!("Queued OPD training (position {queue_position} in queue)."),
+        message: format!(
+            "Queued OPD training (position {queue_position} in queue).{}",
+            top_k_adjustment_suffix(top_k_adjustment)
+        ),
     }))
 }
 
@@ -1190,13 +1561,14 @@ async fn submit_opd(
 /// as `/v1/train/opd`.
 async fn submit_distill_refresh(
     State(state): State<AppState>,
-    Json(req): Json<DistillRefreshRequest>,
+    Json(mut req): Json<DistillRefreshRequest>,
 ) -> Result<Json<TrainingResponse>, ApiError> {
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
     }
 
     validate_post_eval_suite(&state, req.post_eval.as_ref())?;
+    validate_distill_refresh_at_submit(&req)?;
     let max_queued = state.max_queued_training_jobs;
     let queued_now = state.training_queue.lock().unwrap().len();
     if queued_now >= max_queued {
@@ -1213,6 +1585,7 @@ async fn submit_distill_refresh(
         ));
     }
     super::adapters::validate_adapter_name(&req.name)?;
+    validate_opd_config_at_submit(&req.config)?;
     validate_lora_scale_at_submit(
         req.config.lora_rank,
         req.config.lora_alpha,
@@ -1223,7 +1596,7 @@ async fn submit_distill_refresh(
             "DistillRefresh: `behavioural_teacher` alias must be non-empty".to_string(),
         ));
     }
-    super::teachers::require_registered_teacher(
+    let teacher_spec = super::teachers::require_registered_teacher(
         &state,
         &req.behavioural_teacher,
         format!(
@@ -1231,6 +1604,8 @@ async fn submit_distill_refresh(
             req.behavioural_teacher
         ),
     )?;
+    let source_max_top_k = registered_teacher_top_k_limit(&teacher_spec, req.config.top_k);
+    let top_k_adjustment = resolve_opd_top_k_at_submit(&mut req.config, source_max_top_k)?;
     if !(0.0..=1.0).contains(&req.require_if_eval_recovery) {
         return Err(ApiError::training_invalid_request(
             "require_if_eval_recovery must be in [0.0, 1.0]".to_string(),
@@ -1291,39 +1666,39 @@ async fn submit_distill_refresh(
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };
-    state
-        .training_jobs
-        .write()
-        .unwrap()
-        .insert(job_id.clone(), info);
-
-    let queue_position = {
-        let mut q = state.training_queue.lock().unwrap();
-        q.push(QueueEntry {
-            job_id: job_id.clone(),
-            reserved_bytes,
-            job: QueuedJob::DistillRefresh(req),
-        });
-        q.len()
-    };
+    let queue_position = admit_training_jobs(
+        &state,
+        vec![(
+            info,
+            QueueEntry {
+                job_id: job_id.clone(),
+                reserved_bytes,
+                job: QueuedJob::DistillRefresh(req),
+            },
+        )],
+    )?;
 
     Ok(Json(TrainingResponse {
         job_id,
         state: TrainingState::Queued,
-        message: format!("Queued distill/refresh (position {queue_position} in queue)."),
+        message: format!(
+            "Queued distill/refresh (position {queue_position} in queue).{}",
+            top_k_adjustment_suffix(top_k_adjustment)
+        ),
     }))
 }
 
 /// `POST /v1/adapters/distill_merge` — §3.4 behaviour-space merge.
 async fn submit_distill_merge(
     State(state): State<AppState>,
-    Json(req): Json<DistillMergeRequest>,
+    Json(mut req): Json<DistillMergeRequest>,
 ) -> Result<Json<TrainingResponse>, ApiError> {
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
     }
 
     validate_post_eval_suite(&state, req.post_eval.as_ref())?;
+    validate_distill_merge_at_submit(&state, &req)?;
     if req.sources.is_empty() {
         return Err(ApiError::training_invalid_request(
             "distill_merge: `sources` must be non-empty".to_string(),
@@ -1335,11 +1710,15 @@ async fn submit_distill_merge(
         ));
     }
     super::adapters::validate_adapter_name(&req.name)?;
+    validate_opd_config_at_submit(&req.config)?;
+    require_off_policy_fixture_mode("distill_merge", &req.config)?;
     validate_lora_scale_at_submit(
         req.config.lora_rank,
         req.config.lora_alpha,
         req.config.allow_high_lora_scale,
     )?;
+    let requested_top_k = req.config.top_k;
+    let top_k_adjustment = resolve_opd_top_k_at_submit(&mut req.config, requested_top_k)?;
     // A source adapter that doesn't exist on disk is a typo — fail now,
     // not after the job dequeues and silently falls back to the base
     // model for that source's prompts.
@@ -1366,30 +1745,34 @@ async fn submit_distill_merge(
         auto_load,
         reserved_bytes,
         QueuedJob::DistillMerge(req),
-    );
+    )?;
     Ok(Json(TrainingResponse {
         job_id,
         state: TrainingState::Queued,
-        message: "Queued distill_merge.".to_string(),
+        message: format!(
+            "Queued distill_merge.{}",
+            top_k_adjustment_suffix(top_k_adjustment)
+        ),
     }))
 }
 
 /// `POST /v1/distill/pump` — §3.5 Knowledge Pump.
 async fn submit_distill_pump(
     State(state): State<AppState>,
-    Json(req): Json<DistillPumpRequest>,
+    Json(mut req): Json<DistillPumpRequest>,
 ) -> Result<Json<TrainingResponse>, ApiError> {
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
     }
 
     validate_post_eval_suite(&state, req.post_eval.as_ref())?;
+    validate_distill_pump_at_submit(&req)?;
     if req.teacher.trim().is_empty() {
         return Err(ApiError::training_invalid_request(
             "distill/pump: `teacher` alias must be non-empty".to_string(),
         ));
     }
-    super::teachers::require_registered_teacher(
+    let teacher_spec = super::teachers::require_registered_teacher(
         &state,
         &req.teacher,
         format!(
@@ -1398,6 +1781,7 @@ async fn submit_distill_pump(
         ),
     )?;
     super::adapters::validate_adapter_name(&req.name)?;
+    validate_opd_config_at_submit(&req.config)?;
     // The worker overrides config.lora_rank with the request's top-level
     // `rank` when set (training_queue.rs pump arm) — validate the rank
     // that will actually train, not the config default it shadows.
@@ -1406,6 +1790,8 @@ async fn submit_distill_pump(
         req.config.lora_alpha,
         req.config.allow_high_lora_scale,
     )?;
+    let source_max_top_k = registered_teacher_top_k_limit(&teacher_spec, req.config.top_k);
+    let top_k_adjustment = resolve_opd_top_k_at_submit(&mut req.config, source_max_top_k)?;
     enforce_queue_caps(&state)?;
     let inline_prompts: &[kiln_train::opd::OpdPrompt] = match &req.mode {
         kiln_train::DistillPumpMode::Examples { examples } => examples.as_slice(),
@@ -1424,35 +1810,50 @@ async fn submit_distill_pump(
         auto_load,
         reserved_bytes,
         QueuedJob::DistillPump(req),
-    );
+    )?;
     Ok(Json(TrainingResponse {
         job_id,
         state: TrainingState::Queued,
-        message: "Queued distill/pump.".to_string(),
+        message: format!(
+            "Queued distill/pump.{}",
+            top_k_adjustment_suffix(top_k_adjustment)
+        ),
     }))
 }
 
 /// `POST /v1/distill/self` — §3.12 PI self-distillation.
 async fn submit_distill_self(
     State(state): State<AppState>,
-    Json(req): Json<DistillSelfRequest>,
+    Json(mut req): Json<DistillSelfRequest>,
 ) -> Result<Json<TrainingResponse>, ApiError> {
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
     }
 
     validate_post_eval_suite(&state, req.post_eval.as_ref())?;
+    validate_distill_self_at_submit(&req)?;
     if req.name.trim().is_empty() {
         return Err(ApiError::training_invalid_request(
             "distill/self: `name` must be non-empty".to_string(),
         ));
     }
+    if matches!(req.mode, kiln_train::SelfDistillMode::ReverseTeacher) {
+        return Err(ApiError::training_invalid_request(
+            "distill/self: `reverse_teacher` is unsupported because it requires a distinct reverse objective; negated logprobs are invalid"
+                .to_string(),
+        ));
+    }
+    validate_self_distill_context_at_submit(&req)?;
+    validate_opd_config_at_submit(&req.config)?;
+    require_off_policy_fixture_mode("distill/self", &req.config)?;
     super::adapters::validate_adapter_name(&req.name)?;
     validate_lora_scale_at_submit(
         req.config.lora_rank,
         req.config.lora_alpha,
         req.config.allow_high_lora_scale,
     )?;
+    let requested_top_k = req.config.top_k;
+    let top_k_adjustment = resolve_opd_top_k_at_submit(&mut req.config, requested_top_k)?;
     enforce_queue_caps(&state)?;
     let reserved_bytes = distill_working_set_reservation(
         &state,
@@ -1469,11 +1870,14 @@ async fn submit_distill_self(
         auto_load,
         reserved_bytes,
         QueuedJob::DistillSelf(req),
-    );
+    )?;
     Ok(Json(TrainingResponse {
         job_id,
         state: TrainingState::Queued,
-        message: "Queued distill/self.".to_string(),
+        message: format!(
+            "Queued distill/self.{}",
+            top_k_adjustment_suffix(top_k_adjustment)
+        ),
     }))
 }
 
@@ -1510,18 +1914,109 @@ pub(crate) fn validate_post_eval_suite(
 }
 
 pub(crate) fn enforce_queue_caps(state: &AppState) -> Result<(), ApiError> {
-    let max_queued = state.max_queued_training_jobs;
-    if state.training_queue.lock().unwrap().len() >= max_queued {
+    enforce_queue_capacity_for(state, 1)
+}
+
+pub(crate) fn enforce_queue_capacity_for(
+    state: &AppState,
+    additional_jobs: usize,
+) -> Result<(), ApiError> {
+    // Keep the same lock order as the atomic admission path below. This is
+    // only an advisory fast-fail check: admission rechecks both caps while
+    // holding write access to the tracking map and exclusive queue access.
+    let tracked = state.training_jobs.read().unwrap();
+    let queue = state.training_queue.lock().unwrap();
+    validate_training_admission_capacity(
+        queue.len(),
+        state.max_queued_training_jobs,
+        tracked.len(),
+        state.max_tracked_jobs,
+        additional_jobs,
+        !matches!(state.backend.as_ref(), ModelBackend::Mock { .. }),
+    )
+}
+
+fn validate_training_admission_capacity(
+    queued: usize,
+    max_queued: usize,
+    tracked: usize,
+    max_tracked: usize,
+    additional_jobs: usize,
+    training_supported: bool,
+) -> Result<(), ApiError> {
+    if queued.saturating_add(additional_jobs) > max_queued {
         return Err(ApiError::training_queue_full(max_queued));
     }
-    let max_tracked = state.max_tracked_jobs;
-    if state.training_jobs.read().unwrap().len() >= max_tracked {
+    if tracked.saturating_add(additional_jobs) > max_tracked {
         return Err(ApiError::training_tracked_full(max_tracked));
     }
-    if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
+    if !training_supported {
         return Err(ApiError::mock_mode_no_training());
     }
     Ok(())
+}
+
+fn admit_training_jobs_into(
+    training_jobs: &crate::state::TrainingJobs,
+    training_queue: &crate::training_queue::SharedTrainingQueue,
+    max_queued: usize,
+    max_tracked: usize,
+    training_supported: bool,
+    pending: Vec<(TrainingJobInfo, QueueEntry)>,
+) -> Result<usize, ApiError> {
+    let additional_jobs = pending.len();
+
+    // `list_queue` already uses this order. Holding both guards makes the
+    // capacity decision and every insert one transaction with respect to all
+    // other API submissions routed through this function.
+    let mut tracked = training_jobs.write().unwrap();
+    let mut queue = training_queue.lock().unwrap();
+    validate_training_admission_capacity(
+        queue.len(),
+        max_queued,
+        tracked.len(),
+        max_tracked,
+        additional_jobs,
+        training_supported,
+    )?;
+
+    let mut pending_ids = std::collections::HashSet::with_capacity(additional_jobs);
+    for (info, entry) in &pending {
+        if info.job_id != entry.job_id {
+            return Err(ApiError::internal(format!(
+                "training admission job id mismatch: tracking={} queue={}",
+                info.job_id, entry.job_id
+            )));
+        }
+        if tracked.contains_key(&info.job_id) || !pending_ids.insert(info.job_id.clone()) {
+            return Err(ApiError::internal(format!(
+                "training admission duplicate job id: {}",
+                info.job_id
+            )));
+        }
+    }
+
+    for (info, entry) in pending {
+        tracked.insert(info.job_id.clone(), info);
+        queue.push(entry);
+    }
+    Ok(queue.len())
+}
+
+/// Atomically reserve queue/tracking capacity and publish a complete batch.
+/// A rejected batch leaves both the tracking map and FIFO unchanged.
+pub(crate) fn admit_training_jobs(
+    state: &AppState,
+    pending: Vec<(TrainingJobInfo, QueueEntry)>,
+) -> Result<usize, ApiError> {
+    admit_training_jobs_into(
+        &state.training_jobs,
+        &state.training_queue,
+        state.max_queued_training_jobs,
+        state.max_tracked_jobs,
+        !matches!(state.backend.as_ref(), ModelBackend::Mock { .. }),
+        pending,
+    )
 }
 
 /// Working-set preflight for distill-family jobs: longest inline prompt
@@ -1565,7 +2060,7 @@ fn register_and_enqueue_distill(
     auto_load: bool,
     reserved_bytes: u64,
     job: QueuedJob,
-) {
+) -> Result<usize, ApiError> {
     let info = TrainingJobInfo {
         job_id: job_id.to_string(),
         adapter_name: adapter_name.to_string(),
@@ -1588,17 +2083,17 @@ fn register_and_enqueue_distill(
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };
-    state
-        .training_jobs
-        .write()
-        .unwrap()
-        .insert(job_id.to_string(), info);
-    let mut q = state.training_queue.lock().unwrap();
-    q.push(QueueEntry {
-        job_id: job_id.to_string(),
-        reserved_bytes,
-        job,
-    });
+    admit_training_jobs(
+        state,
+        vec![(
+            info,
+            QueueEntry {
+                job_id: job_id.to_string(),
+                reserved_bytes,
+                job,
+            },
+        )],
+    )
 }
 
 fn training_status_from_info(j: &crate::state::TrainingJobInfo) -> TrainingStatus {
@@ -2065,11 +2560,379 @@ pub fn routes() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kiln_train::opd::StableOpdMode;
     use kiln_train::opd::{OpdConfig, OpdPrompt};
-    use kiln_train::{ChatMessage, GrpoConfig, OpdLossGranularity, ScoredCompletion};
-    use std::sync::Mutex;
+    use kiln_train::{
+        ChatMessage, GrpoConfig, OpdLossGranularity, OpdObjective, ScoredCompletion, SftConfig,
+    };
+    use std::sync::{Arc, Barrier, Mutex, RwLock};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn pending_sft_job(job_id: impl Into<String>) -> (TrainingJobInfo, QueueEntry) {
+        let job_id = job_id.into();
+        let info = TrainingJobInfo {
+            job_id: job_id.clone(),
+            adapter_name: format!("adapter-{job_id}"),
+            job_type: TrainingJobType::Sft,
+            state: TrainingState::Queued,
+            progress: 0.0,
+            loss: None,
+            epoch: None,
+            adapter_path: None,
+            submitted_at: std::time::Instant::now(),
+            submitted_unix_ms: crate::recent_requests::now_unix_ms(),
+            auto_load: false,
+            consumed_correction_ids: Vec::new(),
+            finished_at: None,
+            finished_unix_ms: None,
+            error: None,
+            linked_eval_job_ids: Vec::new(),
+            post_eval_verdict: None,
+            gate_outcome: None,
+            loss_history: Vec::new(),
+            cancel_requested: Default::default(),
+        };
+        let request = SftRequest {
+            examples: Vec::new(),
+            dataset_path: None,
+            dataset: None,
+            config: SftConfig::default(),
+            post_eval: None,
+        };
+        (
+            info,
+            QueueEntry {
+                job_id,
+                reserved_bytes: 0,
+                job: QueuedJob::Sft(request),
+            },
+        )
+    }
+
+    #[test]
+    fn concurrent_batch_admission_is_capacity_atomic() {
+        let tracked: crate::state::TrainingJobs = Arc::new(RwLock::new(Default::default()));
+        let queue = crate::training_queue::new_shared_queue();
+        let start = Arc::new(Barrier::new(2));
+
+        let handles: Vec<_> = (0..2)
+            .map(|batch| {
+                let tracked = tracked.clone();
+                let queue = queue.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    let pending = vec![
+                        pending_sft_job(format!("batch-{batch}-a")),
+                        pending_sft_job(format!("batch-{batch}-b")),
+                    ];
+                    start.wait();
+                    admit_training_jobs_into(&tracked, &queue, 3, 3, true, pending)
+                })
+            })
+            .collect();
+
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("admission thread panicked"))
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+
+        let tracked = tracked.read().unwrap();
+        let queue = queue.lock().unwrap();
+        assert_eq!(tracked.len(), 2);
+        assert_eq!(queue.len(), 2);
+        assert!(
+            queue
+                .queue
+                .iter()
+                .all(|entry| tracked.contains_key(&entry.job_id))
+        );
+    }
+
+    #[test]
+    fn concurrent_single_submission_cannot_bypass_batch_capacity() {
+        let tracked: crate::state::TrainingJobs = Arc::new(RwLock::new(Default::default()));
+        let queue = crate::training_queue::new_shared_queue();
+        let start = Arc::new(Barrier::new(2));
+
+        let batch_handle = {
+            let tracked = tracked.clone();
+            let queue = queue.clone();
+            let start = start.clone();
+            std::thread::spawn(move || {
+                start.wait();
+                admit_training_jobs_into(
+                    &tracked,
+                    &queue,
+                    2,
+                    2,
+                    true,
+                    vec![pending_sft_job("batch-a"), pending_sft_job("batch-b")],
+                )
+            })
+        };
+        let single_handle = {
+            let tracked = tracked.clone();
+            let queue = queue.clone();
+            let start = start.clone();
+            std::thread::spawn(move || {
+                start.wait();
+                admit_training_jobs_into(
+                    &tracked,
+                    &queue,
+                    2,
+                    2,
+                    true,
+                    vec![pending_sft_job("single")],
+                )
+            })
+        };
+
+        let batch_result = batch_handle.join().expect("batch thread panicked");
+        let single_result = single_handle.join().expect("single thread panicked");
+        assert_ne!(batch_result.is_ok(), single_result.is_ok());
+
+        let tracked = tracked.read().unwrap();
+        let queue = queue.lock().unwrap();
+        let expected_len = if batch_result.is_ok() { 2 } else { 1 };
+        assert_eq!(tracked.len(), expected_len);
+        assert_eq!(queue.len(), expected_len);
+        assert!(queue.len() <= 2);
+    }
+
+    #[test]
+    fn rejected_batch_leaves_tracking_and_queue_unchanged() {
+        let tracked: crate::state::TrainingJobs = Arc::new(RwLock::new(Default::default()));
+        let queue = crate::training_queue::new_shared_queue();
+        let error = admit_training_jobs_into(
+            &tracked,
+            &queue,
+            10,
+            1,
+            true,
+            vec![pending_sft_job("a"), pending_sft_job("b")],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "training_tracked_full");
+        assert!(tracked.read().unwrap().is_empty());
+        assert_eq!(queue.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn single_job_admission_preserves_queue_position_semantics() {
+        let tracked: crate::state::TrainingJobs = Arc::new(RwLock::new(Default::default()));
+        let queue = crate::training_queue::new_shared_queue();
+
+        let position = admit_training_jobs_into(
+            &tracked,
+            &queue,
+            2,
+            2,
+            true,
+            vec![pending_sft_job("single")],
+        )
+        .unwrap();
+
+        assert_eq!(position, 1);
+        assert!(tracked.read().unwrap().contains_key("single"));
+        let queue = queue.lock().unwrap();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.queue.front().unwrap().job_id, "single");
+    }
+
+    #[test]
+    fn sampled_token_opd_is_rejected_at_submission() {
+        let err = validate_opd_loss_at_submit(OpdLossGranularity::SampledToken).unwrap_err();
+        assert!(err.to_string().contains("identically zero"), "{err}");
+        validate_opd_loss_at_submit(OpdLossGranularity::TeacherTopK).unwrap();
+        let err = validate_opd_loss_at_submit(OpdLossGranularity::FullVocab).unwrap_err();
+        assert!(err.to_string().contains("no concrete"), "{err}");
+    }
+
+    #[test]
+    fn unwired_opd_semantics_are_rejected_at_submission() {
+        let mut config = OpdConfig::default();
+        validate_opd_config_at_submit(&config).unwrap();
+
+        config.objective = OpdObjective::CrossEntropy;
+        assert!(
+            validate_opd_config_at_submit(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("cross_entropy")
+        );
+
+        config = OpdConfig::default();
+        config.stable_opd = StableOpdMode::Auto;
+        assert!(
+            validate_opd_config_at_submit(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("Stable-OPD")
+        );
+    }
+
+    #[test]
+    fn alternate_opd_admission_rejects_empty_and_unscored_off_policy_work() {
+        let mut request = OpdRequest {
+            prompts: Vec::new(),
+            dataset_path: None,
+            teacher: "teacher".into(),
+            config: OpdConfig::default(),
+            post_eval: None,
+        };
+        assert!(validate_opd_request_at_submit(&request).is_err());
+
+        request.config.training_mode = kiln_train::opd::OpdTrainingMode::OffPolicy;
+        request.prompts = vec![OpdPrompt {
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: "question".into(),
+            }],
+            teacher_extra_messages: Vec::new(),
+            trajectory: Vec::new(),
+        }];
+        let error = validate_opd_request_at_submit(&request).unwrap_err();
+        assert!(error.to_string().contains("assistant action"), "{error}");
+    }
+
+    #[test]
+    fn fixed_fixture_request_defaults_are_off_policy_and_self_requires_actions() {
+        let merge: kiln_train::DistillMergeRequest =
+            serde_json::from_str(r#"{"name":"merged","sources":[{"adapter":"source"}]}"#).unwrap();
+        assert!(matches!(
+            merge.config.training_mode,
+            kiln_train::opd::OpdTrainingMode::OffPolicy
+        ));
+
+        let mut self_request: kiln_train::DistillSelfRequest = serde_json::from_str(
+            r#"{"name":"self","mode":"conciseness","prompts":[{"messages":[{"role":"user","content":"question"},{"role":"assistant","content":"answer"}]}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            self_request.config.training_mode,
+            kiln_train::opd::OpdTrainingMode::OffPolicy
+        ));
+        validate_distill_self_at_submit(&self_request).unwrap();
+
+        self_request.prompts = None;
+        let error = validate_distill_self_at_submit(&self_request).unwrap_err();
+        assert!(error.to_string().contains("explicit off-policy prompts"));
+    }
+
+    #[test]
+    fn pump_examples_are_validated_before_enqueue_in_both_training_modes() {
+        let mut request: kiln_train::DistillPumpRequest =
+            serde_json::from_str(r#"{"name":"pump","teacher":"teacher","mode":{"examples":[]}}"#)
+                .unwrap();
+        let error = validate_distill_pump_at_submit(&request).unwrap_err();
+        assert!(error.to_string().contains("at least one prompt"), "{error}");
+
+        request.mode = kiln_train::DistillPumpMode::Examples {
+            examples: vec![OpdPrompt {
+                messages: Vec::new(),
+                teacher_extra_messages: Vec::new(),
+                trajectory: Vec::new(),
+            }],
+        };
+        let error = validate_distill_pump_at_submit(&request).unwrap_err();
+        assert!(error.to_string().contains("has no messages"), "{error}");
+
+        request.mode = kiln_train::DistillPumpMode::Examples {
+            examples: vec![OpdPrompt {
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: "question".into(),
+                }],
+                teacher_extra_messages: Vec::new(),
+                trajectory: Vec::new(),
+            }],
+        };
+        validate_distill_pump_at_submit(&request).unwrap();
+
+        request.config.training_mode = kiln_train::opd::OpdTrainingMode::OffPolicy;
+        let error = validate_distill_pump_at_submit(&request).unwrap_err();
+        assert!(error.to_string().contains("assistant action"), "{error}");
+    }
+
+    #[test]
+    fn opd_top_k_is_resolved_to_the_executable_kernel_envelope() {
+        let mut config = OpdConfig::default();
+        assert_eq!(
+            resolve_opd_top_k_at_submit(&mut config, 20).unwrap(),
+            Some((32, 16))
+        );
+        assert_eq!(config.top_k, 16);
+
+        config.top_k = 32;
+        assert_eq!(resolve_opd_top_k_at_submit(&mut config, 32).unwrap(), None);
+        assert_eq!(config.top_k, 32);
+
+        config.top_k = 15;
+        let error = resolve_opd_top_k_at_submit(&mut config, 20).unwrap_err();
+        assert!(error.to_string().contains("not executable"), "{error}");
+    }
+
+    #[test]
+    fn stock_vllm_registration_limits_opd_to_its_default_twenty() {
+        let mut spec = super::super::teachers::TeacherSpec {
+            alias: "remote".into(),
+            kind: super::super::teachers::TeacherKind::Remote,
+            provider: Some(kiln_train::RemoteProvider::Vllm),
+            model_id: "model".into(),
+            max_top_k: None,
+            vocab_size: Some(1024),
+            supports_full_vocab: Some(false),
+            tokenizer_hash: None,
+            url: Some("http://vllm.local".into()),
+            api_key_env: None,
+            notes: None,
+            adapter: None,
+        };
+        assert_eq!(registered_teacher_top_k_limit(&spec, 32), 20);
+        spec.max_top_k = Some(32);
+        assert_eq!(registered_teacher_top_k_limit(&spec, 32), 32);
+    }
+
+    #[test]
+    fn self_distill_privileged_modes_require_one_nonempty_context_per_prompt() {
+        let prompts = vec![OpdPrompt {
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: "question".into(),
+            }],
+            teacher_extra_messages: vec![],
+            trajectory: vec![],
+        }];
+        let mut req = kiln_train::DistillSelfRequest {
+            name: "self-test".into(),
+            mode: kiln_train::SelfDistillMode::GroundTruthConditioning,
+            prompts: Some(prompts.clone()),
+            ground_truth: None,
+            documents: None,
+            config: OpdConfig::default(),
+            post_eval: None,
+        };
+        assert!(validate_self_distill_context_at_submit(&req).is_err());
+        req.ground_truth = Some(vec!["  ".into()]);
+        assert!(validate_self_distill_context_at_submit(&req).is_err());
+        req.ground_truth = Some(vec!["answer".into()]);
+        validate_self_distill_context_at_submit(&req).unwrap();
+
+        req.mode = kiln_train::SelfDistillMode::DocumentAsPi;
+        req.ground_truth = None;
+        assert!(validate_self_distill_context_at_submit(&req).is_err());
+        req.documents = Some(vec!["context".into()]);
+        validate_self_distill_context_at_submit(&req).unwrap();
+
+        req.mode = kiln_train::SelfDistillMode::Conciseness;
+        req.prompts = None;
+        req.documents = None;
+        validate_self_distill_context_at_submit(&req).unwrap();
+    }
 
     fn grpo_group() -> GrpoGroup {
         GrpoGroup {
@@ -2366,12 +3229,11 @@ mod tests {
         // A streaming-dataset payload — no inline prompts but a
         // `dataset_path` set. The `submit_opd` handler treats this as
         // valid; tested at the wire level.
-        let json =
-            r#"{"prompts":[],"dataset_path":"/tmp/opd.jsonl","teacher":"qwen3.6-27b@openrouter"}"#;
+        let json = r#"{"prompts":[],"dataset_path":"/tmp/opd.jsonl","teacher":"qwen3.6-27b@vllm"}"#;
         let req: OpdRequest = serde_json::from_str(json).unwrap();
         assert!(req.prompts.is_empty());
         assert_eq!(req.dataset_path.as_deref(), Some("/tmp/opd.jsonl"));
-        assert_eq!(req.teacher, "qwen3.6-27b@openrouter");
+        assert_eq!(req.teacher, "qwen3.6-27b@vllm");
     }
 
     #[test]

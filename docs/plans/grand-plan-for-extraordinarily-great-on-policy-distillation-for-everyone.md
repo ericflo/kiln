@@ -2,7 +2,21 @@
 
 > *Frontier brilliance, distilled by anyone, on whatever hardware they own, into a 4B model that gets sharper every time they use it.*
 
-**Status:** Implemented on branch `on-policy-distillation`. Every pillar in §3, every endpoint in §4, every §6 default, every §7 workflow, every §8 pit-of-success guarantee, every §9 CUDA gate, every §10 agentic deliverable (including the §10.6 self-distillation engine), and every §11 failure-mode mitigation is wired in this branch. Items marked **Non-goal for this branch** in §5 / §13 are external infrastructure or human-in-the-loop studies; the engineering primitives they sit on top of are in. CUDA-side; Vulkan and Metal kernels are scoped out per the user's explicit instruction (they ship alongside the in-flight Vulkan inference work).
+> **Implementation boundary (2026-07-10):** This is an aspirational product
+> plan, not a support matrix. The qualified server path currently admits only
+> `teacher_top_k` with executable K in `{16, 32}`. Remote teachers must declare
+> `provider: "vllm"` and use vLLM numeric-ID `prompt_logprobs`; hosted APIs,
+> SGLang, llama.cpp, TGI, and full-vocabulary server teachers remain roadmap
+> items. A `local` teacher uses the currently served base weights plus an
+> optional registered LoRA; it does not load the arbitrary second model named by
+> `model_id`. The executable trainer currently roots direct top-K reverse-KL;
+> `cross_entropy`, Stable-OPD, nonzero discount/clipping, and paid-provider cost
+> caps are rejected until their production implementations exist. Behaviour-space
+> merge and privileged self-distillation use fixed fixtures and therefore require
+> off-policy prompts with explicit assistant actions. The confidence-hardening
+> goal is the authoritative qualification record.
+
+**Status:** Aspirational design record with a partially implemented bounded path. The implementation-boundary note above and the confidence-hardening goal override historical “ships” language below.
 **Author:** Synthesised by Claude (Opus 4.7) from the on-policy-distillation paper corpus in `docs/papers/on-policy-distillation/` and the kiln codebase as of branch `on-policy-distillation`.
 **Date:** 2026-05-15. Implementation pass: 2026-05-16.
 
@@ -120,11 +134,11 @@ Twelve pillars, each with a clear home in the kiln crate layout. The numbering m
 
 **Where:** new module `crates/kiln-train/src/opd.rs`, sibling to `cuda_train.rs` and `vk_train.rs`. The trainer dispatches to either backend.
 
-**Loss:** Per-token reverse KL with discount γ=0 (Lu's choice; we don't pay the variance cost of γ>0). Three available granularities, controlled by one config knob:
+**Loss:** Per-token reverse KL with discount γ=0 (Lu's choice; we don't pay the variance cost of γ>0). The wire enum retains three granularities, but the server currently admits only the validated `teacher_top_k` product path:
 
-- `sampled_token` — the simplest, brittle on long rollouts (Fu et al.). Available for backwards-compat / debugging only.
+- `sampled_token` — retained as a backwards-compatible wire value but rejected before training. A correct version needs the sampled token's teacher logprob; mapping ranked top-1 into the support-normalized KL produces an identically zero loss.
 - `teacher_top_k` (default) — renormalise both distributions over the teacher's top-K support, then KL. K=32 by default per Fu et al. ablation. **This is the default for laptop and prosumer tiers because it works with API-provided top-K logits.**
-- `full_vocab` — exact full-vocab KL. Required for corporate-tier multi-teacher consolidation. **This is the default for Tier 3.**
+- `full_vocab` — exact full-vocab KL plumbing exists, but no concrete server-built teacher returns it. The REST API and UI reject it until a real source is implemented and qualified.
 
 **Stabilisers, on by default:**
 
@@ -154,13 +168,12 @@ L_total = L_OPD                                # base reverse KL
 
 ```rust
 trait LogitSource: Send + Sync {
-    /// For each token position in `tokens`, return the teacher's
-    /// top-K logprobs (or full-vocab if K is None). May reorder
-    /// internally for batch efficiency.
-    async fn fetch_logprobs(
+    /// For each causal logits row p, return the distribution that predicts
+    /// tokens[p + 1]. Output preserves the requested row order.
+    fn fetch_logprobs(
         &self,
         tokens: &[TokenId],
-        position_offsets: &[usize],
+        logits_rows: &[usize],
         top_k: Option<usize>,
     ) -> Result<LogprobBatch>;
 
@@ -172,24 +185,27 @@ trait LogitSource: Send + Sync {
 
 Implementations:
 
-1. **`LocalTeacher`** — loads a second model into the same kiln process (or a sibling process behind a Unix socket for memory isolation). Uses the same kernel stack as inference. Default for Tier 2/3. Knows how to share KV with student rollouts at the prefix level when chat templates align.
+1. **`LocalTeacher`** — the implementation today scores with the model already loaded by the server, optionally wearing a registered source LoRA. It fails closed if that LoRA or any fixed prompt cannot be loaded/tokenized. Loading and qualifying an arbitrary second model is a future capability; until the identity gate lands, `model_id` must not be read as proof that a distinct model was loaded.
 
-2. **`RemoteTeacher`** — speaks the OpenAI-compatible `top_logprobs` schema. Adapters live in `logit_source/remote/{vllm.rs, sglang.rs, llama_cpp.rs, openrouter.rs, together.rs, fireworks.rs, deepinfra.rs, anyscale.rs, hf_endpoints.rs, tgi.rs, nim.rs}`. Each adapter encodes:
-   - URL / auth conventions.
-   - Top-K cap and whether `top_logprobs` returns log-softmax over the full vocab or top-K only.
-   - Tokenization-stability check (kiln re-tokenises the prompt with its own tokenizer and compares against the provider's `usage.prompt_tokens` to catch silent drift).
-   - Streaming support detection.
-   - Cost-per-token metadata for the budget guard.
+2. **`RemoteTeacher`** — the concrete adapter today is vLLM
+   `/v1/completions` with raw token IDs and numeric-ID `prompt_logprobs`.
+   Registration requires explicit `provider: "vllm"`; URL inference and all
+   unwired provider enum variants fail closed. The parser verifies the exact
+   response model, prompt-token count, row count, observed token, rank and
+   cardinality contract, vocabulary bounds, finite logprobs, and causal row
+   alignment before returning data. The authoritative tokenizer/model/adapter
+   content handshake is the next qualification gate; `usage.prompt_tokens`
+   proves request shape, not token-ID semantics.
 
-3. **`CachedTeacher`** — a wrapper that satisfies queries from the local logit cache (§3.3) before falling through to an inner `LogitSource`. Always present in the stack.
+3. **`CachedTeacher`** — a wrapper that satisfies queries from the local JSON-on-disk logit cache (§3.3) before falling through to an inner `LogitSource`. Cache paths use bounded identity digests and entries retain and verify the exact logical identity.
 
-The `Logit Source` is independent of the loss granularity. The trainer asks the source what it can deliver and picks `full_vocab` if available, `teacher_top_k` otherwise.
+The library trait remains independent of loss granularity, but the server currently admits only `teacher_top_k`; no server-built source truthfully supports `full_vocab` yet.
 
-**Why this matters for the masses:** *the same `POST /v1/train/opd` endpoint works whether you have a 27B model loaded locally, a $5/month OpenRouter sub, or a friend with an H200 sharing logits over Tailscale.* That is the unlock.
+**Current usable boundary:** the same `POST /v1/train/opd` endpoint works with the served model/LoRA as a local teacher or an explicitly configured vLLM server. Hosted-provider adapters remain part of the roadmap.
 
 ### 3.3. The Logit Cache — `kiln-train::logit_cache`
 
-**Where:** new module backed by an on-disk store (RocksDB or sled).
+**Where:** `kiln-train::logit_cache`, currently a versioned JSON-on-disk store.
 
 **Key:** `(teacher_id, tokenizer_hash, prefix_hash, position_offset_within_response)`.
 **Value:** top-K logprobs, with K being the maximum K the source ever returned for that key (so a later request asking for fewer K is satisfied trivially, and a later request asking for more K *misses* and re-fetches at the wider K).
@@ -224,10 +240,12 @@ Content-Type: application/json
     {"adapter": "sql-helper",    "weight": 0.7}
   ],
   "student": "base",                   // or "rust-helper" for continual learning
-  "rollout_budget": 5000,              // total student trajectories
-  "loss": "teacher_top_k",             // auto-selected from source caps
-  "stable_opd": "auto",                // engages automatically if needed
-  "post_eval": ["coder-eval"]          // existing post_eval flywheel
+  "rollout_budget": 5000,
+  "config": {
+    "training_mode": "off_policy",
+    "loss": "teacher_top_k",
+    "stable_opd": {"mode": "off"}
+  }
 }
 ```
 
@@ -254,11 +272,14 @@ Three modes, all behind one endpoint, each producing a downloadable LoRA:
 POST /v1/distill/pump
 {
   "name": "math-frontier-lora",
-  "teacher": "qwen3.6-27b@openrouter",   // or any LogitSource alias
-  "domain": "math_reasoning",            // canonical kiln-curated corpus
+  "teacher": "qwen3.6-27b@vllm",         // explicit registered vLLM alias
+  "mode": {"domain": "math"},
   "rank": 64,
   "rollout_budget": 50000,
-  "stable_opd": "auto",
+  "config": {
+    "training_mode": "on_policy",
+    "stable_opd": {"mode": "off"}
+  },
   "use_cache": true                      // public + local cache hit-through
 }
 ```
@@ -389,7 +410,8 @@ steps:
     teacher: ${inputs.teacher}
     prompts: ${prompts}
     loss: teacher_top_k
-    stable_opd: auto
+    stable_opd:
+      mode: off
     output: ${inputs.name}
 
   - kind: post_eval
@@ -509,7 +531,7 @@ The complete list of new endpoints, in keeping with kiln's `POST /v1/<verb>/<nou
 | `POST` | `/v1/recipes/run` | Run a named recipe (§3.7) |
 | `GET`  | `/v1/recipes` | List available recipes |
 | `GET`  | `/v1/teachers` | List configured `LogitSource`s and their capabilities (§3.2) |
-| `POST` | `/v1/teachers` | Register a new `LogitSource` (e.g. an OpenRouter API key) |
+| `POST` | `/v1/teachers` | Register a fixture, served-model local teacher, or explicit vLLM source |
 | `GET`  | `/v1/library` | Browse the public Adapter Library (§3.10) |
 | `POST` | `/v1/library/install/{adapter_id}` | Download and register a public adapter |
 | `POST` | `/v1/library/publish/{adapter_name}` | Publish an adapter to the library (with reproducibility receipt) |
@@ -528,17 +550,17 @@ Content-Type: application/json
     {"messages": [{"role":"user","content":"..."}]},
     ...
   ],
-  "teacher": "qwen3.6-27b@openrouter",      // alias resolved via /v1/teachers
-  "loss": "teacher_top_k",                   // or "full_vocab" or "sampled_token"
-  "top_k": 32,
-  "samples_per_prompt": 4,
-  "temperature": 1.0,
-  "top_p": 0.9,
-  "max_tokens": 4096,
-  "stable_opd": "auto",                      // {auto, off, {kl: 0.01, sft: 0.1}}
-  "rollouts": 5000,
-  "post_eval": ["math-frontier-eval"],
-  "name": "math-pump-2026-05-15"
+  "teacher": "qwen3.6-27b@vllm",
+  "config": {
+    "loss": "teacher_top_k",
+    "top_k": 32,
+    "samples_per_prompt": 4,
+    "temperature": 1.0,
+    "top_p": 0.9,
+    "max_tokens": 4096,
+    "stable_opd": {"mode": "off"},
+    "output_name": "math-pump-2026-05-15"
+  }
 }
 ```
 
@@ -602,7 +624,7 @@ The minimum that makes "OPD with a local teacher" work end-to-end.
 
 ### Phase 6 — Frontier (research-grade)
 
-- Privileged-information self-distillation suite (§3.12). _All four modes wired end-to-end via `build_self_distill_teacher` (`run_distill_self`): GroundTruthConditioning prepends the answer as a privileged system message, Conciseness prepends "be concise", DocumentAsPi prepends retrieved documents, ReverseTeacher flips the logprob sign. The CRISP / OPSD / GATES / RLRT recipes from §10.6.4 sit on top._
+- Privileged-information self-distillation suite (§3.12). _Three conditioning modes are wired through `build_self_distill_teacher` (`run_distill_self`): GroundTruthConditioning prepends the answer as a privileged system message, Conciseness prepends "be concise", and DocumentAsPi prepends retrieved documents. ReverseTeacher is rejected at admission because negating logprobs is not a valid probability distribution; it needs a distinct, reviewed reverse objective before it can be supported. The CRISP / OPSD / GATES / RLRT recipes from §10.6.4 sit on top._
 - Logit-only oblivious inference protocol exploration. **Non-goal for this branch** — research-grade, multi-month protocol work.
 - Continual-OPD scaling study — extend the Lu continual-learning experiment to multi-domain sequential learning over months of real user data. **Non-goal for this branch** — requires months of real user data; the `distill_refresh` recipe is the substrate the study runs on top of.
 - Active-learning OPD: kiln picks the next prompts to teach by maximising expected information gain on a held-out eval set. **Non-goal for this branch** — research-grade open problem (§14 #2); shipping primitives (eval queue, OPD trainer) are in place.
@@ -620,8 +642,8 @@ The defaults below are not arbitrary; each one is the conclusion of a paper in t
 | Granularity | Teacher top-K with support renormalisation, K=32 | Fu et al. (2026) — +19.8% over sampled-token |
 | Rollout sampling | top-p=0.9, temp=1.0 | Fu et al. (2026) ablation table 3 |
 | Special-token masking | On | Fu et al. (2026) — orthogonal but consistent gain | _Partial: kiln's `label_mask_from_rendered_assistant_spans` builds the active mask from `<\|im_start\|>assistant\n...<\|im_end\|>` spans; the role-marker tokens themselves are presently included in the mask. Tightening to exclude `<\|im_start\|>assistant\n` (so loss applies only to content + EOS) is filed as a follow-up — the Fu et al. paper labels this an "orthogonal but consistent gain" so the trainer works correctly without it._ |
-| Reference-KL penalty β | Auto, default 0.01 | Luo et al. (2026) — Stable-OPD ablation |
-| Golden-trajectory mixture λ | Auto, default 0.1 | Luo et al. (2026) |
+| Reference-KL penalty β | Roadmap; current runtime rejects Stable-OPD modes other than off | Luo et al. (2026) — Stable-OPD ablation |
+| Golden-trajectory mixture λ | Roadmap; current runtime rejects Stable-OPD modes other than off | Luo et al. (2026) |
 | Cold-start before OPD | **Auto-injected** when initial-overlap probe < 0.5 (user never opts in) | Li et al. (2026) §5.1; Lu (2025) [^support] |
 | Teacher-aligned chat template | Required | Li et al. (2026) §5.2 |
 | Rollout length cap | 7K tokens default; raises require explicit flag and a degradation-curve run | Li et al. (2026) §6.1 — reward decays past this point |
@@ -639,8 +661,8 @@ The defaults below are not arbitrary; each one is the conclusion of a paper in t
 | Batch size | Auto: largest power-of-2 fitting in VRAM, capped at 64 | LoRA Without Regret — both LoRA and FullFT achieve best loss at smaller batches | _Partial: opd_train currently processes one prompt per iteration (effective batch 1) and uses the existing FLCE / paged-KV memory-management to fit each prompt; the auto-sized cross-prompt batch knob isn't on the OpdConfig yet. The §8.5 capacity calculator already estimates the right effective batch size; wiring it through to the trainer is the follow-up._ |
 | Auto-checkpoint cadence | Every 10 OPD steps; retain last 5 (5 steps for corporate tier) | Luo et al. (2026) — phase-transition collapses can wipe a 30-step window |
 | Auto-rollback policy | On any guardrail trigger within 20 steps of last passing checkpoint | Pragmatic — user must never wake up to a broken adapter | _Partial: the §3.9 guardrail engine *detects* all 12 trigger conditions (RepetitionRateAbove / TruncationSpike / OverlapStagnation / EntropyGapWidening / LongTailRewardDecay / ThinkingPatternMismatch / CapacityGap / FlawedPrefixCollapse / DiversityCollapse / SelfPlaySaturation / TokenizerDrift, plus the cold-start probe), and the `OpdConfig.checkpoint_interval` defaults to 10 steps so a last-known-good snapshot exists; tying the trigger to an automatic in-process rollback inside `opd_train` is the remaining wire-up. The pit-of-success workflow surfaces the trigger via tracing+receipt today; programmatic rollback ships next._ |
-| Cost cap (remote teachers) | Hard cap at user-set ceiling, default $25; pause on cap; cache fall-through option | Pragmatic — no surprise bills, ever |
-| First-run dry-run | Mandatory on first use of any remote `LogitSource`; estimates $ and wall-clock before any token sent | Pragmatic — informed consent before paid API calls | _Partial: the §8.5 capacity calculator at `POST /v1/preflight/capacity` returns $ and wall-clock estimates ahead of any commitment; the §8.6 cost-lock (default $25 via `DEFAULT_REMOTE_COST_CAP_USD`) ensures hard-capped spend even without the dry-run. Auto-blocking the first remote-teacher call behind a mandatory dry-run prompt is a dashboard/CLI UX flow, filed as a follow-up._ |
+| Cost cap (remote teachers) | Unavailable; `max_cost_usd` is rejected while self-hosted vLLM is the only wired provider | A real cap requires an authoritative metered-provider billing rate and atomic accounting |
+| First-run dry-run | Not implemented for remote teachers | The capacity calculator estimates compute shape, not provider billing |
 | Adapter promotion gate | Eval gate required; auto-promote off by default | Pragmatic — bad runs do not regress production traffic |
 | Agentic loss extras | SCoRe earliest-error weighting + TIP tool-call upweight + verifier reward (λ=0.3) when programmatic outcome available | Lyu et al. (2025); Xu et al. (2026); §10.4 |
 | Rollout execution (agentic) | Via pi (subprocess or SDK); kiln inherits pi's trust model | §10.5 — no bespoke sandbox infrastructure |
@@ -655,23 +677,26 @@ When a default is wrong for a given user, kiln tells them which paper says so, a
 
 ## 7. The three killer workflows, scripted out
 
-### 7.1. "Pump frontier brilliance into a domain LoRA" (laptop, ~$5)
+### 7.1. "Pump frontier brilliance into a domain LoRA" (laptop student + vLLM teacher)
 
 ```bash
-# 1. Register a hosted teacher (one-time).
+# 1. Register an already-running vLLM teacher (one-time). Stock vLLM's cap
+#    of 20 resolves to executable K=16; max_top_k=32 asserts that the operator
+#    started vLLM with --max-logprobs 32.
 curl -X POST http://localhost:8420/v1/teachers \
   -H 'content-type: application/json' \
-  -d '{"alias":"qwen3.6-27b@openrouter","kind":"openrouter",
-       "model":"qwen/qwen-3.6-27b","api_key_env":"OPENROUTER_API_KEY",
-       "top_k_max":20}'
+  -d '{"alias":"qwen3.6-27b@vllm","kind":"remote","provider":"vllm",
+       "model_id":"Qwen/Qwen3.6-27B","url":"http://teacher-host:8000",
+       "max_top_k":32,"vocab_size":152064}'
 
 # 2. Pump.
 curl -X POST http://localhost:8420/v1/distill/pump \
   -H 'content-type: application/json' \
-  -d '{"name":"math-frontier","domain":"math_reasoning",
-       "teacher":"qwen3.6-27b@openrouter","rank":64,
+  -d '{"name":"math-frontier","teacher":"qwen3.6-27b@vllm",
+       "mode":{"domain":"math_reasoning"},"rank":64,
        "rollout_budget":50000,"use_cache":true,
-       "post_eval":["math-frontier-eval"]}'
+       "config":{"top_k":32},
+       "post_eval":{"suite":"math-frontier-eval"}}'
 
 # 3. Wait. Watch the diagnostic dashboard. Approve the post-eval.
 # 4. The next inference uses the new LoRA.
@@ -681,7 +706,8 @@ curl http://localhost:8420/v1/chat/completions \
        "adapter":"math-frontier"}'
 ```
 
-**Cost:** with ~70% cache hit against canonical-domain prepopulated cache, ~15K teacher API calls × ~1K prompt tokens × $0.0003/1K = ~$5. Time: 2–6 hours on a 4090.
+**Cost accounting:** the wired vLLM transport is self-hosted. Kiln does not
+assign it a dollar rate or claim to enforce provider spend.
 
 ### 7.2. "Merge my last 5 LoRAs into one unified assistant" (prosumer, no API)
 
@@ -698,8 +724,10 @@ curl -X POST http://localhost:8420/v1/adapters/distill_merge \
          {"adapter":"math-frontier"}
        ],
        "rollout_budget":20000,
-       "stable_opd":"auto",
-       "post_eval":["coder-eval","math-frontier-eval"]}'
+       "config":{
+         "training_mode":"off_policy",
+         "stable_opd":{"mode":"off"}
+       }}'
 ```
 
 What the user sees in the dashboard:
@@ -793,8 +821,8 @@ For each knob, kiln picks based on a rule. The rule is auditable in the dashboar
 
 | # | Knob | Auto-pick rule |
 |---|---|---|
-| 1 | Loss type (`sampled_token` / `top_k` / `full_vocab`) | From teacher capabilities — `full_vocab` if local, `top_k` if remote |
-| 2 | `top_k` | min(teacher_max_topk, 32) — Fu et al. ablation optimum |
+| 1 | Loss type | `top_k`; `sampled_token` and `full_vocab` are rejected until their missing source contracts are implemented and qualified |
+| 2 | `top_k` | Largest executable K in `{32, 16}` not exceeding the request and teacher cap. Stock vLLM cap 20 therefore resolves to K=16. |
 | 3 | Learning rate | 10× FullFT-optimum-for-this-model from Schulman's 14-model sweep |
 | 4 | Batch size | Largest power-of-2 fitting in VRAM, capped at 64 — Schulman's small-batch finding |
 | 5 | LoRA rank | Capacity calculator (§8.5): bits-required(prompts × samples × top_k) → rank with 2× headroom |
@@ -894,7 +922,7 @@ Every adapter shipped from kiln carries a JSON receipt:
   "kernel_versions": {"cuda": "...", "vulkan": "...", "metal": "..."},
   "seed": 4218,
   "teacher": {
-    "alias": "qwen3.6-27b@openrouter",
+    "alias": "qwen3.6-27b@vllm",
     "model_id": "qwen/qwen-3.6-27b",
     "model_version_hash": "sha256:...",
     "snapshot_url": "..."
@@ -935,7 +963,7 @@ For engineering reference. These are the values kiln picks per tier when the use
 | Setting | Laptop tier | Prosumer tier | Corporate tier |
 |---|---|---|---|
 | Default `LogitSource` | Best-cached → `RemoteTeacher` | `LocalTeacher(qwen3.6-27b, fp8)` | `LocalTeacher(qwen3.6-27b, full)` ×N |
-| Default loss | `teacher_top_k`, K=20 (most APIs cap) | `teacher_top_k`, K=32 | `full_vocab` |
+| Default loss | `teacher_top_k`, K=16 (fits stock vLLM's cap of 20) | `teacher_top_k`, K=32 | `teacher_top_k`, K=32 (`full_vocab` remains aspirational until a qualified source exists) |
 | LoRA rank | 16 | 32 | 64–256 (capacity-calculator-set) |
 | Batch size | 8 | 16 | 32–64 |
 | `samples_per_prompt` (default-data path) | 4 | 4 | 4 |

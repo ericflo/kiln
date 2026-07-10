@@ -1,4 +1,4 @@
-//! Run true on-policy OPD against a `RemoteTeacher` (vLLM/sglang).
+//! Run true on-policy OPD against a vLLM `RemoteTeacher`.
 //!
 //! Each step:
 //!   1. Sample a student rollout under the current LoRA.
@@ -16,7 +16,7 @@
 //!   --output-dir /tmp/opd-out \
 //!   --adapter-name opd-onpolicy-v1 \
 //!   --epochs 1 --rank 8 --alpha 16 --lr 1e-4 \
-//!   --top-k 8 --temperature 1.0 --top-p 0.9 --max-tokens 256
+//!   --top-k 16 --temperature 1.0 --top-p 0.9 --max-tokens 256
 //! ```
 //!
 //! ## Asymmetric teacher conditioning (§20 of opd-capability-creator skill)
@@ -102,7 +102,7 @@ impl Args {
         let mut lora_alpha = 16.0f32;
         let mut allow_high_lora_scale = false;
         let mut learning_rate = 1e-4f64;
-        let mut top_k = 8usize;
+        let mut top_k = 16usize;
         let mut temperature = 1.0f64;
         let mut top_p = 0.9f64;
         let mut max_tokens = 256usize;
@@ -182,6 +182,10 @@ impl Args {
                 other => anyhow::bail!("unknown arg {other}"),
             }
         }
+        anyhow::ensure!(
+            matches!(top_k, 16 | 32),
+            "--top-k must be 16 or 32; those are the executable OPD kernel widths"
+        );
         Ok(Self {
             data: data.context("--data required")?,
             model_path: model_path.context("--model-path required")?,
@@ -287,11 +291,14 @@ fn main() -> Result<()> {
         teacher_id: format!("vllm/{}", args.teacher_model),
         tokenizer_hash: None,
         max_top_k: args.top_k,
-        vocab_size: 0,
+        // This example assumes a shared token-ID space and therefore requires
+        // the teacher's explicit vocabulary width. Authoritative remote
+        // tokenizer verification is a separate handshake.
+        vocab_size: model_config.vocab_size,
         max_cost_usd: None,
         timeout_ms: 120_000,
     };
-    let teacher: Arc<dyn LogitSource> = Arc::new(RemoteTeacher::new(teacher_cfg));
+    let teacher: Arc<dyn LogitSource> = Arc::new(RemoteTeacher::new(teacher_cfg)?);
     println!("teacher_caps={:?}", teacher.capabilities());
 
     std::fs::create_dir_all(&args.output_dir)?;

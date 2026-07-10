@@ -108,19 +108,27 @@ async fn judge_distill(
     // remediation first). Before this, the corpus silently fell through
     // to generic seed prompts and reported success.
     let (pump_req, num_pairs) = build_judge_pump_request(&state.adapter_dir, &req)?;
+    let mut queued = QueuedJob::DistillPump(pump_req);
+    let top_k_adjustment = super::training::normalize_queued_opd_top_k(&state, &mut queued)?;
     super::training::validate_post_eval_suite(&state, req.post_eval.as_ref())?;
     super::training::enforce_queue_caps(&state)?;
 
     let job_id = uuid::Uuid::new_v4().to_string();
-    register_agent_job(&state, &job_id, &req.name, QueuedJob::DistillPump(pump_req));
+    super::training::admit_training_jobs(
+        &state,
+        vec![prepare_agent_job(&job_id, &req.name, queued)],
+    )?;
+    let top_k_note = top_k_adjustment.map_or_else(String::new, |(requested, effective)| {
+        format!(" Effective top_k was resolved from {requested} to {effective}.")
+    });
     Ok(Json(JudgeDistillResponse {
         job_id,
         state: TrainingState::Queued,
         message: format!(
             "Queued judge distillation for '{}' on {num_pairs} (turn, context) pairs \
              from your indexed pi sessions. Per §10.6.1 this is the one-time \
-             investment — pay once, judge approximates 27B at <1% inference cost.",
-            req.name
+             investment — pay once, judge approximates 27B at <1% inference cost.{top_k_note}",
+            req.name,
         ),
     }))
 }
@@ -217,32 +225,51 @@ pub fn submit_self_improve(
     // at run time so sessions captured between submission and dequeue
     // are included.)
     let (opd_phase, crisp_pump, num_tasks) = build_self_improve_jobs(&state.adapter_dir, &req)?;
-    super::training::enforce_queue_caps(state)?;
+    let mut opd_phase = QueuedJob::Opd(opd_phase);
+    let opd_top_k_adjustment = super::training::normalize_queued_opd_top_k(state, &mut opd_phase)?;
+    let mut crisp_pump = crisp_pump.map(QueuedJob::DistillPump);
+    let crisp_top_k_adjustment = match crisp_pump.as_mut() {
+        Some(job) => super::training::normalize_queued_opd_top_k(state, job)?,
+        None => None,
+    };
+    let additional_jobs = 1 + usize::from(crisp_pump.is_some());
+    super::training::enforce_queue_capacity_for(state, additional_jobs)?;
 
     // §10.6.2: score with judge → GRPO → CRISP pass. Each phase
     // queues independently. The trainer body (#31) wires the
     // judge-scored advantages into the GRPO step.
     let mut job_ids = Vec::new();
+    let mut pending = Vec::with_capacity(additional_jobs);
 
     let opd_job = uuid::Uuid::new_v4().to_string();
-    register_agent_job(
-        state,
+    pending.push(prepare_agent_job(
         &opd_job,
         &format!("{}-improve", req.agent),
-        QueuedJob::Opd(opd_phase),
-    );
+        opd_phase,
+    ));
     job_ids.push(opd_job);
 
     if let Some(crisp_pump) = crisp_pump {
         let crisp_job = uuid::Uuid::new_v4().to_string();
-        register_agent_job(
-            state,
+        pending.push(prepare_agent_job(
             &crisp_job,
             &format!("{}-crisp", req.agent),
-            QueuedJob::DistillPump(crisp_pump),
-        );
+            crisp_pump,
+        ));
         job_ids.push(crisp_job);
     }
+    super::training::admit_training_jobs(state, pending)?;
+
+    let mut top_k_notes = Vec::new();
+    if let Some((requested, effective)) = opd_top_k_adjustment {
+        top_k_notes.push(format!("OPD {requested}->{effective}"));
+    }
+    if let Some((requested, effective)) = crisp_top_k_adjustment {
+        top_k_notes.push(format!("CRISP {requested}->{effective}"));
+    }
+    let top_k_note = (!top_k_notes.is_empty())
+        .then(|| format!(" Effective top_k: {}.", top_k_notes.join(", ")))
+        .unwrap_or_default();
 
     Ok(SelfImproveResponse {
         job_ids,
@@ -250,8 +277,8 @@ pub fn submit_self_improve(
         message: format!(
             "§10.6.2 self_improve queued on {num_tasks} task(s) from this week's pi \
              sessions: agent={}, judge={}, crisp={}. Phase 1 = judge-scored GRPO; \
-             Phase 2 = CRISP terseness pass.",
-            req.agent, req.judge, req.crisp
+             Phase 2 = CRISP terseness pass.{top_k_note}",
+            req.agent, req.judge, req.crisp,
         ),
     })
 }
@@ -449,7 +476,11 @@ fn build_self_improve_jobs(
 
 use super::teachers::require_registered_teacher;
 
-fn register_agent_job(state: &AppState, job_id: &str, adapter_name: &str, job: QueuedJob) {
+fn prepare_agent_job(
+    job_id: &str,
+    adapter_name: &str,
+    job: QueuedJob,
+) -> (TrainingJobInfo, QueueEntry) {
     let info = TrainingJobInfo {
         job_id: job_id.to_string(),
         adapter_name: adapter_name.to_string(),
@@ -472,16 +503,14 @@ fn register_agent_job(state: &AppState, job_id: &str, adapter_name: &str, job: Q
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };
-    state
-        .training_jobs
-        .write()
-        .unwrap()
-        .insert(job_id.to_string(), info);
-    state.training_queue.lock().unwrap().push(QueueEntry {
-        job_id: job_id.to_string(),
-        reserved_bytes: 0,
-        job,
-    });
+    (
+        info,
+        QueueEntry {
+            job_id: job_id.to_string(),
+            reserved_bytes: 0,
+            job,
+        },
+    )
 }
 
 // Avoid unused warnings on the Response type alias.

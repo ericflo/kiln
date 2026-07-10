@@ -12,7 +12,7 @@
 //!   "kernel_versions": { "cuda": "...", "vulkan": "...", "metal": "..." },
 //!   "seed": 4218,
 //!   "teacher": {
-//!     "alias": "qwen3.6-27b@openrouter",
+//!     "alias": "qwen3.6-27b@vllm",
 //!     "model_id": "qwen/qwen-3.6-27b",
 //!     "model_version_hash": "sha256:...",
 //!     "snapshot_url": "..."
@@ -106,7 +106,7 @@ pub struct AdapterReceipt {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeacherDescriptor {
     /// `/v1/teachers` alias used at run time
-    /// (e.g. `qwen3.6-27b@openrouter`).
+    /// (e.g. `qwen3.6-27b@vllm`).
     pub alias: String,
     /// Provider's model id (e.g. `qwen/qwen-3.6-27b`).
     pub model_id: String,
@@ -313,7 +313,7 @@ mod tests {
     fn receipt_round_trips_through_json() {
         let r = AdapterReceipt::new("math-frontier", "opd", 4218)
             .with_teacher(TeacherDescriptor {
-                alias: "qwen3.6-27b@openrouter".into(),
+                alias: "qwen3.6-27b@vllm".into(),
                 model_id: "qwen/qwen-3.6-27b".into(),
                 model_version_hash: Some("sha256:dead".into()),
                 snapshot_url: None,
@@ -335,7 +335,7 @@ mod tests {
         assert_eq!(parsed.schema_version, RECEIPT_SCHEMA_VERSION);
         assert_eq!(parsed.adapter, r.adapter);
         assert_eq!(parsed.seed, r.seed);
-        assert_eq!(parsed.teacher.unwrap().alias, "qwen3.6-27b@openrouter");
+        assert_eq!(parsed.teacher.unwrap().alias, "qwen3.6-27b@vllm");
         let p = parsed.prompts.unwrap();
         assert_eq!(p.count, 100_000);
         assert_eq!(parsed.post_eval.get("math-frontier-eval"), Some(&0.71));

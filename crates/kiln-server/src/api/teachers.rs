@@ -20,7 +20,7 @@
 //!   prior self" and "judge as teacher" mean what they say). On-policy
 //!   runs get a `LiveLocalTeacher`; off-policy runs pre-compute a
 //!   fixture.
-//! - **Remote** — HTTP `prompt_logprobs`. Only vLLM/sglang are wired
+//! - **Remote** — HTTP numeric-ID `prompt_logprobs`. Only vLLM is wired
 //!   today; registration rejects URLs that resolve to unsupported
 //!   providers instead of letting the job fail at dequeue.
 
@@ -45,16 +45,22 @@ pub struct TeacherSpec {
     pub alias: String,
     /// Concrete kind. Determines which builder runs at resolve time.
     pub kind: TeacherKind,
+    /// Wire protocol for `Remote` teachers. Required explicitly because a URL
+    /// cannot identify the server implementation reliably.
+    #[serde(default)]
+    pub provider: Option<kiln_train::RemoteProvider>,
     /// Provider's model id (e.g. `qwen/qwen-3.6-27b`).
     pub model_id: String,
-    /// Maximum top-K this teacher can return.
+    /// Maximum top-K this teacher can return. For vLLM, omitted/zero uses the
+    /// upstream default of 20; a larger value asserts a matching
+    /// `--max-logprobs` server configuration until capability probing lands.
     #[serde(default)]
     pub max_top_k: Option<usize>,
     /// Vocab size, when known at registration time.
     #[serde(default)]
     pub vocab_size: Option<usize>,
-    /// Whether the source supports full-vocab logprobs (DeepSeek-V4-
-    /// style multi-teacher consolidation needs this).
+    /// Reserved capability field. Registrations setting this to true are
+    /// rejected until a concrete server-built full-vocabulary source exists.
     #[serde(default)]
     pub supports_full_vocab: Option<bool>,
     /// Tokenizer hash for drift detection (§3.9 `TokenizerDrift`).
@@ -93,8 +99,8 @@ pub enum TeacherKind {
     /// sibling process). Resolution at trainer time produces the
     /// `LocalTeacher` LogitSource impl.
     Local,
-    /// HTTP `top_logprobs` (OpenAI-compatible). vLLM, sglang,
-    /// llama.cpp, OpenRouter, Together, Fireworks, etc.
+    /// HTTP logprobs. Registration currently accepts only vLLM; other
+    /// providers need dedicated protocol adapters.
     Remote,
 }
 
@@ -199,55 +205,7 @@ async fn register_teacher(
     State(state): State<AppState>,
     Json(spec): Json<TeacherSpec>,
 ) -> Result<Json<TeacherEntry>, ApiError> {
-    if spec.alias.trim().is_empty() {
-        return Err(ApiError::training_invalid_request(
-            "teacher alias must be non-empty".to_string(),
-        ));
-    }
-    if spec.model_id.trim().is_empty() {
-        return Err(ApiError::training_invalid_request(
-            "teacher model_id must be non-empty".to_string(),
-        ));
-    }
-    if matches!(spec.kind, TeacherKind::Remote) && spec.url.is_none() {
-        return Err(ApiError::training_invalid_request(
-            "Remote teacher requires a `url`".to_string(),
-        ));
-    }
-    // Fail registrations that are guaranteed to die at job dequeue —
-    // possibly hours later, behind a queue.
-    if let Some(adapter) = spec.adapter.as_deref() {
-        if !matches!(spec.kind, TeacherKind::Local) {
-            return Err(ApiError::training_invalid_request(format!(
-                "`adapter` is only valid on kind=local teachers (got kind={:?})",
-                spec.kind
-            )));
-        }
-        super::adapters::validate_adapter_name(adapter)?;
-        let dir = state.adapter_dir.join(adapter);
-        if !dir.is_dir() {
-            return Err(ApiError::training_invalid_request(format!(
-                "teacher adapter `{adapter}` not found at {} — train or upload it first",
-                dir.display()
-            )));
-        }
-    }
-    if matches!(spec.kind, TeacherKind::Remote) {
-        if let Some(url) = spec.url.as_deref() {
-            let provider = crate::training_queue::guess_remote_provider(url);
-            if !matches!(
-                provider,
-                kiln_train::RemoteProvider::Vllm | kiln_train::RemoteProvider::Sglang
-            ) {
-                return Err(ApiError::training_invalid_request(format!(
-                    "remote provider {provider:?} (inferred from url {url:?}) is not wired \
-                     yet — only vLLM and sglang prompt_logprobs are supported today. Point \
-                     the URL at a vLLM/sglang server, or self-host one in front of your \
-                     provider."
-                )));
-            }
-        }
-    }
+    validate_teacher_spec_for_use(&state, &spec)?;
     state.teacher_registry.insert(spec.clone());
     // Persist immediately so a crash doesn't lose the registration.
     let teachers_path = state.adapter_dir.join("teachers.json");
@@ -257,6 +215,107 @@ async fn register_teacher(
     }
     let capabilities = resolve_caps_for(&spec);
     Ok(Json(TeacherEntry { spec, capabilities }))
+}
+
+fn validate_remote_teacher_url(url: &str) -> Result<(), String> {
+    kiln_train::normalize_vllm_completions_url(url).map(|_| ())
+}
+
+fn validate_teacher_spec_static(spec: &TeacherSpec) -> Result<(), String> {
+    if spec.alias.trim().is_empty() {
+        return Err("teacher alias must be non-empty".to_string());
+    }
+    if spec.model_id.trim().is_empty() {
+        return Err("teacher model_id must be non-empty".to_string());
+    }
+    if spec.supports_full_vocab == Some(true) {
+        return Err(
+            "supports_full_vocab=true is not available: no concrete server-built teacher returns full-vocabulary logprobs"
+                .to_string(),
+        );
+    }
+    if spec.vocab_size == Some(0) {
+        return Err("teacher vocab_size must be greater than zero when specified".to_string());
+    }
+    if spec.max_top_k == Some(0) && !matches!(spec.kind, TeacherKind::Remote) {
+        return Err(
+            "teacher max_top_k must be greater than zero when specified for a local or fixture teacher"
+                .to_string(),
+        );
+    }
+    if spec.adapter.is_some() && !matches!(spec.kind, TeacherKind::Local) {
+        return Err(format!(
+            "`adapter` is only valid on kind=local teachers (got kind={:?})",
+            spec.kind
+        ));
+    }
+    if matches!(spec.kind, TeacherKind::Remote) {
+        match spec.provider {
+            Some(kiln_train::RemoteProvider::Vllm) => {}
+            Some(provider) => {
+                return Err(format!(
+                    "remote provider {provider:?} is not wired yet; only provider=\"vllm\" (vLLM numeric-ID prompt_logprobs) is supported today"
+                ));
+            }
+            None => {
+                return Err(
+                    "Remote teacher requires explicit provider=\"vllm\" (vLLM); re-register legacy entries because provider inference from URLs is unsafe"
+                        .to_string(),
+                );
+            }
+        }
+        let url = spec
+            .url
+            .as_deref()
+            .ok_or_else(|| "Remote teacher requires a `url`".to_string())?;
+        validate_remote_teacher_url(url)?;
+        if spec
+            .api_key_env
+            .as_deref()
+            .is_some_and(|name| name.trim().is_empty() || name.trim() != name)
+        {
+            return Err(
+                "remote teacher api_key_env must be a non-empty environment-variable name without surrounding whitespace"
+                    .to_string(),
+            );
+        }
+    } else if spec.provider.is_some() || spec.url.is_some() || spec.api_key_env.is_some() {
+        return Err(
+            "`provider`, `url`, and `api_key_env` are only valid on kind=remote teachers"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Apply the same admission contract to new and persisted registry entries.
+/// Older `teachers.json` files can contain providers or capability claims that
+/// current code no longer supports, so alias presence alone is insufficient.
+fn validate_teacher_spec_for_use(state: &AppState, spec: &TeacherSpec) -> Result<(), ApiError> {
+    validate_teacher_spec_static(spec).map_err(ApiError::training_invalid_request)?;
+    if let Some(env_name) = spec.api_key_env.as_deref() {
+        let value = std::env::var(env_name).map_err(|_| {
+            ApiError::training_invalid_request(format!(
+                "teacher api_key_env names {env_name:?}, but that environment variable is not set"
+            ))
+        })?;
+        if value.trim().is_empty() {
+            return Err(ApiError::training_invalid_request(format!(
+                "teacher api_key_env names {env_name:?}, but that environment variable is empty"
+            )));
+        }
+    }
+    if let Some(adapter) = spec.adapter.as_deref() {
+        super::adapters::validate_adapter_name(adapter)?;
+        let dir = state.adapter_dir.join(adapter);
+        if !dir.is_dir() {
+            return Err(ApiError::training_invalid_request(format!(
+                "teacher adapter `{adapter}` not found at {} — train or upload it first",
+                dir.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 async fn delete_teacher(
@@ -286,12 +345,35 @@ async fn delete_teacher(
 /// here we report what we know at registration so the dashboard can
 /// show capabilities ahead of the first run.
 fn resolve_caps_for(spec: &TeacherSpec) -> Option<LogitSourceCaps> {
+    if matches!(spec.kind, TeacherKind::Remote)
+        && spec.provider != Some(kiln_train::RemoteProvider::Vllm)
+    {
+        return None;
+    }
+    if !matches!(spec.kind, TeacherKind::Remote) && spec.max_top_k.is_none() {
+        // Local and fixture sources are constructed with the admitted request
+        // K when no bound was registered, so zero would be a false concrete
+        // capability. Report unknown until construction instead.
+        return None;
+    }
+    let configured_max_top_k = spec.max_top_k.unwrap_or(0);
+    let configured_or_default_max_top_k =
+        if matches!(spec.kind, TeacherKind::Remote) && configured_max_top_k == 0 {
+            kiln_train::RemoteProvider::Vllm.default_max_top_k()
+        } else {
+            configured_max_top_k
+        };
+    let max_top_k = spec
+        .vocab_size
+        .map_or(configured_or_default_max_top_k, |vocab_size| {
+            configured_or_default_max_top_k.min(vocab_size)
+        });
     Some(LogitSourceCaps {
         teacher_id: spec.alias.clone(),
         vocab_size: spec.vocab_size.unwrap_or(0),
-        max_top_k: spec.max_top_k.unwrap_or(0),
-        supports_full_vocab: spec.supports_full_vocab.unwrap_or(false),
-        supports_batched: matches!(spec.kind, TeacherKind::Local | TeacherKind::Remote),
+        max_top_k,
+        supports_full_vocab: false,
+        supports_batched: true,
         tokenizer_hash: spec.tokenizer_hash.clone(),
     })
 }
@@ -322,9 +404,10 @@ pub(crate) fn require_registered_teacher(
     state: &AppState,
     alias: &str,
     detail: String,
-) -> Result<(), ApiError> {
-    if state.teacher_registry.get(alias).is_some() {
-        return Ok(());
+) -> Result<TeacherSpec, ApiError> {
+    if let Some(spec) = state.teacher_registry.get(alias) {
+        validate_teacher_spec_for_use(state, &spec)?;
+        return Ok(spec);
     }
     let registered: Vec<String> = state
         .teacher_registry
@@ -354,6 +437,7 @@ mod tests {
         let spec = TeacherSpec {
             alias: "qwen3.6-27b@local".into(),
             kind: TeacherKind::Local,
+            provider: None,
             model_id: "qwen/qwen-3.6-27b".into(),
             max_top_k: Some(0),
             vocab_size: Some(152_064),
@@ -374,6 +458,70 @@ mod tests {
     }
 
     #[test]
+    fn remote_registration_requires_explicit_supported_provider_and_valid_url() {
+        validate_remote_teacher_url("http://127.0.0.1:8000").unwrap();
+        validate_remote_teacher_url("http://127.0.0.1:8080").unwrap();
+        assert!(validate_remote_teacher_url("").is_err());
+        assert!(validate_remote_teacher_url("not a URL").is_err());
+        assert!(validate_remote_teacher_url("http://vllm.local?mode=test").is_err());
+
+        let mut spec = TeacherSpec {
+            alias: "remote".into(),
+            kind: TeacherKind::Remote,
+            provider: Some(kiln_train::RemoteProvider::Vllm),
+            model_id: "model".into(),
+            max_top_k: None,
+            vocab_size: Some(1024),
+            supports_full_vocab: Some(false),
+            tokenizer_hash: None,
+            url: Some("http://127.0.0.1:8080".into()),
+            api_key_env: None,
+            notes: None,
+            adapter: None,
+        };
+        validate_teacher_spec_static(&spec).unwrap();
+        spec.provider = Some(kiln_train::RemoteProvider::Sglang);
+        let error = validate_teacher_spec_static(&spec).unwrap_err();
+        assert!(error.contains("Sglang"), "{error}");
+
+        spec.provider = Some(kiln_train::RemoteProvider::Vllm);
+        spec.api_key_env = Some(String::new());
+        let error = validate_teacher_spec_static(&spec).unwrap_err();
+        assert!(error.contains("api_key_env"), "{error}");
+
+        spec.kind = TeacherKind::Local;
+        spec.provider = None;
+        spec.api_key_env = None;
+        let error = validate_teacher_spec_static(&spec).unwrap_err();
+        assert!(error.contains("only valid on kind=remote"), "{error}");
+    }
+
+    #[test]
+    fn persisted_unsupported_remote_spec_is_rejected_when_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("teachers.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "legacy": {
+                "alias": "legacy",
+                "kind": "remote",
+                "model_id": "old-model",
+                "url": "http://sglang.internal:30000",
+                "max_top_k": 20,
+                "vocab_size": 1024
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let registry = TeacherRegistry::load_from_path(&path);
+        let spec = registry.get("legacy").expect("legacy entry loaded");
+        let error = validate_teacher_spec_static(&spec).unwrap_err();
+        assert!(error.contains("explicit provider=\"vllm\""), "{error}");
+    }
+
+    #[test]
     fn registry_round_trip_through_disk() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("teachers.json");
@@ -381,6 +529,7 @@ mod tests {
         reg.insert(TeacherSpec {
             alias: "fixture@test".into(),
             kind: TeacherKind::Fixture,
+            provider: None,
             model_id: "test".into(),
             max_top_k: Some(32),
             vocab_size: Some(1024),
@@ -404,10 +553,12 @@ mod tests {
         let spec = TeacherSpec {
             alias: "x".into(),
             kind: TeacherKind::Remote,
+            provider: Some(kiln_train::RemoteProvider::Vllm),
             model_id: "y".into(),
-            max_top_k: Some(20),
+            max_top_k: None,
             vocab_size: Some(50_257),
-            supports_full_vocab: Some(false),
+            // Capability reporting must not echo an unimplemented claim.
+            supports_full_vocab: Some(true),
             tokenizer_hash: None,
             url: Some("https://api".into()),
             api_key_env: None,
@@ -420,6 +571,54 @@ mod tests {
         assert_eq!(caps.vocab_size, 50_257);
         assert!(!caps.supports_full_vocab);
         assert!(caps.supports_batched);
+    }
+
+    #[test]
+    fn resolve_caps_never_advertises_more_tokens_than_the_vocabulary() {
+        let spec = TeacherSpec {
+            alias: "tiny".into(),
+            kind: TeacherKind::Remote,
+            provider: Some(kiln_train::RemoteProvider::Vllm),
+            model_id: "tiny-model".into(),
+            max_top_k: Some(32),
+            vocab_size: Some(8),
+            supports_full_vocab: Some(false),
+            tokenizer_hash: None,
+            url: Some("https://api".into()),
+            api_key_env: None,
+            notes: None,
+            adapter: None,
+        };
+
+        let caps = resolve_caps_for(&spec).unwrap();
+        assert_eq!(caps.max_top_k, 8);
+    }
+
+    #[test]
+    fn resolve_caps_reports_fixture_batching_and_unknown_dynamic_bounds_honestly() {
+        let mut spec = TeacherSpec {
+            alias: "fixture".into(),
+            kind: TeacherKind::Fixture,
+            provider: None,
+            model_id: "fixture".into(),
+            max_top_k: Some(16),
+            vocab_size: Some(32),
+            supports_full_vocab: Some(false),
+            tokenizer_hash: None,
+            url: None,
+            api_key_env: None,
+            notes: None,
+            adapter: None,
+        };
+
+        let caps = resolve_caps_for(&spec).unwrap();
+        assert_eq!(caps.max_top_k, 16);
+        assert!(caps.supports_batched);
+
+        spec.max_top_k = None;
+        assert!(resolve_caps_for(&spec).is_none());
+        spec.kind = TeacherKind::Local;
+        assert!(resolve_caps_for(&spec).is_none());
     }
 
     #[test]
@@ -441,15 +640,16 @@ mod tests {
     #[test]
     fn spec_round_trips_through_serde() {
         let spec = TeacherSpec {
-            alias: "openrouter@qwen".into(),
+            alias: "vllm@qwen".into(),
             kind: TeacherKind::Remote,
+            provider: Some(kiln_train::RemoteProvider::Vllm),
             model_id: "qwen/qwen-3.6-27b".into(),
             max_top_k: Some(20),
             vocab_size: None,
             supports_full_vocab: Some(false),
             tokenizer_hash: None,
-            url: Some("https://openrouter.ai/api/v1".into()),
-            api_key_env: Some("OPENROUTER_API_KEY".into()),
+            url: Some("http://vllm.internal:8000".into()),
+            api_key_env: None,
             notes: None,
             adapter: None,
         };
@@ -457,6 +657,6 @@ mod tests {
         let parsed: TeacherSpec = serde_json::from_str(&s).unwrap();
         assert_eq!(parsed.alias, spec.alias);
         assert!(matches!(parsed.kind, TeacherKind::Remote));
-        assert_eq!(parsed.api_key_env.as_deref(), Some("OPENROUTER_API_KEY"));
+        assert_eq!(parsed.provider, Some(kiln_train::RemoteProvider::Vllm));
     }
 }

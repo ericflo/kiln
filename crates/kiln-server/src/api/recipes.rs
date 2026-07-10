@@ -293,6 +293,7 @@ async fn run_recipe(
     // adapter name on step N must reject the whole recipe before step 1 is
     // queued — never a partially-enqueued recipe.
     let mut prepared = Vec::with_capacity(recipe.steps.len());
+    let mut top_k_adjustments = Vec::new();
     let mut previous_adapter: Option<String> = None;
     for (idx, step) in recipe.steps.iter().enumerate() {
         if let RecipeStep::PostEval { suite, adapter, .. } = step {
@@ -332,31 +333,43 @@ async fn run_recipe(
             _ => None,
         };
         let job_id = uuid::Uuid::new_v4().to_string();
-        let (adapter_name, queued) = step_to_queued_job(
+        let (adapter_name, mut queued) = step_to_queued_job(
             &state,
             step,
             previous_adapter.as_deref(),
             &job_id,
             post_eval,
         )?;
+        if let Some((requested, effective)) =
+            super::training::normalize_queued_opd_top_k(&state, &mut queued)?
+        {
+            top_k_adjustments.push(format!("{adapter_name}: {requested}->{effective}"));
+        }
         previous_adapter = Some(adapter_name.clone());
         prepared.push((job_id, adapter_name, queued));
     }
 
-    let mut job_ids = Vec::with_capacity(prepared.len());
-    for (job_id, adapter_name, queued) in prepared {
-        super::training::enforce_queue_caps(&state)?;
-        register_step_job(&state, &job_id, &adapter_name, queued);
-        job_ids.push(job_id);
-    }
+    super::training::enforce_queue_capacity_for(&state, prepared.len())?;
+    let job_ids: Vec<String> = prepared
+        .iter()
+        .map(|(job_id, _, _)| job_id.clone())
+        .collect();
+    let pending = prepared
+        .into_iter()
+        .map(|(job_id, adapter_name, queued)| prepare_step_job(&job_id, &adapter_name, queued))
+        .collect();
+    super::training::admit_training_jobs(&state, pending)?;
 
     Ok(Json(RecipeRunResponse {
         recipe: recipe_name.clone(),
         message: format!(
             "Queued {} training step(s) from recipe {recipe_name}. Steps run \
              FIFO; each step's base_adapter chains to the previous output by \
-             default.",
-            job_ids.len()
+             default.{}",
+            job_ids.len(),
+            (!top_k_adjustments.is_empty())
+                .then(|| format!(" Effective top_k: {}.", top_k_adjustments.join(", ")))
+                .unwrap_or_default()
         ),
         job_ids,
     }))
@@ -577,11 +590,13 @@ fn step_to_queued_job(
     }
 }
 
-fn register_step_job(
-    state: &AppState,
+fn prepare_step_job(
     job_id: &str,
     adapter_name: &str,
     queued: crate::training_queue::QueuedJob,
+) -> (
+    crate::state::TrainingJobInfo,
+    crate::training_queue::QueueEntry,
 ) {
     use crate::state::{TrainingJobInfo, TrainingJobType};
     use crate::training_queue::QueueEntry;
@@ -607,16 +622,14 @@ fn register_step_job(
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };
-    state
-        .training_jobs
-        .write()
-        .unwrap()
-        .insert(job_id.to_string(), info);
-    state.training_queue.lock().unwrap().push(QueueEntry {
-        job_id: job_id.to_string(),
-        reserved_bytes: 0,
-        job: queued,
-    });
+    (
+        info,
+        QueueEntry {
+            job_id: job_id.to_string(),
+            reserved_bytes: 0,
+            job: queued,
+        },
+    )
 }
 
 use kiln_train::TrainingState;

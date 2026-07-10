@@ -6,11 +6,15 @@ Pod-level reproduction (acquiring hardware, downloading the model, running the e
 
 ---
 
-## Vignette 1 — Alice (laptop, ~$5, ~6 hours)
+## Vignette 1 — Alice (laptop student with a separate vLLM teacher)
 
-> Alice opens kiln on her MacBook. She drops in a folder of her writing. She picks `frontier-pump` against `qwen3.6-27b@best-cached-source`. Six hours and four dollars later she has a 200 MB LoRA that writes like her.
+> Alice opens kiln on her MacBook, points it at a separately hosted vLLM
+> teacher, and distils her writing prompts into a local LoRA.
 
-**Hardware:** any kiln-supported host (M-series MacBook ≥ 16 GB, prosumer 4090, etc.).
+**Hardware:** any kiln-supported student host plus a separately provisioned
+vLLM teacher. The current remote-teacher protocol is vLLM-only; the hosted
+OpenRouter version of this vignette remains aspirational until it has a
+dedicated, qualified adapter.
 
 **Reproduction:**
 
@@ -18,38 +22,42 @@ Pod-level reproduction (acquiring hardware, downloading the model, running the e
 # 1. Boot kiln (any backend; Metal on a MacBook, CUDA on a 4090).
 kiln serve
 
-# 2. Register a hosted Qwen3.6-27B teacher (§3.2). The API key lives
-#    in an env var, never in the request body — §8.6 cost-lock policy.
-export OPENROUTER_API_KEY=...
+# 2. Start vLLM for the teacher on another device/process. Raising
+#    --max-logprobs to 32 is an explicit operator contract; stock vLLM caps
+#    at 20 and Kiln will resolve the executable OPD width to 16.
+vllm serve Qwen/Qwen3.6-27B --port 8000 --max-logprobs 32
+
+# 3. Register the explicit vLLM protocol. Kiln never infers a provider from
+#    a hostname or port.
 curl -X POST localhost:8420/v1/teachers -H content-type:application/json -d '{
-  "alias":         "qwen3.6-27b@openrouter",
+  "alias":         "qwen3.6-27b@vllm",
   "kind":          "remote",
-  "model_id":      "qwen/qwen-3.6-27b",
-  "url":           "https://openrouter.ai/api/v1",
-  "api_key_env":   "OPENROUTER_API_KEY",
+  "provider":      "vllm",
+  "model_id":      "Qwen/Qwen3.6-27B",
+  "url":           "http://teacher-host:8000",
   "max_top_k":     32,
   "vocab_size":    152064
 }'
 
-# 3. Drop the writing corpus as a JSONL dataset on disk (one
+# 4. Drop the writing corpus as a JSONL dataset on disk (one
 #    {messages:[...]} per line) and register it via the dataset API.
 #    For tiny corpora (<200 prompts) the §6 data-multiplier mode
 #    auto-engages — samples_per_prompt scales 4 → 16 → 64.
 
-# 4. Run the `frontier-pump` recipe (§3.5 + §3.7). The recipe ships
+# 5. Run the `frontier-pump` recipe (§3.5 + §3.7). The recipe ships
 #    with the §6 paper-cited defaults: top-K=32, top-p=0.9, temp=1.0,
 #    K=10× FullFT LR, all-linear-layer LoRA targets, rank-32 on
 #    prosumer / rank-16 on laptop (§8.13 tier_defaults).
 curl -X POST localhost:8420/v1/recipes/run -d '{
   "recipe": "frontier-pump",
   "inputs": {
-    "teacher":    "qwen3.6-27b@openrouter",
+    "teacher":    "qwen3.6-27b@vllm",
     "prompts":    "alice-writing.jsonl",
     "name":       "alice-writes-like-her"
   }
 }'
 
-# 5. When the run finishes, publish to the Adapter Library (§3.10)
+# 6. When the run finishes, publish to the Adapter Library (§3.10)
 #    with the reproducibility receipt (§8.11). Anyone with the same
 #    teacher + same prompts + same seed rebuilds the same adapter.
 curl -X POST localhost:8420/v1/library/publish/alice-writes-like-her
@@ -62,7 +70,8 @@ curl -X POST localhost:8420/v1/library/publish/alice-writes-like-her
 - §3.7 recipe runtime with auto-chained `base_adapter`.
 - §3.10 adapter library publish.
 - §6 paper-cited defaults (top-K=32, top-p=0.9, temp=1.0).
-- §8.6 cost-lock — `RemoteTeacher` always carries a `max_cost_usd` cap (`$DEFAULT_REMOTE_COST_CAP_USD = 25`).
+- Remote vLLM transport is self-hosted and has no Kiln-side billing meter;
+  `max_cost_usd` is rejected until a metered provider adapter exists.
 - §8.11 reproducibility receipt — `AdapterReceipt::write_to_adapter_dir` runs at the end of every training job.
 - §8.13 tier-aware defaults (rank 16/32/128 per laptop/prosumer/corporate tier).
 - §11 12-trigger guardrail cascade (`LengthInflationGuardrail`).
@@ -73,7 +82,10 @@ curl -X POST localhost:8420/v1/library/publish/alice-writes-like-her
 
 ## Vignette 2 — Bob (4090 office, pi pointed at kiln, weekly self-improve)
 
-> Bob's startup has a 4090 in the back office. Every developer's terminal runs pi pointed at the office kiln server. They paid $5 once to distil a 27B-quality turn-judge into a small judge LoRA (§10.6.1). Each Saturday morning, kiln auto-runs `kiln self-improve`. **Their agent gets better every week from their own work, and they have not called a frontier API since Tuesday.**
+> Bob's startup has a 4090 in the back office. Every developer's terminal runs
+> pi pointed at the office Kiln server. They use their separately hosted vLLM
+> teacher to distil a turn-judge LoRA, then schedule local self-improvement
+> rounds from their own recorded work.
 
 **Hardware:** any CUDA 4090 (or stronger) host running the kiln server.
 
@@ -85,12 +97,11 @@ curl -X POST localhost:8420/v1/library/publish/alice-writes-like-her
 #    office kiln server without deleting existing providers.
 kiln pi-setup --kiln-url http://office-kiln:8420
 
-# 2. One-time judge distil (§10.6.1). Pulls 27B once over a week of
-#    pi-session contested-cases sample, trains a small judge LoRA.
-#    ≈ $5 over OpenRouter; the 80% drift threshold (§10.6.3) auto-
-#    refreshes the judge against 27B once a quarter.
+# 2. One-time judge distil (§10.6.1). Scores a week of pi-session
+#    contested cases through the explicitly registered vLLM teacher and
+#    trains a small judge LoRA. Hosted-provider protocols are not wired yet.
 kiln judge distill \
-  --teacher qwen3.6-27b@openrouter \
+  --teacher qwen3.6-27b@vllm \
   --sessions ~/.pi/agent/sessions/ \
   --judge-name office-judge \
   --rank 16
@@ -115,7 +126,7 @@ kiln self-improve \
 #    command exits non-zero.
 kiln judge drift-check \
   --judge office-judge \
-  --teacher qwen3.6-27b@openrouter \
+  --teacher qwen3.6-27b@vllm \
   --sample-size 50
 ```
 
@@ -132,20 +143,29 @@ kiln judge drift-check \
 
 ---
 
-## Vignette 3 — Carol (8×H200 corporate, full_vocab multi-teacher consolidation)
+## Vignette 3 — Carol (single-GPU multi-teacher consolidation)
 
-> Carol's bank has a rack of H200s. They run kiln in `full_vocab` mode with eight domain specialists each trained on a separate compliance vertical. The unified adapter, consolidated by `distill_merge`, beats their previous Qwen3.6-27B-based generic deployment on every internal eval at 1/7th the inference cost.
+> Carol's team trains separate compliance adapters, retains each adapter's
+> replay prompts, and consolidates them with bounded top-K behaviour-space
+> distillation. Every resulting adapter carries a receipt.
 
-**Hardware:** 8×H200 box (one machine, eight GPUs). The full Carol vignette numbers (beats 27B at 1/7th the inference cost) require this hardware and is filed as a §5 Phase 4 non-goal for this branch. The *recipe* is reproducible at single-GPU scale today:
+**Hardware:** one supported training GPU for Kiln plus a separately provisioned
+vLLM teacher for the specialist pumps. The executable loss is
+`teacher_top_k`; full-vocabulary and multi-GPU training remain roadmap items.
 
 ```bash
 # 1. Train each domain specialist via the targeted-domain pump.
 for domain in fcra aml kyc sec-compliance tax-treaty fed-reg accounting audit; do
   curl -X POST localhost:8420/v1/distill/pump -d '{
     "name":       "carol-specialist-'$domain'",
-    "teacher":    "qwen3.6-27b@local",
+    "teacher":    "qwen3.6-27b@vllm",
     "mode":       {"domain": "'$domain'"},
-    "config":     {"loss": "full_vocab", "lora_rank": 128}
+    "config":     {
+      "training_mode": "on_policy",
+      "loss": "teacher_top_k",
+      "top_k": 16,
+      "lora_rank": 128
+    }
   }'
 done
 
@@ -169,7 +189,12 @@ curl -X POST localhost:8420/v1/adapters/distill_merge -d '{
   ],
   "student":        "base",
   "rollout_budget": 50000,
-  "config":         {"loss": "full_vocab", "lora_rank": 128}
+  "config":         {
+    "training_mode": "off_policy",
+    "loss": "teacher_top_k",
+    "top_k": 32,
+    "lora_rank": 128
+  }
 }'
 
 # 3. The auditor gets a reproducibility receipt for every adapter.
@@ -180,7 +205,8 @@ curl localhost:8420/v1/adapters/carol-unified-2026-q2/receipt
 - §3.4 Multi-tenant LoRA-as-teacher (`run_distill_merge` →
   `build_multi_tenant_merge_teacher`).
 - §3.5 Targeted-domain knowledge pump.
-- §6 `full_vocab` loss path.
+- Supported `teacher_top_k` loss with K=16 for stock-vLLM pumps and K=32
+  for local per-source merge fixtures.
 - §8.11 Reproducibility receipt (the auditor's hook).
 - §8.13 Corporate-tier defaults (LoRA rank 128–256).
 

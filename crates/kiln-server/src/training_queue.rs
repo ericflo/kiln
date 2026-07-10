@@ -604,6 +604,9 @@ fn run_opd(
     teacher_registry: &crate::api::teachers::TeacherRegistry,
     job_id: &str,
 ) -> std::result::Result<PathBuf, String> {
+    req.config
+        .validate_runtime_contract()
+        .map_err(|error| format!("OPD request has unsupported configuration: {error:#}"))?;
     if req.prompts.is_empty() && req.dataset_path.is_none() {
         return Err("OPD request must include at least one prompt or a dataset_path".into());
     }
@@ -739,7 +742,12 @@ fn run_opd(
                             spec.alias
                         )
                     })?;
-                let provider = guess_remote_provider(&url);
+                let provider = spec.provider.ok_or_else(|| {
+                    format!(
+                        "teacher {:?} is Remote but has no explicit provider — re-register with provider=\"vllm\"",
+                        spec.alias
+                    )
+                })?;
                 let cfg = kiln_train::RemoteTeacherConfig {
                     provider,
                     model: spec.model_id.clone(),
@@ -747,16 +755,18 @@ fn run_opd(
                     api_key_env: spec.api_key_env.clone(),
                     teacher_id: spec.alias.clone(),
                     tokenizer_hash: spec.tokenizer_hash.clone(),
-                    max_top_k: resolved_max_top_k,
+                    // Zero selects vLLM's upstream default (20). A registry
+                    // value is an explicit assertion that --max-logprobs was
+                    // raised on this server.
+                    max_top_k: spec.max_top_k.unwrap_or(0),
                     vocab_size: resolved_vocab,
-                    max_cost_usd: Some(
-                        req.config
-                            .max_cost_usd
-                            .unwrap_or(DEFAULT_REMOTE_COST_CAP_USD),
-                    ),
+                    max_cost_usd: None,
                     timeout_ms: 60_000,
                 };
-                std::sync::Arc::new(kiln_train::RemoteTeacher::new(cfg))
+                std::sync::Arc::new(
+                    kiln_train::RemoteTeacher::new(cfg)
+                        .map_err(|e| format!("construct remote teacher: {e}"))?,
+                )
             }
         }
     };
@@ -838,6 +848,59 @@ fn run_opd(
     Ok(output_dir)
 }
 
+/// Load a declared merge source without permitting a base-model fallback.
+fn load_declared_merge_source_lora(
+    source_adapter: &str,
+    src_dir: &std::path::Path,
+    num_layers: usize,
+    device: kiln_tensor::Device,
+) -> std::result::Result<kiln_model::lora_loader::LoraWeights, String> {
+    kiln_model::lora_loader::LoraWeights::load(src_dir, num_layers, device).map_err(|e| {
+        format!(
+            "distill_merge: declared source adapter '{source_adapter}' failed to load from {}: {e}",
+            src_dir.display()
+        )
+    })
+}
+
+fn tokenize_teacher_prompts(
+    operation: &str,
+    source_id: &str,
+    prompts: &[kiln_train::opd::OpdPrompt],
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+) -> std::result::Result<Vec<(Vec<u32>, Vec<usize>)>, String> {
+    if prompts.is_empty() {
+        return Err(format!(
+            "{operation}: source '{source_id}' has no prompts to score"
+        ));
+    }
+
+    let mut tokenized = Vec::with_capacity(prompts.len());
+    for (prompt_index, prompt) in prompts.iter().enumerate() {
+        let ex = kiln_train::SftExample {
+            messages: prompt.messages.clone(),
+        };
+        let (tokens, label_mask) = kiln_train::trainer::tokenize_for_training(&ex, tokenizer)
+            .map_err(|e| {
+                format!(
+                    "{operation}: source '{source_id}' prompt {prompt_index} failed to tokenize: {e:#}"
+                )
+            })?;
+        let active: Vec<usize> = label_mask
+            .iter()
+            .enumerate()
+            .filter_map(|(position, &is_active)| is_active.then_some(position))
+            .collect();
+        if active.is_empty() {
+            return Err(format!(
+                "{operation}: source '{source_id}' prompt {prompt_index} produced no active assistant tokens"
+            ));
+        }
+        tokenized.push((tokens, active));
+    }
+    Ok(tokenized)
+}
+
 /// Build the §3.4 multi-tenant merge teacher.
 ///
 /// Loads each source LoRA, runs the model forward over that source's
@@ -854,6 +917,9 @@ fn run_opd(
 /// Per-source `weight` (a `DistillMergeSource` field) is not yet
 /// applied — the unified fixture treats every (source, prompt) entry
 /// equally. Weighted loss aggregation is filed as a §3.4 follow-up.
+/// A declared source adapter and every one of its prompts are required:
+/// preparation fails closed rather than substituting the base model or
+/// silently scoring only a subset of the source dataset.
 #[allow(clippy::too_many_arguments)]
 fn build_multi_tenant_merge_teacher(
     teacher_id: &str,
@@ -866,7 +932,6 @@ fn build_multi_tenant_merge_teacher(
     weights: &kiln_model::forward::GpuWeights,
     model_config: &kiln_core::config::ModelConfig,
     top_k: usize,
-    job_id: &str,
 ) -> std::result::Result<kiln_train::logit_source::FixtureLogitSource, String> {
     let mut unified = kiln_train::logit_source::FixtureLogitSource::uniform_topk(
         teacher_id.to_string(),
@@ -874,60 +939,25 @@ fn build_multi_tenant_merge_teacher(
         top_k,
     );
     for (source, prompts) in per_source {
-        // Try to load the source LoRA from disk. On failure (no
-        // PEFT files yet) we fall back to base-model teacher for
-        // this source's prompts and surface a tracing warning.
+        // The source identity is the declared LoRA. Loading it is part of the
+        // teacher contract, so failure cannot degrade to base-model scoring.
         let src_dir = adapter_dir.join(&source.adapter);
         let device = weights.embed_tokens.device().clone();
-        // #1082: `device` is kt (kt `GpuWeights`); LoraWeights::load wants
-        // candle — bridge kt->candle. A bridge failure falls through to the
-        // same graceful Err fallback below.
-        // #1082: LoraWeights::load is kt-native — pass the kt device directly.
-        let teacher_lora = match kiln_model::lora_loader::LoraWeights::load(
+        let teacher_lora = load_declared_merge_source_lora(
+            &source.adapter,
             &src_dir,
             model_config.num_layers,
             device,
-        ) {
-            Ok(weights) => Some(weights),
-            Err(e) => {
-                tracing::warn!(
-                    job_id = %job_id,
-                    source = %source.adapter,
-                    error = %e,
-                    "distill_merge: source LoRA load failed — base-model teacher for this source's prompts"
-                );
-                None
-            }
-        };
+        )?;
 
-        // Tokenize this source's prompts.
-        let mut tokenized: Vec<(Vec<u32>, Vec<usize>)> = Vec::with_capacity(prompts.len());
-        for prompt in prompts {
-            let ex = kiln_train::SftExample {
-                messages: prompt.messages.clone(),
-            };
-            if let Ok((tokens, label_mask)) =
-                kiln_train::trainer::tokenize_for_training(&ex, tokenizer)
-            {
-                let active: Vec<usize> = label_mask
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, &m)| if m { Some(i) } else { None })
-                    .collect();
-                if !active.is_empty() {
-                    tokenized.push((tokens, active));
-                }
-            }
-        }
-        if tokenized.is_empty() {
-            continue;
-        }
+        let tokenized =
+            tokenize_teacher_prompts("distill_merge", &source.adapter, prompts, tokenizer)?;
         let source_fixture = kiln_train::opd::build_local_teacher_fixture(
             format!("{teacher_id}:{}", source.adapter),
             &tokenized,
             weights,
             model_config,
-            teacher_lora.as_ref(),
+            Some(&teacher_lora),
             top_k,
             None,
         )
@@ -935,21 +965,243 @@ fn build_multi_tenant_merge_teacher(
 
         // Drain entries from source_fixture into unified.
         for (tokens, active_positions) in &tokenized {
-            for &pos in active_positions {
-                let batch = match source_fixture.fetch_logprobs(tokens, &[pos], Some(top_k)) {
-                    Ok(b) => b,
-                    Err(_) => continue,
-                };
-                let (indices, logprobs) = match batch {
-                    kiln_train::LogprobBatch::TopK(t) => (t.indices, t.logprobs),
-                    _ => continue,
+            let logits_rows = kiln_train::logit_source::target_token_positions_to_logits_rows(
+                teacher_id,
+                tokens.len(),
+                active_positions,
+            )
+            .map_err(|e| format!("distill_merge invalid action-token positions: {e}"))?;
+            for &logits_row in &logits_rows {
+                let batch = source_fixture
+                    .fetch_logprobs(tokens, &[logits_row], Some(top_k))
+                    .map_err(|e| format!("distill_merge fixture read failed: {e}"))?;
+                let kiln_train::LogprobBatch::TopK(topk) = batch else {
+                    return Err("distill_merge top-K fixture returned full-vocab logits".into());
                 };
                 let key = kiln_train::logit_source::FixtureLogitSource::hash_tokens(tokens);
-                unified.insert(key, pos, indices, logprobs);
+                unified.insert(key, logits_row, topk.indices, topk.logprobs);
             }
         }
     }
     Ok(unified)
+}
+
+fn validate_self_distill_target_alignment(
+    prompt_index: usize,
+    student_tokens: &[u32],
+    student_targets: &[usize],
+    teacher_tokens: &[u32],
+    teacher_targets: &[usize],
+) -> std::result::Result<(), String> {
+    if student_targets.len() != teacher_targets.len() {
+        return Err(format!(
+            "self-distill prompt {prompt_index} has {} student action tokens but {} teacher action tokens",
+            student_targets.len(),
+            teacher_targets.len()
+        ));
+    }
+    kiln_train::logit_source::target_token_positions_to_logits_rows(
+        "self-distill-student",
+        student_tokens.len(),
+        student_targets,
+    )
+    .map_err(|e| format!("self-distill prompt {prompt_index} student targets: {e}"))?;
+    kiln_train::logit_source::target_token_positions_to_logits_rows(
+        "self-distill-teacher",
+        teacher_tokens.len(),
+        teacher_targets,
+    )
+    .map_err(|e| format!("self-distill prompt {prompt_index} teacher targets: {e}"))?;
+    for (pair_index, (&student_target, &teacher_target)) in student_targets
+        .iter()
+        .zip(teacher_targets.iter())
+        .enumerate()
+    {
+        let student_token = student_tokens[student_target];
+        let teacher_token = teacher_tokens[teacher_target];
+        if student_token != teacher_token {
+            return Err(format!(
+                "self-distill prompt {prompt_index} action pair {pair_index} differs: student token {student_token} at {student_target}, teacher token {teacher_token} at {teacher_target}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+type TokenizedSelfDistillPrompts = Vec<(Vec<u32>, Vec<usize>)>;
+
+fn validate_self_distill_conditioning(
+    mode: kiln_train::SelfDistillMode,
+    prompt_count: usize,
+    ground_truth: Option<&[String]>,
+    documents: Option<&[String]>,
+) -> std::result::Result<(), String> {
+    use kiln_train::SelfDistillMode;
+
+    if prompt_count == 0 {
+        return Err("distill_self: prompts resolved to zero items".into());
+    }
+
+    match mode {
+        SelfDistillMode::GroundTruthConditioning => {
+            let answers = ground_truth.ok_or_else(|| {
+                "distill_self GroundTruthConditioning: ground_truth is required (one non-empty entry per prompt)"
+                    .to_string()
+            })?;
+            if answers.len() != prompt_count {
+                return Err(format!(
+                    "distill_self GroundTruthConditioning: ground_truth.len() ({}) != prompts.len() ({prompt_count})",
+                    answers.len()
+                ));
+            }
+            if let Some((prompt_index, _)) = answers
+                .iter()
+                .enumerate()
+                .find(|(_, answer)| answer.trim().is_empty())
+            {
+                return Err(format!(
+                    "distill_self GroundTruthConditioning: ground_truth[{prompt_index}] must be non-empty"
+                ));
+            }
+        }
+        SelfDistillMode::DocumentAsPi => {
+            let per_prompt_documents = documents.ok_or_else(|| {
+                "distill_self DocumentAsPi: documents is required (one non-empty entry per prompt)"
+                    .to_string()
+            })?;
+            if per_prompt_documents.len() != prompt_count {
+                return Err(format!(
+                    "distill_self DocumentAsPi: documents.len() ({}) != prompts.len() ({prompt_count})",
+                    per_prompt_documents.len()
+                ));
+            }
+            if let Some((prompt_index, _)) = per_prompt_documents
+                .iter()
+                .enumerate()
+                .find(|(_, document)| document.trim().is_empty())
+            {
+                return Err(format!(
+                    "distill_self DocumentAsPi: documents[{prompt_index}] must be non-empty"
+                ));
+            }
+        }
+        SelfDistillMode::Conciseness => {}
+        SelfDistillMode::ReverseTeacher => {
+            return Err(
+                "self-distill reverse_teacher is unsupported: negated logprobs are not a probability distribution"
+                    .into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn prepare_self_distill_prompts(
+    prompts: &[kiln_train::opd::OpdPrompt],
+    mode: kiln_train::SelfDistillMode,
+    ground_truth: Option<&[String]>,
+    documents: Option<&[String]>,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+) -> std::result::Result<(TokenizedSelfDistillPrompts, TokenizedSelfDistillPrompts), String> {
+    use kiln_train::{ChatMessage, SelfDistillMode};
+
+    validate_self_distill_conditioning(mode, prompts.len(), ground_truth, documents)?;
+
+    let mut student_active = Vec::with_capacity(prompts.len());
+    let mut teacher_only = Vec::with_capacity(prompts.len());
+    for (prompt_index, prompt) in prompts.iter().enumerate() {
+        let student_ex = kiln_train::SftExample {
+            messages: prompt.messages.clone(),
+        };
+        let (student_tokens, student_label_mask) =
+            kiln_train::trainer::tokenize_for_training(&student_ex, tokenizer).map_err(|e| {
+                format!("self-distill prompt {prompt_index} student tokenization failed: {e:#}")
+            })?;
+        let student_targets: Vec<usize> = student_label_mask
+            .iter()
+            .enumerate()
+            .filter_map(|(position, &is_active)| is_active.then_some(position))
+            .collect();
+        if student_targets.is_empty() {
+            return Err(format!(
+                "self-distill prompt {prompt_index} student tokenization produced no active assistant tokens"
+            ));
+        }
+
+        let mut teacher_messages = Vec::new();
+        match mode {
+            SelfDistillMode::GroundTruthConditioning => {
+                let answer = ground_truth.and_then(|values| values.get(prompt_index)).ok_or_else(
+                    || {
+                        format!(
+                            "distill_self GroundTruthConditioning: missing ground_truth[{prompt_index}]"
+                        )
+                    },
+                )?;
+                teacher_messages.push(ChatMessage {
+                    role: "system".into(),
+                    content: format!(
+                        "Privileged context (visible only to the teacher): the correct answer is: {answer}"
+                    ),
+                });
+            }
+            SelfDistillMode::Conciseness => {
+                teacher_messages.push(ChatMessage {
+                    role: "system".into(),
+                    content:
+                        "Privileged context (visible only to the teacher): respond with maximal concision; trim every unnecessary word; never explain reasoning unless explicitly asked."
+                            .into(),
+                });
+            }
+            SelfDistillMode::DocumentAsPi => {
+                let document = documents
+                    .and_then(|values| values.get(prompt_index))
+                    .ok_or_else(|| {
+                        format!("distill_self DocumentAsPi: missing documents[{prompt_index}]")
+                    })?;
+                teacher_messages.push(ChatMessage {
+                    role: "system".into(),
+                    content: format!(
+                        "Privileged context (visible only to the teacher) — use the following retrieved document to answer:\n\n{document}"
+                    ),
+                });
+            }
+            SelfDistillMode::ReverseTeacher => {
+                return Err(
+                    "self-distill reverse_teacher is unsupported: negated logprobs are not a probability distribution"
+                        .into(),
+                );
+            }
+        }
+        teacher_messages.extend(prompt.messages.iter().cloned());
+        let teacher_ex = kiln_train::SftExample {
+            messages: teacher_messages,
+        };
+        let (teacher_tokens, teacher_label_mask) =
+            kiln_train::trainer::tokenize_for_training(&teacher_ex, tokenizer).map_err(|e| {
+                format!("self-distill prompt {prompt_index} teacher tokenization failed: {e:#}")
+            })?;
+        let teacher_targets: Vec<usize> = teacher_label_mask
+            .iter()
+            .enumerate()
+            .filter_map(|(position, &is_active)| is_active.then_some(position))
+            .collect();
+        if teacher_targets.is_empty() {
+            return Err(format!(
+                "self-distill prompt {prompt_index} teacher tokenization produced no active assistant tokens"
+            ));
+        }
+        validate_self_distill_target_alignment(
+            prompt_index,
+            &student_tokens,
+            &student_targets,
+            &teacher_tokens,
+            &teacher_targets,
+        )?;
+        student_active.push((student_tokens, student_targets));
+        teacher_only.push((teacher_tokens, teacher_targets));
+    }
+    Ok((student_active, teacher_only))
 }
 
 /// Build the §3.12 privileged-information self-teacher.
@@ -957,17 +1209,15 @@ fn build_multi_tenant_merge_teacher(
 /// For each prompt and the chosen `SelfDistillMode`, we construct a
 /// teacher-side prompt that *includes* the privileged context (a
 /// system message carrying ground-truth answers, a "be concise"
-/// instruction, or retrieved documents). The teacher's forward pass
+/// instruction, or that prompt's retrieved document). The teacher's forward pass
 /// runs against that shaped prompt; we then transplant the resulting
 /// top-K logprobs back onto the *student's* (un-shaped) token stream
 /// by aligning active assistant positions. The student then distils
 /// against logits that "knew" the privileged context — Lu's PI
 /// recipe (CRISP, OPSD, GATES, RLRT) made concrete.
 ///
-/// For `ReverseTeacher` the privileged context is omitted but the
-/// per-position logprobs are negated post-hoc so the student moves
-/// *away* from the teacher's distribution — the survey's
-/// reversed-teacher knob.
+/// `ReverseTeacher` is rejected: negating logprobs does not produce a valid
+/// probability distribution, so that mode needs a distinct loss objective.
 #[allow(clippy::too_many_arguments)]
 fn build_self_distill_teacher(
     teacher_id: &str,
@@ -980,103 +1230,10 @@ fn build_self_distill_teacher(
     model_config: &kiln_core::config::ModelConfig,
     top_k: usize,
 ) -> std::result::Result<kiln_train::logit_source::FixtureLogitSource, String> {
-    use kiln_train::ChatMessage;
-    use kiln_train::SelfDistillMode;
-
-    // Build (student_tokens, teacher_tokens, active_positions) triples.
-    // Active positions are derived from the *student* tokenization
-    // since that's what opd_train will query.
-    let mut student_active: Vec<(Vec<u32>, Vec<usize>)> = Vec::new();
-    let mut teacher_only: Vec<(Vec<u32>, Vec<usize>)> = Vec::new();
-    for (i, prompt) in prompts.iter().enumerate() {
-        let student_ex = kiln_train::SftExample {
-            messages: prompt.messages.clone(),
-        };
-        let (student_tokens, student_label_mask) = match kiln_train::trainer::tokenize_for_training(
-            &student_ex,
-            tokenizer,
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(prompt_idx = i, error = %e, "self-distill: skipping student-tokenize failure");
-                continue;
-            }
-        };
-        let active: Vec<usize> = student_label_mask
-            .iter()
-            .enumerate()
-            .filter_map(|(j, &m)| if m { Some(j) } else { None })
-            .collect();
-        if active.is_empty() {
-            continue;
-        }
-
-        // Build the teacher-side messages per mode.
-        let mut teacher_messages: Vec<ChatMessage> = Vec::new();
-        match mode {
-            SelfDistillMode::GroundTruthConditioning => {
-                if let Some(gt) = ground_truth.and_then(|g| g.get(i)) {
-                    teacher_messages.push(ChatMessage {
-                        role: "system".into(),
-                        content: format!(
-                            "Privileged context (visible only to the teacher): the correct answer is: {gt}"
-                        ),
-                    });
-                }
-            }
-            SelfDistillMode::Conciseness => {
-                teacher_messages.push(ChatMessage {
-                    role: "system".into(),
-                    content:
-                        "Privileged context (visible only to the teacher): respond with maximal concision; trim every unnecessary word; never explain reasoning unless explicitly asked."
-                            .into(),
-                });
-            }
-            SelfDistillMode::DocumentAsPi => {
-                if let Some(docs) = documents {
-                    let joined = docs.join("\n\n---\n\n");
-                    teacher_messages.push(ChatMessage {
-                        role: "system".into(),
-                        content: format!(
-                            "Privileged context (visible only to the teacher) — use the following retrieved documents to answer:\n\n{joined}"
-                        ),
-                    });
-                }
-            }
-            SelfDistillMode::ReverseTeacher => {
-                // No privileged context; teacher forward matches
-                // student forward. Logprobs are flipped (negated)
-                // before insertion so the student moves *away*.
-            }
-        }
-        teacher_messages.extend(prompt.messages.iter().cloned());
-        let teacher_ex = kiln_train::SftExample {
-            messages: teacher_messages,
-        };
-        let (teacher_tokens, _) = match kiln_train::trainer::tokenize_for_training(
-            &teacher_ex,
-            tokenizer,
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(prompt_idx = i, error = %e, "self-distill: skipping teacher-tokenize failure");
-                continue;
-            }
-        };
-        student_active.push((student_tokens, active.clone()));
-        // Teacher-side active positions: the suffix of the teacher
-        // tokenization that aligns with the student's active span.
-        // Compute offset = teacher_len - student_len (the privileged
-        // context prefix length) and shift each active by that.
-        let teacher_len = teacher_tokens.len();
-        let student_len = student_active.last().unwrap().0.len();
-        let prefix = teacher_len.saturating_sub(student_len);
-        let teacher_active: Vec<usize> = active.iter().map(|&p| p + prefix).collect();
-        teacher_only.push((teacher_tokens, teacher_active));
-    }
-    if student_active.is_empty() {
-        return Err("self-distill: no prompts tokenized cleanly".into());
-    }
+    // Tokenization and target alignment complete before any forward so a bad
+    // prompt cannot create a partial fixture or silently change the dataset.
+    let (student_active, teacher_only) =
+        prepare_self_distill_prompts(prompts, mode, ground_truth, documents, tokenizer)?;
 
     // Run the teacher forwards on the shaped teacher_only sequences
     // and build a FixtureLogitSource keyed by the *student* tokens
@@ -1101,27 +1258,31 @@ fn build_self_distill_teacher(
         top_k,
     );
 
-    // Transplant teacher-key entries → student-key entries.
+    // Transplant teacher-key entries to student-key entries.
     for ((s_tokens, s_active), (t_tokens, t_active)) in
         student_active.iter().zip(teacher_only.iter())
     {
         let s_hash = kiln_train::logit_source::FixtureLogitSource::hash_tokens(s_tokens);
-        for (sp, tp) in s_active.iter().zip(t_active.iter()) {
-            // Query the teacher fixture at the teacher key/position.
-            let batch = match teacher_fixture.fetch_logprobs(t_tokens, &[*tp], Some(top_k)) {
-                Ok(b) => b,
-                Err(_) => continue,
+        let student_rows = kiln_train::logit_source::target_token_positions_to_logits_rows(
+            teacher_id,
+            s_tokens.len(),
+            s_active,
+        )
+        .map_err(|e| format!("self-distill invalid student action positions: {e}"))?;
+        let teacher_rows = kiln_train::logit_source::target_token_positions_to_logits_rows(
+            teacher_id,
+            t_tokens.len(),
+            t_active,
+        )
+        .map_err(|e| format!("self-distill invalid teacher action positions: {e}"))?;
+        for (&student_row, &teacher_row) in student_rows.iter().zip(teacher_rows.iter()) {
+            let batch = teacher_fixture
+                .fetch_logprobs(t_tokens, &[teacher_row], Some(top_k))
+                .map_err(|e| format!("self-distill teacher fixture read failed: {e}"))?;
+            let kiln_train::LogprobBatch::TopK(topk) = batch else {
+                return Err("self-distill top-K fixture returned full-vocab logits".into());
             };
-            let (indices, mut logprobs) = match batch {
-                kiln_train::LogprobBatch::TopK(t) => (t.indices, t.logprobs),
-                _ => continue,
-            };
-            if matches!(mode, kiln_train::SelfDistillMode::ReverseTeacher) {
-                for lp in logprobs.iter_mut() {
-                    *lp = -*lp;
-                }
-            }
-            student_fixture.insert(s_hash, *sp, indices, logprobs);
+            student_fixture.insert(s_hash, student_row, topk.indices, topk.logprobs);
         }
     }
 
@@ -1134,7 +1295,9 @@ fn build_self_distill_teacher(
 /// marked), the model is run forward once per prompt — wearing the
 /// spec's `adapter` LoRA when one is registered, base model otherwise —
 /// and the top-K logprobs at active positions are inserted into the
-/// fixture keyed by tokens_hash.
+/// fixture keyed by tokens_hash. Off-policy precomputation requires every
+/// prompt to tokenize with active assistant targets; it never changes the
+/// requested dataset by skipping an invalid prompt.
 #[allow(clippy::too_many_arguments)]
 fn build_local_teacher_for(
     spec: &crate::api::teachers::TeacherSpec,
@@ -1188,30 +1351,8 @@ fn build_local_teacher_for(
 
     // OFF-POLICY: the assistant turns are fixed, so pre-compute the fixture keyed
     // by tokens_hash (cheaper — one forward per prompt up front).
-    let mut prompts_and_active: Vec<(Vec<u32>, Vec<usize>)> = Vec::with_capacity(prompts.len());
-    for prompt in prompts {
-        let ex = kiln_train::SftExample {
-            messages: prompt.messages.clone(),
-        };
-        match kiln_train::trainer::tokenize_for_training(&ex, tokenizer) {
-            Ok((tokens, label_mask)) => {
-                let active: Vec<usize> = label_mask
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, &m)| if m { Some(i) } else { None })
-                    .collect();
-                if !active.is_empty() {
-                    prompts_and_active.push((tokens, active));
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "local-teacher: skipping prompt that failed to tokenize");
-            }
-        }
-    }
-    if prompts_and_active.is_empty() {
-        return Err("local-teacher: no prompts tokenized cleanly for teacher pre-compute".into());
-    }
+    let prompts_and_active =
+        tokenize_teacher_prompts("local-teacher", &spec.alias, prompts, tokenizer)?;
     let fixture = kiln_train::opd::build_local_teacher_fixture(
         spec.alias.clone(),
         &prompts_and_active,
@@ -1223,38 +1364,6 @@ fn build_local_teacher_for(
     )
     .map_err(|e| format!("build_local_teacher_fixture failed: {e:#}"))?;
     Ok(std::sync::Arc::new(fixture))
-}
-
-/// §6 / §8.6 — default per-job hard cap on remote-teacher $ spend
-/// when the caller didn't specify one. Matches the prosumer tier's
-/// `cost_cap_default_usd`. Set explicitly so `RemoteTeacher` always
-/// has a cap and never racks up surprise bills.
-pub const DEFAULT_REMOTE_COST_CAP_USD: f64 = 25.0;
-
-/// Best-effort provider guess from the configured base URL. Lets the
-/// user re-use `TeacherSpec` (which only carries a `url`) without
-/// adding a provider field — the §3.2 registry is intentionally
-/// minimal. Defaults to `Vllm` (the most common OSS top_logprobs
-/// endpoint shape) when no host token matches.
-pub(crate) fn guess_remote_provider(url: &str) -> kiln_train::RemoteProvider {
-    let lower = url.to_ascii_lowercase();
-    if lower.contains("openrouter.ai") {
-        kiln_train::RemoteProvider::OpenRouter
-    } else if lower.contains("together.ai") || lower.contains("together.xyz") {
-        kiln_train::RemoteProvider::Together
-    } else if lower.contains("fireworks.ai") {
-        kiln_train::RemoteProvider::Fireworks
-    } else if lower.contains("deepinfra") {
-        kiln_train::RemoteProvider::DeepInfra
-    } else if lower.contains("sglang") {
-        kiln_train::RemoteProvider::Sglang
-    } else if lower.contains("tgi") || lower.contains("huggingface") {
-        kiln_train::RemoteProvider::Tgi
-    } else if lower.contains("llama.cpp") || lower.contains("llamacpp") || lower.contains("8080") {
-        kiln_train::RemoteProvider::LlamaCpp
-    } else {
-        kiln_train::RemoteProvider::Vllm
-    }
 }
 
 /// `/v1/distill/refresh` runtime — §3.6 continual-learning recipe.
@@ -1292,6 +1401,9 @@ fn run_distill_refresh(
     dataset_registry: Option<&crate::eval::DatasetRegistry>,
     job_id: &str,
 ) -> std::result::Result<PathBuf, String> {
+    req.config
+        .validate_runtime_contract()
+        .map_err(|error| format!("DistillRefresh has unsupported OPD config: {error:#}"))?;
     if req.name.trim().is_empty() {
         return Err("DistillRefresh: `name` (adapter to refresh) must be non-empty".into());
     }
@@ -1418,8 +1530,7 @@ fn run_distill_refresh(
             model_config,
             adapter_dir,
             req.config.top_k,
-            // Distill refresh phase 2 scores fixed teacher turns — fixture path.
-            kiln_train::opd::OpdTrainingMode::OffPolicy,
+            req.config.training_mode,
         )
         .map_err(|e| format!("distill_refresh phase 2 local-teacher build: {e}"))?,
         crate::api::teachers::TeacherKind::Remote => {
@@ -1427,22 +1538,26 @@ fn run_distill_refresh(
                 format!("teacher {:?} is Remote but has no `url` field", spec.alias)
             })?;
             let cfg = kiln_train::RemoteTeacherConfig {
-                provider: guess_remote_provider(&url),
+                provider: spec.provider.ok_or_else(|| {
+                    format!(
+                        "teacher {:?} is Remote but has no explicit provider — re-register with provider=\"vllm\"",
+                        spec.alias
+                    )
+                })?,
                 model: spec.model_id.clone(),
                 url,
                 api_key_env: spec.api_key_env.clone(),
                 teacher_id: spec.alias.clone(),
                 tokenizer_hash: spec.tokenizer_hash.clone(),
-                max_top_k: resolved_max_top_k,
+                max_top_k: spec.max_top_k.unwrap_or(0),
                 vocab_size: resolved_vocab,
-                max_cost_usd: Some(
-                    req.config
-                        .max_cost_usd
-                        .unwrap_or(DEFAULT_REMOTE_COST_CAP_USD),
-                ),
+                max_cost_usd: None,
                 timeout_ms: 60_000,
             };
-            std::sync::Arc::new(kiln_train::RemoteTeacher::new(cfg))
+            std::sync::Arc::new(
+                kiln_train::RemoteTeacher::new(cfg)
+                    .map_err(|e| format!("construct remote teacher: {e}"))?,
+            )
         }
     };
 
@@ -1517,17 +1632,28 @@ fn run_distill_merge(
     progress_cb: trainer::ProgressCallback,
     job_id: &str,
 ) -> std::result::Result<PathBuf, String> {
+    req.config
+        .validate_runtime_contract()
+        .map_err(|error| format!("distill_merge has unsupported OPD config: {error:#}"))?;
     if req.sources.is_empty() {
         return Err("distill_merge: at least one source required".into());
+    }
+    if !matches!(
+        req.config.training_mode,
+        kiln_train::opd::OpdTrainingMode::OffPolicy
+    ) {
+        return Err(
+            "distill_merge: fixed per-source teacher fixtures require config.training_mode=\"off_policy\""
+                .into(),
+        );
     }
     // Validate every source adapter exists on disk and has a
     // lineage / replay log we can read prompts from. We resolve the
     // training prompts via each source's replay log — the §3.4
     // recipe says "treat each source's *training* prompts as the
-    // distribution that source is good at." When a source has no
-    // replay history we fall back to the wide canonical seed-prompt
-    // bank for that source so the runtime still produces a real
-    // adapter; the user is warned via tracing.
+    // distribution that source is good at." Missing replay history is
+    // fatal because substituting unrelated prompts changes the declared
+    // merge dataset.
     let mut per_source: Vec<(
         kiln_train::DistillMergeSource,
         Vec<kiln_train::opd::OpdPrompt>,
@@ -1541,16 +1667,13 @@ fn run_distill_merge(
             ));
         }
         let derived = derive_source_prompts(&src_dir, &source.adapter);
-        let prompts = if derived.is_empty() {
-            tracing::warn!(
-                job_id = %job_id,
-                source = %source.adapter,
-                "distill_merge: no replay prompts for source — falling back to wide seeds"
-            );
-            wide_seed_prompts()
-        } else {
-            derived
-        };
+        if derived.is_empty() {
+            return Err(format!(
+                "distill_merge: source adapter {:?} has no usable replay prompts; refusing to substitute unrelated seed data",
+                source.adapter
+            ));
+        }
+        let prompts = derived;
         per_source.push((source.clone(), prompts));
     }
     let all_prompts: Vec<kiln_train::opd::OpdPrompt> = per_source
@@ -1583,9 +1706,9 @@ fn run_distill_merge(
     // the trainer queries the *correct* source's teacher for each
     // prompt, with no per-step LoRA swaps needed.
     //
-    // When a source's adapter on disk fails to load, we fall back to
-    // the base-model teacher for that source's prompts and surface
-    // the issue via tracing — the run still produces a real adapter.
+    // Each source must load and every prompt must yield active targets. The
+    // merge aborts if either contract fails, preserving the declared teacher
+    // identities and exact prompt dataset.
     let teacher_id = format!("merge-multi:{}", req.name);
     let teacher: std::sync::Arc<dyn kiln_train::LogitSource> =
         std::sync::Arc::new(build_multi_tenant_merge_teacher(
@@ -1596,7 +1719,6 @@ fn run_distill_merge(
             weights,
             model_config,
             req.config.top_k,
-            job_id,
         )?);
 
     let mut merge_config = req.config.clone();
@@ -1719,6 +1841,9 @@ fn run_distill_pump(
     teacher_registry: &crate::api::teachers::TeacherRegistry,
     job_id: &str,
 ) -> std::result::Result<PathBuf, String> {
+    req.config
+        .validate_runtime_contract()
+        .map_err(|error| format!("distill_pump has unsupported OPD config: {error:#}"))?;
     if req.teacher.trim().is_empty() {
         return Err("distill_pump: teacher alias must be non-empty".into());
     }
@@ -1777,8 +1902,7 @@ fn run_distill_pump(
             model_config,
             adapter_dir,
             req.config.top_k,
-            // Distill pump pre-computes against fixed teacher turns — fixture path.
-            kiln_train::opd::OpdTrainingMode::OffPolicy,
+            req.config.training_mode,
         )
         .map_err(|e| format!("distill_pump local-teacher build: {e}"))?,
         crate::api::teachers::TeacherKind::Remote => {
@@ -1786,22 +1910,26 @@ fn run_distill_pump(
                 format!("teacher {:?} is Remote but has no `url` field", spec.alias)
             })?;
             let cfg = kiln_train::RemoteTeacherConfig {
-                provider: guess_remote_provider(&url),
+                provider: spec.provider.ok_or_else(|| {
+                    format!(
+                        "teacher {:?} is Remote but has no explicit provider — re-register with provider=\"vllm\"",
+                        spec.alias
+                    )
+                })?,
                 model: spec.model_id.clone(),
                 url,
                 api_key_env: spec.api_key_env.clone(),
                 teacher_id: spec.alias.clone(),
                 tokenizer_hash: spec.tokenizer_hash.clone(),
-                max_top_k: resolved_max_top_k,
+                max_top_k: spec.max_top_k.unwrap_or(0),
                 vocab_size: resolved_vocab,
-                max_cost_usd: Some(
-                    req.config
-                        .max_cost_usd
-                        .unwrap_or(DEFAULT_REMOTE_COST_CAP_USD),
-                ),
+                max_cost_usd: None,
                 timeout_ms: 60_000,
             };
-            std::sync::Arc::new(kiln_train::RemoteTeacher::new(cfg))
+            std::sync::Arc::new(
+                kiln_train::RemoteTeacher::new(cfg)
+                    .map_err(|e| format!("construct remote teacher: {e}"))?,
+            )
         }
     };
 
@@ -1972,18 +2100,11 @@ fn wide_seed_prompts() -> Vec<kiln_train::opd::OpdPrompt> {
 
 /// `/v1/distill/self` runtime — §3.12 PI self-distillation.
 ///
-/// All four PI modes (`GroundTruthConditioning`, `Conciseness`,
-/// `DocumentAsPi`, `ReverseTeacher`) differ only in how the teacher
-/// half of the OPD run is *conditioned*. The student-side OPD step
-/// is identical to a regular `opd_train` call once the teacher is
-/// produced. For the milestone wire-up we delegate to `opd_train`
-/// with a deterministic-uniform "self-teacher" so the runtime path
-/// produces a real adapter. The mode-specific privileged-context
-/// shaping (prepending ground-truth / "be concise" / retrieved docs
-/// to the teacher's prompt) is the §3.12 follow-up that requires the
-/// in-process LocalTeacher; the request payload is still recorded
-/// verbatim in the receipt so the trained adapter is rebuildable
-/// once the LocalTeacher lands.
+/// The three supported PI modes (`GroundTruthConditioning`, `Conciseness`,
+/// and `DocumentAsPi`) shape the teacher context before a local-model forward,
+/// then run the normal OPD student loss. `ReverseTeacher` is rejected because
+/// moving away from a distribution requires a distinct objective; negating
+/// logprobs would violate the teacher-source contract.
 #[allow(clippy::too_many_arguments)]
 fn run_distill_self(
     req: &DistillSelfRequest,
@@ -1995,37 +2116,36 @@ fn run_distill_self(
     progress_cb: trainer::ProgressCallback,
     job_id: &str,
 ) -> std::result::Result<PathBuf, String> {
+    req.config
+        .validate_runtime_contract()
+        .map_err(|error| format!("distill_self has unsupported OPD config: {error:#}"))?;
     if req.name.trim().is_empty() {
         return Err("distill_self: name must be non-empty".into());
     }
-    let prompts: Vec<kiln_train::opd::OpdPrompt> =
-        req.prompts.clone().unwrap_or_else(wide_seed_prompts);
-    if prompts.is_empty() {
-        return Err("distill_self: prompts resolved to zero items".into());
+    if matches!(req.mode, kiln_train::SelfDistillMode::ReverseTeacher) {
+        return Err(
+            "distill_self reverse_teacher is unsupported: it requires a distinct reverse objective and cannot be represented by negated logprobs"
+                .into(),
+        );
     }
-
-    // Validate mode-specific privileged context shapes.
-    match req.mode {
-        kiln_train::SelfDistillMode::GroundTruthConditioning => {
-            if let Some(gt) = &req.ground_truth {
-                if gt.len() != prompts.len() {
-                    return Err(format!(
-                        "distill_self GroundTruthConditioning: ground_truth.len() ({}) != prompts.len() ({})",
-                        gt.len(),
-                        prompts.len()
-                    ));
-                }
-            }
-        }
-        kiln_train::SelfDistillMode::DocumentAsPi => {
-            if let Some(docs) = &req.documents {
-                if docs.is_empty() {
-                    return Err("distill_self DocumentAsPi: documents must be non-empty".into());
-                }
-            }
-        }
-        _ => {}
+    if !matches!(
+        req.config.training_mode,
+        kiln_train::opd::OpdTrainingMode::OffPolicy
+    ) {
+        return Err(
+            "distill_self: fixed privileged teacher fixtures require config.training_mode=\"off_policy\""
+                .into(),
+        );
     }
+    let prompts: Vec<kiln_train::opd::OpdPrompt> = req.prompts.clone().ok_or_else(|| {
+        "distill_self: explicit prompts with assistant actions are required".to_string()
+    })?;
+    validate_self_distill_conditioning(
+        req.mode,
+        prompts.len(),
+        req.ground_truth.as_deref(),
+        req.documents.as_deref(),
+    )?;
 
     tracing::info!(
         job_id = %job_id,
@@ -2935,6 +3055,273 @@ mod tests {
         );
         state.adapter_dir = dir.to_path_buf();
         state
+    }
+
+    fn merge_teacher_test_tokenizer() -> kiln_core::tokenizer::KilnTokenizer {
+        let json = br#"{
+            "version": "1.0",
+            "model": {
+                "type": "BPE",
+                "vocab": {"a": 0, "b": 1},
+                "merges": []
+            }
+        }"#;
+        kiln_core::tokenizer::KilnTokenizer::from_bytes(json)
+            .unwrap()
+            .with_chat_template(
+                "{% for message in messages %}{{ message.content }}{% endfor %}".to_string(),
+            )
+    }
+
+    fn self_distill_test_prompt(with_assistant: bool) -> kiln_train::opd::OpdPrompt {
+        let mut messages = vec![kiln_train::ChatMessage {
+            role: "user".into(),
+            content: if with_assistant { "a" } else { "aa" }.into(),
+        }];
+        if with_assistant {
+            messages.push(kiln_train::ChatMessage {
+                role: "assistant".into(),
+                content: "bb".into(),
+            });
+        }
+        kiln_train::opd::OpdPrompt {
+            messages,
+            teacher_extra_messages: vec![],
+            trajectory: vec![],
+        }
+    }
+
+    #[test]
+    fn declared_merge_source_lora_load_failure_is_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = match load_declared_merge_source_lora(
+            "missing-source",
+            dir.path(),
+            1,
+            kiln_tensor::Device::Cpu,
+        ) {
+            Ok(_) => panic!("an absent declared LoRA must not become a base-model teacher"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.contains("declared source adapter 'missing-source'"),
+            "{err}"
+        );
+        assert!(err.contains(&dir.path().display().to_string()), "{err}");
+        assert!(err.contains("adapter_config.json"), "{err}");
+    }
+
+    #[test]
+    fn teacher_prompt_tokenization_rejects_later_prompt_without_active_tokens() {
+        let prompts = vec![
+            kiln_train::opd::OpdPrompt {
+                messages: vec![
+                    kiln_train::ChatMessage {
+                        role: "user".into(),
+                        content: "a".into(),
+                    },
+                    kiln_train::ChatMessage {
+                        role: "assistant".into(),
+                        content: "bb".into(),
+                    },
+                ],
+                teacher_extra_messages: vec![],
+                trajectory: vec![],
+            },
+            kiln_train::opd::OpdPrompt {
+                messages: vec![kiln_train::ChatMessage {
+                    role: "user".into(),
+                    content: "aa".into(),
+                }],
+                teacher_extra_messages: vec![],
+                trajectory: vec![],
+            },
+        ];
+
+        let err = tokenize_teacher_prompts(
+            "local-teacher",
+            "registered-teacher",
+            &prompts,
+            &merge_teacher_test_tokenizer(),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.contains("local-teacher: source 'registered-teacher' prompt 1 failed to tokenize"),
+            "{err}"
+        );
+        assert!(err.contains("no supervised assistant tokens"), "{err}");
+    }
+
+    #[test]
+    fn teacher_prompt_tokenization_propagates_chat_template_failure() {
+        let tokenizer = merge_teacher_test_tokenizer().with_chat_template("{% if".to_string());
+        let prompts = vec![kiln_train::opd::OpdPrompt {
+            messages: vec![kiln_train::ChatMessage {
+                role: "assistant".into(),
+                content: "bb".into(),
+            }],
+            teacher_extra_messages: vec![],
+            trajectory: vec![],
+        }];
+
+        let err = tokenize_teacher_prompts("distill_merge", "source-a", &prompts, &tokenizer)
+            .unwrap_err();
+
+        assert!(
+            err.contains("distill_merge: source 'source-a' prompt 0 failed to tokenize"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn self_distill_alignment_uses_masked_targets_not_length_offsets() {
+        validate_self_distill_target_alignment(
+            7,
+            &[9, 3, 4, 5],
+            &[1, 3],
+            &[8, 8, 3, 4, 6, 5, 7],
+            &[2, 5],
+        )
+        .expect("pairwise target IDs align despite non-constant position offsets");
+    }
+
+    #[test]
+    fn self_distill_alignment_rejects_target_token_mismatch() {
+        let err = validate_self_distill_target_alignment(
+            2,
+            &[9, 3, 4, 5],
+            &[1, 3],
+            &[8, 3, 4, 6],
+            &[1, 3],
+        )
+        .unwrap_err();
+        assert!(err.contains("action pair 1 differs"), "{err}");
+    }
+
+    #[test]
+    fn self_distill_ground_truth_requires_one_nonempty_answer_per_prompt() {
+        use kiln_train::SelfDistillMode;
+
+        let missing = validate_self_distill_conditioning(
+            SelfDistillMode::GroundTruthConditioning,
+            2,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(missing.contains("ground_truth is required"), "{missing}");
+
+        let too_short = vec!["answer".to_string()];
+        let length = validate_self_distill_conditioning(
+            SelfDistillMode::GroundTruthConditioning,
+            2,
+            Some(&too_short),
+            None,
+        )
+        .unwrap_err();
+        assert!(length.contains("ground_truth.len() (1)"), "{length}");
+
+        let blank = vec!["answer".to_string(), "  ".to_string()];
+        let empty = validate_self_distill_conditioning(
+            SelfDistillMode::GroundTruthConditioning,
+            2,
+            Some(&blank),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            empty.contains("ground_truth[1] must be non-empty"),
+            "{empty}"
+        );
+    }
+
+    #[test]
+    fn self_distill_documents_require_nonempty_context_per_prompt() {
+        use kiln_train::SelfDistillMode;
+
+        let missing =
+            validate_self_distill_conditioning(SelfDistillMode::DocumentAsPi, 2, None, None)
+                .unwrap_err();
+        assert!(missing.contains("documents is required"), "{missing}");
+
+        let too_short = vec!["context".to_string()];
+        let length = validate_self_distill_conditioning(
+            SelfDistillMode::DocumentAsPi,
+            2,
+            None,
+            Some(&too_short),
+        )
+        .unwrap_err();
+        assert!(length.contains("documents.len() (1)"), "{length}");
+
+        let blank = vec!["context".to_string(), "\n".to_string()];
+        let empty = validate_self_distill_conditioning(
+            SelfDistillMode::DocumentAsPi,
+            2,
+            None,
+            Some(&blank),
+        )
+        .unwrap_err();
+        assert!(empty.contains("documents[1] must be non-empty"), "{empty}");
+    }
+
+    #[test]
+    fn self_distill_prompt_preparation_rejects_later_student_failure() {
+        let prompts = vec![
+            self_distill_test_prompt(true),
+            self_distill_test_prompt(false),
+        ];
+        let tokenizer = merge_teacher_test_tokenizer().with_chat_template(
+            concat!(
+                "{% for message in messages %}",
+                "{% if message.role != 'system' %}{{ message.content }}{% endif %}",
+                "{% endfor %}"
+            )
+            .to_string(),
+        );
+        let err = prepare_self_distill_prompts(
+            &prompts,
+            kiln_train::SelfDistillMode::Conciseness,
+            None,
+            None,
+            &tokenizer,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.contains("self-distill prompt 1 student tokenization failed"),
+            "{err}"
+        );
+        assert!(err.contains("no supervised assistant tokens"), "{err}");
+    }
+
+    #[test]
+    fn self_distill_prompt_preparation_propagates_teacher_failure() {
+        let tokenizer = merge_teacher_test_tokenizer().with_chat_template(
+            concat!(
+                "{% if messages[0].role == 'system' %}",
+                "{{ raise_exception('teacher-only template failure') }}",
+                "{% endif %}",
+                "{% for message in messages %}{{ message.content }}{% endfor %}"
+            )
+            .to_string(),
+        );
+        let err = prepare_self_distill_prompts(
+            &[self_distill_test_prompt(true)],
+            kiln_train::SelfDistillMode::Conciseness,
+            None,
+            None,
+            &tokenizer,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.contains("self-distill prompt 0 teacher tokenization failed"),
+            "{err}"
+        );
+        assert!(err.contains("teacher-only template failure"), "{err}");
     }
 
     #[test]

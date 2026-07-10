@@ -68,7 +68,9 @@ pub use receipt::{
     AdapterReceipt, DiagnosticSummary, PromptSourceDescriptor, RECEIPT_SCHEMA_VERSION,
     TeacherDescriptor,
 };
-pub use remote_teacher::{CostTally, RemoteProvider, RemoteTeacher, RemoteTeacherConfig};
+pub use remote_teacher::{
+    RemoteProvider, RemoteTeacher, RemoteTeacherConfig, normalize_vllm_completions_url,
+};
 
 pub use adapter_output::{
     ADAPTER_MANIFEST_FILENAME, ADAPTER_MANIFEST_SCHEMA_VERSION, ADAPTER_RECEIPT_FILENAME,
@@ -109,7 +111,7 @@ pub use opd::{
     default_opd_samples_per_prompt, default_opd_top_k, default_score_decay_steps,
     default_score_earliest_weight, default_tip_tool_call_weight, default_tip_tool_name_weight,
     load_off_policy_distillation_jsonl, parse_off_policy_distillation_jsonl_str,
-    prepare_off_policy_distillation_dataset,
+    prepare_off_policy_distillation_dataset, resolve_opd_top_k,
 };
 pub use train_receipt::{
     ADAPTER_CANARY_STATUS_FILENAME, AdapterCanaryCheckReceipt, AdapterCanaryState,
