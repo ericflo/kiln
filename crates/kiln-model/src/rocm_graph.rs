@@ -165,6 +165,16 @@ impl RocmGraphCacheKey {
 }
 
 #[cfg(feature = "rocm")]
+fn remove_graphs_owned_by<T>(
+    captured: &mut HashMap<RocmGraphCacheKey, T>,
+    owner: RocmGraphOwner,
+) -> usize {
+    let before = captured.len();
+    captured.retain(|key, _| key.owner != owner);
+    before - captured.len()
+}
+
+#[cfg(feature = "rocm")]
 #[derive(Default)]
 struct RocmGraphOwnerTimeline {
     last_decode_seq_len: Option<usize>,
@@ -482,6 +492,33 @@ impl RocmGraphRunner {
         }
     }
 
+    /// Release graph state owned by a finished batching-engine decode row.
+    ///
+    /// `PagedBatchedDecodeState` row ids are unique for the process lifetime.
+    /// Retaining their graphs or continuity timelines after request completion
+    /// would permanently fill the bounded graph cache and grow the timeline map.
+    pub fn release_decode_row(&mut self, row_id: u64) {
+        #[cfg(feature = "rocm")]
+        {
+            let owner = RocmGraphOwner::DecodeRow(row_id);
+            let evicted_graphs = remove_graphs_owned_by(&mut self.captured, owner);
+            let removed_timeline = self.decode_timelines.remove(&owner).is_some();
+            if evicted_graphs > 0 {
+                self.cache_full_warned = false;
+            }
+            if evicted_graphs > 0 || removed_timeline {
+                tracing::trace!(
+                    row_id,
+                    evicted_graphs,
+                    removed_timeline,
+                    "ROCm graph: released finished decode-row state"
+                );
+            }
+        }
+        #[cfg(not(feature = "rocm"))]
+        let _ = row_id;
+    }
+
     #[cfg(feature = "rocm")]
     fn prepare_owner_decode(
         &mut self,
@@ -495,9 +532,8 @@ impl RocmGraphRunner {
             && timeline.last_decode_seq_len == Some(seq_len.wrapping_sub(1))
             && timeline.last_decode_block0 == block0;
         if !continues {
-            let before = self.captured.len();
-            self.captured.retain(|key, _| key.owner != owner);
-            if before != self.captured.len() {
+            let evicted_graphs = remove_graphs_owned_by(&mut self.captured, owner);
+            if evicted_graphs > 0 {
                 tracing::debug!(
                     seq_len,
                     ?owner,
@@ -2286,7 +2322,8 @@ mod tests {
 
     #[test]
     fn disabled_off_device() {
-        let r = RocmGraphRunner::new(&Device::Cpu, true);
+        let mut r = RocmGraphRunner::new(&Device::Cpu, true);
+        r.release_decode_row(7);
         assert!(!r.is_enabled());
         assert_eq!(
             r.stats(),
@@ -2298,6 +2335,47 @@ mod tests {
                 ..RocmGraphStats::default()
             }
         );
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn release_decode_row_removes_only_the_finished_owner() {
+        fn graph_key(seq_len: usize) -> RocmGraphKey {
+            RocmGraphKey {
+                stable_metadata: false,
+                seq_len,
+                block_table: vec![seq_len as u32],
+                max_seqlen_k: 512,
+                max_blocks_per_seq: 8,
+            }
+        }
+
+        let target = RocmGraphOwner::DecodeRow(7);
+        let survivor = RocmGraphOwner::DecodeRow(8);
+        let anonymous = RocmGraphOwner::Anonymous;
+        let mut captured = HashMap::from([
+            (RocmGraphCacheKey::new(target, graph_key(1)), "target-a"),
+            (RocmGraphCacheKey::new(target, graph_key(2)), "target-b"),
+            (RocmGraphCacheKey::new(survivor, graph_key(1)), "survivor"),
+            (RocmGraphCacheKey::new(anonymous, graph_key(1)), "anonymous"),
+        ]);
+        assert_eq!(remove_graphs_owned_by(&mut captured, target), 2);
+        assert_eq!(captured.len(), 2);
+        assert!(captured.keys().all(|key| key.owner != target));
+        assert!(captured.keys().any(|key| key.owner == survivor));
+        assert!(captured.keys().any(|key| key.owner == anonymous));
+
+        let mut runner = RocmGraphRunner::new(&Device::Cpu, true);
+        runner.decode_timelines.insert(target, Default::default());
+        runner.decode_timelines.insert(survivor, Default::default());
+        runner
+            .decode_timelines
+            .insert(anonymous, Default::default());
+        runner.release_decode_row(7);
+
+        assert!(!runner.decode_timelines.contains_key(&target));
+        assert!(runner.decode_timelines.contains_key(&survivor));
+        assert!(runner.decode_timelines.contains_key(&anonymous));
     }
 
     #[test]

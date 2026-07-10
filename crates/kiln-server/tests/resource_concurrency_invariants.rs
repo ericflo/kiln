@@ -192,6 +192,51 @@ fn rocm_graph_state_is_decode_row_owned() {
 }
 
 #[test]
+fn rocm_graph_decode_row_state_is_released_before_finish_work() {
+    let rocm_graph = read("crates/kiln-model/src/rocm_graph.rs");
+    let generate = read("crates/kiln-model/src/generate.rs");
+    let batching_engine = read("crates/kiln-server/src/batching_engine.rs");
+
+    for required in [
+        "pub fn release_decode_row(&mut self, row_id: u64)",
+        "remove_graphs_owned_by(&mut self.captured, owner)",
+        "self.decode_timelines.remove(&owner)",
+    ] {
+        assert!(
+            rocm_graph.contains(required),
+            "ROCm graph request cleanup must release captured graphs and timelines: {required}"
+        );
+    }
+
+    let finish = source_between(
+        &generate,
+        "pub fn finish_paged_batched_decode(",
+        "fn completed_prompt_registration(",
+    );
+    let release = finish
+        .find("graph.release_decode_row(state.id)")
+        .expect("batched decode finish must release its ROCm graph owner");
+    let destructure = finish
+        .find("let PagedBatchedDecodeState {")
+        .expect("batched decode finish must destructure its state");
+    let tokenize = finish
+        .find(".tokenizer")
+        .expect("batched decode finish must decode output tokens");
+    assert!(
+        release < destructure && release < tokenize,
+        "decode-row graph cleanup must precede all fallible finish work"
+    );
+
+    assert!(
+        batching_engine
+            .matches("finish_paged_batched_decode(state,")
+            .count()
+            >= 2,
+        "normal and discarded batching requests must share the owner-releasing finish path"
+    );
+}
+
+#[test]
 fn cuda_graph_state_is_decode_row_owned() {
     let cuda_graph = read("crates/kiln-model/src/cuda_graph.rs");
     let generate = read("crates/kiln-model/src/generate.rs");

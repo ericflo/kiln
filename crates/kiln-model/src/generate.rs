@@ -4038,6 +4038,21 @@ impl ModelRunner {
         state: PagedBatchedDecodeState,
         finish_reason: FinishReason,
     ) -> Result<PrefixCachedGenerationOutput> {
+        // This is the common completion boundary for normal, cancelled,
+        // disconnected, and failed batching-engine requests. Release the unique
+        // decode-row owner before token decoding or other fallible finish work so
+        // stale graphs and timelines cannot accumulate in a long-running server.
+        match self.rocm_graph.lock() {
+            Ok(mut graph) => graph.release_decode_row(state.id),
+            Err(poisoned) => {
+                tracing::warn!(
+                    row_id = state.id,
+                    "recovering poisoned ROCm graph lock to release finished decode row"
+                );
+                poisoned.into_inner().release_decode_row(state.id);
+            }
+        }
+
         let PagedBatchedDecodeState {
             block_table,
             generated_tokens,
