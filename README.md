@@ -461,7 +461,7 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | POST | `/v1/agent/runs/{id}/steer` | Queue a steering message into a live run |
 | POST | `/v1/agent/runs/{id}/follow_up` | Queue a follow-up task into a live run |
 | POST | `/v1/agent/runs/{id}/abort` | Abort a queued or running run |
-| GET | `/v1/adapters` | List saved/available LoRA adapters and the exact loaded name/content revision |
+| GET | `/v1/adapters` | List saved/available LoRA adapters, identify the active adapter, and report the exact loaded name/content revision |
 | GET | `/v1/adapters/{name}/detail` | Files + training history + eval history for one adapter |
 | POST | `/v1/adapters/load` | Load adapter from disk and return its exact content revision |
 | POST | `/v1/adapters/unload` | Unload active adapter |

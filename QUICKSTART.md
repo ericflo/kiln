@@ -792,7 +792,7 @@ Use `kiln -v serve` when first-run startup or model-load diagnostics are needed.
 | GET | `/v1/models` | List available models |
 | POST | `/v1/chat/completions` | Chat completion (OpenAI-compatible). Kiln extensions include `thinking_budget_tokens` / `thinking_budget_ms` and per-request `adapter` or `adapters: [{name, scale}, …]` composition (see [9.8](#98-compose-adapters-per-request)). |
 | POST | `/v1/completions/batch` | Multi-prompt batch generation with the same thinking-budget controls — efficient for GRPO rollouts (see [9.4](#94-batch-generation-efficient-for-grpo-rollouts)). |
-| GET | `/v1/adapters` | List LoRA adapters and the exact loaded name/content revision |
+| GET | `/v1/adapters` | List saved/available LoRA adapters, identify the active adapter, and report the exact loaded name/content revision |
 | POST | `/v1/adapters/load` | Load adapter from disk and return its exact content revision |
 | POST | `/v1/adapters/unload` | Unload active adapter |
 | DELETE | `/v1/adapters/{name}` | Delete an adapter |

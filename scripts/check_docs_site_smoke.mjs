@@ -182,6 +182,7 @@ const adapterListStaleWordingSurfaces = [
 const expectedAdapterListSemantics = [
   'saved/available LoRA adapters',
   'active adapter',
+  'content revision',
 ];
 
 const expectedApiSections = [
