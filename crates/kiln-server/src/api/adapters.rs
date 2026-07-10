@@ -138,8 +138,25 @@ fn ensure_adapter_mutation_admission(state: &AppState) -> Result<(), ApiError> {
         .map_err(ApiError::backend_quarantined)
 }
 
+fn ensure_adapter_weight_transition_admission(state: &AppState) -> Result<(), ApiError> {
+    state
+        .ensure_adapter_weight_transition_allowed()
+        .map_err(|_| {
+            ApiError::serving_profile_conflict(
+                state.serving_profile.profile(),
+                "live adapter weight transitions",
+            )
+        })
+}
+
 fn adapter_swap_error(state: &AppState, error: String) -> ApiError {
     match state.ensure_backend_healthy() {
+        Ok(()) if state.ensure_adapter_weight_transition_allowed().is_err() => {
+            ApiError::serving_profile_conflict(
+                state.serving_profile.profile(),
+                "live adapter weight transitions",
+            )
+        }
         Ok(()) => ApiError::adapter_load_failed(error),
         Err(health_error) => ApiError::backend_quarantined(health_error),
     }
@@ -192,6 +209,9 @@ async fn load_adapter(
 ) -> Result<Json<LoadAdapterResponse>, ApiError> {
     ensure_adapter_mutation_admission(&state)?;
     validate_adapter_name(&req.name)?;
+    if state.loaded_adapter_name().as_deref() != Some(req.name.as_str()) {
+        ensure_adapter_weight_transition_admission(&state)?;
+    }
     let serial = crate::adapter_swap::adapter_mutation_guard(&state)
         .await
         .map_err(|error| adapter_swap_error(&state, error))?;
@@ -408,6 +428,9 @@ async fn unload_adapter(
     State(state): State<AppState>,
 ) -> Result<Json<UnloadAdapterResponse>, ApiError> {
     ensure_adapter_mutation_admission(&state)?;
+    if state.loaded_adapter_identity().is_some() {
+        ensure_adapter_weight_transition_admission(&state)?;
+    }
     let serial = crate::adapter_swap::adapter_mutation_guard(&state)
         .await
         .map_err(|error| adapter_swap_error(&state, error))?;

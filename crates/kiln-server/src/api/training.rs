@@ -2080,7 +2080,13 @@ fn pin_registered_teachers(
 fn ensure_training_backend_admission(state: &AppState) -> Result<(), ApiError> {
     state
         .ensure_backend_healthy()
-        .map_err(ApiError::backend_quarantined)
+        .map_err(ApiError::backend_quarantined)?;
+    state.ensure_training_gpu_ownership_allowed().map_err(|_| {
+        ApiError::serving_profile_conflict(
+            state.serving_profile.profile(),
+            "training GPU ownership",
+        )
+    })
 }
 
 /// Atomically reserve queue/tracking capacity and publish a complete batch.

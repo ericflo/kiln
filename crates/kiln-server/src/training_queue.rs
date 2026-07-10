@@ -2585,8 +2585,12 @@ fn prepare_training_memory_for_job(state: &AppState, reserved_bytes: u64) -> Res
         .map_err(|error| format!("{error:#}"))
 }
 
-fn reject_queued_job_for_backend_quarantine(state: &AppState, job_id: &str, error: anyhow::Error) {
-    let detail = format!("training rejected because {error:#}");
+fn reject_queued_training_job(
+    state: &AppState,
+    job_id: &str,
+    detail: String,
+    reason: &'static str,
+) {
     let metadata = state
         .training_jobs
         .read()
@@ -2619,7 +2623,25 @@ fn reject_queued_job_for_backend_quarantine(state: &AppState, job_id: &str, erro
             );
         }
     }
-    tracing::error!(job_id, error = %detail, "queued training rejected by backend quarantine");
+    tracing::error!(job_id, error = %detail, reason, "queued training rejected before execution");
+}
+
+fn reject_queued_job_for_backend_quarantine(state: &AppState, job_id: &str, error: anyhow::Error) {
+    reject_queued_training_job(
+        state,
+        job_id,
+        format!("training rejected because {error:#}"),
+        "backend_quarantine",
+    );
+}
+
+fn reject_queued_job_for_serving_profile(state: &AppState, job_id: &str, error: anyhow::Error) {
+    reject_queued_training_job(
+        state,
+        job_id,
+        format!("training rejected because {error:#}"),
+        "serving_profile",
+    );
 }
 
 struct PreparedTrainingPublication {
@@ -2837,6 +2859,10 @@ fn execute_job(state: AppState, entry: QueueEntry) {
         reject_queued_job_for_backend_quarantine(&state, &job_id, error);
         return;
     }
+    if let Err(error) = state.ensure_training_gpu_ownership_allowed() {
+        reject_queued_job_for_serving_profile(&state, &job_id, error);
+        return;
+    }
 
     // Mark as running
     {
@@ -2856,6 +2882,10 @@ fn execute_job(state: AppState, entry: QueueEntry) {
 
     if let Err(error) = state.ensure_backend_healthy() {
         reject_queued_job_for_backend_quarantine(&state, &job_id, error);
+        return;
+    }
+    if let Err(error) = state.ensure_training_gpu_ownership_allowed() {
+        reject_queued_job_for_serving_profile(&state, &job_id, error);
         return;
     }
 

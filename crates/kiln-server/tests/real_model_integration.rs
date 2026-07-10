@@ -24,6 +24,7 @@ use kiln_model::forward::{
 use kiln_model::lora_loader::LoraSourceIdentity;
 use kiln_model::{LoraWeights, ModelRunner};
 use kiln_server::api;
+use kiln_server::config::{ConfigValueSource, ServingProfile, ServingProfileSetting};
 use kiln_server::state::{AppState, ModelBackend};
 
 /// Create a tiny model config for testing.
@@ -266,6 +267,11 @@ fn real_runner(state: &AppState) -> Arc<std::sync::RwLock<ModelRunner>> {
     }
 }
 
+fn enable_experimental_serving(state: &mut AppState) {
+    state.serving_profile =
+        ServingProfileSetting::new(ServingProfile::Experimental, ConfigValueSource::ConfigFile);
+}
+
 fn prompt_logprob_request(prompt: &[u32], top_k: usize) -> Request<Body> {
     Request::builder()
         .method("POST")
@@ -302,6 +308,7 @@ async fn adapter_load_publishes_the_exact_loaded_content_revision() {
     let exact_source = LoraSourceIdentity::from_adapter_dir(&adapter_dir).unwrap();
     let expected_revision = exact_source.content_revision();
     let mut state = tiny_real_state_with_timeout(tiny_config(), Duration::from_secs(1));
+    enable_experimental_serving(&mut state);
     state.adapter_dir = adapters.path().to_path_buf();
     let state_for_assert = state.clone();
     let runner = real_runner(&state);
@@ -342,6 +349,40 @@ async fn adapter_load_publishes_the_exact_loaded_content_revision() {
 }
 
 #[tokio::test]
+async fn stable_profile_rejects_adapter_load_before_gpu_writer_acquisition() {
+    let state = tiny_real_state_with_timeout(tiny_config(), Duration::from_secs(1));
+    let state_for_assert = state.clone();
+    let retained_inference = state.gpu_lock.clone().read_owned().await;
+    let app = api::router(state);
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/adapters/load")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"must-not-touch-disk"}"#))
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("stable adapter admission must not wait for the GPU writer")
+    .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(json["error"]["code"], "serving_profile_conflict");
+    assert!(state_for_assert.loaded_adapter_identity().is_none());
+    assert!(state_for_assert.gpu_lock.try_write().is_err());
+    drop(retained_inference);
+    assert!(state_for_assert.gpu_lock.try_write().is_ok());
+}
+
+#[tokio::test]
 async fn quarantined_backend_rejects_training_admission_without_publication() {
     let state = tiny_real_state_with_timeout(tiny_config(), Duration::from_secs(1));
     let state_for_assert = state.clone();
@@ -375,19 +416,49 @@ async fn quarantined_backend_rejects_training_admission_without_publication() {
 }
 
 #[tokio::test]
-async fn queued_training_transition_fails_while_quarantined_reader_is_retained() {
+async fn stable_profile_rejects_training_admission_without_publication_or_gpu_wait() {
+    let state = tiny_real_state_with_timeout(tiny_config(), Duration::from_secs(1));
+    let state_for_assert = state.clone();
+    let retained_inference = state.gpu_lock.clone().read_owned().await;
+    let app = api::router(state);
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/train/sft")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"examples":[]}"#))
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("stable training admission must not wait for the GPU writer")
+    .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(json["error"]["code"], "serving_profile_conflict");
+    assert!(state_for_assert.training_jobs.read().unwrap().is_empty());
+    assert_eq!(state_for_assert.training_queue.lock().unwrap().len(), 0);
+    assert!(state_for_assert.gpu_lock.try_write().is_err());
+    drop(retained_inference);
+    assert!(state_for_assert.gpu_lock.try_write().is_ok());
+}
+
+fn enqueue_empty_sft_job(state: &AppState, job_id: &str) {
     use kiln_server::state::{TrainingJobInfo, TrainingJobType};
-    use kiln_server::training_queue::{QueueEntry, QueuedJob, spawn_training_worker};
+    use kiln_server::training_queue::{QueueEntry, QueuedJob};
     use kiln_train::{SftRequest, TrainingState};
 
-    let mut state = tiny_real_state_with_timeout(tiny_config(), Duration::from_secs(1));
-    let adapter_dir = tempfile::tempdir().unwrap();
-    state.adapter_dir = adapter_dir.path().to_path_buf();
-    let job_id = "quarantine-transition".to_string();
     state.training_jobs.write().unwrap().insert(
-        job_id.clone(),
+        job_id.to_string(),
         TrainingJobInfo {
-            job_id: job_id.clone(),
+            job_id: job_id.to_string(),
             adapter_name: "never-started".to_string(),
             job_type: TrainingJobType::Sft,
             state: TrainingState::Queued,
@@ -410,7 +481,7 @@ async fn queued_training_transition_fails_while_quarantined_reader_is_retained()
         },
     );
     state.training_queue.lock().unwrap().push(QueueEntry {
-        job_id: job_id.clone(),
+        job_id: job_id.to_string(),
         reserved_bytes: 0,
         teacher_bindings: Vec::new(),
         job: QueuedJob::Sft(SftRequest {
@@ -421,6 +492,18 @@ async fn queued_training_transition_fails_while_quarantined_reader_is_retained()
             post_eval: None,
         }),
     });
+}
+
+#[tokio::test]
+async fn queued_training_transition_fails_while_quarantined_reader_is_retained() {
+    use kiln_server::training_queue::spawn_training_worker;
+    use kiln_train::TrainingState;
+
+    let mut state = tiny_real_state_with_timeout(tiny_config(), Duration::from_secs(1));
+    let adapter_dir = tempfile::tempdir().unwrap();
+    state.adapter_dir = adapter_dir.path().to_path_buf();
+    let job_id = "quarantine-transition".to_string();
+    enqueue_empty_sft_job(&state, &job_id);
 
     let retained_inference = state.gpu_lock.clone().read_owned().await;
     match state.backend.as_ref() {
@@ -467,6 +550,57 @@ async fn queued_training_transition_fails_while_quarantined_reader_is_retained()
     drop(retained_inference);
 }
 
+#[tokio::test]
+async fn stable_queued_training_fails_without_gpu_writer_acquisition() {
+    use kiln_server::training_queue::spawn_training_worker;
+    use kiln_train::TrainingState;
+
+    let mut state = tiny_real_state_with_timeout(tiny_config(), Duration::from_secs(1));
+    let adapter_dir = tempfile::tempdir().unwrap();
+    state.adapter_dir = adapter_dir.path().to_path_buf();
+    let job_id = "stable-profile-transition".to_string();
+    enqueue_empty_sft_job(&state, &job_id);
+
+    let retained_inference = state.gpu_lock.clone().read_owned().await;
+    spawn_training_worker(state.clone(), state.shutdown.clone());
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let terminal = state
+                .training_jobs
+                .read()
+                .unwrap()
+                .get(&job_id)
+                .is_some_and(|job| job.state == TrainingState::Failed);
+            if terminal {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("stable queued job must reject without waiting for GPU ownership");
+
+    let jobs = state.training_jobs.read().unwrap();
+    let failed = jobs.get(&job_id).unwrap();
+    assert_eq!(failed.state, TrainingState::Failed);
+    assert!(
+        failed
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("prohibits training GPU ownership")),
+        "{:?}",
+        failed.error
+    );
+    assert!(state.gpu_lock.try_write().is_err());
+    drop(jobs);
+    state
+        .shutdown
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    drop(retained_inference);
+    assert!(state.gpu_lock.try_write().is_ok());
+}
+
 #[cfg(feature = "vulkan")]
 #[tokio::test]
 async fn submit_grpo_dataset_path_route_defaults_to_vulkan_streaming_queue() {
@@ -492,7 +626,7 @@ async fn submit_grpo_dataset_path_route_defaults_to_vulkan_streaming_queue() {
     );
 
     let adapter_dir = tempfile::tempdir().unwrap();
-    let state = AppState::new_real(
+    let mut state = AppState::new_real(
         config,
         runner,
         state_tokenizer,
@@ -506,6 +640,7 @@ async fn submit_grpo_dataset_path_route_defaults_to_vulkan_streaming_queue() {
         &kiln_server::config::PrefixCacheConfig::default(),
         None,
     );
+    enable_experimental_serving(&mut state);
     let state_for_assert = state.clone();
     let app = api::router(state);
 

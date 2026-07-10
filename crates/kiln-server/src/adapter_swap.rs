@@ -143,6 +143,10 @@ pub(crate) async fn swap_runtime_adapter_locked(
         return Ok(current);
     }
 
+    state
+        .ensure_adapter_weight_transition_allowed()
+        .map_err(|error| format!("{error:#}"))?;
+
     let (runner, engine) = real_backend_handles(state)?;
     let lora = match resolve_dir(state, &req.target)? {
         Some(dir) => {
@@ -240,6 +244,10 @@ fn swap_runtime_adapter_blocking_locked_with_action(
         apply_default_update(state, &req.default_adapter);
         return Ok(current);
     }
+
+    state
+        .ensure_adapter_weight_transition_allowed()
+        .map_err(|error| format!("{error:#}"))?;
 
     let (runner, engine) = real_backend_handles(state)?;
     let lora = match resolve_dir(state, &req.target)? {

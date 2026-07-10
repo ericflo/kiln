@@ -90,6 +90,19 @@ impl ApiError {
         }
     }
 
+    pub fn serving_profile_conflict(
+        profile: crate::config::ServingProfile,
+        operation: impl std::fmt::Display,
+    ) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "serving_profile_conflict",
+            message: format!("Serving profile `{profile}` prohibits {operation}"),
+            hint: "Restart with KILN_SERVING_PROFILE=experimental for controlled concurrent mutation, or KILN_SERVING_PROFILE=maintenance for drained exclusive work.",
+            retry_after_seconds: None,
+        }
+    }
+
     /// OpenAI-compatible context overflow: agent harnesses (pi included)
     /// key their auto-compaction off HTTP 400 + this exact code, so both
     /// must match the convention.

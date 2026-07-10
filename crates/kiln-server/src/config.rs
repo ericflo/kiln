@@ -165,6 +165,13 @@ pub struct ServingProfileSetting {
 }
 
 impl ServingProfileSetting {
+    /// Construct an already-resolved setting for embedders and tests that do
+    /// not use [`KilnConfig::load`]. Production configuration should retain
+    /// the source that actually selected the profile.
+    pub const fn new(profile: ServingProfile, source: ConfigValueSource) -> Self {
+        Self { profile, source }
+    }
+
     fn from_environment_value(raw: &str) -> Result<Self> {
         Ok(Self {
             profile: ServingProfile::parse(raw, SERVING_PROFILE_ENV)?,

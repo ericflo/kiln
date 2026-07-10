@@ -2572,6 +2572,37 @@ impl AppState {
         Ok(())
     }
 
+    /// Refuse any real-backend training path that could take exclusive GPU
+    /// ownership when the process was started for stable serving.
+    pub(crate) fn ensure_training_gpu_ownership_allowed(&self) -> anyhow::Result<()> {
+        if matches!(self.backend.as_ref(), ModelBackend::Real { .. })
+            && !self.serving_profile.runtime_policy().training_gpu_ownership
+        {
+            anyhow::bail!(
+                "serving profile `{}` prohibits training GPU ownership",
+                self.serving_profile.profile()
+            );
+        }
+        Ok(())
+    }
+
+    /// Refuse a live LoRA weight flip before loading weights or entering the
+    /// batching actor's quiescence barrier. Mock mode has no GPU weights.
+    pub(crate) fn ensure_adapter_weight_transition_allowed(&self) -> anyhow::Result<()> {
+        if matches!(self.backend.as_ref(), ModelBackend::Real { .. })
+            && !self
+                .serving_profile
+                .runtime_policy()
+                .adapter_weight_transitions
+        {
+            anyhow::bail!(
+                "serving profile `{}` prohibits live adapter weight transitions",
+                self.serving_profile.profile()
+            );
+        }
+        Ok(())
+    }
+
     /// Register a new eval job: insert the `EvalJobInfo::queued` record
     /// into `eval_jobs` and push the corresponding `EvalQueueEntry` onto
     /// the worker queue. Returns the generated `job_id`. The two-write
