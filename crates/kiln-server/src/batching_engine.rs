@@ -325,6 +325,9 @@ fn collect_ready_decode_indices(
 
 pub trait DecodeForward: Send + Sync + 'static {
     fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot>;
+    fn supports_resumable_prefill(&self) -> bool {
+        false
+    }
     fn prepare_request_chunked(
         &self,
         req: &EngineRequest,
@@ -348,6 +351,12 @@ pub trait DecodeForward: Send + Sync + 'static {
         _cancel: &CancelHandle,
     ) -> Result<RequestPreparation> {
         anyhow::bail!("decode forward does not support resumable prefill")
+    }
+    /// Cheap, deterministic classification used on the actor hot path. Custom
+    /// forwards may keep resumable state outside [`DecodeSlot`] and override
+    /// this method; the production forward uses `RealPrefill` ownership.
+    fn is_prefilling(&self, slot: &DecodeSlot) -> bool {
+        matches!(slot, DecodeSlot::RealPrefill { .. })
     }
     fn can_reuse_as_strict_prefix(&self, _prompt_token_len: usize) -> bool {
         false
@@ -614,6 +623,10 @@ impl RealDecodeForward {
 }
 
 impl DecodeForward for RealDecodeForward {
+    fn supports_resumable_prefill(&self) -> bool {
+        true
+    }
+
     fn grow_for_decode(&self, slots: &mut [&mut DecodeSlot]) -> Result<Vec<usize>> {
         self.grow_for_decode_per_slot(slots)
     }
@@ -1495,6 +1508,12 @@ struct ActiveRequest {
     slot: DecodeSlot,
 }
 
+#[derive(Default)]
+struct AdmissionOutcome {
+    submitted_first_tokens: bool,
+    tokens_processed: usize,
+}
+
 struct EngineDeliveryResultSink {
     // One worker flush becomes one channel item. The actor cannot observe a
     // prefix of a decode cohort and accidentally launch a narrower forward.
@@ -1669,11 +1688,18 @@ impl BatchingEngineActor {
             if self.stopped {
                 break;
             }
-            let admission_deliveries = self.admit_waiting();
+            // Existing decode rows reserve their one-token steps before any
+            // fallback forward may do admission-time prompt work. Production
+            // resumable admission is allocation-only and reports zero tokens.
+            let decode_reservation = self
+                .ready_decode_indices_with_limit(self.max_batch_tokens)
+                .len();
+            let admission_budget = self.max_batch_tokens.saturating_sub(decode_reservation);
+            let admission = self.admit_waiting_with_budget(admission_budget);
             if self.stopped {
                 break;
             }
-            if admission_deliveries {
+            if admission.submitted_first_tokens {
                 let barrier = self
                     .delivery_worker
                     .as_ref()
@@ -1693,15 +1719,21 @@ impl BatchingEngineActor {
                     break;
                 }
             }
-            let decoded_tokens = if self.has_ready_decode_row() {
-                self.run_decode_batch()
+            let decode_budget = self
+                .max_batch_tokens
+                .saturating_sub(admission.tokens_processed);
+            let decoded_tokens = if decode_budget > 0 && self.has_ready_decode_row() {
+                self.run_decode_batch_with_budget(decode_budget)
             } else {
                 0
             };
             if self.stopped {
                 break;
             }
-            let prefill_budget = self.max_batch_tokens.saturating_sub(decoded_tokens);
+            let prefill_budget = self
+                .max_batch_tokens
+                .saturating_sub(admission.tokens_processed)
+                .saturating_sub(decoded_tokens);
             let advanced_prefill = self.run_prefill_budget(prefill_budget);
             if decoded_tokens > 0 || advanced_prefill {
                 continue;
@@ -1753,6 +1785,7 @@ impl BatchingEngineActor {
     fn has_ready_decode_row(&self) -> bool {
         self.active.iter().any(|active| {
             active.delivery_state == ActiveDeliveryState::Ready
+                && !self.forward.is_prefilling(&active.slot)
                 && match &active.slot {
                     DecodeSlot::Real {
                         first_token_pending,
@@ -2068,14 +2101,15 @@ impl BatchingEngineActor {
 
     /// Admit queued requests and report whether this cycle submitted one or
     /// more prefill-produced first tokens to the delivery worker.
-    fn admit_waiting(&mut self) -> bool {
+    fn admit_waiting_with_budget(&mut self, mut token_budget: usize) -> AdmissionOutcome {
         // A pending adapter swap needs the active batch to drain — admitting
         // new requests now would (a) delay the swap arbitrarily and (b) run
         // them under weights the caller is replacing. They stay queued and
         // resume right after the swap executes.
         if !self.pending_swaps.is_empty() {
-            return false;
+            return AdmissionOutcome::default();
         }
+        let initial_token_budget = token_budget;
         let mut admitted = 0usize;
         let mut submitted_first_tokens = false;
         // #1082 CUDA concurrency regression fix: CUDA (burst_refill) refills the
@@ -2093,6 +2127,7 @@ impl BatchingEngineActor {
         while self.active.len() < self.max_decode_batch
             && admitted < admission_limit
             && !self.waiting.is_empty()
+            && token_budget > 0
         {
             // Count deferrals during the admission scan itself — when every
             // waiting row is deferred, position() has already evaluated the
@@ -2114,10 +2149,16 @@ impl BatchingEngineActor {
                 .waiting
                 .remove(waiting_idx)
                 .expect("waiting index selected from VecDeque");
+            if !self.forward.supports_resumable_prefill()
+                && queued.req.prompt_tokens.len() > token_budget
+            {
+                self.waiting.insert(waiting_idx, queued);
+                break;
+            }
             let started = Instant::now();
             match self
                 .forward
-                .prepare_request_chunked(&queued.req, self.max_batch_tokens)
+                .prepare_request_chunked(&queued.req, token_budget)
             {
                 Ok(preparation) => {
                     let (slot, tokens_processed, ready) = match preparation {
@@ -2130,14 +2171,13 @@ impl BatchingEngineActor {
                             tokens_processed,
                         } => (slot, tokens_processed, true),
                     };
-                    if tokens_processed > self.max_batch_tokens {
+                    if tokens_processed > token_budget {
                         self.forward.discard_request(slot);
                         self.snapshot.total_errors = self.snapshot.total_errors.saturating_add(1);
                         self.terminate_delivery(
                             queued.delivery_key,
                             format!(
-                                "prefill admission processed {tokens_processed} tokens beyond the {}-token budget",
-                                self.max_batch_tokens
+                                "prefill admission processed {tokens_processed} tokens beyond the {token_budget}-token remainder"
                             ),
                         );
                         continue;
@@ -2148,6 +2188,7 @@ impl BatchingEngineActor {
                         .snapshot
                         .total_prefill_tokens
                         .saturating_add(tokens_processed as u64);
+                    token_budget -= tokens_processed;
                     admitted += 1;
                     let active_idx = self.active.len();
                     self.active.push(ActiveRequest {
@@ -2193,7 +2234,16 @@ impl BatchingEngineActor {
                 .saturating_add(1);
         }
         self.refresh_snapshot();
-        submitted_first_tokens
+        AdmissionOutcome {
+            submitted_first_tokens,
+            tokens_processed: initial_token_budget.saturating_sub(token_budget),
+        }
+    }
+
+    #[cfg(test)]
+    fn admit_waiting(&mut self) -> bool {
+        self.admit_waiting_with_budget(self.max_batch_tokens)
+            .submitted_first_tokens
     }
 
     /// Spend at most one combined-cycle token remainder on resumable prefills.
@@ -2208,7 +2258,7 @@ impl BatchingEngineActor {
                 .map(|offset| (self.next_prefill_index + offset) % active_len)
                 .find(|&idx| {
                     self.active[idx].delivery_state == ActiveDeliveryState::Ready
-                        && matches!(&self.active[idx].slot, DecodeSlot::RealPrefill { .. })
+                        && self.forward.is_prefilling(&self.active[idx].slot)
                 })
             else {
                 break;
@@ -2421,8 +2471,8 @@ impl BatchingEngineActor {
             })
     }
 
-    fn run_decode_batch(&mut self) -> usize {
-        let mut ready_indices = self.ready_decode_indices();
+    fn run_decode_batch_with_budget(&mut self, max_rows: usize) -> usize {
+        let mut ready_indices = self.ready_decode_indices_with_limit(max_rows);
         if ready_indices.is_empty() {
             return 0;
         }
@@ -2462,7 +2512,7 @@ impl BatchingEngineActor {
                         );
                         self.finish_active(idx, FinishReason::MaxTokens, None);
                     }
-                    ready_indices = self.ready_decode_indices();
+                    ready_indices = self.ready_decode_indices_with_limit(max_rows);
                     if ready_indices.is_empty() {
                         self.refresh_snapshot();
                         return 0;
@@ -2552,12 +2602,20 @@ impl BatchingEngineActor {
         batch_len
     }
 
-    fn ready_decode_indices(&self) -> Vec<usize> {
+    #[cfg(test)]
+    fn run_decode_batch(&mut self) -> usize {
+        self.run_decode_batch_with_budget(self.max_batch_tokens)
+    }
+
+    fn ready_decode_indices_with_limit(&self, max_rows: usize) -> Vec<usize> {
         self.active
             .iter()
             .enumerate()
             .filter_map(|(idx, active)| {
                 if active.delivery_state != ActiveDeliveryState::Ready {
+                    return None;
+                }
+                if self.forward.is_prefilling(&active.slot) {
                     return None;
                 }
                 match &active.slot {
@@ -2569,7 +2627,7 @@ impl BatchingEngineActor {
                     DecodeSlot::Real { .. } | DecodeSlot::Mock { .. } => Some(idx),
                 }
             })
-            .take(self.max_decode_batch)
+            .take(self.max_decode_batch.min(max_rows))
             .collect()
     }
 
@@ -2698,7 +2756,7 @@ impl BatchingEngineActor {
         self.snapshot.active_prefill = self
             .active
             .iter()
-            .filter(|active| matches!(&active.slot, DecodeSlot::RealPrefill { .. }))
+            .filter(|active| self.forward.is_prefilling(&active.slot))
             .count();
         self.snapshot.active_decode = self
             .active

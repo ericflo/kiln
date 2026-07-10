@@ -107,16 +107,21 @@ struct BatchingEngineSnapshotDebug {
     accepting: bool,
     queue_depth: usize,
     active_decode: usize,
+    active_prefill: usize,
+    max_batch_tokens: usize,
+    max_batch_tokens_source: ConfigValueSource,
     max_prefill_admission_quantum: usize,
     current_batch_size: usize,
     last_batch_size: usize,
     max_observed_batch_size: usize,
     last_forward_ms: f64,
     last_prefill_ms: f64,
+    last_prefill_tokens: usize,
     total_decode_forwards: u64,
     total_batched_decode_forwards: u64,
     total_decode_rows: u64,
     total_prefill_admission_cycles: u64,
+    total_prefill_forwards: u64,
     total_decode_tokens: u64,
     total_prefill_tokens: u64,
     total_errors: u64,
@@ -378,6 +383,7 @@ fn selected_env_flags() -> BTreeMap<&'static str, EnvFlagState> {
         "KILN_INFERENCE_MEMORY_FRACTION",
         "KILN_HTTP_SEND_BUFFER_BYTES",
         "KILN_STREAM_STALL_GRACE_MS",
+        "KILN_MAX_BATCH_TOKENS",
     ]
     .into_iter()
     .map(|name| {
@@ -518,16 +524,21 @@ impl From<BatchingEngineSnapshot> for BatchingEngineSnapshotDebug {
             accepting: snapshot.accepting,
             queue_depth: snapshot.queue_depth,
             active_decode: snapshot.active_decode,
+            active_prefill: snapshot.active_prefill,
+            max_batch_tokens: snapshot.max_batch_tokens,
+            max_batch_tokens_source: snapshot.max_batch_tokens_source,
             max_prefill_admission_quantum: snapshot.max_prefill_admission_quantum,
             current_batch_size: snapshot.current_batch_size,
             last_batch_size: snapshot.last_batch_size,
             max_observed_batch_size: snapshot.max_observed_batch_size,
             last_forward_ms: snapshot.last_forward_ms,
             last_prefill_ms: snapshot.last_prefill_ms,
+            last_prefill_tokens: snapshot.last_prefill_tokens,
             total_decode_forwards: snapshot.total_decode_forwards,
             total_batched_decode_forwards: snapshot.total_batched_decode_forwards,
             total_decode_rows: snapshot.total_decode_rows,
             total_prefill_admission_cycles: snapshot.total_prefill_admission_cycles,
+            total_prefill_forwards: snapshot.total_prefill_forwards,
             total_decode_tokens: snapshot.total_decode_tokens,
             total_prefill_tokens: snapshot.total_prefill_tokens,
             total_errors: snapshot.total_errors,
@@ -698,6 +709,7 @@ mod tests {
         assert!(json["env_flags"]["KILN_MEMORY_RECLAIM_MODE"].is_object());
         assert!(json["env_flags"]["KILN_HTTP_SEND_BUFFER_BYTES"].is_object());
         assert!(json["env_flags"]["KILN_STREAM_STALL_GRACE_MS"].is_object());
+        assert!(json["env_flags"]["KILN_MAX_BATCH_TOKENS"].is_object());
         assert_eq!(json["http"]["send_buffer_requested_bytes"], 4096);
         assert_eq!(json["http"]["send_buffer_kernel_readback_bytes"], 8192);
         assert_eq!(json["http"]["send_buffer_effective_bytes"], 4096);
@@ -717,6 +729,11 @@ mod tests {
         let debug = BatchingEngineSnapshotDebug::from(BatchingEngineSnapshot {
             stream_stall_grace_ms: 500,
             stream_stall_grace_source: ConfigValueSource::ConfigFile,
+            active_prefill: 3,
+            max_batch_tokens: 128,
+            max_batch_tokens_source: ConfigValueSource::Environment,
+            last_prefill_tokens: 124,
+            total_prefill_forwards: 11,
             response_delivery_in_flight: 4,
             response_delivery_backpressured: 2,
             response_delivery_pending_terminal: 1,
@@ -726,6 +743,11 @@ mod tests {
 
         assert_eq!(json["stream_stall_grace_ms"], 500);
         assert_eq!(json["stream_stall_grace_source"], "config_file");
+        assert_eq!(json["active_prefill"], 3);
+        assert_eq!(json["max_batch_tokens"], 128);
+        assert_eq!(json["max_batch_tokens_source"], "environment");
+        assert_eq!(json["last_prefill_tokens"], 124);
+        assert_eq!(json["total_prefill_forwards"], 11);
         assert_eq!(json["response_delivery_in_flight"], 4);
         assert_eq!(json["response_delivery_backpressured"], 2);
         assert_eq!(json["response_delivery_pending_terminal"], 1);

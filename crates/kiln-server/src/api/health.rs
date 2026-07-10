@@ -316,16 +316,21 @@ struct BatchingEngineInfo {
     accepting: bool,
     queue_depth: usize,
     active_decode: usize,
+    active_prefill: usize,
+    max_batch_tokens: usize,
+    max_batch_tokens_source: ConfigValueSource,
     max_prefill_admission_quantum: usize,
     current_batch_size: usize,
     last_batch_size: usize,
     max_observed_batch_size: usize,
     last_forward_ms: f64,
     last_prefill_ms: f64,
+    last_prefill_tokens: usize,
     total_decode_forwards: u64,
     total_batched_decode_forwards: u64,
     total_decode_rows: u64,
     total_prefill_admission_cycles: u64,
+    total_prefill_forwards: u64,
     total_decode_tokens: u64,
     total_prefill_tokens: u64,
     total_errors: u64,
@@ -823,16 +828,21 @@ impl From<BatchingEngineSnapshot> for BatchingEngineInfo {
             accepting: snapshot.accepting,
             queue_depth: snapshot.queue_depth,
             active_decode: snapshot.active_decode,
+            active_prefill: snapshot.active_prefill,
+            max_batch_tokens: snapshot.max_batch_tokens,
+            max_batch_tokens_source: snapshot.max_batch_tokens_source,
             max_prefill_admission_quantum: snapshot.max_prefill_admission_quantum,
             current_batch_size: snapshot.current_batch_size,
             last_batch_size: snapshot.last_batch_size,
             max_observed_batch_size: snapshot.max_observed_batch_size,
             last_forward_ms: snapshot.last_forward_ms,
             last_prefill_ms: snapshot.last_prefill_ms,
+            last_prefill_tokens: snapshot.last_prefill_tokens,
             total_decode_forwards: snapshot.total_decode_forwards,
             total_batched_decode_forwards: snapshot.total_batched_decode_forwards,
             total_decode_rows: snapshot.total_decode_rows,
             total_prefill_admission_cycles: snapshot.total_prefill_admission_cycles,
+            total_prefill_forwards: snapshot.total_prefill_forwards,
             total_decode_tokens: snapshot.total_decode_tokens,
             total_prefill_tokens: snapshot.total_prefill_tokens,
             total_errors: snapshot.total_errors,
@@ -937,6 +947,11 @@ mod tests {
             snapshot_age_ms: 125,
             stream_stall_grace_ms: 750,
             stream_stall_grace_source: ConfigValueSource::Environment,
+            active_prefill: 2,
+            max_batch_tokens: 256,
+            max_batch_tokens_source: ConfigValueSource::ConfigFile,
+            last_prefill_tokens: 251,
+            total_prefill_forwards: 9,
             response_backpressure_events: 3,
             response_backpressure_wait_ms: 750,
             response_stall_evictions: 2,
@@ -951,6 +966,11 @@ mod tests {
         assert_eq!(json["snapshot_age_ms"], 125);
         assert_eq!(json["stream_stall_grace_ms"], 750);
         assert_eq!(json["stream_stall_grace_source"], "environment");
+        assert_eq!(json["active_prefill"], 2);
+        assert_eq!(json["max_batch_tokens"], 256);
+        assert_eq!(json["max_batch_tokens_source"], "config_file");
+        assert_eq!(json["last_prefill_tokens"], 251);
+        assert_eq!(json["total_prefill_forwards"], 9);
         assert_eq!(json["response_delivery_in_flight"], 7);
         assert_eq!(json["response_delivery_backpressured"], 2);
         assert_eq!(json["response_delivery_pending_terminal"], 1);
