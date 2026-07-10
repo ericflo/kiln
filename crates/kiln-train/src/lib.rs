@@ -57,6 +57,7 @@ pub mod sft_tape_shim;
 // can extend it to cover the full per-step graph. See module docstring
 // + `docs/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md`. (#1082)
 pub mod tape_step;
+pub mod teacher_identity;
 pub mod train_receipt;
 pub mod trainer;
 pub mod trajectory;
@@ -70,6 +71,13 @@ pub use receipt::{
 };
 pub use remote_teacher::{
     RemoteProvider, RemoteTeacher, RemoteTeacherConfig, normalize_vllm_completions_url,
+};
+pub use teacher_identity::{
+    MAX_TEACHER_IDENTITY_FINGERPRINT_BYTES, MAX_TEACHER_IDENTITY_JSON_BYTES,
+    MAX_TEACHER_IDENTITY_NAME_BYTES, MAX_TEACHER_IMPLEMENTATION_BYTES, MAX_TEACHER_MODEL_LEN,
+    MAX_TEACHER_TOP_K, MAX_TEACHER_VOCAB_SIZE, TEACHER_IDENTITY_FINGERPRINT_PREFIX_V1,
+    TEACHER_IDENTITY_LOGPROBS_MODE_V1, TEACHER_IDENTITY_PROTOCOL_V1, TEACHER_IDENTITY_SCHEMA_V1,
+    TeacherAdapterIdentityV1, TeacherIdentityError, TeacherIdentityV1,
 };
 
 pub use adapter_output::{
