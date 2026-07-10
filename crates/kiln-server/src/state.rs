@@ -204,6 +204,44 @@ pub(crate) fn gpu_coordination_write_guard(
     futures::executor::block_on(gpu_lock.clone().write_owned())
 }
 
+const GPU_COORDINATION_HEALTH_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Wait for exclusive GPU ownership without entering an uninterruptible wait
+/// behind an inference owner whose completion state has been quarantined.
+///
+/// Quarantine deliberately leaks unknown GPU ownership. Polling `try_write`
+/// keeps writers responsive to that process-lifetime latch, and the second
+/// health check closes the acquisition race before the caller can mutate GPU
+/// state.
+pub(crate) fn gpu_coordination_write_guard_while_healthy(
+    gpu_lock: &GpuCoordinationLock,
+    backend_health: &BackendHealthHandle,
+) -> anyhow::Result<OwnedRwLockWriteGuard<()>> {
+    loop {
+        backend_health.ensure_healthy()?;
+        if let Ok(guard) = gpu_lock.clone().try_write_owned() {
+            backend_health.ensure_healthy()?;
+            return Ok(guard);
+        }
+        std::thread::sleep(GPU_COORDINATION_HEALTH_POLL);
+    }
+}
+
+/// Async counterpart of [`gpu_coordination_write_guard_while_healthy`].
+pub(crate) async fn gpu_coordination_write_guard_while_healthy_async(
+    gpu_lock: &GpuCoordinationLock,
+    backend_health: &BackendHealthHandle,
+) -> anyhow::Result<OwnedRwLockWriteGuard<()>> {
+    loop {
+        backend_health.ensure_healthy()?;
+        if let Ok(guard) = gpu_lock.clone().try_write_owned() {
+            backend_health.ensure_healthy()?;
+            return Ok(guard);
+        }
+        tokio::time::sleep(GPU_COORDINATION_HEALTH_POLL).await;
+    }
+}
+
 /// Type of training job.
 #[derive(Debug, Clone, Copy, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2142,6 +2180,24 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Return the process-lifetime health latch for a real backend. Mock mode
+    /// has no accelerator state to quarantine.
+    pub(crate) fn backend_health_handle(&self) -> Option<BackendHealthHandle> {
+        match self.backend.as_ref() {
+            ModelBackend::Real { backend_health, .. } => Some(backend_health.clone()),
+            ModelBackend::Mock { .. } => None,
+        }
+    }
+
+    /// Central admission gate shared by every server surface that can use or
+    /// mutate real backend state.
+    pub(crate) fn ensure_backend_healthy(&self) -> anyhow::Result<()> {
+        if let Some(backend_health) = self.backend_health_handle() {
+            backend_health.ensure_healthy()?;
+        }
+        Ok(())
+    }
+
     /// Register a new eval job: insert the `EvalJobInfo::queued` record
     /// into `eval_jobs` and push the corresponding `EvalQueueEntry` onto
     /// the worker queue. Returns the generated `job_id`. The two-write
@@ -2832,7 +2888,14 @@ impl AppState {
             let ready = runner
                 .read()
                 .unwrap()
-                .warm_resident_decode_pool(resident_max_batch);
+                .warm_resident_decode_pool(resident_max_batch)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(
+                        error = %format!("{error:#}"),
+                        "resident decode pool startup allocation rejected"
+                    );
+                    false
+                });
             tracing::info!(
                 max_batch = resident_max_batch,
                 ready,
@@ -3634,6 +3697,66 @@ mod tests {
             gpu_lock.try_write().is_ok(),
             "training writer must acquire after the moved read owner drops"
         );
+    }
+
+    #[test]
+    fn health_checked_gpu_writer_rejects_without_waiting_for_retained_reader() {
+        let gpu_lock: GpuCoordinationLock = std::sync::Arc::new(RwLock::new(()));
+        let retained_reader = gpu_coordination_read_guard(&gpu_lock);
+        let backend_health = BackendHealthHandle::default();
+        let worker_lock = gpu_lock.clone();
+        let worker_health = backend_health.clone();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            let result =
+                gpu_coordination_write_guard_while_healthy(&worker_lock, &worker_health).map(drop);
+            result_tx.send(result).unwrap();
+        });
+
+        assert!(
+            result_rx
+                .recv_timeout(std::time::Duration::from_millis(25))
+                .is_err(),
+            "healthy writer should still be waiting behind inference"
+        );
+        backend_health.quarantine("injected unknown inference completion");
+        let error = result_rx
+            .recv_timeout(std::time::Duration::from_millis(250))
+            .expect("quarantine must interrupt the writer wait")
+            .expect_err("quarantined writer must reject");
+        assert!(error.to_string().contains("requires restart"));
+        assert!(
+            gpu_lock.try_write().is_err(),
+            "the test must retain the unknown inference owner"
+        );
+        std::mem::forget(retained_reader);
+    }
+
+    #[tokio::test]
+    async fn async_health_checked_gpu_writer_rejects_retained_reader() {
+        let gpu_lock: GpuCoordinationLock = std::sync::Arc::new(RwLock::new(()));
+        let retained_reader = gpu_lock.clone().read_owned().await;
+        let backend_health = BackendHealthHandle::default();
+        let worker_lock = gpu_lock.clone();
+        let worker_health = backend_health.clone();
+        let writer = tokio::spawn(async move {
+            gpu_coordination_write_guard_while_healthy_async(&worker_lock, &worker_health)
+                .await
+                .map(drop)
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        assert!(!writer.is_finished());
+        backend_health.quarantine("injected async unknown inference completion");
+        let error = tokio::time::timeout(std::time::Duration::from_millis(250), writer)
+            .await
+            .expect("quarantine must interrupt the async writer wait")
+            .unwrap()
+            .expect_err("quarantined async writer must reject");
+        assert!(error.to_string().contains("requires restart"));
+        assert!(gpu_lock.try_write().is_err());
+        std::mem::forget(retained_reader);
     }
 
     fn tiny_linear_config() -> ModelConfig {

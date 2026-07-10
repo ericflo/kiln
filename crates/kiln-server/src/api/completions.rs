@@ -43,7 +43,7 @@ use crate::state::{
     DeterministicCompletionCacheClaim, DeterministicCompletionCacheKey,
     DeterministicCompletionCacheProbe, DeterministicCompletionCacheValue,
     DeterministicCompletionInFlightState, ModelBackend, RealPrefixCache, RealPrefixCacheRequest,
-    gpu_coordination_read_guard,
+    gpu_coordination_read_guard, gpu_coordination_write_guard_while_healthy_async,
 };
 use crate::teacher_identity::{
     MAX_COMPLETION_PROMPT_LOGPROB_CANDIDATES, MAX_COMPLETION_PROMPT_LOGPROBS,
@@ -66,11 +66,8 @@ fn observe_post_prefill_vram(memory_budget: &std::sync::Arc<crate::state::GpuMem
 }
 
 fn ensure_backend_admission(state: &AppState) -> Result<(), ApiError> {
-    let ModelBackend::Real { backend_health, .. } = state.backend.as_ref() else {
-        return Ok(());
-    };
-    backend_health
-        .ensure_healthy()
+    state
+        .ensure_backend_healthy()
         .map_err(ApiError::backend_quarantined)
 }
 
@@ -5525,9 +5522,16 @@ async fn real_prompt_logprobs(
     // Take exclusive GPU admission so concurrent scoring/generation/training
     // cannot multiply its bounded scratch residency into an OOM or a visible
     // mid-inference allocator stall.
-    let gpu_guard = tokio::time::timeout_at(deadline, state.gpu_lock.clone().write_owned())
-        .await
-        .map_err(|_| ApiError::request_timeout(timeout.as_secs()))?;
+    let gpu_guard = match tokio::time::timeout_at(
+        deadline,
+        gpu_coordination_write_guard_while_healthy_async(&state.gpu_lock, &backend_health),
+    )
+    .await
+    {
+        Ok(Ok(guard)) => guard,
+        Ok(Err(error)) => return Err(ApiError::backend_quarantined(error)),
+        Err(_) => return Err(ApiError::request_timeout(timeout.as_secs())),
+    };
 
     let runner = runner.clone();
     let prompt_tokens_owned = prompt_tokens.to_vec();

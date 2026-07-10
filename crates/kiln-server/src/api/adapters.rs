@@ -128,6 +128,19 @@ struct DeleteAdapterResponse {
     name: String,
 }
 
+fn ensure_adapter_mutation_admission(state: &AppState) -> Result<(), ApiError> {
+    state
+        .ensure_backend_healthy()
+        .map_err(ApiError::backend_quarantined)
+}
+
+fn adapter_swap_error(state: &AppState, error: String) -> ApiError {
+    match state.ensure_backend_healthy() {
+        Ok(()) => ApiError::adapter_load_failed(error),
+        Err(health_error) => ApiError::backend_quarantined(health_error),
+    }
+}
+
 /// List saved/available adapters and identify the active adapter.
 async fn list_adapters(State(state): State<AppState>) -> Json<AdaptersResponse> {
     // Read the active adapter name from shared state.
@@ -169,6 +182,7 @@ async fn load_adapter(
     State(state): State<AppState>,
     Json(req): Json<LoadAdapterRequest>,
 ) -> Result<Json<LoadAdapterResponse>, ApiError> {
+    ensure_adapter_mutation_admission(&state)?;
     validate_adapter_name(&req.name)?;
 
     let adapter_path = state.adapter_dir.join(&req.name);
@@ -258,7 +272,7 @@ async fn load_adapter(
             operation = "load",
             "adapter load rejected"
         );
-        return Err(ApiError::adapter_load_failed(err));
+        return Err(adapter_swap_error(&state, err));
     }
 
     record_adapter_loaded(&state, &req.name, &resolved_adapter_path);
@@ -348,6 +362,7 @@ fn find_single_nested_adapter_dir(parent: &Path) -> Option<PathBuf> {
 async fn unload_adapter(
     State(state): State<AppState>,
 ) -> Result<Json<UnloadAdapterResponse>, ApiError> {
+    ensure_adapter_mutation_admission(&state)?;
     let runner = match state.backend.as_ref() {
         ModelBackend::Real { runner, .. } => runner,
         ModelBackend::Mock { .. } => {
@@ -373,7 +388,7 @@ async fn unload_adapter(
         },
     )
     .await
-    .map_err(ApiError::adapter_load_failed)?;
+    .map_err(|error| adapter_swap_error(&state, error))?;
 
     record_adapter_unloaded(&state);
 
@@ -400,6 +415,7 @@ async fn delete_adapter(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<DeleteAdapterResponse>, ApiError> {
+    ensure_adapter_mutation_admission(&state)?;
     validate_adapter_name(&name)?;
     let adapter_path = state.adapter_dir.join(&name);
 
@@ -774,6 +790,7 @@ async fn merge_adapters(
     State(state): State<AppState>,
     Json(req): Json<MergeAdapterRequest>,
 ) -> Result<Json<MergeAdapterResponse>, ApiError> {
+    ensure_adapter_mutation_admission(&state)?;
     // Validate mode (default = weighted_average).
     let mode_str = req.mode.as_deref().unwrap_or("weighted_average");
     let resolved_mode: &'static str = match mode_str {
@@ -907,6 +924,11 @@ async fn merge_adapters(
             return Err(ApiError::adapter_merge_failed(msg));
         }
     };
+
+    if let Err(error) = ensure_adapter_mutation_admission(&state) {
+        let _ = std::fs::remove_dir_all(&output_path);
+        return Err(error);
+    }
 
     tracing::info!(
         output = %output_name,
@@ -1157,6 +1179,7 @@ async fn upload_adapter(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> Result<Json<UploadAdapterResponse>, ApiError> {
+    ensure_adapter_mutation_admission(&state)?;
     let mut name: Option<String> = None;
     let mut archive_path: Option<PathBuf> = None;
     let mut tmp_root: Option<PathBuf> = None;
@@ -1283,6 +1306,7 @@ async fn upload_adapter(
         cleanup_tmp(&tmp_root);
         return Err(ApiError::adapter_already_exists(&name));
     }
+    ensure_adapter_mutation_admission(&state)?;
 
     // Extract on a blocking thread — tar/flate2 are sync, and decompression of
     // a real adapter pegs a CPU for ~hundreds of ms.
@@ -1490,6 +1514,11 @@ async fn upload_adapter(
             return Err(ApiError::adapter_disk_quota_exceeded(msg));
         }
     };
+
+    if let Err(error) = ensure_adapter_mutation_admission(&state) {
+        let _ = std::fs::remove_dir_all(&target_dir);
+        return Err(error);
+    }
 
     tracing::info!(
         adapter = %name,

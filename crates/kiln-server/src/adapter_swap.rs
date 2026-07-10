@@ -70,7 +70,7 @@ pub async fn swap_runtime_adapter(
     state: &AppState,
     req: SwapRequest,
 ) -> Result<Option<String>, String> {
-    let _serial = state.adapter_swap_lock.lock().await;
+    let _serial = adapter_swap_guard(state).await?;
 
     let target_name = req.target.cache_name();
     let current = state.loaded_adapter_name.read().unwrap().clone();
@@ -102,6 +102,13 @@ pub async fn swap_runtime_adapter(
         }
         None => None,
     };
+    state
+        .ensure_backend_healthy()
+        .map_err(|error| format!("{error:#}"))?;
+
+    let backend_health = state
+        .backend_health_handle()
+        .ok_or_else(|| "adapter swap requires the real model backend".to_string())?;
 
     let closure = swap_closure(
         state,
@@ -112,7 +119,7 @@ pub async fn swap_runtime_adapter(
     );
     match engine {
         Some(engine) => engine
-            .swap_adapter(closure)
+            .swap_adapter_while_healthy(closure, &backend_health)
             .await
             .map_err(|e| format!("{e:#}"))?,
         None => {
@@ -131,7 +138,7 @@ pub fn swap_runtime_adapter_blocking(
     state: &AppState,
     req: SwapRequest,
 ) -> Result<Option<String>, String> {
-    let _serial = state.adapter_swap_lock.blocking_lock();
+    let _serial = adapter_swap_guard_blocking(state)?;
 
     let target_name = req.target.cache_name();
     let current = state.loaded_adapter_name.read().unwrap().clone();
@@ -153,6 +160,13 @@ pub fn swap_runtime_adapter_blocking(
         }
         None => None,
     };
+    state
+        .ensure_backend_healthy()
+        .map_err(|error| format!("{error:#}"))?;
+
+    let backend_health = state
+        .backend_health_handle()
+        .ok_or_else(|| "adapter swap requires the real model backend".to_string())?;
 
     let closure = swap_closure(
         state,
@@ -163,13 +177,45 @@ pub fn swap_runtime_adapter_blocking(
     );
     match engine {
         Some(engine) => engine
-            .swap_adapter_blocking(closure)
+            .swap_adapter_blocking_while_healthy(closure, &backend_health)
             .map_err(|e| format!("{e:#}"))?,
         None => closure()?,
     }
 
     log_transition(&current, &target_name, req.reason);
     Ok(current)
+}
+
+async fn adapter_swap_guard(state: &AppState) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+    loop {
+        state
+            .ensure_backend_healthy()
+            .map_err(|error| format!("{error:#}"))?;
+        if let Ok(guard) = state.adapter_swap_lock.try_lock() {
+            state
+                .ensure_backend_healthy()
+                .map_err(|error| format!("{error:#}"))?;
+            return Ok(guard);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+fn adapter_swap_guard_blocking(
+    state: &AppState,
+) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+    loop {
+        state
+            .ensure_backend_healthy()
+            .map_err(|error| format!("{error:#}"))?;
+        if let Ok(guard) = state.adapter_swap_lock.try_lock() {
+            state
+                .ensure_backend_healthy()
+                .map_err(|error| format!("{error:#}"))?;
+            return Ok(guard);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
 }
 
 fn real_backend_handles(
@@ -221,10 +267,18 @@ fn swap_closure(
 ) -> crate::batching_engine::AdapterSwapClosure {
     let state = state.clone();
     Box::new(move || {
+        state
+            .ensure_backend_healthy()
+            .map_err(|error| format!("{error:#}"))?;
         {
             let mut guard = runner.write().unwrap();
-            guard.swap_lora(lora);
+            guard
+                .swap_lora(lora)
+                .map_err(|error| format!("{error:#}"))?;
         }
+        state
+            .ensure_backend_healthy()
+            .map_err(|error| format!("{error:#}"))?;
         *state.loaded_adapter_name.write().unwrap() = target_name.clone();
         if content_changed {
             state.purge_adapter_caches(&target_name);

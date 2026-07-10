@@ -528,7 +528,13 @@ impl EvalGenerator for LiveEvalGenerator {
             // synchronous enqueue scheduling step.
             let active_adapter = state.active_adapter_name.read().unwrap().clone();
             let enqueue_fut = {
+                state
+                    .ensure_backend_healthy()
+                    .map_err(|error| format!("{error:#}"))?;
                 let _gpu_guard = state.gpu_lock.clone().read_owned().await;
+                state
+                    .ensure_backend_healthy()
+                    .map_err(|error| format!("{error:#}"))?;
                 batching_engine.enqueue(EngineRequest {
                     request_id,
                     prompt_tokens: prompt_tokens.clone(),

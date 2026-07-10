@@ -645,14 +645,18 @@ async fn test_real_model_prompt_logprobs_rejects_active_adapter() {
     let state = tiny_real_state_with_timeout(tiny_config(), Duration::from_secs(1));
     let gpu_lock = state.gpu_lock.clone();
     let runner = real_runner(&state);
-    runner.write().unwrap().swap_lora(Some(LoraWeights {
-        layers: Vec::new(),
-        mtp: None,
-        rank: 1,
-        alpha: 1.0,
-        scale: 1.0,
-        source_identity: None,
-    }));
+    runner
+        .write()
+        .unwrap()
+        .swap_lora(Some(LoraWeights {
+            layers: Vec::new(),
+            mtp: None,
+            rank: 1,
+            alpha: 1.0,
+            scale: 1.0,
+            source_identity: None,
+        }))
+        .unwrap();
     let app = api::router(state);
 
     let response = app

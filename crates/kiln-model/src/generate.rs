@@ -2309,17 +2309,22 @@ impl ModelRunner {
     /// Eagerly allocate the backend-resident decode scratch ring when the
     /// backend supports it. This keeps the first live decode request from
     /// paying the pool feasibility/allocation cost on the request path.
-    pub fn warm_resident_decode_pool(&self, max_batch: usize) -> bool {
-        ReplayBackend::runtime_decode_resident_pool_ready(
+    pub fn warm_resident_decode_pool(&self, max_batch: usize) -> Result<bool> {
+        self.ensure_backend_healthy()?;
+        let ready = ReplayBackend::runtime_decode_resident_pool_ready(
             self.backend.as_ref(),
             self.config.hidden_size,
             self.config.intermediate_size,
             max_batch,
-        )
+        );
+        self.ensure_backend_healthy()?;
+        Ok(ready)
     }
 
     pub fn precompile_backend_startup_kernels(&self) -> Result<()> {
-        StartupBackend::runtime_precompile_startup_kernels(self.backend.as_ref())
+        self.ensure_backend_healthy()?;
+        StartupBackend::runtime_precompile_startup_kernels(self.backend.as_ref())?;
+        self.ensure_backend_healthy()
     }
 
     /// Preload backend-specific decode weights into persistent device caches.
@@ -2328,7 +2333,9 @@ impl ModelRunner {
     /// training retain the authoritative tensors because portable fallback and
     /// backward both read them directly.
     pub fn prewarm_backend_decode_weights(&self) -> Result<()> {
-        LinearBackend::runtime_prewarm_decode_weights(self.backend.as_ref(), &self.weights)
+        self.ensure_backend_healthy()?;
+        LinearBackend::runtime_prewarm_decode_weights(self.backend.as_ref(), &self.weights)?;
+        self.ensure_backend_healthy()
     }
 
     /// Load a LoRA adapter from a PEFT-compatible directory.
@@ -2336,6 +2343,7 @@ impl ModelRunner {
     /// The directory must contain `adapter_config.json` and `adapter_model.safetensors`.
     /// Replaces any previously loaded adapter.
     pub fn load_adapter(&mut self, path: &Path) -> Result<()> {
+        self.ensure_backend_healthy()?;
         // (#1082) `LoraWeights::load` is kt-native — pass kt device by value.
         let kt_device = self.weights.embed_tokens.device();
         let num_layers = self.config.num_layers;
@@ -2374,11 +2382,12 @@ impl ModelRunner {
         if let Ok(mut cache) = self.batched_state_cache.lock() {
             *cache = None;
         }
-        Ok(())
+        self.ensure_backend_healthy()
     }
 
     /// Unload the currently active LoRA adapter, reverting to base model.
-    pub fn unload_adapter(&mut self) {
+    pub fn unload_adapter(&mut self) -> Result<()> {
+        self.ensure_backend_healthy()?;
         if let Some(prev) = self.active_lora.take() {
             // Phase 4.1: evict the now-removed adapter's LoRA Vars
             // from the resident registry so they don't leak.
@@ -2396,6 +2405,7 @@ impl ModelRunner {
         if let Ok(mut cache) = self.batched_state_cache.lock() {
             *cache = None;
         }
+        self.ensure_backend_healthy()
     }
 
     /// Returns a reference to the active LoRA weights, if any.
@@ -2454,7 +2464,8 @@ impl ModelRunner {
     ///
     /// Invalidates any captured CUDA graph since the adapter change alters
     /// weight tensor pointers embedded in the graph.
-    pub fn swap_lora(&mut self, lora: Option<LoraWeights>) {
+    pub fn swap_lora(&mut self, lora: Option<LoraWeights>) -> Result<()> {
+        self.ensure_backend_healthy()?;
         self.active_lora = lora;
         if let Ok(mut graph) = self.cuda_graph.lock() {
             graph.invalidate();
@@ -2468,6 +2479,7 @@ impl ModelRunner {
         if let Ok(mut cache) = self.batched_state_cache.lock() {
             *cache = None;
         }
+        self.ensure_backend_healthy()
     }
 
     fn snapshot_draft_linear_state(

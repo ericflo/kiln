@@ -16,8 +16,9 @@ use kiln_core::block::BlockManager;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 use kiln_model::{
-    CancelHandle, DecodeBatcherPolicy, FinishReason, GenerationOutput, ModelRunner,
-    PagedBatchedDecodeState, PagedKvCacheKt, PagedPrefixRegistration, PagedPrefixReuse,
+    BackendHealthHandle, CancelHandle, DecodeBatcherPolicy, FinishReason, GenerationOutput,
+    ModelRunner, PagedBatchedDecodeState, PagedKvCacheKt, PagedPrefixRegistration,
+    PagedPrefixReuse,
 };
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
@@ -30,7 +31,7 @@ use crate::response_delivery::{
 };
 use crate::state::{
     GpuCoordinationLock, RealPrefixCache, RealPrefixCacheRequest, gpu_coordination_read_guard,
-    gpu_coordination_write_guard,
+    gpu_coordination_write_guard_while_healthy,
 };
 
 const DEFAULT_ENGINE_CHANNEL: usize = 1024;
@@ -360,6 +361,7 @@ pub trait DecodeForward: Send + Sync + 'static {
 
 pub struct RealDecodeForward {
     runner: Arc<RwLock<ModelRunner>>,
+    backend_health: BackendHealthHandle,
     block_manager: Arc<Mutex<BlockManager>>,
     paged_cache: Arc<PagedKvCacheKt>,
     prefix_cache: Arc<Mutex<RealPrefixCache>>,
@@ -380,8 +382,13 @@ impl RealDecodeForward {
         gpu_lock: GpuCoordinationLock,
     ) -> Self {
         let rowwise_decode = default_rowwise_decode();
+        let backend_health = runner
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .backend_health_handle();
         Self {
             runner,
+            backend_health,
             block_manager,
             paged_cache,
             prefix_cache,
@@ -905,7 +912,8 @@ impl DecodeForward for RealDecodeForward {
         // pool we are about to drop. Combined with the device-sync inside
         // `physical_resize_to`, the swap is race-free. Resize is rare
         // (governor-driven under pressure), so the brief decode stall is fine.
-        let _gpu = gpu_coordination_write_guard(&self.gpu_lock);
+        let _gpu =
+            gpu_coordination_write_guard_while_healthy(&self.gpu_lock, &self.backend_health)?;
         if target_blocks < cur {
             // SHRINK. Logical first: lower the ceiling + retire free high blocks.
             // We can only physically drop to the live high-water mark right now;
@@ -1146,6 +1154,32 @@ impl BatchingEngineHandle {
             .map_err(|e| anyhow::anyhow!(e))
     }
 
+    /// Health-aware adapter barrier. If inference quarantines while the actor
+    /// drains its active batch, the caller returns promptly. The queued swap
+    /// closure must still recheck the same latch before mutating weights.
+    pub async fn swap_adapter_while_healthy(
+        &self,
+        swap: AdapterSwapClosure,
+        backend_health: &BackendHealthHandle,
+    ) -> Result<()> {
+        let (reply, mut rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::SwapAdapter { swap, reply })
+            .await
+            .map_err(|_| anyhow::anyhow!("batching engine stopped"))?;
+        loop {
+            backend_health.ensure_healthy()?;
+            tokio::select! {
+                result = &mut rx => {
+                    return result
+                        .map_err(|_| anyhow::anyhow!("batching engine stopped before swap ack"))?
+                        .map_err(|error| anyhow::anyhow!(error));
+                }
+                _ = tokio::time::sleep(Duration::from_millis(5)) => {}
+            }
+        }
+    }
+
     /// Blocking variant of [`Self::swap_adapter`] for the training worker's
     /// (non-async) job thread.
     pub fn swap_adapter_blocking(&self, swap: AdapterSwapClosure) -> Result<()> {
@@ -1156,6 +1190,30 @@ impl BatchingEngineHandle {
         rx.blocking_recv()
             .map_err(|_| anyhow::anyhow!("batching engine stopped before swap ack"))?
             .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    /// Blocking counterpart of [`Self::swap_adapter_while_healthy`].
+    pub fn swap_adapter_blocking_while_healthy(
+        &self,
+        swap: AdapterSwapClosure,
+        backend_health: &BackendHealthHandle,
+    ) -> Result<()> {
+        let (reply, mut rx) = oneshot::channel();
+        self.tx
+            .blocking_send(EngineCommand::SwapAdapter { swap, reply })
+            .map_err(|_| anyhow::anyhow!("batching engine stopped"))?;
+        loop {
+            backend_health.ensure_healthy()?;
+            match rx.try_recv() {
+                Ok(result) => return result.map_err(|error| anyhow::anyhow!(error)),
+                Err(oneshot::error::TryRecvError::Empty) => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    anyhow::bail!("batching engine stopped before swap ack")
+                }
+            }
+        }
     }
 }
 
@@ -2838,6 +2896,52 @@ mod tests {
             "both of A's decode steps precede the swap: {log:?}"
         );
 
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn health_checked_adapter_swap_rejects_while_active_request_drains() {
+        let events: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+        let (forward, release) = GatedForward::new(events.clone());
+        let handle = BatchingEngineHandle::start_with_options(Arc::new(forward), 8);
+        let mut response = handle.enqueue(request(100, 2)).await.unwrap();
+        release.send(()).unwrap();
+        assert!(matches!(
+            response.recv().await,
+            Some(EngineEvent::Token { .. })
+        ));
+
+        let backend_health = BackendHealthHandle::default();
+        let swap_health = backend_health.clone();
+        let swap_handle = handle.clone();
+        let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let fired_in_swap = fired.clone();
+        let swap = tokio::spawn(async move {
+            swap_handle
+                .swap_adapter_while_healthy(
+                    Box::new(move || {
+                        fired_in_swap.store(true, std::sync::atomic::Ordering::SeqCst);
+                        Ok(())
+                    }),
+                    &swap_health,
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(!swap.is_finished());
+
+        backend_health.quarantine("injected unknown completion during adapter barrier");
+        let error = tokio::time::timeout(Duration::from_millis(250), swap)
+            .await
+            .expect("quarantine must interrupt the adapter barrier wait")
+            .unwrap()
+            .expect_err("quarantined adapter barrier must reject");
+        assert!(error.to_string().contains("requires restart"));
+        assert!(!fired.load(std::sync::atomic::Ordering::SeqCst));
+
+        // Let the actor settle so this test does not leave its worker thread
+        // blocked. Production adapter closures recheck health and reject here.
+        release.send(()).unwrap();
         handle.stop().await.unwrap();
     }
 
