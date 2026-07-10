@@ -2672,6 +2672,7 @@ fn batching_forward_rejects_queued_request_after_same_name_revision_swap() {
         ))),
         Arc::new(tokio::sync::RwLock::new(())),
         loaded_adapter,
+        false,
     );
     let request = EngineRequest {
         request_id: Uuid::new_v4(),
@@ -2692,6 +2693,42 @@ fn batching_forward_rejects_queued_request_after_same_name_revision_swap() {
         error.to_string().contains("adapter revision is stale"),
         "{error:#}"
     );
+}
+
+#[test]
+fn stable_real_forward_rejects_physical_kv_resize_without_mutation() {
+    let config = tiny_config();
+    let runner = ModelRunner::new(
+        tiny_weights(&config, &Device::Cpu),
+        test_tokenizer(),
+        config.clone(),
+    );
+    let paged_cache = Arc::new(prefix_test_paged_cache(&config));
+    let start_blocks = paged_cache.num_blocks();
+    let forward = RealDecodeForward::new(
+        Arc::new(RwLock::new(runner)),
+        Arc::new(Mutex::new(BlockManager::new(
+            PREFIX_TEST_NUM_BLOCKS,
+            PREFIX_TEST_BLOCK_SIZE,
+        ))),
+        Arc::clone(&paged_cache),
+        Arc::new(Mutex::new(RealPrefixCache::disabled(
+            PREFIX_TEST_BLOCK_SIZE,
+        ))),
+        Arc::new(tokio::sync::RwLock::new(())),
+        Arc::new(RwLock::new(None)),
+        false,
+    );
+
+    let error = forward
+        .resize_kv(start_blocks.saturating_sub(1))
+        .expect_err("stable profile must reject physical KV resize");
+    assert!(
+        error
+            .to_string()
+            .contains("prohibited by the active serving profile")
+    );
+    assert_eq!(paged_cache.num_blocks(), start_blocks);
 }
 
 #[test]
@@ -3051,6 +3088,7 @@ fn real_resumable_prefill_cancel_and_discard_release_cpu_ownership() {
         prefix_cache.clone(),
         Arc::new(tokio::sync::RwLock::new(())),
         Arc::new(RwLock::new(None)),
+        false,
     );
     let sampling = SamplingParams {
         max_tokens: 1,
@@ -3146,6 +3184,7 @@ fn prefix_cache_multi_turn_hit_through_batching_engine_forward() {
         prefix_cache.clone(),
         Arc::new(tokio::sync::RwLock::new(())),
         Arc::new(RwLock::new(None)),
+        false,
     );
 
     let sampling = SamplingParams {

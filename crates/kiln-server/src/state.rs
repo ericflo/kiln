@@ -2314,6 +2314,8 @@ pub struct SelfImproveSchedulerStatus {
 
 #[derive(Clone)]
 pub struct AppState {
+    /// Immutable process-lifetime serving policy and its startup provenance.
+    pub serving_profile: crate::config::ServingProfileSetting,
     pub model_config: ModelConfig,
     /// Configured model directory path for real inference mode. `None` in mock mode.
     pub model_path: Option<PathBuf>,
@@ -2690,6 +2692,7 @@ impl AppState {
     ) -> Self {
         let config_hashes = ConfigHashes::from_model_tokenizer(&model_config, &tokenizer, None);
         Self {
+            serving_profile: crate::config::ServingProfileSetting::default(),
             model_config,
             model_path: None,
             base_teacher_identity: None,
@@ -2808,6 +2811,42 @@ impl AppState {
         prefix_cache_cfg: &crate::config::PrefixCacheConfig,
         base_teacher_identity: Option<Arc<kiln_train::TeacherIdentityV1>>,
     ) -> Self {
+        Self::new_real_with_serving_profile(
+            model_config,
+            runner,
+            tokenizer,
+            device_kt,
+            adapter_dir,
+            memory_cfg,
+            response_delivery_policy,
+            max_batch_tokens,
+            request_timeout_secs,
+            served_model_id,
+            prefix_cache_cfg,
+            base_teacher_identity,
+            crate::config::ServingProfileSetting::default(),
+        )
+    }
+
+    /// Production constructor with an explicit process-lifetime serving
+    /// profile. The compatibility constructor above resolves to stable.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_real_with_serving_profile(
+        model_config: ModelConfig,
+        runner: ModelRunner,
+        tokenizer: KilnTokenizer,
+        device_kt: kiln_tensor::Device,
+        adapter_dir: PathBuf,
+        memory_cfg: &crate::config::MemoryConfig,
+        response_delivery_policy: crate::batching_engine::ResponseDeliveryPolicy,
+        max_batch_tokens: crate::config::BatchTokenBudget,
+        request_timeout_secs: u64,
+        served_model_id: String,
+        prefix_cache_cfg: &crate::config::PrefixCacheConfig,
+        base_teacher_identity: Option<Arc<kiln_train::TeacherIdentityV1>>,
+        serving_profile: crate::config::ServingProfileSetting,
+    ) -> Self {
+        let serving_policy = serving_profile.runtime_policy();
         let block_size = DEFAULT_BLOCK_SIZE;
         // §3.2 teacher registry — loaded from `adapter_dir/teachers.json`
         // if present. Clone-able Arc so the AppState field below can
@@ -2910,12 +2949,17 @@ impl AppState {
         // — e.g. a coexisting llama.cpp / vLLM job, or a training run, grabbing
         // VRAM — the governor returns kiln's pooled-but-unused VRAM to the OS
         // instead of hoarding it. Idempotent via the OnceLock guard.
-        {
+        if serving_policy.allocator_reclaim {
             static GOVERNOR_WIRED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
             GOVERNOR_WIRED.get_or_init(|| {
                 register_backend_memory_reclaimer(gpu_memory_reclaim_policy, device_kt);
                 kiln_memory::MemoryGovernor::global().start_monitor();
             });
+        } else {
+            tracing::info!(
+                serving_profile = %serving_profile.profile(),
+                "backend allocator reclaim hooks disabled by serving profile"
+            );
         }
 
         let post_load_used_vram_info = runtime_used_vram_for_policy(gpu_memory_budget_policy);
@@ -3088,7 +3132,10 @@ impl AppState {
                 // have failed only because freed blocks were still pooled (or a
                 // coexisting job briefly spiked). Cheaper than shrinking the KV
                 // cache if the memory is genuinely reclaimable.
-                Err(first) if gpu_memory_budget_policy.retry_kv_allocation_after_reclaim => {
+                Err(first)
+                    if serving_policy.allocator_reclaim
+                        && gpu_memory_budget_policy.retry_kv_allocation_after_reclaim =>
+                {
                     let freed = kiln_memory::MemoryGovernor::global().reclaim(u64::MAX);
                     tracing::warn!(
                         num_blocks = n,
@@ -3325,6 +3372,7 @@ impl AppState {
                     prefix_cache.clone(),
                     gpu_lock.clone(),
                     loaded_adapter.clone(),
+                    serving_policy.dynamic_kv_resize,
                 )),
                 max_decode_batch,
                 Some(decode_batcher_policy),
@@ -3339,7 +3387,9 @@ impl AppState {
         // arbitrate. The autoscaler shrinks KV when VRAM gets tight and grows it
         // back when headroom returns; the resize itself runs on the engine actor
         // at its barrier under exclusive GPU access.
-        let kv_autoscaler = if let Some(engine) = batching_engine.clone() {
+        let kv_autoscaler = if !serving_policy.dynamic_kv_resize {
+            crate::kv_autoscaler::KvAutoscalerState::unavailable("serving_profile_stable")
+        } else if let Some(engine) = batching_engine.clone() {
             if backend_capabilities.storage.kv_cache_device_memory_pressure {
                 crate::kv_autoscaler::spawn(
                     engine,
@@ -3379,6 +3429,7 @@ impl AppState {
 
         let config_hashes = ConfigHashes::from_model_tokenizer(&model_config, &tokenizer, None);
         Self {
+            serving_profile,
             model_config,
             model_path: None,
             base_teacher_identity,

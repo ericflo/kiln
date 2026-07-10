@@ -20,9 +20,24 @@ use kiln_core::sampling::SamplingParams;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::MockEngine;
 use kiln_model::forward::GpuWeights;
-use kiln_model::{ModelRunner, StartupCapabilities};
+use kiln_model::{ModelRunner, ModelRunnerRuntimeOptions, StartupCapabilities};
 use kiln_scheduler::{Scheduler, SchedulerConfig};
 use state::{AppState, GpuCoordinationLock, ModelBackend};
+
+fn resolve_model_runner_runtime_options(
+    policy: kiln_server::config::ServingRuntimePolicy,
+    cuda_graphs_requested: bool,
+) -> ModelRunnerRuntimeOptions {
+    if policy.live_graph_capture {
+        ModelRunnerRuntimeOptions {
+            cuda_graphs: cuda_graphs_requested,
+            rocm_graphs: true,
+            metal_graphs: true,
+        }
+    } else {
+        ModelRunnerRuntimeOptions::eager_only()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct HttpSendBufferApplication {
@@ -341,6 +356,7 @@ async fn main() -> Result<()> {
 
     // --- Server startup ---
     let config = KilnConfig::load(args.config.as_deref())?;
+    let serving_policy = config.server.serving_profile.runtime_policy();
 
     let level = args.effective_log_level(&config.logging.level);
     kiln_server::logging::init(level, &config.logging.format)?;
@@ -439,7 +455,9 @@ async fn main() -> Result<()> {
         // Real inference mode: load model weights and create ModelRunner.
         tracing::debug!("loading model weights from {mp}");
         let load_spinner = cli::make_startup_spinner("selecting device");
-        let device_kt = select_device_with_options_kt(config.memory.cuda_graphs)?;
+        let graph_options =
+            resolve_model_runner_runtime_options(serving_policy, config.memory.cuda_graphs);
+        let device_kt = select_device_with_options_kt(graph_options.cuda_graphs)?;
         if let Some(pb) = load_spinner.as_ref() {
             pb.set_message(format!("loading model weights from {mp}"));
         }
@@ -470,11 +488,11 @@ async fn main() -> Result<()> {
         if let Some(pb) = load_spinner.as_ref() {
             pb.set_message("initializing inference runtime");
         }
-        let runner = ModelRunner::new_with_options(
+        let runner = ModelRunner::new_with_runtime_options(
             gpu_weights,
             tokenizer.clone(),
             model_config.clone(),
-            config.memory.cuda_graphs,
+            graph_options,
         );
         let executable_sha256 = kiln_server::teacher_identity::current_executable_sha256()
             .context("failed to fingerprint the running server executable")?;
@@ -516,7 +534,7 @@ async fn main() -> Result<()> {
         tracing::debug!(
             "training endpoints available — in-process LoRA training (no sidecar needed)"
         );
-        AppState::new_real(
+        AppState::new_real_with_serving_profile(
             model_config,
             runner,
             tokenizer,
@@ -529,6 +547,7 @@ async fn main() -> Result<()> {
             served_model_id,
             &config.prefix_cache,
             Some(base_teacher_identity),
+            config.server.serving_profile,
         )
     } else {
         // Mock mode: use scheduler + mock engine.
@@ -555,6 +574,7 @@ async fn main() -> Result<()> {
     };
 
     // Apply server-level checkpoint_interval from config
+    state.serving_profile = config.server.serving_profile;
     state.checkpoint_interval = config.training.checkpoint_interval;
     state.training_webhook_url = config.training.webhook_url.clone();
     state.max_queued_training_jobs = config.training.max_queued_jobs;
@@ -1333,6 +1353,31 @@ async fn shutdown_signal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stable_and_maintenance_profiles_force_eager_runners() {
+        for profile in [
+            kiln_server::config::ServingProfile::Stable,
+            kiln_server::config::ServingProfile::Maintenance,
+        ] {
+            let options = resolve_model_runner_runtime_options(profile.runtime_policy(), true);
+            assert_eq!(options, ModelRunnerRuntimeOptions::eager_only());
+        }
+    }
+
+    #[test]
+    fn experimental_profile_preserves_explicit_graph_eligibility() {
+        let policy = kiln_server::config::ServingProfile::Experimental.runtime_policy();
+        assert_eq!(
+            resolve_model_runner_runtime_options(policy, true),
+            ModelRunnerRuntimeOptions {
+                cuda_graphs: true,
+                rocm_graphs: true,
+                metal_graphs: true,
+            }
+        );
+        assert!(!resolve_model_runner_runtime_options(policy, false).cuda_graphs);
+    }
 
     #[test]
     fn send_buffer_readback_uses_platform_accounting() {

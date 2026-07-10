@@ -424,6 +424,7 @@ pub struct RealDecodeForward {
     prefix_cache: Arc<Mutex<RealPrefixCache>>,
     gpu_lock: GpuCoordinationLock,
     loaded_adapter: Arc<RwLock<Option<LoadedAdapterIdentity>>>,
+    allow_dynamic_kv_resize: bool,
     // When set, multi-row decode steps are dispatched as a loop of single-row
     // forwards instead of one batched forward. Defaults off so Vulkan reaches
     // the native multi-row resident decode route; the env override is kept for
@@ -439,6 +440,7 @@ impl RealDecodeForward {
         prefix_cache: Arc<Mutex<RealPrefixCache>>,
         gpu_lock: GpuCoordinationLock,
         loaded_adapter: Arc<RwLock<Option<LoadedAdapterIdentity>>>,
+        allow_dynamic_kv_resize: bool,
     ) -> Self {
         let rowwise_decode = default_rowwise_decode();
         let backend_health = runner
@@ -453,6 +455,7 @@ impl RealDecodeForward {
             prefix_cache,
             gpu_lock,
             loaded_adapter,
+            allow_dynamic_kv_resize,
             rowwise_decode,
         }
     }
@@ -1103,6 +1106,10 @@ impl DecodeForward for RealDecodeForward {
     }
 
     fn resize_kv(&self, target_blocks: usize) -> Result<usize> {
+        anyhow::ensure!(
+            self.allow_dynamic_kv_resize,
+            "physical KV resize is prohibited by the active serving profile"
+        );
         // Check before taking the exclusive GPU lock: quarantine deliberately
         // retains a read owner forever, so entering the write wait would hang.
         drop(self.runner_guard()?);

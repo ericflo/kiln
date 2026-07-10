@@ -323,6 +323,28 @@ pub struct ModelRunner {
     backend_health: BackendHealthHandle,
 }
 
+/// Backend graph eligibility resolved before a [`ModelRunner`] is built.
+///
+/// The server's stable profile sets every field false. Other embedding callers
+/// can continue using [`ModelRunner::new_with_options`] for the historical
+/// CUDA-only option plus backend defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelRunnerRuntimeOptions {
+    pub cuda_graphs: bool,
+    pub rocm_graphs: bool,
+    pub metal_graphs: bool,
+}
+
+impl ModelRunnerRuntimeOptions {
+    pub const fn eager_only() -> Self {
+        Self {
+            cuda_graphs: false,
+            rocm_graphs: false,
+            metal_graphs: false,
+        }
+    }
+}
+
 /// Process-lifetime health gate for a backend whose asynchronous completion
 /// can no longer be proven. Once quarantined, inference must remain disabled
 /// until the process is restarted; reusing mutable GPU state would be unsafe.
@@ -2246,18 +2268,37 @@ impl ModelRunner {
         config: ModelConfig,
         cuda_graphs: bool,
     ) -> Self {
+        Self::new_with_runtime_options(
+            weights,
+            tokenizer,
+            config,
+            ModelRunnerRuntimeOptions {
+                cuda_graphs,
+                rocm_graphs: true,
+                metal_graphs: true,
+            },
+        )
+    }
+
+    /// Create a runner with backend graph eligibility resolved by the owning
+    /// product surface. Environment kill switches remain subordinate to these
+    /// booleans; they can disable an eligible runner but cannot enable one the
+    /// server profile prohibited.
+    pub fn new_with_runtime_options(
+        weights: GpuWeights,
+        tokenizer: KilnTokenizer,
+        config: ModelConfig,
+        options: ModelRunnerRuntimeOptions,
+    ) -> Self {
         let eos_token_ids = tokenizer.eos_token_ids();
         // (#1082) `embed_tokens.device()` is a kt `Device`. The backend
         // dispatcher is kt-native (`for_device_kt`). (#1082) `CudaGraphRunner::new`
         // is kt-native now — no candle device bridge.
         let kt_device = weights.embed_tokens.device();
         let backend = backend::for_device_kt(&kt_device);
-        let cuda_graph = CudaGraphRunner::new(&kt_device, cuda_graphs);
-        // R.9: the ROCm graph runner gates itself on a Rocm device and the
-        // `KILN_ROCM_GRAPHS=0` kill switch, so pass `true` here; it is inert on
-        // every other backend.
-        let rocm_graph = RocmGraphRunner::new(&kt_device, true);
-        let metal_graph = MetalGraphRunner::new(&kt_device, true);
+        let cuda_graph = CudaGraphRunner::new(&kt_device, options.cuda_graphs);
+        let rocm_graph = RocmGraphRunner::new(&kt_device, options.rocm_graphs);
+        let metal_graph = MetalGraphRunner::new(&kt_device, options.metal_graphs);
         let training_caps = TrainingLossBackend::runtime_training_capabilities(backend.as_ref());
         tracing::info!(
             backend = BackendIdentity::runtime_name(backend.as_ref()),
